@@ -38,7 +38,14 @@ import {
   getPasswordLabel,
   isImapCredentialsProvider,
 } from "../../lib/inboxProviderDefaults";
-import { readLiveInboxSnapshots } from "../../lib/liveInboxSnapshots";
+import {
+  readLiveInboxSnapshots,
+  saveLiveInboxSnapshot,
+} from "../../lib/liveInboxSnapshots";
+import {
+  connectInboxWithImap,
+  type LiveInboxMessageSnapshot,
+} from "../../lib/inboxConnectionApi";
 
 const primaryNavigationItems = [
   { section: "Dashboard", label: "Dashboard", shortLabel: "Dash" },
@@ -5430,6 +5437,8 @@ function MailboxView({
   getLinkedReviewForMessage,
   getLinkedReviewBadgeLabel,
   onOpenLinkedReview,
+  onSyncMailbox,
+  isSyncingMailbox,
 }: {
   mailbox: OrderedMailbox;
   orderedMailboxes: OrderedMailbox[];
@@ -5471,6 +5480,8 @@ function MailboxView({
   getLinkedReviewForMessage: (messageId: string) => ReviewItem | null;
   getLinkedReviewBadgeLabel: (messageId: string) => string | null;
   onOpenLinkedReview: (target: ReviewWorkspaceTarget) => void;
+  onSyncMailbox: () => void;
+  isSyncingMailbox: boolean;
 }) {
   const [activeFilter, setActiveFilter] = useState<MailFilter>("All");
   const [sortOrder, setSortOrder] = useState<MailSortOrder>("desc");
@@ -8893,11 +8904,15 @@ function MailboxView({
             </svg>
             Compose
           </button>
-          <MailToolbarIconButton label="Sync">
+          <MailToolbarIconButton
+            label={isSyncingMailbox ? "Syncing" : "Sync"}
+            onClick={onSyncMailbox}
+            disabled={isSyncingMailbox}
+          >
             <svg
               aria-hidden="true"
               viewBox="0 0 16 16"
-              className="h-4 w-4"
+              className={`h-4 w-4 ${isSyncingMailbox ? "animate-spin" : ""}`}
               fill="none"
               stroke="currentColor"
               strokeWidth="1.7"
@@ -17991,6 +18006,7 @@ export function WorkspaceShell({
     useState<MailboxReturnContext | null>(null);
   const [learningLaunchRequest, setLearningLaunchRequest] =
     useState<LearningLaunchRequest>(null);
+  const [syncingMailboxId, setSyncingMailboxId] = useState<InboxId | null>(null);
   const [workspaceName, setWorkspaceName] = useState("Cuevion Studio");
   const [inboxSignatures, setInboxSignatures] = useState<InboxSignatureStore>(() => {
     if (typeof window === "undefined") {
@@ -19165,6 +19181,118 @@ export function WorkspaceShell({
     });
   };
 
+  const applyLiveInboxMessagesToMailboxStore = (
+    mailboxId: InboxId,
+    messages: LiveInboxMessageSnapshot[],
+  ) => {
+    const targetMailbox = orderedMailboxes.find((entry) => entry.id === mailboxId);
+
+    if (!targetMailbox) {
+      return;
+    }
+
+    setMailboxStore((currentStore) => {
+      const currentCollections =
+        currentStore[targetMailbox.id] ?? createEmptyMailboxCollections();
+
+      const nextStore = {
+        ...currentStore,
+        [targetMailbox.id]: {
+          ...currentCollections,
+          Inbox: messages.map((message) =>
+            normalizeMailMessage(
+              {
+                id: message.id,
+                sender: message.sender,
+                subject: message.subject,
+                snippet: message.snippet,
+                time: message.timestamp,
+                createdAt: message.createdAt,
+                unread: message.unread,
+                from: message.from,
+                to: message.to,
+                cc: message.cc,
+                timestamp: message.timestamp,
+                body: message.body,
+              },
+              targetMailbox.id,
+              senderCategoryLearning,
+              messageOwnershipInteractions,
+              currentWorkspaceUserId,
+              currentStore,
+            ),
+          ),
+        },
+      };
+
+      return normalizeMailboxStore(
+        nextStore,
+        orderedMailboxes,
+        senderCategoryLearning,
+        messageOwnershipInteractions,
+        currentWorkspaceUserId,
+      );
+    });
+  };
+
+  const handleSyncActiveMailbox = async () => {
+    if (!activeMailbox || syncingMailboxId === activeMailbox.id) {
+      return;
+    }
+
+    const managedMailbox = savedManagedInboxes.find(
+      (mailbox) => mailbox.id === activeMailbox.id,
+    );
+
+    if (
+      !managedMailbox ||
+      !managedMailbox.connected ||
+      !managedMailbox.provider ||
+      !isImapCredentialsProvider(managedMailbox.provider)
+    ) {
+      return;
+    }
+
+    const resolvedImapSettings = applyProviderDefaults(
+      managedMailbox.provider,
+      managedMailbox.customImap,
+      managedMailbox.email,
+    );
+
+    setSyncingMailboxId(activeMailbox.id);
+
+    try {
+      const response = await connectInboxWithImap({
+        provider: managedMailbox.provider,
+        email: managedMailbox.email.trim(),
+        host: resolvedImapSettings.host.trim(),
+        port: resolvedImapSettings.port.trim(),
+        ssl: resolvedImapSettings.ssl,
+        username:
+          managedMailbox.provider === "google"
+            ? managedMailbox.email.trim()
+            : resolvedImapSettings.username.trim(),
+        password: resolvedImapSettings.password,
+      });
+
+      if (!response.ok) {
+        return;
+      }
+
+      const messages = response.messages ?? [];
+
+      saveLiveInboxSnapshot({
+        inboxId: managedMailbox.id,
+        email: managedMailbox.email.trim().toLowerCase(),
+        fetchedAt: new Date().toISOString(),
+        messages,
+      });
+      applyLiveInboxMessagesToMailboxStore(managedMailbox.id as InboxId, messages);
+    } finally {
+      setSyncingMailboxId(null);
+    }
+  };
+
   const handleApplyManagedInboxes = (nextMailboxes: ManagedWorkspaceInbox[]) => {
     const validMailboxes = nextMailboxes
       .filter((mailbox) => isManagedInboxReady(mailbox))
@@ -20105,12 +20233,14 @@ export function WorkspaceShell({
 	                      current?.requestKey === requestKey ? null : current,
 	                    )
 	                  }
-	                  manualPriorityOverrides={manualPriorityOverrides}
-	                  onSetManualPriority={handleSetManualPriority}
-	                  getLinkedReviewForMessage={getLinkedReviewForMessage}
-	                  getLinkedReviewBadgeLabel={getLinkedReviewBadgeLabel}
-	                  onOpenLinkedReview={(target) => setActiveTarget(target)}
-	                />
+                  manualPriorityOverrides={manualPriorityOverrides}
+                  onSetManualPriority={handleSetManualPriority}
+                  getLinkedReviewForMessage={getLinkedReviewForMessage}
+                  getLinkedReviewBadgeLabel={getLinkedReviewBadgeLabel}
+                  onOpenLinkedReview={(target) => setActiveTarget(target)}
+                  onSyncMailbox={handleSyncActiveMailbox}
+                  isSyncingMailbox={syncingMailboxId === activeMailbox.id}
+                />
               </div>
             ) : activeSection === "Dashboard" ? (
               <div className="min-h-0 flex-1 overflow-y-auto pr-1">
