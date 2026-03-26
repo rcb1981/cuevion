@@ -49,7 +49,7 @@ function ComingSoonLanding() {
             Cuevion
           </h1>
           <p className="mt-4 max-w-[32rem] text-[1.05rem] font-medium tracking-[-0.02em] text-[rgba(244,242,235,0.82)] sm:text-[1.35rem]">
-            The new standard for music communication.
+            Email for the music industry.
           </p>
           <p className="mt-6 text-[0.9rem] font-medium tracking-[0.08em] text-[rgba(244,242,235,0.56)]">
             Coming soon...
@@ -302,5 +302,168 @@ function CollaborationInviteAuthGate({
 }
 
 export default function App() {
-  return <ComingSoonLanding />;
+  const hostname =
+    typeof window === "undefined" ? "" : window.location.hostname.toLowerCase();
+  const shouldShowProductionLanding =
+    hostname === "cuevion.com" || hostname === "www.cuevion.com";
+
+  if (shouldShowProductionLanding) {
+    return <ComingSoonLanding />;
+  }
+
+  const workspaceDataMode = resolveWorkspaceDataMode();
+  const [persistedOnboardingSession, setPersistedOnboardingSession] =
+    useState<PersistedOnboardingSession | null>(() => {
+      if (shouldResetOnboardingFromQuery()) {
+        window.localStorage.removeItem(ONBOARDING_STATE_STORAGE_KEY);
+        clearOnboardingDependentWorkspaceState();
+        clearOnboardingResetQueryParam();
+        return null;
+      }
+
+      return parsePersistedOnboardingSession();
+    });
+  const [view, setView] = useState<"onboarding" | "transition" | "workspace">(
+    () => (persistedOnboardingSession ? "workspace" : "onboarding"),
+  );
+  const [authenticatedUser, setAuthenticatedUser] = useState<AuthenticatedCuevionUser | null>(
+    () => {
+      const storedAuthUser = window.localStorage.getItem(CUEVION_AUTH_STORAGE_KEY);
+
+      if (!storedAuthUser) {
+        return null;
+      }
+
+      try {
+        return normalizeAuthenticatedUser(JSON.parse(storedAuthUser));
+      } catch {
+        return null;
+      }
+    },
+  );
+  const [collaborationInviteRoute, setCollaborationInviteRoute] =
+    useState<CollaborationInviteRoute | null>(() => parseCollaborationInviteRoute());
+  const [onboardingState, setOnboardingState] = useState<OnboardingState>(
+    () => persistedOnboardingSession?.state ?? initialOnboardingState,
+  );
+
+  useEffect(() => {
+    if (authenticatedUser) {
+      window.localStorage.setItem(
+        CUEVION_AUTH_STORAGE_KEY,
+        JSON.stringify(authenticatedUser),
+      );
+      return;
+    }
+
+    window.localStorage.removeItem(CUEVION_AUTH_STORAGE_KEY);
+  }, [authenticatedUser]);
+
+  useEffect(() => {
+    const nextInviteRoute = parseCollaborationInviteRoute();
+    setCollaborationInviteRoute(nextInviteRoute);
+
+    if (nextInviteRoute) {
+      window.localStorage.setItem(
+        PENDING_COLLAB_INVITE_STORAGE_KEY,
+        JSON.stringify(nextInviteRoute),
+      );
+      window.localStorage.setItem(
+        PENDING_COLLAB_INVITE_URL_STORAGE_KEY,
+        getCurrentInviteUrl(),
+      );
+      return;
+    }
+
+    window.localStorage.removeItem(PENDING_COLLAB_INVITE_STORAGE_KEY);
+    window.localStorage.removeItem(PENDING_COLLAB_INVITE_URL_STORAGE_KEY);
+  }, []);
+
+  useEffect(() => {
+    if (view !== "transition") {
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      setView("workspace");
+    }, 2200);
+
+    return () => window.clearTimeout(timer);
+  }, [view]);
+
+  if (collaborationInviteRoute) {
+    if (!authenticatedUser) {
+      return (
+        <CollaborationInviteAuthGate
+          onAuthenticate={(user) => {
+            const pendingInvite = window.localStorage.getItem(
+              PENDING_COLLAB_INVITE_STORAGE_KEY,
+            );
+            const pendingInviteUrl = window.localStorage.getItem(
+              PENDING_COLLAB_INVITE_URL_STORAGE_KEY,
+            );
+
+            if (pendingInviteUrl) {
+              window.history.replaceState(null, "", pendingInviteUrl);
+            }
+
+            const restoredInviteRoute = parseCollaborationInviteRoute();
+
+            if (restoredInviteRoute) {
+              setCollaborationInviteRoute(restoredInviteRoute);
+            } else if (pendingInvite) {
+              setCollaborationInviteRoute(
+                JSON.parse(pendingInvite) as CollaborationInviteRoute,
+              );
+            }
+
+            setAuthenticatedUser(user);
+            setView("workspace");
+          }}
+        />
+      );
+    }
+
+    return (
+      <WorkspaceShell
+        onboardingState={onboardingState}
+        authenticatedUser={authenticatedUser}
+        collaborationInviteRoute={collaborationInviteRoute}
+        workspaceDataMode={workspaceDataMode}
+      />
+    );
+  }
+
+  if (view === "workspace") {
+    return (
+      <WorkspaceShell
+        onboardingState={onboardingState}
+        workspaceDataMode={workspaceDataMode}
+      />
+    );
+  }
+
+  if (view === "transition") {
+    return <WorkspaceTransition />;
+  }
+
+  return (
+    <OnboardingFlow
+      state={onboardingState}
+      onStateChange={setOnboardingState}
+      onOpenWorkspace={() => {
+        const completedSession: PersistedOnboardingSession = {
+          completed: true,
+          state: onboardingState,
+        };
+
+        window.localStorage.setItem(
+          ONBOARDING_STATE_STORAGE_KEY,
+          JSON.stringify(completedSession),
+        );
+        setPersistedOnboardingSession(completedSession);
+        setView("transition");
+      }}
+    />
+  );
 }
