@@ -440,6 +440,7 @@ const MANAGED_INBOXES_STORAGE_KEY = "cuevion-managed-inboxes";
 const OUT_OF_OFFICE_SUPPRESSION_WINDOW_MS = 24 * 60 * 60 * 1000;
 const SMART_FOLDERS_STORAGE_KEY = "cuevion-smart-folders";
 const MAIL_LIST_PANE_WIDTH_STORAGE_KEY = "cuevion-mail-list-pane-width";
+const ACTIVE_MAILBOX_AUTO_REFRESH_INTERVAL_MS = 3 * 60 * 1000;
 const MAIL_FOLDER_COLUMN_WIDTH = 180;
 const MAIL_SPLIT_GAP = 24;
 const MIN_MAIL_LIST_PANE_WIDTH = 320;
@@ -18180,6 +18181,52 @@ export function WorkspaceShell({
       JSON.stringify(savedManagedInboxes),
     );
   }, [savedManagedInboxes]);
+
+  useEffect(() => {
+    if (!activeMailbox) {
+      return;
+    }
+
+    const managedMailbox = savedManagedInboxes.find(
+      (mailbox) => mailbox.id === activeMailbox.id,
+    );
+
+    if (
+      !managedMailbox ||
+      !managedMailbox.connected ||
+      !managedMailbox.provider ||
+      !isImapCredentialsProvider(managedMailbox.provider)
+    ) {
+      return;
+    }
+
+    void refreshMailboxById(activeMailbox.id);
+  }, [activeMailbox, savedManagedInboxes]);
+
+  useEffect(() => {
+    if (!activeMailbox) {
+      return;
+    }
+
+    const managedMailbox = savedManagedInboxes.find(
+      (mailbox) => mailbox.id === activeMailbox.id,
+    );
+
+    if (
+      !managedMailbox ||
+      !managedMailbox.connected ||
+      !managedMailbox.provider ||
+      !isImapCredentialsProvider(managedMailbox.provider)
+    ) {
+      return;
+    }
+
+    const intervalId = window.setInterval(() => {
+      void refreshMailboxById(activeMailbox.id);
+    }, ACTIVE_MAILBOX_AUTO_REFRESH_INTERVAL_MS);
+
+    return () => window.clearInterval(intervalId);
+  }, [activeMailbox, savedManagedInboxes, syncingMailboxId]);
   const workspaceShellPaddingClass = usesExpandedInboxWorkspaceLayout
     ? "p-3 md:p-4 lg:p-5"
     : "p-6 md:p-8 lg:p-10";
@@ -19235,13 +19282,13 @@ export function WorkspaceShell({
     });
   };
 
-  const handleSyncActiveMailbox = async () => {
-    if (!activeMailbox || syncingMailboxId === activeMailbox.id) {
+  const refreshMailboxById = async (mailboxId: InboxId) => {
+    if (syncingMailboxId === mailboxId) {
       return;
     }
 
     const managedMailbox = savedManagedInboxes.find(
-      (mailbox) => mailbox.id === activeMailbox.id,
+      (mailbox) => mailbox.id === mailboxId,
     );
 
     if (
@@ -19259,7 +19306,7 @@ export function WorkspaceShell({
       managedMailbox.email,
     );
 
-    setSyncingMailboxId(activeMailbox.id);
+    setSyncingMailboxId(mailboxId);
 
     try {
       const response = await connectInboxWithImap({
@@ -19291,6 +19338,14 @@ export function WorkspaceShell({
     } finally {
       setSyncingMailboxId(null);
     }
+  };
+
+  const handleSyncActiveMailbox = async () => {
+    if (!activeMailbox) {
+      return;
+    }
+
+    await refreshMailboxById(activeMailbox.id);
   };
 
   const handleApplyManagedInboxes = (nextMailboxes: ManagedWorkspaceInbox[]) => {
