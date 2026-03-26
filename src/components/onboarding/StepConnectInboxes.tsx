@@ -130,12 +130,15 @@ function getConnectionFeedback(connection: InboxConnection): ConnectionFeedback 
   return null;
 }
 
-function buildConnectionError(code?: string): ConnectionFeedback {
+function buildConnectionError(
+  code?: string,
+  message?: string,
+): ConnectionFeedback {
   if (code === "invalid_credentials") {
-    return { password: onboardingText.connect.incorrectPassword };
+    return { password: message || onboardingText.connect.incorrectPassword };
   }
 
-  return { general: onboardingText.connect.couldNotConnect };
+  return { general: message || onboardingText.connect.couldNotConnect };
 }
 
 export function StepConnectInboxes({
@@ -211,7 +214,10 @@ export function StepConnectInboxes({
     } else {
       setConnectionErrors((current) => ({
         ...current,
-        [inboxId]: buildConnectionError(response.error?.code),
+        [inboxId]: buildConnectionError(
+          response.error?.code,
+          response.error?.message,
+        ),
       }));
     }
 

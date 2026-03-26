@@ -37,14 +37,14 @@ export async function connectInboxWithImap(
   request: ConnectInboxRequest,
 ): Promise<ConnectInboxResponse> {
   try {
-    const response = await fetch("/api/inboxes/connect", {
+    const response = await fetch("/api/inboxes/connect-imap", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
       },
       body: JSON.stringify(request),
     });
-
+    
     const payload = (await response.json()) as ConnectInboxResponse;
 
     if (!response.ok) {
