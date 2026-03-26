@@ -1,1 +1,10 @@
 .env
+frontend/dist
+frontend/node_modules
+frontend/.cache
+frontend/.npm-cache
+__pycache__
+*.pyc
+venv
+.DS_Store
+*.tsbuildinfo

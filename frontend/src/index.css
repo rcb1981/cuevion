@@ -1,0 +1,334 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color: #1f2a24;
+  background:
+    radial-gradient(circle at top left, rgba(239, 229, 214, 0.95), transparent 38%),
+    radial-gradient(circle at right, rgba(185, 133, 91, 0.18), transparent 30%),
+    linear-gradient(180deg, #f8f4ee 0%, #f2ebe2 100%);
+  --workspace-bg:
+    radial-gradient(circle at top left, rgba(239, 229, 214, 0.95), transparent 38%),
+    radial-gradient(circle at right, rgba(185, 133, 91, 0.18), transparent 30%),
+    linear-gradient(180deg, #f8f4ee 0%, #f2ebe2 100%);
+  --workspace-shell: rgba(255, 255, 255, 0.55);
+  --workspace-shell-border: rgba(255, 255, 255, 0.5);
+  --workspace-sidebar: #264238;
+  --workspace-sidebar-border: rgba(31, 42, 36, 0.08);
+  --workspace-sidebar-text: rgba(255, 255, 255, 0.92);
+  --workspace-sidebar-text-muted: rgba(255, 255, 255, 0.68);
+  --workspace-sidebar-hover: rgba(255, 255, 255, 0.06);
+  --workspace-sidebar-active-start: rgba(226, 236, 229, 0.16);
+  --workspace-sidebar-active-end: rgba(255, 255, 255, 0.06);
+  --workspace-sidebar-glow: radial-gradient(circle at top, rgba(255, 255, 255, 0.12), transparent 38%);
+  --workspace-card: rgba(255, 255, 255, 0.72);
+  --workspace-card-featured-start: rgba(241, 233, 223, 0.56);
+  --workspace-card-featured-end: rgba(255, 255, 255, 0.82);
+  --workspace-card-curated-start: rgba(241, 247, 242, 0.95);
+  --workspace-card-curated-end: rgba(236, 242, 233, 0.91);
+  --workspace-card-curated-border: rgba(98, 112, 96, 0.16);
+  --workspace-card-subtle: rgba(239, 229, 214, 0.18);
+  --workspace-card-hover: rgba(255, 255, 255, 0.84);
+  --workspace-selected-surface-start: rgba(245, 238, 229, 0.98);
+  --workspace-selected-surface-end: rgba(233, 220, 205, 0.96);
+  --workspace-card-featured-hover-start: rgba(244, 236, 227, 0.68);
+  --workspace-card-featured-hover-end: rgba(255, 255, 255, 0.88);
+  --workspace-card-curated-hover-start: rgba(243, 248, 243, 0.98);
+  --workspace-card-curated-hover-end: rgba(238, 244, 235, 0.94);
+  --workspace-border: rgba(31, 42, 36, 0.08);
+  --workspace-border-soft: rgba(31, 42, 36, 0.06);
+  --workspace-border-hover: rgba(31, 42, 36, 0.12);
+  --workspace-text: #1f2a24;
+  --workspace-text-muted: rgba(31, 42, 36, 0.68);
+  --workspace-text-soft: rgba(31, 42, 36, 0.56);
+  --workspace-text-faint: rgba(31, 42, 36, 0.44);
+  --workspace-accent-soft: rgba(239, 229, 214, 0.92);
+  --workspace-accent-primary: rgba(44, 99, 62, 0.98);
+  --workspace-accent-border: rgba(111, 148, 111, 0.58);
+  --workspace-accent-surface-start: rgba(226, 236, 229, 0.92);
+  --workspace-accent-surface-end: rgba(246, 249, 246, 0.98);
+  --workspace-accent-surface-hover-start: rgba(214, 228, 218, 0.96);
+  --workspace-accent-surface-hover-end: rgba(239, 245, 240, 0.98);
+  --workspace-accent-text: rgba(27, 39, 31, 0.96);
+  --workspace-provider-selected-surface: linear-gradient(
+    180deg,
+    rgba(226, 236, 229, 0.92),
+    rgba(246, 249, 246, 0.98)
+  );
+  --workspace-provider-selected-border: rgba(111, 148, 111, 0.58);
+  --workspace-provider-selected-text: rgba(31, 42, 36, 0.96);
+  --workspace-status-success-bg: rgba(226, 236, 229, 0.84);
+  --workspace-status-success-text: rgba(44, 99, 62, 0.96);
+  --workspace-status-success-border: rgba(111, 148, 111, 0.22);
+  --workspace-toggle-on-start: rgba(131, 162, 125, 0.96);
+  --workspace-toggle-on-end: rgba(96, 128, 95, 0.98);
+  --workspace-close-button-bg: var(--workspace-accent-primary);
+  --workspace-close-button-bg-hover: color-mix(in srgb, var(--workspace-accent-primary) 82%, black);
+  --workspace-close-button-border: var(--workspace-accent-border);
+  --workspace-close-button-text: rgba(251, 248, 242, 0.98);
+  --workspace-back-button-bg: rgba(120, 160, 130, 0.12);
+  --workspace-back-button-bg-hover: rgba(120, 160, 130, 0.18);
+  --workspace-back-button-border: rgba(111, 148, 111, 0.6);
+  --workspace-back-button-border-hover: rgba(111, 148, 111, 0.8);
+  --workspace-back-button-text: rgba(111, 143, 116, 0.96);
+  --workspace-surface-default: rgba(255, 255, 255, 0.72);
+  --workspace-surface-elevated: rgba(255, 255, 255, 0.82);
+  --workspace-surface-hover: rgba(255, 255, 255, 0.78);
+  --workspace-surface-selected: linear-gradient(
+    180deg,
+    rgba(245, 238, 229, 0.98),
+    rgba(233, 220, 205, 0.96)
+  );
+  --workspace-surface-overlay: rgba(249, 245, 239, 1);
+  --workspace-surface-menu: rgba(251, 247, 241, 0.97);
+  --workspace-hover-surface: rgba(255, 255, 255, 0.78);
+  --workspace-hover-surface-strong: rgba(255, 255, 255, 0.84);
+  --workspace-input-bg: rgba(255, 252, 247, 0.88);
+  --workspace-input-focus-bg: rgba(255, 252, 247, 0.96);
+  --workspace-modal-scrim: rgba(58, 44, 34, 0.22);
+  --workspace-settings-modal-backdrop:
+    radial-gradient(circle at top, rgba(255, 252, 247, 0.18), transparent 46%),
+    rgba(92, 78, 65, 0.14);
+  --workspace-modal-bg: rgba(249, 245, 239, 1);
+  --workspace-modal-subtle: rgba(249, 245, 239, 0.99);
+  --workspace-modal-inner: rgba(255, 252, 248, 0.98);
+  --workspace-modal-border-strong: rgba(120, 104, 89, 0.1);
+  --workspace-menu-bg: rgba(251, 247, 241, 0.97);
+  --workspace-menu-border: rgba(120, 104, 89, 0.12);
+  --workspace-menu-hover: rgba(241, 233, 223, 0.9);
+  --workspace-selection-indicator-bg: rgba(255, 255, 255, 0.66);
+  --workspace-selection-indicator-border: rgba(120, 104, 89, 0.18);
+  --workspace-selection-indicator-text: rgba(92, 78, 65, 0.82);
+  --workspace-preview-surface-start: rgba(244, 236, 226, 0.94);
+  --workspace-preview-surface-end: rgba(231, 218, 204, 0.9);
+  --workspace-divider: rgba(120, 104, 89, 0.12);
+  --workspace-emphasis-text: rgba(92, 78, 65, 0.88);
+  --workspace-scrollbar-track: rgba(120, 104, 89, 0.08);
+  --workspace-scrollbar-thumb: rgba(120, 104, 89, 0.22);
+  --workspace-scrollbar-thumb-hover: rgba(120, 104, 89, 0.3);
+  --workspace-placeholder-strong: rgba(31, 42, 36, 0.1);
+  --workspace-placeholder-soft: rgba(31, 42, 36, 0.07);
+  --workspace-help-guidance-surface: rgba(255, 252, 247, 0.62);
+  --workspace-help-guidance-surface-selected: rgba(255, 252, 247, 0.68);
+  --workspace-help-guidance-border: rgba(121, 151, 120, 0.1);
+  --workspace-help-guidance-hover: rgba(121, 151, 120, 0.035);
+  --workspace-help-guidance-text: var(--workspace-text-soft);
+  --workspace-help-guidance-accent: var(--workspace-accent-soft);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+[data-theme="dark"] {
+  --workspace-bg:
+    radial-gradient(circle at top left, rgba(88, 69, 55, 0.28), transparent 34%),
+    radial-gradient(circle at right, rgba(55, 87, 74, 0.22), transparent 28%),
+    linear-gradient(180deg, #1d1b18 0%, #171613 100%);
+  --workspace-shell: rgba(28, 27, 23, 0.78);
+  --workspace-shell-border: rgba(223, 211, 196, 0.08);
+  --workspace-sidebar: #1d342c;
+  --workspace-sidebar-border: rgba(223, 211, 196, 0.05);
+  --workspace-sidebar-text: rgba(246, 239, 231, 0.9);
+  --workspace-sidebar-text-muted: rgba(246, 239, 231, 0.64);
+  --workspace-sidebar-hover: rgba(246, 239, 231, 0.05);
+  --workspace-sidebar-active-start: rgba(223, 211, 196, 0.12);
+  --workspace-sidebar-active-end: rgba(246, 239, 231, 0.04);
+  --workspace-sidebar-glow: radial-gradient(circle at top, rgba(246, 239, 231, 0.05), transparent 38%);
+  --workspace-card: rgba(34, 32, 28, 0.86);
+  --workspace-card-featured-start: rgba(63, 54, 45, 0.72);
+  --workspace-card-featured-end: rgba(34, 32, 28, 0.9);
+  --workspace-card-curated-start: rgba(56, 66, 58, 0.86);
+  --workspace-card-curated-end: rgba(49, 56, 49, 0.91);
+  --workspace-card-curated-border: rgba(219, 226, 217, 0.17);
+  --workspace-card-subtle: rgba(84, 70, 57, 0.22);
+  --workspace-card-hover: rgba(40, 37, 33, 0.92);
+  --workspace-selected-surface-start: rgba(64, 58, 52, 0.98);
+  --workspace-selected-surface-end: rgba(49, 45, 40, 1);
+  --workspace-card-featured-hover-start: rgba(72, 61, 51, 0.8);
+  --workspace-card-featured-hover-end: rgba(38, 35, 30, 0.94);
+  --workspace-card-curated-hover-start: rgba(60, 70, 62, 0.91);
+  --workspace-card-curated-hover-end: rgba(51, 59, 52, 0.95);
+  --workspace-border: rgba(223, 211, 196, 0.08);
+  --workspace-border-soft: rgba(223, 211, 196, 0.05);
+  --workspace-border-hover: rgba(223, 211, 196, 0.14);
+  --workspace-text: rgba(246, 239, 231, 0.92);
+  --workspace-text-muted: rgba(246, 239, 231, 0.7);
+  --workspace-text-soft: rgba(246, 239, 231, 0.58);
+  --workspace-text-faint: rgba(246, 239, 231, 0.42);
+  --workspace-accent-soft: rgba(92, 77, 63, 0.78);
+  --workspace-accent-primary: rgba(94, 154, 112, 0.98);
+  --workspace-accent-border: rgba(111, 148, 111, 0.46);
+  --workspace-accent-surface-start: rgba(74, 92, 76, 0.96);
+  --workspace-accent-surface-end: rgba(53, 68, 56, 0.98);
+  --workspace-accent-surface-hover-start: rgba(81, 101, 83, 0.98);
+  --workspace-accent-surface-hover-end: rgba(58, 74, 61, 1);
+  --workspace-accent-text: rgba(188, 223, 195, 0.98);
+  --workspace-provider-selected-surface: linear-gradient(
+    180deg,
+    rgba(62, 57, 51, 0.96),
+    rgba(45, 42, 38, 0.98)
+  );
+  --workspace-provider-selected-border: rgba(111, 148, 111, 0.42);
+  --workspace-provider-selected-text: rgba(242, 236, 228, 0.92);
+  --workspace-status-success-bg: rgba(94, 154, 112, 0.14);
+  --workspace-status-success-text: rgba(188, 223, 195, 0.94);
+  --workspace-status-success-border: rgba(111, 148, 111, 0.3);
+  --workspace-toggle-on-start: color-mix(in srgb, var(--workspace-accent-surface-start) 82%, var(--workspace-accent-primary));
+  --workspace-toggle-on-end: color-mix(in srgb, var(--workspace-accent-surface-end) 72%, var(--workspace-accent-primary));
+  --workspace-close-button-bg: rgba(49, 61, 52, 0.36);
+  --workspace-close-button-bg-hover: rgba(60, 78, 65, 0.52);
+  --workspace-close-button-border: rgba(111, 148, 111, 0.44);
+  --workspace-close-button-text: rgba(246, 239, 231, 0.94);
+  --workspace-back-button-bg: var(--workspace-card);
+  --workspace-back-button-bg-hover: var(--workspace-hover-surface-strong);
+  --workspace-back-button-border: var(--workspace-border);
+  --workspace-back-button-border-hover: var(--workspace-border-hover);
+  --workspace-back-button-text: var(--workspace-text-soft);
+  --workspace-surface-default: rgba(34, 32, 28, 0.86);
+  --workspace-surface-elevated: rgba(41, 38, 34, 0.94);
+  --workspace-surface-hover: rgba(47, 43, 39, 0.9);
+  --workspace-surface-selected: linear-gradient(
+    180deg,
+    rgba(64, 58, 52, 0.98),
+    rgba(49, 45, 40, 1)
+  );
+  --workspace-surface-overlay: rgba(30, 28, 25, 0.98);
+  --workspace-surface-menu: rgba(41, 38, 34, 0.98);
+  --workspace-hover-surface: rgba(47, 43, 39, 0.9);
+  --workspace-hover-surface-strong: rgba(53, 49, 44, 0.96);
+  --workspace-input-bg: rgba(43, 40, 35, 0.92);
+  --workspace-input-focus-bg: rgba(48, 44, 39, 0.98);
+  --workspace-modal-scrim: rgba(10, 10, 9, 0.42);
+  --workspace-settings-modal-backdrop:
+    radial-gradient(circle at top, rgba(246, 239, 231, 0.06), transparent 42%),
+    rgba(12, 12, 11, 0.28);
+  --workspace-modal-bg: rgba(30, 28, 25, 0.98);
+  --workspace-modal-subtle: rgba(37, 34, 30, 0.98);
+  --workspace-modal-inner: rgba(44, 40, 36, 0.98);
+  --workspace-modal-border-strong: rgba(223, 211, 196, 0.08);
+  --workspace-menu-bg: rgba(41, 38, 34, 0.98);
+  --workspace-menu-border: rgba(223, 211, 196, 0.08);
+  --workspace-menu-hover: rgba(56, 51, 46, 0.96);
+  --workspace-selection-indicator-bg: rgba(60, 55, 49, 0.96);
+  --workspace-selection-indicator-border: rgba(223, 211, 196, 0.1);
+  --workspace-selection-indicator-text: rgba(242, 236, 228, 0.9);
+  --workspace-preview-surface-start: rgba(57, 52, 47, 0.96);
+  --workspace-preview-surface-end: rgba(45, 41, 37, 0.98);
+  --workspace-divider: rgba(223, 211, 196, 0.1);
+  --workspace-emphasis-text: rgba(236, 227, 216, 0.82);
+  --workspace-scrollbar-track: rgba(18, 17, 15, 0.72);
+  --workspace-scrollbar-thumb: rgba(92, 85, 77, 0.7);
+  --workspace-scrollbar-thumb-hover: rgba(110, 102, 93, 0.82);
+  --workspace-placeholder-strong: rgba(246, 239, 231, 0.1);
+  --workspace-placeholder-soft: rgba(246, 239, 231, 0.06);
+  --workspace-help-guidance-surface: color-mix(in srgb, var(--workspace-card-subtle) 78%, var(--workspace-card) 22%);
+  --workspace-help-guidance-surface-selected: color-mix(
+    in srgb,
+    var(--workspace-card) 58%,
+    var(--workspace-hover-surface) 42%
+  );
+  --workspace-help-guidance-border: color-mix(in srgb, var(--workspace-border-soft) 88%, rgba(140, 122, 103, 0.22));
+  --workspace-help-guidance-hover: color-mix(in srgb, var(--workspace-hover-surface) 86%, transparent);
+  --workspace-help-guidance-text: color-mix(in srgb, var(--workspace-text) 78%, var(--workspace-text-soft));
+  --workspace-help-guidance-accent: color-mix(in srgb, var(--workspace-accent-soft) 76%, var(--workspace-card) 24%);
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+@keyframes fade-in-soft {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes loading-line {
+  0% {
+    transform: translateX(-115%);
+  }
+
+  100% {
+    transform: translateX(320%);
+  }
+}
+
+.animate-fade-in {
+  animation: fade-in-soft 420ms ease-out both;
+}
+
+.animate-loading-line {
+  animation: loading-line 1.4s ease-in-out infinite;
+}
+
+.cuevion-soft-scroll::-webkit-scrollbar {
+  width: 8px;
+}
+
+.cuevion-soft-scroll::-webkit-scrollbar-track {
+  background: var(--workspace-scrollbar-track);
+  border-radius: 999px;
+}
+
+.cuevion-soft-scroll::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: var(--workspace-scrollbar-thumb);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+.cuevion-soft-scroll::-webkit-scrollbar-thumb:hover {
+  background: var(--workspace-scrollbar-thumb-hover);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+[data-theme="dark"] .cuevion-dark-scroll {
+  color-scheme: dark;
+  scrollbar-width: thin;
+  scrollbar-color: var(--workspace-scrollbar-thumb) var(--workspace-scrollbar-track);
+}
+
+[data-theme="dark"] .cuevion-dark-scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+[data-theme="dark"] .cuevion-dark-scroll::-webkit-scrollbar-track {
+  background: var(--workspace-scrollbar-track);
+  border-radius: 999px;
+}
+
+[data-theme="dark"] .cuevion-dark-scroll::-webkit-scrollbar-thumb {
+  background: var(--workspace-scrollbar-thumb);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+[data-theme="dark"] .cuevion-dark-scroll::-webkit-scrollbar-thumb:hover {
+  background: var(--workspace-scrollbar-thumb-hover);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
