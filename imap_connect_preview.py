@@ -1,5 +1,6 @@
 import hashlib
 import imaplib
+import logging
 from datetime import datetime, timezone
 from email import message_from_bytes
 from email.header import decode_header
@@ -12,6 +13,7 @@ DEFAULT_GMAIL_HOST = "imap.gmail.com"
 DEFAULT_GMAIL_PORT = 993
 DEFAULT_FETCH_LIMIT = 10
 MAX_FETCH_LIMIT = 25
+logger = logging.getLogger(__name__)
 
 
 def decode_mime_words(value: str | None) -> str:
@@ -224,6 +226,15 @@ def build_connect_preview_response(payload: dict[str, Any]) -> tuple[int, dict[s
             "messages": previews,
         }
     except imaplib.IMAP4.error as exc:
+        logger.exception(
+            "IMAP connection failed with IMAP4 error",
+            extra={
+                "imap_host": host,
+                "imap_port": port,
+                "imap_ssl_enabled": ssl_enabled,
+                "imap_error_message": str(exc),
+            },
+        )
         return 400, {
             "ok": False,
             "error": {
@@ -232,6 +243,15 @@ def build_connect_preview_response(payload: dict[str, Any]) -> tuple[int, dict[s
             },
         }
     except Exception as exc:
+        logger.exception(
+            "IMAP connection failed with unexpected error",
+            extra={
+                "imap_host": host,
+                "imap_port": port,
+                "imap_ssl_enabled": ssl_enabled,
+                "imap_error_message": str(exc),
+            },
+        )
         return 400, {
             "ok": False,
             "error": {
