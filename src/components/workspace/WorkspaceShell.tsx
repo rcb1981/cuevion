@@ -6413,43 +6413,8 @@ function MailboxView({
   }, [activeCollaborationMessageId, highlightedCollaborationMessageId]);
 
   const renderBehaviorSuggestion = (message: MailMessage) => {
-    const behaviorSuggestion = message.behaviorSuggestion;
-
-    if (behaviorSuggestion?.type !== "auto_category") {
-      return null;
-    }
-
-    const isResolvingBehaviorSuggestion = resolvingBehaviorSuggestionIds.includes(message.id);
-
-    return (
-      <div
-        className={`w-[94%] pt-0.5 text-[0.88rem] leading-[1.85] text-[color:rgba(103,95,86,0.82)] transition-[opacity,transform] duration-150 ${
-          isResolvingBehaviorSuggestion
-            ? "translate-y-[-1px] opacity-0"
-            : "translate-y-0 opacity-100"
-        }`}
-      >
-        <div>{`This looks like ${behaviorSuggestion.category} — treat similar emails this way?`}</div>
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 pt-1.5 text-[0.8rem] leading-6 text-[color:rgba(114,105,95,0.74)]">
-          <button
-            type="button"
-            onClick={() =>
-              enableAutoCategoryBehavior(activeFolder, message.id, message.from)
-            }
-            className="font-medium text-[color:rgba(89,84,76,0.9)] transition-colors duration-150 hover:text-[var(--workspace-text)] focus-visible:outline-none"
-          >
-            Always do this for this sender
-          </button>
-          <button
-            type="button"
-            onClick={() => dismissBehaviorSuggestion(activeFolder, message.id)}
-            className="text-[color:rgba(126,116,103,0.76)] transition-colors duration-150 hover:text-[var(--workspace-text-soft)] focus-visible:outline-none"
-          >
-            Not now
-          </button>
-        </div>
-      </div>
-    );
+    void message;
+    return null;
   };
 
   const renderMessageCollaboration = (message: MailMessage) => {
@@ -10123,18 +10088,12 @@ function MailboxView({
                   <div className="space-y-2">
                     {sortedMessages.map((message) => {
                       const active = visibleSelectedMessageIds.includes(message.id);
-                      const isResolvingSuggestion = resolvingSuggestionIds.includes(message.id);
                       const compactSnippet =
                         message.snippet.length > MAIL_LIST_PREVIEW_CHARACTER_CAP
                           ? message.snippet
                               .slice(0, MAIL_LIST_PREVIEW_CHARACTER_CAP)
                               .trimEnd()
                           : message.snippet;
-                      const categorySuggestion = message.suggestion;
-                      const proposedCategory =
-                        categorySuggestion?.type === "confirm_category"
-                          ? categorySuggestion.proposedCategory
-                          : null;
                       const sharedContextHint =
                         isSharedView && message.isShared
                           ? formatSharedContextHint(message.sharedContext)
@@ -10146,11 +10105,6 @@ function MailboxView({
                           : message.priorityScore === "low"
                             ? "text-[color:rgba(96,89,81,0.84)]"
                             : "text-[var(--workspace-text)]";
-                      const suggestionCopy =
-                        proposedCategory
-                          ? `This looks like ${proposedCategory} — treat similar emails this way?`
-                          : null;
-
                       return (
                         <button
                           key={message.id}
@@ -10282,46 +10236,6 @@ function MailboxView({
                               {sharedContextHint ? (
                                 <div className="pt-1 text-[0.68rem] leading-5 text-[color:rgba(120,111,100,0.72)]">
                                   {sharedContextHint}
-                                </div>
-                              ) : null}
-                              {suggestionCopy ? (
-                                <div
-                                  className={`flex flex-wrap items-center gap-x-2.5 gap-y-1 pt-2 text-[0.69rem] leading-5 text-[color:rgba(111,102,91,0.76)] transition-[opacity,transform] duration-150 ${
-                                    isResolvingSuggestion
-                                      ? "translate-y-[-1px] opacity-0"
-                                      : "translate-y-0 opacity-100"
-                                  }`}
-                                  onClick={(event) => event.stopPropagation()}
-                                >
-                                  <span>{suggestionCopy}</span>
-                                  <button
-                                    type="button"
-                                    onClick={(event) => {
-                                      event.stopPropagation();
-                                      if (!proposedCategory) {
-                                        return;
-                                      }
-                                      acceptCategorySuggestion(
-                                        activeFolder,
-                                        message.id,
-                                        message.from,
-                                        proposedCategory,
-                                      );
-                                    }}
-                                    className="font-medium text-[color:rgba(84,89,74,0.92)] transition-colors duration-150 hover:text-[var(--workspace-text)] focus-visible:outline-none"
-                                  >
-                                    Accept
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={(event) => {
-                                      event.stopPropagation();
-                                      dismissCategorySuggestion(activeFolder, message.id);
-                                    }}
-                                    className="text-[color:rgba(126,116,103,0.78)] transition-colors duration-150 hover:text-[var(--workspace-text-soft)] focus-visible:outline-none"
-                                  >
-                                    Dismiss
-                                  </button>
                                 </div>
                               ) : null}
                             </div>
