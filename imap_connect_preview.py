@@ -11,7 +11,7 @@ from typing import Any
 
 DEFAULT_GMAIL_HOST = "imap.gmail.com"
 DEFAULT_GMAIL_PORT = 993
-DEFAULT_FETCH_LIMIT = 10
+DEFAULT_FETCH_LIMIT = 20
 MAX_FETCH_LIMIT = 25
 logger = logging.getLogger(__name__)
 
