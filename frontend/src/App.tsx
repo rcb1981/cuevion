@@ -303,11 +303,10 @@ function CollaborationInviteAuthGate({
 
 export default function App() {
   const hostname =
-    typeof window === "undefined" ? "" : window.location.hostname.toLowerCase();
-  const shouldShowProductionLanding =
-    hostname === "cuevion.com" || hostname === "www.cuevion.com";
+    typeof window !== "undefined" ? window.location.hostname.toLowerCase() : "";
+  const shouldShowFullApp = hostname.includes("vercel.app");
 
-  if (shouldShowProductionLanding) {
+  if (!shouldShowFullApp) {
     return <ComingSoonLanding />;
   }
 
