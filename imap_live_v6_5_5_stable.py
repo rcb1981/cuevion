@@ -1590,6 +1590,26 @@ def normalize_priority(result, inbox_profile="", user_reminder_settings=None):
         else:
             result["priority"] = "LOW"
 
+    elif category == "business":
+        if inbox_profile in ["business_mixed", "personal_broad"]:
+            result["priority"] = "REVIEW"
+        elif inbox_profile == "demo_first":
+            result["priority"] = "LOW"
+        elif inbox_profile == "promo_first":
+            result["priority"] = "LOW"
+        else:
+            result["priority"] = "REVIEW"
+
+    elif category == "finance":
+        if inbox_profile in ["business_mixed", "personal_broad"]:
+            result["priority"] = "REVIEW"
+        elif inbox_profile == "demo_first":
+            result["priority"] = "LOW"
+        elif inbox_profile == "promo_first":
+            result["priority"] = "LOW"
+        else:
+            result["priority"] = "REVIEW"
+
     elif category == "info":
         if inbox_profile in ["business_mixed", "personal_broad"]:
             result["priority"] = "REVIEW"

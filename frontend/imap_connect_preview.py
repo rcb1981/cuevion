@@ -227,105 +227,138 @@ def resolve_ui_signal(message: Message, email_address: str) -> str:
             user_link_settings=USER_LINK_SETTINGS,
             user_reminder_settings=USER_REMINDER_SETTINGS,
         )
+        subject = decode_mime_words(message.get("Subject", ""))
+        from_header = decode_mime_words(message.get("From", ""))
+        sender_name, sender_email = parseaddr(from_header)
+        sender_name = decode_mime_words(sender_name)
+        body = get_message_body(message)
+        subject_lower = subject.lower()
+        body_lower = body.lower()
+        sender_lower = sender_email.lower()
+        extracted_links = extract_all_links(
+            body,
+            "",
+            subject=subject,
+            artist_name=sender_name or result.get("artist"),
+        )
+        usable_demo_links = get_usable_demo_links(
+            extracted_links=extracted_links,
+            category="demo",
+            user_link_settings=USER_LINK_SETTINGS,
+        )
+        promo_keywords = [
+            "out now",
+            "out soon",
+            "new release",
+            "new track",
+            "check out my track",
+            "check this release",
+            "remix",
+            "bootleg",
+            "radio support",
+            "dj support",
+            "playlist support",
+            "support this track",
+            "support the release",
+            "play in your sets",
+        ]
+        business_keywords = [
+            "collaboration",
+            "samenwerken",
+            "proposal",
+            "partnership",
+            "business call",
+            "let's work together",
+            "work together",
+            "discuss a proposal",
+            "schedule a call",
+            "meeting",
+            "opportunity",
+        ]
+        demo_intent_keywords = [
+            "demo",
+            "demo submission",
+            "please consider this track",
+            "for your label",
+            "would love your feedback",
+            "submission",
+            "listen to this track",
+            "check my track",
+            "track for your label",
+        ]
+        finance_keywords = [
+            "invoice",
+            "receipt",
+            "payment",
+            "billing",
+            "paid",
+            "payout",
+            "statement",
+            "royalty",
+            "royalties",
+            "earnings",
+            "ad receipt",
+            "ads receipt",
+            "payment confirmation",
+            "factuur",
+            "betaling",
+            "betalingsoverzicht",
+            "declaratie",
+        ]
+        google_security_keywords = [
+            "security alert",
+            "security notification",
+            "new sign-in",
+            "sign-in attempt",
+            "login attempt",
+            "log in",
+            "password",
+            "verification code",
+            "2-step verification",
+            "two-step verification",
+            "suspicious activity",
+        ]
+        classification_text = f"{subject_lower} {body_lower}"
+        original_category = str(result.get("category") or "").strip().lower()
+
+        if original_category in ["", "info", "unknown"]:
+            if (
+                ("google" in sender_lower or "accounts.google.com" in classification_text)
+                and any(keyword in classification_text for keyword in google_security_keywords)
+            ):
+                result["category"] = "info"
+            elif any(keyword in classification_text for keyword in finance_keywords):
+                result["category"] = "finance"
+            elif usable_demo_links:
+                result["category"] = "demo"
+                result["usable_demo_links"] = usable_demo_links
+            elif any(keyword in classification_text for keyword in demo_intent_keywords):
+                result["category"] = "demo"
+            elif any(keyword in classification_text for keyword in promo_keywords):
+                result["category"] = "promo"
+            elif any(keyword in classification_text for keyword in business_keywords):
+                result["category"] = "business"
+
+        if str(result.get("category") or "").strip().lower() != original_category:
+            logger.info(
+                "Post-normalized category: %s -> %s | sender=%s | subject=%s",
+                original_category,
+                str(result.get("category") or "").strip().lower(),
+                sender_email,
+                subject,
+            )
+            result = normalize_priority(
+                result,
+                inbox_profile=inbox_profile,
+                user_reminder_settings=USER_REMINDER_SETTINGS,
+            )
 
         if str(result.get("reason") or "").startswith("AI parse failed:"):
             logger.warning(
                 "Preview ui_signal falling back to deterministic rules: %s",
                 result.get("reason"),
             )
-            subject = decode_mime_words(message.get("Subject", ""))
-            from_header = decode_mime_words(message.get("From", ""))
             to_header = decode_mime_words(message.get("To", ""))
-            sender_name, sender_email = parseaddr(from_header)
-            sender_name = decode_mime_words(sender_name)
-            body = get_message_body(message)
-            subject_lower = subject.lower()
-            body_lower = body.lower()
-            sender_lower = sender_email.lower()
-            extracted_links = extract_all_links(
-                body,
-                "",
-                subject=subject,
-                artist_name=sender_name or result.get("artist"),
-            )
-            usable_demo_links = get_usable_demo_links(
-                extracted_links=extracted_links,
-                category="demo",
-                user_link_settings=USER_LINK_SETTINGS,
-            )
-            promo_keywords = [
-                "out now",
-                "out soon",
-                "new release",
-                "new track",
-                "check out my track",
-                "check this release",
-                "remix",
-                "bootleg",
-                "radio support",
-                "dj support",
-                "playlist support",
-                "support this track",
-                "support the release",
-                "play in your sets",
-            ]
-            business_keywords = [
-                "collaboration",
-                "samenwerken",
-                "proposal",
-                "partnership",
-                "business call",
-                "let's work together",
-                "work together",
-                "discuss a proposal",
-                "schedule a call",
-                "meeting",
-                "opportunity",
-            ]
-            demo_intent_keywords = [
-                "demo",
-                "demo submission",
-                "please consider this track",
-                "for your label",
-                "would love your feedback",
-                "submission",
-                "listen to this track",
-                "check my track",
-                "track for your label",
-            ]
-            finance_keywords = [
-                "invoice",
-                "receipt",
-                "payment",
-                "billing",
-                "paid",
-                "payout",
-                "statement",
-                "royalty",
-                "royalties",
-                "earnings",
-                "ad receipt",
-                "ads receipt",
-                "payment confirmation",
-                "factuur",
-                "betaling",
-                "betalingsoverzicht",
-                "declaratie",
-            ]
-            google_security_keywords = [
-                "security alert",
-                "security notification",
-                "new sign-in",
-                "sign-in attempt",
-                "login attempt",
-                "log in",
-                "password",
-                "verification code",
-                "2-step verification",
-                "two-step verification",
-                "suspicious activity",
-            ]
-            classification_text = f"{subject_lower} {body_lower}"
 
             result = {
                 "category": "info",
