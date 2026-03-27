@@ -7267,6 +7267,10 @@ function MailboxView({
   };
 
   useEffect(() => {
+    // Temporary diagnostic guard: disable all auto-read timing so we can
+    // isolate whether unread flips are coming from another path.
+    return;
+
     if (
       !selectedMessageId ||
       selectedMessageId !== autoReadCandidateMessageId ||
@@ -8044,21 +8048,12 @@ function MailboxView({
       selectedMessageIdAfter: messageId,
     });
     setSelectionState([messageId], messageId, messageId);
-    if (options?.triggerAutoRead && targetMessage?.unread) {
-      console.log("[AUTO-READ] arm-candidate", {
-        messageId,
-        selectedMessageIdBefore,
-      });
-      setAutoReadCandidateMessageId(messageId);
-      setAutoReadTriggerToken((current) => current + 1);
-    } else {
-      console.log("[AUTO-READ] clear-candidate-from-select", {
-        messageId,
-        triggerAutoRead: Boolean(options?.triggerAutoRead),
-        targetUnread: Boolean(targetMessage?.unread),
-      });
-      setAutoReadCandidateMessageId(null);
-    }
+    console.log("[AUTO-READ] diagnostic disable auto-arm", {
+      messageId,
+      triggerAutoRead: Boolean(options?.triggerAutoRead),
+      targetUnread: Boolean(targetMessage?.unread),
+    });
+    setAutoReadCandidateMessageId(null);
     setIsFullMessageOpen(Boolean(options?.openFull));
     onRecordMessageOwnershipInteraction(messageId);
   };
