@@ -206,12 +206,16 @@ def resolve_ui_signal(message: Message, email_address: str) -> str:
             inbox_profile=inbox_profile,
             user_link_settings=USER_LINK_SETTINGS,
             user_reminder_settings=USER_REMINDER_SETTINGS,
+            preview_mode=True,
         )
-        subject = decode_mime_words(message.get("Subject", ""))
-        from_header = decode_mime_words(message.get("From", ""))
-        sender_name, sender_email = parseaddr(from_header)
-        sender_name = decode_mime_words(sender_name)
-        body = get_message_body(message)
+        subject = str(result.get("subject") or decode_mime_words(message.get("Subject", "")))
+        from_header = str(result.get("from") or decode_mime_words(message.get("From", "")))
+        sender_name = str(result.get("sender_name") or "")
+        sender_email = str(result.get("sender_email") or "")
+        if not sender_email:
+            sender_name, sender_email = parseaddr(from_header)
+            sender_name = decode_mime_words(sender_name)
+        body = str(result.get("body") or get_message_body(message))
         subject_lower = subject.lower()
         body_lower = body.lower()
         sender_lower = sender_email.lower()
