@@ -126,16 +126,26 @@ def fetch_recent_messages(mailbox, folder: str = "INBOX", limit: int = DEFAULT_F
         uid_match = re.search(r"UID\s+(\d+)", combined_metadata)
         imap_uid = uid_match.group(1) if uid_match else None
         if imap_uid is None:
-            print(
-                f"[IMAP-PREVIEW-RAW-META] message_id={message_id.decode('utf-8', errors='ignore') if isinstance(message_id, bytes) else str(message_id)} meta={combined_metadata[:400]}"
-            )
-            logger.info(
-                "[IMAP-PREVIEW-UID-META] message_id=%s meta=%s",
-                message_id.decode("utf-8", errors="ignore")
-                if isinstance(message_id, bytes)
-                else str(message_id),
-                combined_metadata[:300],
-            )
+            uid_status, uid_data = mailbox.fetch(message_id, "(UID)")
+            if uid_status == "OK":
+                uid_metadata_parts: list[str] = []
+                for uid_item in uid_data:
+                    if isinstance(uid_item, tuple):
+                        uid_response_meta = uid_item[0]
+                        if isinstance(uid_response_meta, bytes):
+                            uid_response_meta = uid_response_meta.decode("utf-8", errors="ignore")
+                        else:
+                            uid_response_meta = str(uid_response_meta)
+                        uid_metadata_parts.append(uid_response_meta)
+                    elif isinstance(uid_item, bytes):
+                        uid_metadata_parts.append(uid_item.decode("utf-8", errors="ignore"))
+                    elif uid_item is not None:
+                        uid_metadata_parts.append(str(uid_item))
+
+                uid_combined_metadata = " ".join(uid_metadata_parts)
+                uid_match = re.search(r"UID\s+(\d+)", uid_combined_metadata)
+                if uid_match:
+                    imap_uid = uid_match.group(1)
         if not flags_match:
             logger.info(
                 "IMAP fetch missing FLAGS for %s | meta=%s",
