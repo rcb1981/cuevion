@@ -98,7 +98,7 @@ def fetch_recent_messages(mailbox, folder: str = "INBOX", limit: int = DEFAULT_F
     results: list[tuple[Message, bool, str | None]] = []
 
     for message_id in reversed(latest_ids):
-        status, message_data = mailbox.fetch(message_id, "(FLAGS BODY.PEEK[])")
+        status, message_data = mailbox.fetch(message_id, "(UID FLAGS BODY.PEEK[])")
 
         if status != "OK":
             continue
