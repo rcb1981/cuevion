@@ -10120,9 +10120,10 @@ function MailboxView({
                       const subjectPriorityClass =
                         isVisiblePriorityMessage(message) || message.priorityScore === "high"
                           ? "text-[color:rgba(67,62,56,0.98)]"
-                          : message.priorityScore === "low"
-                            ? "text-[color:rgba(83,76,69,0.92)]"
-                            : "text-[var(--workspace-text)]";
+                          : "text-[var(--workspace-text)]";
+                      const subjectReadabilityClass = message.unread
+                        ? "font-semibold"
+                        : "font-medium";
                       return (
                         <button
                           key={message.id}
@@ -10245,7 +10246,9 @@ function MailboxView({
                                   {message.sender}
                                 </div>
                               </div>
-                              <div className={`truncate text-[0.97rem] font-semibold leading-5 tracking-[-0.015em] ${subjectPriorityClass}`}>
+                              <div
+                                className={`truncate text-[0.97rem] leading-5 tracking-[-0.015em] ${subjectPriorityClass} ${subjectReadabilityClass}`}
+                              >
                                 {message.subject}
                               </div>
                               <div
