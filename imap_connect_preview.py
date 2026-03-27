@@ -125,6 +125,14 @@ def fetch_recent_messages(mailbox, folder: str = "INBOX", limit: int = DEFAULT_F
         flags_content = flags_match.group(1) if flags_match else ""
         uid_match = re.search(r"UID\s+(\d+)", combined_metadata)
         imap_uid = uid_match.group(1) if uid_match else None
+        if imap_uid is None:
+            logger.info(
+                "[IMAP-PREVIEW-UID-META] message_id=%s meta=%s",
+                message_id.decode("utf-8", errors="ignore")
+                if isinstance(message_id, bytes)
+                else str(message_id),
+                combined_metadata[:300],
+            )
         if not flags_match:
             logger.info(
                 "IMAP fetch missing FLAGS for %s | meta=%s",
