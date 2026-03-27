@@ -1,6 +1,7 @@
 import hashlib
 import imaplib
 import logging
+import re
 from datetime import datetime, timezone
 from email import message_from_bytes
 from email.header import decode_header
@@ -122,7 +123,7 @@ def fetch_recent_messages(mailbox, folder: str = "INBOX", limit: int = DEFAULT_F
         if status != "OK":
             continue
 
-        flags = ""
+        metadata_parts: list[str] = []
         for item in message_data:
             if isinstance(item, tuple):
                 response_meta = item[0]
@@ -130,12 +131,26 @@ def fetch_recent_messages(mailbox, folder: str = "INBOX", limit: int = DEFAULT_F
                     response_meta = response_meta.decode("utf-8", errors="ignore")
                 else:
                     response_meta = str(response_meta)
-                if "FLAGS" in response_meta:
-                    flags = response_meta
-                    break
+                metadata_parts.append(response_meta)
+            elif isinstance(item, bytes):
+                metadata_parts.append(item.decode("utf-8", errors="ignore"))
+            elif item is not None:
+                metadata_parts.append(str(item))
+
+        combined_metadata = " ".join(metadata_parts)
+        flags_match = re.search(r"FLAGS\s*\((.*?)\)", combined_metadata)
+        flags_content = flags_match.group(1) if flags_match else ""
+        if not flags_match:
+            logger.info(
+                "IMAP fetch missing FLAGS for %s | meta=%s",
+                message_id.decode("utf-8", errors="ignore")
+                if isinstance(message_id, bytes)
+                else str(message_id),
+                combined_metadata[:160],
+            )
 
         raw_email = message_data[0][1]
-        unread = "\\Seen" not in flags
+        unread = "\\Seen" not in flags_content
         results.append((message_from_bytes(raw_email), unread))
 
     return results
