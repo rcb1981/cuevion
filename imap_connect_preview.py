@@ -126,6 +126,9 @@ def fetch_recent_messages(mailbox, folder: str = "INBOX", limit: int = DEFAULT_F
         uid_match = re.search(r"UID\s+(\d+)", combined_metadata)
         imap_uid = uid_match.group(1) if uid_match else None
         if imap_uid is None:
+            print(
+                f"[IMAP-PREVIEW-RAW-META] message_id={message_id.decode('utf-8', errors='ignore') if isinstance(message_id, bytes) else str(message_id)} meta={combined_metadata[:400]}"
+            )
             logger.info(
                 "[IMAP-PREVIEW-UID-META] message_id=%s meta=%s",
                 message_id.decode("utf-8", errors="ignore")
