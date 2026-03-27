@@ -437,6 +437,7 @@ const MAIL_SIGNATURES_STORAGE_KEY = "cuevion-mail-signatures";
 const MAIL_OUT_OF_OFFICE_STORAGE_KEY = "cuevion-mail-out-of-office";
 const OUT_OF_OFFICE_REPLY_LOG_STORAGE_KEY = "cuevion-out-of-office-reply-log";
 const MANAGED_INBOXES_STORAGE_KEY = "cuevion-managed-inboxes";
+const MAILBOX_TITLE_OVERRIDES_STORAGE_KEY = "cuevion-mailbox-title-overrides";
 const OUT_OF_OFFICE_SUPPRESSION_WINDOW_MS = 24 * 60 * 60 * 1000;
 const SMART_FOLDERS_STORAGE_KEY = "cuevion-smart-folders";
 const MAIL_LIST_PANE_WIDTH_STORAGE_KEY = "cuevion-mail-list-pane-width";
@@ -17891,7 +17892,23 @@ export function WorkspaceShell({
   );
   const [mailboxTitleOverrides, setMailboxTitleOverrides] = useState<
     Partial<Record<InboxId, string>>
-  >({});
+  >(() => {
+    if (typeof window === "undefined") {
+      return {};
+    }
+
+    const storedValue = window.localStorage.getItem(MAILBOX_TITLE_OVERRIDES_STORAGE_KEY);
+
+    if (!storedValue) {
+      return {};
+    }
+
+    try {
+      return JSON.parse(storedValue) as Partial<Record<InboxId, string>>;
+    } catch {
+      return {};
+    }
+  });
   const [savedManagedInboxes, setSavedManagedInboxes] = useState<ManagedWorkspaceInbox[]>(() => {
     if (typeof window === "undefined") {
       return buildManagedWorkspaceInboxes(onboardingState);
@@ -18181,6 +18198,13 @@ export function WorkspaceShell({
       JSON.stringify(savedManagedInboxes),
     );
   }, [savedManagedInboxes]);
+
+  useEffect(() => {
+    window.localStorage.setItem(
+      MAILBOX_TITLE_OVERRIDES_STORAGE_KEY,
+      JSON.stringify(mailboxTitleOverrides),
+    );
+  }, [mailboxTitleOverrides]);
 
   useEffect(() => {
     if (!activeMailbox) {
