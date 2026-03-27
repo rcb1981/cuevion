@@ -129,6 +129,10 @@ type ContactTicket = {
   updatedAt: string;
   messages: ContactTicketMessage[];
 };
+
+const getUnreadPreviewIds = (messages: Array<{ id: string; unread?: boolean }>) =>
+  messages.filter((message) => message.unread).map((message) => message.id).slice(0, 8);
+
 type LearningLaunchRequest =
   | {
       key: string;
@@ -7393,12 +7397,6 @@ function MailboxView({
 
     return messageId ? [messageId] : selectedMessageIds;
   };
-
-  const getUnreadPreviewIds = (messages: Array<{ id: string; unread?: boolean }>) =>
-    messages
-      .filter((message) => message.unread)
-      .map((message) => message.id)
-      .slice(0, 8);
 
   const openShareCollaboration = (messageId: string) => {
     const message = getMessageById(messageId);
