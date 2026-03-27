@@ -269,6 +269,63 @@ def resolve_ui_signal(message: Message, email_address: str) -> str:
                 "support the release",
                 "play in your sets",
             ]
+            business_keywords = [
+                "collaboration",
+                "samenwerken",
+                "proposal",
+                "partnership",
+                "business call",
+                "let's work together",
+                "work together",
+                "discuss a proposal",
+                "schedule a call",
+                "meeting",
+                "opportunity",
+            ]
+            demo_intent_keywords = [
+                "demo",
+                "demo submission",
+                "please consider this track",
+                "for your label",
+                "would love your feedback",
+                "submission",
+                "listen to this track",
+                "check my track",
+                "track for your label",
+            ]
+            finance_keywords = [
+                "invoice",
+                "receipt",
+                "payment",
+                "billing",
+                "paid",
+                "payout",
+                "statement",
+                "royalty",
+                "royalties",
+                "earnings",
+                "ad receipt",
+                "ads receipt",
+                "payment confirmation",
+                "factuur",
+                "betaling",
+                "betalingsoverzicht",
+                "declaratie",
+            ]
+            google_security_keywords = [
+                "security alert",
+                "security notification",
+                "new sign-in",
+                "sign-in attempt",
+                "login attempt",
+                "log in",
+                "password",
+                "verification code",
+                "2-step verification",
+                "two-step verification",
+                "suspicious activity",
+            ]
+            classification_text = f"{subject_lower} {body_lower}"
 
             result = {
                 "category": "info",
@@ -296,11 +353,22 @@ def resolve_ui_signal(message: Message, email_address: str) -> str:
                 result["category"] = "royalty_statement"
             elif is_promo_reminder_email(subject, body, sender_email):
                 result["category"] = "promo_reminder"
+            elif (
+                ("google" in sender_lower or "accounts.google.com" in classification_text)
+                and any(keyword in classification_text for keyword in google_security_keywords)
+            ):
+                result["category"] = "info"
+            elif any(keyword in classification_text for keyword in finance_keywords):
+                result["category"] = "finance"
             elif usable_demo_links:
                 result["category"] = "demo"
                 result["usable_demo_links"] = usable_demo_links
-            elif any(keyword in f"{subject_lower} {body_lower}" for keyword in promo_keywords):
+            elif any(keyword in classification_text for keyword in demo_intent_keywords):
+                result["category"] = "demo"
+            elif any(keyword in classification_text for keyword in promo_keywords):
                 result["category"] = "promo"
+            elif any(keyword in classification_text for keyword in business_keywords):
+                result["category"] = "business"
 
             result["workflow_links"] = [
                 link_name
