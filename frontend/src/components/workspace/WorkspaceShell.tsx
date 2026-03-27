@@ -10116,6 +10116,7 @@ function MailboxView({
                           ? formatSharedContextHint(message.sharedContext)
                           : null;
                       const visibleSignal = getVisibleMessageSignal(message);
+                      const displaySignal = visibleSignal ?? "NEW";
                       const subjectPriorityClass =
                         isVisiblePriorityMessage(message) || message.priorityScore === "high"
                           ? "text-[color:rgba(67,62,56,0.98)]"
@@ -10247,6 +10248,15 @@ function MailboxView({
                               <div className={`truncate text-[0.96rem] font-medium tracking-[-0.014em] ${subjectPriorityClass}`}>
                                 {message.subject}
                               </div>
+                              <div
+                                className={`pt-0.5 text-[0.6rem] font-medium uppercase tracking-[0.12em] ${
+                                  visibleSignal
+                                    ? "text-[var(--workspace-text-faint)]"
+                                    : "text-[color:rgba(120,111,100,0.42)]"
+                                }`}
+                              >
+                                {displaySignal}
+                              </div>
                               <div className="truncate text-[0.78rem] leading-5 text-[var(--workspace-text-faint)]">
                                 {compactSnippet}
                               </div>
@@ -10255,15 +10265,6 @@ function MailboxView({
                                   {sharedContextHint}
                                 </div>
                               ) : null}
-                            </div>
-                            <div
-                              className={`pt-1 text-[0.6rem] font-medium uppercase tracking-[0.12em] ${
-                                visibleSignal
-                                  ? "text-[var(--workspace-text-faint)]"
-                                  : "invisible"
-                              }`}
-                            >
-                              {visibleSignal ?? "Signal"}
                             </div>
                           </div>
                           <div className="flex-none self-start pt-0 text-right text-[0.64rem] font-medium uppercase tracking-[0.12em] text-[var(--workspace-text-faint)]">
