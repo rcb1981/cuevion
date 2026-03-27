@@ -7233,6 +7233,7 @@ function MailboxView({
           message.id === selectedMessageId ? { ...message, unread: false } : message,
         ),
       );
+      setAutoReadCandidateMessageId(null);
     }, 2000);
 
     return () => window.clearTimeout(timeoutId);
@@ -7882,6 +7883,7 @@ function MailboxView({
       openFull?: boolean;
       isToggle?: boolean;
       isRange?: boolean;
+      triggerAutoRead?: boolean;
     },
   ) => {
     const sortedMessageIds = sortedMessages.map((message) => message.id);
@@ -7948,8 +7950,12 @@ function MailboxView({
     // Normal click must always leave multi-select mode immediately and reset the
     // range anchor to the clicked message.
     setSelectionState([messageId], messageId, messageId);
-    setAutoReadCandidateMessageId(targetMessage?.unread ? messageId : null);
-    setAutoReadTriggerToken((current) => current + 1);
+    if (options?.triggerAutoRead && targetMessage?.unread) {
+      setAutoReadCandidateMessageId(messageId);
+      setAutoReadTriggerToken((current) => current + 1);
+    } else {
+      setAutoReadCandidateMessageId(null);
+    }
     setIsFullMessageOpen(Boolean(options?.openFull));
     onRecordMessageOwnershipInteraction(messageId);
   };
@@ -10321,7 +10327,9 @@ function MailboxView({
                               return;
                             }
 
-                            handleSelectMessage(activeFolder, message.id);
+                            handleSelectMessage(activeFolder, message.id, {
+                              triggerAutoRead: true,
+                            });
                           }}
                           onDoubleClick={() => {
                             handleSelectMessage(activeFolder, message.id, {
@@ -10330,16 +10338,6 @@ function MailboxView({
                           }}
                           onContextMenu={(event) => {
                             event.preventDefault();
-                            const nextSelectionIds = selectedMessageIds.includes(message.id)
-                              ? selectedMessageIds
-                              : [message.id];
-                            setSelectionState(
-                              nextSelectionIds,
-                              message.id,
-                              selectedMessageIds.includes(message.id)
-                                ? selectionAnchorId
-                                : message.id,
-                            );
                             setIsFullMessageOpen(false);
                             setIsMoreMenuOpen(false);
                             setContextMenuState({
