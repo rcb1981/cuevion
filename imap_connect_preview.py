@@ -320,6 +320,14 @@ def resolve_ui_signal(message: Message, email_address: str) -> str:
 
             result["v7_final_priority"] = v7_decision.final_priority
 
+        logger.warning(
+            "Preview ui_signal resolved category=%s priority=%s workflow_links=%s usable_demo_links=%s subject=%s",
+            result.get("category"),
+            result.get("priority"),
+            result.get("workflow_links"),
+            result.get("usable_demo_links"),
+            decode_mime_words(message.get("Subject", "")),
+        )
         return result.get("ui_signal") or map_to_ui_signal(result)
     except Exception:
         logger.exception("Could not resolve ui_signal for message preview")
