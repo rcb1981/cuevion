@@ -8,17 +8,6 @@ from email.message import Message
 from email.utils import parseaddr, parsedate_to_datetime
 from typing import Any
 
-from imap_live_v6_5_5_stable import (
-    INBOX_CONFIG,
-    USER_LINK_SETTINGS,
-    USER_REMINDER_SETTINGS,
-    V7_USER_CONFIG,
-    analyze_email,
-    map_to_ui_signal,
-)
-from v7_config import EngineResult
-from v7_decision_layer import decide_message_behavior
-
 
 DEFAULT_GMAIL_HOST = "imap.gmail.com"
 DEFAULT_GMAIL_PORT = 993
@@ -153,6 +142,21 @@ def format_timestamp(date_header: str) -> tuple[str, str]:
 
 
 def resolve_ui_signal(message: Message, email_address: str) -> str:
+    try:
+        from imap_live_v6_5_5_stable import (
+            INBOX_CONFIG,
+            USER_LINK_SETTINGS,
+            USER_REMINDER_SETTINGS,
+            V7_USER_CONFIG,
+            analyze_email,
+            map_to_ui_signal,
+        )
+        from v7_config import EngineResult
+        from v7_decision_layer import decide_message_behavior
+    except Exception:
+        logger.exception("Could not load ui_signal dependencies for message preview")
+        return "NEW"
+
     local_part = email_address.split("@")[0].strip().lower()
     mailbox_label = f"{local_part}@"
     inbox_profile = next(
