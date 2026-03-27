@@ -8,6 +8,17 @@ from email.message import Message
 from email.utils import parseaddr, parsedate_to_datetime
 from typing import Any
 
+from imap_live_v6_5_5_stable import (
+    INBOX_CONFIG,
+    USER_LINK_SETTINGS,
+    USER_REMINDER_SETTINGS,
+    V7_USER_CONFIG,
+    analyze_email,
+    map_to_ui_signal,
+)
+from v7_config import EngineResult
+from v7_decision_layer import decide_message_behavior
+
 
 DEFAULT_GMAIL_HOST = "imap.gmail.com"
 DEFAULT_GMAIL_PORT = 993
@@ -141,7 +152,61 @@ def format_timestamp(date_header: str) -> tuple[str, str]:
         return fallback_timestamp, fallback_timestamp
 
 
-def to_message_preview(message: Message, index: int) -> dict[str, Any]:
+def resolve_ui_signal(message: Message, email_address: str) -> str:
+    local_part = email_address.split("@")[0].strip().lower()
+    mailbox_label = f"{local_part}@"
+    inbox_profile = next(
+        (
+            mailbox_config.get("profile", "")
+            for mailbox_config in INBOX_CONFIG
+            if mailbox_config.get("label", "").replace("@", "").lower() == local_part
+        ),
+        "",
+    )
+
+    try:
+        result = analyze_email(
+            message,
+            inbox_name=mailbox_label,
+            inbox_profile=inbox_profile,
+            user_link_settings=USER_LINK_SETTINGS,
+            user_reminder_settings=USER_REMINDER_SETTINGS,
+        )
+
+        mailbox_match = next(
+            (
+                mailbox
+                for mailbox in V7_USER_CONFIG.mailboxes
+                if mailbox.email_address.split("@")[0].lower() == local_part
+            ),
+            None,
+        )
+
+        if mailbox_match:
+            engine_result = EngineResult(
+                inbox_name=mailbox_label,
+                category=result.get("category", "unknown"),
+                priority=result.get("priority", "NORMAL"),
+                workflow_links=result.get("workflow_links", []),
+                usable_demo_links=result.get("usable_demo_links", []),
+                reason=result.get("reason", ""),
+            )
+
+            v7_decision = decide_message_behavior(
+                engine_result=engine_result,
+                user_config=V7_USER_CONFIG,
+                mailbox_config=mailbox_match,
+            )
+
+            result["v7_final_priority"] = v7_decision.final_priority
+
+        return result.get("ui_signal") or map_to_ui_signal(result)
+    except Exception:
+        logger.exception("Could not resolve ui_signal for message preview")
+        return "NEW"
+
+
+def to_message_preview(message: Message, index: int, email_address: str) -> dict[str, Any]:
     subject = decode_mime_words(message.get("Subject", "Untitled message"))
     from_header = decode_mime_words(message.get("From", "Unknown sender"))
     to_header = decode_mime_words(message.get("To", ""))
@@ -167,6 +232,7 @@ def to_message_preview(message: Message, index: int) -> dict[str, Any]:
       "createdAt": created_at,
       "body": body.split("\n\n") if body else [snippet or "No message preview available."],
       "unread": False,
+      "ui_signal": resolve_ui_signal(message, email_address),
     }
 
 
@@ -217,7 +283,7 @@ def build_connect_preview_response(payload: dict[str, Any]) -> tuple[int, dict[s
         )
         messages = fetch_recent_messages(mailbox, folder=folder, limit=limit)
         previews = [
-            to_message_preview(message, index)
+            to_message_preview(message, index, email_address)
             for index, message in enumerate(messages)
         ]
 
