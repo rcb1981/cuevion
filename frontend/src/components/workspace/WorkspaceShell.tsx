@@ -10117,13 +10117,21 @@ function MailboxView({
                           : null;
                       const visibleSignal = getVisibleMessageSignal(message);
                       const displaySignal = visibleSignal ?? "NEW";
+                      const senderTextClass = message.unread
+                        ? "text-[var(--workspace-text)]"
+                        : "text-[color:rgba(67,62,56,0.94)]";
                       const subjectPriorityClass =
                         isVisiblePriorityMessage(message) || message.priorityScore === "high"
                           ? "text-[color:rgba(67,62,56,0.98)]"
-                          : "text-[var(--workspace-text)]";
+                          : "text-[color:rgba(61,56,50,0.96)]";
                       const subjectReadabilityClass = message.unread
                         ? "font-semibold"
                         : "font-medium";
+                      const signalTextClass = visibleSignal
+                        ? "text-[color:rgba(120,111,100,0.72)]"
+                        : "text-[color:rgba(120,111,100,0.34)]";
+                      const snippetTextClass = "text-[color:rgba(111,103,94,0.82)]";
+                      const timeTextClass = "text-[color:rgba(120,111,100,0.74)]";
                       return (
                         <button
                           key={message.id}
@@ -10202,7 +10210,7 @@ function MailboxView({
                               : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)]"
                           } focus-visible:border-[var(--workspace-border-hover)] focus-visible:outline-none`}
                         >
-                          <div className="flex min-w-0 flex-1 flex-col justify-between">
+                          <div className="flex min-w-0 flex-1 flex-col justify-between text-[var(--workspace-text)] opacity-100">
                             <div className="min-w-0 space-y-0.5">
                               <div className="flex items-center gap-2">
                                 {active ? (
@@ -10242,7 +10250,7 @@ function MailboxView({
                                     </svg>
                                   </span>
                                 ) : null}
-                                <div className="truncate text-[0.96rem] font-semibold tracking-[-0.014em] text-[var(--workspace-text)]">
+                                <div className={`truncate text-[0.96rem] font-semibold tracking-[-0.014em] ${senderTextClass}`}>
                                   {message.sender}
                                 </div>
                               </div>
@@ -10251,17 +10259,13 @@ function MailboxView({
                               >
                                 {message.subject}
                               </div>
+                              <div className={`truncate text-[0.78rem] leading-5 ${snippetTextClass}`}>
+                                {compactSnippet}
+                              </div>
                               <div
-                                className={`pt-0.5 text-[0.6rem] font-medium uppercase tracking-[0.12em] ${
-                                  visibleSignal
-                                    ? "text-[var(--workspace-text-faint)]"
-                                    : "text-[color:rgba(120,111,100,0.34)]"
-                                }`}
+                                className={`pt-0.5 text-[0.6rem] font-medium uppercase tracking-[0.12em] ${signalTextClass}`}
                               >
                                 {displaySignal}
-                              </div>
-                              <div className="truncate text-[0.78rem] leading-5 text-[var(--workspace-text-muted)]">
-                                {compactSnippet}
                               </div>
                               {sharedContextHint ? (
                                 <div className="pt-1 text-[0.68rem] leading-5 text-[color:rgba(120,111,100,0.72)]">
@@ -10270,7 +10274,7 @@ function MailboxView({
                               ) : null}
                             </div>
                           </div>
-                          <div className="flex-none self-start pt-0 text-right text-[0.64rem] font-medium uppercase tracking-[0.12em] text-[var(--workspace-text-faint)]">
+                          <div className={`flex-none self-start pt-0 text-right text-[0.64rem] font-medium uppercase tracking-[0.12em] ${timeTextClass}`}>
                             {message.time}
                           </div>
                         </button>
