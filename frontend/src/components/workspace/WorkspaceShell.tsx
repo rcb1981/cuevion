@@ -7167,36 +7167,6 @@ function MailboxView({
   }, [selectedMessageIds, selectionAnchorId]);
 
   useEffect(() => {
-    if (!selectedMessageId || isMultiSelectActive || isSharedView || activeSmartFolder) {
-      return;
-    }
-
-    const targetMessage = folderMessages.find((message) => message.id === selectedMessageId);
-
-    if (!targetMessage?.unread) {
-      return;
-    }
-
-    const timeoutId = window.setTimeout(() => {
-      updateFolderMessages(activeFolder, (messages) =>
-        messages.map((message) =>
-          message.id === selectedMessageId ? { ...message, unread: false } : message,
-        ),
-      );
-    }, 2000);
-
-    return () => window.clearTimeout(timeoutId);
-  }, [
-    activeFolder,
-    activeSmartFolder,
-    folderMessages,
-    isMultiSelectActive,
-    isSharedView,
-    selectedMessageId,
-    updateFolderMessages,
-  ]);
-
-  useEffect(() => {
     return () => {
       dragPreviewCleanupRef.current?.();
     };
@@ -7241,6 +7211,36 @@ function MailboxView({
       },
     }));
   };
+
+  useEffect(() => {
+    if (!selectedMessageId || isMultiSelectActive || isSharedView || activeSmartFolder) {
+      return;
+    }
+
+    const targetMessage = folderMessages.find((message) => message.id === selectedMessageId);
+
+    if (!targetMessage?.unread) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      updateFolderMessages(activeFolder, (messages) =>
+        messages.map((message) =>
+          message.id === selectedMessageId ? { ...message, unread: false } : message,
+        ),
+      );
+    }, 2000);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [
+    activeFolder,
+    activeSmartFolder,
+    folderMessages,
+    isMultiSelectActive,
+    isSharedView,
+    selectedMessageId,
+    updateFolderMessages,
+  ]);
 
   const updateMessageById = (
     messageId: string,
