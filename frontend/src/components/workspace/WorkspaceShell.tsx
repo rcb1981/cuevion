@@ -7167,6 +7167,36 @@ function MailboxView({
   }, [selectedMessageIds, selectionAnchorId]);
 
   useEffect(() => {
+    if (!selectedMessageId || isMultiSelectActive || isSharedView || activeSmartFolder) {
+      return;
+    }
+
+    const targetMessage = folderMessages.find((message) => message.id === selectedMessageId);
+
+    if (!targetMessage?.unread) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      updateFolderMessages(activeFolder, (messages) =>
+        messages.map((message) =>
+          message.id === selectedMessageId ? { ...message, unread: false } : message,
+        ),
+      );
+    }, 2000);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [
+    activeFolder,
+    activeSmartFolder,
+    folderMessages,
+    isMultiSelectActive,
+    isSharedView,
+    selectedMessageId,
+    updateFolderMessages,
+  ]);
+
+  useEffect(() => {
     return () => {
       dragPreviewCleanupRef.current?.();
     };
@@ -7841,7 +7871,7 @@ function MailboxView({
   };
 
   const handleSelectMessage = (
-    folder: MailFolder,
+    _folder: MailFolder,
     messageId: string,
     options?: {
       openFull?: boolean;
@@ -7910,29 +7940,11 @@ function MailboxView({
       return;
     }
 
-    const isAlreadySoleSelection =
-      selectedMessageIds.length === 1 && selectedMessageIds[0] === messageId;
-
     // Normal click must always leave multi-select mode immediately and reset the
     // range anchor to the clicked message.
     setSelectionState([messageId], messageId, messageId);
     setIsFullMessageOpen(Boolean(options?.openFull));
     onRecordMessageOwnershipInteraction(messageId);
-
-    if (!targetMessage?.unread || isAlreadySoleSelection) {
-      return;
-    }
-
-    if (isSharedView || activeSmartFolder) {
-      updateMessageById(messageId, (message) => ({ ...message, unread: false }));
-      return;
-    }
-
-    updateFolderMessages(folder, (messages) =>
-      messages.map((message) =>
-        message.id === messageId ? { ...message, unread: false } : message,
-      ),
-    );
   };
 
   const moveMessagesAcrossWorkspace = (
