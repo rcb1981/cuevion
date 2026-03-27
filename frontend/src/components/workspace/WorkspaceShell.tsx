@@ -10121,7 +10121,7 @@ function MailboxView({
                         isVisiblePriorityMessage(message) || message.priorityScore === "high"
                           ? "text-[color:rgba(67,62,56,0.98)]"
                           : message.priorityScore === "low"
-                            ? "text-[color:rgba(96,89,81,0.84)]"
+                            ? "text-[color:rgba(83,76,69,0.92)]"
                             : "text-[var(--workspace-text)]";
                       return (
                         <button
@@ -10241,23 +10241,23 @@ function MailboxView({
                                     </svg>
                                   </span>
                                 ) : null}
-                                <div className="truncate text-[0.96rem] font-medium tracking-[-0.014em] text-[var(--workspace-text)]">
+                                <div className="truncate text-[0.96rem] font-semibold tracking-[-0.014em] text-[var(--workspace-text)]">
                                   {message.sender}
                                 </div>
                               </div>
-                              <div className={`truncate text-[0.96rem] font-medium tracking-[-0.014em] ${subjectPriorityClass}`}>
+                              <div className={`truncate text-[0.97rem] font-semibold leading-5 tracking-[-0.015em] ${subjectPriorityClass}`}>
                                 {message.subject}
                               </div>
                               <div
                                 className={`pt-0.5 text-[0.6rem] font-medium uppercase tracking-[0.12em] ${
                                   visibleSignal
                                     ? "text-[var(--workspace-text-faint)]"
-                                    : "text-[color:rgba(120,111,100,0.42)]"
+                                    : "text-[color:rgba(120,111,100,0.34)]"
                                 }`}
                               >
                                 {displaySignal}
                               </div>
-                              <div className="truncate text-[0.78rem] leading-5 text-[var(--workspace-text-faint)]">
+                              <div className="truncate text-[0.78rem] leading-5 text-[var(--workspace-text-muted)]">
                                 {compactSnippet}
                               </div>
                               {sharedContextHint ? (
