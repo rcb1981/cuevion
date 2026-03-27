@@ -11,6 +11,12 @@ export type LiveInboxSnapshot = {
 
 type LiveInboxSnapshotStore = Record<string, LiveInboxSnapshot>;
 
+function isSnapshotUiSignalComplete(snapshot: LiveInboxSnapshot) {
+  return snapshot.messages.every(
+    (message) => typeof message.ui_signal === "string" && message.ui_signal.length > 0,
+  );
+}
+
 export function readLiveInboxSnapshots(): LiveInboxSnapshotStore {
   if (typeof window === "undefined") {
     return {};
@@ -23,7 +29,19 @@ export function readLiveInboxSnapshots(): LiveInboxSnapshotStore {
   }
 
   try {
-    return JSON.parse(storedValue) as LiveInboxSnapshotStore;
+    const parsed = JSON.parse(storedValue) as LiveInboxSnapshotStore;
+    const nextSnapshots = Object.fromEntries(
+      Object.entries(parsed).filter(([, snapshot]) => isSnapshotUiSignalComplete(snapshot)),
+    ) as LiveInboxSnapshotStore;
+
+    if (Object.keys(nextSnapshots).length !== Object.keys(parsed).length) {
+      window.localStorage.setItem(
+        LIVE_INBOX_SNAPSHOTS_STORAGE_KEY,
+        JSON.stringify(nextSnapshots),
+      );
+    }
+
+    return nextSnapshots;
   } catch {
     return {};
   }
