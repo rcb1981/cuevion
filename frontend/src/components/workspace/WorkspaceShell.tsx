@@ -7146,19 +7146,31 @@ function MailboxView({
     const nextSelectedMessageIds = selectedMessageIds.filter((messageId) =>
       availableMessageIds.has(messageId),
     );
+    let repairedSelection = false;
 
     if (nextSelectedMessageIds.length !== selectedMessageIds.length) {
       setSelectedMessageIds(nextSelectedMessageIds);
+      repairedSelection = true;
     }
 
     if (selectedMessageId && !availableMessageIds.has(selectedMessageId)) {
       setSelectedMessageId(nextSelectedMessageIds[0] ?? null);
+      repairedSelection = true;
     }
 
     if (selectionAnchorId && !availableMessageIds.has(selectionAnchorId)) {
       setSelectionAnchorId(nextSelectedMessageIds[0] ?? null);
+      repairedSelection = true;
+    }
+
+    if (repairedSelection) {
+      setAutoReadCandidateMessageId(null);
     }
   }, [folderMessages, selectedMessageId, selectedMessageIds, selectionAnchorId]);
+
+  useEffect(() => {
+    setAutoReadCandidateMessageId(null);
+  }, [activeFolder, activeSmartFolderId, isSharedView, mailbox.id]);
 
   useEffect(() => {
     if (selectedMessageIds.length === 1 && selectionAnchorId !== selectedMessageIds[0]) {
