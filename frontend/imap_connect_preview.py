@@ -114,7 +114,7 @@ def fetch_recent_messages(mailbox, folder: str = "INBOX", limit: int = DEFAULT_F
 
     message_ids = messages[0].split()
     latest_ids = message_ids[-limit:]
-    results: list[Message] = []
+    results: list[tuple[Message, bool]] = []
 
     for message_id in reversed(latest_ids):
         status, message_data = mailbox.fetch(message_id, "(RFC822)")
@@ -122,8 +122,19 @@ def fetch_recent_messages(mailbox, folder: str = "INBOX", limit: int = DEFAULT_F
         if status != "OK":
             continue
 
+        flags = ""
+        for item in message_data:
+            if isinstance(item, tuple):
+                response_meta = item[0]
+                if isinstance(response_meta, bytes):
+                    flags = response_meta.decode("utf-8", errors="ignore")
+                else:
+                    flags = str(response_meta)
+                break
+
         raw_email = message_data[0][1]
-        results.append(message_from_bytes(raw_email))
+        unread = "\\Seen" not in flags
+        results.append((message_from_bytes(raw_email), unread))
 
     return results
 
@@ -475,7 +486,7 @@ def resolve_ui_signal(message: Message, email_address: str) -> str:
         return "NEW"
 
 
-def to_message_preview(message: Message, index: int, email_address: str) -> dict[str, Any]:
+def to_message_preview(message: Message, index: int, email_address: str, unread: bool) -> dict[str, Any]:
     subject = decode_mime_words(message.get("Subject", "Untitled message"))
     from_header = decode_mime_words(message.get("From", "Unknown sender"))
     to_header = decode_mime_words(message.get("To", ""))
@@ -500,7 +511,7 @@ def to_message_preview(message: Message, index: int, email_address: str) -> dict
       "timestamp": display_timestamp,
       "createdAt": created_at,
       "body": body.split("\n\n") if body else [snippet or "No message preview available."],
-      "unread": False,
+      "unread": unread,
       "ui_signal": resolve_ui_signal(message, email_address),
     }
 
@@ -552,8 +563,8 @@ def build_connect_preview_response(payload: dict[str, Any]) -> tuple[int, dict[s
         )
         messages = fetch_recent_messages(mailbox, folder=folder, limit=limit)
         previews = [
-            to_message_preview(message, index, email_address)
-            for index, message in enumerate(messages)
+            to_message_preview(message, index, email_address, unread)
+            for index, (message, unread) in enumerate(messages)
         ]
 
         return 200, {
