@@ -1906,6 +1906,109 @@ function resolveMessageFocusSignal(
   return null;
 }
 
+function includesAnyKeyword(value: string, keywords: string[]) {
+  return keywords.some((keyword) => value.includes(keyword));
+}
+
+function inferHeuristicSignal(
+  message: Pick<
+    MailMessageSeed,
+    "signal" | "sender" | "subject" | "snippet" | "from" | "body" | "isAutoReply"
+  >,
+) {
+  if (message.signal?.trim()) {
+    return message.signal;
+  }
+
+  const normalizedSender = normalizeSenderLearningKey(message.from || message.sender);
+  const searchableText = [
+    message.subject,
+    message.snippet,
+    ...(message.body ?? []),
+  ]
+    .join(" ")
+    .toLowerCase();
+  const automatedSenderHints = [
+    "no-reply",
+    "noreply",
+    "notifications@",
+    "notification@",
+    "newsletter@",
+    "updates@",
+    "mailer-daemon",
+    "donotreply",
+    "do-not-reply",
+  ];
+  const priorityKeywords = [
+    "urgent",
+    "asap",
+    "action required",
+    "approval",
+    "approve",
+    "contract",
+    "invoice",
+    "payment",
+    "deadline",
+    "due today",
+    "due tomorrow",
+    "please review",
+    "signature",
+    "confirm",
+    "wire",
+  ];
+  const updateKeywords = [
+    "update",
+    "updated",
+    "status",
+    "fyi",
+    "recap",
+    "summary",
+    "confirmed",
+    "scheduled",
+    "completed",
+    "resolved",
+    "sent",
+    "delivered",
+    "receipt",
+  ];
+  const promoKeywords = [
+    "unsubscribe",
+    "newsletter",
+    "promotion",
+    "promo",
+    "offer",
+    "discount",
+    "sale",
+    "campaign",
+    "webinar",
+    "announcement",
+    "register now",
+    "limited time",
+  ];
+  const isAutomatedSender = includesAnyKeyword(normalizedSender, automatedSenderHints);
+  const isPromo = includesAnyKeyword(searchableText, promoKeywords);
+  const isPriority =
+    includesAnyKeyword(searchableText, priorityKeywords) && !isPromo;
+  const isUpdate =
+    message.isAutoReply ||
+    includesAnyKeyword(searchableText, updateKeywords) ||
+    (isAutomatedSender && !isPromo);
+
+  if (isPriority) {
+    return "Priority";
+  }
+
+  if (isPromo) {
+    return "Promo";
+  }
+
+  if (isUpdate) {
+    return "Update";
+  }
+
+  return "Other";
+}
+
 function inferInternalClassification(
   message: Pick<MailMessageSeed, "signal" | "internalClassification">,
   mailboxId: InboxId,
@@ -1930,6 +2033,8 @@ function inferInternalClassification(
     case "Priority":
     case "Active":
       return mailboxId === "promo" ? "promo" : "business";
+    case "Promo":
+      return "promo";
     default:
       return "unknown";
   }
@@ -2354,6 +2459,7 @@ function normalizeMailMessage(
     senderCategoryLearning,
     mailboxStore,
   );
+  const resolvedSignal = inferHeuristicSignal(message);
   const owner = resolveImplicitOwner(message.id, messageOwnershipInteractions);
   const priorityScore = resolveMessagePriorityScore(
     categorization.category,
@@ -2361,7 +2467,8 @@ function normalizeMailMessage(
     message.sharedContext,
   );
   const internalClassification =
-    message.internalClassification ?? inferInternalClassification(message, mailboxId);
+    message.internalClassification ??
+    inferInternalClassification({ ...message, signal: resolvedSignal }, mailboxId);
   const normalizedAttachments = (message.attachments ?? []).map((attachment) =>
     normalizeMailAttachment(attachment),
   );
@@ -2369,6 +2476,7 @@ function normalizeMailMessage(
   return {
     ...baseMessage,
     threadId: resolveMailThreadId(message),
+    signal: resolvedSignal,
     attachments: normalizedAttachments,
     internalClassification,
     suggestionDismissed: message.suggestionDismissed,
@@ -10133,7 +10241,7 @@ function MailboxView({
                           ? formatSharedContextHint(message.sharedContext)
                           : null;
                       const visibleSignal = getVisibleMessageSignal(message);
-                      const displaySignal = visibleSignal ?? "NEW";
+                      const signal = message.ui_signal || "NEW";
                       const senderTextClass =
                         themeMode === "dark"
                           ? message.unread
@@ -10291,7 +10399,9 @@ function MailboxView({
                               <div
                                 className={`pt-0.5 text-[0.6rem] font-medium uppercase tracking-[0.12em] ${signalTextClass}`}
                               >
-                                {displaySignal}
+                                <span className="text-xs opacity-70">
+                                  {signal}
+                                </span>
                               </div>
                               {sharedContextHint ? (
                                 <div className="pt-1 text-[0.68rem] leading-5 text-[color:rgba(120,111,100,0.72)]">

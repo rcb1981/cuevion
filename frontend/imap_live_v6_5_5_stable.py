@@ -211,6 +211,7 @@ def print_v7_summary(result: dict) -> None:
     print(f"V7 FINAL PRIORITY: {result.get('v7_final_priority')}")
     print(f"V7 FINAL VISIBILITY: {result.get('v7_final_visibility')}")
     print(f"V7 ACTION: {result.get('v7_action')}")
+    print(f"UI SIGNAL: {result.get('ui_signal')}")
 
     explanation = result.get("v7_explanation")
 
@@ -227,6 +228,27 @@ def print_v7_summary(result: dict) -> None:
                 print(f"  - {rule}")
     else:
         print(f"V7 EXPLANATION: {explanation}")
+
+def map_to_ui_signal(result):
+    priority = result.get("v7_final_priority")
+    category = result.get("category")
+
+    if priority == "PRIORITY":
+        return "PRIORITY"
+
+    if category in ["promo"]:
+        return "PROMO"
+
+    if category in [
+        "distributor_update",
+        "labelradar_update",
+        "trackstack_submission",
+        "royalty_statement",
+        "business_reminder"
+    ]:
+        return "UPDATE"
+
+    return "NEW"
 
 def normalize_url(url):
     if not url:
@@ -1747,7 +1769,8 @@ def print_result(result, mailbox_label):
         result["v7_final_visibility"] = v7_decision.final_visibility
         result["v7_action"] = v7_decision.action
         result["v7_explanation"] = v7_decision.explanation.final_summary
-        
+        result["ui_signal"] = map_to_ui_signal(result)
+
         print_v7_summary(result)
         print("-" * 80)
 

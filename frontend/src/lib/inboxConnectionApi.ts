@@ -12,6 +12,7 @@ export type LiveInboxMessageSnapshot = {
   createdAt: string;
   body: string[];
   unread?: boolean;
+  ui_signal?: string;
 };
 
 type ConnectInboxRequest = {
