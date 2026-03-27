@@ -7978,6 +7978,9 @@ function MailboxView({
     const sortedMessageIds = sortedMessages.map((message) => message.id);
     const targetMessage = folderMessages.find((message) => message.id === messageId);
     const selectedMessageIdBefore = selectedMessageId;
+    const unreadMessageIdsBefore = folderMessages
+      .filter((message) => message.unread)
+      .map((message) => message.id);
 
     if (options?.isRange) {
       const anchorId =
@@ -8039,6 +8042,10 @@ function MailboxView({
 
     // Normal click must always leave multi-select mode immediately and reset the
     // range anchor to the clicked message.
+    console.log("[UNREAD-REFRESH] left-click select", {
+      messageId,
+      unreadMessageIdsBefore,
+    });
     console.log("[AUTO-READ] handleSelectMessage", {
       messageId,
       triggerAutoRead: Boolean(options?.triggerAutoRead),
@@ -19522,6 +19529,18 @@ export function WorkspaceShell({
     setMailboxStore((currentStore) => {
       const currentCollections =
         currentStore[targetMailbox.id] ?? createEmptyMailboxCollections();
+      const unreadBefore = currentCollections.Inbox
+        .filter((message) => message.unread)
+        .map((message) => message.id);
+      const unreadAfter = messages
+        .filter((message) => message.unread)
+        .map((message) => message.id);
+
+      console.log("[UNREAD-REFRESH] applyLiveInboxMessagesToMailboxStore", {
+        mailboxId: targetMailbox.id,
+        unreadBefore,
+        unreadAfter,
+      });
 
       const nextStore = {
         ...currentStore,
@@ -19591,6 +19610,9 @@ export function WorkspaceShell({
     setSyncingMailboxId(mailboxId);
 
     try {
+      console.log("[UNREAD-REFRESH] refresh start", {
+        mailboxId,
+      });
       const response = await connectInboxWithImap({
         provider: managedMailbox.provider,
         email: managedMailbox.email.trim(),
@@ -19609,6 +19631,14 @@ export function WorkspaceShell({
       }
 
       const messages = response.messages ?? [];
+
+      console.log("[UNREAD-REFRESH] refresh result", {
+        mailboxId,
+        count: messages.length,
+        unreadMessageIds: messages
+          .filter((message) => message.unread)
+          .map((message) => message.id),
+      });
 
       saveLiveInboxSnapshot({
         inboxId: managedMailbox.id,
