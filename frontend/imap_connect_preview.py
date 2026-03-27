@@ -117,7 +117,7 @@ def fetch_recent_messages(mailbox, folder: str = "INBOX", limit: int = DEFAULT_F
     results: list[tuple[Message, bool]] = []
 
     for message_id in reversed(latest_ids):
-        status, message_data = mailbox.fetch(message_id, "(RFC822)")
+        status, message_data = mailbox.fetch(message_id, "(FLAGS RFC822)")
 
         if status != "OK":
             continue
@@ -127,10 +127,12 @@ def fetch_recent_messages(mailbox, folder: str = "INBOX", limit: int = DEFAULT_F
             if isinstance(item, tuple):
                 response_meta = item[0]
                 if isinstance(response_meta, bytes):
-                    flags = response_meta.decode("utf-8", errors="ignore")
+                    response_meta = response_meta.decode("utf-8", errors="ignore")
                 else:
-                    flags = str(response_meta)
-                break
+                    response_meta = str(response_meta)
+                if "FLAGS" in response_meta:
+                    flags = response_meta
+                    break
 
         raw_email = message_data[0][1]
         unread = "\\Seen" not in flags
