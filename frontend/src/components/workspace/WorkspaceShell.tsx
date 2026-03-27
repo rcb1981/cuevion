@@ -7267,8 +7267,7 @@ function MailboxView({
   };
 
   useEffect(() => {
-    // Temporary diagnostic guard: disable all auto-read timing so we can
-    // isolate whether unread flips are coming from another path.
+    // Temporary stabilization guard: disable all auto-read behavior.
     return;
 
     if (
@@ -10425,9 +10424,7 @@ function MailboxView({
                               return;
                             }
 
-                            handleSelectMessage(activeFolder, message.id, {
-                              triggerAutoRead: true,
-                            });
+                            handleSelectMessage(activeFolder, message.id);
                           }}
                           onDoubleClick={() => {
                             handleSelectMessage(activeFolder, message.id, {
