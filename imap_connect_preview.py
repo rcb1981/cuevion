@@ -143,7 +143,15 @@ def fetch_recent_messages(mailbox, folder: str = "INBOX", limit: int = DEFAULT_F
                         uid_metadata_parts.append(str(uid_item))
 
                 uid_combined_metadata = " ".join(uid_metadata_parts)
-                uid_match = re.search(r"UID\s+(\d+)", uid_combined_metadata)
+                uid_raw_text = (
+                    uid_data.decode("utf-8", errors="ignore")
+                    if isinstance(uid_data, bytes)
+                    else str(uid_data)
+                )
+                uid_match = re.search(
+                    r"UID\s+(\d+)",
+                    f"{uid_combined_metadata} {uid_raw_text}",
+                )
                 if uid_match:
                     imap_uid = uid_match.group(1)
         if not flags_match:
