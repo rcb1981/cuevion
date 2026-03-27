@@ -115,7 +115,7 @@ def fetch_recent_messages(mailbox, folder: str = "INBOX", limit: int = DEFAULT_F
 
     message_ids = messages[0].split()
     latest_ids = message_ids[-limit:]
-    results: list[tuple[Message, bool]] = []
+    results: list[tuple[Message, bool, str | None]] = []
 
     for message_id in reversed(latest_ids):
         status, message_data = mailbox.fetch(message_id, "(FLAGS BODY.PEEK[])")
@@ -143,6 +143,8 @@ def fetch_recent_messages(mailbox, folder: str = "INBOX", limit: int = DEFAULT_F
         combined_metadata = " ".join(metadata_parts)
         flags_match = re.search(r"FLAGS\s*\((.*?)\)", combined_metadata)
         flags_content = flags_match.group(1) if flags_match else ""
+        uid_match = re.search(r"UID\s+(\d+)", combined_metadata)
+        imap_uid = uid_match.group(1) if uid_match else None
         if not flags_match:
             logger.info(
                 "IMAP fetch missing FLAGS for %s | meta=%s",
@@ -164,7 +166,7 @@ def fetch_recent_messages(mailbox, folder: str = "INBOX", limit: int = DEFAULT_F
             unread,
             combined_metadata[:160],
         )
-        results.append((message_from_bytes(raw_email), unread))
+        results.append((message_from_bytes(raw_email), unread, imap_uid))
 
     return results
 
@@ -516,7 +518,13 @@ def resolve_ui_signal(message: Message, email_address: str) -> str:
         return "NEW"
 
 
-def to_message_preview(message: Message, index: int, email_address: str, unread: bool) -> dict[str, Any]:
+def to_message_preview(
+    message: Message,
+    index: int,
+    email_address: str,
+    unread: bool,
+    imap_uid: str | None,
+) -> dict[str, Any]:
     subject = decode_mime_words(message.get("Subject", "Untitled message"))
     from_header = decode_mime_words(message.get("From", "Unknown sender"))
     to_header = decode_mime_words(message.get("To", ""))
@@ -542,6 +550,7 @@ def to_message_preview(message: Message, index: int, email_address: str, unread:
       "createdAt": created_at,
       "body": body.split("\n\n") if body else [snippet or "No message preview available."],
       "unread": unread,
+      "imapUid": imap_uid,
       "ui_signal": resolve_ui_signal(message, email_address),
     }
 
@@ -593,8 +602,8 @@ def build_connect_preview_response(payload: dict[str, Any]) -> tuple[int, dict[s
         )
         messages = fetch_recent_messages(mailbox, folder=folder, limit=limit)
         previews = [
-            to_message_preview(message, index, email_address, unread)
-            for index, (message, unread) in enumerate(messages)
+            to_message_preview(message, index, email_address, unread, imap_uid)
+            for index, (message, unread, imap_uid) in enumerate(messages)
         ]
 
         return 200, {

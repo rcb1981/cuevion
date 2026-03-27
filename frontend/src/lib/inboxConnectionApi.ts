@@ -2,6 +2,7 @@ import type { ProviderId } from "../types/onboarding";
 
 export type LiveInboxMessageSnapshot = {
   id: string;
+  imapUid?: string;
   sender: string;
   subject: string;
   snippet: string;
