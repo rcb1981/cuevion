@@ -10117,13 +10117,22 @@ function MailboxView({
                           : null;
                       const visibleSignal = getVisibleMessageSignal(message);
                       const displaySignal = visibleSignal ?? "NEW";
-                      const senderTextClass = message.unread
-                        ? "text-[var(--workspace-text)]"
-                        : "text-[color:rgba(67,62,56,0.94)]";
+                      const senderTextClass =
+                        themeMode === "dark"
+                          ? message.unread
+                            ? "text-[color:rgba(247,244,239,0.98)]"
+                            : "text-[color:rgba(231,224,215,0.94)]"
+                          : message.unread
+                            ? "text-[var(--workspace-text)]"
+                            : "text-[color:rgba(67,62,56,0.94)]";
                       const subjectPriorityClass =
-                        isVisiblePriorityMessage(message) || message.priorityScore === "high"
-                          ? "text-[color:rgba(67,62,56,0.98)]"
-                          : "text-[color:rgba(61,56,50,0.96)]";
+                        themeMode === "dark"
+                          ? isVisiblePriorityMessage(message) || message.priorityScore === "high"
+                            ? "text-[color:rgba(250,246,240,0.99)]"
+                            : "text-[color:rgba(241,235,227,0.96)]"
+                          : isVisiblePriorityMessage(message) || message.priorityScore === "high"
+                            ? "text-[color:rgba(67,62,56,0.98)]"
+                            : "text-[color:rgba(61,56,50,0.96)]";
                       const subjectReadabilityClass = message.unread
                         ? "font-semibold"
                         : "font-medium";
