@@ -23,20 +23,40 @@ def map_to_ui_signal(result: dict[str, Any]) -> str:
     if priority == "PRIORITY":
         return "PRIORITY"
 
-    if category in ["promo"]:
+    if category in ["promo", "promo_reminder"]:
         return "PROMO"
-
-    if category in [
-        "distributor_update",
-        "labelradar_update",
-        "trackstack_submission",
-        "royalty_statement",
-        "business_reminder",
-    ]:
-        return "UPDATE"
 
     if category in ["demo", "high_priority_demo"]:
         return "DEMO"
+
+    if category == "reply":
+        return "REPLY"
+
+    if category in [
+        "workflow_update",
+        "distributor_update",
+        "labelradar_update",
+        "trackstack_submission",
+    ]:
+        return "UPDATE"
+
+    if category in [
+        "business",
+        "business_reminder",
+    ]:
+        return "BUSINESS"
+
+    if category in [
+        "finance",
+        "royalty_statement",
+    ]:
+        return "FINANCE"
+
+    if category == "info":
+        return "INFO"
+
+    if category == "unknown":
+        return "NEW"
 
     return "NEW"
 
