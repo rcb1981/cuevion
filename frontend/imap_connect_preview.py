@@ -16,6 +16,28 @@ MAX_FETCH_LIMIT = 25
 logger = logging.getLogger(__name__)
 
 
+def map_to_ui_signal(result: dict[str, Any]) -> str:
+    priority = result.get("v7_final_priority")
+    category = result.get("category")
+
+    if priority == "PRIORITY":
+        return "PRIORITY"
+
+    if category in ["promo"]:
+        return "PROMO"
+
+    if category in [
+        "distributor_update",
+        "labelradar_update",
+        "trackstack_submission",
+        "royalty_statement",
+        "business_reminder",
+    ]:
+        return "UPDATE"
+
+    return "NEW"
+
+
 def decode_mime_words(value: str | None) -> str:
     if not value:
         return ""
@@ -149,7 +171,13 @@ def resolve_ui_signal(message: Message, email_address: str) -> str:
             USER_REMINDER_SETTINGS,
             V7_USER_CONFIG,
             analyze_email,
-            map_to_ui_signal,
+            extract_all_links,
+            get_usable_demo_links,
+            is_business_reminder_email,
+            is_distributor_update_email,
+            is_promo_reminder_email,
+            is_royalty_statement_email,
+            normalize_priority,
         )
         from v7_config import EngineResult
         from v7_decision_layer import decide_message_behavior
@@ -176,6 +204,91 @@ def resolve_ui_signal(message: Message, email_address: str) -> str:
             user_link_settings=USER_LINK_SETTINGS,
             user_reminder_settings=USER_REMINDER_SETTINGS,
         )
+
+        if str(result.get("reason") or "").startswith("AI parse failed:"):
+            logger.warning(
+                "Preview ui_signal falling back to deterministic rules: %s",
+                result.get("reason"),
+            )
+            subject = decode_mime_words(message.get("Subject", ""))
+            from_header = decode_mime_words(message.get("From", ""))
+            to_header = decode_mime_words(message.get("To", ""))
+            sender_name, sender_email = parseaddr(from_header)
+            sender_name = decode_mime_words(sender_name)
+            body = get_message_body(message)
+            subject_lower = subject.lower()
+            body_lower = body.lower()
+            sender_lower = sender_email.lower()
+            extracted_links = extract_all_links(
+                body,
+                "",
+                subject=subject,
+                artist_name=sender_name or result.get("artist"),
+            )
+            usable_demo_links = get_usable_demo_links(
+                extracted_links=extracted_links,
+                category="demo",
+                user_link_settings=USER_LINK_SETTINGS,
+            )
+            promo_keywords = [
+                "out now",
+                "out soon",
+                "new release",
+                "new track",
+                "check out my track",
+                "check this release",
+                "remix",
+                "bootleg",
+                "radio support",
+                "dj support",
+                "playlist support",
+                "support this track",
+                "support the release",
+                "play in your sets",
+            ]
+
+            result = {
+                "category": "info",
+                "priority": "LOW",
+                "reason": "Preview rules fallback",
+                "workflow_links": [],
+                "usable_demo_links": [],
+            }
+
+            if (
+                message.get("In-Reply-To")
+                or message.get("References")
+                or subject_lower.startswith("re:")
+            ):
+                result["category"] = "reply"
+            elif "trackstack" in sender_lower or "trackstack" in subject_lower or "trackstack" in body_lower:
+                result["category"] = "trackstack_submission"
+            elif "labelradar" in sender_lower or "labelradar" in subject_lower or "labelradar" in body_lower:
+                result["category"] = "labelradar_update"
+            elif is_distributor_update_email(subject, body, sender_email):
+                result["category"] = "distributor_update"
+            elif is_business_reminder_email(subject, body, sender_email):
+                result["category"] = "business_reminder"
+            elif is_royalty_statement_email(subject, body, sender_email):
+                result["category"] = "royalty_statement"
+            elif is_promo_reminder_email(subject, body, sender_email):
+                result["category"] = "promo_reminder"
+            elif usable_demo_links:
+                result["category"] = "demo"
+                result["usable_demo_links"] = usable_demo_links
+            elif any(keyword in f"{subject_lower} {body_lower}" for keyword in promo_keywords):
+                result["category"] = "promo"
+
+            result["workflow_links"] = [
+                link_name
+                for link_name in ["soundcloud", "dropbox", "wetransfer", "disco", "gdrive", "onedrive"]
+                if extracted_links.get(link_name)
+            ]
+            result = normalize_priority(
+                result,
+                inbox_profile=inbox_profile,
+                user_reminder_settings=USER_REMINDER_SETTINGS,
+            )
 
         mailbox_match = next(
             (
