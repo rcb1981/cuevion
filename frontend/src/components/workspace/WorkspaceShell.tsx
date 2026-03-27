@@ -7394,6 +7394,12 @@ function MailboxView({
     return messageId ? [messageId] : selectedMessageIds;
   };
 
+  const getUnreadPreviewIds = (messages: Array<{ id: string; unread?: boolean }>) =>
+    messages
+      .filter((message) => message.unread)
+      .map((message) => message.id)
+      .slice(0, 8);
+
   const openShareCollaboration = (messageId: string) => {
     const message = getMessageById(messageId);
 
@@ -8042,10 +8048,14 @@ function MailboxView({
 
     // Normal click must always leave multi-select mode immediately and reset the
     // range anchor to the clicked message.
-    console.log("[UNREAD-REFRESH] left-click select", {
-      messageId,
-      unreadMessageIdsBefore,
-    });
+    if (!options?.openFull) {
+      console.log("[UNREAD-REFRESH] left-click select", {
+        messageId,
+        mailboxId: mailbox.id,
+        folder: activeFolder,
+        unreadMessageIdsBefore: unreadMessageIdsBefore.slice(0, 8),
+      });
+    }
     console.log("[AUTO-READ] handleSelectMessage", {
       messageId,
       triggerAutoRead: Boolean(options?.triggerAutoRead),
@@ -19529,15 +19539,17 @@ export function WorkspaceShell({
     setMailboxStore((currentStore) => {
       const currentCollections =
         currentStore[targetMailbox.id] ?? createEmptyMailboxCollections();
-      const unreadBefore = currentCollections.Inbox
-        .filter((message) => message.unread)
-        .map((message) => message.id);
-      const unreadAfter = messages
-        .filter((message) => message.unread)
-        .map((message) => message.id);
+      const unreadBeforeCount = currentCollections.Inbox.filter(
+        (message) => message.unread,
+      ).length;
+      const unreadAfterCount = messages.filter((message) => message.unread).length;
+      const unreadBefore = getUnreadPreviewIds(currentCollections.Inbox);
+      const unreadAfter = getUnreadPreviewIds(messages);
 
       console.log("[UNREAD-REFRESH] applyLiveInboxMessagesToMailboxStore", {
         mailboxId: targetMailbox.id,
+        unreadBeforeCount,
+        unreadAfterCount,
         unreadBefore,
         unreadAfter,
       });
@@ -19631,13 +19643,12 @@ export function WorkspaceShell({
       }
 
       const messages = response.messages ?? [];
+      const unreadMessageIds = getUnreadPreviewIds(messages);
 
       console.log("[UNREAD-REFRESH] refresh result", {
         mailboxId,
         count: messages.length,
-        unreadMessageIds: messages
-          .filter((message) => message.unread)
-          .map((message) => message.id),
+        unreadMessageIds,
       });
 
       saveLiveInboxSnapshot({
