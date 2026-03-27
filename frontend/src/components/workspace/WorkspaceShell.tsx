@@ -317,6 +317,7 @@ type MailMessage = {
   unread?: boolean;
   flagged?: boolean;
   signal?: string;
+  ui_signal?: string;
   from: string;
   to: string;
   cc?: string;
