@@ -6211,6 +6211,37 @@ function MailboxView({
   const fullWidthMessage =
     folderMessages.find((message) => message.id === selectedMessageId) ??
     selectedMessage;
+  const advanceSelectionAfterAction = (processedMessageIds: string[]) => {
+    if (processedMessageIds.length === 0) {
+      return;
+    }
+
+    const processedIdSet = new Set(processedMessageIds);
+    const currentIndex = sortedMessages.findIndex(
+      (message) => message.id === selectedMessageId && processedIdSet.has(message.id),
+    );
+    const fallbackIndex = sortedMessages.findIndex((message) =>
+      processedIdSet.has(message.id),
+    );
+    const anchorIndex = currentIndex >= 0 ? currentIndex : fallbackIndex;
+    const remainingMessages = sortedMessages.filter(
+      (message) => !processedIdSet.has(message.id),
+    );
+    const nextMessage =
+      anchorIndex >= 0
+        ? remainingMessages[Math.min(anchorIndex, remainingMessages.length - 1)] ?? null
+        : remainingMessages[0] ?? null;
+
+    setSelectionState(
+      nextMessage ? [nextMessage.id] : [],
+      nextMessage?.id ?? null,
+      nextMessage?.id ?? null,
+    );
+
+    if (!nextMessage) {
+      setIsFullMessageOpen(false);
+    }
+  };
   const getThreadMessages = (message: MailMessage | null) => {
     if (!message) {
       return [];
@@ -7588,6 +7619,9 @@ function MailboxView({
           return nextStore;
         }, {} as MailboxStore),
       );
+      if (activeFilter === "Unread" && unread === false) {
+        advanceSelectionAfterAction(messageIds);
+      }
       closeMenus();
       return;
     }
@@ -7598,6 +7632,9 @@ function MailboxView({
         messageIdSet.has(message.id) ? { ...message, unread } : message,
       ),
     );
+    if (activeFilter === "Unread" && unread === false) {
+      advanceSelectionAfterAction(messageIds);
+    }
     closeMenus();
   };
 
@@ -7879,6 +7916,11 @@ function MailboxView({
         return nextStore;
       }, {} as MailboxStore);
     });
+
+    if (isSharedView || activeSmartFolder) {
+      advanceSelectionAfterAction(messageIds);
+    }
+
     closeMenus();
   };
 
@@ -8074,19 +8116,7 @@ function MailboxView({
       return nextStore;
     });
     if (mailbox.id === sourceMailboxId && activeFolder === sourceFolder) {
-      const remainingVisibleMessageIds = sortedMessages
-        .map((message) => message.id)
-        .filter((id) => !messageIdSet.has(id));
-      const nextPrimaryMessageId = remainingVisibleMessageIds[0] ?? null;
-
-      setSelectionState(
-        nextPrimaryMessageId ? [nextPrimaryMessageId] : [],
-        nextPrimaryMessageId,
-        nextPrimaryMessageId,
-      );
-      if (!nextPrimaryMessageId) {
-        setIsFullMessageOpen(false);
-      }
+      advanceSelectionAfterAction(messageIds);
     }
     closeMenus();
   };
@@ -8124,20 +8154,7 @@ function MailboxView({
     });
 
     if (mailbox.id === targetMailboxId && activeFolder === "Trash") {
-      const remainingVisibleMessageIds = sortedMessages
-        .map((message) => message.id)
-        .filter((id) => !messageIdSet.has(id));
-      const nextPrimaryMessageId = remainingVisibleMessageIds[0] ?? null;
-
-      setSelectionState(
-        nextPrimaryMessageId ? [nextPrimaryMessageId] : [],
-        nextPrimaryMessageId,
-        nextPrimaryMessageId,
-      );
-
-      if (!nextPrimaryMessageId) {
-        setIsFullMessageOpen(false);
-      }
+      advanceSelectionAfterAction(messageIds);
     }
 
     if (feedbackMessage) {
