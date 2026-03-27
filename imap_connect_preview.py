@@ -138,13 +138,13 @@ def fetch_recent_messages(mailbox, folder: str = "INBOX", limit: int = DEFAULT_F
             continue
         unread = "\\Seen" not in flags_content
         logger.info(
-            "IMAP preview flags | id=%s | flags=%s | unread=%s | meta=%s",
+            "[IMAP-PREVIEW-FLAGS] message_id=%s uid=%s flags=%s unread=%s",
             message_id.decode("utf-8", errors="ignore")
             if isinstance(message_id, bytes)
             else str(message_id),
+            imap_uid,
             flags_content,
             unread,
-            combined_metadata[:160],
         )
         results.append((message_from_bytes(raw_email), unread, imap_uid))
 
