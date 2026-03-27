@@ -16,6 +16,31 @@ MAX_FETCH_LIMIT = 25
 logger = logging.getLogger(__name__)
 
 
+def map_to_ui_signal(result: dict[str, Any]) -> str:
+    priority = result.get("v7_final_priority")
+    category = result.get("category")
+
+    if priority == "PRIORITY":
+        return "PRIORITY"
+
+    if category in ["promo"]:
+        return "PROMO"
+
+    if category in [
+        "distributor_update",
+        "labelradar_update",
+        "trackstack_submission",
+        "royalty_statement",
+        "business_reminder",
+    ]:
+        return "UPDATE"
+
+    if category in ["demo", "high_priority_demo"]:
+        return "DEMO"
+
+    return "NEW"
+
+
 def decode_mime_words(value: str | None) -> str:
     if not value:
         return ""
@@ -141,7 +166,167 @@ def format_timestamp(date_header: str) -> tuple[str, str]:
         return fallback_timestamp, fallback_timestamp
 
 
-def to_message_preview(message: Message, index: int) -> dict[str, Any]:
+def resolve_ui_signal(message: Message, email_address: str) -> str:
+    try:
+        from imap_live_v6_5_5_stable import (
+            INBOX_CONFIG,
+            USER_LINK_SETTINGS,
+            USER_REMINDER_SETTINGS,
+            V7_USER_CONFIG,
+            analyze_email,
+            extract_all_links,
+            get_usable_demo_links,
+            is_business_reminder_email,
+            is_distributor_update_email,
+            is_promo_reminder_email,
+            is_royalty_statement_email,
+            normalize_priority,
+        )
+        from v7_config import EngineResult
+        from v7_decision_layer import decide_message_behavior
+    except Exception:
+        logger.exception("Could not load ui_signal dependencies for message preview")
+        return "NEW"
+
+    local_part = email_address.split("@")[0].strip().lower()
+    mailbox_label = f"{local_part}@"
+    inbox_profile = next(
+        (
+            mailbox_config.get("profile", "")
+            for mailbox_config in INBOX_CONFIG
+            if mailbox_config.get("label", "").replace("@", "").lower() == local_part
+        ),
+        "",
+    )
+
+    try:
+        result = analyze_email(
+            message,
+            inbox_name=mailbox_label,
+            inbox_profile=inbox_profile,
+            user_link_settings=USER_LINK_SETTINGS,
+            user_reminder_settings=USER_REMINDER_SETTINGS,
+        )
+
+        if str(result.get("reason") or "").startswith("AI parse failed:"):
+            logger.warning(
+                "Preview ui_signal falling back to deterministic rules: %s",
+                result.get("reason"),
+            )
+            subject = decode_mime_words(message.get("Subject", ""))
+            from_header = decode_mime_words(message.get("From", ""))
+            to_header = decode_mime_words(message.get("To", ""))
+            sender_name, sender_email = parseaddr(from_header)
+            sender_name = decode_mime_words(sender_name)
+            body = get_message_body(message)
+            subject_lower = subject.lower()
+            body_lower = body.lower()
+            sender_lower = sender_email.lower()
+            extracted_links = extract_all_links(
+                body,
+                "",
+                subject=subject,
+                artist_name=sender_name or result.get("artist"),
+            )
+            usable_demo_links = get_usable_demo_links(
+                extracted_links=extracted_links,
+                category="demo",
+                user_link_settings=USER_LINK_SETTINGS,
+            )
+            promo_keywords = [
+                "out now",
+                "out soon",
+                "new release",
+                "new track",
+                "check out my track",
+                "check this release",
+                "remix",
+                "bootleg",
+                "radio support",
+                "dj support",
+                "playlist support",
+                "support this track",
+                "support the release",
+                "play in your sets",
+            ]
+
+            result = {
+                "category": "info",
+                "priority": "LOW",
+                "reason": "Preview rules fallback",
+                "workflow_links": [],
+                "usable_demo_links": [],
+            }
+
+            if (
+                message.get("In-Reply-To")
+                or message.get("References")
+                or subject_lower.startswith("re:")
+            ):
+                result["category"] = "reply"
+            elif "trackstack" in sender_lower or "trackstack" in subject_lower or "trackstack" in body_lower:
+                result["category"] = "trackstack_submission"
+            elif "labelradar" in sender_lower or "labelradar" in subject_lower or "labelradar" in body_lower:
+                result["category"] = "labelradar_update"
+            elif is_distributor_update_email(subject, body, sender_email):
+                result["category"] = "distributor_update"
+            elif is_business_reminder_email(subject, body, sender_email):
+                result["category"] = "business_reminder"
+            elif is_royalty_statement_email(subject, body, sender_email):
+                result["category"] = "royalty_statement"
+            elif is_promo_reminder_email(subject, body, sender_email):
+                result["category"] = "promo_reminder"
+            elif usable_demo_links:
+                result["category"] = "demo"
+                result["usable_demo_links"] = usable_demo_links
+            elif any(keyword in f"{subject_lower} {body_lower}" for keyword in promo_keywords):
+                result["category"] = "promo"
+
+            result["workflow_links"] = [
+                link_name
+                for link_name in ["soundcloud", "dropbox", "wetransfer", "disco", "gdrive", "onedrive"]
+                if extracted_links.get(link_name)
+            ]
+            result = normalize_priority(
+                result,
+                inbox_profile=inbox_profile,
+                user_reminder_settings=USER_REMINDER_SETTINGS,
+            )
+
+        mailbox_match = next(
+            (
+                mailbox
+                for mailbox in V7_USER_CONFIG.mailboxes
+                if mailbox.email_address.split("@")[0].lower() == local_part
+            ),
+            None,
+        )
+
+        if mailbox_match:
+            engine_result = EngineResult(
+                inbox_name=mailbox_label,
+                category=result.get("category", "unknown"),
+                priority=result.get("priority", "NORMAL"),
+                workflow_links=result.get("workflow_links", []),
+                usable_demo_links=result.get("usable_demo_links", []),
+                reason=result.get("reason", ""),
+            )
+
+            v7_decision = decide_message_behavior(
+                engine_result=engine_result,
+                user_config=V7_USER_CONFIG,
+                mailbox_config=mailbox_match,
+            )
+
+            result["v7_final_priority"] = v7_decision.final_priority
+
+        return result.get("ui_signal") or map_to_ui_signal(result)
+    except Exception:
+        logger.exception("Could not resolve ui_signal for message preview")
+        return "NEW"
+
+
+def to_message_preview(message: Message, index: int, email_address: str) -> dict[str, Any]:
     subject = decode_mime_words(message.get("Subject", "Untitled message"))
     from_header = decode_mime_words(message.get("From", "Unknown sender"))
     to_header = decode_mime_words(message.get("To", ""))
@@ -167,6 +352,7 @@ def to_message_preview(message: Message, index: int) -> dict[str, Any]:
       "createdAt": created_at,
       "body": body.split("\n\n") if body else [snippet or "No message preview available."],
       "unread": False,
+      "ui_signal": resolve_ui_signal(message, email_address),
     }
 
 
@@ -217,7 +403,7 @@ def build_connect_preview_response(payload: dict[str, Any]) -> tuple[int, dict[s
         )
         messages = fetch_recent_messages(mailbox, folder=folder, limit=limit)
         previews = [
-            to_message_preview(message, index)
+            to_message_preview(message, index, email_address)
             for index, message in enumerate(messages)
         ]
 
