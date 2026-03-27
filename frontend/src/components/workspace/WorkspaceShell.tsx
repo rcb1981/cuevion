@@ -5669,6 +5669,10 @@ function MailboxView({
   const [selectionAnchorId, setSelectionAnchorId] = useState<string | null>(
     mailboxStore[mailbox.id]?.Inbox[0]?.id ?? null,
   );
+  const [autoReadCandidateMessageId, setAutoReadCandidateMessageId] = useState<string | null>(
+    null,
+  );
+  const [autoReadTriggerToken, setAutoReadTriggerToken] = useState(0);
   const [resolvingSuggestionIds, setResolvingSuggestionIds] = useState<string[]>([]);
   const [resolvingBehaviorSuggestionIds, setResolvingBehaviorSuggestionIds] = useState<
     string[]
@@ -7213,13 +7217,13 @@ function MailboxView({
   };
 
   useEffect(() => {
-    if (!selectedMessageId || isMultiSelectActive || isSharedView || activeSmartFolder) {
-      return;
-    }
-
-    const targetMessage = folderMessages.find((message) => message.id === selectedMessageId);
-
-    if (!targetMessage?.unread) {
+    if (
+      !selectedMessageId ||
+      selectedMessageId !== autoReadCandidateMessageId ||
+      isMultiSelectActive ||
+      isSharedView ||
+      activeSmartFolder
+    ) {
       return;
     }
 
@@ -7235,7 +7239,8 @@ function MailboxView({
   }, [
     activeFolder,
     activeSmartFolder,
-    folderMessages,
+    autoReadCandidateMessageId,
+    autoReadTriggerToken,
     isMultiSelectActive,
     isSharedView,
     selectedMessageId,
@@ -7943,6 +7948,8 @@ function MailboxView({
     // Normal click must always leave multi-select mode immediately and reset the
     // range anchor to the clicked message.
     setSelectionState([messageId], messageId, messageId);
+    setAutoReadCandidateMessageId(targetMessage?.unread ? messageId : null);
+    setAutoReadTriggerToken((current) => current + 1);
     setIsFullMessageOpen(Boolean(options?.openFull));
     onRecordMessageOwnershipInteraction(messageId);
   };
