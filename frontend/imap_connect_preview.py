@@ -305,6 +305,18 @@ def resolve_ui_signal(message: Message, email_address: str) -> str:
             "betalingsoverzicht",
             "declaratie",
         ]
+        meta_ads_keywords = [
+            "advertentie",
+            "advertenties",
+            "ad approved",
+            "campaign approved",
+            "ad account",
+            "ads account",
+            "campaign",
+            "meta ads",
+            "facebook ads",
+            "advertising account",
+        ]
         google_security_keywords = [
             "security alert",
             "security notification",
@@ -334,6 +346,8 @@ def resolve_ui_signal(message: Message, email_address: str) -> str:
                 result["usable_demo_links"] = usable_demo_links
             elif any(keyword in classification_text for keyword in demo_intent_keywords):
                 result["category"] = "demo"
+            elif any(keyword in classification_text for keyword in meta_ads_keywords):
+                result["category"] = "finance"
             elif any(keyword in classification_text for keyword in promo_keywords):
                 result["category"] = "promo"
             elif any(keyword in classification_text for keyword in business_keywords):
