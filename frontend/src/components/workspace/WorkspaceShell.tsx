@@ -19518,6 +19518,35 @@ export function WorkspaceShell({
     await refreshMailboxById(activeMailbox.id);
   };
 
+  useEffect(() => {
+    const fallbackMailboxId = activeMailbox?.id ?? orderedMailboxes[0]?.id;
+
+    if (!fallbackMailboxId || syncingMailboxId === fallbackMailboxId) {
+      return;
+    }
+
+    const managedMailbox = savedManagedInboxes.find(
+      (mailbox) => mailbox.id === fallbackMailboxId,
+    );
+
+    if (
+      !managedMailbox ||
+      !managedMailbox.connected ||
+      !managedMailbox.provider ||
+      !isImapCredentialsProvider(managedMailbox.provider)
+    ) {
+      return;
+    }
+
+    const snapshots = readLiveInboxSnapshots();
+
+    if (snapshots[fallbackMailboxId]?.messages.length) {
+      return;
+    }
+
+    void refreshMailboxById(fallbackMailboxId);
+  }, [activeMailbox, orderedMailboxes, savedManagedInboxes, syncingMailboxId]);
+
   const handleApplyManagedInboxes = (nextMailboxes: ManagedWorkspaceInbox[]) => {
     const validMailboxes = nextMailboxes
       .filter((mailbox) => isManagedInboxReady(mailbox))
