@@ -1394,7 +1394,8 @@ def enrich_email_result(
     sender_email,
     to_header,
     user_link_settings=None,
-    user_reminder_settings=None
+    user_reminder_settings=None,
+    preview_mode=False
 ):
     body_lower = (body or "").lower()
     subject_lower = (subject or "").lower()
@@ -1505,7 +1506,7 @@ def enrich_email_result(
     spotify_info = None
     category = result.get("category", "")
 
-    if category in ["demo", "high_priority_demo"]:
+    if not preview_mode and category in ["demo", "high_priority_demo"]:
         if spotify_url:
             spotify_info = spotify_url
         elif is_reliable_spotify_artist_name(artist_name):
@@ -1638,7 +1639,8 @@ def analyze_email(
     inbox_name="",
     inbox_profile="",
     user_link_settings=None,
-    user_reminder_settings=None
+    user_reminder_settings=None,
+    preview_mode=False
 ):
     subject = decode_mime_words(msg.get("Subject", ""))
     from_header = decode_mime_words(msg.get("From", ""))
@@ -1666,7 +1668,8 @@ def analyze_email(
         sender_email=sender_email,
         to_header=to_header,
         user_link_settings=user_link_settings,
-        user_reminder_settings=user_reminder_settings
+        user_reminder_settings=user_reminder_settings,
+        preview_mode=preview_mode
     )
 
     result = normalize_priority(
