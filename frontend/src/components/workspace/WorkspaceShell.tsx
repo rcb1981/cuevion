@@ -7147,6 +7147,8 @@ function MailboxView({
       availableMessageIds.has(messageId),
     );
     let repairedSelection = false;
+    let clearedSelectedMessageId = false;
+    let clearedSelectionAnchorId = false;
 
     if (nextSelectedMessageIds.length !== selectedMessageIds.length) {
       setSelectedMessageIds(nextSelectedMessageIds);
@@ -7156,21 +7158,57 @@ function MailboxView({
     if (selectedMessageId && !availableMessageIds.has(selectedMessageId)) {
       setSelectedMessageId(nextSelectedMessageIds[0] ?? null);
       repairedSelection = true;
+      clearedSelectedMessageId = true;
     }
 
     if (selectionAnchorId && !availableMessageIds.has(selectionAnchorId)) {
       setSelectionAnchorId(nextSelectedMessageIds[0] ?? null);
       repairedSelection = true;
+      clearedSelectionAnchorId = true;
     }
+
+    console.log("[AUTO-READ] selection-repair", {
+      selectedMessageId,
+      selectedMessageIds,
+      nextSelectedMessageIds,
+      repairedSelection,
+      clearedSelectedMessageId,
+      clearedSelectionAnchorId,
+    });
 
     if (repairedSelection) {
+      console.log("[AUTO-READ] selection-repair clear-candidate", {
+        selectedMessageId,
+        autoReadCandidateMessageId,
+      });
       setAutoReadCandidateMessageId(null);
     }
-  }, [folderMessages, selectedMessageId, selectedMessageIds, selectionAnchorId]);
+  }, [
+    autoReadCandidateMessageId,
+    folderMessages,
+    selectedMessageId,
+    selectedMessageIds,
+    selectionAnchorId,
+  ]);
 
   useEffect(() => {
+    console.log("[AUTO-READ] view-change clear-candidate", {
+      activeFolder,
+      activeSmartFolderId,
+      isSharedView,
+      mailboxId: mailbox.id,
+      selectedMessageId,
+      autoReadCandidateMessageId,
+    });
     setAutoReadCandidateMessageId(null);
-  }, [activeFolder, activeSmartFolderId, isSharedView, mailbox.id]);
+  }, [
+    activeFolder,
+    activeSmartFolderId,
+    autoReadCandidateMessageId,
+    isSharedView,
+    mailbox.id,
+    selectedMessageId,
+  ]);
 
   useEffect(() => {
     if (selectedMessageIds.length === 1 && selectionAnchorId !== selectedMessageIds[0]) {
@@ -7236,10 +7274,31 @@ function MailboxView({
       isSharedView ||
       activeSmartFolder
     ) {
+      console.log("[AUTO-READ] timer-skip", {
+        selectedMessageId,
+        autoReadCandidateMessageId,
+        activeFolder,
+        isSharedView,
+        activeSmartFolder: Boolean(activeSmartFolder),
+        isMultiSelectActive,
+      });
       return;
     }
 
+    console.log("[AUTO-READ] timer-arm", {
+      selectedMessageId,
+      autoReadCandidateMessageId,
+      activeFolder,
+      isSharedView,
+      activeSmartFolder: Boolean(activeSmartFolder),
+      isMultiSelectActive,
+    });
     const timeoutId = window.setTimeout(() => {
+      console.log("[AUTO-READ] timer-fire", {
+        selectedMessageId,
+        autoReadCandidateMessageId,
+        activeFolder,
+      });
       updateFolderMessages(activeFolder, (messages) =>
         messages.map((message) =>
           message.id === selectedMessageId ? { ...message, unread: false } : message,
@@ -7248,7 +7307,14 @@ function MailboxView({
       setAutoReadCandidateMessageId(null);
     }, 2000);
 
-    return () => window.clearTimeout(timeoutId);
+    return () => {
+      console.log("[AUTO-READ] timer-cancel", {
+        selectedMessageId,
+        autoReadCandidateMessageId,
+        activeFolder,
+      });
+      window.clearTimeout(timeoutId);
+    };
   }, [
     activeFolder,
     activeSmartFolder,
@@ -7784,6 +7850,14 @@ function MailboxView({
     }
 
     const messageIdSet = new Set(messageIds);
+    if (unread === false) {
+      console.log("[AUTO-READ] setMessagesUnreadState unread-false", {
+        folder,
+        messageIds,
+        isSharedView,
+        activeSmartFolder: Boolean(activeSmartFolder),
+      });
+    }
     updateFolderMessages(folder, (messages) =>
       messages.map((message) =>
         messageIdSet.has(message.id) ? { ...message, unread } : message,
@@ -7900,6 +7974,7 @@ function MailboxView({
   ) => {
     const sortedMessageIds = sortedMessages.map((message) => message.id);
     const targetMessage = folderMessages.find((message) => message.id === messageId);
+    const selectedMessageIdBefore = selectedMessageId;
 
     if (options?.isRange) {
       const anchorId =
@@ -7961,11 +8036,27 @@ function MailboxView({
 
     // Normal click must always leave multi-select mode immediately and reset the
     // range anchor to the clicked message.
+    console.log("[AUTO-READ] handleSelectMessage", {
+      messageId,
+      triggerAutoRead: Boolean(options?.triggerAutoRead),
+      targetUnread: Boolean(targetMessage?.unread),
+      selectedMessageIdBefore,
+      selectedMessageIdAfter: messageId,
+    });
     setSelectionState([messageId], messageId, messageId);
     if (options?.triggerAutoRead && targetMessage?.unread) {
+      console.log("[AUTO-READ] arm-candidate", {
+        messageId,
+        selectedMessageIdBefore,
+      });
       setAutoReadCandidateMessageId(messageId);
       setAutoReadTriggerToken((current) => current + 1);
     } else {
+      console.log("[AUTO-READ] clear-candidate-from-select", {
+        messageId,
+        triggerAutoRead: Boolean(options?.triggerAutoRead),
+        targetUnread: Boolean(targetMessage?.unread),
+      });
       setAutoReadCandidateMessageId(null);
     }
     setIsFullMessageOpen(Boolean(options?.openFull));
