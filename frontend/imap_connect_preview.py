@@ -118,7 +118,7 @@ def fetch_recent_messages(mailbox, folder: str = "INBOX", limit: int = DEFAULT_F
     results: list[tuple[Message, bool, str | None]] = []
 
     for message_id in reversed(latest_ids):
-        status, message_data = mailbox.fetch(message_id, "(FLAGS BODY.PEEK[])")
+        status, message_data = mailbox.fetch(message_id, "(UID FLAGS BODY.PEEK[])")
 
         if status != "OK":
             continue
@@ -145,6 +145,27 @@ def fetch_recent_messages(mailbox, folder: str = "INBOX", limit: int = DEFAULT_F
         flags_content = flags_match.group(1) if flags_match else ""
         uid_match = re.search(r"UID\s+(\d+)", combined_metadata)
         imap_uid = uid_match.group(1) if uid_match else None
+        if imap_uid is None:
+            uid_status, uid_data = mailbox.fetch(message_id, "(UID)")
+            if uid_status == "OK":
+                uid_metadata_parts: list[str] = []
+                for item in uid_data:
+                    if isinstance(item, tuple):
+                        response_meta = item[0]
+                        if isinstance(response_meta, bytes):
+                            response_meta = response_meta.decode("utf-8", errors="ignore")
+                        else:
+                            response_meta = str(response_meta)
+                        uid_metadata_parts.append(response_meta)
+                    elif isinstance(item, bytes):
+                        uid_metadata_parts.append(item.decode("utf-8", errors="ignore"))
+                    elif item is not None:
+                        uid_metadata_parts.append(str(item))
+
+                uid_combined_metadata = " ".join(uid_metadata_parts)
+                uid_match = re.search(r"UID\s+(\d+)", uid_combined_metadata)
+                if uid_match:
+                    imap_uid = uid_match.group(1)
         if not flags_match:
             logger.info(
                 "IMAP fetch missing FLAGS for %s | meta=%s",
@@ -157,15 +178,6 @@ def fetch_recent_messages(mailbox, folder: str = "INBOX", limit: int = DEFAULT_F
         if raw_email is None:
             continue
         unread = "\\Seen" not in flags_content
-        logger.info(
-            "[IMAP-PREVIEW-FLAGS] message_id=%s uid=%s flags=%s unread=%s",
-            message_id.decode("utf-8", errors="ignore")
-            if isinstance(message_id, bytes)
-            else str(message_id),
-            imap_uid,
-            flags_content,
-            unread,
-        )
         results.append((message_from_bytes(raw_email), unread, imap_uid))
 
     return results
