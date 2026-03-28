@@ -521,6 +521,7 @@ const TEAM_ACTIVITY_STORAGE_KEY = "cuevion-team-activity-enabled";
 const WORKSPACE_THEME_MODE_STORAGE_KEY = "cuevion-workspace-theme-mode";
 const CATEGORY_LEARNING_STORAGE_KEY = "cuevion-sender-category-learning";
 const MESSAGE_OWNERSHIP_STORAGE_KEY = "cuevion-message-ownership";
+const CUEVION_MESSAGE_UNREAD_OVERRIDES_STORAGE_KEY = "cuevion-message-unread-overrides";
 const MAIL_SIGNATURES_STORAGE_KEY = "cuevion-mail-signatures";
 const MAIL_OUT_OF_OFFICE_STORAGE_KEY = "cuevion-mail-out-of-office";
 const OUT_OF_OFFICE_REPLY_LOG_STORAGE_KEY = "cuevion-out-of-office-reply-log";
@@ -536,6 +537,13 @@ const MIN_MAIL_LIST_PANE_WIDTH = 320;
 const MIN_MAIL_DETAIL_PANE_WIDTH = 400;
 const MAIL_SPLIT_DIVIDER_WIDTH = 24;
 const MAIL_LIST_PREVIEW_CHARACTER_CAP = 128;
+
+function buildMessageUnreadOverridesStorageKey(
+  workspaceUserId: string,
+  orderedMailboxKey: string,
+) {
+  return `${CUEVION_MESSAGE_UNREAD_OVERRIDES_STORAGE_KEY}:${workspaceUserId}:${orderedMailboxKey}`;
+}
 
 function createEmptySignatureSettings(): InboxSignatureSettings {
   return {
@@ -18195,6 +18203,10 @@ export function WorkspaceShell({
   const activeWorkspaceEmail = authenticatedUser?.email ?? primaryWorkspaceEmail;
   const currentWorkspaceUserId = normalizeSenderLearningKey(activeWorkspaceEmail);
   const mailboxOrderKey = orderedMailboxes.map((mailbox) => mailbox.id).join("|");
+  const messageUnreadOverridesStorageKey = buildMessageUnreadOverridesStorageKey(
+    currentWorkspaceUserId,
+    mailboxOrderKey,
+  );
   const liveMailboxSyncKey = orderedMailboxes
     .map((mailbox) => `${mailbox.id}:${mailbox.email}:${mailbox.title}`)
     .join("|");
@@ -18250,7 +18262,23 @@ export function WorkspaceShell({
     ),
   );
   const [messageUnreadOverrides, setMessageUnreadOverrides] =
-    useState<MessageUnreadOverrideStore>({});
+    useState<MessageUnreadOverrideStore>(() => {
+      if (typeof window === "undefined") {
+        return {};
+      }
+
+      const storedValue = window.localStorage.getItem(messageUnreadOverridesStorageKey);
+
+      if (!storedValue) {
+        return {};
+      }
+
+      try {
+        return JSON.parse(storedValue) as MessageUnreadOverrideStore;
+      } catch {
+        return {};
+      }
+    });
   const syncUnreadOverrides = (
     messages: MessageIdentitySource[],
     unread: boolean,
@@ -19801,6 +19829,36 @@ export function WorkspaceShell({
     messageOwnershipInteractions,
     currentWorkspaceUserId,
   ]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const storedValue = window.localStorage.getItem(messageUnreadOverridesStorageKey);
+
+    if (!storedValue) {
+      setMessageUnreadOverrides({});
+      return;
+    }
+
+    try {
+      setMessageUnreadOverrides(JSON.parse(storedValue) as MessageUnreadOverrideStore);
+    } catch {
+      setMessageUnreadOverrides({});
+    }
+  }, [messageUnreadOverridesStorageKey]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    window.localStorage.setItem(
+      messageUnreadOverridesStorageKey,
+      JSON.stringify(messageUnreadOverrides),
+    );
+  }, [messageUnreadOverrides, messageUnreadOverridesStorageKey]);
 
   useEffect(() => {
     window.localStorage.setItem(
