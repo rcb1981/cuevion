@@ -318,6 +318,7 @@ type MailMessage = {
   snippet: string;
   time: string;
   createdAt?: string;
+  imapUid?: string;
   unread?: boolean;
   flagged?: boolean;
   signal?: string;
