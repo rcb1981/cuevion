@@ -164,18 +164,8 @@ def fetch_recent_messages(mailbox, folder: str = "INBOX", limit: int = DEFAULT_F
             )
 
         unread = "\\Seen" not in flags_content
-        print(f"[IMAP-PREVIEW-FLAGS] message_id={message_id} uid={imap_uid} flags={flags_content} unread={unread}")
         if raw_email is None:
             continue
-        logger.info(
-            "[IMAP-PREVIEW-FLAGS] message_id=%s uid=%s flags=%s unread=%s",
-            message_id.decode("utf-8", errors="ignore")
-            if isinstance(message_id, bytes)
-            else str(message_id),
-            imap_uid,
-            flags_content,
-            unread,
-        )
         results.append((message_from_bytes(raw_email), unread, imap_uid))
 
     return results

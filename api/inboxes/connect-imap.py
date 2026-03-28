@@ -1,8 +1,6 @@
 import json
 from http.server import BaseHTTPRequestHandler
 
-from imap_connect_preview import build_connect_preview_response
-
 
 class handler(BaseHTTPRequestHandler):
     def _send_json(self, status_code: int, payload: dict):
@@ -32,8 +30,22 @@ class handler(BaseHTTPRequestHandler):
             )
             return
 
-        status_code, response_payload = build_connect_preview_response(payload)
-        self._send_json(status_code, response_payload)
+        try:
+            from imap_connect_preview import build_connect_preview_response
+
+            status_code, response_payload = build_connect_preview_response(payload)
+            self._send_json(status_code, response_payload)
+        except Exception:
+            self._send_json(
+                500,
+                {
+                    "ok": False,
+                    "error": {
+                        "code": "server_error",
+                        "message": "Could not connect to inbox.",
+                    },
+                },
+            )
 
     def do_GET(self):
         self._send_json(

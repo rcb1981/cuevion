@@ -1709,6 +1709,34 @@ def fetch_recent_messages(mail, folder="INBOX", limit=TEST_LIMIT):
         if status != "OK":
             continue
 
+        metadata_parts = []
+        for item in msg_data:
+            if isinstance(item, tuple):
+                response_meta = item[0]
+                if isinstance(response_meta, bytes):
+                    response_meta = response_meta.decode("utf-8", errors="ignore")
+                else:
+                    response_meta = str(response_meta)
+                metadata_parts.append(response_meta)
+            elif isinstance(item, bytes):
+                metadata_parts.append(item.decode("utf-8", errors="ignore"))
+            elif item is not None:
+                metadata_parts.append(str(item))
+
+        combined_metadata = " ".join(metadata_parts)
+        uid_match = re.search(r"UID\s+(\d+)", combined_metadata)
+        flags_match = re.search(r"FLAGS\s*\((.*?)\)", combined_metadata)
+        uid = (
+            uid_match.group(1)
+            if uid_match
+            else mail_id.decode("utf-8", errors="ignore")
+            if isinstance(mail_id, bytes)
+            else str(mail_id)
+        )
+        flags_content = flags_match.group(1) if flags_match else ""
+        unread = "\\Seen" not in flags_content
+        print(f"[IMAP-FLAGS] uid={uid} flags={flags_content} unread={unread}")
+
         raw_email = msg_data[0][1]
         msg = email.message_from_bytes(raw_email)
         results.append(msg)
