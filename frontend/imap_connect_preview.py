@@ -545,10 +545,14 @@ def to_message_preview(
     body = get_message_body(message)
     snippet = clean_text(body.replace("\n", " "))[:220]
     created_at, display_timestamp = format_timestamp(message.get("Date", ""))
-    stable_id_source = f"{subject}|{from_header}|{display_timestamp}|{index}"
-    message_id = message.get("Message-Id") or hashlib.sha1(
-        stable_id_source.encode("utf-8"),
-    ).hexdigest()
+    stable_id_source = f"{subject}|{from_header}|{display_timestamp}"
+    message_id = (
+        message.get("Message-Id")
+        or (f"imap-uid-{imap_uid}" if imap_uid else None)
+        or hashlib.sha1(
+            stable_id_source.encode("utf-8"),
+        ).hexdigest()
+    )
 
     return {
       "id": message_id.strip("<>"),
