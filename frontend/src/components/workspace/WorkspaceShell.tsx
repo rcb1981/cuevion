@@ -5674,10 +5674,6 @@ function MailboxView({
   const [selectionAnchorId, setSelectionAnchorId] = useState<string | null>(
     mailboxStore[mailbox.id]?.Inbox[0]?.id ?? null,
   );
-  const [autoReadCandidateMessageId, setAutoReadCandidateMessageId] = useState<string | null>(
-    null,
-  );
-  const [autoReadTriggerToken, setAutoReadTriggerToken] = useState(0);
   const [resolvingSuggestionIds, setResolvingSuggestionIds] = useState<string[]>([]);
   const [resolvingBehaviorSuggestionIds, setResolvingBehaviorSuggestionIds] = useState<
     string[]
@@ -7151,68 +7147,22 @@ function MailboxView({
     const nextSelectedMessageIds = selectedMessageIds.filter((messageId) =>
       availableMessageIds.has(messageId),
     );
-    let repairedSelection = false;
-    let clearedSelectedMessageId = false;
-    let clearedSelectionAnchorId = false;
-
     if (nextSelectedMessageIds.length !== selectedMessageIds.length) {
       setSelectedMessageIds(nextSelectedMessageIds);
-      repairedSelection = true;
     }
 
     if (selectedMessageId && !availableMessageIds.has(selectedMessageId)) {
       setSelectedMessageId(nextSelectedMessageIds[0] ?? null);
-      repairedSelection = true;
-      clearedSelectedMessageId = true;
     }
 
     if (selectionAnchorId && !availableMessageIds.has(selectionAnchorId)) {
       setSelectionAnchorId(nextSelectedMessageIds[0] ?? null);
-      repairedSelection = true;
-      clearedSelectionAnchorId = true;
-    }
-
-    console.log("[AUTO-READ] selection-repair", {
-      selectedMessageId,
-      selectedMessageIds,
-      nextSelectedMessageIds,
-      repairedSelection,
-      clearedSelectedMessageId,
-      clearedSelectionAnchorId,
-    });
-
-    if (repairedSelection) {
-      console.log("[AUTO-READ] selection-repair clear-candidate", {
-        selectedMessageId,
-        autoReadCandidateMessageId,
-      });
-      setAutoReadCandidateMessageId(null);
     }
   }, [
-    autoReadCandidateMessageId,
     folderMessages,
     selectedMessageId,
     selectedMessageIds,
     selectionAnchorId,
-  ]);
-
-  useEffect(() => {
-    console.log("[AUTO-READ] view-change clear-candidate", {
-      activeFolder,
-      activeSmartFolderId,
-      isSharedView,
-      mailboxId: mailbox.id,
-      selectedMessageId,
-      autoReadCandidateMessageId,
-    });
-    setAutoReadCandidateMessageId(null);
-  }, [
-    activeFolder,
-    activeSmartFolderId,
-    autoReadCandidateMessageId,
-    isSharedView,
-    mailbox.id,
-    selectedMessageId,
   ]);
 
   useEffect(() => {
@@ -7270,69 +7220,6 @@ function MailboxView({
       },
     }));
   };
-
-  useEffect(() => {
-    // Temporary stabilization guard: disable all auto-read behavior.
-    return;
-
-    if (
-      !selectedMessageId ||
-      selectedMessageId !== autoReadCandidateMessageId ||
-      isMultiSelectActive ||
-      isSharedView ||
-      activeSmartFolder
-    ) {
-      console.log("[AUTO-READ] timer-skip", {
-        selectedMessageId,
-        autoReadCandidateMessageId,
-        activeFolder,
-        isSharedView,
-        activeSmartFolder: Boolean(activeSmartFolder),
-        isMultiSelectActive,
-      });
-      return;
-    }
-
-    console.log("[AUTO-READ] timer-arm", {
-      selectedMessageId,
-      autoReadCandidateMessageId,
-      activeFolder,
-      isSharedView,
-      activeSmartFolder: Boolean(activeSmartFolder),
-      isMultiSelectActive,
-    });
-    const timeoutId = window.setTimeout(() => {
-      console.log("[AUTO-READ] timer-fire", {
-        selectedMessageId,
-        autoReadCandidateMessageId,
-        activeFolder,
-      });
-      updateFolderMessages(activeFolder, (messages) =>
-        messages.map((message) =>
-          message.id === selectedMessageId ? { ...message, unread: false } : message,
-        ),
-      );
-      setAutoReadCandidateMessageId(null);
-    }, 2000);
-
-    return () => {
-      console.log("[AUTO-READ] timer-cancel", {
-        selectedMessageId,
-        autoReadCandidateMessageId,
-        activeFolder,
-      });
-      window.clearTimeout(timeoutId);
-    };
-  }, [
-    activeFolder,
-    activeSmartFolder,
-    autoReadCandidateMessageId,
-    autoReadTriggerToken,
-    isMultiSelectActive,
-    isSharedView,
-    selectedMessageId,
-    updateFolderMessages,
-  ]);
 
   const updateMessageById = (
     messageId: string,
@@ -7858,14 +7745,6 @@ function MailboxView({
     }
 
     const messageIdSet = new Set(messageIds);
-    if (unread === false) {
-      console.log("[AUTO-READ] setMessagesUnreadState unread-false", {
-        folder,
-        messageIds,
-        isSharedView,
-        activeSmartFolder: Boolean(activeSmartFolder),
-      });
-    }
     updateFolderMessages(folder, (messages) =>
       messages.map((message) =>
         messageIdSet.has(message.id) ? { ...message, unread } : message,
@@ -7981,12 +7860,6 @@ function MailboxView({
     },
   ) => {
     const sortedMessageIds = sortedMessages.map((message) => message.id);
-    const targetMessage = folderMessages.find((message) => message.id === messageId);
-    const selectedMessageIdBefore = selectedMessageId;
-    const unreadMessageIdsBefore = folderMessages
-      .filter((message) => message.unread)
-      .map((message) => message.id);
-
     if (options?.isRange) {
       const anchorId =
         selectionAnchorId && sortedMessageIds.includes(selectionAnchorId)
@@ -8047,38 +7920,7 @@ function MailboxView({
 
     // Normal click must always leave multi-select mode immediately and reset the
     // range anchor to the clicked message.
-    if (!options?.openFull) {
-      console.log("[UNREAD-REFRESH] left-click select", {
-        messageId,
-        mailboxId: mailbox.id,
-        folder: activeFolder,
-        unreadMessageIdsBefore: unreadMessageIdsBefore.slice(0, 8),
-      });
-      if (_folder === "Inbox") {
-        console.log("[UNREAD-TRACE] handleSelectMessage", {
-          folder: _folder,
-          messageId,
-          matchedMessageId: targetMessage?.id ?? null,
-          matchedMessageImapUid: targetMessage?.imapUid ?? null,
-          beforeUnread: targetMessage?.unread ?? null,
-          afterUnread: false,
-        });
-      }
-    }
-    console.log("[AUTO-READ] handleSelectMessage", {
-      messageId,
-      triggerAutoRead: Boolean(options?.triggerAutoRead),
-      targetUnread: Boolean(targetMessage?.unread),
-      selectedMessageIdBefore,
-      selectedMessageIdAfter: messageId,
-    });
     setSelectionState([messageId], messageId, messageId);
-    console.log("[AUTO-READ] diagnostic disable auto-arm", {
-      messageId,
-      triggerAutoRead: Boolean(options?.triggerAutoRead),
-      targetUnread: Boolean(targetMessage?.unread),
-    });
-    setAutoReadCandidateMessageId(null);
     setIsFullMessageOpen(Boolean(options?.openFull));
     onRecordMessageOwnershipInteraction(messageId);
   };
@@ -10450,14 +10292,6 @@ function MailboxView({
                               return;
                             }
 
-                            if (activeFolder === "Inbox") {
-                              console.log("[UNREAD-TRACE] plain-left-click", {
-                                activeFolder,
-                                messageId: message.id,
-                                imapUid: message.imapUid ?? null,
-                                unread: message.unread ?? null,
-                              });
-                            }
                             handleSelectMessage(activeFolder, message.id);
                             updateFolderMessages(activeFolder, (messages) =>
                               messages.map((entry) =>
@@ -19575,20 +19409,12 @@ export function WorkspaceShell({
           .filter((message) => Boolean(message.imapUid))
           .map((message) => [message.imapUid as string, message]),
       );
-      const unreadBeforeCount = currentCollections.Inbox.filter(
-        (message) => message.unread,
-      ).length;
-      const unreadAfterCount = messages.filter((message) => message.unread).length;
-      const unreadBefore = getUnreadPreviewIds(currentCollections.Inbox);
-      const unreadAfter = getUnreadPreviewIds(messages);
-
-      console.log("[UNREAD-REFRESH] applyLiveInboxMessagesToMailboxStore", {
-        mailboxId: targetMailbox.id,
-        unreadBeforeCount,
-        unreadAfterCount,
-        unreadBefore,
-        unreadAfter,
-      });
+      const currentInboxByPreviewIdentity = new Map(
+        currentCollections.Inbox.map((message) => [
+          `${message.subject}|${message.from}|${message.timestamp}`,
+          message,
+        ]),
+      );
 
       const nextStore = {
         ...currentStore,
@@ -19600,18 +19426,10 @@ export function WorkspaceShell({
                 currentInboxById.get(message.id) ??
                 (message.imapUid
                   ? currentInboxByImapUid.get(message.imapUid)
-                  : undefined);
-              const finalUnread = existingMessage?.unread ?? message.unread;
-
-              console.log("[UNREAD-TRACE] applyLiveInboxMessagesToMailboxStore", {
-                incomingId: message.id,
-                incomingImapUid: message.imapUid ?? null,
-                incomingUnread: message.unread,
-                existingMatchedId: existingMessage?.id ?? null,
-                existingMatchedImapUid: existingMessage?.imapUid ?? null,
-                existingUnread: existingMessage?.unread ?? null,
-                finalUnread,
-              });
+                  : undefined) ??
+                currentInboxByPreviewIdentity.get(
+                  `${message.subject}|${message.from}|${message.timestamp}`,
+                );
 
               return normalizeMailMessage(
                 {
@@ -19622,7 +19440,7 @@ export function WorkspaceShell({
                   time: message.timestamp,
                   createdAt: message.createdAt,
                   imapUid: message.imapUid,
-                  unread: finalUnread,
+                  unread: existingMessage?.unread ?? message.unread,
                   ui_signal: message.ui_signal,
                   from: message.from,
                   to: message.to,
@@ -19678,9 +19496,6 @@ export function WorkspaceShell({
     setSyncingMailboxId(mailboxId);
 
     try {
-      console.log("[UNREAD-REFRESH] refresh start", {
-        mailboxId,
-      });
       const response = await connectInboxWithImap({
         provider: managedMailbox.provider,
         email: managedMailbox.email.trim(),
@@ -19699,14 +19514,6 @@ export function WorkspaceShell({
       }
 
       const messages = response.messages ?? [];
-      const unreadMessageIds = getUnreadPreviewIds(messages);
-
-      console.log("[UNREAD-REFRESH] refresh result", {
-        mailboxId,
-        count: messages.length,
-        unreadMessageIds,
-      });
-
       saveLiveInboxSnapshot({
         inboxId: managedMailbox.id,
         email: managedMailbox.email.trim().toLowerCase(),
@@ -19841,6 +19648,7 @@ export function WorkspaceShell({
                 snippet: message.snippet,
                 time: message.timestamp,
                 createdAt: message.createdAt,
+                imapUid: message.imapUid,
                 unread: message.unread,
                 ui_signal: message.ui_signal,
                 from: message.from,
