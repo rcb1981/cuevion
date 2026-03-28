@@ -8054,6 +8054,16 @@ function MailboxView({
         folder: activeFolder,
         unreadMessageIdsBefore: unreadMessageIdsBefore.slice(0, 8),
       });
+      if (_folder === "Inbox") {
+        console.log("[UNREAD-TRACE] handleSelectMessage", {
+          folder: _folder,
+          messageId,
+          matchedMessageId: targetMessage?.id ?? null,
+          matchedMessageImapUid: targetMessage?.imapUid ?? null,
+          beforeUnread: targetMessage?.unread ?? null,
+          afterUnread: false,
+        });
+      }
     }
     console.log("[AUTO-READ] handleSelectMessage", {
       messageId,
@@ -10440,6 +10450,14 @@ function MailboxView({
                               return;
                             }
 
+                            if (activeFolder === "Inbox") {
+                              console.log("[UNREAD-TRACE] plain-left-click", {
+                                activeFolder,
+                                messageId: message.id,
+                                imapUid: message.imapUid ?? null,
+                                unread: message.unread ?? null,
+                              });
+                            }
                             handleSelectMessage(activeFolder, message.id);
                             updateFolderMessages(activeFolder, (messages) =>
                               messages.map((entry) =>
@@ -19577,6 +19595,17 @@ export function WorkspaceShell({
                 (message.imapUid
                   ? currentInboxByImapUid.get(message.imapUid)
                   : undefined);
+              const finalUnread = existingMessage?.unread ?? message.unread;
+
+              console.log("[UNREAD-TRACE] applyLiveInboxMessagesToMailboxStore", {
+                incomingId: message.id,
+                incomingImapUid: message.imapUid ?? null,
+                incomingUnread: message.unread,
+                existingMatchedId: existingMessage?.id ?? null,
+                existingMatchedImapUid: existingMessage?.imapUid ?? null,
+                existingUnread: existingMessage?.unread ?? null,
+                finalUnread,
+              });
 
               return normalizeMailMessage(
                 {
@@ -19587,7 +19616,7 @@ export function WorkspaceShell({
                   time: message.timestamp,
                   createdAt: message.createdAt,
                   imapUid: message.imapUid,
-                  unread: existingMessage?.unread ?? message.unread,
+                  unread: finalUnread,
                   ui_signal: message.ui_signal,
                   from: message.from,
                   to: message.to,
