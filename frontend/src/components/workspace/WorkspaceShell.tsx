@@ -133,6 +133,88 @@ type ContactTicket = {
 const getUnreadPreviewIds = (messages: Array<{ id: string; unread?: boolean }>) =>
   messages.filter((message) => message.unread).map((message) => message.id).slice(0, 8);
 
+type MessageIdentitySource = {
+  id?: string | null;
+  imapUid?: string | null;
+  subject?: string | null;
+  from?: string | null;
+  timestamp?: string | null;
+};
+
+type MessageUnreadOverrideStore = Record<string, boolean>;
+
+function buildStablePreviewIdentity(message: MessageIdentitySource) {
+  return `${message.subject ?? ""}|${message.from ?? ""}|${message.timestamp ?? ""}`;
+}
+
+function getCanonicalMessageIdentityKey(message: MessageIdentitySource) {
+  if (message.imapUid) {
+    return `imap:${message.imapUid}`;
+  }
+
+  if (message.id) {
+    return `id:${message.id}`;
+  }
+
+  return `preview:${buildStablePreviewIdentity(message)}`;
+}
+
+function getCanonicalMessageIdentityKeys(message: MessageIdentitySource) {
+  const keys: string[] = [];
+
+  if (message.imapUid) {
+    keys.push(`imap:${message.imapUid}`);
+  }
+
+  if (message.id) {
+    keys.push(`id:${message.id}`);
+  }
+
+  keys.push(`preview:${buildStablePreviewIdentity(message)}`);
+
+  return keys;
+}
+
+function findMatchingMessageByIdentity<T>(
+  message: MessageIdentitySource,
+  indexes: {
+    byId: Map<string, T>;
+    byImapUid: Map<string, T>;
+    byPreviewIdentity: Map<string, T>;
+  },
+) {
+  if (message.imapUid) {
+    const matchedByImapUid = indexes.byImapUid.get(message.imapUid);
+
+    if (matchedByImapUid) {
+      return matchedByImapUid;
+    }
+  }
+
+  if (message.id) {
+    const matchedById = indexes.byId.get(message.id);
+
+    if (matchedById) {
+      return matchedById;
+    }
+  }
+
+  return indexes.byPreviewIdentity.get(buildStablePreviewIdentity(message));
+}
+
+function resolveUnreadOverride(
+  overrides: MessageUnreadOverrideStore,
+  message: MessageIdentitySource,
+) {
+  for (const key of getCanonicalMessageIdentityKeys(message)) {
+    if (Object.prototype.hasOwnProperty.call(overrides, key)) {
+      return overrides[key];
+    }
+  }
+
+  return undefined;
+}
+
 type LearningLaunchRequest =
   | {
       key: string;
@@ -7221,6 +7303,94 @@ function MailboxView({
     }));
   };
 
+  const syncUnreadOverrides = (
+    messages: MessageIdentitySource[],
+    unread: boolean,
+  ) => {
+    if (messages.length === 0) {
+      return;
+    }
+
+    setMessageUnreadOverrides((current) => {
+      const nextOverrides = { ...current };
+
+      messages.forEach((message) => {
+        getCanonicalMessageIdentityKeys(message).forEach((key) => {
+          nextOverrides[key] = unread;
+        });
+      });
+
+      return nextOverrides;
+    });
+  };
+
+  const buildInboxIdentityIndexes = (messages: MailMessage[]) => ({
+    byId: new Map(messages.map((message) => [message.id, message])),
+    byImapUid: new Map(
+      messages
+        .filter((message) => Boolean(message.imapUid))
+        .map((message) => [message.imapUid as string, message]),
+    ),
+    byPreviewIdentity: new Map(
+      messages.map((message) => [buildStablePreviewIdentity(message), message]),
+    ),
+  });
+
+  const getMessagesByIds = (messageIds: string[]) => {
+    if (messageIds.length === 0) {
+      return [];
+    }
+
+    const messageIdSet = new Set(messageIds);
+
+    return Object.values(mailboxStore).flatMap((collections) =>
+      canonicalFolderOrder.flatMap((folder) =>
+        collections[folder].filter((message) => messageIdSet.has(message.id)),
+      ),
+    );
+  };
+
+  const mergeLiveInboxMessages = (
+    mailboxId: InboxId,
+    incomingMessages: LiveInboxMessageSnapshot[],
+    currentInboxMessages: MailMessage[],
+    currentStore: MailboxStore,
+  ) => {
+    const currentInboxIndexes = buildInboxIdentityIndexes(currentInboxMessages);
+
+    return incomingMessages.map((message) => {
+      const existingMessage = findMatchingMessageByIdentity(message, currentInboxIndexes);
+      const unread =
+        resolveUnreadOverride(messageUnreadOverrides, message) ??
+        existingMessage?.unread ??
+        message.unread;
+
+      return normalizeMailMessage(
+        {
+          id: message.id,
+          sender: message.sender,
+          subject: message.subject,
+          snippet: message.snippet,
+          time: message.timestamp,
+          createdAt: message.createdAt,
+          imapUid: message.imapUid,
+          unread,
+          ui_signal: message.ui_signal,
+          from: message.from,
+          to: message.to,
+          cc: message.cc,
+          timestamp: message.timestamp,
+          body: message.body,
+        },
+        mailboxId,
+        senderCategoryLearning,
+        messageOwnershipInteractions,
+        currentWorkspaceUserId,
+        currentStore,
+      );
+    });
+  };
+
   const updateMessageById = (
     messageId: string,
     updater: (message: MailMessage) => MailMessage,
@@ -7706,6 +7876,8 @@ function MailboxView({
       return;
     }
 
+    syncUnreadOverrides(getMessagesByIds(messageIds), unread);
+
     if (isSharedView || activeSmartFolder) {
       const messageIdSet = new Set(messageIds);
 
@@ -7762,6 +7934,25 @@ function MailboxView({
     unread: boolean,
   ) => {
     setMessagesUnreadState(folder, [messageId], unread);
+  };
+
+  const markInboxMessageReadOnOpen = (message: MailMessage) => {
+    if (activeFolder !== "Inbox" || isSharedView || activeSmartFolder) {
+      return;
+    }
+
+    syncUnreadOverrides([message], false);
+    updateFolderMessages("Inbox", (messages) =>
+      messages.map((entry) =>
+        entry.id === message.id
+          ? {
+              ...entry,
+              imapUid: message.imapUid ?? entry.imapUid,
+              unread: false,
+            }
+          : entry,
+      ),
+    );
   };
 
   const toggleMessageFlagState = (messageId: string) => {
@@ -10293,17 +10484,7 @@ function MailboxView({
                             }
 
                             handleSelectMessage(activeFolder, message.id);
-                            updateFolderMessages(activeFolder, (messages) =>
-                              messages.map((entry) =>
-                                entry.id === message.id
-                                  ? {
-                                      ...entry,
-                                      imapUid: message.imapUid ?? entry.imapUid,
-                                      unread: false,
-                                    }
-                                  : entry,
-                              ),
-                            );
+                            markInboxMessageReadOnOpen(message);
                           }}
                           onDoubleClick={() => {
                             handleSelectMessage(activeFolder, message.id, {
@@ -18140,6 +18321,8 @@ export function WorkspaceShell({
       currentWorkspaceUserId,
     ),
   );
+  const [messageUnreadOverrides, setMessageUnreadOverrides] =
+    useState<MessageUnreadOverrideStore>({});
   const primaryInboxEmailCount = getMailboxFolderBadgeCount(
     mailboxStore[orderedMailboxes[0]?.id ?? "main"],
     "Inbox",
@@ -19401,60 +19584,16 @@ export function WorkspaceShell({
     setMailboxStore((currentStore) => {
       const currentCollections =
         currentStore[targetMailbox.id] ?? createEmptyMailboxCollections();
-      const currentInboxById = new Map(
-        currentCollections.Inbox.map((message) => [message.id, message]),
-      );
-      const currentInboxByImapUid = new Map(
-        currentCollections.Inbox
-          .filter((message) => Boolean(message.imapUid))
-          .map((message) => [message.imapUid as string, message]),
-      );
-      const currentInboxByPreviewIdentity = new Map(
-        currentCollections.Inbox.map((message) => [
-          `${message.subject}|${message.from}|${message.timestamp}`,
-          message,
-        ]),
-      );
 
       const nextStore = {
         ...currentStore,
         [targetMailbox.id]: {
           ...currentCollections,
-          Inbox: messages.map((message) =>
-            {
-              const existingMessage =
-                currentInboxById.get(message.id) ??
-                (message.imapUid
-                  ? currentInboxByImapUid.get(message.imapUid)
-                  : undefined) ??
-                currentInboxByPreviewIdentity.get(
-                  `${message.subject}|${message.from}|${message.timestamp}`,
-                );
-
-              return normalizeMailMessage(
-                {
-                  id: message.id,
-                  sender: message.sender,
-                  subject: message.subject,
-                  snippet: message.snippet,
-                  time: message.timestamp,
-                  createdAt: message.createdAt,
-                  imapUid: message.imapUid,
-                  unread: existingMessage?.unread ?? message.unread,
-                  ui_signal: message.ui_signal,
-                  from: message.from,
-                  to: message.to,
-                  cc: message.cc,
-                  timestamp: message.timestamp,
-                  body: message.body,
-                },
-                targetMailbox.id,
-                senderCategoryLearning,
-                messageOwnershipInteractions,
-                currentWorkspaceUserId,
-                currentStore,
-              );
-            },
+          Inbox: mergeLiveInboxMessages(
+            targetMailbox.id,
+            messages,
+            currentCollections.Inbox,
+            currentStore,
           ),
         },
       };
@@ -19639,30 +19778,11 @@ export function WorkspaceShell({
 
         nextStore[mailbox.id] = {
           ...currentCollections,
-          Inbox: snapshot.messages.map((message) =>
-            normalizeMailMessage(
-              {
-                id: message.id,
-                sender: message.sender,
-                subject: message.subject,
-                snippet: message.snippet,
-                time: message.timestamp,
-                createdAt: message.createdAt,
-                imapUid: message.imapUid,
-                unread: message.unread,
-                ui_signal: message.ui_signal,
-                from: message.from,
-                to: message.to,
-                cc: message.cc,
-                timestamp: message.timestamp,
-                body: message.body,
-              },
-              mailbox.id,
-              senderCategoryLearning,
-              messageOwnershipInteractions,
-              currentWorkspaceUserId,
-              currentStore,
-            ),
+          Inbox: mergeLiveInboxMessages(
+            mailbox.id,
+            snapshot.messages,
+            currentCollections.Inbox,
+            currentStore,
           ),
         };
       });
@@ -19677,6 +19797,7 @@ export function WorkspaceShell({
     });
   }, [
     liveMailboxSyncKey,
+    messageUnreadOverrides,
     senderCategoryLearning,
     messageOwnershipInteractions,
     currentWorkspaceUserId,
