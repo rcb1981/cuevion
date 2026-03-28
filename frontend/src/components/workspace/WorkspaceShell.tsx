@@ -19586,6 +19586,7 @@ export function WorkspaceShell({
                   snippet: message.snippet,
                   time: message.timestamp,
                   createdAt: message.createdAt,
+                  imapUid: message.imapUid,
                   unread: existingMessage?.unread ?? message.unread,
                   ui_signal: message.ui_signal,
                   from: message.from,
