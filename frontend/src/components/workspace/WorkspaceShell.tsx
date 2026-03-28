@@ -19540,6 +19540,11 @@ export function WorkspaceShell({
       const currentInboxById = new Map(
         currentCollections.Inbox.map((message) => [message.id, message]),
       );
+      const currentInboxByImapUid = new Map(
+        currentCollections.Inbox
+          .filter((message) => Boolean(message.imapUid))
+          .map((message) => [message.imapUid as string, message]),
+      );
       const unreadBeforeCount = currentCollections.Inbox.filter(
         (message) => message.unread,
       ).length;
@@ -19560,28 +19565,36 @@ export function WorkspaceShell({
         [targetMailbox.id]: {
           ...currentCollections,
           Inbox: messages.map((message) =>
-            normalizeMailMessage(
-              {
-                id: message.id,
-                sender: message.sender,
-                subject: message.subject,
-                snippet: message.snippet,
-                time: message.timestamp,
-                createdAt: message.createdAt,
-                unread: currentInboxById.get(message.id)?.unread ?? message.unread,
-                ui_signal: message.ui_signal,
-                from: message.from,
-                to: message.to,
-                cc: message.cc,
-                timestamp: message.timestamp,
-                body: message.body,
-              },
-              targetMailbox.id,
-              senderCategoryLearning,
-              messageOwnershipInteractions,
-              currentWorkspaceUserId,
-              currentStore,
-            ),
+            {
+              const existingMessage =
+                currentInboxById.get(message.id) ??
+                (message.imapUid
+                  ? currentInboxByImapUid.get(message.imapUid)
+                  : undefined);
+
+              return normalizeMailMessage(
+                {
+                  id: message.id,
+                  sender: message.sender,
+                  subject: message.subject,
+                  snippet: message.snippet,
+                  time: message.timestamp,
+                  createdAt: message.createdAt,
+                  unread: existingMessage?.unread ?? message.unread,
+                  ui_signal: message.ui_signal,
+                  from: message.from,
+                  to: message.to,
+                  cc: message.cc,
+                  timestamp: message.timestamp,
+                  body: message.body,
+                },
+                targetMailbox.id,
+                senderCategoryLearning,
+                messageOwnershipInteractions,
+                currentWorkspaceUserId,
+                currentStore,
+              );
+            },
           ),
         },
       };
