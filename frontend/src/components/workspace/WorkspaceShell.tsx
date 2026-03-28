@@ -19537,6 +19537,9 @@ export function WorkspaceShell({
     setMailboxStore((currentStore) => {
       const currentCollections =
         currentStore[targetMailbox.id] ?? createEmptyMailboxCollections();
+      const currentInboxById = new Map(
+        currentCollections.Inbox.map((message) => [message.id, message]),
+      );
       const unreadBeforeCount = currentCollections.Inbox.filter(
         (message) => message.unread,
       ).length;
@@ -19565,7 +19568,7 @@ export function WorkspaceShell({
                 snippet: message.snippet,
                 time: message.timestamp,
                 createdAt: message.createdAt,
-                unread: message.unread,
+                unread: currentInboxById.get(message.id)?.unread ?? message.unread,
                 ui_signal: message.ui_signal,
                 from: message.from,
                 to: message.to,
