@@ -10441,6 +10441,11 @@ function MailboxView({
                             }
 
                             handleSelectMessage(activeFolder, message.id);
+                            updateFolderMessages(activeFolder, (messages) =>
+                              messages.map((entry) =>
+                                entry.id === message.id ? { ...entry, unread: false } : entry,
+                              ),
+                            );
                           }}
                           onDoubleClick={() => {
                             handleSelectMessage(activeFolder, message.id, {
