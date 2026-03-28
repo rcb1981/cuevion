@@ -1,5 +1,14 @@
 import json
+import sys
 from http.server import BaseHTTPRequestHandler
+from pathlib import Path
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from imap_connect_preview import build_connect_preview_response
 
 
 class handler(BaseHTTPRequestHandler):
@@ -31,8 +40,6 @@ class handler(BaseHTTPRequestHandler):
             return
 
         try:
-            from imap_connect_preview import build_connect_preview_response
-
             status_code, response_payload = build_connect_preview_response(payload)
             self._send_json(status_code, response_payload)
         except Exception:
