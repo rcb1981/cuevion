@@ -5637,6 +5637,7 @@ function MailboxView({
   onOpenLinkedReview,
   onSyncMailbox,
   isSyncingMailbox,
+  onSyncUnreadOverrides,
 }: {
   mailbox: OrderedMailbox;
   orderedMailboxes: OrderedMailbox[];
@@ -5680,6 +5681,7 @@ function MailboxView({
   onOpenLinkedReview: (target: ReviewWorkspaceTarget) => void;
   onSyncMailbox: () => void;
   isSyncingMailbox: boolean;
+  onSyncUnreadOverrides: (messages: MessageIdentitySource[], unread: boolean) => void;
 }) {
   const [activeFilter, setActiveFilter] = useState<MailFilter>("All");
   const [sortOrder, setSortOrder] = useState<MailSortOrder>("desc");
@@ -7303,39 +7305,6 @@ function MailboxView({
     }));
   };
 
-  const syncUnreadOverrides = (
-    messages: MessageIdentitySource[],
-    unread: boolean,
-  ) => {
-    if (messages.length === 0) {
-      return;
-    }
-
-    setMessageUnreadOverrides((current) => {
-      const nextOverrides = { ...current };
-
-      messages.forEach((message) => {
-        getCanonicalMessageIdentityKeys(message).forEach((key) => {
-          nextOverrides[key] = unread;
-        });
-      });
-
-      return nextOverrides;
-    });
-  };
-
-  const buildInboxIdentityIndexes = (messages: MailMessage[]) => ({
-    byId: new Map(messages.map((message) => [message.id, message])),
-    byImapUid: new Map(
-      messages
-        .filter((message) => Boolean(message.imapUid))
-        .map((message) => [message.imapUid as string, message]),
-    ),
-    byPreviewIdentity: new Map(
-      messages.map((message) => [buildStablePreviewIdentity(message), message]),
-    ),
-  });
-
   const getMessagesByIds = (messageIds: string[]) => {
     if (messageIds.length === 0) {
       return [];
@@ -7348,47 +7317,6 @@ function MailboxView({
         collections[folder].filter((message) => messageIdSet.has(message.id)),
       ),
     );
-  };
-
-  const mergeLiveInboxMessages = (
-    mailboxId: InboxId,
-    incomingMessages: LiveInboxMessageSnapshot[],
-    currentInboxMessages: MailMessage[],
-    currentStore: MailboxStore,
-  ) => {
-    const currentInboxIndexes = buildInboxIdentityIndexes(currentInboxMessages);
-
-    return incomingMessages.map((message) => {
-      const existingMessage = findMatchingMessageByIdentity(message, currentInboxIndexes);
-      const unread =
-        resolveUnreadOverride(messageUnreadOverrides, message) ??
-        existingMessage?.unread ??
-        message.unread;
-
-      return normalizeMailMessage(
-        {
-          id: message.id,
-          sender: message.sender,
-          subject: message.subject,
-          snippet: message.snippet,
-          time: message.timestamp,
-          createdAt: message.createdAt,
-          imapUid: message.imapUid,
-          unread,
-          ui_signal: message.ui_signal,
-          from: message.from,
-          to: message.to,
-          cc: message.cc,
-          timestamp: message.timestamp,
-          body: message.body,
-        },
-        mailboxId,
-        senderCategoryLearning,
-        messageOwnershipInteractions,
-        currentWorkspaceUserId,
-        currentStore,
-      );
-    });
   };
 
   const updateMessageById = (
@@ -7876,7 +7804,7 @@ function MailboxView({
       return;
     }
 
-    syncUnreadOverrides(getMessagesByIds(messageIds), unread);
+    onSyncUnreadOverrides(getMessagesByIds(messageIds), unread);
 
     if (isSharedView || activeSmartFolder) {
       const messageIdSet = new Set(messageIds);
@@ -7941,7 +7869,7 @@ function MailboxView({
       return;
     }
 
-    syncUnreadOverrides([message], false);
+    onSyncUnreadOverrides([message], false);
     updateFolderMessages("Inbox", (messages) =>
       messages.map((entry) =>
         entry.id === message.id
@@ -18323,6 +18251,77 @@ export function WorkspaceShell({
   );
   const [messageUnreadOverrides, setMessageUnreadOverrides] =
     useState<MessageUnreadOverrideStore>({});
+  const syncUnreadOverrides = (
+    messages: MessageIdentitySource[],
+    unread: boolean,
+  ) => {
+    if (messages.length === 0) {
+      return;
+    }
+
+    setMessageUnreadOverrides((current: MessageUnreadOverrideStore) => {
+      const nextOverrides = { ...current };
+
+      messages.forEach((message) => {
+        getCanonicalMessageIdentityKeys(message).forEach((key) => {
+          nextOverrides[key] = unread;
+        });
+      });
+
+      return nextOverrides;
+    });
+  };
+  const buildInboxIdentityIndexes = (messages: MailMessage[]) => ({
+    byId: new Map(messages.map((message) => [message.id, message])),
+    byImapUid: new Map(
+      messages
+        .filter((message) => Boolean(message.imapUid))
+        .map((message) => [message.imapUid as string, message]),
+    ),
+    byPreviewIdentity: new Map(
+      messages.map((message) => [buildStablePreviewIdentity(message), message]),
+    ),
+  });
+  const mergeLiveInboxMessages = (
+    mailboxId: InboxId,
+    incomingMessages: LiveInboxMessageSnapshot[],
+    currentInboxMessages: MailMessage[],
+    currentStore: MailboxStore,
+  ) => {
+    const currentInboxIndexes = buildInboxIdentityIndexes(currentInboxMessages);
+
+    return incomingMessages.map((message) => {
+      const existingMessage = findMatchingMessageByIdentity(message, currentInboxIndexes);
+      const unread =
+        resolveUnreadOverride(messageUnreadOverrides, message) ??
+        existingMessage?.unread ??
+        message.unread;
+
+      return normalizeMailMessage(
+        {
+          id: message.id,
+          sender: message.sender,
+          subject: message.subject,
+          snippet: message.snippet,
+          time: message.timestamp,
+          createdAt: message.createdAt,
+          imapUid: message.imapUid,
+          unread,
+          ui_signal: message.ui_signal,
+          from: message.from,
+          to: message.to,
+          cc: message.cc,
+          timestamp: message.timestamp,
+          body: message.body,
+        },
+        mailboxId,
+        senderCategoryLearning,
+        messageOwnershipInteractions,
+        currentWorkspaceUserId,
+        currentStore,
+      );
+    });
+  };
   const primaryInboxEmailCount = getMailboxFolderBadgeCount(
     mailboxStore[orderedMailboxes[0]?.id ?? "main"],
     "Inbox",
@@ -20604,6 +20603,7 @@ export function WorkspaceShell({
                   onOpenLinkedReview={(target) => setActiveTarget(target)}
                   onSyncMailbox={handleSyncActiveMailbox}
                   isSyncingMailbox={syncingMailboxId === activeMailbox.id}
+                  onSyncUnreadOverrides={syncUnreadOverrides}
                 />
               </div>
             ) : activeSection === "Dashboard" ? (
