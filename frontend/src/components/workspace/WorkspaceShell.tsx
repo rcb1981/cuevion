@@ -19662,6 +19662,7 @@ export function WorkspaceShell({
     setSyncingMailboxId(mailboxId);
 
     try {
+      const syncStartedAt = performance.now();
       const response = await connectInboxWithImap({
         provider: managedMailbox.provider,
         email: managedMailbox.email.trim(),
@@ -19674,12 +19675,20 @@ export function WorkspaceShell({
             : resolvedImapSettings.username.trim(),
         password: resolvedImapSettings.password,
       });
+      const requestDurationMs = performance.now() - syncStartedAt;
 
       if (!response.ok) {
+        console.info("[SYNC-TIMING] refreshMailboxById failed", {
+          mailboxId,
+          email: managedMailbox.email.trim(),
+          requestDurationMs: Math.round(requestDurationMs),
+          error: response.error?.message ?? response.error?.code ?? "unknown",
+        });
         return;
       }
 
       const messages = response.messages ?? [];
+      const mergeStartedAt = performance.now();
       saveLiveInboxSnapshot({
         inboxId: managedMailbox.id,
         email: managedMailbox.email.trim().toLowerCase(),
@@ -19687,6 +19696,14 @@ export function WorkspaceShell({
         messages,
       });
       applyLiveInboxMessagesToMailboxStore(managedMailbox.id as InboxId, messages);
+      console.info("[SYNC-TIMING] refreshMailboxById complete", {
+        mailboxId,
+        email: managedMailbox.email.trim(),
+        requestDurationMs: Math.round(requestDurationMs),
+        mergeDurationMs: Math.round(performance.now() - mergeStartedAt),
+        totalDurationMs: Math.round(performance.now() - syncStartedAt),
+        messageCount: messages.length,
+      });
     } finally {
       setSyncingMailboxId(null);
     }

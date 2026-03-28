@@ -2,6 +2,7 @@ import hashlib
 import imaplib
 import logging
 import re
+import time
 from datetime import datetime, timezone
 from email import message_from_bytes
 from email.header import decode_header
@@ -107,20 +108,40 @@ def connect_mailbox_with_settings(
 
 
 def fetch_recent_messages(mailbox, folder: str = "INBOX", limit: int = DEFAULT_FETCH_LIMIT):
+    fetch_start = time.perf_counter()
+    select_start = time.perf_counter()
     mailbox.select(folder)
+    select_duration_ms = (time.perf_counter() - select_start) * 1000
+    search_start = time.perf_counter()
     status, messages = mailbox.search(None, "ALL")
+    search_duration_ms = (time.perf_counter() - search_start) * 1000
 
     if status != "OK":
+        logger.warning(
+            "IMAP preview fetch_recent_messages failed status=%s folder=%s select_ms=%.1f search_ms=%.1f",
+            status,
+            folder,
+            select_duration_ms,
+            search_duration_ms,
+        )
         return []
 
     message_ids = messages[0].split()
     latest_ids = message_ids[-limit:]
     results: list[tuple[Message, bool, str | None]] = []
 
-    for message_id in reversed(latest_ids):
+    for index, message_id in enumerate(reversed(latest_ids)):
+        per_message_start = time.perf_counter()
         status, message_data = mailbox.fetch(message_id, "(UID FLAGS BODY.PEEK[])")
+        fetch_duration_ms = (time.perf_counter() - per_message_start) * 1000
 
         if status != "OK":
+            logger.warning(
+                "IMAP preview per-message fetch failed idx=%s status=%s fetch_ms=%.1f",
+                index,
+                status,
+                fetch_duration_ms,
+            )
             continue
 
         metadata_parts: list[str] = []
@@ -146,7 +167,9 @@ def fetch_recent_messages(mailbox, folder: str = "INBOX", limit: int = DEFAULT_F
         uid_match = re.search(r"UID\s+(\d+)", combined_metadata)
         imap_uid = uid_match.group(1) if uid_match else None
         if imap_uid is None:
+            uid_fetch_start = time.perf_counter()
             uid_status, uid_data = mailbox.fetch(message_id, "(UID)")
+            uid_fetch_duration_ms = (time.perf_counter() - uid_fetch_start) * 1000
             if uid_status == "OK":
                 uid_metadata_parts: list[str] = []
                 for item in uid_data:
@@ -166,6 +189,12 @@ def fetch_recent_messages(mailbox, folder: str = "INBOX", limit: int = DEFAULT_F
                 uid_match = re.search(r"UID\s+(\d+)", uid_combined_metadata)
                 if uid_match:
                     imap_uid = uid_match.group(1)
+            logger.info(
+                "IMAP preview UID fallback idx=%s uid_status=%s uid_fetch_ms=%.1f",
+                index,
+                uid_status,
+                uid_fetch_duration_ms,
+            )
         if not flags_match:
             logger.info(
                 "IMAP fetch missing FLAGS for %s | meta=%s",
@@ -179,6 +208,25 @@ def fetch_recent_messages(mailbox, folder: str = "INBOX", limit: int = DEFAULT_F
             continue
         unread = "\\Seen" not in flags_content
         results.append((message_from_bytes(raw_email), unread, imap_uid))
+        logger.info(
+            "IMAP preview per-message fetch idx=%s fetch_ms=%.1f total_ms=%.1f bytes=%s uid_present=%s unread=%s",
+            index,
+            fetch_duration_ms,
+            (time.perf_counter() - per_message_start) * 1000,
+            len(raw_email),
+            bool(imap_uid),
+            unread,
+        )
+
+    logger.warning(
+        "IMAP preview fetch_recent_messages complete folder=%s limit=%s returned=%s select_ms=%.1f search_ms=%.1f total_ms=%.1f",
+        folder,
+        limit,
+        len(results),
+        select_duration_ms,
+        search_duration_ms,
+        (time.perf_counter() - fetch_start) * 1000,
+    )
 
     return results
 
@@ -242,13 +290,13 @@ def format_timestamp(date_header: str) -> tuple[str, str]:
 
 
 def resolve_ui_signal(message: Message, email_address: str) -> str:
+    resolve_start = time.perf_counter()
     try:
         from imap_live_v6_5_5_stable import (
             INBOX_CONFIG,
             USER_LINK_SETTINGS,
             USER_REMINDER_SETTINGS,
             V7_USER_CONFIG,
-            analyze_email,
             extract_all_links,
             get_usable_demo_links,
             is_business_reminder_email,
@@ -275,22 +323,11 @@ def resolve_ui_signal(message: Message, email_address: str) -> str:
     )
 
     try:
-        result = analyze_email(
-            message,
-            inbox_name=mailbox_label,
-            inbox_profile=inbox_profile,
-            user_link_settings=USER_LINK_SETTINGS,
-            user_reminder_settings=USER_REMINDER_SETTINGS,
-            preview_mode=True,
-        )
-        subject = str(result.get("subject") or decode_mime_words(message.get("Subject", "")))
-        from_header = str(result.get("from") or decode_mime_words(message.get("From", "")))
-        sender_name = str(result.get("sender_name") or "")
-        sender_email = str(result.get("sender_email") or "")
-        if not sender_email:
-            sender_name, sender_email = parseaddr(from_header)
-            sender_name = decode_mime_words(sender_name)
-        body = str(result.get("body") or get_message_body(message))
+        subject = decode_mime_words(message.get("Subject", ""))
+        from_header = decode_mime_words(message.get("From", ""))
+        sender_name, sender_email = parseaddr(from_header)
+        sender_name = decode_mime_words(sender_name)
+        body = get_message_body(message)
         subject_lower = subject.lower()
         body_lower = body.lower()
         sender_lower = sender_email.lower()
@@ -390,104 +427,60 @@ def resolve_ui_signal(message: Message, email_address: str) -> str:
             "suspicious activity",
         ]
         classification_text = f"{subject_lower} {body_lower}"
-        original_category = str(result.get("category") or "").strip().lower()
-
-        if original_category in ["", "info", "unknown"]:
-            if (
-                ("google" in sender_lower or "accounts.google.com" in classification_text)
-                and any(keyword in classification_text for keyword in google_security_keywords)
-            ):
-                result["category"] = "info"
-            elif any(keyword in classification_text for keyword in finance_keywords):
-                result["category"] = "finance"
-            elif usable_demo_links:
-                result["category"] = "demo"
-                result["usable_demo_links"] = usable_demo_links
-            elif any(keyword in classification_text for keyword in demo_intent_keywords):
-                result["category"] = "demo"
-            elif any(keyword in classification_text for keyword in meta_ads_keywords):
-                result["category"] = "finance"
-            elif any(keyword in classification_text for keyword in promo_keywords):
-                result["category"] = "promo"
-            elif any(keyword in classification_text for keyword in business_keywords):
-                result["category"] = "business"
-
-        if str(result.get("category") or "").strip().lower() != original_category:
-            logger.info(
-                "Post-normalized category: %s -> %s | sender=%s | subject=%s",
-                original_category,
-                str(result.get("category") or "").strip().lower(),
-                sender_email,
-                subject,
-            )
-            result = normalize_priority(
-                result,
-                inbox_profile=inbox_profile,
-                user_reminder_settings=USER_REMINDER_SETTINGS,
-            )
-
-        if str(result.get("reason") or "").startswith("AI parse failed:"):
-            logger.warning(
-                "Preview ui_signal falling back to deterministic rules: %s",
-                result.get("reason"),
-            )
-            to_header = decode_mime_words(message.get("To", ""))
-
-            result = {
-                "category": "info",
-                "priority": "LOW",
-                "reason": "Preview rules fallback",
-                "workflow_links": [],
-                "usable_demo_links": [],
-            }
-
-            if (
-                message.get("In-Reply-To")
-                or message.get("References")
-                or subject_lower.startswith("re:")
-            ):
-                result["category"] = "reply"
-            elif "trackstack" in sender_lower or "trackstack" in subject_lower or "trackstack" in body_lower:
-                result["category"] = "trackstack_submission"
-            elif "labelradar" in sender_lower or "labelradar" in subject_lower or "labelradar" in body_lower:
-                result["category"] = "labelradar_update"
-            elif is_distributor_update_email(subject, body, sender_email):
-                result["category"] = "distributor_update"
-            elif is_business_reminder_email(subject, body, sender_email):
-                result["category"] = "business_reminder"
-            elif is_royalty_statement_email(subject, body, sender_email):
-                result["category"] = "royalty_statement"
-            elif is_promo_reminder_email(subject, body, sender_email):
-                result["category"] = "promo_reminder"
-            elif (
-                ("google" in sender_lower or "accounts.google.com" in classification_text)
-                and any(keyword in classification_text for keyword in google_security_keywords)
-            ):
-                result["category"] = "info"
-            elif any(keyword in classification_text for keyword in finance_keywords):
-                result["category"] = "finance"
-            elif usable_demo_links:
-                result["category"] = "demo"
-                result["usable_demo_links"] = usable_demo_links
-            elif any(keyword in classification_text for keyword in demo_intent_keywords):
-                result["category"] = "demo"
-            elif any(keyword in classification_text for keyword in meta_ads_keywords):
-                result["category"] = "finance"
-            elif any(keyword in classification_text for keyword in promo_keywords):
-                result["category"] = "promo"
-            elif any(keyword in classification_text for keyword in business_keywords):
-                result["category"] = "business"
-
-            result["workflow_links"] = [
+        result = {
+            "category": "info",
+            "priority": "LOW",
+            "reason": "Preview fast-path rules",
+            "workflow_links": [
                 link_name
                 for link_name in ["soundcloud", "dropbox", "wetransfer", "disco", "gdrive", "onedrive"]
                 if extracted_links.get(link_name)
-            ]
-            result = normalize_priority(
-                result,
-                inbox_profile=inbox_profile,
-                user_reminder_settings=USER_REMINDER_SETTINGS,
-            )
+            ],
+            "usable_demo_links": [],
+        }
+
+        if (
+            message.get("In-Reply-To")
+            or message.get("References")
+            or subject_lower.startswith("re:")
+        ):
+            result["category"] = "reply"
+        elif "trackstack" in sender_lower or "trackstack" in subject_lower or "trackstack" in body_lower:
+            result["category"] = "trackstack_submission"
+        elif "labelradar" in sender_lower or "labelradar" in subject_lower or "labelradar" in body_lower:
+            result["category"] = "labelradar_update"
+        elif is_distributor_update_email(subject, body, sender_email):
+            result["category"] = "distributor_update"
+        elif is_business_reminder_email(subject, body, sender_email):
+            result["category"] = "business_reminder"
+        elif is_royalty_statement_email(subject, body, sender_email):
+            result["category"] = "royalty_statement"
+        elif is_promo_reminder_email(subject, body, sender_email):
+            result["category"] = "promo_reminder"
+        elif (
+            ("google" in sender_lower or "accounts.google.com" in classification_text)
+            and any(keyword in classification_text for keyword in google_security_keywords)
+        ):
+            result["category"] = "info"
+        elif any(keyword in classification_text for keyword in finance_keywords):
+            result["category"] = "finance"
+        elif usable_demo_links:
+            result["category"] = "demo"
+            result["usable_demo_links"] = usable_demo_links
+        elif any(keyword in classification_text for keyword in demo_intent_keywords):
+            result["category"] = "demo"
+        elif any(keyword in classification_text for keyword in meta_ads_keywords):
+            result["category"] = "finance"
+        elif any(keyword in classification_text for keyword in promo_keywords):
+            result["category"] = "promo"
+        elif any(keyword in classification_text for keyword in business_keywords):
+            result["category"] = "business"
+
+        result = normalize_priority(
+            result,
+            inbox_profile=inbox_profile,
+            user_reminder_settings=USER_REMINDER_SETTINGS,
+        )
 
         mailbox_match = next(
             (
@@ -517,16 +510,21 @@ def resolve_ui_signal(message: Message, email_address: str) -> str:
             result["v7_final_priority"] = v7_decision.final_priority
 
         logger.warning(
-            "Preview ui_signal resolved category=%s priority=%s workflow_links=%s usable_demo_links=%s subject=%s",
+            "Preview ui_signal resolved category=%s priority=%s workflow_links=%s usable_demo_links=%s analyze_ms=%.1f total_ms=%.1f subject=%s",
             result.get("category"),
             result.get("priority"),
             result.get("workflow_links"),
             result.get("usable_demo_links"),
+            0.0,
+            (time.perf_counter() - resolve_start) * 1000,
             decode_mime_words(message.get("Subject", "")),
         )
         return result.get("ui_signal") or map_to_ui_signal(result)
     except Exception:
-        logger.exception("Could not resolve ui_signal for message preview")
+        logger.exception(
+            "Could not resolve ui_signal for message preview after %.1f ms",
+            (time.perf_counter() - resolve_start) * 1000,
+        )
         return "NEW"
 
 
@@ -570,6 +568,7 @@ def to_message_preview(
 
 
 def build_connect_preview_response(payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    request_start = time.perf_counter()
     provider = payload.get("provider")
     email_address = str(payload.get("email") or "").strip()
     password = str(payload.get("password") or "")
@@ -607,6 +606,7 @@ def build_connect_preview_response(payload: dict[str, Any]) -> tuple[int, dict[s
     mailbox = None
 
     try:
+        connect_start = time.perf_counter()
         mailbox = connect_mailbox_with_settings(
             host=host,
             port=port,
@@ -614,11 +614,27 @@ def build_connect_preview_response(payload: dict[str, Any]) -> tuple[int, dict[s
             password=password,
             ssl_enabled=ssl_enabled,
         )
+        connect_duration_ms = (time.perf_counter() - connect_start) * 1000
+        fetch_start = time.perf_counter()
         messages = fetch_recent_messages(mailbox, folder=folder, limit=limit)
+        fetch_duration_ms = (time.perf_counter() - fetch_start) * 1000
+        preview_build_start = time.perf_counter()
         previews = [
             to_message_preview(message, index, email_address, unread, imap_uid)
             for index, (message, unread, imap_uid) in enumerate(messages)
         ]
+        preview_build_duration_ms = (time.perf_counter() - preview_build_start) * 1000
+        logger.warning(
+            "IMAP preview request complete email=%s folder=%s limit=%s connect_ms=%.1f fetch_ms=%.1f preview_build_ms=%.1f total_ms=%.1f messages=%s",
+            email_address,
+            folder,
+            limit,
+            connect_duration_ms,
+            fetch_duration_ms,
+            preview_build_duration_ms,
+            (time.perf_counter() - request_start) * 1000,
+            len(previews),
+        )
 
         return 200, {
             "ok": True,

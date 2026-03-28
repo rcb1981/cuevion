@@ -38,6 +38,7 @@ type ConnectInboxResponse = {
 export async function connectInboxWithImap(
   request: ConnectInboxRequest,
 ): Promise<ConnectInboxResponse> {
+  const requestStartedAt = performance.now();
   try {
     const response = await fetch("/api/inboxes/connect-imap", {
       method: "POST",
@@ -48,6 +49,12 @@ export async function connectInboxWithImap(
     });
     
     const payload = (await response.json()) as ConnectInboxResponse;
+    console.info("[SYNC-TIMING] connectInboxWithImap response", {
+      ok: response.ok,
+      email: request.email,
+      durationMs: Math.round(performance.now() - requestStartedAt),
+      messageCount: payload.messages?.length ?? 0,
+    });
 
     if (!response.ok) {
       return {
@@ -61,6 +68,11 @@ export async function connectInboxWithImap(
 
     return payload;
   } catch (error) {
+    console.error("[SYNC-TIMING] connectInboxWithImap failed", {
+      email: request.email,
+      durationMs: Math.round(performance.now() - requestStartedAt),
+      error: error instanceof Error ? error.message : String(error),
+    });
     return {
       ok: false,
       error: {

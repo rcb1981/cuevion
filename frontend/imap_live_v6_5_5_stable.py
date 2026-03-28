@@ -1,5 +1,6 @@
 import imaplib
 import email
+import logging
 from email.header import decode_header
 from email.utils import parseaddr
 from dotenv import load_dotenv
@@ -9,6 +10,7 @@ import re
 import json
 import requests
 import html
+import time
 from urllib.parse import urlparse, parse_qs, unquote
 from v7_config import create_default_user_config, MailboxConnection, EngineResult
 from v7_decision_layer import decide_message_behavior
@@ -19,6 +21,7 @@ from v7_decision_layer import decide_message_behavior
 load_dotenv()
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+logger = logging.getLogger(__name__)
 
 # =========================
 # GLOBAL SETTINGS
@@ -1337,6 +1340,7 @@ Important:
 """
 
     try:
+        openai_start = time.perf_counter()
         response = client.chat.completions.create(
             model="gpt-4.1",
             temperature=0.1,
@@ -1355,6 +1359,13 @@ Body:
                 }
             ]
         )
+        openai_duration_ms = (time.perf_counter() - openai_start) * 1000
+        logger.warning(
+            "Preview classify_email_with_ai complete openai_ms=%.1f subject=%s sender=%s",
+            openai_duration_ms,
+            subject[:120],
+            sender_email,
+        )
 
         raw = response.choices[0].message.content.strip()
         raw = re.sub(r"^```json\s*", "", raw)
@@ -1364,6 +1375,12 @@ Body:
         return data
 
     except Exception as e:
+        logger.exception(
+            "Preview classify_email_with_ai failed after %.1f ms subject=%s sender=%s",
+            (time.perf_counter() - openai_start) * 1000,
+            subject[:120],
+            sender_email,
+        )
         return {
             "artist": sender_name or "",
             "category": "info",
@@ -1642,6 +1659,7 @@ def analyze_email(
     user_reminder_settings=None,
     preview_mode=False
 ):
+    analyze_start = time.perf_counter()
     subject = decode_mime_words(msg.get("Subject", ""))
     from_header = decode_mime_words(msg.get("From", ""))
     to_header = decode_mime_words(msg.get("To", ""))
@@ -1681,6 +1699,15 @@ def analyze_email(
     result["from"] = from_header
     result["inbox_name"] = inbox_name
     result["inbox_profile"] = inbox_profile
+    logger.warning(
+        "Preview analyze_email complete subject=%s sender=%s preview_mode=%s total_ms=%.1f category=%s priority=%s",
+        subject[:120],
+        sender_email,
+        preview_mode,
+        (time.perf_counter() - analyze_start) * 1000,
+        result.get("category"),
+        result.get("priority"),
+    )
     return result
 
 
