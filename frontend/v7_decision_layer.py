@@ -314,6 +314,38 @@ def decide_message_behavior(
     if category == "promo_reminder":
         final_visibility = min_visibility(final_visibility, "show_low")
 
+    if internal_role:
+
+        # DEMO emails
+        if category in ["demo", "high_priority_demo"]:
+            if internal_role in ["ar_manager", "label_ar_manager"]:
+                final_priority = "PRIORITY"
+            elif internal_role in ["finance_manager", "legal_rights_manager"]:
+                if final_priority != "PRIORITY":
+                    final_priority = "LOW"
+
+        # PROMO emails
+        if category == "promo":
+            if internal_role in ["dj", "producer"]:
+                if final_priority == "LOW":
+                    final_priority = "MEDIUM"
+            else:
+                if final_priority != "PRIORITY":
+                    final_priority = "LOW"
+
+        # FINANCE emails
+        if category in ["finance", "royalty_statement"]:
+            if internal_role in [
+                "management",
+                "label_manager",
+                "finance_manager",
+                "artist_manager",
+                "producer",
+                "dj",
+                "artist"
+            ]:
+                final_priority = "PRIORITY"
+
     if category == "demo":
         explanation.final_summary = "Shown prominently because this looks like a real demo submission."
 
