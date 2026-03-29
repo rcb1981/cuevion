@@ -74,6 +74,8 @@ export interface OnboardingState {
     updates: FocusPreferenceLevel;
     distribution: FocusPreferenceLevel;
     royalties: FocusPreferenceLevel;
+    promoReminders: FocusPreferenceLevel;
+    paymentReminders: FocusPreferenceLevel;
   };
   inboxCount: InboxCountId | null;
   selectedInboxes: InboxId[];

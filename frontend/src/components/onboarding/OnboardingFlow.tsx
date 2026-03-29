@@ -67,6 +67,8 @@ function getDefaultFocusPreferencesForRole(
       updates: "medium",
       distribution: "low",
       royalties: "low",
+      promoReminders: "low",
+      paymentReminders: "low",
     };
   }
 
@@ -80,6 +82,8 @@ function getDefaultFocusPreferencesForRole(
       updates: "medium",
       distribution: "medium",
       royalties: "medium",
+      promoReminders: "medium",
+      paymentReminders: "medium",
     };
   }
 
@@ -95,6 +99,8 @@ function getDefaultFocusPreferencesForRole(
       updates: "medium",
       distribution: "medium",
       royalties: "high",
+      promoReminders: "low",
+      paymentReminders: "high",
     },
     product_manager: {
       demos: "low",
@@ -105,6 +111,8 @@ function getDefaultFocusPreferencesForRole(
       updates: "high",
       distribution: "high",
       royalties: "medium",
+      promoReminders: "low",
+      paymentReminders: "medium",
     },
     artist_manager: {
       demos: "medium",
@@ -115,6 +123,8 @@ function getDefaultFocusPreferencesForRole(
       updates: "medium",
       distribution: "low",
       royalties: "high",
+      promoReminders: "medium",
+      paymentReminders: "high",
     },
     dj: {
       demos: "low",
@@ -125,6 +135,8 @@ function getDefaultFocusPreferencesForRole(
       updates: "low",
       distribution: "low",
       royalties: "high",
+      promoReminders: "low",
+      paymentReminders: "medium",
     },
     producer: {
       demos: "medium",
@@ -135,6 +147,8 @@ function getDefaultFocusPreferencesForRole(
       updates: "low",
       distribution: "low",
       royalties: "high",
+      promoReminders: "low",
+      paymentReminders: "high",
     },
     management: {
       demos: "low",
@@ -145,6 +159,8 @@ function getDefaultFocusPreferencesForRole(
       updates: "medium",
       distribution: "medium",
       royalties: "high",
+      promoReminders: "low",
+      paymentReminders: "high",
     },
   };
 
@@ -158,6 +174,8 @@ function getDefaultFocusPreferencesForRole(
       updates: "medium",
       distribution: "medium",
       royalties: "medium",
+      promoReminders: "medium",
+      paymentReminders: "medium",
     }
   );
 }

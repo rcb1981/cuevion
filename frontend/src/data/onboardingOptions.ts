@@ -103,6 +103,8 @@ export const initialOnboardingState: OnboardingState = {
     updates: "medium",
     distribution: "medium",
     royalties: "medium",
+    promoReminders: "medium",
+    paymentReminders: "medium",
   },
   inboxCount: null,
   selectedInboxes: [],
