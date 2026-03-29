@@ -94,6 +94,7 @@ export const initialOnboardingState: OnboardingState = {
   primaryRole: null,
   internalRole: null,
   secondaryRole: null,
+  primaryInbox: "main",
   focusPreferences: {
     demos: "medium",
     promo: "medium",

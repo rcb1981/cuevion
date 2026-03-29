@@ -65,6 +65,7 @@ export interface OnboardingState {
   primaryRole: RoleId | null;
   internalRole: InternalRole | null;
   secondaryRole: RoleId | null;
+  primaryInbox: InboxId | null;
   focusPreferences: {
     demos: FocusPreferenceLevel;
     promo: FocusPreferenceLevel;

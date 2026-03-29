@@ -3,6 +3,8 @@ import { onboardingText } from "../../copy/onboardingCopy";
 import {
   createCustomInboxId,
   createInboxConnection,
+  mainInboxOptions,
+  specializedInboxOptions,
 } from "../../data/onboardingOptions";
 import type { LiveInboxMessageSnapshot } from "../../lib/inboxConnectionApi";
 import {
@@ -51,6 +53,36 @@ function getRequiredInboxCount(inboxCount: OnboardingState["inboxCount"]) {
   if (inboxCount === "4+") return 4;
   if (inboxCount === "not_sure") return 2;
   return 1;
+}
+
+function getDefaultPrimaryInboxForRole(role: RoleId): InboxId {
+  const internalRole = mapRoleToInternal(role);
+
+  if (role === "ar_manager") {
+    return "demo";
+  }
+
+  if (role === "label_ar_manager") {
+    return "main";
+  }
+
+  if (internalRole === "product_manager") {
+    return "business";
+  }
+
+  if (internalRole === "artist_manager") {
+    return "main";
+  }
+
+  if (internalRole === "dj") {
+    return "main";
+  }
+
+  if (internalRole === "producer") {
+    return "main";
+  }
+
+  return "main";
 }
 
 function getDefaultFocusPreferencesForRole(
@@ -255,13 +287,28 @@ export function OnboardingFlow({
   }, [state, step]);
 
   const setPrimaryRole = (role: RoleId) => {
-    onStateChange((current) => ({
-      ...current,
-      primaryRole: role,
-      internalRole: mapRoleToInternal(role),
-      focusPreferences: getDefaultFocusPreferencesForRole(role),
-      secondaryRole: current.secondaryRole === role ? null : current.secondaryRole,
-    }));
+    onStateChange((current) => {
+      const nextPrimaryInbox = getDefaultPrimaryInboxForRole(role);
+      const maxActiveInboxCount = getMaxActiveInboxCount(current.inboxCount);
+      const dedupedSelectedInboxes = [
+        nextPrimaryInbox,
+        ...current.selectedInboxes.filter((inboxId) => inboxId !== nextPrimaryInbox),
+      ];
+      const nextSelectedInboxes = dedupedSelectedInboxes.slice(
+        0,
+        maxActiveInboxCount,
+      );
+
+      return {
+        ...current,
+        primaryRole: role,
+        internalRole: mapRoleToInternal(role),
+        secondaryRole: current.secondaryRole === role ? null : current.secondaryRole,
+        primaryInbox: nextPrimaryInbox,
+        selectedInboxes: nextSelectedInboxes,
+        focusPreferences: getDefaultFocusPreferencesForRole(role),
+      };
+    });
   };
 
   const setFocusPreference = (
@@ -286,8 +333,41 @@ export function OnboardingFlow({
     selectedInboxes: state.selectedInboxes,
   };
 
-  const toggleInbox = (inboxId: InboxId) => {
+  const availableInboxOptions = [
+    ...mainInboxOptions,
+    ...specializedInboxOptions,
+    ...state.customInboxes.map((inbox) => ({
+      id: inbox.id,
+      label: inbox.name,
+    })),
+  ];
+
+  const setPrimaryInbox = (inboxId: InboxId) => {
     onStateChange((current) => {
+      const maxActiveInboxCount = getMaxActiveInboxCount(current.inboxCount);
+      const dedupedSelectedInboxes = [
+        inboxId,
+        ...current.selectedInboxes.filter((selectedInboxId) => selectedInboxId !== inboxId),
+      ];
+      const nextSelectedInboxes = dedupedSelectedInboxes.slice(
+        0,
+        maxActiveInboxCount,
+      );
+
+      return {
+        ...current,
+        primaryInbox: inboxId,
+        selectedInboxes: nextSelectedInboxes,
+      };
+    });
+  };
+
+  const toggleAdditionalInbox = (inboxId: InboxId) => {
+    onStateChange((current) => {
+      if (current.primaryInbox === inboxId) {
+        return current;
+      }
+
       const exists = current.selectedInboxes.includes(inboxId);
       const maxActiveInboxCount = getMaxActiveInboxCount(current.inboxCount);
 
@@ -480,14 +560,15 @@ export function OnboardingFlow({
             onChange={(inboxCount) =>
               onStateChange((current) => {
                 const maxActiveInboxCount = getMaxActiveInboxCount(inboxCount);
+                const resolvedPrimaryInbox = current.primaryInbox ?? "main";
                 const preservedSecondaryInboxes = current.selectedInboxes.filter(
-                  (inboxId) => inboxId !== "main",
+                  (inboxId) => inboxId !== resolvedPrimaryInbox,
                 );
                 const nextSelectedInboxes =
                   maxActiveInboxCount === 1
-                    ? (["main"] as InboxId[])
+                    ? ([resolvedPrimaryInbox] as InboxId[])
                     : ([
-                        "main",
+                        resolvedPrimaryInbox,
                         ...preservedSecondaryInboxes.slice(
                           0,
                           Math.max(0, maxActiveInboxCount - 1),
@@ -497,6 +578,7 @@ export function OnboardingFlow({
                 return {
                   ...current,
                   inboxCount,
+                  primaryInbox: resolvedPrimaryInbox,
                   selectedInboxes: nextSelectedInboxes,
                 };
               })
@@ -506,11 +588,14 @@ export function OnboardingFlow({
       case 4:
         return (
           <StepInboxSetup
+            primaryInbox={state.primaryInbox}
             selectedInboxes={state.selectedInboxes}
+            availableInboxOptions={availableInboxOptions}
             customInboxes={state.customInboxes}
             maxActiveInboxCount={getMaxActiveInboxCount(state.inboxCount)}
             requiredInboxCount={getRequiredInboxCount(state.inboxCount)}
-            onToggleInbox={toggleInbox}
+            onPrimaryInboxChange={setPrimaryInbox}
+            onToggleAdditionalInbox={toggleAdditionalInbox}
             onAddCustomInbox={addCustomInbox}
           />
         );
