@@ -5828,6 +5828,7 @@ function MailboxView({
   const [isSendingCompose, setIsSendingCompose] = useState(false);
   const [pendingComposeAttachmentPickerOpen, setPendingComposeAttachmentPickerOpen] =
     useState(false);
+  const composeToInputRef = useRef<HTMLInputElement | null>(null);
   const composeBodyInputRef = useRef<HTMLDivElement | null>(null);
   const composeAttachmentInputRef = useRef<HTMLInputElement | null>(null);
   const [isEditingMailboxTitle, setIsEditingMailboxTitle] = useState(false);
@@ -6328,6 +6329,11 @@ function MailboxView({
     }
 
     requestAnimationFrame(() => {
+      if (composeMode === "new") {
+        composeToInputRef.current?.focus();
+        return;
+      }
+
       const editor = composeBodyInputRef.current;
 
       if (!editor) {
@@ -9786,6 +9792,7 @@ function MailboxView({
                   </span>
                   <div className="relative">
                     <input
+                      ref={composeToInputRef}
                       value={composeTo}
                       onChange={(event) => {
                         setComposeTo(event.target.value);
