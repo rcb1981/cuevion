@@ -527,6 +527,7 @@ const MESSAGE_OWNERSHIP_STORAGE_KEY = "cuevion-message-ownership";
 const CUEVION_MESSAGE_UNREAD_OVERRIDES_STORAGE_KEY = "cuevion-message-unread-overrides";
 const CUEVION_SENT_MESSAGES_STORAGE_KEY = "cuevion-sent-messages";
 const CUEVION_TRASH_MESSAGES_STORAGE_KEY = "cuevion-trash-messages";
+const CUEVION_SPAM_MESSAGES_STORAGE_KEY = "cuevion-spam-messages";
 const MAIL_SIGNATURES_STORAGE_KEY = "cuevion-mail-signatures";
 const MAIL_OUT_OF_OFFICE_STORAGE_KEY = "cuevion-mail-out-of-office";
 const OUT_OF_OFFICE_REPLY_LOG_STORAGE_KEY = "cuevion-out-of-office-reply-log";
@@ -563,6 +564,13 @@ function buildTrashMessagesStorageKey(
   orderedMailboxKey: string,
 ) {
   return `${CUEVION_TRASH_MESSAGES_STORAGE_KEY}:${workspaceUserId}:${orderedMailboxKey}`;
+}
+
+function buildSpamMessagesStorageKey(
+  workspaceUserId: string,
+  orderedMailboxKey: string,
+) {
+  return `${CUEVION_SPAM_MESSAGES_STORAGE_KEY}:${workspaceUserId}:${orderedMailboxKey}`;
 }
 
 function createEmptySignatureSettings(): InboxSignatureSettings {
@@ -18565,6 +18573,10 @@ export function WorkspaceShell({
     currentWorkspaceUserId,
     mailboxOrderKey,
   );
+  const spamMessagesStorageKey = buildSpamMessagesStorageKey(
+    currentWorkspaceUserId,
+    mailboxOrderKey,
+  );
   const liveMailboxSyncKey = orderedMailboxes
     .map((mailbox) => `${mailbox.id}:${mailbox.email}:${mailbox.title}`)
     .join("|");
@@ -20312,6 +20324,57 @@ export function WorkspaceShell({
       return;
     }
 
+    const storedValue = window.localStorage.getItem(spamMessagesStorageKey);
+
+    if (!storedValue) {
+      return;
+    }
+
+    try {
+      const parsed = JSON.parse(storedValue) as Partial<Record<string, MailMessage[]>>;
+
+      setMailboxStore((currentStore) => {
+        const nextStore = { ...currentStore };
+
+        orderedMailboxes.forEach((mailbox) => {
+          const storedMessages = Array.isArray(parsed[mailbox.id]) ? parsed[mailbox.id] ?? [] : [];
+
+          if (storedMessages.length === 0) {
+            return;
+          }
+
+          const currentCollections = nextStore[mailbox.id] ?? createEmptyMailboxCollections();
+
+          nextStore[mailbox.id] = {
+            ...currentCollections,
+            Spam: [...storedMessages, ...currentCollections.Spam],
+          };
+        });
+
+        return normalizeMailboxStore(
+          nextStore,
+          orderedMailboxes,
+          senderCategoryLearning,
+          messageOwnershipInteractions,
+          currentWorkspaceUserId,
+        );
+      });
+    } catch {
+      return;
+    }
+  }, [
+    spamMessagesStorageKey,
+    mailboxOrderKey,
+    senderCategoryLearning,
+    messageOwnershipInteractions,
+    currentWorkspaceUserId,
+  ]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
     const storedValue = window.localStorage.getItem(messageUnreadOverridesStorageKey);
 
     if (!storedValue) {
@@ -20372,6 +20435,24 @@ export function WorkspaceShell({
       JSON.stringify(trashMessagesByMailbox),
     );
   }, [mailboxStore, orderedMailboxes, trashMessagesStorageKey]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const spamMessagesByMailbox = Object.fromEntries(
+      orderedMailboxes.map((mailbox) => [
+        mailbox.id,
+        (mailboxStore[mailbox.id]?.Spam ?? []).slice(0, 100),
+      ]),
+    );
+
+    window.localStorage.setItem(
+      spamMessagesStorageKey,
+      JSON.stringify(spamMessagesByMailbox),
+    );
+  }, [mailboxStore, orderedMailboxes, spamMessagesStorageKey]);
 
   useEffect(() => {
     window.localStorage.setItem(
