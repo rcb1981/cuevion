@@ -2342,6 +2342,22 @@ function getLocalAutoPriorityScore(
     "collaboration",
     "reply",
   ]);
+  const hasRealHumanActionProtection =
+    hasReplyThreadIndicator ||
+    includesAnyKeyword(searchableText, [
+      "can you",
+      "could you",
+      "please",
+      "please confirm",
+      "please review",
+      "please send",
+      "need your",
+      "let me know",
+      "proposal",
+      "collaboration",
+      "meeting",
+      "schedule a call",
+    ]);
   const hasStrongActionSignal =
     hasReplyThreadIndicator ||
     includesAnyKeyword(searchableText, autoPriorityStrongKeywords) ||
@@ -2437,8 +2453,16 @@ function getLocalAutoPriorityScore(
       "rights",
       "license",
     ]);
+  const hasHardSuppressibleSystemPattern =
+    isGoogleSecurityAuthMail ||
+    isMetaBillingSystemMail ||
+    (isNoReplySender && isPureInfoLowActionMail);
 
   let score = 0;
+
+  if (hasHardSuppressibleSystemPattern && !hasRealHumanActionProtection) {
+    return -10;
+  }
 
   if (message.signal === "Priority") {
     score += 6;
