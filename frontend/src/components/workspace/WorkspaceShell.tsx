@@ -2203,6 +2203,86 @@ function resolveVisiblePrioritySignal(
   return message.signal ?? null;
 }
 
+function getVisiblePriorityBadge(
+  message: Pick<MailMessage, "priorityScore" | "signal">,
+  override?: ManualPriorityOverride,
+) {
+  if (override === "priority" || message.signal === "Priority") {
+    return "PRIORITY";
+  }
+
+  if (message.signal === "For review" || message.priorityScore === "medium") {
+    return "NORMAL";
+  }
+
+  if (message.priorityScore === "high") {
+    return "PRIORITY";
+  }
+
+  if (message.priorityScore === "low") {
+    return "LOW";
+  }
+
+  return "NORMAL";
+}
+
+function getVisibleCategoryLabel(
+  message: Pick<MailMessage, "internalClassification" | "signal" | "ui_signal">,
+) {
+  const classification = message.internalClassification;
+
+  switch (classification) {
+    case "demo":
+    case "high_priority_demo":
+      return "Demo";
+    case "finance":
+    case "royalty_statement":
+      return "Finance";
+    case "promo":
+    case "promo_reminder":
+      return "Promo";
+    case "business":
+    case "business_reminder":
+      return "Business";
+    case "workflow_update":
+    case "distributor_update":
+    case "info":
+      return "Update";
+    case "reply":
+      return "Reply";
+    case "unknown":
+      return "Other";
+    default:
+      break;
+  }
+
+  switch (message.ui_signal ?? message.signal) {
+    case "DEMO":
+    case "For review":
+    case "Shortlist":
+      return "Demo";
+    case "FINANCE":
+    case "Finance":
+      return "Finance";
+    case "PROMO":
+    case "Promo":
+      return "Promo";
+    case "BUSINESS":
+    case "Priority":
+    case "Active":
+      return "Business";
+    case "UPDATE":
+    case "Update":
+    case "Timing":
+      return "Update";
+    case "REPLY":
+    case "Follow-up":
+      return "Reply";
+    default:
+      return "Other";
+  }
+}
+
 const autoPriorityStrongKeywords = [
   "action required",
   "please review",
@@ -11190,8 +11270,12 @@ function MailboxView({
                           ? formatSharedContextHint(message.sharedContext)
                           : null;
                       const visibleSignal = getVisibleMessageSignal(message);
-                      const signal =
-                        message.ui_signal ?? (message.signal === "Sent" ? "" : "NEW");
+                      const priorityBadge = getVisiblePriorityBadge(
+                        message,
+                        getManualPriorityOverride(message.id),
+                      );
+                      const categoryLabel = getVisibleCategoryLabel(message);
+                      const signal = message.signal === "Sent" ? "" : priorityBadge;
                       const senderTextClass =
                         themeMode === "dark"
                           ? message.unread
@@ -11342,9 +11426,14 @@ function MailboxView({
                                 <div
                                   className={`pt-0.5 text-[0.6rem] font-medium uppercase tracking-[0.12em] ${signalTextClass}`}
                                 >
-                                  <span className="text-xs opacity-70">
+                                  <span className="text-xs opacity-80">
                                     {signal}
                                   </span>
+                                  {categoryLabel ? (
+                                    <span className="ml-1.5 text-[0.64rem] normal-case tracking-normal opacity-55">
+                                      · {categoryLabel}
+                                    </span>
+                                  ) : null}
                                 </div>
                               ) : null}
                               {sharedContextHint ? (
