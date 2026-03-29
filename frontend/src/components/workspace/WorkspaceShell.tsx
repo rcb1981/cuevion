@@ -2200,6 +2200,12 @@ function isMessageVisiblePriority(
   return resolveVisiblePrioritySignal(message, override) === "Priority";
 }
 
+function isLiveInboxPriorityMessage(
+  message: Pick<MailMessage, "signal" | "priorityScore">,
+) {
+  return message.signal === "Priority" || message.priorityScore === "high";
+}
+
 function normalizeThreadSubject(subject: string) {
   return subject
     .trim()
@@ -5051,6 +5057,7 @@ function TopCards({
   onOpenInboxes,
   primaryInboxTitle,
   primaryInboxEmailCount,
+  priorityInboxCount,
   connectedInboxCount,
 }: {
   onOpenPriority: () => void;
@@ -5058,13 +5065,17 @@ function TopCards({
   onOpenInboxes: () => void;
   primaryInboxTitle: string;
   primaryInboxEmailCount: number;
+  priorityInboxCount: number;
   connectedInboxCount: number;
 }) {
   const cards = [
     {
       label: "Priority",
-      value: "0",
-      context: "No items yet",
+      value: String(priorityInboxCount),
+      context:
+        priorityInboxCount > 0
+          ? `${priorityInboxCount} item${priorityInboxCount === 1 ? "" : "s"} ready in Inbox`
+          : "No items yet",
       actionLabel: "Open queue",
       onClick: onOpenPriority,
     },
@@ -5322,6 +5333,7 @@ function DashboardView({
   teamActivityEnabled,
   primaryInboxTitle,
   primaryInboxEmailCount,
+  priorityInboxCount,
   connectedInboxCount,
   showDemoContent,
 }: {
@@ -5335,6 +5347,7 @@ function DashboardView({
   teamActivityEnabled: boolean;
   primaryInboxTitle: string;
   primaryInboxEmailCount: number;
+  priorityInboxCount: number;
   connectedInboxCount: number;
   showDemoContent: boolean;
 }) {
@@ -5372,6 +5385,7 @@ function DashboardView({
         onOpenInboxes={onOpenInboxes}
         primaryInboxTitle={primaryInboxTitle}
         primaryInboxEmailCount={primaryInboxEmailCount}
+        priorityInboxCount={priorityInboxCount}
         connectedInboxCount={connectedInboxCount}
       />
 
@@ -19082,86 +19096,51 @@ export function WorkspaceShell({
   const getLinkedReviewForMessage = (messageId: string) =>
     reviewController.getReviewBySourceId(messageId);
   const getLinkedReviewBadgeLabel = (_messageId: string) => null;
-  const isWorkspaceMessageVisiblePriority = (messageId: string) => {
-    const message = getWorkspaceMessageById(messageId);
-
-    if (!message) {
-      return false;
-    }
-
-    return isMessageVisiblePriority(message, manualPriorityOverrides[messageId]);
-  };
-  const allWorkspaceMessages = Array.from(
-    Object.values(mailboxStore)
-      .flatMap((collections) => canonicalFolderOrder.flatMap((folder) => collections[folder]))
-      .reduce<Map<string, MailMessage>>((messagesById, message) => {
-        if (!messagesById.has(message.id)) {
-          messagesById.set(message.id, message);
-        }
-
-        return messagesById;
-      }, new Map()),
-  ).map(([, message]) => message);
-  const hiddenPriorityReviewIds = Array.from(
-    new Set([
-      ...completedPriorityReviewIds,
-      ...reviewController.store.items
-        .filter((item) => {
-          const sourceMessage = getWorkspaceMessageById(item.sourceId);
-          const sourceLocation = getWorkspaceMessageLocationById(item.sourceId);
-
-          return !sourceMessage || !sourceLocation || !isWorkspaceMessageVisiblePriority(item.sourceId);
-        })
-        .map((item) => item.id),
-    ]),
+  const livePriorityInboxEntries = orderedMailboxes.flatMap((candidate) =>
+    (mailboxStore[candidate.id]?.Inbox ?? [])
+      .filter((message) => isLiveInboxPriorityMessage(message))
+      .map((message) => ({
+        mailboxId: candidate.id,
+        mailboxTitle: candidate.title,
+        message,
+      })),
   );
-  const priorityDisplayOverrides = Object.fromEntries(
-    reviewController.store.items.flatMap((item) => {
-      const sourceMessage = getWorkspaceMessageById(item.sourceId);
-
-      if (!sourceMessage) {
-        return [];
-      }
-
-      return [
-        [
-          item.id,
-          {
-            sender: `${sourceMessage.sender} · ${sourceMessage.from}`,
-            subject: sourceMessage.subject,
-            context: sourceMessage.snippet,
-          },
-        ],
-      ];
-    }),
-  );
-  const manualPriorityWorkspaceItems: ReviewItem[] = allWorkspaceMessages
-    .filter(
-      (message) =>
-        isWorkspaceMessageVisiblePriority(message.id) &&
-        !reviewController.getReviewBySourceId(message.id),
-    )
-    .map((message) => ({
-      id: `manual-priority-${message.id}`,
+  const livePriorityInboxItems: ReviewItem[] = livePriorityInboxEntries.map(
+    ({ mailboxId, mailboxTitle, message }) => ({
+      id: `live-priority-${mailboxId}-${message.id}`,
       target: "demo-review",
       type: "business_context_review",
       title: message.subject,
       subtitle: `${message.sender} · ${message.from}`,
-      description: "Manually promoted to Priority from the inbox.",
+      description: "Priority message from your live Inbox.",
       status: "needs_decision",
-      owner:
-        orderedMailboxes.find((candidate) => candidate.id === getWorkspaceMessageLocationById(message.id)?.mailboxId)
-          ?.title ?? "Inbox",
-      nextStep: "Open the thread and reply when ready.",
+      owner: mailboxTitle,
+      nextStep: "Open this thread in Inbox.",
       highlights: [message.snippet],
       relatedItems: [],
-      primaryAction: { id: `manual-priority-open-${message.id}`, label: "Open email", kind: "open_full_review" },
+      primaryAction: {
+        id: `live-priority-open-${mailboxId}-${message.id}`,
+        label: "Open email",
+        kind: "open_full_review",
+      },
       sourceType: "mail_message",
       sourceId: message.id,
       linkedEntityIds: [],
-      createdAt: message.createdAt ?? new Date().toISOString(),
-      updatedAt: message.createdAt ?? new Date().toISOString(),
-    }));
+      createdAt: message.createdAt ?? message.timestamp,
+      updatedAt: message.createdAt ?? message.timestamp,
+    }),
+  );
+  const hiddenPriorityReviewIds = reviewController.store.items.map((item) => item.id);
+  const priorityDisplayOverrides = Object.fromEntries(
+    livePriorityInboxEntries.map(({ mailboxId, message }) => [
+      `live-priority-${mailboxId}-${message.id}`,
+      {
+        sender: `${message.sender} · ${message.from}`,
+        subject: message.subject,
+        context: message.snippet,
+      },
+    ]),
+  );
 
   const decodedInvitePayload = collaborationInviteRoute
     ? decodeCollaborationInviteToken(collaborationInviteRoute.inviteToken)
@@ -19848,6 +19827,27 @@ export function WorkspaceShell({
   };
 
   const handleOpenPriorityItem = (reviewItem: ReviewItem) => {
+    if (reviewItem.id.startsWith("live-priority-")) {
+      const sourceLocation = getWorkspaceMessageLocationById(reviewItem.sourceId);
+      const targetMailbox = sourceLocation
+        ? orderedMailboxes.find((mailbox) => mailbox.id === sourceLocation.mailboxId) ?? null
+        : null;
+
+      if (!sourceLocation || !targetMailbox) {
+        return;
+      }
+
+      openMailboxFromContext(targetMailbox);
+      setNotificationNavigationRequest({
+        mailboxId: sourceLocation.mailboxId,
+        messageId: reviewItem.sourceId,
+        type: "reply",
+        focusReplyComposer: false,
+        requestKey: Date.now(),
+      });
+      return;
+    }
+
     openReviewItemInInbox(reviewItem, { source: "priority-list" });
   };
 
@@ -21368,6 +21368,7 @@ export function WorkspaceShell({
                   teamActivityEnabled={teamActivityEnabled}
                   primaryInboxTitle={primaryInboxTitle}
                   primaryInboxEmailCount={primaryInboxEmailCount}
+                  priorityInboxCount={livePriorityInboxItems.length}
                   connectedInboxCount={connectedInboxCount}
                   showDemoContent={isDemoWorkspace}
                 />
@@ -21379,7 +21380,7 @@ export function WorkspaceShell({
 	                controller={reviewController}
 	                onOpenItem={handleOpenPriorityItem}
 	                hiddenReviewIds={hiddenPriorityReviewIds}
-	                supplementalItems={manualPriorityWorkspaceItems}
+	                supplementalItems={livePriorityInboxItems}
 	                displayOverrides={priorityDisplayOverrides}
 	              />
 	            </div>
