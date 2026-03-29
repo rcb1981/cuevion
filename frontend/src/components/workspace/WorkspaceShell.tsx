@@ -19523,17 +19523,35 @@ export function WorkspaceShell({
   const getLinkedReviewForMessage = (messageId: string) =>
     reviewController.getReviewBySourceId(messageId);
   const getLinkedReviewBadgeLabel = (_messageId: string) => null;
-  const livePriorityInboxEntries = orderedMailboxes.flatMap((candidate) =>
-    (mailboxStore[candidate.id]?.Inbox ?? [])
-      .filter((message) =>
-        isLiveInboxPriorityMessage(message, manualPriorityOverrides[message.id])
-      )
-      .map((message) => ({
-        mailboxId: candidate.id,
-        mailboxTitle: candidate.title,
-        message,
-      })),
-  );
+  const livePriorityInboxEntries = (() => {
+    const seenMessageIds = new Set<string>();
+    const uniqueEntries: Array<{
+      mailboxId: InboxId;
+      mailboxTitle: string;
+      message: MailMessage;
+    }> = [];
+
+    for (const candidate of orderedMailboxes) {
+      for (const message of mailboxStore[candidate.id]?.Inbox ?? []) {
+        if (!isLiveInboxPriorityMessage(message, manualPriorityOverrides[message.id])) {
+          continue;
+        }
+
+        if (seenMessageIds.has(message.id)) {
+          continue;
+        }
+
+        seenMessageIds.add(message.id);
+        uniqueEntries.push({
+          mailboxId: candidate.id,
+          mailboxTitle: candidate.title,
+          message,
+        });
+      }
+    }
+
+    return uniqueEntries;
+  })();
   const livePriorityInboxItems: ReviewItem[] = livePriorityInboxEntries.map(
     ({ mailboxId, mailboxTitle, message }) => ({
       id: `live-priority-${mailboxId}-${message.id}`,
