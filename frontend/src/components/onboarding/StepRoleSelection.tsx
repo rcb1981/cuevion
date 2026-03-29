@@ -15,6 +15,13 @@ interface StepRoleSelectionProps {
   onSecondaryChange: (role: RoleId | null) => void;
 }
 
+type VisibleRoleOption = {
+  optionId: string;
+  id: RoleId;
+  label: string;
+  description: string;
+};
+
 function RoleCard({
   label,
   description,
@@ -73,8 +80,8 @@ function RoleCard({
 }
 
 function buildVisibleRoleGrid(
-  baseRoles: Array<{ id: RoleId; label: string; description: string }>,
-  selectedExtraRole: { id: RoleId; label: string; description: string } | null,
+  baseRoles: VisibleRoleOption[],
+  selectedExtraRole: VisibleRoleOption | null,
 ) {
   if (!selectedExtraRole) {
     return baseRoles;
@@ -84,9 +91,107 @@ function buildVisibleRoleGrid(
 }
 
 function mergeUniqueRoles(
-  ...roleGroups: Array<Array<{ id: RoleId; label: string; description: string }>>
+  ...roleGroups: VisibleRoleOption[][]
 ) {
-  return [...new Map(roleGroups.flat().map((role) => [role.id, role])).values()];
+  return [...new Map(roleGroups.flat().map((role) => [role.optionId, role])).values()];
+}
+
+function toVisibleRoleOption(role: {
+  id: RoleId;
+  label: string;
+  description: string;
+}): VisibleRoleOption {
+  return {
+    optionId: role.id,
+    id: role.id,
+    label: role.label,
+    description: role.description,
+  };
+}
+
+const extraVisibleRoleAliases: VisibleRoleOption[] = [
+  {
+    optionId: "ceo_founder",
+    id: "label_owner",
+    label: "CEO / Founder",
+    description: "Leadership, strategy and company direction",
+  },
+  {
+    optionId: "marketing_manager",
+    id: "promo_manager",
+    label: "Marketing Manager",
+    description: "Campaign planning, marketing and release outreach",
+  },
+  {
+    optionId: "streaming_manager",
+    id: "distribution",
+    label: "Streaming Manager",
+    description: "DSP performance, playlist strategy and streaming coordination",
+  },
+  {
+    optionId: "distribution_manager",
+    id: "distribution",
+    label: "Distribution Manager",
+    description: "Delivery, release logistics and distribution operations",
+  },
+  {
+    optionId: "publishing_manager",
+    id: "royalty",
+    label: "Publishing Manager",
+    description: "Catalog administration, statements and publishing follow-up",
+  },
+  {
+    optionId: "sync_licensing_manager",
+    id: "sync_licensing",
+    label: "Sync / Licensing Manager",
+    description: "Placements, licensing and sync opportunity handling",
+  },
+  {
+    optionId: "finance_manager",
+    id: "finance",
+    label: "Finance Manager",
+    description: "Payments, reporting and financial oversight",
+  },
+  {
+    optionId: "legal_rights_manager",
+    id: "legal",
+    label: "Legal / Rights Manager",
+    description: "Contracts, approvals and rights management",
+  },
+  {
+    optionId: "artist",
+    id: "dj",
+    label: "Artist",
+    description: "Artist workflow, releases, promo and live activity",
+  },
+  {
+    optionId: "songwriter",
+    id: "producer",
+    label: "Songwriter",
+    description: "Writing, sessions and creative development",
+  },
+  {
+    optionId: "mixing_mastering_engineer",
+    id: "producer",
+    label: "Mixing / Mastering Engineer",
+    description: "Mix, master and delivery-ready production work",
+  },
+];
+
+function isVisibleRoleSelected(
+  selectedRole: RoleId | null,
+  selectedOptionId: string | null,
+  role: VisibleRoleOption,
+) {
+  if (selectedRole !== role.id) {
+    return false;
+  }
+
+  if (selectedOptionId) {
+    return selectedOptionId === role.optionId;
+  }
+
+  return role.optionId === role.id;
 }
 
 function isOverlappingMusicRole(primaryRole: RoleId | null, secondaryRole: RoleId) {
@@ -139,23 +244,51 @@ export function StepRoleSelection({
 }: StepRoleSelectionProps) {
   const [showPrimaryExtraRoles, setShowPrimaryExtraRoles] = useState(false);
   const [showSecondaryExtraRoles, setShowSecondaryExtraRoles] = useState(false);
+  const [selectedPrimaryOptionId, setSelectedPrimaryOptionId] = useState<string | null>(null);
+  const [selectedSecondaryOptionId, setSelectedSecondaryOptionId] = useState<string | null>(null);
   const primarySectionRef = useRef<HTMLElement | null>(null);
+  const visiblePrimaryRoleOptions = useMemo(
+    () => primaryRoleOptions.map(toVisibleRoleOption),
+    [],
+  );
+  const visibleSecondaryRoleOptions = useMemo(
+    () => secondaryRoleOptions.map(toVisibleRoleOption),
+    [],
+  );
+  const visibleExtraRoleOptions = useMemo(
+    () => [...extraRoleOptions.map(toVisibleRoleOption), ...extraVisibleRoleAliases],
+    [],
+  );
+  const visibleAllRoleOptions = useMemo(
+    () => [...allRoleOptions.map(toVisibleRoleOption), ...extraVisibleRoleAliases],
+    [],
+  );
 
   const primaryExtraRole = useMemo(
-    () => extraRoleOptions.find((role) => role.id === primaryRole) ?? null,
-    [primaryRole],
+    () =>
+      (selectedPrimaryOptionId
+        ? visibleExtraRoleOptions.find((role) => role.optionId === selectedPrimaryOptionId)
+        : null) ??
+      visibleExtraRoleOptions.find((role) => role.optionId === primaryRole) ??
+      null,
+    [primaryRole, selectedPrimaryOptionId, visibleExtraRoleOptions],
   );
   const secondaryExtraRole = useMemo(
-    () => extraRoleOptions.find((role) => role.id === secondaryRole) ?? null,
-    [secondaryRole],
+    () =>
+      (selectedSecondaryOptionId
+        ? visibleExtraRoleOptions.find((role) => role.optionId === selectedSecondaryOptionId)
+        : null) ??
+      visibleExtraRoleOptions.find((role) => role.optionId === secondaryRole) ??
+      null,
+    [secondaryRole, selectedSecondaryOptionId, visibleExtraRoleOptions],
   );
 
-  const secondaryOptions = allRoleOptions.filter((role) => role.id !== primaryRole);
+  const secondaryOptions = visibleAllRoleOptions.filter((role) => role.id !== primaryRole);
   const primaryVisibleRoles = buildVisibleRoleGrid(
-    primaryRoleOptions,
+    visiblePrimaryRoleOptions,
     primaryExtraRole,
   );
-  const secondaryBaseRoles = secondaryRoleOptions.filter(
+  const secondaryBaseRoles = visibleSecondaryRoleOptions.filter(
     (role) =>
       role.id !== primaryRole && !isOverlappingMusicRole(primaryRole, role.id),
   );
@@ -170,7 +303,7 @@ export function StepRoleSelection({
     ? secondaryOptions.filter(
         (role) =>
           !isOverlappingMusicRole(primaryRole, role.id) &&
-        extraRoleOptions.some((extraRole) => extraRole.id === role.id),
+          visibleExtraRoleOptions.some((extraRole) => extraRole.id === role.id),
       )
     : [];
   const secondaryMergedRoles = mergeUniqueRoles(
@@ -207,12 +340,13 @@ export function StepRoleSelection({
       <div className="grid gap-4 md:grid-cols-2">
         {primaryVisibleRoles.map((role) => (
           <RoleCard
-            key={role.id}
+            key={role.optionId}
             label={role.label}
             description={role.description}
-            selected={primaryRole === role.id}
+            selected={isVisibleRoleSelected(primaryRole, selectedPrimaryOptionId, role)}
             onClick={() => {
               setShowPrimaryExtraRoles(false);
+              setSelectedPrimaryOptionId(role.optionId);
               onPrimaryChange(role.id);
             }}
           />
@@ -233,14 +367,15 @@ export function StepRoleSelection({
 
       {showPrimaryExtraRoles ? (
         <div className="grid gap-3 md:grid-cols-2">
-          {extraRoleOptions.map((role) => (
+          {visibleExtraRoleOptions.map((role) => (
             <RoleCard
-              key={role.id}
+              key={role.optionId}
               label={role.label}
               description={role.description}
-              selected={primaryRole === role.id}
+              selected={isVisibleRoleSelected(primaryRole, selectedPrimaryOptionId, role)}
               compact
               onClick={() => {
+                setSelectedPrimaryOptionId(role.optionId);
                 onPrimaryChange(role.id);
                 setShowPrimaryExtraRoles(false);
                 scrollToPrimaryGrid();
@@ -291,12 +426,15 @@ export function StepRoleSelection({
             </button>
             {secondaryMergedRoles.map((role) => (
               <RoleCard
-                key={role.id}
+                key={role.optionId}
                 label={role.label}
                 description={role.description}
-                selected={secondaryRole === role.id}
+                selected={isVisibleRoleSelected(secondaryRole, selectedSecondaryOptionId, role)}
                 compact
-                onClick={() => onSecondaryChange(role.id)}
+                onClick={() => {
+                  setSelectedSecondaryOptionId(role.optionId);
+                  onSecondaryChange(role.id);
+                }}
               />
             ))}
           </div>
