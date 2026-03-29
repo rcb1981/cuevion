@@ -27,7 +27,7 @@ export const onboardingCopy = {
     },
     welcome: {
       title: "Built for modern music workflows.",
-      text: "Set up Cuevion around how you work in music — from demos and releases to finance, rights and distribution.",
+      text: "Built for modern music workflows",
     },
     roles: {
       title: "Choose your role",

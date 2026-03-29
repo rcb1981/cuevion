@@ -41,20 +41,20 @@ function RoleCard({
 }) {
   return (
     <div
-      className={`rounded-3xl border text-left transition ${
+      className={`min-h-[52px] rounded-3xl border text-left transition ${
         selected
           ? "border-pine bg-[linear-gradient(180deg,rgba(226,236,229,0.92),rgba(246,249,246,0.98))] text-ink shadow-panel"
           : "border-ink/10 bg-white/78 text-ink hover:border-moss/30 hover:bg-white"
-      } ${compact ? "px-3 py-3" : "px-4 py-3.5"}`}
+      } ${compact ? "px-3 py-3" : "px-4 py-3"}`}
     >
-      <div className="flex items-start gap-3">
+      <div className="flex items-center gap-3">
         <button
           type="button"
           onClick={onClick}
-          className="flex min-w-0 flex-1 items-start gap-3 rounded-[18px] text-left outline-none focus-visible:text-ink"
+          className="flex min-w-0 flex-1 items-center gap-3 rounded-[18px] text-left outline-none focus-visible:text-ink"
         >
           <span
-            className={`mt-0.5 flex h-6 w-6 flex-none items-center justify-center rounded-full border text-xs font-semibold transition ${
+            className={`flex h-6 w-6 flex-none items-center justify-center rounded-full border text-xs font-semibold transition ${
               selected
                 ? "border-moss bg-moss text-white"
                 : "border-ink/15 bg-white/80 text-transparent"
@@ -77,7 +77,7 @@ function RoleCard({
           type="button"
           onClick={onToggleInfo}
           aria-label={`More info about ${label}`}
-          className={`mt-0.5 inline-flex h-6 w-6 flex-none items-center justify-center rounded-full border text-[0.72rem] font-semibold transition ${
+          className={`inline-flex h-6 w-6 flex-none items-center justify-center rounded-full border text-[0.72rem] font-semibold opacity-60 transition hover:opacity-100 ${
             infoOpen
               ? "border-pine bg-[rgba(226,236,229,0.92)] text-pine"
               : "border-ink/12 bg-white/70 text-ink/58 hover:border-moss/24 hover:text-pine"
