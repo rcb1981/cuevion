@@ -35,6 +35,35 @@ type ConnectInboxResponse = {
   };
 };
 
+export type SendInboxAttachmentRequest = {
+  name: string;
+  mimeType?: string;
+  contentBase64: string;
+};
+
+export type SendGmailMessageRequest = {
+  provider: ProviderId;
+  email: string;
+  username: string;
+  password: string;
+  from: string;
+  to: string;
+  cc?: string;
+  bcc?: string;
+  subject: string;
+  bodyHtml: string;
+  bodyText: string;
+  attachments?: SendInboxAttachmentRequest[];
+};
+
+type SendGmailMessageResponse = {
+  ok: boolean;
+  error?: {
+    code?: string;
+    message?: string;
+  };
+};
+
 export async function connectInboxWithImap(
   request: ConnectInboxRequest,
 ): Promise<ConnectInboxResponse> {
@@ -81,5 +110,64 @@ export async function connectInboxWithImap(
           error instanceof Error ? error.message : "Could not connect to inbox.",
       },
     };
+  }
+}
+
+export async function sendGmailMessage(
+  request: SendGmailMessageRequest,
+): Promise<SendGmailMessageResponse> {
+  const abortController = new AbortController();
+  const timeoutId = window.setTimeout(() => {
+    abortController.abort();
+  }, 45000);
+
+  try {
+    const response = await fetch("/api/inboxes/send-gmail", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      signal: abortController.signal,
+      body: JSON.stringify(request),
+    });
+    const rawPayload = await response.text();
+    let payload: SendGmailMessageResponse | null = null;
+
+    if (rawPayload.trim()) {
+      try {
+        payload = JSON.parse(rawPayload) as SendGmailMessageResponse;
+      } catch {
+        payload = null;
+      }
+    }
+
+    if (!response.ok) {
+      return {
+        ok: false,
+        error: payload?.error ?? {
+          code: "send_failed",
+          message: `Could not send email${response.status ? ` (${response.status})` : ""}.`,
+        },
+      };
+    }
+
+    return payload ?? { ok: true };
+  } catch (error) {
+    return {
+      ok: false,
+      error: {
+        code: error instanceof DOMException && error.name === "AbortError"
+          ? "timeout"
+          : "send_failed",
+        message:
+          error instanceof DOMException && error.name === "AbortError"
+            ? "Sending timed out. Please try again."
+            : error instanceof Error
+              ? error.message
+              : "Could not send email.",
+      },
+    };
+  } finally {
+    window.clearTimeout(timeoutId);
   }
 }

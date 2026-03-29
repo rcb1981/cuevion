@@ -44,6 +44,8 @@ import {
 } from "../../lib/liveInboxSnapshots";
 import {
   connectInboxWithImap,
+  sendGmailMessage,
+  type SendInboxAttachmentRequest,
   type LiveInboxMessageSnapshot,
 } from "../../lib/inboxConnectionApi";
 
@@ -5616,6 +5618,7 @@ function InboxesView({
 function MailboxView({
   mailbox,
   orderedMailboxes,
+  managedInboxes,
   smartFolders,
   onOpenSmartFolderModal,
   onEditSmartFolder,
@@ -5649,6 +5652,7 @@ function MailboxView({
 }: {
   mailbox: OrderedMailbox;
   orderedMailboxes: OrderedMailbox[];
+  managedInboxes: ManagedWorkspaceInbox[];
   smartFolders: SmartFolderDefinition[];
   onOpenSmartFolderModal: () => void;
   onEditSmartFolder: (folderId: string) => void;
@@ -5790,6 +5794,8 @@ function MailboxView({
   const [composeMode, setComposeMode] = useState<ComposeMode>("new");
   const [composeSourceMessage, setComposeSourceMessage] = useState<MailMessage | null>(null);
   const [composeAttachments, setComposeAttachments] = useState<MailAttachment[]>([]);
+  const [composeSendError, setComposeSendError] = useState<string | null>(null);
+  const [isSendingCompose, setIsSendingCompose] = useState(false);
   const [pendingComposeAttachmentPickerOpen, setPendingComposeAttachmentPickerOpen] =
     useState(false);
   const composeBodyInputRef = useRef<HTMLDivElement | null>(null);
@@ -5892,6 +5898,8 @@ function MailboxView({
     setComposeMode("new");
     setComposeSourceMessage(null);
     setComposeAttachments([]);
+    setComposeSendError(null);
+    setIsSendingCompose(false);
   };
 
   const clampMailListPaneWidth = (nextWidth: number) => {
@@ -7024,6 +7032,25 @@ function MailboxView({
     );
   };
 
+  const serializeComposeAttachment = async (attachment: MailAttachment) => {
+    if (!attachment.file) {
+      return null;
+    }
+
+    const bytes = new Uint8Array(await attachment.file.arrayBuffer());
+    let binary = "";
+
+    bytes.forEach((byte) => {
+      binary += String.fromCharCode(byte);
+    });
+
+    return {
+      name: attachment.name,
+      mimeType: attachment.mimeType,
+      contentBase64: btoa(binary),
+    };
+  };
+
   const saveDraftAndClose = () => {
     const draftId = `${activeComposeMailbox.id}-draft-${Date.now()}`;
     const bodyPreview = extractComposePlainText(composeBody);
@@ -7072,64 +7099,143 @@ function MailboxView({
     resetComposeState();
   };
 
-  const sendMessage = () => {
-    const sentId = `${activeComposeMailbox.id}-sent-${Date.now()}`;
-    const bodyPreview = extractComposePlainText(composeBody);
-    const bodyParagraphs = extractComposeParagraphs(composeBody);
-    const sentMessage = normalizeMailMessage({
-      id: sentId,
-      threadId:
-        composeMode === "reply" || composeMode === "reply_all"
-          ? composeSourceMessage?.threadId ??
-            resolveMailThreadId({
-              subject:
-                composeSourceMessage?.subject ??
-                (composeSubject.trim() || "Untitled message"),
-            })
-          : undefined,
-      sender: "You",
-      subject: composeSubject.trim() || "Untitled message",
-      snippet:
-        bodyPreview.length > 0
-          ? bodyPreview.replace(/\s+/g, " ").slice(0, 96)
-          : "Message sent",
-      time: "Now",
-      createdAt: new Date().toISOString(),
-      signal: "Sent",
-      from: activeComposeMailbox.email,
-      to: composeTo.trim() || "No recipient yet",
-      timestamp: "Sent just now",
-      body: bodyParagraphs.length > 0 ? bodyParagraphs : ["Message sent"],
-      bodyHtml: composeBody,
-      signature: undefined,
-      attachments: composeAttachments,
-      cc: composeCc.trim() || undefined,
-    }, activeComposeMailbox.id, senderCategoryLearning, messageOwnershipInteractions, currentUserId, mailboxStore);
-
-    setMailboxStore((currentStore) => ({
-      ...currentStore,
-      [activeComposeMailbox.id]: {
-        ...currentStore[activeComposeMailbox.id],
-        Sent: [sentMessage, ...currentStore[activeComposeMailbox.id].Sent],
-      },
-    }));
-
-    if ((composeMode === "reply" || composeMode === "reply_all") && composeSourceMessage) {
-      setIsComposeOpen(false);
-      setSelectionState(
-        [composeSourceMessage.id],
-        composeSourceMessage.id,
-        composeSourceMessage.id,
-      );
-      resetComposeState();
+  const sendMessage = async () => {
+    if (isSendingCompose) {
       return;
     }
 
-    setActiveFolder("Sent");
-    setSelectionState([sentId], sentId, sentId);
-    setIsFullMessageOpen(false);
-    setIsComposeOpen(false);
-    resetComposeState();
+    const managedMailbox = managedInboxes.find(
+      (candidate) => candidate.id === activeComposeMailbox.id,
+    );
+
+    if (
+      !managedMailbox ||
+      !managedMailbox.connected ||
+      managedMailbox.provider !== "google"
+    ) {
+      setComposeSendError("This mailbox is not ready for Gmail sending.");
+      return;
+    }
+
+    const resolvedImapSettings = applyProviderDefaults(
+      managedMailbox.provider,
+      managedMailbox.customImap,
+      managedMailbox.email,
+    );
+    const toRecipients = composeTo.trim();
+
+    if (!toRecipients) {
+      setComposeSendError("Add at least one recipient before sending.");
+      return;
+    }
+
+    if (!resolvedImapSettings.password.trim()) {
+      setComposeSendError("Gmail credentials are missing for this mailbox.");
+      return;
+    }
+
+    setComposeSendError(null);
+    setIsSendingCompose(true);
+
+    try {
+      const serializedAttachments: SendInboxAttachmentRequest[] = [];
+      const attachmentPayloads = await Promise.all(
+        composeAttachments.map(serializeComposeAttachment),
+      );
+
+      attachmentPayloads.forEach((attachment) => {
+        if (attachment) {
+          serializedAttachments.push(attachment);
+        }
+      });
+
+      const bodyPreview = extractComposePlainText(composeBody);
+      const sendResponse = await sendGmailMessage({
+        provider: managedMailbox.provider,
+        email: managedMailbox.email.trim(),
+        username:
+          managedMailbox.provider === "google"
+            ? managedMailbox.email.trim()
+            : resolvedImapSettings.username.trim(),
+        password: resolvedImapSettings.password,
+        from: activeComposeMailbox.email,
+        to: toRecipients,
+        cc: composeCc.trim() || undefined,
+        bcc: composeBcc.trim() || undefined,
+        subject: composeSubject.trim() || "Untitled message",
+        bodyHtml: composeBody,
+        bodyText: bodyPreview || " ",
+        attachments: serializedAttachments,
+      });
+
+      if (!sendResponse.ok) {
+        setComposeSendError(sendResponse.error?.message ?? "Could not send email.");
+        return;
+      }
+
+      const sentId = `${activeComposeMailbox.id}-sent-${Date.now()}`;
+      const bodyParagraphs = extractComposeParagraphs(composeBody);
+      const sentMessage = normalizeMailMessage({
+        id: sentId,
+        threadId:
+          composeMode === "reply" || composeMode === "reply_all"
+            ? composeSourceMessage?.threadId ??
+              resolveMailThreadId({
+                subject:
+                  composeSourceMessage?.subject ??
+                  (composeSubject.trim() || "Untitled message"),
+              })
+            : undefined,
+        sender: "You",
+        subject: composeSubject.trim() || "Untitled message",
+        snippet:
+          bodyPreview.length > 0
+            ? bodyPreview.replace(/\s+/g, " ").slice(0, 96)
+            : "Message sent",
+        time: "Now",
+        createdAt: new Date().toISOString(),
+        signal: "Sent",
+        from: activeComposeMailbox.email,
+        to: composeTo.trim() || "No recipient yet",
+        timestamp: "Sent just now",
+        body: bodyParagraphs.length > 0 ? bodyParagraphs : ["Message sent"],
+        bodyHtml: composeBody,
+        signature: undefined,
+        attachments: composeAttachments,
+        cc: composeCc.trim() || undefined,
+      }, activeComposeMailbox.id, senderCategoryLearning, messageOwnershipInteractions, currentUserId, mailboxStore);
+
+      setMailboxStore((currentStore) => ({
+        ...currentStore,
+        [activeComposeMailbox.id]: {
+          ...currentStore[activeComposeMailbox.id],
+          Sent: [sentMessage, ...currentStore[activeComposeMailbox.id].Sent],
+        },
+      }));
+
+      if ((composeMode === "reply" || composeMode === "reply_all") && composeSourceMessage) {
+        setIsComposeOpen(false);
+        setSelectionState(
+          [composeSourceMessage.id],
+          composeSourceMessage.id,
+          composeSourceMessage.id,
+        );
+        resetComposeState();
+        return;
+      }
+
+      setActiveFolder("Sent");
+      setSelectionState([sentId], sentId, sentId);
+      setIsFullMessageOpen(false);
+      setIsComposeOpen(false);
+      resetComposeState();
+    } catch (error) {
+      setComposeSendError(
+        error instanceof Error ? error.message : "Could not prepare email for sending.",
+      );
+    } finally {
+      setIsSendingCompose(false);
+    }
   };
 
   const closeMenus = () => {
@@ -9679,17 +9785,25 @@ function MailboxView({
 
                   <div className="rounded-[20px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-4">
                     <div className="flex items-center justify-between gap-4">
-                      <div className="text-[0.82rem] leading-6 text-[var(--workspace-text-faint)]">
-                        {composeAttachments.length > 0
-                          ? `${composeAttachments.length} attachment${composeAttachments.length === 1 ? "" : "s"} ready`
-                          : "Message ready to send"}
+                      <div>
+                        <div className="text-[0.82rem] leading-6 text-[var(--workspace-text-faint)]">
+                          {composeAttachments.length > 0
+                            ? `${composeAttachments.length} attachment${composeAttachments.length === 1 ? "" : "s"} ready`
+                            : "Message ready to send"}
+                        </div>
+                        {composeSendError ? (
+                          <div className="mt-1 text-[0.8rem] leading-5 text-[color:rgba(148,63,38,0.96)]">
+                            {composeSendError}
+                          </div>
+                        ) : null}
                       </div>
                       <button
                         type="button"
                         onClick={sendMessage}
-                        className="inline-flex h-10 min-w-[7.4rem] items-center justify-center rounded-full bg-pine px-6 text-[0.72rem] font-medium uppercase tracking-[0.18em] text-white transition-[background-color,transform] duration-150 hover:bg-moss active:scale-[0.99] focus-visible:outline-none"
+                        disabled={isSendingCompose}
+                        className="inline-flex h-10 min-w-[7.4rem] items-center justify-center rounded-full bg-pine px-6 text-[0.72rem] font-medium uppercase tracking-[0.18em] text-white transition-[background-color,transform] duration-150 hover:bg-moss active:scale-[0.99] focus-visible:outline-none disabled:cursor-not-allowed disabled:bg-[color:rgba(101,124,103,0.72)] disabled:hover:bg-[color:rgba(101,124,103,0.72)]"
                       >
-                        Send
+                        {isSendingCompose ? "Sending..." : "Send"}
                       </button>
                     </div>
                   </div>
@@ -20617,11 +20731,12 @@ export function WorkspaceShell({
 	              )
 	            ) : activeMailbox ? (
               <div className="h-0 min-h-0 flex-1 overflow-hidden">
-                <MailboxView
-                  key={`${activeMailbox.id}-${mailboxResetToken}`}
-                  mailbox={activeMailbox}
-                  orderedMailboxes={orderedMailboxes}
-                  smartFolders={smartFolders}
+	                <MailboxView
+	                  key={`${activeMailbox.id}-${mailboxResetToken}`}
+	                  mailbox={activeMailbox}
+	                  orderedMailboxes={orderedMailboxes}
+	                  managedInboxes={savedManagedInboxes}
+	                  smartFolders={smartFolders}
                   onOpenSmartFolderModal={() => {
                     resetSmartFolderDraft();
                     setIsSmartFolderModalOpen(true);
