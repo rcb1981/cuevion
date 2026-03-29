@@ -170,6 +170,7 @@ def decide_message_behavior(
     user_config: UserConfig,
     mailbox_config: MailboxConfig,
     internal_role: str | None = None,
+    focus_preferences: dict | None = None,
 ) -> FinalDecision:
     category = engine_result.category or "unknown"
     base_visibility = BASE_CATEGORY_VISIBILITY.get(category, "show_low")
@@ -351,6 +352,41 @@ def decide_message_behavior(
         if final_priority != "PRIORITY":
             final_priority = "LOW"
 
+    # DAMPENING FILTER — reduce repeated / spammy priority
+
+    # common automated prefixes in sender
+    if any(prefix in sender_lower for prefix in [
+        "updates@",
+        "news@",
+        "info@",
+        "hello@",
+        "team@"
+    ]):
+        if final_priority != "PRIORITY":
+            final_priority = "LOW"
+
+    # repetitive subject patterns
+    if any(keyword in subject_lower for keyword in [
+        "weekly",
+        "newsletter",
+        "digest",
+        "update",
+        "report"
+    ]):
+        if final_priority == "PRIORITY":
+            if category not in ["finance", "royalty_statement", "demo", "high_priority_demo"]:
+                final_priority = "MEDIUM"
+
+    # generic / non-urgent phrasing
+    if any(keyword in subject_lower for keyword in [
+        "just letting you know",
+        "for your information",
+        "fyi",
+        "no action needed"
+    ]):
+        if final_priority != "PRIORITY":
+            final_priority = "LOW"
+
     if internal_role:
 
         # DEMO emails
@@ -382,6 +418,36 @@ def decide_message_behavior(
                 "artist"
             ]:
                 final_priority = "PRIORITY"
+
+    if focus_preferences:
+        demo_pref = focus_preferences.get("demos", "medium")
+        promo_pref = focus_preferences.get("promo", "medium")
+        finance_pref = focus_preferences.get("finance", "medium")
+        legal_pref = focus_preferences.get("legal", "medium")
+
+        if category in ["demo", "high_priority_demo"]:
+            if demo_pref == "high":
+                final_priority = "PRIORITY"
+            elif demo_pref == "low" and final_priority != "PRIORITY":
+                final_priority = "LOW"
+
+        if category in ["promo", "promo_reminder"]:
+            if promo_pref == "high" and final_priority == "LOW":
+                final_priority = "NORMAL"
+            elif promo_pref == "low" and final_priority != "PRIORITY":
+                final_priority = "LOW"
+
+        if category in ["finance", "royalty_statement"]:
+            if finance_pref == "high":
+                final_priority = "PRIORITY"
+            elif finance_pref == "low" and final_priority != "PRIORITY":
+                final_priority = "LOW"
+
+        if category in ["legal", "legal_rights", "contract", "rights_issue"]:
+            if legal_pref == "high":
+                final_priority = "PRIORITY"
+            elif legal_pref == "low" and final_priority != "PRIORITY":
+                final_priority = "LOW"
 
     if category == "demo":
         explanation.final_summary = "Shown prominently because this looks like a real demo submission."

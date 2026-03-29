@@ -391,6 +391,7 @@ export function OnboardingFlow({
             customInboxes={state.customInboxes}
             inboxConnections={state.inboxConnections}
             internalRole={state.internalRole}
+            focusPreferences={state.focusPreferences}
             onProviderChange={setProvider}
             onEmailChange={setEmail}
             onCustomImapChange={setCustomImap}

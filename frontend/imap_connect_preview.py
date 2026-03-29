@@ -293,6 +293,7 @@ def resolve_ui_signal(
     message: Message,
     email_address: str,
     internal_role: str | None = None,
+    focus_preferences: dict[str, Any] | None = None,
 ) -> str:
     resolve_start = time.perf_counter()
     try:
@@ -510,6 +511,7 @@ def resolve_ui_signal(
                 user_config=V7_USER_CONFIG,
                 mailbox_config=mailbox_match,
                 internal_role=internal_role,
+                focus_preferences=focus_preferences,
             )
 
             result["v7_final_priority"] = v7_decision.final_priority
@@ -540,6 +542,7 @@ def to_message_preview(
     unread: bool,
     imap_uid: str | None,
     internal_role: str | None = None,
+    focus_preferences: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     subject = decode_mime_words(message.get("Subject", "Untitled message"))
     from_header = decode_mime_words(message.get("From", "Unknown sender"))
@@ -569,7 +572,12 @@ def to_message_preview(
       "body": body.split("\n\n") if body else [snippet or "No message preview available."],
       "unread": unread,
       "imapUid": imap_uid,
-      "ui_signal": resolve_ui_signal(message, email_address, internal_role=internal_role),
+      "ui_signal": resolve_ui_signal(
+          message,
+          email_address,
+          internal_role=internal_role,
+          focus_preferences=focus_preferences,
+      ),
     }
 
 
@@ -583,6 +591,7 @@ def build_connect_preview_response(payload: dict[str, Any]) -> tuple[int, dict[s
     ssl_enabled = bool(payload.get("ssl", True))
     username = str(payload.get("username") or "").strip() or email_address
     internal_role = payload.get("internalRole", None)
+    focus_preferences = payload.get("focusPreferences", None)
     folder = str(payload.get("folder") or "INBOX").strip() or "INBOX"
     limit = max(1, min(int(payload.get("limit") or DEFAULT_FETCH_LIMIT), MAX_FETCH_LIMIT))
 
@@ -634,6 +643,7 @@ def build_connect_preview_response(payload: dict[str, Any]) -> tuple[int, dict[s
                 unread,
                 imap_uid,
                 internal_role=internal_role,
+                focus_preferences=focus_preferences,
             )
             for index, (message, unread, imap_uid) in enumerate(messages)
         ]

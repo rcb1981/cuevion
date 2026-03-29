@@ -16,6 +16,7 @@ import type {
   CustomImapSettings,
   InboxConnection,
   InboxId,
+  OnboardingState,
   ProviderId,
 } from "../../types/onboarding";
 
@@ -31,6 +32,7 @@ interface StepConnectInboxesProps {
   customInboxes: CustomInboxDefinition[];
   inboxConnections: Record<string, InboxConnection>;
   internalRole?: string | null;
+  focusPreferences?: OnboardingState["focusPreferences"] | null;
   onProviderChange: (inboxId: InboxId, provider: ProviderId) => void;
   onEmailChange: (inboxId: InboxId, email: string) => void;
   onCustomImapChange: (
@@ -147,6 +149,7 @@ export function StepConnectInboxes({
   customInboxes,
   inboxConnections,
   internalRole,
+  focusPreferences,
   onProviderChange,
   onEmailChange,
   onCustomImapChange,
@@ -209,6 +212,7 @@ export function StepConnectInboxes({
           : connection.customImap.username.trim(),
       password: connection.customImap.password,
       internalRole,
+      focusPreferences,
     });
 
     if (response.ok) {

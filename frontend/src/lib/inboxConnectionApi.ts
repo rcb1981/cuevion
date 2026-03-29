@@ -1,4 +1,4 @@
-import type { ProviderId } from "../types/onboarding";
+import type { OnboardingState, ProviderId } from "../types/onboarding";
 
 export type LiveInboxMessageSnapshot = {
   id: string;
@@ -25,6 +25,7 @@ type ConnectInboxRequest = {
   username: string;
   password: string;
   internalRole?: string | null;
+  focusPreferences?: OnboardingState["focusPreferences"] | null;
 };
 
 type ConnectInboxResponse = {
