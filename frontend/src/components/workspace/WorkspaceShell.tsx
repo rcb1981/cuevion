@@ -7227,6 +7227,21 @@ function MailboxView({
                   placement === "full" ? "right-0" : "left-0"
                 }`}
               >
+                {messageIsVisiblePriority ? (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onSetManualPriority(message.id, false);
+                        setDetailActionsMenuState(null);
+                      }}
+                      className={menuItemClass}
+                    >
+                      Mark as done
+                    </button>
+                    <div className="my-1.5 h-px bg-[var(--workspace-divider)]" />
+                  </>
+                ) : null}
                 <button
                   type="button"
                   onClick={() => {
@@ -7246,18 +7261,6 @@ function MailboxView({
                 >
                   {messageIsVisiblePriority ? "Remove priority" : "Mark as priority"}
                 </button>
-                {messageIsVisiblePriority ? (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      onSetManualPriority(message.id, false);
-                      setDetailActionsMenuState(null);
-                    }}
-                    className={menuItemClass}
-                  >
-                    Mark as done
-                  </button>
-                ) : null}
                 <button
                   type="button"
                   onClick={() => {
