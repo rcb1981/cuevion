@@ -2203,8 +2203,220 @@ function resolveVisiblePrioritySignal(
   return message.signal ?? null;
 }
 
+const autoPriorityStrongKeywords = [
+  "action required",
+  "please review",
+  "please send",
+  "please confirm",
+  "please approve",
+  "need approval",
+  "needs approval",
+  "need your approval",
+  "can you",
+  "could you",
+  "will you",
+  "deadline",
+  "cutoff",
+  "urgent",
+  "asap",
+  "contract",
+  "agreement",
+  "rights",
+  "license",
+  "legal",
+  "approve",
+  "approval",
+  "signature",
+  "sign off",
+  "review attached",
+  "timing",
+  "today",
+  "tomorrow",
+  "eod",
+];
+
+const autoPriorityMediumKeywords = [
+  "follow up",
+  "follow-up",
+  "check in",
+  "next step",
+  "next steps",
+  "question",
+  "feedback",
+  "confirm",
+  "review",
+  "send over",
+  "let me know",
+  "needs review",
+  "invoice",
+  "payment",
+  "finance",
+];
+
+const autoPriorityInfoKeywords = [
+  "fyi",
+  "for your information",
+  "status update",
+  "update",
+  "updated",
+  "recap",
+  "summary",
+  "report",
+  "snapshot",
+  "completed",
+  "delivered",
+  "receipt",
+  "confirmed",
+];
+
+const autoPriorityPromoKeywords = [
+  "unsubscribe",
+  "newsletter",
+  "promotion",
+  "promo",
+  "offer",
+  "discount",
+  "sale",
+  "register now",
+  "limited time",
+];
+
+const autoPriorityNoReplyHints = [
+  "no-reply",
+  "noreply",
+  "do-not-reply",
+  "donotreply",
+  "notifications@",
+  "notification@",
+  "mailer-daemon",
+];
+
+function getLocalAutoPriorityScore(
+  message: Pick<
+    MailMessage,
+    | "signal"
+    | "priorityScore"
+    | "category"
+    | "categoryConfidence"
+    | "sharedContext"
+    | "isShared"
+    | "owner"
+    | "unread"
+    | "attachments"
+    | "subject"
+    | "snippet"
+    | "body"
+    | "from"
+    | "sender"
+    | "isAutoReply"
+  >,
+) {
+  const searchableText = [message.subject, message.snippet, ...(message.body ?? [])]
+    .join(" ")
+    .toLowerCase();
+  const senderText = `${message.sender} ${message.from}`.toLowerCase();
+  const hasAttachments = (message.attachments?.length ?? 0) > 0;
+  const hasSharedContext = Boolean(message.sharedContext || message.isShared);
+  const isPrimaryConfident =
+    message.category === "Primary" &&
+    (message.categoryConfidence === "medium" || message.categoryConfidence === "high");
+  const hasStrongActionSignal =
+    includesAnyKeyword(searchableText, autoPriorityStrongKeywords) || searchableText.includes("?");
+  const hasMediumActionSignal = includesAnyKeyword(
+    searchableText,
+    autoPriorityMediumKeywords,
+  );
+  const hasInfoOnlySignal = includesAnyKeyword(searchableText, autoPriorityInfoKeywords);
+  const isPromoOnly =
+    message.category === "Promo" ||
+    includesAnyKeyword(searchableText, autoPriorityPromoKeywords);
+  const isNoReplySender = includesAnyKeyword(senderText, autoPriorityNoReplyHints);
+  const hasBusinessAttachmentContext =
+    hasAttachments &&
+    includesAnyKeyword(searchableText, [
+      "contract",
+      "agreement",
+      "invoice",
+      "payment",
+      "review",
+      "approval",
+      "rights",
+      "license",
+    ]);
+
+  let score = 0;
+
+  if (message.signal === "Priority") {
+    score += 6;
+  }
+
+  if (message.priorityScore === "high") {
+    score += 5;
+  }
+
+  if (message.category === "Primary" && hasSharedContext) {
+    score += 4;
+  }
+
+  if (isPrimaryConfident && (message.unread || hasSharedContext)) {
+    score += 2;
+  }
+
+  if (
+    message.owner &&
+    (message.owner.confidence === "medium" || message.owner.confidence === "high")
+  ) {
+    score += 1;
+  }
+
+  if (hasStrongActionSignal) {
+    score += 4;
+  } else if (hasMediumActionSignal) {
+    score += 2;
+  }
+
+  if (hasBusinessAttachmentContext) {
+    score += 2;
+  }
+
+  if (message.isAutoReply) {
+    score -= 4;
+  }
+
+  if (isNoReplySender && !hasStrongActionSignal) {
+    score -= 3;
+  }
+
+  if (hasInfoOnlySignal && !hasStrongActionSignal && !hasMediumActionSignal) {
+    score -= 3;
+  }
+
+  if (isPromoOnly && !hasStrongActionSignal) {
+    score -= 4;
+  }
+
+  return score;
+}
+
 function isMessageVisiblePriority(
-  message: Pick<MailMessage, "signal" | "priorityScore">,
+  message: Pick<
+    MailMessage,
+    | "signal"
+    | "priorityScore"
+    | "category"
+    | "categoryConfidence"
+    | "sharedContext"
+    | "isShared"
+    | "owner"
+    | "unread"
+    | "attachments"
+    | "subject"
+    | "snippet"
+    | "body"
+    | "from"
+    | "sender"
+    | "isAutoReply"
+  >,
   override?: ManualPriorityOverride,
 ) {
   if (override === "priority") {
@@ -2215,11 +2427,28 @@ function isMessageVisiblePriority(
     return false;
   }
 
-  return message.signal === "Priority" || message.priorityScore === "high";
+  return getLocalAutoPriorityScore(message) >= 4;
 }
 
 function isLiveInboxPriorityMessage(
-  message: Pick<MailMessage, "signal" | "priorityScore">,
+  message: Pick<
+    MailMessage,
+    | "signal"
+    | "priorityScore"
+    | "category"
+    | "categoryConfidence"
+    | "sharedContext"
+    | "isShared"
+    | "owner"
+    | "unread"
+    | "attachments"
+    | "subject"
+    | "snippet"
+    | "body"
+    | "from"
+    | "sender"
+    | "isAutoReply"
+  >,
   override?: ManualPriorityOverride,
 ) {
   return isMessageVisiblePriority(message, override);
