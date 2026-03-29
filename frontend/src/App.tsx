@@ -4,6 +4,7 @@ import { WorkspaceTransition } from "./components/workspace/WorkspaceTransition"
 import { WorkspaceShell } from "./components/workspace/WorkspaceShell";
 import { initialOnboardingState } from "./data/onboardingOptions";
 import type { OnboardingState } from "./types/onboarding";
+import type { UserConfig } from "./types/userConfig";
 
 const ONBOARDING_STATE_STORAGE_KEY = "label-inbox-ai-onboarding-state";
 const CATEGORY_LEARNING_STORAGE_KEY = "cuevion-sender-category-learning";
@@ -31,6 +32,17 @@ type PersistedOnboardingSession = {
   state: OnboardingState;
 };
 type WorkspaceDataMode = "demo" | "live";
+
+function buildUserConfig(state: OnboardingState): UserConfig {
+  return {
+    primaryRole: state.primaryRole,
+    internalRole: state.internalRole,
+    focusPreferences: state.focusPreferences,
+    workflowStyle: state.workflowStyle,
+    inboxCount: state.inboxCount,
+    selectedInboxes: state.selectedInboxes,
+  };
+}
 
 function ComingSoonLanding() {
   return (
@@ -65,6 +77,10 @@ function normalizeOnboardingState(value: Partial<OnboardingState>): OnboardingSt
     ...initialOnboardingState,
     ...value,
     internalRole: value.internalRole ?? null,
+    focusPreferences: {
+      ...initialOnboardingState.focusPreferences,
+      ...(value.focusPreferences ?? {}),
+    },
     customInboxes: Array.isArray(value.customInboxes) ? value.customInboxes : [],
     inboxConnections: {
       ...initialOnboardingState.inboxConnections,
@@ -346,6 +362,9 @@ export default function App() {
   const [onboardingState, setOnboardingState] = useState<OnboardingState>(
     () => persistedOnboardingSession?.state ?? initialOnboardingState,
   );
+  const [userConfig, setUserConfig] = useState<UserConfig | null>(() =>
+    persistedOnboardingSession?.state ? buildUserConfig(persistedOnboardingSession.state) : null,
+  );
 
   useEffect(() => {
     if (authenticatedUser) {
@@ -426,6 +445,7 @@ export default function App() {
 
     return (
       <WorkspaceShell
+        userConfig={userConfig ?? buildUserConfig(onboardingState)}
         onboardingState={onboardingState}
         authenticatedUser={authenticatedUser}
         collaborationInviteRoute={collaborationInviteRoute}
@@ -434,9 +454,10 @@ export default function App() {
     );
   }
 
-  if (view === "workspace") {
+  if (view === "workspace" && userConfig) {
     return (
       <WorkspaceShell
+        userConfig={userConfig}
         onboardingState={onboardingState}
         workspaceDataMode={workspaceDataMode}
       />
@@ -451,7 +472,7 @@ export default function App() {
     <OnboardingFlow
       state={onboardingState}
       onStateChange={setOnboardingState}
-      onOpenWorkspace={() => {
+      onOpenWorkspace={(nextUserConfig) => {
         const completedSession: PersistedOnboardingSession = {
           completed: true,
           state: onboardingState,
@@ -462,6 +483,7 @@ export default function App() {
           JSON.stringify(completedSession),
         );
         setPersistedOnboardingSession(completedSession);
+        setUserConfig(nextUserConfig);
         setView("transition");
       }}
     />

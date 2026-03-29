@@ -21,6 +21,7 @@ import type {
   RoleId,
   WorkflowStyleId,
 } from "../../types/onboarding";
+import type { UserConfig } from "../../types/userConfig";
 import { NavigationBar } from "./NavigationBar";
 import { ProgressIndicator } from "./ProgressIndicator";
 import { StepComplete } from "./StepComplete";
@@ -185,7 +186,7 @@ interface OnboardingFlowProps {
   onStateChange: (
     value: OnboardingState | ((current: OnboardingState) => OnboardingState),
   ) => void;
-  onOpenWorkspace: () => void;
+  onOpenWorkspace: (userConfig: UserConfig) => void;
 }
 
 export function OnboardingFlow({
@@ -274,6 +275,15 @@ export function OnboardingFlow({
         [field]: value,
       },
     }));
+  };
+
+  const userConfig: UserConfig = {
+    primaryRole: state.primaryRole,
+    internalRole: state.internalRole,
+    focusPreferences: state.focusPreferences,
+    workflowStyle: state.workflowStyle,
+    inboxCount: state.inboxCount,
+    selectedInboxes: state.selectedInboxes,
   };
 
   const toggleInbox = (inboxId: InboxId) => {
@@ -621,7 +631,7 @@ export function OnboardingFlow({
                 canGoBack={step > 0}
                 backLabel={step === 7 ? "Edit setup" : undefined}
                 onBack={back}
-                onNext={step === 7 ? onOpenWorkspace : next}
+                onNext={step === 7 ? () => onOpenWorkspace(userConfig) : next}
                 nextLabel={nextLabel}
                 isNextDisabled={step === 7 ? false : !canGoNext}
               />

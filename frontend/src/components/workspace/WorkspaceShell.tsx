@@ -32,6 +32,7 @@ import type {
   PresetInboxId,
   ProviderId,
 } from "../../types/onboarding";
+import type { UserConfig } from "../../types/userConfig";
 import { NavigationBar } from "../onboarding/NavigationBar";
 import {
   applyProviderDefaults,
@@ -19062,12 +19063,14 @@ function ForYouView({
 
 export function WorkspaceShell({
   theme = "light",
+  userConfig,
   onboardingState,
   authenticatedUser = null,
   collaborationInviteRoute = null,
   workspaceDataMode = "live",
 }: {
   theme?: "light" | "dark";
+  userConfig: UserConfig;
   onboardingState: OnboardingState;
   authenticatedUser?: AuthenticatedCuevionUser | null;
   collaborationInviteRoute?: CollaborationInviteRoute | null;
