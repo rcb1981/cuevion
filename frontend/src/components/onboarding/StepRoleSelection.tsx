@@ -27,55 +27,225 @@ function RoleCard({
   description,
   selected,
   compact = false,
+  infoOpen = false,
   onClick,
+  onToggleInfo,
 }: {
   label: string;
   description: string;
   selected: boolean;
   compact?: boolean;
+  infoOpen?: boolean;
   onClick: () => void;
+  onToggleInfo: () => void;
 }) {
   return (
-    <button
-      type="button"
-      onClick={onClick}
+    <div
       className={`rounded-3xl border text-left transition ${
         selected
           ? "border-pine bg-[linear-gradient(180deg,rgba(226,236,229,0.92),rgba(246,249,246,0.98))] text-ink shadow-panel"
           : "border-ink/10 bg-white/78 text-ink hover:border-moss/30 hover:bg-white"
-      } ${compact ? "min-h-[132px] p-4" : "min-h-[156px] p-5"} outline-none focus-visible:border-pine focus-visible:bg-[linear-gradient(180deg,rgba(226,236,229,0.92),rgba(246,249,246,0.98))] focus-visible:text-ink focus-visible:shadow-panel`}
+      } ${compact ? "px-3 py-3" : "px-4 py-3.5"}`}
     >
-      <div className="flex h-full items-start justify-between gap-4">
-        <div className="space-y-2 pt-0.5">
-          <div
-            className={`font-semibold tracking-tight ${
-              compact ? "text-base" : "text-lg"
-            }`}
-          >
-            {label}
-          </div>
-          <p
-            className={`max-w-xs leading-6 ${
-              compact ? "text-[13px]" : "text-sm"
-            } ${
-              selected ? "text-ink/72" : "text-ink/58"
-            }`}
-          >
-            {description}
-          </p>
-        </div>
-        <span
-          className={`mt-1 flex h-7 w-7 items-center justify-center rounded-full border text-sm font-semibold transition ${
-            selected
-              ? "border-moss bg-moss text-white"
-              : "border-ink/15 bg-white/80 text-transparent"
-          }`}
-          aria-hidden="true"
+      <div className="flex items-start gap-3">
+        <button
+          type="button"
+          onClick={onClick}
+          className="flex min-w-0 flex-1 items-start gap-3 rounded-[18px] text-left outline-none focus-visible:text-ink"
         >
-          ✓
-        </span>
+          <span
+            className={`mt-0.5 flex h-6 w-6 flex-none items-center justify-center rounded-full border text-xs font-semibold transition ${
+              selected
+                ? "border-moss bg-moss text-white"
+                : "border-ink/15 bg-white/80 text-transparent"
+            }`}
+            aria-hidden="true"
+          >
+            ✓
+          </span>
+          <span className="min-w-0 flex-1 pt-0.5">
+            <span
+              className={`block font-semibold tracking-tight ${
+                compact ? "text-[0.95rem]" : "text-base"
+              }`}
+            >
+              {label}
+            </span>
+          </span>
+        </button>
+        <button
+          type="button"
+          onClick={onToggleInfo}
+          aria-label={`More info about ${label}`}
+          className={`mt-0.5 inline-flex h-6 w-6 flex-none items-center justify-center rounded-full border text-[0.72rem] font-semibold transition ${
+            infoOpen
+              ? "border-pine bg-[rgba(226,236,229,0.92)] text-pine"
+              : "border-ink/12 bg-white/70 text-ink/58 hover:border-moss/24 hover:text-pine"
+          }`}
+        >
+          i
+        </button>
       </div>
-    </button>
+      {infoOpen ? (
+        <p
+          className={`pl-9 pr-1 pt-2 leading-6 ${
+            compact ? "text-[13px]" : "text-sm"
+          } ${selected ? "text-ink/72" : "text-ink/58"}`}
+        >
+          {description}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+function RoleGroup({
+  title,
+  roles,
+  selectedRole,
+  selectedOptionId,
+  infoOpenId,
+  compact = false,
+  onSelect,
+  onToggleInfo,
+}: {
+  title: string;
+  roles: VisibleRoleOption[];
+  selectedRole: RoleId | null;
+  selectedOptionId: string | null;
+  infoOpenId: string | null;
+  compact?: boolean;
+  onSelect: (role: VisibleRoleOption) => void;
+  onToggleInfo: (optionId: string) => void;
+}) {
+  if (roles.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="space-y-2.5">
+      <div className="px-1 text-[0.68rem] font-medium uppercase tracking-[0.16em] text-ink/44">
+        {title}
+      </div>
+      <div className="space-y-2">
+        {roles.map((role) => (
+          <RoleCard
+            key={role.optionId}
+            label={role.label}
+            description={role.description}
+            selected={isVisibleRoleSelected(selectedRole, selectedOptionId, role)}
+            infoOpen={infoOpenId === role.optionId}
+            compact={compact}
+            onClick={() => onSelect(role)}
+            onToggleInfo={() => onToggleInfo(role.optionId)}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function getExpandedRoleGroup(role: VisibleRoleOption) {
+  switch (role.optionId) {
+    case "artist":
+    case "songwriter":
+    case "mixing_mastering_engineer":
+      return "Creative";
+    case "social_media_manager":
+    case "label_owner":
+    case "promo_manager":
+    case "admin":
+      return "Business";
+    case "finance":
+    case "legal":
+      return "Finance & Legal";
+    case "streaming_manager":
+    case "distribution":
+    case "royalty":
+    case "sync_licensing":
+      return "Distribution / Publishing / Sync";
+    default:
+      return "Other";
+  }
+}
+
+function buildRoleGroups(roles: VisibleRoleOption[]) {
+  const groupOrder = [
+    "Creative",
+    "Business",
+    "Finance & Legal",
+    "Distribution / Publishing / Sync",
+    "Other",
+  ] as const;
+
+  return groupOrder
+    .map((title) => ({
+      title,
+      roles: roles.filter((role) => getExpandedRoleGroup(role) === title),
+    }))
+    .filter((group) => group.roles.length > 0);
+}
+
+function NoSecondaryRoleRow({
+  selected,
+  infoOpen,
+  onClick,
+  onToggleInfo,
+}: {
+  selected: boolean;
+  infoOpen: boolean;
+  onClick: () => void;
+  onToggleInfo: () => void;
+}) {
+  return (
+    <div
+      className={`rounded-3xl border px-4 py-3.5 transition ${
+        selected
+          ? "border-pine bg-[linear-gradient(180deg,rgba(226,236,229,0.92),rgba(246,249,246,0.98))] text-ink shadow-panel"
+          : "border-ink/10 bg-white/78 text-ink hover:border-moss/30 hover:bg-white"
+      }`}
+    >
+      <div className="flex items-start gap-3">
+        <button
+          type="button"
+          onClick={onClick}
+          className="flex min-w-0 flex-1 items-start gap-3 rounded-[18px] text-left outline-none"
+        >
+          <span
+            className={`mt-0.5 flex h-6 w-6 flex-none items-center justify-center rounded-full border text-xs font-semibold ${
+              selected
+                ? "border-moss bg-moss text-white"
+                : "border-ink/15 bg-white/80 text-transparent"
+            }`}
+            aria-hidden="true"
+          >
+            ✓
+          </span>
+          <span className="min-w-0 flex-1 pt-0.5">
+            <span className="block text-base font-semibold tracking-tight">
+              {onboardingText.roles.noSecondaryRole}
+            </span>
+          </span>
+        </button>
+        <button
+          type="button"
+          onClick={onToggleInfo}
+          aria-label="More info about no secondary role"
+          className={`mt-0.5 inline-flex h-6 w-6 flex-none items-center justify-center rounded-full border text-[0.72rem] font-semibold transition ${
+            infoOpen
+              ? "border-pine bg-[rgba(226,236,229,0.92)] text-pine"
+              : "border-ink/12 bg-white/70 text-ink/58 hover:border-moss/24 hover:text-pine"
+          }`}
+        >
+          i
+        </button>
+      </div>
+      {infoOpen ? (
+        <p className={`pl-9 pr-1 pt-2 text-sm leading-6 ${selected ? "text-ink/72" : "text-ink/58"}`}>
+          {onboardingText.roles.noSecondaryRoleDescription}
+        </p>
+      ) : null}
+    </div>
   );
 }
 
@@ -101,62 +271,72 @@ function toVisibleRoleOption(role: {
   label: string;
   description: string;
 }): VisibleRoleOption {
-  return {
-    optionId: role.id,
-    id: role.id,
-    label: role.label,
-    description: role.description,
-  };
+  switch (role.id) {
+    case "label_owner":
+      return {
+        optionId: role.id,
+        id: role.id,
+        label: "CEO / Founder",
+        description: "Leadership, strategy and company direction",
+      };
+    case "promo_manager":
+      return {
+        optionId: role.id,
+        id: role.id,
+        label: "Marketing Manager",
+        description: "Campaign planning, marketing and release outreach",
+      };
+    case "distribution":
+      return {
+        optionId: role.id,
+        id: role.id,
+        label: "Distribution Manager",
+        description: "Delivery, release logistics and distribution operations",
+      };
+    case "royalty":
+      return {
+        optionId: role.id,
+        id: role.id,
+        label: "Publishing Manager",
+        description: "Catalog administration, statements and publishing follow-up",
+      };
+    case "sync_licensing":
+      return {
+        optionId: role.id,
+        id: role.id,
+        label: "Sync / Licensing Manager",
+        description: "Placements, licensing and sync opportunity handling",
+      };
+    case "finance":
+      return {
+        optionId: role.id,
+        id: role.id,
+        label: "Finance Manager",
+        description: "Payments, reporting and financial oversight",
+      };
+    case "legal":
+      return {
+        optionId: role.id,
+        id: role.id,
+        label: "Legal / Rights Manager",
+        description: "Contracts, approvals and rights management",
+      };
+    default:
+      return {
+        optionId: role.id,
+        id: role.id,
+        label: role.label,
+        description: role.description,
+      };
+  }
 }
 
 const extraVisibleRoleAliases: VisibleRoleOption[] = [
-  {
-    optionId: "ceo_founder",
-    id: "label_owner",
-    label: "CEO / Founder",
-    description: "Leadership, strategy and company direction",
-  },
-  {
-    optionId: "marketing_manager",
-    id: "promo_manager",
-    label: "Marketing Manager",
-    description: "Campaign planning, marketing and release outreach",
-  },
   {
     optionId: "streaming_manager",
     id: "distribution",
     label: "Streaming Manager",
     description: "DSP performance, playlist strategy and streaming coordination",
-  },
-  {
-    optionId: "distribution_manager",
-    id: "distribution",
-    label: "Distribution Manager",
-    description: "Delivery, release logistics and distribution operations",
-  },
-  {
-    optionId: "publishing_manager",
-    id: "royalty",
-    label: "Publishing Manager",
-    description: "Catalog administration, statements and publishing follow-up",
-  },
-  {
-    optionId: "sync_licensing_manager",
-    id: "sync_licensing",
-    label: "Sync / Licensing Manager",
-    description: "Placements, licensing and sync opportunity handling",
-  },
-  {
-    optionId: "finance_manager",
-    id: "finance",
-    label: "Finance Manager",
-    description: "Payments, reporting and financial oversight",
-  },
-  {
-    optionId: "legal_rights_manager",
-    id: "legal",
-    label: "Legal / Rights Manager",
-    description: "Contracts, approvals and rights management",
   },
   {
     optionId: "artist",
@@ -246,6 +426,8 @@ export function StepRoleSelection({
   const [showSecondaryExtraRoles, setShowSecondaryExtraRoles] = useState(false);
   const [selectedPrimaryOptionId, setSelectedPrimaryOptionId] = useState<string | null>(null);
   const [selectedSecondaryOptionId, setSelectedSecondaryOptionId] = useState<string | null>(null);
+  const [openPrimaryInfoId, setOpenPrimaryInfoId] = useState<string | null>(null);
+  const [openSecondaryInfoId, setOpenSecondaryInfoId] = useState<string | null>(null);
   const primarySectionRef = useRef<HTMLElement | null>(null);
   const visiblePrimaryRoleOptions = useMemo(
     () => primaryRoleOptions.map(toVisibleRoleOption),
@@ -306,9 +488,13 @@ export function StepRoleSelection({
           visibleExtraRoleOptions.some((extraRole) => extraRole.id === role.id),
       )
     : [];
-  const secondaryMergedRoles = mergeUniqueRoles(
-    secondaryDefaultVisibleRoles,
-    secondaryExpandedRoles,
+  const primaryExpandedRoleGroups = buildRoleGroups(
+    visibleExtraRoleOptions.filter((role) => role.optionId !== primaryExtraRole?.optionId),
+  );
+  const secondaryExpandedRoleGroups = buildRoleGroups(
+    mergeUniqueRoles(secondaryExpandedRoles).filter(
+      (role) => role.optionId !== secondaryExtraRole?.optionId,
+    ),
   );
 
   const scrollToPrimaryGrid = () => {
@@ -337,18 +523,24 @@ export function StepRoleSelection({
         <p className="text-base text-ink/68">{onboardingText.roles.primaryRequired}</p>
       </div>
 
-      <div className="grid gap-4 md:grid-cols-2">
+      <div className="space-y-2">
         {primaryVisibleRoles.map((role) => (
           <RoleCard
             key={role.optionId}
             label={role.label}
             description={role.description}
             selected={isVisibleRoleSelected(primaryRole, selectedPrimaryOptionId, role)}
+            infoOpen={openPrimaryInfoId === role.optionId}
             onClick={() => {
               setShowPrimaryExtraRoles(false);
               setSelectedPrimaryOptionId(role.optionId);
               onPrimaryChange(role.id);
             }}
+            onToggleInfo={() =>
+              setOpenPrimaryInfoId((current) =>
+                current === role.optionId ? null : role.optionId,
+              )
+            }
           />
         ))}
       </div>
@@ -360,26 +552,31 @@ export function StepRoleSelection({
           className="inline-flex w-fit rounded-full border border-ink/10 bg-white/55 px-4 py-2 text-sm font-medium text-moss transition hover:border-moss/20 hover:bg-white hover:text-pine"
         >
           {showPrimaryExtraRoles
-            ? onboardingText.roles.hideMoreRoles
-            : onboardingText.roles.showMoreRoles}
+            ? "Hide roles"
+            : "Show all roles"}
         </button>
       </div>
 
       {showPrimaryExtraRoles ? (
-        <div className="grid gap-3 md:grid-cols-2">
-          {visibleExtraRoleOptions.map((role) => (
-            <RoleCard
-              key={role.optionId}
-              label={role.label}
-              description={role.description}
-              selected={isVisibleRoleSelected(primaryRole, selectedPrimaryOptionId, role)}
+        <div className="space-y-5">
+          {primaryExpandedRoleGroups.map((group) => (
+            <RoleGroup
+              key={group.title}
+              title={group.title}
+              roles={group.roles}
+              selectedRole={primaryRole}
+              selectedOptionId={selectedPrimaryOptionId}
+              infoOpenId={openPrimaryInfoId}
               compact
-              onClick={() => {
+              onSelect={(role) => {
                 setSelectedPrimaryOptionId(role.optionId);
                 onPrimaryChange(role.id);
                 setShowPrimaryExtraRoles(false);
                 scrollToPrimaryGrid();
               }}
+              onToggleInfo={(optionId) =>
+                setOpenPrimaryInfoId((current) => (current === optionId ? null : optionId))
+              }
             />
           ))}
         </div>
@@ -393,48 +590,34 @@ export function StepRoleSelection({
             </h3>
             <p className="text-sm text-ink/68">{onboardingText.roles.secondaryOptional}</p>
           </div>
-          <div className="mt-5 grid gap-4 md:grid-cols-2">
-            <button
-              type="button"
+          <div className="mt-5 space-y-2">
+            <NoSecondaryRoleRow
+              selected={secondaryRole === null}
+              infoOpen={openSecondaryInfoId === "no_secondary"}
               onClick={() => onSecondaryChange(null)}
-              className={`rounded-3xl border p-4 text-left transition ${
-                secondaryRole === null
-                  ? "border-pine bg-[linear-gradient(180deg,rgba(226,236,229,0.72),rgba(255,255,255,0.98))] text-ink"
-                  : "border-ink/10 bg-white/70 text-ink hover:border-moss/30 hover:bg-white"
-              } outline-none focus-visible:border-pine focus-visible:bg-[linear-gradient(180deg,rgba(226,236,229,0.92),rgba(246,249,246,0.98))] focus-visible:text-ink focus-visible:shadow-panel`}
-            >
-              <div className="flex items-start justify-between gap-4">
-                <div className="space-y-2">
-                  <div className="text-base font-semibold tracking-tight">
-                    {onboardingText.roles.noSecondaryRole}
-                  </div>
-                  <p className="max-w-xs text-[13px] leading-6 text-ink/58">
-                    {onboardingText.roles.noSecondaryRoleDescription}
-                  </p>
-                </div>
-                <span
-                  className={`mt-1 flex h-7 w-7 items-center justify-center rounded-full border text-sm font-semibold ${
-                    secondaryRole === null
-                      ? "border-moss bg-moss text-white"
-                      : "border-ink/15 bg-white/80 text-transparent"
-                  }`}
-                  aria-hidden="true"
-                >
-                  ✓
-                </span>
-              </div>
-            </button>
-            {secondaryMergedRoles.map((role) => (
+              onToggleInfo={() =>
+                setOpenSecondaryInfoId((current) =>
+                  current === "no_secondary" ? null : "no_secondary",
+                )
+              }
+            />
+            {secondaryDefaultVisibleRoles.map((role) => (
               <RoleCard
                 key={role.optionId}
                 label={role.label}
                 description={role.description}
                 selected={isVisibleRoleSelected(secondaryRole, selectedSecondaryOptionId, role)}
+                infoOpen={openSecondaryInfoId === role.optionId}
                 compact
                 onClick={() => {
                   setSelectedSecondaryOptionId(role.optionId);
                   onSecondaryChange(role.id);
                 }}
+                onToggleInfo={() =>
+                  setOpenSecondaryInfoId((current) =>
+                    current === role.optionId ? null : role.optionId,
+                  )
+                }
               />
             ))}
           </div>
@@ -446,10 +629,34 @@ export function StepRoleSelection({
               className="inline-flex w-fit rounded-full border border-ink/10 bg-white/55 px-4 py-2 text-sm font-medium text-moss transition hover:border-moss/20 hover:bg-white hover:text-pine"
             >
               {showSecondaryExtraRoles
-                ? onboardingText.roles.hideMoreRoles
-                : onboardingText.roles.showMoreRoles}
+                ? "Hide roles"
+                : "Show all roles"}
             </button>
           </div>
+          {showSecondaryExtraRoles ? (
+            <div className="space-y-5">
+              {secondaryExpandedRoleGroups.map((group) => (
+                <RoleGroup
+                  key={group.title}
+                  title={group.title}
+                  roles={group.roles}
+                  selectedRole={secondaryRole}
+                  selectedOptionId={selectedSecondaryOptionId}
+                  infoOpenId={openSecondaryInfoId}
+                  compact
+                  onSelect={(role) => {
+                    setSelectedSecondaryOptionId(role.optionId);
+                    onSecondaryChange(role.id);
+                  }}
+                  onToggleInfo={(optionId) =>
+                    setOpenSecondaryInfoId((current) =>
+                      current === optionId ? null : optionId,
+                    )
+                  }
+                />
+              ))}
+            </div>
+          ) : null}
         </div>
       ) : null}
     </section>

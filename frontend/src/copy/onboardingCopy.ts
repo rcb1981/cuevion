@@ -12,7 +12,7 @@ export const onboardingCopy = {
     },
     sidebar: {
       workspaceSetup: "Workspace Setup",
-      description: "Built for modern label communication.",
+      description: "Built for modern music workflows.",
       progressLabel: "Setup Progress",
       helperLabel: "Quick note",
       progressStep: (currentStep: number, totalSteps: number) =>
@@ -26,8 +26,8 @@ export const onboardingCopy = {
       },
     },
     welcome: {
-      title: "Organize your inbox workflow",
-      text: "Set up your workspace in a few steps.",
+      title: "Built for modern music workflows.",
+      text: "Set up Cuevion around how you work in music — from demos and releases to finance, rights and distribution.",
     },
     roles: {
       title: "Choose your role",
