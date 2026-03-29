@@ -6879,6 +6879,13 @@ function MailboxView({
       notificationNavigationRequest.messageId,
       notificationNavigationRequest.messageId,
     );
+    requestAnimationFrame(() => {
+      const targetRow = mailListViewportRef.current?.querySelector<HTMLElement>(
+        `[data-message-row-id="${CSS.escape(notificationNavigationRequest.messageId)}"]`,
+      );
+
+      targetRow?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    });
     if (notificationNavigationRequest.focusReplyComposer) {
       closeCollaborationOverlay();
       openComposeFromMessage(targetMessage, "reply");
@@ -10788,6 +10795,7 @@ function MailboxView({
                         <button
                           key={message.id}
                           type="button"
+                          data-message-row-id={message.id}
                           draggable={!isReadOnlySmartFolderView}
                           onDragStart={(event) => {
                             if (isReadOnlySmartFolderView) {
