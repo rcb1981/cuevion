@@ -497,6 +497,7 @@ type NotificationNavigationRequest = {
   collaborationMessageId?: string;
   inviteeEmail?: string;
   focusReplyComposer?: boolean;
+  openFullMessage?: boolean;
   requestKey: number;
 };
 type ReviewInboxHandoff = {
@@ -6873,7 +6874,7 @@ function MailboxView({
     setActiveSmartFolderId(null);
     setActiveFolder(targetFolder);
     setIsSharedView(false);
-    setIsFullMessageOpen(false);
+    setIsFullMessageOpen(Boolean(notificationNavigationRequest.openFullMessage));
     setSelectionState(
       [notificationNavigationRequest.messageId],
       notificationNavigationRequest.messageId,
@@ -6889,6 +6890,9 @@ function MailboxView({
     if (notificationNavigationRequest.focusReplyComposer) {
       closeCollaborationOverlay();
       openComposeFromMessage(targetMessage, "reply");
+    } else if (notificationNavigationRequest.openFullMessage) {
+      closeCollaborationOverlay();
+      setHighlightedCollaborationMessageId(null);
     } else {
       setHighlightedCollaborationMessageId(
         notificationNavigationRequest.collaborationMessageId ?? null,
@@ -19890,6 +19894,7 @@ export function WorkspaceShell({
         messageId: reviewItem.sourceId,
         type: "reply",
         focusReplyComposer: false,
+        openFullMessage: true,
         requestKey: Date.now(),
       });
       return;
