@@ -2365,6 +2365,16 @@ function getLocalAutoPriorityScore(
     "sign-in",
     "login",
     "account access",
+    "beveiligingsmelding",
+    "beveiligingswaarschuwing",
+    "tweestapsverificatie",
+    "app-wachtwoord",
+    "ingelogd",
+    "inloggen",
+    "accounttoegang",
+    "verificatiecode",
+    "wachtwoord",
+    "beveiliging",
   ]);
   const isMetaBillingSystemMail = includesAnyKeyword(searchableText, [
     "meta for business",
@@ -2375,6 +2385,18 @@ function getLocalAutoPriorityScore(
     "invoice",
     "account update",
     "ad account",
+    "ontvangstbewijs",
+    "betalingsoverzicht",
+    "dit is geen factuur",
+    "factuur",
+    "advertentie is goedgekeurd",
+    "advertentie goedgekeurd",
+    "advertentie",
+    "advertenties",
+    "account-id",
+    "producttype",
+    "reden factuur",
+    "uitgaven van advertenties",
   ]);
   const isPureInfoLowActionMail = includesAnyKeyword(searchableText, [
     "this is not a bill",
@@ -2384,6 +2406,15 @@ function getLocalAutoPriorityScore(
     "snapshot",
     "update",
     "confirmation",
+    "overzicht",
+    "samenvatting",
+    "bevestiging",
+    "rapport",
+    "momentopname",
+    "status",
+    "goedgekeurd",
+    "aangezet",
+    "gemaakt",
   ]);
   const isLowSignalTestMail =
     subjectText.includes("test") &&
