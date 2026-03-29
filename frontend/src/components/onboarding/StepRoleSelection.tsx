@@ -127,7 +127,7 @@ function RoleGroup({
       <div className="px-1 text-[0.68rem] font-medium uppercase tracking-[0.16em] text-ink/44">
         {title}
       </div>
-      <div className="space-y-2">
+      <div className="grid gap-2 md:grid-cols-2">
         {roles.map((role) => (
           <RoleCard
             key={role.optionId}
@@ -523,7 +523,7 @@ export function StepRoleSelection({
         <p className="text-base text-ink/68">{onboardingText.roles.primaryRequired}</p>
       </div>
 
-      <div className="space-y-2">
+      <div className="grid gap-2 md:grid-cols-2">
         {primaryVisibleRoles.map((role) => (
           <RoleCard
             key={role.optionId}
@@ -590,17 +590,19 @@ export function StepRoleSelection({
             </h3>
             <p className="text-sm text-ink/68">{onboardingText.roles.secondaryOptional}</p>
           </div>
-          <div className="mt-5 space-y-2">
-            <NoSecondaryRoleRow
-              selected={secondaryRole === null}
-              infoOpen={openSecondaryInfoId === "no_secondary"}
-              onClick={() => onSecondaryChange(null)}
-              onToggleInfo={() =>
-                setOpenSecondaryInfoId((current) =>
-                  current === "no_secondary" ? null : "no_secondary",
-                )
-              }
-            />
+          <div className="mt-5 grid gap-2 md:grid-cols-2">
+            <div className="md:col-span-2">
+              <NoSecondaryRoleRow
+                selected={secondaryRole === null}
+                infoOpen={openSecondaryInfoId === "no_secondary"}
+                onClick={() => onSecondaryChange(null)}
+                onToggleInfo={() =>
+                  setOpenSecondaryInfoId((current) =>
+                    current === "no_secondary" ? null : "no_secondary",
+                  )
+                }
+              />
+            </div>
             {secondaryDefaultVisibleRoles.map((role) => (
               <RoleCard
                 key={role.optionId}
