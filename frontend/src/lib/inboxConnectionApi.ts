@@ -16,7 +16,7 @@ export type LiveInboxMessageSnapshot = {
   ui_signal?: string;
 };
 
-type ConnectInboxRequest = {
+export type ConnectInboxRequest = {
   provider: ProviderId;
   email: string;
   host: string;
@@ -26,6 +26,7 @@ type ConnectInboxRequest = {
   password: string;
   internalRole?: string | null;
   focusPreferences?: OnboardingState["focusPreferences"] | null;
+  selectedInboxes?: string[] | null;
 };
 
 type ConnectInboxResponse = {

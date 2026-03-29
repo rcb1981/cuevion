@@ -4,7 +4,10 @@ import {
   providerOptions,
   specializedInboxOptions,
 } from "../../data/onboardingOptions";
-import type { LiveInboxMessageSnapshot } from "../../lib/inboxConnectionApi";
+import type {
+  ConnectInboxRequest,
+  LiveInboxMessageSnapshot,
+} from "../../lib/inboxConnectionApi";
 import { connectInboxWithImap } from "../../lib/inboxConnectionApi";
 import {
   getPasswordLabel,
@@ -203,7 +206,7 @@ export function StepConnectInboxes({
     console.log("[DEBUG] StepConnectInboxes selectedInboxes:", selectedInboxes);
     console.log("[DEBUG] Sending to backend selectedInboxes:", selectedInboxes);
 
-    const response = await connectInboxWithImap({
+    const request: ConnectInboxRequest = {
       provider: connection.provider as ProviderId,
       email: connection.email.trim(),
       host: connection.customImap.host.trim(),
@@ -217,7 +220,9 @@ export function StepConnectInboxes({
       internalRole,
       focusPreferences,
       selectedInboxes,
-    });
+    };
+
+    const response = await connectInboxWithImap(request);
 
     if (response.ok) {
       onConnectInbox(inboxId, response.messages ?? []);
