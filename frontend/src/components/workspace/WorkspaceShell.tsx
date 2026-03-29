@@ -10121,8 +10121,8 @@ function MailboxView({
 	                const linkedReviewLabel = getLinkedReviewBadgeLabel(fullWidthMessage.id);
 
 	                return (
-	              <div className="flex items-center justify-between gap-4">
-	                <div className="space-y-1">
+	              <div className="flex items-start justify-between gap-4">
+	                <div className="min-w-0 flex-1 space-y-1">
 	                  <div className="text-[0.68rem] font-medium uppercase tracking-[0.18em] text-[var(--workspace-text-faint)]">
 	                    Message
 	                  </div>
@@ -10139,7 +10139,7 @@ function MailboxView({
 	                    </button>
 	                  ) : null}
 	                </div>
-	                <div className="flex items-center gap-4">
+	                <div className="flex flex-none flex-wrap items-start justify-end gap-4 self-start">
 	                  {renderMessageActions(fullWidthMessage, "full")}
                   {aiSuggestionsEnabled ? (
                   <ReadingLearningButton
