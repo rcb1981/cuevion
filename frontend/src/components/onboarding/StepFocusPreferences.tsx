@@ -47,7 +47,7 @@ export function StepFocusPreferences({
         </p>
       </div>
 
-      <div className="grid gap-3 md:grid-cols-2">
+      <div className="grid gap-4 md:gap-x-6 grid-cols-1 md:grid-cols-2">
         {focusOptions.map((option) => (
           <div
             key={option.id}
