@@ -6929,6 +6929,19 @@ function MailboxView({
     return null;
   };
 
+  const markPriorityMessageDone = (messageId: string) => {
+    onSetManualPriority(messageId, false);
+
+    if (
+      isFullMessageOpen &&
+      fullWidthMessage?.id === messageId &&
+      lastNavigationSource === "priority"
+    ) {
+      setLastNavigationSource(null);
+      onBack();
+    }
+  };
+
   const renderMessageCollaboration = (message: MailMessage) => {
     const collaboration = message.collaboration;
 
@@ -7232,7 +7245,7 @@ function MailboxView({
                     <button
                       type="button"
                       onClick={() => {
-                        onSetManualPriority(message.id, false);
+                        markPriorityMessageDone(message.id);
                         setDetailActionsMenuState(null);
                       }}
                       className={menuItemClass}
@@ -9812,7 +9825,7 @@ function MailboxView({
                       <button
                         type="button"
                         onClick={() => {
-                          onSetManualPriority(selectedMessage.id, false);
+                          markPriorityMessageDone(selectedMessage.id);
                           closeMenus();
                         }}
                         className={contextMenuMainItemClass}
@@ -11303,7 +11316,7 @@ function MailboxView({
                     <button
                       type="button"
                       onClick={() => {
-                        onSetManualPriority(contextMenuMessage.id, false);
+                        markPriorityMessageDone(contextMenuMessage.id);
                         closeMenus();
                       }}
                       className={contextMenuMainItemClass}
