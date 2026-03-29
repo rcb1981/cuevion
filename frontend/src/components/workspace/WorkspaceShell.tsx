@@ -3656,14 +3656,21 @@ function normalizeMailboxStore(
         const signature = message.id || getMessageSignature(message);
         const fallbackSignature = getMessageSignature(message);
         const uniquenessKey = `${signature}::${fallbackSignature}`;
+        const hasStableId = Boolean(message.id);
 
-        if (seenInFolder.has(uniquenessKey) || signatureOwner.has(signature) || signatureOwner.has(fallbackSignature)) {
+        if (
+          seenInFolder.has(uniquenessKey) ||
+          signatureOwner.has(signature) ||
+          (!hasStableId && signatureOwner.has(fallbackSignature))
+        ) {
           continue;
         }
 
         seenInFolder.add(uniquenessKey);
         signatureOwner.set(signature, { mailboxId, folder });
-        signatureOwner.set(fallbackSignature, { mailboxId, folder });
+        if (!hasStableId) {
+          signatureOwner.set(fallbackSignature, { mailboxId, folder });
+        }
         nextStore[mailboxId][folder].push(
           normalizeMailMessage(
             message,
