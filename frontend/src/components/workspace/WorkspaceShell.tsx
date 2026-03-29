@@ -2311,17 +2311,42 @@ function getLocalAutoPriorityScore(
     | "isAutoReply"
   >,
 ) {
-  const searchableText = [message.subject, message.snippet, ...(message.body ?? [])]
+  const searchableText = [
+    message.subject,
+    message.snippet,
+    ...(message.body ?? []),
+    message.sender,
+    message.from,
+  ]
     .join(" ")
     .toLowerCase();
   const senderText = `${message.sender} ${message.from}`.toLowerCase();
+  const subjectText = message.subject.toLowerCase();
   const hasAttachments = (message.attachments?.length ?? 0) > 0;
   const hasSharedContext = Boolean(message.sharedContext || message.isShared);
   const isPrimaryConfident =
     message.category === "Primary" &&
     (message.categoryConfidence === "medium" || message.categoryConfidence === "high");
+  const hasReplyThreadIndicator = /^(re|fw|fwd):/i.test(message.subject.trim());
+  const hasDirectRequestSignal = includesAnyKeyword(searchableText, [
+    "please",
+    "review",
+    "confirm",
+    "send",
+    "need",
+    "can you",
+    "could you",
+    "will you",
+    "proposal",
+    "meeting",
+    "collaboration",
+    "reply",
+  ]);
   const hasStrongActionSignal =
-    includesAnyKeyword(searchableText, autoPriorityStrongKeywords) || searchableText.includes("?");
+    hasReplyThreadIndicator ||
+    includesAnyKeyword(searchableText, autoPriorityStrongKeywords) ||
+    searchableText.includes("?") ||
+    hasDirectRequestSignal;
   const hasMediumActionSignal = includesAnyKeyword(
     searchableText,
     autoPriorityMediumKeywords,
@@ -2331,6 +2356,44 @@ function getLocalAutoPriorityScore(
     message.category === "Promo" ||
     includesAnyKeyword(searchableText, autoPriorityPromoKeywords);
   const isNoReplySender = includesAnyKeyword(senderText, autoPriorityNoReplyHints);
+  const isGoogleSecurityAuthMail = includesAnyKeyword(searchableText, [
+    "verification",
+    "2-step",
+    "two-step",
+    "password",
+    "security alert",
+    "sign-in",
+    "login",
+    "account access",
+  ]);
+  const isMetaBillingSystemMail = includesAnyKeyword(searchableText, [
+    "meta for business",
+    "ads",
+    "receipt",
+    "payment",
+    "billing",
+    "invoice",
+    "account update",
+    "ad account",
+  ]);
+  const isPureInfoLowActionMail = includesAnyKeyword(searchableText, [
+    "this is not a bill",
+    "receipt",
+    "summary",
+    "report",
+    "snapshot",
+    "update",
+    "confirmation",
+  ]);
+  const isLowSignalTestMail =
+    subjectText.includes("test") &&
+    !includesAnyKeyword(searchableText, [
+      "please",
+      "review",
+      "confirm",
+      "send",
+      "need",
+    ]);
   const hasBusinessAttachmentContext =
     hasAttachments &&
     includesAnyKeyword(searchableText, [
@@ -2384,11 +2447,27 @@ function getLocalAutoPriorityScore(
   }
 
   if (isNoReplySender && !hasStrongActionSignal) {
-    score -= 3;
+    score -= 5;
+  }
+
+  if (isGoogleSecurityAuthMail && !hasStrongActionSignal) {
+    score -= 6;
+  }
+
+  if (isMetaBillingSystemMail && !hasStrongActionSignal) {
+    score -= 6;
   }
 
   if (hasInfoOnlySignal && !hasStrongActionSignal && !hasMediumActionSignal) {
     score -= 3;
+  }
+
+  if (isPureInfoLowActionMail && !hasStrongActionSignal) {
+    score -= 4;
+  }
+
+  if (isLowSignalTestMail && !hasStrongActionSignal) {
+    score -= 5;
   }
 
   if (isPromoOnly && !hasStrongActionSignal) {
