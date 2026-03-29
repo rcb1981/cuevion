@@ -6339,7 +6339,7 @@ function MailboxView({
     }
 
     requestAnimationFrame(() => {
-      if (composeMode === "new") {
+      if (composeMode === "new" || composeMode === "forward") {
         composeToInputRef.current?.focus();
         return;
       }
