@@ -494,6 +494,7 @@ type NotificationNavigationRequest = {
   mailboxId: InboxId;
   messageId: string;
   type: "invite" | "reply" | "mention";
+  source?: "priority";
   collaborationMessageId?: string;
   inviteeEmail?: string;
   focusReplyComposer?: boolean;
@@ -5800,6 +5801,7 @@ function MailboxView({
   const splitPaneContainerRef = useRef<HTMLDivElement | null>(null);
   const [isComposeOpen, setIsComposeOpen] = useState(false);
   const [isFullMessageOpen, setIsFullMessageOpen] = useState(false);
+  const [lastNavigationSource, setLastNavigationSource] = useState<"priority" | null>(null);
   const [isCloseModalOpen, setIsCloseModalOpen] = useState(false);
   const [isMoreMenuOpen, setIsMoreMenuOpen] = useState(false);
   const [isSortMenuOpen, setIsSortMenuOpen] = useState(false);
@@ -6875,6 +6877,7 @@ function MailboxView({
     setActiveFolder(targetFolder);
     setIsSharedView(false);
     setIsFullMessageOpen(Boolean(notificationNavigationRequest.openFullMessage));
+    setLastNavigationSource(notificationNavigationRequest.source ?? null);
     setSelectionState(
       [notificationNavigationRequest.messageId],
       notificationNavigationRequest.messageId,
@@ -9369,6 +9372,12 @@ function MailboxView({
     }
 
     if (isFullMessageOpen) {
+      if (lastNavigationSource === "priority") {
+        setLastNavigationSource(null);
+        onBack();
+        return;
+      }
+
       setIsFullMessageOpen(false);
       return;
     }
@@ -10153,9 +10162,6 @@ function MailboxView({
                     onClick={() => setIsFullMessageOpen(false)}
                     className={closeActionButtonClass}
                   >
-                    <span aria-hidden="true" className="text-[0.8rem] leading-none">
-                      ×
-                    </span>
                     Close
 	                  </button>
 	                </div>
@@ -19893,6 +19899,7 @@ export function WorkspaceShell({
         mailboxId: sourceLocation.mailboxId,
         messageId: reviewItem.sourceId,
         type: "reply",
+        source: "priority",
         focusReplyComposer: false,
         openFullMessage: true,
         requestKey: Date.now(),
