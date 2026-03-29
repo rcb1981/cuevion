@@ -9687,7 +9687,11 @@ function MailboxView({
                     role="textbox"
                     aria-multiline="true"
                     dir="ltr"
-                    style={{ direction: "ltr" }}
+                    style={{
+                      direction: "ltr",
+                      unicodeBidi: "plaintext",
+                      textAlign: "left",
+                    }}
                     onInput={syncComposeBodyValue}
                     onKeyDown={handleComposeBodyKeyDown}
                     onPaste={handleComposeBodyPaste}
@@ -9962,7 +9966,7 @@ function MailboxView({
                     !activeSmartFolder &&
                     folder === activeFolder;
                       const count = getFolderBadgeCount(folder);
-                      const shouldShowFolderCount = folder !== "Sent";
+                      const shouldShowFolderCount = folder === "Inbox";
                   const dragTargetId = `folder-${folder}`;
                   const isDragTargetActive = dragTargetKey === dragTargetId;
                   const folderLabel =
