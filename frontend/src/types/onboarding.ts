@@ -70,6 +70,10 @@ export interface OnboardingState {
     promo: FocusPreferenceLevel;
     finance: FocusPreferenceLevel;
     legal: FocusPreferenceLevel;
+    business: FocusPreferenceLevel;
+    updates: FocusPreferenceLevel;
+    distribution: FocusPreferenceLevel;
+    royalties: FocusPreferenceLevel;
   };
   inboxCount: InboxCountId | null;
   selectedInboxes: InboxId[];

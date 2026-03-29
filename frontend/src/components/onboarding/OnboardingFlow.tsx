@@ -9,7 +9,7 @@ import {
   applyProviderDefaults,
   isImapCredentialsProvider,
 } from "../../lib/inboxProviderDefaults";
-import { mapRoleToInternal } from "../../lib/roleMapping";
+import { mapRoleToInternal, type InternalRole } from "../../lib/roleMapping";
 import { saveLiveInboxSnapshot } from "../../lib/liveInboxSnapshots";
 import type {
   CustomInboxDefinition,
@@ -50,6 +50,116 @@ function getRequiredInboxCount(inboxCount: OnboardingState["inboxCount"]) {
   if (inboxCount === "4+") return 4;
   if (inboxCount === "not_sure") return 2;
   return 1;
+}
+
+function getDefaultFocusPreferencesForRole(
+  role: RoleId,
+): OnboardingState["focusPreferences"] {
+  const internalRole = mapRoleToInternal(role);
+
+  if (role === "ar_manager") {
+    return {
+      demos: "high",
+      promo: "low",
+      finance: "low",
+      legal: "low",
+      business: "medium",
+      updates: "medium",
+      distribution: "low",
+      royalties: "low",
+    };
+  }
+
+  if (internalRole === "label_ar_manager") {
+    return {
+      demos: "high",
+      promo: "medium",
+      finance: "medium",
+      legal: "medium",
+      business: "high",
+      updates: "medium",
+      distribution: "medium",
+      royalties: "medium",
+    };
+  }
+
+  const defaultsByInternalRole: Partial<
+    Record<InternalRole, OnboardingState["focusPreferences"]>
+  > = {
+    label_manager: {
+      demos: "medium",
+      promo: "low",
+      finance: "high",
+      legal: "medium",
+      business: "high",
+      updates: "medium",
+      distribution: "medium",
+      royalties: "high",
+    },
+    product_manager: {
+      demos: "low",
+      promo: "low",
+      finance: "medium",
+      legal: "medium",
+      business: "high",
+      updates: "high",
+      distribution: "high",
+      royalties: "medium",
+    },
+    artist_manager: {
+      demos: "medium",
+      promo: "medium",
+      finance: "medium",
+      legal: "low",
+      business: "high",
+      updates: "medium",
+      distribution: "low",
+      royalties: "high",
+    },
+    dj: {
+      demos: "low",
+      promo: "high",
+      finance: "medium",
+      legal: "low",
+      business: "medium",
+      updates: "low",
+      distribution: "low",
+      royalties: "high",
+    },
+    producer: {
+      demos: "medium",
+      promo: "medium",
+      finance: "high",
+      legal: "low",
+      business: "medium",
+      updates: "low",
+      distribution: "low",
+      royalties: "high",
+    },
+    management: {
+      demos: "low",
+      promo: "low",
+      finance: "high",
+      legal: "high",
+      business: "high",
+      updates: "medium",
+      distribution: "medium",
+      royalties: "high",
+    },
+  };
+
+  return (
+    defaultsByInternalRole[internalRole] ?? {
+      demos: "medium",
+      promo: "medium",
+      finance: "medium",
+      legal: "medium",
+      business: "medium",
+      updates: "medium",
+      distribution: "medium",
+      royalties: "medium",
+    }
+  );
 }
 
 interface OnboardingFlowProps {
@@ -130,6 +240,7 @@ export function OnboardingFlow({
       ...current,
       primaryRole: role,
       internalRole: mapRoleToInternal(role),
+      focusPreferences: getDefaultFocusPreferencesForRole(role),
       secondaryRole: current.secondaryRole === role ? null : current.secondaryRole,
     }));
   };

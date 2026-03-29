@@ -8,6 +8,10 @@ const focusOptions: Array<{
   { id: "promo", label: "Promo" },
   { id: "finance", label: "Finance" },
   { id: "legal", label: "Legal" },
+  { id: "business", label: "Business" },
+  { id: "updates", label: "Updates" },
+  { id: "distribution", label: "Distribution" },
+  { id: "royalties", label: "Royalties" },
 ];
 
 const preferenceLevels: FocusPreferenceLevel[] = ["high", "medium", "low"];
@@ -35,7 +39,7 @@ export function StepFocusPreferences({
         </p>
       </div>
 
-      <div className="space-y-3">
+      <div className="grid gap-3 md:grid-cols-2">
         {focusOptions.map((option) => (
           <div
             key={option.id}
