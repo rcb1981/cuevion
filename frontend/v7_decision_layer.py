@@ -314,6 +314,43 @@ def decide_message_behavior(
     if category == "promo_reminder":
         final_visibility = min_visibility(final_visibility, "show_low")
 
+    # SAFETY FILTER — prevent false positives
+    subject_lower = (
+        getattr(engine_result, "subject", None)
+        or engine_result.metadata.get("subject", "")
+    ).lower()
+    sender_lower = (
+        getattr(engine_result, "sender", None)
+        or engine_result.metadata.get("sender", "")
+    ).lower()
+
+    # 2FA / security emails
+    if any(keyword in subject_lower for keyword in [
+        "verification code",
+        "security alert",
+        "login attempt",
+        "two-factor",
+        "2fa",
+        "password reset"
+    ]):
+        final_priority = "LOW"
+
+    # forwarded emails (often duplicates / noise)
+    if subject_lower.startswith("fwd:") or subject_lower.startswith("fw:"):
+        if final_priority != "PRIORITY":
+            final_priority = "LOW"
+
+    # system / no-reply senders
+    if any(keyword in sender_lower for keyword in [
+        "no-reply",
+        "noreply",
+        "donotreply",
+        "notification",
+        "automated"
+    ]):
+        if final_priority != "PRIORITY":
+            final_priority = "LOW"
+
     if internal_role:
 
         # DEMO emails
