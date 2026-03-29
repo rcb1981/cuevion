@@ -393,6 +393,7 @@ type MailAttachment = {
   file?: File;
 };
 type MailAttachmentInput = string | MailAttachment;
+type ComposeRecipientField = "to" | "cc" | "bcc";
 
 type MailMessage = {
   id: string;
@@ -532,6 +533,7 @@ const MAILBOX_TITLE_OVERRIDES_STORAGE_KEY = "cuevion-mailbox-title-overrides";
 const OUT_OF_OFFICE_SUPPRESSION_WINDOW_MS = 24 * 60 * 60 * 1000;
 const SMART_FOLDERS_STORAGE_KEY = "cuevion-smart-folders";
 const MAIL_LIST_PANE_WIDTH_STORAGE_KEY = "cuevion-mail-list-pane-width";
+const COMPOSE_RECIPIENT_MEMORY_STORAGE_KEY = "cuevion-compose-recipient-memory";
 const ACTIVE_MAILBOX_AUTO_REFRESH_INTERVAL_MS = 3 * 60 * 1000;
 const MAIL_FOLDER_COLUMN_WIDTH = 180;
 const MAIL_SPLIT_GAP = 24;
@@ -5793,6 +5795,27 @@ function MailboxView({
   const [composeTo, setComposeTo] = useState("");
   const [composeCc, setComposeCc] = useState("");
   const [composeBcc, setComposeBcc] = useState("");
+  const [rememberedRecipients, setRememberedRecipients] = useState<string[]>(() => {
+    if (typeof window === "undefined") {
+      return [];
+    }
+
+    const storedValue = window.localStorage.getItem(COMPOSE_RECIPIENT_MEMORY_STORAGE_KEY);
+
+    if (!storedValue) {
+      return [];
+    }
+
+    try {
+      const parsed = JSON.parse(storedValue) as string[];
+
+      return parsed.filter((value) => typeof value === "string");
+    } catch {
+      return [];
+    }
+  });
+  const [activeRecipientSuggestionField, setActiveRecipientSuggestionField] =
+    useState<ComposeRecipientField | null>(null);
   const [showComposeBcc, setShowComposeBcc] = useState(false);
   const [composeSubject, setComposeSubject] = useState("");
   const [composeBody, setComposeBody] = useState("");
@@ -5897,6 +5920,7 @@ function MailboxView({
     setComposeTo("");
     setComposeCc("");
     setComposeBcc("");
+    setActiveRecipientSuggestionField(null);
     setShowComposeBcc(false);
     setComposeSubject("");
     setComposeBody("");
@@ -5908,6 +5932,144 @@ function MailboxView({
     setComposeSendError(null);
     setIsSendingCompose(false);
   };
+
+  const normalizeRememberedRecipient = (value: string) => value.trim().toLowerCase();
+
+  const extractRecipientEmails = (value: string) =>
+    value
+      .split(/[,;]+/)
+      .map((entry) => normalizeRememberedRecipient(entry))
+      .filter((entry) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(entry));
+
+  const rememberSentRecipients = (values: Array<string | undefined>) => {
+    const nextRecipients = values.flatMap((value) => extractRecipientEmails(value ?? ""));
+
+    if (nextRecipients.length === 0) {
+      return;
+    }
+
+    setRememberedRecipients((current) => {
+      const merged = [...nextRecipients, ...current].filter(
+        (value, index, array) => array.indexOf(value) === index,
+      );
+
+      return merged.slice(0, 50);
+    });
+  };
+
+  const getComposeRecipientValue = (field: ComposeRecipientField) => {
+    if (field === "to") {
+      return composeTo;
+    }
+
+    if (field === "cc") {
+      return composeCc;
+    }
+
+    return composeBcc;
+  };
+
+  const setComposeRecipientValue = (field: ComposeRecipientField, value: string) => {
+    if (field === "to") {
+      setComposeTo(value);
+      return;
+    }
+
+    if (field === "cc") {
+      setComposeCc(value);
+      return;
+    }
+
+    setComposeBcc(value);
+  };
+
+  const getComposeRecipientQuery = (value: string) => {
+    const segments = value.split(/[,;]+/);
+    return normalizeRememberedRecipient(segments[segments.length - 1] ?? "");
+  };
+
+  const getRecipientSuggestions = (field: ComposeRecipientField) => {
+    const value = getComposeRecipientValue(field);
+    const query = getComposeRecipientQuery(value);
+
+    if (!query) {
+      return [];
+    }
+
+    const existingRecipients = new Set(extractRecipientEmails(value));
+
+    return rememberedRecipients
+      .filter(
+        (recipient) =>
+          !existingRecipients.has(recipient) &&
+          (recipient.startsWith(query) || recipient.includes(query)),
+      )
+      .slice(0, 6);
+  };
+
+  const applyRecipientSuggestion = (field: ComposeRecipientField, recipient: string) => {
+    const currentValue = getComposeRecipientValue(field);
+    const lastCommaIndex = currentValue.lastIndexOf(",");
+    const lastSemicolonIndex = currentValue.lastIndexOf(";");
+    const lastSeparatorIndex = Math.max(lastCommaIndex, lastSemicolonIndex);
+
+    if (lastSeparatorIndex === -1) {
+      setComposeRecipientValue(field, recipient);
+    } else {
+      const prefix = currentValue.slice(0, lastSeparatorIndex + 1);
+      const spacer = /\s$/.test(prefix) ? "" : " ";
+      setComposeRecipientValue(field, `${prefix}${spacer}${recipient}`);
+    }
+
+    setActiveRecipientSuggestionField(null);
+  };
+
+  const handleComposeRecipientBlur = () => {
+    window.setTimeout(() => {
+      setActiveRecipientSuggestionField(null);
+    }, 120);
+  };
+
+  const renderComposeRecipientSuggestions = (field: ComposeRecipientField) => {
+    if (activeRecipientSuggestionField !== field) {
+      return null;
+    }
+
+    const suggestions = getRecipientSuggestions(field);
+
+    if (suggestions.length === 0) {
+      return null;
+    }
+
+    return (
+      <div className="absolute left-0 right-0 top-full z-20 mt-2 rounded-[16px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] p-1 shadow-panel">
+        {suggestions.map((recipient) => (
+          <button
+            key={recipient}
+            type="button"
+            onMouseDown={(event) => {
+              event.preventDefault();
+              applyRecipientSuggestion(field, recipient);
+            }}
+            className="flex w-full items-center rounded-[12px] px-3 py-2 text-left text-[0.82rem] text-[var(--workspace-text-soft)] transition-[background-color,color] duration-150 hover:bg-[var(--workspace-card-subtle)] hover:text-[var(--workspace-text)] focus-visible:outline-none"
+          >
+            {recipient}
+          </button>
+        ))}
+      </div>
+    );
+  };
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    window.localStorage.setItem(
+      COMPOSE_RECIPIENT_MEMORY_STORAGE_KEY,
+      JSON.stringify(rememberedRecipients),
+    );
+  }, [rememberedRecipients]);
 
   const clampMailListPaneWidth = (nextWidth: number) => {
     if (!splitPaneWidth) {
@@ -7179,6 +7341,12 @@ function MailboxView({
         setComposeSendError(sendResponse.error?.message ?? "Could not send email.");
         return;
       }
+
+      rememberSentRecipients([
+        toRecipients,
+        composeCc.trim() || undefined,
+        composeBcc.trim() || undefined,
+      ]);
 
       const sentId = `${activeComposeMailbox.id}-sent-${Date.now()}`;
       const bodyParagraphs = extractComposeParagraphs(composeBody);
@@ -9616,40 +9784,15 @@ function MailboxView({
                   <span className="text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
                     To
                   </span>
-                  <input
-                    value={composeTo}
-                    onChange={(event) => setComposeTo(event.target.value)}
-                    placeholder="Add recipient"
-                    autoCorrect="on"
-                    autoComplete="email"
-                    autoCapitalize="none"
-                    spellCheck
-                    className="w-full bg-transparent text-[0.9rem] leading-6 text-[var(--workspace-text-soft)] outline-none placeholder:text-[var(--workspace-text-faint)]"
-                  />
-                </label>
-                <label className="grid grid-cols-[72px_minmax(0,1fr)] items-center gap-4 rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3">
-                  <span className="text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
-                    CC
-                  </span>
-                  <input
-                    value={composeCc}
-                    onChange={(event) => setComposeCc(event.target.value)}
-                    placeholder="Add recipient"
-                    autoCorrect="on"
-                    autoComplete="email"
-                    autoCapitalize="none"
-                    spellCheck
-                    className="w-full bg-transparent text-[0.9rem] leading-6 text-[var(--workspace-text-soft)] outline-none placeholder:text-[var(--workspace-text-faint)]"
-                  />
-                </label>
-                {showComposeBcc ? (
-                  <label className="grid grid-cols-[72px_minmax(0,1fr)] items-center gap-4 rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3">
-                    <span className="text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
-                      BCC
-                    </span>
+                  <div className="relative">
                     <input
-                      value={composeBcc}
-                      onChange={(event) => setComposeBcc(event.target.value)}
+                      value={composeTo}
+                      onChange={(event) => {
+                        setComposeTo(event.target.value);
+                        setActiveRecipientSuggestionField("to");
+                      }}
+                      onFocus={() => setActiveRecipientSuggestionField("to")}
+                      onBlur={handleComposeRecipientBlur}
                       placeholder="Add recipient"
                       autoCorrect="on"
                       autoComplete="email"
@@ -9657,6 +9800,55 @@ function MailboxView({
                       spellCheck
                       className="w-full bg-transparent text-[0.9rem] leading-6 text-[var(--workspace-text-soft)] outline-none placeholder:text-[var(--workspace-text-faint)]"
                     />
+                    {renderComposeRecipientSuggestions("to")}
+                  </div>
+                </label>
+                <label className="grid grid-cols-[72px_minmax(0,1fr)] items-center gap-4 rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3">
+                  <span className="text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                    CC
+                  </span>
+                  <div className="relative">
+                    <input
+                      value={composeCc}
+                      onChange={(event) => {
+                        setComposeCc(event.target.value);
+                        setActiveRecipientSuggestionField("cc");
+                      }}
+                      onFocus={() => setActiveRecipientSuggestionField("cc")}
+                      onBlur={handleComposeRecipientBlur}
+                      placeholder="Add recipient"
+                      autoCorrect="on"
+                      autoComplete="email"
+                      autoCapitalize="none"
+                      spellCheck
+                      className="w-full bg-transparent text-[0.9rem] leading-6 text-[var(--workspace-text-soft)] outline-none placeholder:text-[var(--workspace-text-faint)]"
+                    />
+                    {renderComposeRecipientSuggestions("cc")}
+                  </div>
+                </label>
+                {showComposeBcc ? (
+                  <label className="grid grid-cols-[72px_minmax(0,1fr)] items-center gap-4 rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3">
+                    <span className="text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                      BCC
+                    </span>
+                    <div className="relative">
+                      <input
+                        value={composeBcc}
+                        onChange={(event) => {
+                          setComposeBcc(event.target.value);
+                          setActiveRecipientSuggestionField("bcc");
+                        }}
+                        onFocus={() => setActiveRecipientSuggestionField("bcc")}
+                        onBlur={handleComposeRecipientBlur}
+                        placeholder="Add recipient"
+                        autoCorrect="on"
+                        autoComplete="email"
+                        autoCapitalize="none"
+                        spellCheck
+                        className="w-full bg-transparent text-[0.9rem] leading-6 text-[var(--workspace-text-soft)] outline-none placeholder:text-[var(--workspace-text-faint)]"
+                      />
+                      {renderComposeRecipientSuggestions("bcc")}
+                    </div>
                   </label>
                 ) : (
                   <button
