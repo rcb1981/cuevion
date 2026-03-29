@@ -7246,6 +7246,18 @@ function MailboxView({
                 >
                   {messageIsVisiblePriority ? "Remove priority" : "Mark as priority"}
                 </button>
+                {messageIsVisiblePriority ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onSetManualPriority(message.id, false);
+                      setDetailActionsMenuState(null);
+                    }}
+                    className={menuItemClass}
+                  >
+                    Mark as done
+                  </button>
+                ) : null}
                 <button
                   type="button"
                   onClick={() => {
@@ -9777,21 +9789,35 @@ function MailboxView({
                   Start collaboration…
                 </button>
                 {hasSingleSelection && selectedMessage ? (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      onSetManualPriority(
-                        selectedMessage.id,
-                        !isVisiblePriorityMessage(selectedMessage),
-                      );
-                      closeMenus();
-                    }}
-                    className={contextMenuMainItemClass}
-                  >
-                    {isVisiblePriorityMessage(selectedMessage)
-                      ? "Remove priority"
-                      : "Mark as priority"}
-                  </button>
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onSetManualPriority(
+                          selectedMessage.id,
+                          !isVisiblePriorityMessage(selectedMessage),
+                        );
+                        closeMenus();
+                      }}
+                      className={contextMenuMainItemClass}
+                    >
+                      {isVisiblePriorityMessage(selectedMessage)
+                        ? "Remove priority"
+                        : "Mark as priority"}
+                    </button>
+                    {isVisiblePriorityMessage(selectedMessage) ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          onSetManualPriority(selectedMessage.id, false);
+                          closeMenus();
+                        }}
+                        className={contextMenuMainItemClass}
+                      >
+                        Mark as done
+                      </button>
+                    ) : null}
+                  </>
                 ) : null}
                 {!isSharedView &&
                 !activeSmartFolder &&
@@ -11270,6 +11296,18 @@ function MailboxView({
                       ? "Remove priority"
                       : "Mark as priority"}
                   </button>
+                  {isVisiblePriorityMessage(contextMenuMessage) ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onSetManualPriority(contextMenuMessage.id, false);
+                        closeMenus();
+                      }}
+                      className={contextMenuMainItemClass}
+                    >
+                      Mark as done
+                    </button>
+                  ) : null}
                 </div>
 
                 {!isReadOnlySmartFolderView ? (
