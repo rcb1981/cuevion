@@ -7473,6 +7473,16 @@ function MailboxView({
         },
       }));
 
+      if (
+        composeSourceMessage &&
+        (composeMode === "reply" ||
+          composeMode === "reply_all" ||
+          composeMode === "forward") &&
+        isVisiblePriorityMessage(composeSourceMessage)
+      ) {
+        onSetManualPriority(composeSourceMessage.id, false);
+      }
+
       if ((composeMode === "reply" || composeMode === "reply_all") && composeSourceMessage) {
         setIsComposeOpen(false);
         setSelectionState(
