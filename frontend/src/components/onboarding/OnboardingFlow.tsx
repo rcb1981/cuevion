@@ -9,6 +9,7 @@ import {
   applyProviderDefaults,
   isImapCredentialsProvider,
 } from "../../lib/inboxProviderDefaults";
+import { mapRoleToInternal } from "../../lib/roleMapping";
 import { saveLiveInboxSnapshot } from "../../lib/liveInboxSnapshots";
 import type {
   CustomInboxDefinition,
@@ -121,6 +122,7 @@ export function OnboardingFlow({
     onStateChange((current) => ({
       ...current,
       primaryRole: role,
+      internalRole: mapRoleToInternal(role),
       secondaryRole: current.secondaryRole === role ? null : current.secondaryRole,
     }));
   };

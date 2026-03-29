@@ -1,3 +1,5 @@
+import type { InternalRole } from "../lib/roleMapping";
+
 export type RoleId =
   | "label_ar_manager"
   | "label_manager"
@@ -60,6 +62,7 @@ export interface CustomInboxDefinition {
 
 export interface OnboardingState {
   primaryRole: RoleId | null;
+  internalRole: InternalRole | null;
   secondaryRole: RoleId | null;
   inboxCount: InboxCountId | null;
   selectedInboxes: InboxId[];
