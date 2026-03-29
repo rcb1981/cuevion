@@ -39,6 +39,7 @@ export type ProviderId =
   | "icloud"
   | "yahoo"
   | "custom_imap";
+export type FocusPreferenceLevel = "high" | "medium" | "low";
 
 export interface CustomImapSettings {
   host: string;
@@ -64,6 +65,12 @@ export interface OnboardingState {
   primaryRole: RoleId | null;
   internalRole: InternalRole | null;
   secondaryRole: RoleId | null;
+  focusPreferences: {
+    demos: FocusPreferenceLevel;
+    promo: FocusPreferenceLevel;
+    finance: FocusPreferenceLevel;
+    legal: FocusPreferenceLevel;
+  };
   inboxCount: InboxCountId | null;
   selectedInboxes: InboxId[];
   workflowStyle: WorkflowStyleId | null;

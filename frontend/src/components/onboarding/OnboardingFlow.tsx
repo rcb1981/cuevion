@@ -14,6 +14,7 @@ import { saveLiveInboxSnapshot } from "../../lib/liveInboxSnapshots";
 import type {
   CustomInboxDefinition,
   CustomImapSettings,
+  FocusPreferenceLevel,
   InboxId,
   OnboardingState,
   ProviderId,
@@ -24,14 +25,15 @@ import { NavigationBar } from "./NavigationBar";
 import { ProgressIndicator } from "./ProgressIndicator";
 import { StepComplete } from "./StepComplete";
 import { StepConnectInboxes } from "./StepConnectInboxes";
+import { StepFocusPreferences } from "./StepFocusPreferences";
 import { StepInboxCount } from "./StepInboxCount";
 import { StepInboxSetup } from "./StepInboxSetup";
 import { StepRoleSelection } from "./StepRoleSelection";
 import { StepWelcome } from "./StepWelcome";
 import { StepWorkflowStyle } from "./StepWorkflowStyle";
 
-const totalScreens = 7;
-const totalProgressSteps = 6;
+const totalScreens = 8;
+const totalProgressSteps = 7;
 
 function getMaxActiveInboxCount(inboxCount: OnboardingState["inboxCount"]) {
   if (inboxCount === "1") return 1;
@@ -65,13 +67,18 @@ export function OnboardingFlow({
 }: OnboardingFlowProps) {
   const [step, setStep] = useState(0);
   const showSetupProgress = step > 0;
-  const isFinalScreen = step === 6;
+  const isFinalScreen = step === 7;
   const sidebarHelperText =
-    step > 0 && step < 6
-      ? onboardingText.sidebar.stepHelper[
-          step as keyof typeof onboardingText.sidebar.stepHelper
-        ]
-      : null;
+    (
+      {
+        1: onboardingText.sidebar.stepHelper[1],
+        2: "Set what matters most to you inside the inbox before the workspace is structured.",
+        3: onboardingText.sidebar.stepHelper[2],
+        4: onboardingText.sidebar.stepHelper[3],
+        5: onboardingText.sidebar.stepHelper[4],
+        6: onboardingText.sidebar.stepHelper[5],
+      } as const
+    )[step as 1 | 2 | 3 | 4 | 5 | 6] ?? null;
 
   const getInboxConnection = (current: OnboardingState, inboxId: InboxId) =>
     current.inboxConnections[inboxId] ?? createInboxConnection();
@@ -81,19 +88,19 @@ export function OnboardingFlow({
       return Boolean(state.primaryRole);
     }
 
-    if (step === 2) {
+    if (step === 3) {
       return Boolean(state.inboxCount);
     }
 
-    if (step === 3) {
+    if (step === 4) {
       return state.selectedInboxes.length >= getRequiredInboxCount(state.inboxCount);
     }
 
-    if (step === 4) {
+    if (step === 5) {
       return Boolean(state.workflowStyle);
     }
 
-    if (step === 5) {
+    if (step === 6) {
       return state.selectedInboxes.every((inboxId) => {
         const connection = getInboxConnection(state, inboxId);
         if (
@@ -124,6 +131,19 @@ export function OnboardingFlow({
       primaryRole: role,
       internalRole: mapRoleToInternal(role),
       secondaryRole: current.secondaryRole === role ? null : current.secondaryRole,
+    }));
+  };
+
+  const setFocusPreference = (
+    field: keyof OnboardingState["focusPreferences"],
+    value: FocusPreferenceLevel,
+  ) => {
+    onStateChange((current) => ({
+      ...current,
+      focusPreferences: {
+        ...current.focusPreferences,
+        [field]: value,
+      },
     }));
   };
 
@@ -309,6 +329,13 @@ export function OnboardingFlow({
         );
       case 2:
         return (
+          <StepFocusPreferences
+            value={state.focusPreferences}
+            onChange={setFocusPreference}
+          />
+        );
+      case 3:
+        return (
           <StepInboxCount
             value={state.inboxCount}
             onChange={(inboxCount) =>
@@ -337,7 +364,7 @@ export function OnboardingFlow({
             }
           />
         );
-      case 3:
+      case 4:
         return (
           <StepInboxSetup
             selectedInboxes={state.selectedInboxes}
@@ -348,7 +375,7 @@ export function OnboardingFlow({
             onAddCustomInbox={addCustomInbox}
           />
         );
-      case 4:
+      case 5:
         return (
           <StepWorkflowStyle
             value={state.workflowStyle}
@@ -357,7 +384,7 @@ export function OnboardingFlow({
             }
           />
         );
-      case 5:
+      case 6:
         return (
           <StepConnectInboxes
             selectedInboxes={state.selectedInboxes}
@@ -371,7 +398,7 @@ export function OnboardingFlow({
             onConnectInbox={connectInbox}
           />
         );
-      case 6:
+      case 7:
         return (
           <StepComplete
             connectedInboxCount={state.selectedInboxes.filter(
@@ -387,9 +414,9 @@ export function OnboardingFlow({
   const nextLabel =
     step === 0
       ? onboardingText.navigation.startSetup
-      : step === 5
+      : step === 6
         ? onboardingText.navigation.completeSetup
-        : step === 6
+        : step === 7
           ? onboardingText.navigation.goToDashboard
           : onboardingText.navigation.next;
 
@@ -439,7 +466,7 @@ export function OnboardingFlow({
                 </div>
                 {showSetupProgress ? (
                   <ProgressIndicator
-                    currentStep={step === 6 ? totalProgressSteps : step}
+                    currentStep={step === 7 ? totalProgressSteps : step}
                     totalSteps={totalProgressSteps}
                     variant="sidebar"
                     sidebarLabel={
@@ -454,7 +481,7 @@ export function OnboardingFlow({
               {showSetupProgress ? (
                 <div className="mb-8 lg:hidden">
                   <ProgressIndicator
-                    currentStep={step === 6 ? totalProgressSteps : step}
+                    currentStep={step === 7 ? totalProgressSteps : step}
                     totalSteps={totalProgressSteps}
                   />
                 </div>
@@ -462,11 +489,11 @@ export function OnboardingFlow({
               <div className="flex-1">{renderStep()}</div>
               <NavigationBar
                 canGoBack={step > 0}
-                backLabel={step === 6 ? "Edit setup" : undefined}
+                backLabel={step === 7 ? "Edit setup" : undefined}
                 onBack={back}
-                onNext={step === 6 ? onOpenWorkspace : next}
+                onNext={step === 7 ? onOpenWorkspace : next}
                 nextLabel={nextLabel}
-                isNextDisabled={step === 6 ? false : !canGoNext}
+                isNextDisabled={step === 7 ? false : !canGoNext}
               />
             </section>
           </div>
