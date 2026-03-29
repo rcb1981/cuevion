@@ -5778,6 +5778,7 @@ function MailboxView({
     "reading-pane" | "full-message" | null
   >(null);
   const readingLearningMenuRef = useRef<HTMLDivElement | null>(null);
+  const contextMenuRef = useRef<HTMLDivElement | null>(null);
   const detailActionsMenuRef = useRef<HTMLDivElement | null>(null);
   const [detailActionsMenuState, setDetailActionsMenuState] = useState<{
     messageId: string;
@@ -8786,7 +8787,8 @@ function MailboxView({
   const contextMenuPosition = contextMenuState
     ? (() => {
         const menuWidth = 238;
-        const menuHeight = 388;
+        const menuHeight =
+          contextMenuRef.current?.getBoundingClientRect().height ?? 388;
         const viewportPadding = 12;
         const mailListRect = mailListViewportRef.current?.getBoundingClientRect();
         const boundsLeft = mailListRect?.left ?? viewportPadding;
@@ -11116,6 +11118,7 @@ function MailboxView({
         {contextMenuState && contextMenuMessage && contextMenuPosition
           ? createPortal(
               <div
+                ref={contextMenuRef}
                 data-theme={themeMode}
                 className="fixed z-30 min-w-[238px] rounded-[20px] border border-[var(--workspace-menu-border)] bg-[var(--workspace-menu-bg)] p-2 shadow-panel"
                 style={contextMenuPosition}
