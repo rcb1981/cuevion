@@ -19525,6 +19525,7 @@ export function WorkspaceShell({
   const getLinkedReviewBadgeLabel = (_messageId: string) => null;
   const livePriorityInboxEntries = (() => {
     const seenMessageIds = new Set<string>();
+    const seenMessageSignatures = new Set<string>();
     const uniqueEntries: Array<{
       mailboxId: InboxId;
       mailboxTitle: string;
@@ -19537,11 +19538,17 @@ export function WorkspaceShell({
           continue;
         }
 
-        if (seenMessageIds.has(message.id)) {
+        const messageSignature = getMessageSignature(message);
+
+        if (
+          seenMessageIds.has(message.id) ||
+          seenMessageSignatures.has(messageSignature)
+        ) {
           continue;
         }
 
         seenMessageIds.add(message.id);
+        seenMessageSignatures.add(messageSignature);
         uniqueEntries.push({
           mailboxId: candidate.id,
           mailboxTitle: candidate.title,
