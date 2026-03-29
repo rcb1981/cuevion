@@ -529,6 +529,7 @@ const CUEVION_SENT_MESSAGES_STORAGE_KEY = "cuevion-sent-messages";
 const CUEVION_TRASH_MESSAGES_STORAGE_KEY = "cuevion-trash-messages";
 const CUEVION_SPAM_MESSAGES_STORAGE_KEY = "cuevion-spam-messages";
 const CUEVION_ARCHIVE_MESSAGES_STORAGE_KEY = "cuevion-archive-messages";
+const CUEVION_MANUAL_PRIORITY_OVERRIDES_STORAGE_KEY = "cuevion-manual-priority-overrides";
 const MAIL_SIGNATURES_STORAGE_KEY = "cuevion-mail-signatures";
 const MAIL_OUT_OF_OFFICE_STORAGE_KEY = "cuevion-mail-out-of-office";
 const OUT_OF_OFFICE_REPLY_LOG_STORAGE_KEY = "cuevion-out-of-office-reply-log";
@@ -579,6 +580,13 @@ function buildArchiveMessagesStorageKey(
   orderedMailboxKey: string,
 ) {
   return `${CUEVION_ARCHIVE_MESSAGES_STORAGE_KEY}:${workspaceUserId}:${orderedMailboxKey}`;
+}
+
+function buildManualPriorityOverridesStorageKey(
+  workspaceUserId: string,
+  orderedMailboxKey: string,
+) {
+  return `${CUEVION_MANUAL_PRIORITY_OVERRIDES_STORAGE_KEY}:${workspaceUserId}:${orderedMailboxKey}`;
 }
 
 function createEmptySignatureSettings(): InboxSignatureSettings {
@@ -2194,16 +2202,25 @@ function resolveVisiblePrioritySignal(
 }
 
 function isMessageVisiblePriority(
-  message: Pick<MailMessage, "signal">,
+  message: Pick<MailMessage, "signal" | "priorityScore">,
   override?: ManualPriorityOverride,
 ) {
-  return resolveVisiblePrioritySignal(message, override) === "Priority";
+  if (override === "priority") {
+    return true;
+  }
+
+  if (override === "removed") {
+    return false;
+  }
+
+  return message.signal === "Priority" || message.priorityScore === "high";
 }
 
 function isLiveInboxPriorityMessage(
   message: Pick<MailMessage, "signal" | "priorityScore">,
+  override?: ManualPriorityOverride,
 ) {
-  return message.signal === "Priority" || message.priorityScore === "high";
+  return isMessageVisiblePriority(message, override);
 }
 
 function normalizeThreadSubject(subject: string) {
@@ -10753,10 +10770,10 @@ function MailboxView({
                             : "text-[color:rgba(67,62,56,0.94)]";
                       const subjectPriorityClass =
                         themeMode === "dark"
-                          ? isVisiblePriorityMessage(message) || message.priorityScore === "high"
+                          ? isVisiblePriorityMessage(message)
                             ? "text-[color:rgba(250,246,240,0.99)]"
                             : "text-[color:rgba(241,235,227,0.96)]"
-                          : isVisiblePriorityMessage(message) || message.priorityScore === "high"
+                          : isVisiblePriorityMessage(message)
                             ? "text-[color:rgba(67,62,56,0.98)]"
                             : "text-[color:rgba(61,56,50,0.96)]";
                       const subjectReadabilityClass = message.unread
@@ -18620,6 +18637,10 @@ export function WorkspaceShell({
     currentWorkspaceUserId,
     mailboxOrderKey,
   );
+  const manualPriorityOverridesStorageKey = buildManualPriorityOverridesStorageKey(
+    currentWorkspaceUserId,
+    mailboxOrderKey,
+  );
   const liveMailboxSyncKey = orderedMailboxes
     .map((mailbox) => `${mailbox.id}:${mailbox.email}:${mailbox.title}`)
     .join("|");
@@ -19034,7 +19055,23 @@ export function WorkspaceShell({
   const [completedPriorityReviewIds, setCompletedPriorityReviewIds] = useState<string[]>([]);
   const [manualPriorityOverrides, setManualPriorityOverrides] = useState<
     Partial<Record<string, ManualPriorityOverride>>
-  >({});
+  >(() => {
+    if (typeof window === "undefined") {
+      return {};
+    }
+
+    const storedValue = window.localStorage.getItem(manualPriorityOverridesStorageKey);
+
+    if (!storedValue) {
+      return {};
+    }
+
+    try {
+      return JSON.parse(storedValue) as Partial<Record<string, ManualPriorityOverride>>;
+    } catch {
+      return {};
+    }
+  });
   const isGuestInviteUser = authenticatedUser?.userType === "guest";
 
   const updateWorkspaceMessageById = (
@@ -19098,7 +19135,9 @@ export function WorkspaceShell({
   const getLinkedReviewBadgeLabel = (_messageId: string) => null;
   const livePriorityInboxEntries = orderedMailboxes.flatMap((candidate) =>
     (mailboxStore[candidate.id]?.Inbox ?? [])
-      .filter((message) => isLiveInboxPriorityMessage(message))
+      .filter((message) =>
+        isLiveInboxPriorityMessage(message, manualPriorityOverrides[message.id])
+      )
       .map((message) => ({
         mailboxId: candidate.id,
         mailboxTitle: candidate.title,
@@ -20474,11 +20513,43 @@ export function WorkspaceShell({
       return;
     }
 
+    const storedValue = window.localStorage.getItem(manualPriorityOverridesStorageKey);
+
+    if (!storedValue) {
+      setManualPriorityOverrides({});
+      return;
+    }
+
+    try {
+      setManualPriorityOverrides(
+        JSON.parse(storedValue) as Partial<Record<string, ManualPriorityOverride>>,
+      );
+    } catch {
+      setManualPriorityOverrides({});
+    }
+  }, [manualPriorityOverridesStorageKey]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
     window.localStorage.setItem(
       messageUnreadOverridesStorageKey,
       JSON.stringify(messageUnreadOverrides),
     );
   }, [messageUnreadOverrides, messageUnreadOverridesStorageKey]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    window.localStorage.setItem(
+      manualPriorityOverridesStorageKey,
+      JSON.stringify(manualPriorityOverrides),
+    );
+  }, [manualPriorityOverrides, manualPriorityOverridesStorageKey]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
