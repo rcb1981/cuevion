@@ -9,23 +9,35 @@ import type {
 } from "../types/onboarding";
 import { onboardingText } from "../copy/onboardingCopy";
 
+function normalizeRoleOption(role: {
+  id: RoleId;
+  label: string;
+  description: string;
+}) {
+  if (role.id === "admin" && role.label === "Admin") {
+    return { ...role, label: "Operations Manager" };
+  }
+
+  return { ...role };
+}
+
 export const primaryRoleOptions: Array<{
   id: RoleId;
   label: string;
   description: string;
-}> = onboardingText.roles.primary.map((role) => ({ ...role }));
+}> = onboardingText.roles.primary.map(normalizeRoleOption);
 
 export const secondaryRoleOptions: Array<{
   id: RoleId;
   label: string;
   description: string;
-}> = onboardingText.roles.secondary.map((role) => ({ ...role }));
+}> = onboardingText.roles.secondary.map(normalizeRoleOption);
 
 export const extraRoleOptions: Array<{
   id: RoleId;
   label: string;
   description: string;
-}> = onboardingText.roles.extra.map((role) => ({ ...role }));
+}> = onboardingText.roles.extra.map(normalizeRoleOption);
 
 export const allRoleOptions = [
   ...new Map(
