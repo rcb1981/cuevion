@@ -6179,7 +6179,7 @@ function MailboxView({
       selection.removeAllRanges();
       selection.addRange(range);
     });
-  }, [composeBody.length, composeMode, isComposeOpen]);
+  }, [composeMode, isComposeOpen]);
 
   useEffect(() => {
     const editor = composeBodyInputRef.current;
