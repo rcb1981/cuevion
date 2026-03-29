@@ -926,7 +926,9 @@ function buildComposeBody({
   sourceMessage: MailMessage | null;
   signature?: InboxSignatureSettings | null;
 }) {
-  const quoteHtml = sourceMessage ? buildComposeQuoteHtml(mode, sourceMessage) : "";
+  const quoteHtml = sourceMessage
+    ? `<div><br></div><div><br></div>${buildComposeQuoteHtml(mode, sourceMessage)}`
+    : "";
   return withComposeSignatureMarkup(quoteHtml, signature ?? null);
 }
 
