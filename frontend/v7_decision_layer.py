@@ -169,6 +169,7 @@ def decide_message_behavior(
     engine_result: EngineResult,
     user_config: UserConfig,
     mailbox_config: MailboxConfig,
+    internal_role: str | None = None,
 ) -> FinalDecision:
     category = engine_result.category or "unknown"
     base_visibility = BASE_CATEGORY_VISIBILITY.get(category, "show_low")

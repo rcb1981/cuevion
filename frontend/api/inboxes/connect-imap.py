@@ -30,6 +30,9 @@ class handler(BaseHTTPRequestHandler):
             )
             return
 
+        internal_role = payload.get("internalRole", None)
+        payload["internalRole"] = internal_role
+
         try:
             from imap_connect_preview import build_connect_preview_response
 

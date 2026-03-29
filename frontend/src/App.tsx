@@ -64,6 +64,7 @@ function normalizeOnboardingState(value: Partial<OnboardingState>): OnboardingSt
   return {
     ...initialOnboardingState,
     ...value,
+    internalRole: value.internalRole ?? null,
     customInboxes: Array.isArray(value.customInboxes) ? value.customInboxes : [],
     inboxConnections: {
       ...initialOnboardingState.inboxConnections,
