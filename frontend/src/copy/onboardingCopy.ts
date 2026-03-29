@@ -26,8 +26,8 @@ export const onboardingCopy = {
       },
     },
     welcome: {
-      title: "Built for modern music workflows.",
-      text: "Built for modern music workflows",
+      title: "Organize your inbox workflow",
+      text: "Set up your workspace in a few steps.",
     },
     roles: {
       title: "Choose your role",
