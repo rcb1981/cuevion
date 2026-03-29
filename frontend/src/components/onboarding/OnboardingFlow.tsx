@@ -631,7 +631,17 @@ export function OnboardingFlow({
                 canGoBack={step > 0}
                 backLabel={step === 7 ? "Edit setup" : undefined}
                 onBack={back}
-                onNext={step === 7 ? () => onOpenWorkspace(userConfig) : next}
+                onNext={
+                  step === 7
+                    ? () => {
+                        console.log(
+                          "[DEBUG] OnboardingFlow selectedInboxes:",
+                          state.selectedInboxes,
+                        );
+                        onOpenWorkspace(userConfig);
+                      }
+                    : next
+                }
                 nextLabel={nextLabel}
                 isNextDisabled={step === 7 ? false : !canGoNext}
               />

@@ -200,6 +200,9 @@ export function StepConnectInboxes({
       return;
     }
 
+    console.log("[DEBUG] StepConnectInboxes selectedInboxes:", selectedInboxes);
+    console.log("[DEBUG] Sending to backend selectedInboxes:", selectedInboxes);
+
     const response = await connectInboxWithImap({
       provider: connection.provider as ProviderId,
       email: connection.email.trim(),
@@ -213,6 +216,7 @@ export function StepConnectInboxes({
       password: connection.customImap.password,
       internalRole,
       focusPreferences,
+      selectedInboxes,
     });
 
     if (response.ok) {

@@ -31,7 +31,11 @@ class handler(BaseHTTPRequestHandler):
             return
 
         internal_role = payload.get("internalRole", None)
+        focus_preferences = payload.get("focusPreferences", None)
+        selected_inboxes = payload.get("selectedInboxes", None)
+        print("[DEBUG] Backend received selectedInboxes:", selected_inboxes)
         payload["internalRole"] = internal_role
+        payload["focusPreferences"] = focus_preferences
 
         try:
             from imap_connect_preview import build_connect_preview_response
