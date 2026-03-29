@@ -9686,6 +9686,8 @@ function MailboxView({
                     suppressContentEditableWarning
                     role="textbox"
                     aria-multiline="true"
+                    dir="ltr"
+                    style={{ direction: "ltr" }}
                     onInput={syncComposeBodyValue}
                     onKeyDown={handleComposeBodyKeyDown}
                     onPaste={handleComposeBodyPaste}
@@ -9959,7 +9961,8 @@ function MailboxView({
                     !isSharedView &&
                     !activeSmartFolder &&
                     folder === activeFolder;
-                  const count = getFolderBadgeCount(folder);
+                      const count = getFolderBadgeCount(folder);
+                      const shouldShowFolderCount = folder !== "Sent";
                   const dragTargetId = `folder-${folder}`;
                   const isDragTargetActive = dragTargetKey === dragTargetId;
                   const folderLabel =
@@ -10001,9 +10004,11 @@ function MailboxView({
                         <span className="text-[0.8rem] font-medium uppercase tracking-[0.14em]">
                           {folderLabel}
                         </span>
-                        <span className="text-[0.72rem] text-[var(--workspace-text-faint)]">
-                          {count}
-                        </span>
+                        {shouldShowFolderCount ? (
+                          <span className="text-[0.72rem] text-[var(--workspace-text-faint)]">
+                            {count}
+                          </span>
+                        ) : null}
                       </button>
                       {folder === "Inbox" ? (
                         <>
@@ -10473,7 +10478,8 @@ function MailboxView({
                           ? formatSharedContextHint(message.sharedContext)
                           : null;
                       const visibleSignal = getVisibleMessageSignal(message);
-                      const signal = message.ui_signal || "NEW";
+                      const signal =
+                        message.ui_signal ?? (message.signal === "Sent" ? "" : "NEW");
                       const senderTextClass =
                         themeMode === "dark"
                           ? message.unread
@@ -10619,13 +10625,15 @@ function MailboxView({
                               <div className={`truncate text-[0.78rem] leading-5 ${snippetTextClass}`}>
                                 {compactSnippet}
                               </div>
-                              <div
-                                className={`pt-0.5 text-[0.6rem] font-medium uppercase tracking-[0.12em] ${signalTextClass}`}
-                              >
-                                <span className="text-xs opacity-70">
-                                  {signal}
-                                </span>
-                              </div>
+                              {signal ? (
+                                <div
+                                  className={`pt-0.5 text-[0.6rem] font-medium uppercase tracking-[0.12em] ${signalTextClass}`}
+                                >
+                                  <span className="text-xs opacity-70">
+                                    {signal}
+                                  </span>
+                                </div>
+                              ) : null}
                               {sharedContextHint ? (
                                 <div className="pt-1 text-[0.68rem] leading-5 text-[color:rgba(120,111,100,0.72)]">
                                   {sharedContextHint}
