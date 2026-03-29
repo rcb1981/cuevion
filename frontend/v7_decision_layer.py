@@ -165,6 +165,55 @@ def is_business_like(category: str) -> bool:
     }
 
 
+def apply_focus_preference_boost(
+    category: str,
+    current_priority: str,
+    focus_preferences: dict | None,
+) -> str:
+    if not focus_preferences:
+        return current_priority
+
+    preference_map = {
+        "demo": "demos",
+        "high_priority_demo": "demos",
+        "promo": "promo",
+        "promo_reminder": "promoReminders",
+        "finance": "finance",
+        "royalty_statement": "royalties",
+        "legal": "legal",
+        "legal_rights": "legal",
+        "contract": "legal",
+        "rights_issue": "legal",
+        "business": "business",
+        "business_reminder": "paymentReminders",
+        "workflow_update": "updates",
+        "distributor_update": "distribution",
+        "info": "updates",
+    }
+
+    key = preference_map.get(category)
+    if not key:
+        return current_priority
+
+    pref = focus_preferences.get(key, "medium")
+
+    # HIGH -> promote
+    if pref == "high":
+        if current_priority == "LOW":
+            return "NORMAL"
+        if current_priority == "NORMAL":
+            return "PRIORITY"
+
+    # LOW -> demote (but never kill true priority)
+    if pref == "low":
+        if current_priority == "PRIORITY":
+            return "NORMAL"
+        if current_priority == "NORMAL":
+            return "LOW"
+
+    return current_priority
+
+
 def decide_message_behavior(
     engine_result: EngineResult,
     user_config: UserConfig,
@@ -420,34 +469,11 @@ def decide_message_behavior(
                 final_priority = "PRIORITY"
 
     if focus_preferences:
-        demo_pref = focus_preferences.get("demos", "medium")
-        promo_pref = focus_preferences.get("promo", "medium")
-        finance_pref = focus_preferences.get("finance", "medium")
-        legal_pref = focus_preferences.get("legal", "medium")
-
-        if category in ["demo", "high_priority_demo"]:
-            if demo_pref == "high":
-                final_priority = "PRIORITY"
-            elif demo_pref == "low" and final_priority != "PRIORITY":
-                final_priority = "LOW"
-
-        if category in ["promo", "promo_reminder"]:
-            if promo_pref == "high" and final_priority == "LOW":
-                final_priority = "NORMAL"
-            elif promo_pref == "low" and final_priority != "PRIORITY":
-                final_priority = "LOW"
-
-        if category in ["finance", "royalty_statement"]:
-            if finance_pref == "high":
-                final_priority = "PRIORITY"
-            elif finance_pref == "low" and final_priority != "PRIORITY":
-                final_priority = "LOW"
-
-        if category in ["legal", "legal_rights", "contract", "rights_issue"]:
-            if legal_pref == "high":
-                final_priority = "PRIORITY"
-            elif legal_pref == "low" and final_priority != "PRIORITY":
-                final_priority = "LOW"
+        final_priority = apply_focus_preference_boost(
+            category,
+            final_priority,
+            focus_preferences,
+        )
 
     if category == "demo":
         explanation.final_summary = "Shown prominently because this looks like a real demo submission."
