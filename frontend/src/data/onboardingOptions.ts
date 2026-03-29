@@ -92,6 +92,7 @@ export function createCustomInboxId(name: string): InboxId {
 
 export const initialOnboardingState: OnboardingState = {
   primaryRole: null,
+  internalRole: null,
   secondaryRole: null,
   inboxCount: null,
   selectedInboxes: [],

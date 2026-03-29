@@ -24,6 +24,7 @@ type ConnectInboxRequest = {
   ssl: boolean;
   username: string;
   password: string;
+  internalRole?: string | null;
 };
 
 type ConnectInboxResponse = {

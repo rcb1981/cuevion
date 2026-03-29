@@ -30,6 +30,7 @@ interface StepConnectInboxesProps {
   selectedInboxes: InboxId[];
   customInboxes: CustomInboxDefinition[];
   inboxConnections: Record<string, InboxConnection>;
+  internalRole?: string | null;
   onProviderChange: (inboxId: InboxId, provider: ProviderId) => void;
   onEmailChange: (inboxId: InboxId, email: string) => void;
   onCustomImapChange: (
@@ -145,6 +146,7 @@ export function StepConnectInboxes({
   selectedInboxes,
   customInboxes,
   inboxConnections,
+  internalRole,
   onProviderChange,
   onEmailChange,
   onCustomImapChange,
@@ -206,6 +208,7 @@ export function StepConnectInboxes({
           ? connection.email.trim()
           : connection.customImap.username.trim(),
       password: connection.customImap.password,
+      internalRole,
     });
 
     if (response.ok) {

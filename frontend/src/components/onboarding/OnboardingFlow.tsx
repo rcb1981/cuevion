@@ -363,6 +363,7 @@ export function OnboardingFlow({
             selectedInboxes={state.selectedInboxes}
             customInboxes={state.customInboxes}
             inboxConnections={state.inboxConnections}
+            internalRole={state.internalRole}
             onProviderChange={setProvider}
             onEmailChange={setEmail}
             onCustomImapChange={setCustomImap}
