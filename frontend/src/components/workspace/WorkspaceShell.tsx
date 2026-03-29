@@ -8786,13 +8786,17 @@ function MailboxView({
   const contextMenuPosition = contextMenuState
     ? (() => {
         const menuWidth = 238;
-        const menuHeight = 420;
         const viewportPadding = 12;
         const mailListRect = mailListViewportRef.current?.getBoundingClientRect();
         const boundsLeft = mailListRect?.left ?? viewportPadding;
         const boundsTop = mailListRect?.top ?? viewportPadding;
         const boundsRight = mailListRect?.right ?? window.innerWidth - viewportPadding;
         const boundsBottom = mailListRect?.bottom ?? window.innerHeight - viewportPadding;
+        const maxMenuHeight = Math.max(
+          180,
+          boundsBottom - boundsTop - viewportPadding * 2,
+        );
+        const menuHeight = Math.min(520, maxMenuHeight);
         const openDownward =
           contextMenuState.y + menuHeight + viewportPadding <= boundsBottom;
         const preferredTop = openDownward
@@ -8815,6 +8819,7 @@ function MailboxView({
               boundsBottom - menuHeight - viewportPadding,
             ),
           ),
+          maxHeight: maxMenuHeight,
         };
       })()
     : null;
@@ -11117,7 +11122,7 @@ function MailboxView({
           ? createPortal(
               <div
                 data-theme={themeMode}
-                className="fixed z-30 min-w-[238px] rounded-[20px] border border-[var(--workspace-menu-border)] bg-[var(--workspace-menu-bg)] p-2 shadow-panel"
+                className="cuevion-dark-scroll cuevion-soft-scroll fixed z-30 min-w-[238px] overflow-y-auto rounded-[20px] border border-[var(--workspace-menu-border)] bg-[var(--workspace-menu-bg)] p-2 shadow-panel"
                 style={contextMenuPosition}
                 onMouseDown={(event) => event.stopPropagation()}
               >
