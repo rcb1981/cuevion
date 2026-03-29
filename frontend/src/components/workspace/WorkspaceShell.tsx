@@ -8901,7 +8901,7 @@ function MailboxView({
             anchorY: contextMenuState.learningAnchorY,
             anchorHeight: contextMenuState.learningAnchorHeight,
             submenuWidth: 210,
-            submenuHeight: (learningMailboxTargets.length + 6) * 32 + 40,
+            submenuHeight: Math.min((learningMailboxTargets.length + 6) * 32 + 40, 360),
             interactionRect,
           });
         })()
@@ -8921,7 +8921,7 @@ function MailboxView({
             anchorY: contextMenuState.learningAnchorY,
             anchorHeight: contextMenuState.learningAnchorHeight,
             submenuWidth: 228,
-            submenuHeight: learningMailboxTargets.length * 32 + 48,
+            submenuHeight: Math.min(learningMailboxTargets.length * 32 + 48, 320),
             interactionRect,
           });
         })()
@@ -11444,8 +11444,14 @@ function MailboxView({
           ? createPortal(
               <div
                 data-theme={themeMode}
-                className="fixed z-[31] w-[210px] rounded-[20px] border border-[var(--workspace-menu-border)] bg-[var(--workspace-menu-bg)] p-2 shadow-panel"
-                style={learningSubmenuPosition}
+                className="cuevion-dark-scroll cuevion-soft-scroll fixed z-[31] w-[210px] max-h-[360px] overflow-y-auto rounded-[20px] border border-[var(--workspace-menu-border)] bg-[var(--workspace-menu-bg)] p-2 shadow-panel"
+                style={{
+                  ...learningSubmenuPosition,
+                  colorScheme: themeMode,
+                  scrollbarWidth: "thin",
+                  scrollbarColor:
+                    "var(--workspace-scrollbar-thumb) var(--workspace-scrollbar-track)",
+                }}
                 onMouseDown={(event) => event.stopPropagation()}
               >
                 <div className="space-y-1">
@@ -11542,8 +11548,14 @@ function MailboxView({
           ? createPortal(
               <div
                 data-theme={themeMode}
-                className="fixed z-[31] w-[228px] rounded-[20px] border border-[var(--workspace-menu-border)] bg-[var(--workspace-menu-bg)] p-2 shadow-panel"
-                style={learningChooserPosition}
+                className="cuevion-dark-scroll cuevion-soft-scroll fixed z-[31] w-[228px] max-h-[320px] overflow-y-auto rounded-[20px] border border-[var(--workspace-menu-border)] bg-[var(--workspace-menu-bg)] p-2 shadow-panel"
+                style={{
+                  ...learningChooserPosition,
+                  colorScheme: themeMode,
+                  scrollbarWidth: "thin",
+                  scrollbarColor:
+                    "var(--workspace-scrollbar-thumb) var(--workspace-scrollbar-track)",
+                }}
                 onMouseDown={(event) => event.stopPropagation()}
               >
                 <div className="px-3 pb-2 pt-1 text-[0.66rem] font-medium uppercase tracking-[0.12em] text-[var(--workspace-text-faint)]">
