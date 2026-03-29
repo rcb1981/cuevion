@@ -21,7 +21,6 @@ import type {
   OnboardingState,
   ProviderId,
   RoleId,
-  WorkflowStyleId,
 } from "../../types/onboarding";
 import type { UserConfig } from "../../types/userConfig";
 import { NavigationBar } from "./NavigationBar";
@@ -33,10 +32,13 @@ import { StepInboxCount } from "./StepInboxCount";
 import { StepInboxSetup } from "./StepInboxSetup";
 import { StepRoleSelection } from "./StepRoleSelection";
 import { StepWelcome } from "./StepWelcome";
-import { StepWorkflowStyle } from "./StepWorkflowStyle";
 
-const totalScreens = 8;
-const totalProgressSteps = 7;
+const totalScreens = 7;
+const totalProgressSteps = 6;
+
+function dedupeInboxes(inboxes: Array<InboxId | null | undefined>) {
+  return [...new Set(inboxes.filter((inboxId): inboxId is InboxId => Boolean(inboxId)))];
+}
 
 function getMaxActiveInboxCount(inboxCount: OnboardingState["inboxCount"]) {
   if (inboxCount === "1") return 1;
@@ -53,6 +55,37 @@ function getRequiredInboxCount(inboxCount: OnboardingState["inboxCount"]) {
   if (inboxCount === "4+") return 4;
   if (inboxCount === "not_sure") return 2;
   return 1;
+}
+
+function buildSelectedInboxesForCount(
+  inboxCount: OnboardingState["inboxCount"],
+  primaryInbox: InboxId,
+  secondInbox: InboxId | null,
+  thirdInbox: InboxId | null,
+  currentSelectedInboxes: InboxId[],
+) {
+  const orderedSlots = dedupeInboxes([
+    primaryInbox,
+    secondInbox,
+    thirdInbox,
+  ]);
+
+  if (inboxCount === "1") {
+    return [primaryInbox];
+  }
+
+  if (inboxCount === "2") {
+    return orderedSlots.slice(0, 2);
+  }
+
+  if (inboxCount === "3") {
+    return orderedSlots.slice(0, 3);
+  }
+
+  return dedupeInboxes([
+    primaryInbox,
+    ...currentSelectedInboxes.filter((inboxId) => inboxId !== primaryInbox),
+  ]);
 }
 
 function getDefaultPrimaryInboxForRole(role: RoleId): InboxId {
@@ -228,7 +261,7 @@ export function OnboardingFlow({
 }: OnboardingFlowProps) {
   const [step, setStep] = useState(0);
   const showSetupProgress = step > 0;
-  const isFinalScreen = step === 7;
+  const isFinalScreen = step === 6;
   const sidebarHelperText =
     (
       {
@@ -236,10 +269,9 @@ export function OnboardingFlow({
         2: "Set what matters most to you inside the inbox before the workspace is structured.",
         3: onboardingText.sidebar.stepHelper[2],
         4: onboardingText.sidebar.stepHelper[3],
-        5: onboardingText.sidebar.stepHelper[4],
-        6: onboardingText.sidebar.stepHelper[5],
+        5: onboardingText.sidebar.stepHelper[5],
       } as const
-    )[step as 1 | 2 | 3 | 4 | 5 | 6] ?? null;
+    )[step as 1 | 2 | 3 | 4 | 5] ?? null;
 
   const getInboxConnection = (current: OnboardingState, inboxId: InboxId) =>
     current.inboxConnections[inboxId] ?? createInboxConnection();
@@ -254,14 +286,26 @@ export function OnboardingFlow({
     }
 
     if (step === 4) {
+      if (!state.primaryInbox) {
+        return false;
+      }
+
+      if (state.inboxCount === "1") {
+        return true;
+      }
+
+      if (state.inboxCount === "2") {
+        return Boolean(state.selectedInboxes[1]);
+      }
+
+      if (state.inboxCount === "3") {
+        return Boolean(state.selectedInboxes[1] && state.selectedInboxes[2]);
+      }
+
       return state.selectedInboxes.length >= getRequiredInboxCount(state.inboxCount);
     }
 
     if (step === 5) {
-      return Boolean(state.workflowStyle);
-    }
-
-    if (step === 6) {
       return state.selectedInboxes.every((inboxId) => {
         const connection = getInboxConnection(state, inboxId);
         if (
@@ -289,14 +333,20 @@ export function OnboardingFlow({
   const setPrimaryRole = (role: RoleId) => {
     onStateChange((current) => {
       const nextPrimaryInbox = getDefaultPrimaryInboxForRole(role);
-      const maxActiveInboxCount = getMaxActiveInboxCount(current.inboxCount);
-      const dedupedSelectedInboxes = [
+      const currentSecondInbox =
+        current.selectedInboxes.find(
+          (inboxId) => inboxId !== (current.primaryInbox ?? nextPrimaryInbox),
+        ) ?? null;
+      const currentThirdInbox =
+        current.selectedInboxes.filter(
+          (inboxId) => inboxId !== (current.primaryInbox ?? nextPrimaryInbox),
+        )[1] ?? null;
+      const nextSelectedInboxes = buildSelectedInboxesForCount(
+        current.inboxCount,
         nextPrimaryInbox,
-        ...current.selectedInboxes.filter((inboxId) => inboxId !== nextPrimaryInbox),
-      ];
-      const nextSelectedInboxes = dedupedSelectedInboxes.slice(
-        0,
-        maxActiveInboxCount,
+        currentSecondInbox,
+        currentThirdInbox,
+        current.selectedInboxes,
       );
 
       return {
@@ -328,7 +378,6 @@ export function OnboardingFlow({
     primaryRole: state.primaryRole,
     internalRole: state.internalRole,
     focusPreferences: state.focusPreferences,
-    workflowStyle: state.workflowStyle,
     inboxCount: state.inboxCount,
     selectedInboxes: state.selectedInboxes,
   };
@@ -344,20 +393,81 @@ export function OnboardingFlow({
 
   const setPrimaryInbox = (inboxId: InboxId) => {
     onStateChange((current) => {
-      const maxActiveInboxCount = getMaxActiveInboxCount(current.inboxCount);
-      const dedupedSelectedInboxes = [
+      const currentNonPrimaryInboxes = current.selectedInboxes.filter(
+        (selectedInboxId) => selectedInboxId !== (current.primaryInbox ?? inboxId),
+      );
+      const secondInbox = currentNonPrimaryInboxes[0] ?? null;
+      const thirdInbox = currentNonPrimaryInboxes[1] ?? null;
+      const nextSelectedInboxes = buildSelectedInboxesForCount(
+        current.inboxCount,
         inboxId,
-        ...current.selectedInboxes.filter((selectedInboxId) => selectedInboxId !== inboxId),
-      ];
-      const nextSelectedInboxes = dedupedSelectedInboxes.slice(
-        0,
-        maxActiveInboxCount,
+        secondInbox,
+        thirdInbox,
+        current.selectedInboxes,
       );
 
       return {
         ...current,
         primaryInbox: inboxId,
         selectedInboxes: nextSelectedInboxes,
+      };
+    });
+  };
+
+  const setSecondInbox = (inboxId: InboxId | null) => {
+    onStateChange((current) => {
+      if (!current.primaryInbox) {
+        return current;
+      }
+
+      const currentNonPrimaryInboxes = current.selectedInboxes.filter(
+        (selectedInboxId) => selectedInboxId !== current.primaryInbox,
+      );
+      const nextSecondInbox =
+        inboxId && inboxId !== current.primaryInbox ? inboxId : null;
+      const nextThirdInbox =
+        currentNonPrimaryInboxes.find((selectedInboxId) => selectedInboxId !== nextSecondInbox) ??
+        null;
+
+      return {
+        ...current,
+        selectedInboxes: buildSelectedInboxesForCount(
+          current.inboxCount,
+          current.primaryInbox,
+          nextSecondInbox,
+          nextThirdInbox,
+          current.selectedInboxes,
+        ),
+      };
+    });
+  };
+
+  const setThirdInbox = (inboxId: InboxId | null) => {
+    onStateChange((current) => {
+      if (!current.primaryInbox) {
+        return current;
+      }
+
+      const currentNonPrimaryInboxes = current.selectedInboxes.filter(
+        (selectedInboxId) => selectedInboxId !== current.primaryInbox,
+      );
+      const currentSecondInbox = currentNonPrimaryInboxes[0] ?? null;
+      const nextThirdInbox =
+        inboxId &&
+        inboxId !== current.primaryInbox &&
+        inboxId !== currentSecondInbox
+          ? inboxId
+          : null;
+
+      return {
+        ...current,
+        selectedInboxes: buildSelectedInboxesForCount(
+          current.inboxCount,
+          current.primaryInbox,
+          currentSecondInbox,
+          nextThirdInbox,
+          current.selectedInboxes,
+        ),
       };
     });
   };
@@ -498,24 +608,39 @@ export function OnboardingFlow({
     let added = false;
 
     onStateChange((current) => {
-      const maxActiveInboxCount = getMaxActiveInboxCount(current.inboxCount);
-
-      if (current.selectedInboxes.length >= maxActiveInboxCount) {
-        return current;
-      }
-
       const id = createCustomInboxId(trimmedName);
       const customInbox: CustomInboxDefinition = { id, name: trimmedName };
+      const nextCustomInboxes = [...current.customInboxes, customInbox];
+      const nextInboxConnections = {
+        ...current.inboxConnections,
+        [id]: createInboxConnection(),
+      };
+      const isExpandedInboxMode =
+        current.inboxCount === "4+" || current.inboxCount === "not_sure";
+      const maxActiveInboxCount = getMaxActiveInboxCount(current.inboxCount);
       added = true;
+
+      if (!isExpandedInboxMode) {
+        return {
+          ...current,
+          customInboxes: nextCustomInboxes,
+          inboxConnections: nextInboxConnections,
+        };
+      }
+
+      if (current.selectedInboxes.length >= maxActiveInboxCount) {
+        return {
+          ...current,
+          customInboxes: nextCustomInboxes,
+          inboxConnections: nextInboxConnections,
+        };
+      }
 
       return {
         ...current,
-        customInboxes: [...current.customInboxes, customInbox],
+        customInboxes: nextCustomInboxes,
         selectedInboxes: [...current.selectedInboxes, id],
-        inboxConnections: {
-          ...current.inboxConnections,
-          [id]: createInboxConnection(),
-        },
+        inboxConnections: nextInboxConnections,
       };
     });
 
@@ -561,19 +686,16 @@ export function OnboardingFlow({
               onStateChange((current) => {
                 const maxActiveInboxCount = getMaxActiveInboxCount(inboxCount);
                 const resolvedPrimaryInbox = current.primaryInbox ?? "main";
-                const preservedSecondaryInboxes = current.selectedInboxes.filter(
+                const currentNonPrimaryInboxes = current.selectedInboxes.filter(
                   (inboxId) => inboxId !== resolvedPrimaryInbox,
                 );
-                const nextSelectedInboxes =
-                  maxActiveInboxCount === 1
-                    ? ([resolvedPrimaryInbox] as InboxId[])
-                    : ([
-                        resolvedPrimaryInbox,
-                        ...preservedSecondaryInboxes.slice(
-                          0,
-                          Math.max(0, maxActiveInboxCount - 1),
-                        ),
-                      ] as InboxId[]);
+                const nextSelectedInboxes = buildSelectedInboxesForCount(
+                  inboxCount,
+                  resolvedPrimaryInbox,
+                  currentNonPrimaryInboxes[0] ?? null,
+                  currentNonPrimaryInboxes[1] ?? null,
+                  current.selectedInboxes.slice(0, maxActiveInboxCount),
+                ).slice(0, maxActiveInboxCount);
 
                 return {
                   ...current,
@@ -588,6 +710,7 @@ export function OnboardingFlow({
       case 4:
         return (
           <StepInboxSetup
+            inboxCount={state.inboxCount}
             primaryInbox={state.primaryInbox}
             selectedInboxes={state.selectedInboxes}
             availableInboxOptions={availableInboxOptions}
@@ -595,20 +718,13 @@ export function OnboardingFlow({
             maxActiveInboxCount={getMaxActiveInboxCount(state.inboxCount)}
             requiredInboxCount={getRequiredInboxCount(state.inboxCount)}
             onPrimaryInboxChange={setPrimaryInbox}
+            onSecondaryInboxChange={setSecondInbox}
+            onThirdInboxChange={setThirdInbox}
             onToggleAdditionalInbox={toggleAdditionalInbox}
             onAddCustomInbox={addCustomInbox}
           />
         );
       case 5:
-        return (
-          <StepWorkflowStyle
-            value={state.workflowStyle}
-            onChange={(workflowStyle: WorkflowStyleId) =>
-              onStateChange((current) => ({ ...current, workflowStyle }))
-            }
-          />
-        );
-      case 6:
         return (
           <StepConnectInboxes
             selectedInboxes={state.selectedInboxes}
@@ -623,7 +739,7 @@ export function OnboardingFlow({
             onConnectInbox={connectInbox}
           />
         );
-      case 7:
+      case 6:
         return (
           <StepComplete
             connectedInboxCount={state.selectedInboxes.filter(
@@ -639,9 +755,9 @@ export function OnboardingFlow({
   const nextLabel =
     step === 0
       ? onboardingText.navigation.startSetup
-      : step === 6
+      : step === 5
         ? onboardingText.navigation.completeSetup
-        : step === 7
+        : step === 6
           ? onboardingText.navigation.goToDashboard
           : onboardingText.navigation.next;
 
@@ -691,7 +807,7 @@ export function OnboardingFlow({
                 </div>
                 {showSetupProgress ? (
                   <ProgressIndicator
-                    currentStep={step === 7 ? totalProgressSteps : step}
+                    currentStep={step === 6 ? totalProgressSteps : step}
                     totalSteps={totalProgressSteps}
                     variant="sidebar"
                     sidebarLabel={
@@ -706,7 +822,7 @@ export function OnboardingFlow({
               {showSetupProgress ? (
                 <div className="mb-8 lg:hidden">
                   <ProgressIndicator
-                    currentStep={step === 7 ? totalProgressSteps : step}
+                    currentStep={step === 6 ? totalProgressSteps : step}
                     totalSteps={totalProgressSteps}
                   />
                 </div>
@@ -714,10 +830,10 @@ export function OnboardingFlow({
               <div className="flex-1">{renderStep()}</div>
               <NavigationBar
                 canGoBack={step > 0}
-                backLabel={step === 7 ? "Edit setup" : undefined}
+                backLabel={step === 6 ? "Edit setup" : undefined}
                 onBack={back}
                 onNext={
-                  step === 7
+                  step === 6
                     ? () => {
                         console.log(
                           "[DEBUG] OnboardingFlow selectedInboxes:",
@@ -728,7 +844,7 @@ export function OnboardingFlow({
                     : next
                 }
                 nextLabel={nextLabel}
-                isNextDisabled={step === 7 ? false : !canGoNext}
+                isNextDisabled={step === 6 ? false : !canGoNext}
               />
             </section>
           </div>

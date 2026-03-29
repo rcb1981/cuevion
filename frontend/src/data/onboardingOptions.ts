@@ -5,7 +5,6 @@ import type {
   PresetInboxId,
   ProviderId,
   RoleId,
-  WorkflowStyleId,
 } from "../types/onboarding";
 import { onboardingText } from "../copy/onboardingCopy";
 
@@ -56,14 +55,6 @@ export const mainInboxOptions: Array<{ id: PresetInboxId; label: string }> =
 export const specializedInboxOptions: Array<{ id: PresetInboxId; label: string }> =
   onboardingText.inboxSetup.specialized.map((option) => ({ ...option }));
 
-export const workflowStyleOptions: Array<{
-  id: WorkflowStyleId;
-  label: string;
-  description: string;
-  tooltip: string;
-  recommended?: boolean;
-}> = onboardingText.workflowStyle.options.map((option) => ({ ...option }));
-
 export const providerOptions: Array<{ id: ProviderId; label: string }> =
   onboardingText.connect.providers.map((provider) => ({ ...provider }));
 
@@ -109,7 +100,6 @@ export const initialOnboardingState: OnboardingState = {
   },
   inboxCount: null,
   selectedInboxes: [],
-  workflowStyle: null,
   customInboxes: [],
   inboxConnections: {
     main: createInboxConnection(),

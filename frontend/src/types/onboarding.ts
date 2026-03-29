@@ -31,8 +31,6 @@ export type PresetInboxId =
 
 export type InboxId = PresetInboxId | `custom:${string}`;
 
-export type WorkflowStyleId = "quiet" | "balanced" | "active";
-
 export type ProviderId =
   | "google"
   | "microsoft"
@@ -80,7 +78,6 @@ export interface OnboardingState {
   };
   inboxCount: InboxCountId | null;
   selectedInboxes: InboxId[];
-  workflowStyle: WorkflowStyleId | null;
   customInboxes: CustomInboxDefinition[];
   inboxConnections: Record<string, InboxConnection>;
 }
