@@ -8934,6 +8934,7 @@ function MailboxView({
     setCollaborationReplyVisibility("internal");
     setCollaborationMentionIndex(0);
     setCollaborationReplySelection(null);
+    closeCollaborationOverlay();
   };
 
   const setMessagesUnreadState = (
@@ -10993,6 +10994,8 @@ function MailboxView({
                   </div>
                 ) : null}
 
+                {renderBehaviorSuggestion(fullWidthMessage)}
+
                 {fullWidthMessage.collaboration ? (
                   <button
                     type="button"
@@ -11019,8 +11022,6 @@ function MailboxView({
                 ) : (
                   renderMessageCollaboration(fullWidthMessage)
                 )}
-
-                {renderBehaviorSuggestion(fullWidthMessage)}
 
                     {fullWidthMessage.isShared && fullWidthMessage.sharedContext ? (
                       <div className="w-[94%] text-[0.82rem] leading-6 text-[color:rgba(120,111,100,0.68)]">
@@ -11913,6 +11914,8 @@ function MailboxView({
                       </div>
                     ) : null}
 
+                    {renderBehaviorSuggestion(selectedMessage)}
+
                     {selectedMessage.collaboration ? (
                       <button
                         type="button"
@@ -11939,8 +11942,6 @@ function MailboxView({
                     ) : (
                       renderMessageCollaboration(selectedMessage)
                     )}
-
-                    {renderBehaviorSuggestion(selectedMessage)}
 
                     {selectedMessage.isShared && selectedMessage.sharedContext ? (
                       <div className="w-[94%] text-[0.82rem] leading-6 text-[color:rgba(120,111,100,0.68)]">
