@@ -11560,8 +11560,8 @@ function MailboxView({
                           : message.snippet;
                       const sharedContextHint = message.collaboration
                         ? message.collaboration.state === "resolved"
-                          ? "Collaboration resolved"
-                          : "Collaboration active"
+                          ? "Open collaboration history"
+                          : "Open collaboration"
                         : isSharedView && message.isShared
                           ? formatSharedContextHint(message.sharedContext)
                           : null;
@@ -11746,7 +11746,20 @@ function MailboxView({
                                   ) : null}
                                 </div>
                               ) : null}
-                              {sharedContextHint ? (
+                              {message.collaboration ? (
+                                <div className="pt-1">
+                                  <button
+                                    type="button"
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      openCollaborationOverlay(message.id);
+                                    }}
+                                    className="text-[0.68rem] leading-5 text-[color:rgba(120,111,100,0.72)] transition-colors duration-150 hover:text-[var(--workspace-text)] focus-visible:outline-none"
+                                  >
+                                    {sharedContextHint}
+                                  </button>
+                                </div>
+                              ) : sharedContextHint ? (
                                 <div className="pt-1 text-[0.68rem] leading-5 text-[color:rgba(120,111,100,0.72)]">
                                   {sharedContextHint}
                                 </div>
