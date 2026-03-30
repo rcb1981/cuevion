@@ -7086,6 +7086,23 @@ function MailboxView({
       getPriorityVisibilityAdjustedMessage(message),
       manualPriorityOverrides[message.id],
     );
+  const shouldForceFilteredDemoVisibility = (message: MailMessage) => {
+    if (
+      message.internalClassification !== "demo" &&
+      message.internalClassification !== "high_priority_demo"
+    ) {
+      return false;
+    }
+
+    if (hasProtectedPriorityVisibility(message)) {
+      return false;
+    }
+
+    return (
+      manualPriorityOverrides[message.id] !== "priority" &&
+      resolveFocusPreferenceLevelForMessage(message) === "low"
+    );
+  };
   const isVisiblePriorityMessageForMessage = (message: MailMessage) => {
     const override = manualPriorityOverrides[message.id];
     const adjustedMessage = getPriorityVisibilityAdjustedMessage(message);
@@ -7113,7 +7130,9 @@ function MailboxView({
     return isMessageVisiblePriority(adjustedMessage, override);
   };
   const lowSignalInboxMessages = mailboxCollections.Inbox.filter(
-    (message) => getVisiblePriorityBadgeForMessage(message) === "LOW",
+    (message) =>
+      getVisiblePriorityBadgeForMessage(message) === "LOW" ||
+      shouldForceFilteredDemoVisibility(message),
   );
   const lowSignalInboxMessageIds = new Set(
     lowSignalInboxMessages.map((message) => message.id),
