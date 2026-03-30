@@ -6154,6 +6154,7 @@ function MailboxView({
   messageOwnershipInteractions,
   currentUserId,
   currentUserEmail,
+  focusPreferences,
   mailboxStore,
   setMailboxStore,
   inboxSignatures,
@@ -6199,6 +6200,7 @@ function MailboxView({
   messageOwnershipInteractions: MessageOwnershipInteractionStore;
   currentUserId: string;
   currentUserEmail: string;
+  focusPreferences: UserConfig["focusPreferences"];
   mailboxStore: MailboxStore;
   setMailboxStore: Dispatch<SetStateAction<MailboxStore>>;
   inboxSignatures: InboxSignatureStore;
@@ -6958,20 +6960,20 @@ function MailboxView({
     const preferenceLevel = (() => {
       switch (message.internalClassification) {
         case "promo":
-          return userConfig.focusPreferences.promo;
+          return focusPreferences.promo;
         case "promo_reminder":
-          return userConfig.focusPreferences.promoReminders;
+          return focusPreferences.promoReminders;
         case "finance":
-          return userConfig.focusPreferences.finance;
+          return focusPreferences.finance;
         case "royalty_statement":
-          return userConfig.focusPreferences.royalties;
+          return focusPreferences.royalties;
         case "business_reminder":
-          return userConfig.focusPreferences.paymentReminders;
+          return focusPreferences.paymentReminders;
         case "distributor_update":
-          return userConfig.focusPreferences.distribution;
+          return focusPreferences.distribution;
         case "business":
           return mailbox.id === "business"
-            ? userConfig.focusPreferences.business
+            ? focusPreferences.business
             : null;
         default:
           return null;
@@ -22110,6 +22112,7 @@ export function WorkspaceShell({
                   messageOwnershipInteractions={messageOwnershipInteractions}
                   currentUserId={currentWorkspaceUserId}
                   currentUserEmail={activeWorkspaceEmail}
+                  focusPreferences={userConfig.focusPreferences}
                   mailboxStore={mailboxStore}
                   setMailboxStore={setMailboxStore}
                   inboxSignatures={inboxSignatures}
