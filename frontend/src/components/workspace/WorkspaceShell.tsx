@@ -7110,6 +7110,30 @@ function MailboxView({
         return null;
     }
   };
+  const getVisibleCategoryLabelForMessage = (message: MailMessage) => {
+    switch (resolveVisibilityClassificationForMessage(message)) {
+      case "demo":
+      case "high_priority_demo":
+        return "Demo";
+      case "finance":
+      case "royalty_statement":
+        return "Finance";
+      case "promo":
+      case "promo_reminder":
+        return "Promo";
+      case "business":
+      case "business_reminder":
+        return "Business";
+      case "workflow_update":
+      case "distributor_update":
+      case "info":
+        return "Update";
+      case "reply":
+        return "Reply";
+      default:
+        return "Other";
+    }
+  };
   const resolveOnboardingVisibilityMode = (message: MailMessage) => {
     const preferenceLevel = resolveFocusPreferenceLevelForMessage(message);
 
@@ -11588,7 +11612,7 @@ function MailboxView({
                         getManualPriorityOverride(message.id) !== "priority";
                       const visibleSignal = getVisibleMessageSignal(message);
                       const priorityBadge = getVisiblePriorityBadgeForMessage(message);
-                      const categoryLabel = getVisibleCategoryLabel(message);
+                      const categoryLabel = getVisibleCategoryLabelForMessage(message);
                       const signal =
                         message.signal === "Sent"
                           ? ""
