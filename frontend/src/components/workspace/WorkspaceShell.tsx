@@ -7342,8 +7342,9 @@ function MailboxView({
   };
   const lowSignalInboxMessages = mailboxCollections.Inbox.filter(
     (message) =>
-      getVisiblePriorityBadgeForMessage(message) === "LOW" ||
-      shouldForceFilteredDemoVisibility(message),
+      !message.collaboration &&
+      (getVisiblePriorityBadgeForMessage(message) === "LOW" ||
+        shouldForceFilteredDemoVisibility(message)),
   );
   const lowSignalInboxMessageIds = new Set(
     lowSignalInboxMessages.map((message) => message.id),
@@ -11557,8 +11558,11 @@ function MailboxView({
                               .slice(0, MAIL_LIST_PREVIEW_CHARACTER_CAP)
                               .trimEnd()
                           : message.snippet;
-                      const sharedContextHint =
-                        isSharedView && message.isShared
+                      const sharedContextHint = message.collaboration
+                        ? message.collaboration.state === "resolved"
+                          ? "Collaboration resolved"
+                          : "Collaboration active"
+                        : isSharedView && message.isShared
                           ? formatSharedContextHint(message.sharedContext)
                           : null;
                       const demoFocusPreferenceLevel =
