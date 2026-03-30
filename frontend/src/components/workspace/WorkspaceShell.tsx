@@ -7081,11 +7081,32 @@ function MailboxView({
             : ("low" as const),
     };
   };
-  const getVisiblePriorityBadgeForMessage = (message: MailMessage) =>
-    getVisiblePriorityBadge(
+  const getVisiblePriorityBadgeForMessage = (message: MailMessage) => {
+    const override = manualPriorityOverrides[message.id];
+    const focusPreferenceLevel = resolveFocusPreferenceLevelForMessage(message);
+    const isDemoMessage =
+      message.internalClassification === "demo" ||
+      message.internalClassification === "high_priority_demo";
+
+    if (
+      isDemoMessage &&
+      !hasProtectedPriorityVisibility(message) &&
+      override !== "priority"
+    ) {
+      if (focusPreferenceLevel === "low") {
+        return "LOW";
+      }
+
+      if (focusPreferenceLevel === "high") {
+        return "PRIORITY";
+      }
+    }
+
+    return getVisiblePriorityBadge(
       getPriorityVisibilityAdjustedMessage(message),
-      manualPriorityOverrides[message.id],
+      override,
     );
+  };
   const shouldForceFilteredDemoVisibility = (message: MailMessage) => {
     if (
       message.internalClassification !== "demo" &&
