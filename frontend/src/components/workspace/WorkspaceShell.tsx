@@ -19495,7 +19495,14 @@ export function WorkspaceShell({
     });
   };
   const buildMessageIdentityIndexes = <T extends MessageIdentitySource>(messages: T[]) => ({
-    byId: new Map(messages.map((message) => [message.id, message])),
+    byId: new Map<string, T>(
+      messages
+        .filter(
+          (message): message is T & { id: string } =>
+            typeof message.id === "string" && message.id.length > 0,
+        )
+        .map((message) => [message.id, message]),
+    ),
     byImapUid: new Map(
       messages
         .filter((message) => Boolean(message.imapUid))
