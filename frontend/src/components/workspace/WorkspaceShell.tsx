@@ -6325,6 +6325,7 @@ function MailboxView({
   messageOwnershipInteractions,
   currentUserId,
   currentUserEmail,
+  workspaceCollaborationPeople,
   focusPreferences,
   mailboxStore,
   setMailboxStore,
@@ -6371,6 +6372,7 @@ function MailboxView({
   messageOwnershipInteractions: MessageOwnershipInteractionStore;
   currentUserId: string;
   currentUserEmail: string;
+  workspaceCollaborationPeople: Array<{ id: string; name: string; email: string }>;
   focusPreferences: UserConfig["focusPreferences"];
   mailboxStore: MailboxStore;
   setMailboxStore: Dispatch<SetStateAction<MailboxStore>>;
@@ -6531,6 +6533,8 @@ function MailboxView({
     string | null
   >(null);
   const [collaborationReplyDraft, setCollaborationReplyDraft] = useState("");
+  const [collaborationParticipantPersonId, setCollaborationParticipantPersonId] =
+    useState<string>("");
   const [, setCollaborationReplyVisibility] =
     useState<MailMessageCollaborationVisibility>("internal");
   const collaborationReplyInputRef = useRef<HTMLTextAreaElement | null>(null);
@@ -6544,13 +6548,16 @@ function MailboxView({
     null,
   );
 
-  const collaborationPeople = [
-    {
-      id: currentUserId,
-      name: orderedMailboxes[0]?.title ?? "You",
-      email: currentUserEmail,
-    },
-  ];
+  const collaborationPeople =
+    workspaceCollaborationPeople.length > 0
+      ? workspaceCollaborationPeople
+      : [
+          {
+            id: currentUserId,
+            name: orderedMailboxes[0]?.title ?? "You",
+            email: currentUserEmail,
+          },
+        ];
   const collaborationSelectablePeople = [
     ...collaborationPeople.map((person) => ({
       id: person.id,
@@ -8726,6 +8733,7 @@ function MailboxView({
 
   const closeCollaborationOverlay = () => {
     setActiveCollaborationMessageId(null);
+    setCollaborationParticipantPersonId("");
     setCollaborationReplyDraft("");
     setCollaborationReplyVisibility("internal");
     setCollaborationReplySelection(null);
@@ -8935,6 +8943,61 @@ function MailboxView({
     setCollaborationMentionIndex(0);
     setCollaborationReplySelection(null);
     closeCollaborationOverlay();
+  };
+
+  const addParticipantToCollaboration = (
+    messageId: string,
+    participantPersonId = collaborationParticipantPersonId,
+  ) => {
+    if (!participantPersonId) {
+      return;
+    }
+
+    const nextTimestamp = Date.now();
+    const selectedParticipant = collaborationSelectablePeople.find(
+      (person) => person.id === participantPersonId,
+    );
+
+    if (!selectedParticipant) {
+      return;
+    }
+
+    updateMessageById(messageId, (message) => {
+      if (!message.collaboration) {
+        return message;
+      }
+
+      const existingParticipants = message.collaboration.participants ?? [];
+      const alreadyExists = existingParticipants.some(
+        (participant) =>
+          participant.id === selectedParticipant.id ||
+          participant.email.toLowerCase() === selectedParticipant.email.toLowerCase(),
+      );
+
+      if (alreadyExists) {
+        return message;
+      }
+
+      return {
+        ...message,
+        collaboration: {
+          ...message.collaboration,
+          updatedAt: nextTimestamp,
+          participants: [
+            ...existingParticipants,
+            {
+              id: selectedParticipant.id,
+              name: selectedParticipant.name,
+              email: selectedParticipant.email,
+              kind: selectedParticipant.kind,
+              status: "active" as const,
+            },
+          ],
+        },
+      };
+    });
+
+    setCollaborationParticipantPersonId("");
   };
 
   const setMessagesUnreadState = (
@@ -12793,6 +12856,43 @@ function MailboxView({
                             </div>
                           ))}
                         </div>
+                        {collaborationSelectablePeople.some(
+                          (person) =>
+                            !activeCollaborationParticipants.some(
+                              (participant) => participant.id === person.id,
+                            ),
+                        ) ? (
+                          <div className="space-y-2 pt-2">
+                            <div className="text-[0.68rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)]">
+                              Add participant
+                            </div>
+                            <div className="flex flex-wrap gap-2">
+                              {collaborationSelectablePeople
+                                .filter(
+                                  (person) =>
+                                    !activeCollaborationParticipants.some(
+                                      (participant) => participant.id === person.id,
+                                    ),
+                                )
+                                .map((person) => (
+                                  <button
+                                    key={`collaboration-person-${person.id}`}
+                                    type="button"
+                                    onClick={() => {
+                                      setCollaborationParticipantPersonId(person.id);
+                                      addParticipantToCollaboration(
+                                        activeCollaborationMessage.id,
+                                        person.id,
+                                      );
+                                    }}
+                                    className="inline-flex h-9 items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-soft)] transition-[background-color,border-color,color] duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface-strong)] hover:text-[var(--workspace-text)] focus-visible:outline-none"
+                                  >
+                                    {person.name}
+                                  </button>
+                                ))}
+                            </div>
+                          </div>
+                        ) : null}
                       </div>
                       <p className="text-[0.84rem] leading-6 text-[var(--workspace-text-faint)]">
                         Regarding: {activeCollaborationMessage.subject}
@@ -19813,6 +19913,27 @@ export function WorkspaceShell({
         : null,
     );
   const [memberOfEntries, setMemberOfEntries] = useState<TeamMembershipEntry[]>([]);
+  const workspaceCollaborationPeople = [
+    authenticatedUser
+      ? {
+          id: normalizeSenderLearningKey(authenticatedUser.email),
+          name: authenticatedUser.name,
+          email: authenticatedUser.email,
+        }
+      : {
+          id: currentWorkspaceUserId,
+          name: orderedMailboxes[0]?.title ?? "You",
+          email: activeWorkspaceEmail,
+        },
+    ...memberOfEntries.map((member) => ({
+      id: normalizeSenderLearningKey(member.email),
+      name: member.name,
+      email: member.email,
+    })),
+  ].filter(
+    (person, index, people) =>
+      people.findIndex((candidate) => candidate.id === person.id) === index,
+  );
   const [isSmartFolderModalOpen, setIsSmartFolderModalOpen] = useState(false);
   const [editingSmartFolderId, setEditingSmartFolderId] = useState<string | null>(null);
   const [smartFolderDraftName, setSmartFolderDraftName] = useState("");
@@ -22482,6 +22603,7 @@ export function WorkspaceShell({
                   messageOwnershipInteractions={messageOwnershipInteractions}
                   currentUserId={currentWorkspaceUserId}
                   currentUserEmail={activeWorkspaceEmail}
+                  workspaceCollaborationPeople={workspaceCollaborationPeople}
                   focusPreferences={activeFocusPreferences}
                   mailboxStore={mailboxStore}
                   setMailboxStore={setMailboxStore}
