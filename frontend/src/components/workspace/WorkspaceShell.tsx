@@ -16409,7 +16409,9 @@ const FocusPreferencesSettingsCard = memo(function FocusPreferencesSettingsCard(
               key={`focus-group-${group.title}`}
               className={`rounded-[20px] border px-4 py-3.5 ${
                 index === 0
-                  ? "border-[color:rgba(111,148,111,0.22)] bg-[linear-gradient(180deg,rgba(246,249,244,0.98),rgba(242,246,240,0.92))]"
+                  ? themeMode === "dark"
+                    ? "border-[color:rgba(126,155,128,0.18)] bg-[linear-gradient(180deg,rgba(53,50,45,0.92),rgba(44,41,37,0.96))] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]"
+                    : "border-[color:rgba(111,148,111,0.22)] bg-[linear-gradient(180deg,rgba(246,249,244,0.98),rgba(242,246,240,0.92))]"
                   : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)]"
               }`}
             >
@@ -16451,23 +16453,35 @@ const FocusPreferencesSettingsCard = memo(function FocusPreferencesSettingsCard(
           ))}
 
           {hasUnsavedChanges ? (
-            <div className="flex justify-end gap-3 pt-1">
-              <button
-                type="button"
-                onClick={() => setDraftFocusPreferences(focusPreferences)}
-                disabled={isApplying}
-                className={settingsPairedSecondaryActionClass}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={() => setIsConfirmOpen(true)}
-                disabled={isApplying}
-                className={`${settingsPrimaryActionClass} w-[9rem] disabled:cursor-not-allowed disabled:opacity-70`}
-              >
-                Apply changes
-              </button>
+            <div className="rounded-[20px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-3.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div className="min-w-0">
+                  <div className="text-[0.78rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text)]">
+                    Unsaved changes
+                  </div>
+                  <div className="mt-1 text-[0.82rem] leading-6 text-[var(--workspace-text-muted)]">
+                    Apply to re-evaluate Inbox, Filtered, and Priority.
+                  </div>
+                </div>
+                <div className="flex items-center justify-end gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setDraftFocusPreferences(focusPreferences)}
+                    disabled={isApplying}
+                    className={settingsPairedSecondaryActionClass}
+                  >
+                    Reset
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setIsConfirmOpen(true)}
+                    disabled={isApplying}
+                    className={`${settingsPrimaryActionClass} w-[9rem] disabled:cursor-not-allowed disabled:opacity-70`}
+                  >
+                    {isApplying ? "Applying…" : "Apply changes"}
+                  </button>
+                </div>
+              </div>
             </div>
           ) : isApplying ? (
             <div className="flex justify-end pt-1 text-[0.78rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)]">
