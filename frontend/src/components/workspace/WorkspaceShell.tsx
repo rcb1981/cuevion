@@ -19494,7 +19494,7 @@ export function WorkspaceShell({
       return nextOverrides;
     });
   };
-  const buildInboxIdentityIndexes = (messages: MailMessage[]) => ({
+  const buildMessageIdentityIndexes = <T extends MessageIdentitySource>(messages: T[]) => ({
     byId: new Map(messages.map((message) => [message.id, message])),
     byImapUid: new Map(
       messages
@@ -19505,13 +19505,45 @@ export function WorkspaceShell({
       messages.map((message) => [buildStablePreviewIdentity(message), message]),
     ),
   });
+  const mergePersistedLiveInboxSnapshotMessages = (
+    incomingMessages: LiveInboxMessageSnapshot[],
+    persistedSnapshotMessages: PersistedLiveInboxMessageSnapshot[],
+    currentInboxMessages: MailMessage[],
+  ) => {
+    const persistedSnapshotIndexes = buildMessageIdentityIndexes(persistedSnapshotMessages);
+    const currentInboxIndexes = buildMessageIdentityIndexes(currentInboxMessages);
+
+    return incomingMessages.map((message) => {
+      const persistedSnapshotMessage = findMatchingMessageByIdentity(
+        message,
+        persistedSnapshotIndexes,
+      );
+      const currentInboxMessage = findMatchingMessageByIdentity(message, currentInboxIndexes);
+
+      if (
+        !persistedSnapshotMessage?.collaboration &&
+        !persistedSnapshotMessage?.isShared &&
+        !currentInboxMessage?.collaboration &&
+        !currentInboxMessage?.isShared
+      ) {
+        return message;
+      }
+
+      return {
+        ...message,
+        collaboration:
+          persistedSnapshotMessage?.collaboration ?? currentInboxMessage?.collaboration,
+        isShared: persistedSnapshotMessage?.isShared ?? currentInboxMessage?.isShared,
+      } as PersistedLiveInboxMessageSnapshot;
+    });
+  };
   const mergeLiveInboxMessages = (
     mailboxId: InboxId,
     incomingMessages: LiveInboxMessageSnapshot[],
     currentInboxMessages: MailMessage[],
     currentStore: MailboxStore,
   ) => {
-    const currentInboxIndexes = buildInboxIdentityIndexes(currentInboxMessages);
+    const currentInboxIndexes = buildMessageIdentityIndexes(currentInboxMessages);
 
     return incomingMessages.map((message) => {
       const persistedMessage = message as PersistedLiveInboxMessageSnapshot;
@@ -21082,21 +21114,33 @@ export function WorkspaceShell({
       }
 
       const messages = response.messages ?? [];
+      const persistedSnapshotMessages =
+        (readLiveInboxSnapshots()[managedMailbox.id]?.messages as PersistedLiveInboxMessageSnapshot[]) ??
+        [];
+      const currentInboxMessages = mailboxStore[managedMailbox.id as InboxId]?.Inbox ?? [];
+      const mergedMessages = mergePersistedLiveInboxSnapshotMessages(
+        messages,
+        persistedSnapshotMessages,
+        currentInboxMessages,
+      );
       const mergeStartedAt = performance.now();
       saveLiveInboxSnapshot({
         inboxId: managedMailbox.id,
         email: managedMailbox.email.trim().toLowerCase(),
         fetchedAt: new Date().toISOString(),
-        messages,
+        messages: mergedMessages,
       });
-      applyLiveInboxMessagesToMailboxStore(managedMailbox.id as InboxId, messages);
+      applyLiveInboxMessagesToMailboxStore(
+        managedMailbox.id as InboxId,
+        mergedMessages,
+      );
       console.info("[SYNC-TIMING] refreshMailboxById complete", {
         mailboxId,
         email: managedMailbox.email.trim(),
         requestDurationMs: Math.round(requestDurationMs),
         mergeDurationMs: Math.round(performance.now() - mergeStartedAt),
         totalDurationMs: Math.round(performance.now() - syncStartedAt),
-        messageCount: messages.length,
+        messageCount: mergedMessages.length,
       });
     } finally {
       setSyncingMailboxId(null);
