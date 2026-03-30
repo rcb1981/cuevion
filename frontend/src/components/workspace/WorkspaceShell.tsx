@@ -10993,7 +10993,19 @@ function MailboxView({
                   </div>
                 ) : null}
 
-                {renderMessageCollaboration(fullWidthMessage)}
+                {fullWidthMessage.collaboration ? (
+                  <button
+                    type="button"
+                    onClick={() => openCollaborationOverlay(fullWidthMessage.id)}
+                    className="inline-flex items-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-3 py-1 text-[0.76rem] leading-6 text-[color:rgba(106,98,89,0.86)] transition-[background-color,border-color,color] duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text-soft)] focus-visible:outline-none"
+                  >
+                    {fullWidthMessage.collaboration.state === "resolved"
+                      ? "Open collaboration history"
+                      : "Open collaboration"}
+                  </button>
+                ) : (
+                  renderMessageCollaboration(fullWidthMessage)
+                )}
 
                 {renderBehaviorSuggestion(fullWidthMessage)}
 
@@ -11888,7 +11900,19 @@ function MailboxView({
                       </div>
                     ) : null}
 
-                    {renderMessageCollaboration(selectedMessage)}
+                    {selectedMessage.collaboration ? (
+                      <button
+                        type="button"
+                        onClick={() => openCollaborationOverlay(selectedMessage.id)}
+                        className="inline-flex items-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-3 py-1 text-[0.76rem] leading-6 text-[color:rgba(106,98,89,0.86)] transition-[background-color,border-color,color] duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text-soft)] focus-visible:outline-none"
+                      >
+                        {selectedMessage.collaboration.state === "resolved"
+                          ? "Open collaboration history"
+                          : "Open collaboration"}
+                      </button>
+                    ) : (
+                      renderMessageCollaboration(selectedMessage)
+                    )}
 
                     {renderBehaviorSuggestion(selectedMessage)}
 
