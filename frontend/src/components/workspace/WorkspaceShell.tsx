@@ -5646,72 +5646,26 @@ function TopCards({
 }
 
 function buildVisibleNotificationItems({
+  mailboxStore: _mailboxStore,
+  orderedMailboxes: _orderedMailboxes,
+  authenticatedUser: _authenticatedUser,
   teamActivityEnabled,
-  onOpenNotificationNavigation,
+  onOpenNotificationNavigation: _onOpenNotificationNavigation,
 }: {
+  mailboxStore: MailboxStore;
+  orderedMailboxes: OrderedMailbox[];
+  authenticatedUser?: AuthenticatedCuevionUser | null;
   teamActivityEnabled: boolean;
   onOpenNotificationNavigation: (
     request: Omit<NotificationNavigationRequest, "requestKey">,
   ) => void;
 }) {
-  const notificationItems = [
-    {
-      eventType: "collaboration_invite_received" as const,
-      category: "team-activity" as const,
-      title: "You were invited to a collaboration",
-      detail: "Emma invited you to inspect DSP delivery note",
-      time: "NOW",
-      action: () =>
-        onOpenNotificationNavigation({
-          type: "invite",
-          mailboxId: "main",
-          messageId: "main-5",
-          inviteeEmail: "david@cuevion.com",
-        }),
-    },
-    {
-      eventType: "collaboration_reply_received" as const,
-      category: "team-activity" as const,
-      title: "Emma replied",
-      detail: "DSP delivery note",
-      time: "7 MIN AGO",
-      action: () =>
-        onOpenNotificationNavigation({
-          type: "reply",
-          mailboxId: "main",
-          messageId: "main-5",
-        }),
-    },
-    {
-      eventType: "collaboration_mention_received" as const,
-      category: "team-activity" as const,
-      title: "You were mentioned by David",
-      detail: "Artwork confirmation for vinyl repress",
-      time: "12 MIN AGO",
-      action: () =>
-        onOpenNotificationNavigation({
-          type: "mention",
-          mailboxId: "main",
-          messageId: "main-18",
-          collaborationMessageId: "main-18-collaboration-mention",
-        }),
-    },
-  ];
+  if (!teamActivityEnabled) {
+    return [];
+  }
 
-  return notificationItems.filter((item, index, items) => {
-    if (item.category === "team-activity" && !teamActivityEnabled) {
-      return false;
-    }
-
-    const dedupeKey = `${item.title}:${item.detail}`;
-
-    return (
-      items.findIndex(
-        (candidate) =>
-          `${candidate.title}:${candidate.detail}` === dedupeKey,
-      ) === index
-    );
-  });
+  // Notifications stay intentionally empty until product-ready live types are released.
+  return [];
 }
 
 function NotificationsPreviewBlock({
@@ -5849,27 +5803,21 @@ function DashboardView({
   onOpenPrimaryInbox,
   onOpenInboxes,
   onOpenForYou,
-  onOpenNotificationNavigation,
-  teamActivityEnabled,
+  notificationPreviewItems,
   primaryInboxTitle,
   primaryInboxEmailCount,
   priorityInboxCount,
   connectedInboxCount,
-  showDemoContent,
 }: {
   onOpenPriority: () => void;
   onOpenPrimaryInbox: () => void;
   onOpenInboxes: () => void;
   onOpenForYou: () => void;
-  onOpenNotificationNavigation: (
-    request: Omit<NotificationNavigationRequest, "requestKey">,
-  ) => void;
-  teamActivityEnabled: boolean;
+  notificationPreviewItems: ReturnType<typeof buildVisibleNotificationItems>;
   primaryInboxTitle: string;
   primaryInboxEmailCount: number;
   priorityInboxCount: number;
   connectedInboxCount: number;
-  showDemoContent: boolean;
 }) {
   const userName: string | null = null;
   const currentHour = new Date().getHours();
@@ -5881,12 +5829,6 @@ function DashboardView({
   evening: "Good evening",
 }[dayPeriod];
   const greeting = userName ? `${greetingLabel}, ${userName}` : greetingLabel;
-  const notificationPreviewItems = showDemoContent
-    ? buildVisibleNotificationItems({
-        teamActivityEnabled,
-        onOpenNotificationNavigation,
-      })
-    : [];
 
   return (
     <div className="space-y-8">
@@ -13237,7 +13179,7 @@ function WorkbenchView({
   onOpenDemoInbox,
   onOpenLearningRequest,
   onOpenSenderContext,
-  onOpenNotificationNavigation,
+  notificationItems,
   aiSuggestionsEnabled,
   inboxChangesEnabled,
   teamActivityEnabled,
@@ -13253,9 +13195,7 @@ function WorkbenchView({
   onOpenDemoInbox: () => void;
   onOpenLearningRequest: (request: NonNullable<LearningLaunchRequest>) => void;
   onOpenSenderContext: () => void;
-  onOpenNotificationNavigation: (
-    request: Omit<NotificationNavigationRequest, "requestKey">,
-  ) => void;
+  notificationItems: ReturnType<typeof buildVisibleNotificationItems>;
   aiSuggestionsEnabled: boolean;
   inboxChangesEnabled: boolean;
   teamActivityEnabled: boolean;
@@ -13393,12 +13333,7 @@ function WorkbenchView({
 
     return true;
   });
-  const visibleNotificationItems = showDemoContent
-    ? buildVisibleNotificationItems({
-        teamActivityEnabled,
-        onOpenNotificationNavigation,
-      })
-    : [];
+  const visibleNotificationItems = notificationItems;
   const [teamMembers, setTeamMembers] = useState<TeamMemberEntry[]>(() => showDemoContent ? [
     {
       name: "Emma Stone",
@@ -21058,6 +20993,13 @@ export function WorkspaceShell({
       requestKey: Date.now(),
     });
   };
+  const liveNotificationItems = buildVisibleNotificationItems({
+    mailboxStore,
+    orderedMailboxes,
+    authenticatedUser,
+    teamActivityEnabled,
+    onOpenNotificationNavigation: handleOpenNotificationNavigation,
+  });
 
   const openReviewItemInInbox = (
     reviewItem: ReviewItem,
@@ -22697,13 +22639,11 @@ export function WorkspaceShell({
                   onOpenPrimaryInbox={handleOpenSenderContext}
                   onOpenInboxes={() => handleOpenInboxes("Connected")}
                   onOpenForYou={() => handleOpenForYou("Promo")}
-                  onOpenNotificationNavigation={handleOpenNotificationNavigation}
-                  teamActivityEnabled={teamActivityEnabled}
+                  notificationPreviewItems={liveNotificationItems}
                   primaryInboxTitle={primaryInboxTitle}
                   primaryInboxEmailCount={primaryInboxEmailCount}
                   priorityInboxCount={livePriorityInboxItems.length}
                   connectedInboxCount={connectedInboxCount}
-                  showDemoContent={isDemoWorkspace}
                 />
               </div>
 	            ) : activeSection === "Priority" ? (
@@ -22732,7 +22672,7 @@ export function WorkspaceShell({
                   onOpenDemoInbox={handleOpenDemoInbox}
                   onOpenLearningRequest={handleOpenLearningRequest}
                   onOpenSenderContext={handleOpenSenderContext}
-                  onOpenNotificationNavigation={handleOpenNotificationNavigation}
+                  notificationItems={liveNotificationItems}
                   aiSuggestionsEnabled={aiSuggestionsEnabled}
                   inboxChangesEnabled={inboxChangesEnabled}
                   teamActivityEnabled={teamActivityEnabled}
