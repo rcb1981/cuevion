@@ -14346,7 +14346,7 @@ const settingsPrimaryActionClass =
   `inline-flex h-10 items-center justify-center rounded-full px-5 text-[0.72rem] font-medium uppercase tracking-[0.16em] ${primaryActionSurfaceClass}`;
 const settingsDangerActionClass =
   "inline-flex h-10 items-center justify-center rounded-full border border-[color:rgba(146,82,73,0.34)] bg-[linear-gradient(180deg,rgba(170,103,93,0.96),rgba(138,76,67,0.98))] px-5 text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[color:rgba(255,248,244,0.98)] shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_8px_18px_rgba(123,70,61,0.14)] transition-[background-color,border-color,color,transform,box-shadow] duration-150 hover:border-[color:rgba(132,72,64,0.42)] hover:bg-[linear-gradient(180deg,rgba(156,91,82,0.98),rgba(126,67,60,0.98))] active:scale-[0.99] focus-visible:outline-none";
-const focusPreferenceOptions: FocusPreferenceLevel[] = ["low", "medium", "high"];
+const focusPreferenceOptions: FocusPreferenceLevel[] = ["high", "medium", "low"];
 const focusPreferenceOptionLabels: Record<FocusPreferenceLevel, string> = {
   low: "Low",
   medium: "Medium",
@@ -14367,6 +14367,23 @@ const focusPreferenceFieldLabels: Record<
   promoReminders: "Promo reminders",
   paymentReminders: "Payment reminders",
 };
+const focusPreferenceGroups: Array<{
+  title: string;
+  fields: Array<keyof UserConfig["focusPreferences"]>;
+}> = [
+  {
+    title: "Primary",
+    fields: ["demos", "promo", "business"],
+  },
+  {
+    title: "Financial & Legal",
+    fields: ["finance", "royalties", "legal"],
+  },
+  {
+    title: "Updates & System",
+    fields: ["updates", "distribution", "promoReminders", "paymentReminders"],
+  },
+];
 const teamInvitationPrimaryActionClass =
   settingsPrimaryActionClass;
 const teamInvitationSecondaryActionClass =
@@ -16377,38 +16394,57 @@ const FocusPreferencesSettingsCard = memo(function FocusPreferencesSettingsCard(
     <section className="flex h-full flex-col space-y-2.5">
       <div className={settingsSectionLabelClass}>Focus preferences</div>
       <div className={settingsCardClass(themeMode)}>
-        <div className="mb-3 space-y-2">
+        <div className="mb-4 space-y-2">
           <h2 className="text-[1.1rem] font-medium tracking-tight text-[var(--workspace-text)]">
             Focus preferences
           </h2>
           <p className="max-w-xl text-[0.9rem] leading-6 text-[var(--workspace-text-muted)]">
-            Choose what Cuevion should surface higher or lower across the workspace.
+            Control what Cuevion prioritizes across your workspace.
           </p>
         </div>
 
-        <div className="space-y-3.5">
-          {(Object.entries(focusPreferenceFieldLabels) as Array<
-            [keyof UserConfig["focusPreferences"], string]
-          >).map(([field, label]) => (
-            <div key={`focus-preference-${field}`} className={settingsCardSectionClass}>
-              <div className="mb-2 text-[0.86rem] text-[var(--workspace-text)]">{label}</div>
-              <div className="flex flex-wrap gap-2">
-                {focusPreferenceOptions.map((option) => (
-                  <button
-                    key={`${field}-${option}`}
-                    type="button"
-                    onClick={() =>
-                      setDraftFocusPreferences((current) => ({
-                        ...current,
-                        [field]: option,
-                      }))
-                    }
-                    className={settingsPillButtonClass(
-                      draftFocusPreferences[field] === option,
-                    )}
+        <div className="space-y-4">
+          {focusPreferenceGroups.map((group, index) => (
+            <div
+              key={`focus-group-${group.title}`}
+              className={`rounded-[20px] border px-4 py-3.5 ${
+                index === 0
+                  ? "border-[color:rgba(111,148,111,0.22)] bg-[linear-gradient(180deg,rgba(246,249,244,0.98),rgba(242,246,240,0.92))]"
+                  : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)]"
+              }`}
+            >
+              <div className="mb-3 text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                {group.title}
+              </div>
+              <div className="space-y-2.5">
+                {group.fields.map((field) => (
+                  <div
+                    key={`focus-preference-${field}`}
+                    className="flex flex-col gap-2 rounded-[16px] bg-[var(--workspace-card)] px-3.5 py-3 sm:flex-row sm:items-center sm:justify-between"
                   >
-                    {focusPreferenceOptionLabels[option]}
-                  </button>
+                    <div className="text-[0.9rem] font-medium text-[var(--workspace-text)]">
+                      {focusPreferenceFieldLabels[field]}
+                    </div>
+                    <div className="inline-flex flex-wrap gap-1 self-start rounded-full border border-[var(--workspace-border)] bg-[var(--workspace-card-subtle)] p-1 sm:self-auto">
+                      {focusPreferenceOptions.map((option) => (
+                        <button
+                          key={`${field}-${option}`}
+                          type="button"
+                          onClick={() =>
+                            setDraftFocusPreferences((current) => ({
+                              ...current,
+                              [field]: option,
+                            }))
+                          }
+                          className={settingsPillButtonClass(
+                            draftFocusPreferences[field] === option,
+                          )}
+                        >
+                          {focusPreferenceOptionLabels[option]}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
                 ))}
               </div>
             </div>
@@ -17134,6 +17170,13 @@ function SettingsView({
             onManageInboxes={() => setSettingsPage("manage-inboxes")}
           />
           <AccountSettingsCard themeMode={themeMode} />
+          <NotificationsSettingsCard
+            themeMode={themeMode}
+            inboxChangesEnabled={inboxChangesEnabled}
+            onToggleInboxChanges={onToggleInboxChanges}
+            teamActivityEnabled={teamActivityEnabled}
+            onToggleTeamActivity={onToggleTeamActivity}
+          />
         </div>
         <div className="space-y-6">
           <FocusPreferencesSettingsCard
@@ -17152,13 +17195,6 @@ function SettingsView({
             onManageOutOfOffice={(mailbox) => {
               setActiveOutOfOfficeInboxId(mailbox.id);
             }}
-          />
-          <NotificationsSettingsCard
-            themeMode={themeMode}
-            inboxChangesEnabled={inboxChangesEnabled}
-            onToggleInboxChanges={onToggleInboxChanges}
-            teamActivityEnabled={teamActivityEnabled}
-            onToggleTeamActivity={onToggleTeamActivity}
           />
         </div>
       </div>
