@@ -5363,12 +5363,14 @@ function CuevionMark({ compact = false }: { compact?: boolean }) {
 function WorkspaceSidebar({
   activeSection,
   activeMailboxId,
+  hasTeamAttention,
   orderedMailboxes,
   onChangeSection,
   onOpenMailbox,
 }: {
   activeSection: WorkspaceSection;
   activeMailboxId: InboxId | null;
+  hasTeamAttention: boolean;
   orderedMailboxes: OrderedMailbox[];
   onChangeSection: (view: WorkspaceSection) => void;
   onOpenMailbox: (mailbox: OrderedMailbox) => void;
@@ -5552,7 +5554,7 @@ function WorkspaceSidebar({
           aria-label={item.label}
         >
           <span className="hidden xl:inline">{item.label}</span>
-          {item.section === "Team" ? (
+          {item.section === "Team" && hasTeamAttention ? (
             <span className="ml-2 hidden xl:inline-flex">
               <span className="h-[7px] w-[7px] rounded-full bg-[radial-gradient(circle_at_30%_30%,#DCCFBB_0%,#D2C2A8_48%,#C3B091_100%)] shadow-[0_0_5px_rgba(210,194,168,0.28)]" />
             </span>
@@ -13172,6 +13174,7 @@ function WorkbenchView({
   onAddMemberOfEntry,
   onAcceptPendingTeamInvitation,
   onDeclinePendingTeamInvitation,
+  onHasInvitedTeamMembersChange,
   showDemoContent,
   workspacePersistenceKey,
 }: {
@@ -13190,6 +13193,7 @@ function WorkbenchView({
   onAddMemberOfEntry: (entry: TeamMembershipEntry) => void;
   onAcceptPendingTeamInvitation: () => void;
   onDeclinePendingTeamInvitation: () => void;
+  onHasInvitedTeamMembersChange: (hasInvitedTeamMembers: boolean) => void;
   showDemoContent: boolean;
   workspacePersistenceKey: string;
 }) {
@@ -13384,6 +13388,12 @@ function WorkbenchView({
 
     window.localStorage.setItem(teamMembersStorageKey, JSON.stringify(teamMembers));
   }, [teamMembers, teamMembersStorageKey]);
+
+  useEffect(() => {
+    onHasInvitedTeamMembersChange(
+      teamMembers.some((member) => member.status === "Invited"),
+    );
+  }, [onHasInvitedTeamMembersChange, teamMembers]);
 
   useEffect(() => {
     if (!activeTeamMember) {
@@ -14072,8 +14082,19 @@ function WorkbenchView({
                       console.log(`confirm_cancel_invite_${activeTeamMember?.name ?? "member"}`);
                     } else if (
                       activeTeamConfirmation === "resend-invite" &&
+                      activeTeamMemberIndex !== null &&
                       activeTeamMember
                     ) {
+                      setTeamMembers((current) =>
+                        current.map((member, index) =>
+                          index === activeTeamMemberIndex
+                            ? {
+                                ...member,
+                                status: "Invited",
+                              }
+                            : member,
+                        ),
+                      );
                       setTeamFeedbackMessage("Workspace invite reopened");
                       console.log(`confirm_resend_invite_${activeTeamMember.name}`);
                     } else if (
@@ -19607,6 +19628,7 @@ export function WorkspaceShell({
   const primaryWorkspaceEmail = orderedMailboxes[0]?.email ?? "team@cuevion.com";
   const activeWorkspaceEmail = authenticatedUser?.email ?? primaryWorkspaceEmail;
   const currentWorkspaceUserId = normalizeSenderLearningKey(activeWorkspaceEmail);
+  const teamMembersStorageKey = buildTeamMembersStorageKey(currentWorkspaceUserId);
   const teamPendingInvitationStorageKey =
     buildTeamPendingInvitationStorageKey(currentWorkspaceUserId);
   const teamMembershipsStorageKey =
@@ -20013,6 +20035,25 @@ export function WorkspaceShell({
       return JSON.parse(storedValue) as TeamMembershipEntry[];
     } catch {
       return [];
+    }
+  });
+  const [hasInvitedTeamMembers, setHasInvitedTeamMembers] = useState<boolean>(() => {
+    if (typeof window === "undefined") {
+      return false;
+    }
+
+    const storedValue = window.localStorage.getItem(teamMembersStorageKey);
+
+    if (!storedValue) {
+      return false;
+    }
+
+    try {
+      return (JSON.parse(storedValue) as TeamMemberEntry[]).some(
+        (member) => member.status === "Invited",
+      );
+    } catch {
+      return false;
     }
   });
   const workspaceCollaborationPeople = [
@@ -22640,6 +22681,7 @@ export function WorkspaceShell({
       <WorkspaceSidebar
         activeSection={activeSection}
         activeMailboxId={activeMailbox?.id ?? null}
+        hasTeamAttention={Boolean(pendingTeamInvitation) || hasInvitedTeamMembers}
         orderedMailboxes={orderedMailboxes}
         onChangeSection={handleChangeSection}
         onOpenMailbox={(mailbox) =>
@@ -22807,6 +22849,7 @@ export function WorkspaceShell({
                   onDeclinePendingTeamInvitation={() => {
                     setPendingTeamInvitation(null);
                   }}
+                  onHasInvitedTeamMembersChange={setHasInvitedTeamMembers}
                   showDemoContent={isDemoWorkspace}
                   workspacePersistenceKey={currentWorkspaceUserId}
                 />
