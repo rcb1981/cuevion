@@ -6954,12 +6954,117 @@ function MailboxView({
   }, [isComposeOpen, pendingComposeAttachmentPickerOpen]);
 
   const mailboxCollections = mailboxStore[mailbox.id] ?? createEmptyMailboxCollections();
+  const resolveOnboardingVisibilityMode = (message: MailMessage) => {
+    const preferenceLevel = (() => {
+      switch (message.internalClassification) {
+        case "promo":
+          return userConfig.focusPreferences.promo;
+        case "promo_reminder":
+          return userConfig.focusPreferences.promoReminders;
+        case "finance":
+          return userConfig.focusPreferences.finance;
+        case "royalty_statement":
+          return userConfig.focusPreferences.royalties;
+        case "business_reminder":
+          return userConfig.focusPreferences.paymentReminders;
+        case "distributor_update":
+          return userConfig.focusPreferences.distribution;
+        case "business":
+          return mailbox.id === "business"
+            ? userConfig.focusPreferences.business
+            : null;
+        default:
+          return null;
+      }
+    })();
+
+    if (preferenceLevel === "high") {
+      return "show_priority" as const;
+    }
+
+    if (preferenceLevel === "medium") {
+      return "show_normal" as const;
+    }
+
+    if (preferenceLevel === "low") {
+      return "show_low" as const;
+    }
+
+    return null;
+  };
+  const hasProtectedPriorityVisibility = (message: MailMessage) =>
+    message.signal === "Priority" ||
+    message.signal === "Active" ||
+    message.signal === "For review" ||
+    message.signal === "Shortlist" ||
+    message.internalClassification === "reply" ||
+    message.internalClassification === "high_priority_demo" ||
+    Boolean(message.isShared) ||
+    Boolean(message.sharedContext) ||
+    message.owner?.confidence === "medium" ||
+    message.owner?.confidence === "high";
+  const getEffectiveVisiblePriorityScore = (message: MailMessage) => {
+    if (hasProtectedPriorityVisibility(message)) {
+      return message.priorityScore;
+    }
+
+    const visibilityMode = resolveOnboardingVisibilityMode(message);
+
+    if (visibilityMode === "show_priority") {
+      return "high" as const;
+    }
+
+    if (visibilityMode === "show_normal") {
+      return "medium" as const;
+    }
+
+    if (visibilityMode === "show_low") {
+      return "low" as const;
+    }
+
+    return message.priorityScore;
+  };
+  const getVisiblePriorityBadgeForMessage = (message: MailMessage) =>
+    getVisiblePriorityBadge(
+      {
+        ...message,
+        priorityScore: getEffectiveVisiblePriorityScore(message),
+      },
+      manualPriorityOverrides[message.id],
+    );
+  const isVisiblePriorityMessageForMessage = (message: MailMessage) => {
+    const override = manualPriorityOverrides[message.id];
+
+    if (override === "priority") {
+      return true;
+    }
+
+    if (override === "removed") {
+      return false;
+    }
+
+    if (!hasProtectedPriorityVisibility(message)) {
+      const visibilityMode = resolveOnboardingVisibilityMode(message);
+
+      if (visibilityMode === "show_priority") {
+        return true;
+      }
+
+      if (visibilityMode === "show_normal" || visibilityMode === "show_low") {
+        return false;
+      }
+    }
+
+    return isMessageVisiblePriority(
+      {
+        ...message,
+        priorityScore: getEffectiveVisiblePriorityScore(message),
+      },
+      override,
+    );
+  };
   const lowSignalInboxMessages = mailboxCollections.Inbox.filter(
-    (message) =>
-      getVisiblePriorityBadge(
-        message,
-        manualPriorityOverrides[message.id],
-      ) === "LOW",
+    (message) => getVisiblePriorityBadgeForMessage(message) === "LOW",
   );
   const lowSignalInboxMessageIds = new Set(
     lowSignalInboxMessages.map((message) => message.id),
@@ -7083,7 +7188,7 @@ function MailboxView({
   const getVisibleMessageSignal = (message: MailMessage) =>
     resolveVisiblePrioritySignal(message, getManualPriorityOverride(message.id));
   const isVisiblePriorityMessage = (message: MailMessage) =>
-    isMessageVisiblePriority(message, getManualPriorityOverride(message.id));
+    isVisiblePriorityMessageForMessage(message);
   const folderMessages = activeSmartFolder
     ? smartFolderMessages
     : isSharedView
@@ -11308,10 +11413,7 @@ function MailboxView({
                           ? formatSharedContextHint(message.sharedContext)
                           : null;
                       const visibleSignal = getVisibleMessageSignal(message);
-                      const priorityBadge = getVisiblePriorityBadge(
-                        message,
-                        getManualPriorityOverride(message.id),
-                      );
+                      const priorityBadge = getVisiblePriorityBadgeForMessage(message);
                       const categoryLabel = getVisibleCategoryLabel(message);
                       const signal = message.signal === "Sent" ? "" : priorityBadge;
                       const senderTextClass =
