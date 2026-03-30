@@ -2130,14 +2130,72 @@ function inferHeuristicSignal(
     "register now",
     "limited time",
   ];
+  const googleSecurityKeywords = [
+    "verification",
+    "2-step",
+    "two-step",
+    "password",
+    "security alert",
+    "sign-in",
+    "login",
+    "account access",
+    "beveiligingsmelding",
+    "beveiligingswaarschuwing",
+    "tweestapsverificatie",
+    "app-wachtwoord",
+    "ingelogd",
+    "inloggen",
+    "accounttoegang",
+    "verificatiecode",
+    "wachtwoord",
+    "beveiliging",
+  ];
+  const metaBillingKeywords = [
+    "meta for business",
+    "ads",
+    "receipt",
+    "payment",
+    "billing",
+    "invoice",
+    "account update",
+    "ad account",
+    "ontvangstbewijs",
+    "betalingsoverzicht",
+    "dit is geen factuur",
+    "factuur",
+    "advertentie is goedgekeurd",
+    "advertentie goedgekeurd",
+    "advertentie",
+    "advertenties",
+    "account-id",
+    "producttype",
+    "reden factuur",
+    "uitgaven van advertenties",
+  ];
   const isAutomatedSender = includesAnyKeyword(normalizedSender, automatedSenderHints);
-  const isPromo = includesAnyKeyword(searchableText, promoKeywords);
+  const isGoogleSecurityAuthMail = includesAnyKeyword(
+    searchableText,
+    googleSecurityKeywords,
+  );
+  const isMetaBillingSystemMail = includesAnyKeyword(
+    searchableText,
+    metaBillingKeywords,
+  );
+  const isPromo =
+    includesAnyKeyword(searchableText, promoKeywords) &&
+    !isGoogleSecurityAuthMail &&
+    !isMetaBillingSystemMail;
   const isPriority =
     includesAnyKeyword(searchableText, priorityKeywords) && !isPromo;
   const isUpdate =
     message.isAutoReply ||
+    isGoogleSecurityAuthMail ||
     includesAnyKeyword(searchableText, updateKeywords) ||
     (isAutomatedSender && !isPromo);
+
+  if (isMetaBillingSystemMail) {
+    return "Finance";
+  }
 
   if (isPriority) {
     return "Priority";
