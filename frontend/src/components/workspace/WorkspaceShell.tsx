@@ -1880,8 +1880,8 @@ function getMailboxFolderBadgeCount(
     return 0;
   }
 
-  if (folder === "Inbox") {
-    return mailboxCollections.Inbox.filter((message) => message.unread).length;
+  if (folder === "Inbox" || folder === "Filtered") {
+    return mailboxCollections[folder].filter((message) => message.unread).length;
   }
 
   return mailboxCollections[folder].length;
@@ -8745,12 +8745,16 @@ function MailboxView({
   };
 
   const markInboxMessageReadOnOpen = (message: MailMessage) => {
-    if (activeFolder !== "Inbox" || isSharedView || activeSmartFolder) {
+    if (
+      (activeFolder !== "Inbox" && activeFolder !== "Filtered") ||
+      isSharedView ||
+      activeSmartFolder
+    ) {
       return;
     }
 
     onSyncUnreadOverrides([message], false);
-    updateFolderMessages("Inbox", (messages) =>
+    updateFolderMessages(activeFolder, (messages) =>
       messages.map((entry) =>
         entry.id === message.id
           ? {
