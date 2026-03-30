@@ -509,6 +509,15 @@ type VisibleNotificationItem = {
   time: string;
   action: () => void;
 };
+type VisibleActivityItem = {
+  id: string;
+  type: string;
+  title: string;
+  detail: string;
+  time: string;
+  sortTimestamp: number;
+  action?: () => void;
+};
 type ReviewInboxHandoff = {
   reviewId: string;
   messageId: string;
@@ -5672,6 +5681,159 @@ function buildVisibleNotificationItems({
 
   // Notifications stay intentionally empty until product-ready live types are released.
   return [];
+}
+
+function formatVisibleActivityTimestamp(timestamp: number) {
+  const diffMs = Date.now() - timestamp;
+  const minuteMs = 60 * 1000;
+  const hourMs = 60 * minuteMs;
+  const dayMs = 24 * hourMs;
+
+  if (diffMs < minuteMs) {
+    return "Now";
+  }
+
+  if (diffMs < hourMs) {
+    return `${Math.max(1, Math.round(diffMs / minuteMs))} min ago`;
+  }
+
+  if (diffMs < dayMs) {
+    const hours = Math.max(1, Math.round(diffMs / hourMs));
+    return `${hours} hour${hours === 1 ? "" : "s"} ago`;
+  }
+
+  if (diffMs < dayMs * 2) {
+    return "Yesterday";
+  }
+
+  return new Date(timestamp).toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+  });
+}
+
+function buildVisibleActivityItems({
+  mailboxStore,
+  orderedMailboxes,
+  authenticatedUser,
+  teamActivityEnabled,
+  onOpenActivityNavigation,
+}: {
+  mailboxStore: MailboxStore;
+  orderedMailboxes: OrderedMailbox[];
+  authenticatedUser?: AuthenticatedCuevionUser | null;
+  teamActivityEnabled: boolean;
+  onOpenActivityNavigation: (
+    request: Omit<NotificationNavigationRequest, "requestKey">,
+  ) => void;
+}): VisibleActivityItem[] {
+  if (!teamActivityEnabled) {
+    return [];
+  }
+
+  const viewerType = authenticatedUser?.userType === "guest" ? "external" : "workspace";
+  const seenItemIds = new Set<string>();
+  const items = orderedMailboxes.flatMap((mailbox) =>
+    canonicalFolderOrder.flatMap((folder) =>
+      (mailboxStore[mailbox.id]?.[folder] ?? []).flatMap((message) => {
+        if (!message.collaboration) {
+          return [];
+        }
+
+        const subjectDetail = message.subject;
+        const nextItems: VisibleActivityItem[] = [
+          {
+            id: `created:${message.id}:${message.collaboration.createdAt}`,
+            type: "COLLABORATION",
+            title: `${message.collaboration.requestedBy} started the collaboration`,
+            detail: subjectDetail,
+            time: formatVisibleActivityTimestamp(message.collaboration.createdAt),
+            sortTimestamp: message.collaboration.createdAt,
+            action: () =>
+              onOpenActivityNavigation({
+                type: "reply",
+                mailboxId: mailbox.id,
+                messageId: message.id,
+              }),
+          },
+        ];
+
+        if (
+          message.collaboration.resolvedAt &&
+          message.collaboration.resolvedByUserName
+        ) {
+          nextItems.push({
+            id: `resolved:${message.id}:${message.collaboration.resolvedAt}`,
+            type: "COLLABORATION",
+            title: `${message.collaboration.resolvedByUserName} marked this as done`,
+            detail: subjectDetail,
+            time: formatVisibleActivityTimestamp(message.collaboration.resolvedAt),
+            sortTimestamp: message.collaboration.resolvedAt,
+            action: () =>
+              onOpenActivityNavigation({
+                type: "reply",
+                mailboxId: mailbox.id,
+                messageId: message.id,
+              }),
+          });
+        }
+
+        message.collaboration.messages
+          .filter((entry) => canViewerSeeCollaborationMessage(entry, viewerType))
+          .forEach((entry) => {
+            nextItems.push({
+              id: `reply:${message.id}:${entry.id}`,
+              type: "COLLABORATION",
+              title:
+                getCollaborationMessageVisibility(entry) === "internal"
+                  ? `${entry.authorName} replied internally`
+                  : `${entry.authorName} replied`,
+              detail: subjectDetail,
+              time: formatVisibleActivityTimestamp(entry.timestamp),
+              sortTimestamp: entry.timestamp,
+              action: () =>
+                onOpenActivityNavigation({
+                  type: "reply",
+                  mailboxId: mailbox.id,
+                  messageId: message.id,
+                  collaborationMessageId: entry.id,
+                }),
+            });
+
+            entry.mentions?.forEach((mention) => {
+              nextItems.push({
+                id: `mention:${message.id}:${entry.id}:${mention.id}`,
+                type: "COLLABORATION",
+                title: `${entry.authorName} mentioned ${mention.name}`,
+                detail: subjectDetail,
+                time: formatVisibleActivityTimestamp(entry.timestamp),
+                sortTimestamp: entry.timestamp,
+                action: () =>
+                  onOpenActivityNavigation({
+                    type: "mention",
+                    mailboxId: mailbox.id,
+                    messageId: message.id,
+                    collaborationMessageId: entry.id,
+                  }),
+              });
+            });
+          });
+
+        return nextItems;
+      }),
+    ),
+  )
+    .sort((firstItem, secondItem) => secondItem.sortTimestamp - firstItem.sortTimestamp)
+    .filter((item) => {
+      if (seenItemIds.has(item.id)) {
+        return false;
+      }
+
+      seenItemIds.add(item.id);
+      return true;
+    });
+
+  return items;
 }
 
 function NotificationsPreviewBlock({
@@ -13185,6 +13347,7 @@ function WorkbenchView({
   onOpenDemoInbox,
   onOpenLearningRequest,
   onOpenSenderContext,
+  activityItems,
   notificationItems,
   aiSuggestionsEnabled,
   inboxChangesEnabled,
@@ -13201,6 +13364,7 @@ function WorkbenchView({
   onOpenDemoInbox: () => void;
   onOpenLearningRequest: (request: NonNullable<LearningLaunchRequest>) => void;
   onOpenSenderContext: () => void;
+  activityItems: VisibleActivityItem[];
   notificationItems: VisibleNotificationItem[];
   aiSuggestionsEnabled: boolean;
   inboxChangesEnabled: boolean;
@@ -13242,103 +13406,7 @@ function WorkbenchView({
   };
 
   const view = content[section];
-  const activityItems = showDemoContent ? [
-    {
-      eventType: "collaboration_created" as const,
-      type: "COLLABORATION",
-      category: "team-activity" as const,
-      title: "Rutger started the collaboration",
-      detail: "DSP delivery note for Friday release",
-      time: "Now",
-    },
-    {
-      eventType: "collaboration_invited_user" as const,
-      type: "COLLABORATION",
-      category: "team-activity" as const,
-      title: "Emma invited David to the collaboration",
-      detail: "DSP delivery note for Friday release",
-      time: "Now",
-    },
-    {
-      eventType: "collaboration_user_joined" as const,
-      type: "COLLABORATION",
-      category: "team-activity" as const,
-      title: "David joined the collaboration",
-      detail: "DSP delivery note for Friday release",
-      time: "6 min ago",
-    },
-    {
-      eventType: "collaboration_invite_accepted" as const,
-      type: "COLLABORATION",
-      category: "team-activity" as const,
-      title: "David accepted the invitation",
-      detail: "DSP delivery note for Friday release",
-      time: "9 min ago",
-    },
-    {
-      eventType: "collaboration_reply_added" as const,
-      type: "COLLABORATION",
-      category: "team-activity" as const,
-      title: "Emma replied in the collaboration",
-      detail: "DSP delivery note for Friday release",
-      time: "14 min ago",
-    },
-    {
-      eventType: "collaboration_internal_note_added" as const,
-      type: "COLLABORATION",
-      category: "team-activity" as const,
-      title: "Rutger replied internally",
-      detail: "DSP delivery note for Friday release",
-      time: "22 min ago",
-    },
-    {
-      eventType: "collaboration_shared_message_sent" as const,
-      type: "COLLABORATION",
-      category: "team-activity" as const,
-      title: "Emma replied to all participants",
-      detail: "DSP delivery note for Friday release",
-      time: "31 min ago",
-    },
-    {
-      eventType: "collaboration_mention_added" as const,
-      type: "COLLABORATION",
-      category: "team-activity" as const,
-      title: "David mentioned Emma",
-      detail: "Artwork confirmation for vinyl repress",
-      time: "45 min ago",
-    },
-    {
-      eventType: "collaboration_marked_done" as const,
-      type: "COLLABORATION",
-      category: "team-activity" as const,
-      title: "Rutger marked this as done",
-      detail: "Global tour routing sign-off",
-      time: "2 hours ago",
-    },
-    {
-      eventType: "collaboration_reopened" as const,
-      type: "COLLABORATION",
-      category: "team-activity" as const,
-      title: "Emma reopened the collaboration",
-      detail: "Global tour routing sign-off",
-      time: "Yesterday",
-    },
-    {
-      eventType: "collaboration_invite_declined" as const,
-      type: "COLLABORATION",
-      category: "team-activity" as const,
-      title: "Alex declined the invitation",
-      detail: "Artwork confirmation for vinyl repress",
-      time: "Yesterday",
-    },
-  ] : [];
-  const visibleActivityItems = activityItems.filter((item) => {
-    if (item.category === "team-activity" && !teamActivityEnabled) {
-      return false;
-    }
-
-    return true;
-  });
+  const visibleActivityItems = activityItems;
   const visibleNotificationItems = notificationItems;
   const [teamMembers, setTeamMembers] = useState<TeamMemberEntry[]>(() => showDemoContent ? [
     {
@@ -13480,29 +13548,57 @@ function WorkbenchView({
           visibleActivityItems.length > 0 ? (
             <div className="divide-y divide-[var(--workspace-divider)]">
               {visibleActivityItems.map((item, index) => (
-                <div
-                  key={`${item.title}-${item.time}`}
-                  className={`flex items-start justify-between gap-4 rounded-[18px] px-2 py-4 text-left first:pt-1 last:pb-1 ${
-                    index === 0
-                      ? "bg-[var(--workspace-surface-selected)]"
-                      : "bg-transparent"
-                  }`}
-                >
-                  <div className="min-w-0 space-y-1">
-                    <div className="text-[0.62rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-accent-text)]">
-                      {item.type}
+                item.action ? (
+                  <button
+                    key={item.id}
+                    type="button"
+                    onClick={item.action}
+                    className={`flex w-full items-start justify-between gap-4 rounded-[18px] px-2 py-4 text-left transition-colors duration-200 first:pt-1 last:pb-1 hover:bg-[var(--workspace-surface-hover)] focus-visible:bg-[var(--workspace-surface-selected)] focus-visible:outline-none ${
+                      index === 0
+                        ? "bg-[var(--workspace-surface-selected)]"
+                        : "bg-transparent"
+                    }`}
+                  >
+                    <div className="min-w-0 space-y-1">
+                      <div className="text-[0.62rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-accent-text)]">
+                        {item.type}
+                      </div>
+                      <div className="text-[0.98rem] font-medium tracking-[-0.014em] text-[var(--workspace-text)]">
+                        {item.title}
+                      </div>
+                      <div className="text-[0.84rem] leading-6 text-[var(--workspace-text-soft)]">
+                        {item.detail}
+                      </div>
                     </div>
-                    <div className="text-[0.98rem] font-medium tracking-[-0.014em] text-[var(--workspace-text)]">
-                      {item.title}
+                    <div className="flex-none pt-0.5 text-[0.68rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)]">
+                      {item.time}
                     </div>
-                    <div className="text-[0.84rem] leading-6 text-[var(--workspace-text-soft)]">
-                      {item.detail}
+                  </button>
+                ) : (
+                  <div
+                    key={item.id}
+                    className={`flex items-start justify-between gap-4 rounded-[18px] px-2 py-4 text-left first:pt-1 last:pb-1 ${
+                      index === 0
+                        ? "bg-[var(--workspace-surface-selected)]"
+                        : "bg-transparent"
+                    }`}
+                  >
+                    <div className="min-w-0 space-y-1">
+                      <div className="text-[0.62rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-accent-text)]">
+                        {item.type}
+                      </div>
+                      <div className="text-[0.98rem] font-medium tracking-[-0.014em] text-[var(--workspace-text)]">
+                        {item.title}
+                      </div>
+                      <div className="text-[0.84rem] leading-6 text-[var(--workspace-text-soft)]">
+                        {item.detail}
+                      </div>
+                    </div>
+                    <div className="flex-none pt-0.5 text-[0.68rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)]">
+                      {item.time}
                     </div>
                   </div>
-                  <div className="flex-none pt-0.5 text-[0.68rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)]">
-                    {item.time}
-                  </div>
-                </div>
+                )
               ))}
             </div>
           ) : (
@@ -21006,6 +21102,13 @@ export function WorkspaceShell({
     teamActivityEnabled,
     onOpenNotificationNavigation: handleOpenNotificationNavigation,
   });
+  const liveActivityItems = buildVisibleActivityItems({
+    mailboxStore,
+    orderedMailboxes,
+    authenticatedUser,
+    teamActivityEnabled,
+    onOpenActivityNavigation: handleOpenNotificationNavigation,
+  });
 
   const openReviewItemInInbox = (
     reviewItem: ReviewItem,
@@ -22678,6 +22781,7 @@ export function WorkspaceShell({
                   onOpenDemoInbox={handleOpenDemoInbox}
                   onOpenLearningRequest={handleOpenLearningRequest}
                   onOpenSenderContext={handleOpenSenderContext}
+                  activityItems={liveActivityItems}
                   notificationItems={liveNotificationItems}
                   aiSuggestionsEnabled={aiSuggestionsEnabled}
                   inboxChangesEnabled={inboxChangesEnabled}
