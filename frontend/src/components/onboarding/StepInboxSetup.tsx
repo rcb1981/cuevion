@@ -151,6 +151,90 @@ export function StepInboxSetup({
     </div>
   );
 
+  const renderPrimaryInboxSection = () => (
+    <div className="space-y-3">
+      <div className="space-y-1">
+        <h3 className="text-lg font-medium text-ink">Primary inbox</h3>
+        <p className="text-sm text-ink/52">
+          Choose the inbox that should anchor your workspace.
+        </p>
+      </div>
+
+      <div className="grid gap-4 md:grid-cols-2">
+        {availableInboxOptions.map((option) => {
+          const selected = primaryInbox === option.id;
+          const isMainInboxOption = option.id === "main";
+          const showsInboxTypeControls = isMainInboxOption && selected;
+
+          return (
+            <div
+              key={option.id}
+              className={`rounded-3xl border transition ${
+                selected
+                  ? "border-pine bg-[linear-gradient(180deg,rgba(226,236,229,0.92),rgba(246,249,246,0.98))] text-ink shadow-panel"
+                  : "border-ink/10 bg-white/80 text-ink hover:border-moss/35"
+              }`}
+            >
+              <button
+                type="button"
+                onClick={() => {
+                  setShowLimitHint(false);
+                  onPrimaryInboxChange(option.id);
+                }}
+                className="w-full cursor-pointer rounded-3xl p-5 text-left outline-none focus-visible:border-pine focus-visible:text-ink"
+              >
+                <div className="flex items-center justify-between gap-4">
+                  <div className="space-y-1">
+                    <span className="block text-base font-semibold">{option.label}</span>
+                    {isMainInboxOption ? (
+                      <span className="block text-sm text-ink/52">
+                        Optional: mark it as personal or work.
+                      </span>
+                    ) : null}
+                  </div>
+                  {selected ? (
+                    <span className="rounded-full border border-ink/8 bg-white/55 px-2.5 py-1 text-[10px] uppercase tracking-[0.18em] text-ink/46">
+                      Selected
+                    </span>
+                  ) : null}
+                </div>
+              </button>
+
+              {showsInboxTypeControls ? (
+                <div className="px-5 pb-5 pt-1">
+                  <div className="flex flex-wrap gap-2">
+                    {primaryInboxTypeOptions.map((typeOption) => {
+                      const typeSelected = primaryInboxType === typeOption.id;
+
+                      return (
+                        <button
+                          key={typeOption.id}
+                          type="button"
+                          onClick={() =>
+                            onPrimaryInboxTypeChange(
+                              typeSelected ? null : typeOption.id,
+                            )
+                          }
+                          className={`rounded-full border px-3 py-1.5 text-sm transition ${
+                            typeSelected
+                              ? "border-pine bg-white/82 text-ink shadow-[0_6px_20px_rgba(38,66,56,0.08)]"
+                              : "border-ink/10 bg-white/68 text-ink/72 hover:border-moss/35 hover:text-ink"
+                          } outline-none focus-visible:border-pine focus-visible:text-ink`}
+                        >
+                          {typeOption.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+
   const submitCustomInbox = () => {
     const trimmedName = customInboxName.trim();
 
@@ -199,39 +283,7 @@ export function StepInboxSetup({
         </p>
       </div>
 
-      {renderSingleSelectSection(
-        "Primary inbox",
-        "Choose the inbox that should anchor your workspace.",
-        primaryInbox,
-        availableInboxOptions,
-        onPrimaryInboxChange,
-      )}
-
-      <div className="-mt-4 space-y-2 pl-1">
-        <div className="text-sm font-medium text-ink/62">Inbox type (optional)</div>
-        <div className="flex flex-wrap gap-2">
-          {primaryInboxTypeOptions.map((option) => {
-            const selected = primaryInboxType === option.id;
-
-            return (
-              <button
-                key={option.id}
-                type="button"
-                onClick={() =>
-                  onPrimaryInboxTypeChange(selected ? null : option.id)
-                }
-                className={`rounded-full border px-3 py-1.5 text-sm transition ${
-                  selected
-                    ? "border-pine bg-[rgba(226,236,229,0.92)] text-ink shadow-[0_6px_20px_rgba(38,66,56,0.08)]"
-                    : "border-ink/10 bg-white/78 text-ink/72 hover:border-moss/35 hover:text-ink"
-                } outline-none focus-visible:border-pine focus-visible:text-ink`}
-              >
-                {option.label}
-              </button>
-            );
-          })}
-        </div>
-      </div>
+      {renderPrimaryInboxSection()}
 
       {inboxCount === "2" || inboxCount === "3" ? (
         renderSingleSelectSection(

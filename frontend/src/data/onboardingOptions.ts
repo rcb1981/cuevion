@@ -50,7 +50,10 @@ export const inboxCountOptions: Array<{ id: InboxCountId; label: string }> =
   onboardingText.inboxCount.options.map((option) => ({ ...option }));
 
 export const mainInboxOptions: Array<{ id: PresetInboxId; label: string }> =
-  onboardingText.inboxSetup.main.map((option) => ({ ...option }));
+  onboardingText.inboxSetup.main.map((option) => ({
+    ...option,
+    label: option.id === "main" ? "Main / Personal Inbox" : option.label,
+  }));
 
 export const specializedInboxOptions: Array<{ id: PresetInboxId; label: string }> =
   onboardingText.inboxSetup.specialized.map((option) => ({ ...option }));
