@@ -2251,8 +2251,6 @@ function getVisibleCategoryLabel(
       return "Update";
     case "reply":
       return "Reply";
-    case "unknown":
-      return "Other";
     default:
       break;
   }
