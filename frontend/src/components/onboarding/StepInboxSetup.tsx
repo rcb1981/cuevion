@@ -1,15 +1,21 @@
 import { useEffect, useRef, useState } from "react";
-import type { CustomInboxDefinition, InboxId } from "../../types/onboarding";
+import type {
+  CustomInboxDefinition,
+  InboxId,
+  PrimaryInboxType,
+} from "../../types/onboarding";
 
 interface StepInboxSetupProps {
   inboxCount: "1" | "2" | "3" | "4+" | "not_sure" | null;
   primaryInbox: InboxId | null;
+  primaryInboxType: PrimaryInboxType | null;
   selectedInboxes: InboxId[];
   availableInboxOptions: Array<{ id: InboxId; label: string }>;
   customInboxes: CustomInboxDefinition[];
   maxActiveInboxCount: number;
   requiredInboxCount: number;
   onPrimaryInboxChange: (inboxId: InboxId) => void;
+  onPrimaryInboxTypeChange: (value: PrimaryInboxType | null) => void;
   onSecondaryInboxChange: (inboxId: InboxId | null) => void;
   onThirdInboxChange: (inboxId: InboxId | null) => void;
   onToggleAdditionalInbox: (inboxId: InboxId) => void;
@@ -19,12 +25,14 @@ interface StepInboxSetupProps {
 export function StepInboxSetup({
   inboxCount,
   primaryInbox,
+  primaryInboxType,
   selectedInboxes,
   availableInboxOptions,
   customInboxes,
   maxActiveInboxCount,
   requiredInboxCount,
   onPrimaryInboxChange,
+  onPrimaryInboxTypeChange,
   onSecondaryInboxChange,
   onThirdInboxChange,
   onToggleAdditionalInbox,
@@ -174,6 +182,13 @@ export function StepInboxSetup({
   const thirdInboxOptions = availableInboxOptions.filter(
     (option) => option.id !== primaryInbox && option.id !== secondInbox,
   );
+  const primaryInboxTypeOptions: Array<{
+    id: Exclude<PrimaryInboxType, null>;
+    label: string;
+  }> = [
+    { id: "personal", label: "Personal" },
+    { id: "work", label: "Work" },
+  ];
 
   return (
     <section className="space-y-8">
@@ -191,6 +206,32 @@ export function StepInboxSetup({
         availableInboxOptions,
         onPrimaryInboxChange,
       )}
+
+      <div className="-mt-4 space-y-2 pl-1">
+        <div className="text-sm font-medium text-ink/62">Inbox type (optional)</div>
+        <div className="flex flex-wrap gap-2">
+          {primaryInboxTypeOptions.map((option) => {
+            const selected = primaryInboxType === option.id;
+
+            return (
+              <button
+                key={option.id}
+                type="button"
+                onClick={() =>
+                  onPrimaryInboxTypeChange(selected ? null : option.id)
+                }
+                className={`rounded-full border px-3 py-1.5 text-sm transition ${
+                  selected
+                    ? "border-pine bg-[rgba(226,236,229,0.92)] text-ink shadow-[0_6px_20px_rgba(38,66,56,0.08)]"
+                    : "border-ink/10 bg-white/78 text-ink/72 hover:border-moss/35 hover:text-ink"
+                } outline-none focus-visible:border-pine focus-visible:text-ink`}
+              >
+                {option.label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
 
       {inboxCount === "2" || inboxCount === "3" ? (
         renderSingleSelectSection(

@@ -12,4 +12,5 @@ export interface UserConfig {
   focusPreferences: OnboardingState["focusPreferences"];
   inboxCount: InboxCountId | null;
   selectedInboxes: InboxId[];
+  primaryInboxType: OnboardingState["primaryInboxType"];
 }

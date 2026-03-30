@@ -40,6 +40,7 @@ function buildUserConfig(state: OnboardingState): UserConfig {
     focusPreferences: state.focusPreferences,
     inboxCount: state.inboxCount,
     selectedInboxes: state.selectedInboxes,
+    primaryInboxType: state.primaryInboxType,
   };
 }
 
@@ -77,6 +78,7 @@ function normalizeOnboardingState(value: Partial<OnboardingState>): OnboardingSt
     ...value,
     internalRole: value.internalRole ?? null,
     primaryInbox: value.primaryInbox ?? initialOnboardingState.primaryInbox,
+    primaryInboxType: value.primaryInboxType ?? null,
     focusPreferences: {
       ...initialOnboardingState.focusPreferences,
       ...(value.focusPreferences ?? {}),

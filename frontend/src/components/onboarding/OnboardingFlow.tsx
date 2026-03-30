@@ -19,6 +19,7 @@ import type {
   FocusPreferenceLevel,
   InboxId,
   OnboardingState,
+  PrimaryInboxType,
   ProviderId,
   RoleId,
 } from "../../types/onboarding";
@@ -380,6 +381,7 @@ export function OnboardingFlow({
     focusPreferences: state.focusPreferences,
     inboxCount: state.inboxCount,
     selectedInboxes: state.selectedInboxes,
+    primaryInboxType: state.primaryInboxType,
   };
 
   const availableInboxOptions = [
@@ -412,6 +414,13 @@ export function OnboardingFlow({
         selectedInboxes: nextSelectedInboxes,
       };
     });
+  };
+
+  const setPrimaryInboxType = (primaryInboxType: PrimaryInboxType | null) => {
+    onStateChange((current) => ({
+      ...current,
+      primaryInboxType,
+    }));
   };
 
   const setSecondInbox = (inboxId: InboxId | null) => {
@@ -712,12 +721,14 @@ export function OnboardingFlow({
           <StepInboxSetup
             inboxCount={state.inboxCount}
             primaryInbox={state.primaryInbox}
+            primaryInboxType={state.primaryInboxType}
             selectedInboxes={state.selectedInboxes}
             availableInboxOptions={availableInboxOptions}
             customInboxes={state.customInboxes}
             maxActiveInboxCount={getMaxActiveInboxCount(state.inboxCount)}
             requiredInboxCount={getRequiredInboxCount(state.inboxCount)}
             onPrimaryInboxChange={setPrimaryInbox}
+            onPrimaryInboxTypeChange={setPrimaryInboxType}
             onSecondaryInboxChange={setSecondInbox}
             onThirdInboxChange={setThirdInbox}
             onToggleAdditionalInbox={toggleAdditionalInbox}

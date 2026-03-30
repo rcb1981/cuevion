@@ -30,6 +30,7 @@ export type PresetInboxId =
   | "sync";
 
 export type InboxId = PresetInboxId | `custom:${string}`;
+export type PrimaryInboxType = "personal" | "work";
 
 export type ProviderId =
   | "google"
@@ -64,6 +65,7 @@ export interface OnboardingState {
   internalRole: InternalRole | null;
   secondaryRole: RoleId | null;
   primaryInbox: InboxId | null;
+  primaryInboxType: PrimaryInboxType | null;
   focusPreferences: {
     demos: FocusPreferenceLevel;
     promo: FocusPreferenceLevel;
