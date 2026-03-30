@@ -27,6 +27,7 @@ import type { ReviewItem, ReviewWorkspaceTarget } from "./review/types";
 import type {
   CustomInboxDefinition,
   CustomImapSettings,
+  FocusPreferenceLevel,
   InboxId,
   OnboardingState,
   PresetInboxId,
@@ -14314,6 +14315,27 @@ const settingsPrimaryActionClass =
   `inline-flex h-10 items-center justify-center rounded-full px-5 text-[0.72rem] font-medium uppercase tracking-[0.16em] ${primaryActionSurfaceClass}`;
 const settingsDangerActionClass =
   "inline-flex h-10 items-center justify-center rounded-full border border-[color:rgba(146,82,73,0.34)] bg-[linear-gradient(180deg,rgba(170,103,93,0.96),rgba(138,76,67,0.98))] px-5 text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[color:rgba(255,248,244,0.98)] shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_8px_18px_rgba(123,70,61,0.14)] transition-[background-color,border-color,color,transform,box-shadow] duration-150 hover:border-[color:rgba(132,72,64,0.42)] hover:bg-[linear-gradient(180deg,rgba(156,91,82,0.98),rgba(126,67,60,0.98))] active:scale-[0.99] focus-visible:outline-none";
+const focusPreferenceOptions: FocusPreferenceLevel[] = ["low", "medium", "high"];
+const focusPreferenceOptionLabels: Record<FocusPreferenceLevel, string> = {
+  low: "Low",
+  medium: "Medium",
+  high: "High",
+};
+const focusPreferenceFieldLabels: Record<
+  keyof UserConfig["focusPreferences"],
+  string
+> = {
+  demos: "Demos",
+  promo: "Promo",
+  finance: "Finance",
+  legal: "Legal",
+  business: "Business",
+  updates: "Updates",
+  distribution: "Distribution",
+  royalties: "Royalties",
+  promoReminders: "Promo reminders",
+  paymentReminders: "Payment reminders",
+};
 const teamInvitationPrimaryActionClass =
   settingsPrimaryActionClass;
 const teamInvitationSecondaryActionClass =
@@ -16296,6 +16318,124 @@ const InboxBehaviorSettingsCard = memo(function InboxBehaviorSettingsCard({
   );
 });
 
+const FocusPreferencesSettingsCard = memo(function FocusPreferencesSettingsCard({
+  themeMode,
+  focusPreferences,
+  onApplyFocusPreferences,
+  isApplying,
+}: {
+  themeMode: "light" | "dark";
+  focusPreferences: UserConfig["focusPreferences"];
+  onApplyFocusPreferences: (nextValue: UserConfig["focusPreferences"]) => void;
+  isApplying: boolean;
+}) {
+  const [draftFocusPreferences, setDraftFocusPreferences] = useState(focusPreferences);
+  const [isConfirmOpen, setIsConfirmOpen] = useState(false);
+  const hasUnsavedChanges =
+    JSON.stringify(draftFocusPreferences) !== JSON.stringify(focusPreferences);
+
+  useEffect(() => {
+    if (isConfirmOpen) {
+      return;
+    }
+
+    setDraftFocusPreferences(focusPreferences);
+  }, [focusPreferences, isConfirmOpen]);
+
+  return (
+    <section className="flex h-full flex-col space-y-2.5">
+      <div className={settingsSectionLabelClass}>Focus preferences</div>
+      <div className={settingsCardClass(themeMode)}>
+        <div className="mb-3 space-y-2">
+          <h2 className="text-[1.1rem] font-medium tracking-tight text-[var(--workspace-text)]">
+            Focus preferences
+          </h2>
+          <p className="max-w-xl text-[0.9rem] leading-6 text-[var(--workspace-text-muted)]">
+            Choose what Cuevion should surface higher or lower across the workspace.
+          </p>
+        </div>
+
+        <div className="space-y-3.5">
+          {(Object.entries(focusPreferenceFieldLabels) as Array<
+            [keyof UserConfig["focusPreferences"], string]
+          >).map(([field, label]) => (
+            <div key={`focus-preference-${field}`} className={settingsCardSectionClass}>
+              <div className="mb-2 text-[0.86rem] text-[var(--workspace-text)]">{label}</div>
+              <div className="flex flex-wrap gap-2">
+                {focusPreferenceOptions.map((option) => (
+                  <button
+                    key={`${field}-${option}`}
+                    type="button"
+                    onClick={() =>
+                      setDraftFocusPreferences((current) => ({
+                        ...current,
+                        [field]: option,
+                      }))
+                    }
+                    className={settingsPillButtonClass(
+                      draftFocusPreferences[field] === option,
+                    )}
+                  >
+                    {focusPreferenceOptionLabels[option]}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ))}
+
+          {hasUnsavedChanges ? (
+            <div className="flex justify-end gap-3 pt-1">
+              <button
+                type="button"
+                onClick={() => setDraftFocusPreferences(focusPreferences)}
+                disabled={isApplying}
+                className={settingsPairedSecondaryActionClass}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => setIsConfirmOpen(true)}
+                disabled={isApplying}
+                className={`${settingsPrimaryActionClass} w-[9rem] disabled:cursor-not-allowed disabled:opacity-70`}
+              >
+                Apply changes
+              </button>
+            </div>
+          ) : isApplying ? (
+            <div className="flex justify-end pt-1 text-[0.78rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)]">
+              Applying…
+            </div>
+          ) : null}
+        </div>
+      </div>
+
+      <SettingsConfirmationModal
+        open={isConfirmOpen}
+        themeMode={themeMode}
+        title="Apply focus preferences?"
+        description="Cuevion will re-evaluate your workspace using these focus preferences."
+        confirmLabel={isApplying ? "Applying…" : "Apply"}
+        onCancel={() => {
+          if (isApplying) {
+            return;
+          }
+
+          setIsConfirmOpen(false);
+        }}
+        onConfirm={() => {
+          if (isApplying) {
+            return;
+          }
+
+          onApplyFocusPreferences(draftFocusPreferences);
+          setIsConfirmOpen(false);
+        }}
+      />
+    </section>
+  );
+});
+
 const NotificationsSettingsCard = memo(function NotificationsSettingsCard({
   themeMode,
   inboxChangesEnabled,
@@ -16825,6 +16965,7 @@ const AccountSettingsCard = memo(function AccountSettingsCard({
 function SettingsView({
   workspaceName,
   savedManagedInboxes,
+  focusPreferences,
   themeMode,
   workspaceMode,
   inboxSignatures,
@@ -16837,12 +16978,15 @@ function SettingsView({
   teamActivityEnabled,
   onToggleTeamActivity,
   onSaveWorkspaceName,
+  onApplyFocusPreferences,
+  isApplyingFocusPreferences,
   onApplyManagedInboxes,
   onSaveInboxSignature,
   onSaveInboxOutOfOffice,
 }: {
   workspaceName: string;
   savedManagedInboxes: ManagedWorkspaceInbox[];
+  focusPreferences: UserConfig["focusPreferences"];
   themeMode: "light" | "dark";
   workspaceMode: SettingsMode;
   inboxSignatures: InboxSignatureStore;
@@ -16855,6 +16999,8 @@ function SettingsView({
   teamActivityEnabled: boolean;
   onToggleTeamActivity: () => void;
   onSaveWorkspaceName: (name: string) => void;
+  onApplyFocusPreferences: (nextValue: UserConfig["focusPreferences"]) => void;
+  isApplyingFocusPreferences: boolean;
   onApplyManagedInboxes: (nextMailboxes: ManagedWorkspaceInbox[]) => boolean;
   onSaveInboxSignature: (inboxId: InboxId, signature: InboxSignatureSettings) => void;
   onSaveInboxOutOfOffice: (
@@ -16959,6 +17105,12 @@ function SettingsView({
           <AccountSettingsCard themeMode={themeMode} />
         </div>
         <div className="space-y-6">
+          <FocusPreferencesSettingsCard
+            themeMode={themeMode}
+            focusPreferences={focusPreferences}
+            onApplyFocusPreferences={onApplyFocusPreferences}
+            isApplying={isApplyingFocusPreferences}
+          />
           <MailSettingsCard
             managedInboxes={savedManagedInboxes}
             inboxOutOfOffice={inboxOutOfOffice}
@@ -19904,6 +20056,10 @@ export function WorkspaceShell({
   const [reviewInboxHandoff, setReviewInboxHandoff] = useState<ReviewInboxHandoff | null>(null);
   const [reviewInboxHandoffFeedback, setReviewInboxHandoffFeedback] = useState<string | null>(null);
   const [completedPriorityReviewIds, setCompletedPriorityReviewIds] = useState<string[]>([]);
+  const [activeFocusPreferences, setActiveFocusPreferences] = useState(
+    userConfig.focusPreferences,
+  );
+  const [isApplyingFocusPreferences, setIsApplyingFocusPreferences] = useState(false);
   const [manualPriorityOverrides, setManualPriorityOverrides] = useState<
     Partial<Record<string, ManualPriorityOverride>>
   >(() => {
@@ -19924,6 +20080,10 @@ export function WorkspaceShell({
     }
   });
   const isGuestInviteUser = authenticatedUser?.userType === "guest";
+
+  useEffect(() => {
+    setActiveFocusPreferences(userConfig.focusPreferences);
+  }, [userConfig.focusPreferences]);
 
   const updateWorkspaceMessageById = (
     messageId: string,
@@ -20055,24 +20215,24 @@ export function WorkspaceShell({
     switch (visibilityClassification) {
       case "demo":
       case "high_priority_demo":
-        return userConfig.focusPreferences.demos;
+        return activeFocusPreferences.demos;
       case "promo":
-        return userConfig.focusPreferences.promo;
+        return activeFocusPreferences.promo;
       case "promo_reminder":
-        return userConfig.focusPreferences.promoReminders;
+        return activeFocusPreferences.promoReminders;
       case "finance":
-        return userConfig.focusPreferences.finance;
+        return activeFocusPreferences.finance;
       case "royalty_statement":
-        return userConfig.focusPreferences.royalties;
+        return activeFocusPreferences.royalties;
       case "business":
-        return userConfig.focusPreferences.business;
+        return activeFocusPreferences.business;
       case "business_reminder":
-        return userConfig.focusPreferences.paymentReminders;
+        return activeFocusPreferences.paymentReminders;
       case "distributor_update":
-        return userConfig.focusPreferences.distribution;
+        return activeFocusPreferences.distribution;
       case "workflow_update":
       case "info":
-        return userConfig.focusPreferences.updates;
+        return activeFocusPreferences.updates;
       default:
         return null;
     }
@@ -21002,6 +21162,26 @@ export function WorkspaceShell({
         },
       };
     });
+  };
+
+  const handleApplyFocusPreferences = (
+    nextFocusPreferences: UserConfig["focusPreferences"],
+  ) => {
+    setIsApplyingFocusPreferences(true);
+    setActiveFocusPreferences(nextFocusPreferences);
+
+    window.setTimeout(() => {
+      setMailboxStore((currentStore) =>
+        normalizeMailboxStore(
+          currentStore,
+          orderedMailboxes,
+          senderCategoryLearning,
+          messageOwnershipInteractions,
+          currentWorkspaceUserId,
+        ),
+      );
+      setIsApplyingFocusPreferences(false);
+    }, 260);
   };
 
   const handleRecordMessageOwnershipInteraction = (messageId: string) => {
@@ -22403,7 +22583,7 @@ export function WorkspaceShell({
                   messageOwnershipInteractions={messageOwnershipInteractions}
                   currentUserId={currentWorkspaceUserId}
                   currentUserEmail={activeWorkspaceEmail}
-                  focusPreferences={userConfig.focusPreferences}
+                  focusPreferences={activeFocusPreferences}
                   mailboxStore={mailboxStore}
                   setMailboxStore={setMailboxStore}
                   inboxSignatures={inboxSignatures}
@@ -22491,6 +22671,7 @@ export function WorkspaceShell({
                 <SettingsView
                   workspaceName={workspaceName}
                   savedManagedInboxes={savedManagedInboxes}
+                  focusPreferences={activeFocusPreferences}
                   themeMode={resolvedTheme}
                   workspaceMode={workspaceMode}
                   inboxSignatures={inboxSignatures}
@@ -22509,6 +22690,8 @@ export function WorkspaceShell({
                     setTeamActivityEnabled((current) => !current)
                   }
                   onSaveWorkspaceName={setWorkspaceName}
+                  onApplyFocusPreferences={handleApplyFocusPreferences}
+                  isApplyingFocusPreferences={isApplyingFocusPreferences}
                   onApplyManagedInboxes={handleApplyManagedInboxes}
                   onSaveInboxSignature={(inboxId, signature) => {
                     setInboxSignatures((current) => ({
