@@ -544,6 +544,12 @@ const canonicalFolderOrder: MailFolder[] = [
 const AI_SUGGESTIONS_STORAGE_KEY = "cuevion-ai-suggestions-enabled";
 const INBOX_CHANGES_STORAGE_KEY = "cuevion-inbox-changes-enabled";
 const TEAM_ACTIVITY_STORAGE_KEY = "cuevion-team-activity-enabled";
+const buildTeamMembersStorageKey = (workspaceKey: string) =>
+  `cuevion-team-members:${workspaceKey}`;
+const buildTeamPendingInvitationStorageKey = (workspaceKey: string) =>
+  `cuevion-team-pending-invitation:${workspaceKey}`;
+const buildTeamMembershipsStorageKey = (workspaceKey: string) =>
+  `cuevion-team-memberships:${workspaceKey}`;
 const WORKSPACE_THEME_MODE_STORAGE_KEY = "cuevion-workspace-theme-mode";
 const CATEGORY_LEARNING_STORAGE_KEY = "cuevion-sender-category-learning";
 const MESSAGE_OWNERSHIP_STORAGE_KEY = "cuevion-message-ownership";
@@ -13167,6 +13173,7 @@ function WorkbenchView({
   onAcceptPendingTeamInvitation,
   onDeclinePendingTeamInvitation,
   showDemoContent,
+  workspacePersistenceKey,
 }: {
   section: WorkbenchSection;
   onOpenDemoInbox: () => void;
@@ -13184,6 +13191,7 @@ function WorkbenchView({
   onAcceptPendingTeamInvitation: () => void;
   onDeclinePendingTeamInvitation: () => void;
   showDemoContent: boolean;
+  workspacePersistenceKey: string;
 }) {
   const content: Record<
     WorkbenchSection,
@@ -13216,29 +13224,72 @@ function WorkbenchView({
   const view = content[section];
   const visibleActivityItems = activityItems;
   const visibleNotificationItems = notificationItems;
-  const [teamMembers, setTeamMembers] = useState<TeamMemberEntry[]>(() => showDemoContent ? [
-    {
-      name: "Emma Stone",
-      email: "emma@cuevion.com",
-      accessLevel: "Admin" as const,
-      selectedInboxes: ["Primary inbox", "Demo inbox", "Promo inbox"],
-      status: "Active",
-    },
-    {
-      name: "David Cole",
-      email: "david@cuevion.com",
-      accessLevel: "Review" as const,
-      selectedInboxes: ["Demo inbox"],
-      status: "Invited",
-    },
-    {
-      name: "Mila Hart",
-      email: "mila@cuevion.com",
-      accessLevel: "Editor" as const,
-      selectedInboxes: ["Promo inbox"],
-      status: "Active",
-    },
-  ] : []);
+  const teamMembersStorageKey = buildTeamMembersStorageKey(workspacePersistenceKey);
+  const [teamMembers, setTeamMembers] = useState<TeamMemberEntry[]>(() => {
+    if (typeof window === "undefined") {
+      return showDemoContent
+        ? [
+            {
+              name: "Emma Stone",
+              email: "emma@cuevion.com",
+              accessLevel: "Admin" as const,
+              selectedInboxes: ["Primary inbox", "Demo inbox", "Promo inbox"],
+              status: "Active",
+            },
+            {
+              name: "David Cole",
+              email: "david@cuevion.com",
+              accessLevel: "Review" as const,
+              selectedInboxes: ["Demo inbox"],
+              status: "Invited",
+            },
+            {
+              name: "Mila Hart",
+              email: "mila@cuevion.com",
+              accessLevel: "Editor" as const,
+              selectedInboxes: ["Promo inbox"],
+              status: "Active",
+            },
+          ]
+        : [];
+    }
+
+    const storedValue = window.localStorage.getItem(teamMembersStorageKey);
+
+    if (!storedValue) {
+      return showDemoContent
+        ? [
+            {
+              name: "Emma Stone",
+              email: "emma@cuevion.com",
+              accessLevel: "Admin" as const,
+              selectedInboxes: ["Primary inbox", "Demo inbox", "Promo inbox"],
+              status: "Active",
+            },
+            {
+              name: "David Cole",
+              email: "david@cuevion.com",
+              accessLevel: "Review" as const,
+              selectedInboxes: ["Demo inbox"],
+              status: "Invited",
+            },
+            {
+              name: "Mila Hart",
+              email: "mila@cuevion.com",
+              accessLevel: "Editor" as const,
+              selectedInboxes: ["Promo inbox"],
+              status: "Active",
+            },
+          ]
+        : [];
+    }
+
+    try {
+      return JSON.parse(storedValue) as TeamMemberEntry[];
+    } catch {
+      return [];
+    }
+  });
   const [activeTeamMemberIndex, setActiveTeamMemberIndex] = useState<number | null>(null);
   const [isChangeAccessOpen, setIsChangeAccessOpen] = useState(false);
   const [isInviteMemberOpen, setIsInviteMemberOpen] = useState(false);
@@ -13325,6 +13376,14 @@ function WorkbenchView({
 
     return () => window.clearTimeout(timeoutId);
   }, [teamFeedbackMessage]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    window.localStorage.setItem(teamMembersStorageKey, JSON.stringify(teamMembers));
+  }, [teamMembers, teamMembersStorageKey]);
 
   useEffect(() => {
     if (!activeTeamMember) {
@@ -13609,6 +13668,9 @@ function WorkbenchView({
                   <h2 className="text-[1.45rem] font-medium tracking-tight text-[var(--workspace-text)]">
                     Invite member
                   </h2>
+                  <p className="text-[0.88rem] leading-6 text-[var(--workspace-text-soft)]">
+                    Creates a workspace invite inside Cuevion. No email is sent yet.
+                  </p>
                 </div>
                 <button
                   type="button"
@@ -13923,8 +13985,8 @@ function WorkbenchView({
                     : activeTeamConfirmation === "cancel-invite"
                       ? "Cancel invite"
                       : activeTeamConfirmation === "resend-invite"
-                        ? "Resend invite"
-                        : "Confirm invite"}
+                        ? "Reopen invite"
+                        : "Create invite"}
                 </h2>
                 <p className="text-[0.9rem] leading-7 text-[var(--workspace-text-soft)]">
                   {activeTeamConfirmation === "revoke"
@@ -13933,9 +13995,9 @@ function WorkbenchView({
                       ? "Are you sure you want to remove this member from the workspace?"
                     : activeTeamConfirmation === "cancel-invite"
                       ? "Are you sure you want to cancel this invitation?"
-                      : activeTeamConfirmation === "resend-invite"
-                        ? "Send this workspace invitation again?"
-                        : "Send workspace invitation to this member?"}
+                    : activeTeamConfirmation === "resend-invite"
+                        ? "Reopen this workspace invite in Cuevion? No email will be sent."
+                        : "Create this workspace invite in Cuevion? No email will be sent."}
                 </p>
               </div>
 
@@ -13991,7 +14053,7 @@ function WorkbenchView({
                       setInviteAccessLevel("Editor");
                       setInviteInboxAccess(["Primary inbox"]);
                       setIsInviteMemberOpen(false);
-                      setTeamFeedbackMessage("Invitation sent");
+                      setTeamFeedbackMessage("Workspace invite created");
                       console.log("confirm_invite_team_member");
                     } else if (
                       activeTeamConfirmation === "cancel-invite" &&
@@ -14012,7 +14074,7 @@ function WorkbenchView({
                       activeTeamConfirmation === "resend-invite" &&
                       activeTeamMember
                     ) {
-                      setTeamFeedbackMessage("Invitation resent");
+                      setTeamFeedbackMessage("Workspace invite reopened");
                       console.log(`confirm_resend_invite_${activeTeamMember.name}`);
                     } else if (
                       activeTeamConfirmation === "remove-member" &&
@@ -19545,6 +19607,10 @@ export function WorkspaceShell({
   const primaryWorkspaceEmail = orderedMailboxes[0]?.email ?? "team@cuevion.com";
   const activeWorkspaceEmail = authenticatedUser?.email ?? primaryWorkspaceEmail;
   const currentWorkspaceUserId = normalizeSenderLearningKey(activeWorkspaceEmail);
+  const teamPendingInvitationStorageKey =
+    buildTeamPendingInvitationStorageKey(currentWorkspaceUserId);
+  const teamMembershipsStorageKey =
+    buildTeamMembershipsStorageKey(currentWorkspaceUserId);
   const mailboxOrderKey = orderedMailboxes.map((mailbox) => mailbox.id).join("|");
   const messageUnreadOverridesStorageKey = buildMessageUnreadOverridesStorageKey(
     currentWorkspaceUserId,
@@ -19903,16 +19969,52 @@ export function WorkspaceShell({
     return storedValue === "true";
   });
   const [pendingTeamInvitation, setPendingTeamInvitation] =
-    useState<PendingTeamInvitation>(() =>
-      isDemoWorkspace
-        ? {
-            inviter: "Emma Stone",
-            accessLevel: "Review",
-            selectedInboxes: ["Demo inbox"],
-          }
-        : null,
-    );
-  const [memberOfEntries, setMemberOfEntries] = useState<TeamMembershipEntry[]>([]);
+    useState<PendingTeamInvitation>(() => {
+      if (typeof window === "undefined") {
+        return isDemoWorkspace
+          ? {
+              inviter: "Emma Stone",
+              accessLevel: "Review",
+              selectedInboxes: ["Demo inbox"],
+            }
+          : null;
+      }
+
+      const storedValue = window.localStorage.getItem(teamPendingInvitationStorageKey);
+
+      if (!storedValue) {
+        return isDemoWorkspace
+          ? {
+              inviter: "Emma Stone",
+              accessLevel: "Review",
+              selectedInboxes: ["Demo inbox"],
+            }
+          : null;
+      }
+
+      try {
+        return JSON.parse(storedValue) as PendingTeamInvitation;
+      } catch {
+        return null;
+      }
+    });
+  const [memberOfEntries, setMemberOfEntries] = useState<TeamMembershipEntry[]>(() => {
+    if (typeof window === "undefined") {
+      return [];
+    }
+
+    const storedValue = window.localStorage.getItem(teamMembershipsStorageKey);
+
+    if (!storedValue) {
+      return [];
+    }
+
+    try {
+      return JSON.parse(storedValue) as TeamMembershipEntry[];
+    } catch {
+      return [];
+    }
+  });
   const workspaceCollaborationPeople = [
     authenticatedUser
       ? {
@@ -22051,6 +22153,28 @@ export function WorkspaceShell({
   }, [teamActivityEnabled]);
 
   useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    window.localStorage.setItem(
+      teamPendingInvitationStorageKey,
+      JSON.stringify(pendingTeamInvitation),
+    );
+  }, [pendingTeamInvitation, teamPendingInvitationStorageKey]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    window.localStorage.setItem(
+      teamMembershipsStorageKey,
+      JSON.stringify(memberOfEntries),
+    );
+  }, [memberOfEntries, teamMembershipsStorageKey]);
+
+  useEffect(() => {
     window.localStorage.setItem(
       MAIL_SIGNATURES_STORAGE_KEY,
       JSON.stringify(inboxSignatures),
@@ -22684,6 +22808,7 @@ export function WorkspaceShell({
                     setPendingTeamInvitation(null);
                   }}
                   showDemoContent={isDemoWorkspace}
+                  workspacePersistenceKey={currentWorkspaceUserId}
                 />
               </div>
             ) : activeSection === "Settings" ? (
