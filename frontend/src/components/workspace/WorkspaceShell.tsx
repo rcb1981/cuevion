@@ -7012,8 +7012,42 @@ function MailboxView({
   }, [isComposeOpen, pendingComposeAttachmentPickerOpen]);
 
   const mailboxCollections = mailboxStore[mailbox.id] ?? createEmptyMailboxCollections();
+  const resolveVisibilityClassificationForMessage = (message: MailMessage) => {
+    if (
+      message.internalClassification &&
+      message.internalClassification !== "unknown"
+    ) {
+      return message.internalClassification;
+    }
+
+    switch (message.ui_signal ?? message.signal) {
+      case "DEMO":
+      case "For review":
+      case "Shortlist":
+        return "demo" as const;
+      case "FINANCE":
+      case "Finance":
+        return "finance" as const;
+      case "PROMO":
+      case "Promo":
+        return "promo" as const;
+      case "BUSINESS":
+      case "Priority":
+      case "Active":
+        return "business" as const;
+      case "UPDATE":
+      case "Update":
+      case "Timing":
+        return "workflow_update" as const;
+      case "REPLY":
+      case "Follow-up":
+        return "reply" as const;
+      default:
+        return message.internalClassification;
+    }
+  };
   const resolveFocusPreferenceLevelForMessage = (message: MailMessage) => {
-    switch (message.internalClassification) {
+    switch (resolveVisibilityClassificationForMessage(message)) {
       case "demo":
       case "high_priority_demo":
         return focusPreferences.demos;
@@ -7085,8 +7119,8 @@ function MailboxView({
     const override = manualPriorityOverrides[message.id];
     const focusPreferenceLevel = resolveFocusPreferenceLevelForMessage(message);
     const isDemoMessage =
-      message.internalClassification === "demo" ||
-      message.internalClassification === "high_priority_demo";
+      resolveVisibilityClassificationForMessage(message) === "demo" ||
+      resolveVisibilityClassificationForMessage(message) === "high_priority_demo";
 
     if (
       isDemoMessage &&
@@ -7108,9 +7142,11 @@ function MailboxView({
     );
   };
   const shouldForceFilteredDemoVisibility = (message: MailMessage) => {
+    const visibilityClassification = resolveVisibilityClassificationForMessage(message);
+
     if (
-      message.internalClassification !== "demo" &&
-      message.internalClassification !== "high_priority_demo"
+      visibilityClassification !== "demo" &&
+      visibilityClassification !== "high_priority_demo"
     ) {
       return false;
     }
@@ -11507,8 +11543,9 @@ function MailboxView({
                       const demoFocusPreferenceLevel =
                         resolveFocusPreferenceLevelForMessage(message);
                       const hasOnboardingControlledDemoBadge =
-                        (message.internalClassification === "demo" ||
-                          message.internalClassification === "high_priority_demo") &&
+                        (resolveVisibilityClassificationForMessage(message) === "demo" ||
+                          resolveVisibilityClassificationForMessage(message) ===
+                            "high_priority_demo") &&
                         !hasProtectedPriorityVisibility(message) &&
                         getManualPriorityOverride(message.id) !== "priority";
                       const visibleSignal = getVisibleMessageSignal(message);
