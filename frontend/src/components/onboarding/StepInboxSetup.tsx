@@ -41,6 +41,7 @@ export function StepInboxSetup({
   void customInboxes;
 
   const [isAddingCustomInbox, setIsAddingCustomInbox] = useState(false);
+  const [isChoosingMainInboxType, setIsChoosingMainInboxType] = useState(false);
   const [customInboxName, setCustomInboxName] = useState("");
   const [customInboxError, setCustomInboxError] = useState<string | null>(null);
   const [showLimitHint, setShowLimitHint] = useState(false);
@@ -62,6 +63,17 @@ export function StepInboxSetup({
 
     customInboxInputRef.current?.focus();
   }, [isAddingCustomInbox]);
+
+  useEffect(() => {
+    if (primaryInbox === "main" && primaryInboxType) {
+      setIsChoosingMainInboxType(false);
+      return;
+    }
+
+    if (primaryInbox !== "main") {
+      setIsChoosingMainInboxType(false);
+    }
+  }, [primaryInbox, primaryInboxType]);
 
   const showTemporaryLimitHint = () => {
     setShowLimitHint(true);
@@ -162,47 +174,29 @@ export function StepInboxSetup({
 
       <div className="grid gap-4 md:grid-cols-2">
         {availableInboxOptions.map((option) => {
-          const selected = primaryInbox === option.id;
           const isMainInboxOption = option.id === "main";
-          const showsInboxTypeControls = isMainInboxOption && selected;
+          const isConfirmedMainSelection =
+            isMainInboxOption &&
+            primaryInbox === "main" &&
+            primaryInboxType !== null &&
+            !isChoosingMainInboxType;
+          const selected = isMainInboxOption
+            ? isConfirmedMainSelection
+            : primaryInbox === option.id;
+          const showsInboxTypeControls = isMainInboxOption && isChoosingMainInboxType;
 
           return (
             <div
               key={option.id}
-              className={`rounded-3xl border transition ${
+              className={`min-h-[116px] rounded-3xl border transition ${
                 selected
                   ? "border-pine bg-[linear-gradient(180deg,rgba(226,236,229,0.92),rgba(246,249,246,0.98))] text-ink shadow-panel"
                   : "border-ink/10 bg-white/80 text-ink hover:border-moss/35"
               }`}
             >
-              <button
-                type="button"
-                onClick={() => {
-                  setShowLimitHint(false);
-                  onPrimaryInboxChange(option.id);
-                }}
-                className="w-full cursor-pointer rounded-3xl p-5 text-left outline-none focus-visible:border-pine focus-visible:text-ink"
-              >
-                <div className="flex items-center justify-between gap-4">
-                  <div className="space-y-1">
-                    <span className="block text-base font-semibold">{option.label}</span>
-                    {isMainInboxOption ? (
-                      <span className="block text-sm text-ink/52">
-                        Optional: mark it as personal or work.
-                      </span>
-                    ) : null}
-                  </div>
-                  {selected ? (
-                    <span className="rounded-full border border-ink/8 bg-white/55 px-2.5 py-1 text-[10px] uppercase tracking-[0.18em] text-ink/46">
-                      Selected
-                    </span>
-                  ) : null}
-                </div>
-              </button>
-
               {showsInboxTypeControls ? (
-                <div className="px-5 pb-5 pt-1">
-                  <div className="flex flex-wrap gap-2">
+                <div className="flex min-h-[116px] items-center justify-center p-5">
+                  <div className="flex flex-wrap justify-center gap-2">
                     {primaryInboxTypeOptions.map((typeOption) => {
                       const typeSelected = primaryInboxType === typeOption.id;
 
@@ -210,11 +204,12 @@ export function StepInboxSetup({
                         <button
                           key={typeOption.id}
                           type="button"
-                          onClick={() =>
-                            onPrimaryInboxTypeChange(
-                              typeSelected ? null : typeOption.id,
-                            )
-                          }
+                          onClick={() => {
+                            setShowLimitHint(false);
+                            setIsChoosingMainInboxType(false);
+                            onPrimaryInboxChange("main");
+                            onPrimaryInboxTypeChange(typeOption.id);
+                          }}
                           className={`rounded-full border px-3 py-1.5 text-sm transition ${
                             typeSelected
                               ? "border-pine bg-white/82 text-ink shadow-[0_6px_20px_rgba(38,66,56,0.08)]"
@@ -227,7 +222,32 @@ export function StepInboxSetup({
                     })}
                   </div>
                 </div>
-              ) : null}
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowLimitHint(false);
+
+                    if (isMainInboxOption) {
+                      setIsChoosingMainInboxType(true);
+                      return;
+                    }
+
+                    setIsChoosingMainInboxType(false);
+                    onPrimaryInboxChange(option.id);
+                  }}
+                  className="flex min-h-[116px] w-full cursor-pointer items-center rounded-3xl p-5 text-left outline-none focus-visible:border-pine focus-visible:text-ink"
+                >
+                  <div className="flex w-full items-center justify-between gap-4">
+                    <span className="block text-base font-semibold">{option.label}</span>
+                    {selected ? (
+                      <span className="rounded-full border border-ink/8 bg-white/55 px-2.5 py-1 text-[10px] uppercase tracking-[0.18em] text-ink/46">
+                        Selected
+                      </span>
+                    ) : null}
+                  </div>
+                </button>
+              )}
             </div>
           );
         })}
@@ -256,7 +276,11 @@ export function StepInboxSetup({
     setIsAddingCustomInbox(false);
   };
 
-  const showMinimumHint = selectedInboxes.length < requiredInboxCount;
+  const effectiveSelectedInboxCount =
+    primaryInbox === "main" && primaryInboxType === null
+      ? selectedInboxes.filter((inboxId) => inboxId !== "main").length
+      : selectedInboxes.length;
+  const showMinimumHint = effectiveSelectedInboxCount < requiredInboxCount;
   const secondInbox = selectedInboxes[1] ?? null;
   const thirdInbox = selectedInboxes[2] ?? null;
   const isExpandedInboxMode = inboxCount === "4+" || inboxCount === "not_sure";

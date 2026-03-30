@@ -291,6 +291,10 @@ export function OnboardingFlow({
         return false;
       }
 
+      if (state.primaryInbox === "main" && state.primaryInboxType === null) {
+        return false;
+      }
+
       if (state.inboxCount === "1") {
         return true;
       }
