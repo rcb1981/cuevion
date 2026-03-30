@@ -19984,6 +19984,128 @@ export function WorkspaceShell({
   const getLinkedReviewForMessage = (messageId: string) =>
     reviewController.getReviewBySourceId(messageId);
   const getLinkedReviewBadgeLabel = (_messageId: string) => null;
+  const resolvePriorityPageVisibilityClassification = (message: MailMessage) => {
+    if (
+      message.internalClassification &&
+      message.internalClassification !== "unknown"
+    ) {
+      return message.internalClassification;
+    }
+
+    switch (message.ui_signal ?? message.signal) {
+      case "DEMO":
+      case "For review":
+      case "Shortlist":
+        return "demo" as const;
+      case "FINANCE":
+      case "Finance":
+        return "finance" as const;
+      case "PROMO":
+      case "Promo":
+        return "promo" as const;
+      case "BUSINESS":
+      case "Priority":
+      case "Active":
+        return "business" as const;
+      case "UPDATE":
+      case "Update":
+      case "Timing":
+        return "workflow_update" as const;
+      case "REPLY":
+      case "Follow-up":
+        return "reply" as const;
+      default:
+        return message.internalClassification;
+    }
+  };
+  const isPriorityPageBroadcastPromoMessage = (message: MailMessage) => {
+    const searchableText = [
+      message.subject,
+      message.snippet,
+      message.sender,
+      message.from,
+      ...(message.body ?? []),
+    ]
+      .join(" ")
+      .toLowerCase();
+
+    return includesAnyKeyword(searchableText, [
+      "newsletter",
+      "nieuws",
+      "newsberichten",
+      "read online",
+      "read this email online",
+      "view in browser",
+      "view online",
+      "unsubscribe",
+      "campaign monitor",
+      "mailchimp",
+    ]);
+  };
+  const resolvePriorityPageFocusPreferenceLevel = (message: MailMessage) => {
+    const visibilityClassification = resolvePriorityPageVisibilityClassification(message);
+
+    if (
+      visibilityClassification === "promo" &&
+      isPriorityPageBroadcastPromoMessage(message)
+    ) {
+      return null;
+    }
+
+    switch (visibilityClassification) {
+      case "demo":
+      case "high_priority_demo":
+        return userConfig.focusPreferences.demos;
+      case "promo":
+        return userConfig.focusPreferences.promo;
+      case "promo_reminder":
+        return userConfig.focusPreferences.promoReminders;
+      case "finance":
+        return userConfig.focusPreferences.finance;
+      case "royalty_statement":
+        return userConfig.focusPreferences.royalties;
+      case "business":
+        return userConfig.focusPreferences.business;
+      case "business_reminder":
+        return userConfig.focusPreferences.paymentReminders;
+      case "distributor_update":
+        return userConfig.focusPreferences.distribution;
+      case "workflow_update":
+      case "info":
+        return userConfig.focusPreferences.updates;
+      default:
+        return null;
+    }
+  };
+  const hasPriorityPageProtectedVisibility = (message: MailMessage) =>
+    message.internalClassification === "reply" ||
+    Boolean(message.isShared) ||
+    Boolean(message.sharedContext);
+  const isPriorityPageVisiblePriorityMessage = (message: MailMessage) => {
+    const override = manualPriorityOverrides[message.id];
+
+    if (override === "priority") {
+      return true;
+    }
+
+    if (override === "removed") {
+      return false;
+    }
+
+    if (!hasPriorityPageProtectedVisibility(message)) {
+      const focusPreferenceLevel = resolvePriorityPageFocusPreferenceLevel(message);
+
+      if (focusPreferenceLevel === "high") {
+        return true;
+      }
+
+      if (focusPreferenceLevel === "medium" || focusPreferenceLevel === "low") {
+        return false;
+      }
+    }
+
+    return isMessageVisiblePriority(message, override);
+  };
   const livePriorityInboxEntries = (() => {
     const seenMessageIds = new Set<string>();
     const seenMessageSignatures = new Set<string>();
@@ -19995,7 +20117,7 @@ export function WorkspaceShell({
 
     for (const candidate of orderedMailboxes) {
       for (const message of mailboxStore[candidate.id]?.Inbox ?? []) {
-        if (!isLiveInboxPriorityMessage(message, manualPriorityOverrides[message.id])) {
+        if (!isPriorityPageVisiblePriorityMessage(message)) {
           continue;
         }
 
