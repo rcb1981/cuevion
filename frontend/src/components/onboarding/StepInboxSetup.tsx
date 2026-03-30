@@ -106,7 +106,7 @@ export function StepInboxSetup({
           setShowLimitHint(false);
           onToggleAdditionalInbox(inboxId);
         }}
-        className={`rounded-3xl border p-5 text-left transition ${
+        className={`rounded-3xl border p-4 text-left transition ${
           selected
             ? "border-pine bg-[linear-gradient(180deg,rgba(226,236,229,0.92),rgba(246,249,246,0.98))] text-ink shadow-panel"
             : "border-ink/10 bg-white/80 text-ink hover:border-moss/35"
@@ -134,7 +134,7 @@ export function StepInboxSetup({
         <p className="text-sm text-ink/52">{subtitle}</p>
       </div>
 
-      <div className="grid gap-4 md:grid-cols-2">
+      <div className="grid gap-3 md:grid-cols-2">
         {options.map((option) => (
           <button
             key={option.id}
@@ -143,7 +143,7 @@ export function StepInboxSetup({
               setShowLimitHint(false);
               onChange(option.id);
             }}
-            className={`rounded-3xl border p-5 text-left transition ${
+            className={`rounded-3xl border p-4 text-left transition ${
               selectedInbox === option.id
                 ? "border-pine bg-[linear-gradient(180deg,rgba(226,236,229,0.92),rgba(246,249,246,0.98))] text-ink shadow-panel"
                 : "border-ink/10 bg-white/80 text-ink hover:border-moss/35"
@@ -172,7 +172,7 @@ export function StepInboxSetup({
         </p>
       </div>
 
-      <div className="grid gap-4 md:grid-cols-2">
+      <div className="grid gap-3 md:grid-cols-2">
         {availableInboxOptions.map((option) => {
           const isMainInboxOption = option.id === "main";
           const isConfirmedMainSelection =
@@ -188,14 +188,14 @@ export function StepInboxSetup({
           return (
             <div
               key={option.id}
-              className={`min-h-[116px] rounded-3xl border transition ${
+              className={`min-h-[100px] rounded-3xl border transition ${
                 selected
                   ? "border-pine bg-[linear-gradient(180deg,rgba(226,236,229,0.92),rgba(246,249,246,0.98))] text-ink shadow-panel"
                   : "border-ink/10 bg-white/80 text-ink hover:border-moss/35"
               }`}
             >
               {showsInboxTypeControls ? (
-                <div className="flex min-h-[116px] items-center justify-center p-5">
+                <div className="flex min-h-[100px] items-center justify-center p-4">
                   <div className="flex flex-wrap justify-center gap-2">
                     {primaryInboxTypeOptions.map((typeOption) => {
                       const typeSelected = primaryInboxType === typeOption.id;
@@ -236,7 +236,7 @@ export function StepInboxSetup({
                     setIsChoosingMainInboxType(false);
                     onPrimaryInboxChange(option.id);
                   }}
-                  className="flex min-h-[116px] w-full cursor-pointer items-center rounded-3xl p-5 text-left outline-none focus-visible:border-pine focus-visible:text-ink"
+                  className="flex min-h-[100px] w-full cursor-pointer items-center rounded-3xl p-4 text-left outline-none focus-visible:border-pine focus-visible:text-ink"
                 >
                   <div className="flex w-full items-center justify-between gap-4">
                     <span className="block text-base font-semibold">{option.label}</span>
@@ -344,7 +344,7 @@ export function StepInboxSetup({
       </div>
 
       {isExpandedInboxMode ? (
-        <div className="space-y-3 rounded-[28px] border border-ink/10 bg-sand/45 px-5 py-6">
+        <div className="space-y-3 rounded-[28px] border border-ink/10 bg-sand/45 px-4 py-5">
         <div className="space-y-1">
           <h3 className="text-lg font-medium text-ink">Additional inboxes</h3>
           <p className="text-sm text-ink/52">
@@ -352,14 +352,14 @@ export function StepInboxSetup({
           </p>
         </div>
 
-        <div className="grid gap-4 md:grid-cols-2">
+        <div className="grid gap-3 md:grid-cols-2">
           {availableInboxOptions
             .filter((option) => option.id !== primaryInbox)
             .map((option) => renderAdditionalCard(option.id, option.label))}
         </div>
 
         {isAddingCustomInbox ? (
-          <div className="rounded-3xl border border-ink/10 bg-white/82 p-5 shadow-panel">
+          <div className="rounded-3xl border border-ink/10 bg-white/82 p-4 shadow-panel">
             <div className="flex flex-col gap-3 md:flex-row md:items-center">
               <input
                 ref={customInboxInputRef}
