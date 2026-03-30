@@ -7012,6 +7012,30 @@ function MailboxView({
   }, [isComposeOpen, pendingComposeAttachmentPickerOpen]);
 
   const mailboxCollections = mailboxStore[mailbox.id] ?? createEmptyMailboxCollections();
+  const isBroadcastPromoMessage = (message: MailMessage) => {
+    const searchableText = [
+      message.subject,
+      message.snippet,
+      message.sender,
+      message.from,
+      ...(message.body ?? []),
+    ]
+      .join(" ")
+      .toLowerCase();
+
+    return includesAnyKeyword(searchableText, [
+      "newsletter",
+      "nieuws",
+      "newsberichten",
+      "read online",
+      "read this email online",
+      "view in browser",
+      "view online",
+      "unsubscribe",
+      "campaign monitor",
+      "mailchimp",
+    ]);
+  };
   const resolveVisibilityClassificationForMessage = (message: MailMessage) => {
     if (
       message.internalClassification &&
@@ -7047,7 +7071,13 @@ function MailboxView({
     }
   };
   const resolveFocusPreferenceLevelForMessage = (message: MailMessage) => {
-    switch (resolveVisibilityClassificationForMessage(message)) {
+    const visibilityClassification = resolveVisibilityClassificationForMessage(message);
+
+    if (visibilityClassification === "promo" && isBroadcastPromoMessage(message)) {
+      return null;
+    }
+
+    switch (visibilityClassification) {
       case "demo":
       case "high_priority_demo":
         return focusPreferences.demos;
