@@ -503,6 +503,12 @@ type NotificationNavigationRequest = {
   openFullMessage?: boolean;
   requestKey: number;
 };
+type VisibleNotificationItem = {
+  title: string;
+  detail: string;
+  time: string;
+  action: () => void;
+};
 type ReviewInboxHandoff = {
   reviewId: string;
   messageId: string;
@@ -5659,7 +5665,7 @@ function buildVisibleNotificationItems({
   onOpenNotificationNavigation: (
     request: Omit<NotificationNavigationRequest, "requestKey">,
   ) => void;
-}) {
+}): VisibleNotificationItem[] {
   if (!teamActivityEnabled) {
     return [];
   }
@@ -5671,7 +5677,7 @@ function buildVisibleNotificationItems({
 function NotificationsPreviewBlock({
   items,
 }: {
-  items: ReturnType<typeof buildVisibleNotificationItems>;
+  items: VisibleNotificationItem[];
 }) {
   return (
     <section className="rounded-[30px] border border-[var(--workspace-border)] bg-[var(--workspace-card)] p-6 shadow-panel">
@@ -5813,7 +5819,7 @@ function DashboardView({
   onOpenPrimaryInbox: () => void;
   onOpenInboxes: () => void;
   onOpenForYou: () => void;
-  notificationPreviewItems: ReturnType<typeof buildVisibleNotificationItems>;
+  notificationPreviewItems: VisibleNotificationItem[];
   primaryInboxTitle: string;
   primaryInboxEmailCount: number;
   priorityInboxCount: number;
@@ -5855,7 +5861,7 @@ function DashboardView({
         <NotificationsPreviewBlock items={notificationPreviewItems} />
         <ContentBlock
           title="Recent updates"
-          showDemoContent={showDemoContent}
+          showDemoContent={false}
           onOpenPriority={onOpenPriority}
           onOpenInboxes={onOpenInboxes}
           onOpenForYou={onOpenForYou}
@@ -13195,7 +13201,7 @@ function WorkbenchView({
   onOpenDemoInbox: () => void;
   onOpenLearningRequest: (request: NonNullable<LearningLaunchRequest>) => void;
   onOpenSenderContext: () => void;
-  notificationItems: ReturnType<typeof buildVisibleNotificationItems>;
+  notificationItems: VisibleNotificationItem[];
   aiSuggestionsEnabled: boolean;
   inboxChangesEnabled: boolean;
   teamActivityEnabled: boolean;
