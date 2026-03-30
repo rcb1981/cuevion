@@ -518,6 +518,10 @@ type VisibleActivityItem = {
   sortTimestamp: number;
   action?: () => void;
 };
+type PersistedLiveInboxMessageSnapshot = LiveInboxMessageSnapshot & {
+  collaboration?: MailMessageCollaboration;
+  isShared?: boolean;
+};
 type ReviewInboxHandoff = {
   reviewId: string;
   messageId: string;
@@ -8595,35 +8599,63 @@ function MailboxView({
     messageId: string,
     updater: (message: MailMessage) => MailMessage,
   ) => {
-    setMailboxStore((currentStore) =>
-      Object.entries(currentStore).reduce<MailboxStore>((nextStore, [mailboxId, collections]) => {
-        nextStore[mailboxId as InboxId] = {
-          Inbox: collections.Inbox.map((message) =>
-            message.id === messageId ? updater(message) : message,
-          ),
-          Drafts: collections.Drafts.map((message) =>
-            message.id === messageId ? updater(message) : message,
-          ),
-          Sent: collections.Sent.map((message) =>
-            message.id === messageId ? updater(message) : message,
-          ),
-          Archive: collections.Archive.map((message) =>
-            message.id === messageId ? updater(message) : message,
-          ),
-          Filtered: collections.Filtered.map((message) =>
-            message.id === messageId ? updater(message) : message,
-          ),
-          Spam: collections.Spam.map((message) =>
-            message.id === messageId ? updater(message) : message,
-          ),
-          Trash: collections.Trash.map((message) =>
-            message.id === messageId ? updater(message) : message,
-          ),
-        };
+    setMailboxStore((currentStore) => {
+      let updatedMessage: MailMessage | null = null;
 
-        return nextStore;
-      }, {} as MailboxStore),
-    );
+      const nextStore = Object.entries(currentStore).reduce<MailboxStore>(
+        (nextStoreValue, [mailboxId, collections]) => {
+          const updateFolder = (messages: MailMessage[]) =>
+            messages.map((message) => {
+              if (message.id !== messageId) {
+                return message;
+              }
+
+              const nextMessage = updater(message);
+              updatedMessage = nextMessage;
+              return nextMessage;
+            });
+
+          nextStoreValue[mailboxId as InboxId] = {
+            Inbox: updateFolder(collections.Inbox),
+            Drafts: updateFolder(collections.Drafts),
+            Sent: updateFolder(collections.Sent),
+            Archive: updateFolder(collections.Archive),
+            Filtered: updateFolder(collections.Filtered),
+            Spam: updateFolder(collections.Spam),
+            Trash: updateFolder(collections.Trash),
+          };
+
+          return nextStoreValue;
+        },
+        {} as MailboxStore,
+      );
+
+      if (updatedMessage) {
+        const snapshots = readLiveInboxSnapshots();
+
+        Object.entries(snapshots).forEach(([snapshotMailboxId, snapshot]) => {
+          const nextMessages = snapshot.messages.map((snapshotMessage) => {
+            if (snapshotMessage.id !== messageId) {
+              return snapshotMessage;
+            }
+
+            return {
+              ...snapshotMessage,
+              collaboration: updatedMessage?.collaboration,
+              isShared: updatedMessage?.isShared,
+            } as PersistedLiveInboxMessageSnapshot;
+          });
+
+          saveLiveInboxSnapshot({
+            ...snapshot,
+            inboxId: snapshotMailboxId,
+            messages: nextMessages,
+          });
+        });
+      }
+
+      return nextStore;
+    });
   };
 
   function getMessageById(messageId: string | null) {
@@ -19474,9 +19506,10 @@ export function WorkspaceShell({
     const currentInboxIndexes = buildInboxIdentityIndexes(currentInboxMessages);
 
     return incomingMessages.map((message) => {
-      const existingMessage = findMatchingMessageByIdentity(message, currentInboxIndexes);
+      const persistedMessage = message as PersistedLiveInboxMessageSnapshot;
+      const existingMessage = findMatchingMessageByIdentity(persistedMessage, currentInboxIndexes);
       const unread =
-        resolveUnreadOverride(messageUnreadOverrides, message) ??
+        resolveUnreadOverride(messageUnreadOverrides, persistedMessage) ??
         existingMessage?.unread ??
         message.unread;
 
@@ -19496,6 +19529,9 @@ export function WorkspaceShell({
           cc: message.cc,
           timestamp: message.timestamp,
           body: message.body,
+          isShared: persistedMessage.isShared ?? existingMessage?.isShared,
+          collaboration:
+            persistedMessage.collaboration ?? existingMessage?.collaboration,
         },
         mailboxId,
         senderCategoryLearning,
