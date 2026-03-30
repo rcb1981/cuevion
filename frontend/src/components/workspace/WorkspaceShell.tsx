@@ -6522,23 +6522,13 @@ function MailboxView({
     "needs_review" | "needs_action" | "note_only"
   >("needs_review");
   const [collaborationPersonId, setCollaborationPersonId] = useState<string>("");
-  const [isInlineCollaborationInviteOpen, setIsInlineCollaborationInviteOpen] =
-    useState(false);
-  const [collaborationInviteDraft, setCollaborationInviteDraft] = useState("");
-  const [collaborationInviteOptions, setCollaborationInviteOptions] = useState<
-    MailMessageCollaborationParticipant[]
-  >([]);
   const [collaborationNote, setCollaborationNote] = useState("");
   const [activeCollaborationMessageId, setActiveCollaborationMessageId] = useState<
     string | null
   >(null);
   const [collaborationReplyDraft, setCollaborationReplyDraft] = useState("");
-  const [collaborationReplyVisibility, setCollaborationReplyVisibility] =
+  const [, setCollaborationReplyVisibility] =
     useState<MailMessageCollaborationVisibility>("internal");
-  const [isInviteParticipantOpen, setIsInviteParticipantOpen] = useState(false);
-  const [collaborationInviteEmail, setCollaborationInviteEmail] = useState("");
-  const [collaborationInvitePersonId, setCollaborationInvitePersonId] = useState("");
-  const [copiedInviteLinkKey, setCopiedInviteLinkKey] = useState<string | null>(null);
   const collaborationReplyInputRef = useRef<HTMLTextAreaElement | null>(null);
   const collaborationMessageRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const [focusCollaborationComposer, setFocusCollaborationComposer] = useState(false);
@@ -6552,19 +6542,9 @@ function MailboxView({
 
   const collaborationPeople = [
     {
-      id: "emma_stone",
-      name: "Emma Stone",
-      email: "emma@cuevion.com",
-    },
-    {
-      id: "david_cole",
-      name: "David Cole",
-      email: "david@cuevion.com",
-    },
-    {
-      id: "mila_hart",
-      name: "Mila Hart",
-      email: "mila@cuevion.com",
+      id: currentUserId,
+      name: orderedMailboxes[0]?.title ?? "You",
+      email: currentUserEmail,
     },
   ];
   const collaborationSelectablePeople = [
@@ -6575,9 +6555,7 @@ function MailboxView({
       kind: "internal" as const,
       status: "active" as const,
     })),
-    ...collaborationInviteOptions,
   ];
-  const isCollaborationInviteDraftValid = isValidInviteEmail(collaborationInviteDraft);
   const currentUserName = orderedMailboxes[0]?.title ?? "You";
   const activeComposeMailbox =
     orderedMailboxes.find((candidate) => candidate.id === composeMailboxId) ?? mailbox;
@@ -8693,18 +8671,12 @@ function MailboxView({
     setIsSortMenuOpen(false);
     setShareCollaborationMessageId(messageId);
     setCollaborationRequestType("needs_review");
-    setCollaborationPersonId(collaborationPeople[0]?.id ?? "");
-    setIsInlineCollaborationInviteOpen(false);
-    setCollaborationInviteDraft("");
-    setCollaborationInviteOptions([]);
+    setCollaborationPersonId(currentUserId);
     setCollaborationNote("");
   };
 
   const closeShareCollaboration = () => {
     setShareCollaborationMessageId(null);
-    setIsInlineCollaborationInviteOpen(false);
-    setCollaborationInviteDraft("");
-    setCollaborationInviteOptions([]);
     setCollaborationNote("");
   };
 
@@ -8725,9 +8697,6 @@ function MailboxView({
     setCollaborationReplyVisibility("internal");
     setCollaborationReplySelection(null);
     setHighlightedCollaborationMessageId(null);
-    setIsInviteParticipantOpen(false);
-    setCollaborationInviteEmail("");
-    setCollaborationInvitePersonId("");
     setFocusCollaborationComposer(false);
   };
 
@@ -8809,17 +8778,19 @@ function MailboxView({
   };
 
   const createMessageCollaboration = () => {
-    if (!shareCollaborationMessageId || !collaborationPersonId) {
+    if (!shareCollaborationMessageId) {
       return;
     }
 
     const selectedPerson = collaborationSelectablePeople.find(
       (person) => person.id === collaborationPersonId,
-    );
-
-    if (!selectedPerson) {
-      return;
-    }
+    ) ?? {
+      id: currentUserId,
+      name: currentUserName,
+      email: currentUserEmail,
+      kind: "internal" as const,
+      status: "active" as const,
+    };
 
     const nextTimestamp = Date.now();
     const trimmedNote = collaborationNote.trim();
@@ -8843,7 +8814,7 @@ function MailboxView({
             authorName: currentUserName,
             text: trimmedNote,
             timestamp: nextTimestamp,
-            visibility: "shared" as const,
+            visibility: "internal" as const,
             mentions: extractCollaborationMentions(
               trimmedNote,
               initialMentionCandidates,
@@ -8914,7 +8885,7 @@ function MailboxView({
                   authorName: currentUserName,
                   text: trimmedReply,
                   timestamp: nextTimestamp,
-                  visibility: collaborationReplyVisibility,
+                  visibility: "internal" as const,
                   mentions,
                 },
               ],
@@ -8926,166 +8897,6 @@ function MailboxView({
     setCollaborationReplyVisibility("internal");
     setCollaborationMentionIndex(0);
     setCollaborationReplySelection(null);
-  };
-
-  const addParticipantToCollaboration = (messageId: string) => {
-    const trimmedEmail = collaborationInviteEmail.trim().toLowerCase();
-    const selectedPerson = collaborationPeople.find(
-      (person) => person.id === collaborationInvitePersonId,
-    );
-
-    if (!selectedPerson && !trimmedEmail) {
-      return;
-    }
-
-    const nextTimestamp = Date.now();
-
-    updateMessageById(messageId, (message) => {
-      if (!message.collaboration) {
-        return message;
-      }
-
-      const existingParticipants = getCollaborationParticipants(message.collaboration);
-      const matchedPersonByEmail = trimmedEmail
-        ? collaborationPeople.find((person) => person.email.toLowerCase() === trimmedEmail)
-        : null;
-      const candidateParticipant: MailMessageCollaborationParticipant | null = selectedPerson
-        ? {
-            id: selectedPerson.id,
-            name: selectedPerson.name,
-            email: selectedPerson.email,
-            kind: "internal",
-            status: "active",
-          }
-        : trimmedEmail
-          ? {
-              id: matchedPersonByEmail?.id ?? `invite-${trimmedEmail}`,
-              name: matchedPersonByEmail?.name ?? trimmedEmail,
-              email: trimmedEmail,
-              kind: matchedPersonByEmail || trimmedEmail.endsWith("@cuevion.com")
-                ? "internal"
-                : "external",
-              status: matchedPersonByEmail
-                ? "active"
-                : "invited",
-            }
-          : null;
-
-      if (!candidateParticipant) {
-        return message;
-      }
-
-      const alreadyExists = existingParticipants.some((participant) =>
-        participant.id === candidateParticipant.id ||
-        (Boolean(participant.email) &&
-          participant.email.toLowerCase() === candidateParticipant.email.toLowerCase()),
-      );
-
-      if (alreadyExists) {
-        return message;
-      }
-
-      return {
-        ...message,
-        collaboration: {
-          ...message.collaboration,
-          updatedAt: nextTimestamp,
-          participants: [...(message.collaboration.participants ?? []), candidateParticipant],
-        },
-      };
-    });
-
-    setIsInviteParticipantOpen(false);
-    setCollaborationInviteEmail("");
-    setCollaborationInvitePersonId("");
-  };
-
-  const removeParticipantFromCollaboration = (
-    messageId: string,
-    participantId: string,
-  ) => {
-    updateMessageById(messageId, (message) =>
-      message.collaboration
-        ? {
-            ...message,
-            collaboration: {
-              ...message.collaboration,
-              updatedAt: Date.now(),
-              participants: (message.collaboration.participants ?? []).filter(
-                (participant) => participant.id !== participantId,
-              ),
-            },
-          }
-        : message,
-    );
-  };
-
-  const addInlineCollaborationInvite = () => {
-    const trimmedEmail = collaborationInviteDraft.trim().toLowerCase();
-
-    if (!trimmedEmail) {
-      return;
-    }
-
-    const matchedPerson = collaborationPeople.find(
-      (person) => person.email.toLowerCase() === trimmedEmail,
-    );
-
-    if (matchedPerson) {
-      setCollaborationPersonId(matchedPerson.id);
-      setIsInlineCollaborationInviteOpen(false);
-      setCollaborationInviteDraft("");
-      return;
-    }
-
-    const inviteId = `invite-${trimmedEmail}`;
-    const alreadyExists = collaborationInviteOptions.some(
-      (person) => person.email.toLowerCase() === trimmedEmail || person.id === inviteId,
-    );
-
-    if (!alreadyExists) {
-      setCollaborationInviteOptions((current) => [
-        ...current,
-        {
-          id: inviteId,
-          name: trimmedEmail,
-          email: trimmedEmail,
-          kind: "external",
-          status: "invited",
-        },
-      ]);
-    }
-
-    setCollaborationPersonId(inviteId);
-    setIsInlineCollaborationInviteOpen(false);
-    setCollaborationInviteDraft("");
-  };
-
-  const copyInviteLink = async (message: MailMessage, email: string) => {
-    const inviteLink = buildCollaborationInviteLink(message, email);
-
-    if (!inviteLink) {
-      return;
-    }
-
-    try {
-      await navigator.clipboard.writeText(inviteLink);
-      const copyKey = `${message.id}:${email.toLowerCase()}`;
-      if (isLocalDevelopmentEnvironment()) {
-        console.debug("cuevion_invite_link_copied", {
-          inviteLink,
-          inviteToken: buildCollaborationInviteToken(message, email),
-          inviteeEmail: email.toLowerCase(),
-          messageId: message.id,
-        });
-      }
-      setCopiedInviteLinkKey(copyKey);
-      window.setTimeout(() => {
-        setCopiedInviteLinkKey((current) => (current === copyKey ? null : current));
-      }, 1800);
-    } catch {
-      setCopiedInviteLinkKey(null);
-    }
   };
 
   const setMessagesUnreadState = (
@@ -12737,52 +12548,15 @@ function MailboxView({
                     <label className="block space-y-2">
                       <div className="flex items-center justify-between gap-3">
                         <span className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
-                          Participants
+                          Internal collaboration
                         </span>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setIsInlineCollaborationInviteOpen((current) => !current)
-                          }
-                          className="inline-flex items-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-3 py-1 text-[0.66rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-soft)] transition-[background-color,border-color,color] duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface-strong)] hover:text-[var(--workspace-text)] focus-visible:outline-none"
-                        >
-                          + Invite
-                        </button>
                       </div>
-                      {isInlineCollaborationInviteOpen ? (
-                        <div className="relative">
-                          <input
-                            value={collaborationInviteDraft}
-                            onChange={(event) => setCollaborationInviteDraft(event.target.value)}
-                            onKeyDown={(event) => {
-                              if (event.key === "Enter" && isCollaborationInviteDraftValid) {
-                                event.preventDefault();
-                                addInlineCollaborationInvite();
-                              }
-                            }}
-                            placeholder="Enter email..."
-                            autoCorrect="off"
-                            autoCapitalize="none"
-                            spellCheck={false}
-                            className="w-full rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3 pr-28 text-[0.9rem] leading-6 text-[var(--workspace-text-soft)] outline-none placeholder:text-[var(--workspace-text-faint)]"
-                          />
-                          {isCollaborationInviteDraftValid ? (
-                            <button
-                              type="button"
-                              onClick={addInlineCollaborationInvite}
-                              className="absolute right-2 top-1/2 inline-flex h-9 -translate-y-1/2 items-center rounded-full border border-[color:rgba(109,154,105,0.34)] bg-[linear-gradient(180deg,rgba(193,221,186,0.92),rgba(143,185,136,0.94))] px-3 text-[0.72rem] font-medium text-[color:rgba(45,74,45,0.98)] shadow-[inset_0_1px_0_rgba(255,255,255,0.22),0_8px_18px_rgba(108,148,102,0.14)] transition-[background-color,border-color,color,box-shadow] duration-150 hover:border-[color:rgba(95,136,92,0.42)] hover:bg-[linear-gradient(180deg,rgba(201,227,194,0.96),rgba(151,193,144,0.96))] focus-visible:outline-none"
-                            >
-                              + Invite
-                            </button>
-                          ) : null}
-                        </div>
-                      ) : null}
                       <div className="grid gap-2.5 md:grid-cols-3">
                         {collaborationSelectablePeople.map((person) => (
                           <div key={person.id} className="relative min-w-0">
                             <button
                               type="button"
-                              onClick={() => setCollaborationPersonId(person.id)}
+                              onClick={() => setCollaborationPersonId(currentUserId)}
                               className={`w-full min-w-0 rounded-[18px] border px-4 py-3 pr-10 text-left transition-[background-color,border-color,color] duration-150 focus-visible:outline-none ${
                                 collaborationPersonId === person.id
                                   ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-card-featured-start),var(--workspace-card-featured-end))]"
@@ -12797,22 +12571,16 @@ function MailboxView({
                                 className="mt-0.5 truncate pr-1 text-[0.8rem] leading-5 text-[color:rgba(120,111,100,0.72)]"
                               >
                                 {person.email}
-                                {person.status === "invited" ? " (invited)" : ""}
                               </div>
                             </button>
-                            {person.status === "invited" || collaborationPersonId === person.id ? (
+                            {collaborationPersonId === person.id ? (
                               <button
                                 type="button"
                                 aria-label={`Remove ${person.name}`}
                                 onClick={(event) => {
                                   event.stopPropagation();
-                                  if (person.status === "invited") {
-                                    setCollaborationInviteOptions((current) =>
-                                      current.filter((entry) => entry.id !== person.id),
-                                    );
-                                  }
                                   if (collaborationPersonId === person.id) {
-                                    setCollaborationPersonId("");
+                                    setCollaborationPersonId(currentUserId);
                                   }
                                 }}
                                 className="absolute right-2 top-2 inline-flex h-6 w-6 items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] text-[0.82rem] leading-none text-[var(--workspace-text-faint)] transition-[background-color,border-color,color] duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface-strong)] hover:text-[var(--workspace-text)] focus-visible:outline-none"
@@ -12876,12 +12644,7 @@ function MailboxView({
                     <button
                       type="button"
                       onClick={createMessageCollaboration}
-                      disabled={!collaborationPersonId}
-                      className={
-                        collaborationPersonId
-                          ? "inline-flex h-10 items-center justify-center rounded-full bg-pine px-5 text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[color:rgba(251,248,242,0.98)] transition-[background-color,transform] duration-150 hover:bg-moss active:scale-[0.99] focus-visible:outline-none"
-                          : "inline-flex h-10 cursor-not-allowed items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-5 text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-soft)] opacity-45 transition-[opacity] duration-150 focus-visible:outline-none"
-                      }
+                      className="inline-flex h-10 items-center justify-center rounded-full bg-pine px-5 text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[color:rgba(251,248,242,0.98)] transition-[background-color,transform] duration-150 hover:bg-moss active:scale-[0.99] focus-visible:outline-none"
                     >
                       Start collaboration
                     </button>
@@ -12907,17 +12670,8 @@ function MailboxView({
                         Collaboration
                       </h2>
                       <div className="space-y-2">
-                        <div className="flex items-center justify-between gap-3">
-                          <div className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
-                            Participants
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() => setIsInviteParticipantOpen((current) => !current)}
-                            className="inline-flex items-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-3 py-1 text-[0.72rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-soft)] transition-[background-color,border-color,color] duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface-strong)] hover:text-[var(--workspace-text)] focus-visible:outline-none"
-                          >
-                            + Invite
-                          </button>
+                        <div className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                          Participants
                         </div>
                         <div className="flex flex-wrap gap-2">
                           {activeCollaborationParticipants.map((participant) => (
@@ -12927,21 +12681,7 @@ function MailboxView({
                             >
                               <span className="truncate pr-0.5 text-[var(--workspace-text)]">
                                 {participant.name || participant.email}
-                                {participant.status === "invited" ? " (invited)" : ""}
                               </span>
-                              <button
-                                type="button"
-                                aria-label={`Remove ${participant.name || participant.email}`}
-                                onClick={() =>
-                                  removeParticipantFromCollaboration(
-                                    activeCollaborationMessage.id,
-                                    participant.id,
-                                  )
-                                }
-                                className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[0.78rem] leading-none text-[var(--workspace-text-faint)] transition-colors duration-150 hover:text-[var(--workspace-text)] focus-visible:outline-none"
-                              >
-                                ×
-                              </button>
                             </div>
                           ))}
                         </div>
@@ -12952,115 +12692,6 @@ function MailboxView({
                     </div>
                     <CloseActionButton onClick={closeCollaborationOverlay} />
                   </div>
-
-                  {isInviteParticipantOpen ? (
-                    <div className="mt-4 rounded-[22px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] p-4">
-                      <div className="space-y-4">
-                        <div className="space-y-2">
-                          <div className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
-                            Existing users
-                          </div>
-                          <div className="flex flex-wrap gap-2">
-                            {collaborationPeople.map((person) => (
-                              <button
-                                key={person.id}
-                                type="button"
-                                onClick={() => {
-                                  setCollaborationInvitePersonId(person.id);
-                                  setCollaborationInviteEmail("");
-                                }}
-                                className={`inline-flex h-9 items-center justify-center rounded-full border px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color] duration-150 focus-visible:outline-none ${
-                                  collaborationInvitePersonId === person.id
-                                    ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)]"
-                                    : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] text-[var(--workspace-text-soft)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface-strong)]"
-                                }`}
-                              >
-                                {person.name}
-                              </button>
-                            ))}
-                          </div>
-                        </div>
-                        <label className="block space-y-2">
-                          <span className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
-                            Email address
-                          </span>
-                          <input
-                            value={collaborationInviteEmail}
-                            onChange={(event) => {
-                              setCollaborationInviteEmail(event.target.value);
-                              setCollaborationInvitePersonId("");
-                            }}
-                            placeholder="name@example.com"
-                            autoCorrect="off"
-                            autoCapitalize="none"
-                            spellCheck={false}
-                            className="w-full rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-3 text-[0.9rem] leading-6 text-[var(--workspace-text-soft)] outline-none placeholder:text-[var(--workspace-text-faint)]"
-                          />
-                        </label>
-                        <div className="flex items-center justify-end gap-3">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setIsInviteParticipantOpen(false);
-                              setCollaborationInviteEmail("");
-                              setCollaborationInvitePersonId("");
-                            }}
-                            className={modalTertiaryActionButtonClass}
-                          >
-                            Close
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() =>
-                              addParticipantToCollaboration(activeCollaborationMessage.id)
-                            }
-                            disabled={
-                              !collaborationInvitePersonId &&
-                              collaborationInviteEmail.trim().length === 0
-                            }
-                            className={
-                              collaborationInvitePersonId ||
-                              collaborationInviteEmail.trim().length > 0
-                                ? `${mailboxPrimaryActionButtonClass} h-10 px-5 text-[0.72rem] tracking-[0.16em]`
-                                : "inline-flex h-10 cursor-not-allowed items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-5 text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-soft)] opacity-45 transition-[opacity] duration-150 focus-visible:outline-none"
-                            }
-                          >
-                            Add participant
-                          </button>
-                        </div>
-                        {getCollaborationParticipants(activeCollaborationMessage.collaboration)
-                          .filter((participant) => participant.status === "invited")
-                          .map((participant) => {
-                            const copyKey = `${activeCollaborationMessage.id}:${participant.email.toLowerCase()}`;
-
-                            return (
-                              <div
-                                key={`active-invite-link-${participant.id}`}
-                                className="flex flex-wrap items-center justify-between gap-3 rounded-[16px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-3"
-                              >
-                                <div className="space-y-1">
-                                  <div className="text-[0.68rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)]">
-                                    Dev only
-                                  </div>
-                                  <div className="text-[0.84rem] leading-6 text-[var(--workspace-text-soft)]">
-                                    {participant.email}
-                                  </div>
-                                </div>
-                                <button
-                                  type="button"
-                                  onClick={() => copyInviteLink(activeCollaborationMessage, participant.email)}
-                                  className="inline-flex h-8 items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-3 text-[0.68rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-soft)] transition-[background-color,border-color,color] duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface-strong)] hover:text-[var(--workspace-text)] focus-visible:outline-none"
-                                >
-                                  {copiedInviteLinkKey === copyKey
-                                    ? "Copied"
-                                    : "Copy invite link"}
-                                </button>
-                              </div>
-                            );
-                          })}
-                      </div>
-                    </div>
-                  ) : null}
 
                   <div className="mt-6 space-y-6">
                     <div className="space-y-4">
@@ -13106,9 +12737,7 @@ function MailboxView({
                       ))}
                       {visibleCollaborationMessages.length === 0 ? (
                         <div className="text-[0.88rem] leading-7 text-[var(--workspace-text-faint)]">
-                          {collaborationReplyVisibility === "internal"
-                            ? "Start an internal discussion with your team"
-                            : "Send a message to all participants"}
+                          Start an internal discussion on this message
                         </div>
                       ) : null}
                       {activeCollaborationMessage.collaboration.resolvedAt &&
@@ -13127,33 +12756,8 @@ function MailboxView({
                       <span className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
                         Reply
                       </span>
-                      <div className="flex flex-wrap gap-2">
-                        {([
-                          { value: "internal", label: "Internal" },
-                          { value: "shared", label: "Shared" },
-                        ] as const).map((option) => (
-                          <button
-                            key={option.value}
-                            type="button"
-                            onClick={() => setCollaborationReplyVisibility(option.value)}
-                            className={`inline-flex h-9 items-center justify-center rounded-full border px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color] duration-150 focus-visible:outline-none ${
-                              collaborationReplyVisibility === option.value
-                                ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)]"
-                                : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[var(--workspace-text-soft)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface-strong)]"
-                            }`}
-                          >
-                            {option.label}
-                          </button>
-                        ))}
-                      </div>
                       <div className="pt-0.5 text-[0.8rem] leading-6 text-[color:rgba(120,111,100,0.76)]">
-                        {collaborationReplyVisibility === "internal"
-                          ? "Only visible to your team"
-                          : `Visible to: ${
-                              activeCollaborationParticipants
-                                .map((participant) => participant.name || participant.email)
-                                .join(", ") || "all participants"
-                            }`}
+                        Only visible inside Cuevion
                       </div>
                       <textarea
                         ref={collaborationReplyInputRef}
@@ -13213,11 +12817,7 @@ function MailboxView({
                           }
                         }}
                         rows={4}
-                        placeholder={
-                          collaborationReplyVisibility === "internal"
-                            ? "Add an internal note for your team"
-                            : "Reply to everyone in this collaboration"
-                        }
+                        placeholder="Add an internal note"
                         className="w-full resize-none rounded-[20px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3 text-[0.92rem] leading-7 text-[var(--workspace-text-soft)] outline-none placeholder:text-[var(--workspace-text-faint)]"
                       />
                       {visibleCollaborationMentionCandidates.length > 0 ? (
