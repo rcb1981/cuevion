@@ -11504,10 +11504,26 @@ function MailboxView({
                         isSharedView && message.isShared
                           ? formatSharedContextHint(message.sharedContext)
                           : null;
+                      const demoFocusPreferenceLevel =
+                        resolveFocusPreferenceLevelForMessage(message);
+                      const hasOnboardingControlledDemoBadge =
+                        (message.internalClassification === "demo" ||
+                          message.internalClassification === "high_priority_demo") &&
+                        !hasProtectedPriorityVisibility(message) &&
+                        getManualPriorityOverride(message.id) !== "priority";
                       const visibleSignal = getVisibleMessageSignal(message);
                       const priorityBadge = getVisiblePriorityBadgeForMessage(message);
                       const categoryLabel = getVisibleCategoryLabel(message);
-                      const signal = message.signal === "Sent" ? "" : priorityBadge;
+                      const signal =
+                        message.signal === "Sent"
+                          ? ""
+                          : hasOnboardingControlledDemoBadge &&
+                              demoFocusPreferenceLevel === "low"
+                            ? "LOW"
+                            : hasOnboardingControlledDemoBadge &&
+                                demoFocusPreferenceLevel === "high"
+                              ? "PRIORITY"
+                              : priorityBadge;
                       const senderTextClass =
                         themeMode === "dark"
                           ? message.unread
