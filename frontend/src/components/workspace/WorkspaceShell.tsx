@@ -6954,29 +6954,35 @@ function MailboxView({
   }, [isComposeOpen, pendingComposeAttachmentPickerOpen]);
 
   const mailboxCollections = mailboxStore[mailbox.id] ?? createEmptyMailboxCollections();
-  const hasLearnedFilteredBehavior = hasLearnedShowLessBehavior(
-    senderCategoryLearning,
+  const lowSignalInboxMessages = mailboxCollections.Inbox.filter(
+    (message) =>
+      getVisiblePriorityBadge(
+        message,
+        manualPriorityOverrides[message.id],
+      ) === "LOW",
   );
-  const visibleMailboxCollections: Record<MailFolder, MailMessage[]> =
-    hasLearnedFilteredBehavior
-      ? {
-          Inbox: mailboxCollections.Inbox,
-          Drafts: mailboxCollections.Drafts,
-          Sent: mailboxCollections.Sent,
-          Archive: mailboxCollections.Archive,
-          Filtered: mailboxCollections.Filtered,
-          Spam: mailboxCollections.Spam,
-          Trash: mailboxCollections.Trash,
-        }
-      : {
-          Inbox: [...mailboxCollections.Inbox, ...mailboxCollections.Filtered],
-          Drafts: mailboxCollections.Drafts,
-          Sent: mailboxCollections.Sent,
-          Archive: mailboxCollections.Archive,
-          Filtered: [],
-          Spam: mailboxCollections.Spam,
-          Trash: mailboxCollections.Trash,
-        };
+  const lowSignalInboxMessageIds = new Set(
+    lowSignalInboxMessages.map((message) => message.id),
+  );
+  const visibleMailboxCollections: Record<MailFolder, MailMessage[]> = {
+    Inbox: mailboxCollections.Inbox.filter(
+      (message) => !lowSignalInboxMessageIds.has(message.id),
+    ),
+    Drafts: mailboxCollections.Drafts,
+    Sent: mailboxCollections.Sent,
+    Archive: mailboxCollections.Archive,
+    Filtered: [
+      ...mailboxCollections.Filtered,
+      ...lowSignalInboxMessages.filter(
+        (message) =>
+          !mailboxCollections.Filtered.some(
+            (filteredMessage) => filteredMessage.id === message.id,
+          ),
+      ),
+    ],
+    Spam: mailboxCollections.Spam,
+    Trash: mailboxCollections.Trash,
+  };
   const messageCollections: Record<MailFolder, MailMessage[]> = {
     Inbox: visibleMailboxCollections.Inbox,
     Drafts: visibleMailboxCollections.Drafts,
@@ -7005,6 +7011,22 @@ function MailboxView({
   );
   const workspaceSharedMessages = workspaceSharedEntries.map((entry) => entry.message);
   const workspaceMessageLocationById = workspaceSharedEntries.reduce<
+    Record<string, { mailboxId: InboxId; folder: MailFolder }>
+  >((locations, entry) => {
+    locations[entry.message.id] = {
+      mailboxId: entry.mailboxId,
+      folder: entry.folder,
+    };
+    return locations;
+  }, {});
+  const currentMailboxEntries = canonicalFolderOrder.flatMap((folder) =>
+    messageCollections[folder].map((message) => ({
+      mailboxId: mailbox.id,
+      folder,
+      message,
+    })),
+  );
+  const currentMailboxMessageLocationById = currentMailboxEntries.reduce<
     Record<string, { mailboxId: InboxId; folder: MailFolder }>
   >((locations, entry) => {
     locations[entry.message.id] = {
@@ -7044,7 +7066,9 @@ function MailboxView({
   }, {});
   const currentMessageLocationById = activeSmartFolder
     ? smartFolderMessageLocationById
-    : workspaceMessageLocationById;
+    : isSharedView
+      ? workspaceMessageLocationById
+      : currentMailboxMessageLocationById;
   const getManualPriorityOverride = (messageId: string) =>
     manualPriorityOverrides[messageId];
   const getVisibleMessageSignal = (message: MailMessage) =>
