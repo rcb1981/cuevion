@@ -6964,6 +6964,20 @@ function MailboxView({
   const lowSignalInboxMessageIds = new Set(
     lowSignalInboxMessages.map((message) => message.id),
   );
+  const dedupeMessagesByCanonicalIdentity = (messages: MailMessage[]) => {
+    const seenIdentityKeys = new Set<string>();
+
+    return messages.filter((message) => {
+      const identityKeys = getCanonicalMessageIdentityKeys(message);
+
+      if (identityKeys.some((key) => seenIdentityKeys.has(key))) {
+        return false;
+      }
+
+      identityKeys.forEach((key) => seenIdentityKeys.add(key));
+      return true;
+    });
+  };
   const visibleMailboxCollections: Record<MailFolder, MailMessage[]> = {
     Inbox: mailboxCollections.Inbox.filter(
       (message) => !lowSignalInboxMessageIds.has(message.id),
@@ -6971,15 +6985,10 @@ function MailboxView({
     Drafts: mailboxCollections.Drafts,
     Sent: mailboxCollections.Sent,
     Archive: mailboxCollections.Archive,
-    Filtered: [
+    Filtered: dedupeMessagesByCanonicalIdentity([
       ...mailboxCollections.Filtered,
-      ...lowSignalInboxMessages.filter(
-        (message) =>
-          !mailboxCollections.Filtered.some(
-            (filteredMessage) => filteredMessage.id === message.id,
-          ),
-      ),
-    ],
+      ...lowSignalInboxMessages,
+    ]),
     Spam: mailboxCollections.Spam,
     Trash: mailboxCollections.Trash,
   };
