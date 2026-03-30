@@ -7038,6 +7038,41 @@ function MailboxView({
     ]);
   };
   const resolveVisibilityClassificationForMessage = (message: MailMessage) => {
+    const signalClassification = (() => {
+      switch (message.ui_signal ?? message.signal) {
+        case "DEMO":
+        case "For review":
+        case "Shortlist":
+          return "demo" as const;
+        case "FINANCE":
+        case "Finance":
+          return "finance" as const;
+        case "PROMO":
+        case "Promo":
+          return "promo" as const;
+        case "BUSINESS":
+        case "Priority":
+        case "Active":
+          return "business" as const;
+        case "UPDATE":
+        case "Update":
+        case "Timing":
+          return "workflow_update" as const;
+        case "REPLY":
+        case "Follow-up":
+          return "reply" as const;
+        default:
+          return message.internalClassification;
+      }
+    })();
+
+    if (
+      (message.internalClassification === "promo" || signalClassification === "promo") &&
+      isBroadcastPromoMessage(message)
+    ) {
+      return "workflow_update" as const;
+    }
+
     if (
       message.internalClassification &&
       message.internalClassification !== "unknown"
@@ -7045,38 +7080,10 @@ function MailboxView({
       return message.internalClassification;
     }
 
-    switch (message.ui_signal ?? message.signal) {
-      case "DEMO":
-      case "For review":
-      case "Shortlist":
-        return "demo" as const;
-      case "FINANCE":
-      case "Finance":
-        return "finance" as const;
-      case "PROMO":
-      case "Promo":
-        return "promo" as const;
-      case "BUSINESS":
-      case "Priority":
-      case "Active":
-        return "business" as const;
-      case "UPDATE":
-      case "Update":
-      case "Timing":
-        return "workflow_update" as const;
-      case "REPLY":
-      case "Follow-up":
-        return "reply" as const;
-      default:
-        return message.internalClassification;
-    }
+    return signalClassification;
   };
   const resolveFocusPreferenceLevelForMessage = (message: MailMessage) => {
     const visibilityClassification = resolveVisibilityClassificationForMessage(message);
-
-    if (visibilityClassification === "promo" && isBroadcastPromoMessage(message)) {
-      return null;
-    }
 
     switch (visibilityClassification) {
       case "demo":
@@ -20145,6 +20152,41 @@ export function WorkspaceShell({
     reviewController.getReviewBySourceId(messageId);
   const getLinkedReviewBadgeLabel = (_messageId: string) => null;
   const resolvePriorityPageVisibilityClassification = (message: MailMessage) => {
+    const signalClassification = (() => {
+      switch (message.ui_signal ?? message.signal) {
+        case "DEMO":
+        case "For review":
+        case "Shortlist":
+          return "demo" as const;
+        case "FINANCE":
+        case "Finance":
+          return "finance" as const;
+        case "PROMO":
+        case "Promo":
+          return "promo" as const;
+        case "BUSINESS":
+        case "Priority":
+        case "Active":
+          return "business" as const;
+        case "UPDATE":
+        case "Update":
+        case "Timing":
+          return "workflow_update" as const;
+        case "REPLY":
+        case "Follow-up":
+          return "reply" as const;
+        default:
+          return message.internalClassification;
+      }
+    })();
+
+    if (
+      (message.internalClassification === "promo" || signalClassification === "promo") &&
+      isPriorityPageBroadcastPromoMessage(message)
+    ) {
+      return "workflow_update" as const;
+    }
+
     if (
       message.internalClassification &&
       message.internalClassification !== "unknown"
@@ -20152,31 +20194,7 @@ export function WorkspaceShell({
       return message.internalClassification;
     }
 
-    switch (message.ui_signal ?? message.signal) {
-      case "DEMO":
-      case "For review":
-      case "Shortlist":
-        return "demo" as const;
-      case "FINANCE":
-      case "Finance":
-        return "finance" as const;
-      case "PROMO":
-      case "Promo":
-        return "promo" as const;
-      case "BUSINESS":
-      case "Priority":
-      case "Active":
-        return "business" as const;
-      case "UPDATE":
-      case "Update":
-      case "Timing":
-        return "workflow_update" as const;
-      case "REPLY":
-      case "Follow-up":
-        return "reply" as const;
-      default:
-        return message.internalClassification;
-    }
+    return signalClassification;
   };
   const isPriorityPageBroadcastPromoMessage = (message: MailMessage) => {
     const searchableText = [
@@ -20204,13 +20222,6 @@ export function WorkspaceShell({
   };
   const resolvePriorityPageFocusPreferenceLevel = (message: MailMessage) => {
     const visibilityClassification = resolvePriorityPageVisibilityClassification(message);
-
-    if (
-      visibilityClassification === "promo" &&
-      isPriorityPageBroadcastPromoMessage(message)
-    ) {
-      return null;
-    }
 
     switch (visibilityClassification) {
       case "demo":
