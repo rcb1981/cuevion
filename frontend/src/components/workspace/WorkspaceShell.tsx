@@ -7058,9 +7058,7 @@ function MailboxView({
   const hasProtectedPriorityVisibility = (message: MailMessage) =>
     message.internalClassification === "reply" ||
     Boolean(message.isShared) ||
-    Boolean(message.sharedContext) ||
-    message.owner?.confidence === "medium" ||
-    message.owner?.confidence === "high";
+    Boolean(message.sharedContext);
   const getPriorityVisibilityAdjustedMessage = (message: MailMessage) => {
     if (hasProtectedPriorityVisibility(message)) {
       return message;
