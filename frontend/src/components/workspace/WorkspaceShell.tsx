@@ -20081,30 +20081,33 @@ export function WorkspaceShell({
     message.internalClassification === "reply" ||
     Boolean(message.isShared) ||
     Boolean(message.sharedContext);
-  const isPriorityPageVisiblePriorityMessage = (message: MailMessage) => {
+  const getPriorityPageVisiblePriorityBadge = (message: MailMessage) => {
     const override = manualPriorityOverrides[message.id];
 
     if (override === "priority") {
-      return true;
+      return "PRIORITY" as const;
     }
 
     if (override === "removed") {
-      return false;
+      return "NORMAL" as const;
     }
 
     if (!hasPriorityPageProtectedVisibility(message)) {
       const focusPreferenceLevel = resolvePriorityPageFocusPreferenceLevel(message);
 
       if (focusPreferenceLevel === "high") {
-        return true;
+        return "PRIORITY" as const;
       }
 
       if (focusPreferenceLevel === "medium" || focusPreferenceLevel === "low") {
-        return false;
+        return "NORMAL" as const;
       }
     }
 
-    return isMessageVisiblePriority(message, override);
+    return getVisiblePriorityBadge(message, override);
+  };
+  const isPriorityPageVisiblePriorityMessage = (message: MailMessage) => {
+    return getPriorityPageVisiblePriorityBadge(message) === "PRIORITY";
   };
   const livePriorityInboxEntries = (() => {
     const seenMessageIds = new Set<string>();
