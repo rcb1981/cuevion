@@ -8126,7 +8126,7 @@ function MailboxView({
                   }}
                   className={menuItemClass}
                 >
-                  Start collaboration…
+                  {message.collaboration ? "Open collaboration…" : "Start collaboration…"}
                 </button>
                 <button
                   type="button"
@@ -8691,7 +8691,7 @@ function MailboxView({
   const openShareCollaboration = (messageId: string) => {
     const message = getMessageById(messageId);
 
-    if (message?.collaboration && message.collaboration.state !== "resolved") {
+    if (message?.collaboration) {
       openCollaborationOverlay(messageId);
       return;
     }
@@ -8807,6 +8807,10 @@ function MailboxView({
           }
         : message,
     );
+
+    if (activeCollaborationMessageId === messageId) {
+      closeCollaborationOverlay();
+    }
   };
 
   const createMessageCollaboration = () => {
@@ -10531,7 +10535,9 @@ function MailboxView({
                   }}
                   className={contextMenuMainItemClass}
                 >
-                  Start collaboration…
+                  {selectedMessage?.collaboration
+                    ? "Open collaboration…"
+                    : "Start collaboration…"}
                 </button>
                 {hasSingleSelection && selectedMessage ? (
                   <>
@@ -12024,7 +12030,9 @@ function MailboxView({
                       }}
                       className={contextMenuMainItemClass}
                     >
-                      Start collaboration…
+                      {contextMenuMessage.collaboration
+                        ? "Open collaboration…"
+                        : "Start collaboration…"}
                     </button>
                   ) : null}
                 </div>
