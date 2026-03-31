@@ -2306,6 +2306,36 @@ function inferInternalClassification(
   }
 }
 
+function isRoyaltyStatementLikeMessage(
+  message: Pick<MailMessageSeed, "subject" | "snippet" | "from" | "sender" | "body">,
+) {
+  const searchableText = [
+    message.subject,
+    message.snippet,
+    message.from,
+    message.sender,
+    ...(message.body ?? []),
+  ]
+    .join(" ")
+    .toLowerCase();
+
+  const hasStrongRoyaltyStatementSignal =
+    includesAnyKeyword(searchableText, [
+      "statement availability",
+      "statement available",
+      "statement ready",
+      "royalty statement",
+      "artist royalties portal",
+      "royalties portal",
+      "royalty portal",
+      "earnings portal",
+    ]) ||
+    (includesAnyKeyword(searchableText, ["warner music", "warnermusic", "wmg"]) &&
+      includesAnyKeyword(searchableText, ["statement", "royalty", "royalties", "portal"]));
+
+  return hasStrongRoyaltyStatementSignal;
+}
+
 function resolveVisiblePrioritySignal(
   message: Pick<MailMessage, "signal">,
   override?: ManualPriorityOverride,
@@ -3188,9 +3218,13 @@ function normalizeMailMessage(
     owner,
     message.sharedContext,
   );
+  const inferredRoyaltyStatement =
+    !message.internalClassification && isRoyaltyStatementLikeMessage(message);
   const internalClassification =
     message.internalClassification ??
-    inferInternalClassification({ ...message, signal: resolvedSignal }, mailboxId);
+    (inferredRoyaltyStatement
+      ? "royalty_statement"
+      : inferInternalClassification({ ...message, signal: resolvedSignal }, mailboxId));
   const normalizedAttachments = (message.attachments ?? []).map((attachment) =>
     normalizeMailAttachment(attachment),
   );
