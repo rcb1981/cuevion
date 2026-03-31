@@ -165,6 +165,27 @@ def is_business_like(category: str) -> bool:
     }
 
 
+def should_raise_priority_from_preference(
+    category: str,
+    final_visibility: VisibilityMode,
+    preferences: UserPreferences,
+    mailbox_profile: str,
+) -> bool:
+    if final_visibility != "show_priority":
+        return False
+
+    if category in {"finance", "royalty_statement"}:
+        return preferences.finance_visibility == "show_priority"
+
+    if category == "business_reminder":
+        return preferences.business_reminders_mode == "show_priority"
+
+    if category == "promo" and mailbox_profile == "business_mixed":
+        return preferences.promos_in_business_inbox_mode == "show_priority"
+
+    return False
+
+
 def decide_message_behavior(
     engine_result: EngineResult,
     user_config: UserConfig,
@@ -302,9 +323,6 @@ def decide_message_behavior(
 )
     explanation.preference_adjustments.extend(pref_notes)
 
-    if category in {"finance", "royalty_statement"} and mailbox_config.inbox_profile == "business_mixed":
-        final_visibility = min_visibility(final_visibility, "show_normal")
-
     # Extra safety: keep demo_first suppression intact after preferences
     if mailbox_config.inbox_profile == "demo_first" and is_business_like(category):
         final_visibility = "hide"
@@ -312,6 +330,17 @@ def decide_message_behavior(
     # Extra safety: promo reminders should not exceed quiet visibility by preference accident
     if category == "promo_reminder":
         final_visibility = min_visibility(final_visibility, "show_low")
+
+    if should_raise_priority_from_preference(
+        category=category,
+        final_visibility=final_visibility,
+        preferences=effective_preferences,
+        mailbox_profile=mailbox_config.inbox_profile,
+    ):
+        final_priority = "PRIORITY"
+        explanation.preference_adjustments.append(
+            f"{category} preference escalated priority via {final_visibility}"
+        )
 
     if category == "demo":
         explanation.final_summary = "Shown prominently because this looks like a real demo submission."

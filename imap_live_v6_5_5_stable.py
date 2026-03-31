@@ -2,8 +2,14 @@ import imaplib
 import email
 from email.header import decode_header
 from email.utils import parseaddr
-from dotenv import load_dotenv
-from openai import OpenAI
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    load_dotenv = None
+try:
+    from openai import OpenAI
+except ImportError:
+    OpenAI = None
 import os
 import re
 import json
@@ -16,9 +22,10 @@ from v7_decision_layer import decide_message_behavior
 # =========================
 # LOAD ENV
 # =========================
-load_dotenv()
+if load_dotenv:
+    load_dotenv()
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY")) if OpenAI else None
 
 # =========================
 # GLOBAL SETTINGS
@@ -863,10 +870,21 @@ def is_royalty_statement_email(subject, body, sender_email):
         "payment report",
         "statement attached",
         "statement available",
+        "statement availability",
+        "statement ready",
+        "statement is available",
+        "statement now available",
+        "statement now ready",
         "your statement is ready",
         "your royalty statement",
+        "artist royalties portal",
+        "royalties portal",
+        "royalty portal",
+        "earnings portal",
         "monthly royalties",
         "royalties available",
+        "royalties statement",
+        "royalty statement available",
         "earnings report",
         "revenue report",
         "sales report",
@@ -882,6 +900,7 @@ def is_royalty_statement_email(subject, body, sender_email):
         "revenue",
         "payout",
         "payments",
+        "portal",
         "sales report",
         "net revenue",
         "accounting period",
@@ -901,13 +920,37 @@ def is_royalty_statement_email(subject, body, sender_email):
         "stem",
         "amuse",
         "ditto",
+        "warner music artist royalties portal",
+        "artist royalties portal",
+        "royalties portal",
+        "royalty portal",
+        "earnings portal",
+        "wmg",
+        "warner music",
+        "warnermusic",
     ]
 
     strong_hit = any(phrase in text for phrase in strong_phrases)
     medium_hits = sum(1 for kw in medium_keywords if kw in text)
     source_hit = any(src in sender or src in text for src in known_sources)
+    portal_statement_hit = (
+        ("statement" in text or "royalty" in text or "royalties" in text)
+        and "portal" in text
+    )
+    warner_royalty_hit = (
+        any(term in text or term in sender for term in ["warner music", "warnermusic", "wmg"])
+        and any(term in text for term in ["royalty", "royalties", "statement", "earnings", "portal"])
+    )
 
     if strong_hit:
+        return True
+
+    if warner_royalty_hit and (
+        "statement" in text or "royalty" in text or "royalties" in text
+    ):
+        return True
+
+    if source_hit and portal_statement_hit:
         return True
 
     if source_hit and medium_hits >= 1:

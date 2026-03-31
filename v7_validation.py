@@ -18,6 +18,7 @@ from v7_config import (
     get_role_based_inbox_suggestion,
 )
 from v7_decision_layer import decide_message_behavior, decision_to_dict
+from imap_live_v6_5_5_stable import is_royalty_statement_email
 
 
 # =========================================================
@@ -73,6 +74,24 @@ class InboxSuggestionValidationCase:
         self.name = name
         self.role = role
         self.mailbox_count = mailbox_count
+        self.expected = expected
+        self.note = note
+
+
+class DetectorValidationCase:
+    def __init__(
+        self,
+        name: str,
+        subject: str,
+        body: str,
+        sender_email: str,
+        expected: bool,
+        note: Optional[str] = None,
+    ):
+        self.name = name
+        self.subject = subject
+        self.body = body
+        self.sender_email = sender_email
         self.expected = expected
         self.note = note
 
@@ -1108,14 +1127,58 @@ VALIDATION_CASES: List[ValidationCase] = [
             reason="User wants finance emails surfaced more strongly.",
         ),
         expected={
-            "final_priority": "REVIEW",
-            "final_visibility": "show_normal",
-            "action": "show_in_main_feed",
+            "final_priority": "PRIORITY",
+            "final_visibility": "show_priority",
+            "action": "show_in_priority",
         },
         preferences_override={
             "finance_visibility": "show_priority",
         },
-        note="Finance override should be applied, but business inbox safety may still cap royalty visibility at normal.",
+        note="Finance override should win and elevate royalty statements to priority when explicitly requested.",
+    ),
+    ValidationCase(
+        name="case_15b_dj_finance_high_onboarding_respected",
+        role="dj",
+        mailbox_email="info@yourlabel.com",
+        engine_result=EngineResult(
+            inbox_name="info@yourlabel.com",
+            category="royalty_statement",
+            priority="REVIEW",
+            workflow_links=[],
+            usable_demo_links=[],
+            reason="High-priority royalty statement delivered.",
+        ),
+        expected={
+            "final_priority": "PRIORITY",
+            "final_visibility": "show_priority",
+            "action": "show_in_priority",
+        },
+        preferences_override={
+            "finance_visibility": "show_priority",
+        },
+        note="Finance high preference must keep royalty mail out of low/filtered handling.",
+    ),
+    ValidationCase(
+        name="case_15c_dj_finance_normal_stays_normal",
+        role="dj",
+        mailbox_email="info@yourlabel.com",
+        engine_result=EngineResult(
+            inbox_name="info@yourlabel.com",
+            category="royalty_statement",
+            priority="LOW",
+            workflow_links=[],
+            usable_demo_links=[],
+            reason="Normal-priority royalty statement delivered.",
+        ),
+        expected={
+            "final_priority": "NORMAL",
+            "final_visibility": "show_normal",
+            "action": "show_in_main_feed",
+        },
+        preferences_override={
+            "finance_visibility": "show_normal",
+        },
+        note="Finance normal should remain visible without forced priority escalation.",
     ),
     ValidationCase(
         name="case_16_label_ar_override_promos_in_business_to_priority",
@@ -1130,14 +1193,14 @@ VALIDATION_CASES: List[ValidationCase] = [
             reason="User wants promos in business inbox surfaced more strongly.",
         ),
         expected={
-            "final_priority": "NORMAL",
+            "final_priority": "PRIORITY",
             "final_visibility": "show_priority",
             "action": "show_in_priority",
         },
         preferences_override={
             "promos_in_business_inbox_mode": "show_priority",
         },
-        note="Promo in business inbox should respect the manual visibility override.",
+        note="Promo in business inbox should respect the manual visibility override and route into priority.",
     ),
     ValidationCase(
         name="case_17_label_ar_override_distributor_to_priority",
@@ -1162,6 +1225,16 @@ VALIDATION_CASES: List[ValidationCase] = [
         note="Distributor visibility override should raise distributor updates to priority visibility.",
     ),
     
+]
+DETECTOR_VALIDATION_CASES = [
+    DetectorValidationCase(
+        name="detector_case_1_warner_statement_availability",
+        subject="Statement Availability - Warner Music Artist Royalties Portal",
+        body="Your latest statement is now available in the artist royalties portal.",
+        sender_email="statements@wmgroyalties.com",
+        expected=True,
+        note="Warner/WMG royalty portal wording should classify as royalty mail.",
+    ),
 ]
 INBOX_SUGGESTION_VALIDATION_CASES = [
     InboxSuggestionValidationCase(
@@ -1263,6 +1336,43 @@ def run_validation_suite() -> None:
     print(f"PASSED: {passed}")
     print(f"FAILED: {failed}")
     print("#" * 100 + "\n")
+
+
+def run_detector_validation_suite() -> None:
+    print("\n" + "#" * 100)
+    print("RUNNING DETECTOR VALIDATION SUITE")
+    print("#" * 100 + "\n")
+
+    passed = 0
+
+    for case in DETECTOR_VALIDATION_CASES:
+        actual = is_royalty_statement_email(
+            case.subject,
+            case.body,
+            case.sender_email,
+        )
+        errors = compare_expected({"detected": case.expected}, {"detected": actual})
+
+        print("=" * 100)
+        print(f"TEST: {case.name}")
+        if case.note:
+            print(f"NOTE: {case.note}")
+        print(f"SUBJECT: {case.subject}")
+        print(f"SENDER: {case.sender_email}")
+        print(f"EXPECTED: {case.expected}")
+        print(f"ACTUAL: {actual}")
+
+        if not errors:
+            passed += 1
+            print("STATUS: PASS")
+        else:
+            print("STATUS: FAIL")
+            for err in errors:
+                print(f"  - {err}")
+
+    print("-" * 100)
+    print(f"RESULT: {passed}/{len(DETECTOR_VALIDATION_CASES)} PASS")
+    print("-" * 100)
 
 
 def run_onboarding_persistence_validation_suite() -> None:
@@ -1504,6 +1614,7 @@ if __name__ == "__main__":
     run_create_user_config_from_onboarding_validation_suite()
     run_onboarding_decision_validation_suite()
     run_validation_suite()
+    run_detector_validation_suite()
     run_onboarding_entry_payload_validation()
     run_onboarding_role_picker_validation()
     run_created_user_decision_validation_suite()
