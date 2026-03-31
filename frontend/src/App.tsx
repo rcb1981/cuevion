@@ -21,6 +21,7 @@ type AuthenticatedCuevionUser = {
 };
 
 type CollaborationInviteRoute = {
+  mode: "invite" | "external_review";
   inviteToken: string;
   messageId?: string;
   inviteeEmail?: string;
@@ -151,7 +152,8 @@ function normalizeAuthenticatedUser(value: unknown): AuthenticatedCuevionUser | 
 
 function parseCollaborationInviteRoute(): CollaborationInviteRoute | null {
   const params = new URLSearchParams(window.location.search);
-  const inviteToken = params.get("collab_invite");
+  const externalReviewToken = params.get("external_review");
+  const inviteToken = externalReviewToken ?? params.get("collab_invite");
   const messageId = params.get("message_id");
   const inviteeEmail = params.get("invitee");
   const inviteStatus = params.get("invite_status") ?? undefined;
@@ -167,6 +169,7 @@ function parseCollaborationInviteRoute(): CollaborationInviteRoute | null {
       : undefined);
 
   return {
+    mode: externalReviewToken ? "external_review" : "invite",
     inviteToken,
     messageId: messageId ?? undefined,
     inviteeEmail: inviteeEmail?.toLowerCase(),
@@ -413,7 +416,7 @@ export default function App() {
   }, [view]);
 
   if (collaborationInviteRoute) {
-    if (!authenticatedUser) {
+    if (collaborationInviteRoute.mode === "invite" && !authenticatedUser) {
       return (
         <CollaborationInviteAuthGate
           onAuthenticate={(user) => {
@@ -449,7 +452,7 @@ export default function App() {
       <WorkspaceShell
         userConfig={userConfig ?? buildUserConfig(onboardingState)}
         onboardingState={onboardingState}
-        authenticatedUser={authenticatedUser}
+        authenticatedUser={collaborationInviteRoute.mode === "invite" ? authenticatedUser : null}
         collaborationInviteRoute={collaborationInviteRoute}
         workspaceDataMode={workspaceDataMode}
       />

@@ -91,6 +91,7 @@ type AuthenticatedCuevionUser = {
   userType: "member" | "guest";
 };
 type CollaborationInviteRoute = {
+  mode: "invite" | "external_review";
   inviteToken: string;
   messageId?: string;
   inviteeEmail?: string;
@@ -1349,6 +1350,22 @@ function buildCollaborationInviteLink(message: MailMessage, email: string) {
   return inviteUrl.toString();
 }
 
+function buildExternalCollaborationReviewLink(message: MailMessage, email: string) {
+  if (typeof window === "undefined" || !message.collaboration) {
+    return "";
+  }
+
+  const inviteUrl = new URL(window.location.pathname, window.location.origin);
+  inviteUrl.searchParams.set(
+    "external_review",
+    buildCollaborationInviteToken(message, email),
+  );
+  inviteUrl.searchParams.set("message_id", message.id);
+  inviteUrl.searchParams.set("invitee", email.toLowerCase());
+
+  return inviteUrl.toString();
+}
+
 function isLocalDevelopmentEnvironment() {
   if (typeof window === "undefined") {
     return false;
@@ -1385,6 +1402,26 @@ function getCollaborationParticipants(collaboration: MailMessageCollaboration) {
   });
 
   return Array.from(participantsByKey.values());
+}
+
+function isValidCollaborationParticipantEmail(value: string) {
+  return /^[^\s@]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}$/.test(
+    value.trim(),
+  );
+}
+
+function formatCollaborationParticipantNameFromEmail(email: string) {
+  const localPart = email.split("@")[0]?.trim();
+
+  if (!localPart) {
+    return email;
+  }
+
+  return localPart
+    .split(/[._-]+/)
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
 }
 
 function getCollaborationMentionTargets(
@@ -6543,6 +6580,8 @@ function MailboxView({
   const [collaborationReplyDraft, setCollaborationReplyDraft] = useState("");
   const [collaborationParticipantPersonId, setCollaborationParticipantPersonId] =
     useState<string>("");
+  const [externalCollaborationEmail, setExternalCollaborationEmail] = useState("");
+  const [externalCollaborationInviteUrl, setExternalCollaborationInviteUrl] = useState("");
   const [, setCollaborationReplyVisibility] =
     useState<MailMessageCollaborationVisibility>("internal");
   const collaborationReplyInputRef = useRef<HTMLTextAreaElement | null>(null);
@@ -8742,6 +8781,8 @@ function MailboxView({
   const closeCollaborationOverlay = () => {
     setActiveCollaborationMessageId(null);
     setCollaborationParticipantPersonId("");
+    setExternalCollaborationEmail("");
+    setExternalCollaborationInviteUrl("");
     setCollaborationReplyDraft("");
     setCollaborationReplyVisibility("internal");
     setCollaborationReplySelection(null);
@@ -9006,6 +9047,73 @@ function MailboxView({
     });
 
     setCollaborationParticipantPersonId("");
+  };
+
+  const createExternalReviewLink = (messageId: string) => {
+    const normalizedEmail = externalCollaborationEmail.trim().toLowerCase();
+
+    if (!normalizedEmail || !isValidCollaborationParticipantEmail(normalizedEmail)) {
+      return;
+    }
+
+    const nextTimestamp = Date.now();
+    let nextInviteMessage: MailMessage | null = null;
+
+    updateMessageById(messageId, (message) => {
+      if (!message.collaboration) {
+        return message;
+      }
+
+      const existingParticipants = message.collaboration.participants ?? [];
+      const existingParticipant = existingParticipants.find(
+        (participant) => participant.email.toLowerCase() === normalizedEmail,
+      );
+      const nextParticipant: MailMessageCollaborationParticipant = existingParticipant
+        ? {
+            ...existingParticipant,
+            kind: "external",
+            status:
+              existingParticipant.status === "declined"
+                ? "invited"
+                : existingParticipant.status,
+          }
+        : {
+            id: normalizeSenderLearningKey(normalizedEmail),
+            name: formatCollaborationParticipantNameFromEmail(normalizedEmail),
+            email: normalizedEmail,
+            kind: "external",
+            status: "invited",
+          };
+      const nextParticipants = existingParticipant
+        ? existingParticipants.map((participant) =>
+            participant.email.toLowerCase() === normalizedEmail ? nextParticipant : participant,
+          )
+        : [...existingParticipants, nextParticipant];
+
+      nextInviteMessage = {
+        ...message,
+        isShared: true,
+        collaboration: {
+          ...message.collaboration,
+          updatedAt: nextTimestamp,
+          participants: nextParticipants,
+        },
+      };
+
+      return nextInviteMessage;
+    });
+
+    if (!nextInviteMessage) {
+      return;
+    }
+
+    const inviteUrl = buildExternalCollaborationReviewLink(
+      nextInviteMessage,
+      normalizedEmail,
+    );
+
+    setExternalCollaborationInviteUrl(inviteUrl);
+    window.open(inviteUrl, "_blank", "noopener,noreferrer");
   };
 
   const setMessagesUnreadState = (
@@ -12861,6 +12969,13 @@ function MailboxView({
                               <span className="truncate pr-0.5 text-[var(--workspace-text)]">
                                 {participant.name || participant.email}
                               </span>
+                              <span className="text-[0.72rem] uppercase tracking-[0.12em] text-[var(--workspace-text-faint)]">
+                                {participant.kind === "external"
+                                  ? participant.status === "invited"
+                                    ? "External invite"
+                                    : "External"
+                                  : "Internal"}
+                              </span>
                             </div>
                           ))}
                         </div>
@@ -12901,6 +13016,52 @@ function MailboxView({
                             </div>
                           </div>
                         ) : null}
+                        <div className="space-y-2 pt-2">
+                          <div className="text-[0.68rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)]">
+                            External review
+                          </div>
+                          <div className="flex flex-col gap-2 sm:flex-row">
+                            <input
+                              type="email"
+                              value={externalCollaborationEmail}
+                              onChange={(event) => {
+                                setExternalCollaborationEmail(event.target.value);
+                                if (externalCollaborationInviteUrl) {
+                                  setExternalCollaborationInviteUrl("");
+                                }
+                              }}
+                              placeholder="reviewer@example.com"
+                              className="min-w-0 flex-1 rounded-[16px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-2.5 text-[0.88rem] leading-6 text-[var(--workspace-text)] outline-none placeholder:text-[var(--workspace-text-faint)]"
+                            />
+                            <button
+                              type="button"
+                              onClick={() =>
+                                createExternalReviewLink(activeCollaborationMessage.id)
+                              }
+                              disabled={
+                                !isValidCollaborationParticipantEmail(
+                                  externalCollaborationEmail,
+                                )
+                              }
+                              className={
+                                isValidCollaborationParticipantEmail(
+                                  externalCollaborationEmail,
+                                )
+                                  ? "inline-flex h-11 items-center justify-center rounded-full bg-pine px-5 text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[color:rgba(251,248,242,0.98)] transition-[background-color,transform] duration-150 hover:bg-moss active:scale-[0.99] focus-visible:outline-none"
+                                  : "inline-flex h-11 cursor-not-allowed items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-5 text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-soft)] opacity-45 transition-[opacity] duration-150 focus-visible:outline-none"
+                              }
+                            >
+                              Open review link
+                            </button>
+                          </div>
+                          {externalCollaborationInviteUrl ? (
+                            <input
+                              readOnly
+                              value={externalCollaborationInviteUrl}
+                              className="w-full rounded-[16px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-2.5 text-[0.8rem] leading-6 text-[var(--workspace-text-soft)] outline-none"
+                            />
+                          ) : null}
+                        </div>
                       </div>
                       <p className="text-[0.84rem] leading-6 text-[var(--workspace-text-faint)]">
                         Regarding: {activeCollaborationMessage.subject}
@@ -20447,6 +20608,7 @@ export function WorkspaceShell({
   const decodedInvitePayload = collaborationInviteRoute
     ? decodeCollaborationInviteToken(collaborationInviteRoute.inviteToken)
     : null;
+  const isExternalReviewRoute = collaborationInviteRoute?.mode === "external_review";
   const decodedInviteMessage = decodedInvitePayload?.message ?? null;
   const storedInviteMessage = collaborationInviteRoute
     ? Object.values(mailboxStore)
@@ -20485,6 +20647,8 @@ export function WorkspaceShell({
         ? "invalid"
         : !inviteMessage || !inviteCollaboration
           ? "unavailable"
+          : isExternalReviewRoute
+            ? "joined"
           : !authenticatedUser ||
               authenticatedUser.email.toLowerCase() !==
                 collaborationInviteRoute.inviteeEmail.toLowerCase()
@@ -22216,7 +22380,11 @@ export function WorkspaceShell({
   }, [smartFolders]);
 
   if (collaborationInviteRoute) {
-    const inviteViewerType = isGuestInviteUser ? "external" : "workspace";
+    const inviteViewerType = isExternalReviewRoute
+      ? "external"
+      : isGuestInviteUser
+        ? "external"
+        : "workspace";
     const inviteVisibleMessages = inviteCollaboration
       ? inviteCollaboration.messages.filter((entry) =>
           canViewerSeeCollaborationMessage(entry, inviteViewerType),
@@ -22290,6 +22458,174 @@ export function WorkspaceShell({
               : inviteRouteState === "declined"
                 ? "You can close this screen now, or reopen the invite later if needed."
                 : null;
+
+    if (isExternalReviewRoute) {
+      if (
+        inviteRouteState === "expired" ||
+        inviteRouteState === "invalid" ||
+        inviteRouteState === "unavailable"
+      ) {
+        return (
+          <main
+            data-theme={resolvedTheme}
+            className="box-border min-h-dvh animate-fade-in px-4 py-8 md:px-8 md:py-10"
+            style={{ background: "var(--workspace-bg)", colorScheme: resolvedTheme }}
+          >
+            <div className="mx-auto flex min-h-[calc(100dvh-5rem)] max-w-[720px] items-center justify-center">
+              <div className="w-full rounded-[36px] border border-[var(--workspace-shell-border)] bg-[var(--workspace-shell)] p-8 shadow-panel md:p-10">
+                <div className="space-y-4 text-center">
+                  <div className="text-[0.72rem] font-medium uppercase tracking-[0.22em] text-[var(--workspace-text-faint)]">
+                    Cuevion external review
+                  </div>
+                  <h1 className="text-[1.9rem] font-medium tracking-[-0.03em] text-[var(--workspace-text)]">
+                    {inviteStateTitle}
+                  </h1>
+                  {inviteStateDescription ? (
+                    <p className="mx-auto max-w-[28rem] text-[0.96rem] leading-7 text-[var(--workspace-text-soft)]">
+                      {inviteStateDescription}
+                    </p>
+                  ) : null}
+                </div>
+              </div>
+            </div>
+          </main>
+        );
+      }
+
+      return (
+        <main
+          data-theme={resolvedTheme}
+          className="box-border min-h-dvh animate-fade-in px-4 py-8 md:px-8 md:py-10"
+          style={{ background: "var(--workspace-bg)", colorScheme: resolvedTheme }}
+        >
+          <div className="mx-auto max-w-[920px] space-y-6">
+            <div className="rounded-[36px] border border-[var(--workspace-shell-border)] bg-[var(--workspace-shell)] p-8 shadow-panel md:p-10">
+              <div className="space-y-2">
+                <div className="text-[0.72rem] font-medium uppercase tracking-[0.22em] text-[var(--workspace-text-faint)]">
+                  Cuevion external review
+                </div>
+                <h1 className="text-[1.75rem] font-medium tracking-[-0.03em] text-[var(--workspace-text)]">
+                  {inviteMessage?.subject ?? "External review"}
+                </h1>
+                <div className="text-[0.92rem] leading-7 text-[var(--workspace-text-soft)]">
+                  Shared by {inviteCollaboration?.requestedBy ?? inviteMessage?.sender ?? "Cuevion"}
+                </div>
+              </div>
+
+              <div className="mt-8 grid gap-5">
+                <section className="rounded-[24px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-6 py-5">
+                  <div className="space-y-4">
+                    <div className="flex flex-wrap items-start justify-between gap-4">
+                      <div>
+                        <div className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                          Subject
+                        </div>
+                        <div className="mt-1 text-[1.04rem] font-medium tracking-[-0.02em] text-[var(--workspace-text)]">
+                          {inviteMessage?.subject}
+                        </div>
+                      </div>
+                      <div className="text-right">
+                        <div className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                          Sender
+                        </div>
+                        <div className="mt-1 text-[0.96rem] text-[var(--workspace-text)]">
+                          {inviteMessage?.sender}
+                        </div>
+                        <div className="text-[0.84rem] leading-6 text-[var(--workspace-text-soft)]">
+                          {inviteMessage?.from}
+                        </div>
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                        Message
+                      </div>
+                      <div className="mt-3 space-y-3 text-[0.94rem] leading-7 text-[var(--workspace-text-soft)]">
+                        {(inviteMessage?.body.length
+                          ? inviteMessage.body
+                          : [inviteMessage?.snippet ?? ""]
+                        )
+                          .filter(Boolean)
+                          .map((paragraph, index) => (
+                            <p key={`external-review-body-${index}`}>{paragraph}</p>
+                          ))}
+                      </div>
+                    </div>
+                  </div>
+                </section>
+
+                <section className="rounded-[24px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-6 py-5">
+                  <div className="space-y-4">
+                    <div className="flex flex-wrap items-start justify-between gap-4">
+                      <div>
+                        <div className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                          Collaboration history
+                        </div>
+                        <div className="mt-1 text-[0.92rem] leading-7 text-[var(--workspace-text-soft)]">
+                          {inviteCollaboration
+                            ? getCollaborationReasonLabel(inviteCollaboration)
+                            : "External review"}
+                        </div>
+                      </div>
+                      <div className="text-[0.84rem] leading-6 text-[var(--workspace-text-faint)]">
+                        {inviteParticipants
+                          .map((participant) => participant.name || participant.email)
+                          .join(", ")}
+                      </div>
+                    </div>
+
+                    {inviteVisibleMessages.length > 0 ? (
+                      <div className="space-y-4">
+                        {inviteVisibleMessages.map((entry) => (
+                          <div
+                            key={entry.id}
+                            className="rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-3"
+                          >
+                            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[0.82rem] leading-6 text-[var(--workspace-text)]">
+                              <span>{entry.authorName}</span>
+                              <span
+                                className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-[0.64rem] font-medium uppercase tracking-[0.14em] ${
+                                  getCollaborationMessageVisibility(entry) === "internal"
+                                    ? "border-[color:rgba(115,132,118,0.24)] bg-[color:rgba(126,155,128,0.12)] text-[color:rgba(82,97,85,0.86)]"
+                                    : "border-[color:rgba(123,116,106,0.18)] bg-[color:rgba(136,127,115,0.08)] text-[color:rgba(126,117,106,0.78)]"
+                                }`}
+                              >
+                                {getCollaborationMessageVisibility(entry) === "internal"
+                                  ? "Internal"
+                                  : "Shared"}
+                              </span>
+                              <span className="text-[0.76rem] text-[var(--workspace-text-faint)]">
+                                {formatCollaborationStatusTimestamp(entry.timestamp)}
+                              </span>
+                            </div>
+                            <div className="mt-1 text-[0.92rem] leading-7 text-[var(--workspace-text-soft)]">
+                              {renderTextWithMentions(
+                                entry.text,
+                                new Map(
+                                  (entry.mentions ?? []).map((mention) => [
+                                    mention.handle.toLowerCase(),
+                                    mention,
+                                  ]),
+                                ),
+                                resolvedTheme,
+                              )}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="text-[0.88rem] leading-7 text-[var(--workspace-text-faint)]">
+                        No collaboration history yet.
+                      </div>
+                    )}
+                  </div>
+                </section>
+              </div>
+            </div>
+          </div>
+        </main>
+      );
+    }
 
     if (inviteRouteState !== "joined") {
       return (
