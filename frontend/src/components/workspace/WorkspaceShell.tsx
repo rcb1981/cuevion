@@ -9445,23 +9445,34 @@ function MailboxView({
     const inviteBodyText = [
       `Hi ${inviteParticipantName || normalizedEmail},`,
       "",
-      `${inviterName} invited you to review and comment on:`,
-      `${sourceMessage.subject}`,
+      `${inviterName} invited you to collaborate in Cuevion.`,
       "",
+      `Subject: ${sourceMessage.subject}`,
       `Context: ${collaborationReason}`,
       "",
-      "Open the review here:",
+      "Open in Cuevion:",
       inviteLink,
       "",
-      "You can reply directly in Cuevion using that link.",
-    ].join("\n");
-    const inviteBodyHtml = `<p>Hi ${escapeInviteHtml(inviteParticipantName || normalizedEmail)},</p><p><strong>${escapeInviteHtml(
-      inviterName,
-    )}</strong> invited you to review and comment on:</p><p><strong>${escapeInviteHtml(
-      sourceMessage.subject,
-    )}</strong></p><p>Context: ${escapeInviteHtml(collaborationReason)}</p><p>Open the review here:</p><p><a href="${escapeInviteHtml(
+      "You can review and reply directly in Cuevion using that link.",
+      "",
+      "Fallback URL:",
       inviteLink,
-    )}">${escapeInviteHtml(inviteLink)}</a></p><p>You can reply directly in Cuevion using that link.</p>`;
+      "",
+      "www.cuevion.com",
+    ].join("\n");
+    const inviteBodyHtml = `<div style="margin:0;padding:32px 0;background:#f5f1ea;font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#261f17;"><div style="max-width:560px;margin:0 auto;padding:0 20px;"><div style="border:1px solid rgba(92,78,62,0.12);border-radius:28px;overflow:hidden;background:#fffdfa;box-shadow:0 18px 44px rgba(61,44,32,0.08);"><div style="padding:18px 28px;border-bottom:1px solid rgba(92,78,62,0.08);background:linear-gradient(180deg,rgba(255,252,247,0.98),rgba(248,243,236,0.96));"><div style="font-size:12px;line-height:1.4;letter-spacing:0.24em;text-transform:uppercase;color:rgba(92,78,62,0.62);font-weight:600;">Cuevion</div></div><div style="padding:30px 28px 28px;"><div style="font-size:28px;line-height:1.15;letter-spacing:-0.03em;color:#261f17;font-weight:600;">${escapeInviteHtml(
+      inviterName,
+    )} invited you to collaborate</div><p style="margin:14px 0 0;font-size:15px;line-height:1.75;color:rgba(65,54,43,0.78);">Hi ${escapeInviteHtml(
+      inviteParticipantName || normalizedEmail,
+    )}, you have been invited to review and comment in Cuevion.</p><div style="margin:22px 0 0;padding:18px 18px 16px;border:1px solid rgba(92,78,62,0.1);border-radius:20px;background:rgba(248,243,236,0.72);"><div style="font-size:11px;line-height:1.4;letter-spacing:0.18em;text-transform:uppercase;color:rgba(92,78,62,0.58);font-weight:600;">Subject</div><div style="margin-top:7px;font-size:18px;line-height:1.45;color:#261f17;font-weight:600;">${escapeInviteHtml(
+      sourceMessage.subject,
+    )}</div><div style="margin-top:14px;font-size:11px;line-height:1.4;letter-spacing:0.18em;text-transform:uppercase;color:rgba(92,78,62,0.58);font-weight:600;">Context</div><div style="margin-top:7px;font-size:14px;line-height:1.7;color:rgba(65,54,43,0.78);">${escapeInviteHtml(
+      collaborationReason,
+    )}</div></div><div style="margin-top:26px;"><a href="${escapeInviteHtml(
+      inviteLink,
+    )}" style="display:inline-block;padding:13px 20px;border-radius:999px;background:#31553e;color:#fbf8f2;text-decoration:none;font-size:13px;line-height:1;font-weight:600;letter-spacing:0.14em;text-transform:uppercase;">Open in Cuevion</a></div><p style="margin:18px 0 0;font-size:14px;line-height:1.75;color:rgba(65,54,43,0.74);">You can review the thread and reply directly inside Cuevion.</p><div style="margin-top:24px;padding-top:18px;border-top:1px solid rgba(92,78,62,0.08);"><div style="font-size:11px;line-height:1.4;letter-spacing:0.18em;text-transform:uppercase;color:rgba(92,78,62,0.54);font-weight:600;">Fallback link</div><div style="margin-top:8px;font-size:12px;line-height:1.7;color:rgba(92,78,62,0.74);word-break:break-word;">${escapeInviteHtml(
+      inviteLink,
+    )}</div></div></div><div style="padding:14px 28px 18px;border-top:1px solid rgba(92,78,62,0.08);background:rgba(248,243,236,0.56);font-size:12px;line-height:1.6;color:rgba(92,78,62,0.62);">www.cuevion.com</div></div></div></div>`;
 
     setExternalInviteEmailFeedback(null);
     setIsSendingExternalInvite(true);
@@ -9511,6 +9522,7 @@ function MailboxView({
       );
 
       setExternalCollaborationInviteUrl(inviteLink);
+      setExternalCollaborationEmail("");
       setExternalInviteEmailFeedback("Invite email sent.");
     } catch {
       setExternalInviteEmailFeedback("Could not send invite email.");
@@ -13431,7 +13443,7 @@ function MailboxView({
                           <div className="space-y-2">
                             <div className="text-[0.8rem] leading-6 text-[var(--workspace-text-faint)]">
                               {primaryExternalReviewParticipant
-                                ? "Invite another reviewer to this external review."
+                                ? "Invite another reviewer into this shared external review."
                                 : "Create the primary external review room for this collaboration."}
                             </div>
                             <div className="flex flex-col gap-2 sm:flex-row">
@@ -23642,13 +23654,15 @@ export function WorkspaceShell({
                 >
                   Send reply
                 </button>
-                <button
-                  type="button"
-                  onClick={markInviteFlowDone}
-                  className={modalSecondaryActionButtonClass}
-                >
-                  Mark as done
-                </button>
+                {!isGuestInviteUser ? (
+                  <button
+                    type="button"
+                    onClick={markInviteFlowDone}
+                    className={modalSecondaryActionButtonClass}
+                  >
+                    Mark as done
+                  </button>
+                ) : null}
               </div>
             </div>
           </div>
