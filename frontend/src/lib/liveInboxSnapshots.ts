@@ -1,6 +1,6 @@
 import type { LiveInboxMessageSnapshot } from "./inboxConnectionApi";
 
-const LIVE_INBOX_SNAPSHOTS_STORAGE_KEY = "cuevion-live-inbox-snapshots";
+const LIVE_INBOX_SNAPSHOTS_STORAGE_KEY = "cuevion-live-inbox-snapshots-v2";
 
 export type LiveInboxSnapshot = {
   inboxId: string;
@@ -13,7 +13,14 @@ type LiveInboxSnapshotStore = Record<string, LiveInboxSnapshot>;
 
 function isSnapshotUiSignalComplete(snapshot: LiveInboxSnapshot) {
   return snapshot.messages.every(
-    (message) => typeof message.ui_signal === "string" && message.ui_signal.length > 0,
+    (message) =>
+      typeof message.ui_signal === "string" &&
+      message.ui_signal.length > 0 &&
+      typeof message.internalClassification === "string" &&
+      message.internalClassification.length > 0 &&
+      (typeof message.final_visibility === "string" ||
+        typeof message.action === "string" ||
+        typeof message.v7_final_priority === "string"),
   );
 }
 
