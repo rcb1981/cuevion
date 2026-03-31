@@ -13085,26 +13085,29 @@ function MailboxView({
                         <div className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
                           Participants
                         </div>
-                        <div className="flex flex-wrap gap-2">
+                        <div className="space-y-2">
                           {activeCollaborationParticipants.map((participant) => (
-                            <div
-                              key={`participant-${participant.id}`}
-                              className="inline-flex max-w-full items-center gap-2 rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-3 py-1.5 text-[0.82rem] leading-6 text-[var(--workspace-text-soft)]"
-                            >
-                              <span className="truncate pr-0.5 text-[var(--workspace-text)]">
-                                {participant.name || participant.email}
-                              </span>
-                              <span className="text-[0.72rem] uppercase tracking-[0.12em] text-[var(--workspace-text-faint)]">
-                                {participant.kind === "external"
-                                  ? participant.status === "invited"
-                                    ? "External invite"
-                                    : "External"
-                                  : "Internal"}
-                              </span>
-                              {participant.kind === "external" &&
-                              participant.externalReviewToken &&
-                              participant.email ? (
-                                <>
+                            participant.kind === "external" &&
+                            participant.externalReviewToken &&
+                            participant.email ? (
+                              <div
+                                key={`participant-${participant.id}`}
+                                className="flex flex-col gap-3 rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-3 text-[0.82rem] leading-6 text-[var(--workspace-text-soft)] sm:flex-row sm:items-center sm:justify-between"
+                              >
+                                <div className="min-w-0">
+                                  <div className="truncate text-[0.9rem] font-medium text-[var(--workspace-text)]">
+                                    {participant.name || participant.email}
+                                  </div>
+                                  <div className="truncate text-[0.8rem] text-[var(--workspace-text-faint)]">
+                                    {participant.email}
+                                  </div>
+                                  <div className="text-[0.68rem] uppercase tracking-[0.12em] text-[var(--workspace-text-faint)]">
+                                    {participant.status === "invited"
+                                      ? "External invite"
+                                      : "External"}
+                                  </div>
+                                </div>
+                                <div className="flex flex-wrap gap-2">
                                   <button
                                     type="button"
                                     onClick={() =>
@@ -13113,7 +13116,7 @@ function MailboxView({
                                         participant,
                                       )
                                     }
-                                    className="inline-flex h-7 items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-2.5 text-[0.62rem] font-medium uppercase tracking-[0.12em] text-[var(--workspace-text-soft)] transition-[background-color,border-color,color] duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] focus-visible:outline-none"
+                                    className="inline-flex h-8 items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-3 text-[0.62rem] font-medium uppercase tracking-[0.12em] text-[var(--workspace-text-soft)] transition-[background-color,border-color,color] duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] focus-visible:outline-none"
                                   >
                                     Open link
                                   </button>
@@ -13125,13 +13128,29 @@ function MailboxView({
                                         participant,
                                       )
                                     }
-                                    className="inline-flex h-7 items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-2.5 text-[0.62rem] font-medium uppercase tracking-[0.12em] text-[var(--workspace-text-soft)] transition-[background-color,border-color,color] duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] focus-visible:outline-none"
+                                    className="inline-flex h-8 items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-3 text-[0.62rem] font-medium uppercase tracking-[0.12em] text-[var(--workspace-text-soft)] transition-[background-color,border-color,color] duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] focus-visible:outline-none"
                                   >
                                     Copy link
                                   </button>
-                                </>
-                              ) : null}
-                            </div>
+                                </div>
+                              </div>
+                            ) : (
+                              <div
+                                key={`participant-${participant.id}`}
+                                className="inline-flex max-w-full items-center gap-2 rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-3 py-1.5 text-[0.82rem] leading-6 text-[var(--workspace-text-soft)]"
+                              >
+                                <span className="truncate pr-0.5 text-[var(--workspace-text)]">
+                                  {participant.name || participant.email}
+                                </span>
+                                <span className="text-[0.72rem] uppercase tracking-[0.12em] text-[var(--workspace-text-faint)]">
+                                  {participant.kind === "external"
+                                    ? participant.status === "invited"
+                                      ? "External invite"
+                                      : "External"
+                                    : "Internal"}
+                                </span>
+                              </div>
+                            ),
                           ))}
                         </div>
                         {collaborationSelectablePeople.some(
