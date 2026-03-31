@@ -9217,6 +9217,30 @@ function MailboxView({
     window.open(inviteUrl, "_blank", "noopener,noreferrer");
   };
 
+  const copyStoredExternalReviewLink = async (
+    messageId: string,
+    participant: MailMessageCollaborationParticipant,
+  ) => {
+    if (
+      typeof navigator === "undefined" ||
+      !navigator.clipboard ||
+      !participant.externalReviewToken ||
+      !participant.email
+    ) {
+      return;
+    }
+
+    const inviteUrl = buildExternalCollaborationReviewLinkFromToken(
+      messageId,
+      participant.email,
+      participant.externalReviewToken,
+    );
+
+    await navigator.clipboard.writeText(inviteUrl);
+    setExternalCollaborationEmail(participant.email);
+    setExternalCollaborationInviteUrl(inviteUrl);
+  };
+
   const setMessagesUnreadState = (
     folder: MailFolder,
     messageIds: string[],
@@ -13080,18 +13104,32 @@ function MailboxView({
                               {participant.kind === "external" &&
                               participant.externalReviewToken &&
                               participant.email ? (
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    openStoredExternalReviewLink(
-                                      activeCollaborationMessage.id,
-                                      participant,
-                                    )
-                                  }
-                                  className="inline-flex h-7 items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-2.5 text-[0.62rem] font-medium uppercase tracking-[0.12em] text-[var(--workspace-text-soft)] transition-[background-color,border-color,color] duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] focus-visible:outline-none"
-                                >
-                                  Open link
-                                </button>
+                                <>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      openStoredExternalReviewLink(
+                                        activeCollaborationMessage.id,
+                                        participant,
+                                      )
+                                    }
+                                    className="inline-flex h-7 items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-2.5 text-[0.62rem] font-medium uppercase tracking-[0.12em] text-[var(--workspace-text-soft)] transition-[background-color,border-color,color] duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] focus-visible:outline-none"
+                                  >
+                                    Open link
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      void copyStoredExternalReviewLink(
+                                        activeCollaborationMessage.id,
+                                        participant,
+                                      )
+                                    }
+                                    className="inline-flex h-7 items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-2.5 text-[0.62rem] font-medium uppercase tracking-[0.12em] text-[var(--workspace-text-soft)] transition-[background-color,border-color,color] duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] focus-visible:outline-none"
+                                  >
+                                    Copy link
+                                  </button>
+                                </>
                               ) : null}
                             </div>
                           ))}
@@ -13135,7 +13173,11 @@ function MailboxView({
                         ) : null}
                         <div className="space-y-2 pt-2">
                           <div className="text-[0.68rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)]">
-                            External review
+                            New external review
+                          </div>
+                          <div className="text-[0.8rem] leading-6 text-[var(--workspace-text-faint)]">
+                            Invite a new external reviewer. Existing reviewers can reopen or copy
+                            their links from the participant list above.
                           </div>
                           <div className="flex flex-col gap-2 sm:flex-row">
                             <input
@@ -13168,7 +13210,7 @@ function MailboxView({
                                   : "inline-flex h-11 cursor-not-allowed items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-5 text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-soft)] opacity-45 transition-[opacity] duration-150 focus-visible:outline-none"
                               }
                             >
-                              Open review link
+                              Create review link
                             </button>
                           </div>
                           {externalCollaborationInviteUrl ? (
