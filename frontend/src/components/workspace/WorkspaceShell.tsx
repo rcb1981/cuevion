@@ -342,6 +342,7 @@ type MailMessageCollaborationParticipant = {
   email: string;
   kind: "internal" | "external";
   status: "active" | "invited" | "declined";
+  externalReviewToken?: string;
 };
 type MailMessageCollaborationMention = {
   id: string;
@@ -1355,12 +1356,25 @@ function buildExternalCollaborationReviewLink(message: MailMessage, email: strin
     return "";
   }
 
-  const inviteUrl = new URL(window.location.pathname, window.location.origin);
-  inviteUrl.searchParams.set(
-    "external_review",
+  return buildExternalCollaborationReviewLinkFromToken(
+    message.id,
+    email,
     buildCollaborationInviteToken(message, email),
   );
-  inviteUrl.searchParams.set("message_id", message.id);
+}
+
+function buildExternalCollaborationReviewLinkFromToken(
+  messageId: string,
+  email: string,
+  inviteToken: string,
+) {
+  if (typeof window === "undefined") {
+    return "";
+  }
+
+  const inviteUrl = new URL(window.location.pathname, window.location.origin);
+  inviteUrl.searchParams.set("external_review", inviteToken);
+  inviteUrl.searchParams.set("message_id", messageId);
   inviteUrl.searchParams.set("invitee", email.toLowerCase());
 
   return inviteUrl.toString();
@@ -9095,8 +9109,30 @@ function MailboxView({
       return;
     }
 
+    const existingInviteMessage = getMessageById(messageId);
+    const existingInviteParticipant = existingInviteMessage?.collaboration?.participants?.find(
+      (participant) => participant.email.toLowerCase() === normalizedEmail,
+    );
+
+    if (
+      existingInviteMessage?.collaboration &&
+      existingInviteParticipant?.externalReviewToken
+    ) {
+      const inviteUrl = buildExternalCollaborationReviewLinkFromToken(
+        existingInviteMessage.id,
+        normalizedEmail,
+        existingInviteParticipant.externalReviewToken,
+      );
+
+      setExternalCollaborationEmail(normalizedEmail);
+      setExternalCollaborationInviteUrl(inviteUrl);
+      window.open(inviteUrl, "_blank", "noopener,noreferrer");
+      return;
+    }
+
     const nextTimestamp = Date.now();
     let nextInviteMessage: MailMessage | null = null;
+    let inviteToken = "";
 
     updateMessageById(messageId, (message) => {
       if (!message.collaboration) {
@@ -9107,10 +9143,14 @@ function MailboxView({
       const existingParticipant = existingParticipants.find(
         (participant) => participant.email.toLowerCase() === normalizedEmail,
       );
+      inviteToken =
+        existingParticipant?.externalReviewToken ||
+        buildCollaborationInviteToken(message, normalizedEmail);
       const nextParticipant: MailMessageCollaborationParticipant = existingParticipant
         ? {
             ...existingParticipant,
             kind: "external",
+            externalReviewToken: inviteToken,
             status:
               existingParticipant.status === "declined"
                 ? "invited"
@@ -9122,6 +9162,7 @@ function MailboxView({
             email: normalizedEmail,
             kind: "external",
             status: "invited",
+            externalReviewToken: inviteToken,
           };
       const nextParticipants = existingParticipant
         ? existingParticipants.map((participant) =>
@@ -9146,11 +9187,32 @@ function MailboxView({
       return;
     }
 
-    const inviteUrl = buildExternalCollaborationReviewLink(
-      nextInviteMessage,
+    const inviteUrl = buildExternalCollaborationReviewLinkFromToken(
+      nextInviteMessage.id,
       normalizedEmail,
+      inviteToken,
     );
 
+    setExternalCollaborationEmail(normalizedEmail);
+    setExternalCollaborationInviteUrl(inviteUrl);
+    window.open(inviteUrl, "_blank", "noopener,noreferrer");
+  };
+
+  const openStoredExternalReviewLink = (
+    messageId: string,
+    participant: MailMessageCollaborationParticipant,
+  ) => {
+    if (!participant.externalReviewToken || !participant.email) {
+      return;
+    }
+
+    const inviteUrl = buildExternalCollaborationReviewLinkFromToken(
+      messageId,
+      participant.email,
+      participant.externalReviewToken,
+    );
+
+    setExternalCollaborationEmail(participant.email);
     setExternalCollaborationInviteUrl(inviteUrl);
     window.open(inviteUrl, "_blank", "noopener,noreferrer");
   };
@@ -13015,6 +13077,22 @@ function MailboxView({
                                     : "External"
                                   : "Internal"}
                               </span>
+                              {participant.kind === "external" &&
+                              participant.externalReviewToken &&
+                              participant.email ? (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    openStoredExternalReviewLink(
+                                      activeCollaborationMessage.id,
+                                      participant,
+                                    )
+                                  }
+                                  className="inline-flex h-7 items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-2.5 text-[0.62rem] font-medium uppercase tracking-[0.12em] text-[var(--workspace-text-soft)] transition-[background-color,border-color,color] duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] focus-visible:outline-none"
+                                >
+                                  Open link
+                                </button>
+                              ) : null}
                             </div>
                           ))}
                         </div>
