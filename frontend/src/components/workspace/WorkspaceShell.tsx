@@ -16723,47 +16723,35 @@ const SmartFolderModal = memo(function SmartFolderModal({
                     <div className="flex items-center rounded-[16px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 text-[0.84rem] text-[var(--workspace-text-soft)]">
                       contains
                     </div>
-                    <div className="space-y-1.5">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <input
-                          type="text"
-                          value={rule.value}
-                          onChange={(event) => onChangeRuleValue(rule.id, event.target.value)}
-                          className={rule.field === "Label" ? `${inputFieldClass} min-w-0 flex-1` : inputFieldClass}
-                          placeholder={
-                            rule.field === "From"
-                              ? "e.g. artist@label.com"
-                              : rule.field === "Subject"
-                                ? "e.g. statement"
-                                : rule.field === "Label"
-                                  ? "e.g. finance"
-                                  : "e.g. beatport.com"
-                          }
-                        />
-                        {rule.field === "Label"
-                          ? [
-                              { value: "finance", label: "Finance" },
-                              { value: "update", label: "Updates" },
-                            ].map((preset) => (
-                              <button
-                                key={`${rule.id}-${preset.value}`}
-                                type="button"
-                                onClick={() => onChangeRuleValue(rule.id, preset.value)}
-                                className={settingsPillButtonClass(
-                                  rule.value.trim().toLowerCase() === preset.value,
-                                )}
-                              >
-                                {preset.label}
-                              </button>
-                            ))
-                          : null}
-                      </div>
-                      {rule.field === "Label" ? (
-                        <div className="text-[0.72rem] leading-5 text-[var(--workspace-text-faint)]">
-                          e.g. finance, promo, demo
-                        </div>
-                      ) : null}
-                    </div>
+                    {rule.field === "Label" ? (
+                      <select
+                        value={rule.value}
+                        onChange={(event) => onChangeRuleValue(rule.id, event.target.value)}
+                        className={inputFieldClass}
+                      >
+                        <option value="finance">Finance</option>
+                        <option value="update">Updates</option>
+                        <option value="promo">Promo</option>
+                        <option value="demo">Demo</option>
+                        <option value="business">Business</option>
+                        <option value="reply">Reply</option>
+                        <option value="info">Info</option>
+                      </select>
+                    ) : (
+                      <input
+                        type="text"
+                        value={rule.value}
+                        onChange={(event) => onChangeRuleValue(rule.id, event.target.value)}
+                        className={inputFieldClass}
+                        placeholder={
+                          rule.field === "From"
+                            ? "e.g. artist@label.com"
+                            : rule.field === "Subject"
+                              ? "e.g. statement"
+                              : "e.g. beatport.com"
+                        }
+                      />
+                    )}
                     {draftRules.length > 1 ? (
                       <button
                         type="button"
