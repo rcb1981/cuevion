@@ -549,7 +549,12 @@ def resolve_preview_routing(
 
             v7_decision = decide_message_behavior(
                 engine_result=engine_result,
-                user_config=V7_USER_CONFIG,
+                user_config=(
+                    V7_USER_CONFIG if internal_role is None and focus_preferences is None
+                    else V7_USER_CONFIG._replace(
+                        role=internal_role or V7_USER_CONFIG.role
+                    )
+                ),
                 mailbox_config=mailbox_match,
                 internal_role=internal_role,
                 focus_preferences=focus_preferences,
