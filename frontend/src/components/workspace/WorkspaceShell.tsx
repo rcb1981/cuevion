@@ -6582,7 +6582,7 @@ function MailboxView({
     useState<string>("");
   const [externalCollaborationEmail, setExternalCollaborationEmail] = useState("");
   const [externalCollaborationInviteUrl, setExternalCollaborationInviteUrl] = useState("");
-  const [, setCollaborationReplyVisibility] =
+  const [collaborationReplyVisibility, setCollaborationReplyVisibility] =
     useState<MailMessageCollaborationVisibility>("internal");
   const collaborationReplyInputRef = useRef<HTMLTextAreaElement | null>(null);
   const collaborationMessageRefs = useRef<Record<string, HTMLDivElement | null>>({});
@@ -8979,7 +8979,7 @@ function MailboxView({
                   authorName: currentUserName,
                   text: trimmedReply,
                   timestamp: nextTimestamp,
-                  visibility: "internal" as const,
+                  visibility: collaborationReplyVisibility,
                   mentions,
                 },
               ],
@@ -13133,8 +13133,33 @@ function MailboxView({
                       <span className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
                         Reply
                       </span>
+                      <div className="flex flex-wrap gap-2">
+                        {([
+                          { value: "internal", label: "Internal" },
+                          { value: "shared", label: "Shared" },
+                        ] as const).map((option) => (
+                          <button
+                            key={option.value}
+                            type="button"
+                            onClick={() => setCollaborationReplyVisibility(option.value)}
+                            className={`inline-flex h-9 items-center justify-center rounded-full border px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color] duration-150 focus-visible:outline-none ${
+                              collaborationReplyVisibility === option.value
+                                ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)]"
+                                : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[var(--workspace-text-soft)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface-strong)]"
+                            }`}
+                          >
+                            {option.label}
+                          </button>
+                        ))}
+                      </div>
                       <div className="pt-0.5 text-[0.8rem] leading-6 text-[color:rgba(120,111,100,0.76)]">
-                        Only visible inside Cuevion
+                        {collaborationReplyVisibility === "internal"
+                          ? "Only visible inside Cuevion"
+                          : `Visible to: ${
+                              activeCollaborationParticipants
+                                .map((participant) => participant.name || participant.email)
+                                .join(", ") || "all participants"
+                            }`}
                       </div>
                       <textarea
                         ref={collaborationReplyInputRef}
@@ -13194,7 +13219,11 @@ function MailboxView({
                           }
                         }}
                         rows={4}
-                        placeholder="Add an internal note"
+                        placeholder={
+                          collaborationReplyVisibility === "internal"
+                            ? "Add an internal note"
+                            : "Reply to everyone in this collaboration"
+                        }
                         className="w-full resize-none rounded-[20px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3 text-[0.92rem] leading-7 text-[var(--workspace-text-soft)] outline-none placeholder:text-[var(--workspace-text-faint)]"
                       />
                       {visibleCollaborationMentionCandidates.length > 0 ? (
