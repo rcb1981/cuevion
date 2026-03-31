@@ -270,7 +270,7 @@ type InboxOutOfOfficeSettings = {
 };
 type InboxOutOfOfficeStore = Partial<Record<InboxId, InboxOutOfOfficeSettings>>;
 type OutOfOfficeReplyLogStore = Partial<Record<InboxId, Record<string, number>>>;
-type SmartFolderRuleField = "From" | "Subject" | "Domain";
+type SmartFolderRuleField = "From" | "Subject" | "Domain" | "Label";
 type SmartFolderRule = {
   id: string;
   field: SmartFolderRuleField;
@@ -838,6 +838,10 @@ function getSmartFolderRuleMatchValue(message: MailMessage, field: SmartFolderRu
     return message.subject;
   }
 
+  if (field === "Label") {
+    return message.internalClassification ?? "unknown";
+  }
+
   const normalizedSender = message.from.trim().toLowerCase();
   const atIndex = normalizedSender.lastIndexOf("@");
 
@@ -845,14 +849,38 @@ function getSmartFolderRuleMatchValue(message: MailMessage, field: SmartFolderRu
 }
 
 function doesMessageMatchSmartFolderRule(message: MailMessage, rule: SmartFolderRule) {
-  const matchValue = getSmartFolderRuleMatchValue(message, rule.field)
-    .trim()
-    .toLowerCase();
   const ruleValue = rule.value.trim().toLowerCase();
 
   if (!ruleValue) {
     return false;
   }
+
+  if (rule.field === "Label") {
+    const classification = (message.internalClassification ?? "unknown")
+      .trim()
+      .toLowerCase();
+
+    if (ruleValue === "finance") {
+      return classification === "finance" || classification === "royalty_statement";
+    }
+
+    if (ruleValue === "update") {
+      return [
+        "workflow_update",
+        "distributor_update",
+        "labelradar_update",
+        "trackstack_submission",
+        "business_reminder",
+        "info",
+      ].includes(classification);
+    }
+
+    return classification.includes(ruleValue);
+  }
+
+  const matchValue = getSmartFolderRuleMatchValue(message, rule.field)
+    .trim()
+    .toLowerCase();
 
   return matchValue.includes(ruleValue);
 }
