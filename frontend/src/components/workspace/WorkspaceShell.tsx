@@ -21011,6 +21011,35 @@ export function WorkspaceShell({
 
     const nextTimestamp = Date.now();
 
+    if (!storedInviteMessage && decodedInvitePayload?.message && orderedMailboxes[0]) {
+      setMailboxStore((currentStore) => {
+        const mailboxId = orderedMailboxes[0].id;
+        const mailboxCollections = currentStore[mailboxId];
+
+        if (!mailboxCollections) {
+          return currentStore;
+        }
+
+        const alreadyExists = canonicalFolderOrder.some((folder) =>
+          currentStore[mailboxId][folder].some(
+            (message) => message.id === decodedInvitePayload.message.id,
+          ),
+        );
+
+        if (alreadyExists) {
+          return currentStore;
+        }
+
+        return {
+          ...currentStore,
+          [mailboxId]: {
+            ...mailboxCollections,
+            Inbox: [decodedInvitePayload.message, ...mailboxCollections.Inbox],
+          },
+        };
+      });
+    }
+
     updateWorkspaceMessageById(inviteMessage.id, (message) =>
       message.collaboration
         ? {
@@ -22638,7 +22667,7 @@ export function WorkspaceShell({
       : [];
     const visibleExternalReviewMessages = isExternalReviewRoute
       ? externalReviewHistoryExpanded
-        ? [...inviteVisibleMessages].reverse()
+        ? [...inviteVisibleMessages].sort((first, second) => second.timestamp - first.timestamp)
         : inviteVisibleMessages.slice(-2)
       : inviteVisibleMessages;
     const inviteMentionCandidates = getCollaborationMentionTargets(inviteParticipants, []);
