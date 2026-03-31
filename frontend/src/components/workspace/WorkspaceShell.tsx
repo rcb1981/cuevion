@@ -7903,6 +7903,30 @@ function MailboxView({
     highlightedMessage.scrollIntoView({ behavior: "smooth", block: "center" });
   }, [activeCollaborationMessageId, highlightedCollaborationMessageId]);
 
+  useEffect(() => {
+    if (!activeCollaborationMessageId || typeof window === "undefined") {
+      return;
+    }
+
+    const syncActiveCollaborationFromSnapshot = () => {
+      syncMessageFromLiveSnapshot(activeCollaborationMessageId);
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        syncActiveCollaborationFromSnapshot();
+      }
+    };
+
+    window.addEventListener("focus", syncActiveCollaborationFromSnapshot);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return () => {
+      window.removeEventListener("focus", syncActiveCollaborationFromSnapshot);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [activeCollaborationMessageId]);
+
   const renderBehaviorSuggestion = (message: MailMessage) => {
     void message;
     return null;
@@ -8786,6 +8810,51 @@ function MailboxView({
       .find((message) => message.id === messageId) ?? null;
   }
 
+  const syncMessageFromLiveSnapshot = (messageId: string | null) => {
+    if (!messageId) {
+      return;
+    }
+
+    const snapshots = readLiveInboxSnapshots();
+    const matchingSnapshot = Object.values(snapshots).find((snapshot) =>
+      snapshot.messages.some((message) => message.id === messageId),
+    );
+    const snapshotMessage = matchingSnapshot?.messages.find(
+      (message) => message.id === messageId,
+    ) as PersistedLiveInboxMessageSnapshot | undefined;
+
+    if (!snapshotMessage) {
+      return;
+    }
+
+    setMailboxStore((currentStore) =>
+      Object.entries(currentStore).reduce<MailboxStore>((nextStore, [mailboxId, collections]) => {
+        const syncFolder = (messages: MailMessage[]) =>
+          messages.map((message) =>
+            message.id === messageId
+              ? {
+                  ...message,
+                  collaboration: snapshotMessage.collaboration ?? message.collaboration,
+                  isShared: snapshotMessage.isShared ?? message.isShared,
+                }
+              : message,
+          );
+
+        nextStore[mailboxId as InboxId] = {
+          Inbox: syncFolder(collections.Inbox),
+          Drafts: syncFolder(collections.Drafts),
+          Sent: syncFolder(collections.Sent),
+          Archive: syncFolder(collections.Archive),
+          Filtered: syncFolder(collections.Filtered),
+          Spam: syncFolder(collections.Spam),
+          Trash: syncFolder(collections.Trash),
+        };
+
+        return nextStore;
+      }, {} as MailboxStore),
+    );
+  };
+
   const setSelectionState = (
     nextSelectedMessageIds: string[],
     nextPrimaryMessageId: string | null,
@@ -8834,6 +8903,7 @@ function MailboxView({
     messageId: string,
     options?: { focusComposer?: boolean },
   ) => {
+    syncMessageFromLiveSnapshot(messageId);
     setSelectionState([messageId], messageId, messageId);
     setActiveCollaborationMessageId(messageId);
     setFocusCollaborationComposer(Boolean(options?.focusComposer));
@@ -13060,31 +13130,6 @@ function MailboxView({
                                   ? "External invite"
                                   : "External"
                                 : "Internal";
-
-                            if (
-                              participant.kind === "external" &&
-                              participant.externalReviewToken &&
-                              participant.email
-                            ) {
-                              return (
-                                <div
-                                  key={`participant-${participant.id}`}
-                                  className="flex flex-col gap-3 rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-3 text-[0.82rem] leading-6 text-[var(--workspace-text-soft)] sm:flex-row sm:items-center sm:justify-between"
-                                >
-                                  <div className="min-w-0">
-                                    <div className="truncate text-[0.9rem] font-medium text-[var(--workspace-text)]">
-                                      {participant.name || participant.email}
-                                    </div>
-                                    <div className="truncate text-[0.8rem] text-[var(--workspace-text-faint)]">
-                                      {participant.email}
-                                    </div>
-                                    <div className="text-[0.68rem] uppercase tracking-[0.12em] text-[var(--workspace-text-faint)]">
-                                      {participantTypeLabel}
-                                    </div>
-                                  </div>
-                                </div>
-                              );
-                            }
 
                             return (
                               <div
