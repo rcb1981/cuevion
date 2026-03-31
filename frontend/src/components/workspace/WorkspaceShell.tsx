@@ -6644,6 +6644,10 @@ function MailboxView({
   );
   const [collaborationHistoryExpanded, setCollaborationHistoryExpanded] = useState(false);
   const [externalReviewCopyFeedback, setExternalReviewCopyFeedback] = useState("");
+  const [externalInviteEmailFeedback, setExternalInviteEmailFeedback] = useState<string | null>(
+    null,
+  );
+  const [isSendingExternalInvite, setIsSendingExternalInvite] = useState(false);
 
   const collaborationPeople =
     workspaceCollaborationPeople.length > 0
@@ -9183,102 +9187,6 @@ function MailboxView({
     setCollaborationParticipantPersonId("");
   };
 
-  const createExternalReviewLink = (messageId: string) => {
-    const normalizedEmail = externalCollaborationEmail.trim().toLowerCase();
-
-    if (!normalizedEmail || !isValidCollaborationParticipantEmail(normalizedEmail)) {
-      return;
-    }
-
-    const existingInviteMessage = getMessageById(messageId);
-    const existingInviteParticipant = existingInviteMessage?.collaboration?.participants?.find(
-      (participant) => participant.email.toLowerCase() === normalizedEmail,
-    );
-
-    if (
-      existingInviteMessage?.collaboration &&
-      existingInviteParticipant?.externalReviewToken
-    ) {
-      const inviteUrl = buildExternalCollaborationReviewLinkFromToken(
-        messageId,
-        normalizedEmail,
-        existingInviteParticipant.externalReviewToken,
-      );
-
-      setExternalCollaborationEmail(normalizedEmail);
-      setExternalCollaborationInviteUrl(inviteUrl);
-      window.open(inviteUrl, "_blank", "noopener,noreferrer");
-      return;
-    }
-
-    const nextTimestamp = Date.now();
-    let nextInviteMessage: MailMessage | null = null;
-    let inviteToken = "";
-
-    updateMessageById(messageId, (message) => {
-      if (!message.collaboration) {
-        return message;
-      }
-
-      const existingParticipants = message.collaboration.participants ?? [];
-      const existingParticipant = existingParticipants.find(
-        (participant) => participant.email.toLowerCase() === normalizedEmail,
-      );
-      inviteToken =
-        existingParticipant?.externalReviewToken ||
-        buildCollaborationInviteToken(message, normalizedEmail);
-      const nextParticipant: MailMessageCollaborationParticipant = existingParticipant
-        ? {
-            ...existingParticipant,
-            kind: "external",
-            externalReviewToken: inviteToken,
-            status:
-              existingParticipant.status === "declined"
-                ? "invited"
-                : existingParticipant.status,
-          }
-        : {
-            id: normalizeSenderLearningKey(normalizedEmail),
-            name: formatCollaborationParticipantNameFromEmail(normalizedEmail),
-            email: normalizedEmail,
-            kind: "external",
-            status: "invited",
-            externalReviewToken: inviteToken,
-          };
-      const nextParticipants = existingParticipant
-        ? existingParticipants.map((participant) =>
-            participant.email.toLowerCase() === normalizedEmail ? nextParticipant : participant,
-          )
-        : [...existingParticipants, nextParticipant];
-
-      nextInviteMessage = {
-        ...message,
-        isShared: true,
-        collaboration: {
-          ...message.collaboration,
-          updatedAt: nextTimestamp,
-          participants: nextParticipants,
-        },
-      };
-
-      return nextInviteMessage;
-    });
-
-    if (!nextInviteMessage) {
-      return;
-    }
-
-    const inviteUrl = buildExternalCollaborationReviewLinkFromToken(
-      messageId,
-      normalizedEmail,
-      inviteToken,
-    );
-
-    setExternalCollaborationEmail(normalizedEmail);
-    setExternalCollaborationInviteUrl(inviteUrl);
-    window.open(inviteUrl, "_blank", "noopener,noreferrer");
-  };
-
   const openStoredExternalReviewLink = (
     messageId: string,
     participant: MailMessageCollaborationParticipant,
@@ -9326,6 +9234,289 @@ function MailboxView({
         current === "Link copied" ? "" : current,
       );
     }, 1800);
+  };
+
+  const copyExternalInviteLink = async (messageId: string) => {
+    if (typeof navigator === "undefined" || !navigator.clipboard) {
+      setExternalInviteEmailFeedback("Copy link is not available in this browser.");
+      return;
+    }
+
+    const normalizedEmail = externalCollaborationEmail.trim().toLowerCase();
+
+    if (!normalizedEmail || !isValidCollaborationParticipantEmail(normalizedEmail)) {
+      setExternalInviteEmailFeedback("Enter a valid reviewer email.");
+      return;
+    }
+
+    let inviteLink = "";
+
+    updateMessageById(messageId, (message) => {
+      if (!message.collaboration) {
+        return message;
+      }
+
+      const nextTimestamp = Date.now();
+      const existingParticipants = message.collaboration.participants ?? [];
+      const existingParticipant = existingParticipants.find(
+        (participant) => participant.email.toLowerCase() === normalizedEmail,
+      );
+      const inviteToken =
+        existingParticipant?.externalReviewToken ||
+        buildCollaborationInviteToken(message, normalizedEmail);
+      const nextParticipant: MailMessageCollaborationParticipant = existingParticipant
+        ? {
+            ...existingParticipant,
+            kind: "external",
+            externalReviewToken: inviteToken,
+            status:
+              existingParticipant.status === "declined"
+                ? "invited"
+                : existingParticipant.status,
+          }
+        : {
+            id: normalizeSenderLearningKey(normalizedEmail),
+            name: formatCollaborationParticipantNameFromEmail(normalizedEmail),
+            email: normalizedEmail,
+            kind: "external",
+            status: "invited",
+            externalReviewToken: inviteToken,
+          };
+      const nextParticipants = existingParticipant
+        ? existingParticipants.map((participant) =>
+            participant.email.toLowerCase() === normalizedEmail ? nextParticipant : participant,
+          )
+        : [...existingParticipants, nextParticipant];
+
+      inviteLink =
+        buildCollaborationInviteLink(
+          {
+            ...message,
+            collaboration: {
+              ...message.collaboration,
+              participants: nextParticipants,
+            },
+          },
+          normalizedEmail,
+        ) || buildCollaborationInviteLink(message, normalizedEmail);
+
+      const nextMessage = {
+        ...message,
+        isShared: true,
+        collaboration: {
+          ...message.collaboration,
+          updatedAt: nextTimestamp,
+          participants: nextParticipants,
+        },
+      };
+
+      return nextMessage;
+    });
+
+    if (!inviteLink) {
+      setExternalInviteEmailFeedback("Could not prepare the invite link.");
+      return;
+    }
+
+    await navigator.clipboard.writeText(inviteLink);
+    setExternalCollaborationInviteUrl(inviteLink);
+    setExternalInviteEmailFeedback("Invite link copied.");
+  };
+
+  const sendExternalReviewInvite = async (messageId: string) => {
+    if (isSendingExternalInvite) {
+      return;
+    }
+
+    const normalizedEmail = externalCollaborationEmail.trim().toLowerCase();
+
+    if (!normalizedEmail || !isValidCollaborationParticipantEmail(normalizedEmail)) {
+      setExternalInviteEmailFeedback("Enter a valid reviewer email.");
+      return;
+    }
+
+    const managedMailbox = managedInboxes.find((candidate) => candidate.id === mailbox.id);
+
+    if (
+      !managedMailbox ||
+      !managedMailbox.connected ||
+      managedMailbox.provider !== "google"
+    ) {
+      setExternalInviteEmailFeedback("Email sending is not available for this mailbox.");
+      return;
+    }
+
+    const resolvedImapSettings = applyProviderDefaults(
+      managedMailbox.provider,
+      managedMailbox.customImap,
+      managedMailbox.email,
+    );
+
+    if (!resolvedImapSettings.password.trim()) {
+      setExternalInviteEmailFeedback("Gmail credentials are missing for this mailbox.");
+      return;
+    }
+
+    const existingInviteMessage = getMessageById(messageId);
+    let inviteLink = "";
+    let inviteParticipantName = formatCollaborationParticipantNameFromEmail(normalizedEmail);
+
+    updateMessageById(messageId, (message) => {
+      if (!message.collaboration) {
+        return message;
+      }
+
+      const nextTimestamp = Date.now();
+      const existingParticipants = message.collaboration.participants ?? [];
+      const existingParticipant = existingParticipants.find(
+        (participant) => participant.email.toLowerCase() === normalizedEmail,
+      );
+      const inviteToken =
+        existingParticipant?.externalReviewToken ||
+        buildCollaborationInviteToken(message, normalizedEmail);
+      inviteParticipantName =
+        existingParticipant?.name ||
+        formatCollaborationParticipantNameFromEmail(normalizedEmail) ||
+        normalizedEmail;
+      const nextParticipant: MailMessageCollaborationParticipant = existingParticipant
+        ? {
+            ...existingParticipant,
+            kind: "external",
+            externalReviewToken: inviteToken,
+            status:
+              existingParticipant.status === "declined"
+                ? "invited"
+                : existingParticipant.status,
+          }
+        : {
+            id: normalizeSenderLearningKey(normalizedEmail),
+            name: inviteParticipantName,
+            email: normalizedEmail,
+            kind: "external",
+            status: "invited",
+            externalReviewToken: inviteToken,
+          };
+      const nextParticipants = existingParticipant
+        ? existingParticipants.map((participant) =>
+            participant.email.toLowerCase() === normalizedEmail ? nextParticipant : participant,
+          )
+        : [...existingParticipants, nextParticipant];
+
+      inviteLink =
+        buildCollaborationInviteLink(
+          {
+            ...message,
+            collaboration: {
+              ...message.collaboration,
+              participants: nextParticipants,
+            },
+          },
+          normalizedEmail,
+        ) || buildCollaborationInviteLink(message, normalizedEmail);
+
+      return {
+        ...message,
+        isShared: true,
+        collaboration: {
+          ...message.collaboration,
+          updatedAt: nextTimestamp,
+          participants: nextParticipants,
+        },
+      };
+    });
+
+    const sourceMessage = getMessageById(messageId) ?? existingInviteMessage;
+
+    if (!sourceMessage?.collaboration || !inviteLink) {
+      setExternalInviteEmailFeedback("Could not prepare the invite email.");
+      return;
+    }
+
+    const inviterName = currentUserName;
+    const collaborationReason = getCollaborationReasonLabel(sourceMessage.collaboration);
+    const inviteSubject = `${inviterName} invited you to review: ${sourceMessage.subject}`;
+    const escapeInviteHtml = (value: string) =>
+      value
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    const inviteBodyText = [
+      `Hi ${inviteParticipantName || normalizedEmail},`,
+      "",
+      `${inviterName} invited you to review and comment on:`,
+      `${sourceMessage.subject}`,
+      "",
+      `Context: ${collaborationReason}`,
+      "",
+      "Open the review here:",
+      inviteLink,
+      "",
+      "You can reply directly in Cuevion using that link.",
+    ].join("\n");
+    const inviteBodyHtml = `<p>Hi ${escapeInviteHtml(inviteParticipantName || normalizedEmail)},</p><p><strong>${escapeInviteHtml(
+      inviterName,
+    )}</strong> invited you to review and comment on:</p><p><strong>${escapeInviteHtml(
+      sourceMessage.subject,
+    )}</strong></p><p>Context: ${escapeInviteHtml(collaborationReason)}</p><p>Open the review here:</p><p><a href="${escapeInviteHtml(
+      inviteLink,
+    )}">${escapeInviteHtml(inviteLink)}</a></p><p>You can reply directly in Cuevion using that link.</p>`;
+
+    setExternalInviteEmailFeedback(null);
+    setIsSendingExternalInvite(true);
+
+    try {
+      const sendResponse = await sendGmailMessage({
+        provider: managedMailbox.provider,
+        email: managedMailbox.email.trim(),
+        username: managedMailbox.email.trim(),
+        password: resolvedImapSettings.password,
+        from: mailbox.email,
+        to: normalizedEmail,
+        subject: inviteSubject,
+        bodyHtml: inviteBodyHtml,
+        bodyText: inviteBodyText,
+      });
+
+      if (!sendResponse.ok) {
+        setExternalInviteEmailFeedback(
+          sendResponse.error?.message ?? "Could not send invite email.",
+        );
+        return;
+      }
+
+      updateMessageById(messageId, (message) =>
+        message.collaboration
+          ? {
+              ...message,
+              collaboration: {
+                ...message.collaboration,
+                updatedAt: Date.now(),
+                messages: [
+                  ...message.collaboration.messages,
+                  {
+                    id: `${messageId}-collaboration-invite-${Date.now()}`,
+                    authorId: currentUserId,
+                    authorName: currentUserName,
+                    text: `Invite email sent to ${normalizedEmail}.`,
+                    timestamp: Date.now(),
+                    visibility: "internal",
+                    mentions: [],
+                  },
+                ],
+              },
+            }
+          : message,
+      );
+
+      setExternalCollaborationInviteUrl(inviteLink);
+      setExternalInviteEmailFeedback("Invite email sent.");
+    } catch {
+      setExternalInviteEmailFeedback("Could not send invite email.");
+    } finally {
+      setIsSendingExternalInvite(false);
+    }
   };
 
   const setMessagesUnreadState = (
@@ -13255,6 +13446,9 @@ function MailboxView({
                                   if (externalReviewCopyFeedback) {
                                     setExternalReviewCopyFeedback("");
                                   }
+                                  if (externalInviteEmailFeedback) {
+                                    setExternalInviteEmailFeedback(null);
+                                  }
                                 }}
                                 placeholder="reviewer@example.com"
                                 className="min-w-0 flex-1 rounded-[16px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-2.5 text-[0.88rem] leading-6 text-[var(--workspace-text)] outline-none placeholder:text-[var(--workspace-text-faint)]"
@@ -13262,7 +13456,27 @@ function MailboxView({
                               <button
                                 type="button"
                                 onClick={() =>
-                                  createExternalReviewLink(activeCollaborationMessage.id)
+                                  void sendExternalReviewInvite(activeCollaborationMessage.id)
+                                }
+                                disabled={
+                                  isSendingExternalInvite ||
+                                  !isValidCollaborationParticipantEmail(externalCollaborationEmail)
+                                }
+                                className={
+                                  !isSendingExternalInvite &&
+                                  isValidCollaborationParticipantEmail(
+                                    externalCollaborationEmail,
+                                  )
+                                    ? "inline-flex h-11 items-center justify-center rounded-full bg-pine px-5 text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[color:rgba(251,248,242,0.98)] transition-[background-color,transform] duration-150 hover:bg-moss active:scale-[0.99] focus-visible:outline-none"
+                                    : "inline-flex h-11 cursor-not-allowed items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-5 text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-soft)] opacity-45 transition-[opacity] duration-150 focus-visible:outline-none"
+                                }
+                              >
+                                {isSendingExternalInvite ? "Sending..." : "Send invite"}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  void copyExternalInviteLink(activeCollaborationMessage.id)
                                 }
                                 disabled={
                                   !isValidCollaborationParticipantEmail(
@@ -13273,15 +13487,18 @@ function MailboxView({
                                   isValidCollaborationParticipantEmail(
                                     externalCollaborationEmail,
                                   )
-                                    ? "inline-flex h-11 items-center justify-center rounded-full bg-pine px-5 text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[color:rgba(251,248,242,0.98)] transition-[background-color,transform] duration-150 hover:bg-moss active:scale-[0.99] focus-visible:outline-none"
+                                    ? "inline-flex h-11 items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-5 text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-soft)] transition-[background-color,border-color,color] duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] focus-visible:outline-none"
                                     : "inline-flex h-11 cursor-not-allowed items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-5 text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-soft)] opacity-45 transition-[opacity] duration-150 focus-visible:outline-none"
                                 }
                               >
-                                {primaryExternalReviewParticipant
-                                  ? "Add reviewer"
-                                  : "Create review link"}
+                                Copy link
                               </button>
                             </div>
+                            {externalInviteEmailFeedback ? (
+                              <div className="text-[0.78rem] leading-6 text-[var(--workspace-text-faint)]">
+                                {externalInviteEmailFeedback}
+                              </div>
+                            ) : null}
                             {externalCollaborationInviteUrl ? (
                               <input
                                 readOnly
