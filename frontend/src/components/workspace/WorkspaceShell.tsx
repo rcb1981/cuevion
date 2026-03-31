@@ -20808,6 +20808,21 @@ export function WorkspaceShell({
   const inviteParticipants = inviteCollaboration
     ? getCollaborationParticipants(inviteCollaboration)
     : [];
+  const externalReviewAuthorEmail =
+    collaborationInviteRoute?.inviteeEmail?.toLowerCase() ??
+    decodedInvitePayload?.inviteeEmail?.toLowerCase() ??
+    "";
+  const externalReviewInviteParticipant = externalReviewAuthorEmail
+    ? (inviteCollaboration?.participants ?? []).find(
+        (participant) => participant.email.toLowerCase() === externalReviewAuthorEmail,
+      ) ?? null
+    : null;
+  const externalReviewAuthorName = externalReviewInviteParticipant?.name
+    ? externalReviewInviteParticipant.name
+    : externalReviewAuthorEmail
+      ? formatCollaborationParticipantNameFromEmail(externalReviewAuthorEmail) ||
+        externalReviewAuthorEmail
+      : "External reviewer";
   const acceptedInviteParticipant = authenticatedUser
     ? (inviteCollaboration?.participants ?? []).find(
         (participant) =>
@@ -20983,6 +20998,51 @@ export function WorkspaceShell({
 
     setInviteReplyDraft("");
     setInviteReplyVisibility(isGuestInviteUser ? "shared" : "internal");
+    setInviteMentionIndex(0);
+    setInviteReplySelection(null);
+  };
+
+  const sendExternalReviewReply = () => {
+    const trimmedReply = inviteReplyDraft.trim();
+
+    if (!trimmedReply || !inviteMessage?.collaboration || !externalReviewAuthorEmail) {
+      return;
+    }
+
+    const nextTimestamp = Date.now();
+
+    updateWorkspaceMessageById(inviteMessage.id, (message) =>
+      message.collaboration
+        ? {
+            ...message,
+            isShared: true,
+            collaboration: {
+              ...message.collaboration,
+              state:
+                message.collaboration.state === "resolved"
+                  ? "needs_review"
+                  : message.collaboration.state,
+              updatedAt: nextTimestamp,
+              previewText: trimmedReply,
+              messages: [
+                ...message.collaboration.messages,
+                {
+                  id: `${inviteMessage.id}-external-review-reply-${nextTimestamp}`,
+                  authorId: normalizeSenderLearningKey(externalReviewAuthorEmail),
+                  authorName: externalReviewAuthorName,
+                  text: trimmedReply,
+                  timestamp: nextTimestamp,
+                  visibility: "shared",
+                  mentions: [],
+                },
+              ],
+            },
+          }
+        : message,
+    );
+
+    setInviteReplyDraft("");
+    setInviteReplyVisibility("shared");
     setInviteMentionIndex(0);
     setInviteReplySelection(null);
   };
@@ -22827,6 +22887,38 @@ export function WorkspaceShell({
                       </div>
                     )}
                   </div>
+                </section>
+
+                <section className="rounded-[24px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-5 py-4">
+                  <label className="block space-y-2.5">
+                    <span className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                      Reply
+                    </span>
+                    <div className="text-[0.8rem] leading-6 text-[color:rgba(120,111,100,0.76)]">
+                      Your reply will be shared back into this collaboration.
+                    </div>
+                    <textarea
+                      value={inviteReplyDraft}
+                      onChange={(event) => setInviteReplyDraft(event.target.value)}
+                      rows={4}
+                      placeholder="Add your comment"
+                      className="w-full resize-none rounded-[20px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3 text-[0.92rem] leading-7 text-[var(--workspace-text-soft)] outline-none placeholder:text-[var(--workspace-text-faint)]"
+                    />
+                    <div className="flex justify-end">
+                      <button
+                        type="button"
+                        onClick={sendExternalReviewReply}
+                        disabled={!inviteReplyDraft.trim()}
+                        className={
+                          inviteReplyDraft.trim()
+                            ? "inline-flex h-11 items-center justify-center rounded-full bg-pine px-5 text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[color:rgba(251,248,242,0.98)] transition-[background-color,transform] duration-150 hover:bg-moss active:scale-[0.99] focus-visible:outline-none"
+                            : "inline-flex h-11 cursor-not-allowed items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-5 text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-soft)] opacity-45 transition-[opacity] duration-150 focus-visible:outline-none"
+                        }
+                      >
+                        Send reply
+                      </button>
+                    </div>
+                  </label>
                 </section>
               </div>
             </div>
