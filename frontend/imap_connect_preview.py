@@ -365,7 +365,7 @@ def resolve_preview_routing(
             body,
             "",
             subject=subject,
-            artist_name=sender_name,
+            artist_name=sender_name or result.get("artist"),
         )
         usable_demo_links = get_usable_demo_links(
             extracted_links=extracted_links,
@@ -535,6 +535,8 @@ def resolve_preview_routing(
                 engine_result=engine_result,
                 user_config=V7_USER_CONFIG,
                 mailbox_config=mailbox_match,
+                internal_role=internal_role,
+                focus_preferences=focus_preferences,
             )
 
             result["v7_final_priority"] = v7_decision.final_priority
@@ -544,7 +546,7 @@ def resolve_preview_routing(
         result["internalClassification"] = normalize_internal_classification(
             result.get("category"),
         )
-        result["ui_signal"] = map_to_ui_signal(result)
+        result["ui_signal"] = result.get("ui_signal") or map_to_ui_signal(result)
 
         logger.warning(
             "Preview ui_signal resolved category=%s priority=%s workflow_links=%s usable_demo_links=%s analyze_ms=%.1f total_ms=%.1f subject=%s",
