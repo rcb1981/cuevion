@@ -9572,9 +9572,13 @@ function MailboxView({
       return;
     }
 
+    if (shouldBlockSmartFolderMutation()) {
+      return;
+    }
+
     onSyncUnreadOverrides(getMessagesByIds(messageIds), unread);
 
-    if (isSharedView || activeSmartFolder) {
+    if (isSharedView) {
       const messageIdSet = new Set(messageIds);
 
       setMailboxStore((currentStore) =>
@@ -9656,6 +9660,10 @@ function MailboxView({
   };
 
   const toggleMessageFlagState = (messageId: string) => {
+    if (shouldBlockSmartFolderMutation()) {
+      return;
+    }
+
     updateMessageById(messageId, (message) => ({
       ...message,
       flagged: !message.flagged,
@@ -9821,6 +9829,10 @@ function MailboxView({
     targetFolder: MailFolder,
     messageIds: string[],
   ) => {
+    if (shouldBlockSmartFolderMutation()) {
+      return;
+    }
+
     if (messageIds.length === 0) {
       closeMenus();
       return;
@@ -9907,7 +9919,7 @@ function MailboxView({
       }, {} as MailboxStore);
     });
 
-    if (isSharedView || activeSmartFolder) {
+    if (isSharedView) {
       advanceSelectionAfterAction(messageIds);
     }
 
@@ -9918,6 +9930,10 @@ function MailboxView({
     targetFolder: MailFolder,
     messageIds: string[],
   ) => {
+    if (shouldBlockSmartFolderMutation()) {
+      return;
+    }
+
     if (messageIds.length === 0) {
       closeMenus();
       return;
@@ -10038,6 +10054,10 @@ function MailboxView({
     targetFolder: MailFolder,
     messageIds: string[],
   ) => {
+    if (shouldBlockSmartFolderMutation()) {
+      return;
+    }
+
     if (sourceMailboxId === targetMailboxId && sourceFolder === targetFolder) {
       closeMenus();
       return;
@@ -10155,6 +10175,10 @@ function MailboxView({
   };
 
   const deleteMessages = (messageIds: string[]) => {
+    if (shouldBlockSmartFolderMutation()) {
+      return;
+    }
+
     if (!isSharedView && !activeSmartFolder && activeFolder === "Trash") {
       removeMessagesFromTrash(mailbox.id, messageIds, "Message removed from Trash");
       return;
@@ -10162,11 +10186,6 @@ function MailboxView({
 
     if (isSharedView) {
       moveMessagesAcrossWorkspace(mailbox.id, "Trash", messageIds);
-      return;
-    }
-
-    if (activeSmartFolder) {
-      moveMessagesToFolderAcrossWorkspace("Trash", messageIds);
       return;
     }
 
@@ -10415,6 +10434,14 @@ function MailboxView({
         ? mailbox.title
         : `${mailbox.title} Inbox`;
   const isReadOnlySmartFolderView = Boolean(activeSmartFolder);
+  const shouldBlockSmartFolderMutation = () => {
+    if (!activeSmartFolder) {
+      return false;
+    }
+
+    closeMenus();
+    return true;
+  };
 
   useEffect(() => {
     setIsReadingLearningMenuOpen(false);
@@ -10433,13 +10460,12 @@ function MailboxView({
       return;
     }
 
-    if (isSharedView) {
-      moveMessagesAcrossWorkspace(mailbox.id, "Archive", actionableSelectionIds);
+    if (shouldBlockSmartFolderMutation()) {
       return;
     }
 
-    if (activeSmartFolder) {
-      moveMessagesToFolderAcrossWorkspace("Archive", actionableSelectionIds);
+    if (isSharedView) {
+      moveMessagesAcrossWorkspace(mailbox.id, "Archive", actionableSelectionIds);
       return;
     }
 
@@ -10448,6 +10474,10 @@ function MailboxView({
 
   const deleteSelectedMessages = () => {
     if (actionableSelectionIds.length === 0) {
+      return;
+    }
+
+    if (shouldBlockSmartFolderMutation()) {
       return;
     }
 
