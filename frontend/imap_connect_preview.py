@@ -474,8 +474,8 @@ def resolve_preview_routing(
         ]
         classification_text = f"{subject_lower} {body_lower}"
         result = {
-            "category": "info",
-            "priority": "LOW",
+            "category": "unknown",
+            "priority": "NORMAL",
             "reason": "Preview fast-path rules",
             "workflow_links": [
                 link_name
