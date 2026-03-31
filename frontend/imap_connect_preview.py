@@ -63,6 +63,22 @@ def map_to_ui_signal(result: dict[str, Any]) -> str:
     return "NEW"
 
 
+def map_to_stable_signal(result: dict[str, Any]) -> str | None:
+    category = result.get("category")
+    final_priority = result.get("v7_final_priority") or result.get("priority")
+
+    if category not in ["finance", "royalty_statement"]:
+        return None
+
+    if final_priority == "PRIORITY":
+        return "Priority"
+
+    if final_priority == "REVIEW":
+        return "For review"
+
+    return None
+
+
 def normalize_internal_classification(category: Any) -> str:
     normalized_category = str(category or "").strip().lower()
 
@@ -547,6 +563,7 @@ def resolve_preview_routing(
             result.get("category"),
         )
         result["ui_signal"] = result.get("ui_signal") or map_to_ui_signal(result)
+        result["signal"] = map_to_stable_signal(result)
 
         logger.warning(
             "Preview ui_signal resolved category=%s priority=%s workflow_links=%s usable_demo_links=%s analyze_ms=%.1f total_ms=%.1f subject=%s",
@@ -630,6 +647,7 @@ def to_message_preview(
       "body": body.split("\n\n") if body else [snippet or "No message preview available."],
       "unread": unread,
       "imapUid": imap_uid,
+      "signal": preview_routing.get("signal"),
       "ui_signal": preview_routing.get("ui_signal"),
       "internalClassification": preview_routing.get("internalClassification"),
       "final_visibility": preview_routing.get("final_visibility"),
