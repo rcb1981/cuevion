@@ -6643,6 +6643,7 @@ function MailboxView({
     null,
   );
   const [collaborationHistoryExpanded, setCollaborationHistoryExpanded] = useState(false);
+  const [externalReviewCopyFeedback, setExternalReviewCopyFeedback] = useState("");
 
   const collaborationPeople =
     workspaceCollaborationPeople.length > 0
@@ -9249,6 +9250,12 @@ function MailboxView({
     await navigator.clipboard.writeText(inviteUrl);
     setExternalCollaborationEmail(participant.email);
     setExternalCollaborationInviteUrl(inviteUrl);
+    setExternalReviewCopyFeedback("Link copied");
+    window.setTimeout(() => {
+      setExternalReviewCopyFeedback((current) =>
+        current === "Link copied" ? "" : current,
+      );
+    }, 1800);
   };
 
   const setMessagesUnreadState = (
@@ -13171,6 +13178,11 @@ function MailboxView({
                                   Copy review link
                                 </button>
                               </div>
+                              {externalReviewCopyFeedback ? (
+                                <div className="text-[0.76rem] leading-6 text-[var(--workspace-text-faint)]">
+                                  {externalReviewCopyFeedback}
+                                </div>
+                              ) : null}
                               {externalCollaborationInviteUrl ? (
                                 <input
                                   readOnly
@@ -13179,54 +13191,64 @@ function MailboxView({
                                 />
                               ) : null}
                             </div>
-                          ) : (
-                            <div className="space-y-2">
-                              <div className="text-[0.8rem] leading-6 text-[var(--workspace-text-faint)]">
-                                Create the primary external review room for this collaboration.
-                              </div>
-                              <div className="flex flex-col gap-2 sm:flex-row">
-                                <input
-                                  type="email"
-                                  value={externalCollaborationEmail}
-                                  onChange={(event) => {
-                                    setExternalCollaborationEmail(event.target.value);
-                                    if (externalCollaborationInviteUrl) {
-                                      setExternalCollaborationInviteUrl("");
-                                    }
-                                  }}
-                                  placeholder="reviewer@example.com"
-                                  className="min-w-0 flex-1 rounded-[16px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-2.5 text-[0.88rem] leading-6 text-[var(--workspace-text)] outline-none placeholder:text-[var(--workspace-text-faint)]"
-                                />
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    createExternalReviewLink(activeCollaborationMessage.id)
-                                  }
-                                  disabled={
-                                    !isValidCollaborationParticipantEmail(
-                                      externalCollaborationEmail,
-                                    )
-                                  }
-                                  className={
-                                    isValidCollaborationParticipantEmail(
-                                      externalCollaborationEmail,
-                                    )
-                                      ? "inline-flex h-11 items-center justify-center rounded-full bg-pine px-5 text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[color:rgba(251,248,242,0.98)] transition-[background-color,transform] duration-150 hover:bg-moss active:scale-[0.99] focus-visible:outline-none"
-                                      : "inline-flex h-11 cursor-not-allowed items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-5 text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-soft)] opacity-45 transition-[opacity] duration-150 focus-visible:outline-none"
-                                  }
-                                >
-                                  Create review link
-                                </button>
-                              </div>
-                              {externalCollaborationInviteUrl ? (
-                                <input
-                                  readOnly
-                                  value={externalCollaborationInviteUrl}
-                                  className="w-full rounded-[16px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-2.5 text-[0.8rem] leading-6 text-[var(--workspace-text-soft)] outline-none"
-                                />
-                              ) : null}
+                          ) : null}
+                          <div className="space-y-2">
+                            <div className="text-[0.8rem] leading-6 text-[var(--workspace-text-faint)]">
+                              {primaryExternalReviewParticipant
+                                ? "Invite another reviewer to this external review."
+                                : "Create the primary external review room for this collaboration."}
                             </div>
-                          )}
+                            <div className="flex flex-col gap-2 sm:flex-row">
+                              <input
+                                type="email"
+                                value={externalCollaborationEmail}
+                                onChange={(event) => {
+                                  setExternalCollaborationEmail(event.target.value);
+                                  if (externalCollaborationInviteUrl) {
+                                    setExternalCollaborationInviteUrl("");
+                                  }
+                                  if (externalReviewCopyFeedback) {
+                                    setExternalReviewCopyFeedback("");
+                                  }
+                                }}
+                                placeholder="reviewer@example.com"
+                                className="min-w-0 flex-1 rounded-[16px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-2.5 text-[0.88rem] leading-6 text-[var(--workspace-text)] outline-none placeholder:text-[var(--workspace-text-faint)]"
+                              />
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  createExternalReviewLink(activeCollaborationMessage.id)
+                                }
+                                disabled={
+                                  !isValidCollaborationParticipantEmail(
+                                    externalCollaborationEmail,
+                                  )
+                                }
+                                className={
+                                  isValidCollaborationParticipantEmail(
+                                    externalCollaborationEmail,
+                                  )
+                                    ? "inline-flex h-11 items-center justify-center rounded-full bg-pine px-5 text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[color:rgba(251,248,242,0.98)] transition-[background-color,transform] duration-150 hover:bg-moss active:scale-[0.99] focus-visible:outline-none"
+                                    : "inline-flex h-11 cursor-not-allowed items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-5 text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-soft)] opacity-45 transition-[opacity] duration-150 focus-visible:outline-none"
+                                }
+                              >
+                                {primaryExternalReviewParticipant
+                                  ? "Add reviewer"
+                                  : "Create review link"}
+                              </button>
+                            </div>
+                            {externalCollaborationInviteUrl ? (
+                              <input
+                                readOnly
+                                value={externalCollaborationInviteUrl}
+                                className={`w-full rounded-[16px] border px-4 py-2.5 text-[0.8rem] leading-6 text-[var(--workspace-text-soft)] outline-none ${
+                                  primaryExternalReviewParticipant
+                                    ? "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)]"
+                                    : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)]"
+                                }`}
+                              />
+                            ) : null}
+                          </div>
                         </div>
                       </div>
                       <p className="text-[0.84rem] leading-6 text-[var(--workspace-text-faint)]">
