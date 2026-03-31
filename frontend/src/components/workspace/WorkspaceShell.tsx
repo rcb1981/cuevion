@@ -7808,7 +7808,7 @@ function MailboxView({
       )
     : [];
   const visibleCompactCollaborationMessages = collaborationHistoryExpanded
-    ? [...visibleCollaborationMessages].reverse()
+    ? [...visibleCollaborationMessages].sort((first, second) => second.timestamp - first.timestamp)
     : visibleCollaborationMessages.slice(-2);
 
   useEffect(() => {
@@ -20541,35 +20541,71 @@ export function WorkspaceShell({
     messageId: string,
     updater: (message: MailMessage) => MailMessage,
   ) => {
-    setMailboxStore((currentStore) =>
-      Object.entries(currentStore).reduce<MailboxStore>((nextStore, [mailboxId, collections]) => {
-        nextStore[mailboxId as InboxId] = {
-          Inbox: collections.Inbox.map((message) =>
-            message.id === messageId ? updater(message) : message,
-          ),
-          Drafts: collections.Drafts.map((message) =>
-            message.id === messageId ? updater(message) : message,
-          ),
-          Sent: collections.Sent.map((message) =>
-            message.id === messageId ? updater(message) : message,
-          ),
-          Archive: collections.Archive.map((message) =>
-            message.id === messageId ? updater(message) : message,
-          ),
-          Filtered: collections.Filtered.map((message) =>
-            message.id === messageId ? updater(message) : message,
-          ),
-          Spam: collections.Spam.map((message) =>
-            message.id === messageId ? updater(message) : message,
-          ),
-          Trash: collections.Trash.map((message) =>
-            message.id === messageId ? updater(message) : message,
-          ),
-        };
+    setMailboxStore((currentStore) => {
+      const updatedMessagesByMailbox = new Map<InboxId, MailMessage>();
+      const nextStore = Object.entries(currentStore).reduce<MailboxStore>(
+        (nextCollectionsByMailbox, [mailboxId, collections]) => {
+          const updateCollection = (messages: MailMessage[]) =>
+            messages.map((message) => {
+              if (message.id !== messageId) {
+                return message;
+              }
 
-        return nextStore;
-      }, {} as MailboxStore),
-    );
+              const updatedMessage = updater(message);
+              updatedMessagesByMailbox.set(mailboxId as InboxId, updatedMessage);
+              return updatedMessage;
+            });
+
+          nextCollectionsByMailbox[mailboxId as InboxId] = {
+            Inbox: updateCollection(collections.Inbox),
+            Drafts: updateCollection(collections.Drafts),
+            Sent: updateCollection(collections.Sent),
+            Archive: updateCollection(collections.Archive),
+            Filtered: updateCollection(collections.Filtered),
+            Spam: updateCollection(collections.Spam),
+            Trash: updateCollection(collections.Trash),
+          };
+
+          return nextCollectionsByMailbox;
+        },
+        {} as MailboxStore,
+      );
+
+      const liveInboxSnapshots = readLiveInboxSnapshots();
+
+      updatedMessagesByMailbox.forEach((updatedMessage, mailboxId) => {
+        const snapshot = liveInboxSnapshots[mailboxId];
+
+        if (!snapshot) {
+          return;
+        }
+
+        const nextSnapshotMessages = snapshot.messages.map((message) =>
+          message.id === updatedMessage.id
+            ? ({
+                ...message,
+                isShared: updatedMessage.isShared,
+                collaboration: updatedMessage.collaboration,
+              } as PersistedLiveInboxMessageSnapshot)
+            : message,
+        );
+
+        const hasMatchingSnapshotMessage = nextSnapshotMessages.some(
+          (message) => message.id === updatedMessage.id,
+        );
+
+        if (!hasMatchingSnapshotMessage) {
+          return;
+        }
+
+        saveLiveInboxSnapshot({
+          ...snapshot,
+          messages: nextSnapshotMessages,
+        });
+      });
+
+      return nextStore;
+    });
   };
 
   const getWorkspaceMessageById = (messageId: string) =>
