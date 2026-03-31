@@ -8920,6 +8920,8 @@ function MailboxView({
     setCollaborationParticipantPersonId("");
     setExternalCollaborationEmail("");
     setExternalCollaborationInviteUrl("");
+    setExternalInviteEmailFeedback(null);
+    setExternalReviewCopyFeedback("");
     setCollaborationHistoryExpanded(false);
     setCollaborationReplyDraft("");
     setCollaborationReplyVisibility("internal");
@@ -9201,8 +9203,9 @@ function MailboxView({
       participant.externalReviewToken,
     );
 
-    setExternalCollaborationEmail(participant.email);
+    setExternalCollaborationEmail("");
     setExternalCollaborationInviteUrl(inviteUrl);
+    setExternalInviteEmailFeedback(null);
     window.open(inviteUrl, "_blank", "noopener,noreferrer");
   };
 
@@ -9226,8 +9229,9 @@ function MailboxView({
     );
 
     await navigator.clipboard.writeText(inviteUrl);
-    setExternalCollaborationEmail(participant.email);
+    setExternalCollaborationEmail("");
     setExternalCollaborationInviteUrl(inviteUrl);
+    setExternalInviteEmailFeedback(null);
     setExternalReviewCopyFeedback("Link copied");
     window.setTimeout(() => {
       setExternalReviewCopyFeedback((current) =>
@@ -9261,8 +9265,12 @@ function MailboxView({
       const existingParticipant = existingParticipants.find(
         (participant) => participant.email.toLowerCase() === normalizedEmail,
       );
+      const sharedExternalReviewToken = existingParticipants.find(
+        (participant) => participant.kind === "external" && participant.externalReviewToken,
+      )?.externalReviewToken;
       const inviteToken =
         existingParticipant?.externalReviewToken ||
+        sharedExternalReviewToken ||
         buildCollaborationInviteToken(message, normalizedEmail);
       const nextParticipant: MailMessageCollaborationParticipant = existingParticipant
         ? {
@@ -9289,16 +9297,11 @@ function MailboxView({
         : [...existingParticipants, nextParticipant];
 
       inviteLink =
-        buildCollaborationInviteLink(
-          {
-            ...message,
-            collaboration: {
-              ...message.collaboration,
-              participants: nextParticipants,
-            },
-          },
+        buildExternalCollaborationReviewLinkFromToken(
+          message.id,
           normalizedEmail,
-        ) || buildCollaborationInviteLink(message, normalizedEmail);
+          inviteToken,
+        );
 
       const nextMessage = {
         ...message,
@@ -9320,6 +9323,7 @@ function MailboxView({
 
     await navigator.clipboard.writeText(inviteLink);
     setExternalCollaborationInviteUrl(inviteLink);
+    setExternalCollaborationEmail("");
     setExternalInviteEmailFeedback("Invite link copied.");
   };
 
@@ -9371,8 +9375,12 @@ function MailboxView({
       const existingParticipant = existingParticipants.find(
         (participant) => participant.email.toLowerCase() === normalizedEmail,
       );
+      const sharedExternalReviewToken = existingParticipants.find(
+        (participant) => participant.kind === "external" && participant.externalReviewToken,
+      )?.externalReviewToken;
       const inviteToken =
         existingParticipant?.externalReviewToken ||
+        sharedExternalReviewToken ||
         buildCollaborationInviteToken(message, normalizedEmail);
       inviteParticipantName =
         existingParticipant?.name ||
@@ -9403,16 +9411,11 @@ function MailboxView({
         : [...existingParticipants, nextParticipant];
 
       inviteLink =
-        buildCollaborationInviteLink(
-          {
-            ...message,
-            collaboration: {
-              ...message.collaboration,
-              participants: nextParticipants,
-            },
-          },
+        buildExternalCollaborationReviewLinkFromToken(
+          message.id,
           normalizedEmail,
-        ) || buildCollaborationInviteLink(message, normalizedEmail);
+          inviteToken,
+        );
 
       return {
         ...message,
