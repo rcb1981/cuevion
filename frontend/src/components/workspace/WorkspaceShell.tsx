@@ -7809,7 +7809,7 @@ function MailboxView({
     : [];
   const visibleCompactCollaborationMessages = collaborationHistoryExpanded
     ? [...visibleCollaborationMessages].sort((first, second) => second.timestamp - first.timestamp)
-    : visibleCollaborationMessages.slice(-2);
+    : [...visibleCollaborationMessages.slice(-2)].reverse();
 
   useEffect(() => {
     if (!activeCollaborationMessageId || !focusCollaborationComposer) {
@@ -22704,7 +22704,7 @@ export function WorkspaceShell({
     const visibleExternalReviewMessages = isExternalReviewRoute
       ? externalReviewHistoryExpanded
         ? [...inviteVisibleMessages].sort((first, second) => second.timestamp - first.timestamp)
-        : inviteVisibleMessages.slice(-2)
+        : [...inviteVisibleMessages.slice(-2)].reverse()
       : inviteVisibleMessages;
     const inviteMentionCandidates = getCollaborationMentionTargets(inviteParticipants, []);
     const inviteMentionQuery = getMentionQueryAtCursor(
