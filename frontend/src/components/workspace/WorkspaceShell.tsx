@@ -7794,7 +7794,7 @@ function MailboxView({
       )
     : [];
   const visibleCompactCollaborationMessages = collaborationHistoryExpanded
-    ? visibleCollaborationMessages
+    ? [...visibleCollaborationMessages].reverse()
     : visibleCollaborationMessages.slice(-2);
 
   useEffect(() => {
@@ -22479,7 +22479,7 @@ export function WorkspaceShell({
       : [];
     const visibleExternalReviewMessages = isExternalReviewRoute
       ? externalReviewHistoryExpanded
-        ? inviteVisibleMessages
+        ? [...inviteVisibleMessages].reverse()
         : inviteVisibleMessages.slice(-2)
       : inviteVisibleMessages;
     const inviteMentionCandidates = getCollaborationMentionTargets(inviteParticipants, []);
