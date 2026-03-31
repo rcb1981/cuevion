@@ -20015,15 +20015,6 @@ export function WorkspaceShell({
     return incomingMessages.map((message) => {
       const persistedMessage = message as PersistedLiveInboxMessageSnapshot;
       const existingMessage = findMatchingMessageByIdentity(persistedMessage, currentInboxIndexes);
-      const financeLikePreview =
-        message.ui_signal === "FINANCE" ||
-        message.internalClassification === "finance" ||
-        message.internalClassification === "royalty_statement";
-      const livePreviewSignal = financeLikePreview
-        ? message.ui_signal === "PRIORITY"
-          ? "Priority"
-          : "For review"
-        : undefined;
       const unread =
         resolveUnreadOverride(messageUnreadOverrides, persistedMessage) ??
         existingMessage?.unread ??
@@ -20039,12 +20030,7 @@ export function WorkspaceShell({
           createdAt: message.createdAt,
           imapUid: message.imapUid,
           unread,
-          signal: livePreviewSignal,
           ui_signal: message.ui_signal,
-          internalClassification:
-            message.internalClassification === "unknown"
-              ? undefined
-              : (message.internalClassification as CuevionInternalClassification | undefined),
           from: message.from,
           to: message.to,
           cc: message.cc,
