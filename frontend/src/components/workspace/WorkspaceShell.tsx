@@ -9119,7 +9119,7 @@ function MailboxView({
       existingInviteParticipant?.externalReviewToken
     ) {
       const inviteUrl = buildExternalCollaborationReviewLinkFromToken(
-        existingInviteMessage.id,
+        messageId,
         normalizedEmail,
         existingInviteParticipant.externalReviewToken,
       );
@@ -9188,7 +9188,7 @@ function MailboxView({
     }
 
     const inviteUrl = buildExternalCollaborationReviewLinkFromToken(
-      nextInviteMessage.id,
+      messageId,
       normalizedEmail,
       inviteToken,
     );
