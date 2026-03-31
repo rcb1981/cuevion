@@ -13564,11 +13564,11 @@ function MailboxView({
                           className="inline-flex h-8 items-center justify-center rounded-full bg-[var(--workspace-card)] px-3 text-[0.66rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-soft)] transition-[background-color,color] duration-150 hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] focus-visible:outline-none"
                         >
                           {collaborationHistoryExpanded
-                            ? "Hide updates"
-                            : `View updates (${visibleCollaborationMessages.length})`}
+                            ? "Hide conversation"
+                            : `View full conversation (${visibleCollaborationMessages.length})`}
                         </button>
                       </div>
-                      {collaborationHistoryExpanded ? (
+                      {visibleCollaborationMessages.length > 0 ? (
                         <div className="max-h-[320px] space-y-2 overflow-y-auto pr-1">
                           {visibleCompactCollaborationMessages.map((entry) => (
                             <div
@@ -13614,11 +13614,11 @@ function MailboxView({
                             </div>
                           ))}
                         </div>
-                      ) : visibleCollaborationMessages.length === 0 ? (
+                      ) : (
                         <div className="text-[0.86rem] leading-6 text-[var(--workspace-text-faint)]">
                           No updates yet.
                         </div>
-                      ) : null}
+                      )}
                       {activeCollaborationMessage.collaboration.resolvedAt &&
                       activeCollaborationMessage.collaboration.resolvedByUserName ? (
                         <div className="pt-1 text-[0.82rem] leading-6 text-[color:rgba(118,110,100,0.76)]">
