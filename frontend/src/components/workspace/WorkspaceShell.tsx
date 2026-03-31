@@ -7920,14 +7920,12 @@ function MailboxView({
       return null;
     }
 
-    const isActiveCollaboration = collaboration.state !== "resolved";
-
     const collaborationButtonClass =
-      !isActiveCollaboration
+      collaboration.state === "resolved"
         ? "inline-flex items-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-3 py-1 text-[0.76rem] leading-6 text-[color:rgba(106,98,89,0.86)] transition-[background-color,border-color,color] duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text-soft)] focus-visible:outline-none"
         : "inline-flex items-center rounded-full border border-[color:rgba(95,138,91,0.4)] bg-[linear-gradient(180deg,rgba(183,216,174,0.44),rgba(127,169,121,0.32))] px-3 py-1 text-[0.76rem] leading-6 shadow-[0_9px_20px_rgba(103,143,98,0.14),inset_0_1px_0_rgba(255,255,255,0.24)] transition-[background-color,border-color,color,box-shadow] duration-150 hover:border-[color:rgba(86,126,82,0.48)] hover:bg-[linear-gradient(180deg,rgba(183,216,174,0.54),rgba(127,169,121,0.4))] focus-visible:outline-none dark:border-[color:rgba(128,167,124,0.34)] dark:bg-[linear-gradient(180deg,rgba(94,126,97,0.34),rgba(67,92,70,0.28))] dark:text-[color:rgba(227,239,223,0.96)] dark:shadow-[0_10px_22px_rgba(18,28,20,0.22),inset_0_1px_0_rgba(255,255,255,0.06)] dark:hover:border-[color:rgba(144,184,140,0.4)] dark:hover:bg-[linear-gradient(180deg,rgba(104,138,107,0.42),rgba(73,100,76,0.34))] dark:hover:text-[color:rgba(240,247,237,0.98)]";
     const collaborationButtonStyle =
-      !isActiveCollaboration || themeMode === "dark"
+      collaboration.state === "resolved" || themeMode === "dark"
         ? undefined
         : {
             color: "rgba(24,34,24,0.99)",
@@ -7949,7 +7947,9 @@ function MailboxView({
           className={collaborationButtonClass}
           style={collaborationButtonStyle}
         >
-          {isActiveCollaboration ? "Open collaboration" : "Open collaboration history"}
+          {collaboration.state === "resolved"
+            ? "Open collaboration history"
+            : "Open collaboration"}
         </button>
       </div>
     );
