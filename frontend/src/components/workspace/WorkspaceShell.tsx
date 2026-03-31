@@ -20338,6 +20338,7 @@ export function WorkspaceShell({
   const [inviteDecisionState, setInviteDecisionState] = useState<
     "pending" | "declined" | "left"
   >("pending");
+  const [externalReviewHistoryExpanded, setExternalReviewHistoryExpanded] = useState(false);
   const [inviteReplyDraft, setInviteReplyDraft] = useState("");
   const [inviteReplyVisibility, setInviteReplyVisibility] =
     useState<MailMessageCollaborationVisibility>(
@@ -22419,6 +22420,11 @@ export function WorkspaceShell({
           canViewerSeeCollaborationMessage(entry, inviteViewerType),
         )
       : [];
+    const visibleExternalReviewMessages = isExternalReviewRoute
+      ? externalReviewHistoryExpanded
+        ? inviteVisibleMessages
+        : inviteVisibleMessages.slice(-2)
+      : inviteVisibleMessages;
     const inviteMentionCandidates = getCollaborationMentionTargets(inviteParticipants, []);
     const inviteMentionQuery = getMentionQueryAtCursor(
       inviteReplyDraft,
@@ -22583,7 +22589,7 @@ export function WorkspaceShell({
                   </div>
                 </section>
 
-                <section className="rounded-[24px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-6 py-5">
+                <section className="rounded-[24px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-5 py-4">
                   <div className="space-y-4">
                     <div className="flex flex-wrap items-start justify-between gap-4">
                       <div>
@@ -22604,43 +22610,60 @@ export function WorkspaceShell({
                     </div>
 
                     {inviteVisibleMessages.length > 0 ? (
-                      <div className="space-y-4">
-                        {inviteVisibleMessages.map((entry) => (
-                          <div
-                            key={entry.id}
-                            className="rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-3"
-                          >
-                            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[0.82rem] leading-6 text-[var(--workspace-text)]">
-                              <span>{entry.authorName}</span>
-                              <span
-                                className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-[0.64rem] font-medium uppercase tracking-[0.14em] ${
-                                  getCollaborationMessageVisibility(entry) === "internal"
-                                    ? "border-[color:rgba(115,132,118,0.24)] bg-[color:rgba(126,155,128,0.12)] text-[color:rgba(82,97,85,0.86)]"
-                                    : "border-[color:rgba(123,116,106,0.18)] bg-[color:rgba(136,127,115,0.08)] text-[color:rgba(126,117,106,0.78)]"
-                                }`}
-                              >
-                                {getCollaborationMessageVisibility(entry) === "internal"
-                                  ? "Internal"
-                                  : "Shared"}
-                              </span>
-                              <span className="text-[0.76rem] text-[var(--workspace-text-faint)]">
-                                {formatCollaborationStatusTimestamp(entry.timestamp)}
-                              </span>
-                            </div>
-                            <div className="mt-1 text-[0.92rem] leading-7 text-[var(--workspace-text-soft)]">
-                              {renderTextWithMentions(
-                                entry.text,
-                                new Map(
-                                  (entry.mentions ?? []).map((mention) => [
-                                    mention.handle.toLowerCase(),
-                                    mention,
-                                  ]),
-                                ),
-                                resolvedTheme,
-                              )}
-                            </div>
+                      <div className="space-y-3">
+                        {inviteVisibleMessages.length > 2 ? (
+                          <div className="flex justify-start">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setExternalReviewHistoryExpanded((current) => !current)
+                              }
+                              className="inline-flex h-8 items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-3 text-[0.66rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-soft)] transition-[background-color,border-color,color] duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] focus-visible:outline-none"
+                            >
+                              {externalReviewHistoryExpanded
+                                ? "Show latest"
+                                : `View all messages (${inviteVisibleMessages.length})`}
+                            </button>
                           </div>
-                        ))}
+                        ) : null}
+                        <div className="max-h-[360px] space-y-2 overflow-y-auto pr-1">
+                          {visibleExternalReviewMessages.map((entry) => (
+                            <div
+                              key={entry.id}
+                              className="rounded-[16px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-3.5 py-2.5"
+                            >
+                              <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[0.78rem] leading-5 text-[var(--workspace-text)]">
+                                <span>{entry.authorName}</span>
+                                <span
+                                  className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[0.6rem] font-medium uppercase tracking-[0.14em] ${
+                                    getCollaborationMessageVisibility(entry) === "internal"
+                                      ? "border-[color:rgba(115,132,118,0.24)] bg-[color:rgba(126,155,128,0.12)] text-[color:rgba(82,97,85,0.86)]"
+                                      : "border-[color:rgba(123,116,106,0.18)] bg-[color:rgba(136,127,115,0.08)] text-[color:rgba(126,117,106,0.78)]"
+                                  }`}
+                                >
+                                  {getCollaborationMessageVisibility(entry) === "internal"
+                                    ? "Internal"
+                                    : "Shared"}
+                                </span>
+                                <span className="text-[0.72rem] text-[var(--workspace-text-faint)]">
+                                  {formatCollaborationStatusTimestamp(entry.timestamp)}
+                                </span>
+                              </div>
+                              <div className="mt-1 text-[0.88rem] leading-6 text-[var(--workspace-text-soft)]">
+                                {renderTextWithMentions(
+                                  entry.text,
+                                  new Map(
+                                    (entry.mentions ?? []).map((mention) => [
+                                      mention.handle.toLowerCase(),
+                                      mention,
+                                    ]),
+                                  ),
+                                  resolvedTheme,
+                                )}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
                       </div>
                     ) : (
                       <div className="text-[0.88rem] leading-7 text-[var(--workspace-text-faint)]">
