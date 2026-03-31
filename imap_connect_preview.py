@@ -42,28 +42,6 @@ def map_to_ui_signal(result: dict[str, Any]) -> str:
     return "NEW"
 
 
-def normalize_internal_classification(category: Any) -> str:
-    normalized_category = str(category or "").strip().lower()
-
-    if normalized_category in {
-        "demo",
-        "high_priority_demo",
-        "promo",
-        "promo_reminder",
-        "reply",
-        "workflow_update",
-        "business",
-        "business_reminder",
-        "royalty_statement",
-        "distributor_update",
-        "finance",
-        "info",
-    }:
-        return normalized_category
-
-    return "unknown"
-
-
 def decode_mime_words(value: str | None) -> str:
     if not value:
         return ""
@@ -251,7 +229,7 @@ def format_timestamp(date_header: str) -> tuple[str, str]:
         return fallback_timestamp, fallback_timestamp
 
 
-def resolve_preview_routing(message: Message, email_address: str) -> dict[str, Any]:
+def resolve_ui_signal(message: Message, email_address: str) -> str:
     try:
         from imap_live_v6_5_5_stable import (
             INBOX_CONFIG,
@@ -271,10 +249,7 @@ def resolve_preview_routing(message: Message, email_address: str) -> dict[str, A
         from v7_decision_layer import decide_message_behavior
     except Exception:
         logger.exception("Could not load ui_signal dependencies for message preview")
-        return {
-            "ui_signal": "NEW",
-            "internalClassification": "unknown",
-        }
+        return "NEW"
 
     local_part = email_address.split("@")[0].strip().lower()
     mailbox_label = f"{local_part}@"
@@ -528,13 +503,6 @@ def resolve_preview_routing(message: Message, email_address: str) -> dict[str, A
             )
 
             result["v7_final_priority"] = v7_decision.final_priority
-            result["final_visibility"] = v7_decision.final_visibility
-            result["action"] = v7_decision.action
-
-        result["internalClassification"] = normalize_internal_classification(
-            result.get("category"),
-        )
-        result["ui_signal"] = result.get("ui_signal") or map_to_ui_signal(result)
 
         logger.warning(
             "Preview ui_signal resolved category=%s priority=%s workflow_links=%s usable_demo_links=%s subject=%s",
@@ -544,17 +512,10 @@ def resolve_preview_routing(message: Message, email_address: str) -> dict[str, A
             result.get("usable_demo_links"),
             decode_mime_words(message.get("Subject", "")),
         )
-        return result
+        return result.get("ui_signal") or map_to_ui_signal(result)
     except Exception:
         logger.exception("Could not resolve ui_signal for message preview")
-        return {
-            "ui_signal": "NEW",
-            "internalClassification": "unknown",
-        }
-
-
-def resolve_ui_signal(message: Message, email_address: str) -> str:
-    return str(resolve_preview_routing(message, email_address).get("ui_signal") or "NEW")
+        return "NEW"
 
 
 def to_message_preview(
@@ -576,7 +537,6 @@ def to_message_preview(
     message_id = message.get("Message-Id") or hashlib.sha1(
         stable_id_source.encode("utf-8"),
     ).hexdigest()
-    preview_routing = resolve_preview_routing(message, email_address)
 
     return {
       "id": message_id.strip("<>"),
@@ -591,12 +551,7 @@ def to_message_preview(
       "body": body.split("\n\n") if body else [snippet or "No message preview available."],
       "unread": unread,
       "imapUid": imap_uid,
-      "ui_signal": preview_routing.get("ui_signal"),
-      "internalClassification": preview_routing.get("internalClassification"),
-      "final_visibility": preview_routing.get("final_visibility"),
-      "action": preview_routing.get("action"),
-      "v7_final_priority": preview_routing.get("v7_final_priority"),
-      "category": preview_routing.get("category"),
+      "ui_signal": resolve_ui_signal(message, email_address),
     }
 
 

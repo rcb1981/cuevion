@@ -303,7 +303,6 @@ type MailMessageOwner = {
   source: "implicit";
 };
 type MailMessagePriorityScore = "low" | "medium" | "high";
-type MailMessagePriorityLabel = "PRIORITY" | "REVIEW" | "NORMAL" | "LOW";
 type MailMessageFocusSignal = "attention" | null;
 type ManualPriorityOverride = "priority" | "removed";
 type LearningDecisionSourceContext =
@@ -427,7 +426,6 @@ type MailMessage = {
   sharedContext?: MailMessageSharedContext;
   collaboration?: MailMessageCollaboration;
   owner?: MailMessageOwner;
-  v7_final_priority?: MailMessagePriorityLabel;
   priorityScore: MailMessagePriorityScore;
   focusSignal?: MailMessageFocusSignal;
   suggestionDismissed?: boolean;
@@ -456,7 +454,6 @@ type MailMessageSeed = Omit<
   category?: CuevionMessageCategory;
   categorySource?: CuevionCategorySource;
   categoryConfidence?: CuevionCategoryConfidence;
-  v7_final_priority?: MailMessagePriorityLabel;
   final_visibility?: string;
   action?: string;
   suggestion?: MailMessageSuggestion;
@@ -2310,7 +2307,7 @@ function inferInternalClassification(
 }
 
 function resolveVisiblePrioritySignal(
-  message: Pick<MailMessage, "signal" | "final_visibility" | "action">,
+  message: Pick<MailMessage, "signal">,
   override?: ManualPriorityOverride,
 ) {
   if (override === "priority") {
@@ -2325,31 +2322,14 @@ function resolveVisiblePrioritySignal(
     return null;
   }
 
-  if (
-    message.final_visibility === "show_priority" ||
-    message.action === "show_in_priority"
-  ) {
-    return "Priority";
-  }
-
   return message.signal ?? null;
 }
 
 function getVisiblePriorityBadge(
-  message: Pick<
-    MailMessage,
-    "priorityScore" | "signal" | "final_visibility" | "action"
-  >,
+  message: Pick<MailMessage, "priorityScore" | "signal">,
   override?: ManualPriorityOverride,
 ) {
   if (override === "priority" || message.signal === "Priority") {
-    return "PRIORITY";
-  }
-
-  if (
-    message.final_visibility === "show_priority" ||
-    message.action === "show_in_priority"
-  ) {
     return "PRIORITY";
   }
 
@@ -3252,24 +3232,13 @@ function shouldRouteMessageToFilteredFolder(
   message: MailMessage,
   senderCategoryLearning: SenderCategoryLearningStore,
 ) {
-  const hasProtectedV7PriorityRouting =
-    message.final_visibility === "show_priority" ||
-    message.action === "show_in_priority";
-  const hasProtectedFinanceVisibility =
-    (message.internalClassification === "royalty_statement" ||
-      message.internalClassification === "finance") &&
-    (message.final_visibility === "show_priority" ||
-      message.final_visibility === "show_normal");
-
   if (
     message.categoryConfidence === "low" ||
     message.isShared ||
     message.signal === "Priority" ||
     message.signal === "Active" ||
     message.signal === "For review" ||
-    message.signal === "Shortlist" ||
-    hasProtectedV7PriorityRouting ||
-    hasProtectedFinanceVisibility
+    message.signal === "Shortlist"
   ) {
     return false;
   }
@@ -7331,8 +7300,6 @@ function MailboxView({
   };
   const hasProtectedPriorityVisibility = (message: MailMessage) =>
     message.internalClassification === "reply" ||
-    message.final_visibility === "show_priority" ||
-    message.action === "show_in_priority" ||
     Boolean(message.isShared) ||
     Boolean(message.sharedContext);
   const getPriorityVisibilityAdjustedMessage = (message: MailMessage) => {
@@ -20064,19 +20031,11 @@ export function WorkspaceShell({
           imapUid: message.imapUid,
           unread,
           ui_signal: message.ui_signal,
-          internalClassification:
-            message.internalClassification === "unknown"
-              ? undefined
-              : (message.internalClassification as CuevionInternalClassification | undefined),
           from: message.from,
           to: message.to,
           cc: message.cc,
           timestamp: message.timestamp,
           body: message.body,
-          v7_final_priority:
-            message.v7_final_priority as MailMessagePriorityLabel | undefined,
-          final_visibility: message.final_visibility,
-          action: message.action,
           isShared: persistedMessage.isShared ?? existingMessage?.isShared,
           collaboration:
             persistedMessage.collaboration ?? existingMessage?.collaboration,
@@ -20603,8 +20562,6 @@ export function WorkspaceShell({
   };
   const hasPriorityPageProtectedVisibility = (message: MailMessage) =>
     message.internalClassification === "reply" ||
-    message.final_visibility === "show_priority" ||
-    message.action === "show_in_priority" ||
     Boolean(message.isShared) ||
     Boolean(message.sharedContext);
   const getPriorityPageVisiblePriorityBadge = (message: MailMessage) => {
@@ -20616,13 +20573,6 @@ export function WorkspaceShell({
 
     if (override === "removed") {
       return "NORMAL" as const;
-    }
-
-    if (
-      message.final_visibility === "show_priority" ||
-      message.action === "show_in_priority"
-    ) {
-      return "PRIORITY" as const;
     }
 
     if (!hasPriorityPageProtectedVisibility(message)) {
