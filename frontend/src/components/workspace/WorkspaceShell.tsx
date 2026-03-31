@@ -20819,6 +20819,7 @@ export function WorkspaceShell({
     "pending" | "declined" | "left"
   >("pending");
   const [externalReviewHistoryExpanded, setExternalReviewHistoryExpanded] = useState(false);
+  const [isExternalReviewMessageOpen, setIsExternalReviewMessageOpen] = useState(false);
   const [inviteReplyDraft, setInviteReplyDraft] = useState("");
   const [inviteReplyVisibility, setInviteReplyVisibility] =
     useState<MailMessageCollaborationVisibility>(
@@ -23132,187 +23133,268 @@ export function WorkspaceShell({
         );
       }
 
+      const externalReviewMessageBody = (
+        inviteMessage?.body.length ? inviteMessage.body : [inviteMessage?.snippet ?? ""]
+      ).filter(Boolean);
+      const externalReviewMessageTimestamp = inviteMessage?.createdAt ?? inviteMessage?.timestamp;
+
       return (
-        <main
-          data-theme={resolvedTheme}
-          className="box-border min-h-dvh animate-fade-in px-4 py-8 md:px-8 md:py-10"
-          style={{ background: "var(--workspace-bg)", colorScheme: resolvedTheme }}
-        >
-          <div className="mx-auto max-w-[920px] space-y-6">
-            <div className="rounded-[36px] border border-[var(--workspace-shell-border)] bg-[var(--workspace-shell)] p-8 shadow-panel md:p-10">
-              <div className="space-y-2">
-                <div className="text-[0.72rem] font-medium uppercase tracking-[0.22em] text-[var(--workspace-text-faint)]">
-                  Cuevion external review
-                </div>
-                <h1 className="text-[1.75rem] font-medium tracking-[-0.03em] text-[var(--workspace-text)]">
-                  {inviteMessage?.subject ?? "External review"}
-                </h1>
-                <div className="text-[0.92rem] leading-7 text-[var(--workspace-text-soft)]">
-                  Shared by {inviteCollaboration?.requestedBy ?? inviteMessage?.sender ?? "Cuevion"}
-                </div>
-              </div>
-
-              <div className="mt-8 grid gap-5">
-                <section className="rounded-[24px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-6 py-5">
-                  <div className="space-y-4">
-                    <div className="flex flex-wrap items-start justify-between gap-4">
-                      <div>
-                        <div className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
-                          Subject
-                        </div>
-                        <div className="mt-1 text-[1.04rem] font-medium tracking-[-0.02em] text-[var(--workspace-text)]">
-                          {inviteMessage?.subject}
-                        </div>
-                      </div>
-                      <div className="text-right">
-                        <div className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
-                          Sender
-                        </div>
-                        <div className="mt-1 text-[0.96rem] text-[var(--workspace-text)]">
-                          {inviteMessage?.sender}
-                        </div>
-                        <div className="text-[0.84rem] leading-6 text-[var(--workspace-text-soft)]">
-                          {inviteMessage?.from}
-                        </div>
-                      </div>
-                    </div>
-                    <div>
-                      <div className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
-                        Message
-                      </div>
-                      <div className="mt-3 space-y-3 text-[0.94rem] leading-7 text-[var(--workspace-text-soft)]">
-                        {(inviteMessage?.body.length
-                          ? inviteMessage.body
-                          : [inviteMessage?.snippet ?? ""]
-                        )
-                          .filter(Boolean)
-                          .map((paragraph, index) => (
-                            <p key={`external-review-body-${index}`}>{paragraph}</p>
-                          ))}
-                      </div>
-                    </div>
+        <>
+          <main
+            data-theme={resolvedTheme}
+            className="box-border min-h-dvh animate-fade-in px-4 py-8 md:px-8 md:py-10"
+            style={{ background: "var(--workspace-bg)", colorScheme: resolvedTheme }}
+          >
+            <div className="mx-auto max-w-[920px] space-y-6">
+              <div className="rounded-[36px] border border-[var(--workspace-shell-border)] bg-[var(--workspace-shell)] p-8 shadow-panel md:p-10">
+                <div className="space-y-2">
+                  <div className="text-[0.72rem] font-medium uppercase tracking-[0.22em] text-[var(--workspace-text-faint)]">
+                    Cuevion external review
                   </div>
-                </section>
+                  <h1 className="text-[1.75rem] font-medium tracking-[-0.03em] text-[var(--workspace-text)]">
+                    {inviteMessage?.subject ?? "External review"}
+                  </h1>
+                  <div className="text-[0.92rem] leading-7 text-[var(--workspace-text-soft)]">
+                    Shared by{" "}
+                    {inviteCollaboration?.requestedBy ?? inviteMessage?.sender ?? "Cuevion"}
+                  </div>
+                </div>
 
-                <section className="rounded-[24px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-5 py-4">
-                  <div className="space-y-4">
-                    <div className="flex flex-wrap items-start justify-between gap-4">
-                      <div>
-                        <div className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
-                          Collaboration history
-                        </div>
-                        <div className="mt-1 text-[0.92rem] leading-7 text-[var(--workspace-text-soft)]">
-                          {inviteCollaboration
-                            ? getCollaborationReasonLabel(inviteCollaboration)
-                            : "External review"}
-                        </div>
-                      </div>
-                      <div className="text-[0.84rem] leading-6 text-[var(--workspace-text-faint)]">
-                        {inviteParticipants
-                          .map((participant) => participant.name || participant.email)
-                          .join(", ")}
-                      </div>
-                    </div>
-
-                    {inviteVisibleMessages.length > 0 ? (
-                      <div className="space-y-3">
-                        {inviteVisibleMessages.length > 2 ? (
-                          <div className="flex justify-start">
-                            <button
-                              type="button"
-                              onClick={() =>
-                                setExternalReviewHistoryExpanded((current) => !current)
-                              }
-                              className="inline-flex h-8 items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-3 text-[0.66rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-soft)] transition-[background-color,border-color,color] duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] focus-visible:outline-none"
-                            >
-                              {externalReviewHistoryExpanded
-                                ? "Show latest"
-                                : `View all messages (${inviteVisibleMessages.length})`}
-                            </button>
+                <div className="mt-8 grid gap-5">
+                  <section className="rounded-[24px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-6 py-5">
+                    <div className="space-y-4">
+                      <div className="flex flex-wrap items-start justify-between gap-4">
+                        <div>
+                          <div className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                            Subject
                           </div>
-                        ) : null}
-                        <div className="max-h-[360px] space-y-2 overflow-y-auto pr-1">
-                          {visibleExternalReviewMessages.map((entry) => (
-                            <div
-                              key={entry.id}
-                              className="rounded-[16px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-3.5 py-2.5"
-                            >
-                              <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[0.78rem] leading-5 text-[var(--workspace-text)]">
-                                <span>{entry.authorName}</span>
-                                <span
-                                  className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[0.6rem] font-medium uppercase tracking-[0.14em] ${
-                                    getCollaborationMessageVisibility(entry) === "internal"
-                                      ? "border-[color:rgba(115,132,118,0.24)] bg-[color:rgba(126,155,128,0.12)] text-[color:rgba(82,97,85,0.86)]"
-                                      : "border-[color:rgba(123,116,106,0.18)] bg-[color:rgba(136,127,115,0.08)] text-[color:rgba(126,117,106,0.78)]"
-                                  }`}
-                                >
-                                  {getCollaborationMessageVisibility(entry) === "internal"
-                                    ? "Internal"
-                                    : "Shared"}
-                                </span>
-                                <span className="text-[0.72rem] text-[var(--workspace-text-faint)]">
-                                  {formatCollaborationStatusTimestamp(entry.timestamp)}
-                                </span>
-                              </div>
-                              <div className="mt-1 text-[0.88rem] leading-6 text-[var(--workspace-text-soft)]">
-                                {renderTextWithMentions(
-                                  entry.text,
-                                  new Map(
-                                    (entry.mentions ?? []).map((mention) => [
-                                      mention.handle.toLowerCase(),
-                                      mention,
-                                    ]),
-                                  ),
-                                  resolvedTheme,
-                                )}
-                              </div>
-                            </div>
-                          ))}
+                          <div className="mt-1 text-[1.04rem] font-medium tracking-[-0.02em] text-[var(--workspace-text)]">
+                            {inviteMessage?.subject}
+                          </div>
+                        </div>
+                        <div className="text-right">
+                          <div className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                            Sender
+                          </div>
+                          <div className="mt-1 text-[0.96rem] text-[var(--workspace-text)]">
+                            {inviteMessage?.sender}
+                          </div>
+                          <div className="text-[0.84rem] leading-6 text-[var(--workspace-text-soft)]">
+                            {inviteMessage?.from}
+                          </div>
                         </div>
                       </div>
-                    ) : (
-                      <div className="text-[0.88rem] leading-7 text-[var(--workspace-text-faint)]">
-                        No collaboration history yet.
+                      <div className="flex flex-wrap items-center justify-between gap-3 rounded-[20px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-3">
+                        <div className="space-y-1">
+                          <div className="text-[0.78rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)]">
+                            Mail message
+                          </div>
+                          <div className="text-[0.88rem] leading-6 text-[var(--workspace-text-soft)]">
+                            Open the original email without leaving this review.
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setIsExternalReviewMessageOpen(true)}
+                          className="inline-flex h-10 items-center justify-center rounded-full bg-pine px-5 text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[color:rgba(251,248,242,0.98)] transition-[background-color,transform] duration-150 hover:bg-moss active:scale-[0.99] focus-visible:outline-none"
+                        >
+                          View Mail Message
+                        </button>
                       </div>
-                    )}
-                  </div>
-                </section>
+                    </div>
+                  </section>
 
-                <section className="rounded-[24px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-5 py-4">
-                  <label className="block space-y-2.5">
-                    <span className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
-                      Reply
-                    </span>
-                    <div className="text-[0.8rem] leading-6 text-[color:rgba(120,111,100,0.76)]">
-                      Your reply will be shared back into this collaboration.
+                  <section className="rounded-[24px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-5 py-4">
+                    <div className="space-y-4">
+                      <div className="flex flex-wrap items-start justify-between gap-4">
+                        <div>
+                          <div className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                            Collaboration history
+                          </div>
+                          <div className="mt-1 text-[0.92rem] leading-7 text-[var(--workspace-text-soft)]">
+                            {inviteCollaboration
+                              ? getCollaborationReasonLabel(inviteCollaboration)
+                              : "External review"}
+                          </div>
+                        </div>
+                        <div className="text-[0.84rem] leading-6 text-[var(--workspace-text-faint)]">
+                          {inviteParticipants
+                            .map((participant) => participant.name || participant.email)
+                            .join(", ")}
+                        </div>
+                      </div>
+
+                      {inviteVisibleMessages.length > 0 ? (
+                        <div className="space-y-3">
+                          {inviteVisibleMessages.length > 2 ? (
+                            <div className="flex justify-start">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setExternalReviewHistoryExpanded((current) => !current)
+                                }
+                                className="inline-flex h-8 items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-3 text-[0.66rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-soft)] transition-[background-color,border-color,color] duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] focus-visible:outline-none"
+                              >
+                                {externalReviewHistoryExpanded
+                                  ? "Show latest"
+                                  : `View all messages (${inviteVisibleMessages.length})`}
+                              </button>
+                            </div>
+                          ) : null}
+                          <div className="max-h-[360px] space-y-2 overflow-y-auto pr-1">
+                            {visibleExternalReviewMessages.map((entry) => (
+                              <div
+                                key={entry.id}
+                                className="rounded-[16px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-3.5 py-2.5"
+                              >
+                                <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[0.78rem] leading-5 text-[var(--workspace-text)]">
+                                  <span>{entry.authorName}</span>
+                                  <span
+                                    className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[0.6rem] font-medium uppercase tracking-[0.14em] ${
+                                      getCollaborationMessageVisibility(entry) === "internal"
+                                        ? "border-[color:rgba(115,132,118,0.24)] bg-[color:rgba(126,155,128,0.12)] text-[color:rgba(82,97,85,0.86)]"
+                                        : "border-[color:rgba(123,116,106,0.18)] bg-[color:rgba(136,127,115,0.08)] text-[color:rgba(126,117,106,0.78)]"
+                                    }`}
+                                  >
+                                    {getCollaborationMessageVisibility(entry) === "internal"
+                                      ? "Internal"
+                                      : "Shared"}
+                                  </span>
+                                  <span className="text-[0.72rem] text-[var(--workspace-text-faint)]">
+                                    {formatCollaborationStatusTimestamp(entry.timestamp)}
+                                  </span>
+                                </div>
+                                <div className="mt-1 text-[0.88rem] leading-6 text-[var(--workspace-text-soft)]">
+                                  {renderTextWithMentions(
+                                    entry.text,
+                                    new Map(
+                                      (entry.mentions ?? []).map((mention) => [
+                                        mention.handle.toLowerCase(),
+                                        mention,
+                                      ]),
+                                    ),
+                                    resolvedTheme,
+                                  )}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="text-[0.88rem] leading-7 text-[var(--workspace-text-faint)]">
+                          No collaboration history yet.
+                        </div>
+                      )}
                     </div>
-                    <textarea
-                      value={inviteReplyDraft}
-                      onChange={(event) => setInviteReplyDraft(event.target.value)}
-                      rows={4}
-                      placeholder="Add your comment"
-                      className="w-full resize-none rounded-[20px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3 text-[0.92rem] leading-7 text-[var(--workspace-text-soft)] outline-none placeholder:text-[var(--workspace-text-faint)]"
-                    />
-                    <div className="flex justify-end">
-                      <button
-                        type="button"
-                        onClick={sendExternalReviewReply}
-                        disabled={!inviteReplyDraft.trim()}
-                        className={
-                          inviteReplyDraft.trim()
-                            ? "inline-flex h-11 items-center justify-center rounded-full bg-pine px-5 text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[color:rgba(251,248,242,0.98)] transition-[background-color,transform] duration-150 hover:bg-moss active:scale-[0.99] focus-visible:outline-none"
-                            : "inline-flex h-11 cursor-not-allowed items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-5 text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-soft)] opacity-45 transition-[opacity] duration-150 focus-visible:outline-none"
-                        }
-                      >
-                        Send reply
-                      </button>
-                    </div>
-                  </label>
-                </section>
+                  </section>
+
+                  <section className="rounded-[24px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-5 py-4">
+                    <label className="block space-y-2.5">
+                      <span className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                        Reply
+                      </span>
+                      <div className="text-[0.8rem] leading-6 text-[color:rgba(120,111,100,0.76)]">
+                        Your reply will be shared back into this collaboration.
+                      </div>
+                      <textarea
+                        value={inviteReplyDraft}
+                        onChange={(event) => setInviteReplyDraft(event.target.value)}
+                        rows={4}
+                        placeholder="Add your comment"
+                        className="w-full resize-none rounded-[20px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3 text-[0.92rem] leading-7 text-[var(--workspace-text-soft)] outline-none placeholder:text-[var(--workspace-text-faint)]"
+                      />
+                      <div className="flex justify-end">
+                        <button
+                          type="button"
+                          onClick={sendExternalReviewReply}
+                          disabled={!inviteReplyDraft.trim()}
+                          className={
+                            inviteReplyDraft.trim()
+                              ? "inline-flex h-11 items-center justify-center rounded-full bg-pine px-5 text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[color:rgba(251,248,242,0.98)] transition-[background-color,transform] duration-150 hover:bg-moss active:scale-[0.99] focus-visible:outline-none"
+                              : "inline-flex h-11 cursor-not-allowed items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-5 text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-soft)] opacity-45 transition-[opacity] duration-150 focus-visible:outline-none"
+                          }
+                        >
+                          Send reply
+                        </button>
+                      </div>
+                    </label>
+                  </section>
+                </div>
               </div>
             </div>
-          </div>
-        </main>
+          </main>
+          {isExternalReviewMessageOpen && inviteMessage
+            ? createPortal(
+                <WorkspaceModalLayer>
+                  <div
+                    data-theme={resolvedTheme}
+                    className="w-full max-w-[760px] overflow-hidden rounded-[28px] border border-[var(--workspace-border)] bg-[var(--workspace-modal-bg)] p-6 shadow-[0_28px_80px_rgba(61,44,32,0.18),0_10px_26px_rgba(61,44,32,0.1)]"
+                    onMouseDown={(event) => event.stopPropagation()}
+                  >
+                    <div className="flex items-start justify-between gap-4">
+                      <div className="space-y-2">
+                        <div className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                          Mail message
+                        </div>
+                        <h2 className="text-[1.35rem] font-medium tracking-tight text-[var(--workspace-text)]">
+                          {inviteMessage.subject}
+                        </h2>
+                      </div>
+                      <CloseActionButton onClick={() => setIsExternalReviewMessageOpen(false)} />
+                    </div>
+
+                    <div className="mt-6 space-y-5">
+                      <div className="grid gap-4 rounded-[22px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-5 py-4 md:grid-cols-2">
+                        <div>
+                          <div className="text-[0.68rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)]">
+                            From
+                          </div>
+                          <div className="mt-1 text-[0.94rem] text-[var(--workspace-text)]">
+                            {inviteMessage.sender}
+                          </div>
+                          <div className="text-[0.82rem] leading-6 text-[var(--workspace-text-soft)]">
+                            {inviteMessage.from}
+                          </div>
+                        </div>
+                        <div className="md:text-right">
+                          <div className="text-[0.68rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)]">
+                            Received
+                          </div>
+                          <div className="mt-1 text-[0.94rem] text-[var(--workspace-text)]">
+                            {externalReviewMessageTimestamp
+                              ? new Date(externalReviewMessageTimestamp).toLocaleString("en-US", {
+                                  month: "short",
+                                  day: "numeric",
+                                  year: "numeric",
+                                  hour: "numeric",
+                                  minute: "2-digit",
+                                })
+                              : "Unknown"}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="rounded-[22px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-5 py-4">
+                        <div className="text-[0.68rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)]">
+                          Message body
+                        </div>
+                        <div className="mt-4 max-h-[420px] space-y-3 overflow-y-auto pr-1 text-[0.94rem] leading-7 text-[var(--workspace-text-soft)]">
+                          {externalReviewMessageBody.length > 0
+                            ? externalReviewMessageBody.map((paragraph, index) => (
+                                <p key={`external-review-mail-body-${index}`}>{paragraph}</p>
+                              ))
+                            : (
+                              <p>No message content available.</p>
+                            )}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </WorkspaceModalLayer>,
+                document.body,
+              )
+            : null}
+        </>
       );
     }
 
