@@ -2377,6 +2377,31 @@ function inferInternalClassification(
   }
 }
 
+function refineUnknownInternalClassification(
+  message: Pick<MailMessageSeed, "subject" | "snippet">,
+  classification: CuevionInternalClassification,
+): CuevionInternalClassification {
+  if (classification !== "unknown") {
+    return classification;
+  }
+
+  const searchableText = [message.subject, message.snippet].join(" ").toLowerCase();
+
+  if (includesAnyKeyword(searchableText, ["invoice", "payment", "contract", "booking", "client"])) {
+    return "business";
+  }
+
+  if (includesAnyKeyword(searchableText, ["demo", "submission", "track submission"])) {
+    return "demo";
+  }
+
+  if (includesAnyKeyword(searchableText, ["update", "reminder", "confirmation", "status"])) {
+    return "workflow_update";
+  }
+
+  return classification;
+}
+
 function isRoyaltyStatementLikeMessage(
   message: Pick<MailMessageSeed, "subject" | "snippet" | "from" | "sender" | "body">,
 ) {
@@ -3349,11 +3374,13 @@ function normalizeMailMessage(
   );
   const inferredRoyaltyStatement =
     !message.internalClassification && isRoyaltyStatementLikeMessage(message);
-  const internalClassification =
+  const internalClassification = refineUnknownInternalClassification(
+    message,
     message.internalClassification ??
-    (inferredRoyaltyStatement
-      ? "royalty_statement"
-      : inferInternalClassification({ ...message, signal: resolvedSignal }, mailboxId));
+      (inferredRoyaltyStatement
+        ? "royalty_statement"
+        : inferInternalClassification({ ...message, signal: resolvedSignal }, mailboxId)),
+  );
   const normalizedAttachments = (message.attachments ?? []).map((attachment) =>
     normalizeMailAttachment(attachment),
   );
