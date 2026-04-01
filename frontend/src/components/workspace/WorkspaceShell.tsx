@@ -2361,19 +2361,37 @@ function isRoyaltyStatementLikeMessage(
     .join(" ")
     .toLowerCase();
 
+  const hasStatementAvailabilitySignal = includesAnyKeyword(searchableText, [
+    "statement availability",
+    "statement available",
+    "statement ready",
+    "royalty statement",
+  ]);
+  const hasRoyaltyPortalSignal = includesAnyKeyword(searchableText, [
+    "artist royalties portal",
+    "royalties portal",
+    "royalty portal",
+    "earnings portal",
+  ]);
+  const hasClearPromoNewsletterSignal = includesAnyKeyword(searchableText, [
+    "watch",
+    "summit",
+    "on demand",
+    "newsletter",
+    "marketing",
+    "event",
+    "sessions",
+    "webinar",
+    "register",
+    "replay",
+    "join us",
+  ]);
   const hasStrongRoyaltyStatementSignal =
-    includesAnyKeyword(searchableText, [
-      "statement availability",
-      "statement available",
-      "statement ready",
-      "royalty statement",
-      "artist royalties portal",
-      "royalties portal",
-      "royalty portal",
-      "earnings portal",
-    ]) ||
+    hasStatementAvailabilitySignal ||
+    (hasRoyaltyPortalSignal && !hasClearPromoNewsletterSignal) ||
     (includesAnyKeyword(searchableText, ["warner music", "warnermusic", "wmg"]) &&
-      includesAnyKeyword(searchableText, ["statement", "royalty", "royalties", "portal"]));
+      includesAnyKeyword(searchableText, ["statement", "royalty", "royalties", "portal"]) &&
+      !hasClearPromoNewsletterSignal);
 
   return hasStrongRoyaltyStatementSignal;
 }
