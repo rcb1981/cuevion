@@ -12330,6 +12330,10 @@ function MailboxView({
                 ) : (
                   <div className="space-y-2">
                     {sortedMessages.map((message) => {
+                      console.log(
+                        "SMART_FOLDER_CLASSIFICATION",
+                        message.internalClassification,
+                      );
                       const active = visibleSelectedMessageIds.includes(message.id);
                       const compactSnippet =
                         message.snippet.length > MAIL_LIST_PREVIEW_CHARACTER_CAP
