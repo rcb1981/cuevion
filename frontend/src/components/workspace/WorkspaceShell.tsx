@@ -2277,6 +2277,20 @@ function inferHeuristicSignal(
     "reden factuur",
     "uitgaven van advertenties",
   ];
+  const hasClearMarketingNewsletterSignal = includesAnyKeyword(searchableText, [
+    "watch",
+    "summit",
+    "on demand",
+    "newsletter",
+    "in brief newsletter",
+    "marketing",
+    "event",
+    "sessions",
+    "webinar",
+    "register",
+    "replay",
+    "join us",
+  ]);
   const isAutomatedSender = includesAnyKeyword(normalizedSender, automatedSenderHints);
   const isGoogleSecurityAuthMail = includesAnyKeyword(
     searchableText,
@@ -2298,7 +2312,7 @@ function inferHeuristicSignal(
     includesAnyKeyword(searchableText, updateKeywords) ||
     (isAutomatedSender && !isPromo);
 
-  if (isMetaBillingSystemMail) {
+  if (isMetaBillingSystemMail && !hasClearMarketingNewsletterSignal) {
     return "Finance";
   }
 
@@ -2396,6 +2410,35 @@ function isRoyaltyStatementLikeMessage(
   return hasStrongRoyaltyStatementSignal;
 }
 
+function isMarketingNewsletterUpdateMessage(
+  message: Pick<MailMessage, "subject" | "snippet" | "sender" | "from" | "body">,
+) {
+  const searchableText = [
+    message.subject,
+    message.snippet,
+    message.sender,
+    message.from,
+    ...(message.body ?? []),
+  ]
+    .join(" ")
+    .toLowerCase();
+
+  return includesAnyKeyword(searchableText, [
+    "watch",
+    "summit",
+    "on demand",
+    "newsletter",
+    "in brief newsletter",
+    "marketing",
+    "event",
+    "sessions",
+    "webinar",
+    "register",
+    "replay",
+    "join us",
+  ]);
+}
+
 function resolveVisiblePrioritySignal(
   message: Pick<MailMessage, "signal">,
   override?: ManualPriorityOverride,
@@ -2439,8 +2482,19 @@ function getVisiblePriorityBadge(
 }
 
 function getVisibleCategoryLabel(
-  message: Pick<MailMessage, "internalClassification" | "signal" | "ui_signal">,
+  message: Pick<
+    MailMessage,
+    "internalClassification" | "signal" | "ui_signal" | "subject" | "snippet" | "sender" | "from" | "body"
+  >,
 ) {
+  if (
+    !message.internalClassification &&
+    (message.ui_signal === "FINANCE" || message.signal === "Finance") &&
+    isMarketingNewsletterUpdateMessage(message)
+  ) {
+    return "Update";
+  }
+
   const classification = message.internalClassification;
 
   switch (classification) {
@@ -7315,6 +7369,14 @@ function MailboxView({
     if (
       (message.internalClassification === "promo" || signalClassification === "promo") &&
       isBroadcastPromoMessage(message)
+    ) {
+      return "workflow_update" as const;
+    }
+
+    if (
+      !message.internalClassification &&
+      signalClassification === "finance" &&
+      isMarketingNewsletterUpdateMessage(message)
     ) {
       return "workflow_update" as const;
     }
@@ -21104,6 +21166,14 @@ export function WorkspaceShell({
     if (
       (message.internalClassification === "promo" || signalClassification === "promo") &&
       isPriorityPageBroadcastPromoMessage(message)
+    ) {
+      return "workflow_update" as const;
+    }
+
+    if (
+      !message.internalClassification &&
+      signalClassification === "finance" &&
+      isMarketingNewsletterUpdateMessage(message)
     ) {
       return "workflow_update" as const;
     }
