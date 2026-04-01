@@ -829,6 +829,26 @@ function createEmptySmartFolderRule(): SmartFolderRule {
   };
 }
 
+const smartFolderLabelClassificationMap = {
+  business: ["business", "business_reminder"],
+  demo: ["demo", "high_priority_demo"],
+  finance: ["finance", "royalty_statement"],
+  info: ["info"],
+  promo: ["promo", "promo_reminder"],
+  reply: ["reply"],
+  update: ["workflow_update", "distributor_update", "business_reminder", "info"],
+} as const satisfies Record<string, CuevionInternalClassification[]>;
+
+const smartFolderLabelOptions = [
+  { value: "business", label: "Business" },
+  { value: "demo", label: "Demo" },
+  { value: "finance", label: "Finance" },
+  { value: "info", label: "Info" },
+  { value: "promo", label: "Promo" },
+  { value: "reply", label: "Reply" },
+  { value: "update", label: "Updates" },
+] as const;
+
 function getSmartFolderRuleMatchValue(message: MailMessage, field: SmartFolderRuleField) {
   if (field === "From") {
     return message.from;
@@ -859,23 +879,18 @@ function doesMessageMatchSmartFolderRule(message: MailMessage, rule: SmartFolder
     const classification = (message.internalClassification ?? "unknown")
       .trim()
       .toLowerCase();
+    const matchingClassifications =
+      smartFolderLabelClassificationMap[
+        ruleValue as keyof typeof smartFolderLabelClassificationMap
+      ];
 
-    if (ruleValue === "finance") {
-      return classification === "finance" || classification === "royalty_statement";
+    if (!matchingClassifications) {
+      return false;
     }
 
-    if (ruleValue === "update") {
-      return [
-        "workflow_update",
-        "distributor_update",
-        "labelradar_update",
-        "trackstack_submission",
-        "business_reminder",
-        "info",
-      ].includes(classification);
-    }
-
-    return classification.includes(ruleValue);
+    return matchingClassifications.includes(
+      classification as CuevionInternalClassification,
+    );
   }
 
   const matchValue = getSmartFolderRuleMatchValue(message, rule.field)
@@ -16809,13 +16824,15 @@ const SmartFolderModal = memo(function SmartFolderModal({
                         onChange={(event) => onChangeRuleValue(rule.id, event.target.value)}
                         className={inputFieldClass}
                       >
-                        <option value="finance">Finance</option>
-                        <option value="update">Updates</option>
-                        <option value="promo">Promo</option>
-                        <option value="demo">Demo</option>
-                        <option value="business">Business</option>
-                        <option value="reply">Reply</option>
-                        <option value="info">Info</option>
+                        <option value="">Choose label</option>
+                        {smartFolderLabelOptions.map((option) => (
+                          <option
+                            key={`smart-folder-label-${option.value}`}
+                            value={option.value}
+                          >
+                            {option.label}
+                          </option>
+                        ))}
                       </select>
                     ) : (
                       <input
