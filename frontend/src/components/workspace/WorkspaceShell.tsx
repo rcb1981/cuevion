@@ -829,7 +829,7 @@ function createEmptySmartFolderRule(): SmartFolderRule {
   };
 }
 
-const smartFolderLabelClassificationMap = {
+const smartFolderLabelClassificationMap: Record<string, CuevionInternalClassification[]> = {
   business: ["business", "business_reminder"],
   demo: ["demo", "high_priority_demo"],
   finance: ["finance", "royalty_statement"],
@@ -837,7 +837,7 @@ const smartFolderLabelClassificationMap = {
   promo: ["promo", "promo_reminder"],
   reply: ["reply"],
   update: ["workflow_update", "distributor_update", "business_reminder", "info"],
-} as const satisfies Record<string, CuevionInternalClassification[]>;
+};
 
 const smartFolderLabelOptions = [
   { value: "business", label: "Business" },
