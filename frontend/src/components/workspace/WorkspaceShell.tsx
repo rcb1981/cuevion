@@ -506,9 +506,11 @@ type NotificationNavigationRequest = {
   requestKey: number;
 };
 type VisibleNotificationItem = {
+  id: string;
   title: string;
   detail: string;
   time: string;
+  sortTimestamp: number;
   action: () => void;
 };
 type VisibleActivityItem = {
@@ -6014,15 +6016,19 @@ function TopCards({
 }
 
 function buildVisibleNotificationItems({
-  mailboxStore: _mailboxStore,
-  orderedMailboxes: _orderedMailboxes,
-  authenticatedUser: _authenticatedUser,
+  mailboxStore,
+  orderedMailboxes,
+  authenticatedUser,
+  currentUserId,
+  currentUserName,
   teamActivityEnabled,
-  onOpenNotificationNavigation: _onOpenNotificationNavigation,
+  onOpenNotificationNavigation,
 }: {
   mailboxStore: MailboxStore;
   orderedMailboxes: OrderedMailbox[];
   authenticatedUser?: AuthenticatedCuevionUser | null;
+  currentUserId: string;
+  currentUserName: string;
   teamActivityEnabled: boolean;
   onOpenNotificationNavigation: (
     request: Omit<NotificationNavigationRequest, "requestKey">,
@@ -6032,8 +6038,97 @@ function buildVisibleNotificationItems({
     return [];
   }
 
-  // Notifications stay intentionally empty until product-ready live types are released.
-  return [];
+  const viewerType = authenticatedUser?.userType === "guest" ? "external" : "workspace";
+  const seenItemIds = new Set<string>();
+
+  return orderedMailboxes
+    .flatMap((mailbox) =>
+      (["Inbox", "Filtered"] as const).flatMap((folder) =>
+        (mailboxStore[mailbox.id]?.[folder] ?? []).flatMap((message) => {
+          if (!message.collaboration) {
+            return [];
+          }
+
+          const subjectDetail = message.subject;
+          const items: VisibleNotificationItem[] = [];
+          const isOwnCollaborationStart =
+            message.collaboration.requestedBy === currentUserName;
+
+          if (!isOwnCollaborationStart) {
+            items.push({
+              id: `notification:created:${message.id}:${message.collaboration.createdAt}`,
+              title: `${message.collaboration.requestedBy} started a collaboration`,
+              detail: subjectDetail,
+              time: formatVisibleActivityTimestamp(message.collaboration.createdAt),
+              sortTimestamp: message.collaboration.createdAt,
+              action: () =>
+                onOpenNotificationNavigation({
+                  type: "reply",
+                  mailboxId: mailbox.id,
+                  messageId: message.id,
+                }),
+            });
+          }
+
+          if (
+            message.collaboration.resolvedAt &&
+            message.collaboration.resolvedByUserName &&
+            message.collaboration.resolvedByUserId !== currentUserId &&
+            message.collaboration.resolvedByUserName !== currentUserName
+          ) {
+            items.push({
+              id: `notification:resolved:${message.id}:${message.collaboration.resolvedAt}`,
+              title: `${message.collaboration.resolvedByUserName} marked this as done`,
+              detail: subjectDetail,
+              time: formatVisibleActivityTimestamp(message.collaboration.resolvedAt),
+              sortTimestamp: message.collaboration.resolvedAt,
+              action: () =>
+                onOpenNotificationNavigation({
+                  type: "reply",
+                  mailboxId: mailbox.id,
+                  messageId: message.id,
+                }),
+            });
+          }
+
+          message.collaboration.messages
+            .filter((entry) => canViewerSeeCollaborationMessage(entry, viewerType))
+            .filter((entry) => entry.authorId !== currentUserId && entry.authorName !== currentUserName)
+            .filter((entry) => entry.timestamp !== message.collaboration?.createdAt)
+            .forEach((entry) => {
+              items.push({
+                id: `notification:reply:${message.id}:${entry.id}`,
+                title:
+                  getCollaborationMessageVisibility(entry) === "internal"
+                    ? `${entry.authorName} replied internally`
+                    : `${entry.authorName} replied`,
+                detail: subjectDetail,
+                time: formatVisibleActivityTimestamp(entry.timestamp),
+                sortTimestamp: entry.timestamp,
+                action: () =>
+                  onOpenNotificationNavigation({
+                    type: "reply",
+                    mailboxId: mailbox.id,
+                    messageId: message.id,
+                    collaborationMessageId: entry.id,
+                  }),
+              });
+            });
+
+          return items;
+        }),
+      ),
+    )
+    .sort((firstItem, secondItem) => secondItem.sortTimestamp - firstItem.sortTimestamp)
+    .filter((item) => {
+      if (seenItemIds.has(item.id)) {
+        return false;
+      }
+
+      seenItemIds.add(item.id);
+      return true;
+    })
+    .slice(0, 24);
 }
 
 function formatVisibleActivityTimestamp(timestamp: number) {
@@ -6206,7 +6301,7 @@ function NotificationsPreviewBlock({
         <div className="space-y-2.5">
           {items.slice(0, 5).map((item) => (
             <button
-              key={`${item.title}-${item.time}`}
+              key={item.id}
               type="button"
               onClick={item.action}
               className="flex w-full items-start justify-between gap-4 rounded-[20px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-3.5 text-left transition-[background-color,background-image,border-color,transform] duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)] focus-visible:border-[var(--workspace-border-hover)] focus-visible:bg-[linear-gradient(180deg,var(--workspace-card-featured-start),var(--workspace-card-featured-end))] focus-visible:outline-none"
@@ -14396,7 +14491,7 @@ function WorkbenchView({
             <div className="divide-y divide-[var(--workspace-divider)]">
               {visibleNotificationItems.map((item) => (
                 <button
-                  key={`${item.title}-${item.time}`}
+                  key={item.id}
                   type="button"
                   onClick={item.action}
                   className="flex w-full items-start justify-between gap-4 rounded-[18px] px-2 py-3 text-left transition-colors duration-200 first:mt-[-0.25rem] first:pt-3 last:mb-[-0.25rem] hover:bg-[var(--workspace-surface-hover)] focus-visible:bg-[var(--workspace-surface-selected)] focus-visible:outline-none"
@@ -22158,6 +22253,8 @@ export function WorkspaceShell({
     mailboxStore,
     orderedMailboxes,
     authenticatedUser,
+    currentUserId: currentWorkspaceUserId,
+    currentUserName: authenticatedUser?.name ?? "You",
     teamActivityEnabled,
     onOpenNotificationNavigation: handleOpenNotificationNavigation,
   });
