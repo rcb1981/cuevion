@@ -2387,15 +2387,43 @@ function refineUnknownInternalClassification(
 
   const searchableText = [message.subject, message.snippet].join(" ").toLowerCase();
 
-  if (includesAnyKeyword(searchableText, ["invoice", "payment", "contract", "booking", "client"])) {
+  if (
+    includesAnyKeyword(searchableText, [
+      "invoice",
+      "payment",
+      "contract",
+      "agreement",
+      "booking",
+      "client",
+      "rights",
+    ])
+  ) {
     return "business";
   }
 
-  if (includesAnyKeyword(searchableText, ["demo", "submission", "track submission"])) {
+  if (
+    includesAnyKeyword(searchableText, [
+      "demo",
+      "submission",
+      "track submission",
+      "send demo",
+      "unreleased track",
+    ])
+  ) {
     return "demo";
   }
 
-  if (includesAnyKeyword(searchableText, ["update", "reminder", "confirmation", "status"])) {
+  if (
+    includesAnyKeyword(searchableText, [
+      "update",
+      "reminder",
+      "confirmation",
+      "confirmed",
+      "status",
+      "delivered",
+      "receipt",
+    ])
+  ) {
     return "workflow_update";
   }
 
@@ -12357,10 +12385,6 @@ function MailboxView({
                 ) : (
                   <div className="space-y-2">
                     {sortedMessages.map((message) => {
-                      console.log(
-                        "SMART_FOLDER_CLASSIFICATION",
-                        message.internalClassification,
-                      );
                       const active = visibleSelectedMessageIds.includes(message.id);
                       const compactSnippet =
                         message.snippet.length > MAIL_LIST_PREVIEW_CHARACTER_CAP
@@ -20703,7 +20727,6 @@ export function WorkspaceShell({
         resolveUnreadOverride(messageUnreadOverrides, persistedMessage) ??
         existingMessage?.unread ??
         message.unread;
-
       return normalizeMailMessage(
         {
           id: message.id,
