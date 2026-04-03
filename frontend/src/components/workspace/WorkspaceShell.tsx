@@ -548,6 +548,7 @@ const canonicalFolderOrder: MailFolder[] = [
 const AI_SUGGESTIONS_STORAGE_KEY = "cuevion-ai-suggestions-enabled";
 const INBOX_CHANGES_STORAGE_KEY = "cuevion-inbox-changes-enabled";
 const TEAM_ACTIVITY_STORAGE_KEY = "cuevion-team-activity-enabled";
+const CUEVION_NOTIFICATION_READ_STORAGE_KEY = "cuevion-notification-read";
 const buildTeamMembersStorageKey = (workspaceKey: string) =>
   `cuevion-team-members:${workspaceKey}`;
 const buildTeamPendingInvitationStorageKey = (workspaceKey: string) =>
@@ -620,6 +621,10 @@ function buildManualPriorityOverridesStorageKey(
   orderedMailboxKey: string,
 ) {
   return `${CUEVION_MANUAL_PRIORITY_OVERRIDES_STORAGE_KEY}:${workspaceUserId}:${orderedMailboxKey}`;
+}
+
+function buildNotificationReadStorageKey(workspaceUserId: string) {
+  return `${CUEVION_NOTIFICATION_READ_STORAGE_KEY}:${workspaceUserId}`;
 }
 
 function createEmptySignatureSettings(): InboxSignatureSettings {
@@ -5730,6 +5735,7 @@ function WorkspaceSidebar({
   activeSection,
   activeMailboxId,
   hasPendingTeamInvitation,
+  notificationUnreadCount,
   orderedMailboxes,
   onChangeSection,
   onOpenMailbox,
@@ -5737,6 +5743,7 @@ function WorkspaceSidebar({
   activeSection: WorkspaceSection;
   activeMailboxId: InboxId | null;
   hasPendingTeamInvitation: boolean;
+  notificationUnreadCount: number;
   orderedMailboxes: OrderedMailbox[];
   onChangeSection: (view: WorkspaceSection) => void;
   onOpenMailbox: (mailbox: OrderedMailbox) => void;
@@ -5920,6 +5927,11 @@ function WorkspaceSidebar({
           aria-label={item.label}
         >
           <span className="hidden xl:inline">{item.label}</span>
+          {item.section === "Notifications" && notificationUnreadCount > 0 ? (
+            <span className="ml-2 hidden min-w-[1.4rem] items-center justify-center rounded-full bg-[linear-gradient(180deg,var(--workspace-sidebar-active-start),var(--workspace-sidebar-active-end))] px-1.5 py-0.5 text-[0.62rem] font-medium tracking-normal text-[var(--workspace-sidebar-text)] xl:inline-flex">
+              {notificationUnreadCount > 99 ? "99+" : notificationUnreadCount}
+            </span>
+          ) : null}
           {item.section === "Team" && hasPendingTeamInvitation ? (
             <span className="ml-2 hidden xl:inline-flex">
               <span className="h-[7px] w-[7px] rounded-full bg-[radial-gradient(circle_at_30%_30%,#DCCFBB_0%,#D2C2A8_48%,#C3B091_100%)] shadow-[0_0_5px_rgba(210,194,168,0.28)]" />
@@ -14229,6 +14241,8 @@ function WorkbenchView({
   onOpenSenderContext,
   activityItems,
   notificationItems,
+  unreadNotificationIds,
+  onOpenNotificationItem,
   aiSuggestionsEnabled,
   inboxChangesEnabled,
   teamActivityEnabled,
@@ -14247,6 +14261,8 @@ function WorkbenchView({
   onOpenSenderContext: () => void;
   activityItems: VisibleActivityItem[];
   notificationItems: VisibleNotificationItem[];
+  unreadNotificationIds: Set<string>;
+  onOpenNotificationItem: (item: VisibleNotificationItem) => void;
   aiSuggestionsEnabled: boolean;
   inboxChangesEnabled: boolean;
   teamActivityEnabled: boolean;
@@ -14546,12 +14562,17 @@ function WorkbenchView({
                 <button
                   key={item.id}
                   type="button"
-                  onClick={item.action}
+                  onClick={() => onOpenNotificationItem(item)}
                   className="flex w-full items-start justify-between gap-4 rounded-[18px] px-2 py-3 text-left transition-colors duration-200 first:mt-[-0.25rem] first:pt-3 last:mb-[-0.25rem] hover:bg-[var(--workspace-surface-hover)] focus-visible:bg-[var(--workspace-surface-selected)] focus-visible:outline-none"
                 >
                   <div className="min-w-0 space-y-0.5">
-                    <div className="text-[0.92rem] font-medium tracking-[-0.014em] text-[var(--workspace-text)]">
-                      {item.title}
+                    <div className="flex items-center gap-2">
+                      {unreadNotificationIds.has(item.id) ? (
+                        <span className="inline-flex h-2 w-2 flex-none rounded-full bg-[var(--workspace-accent-text)]" />
+                      ) : null}
+                      <div className="text-[0.92rem] font-medium tracking-[-0.014em] text-[var(--workspace-text)]">
+                        {item.title}
+                      </div>
                     </div>
                     <div className="text-[0.78rem] leading-6 text-[var(--workspace-text-soft)]">
                       {item.detail}
@@ -20732,6 +20753,7 @@ export function WorkspaceShell({
     currentWorkspaceUserId,
     mailboxOrderKey,
   );
+  const notificationReadStorageKey = buildNotificationReadStorageKey(currentWorkspaceUserId);
   const liveMailboxSyncKey = orderedMailboxes
     .map((mailbox) => `${mailbox.id}:${mailbox.email}:${mailbox.title}`)
     .join("|");
@@ -20804,6 +20826,24 @@ export function WorkspaceShell({
         return {};
       }
     });
+  const [readNotificationIds, setReadNotificationIds] = useState<string[]>(() => {
+    if (typeof window === "undefined") {
+      return [];
+    }
+
+    const storedValue = window.localStorage.getItem(notificationReadStorageKey);
+
+    if (!storedValue) {
+      return [];
+    }
+
+    try {
+      const parsed = JSON.parse(storedValue) as string[];
+      return Array.isArray(parsed) ? parsed.filter((value) => typeof value === "string") : [];
+    } catch {
+      return [];
+    }
+  });
   const syncUnreadOverrides = (
     messages: MessageIdentitySource[],
     unread: boolean,
@@ -22311,6 +22351,12 @@ export function WorkspaceShell({
     teamActivityEnabled,
     onOpenNotificationNavigation: handleOpenNotificationNavigation,
   });
+  const unreadNotificationIds = new Set(
+    liveNotificationItems
+      .filter((item) => !readNotificationIds.includes(item.id))
+      .map((item) => item.id),
+  );
+  const notificationUnreadCount = unreadNotificationIds.size;
   const liveActivityItems = buildVisibleActivityItems({
     mailboxStore,
     orderedMailboxes,
@@ -22318,6 +22364,12 @@ export function WorkspaceShell({
     teamActivityEnabled,
     onOpenActivityNavigation: handleOpenNotificationNavigation,
   });
+  const handleOpenNotificationItem = (item: VisibleNotificationItem) => {
+    setReadNotificationIds((current) =>
+      current.includes(item.id) ? current : [...current, item.id],
+    );
+    item.action();
+  };
 
   const openReviewItemInInbox = (
     reviewItem: ReviewItem,
@@ -23083,6 +23135,17 @@ export function WorkspaceShell({
       JSON.stringify(manualPriorityOverrides),
     );
   }, [manualPriorityOverrides, manualPriorityOverridesStorageKey]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    window.localStorage.setItem(
+      notificationReadStorageKey,
+      JSON.stringify(readNotificationIds),
+    );
+  }, [notificationReadStorageKey, readNotificationIds]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -24185,6 +24248,7 @@ export function WorkspaceShell({
         activeSection={activeSection}
         activeMailboxId={activeMailbox?.id ?? null}
         hasPendingTeamInvitation={Boolean(pendingTeamInvitation)}
+        notificationUnreadCount={notificationUnreadCount}
         orderedMailboxes={orderedMailboxes}
         onChangeSection={handleChangeSection}
         onOpenMailbox={(mailbox) =>
@@ -24337,6 +24401,8 @@ export function WorkspaceShell({
                   onOpenSenderContext={handleOpenSenderContext}
                   activityItems={liveActivityItems}
                   notificationItems={liveNotificationItems}
+                  unreadNotificationIds={unreadNotificationIds}
+                  onOpenNotificationItem={handleOpenNotificationItem}
                   aiSuggestionsEnabled={aiSuggestionsEnabled}
                   inboxChangesEnabled={inboxChangesEnabled}
                   teamActivityEnabled={teamActivityEnabled}
