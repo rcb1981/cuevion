@@ -7735,15 +7735,17 @@ function MailboxView({
       : orderedMailboxes.map((candidate) => candidate.id);
   const smartFolderEntries = activeSmartFolder
     ? smartFolderScopeMailboxIds.flatMap((mailboxId) =>
-        ((mailboxId === mailbox.id
-          ? messageCollections.Inbox
-          : mailboxStore[mailboxId]?.Inbox) ?? [])
-          .filter((message) => doesMessageMatchSmartFolder(message, activeSmartFolder))
-          .map((message) => ({
-            mailboxId,
-            folder: "Inbox" as MailFolder,
-            message,
-          })),
+        (["Inbox", "Filtered"] as const).flatMap((folder) =>
+          ((mailboxId === mailbox.id
+            ? messageCollections[folder]
+            : mailboxStore[mailboxId]?.[folder]) ?? [])
+            .filter((message) => doesMessageMatchSmartFolder(message, activeSmartFolder))
+            .map((message) => ({
+              mailboxId,
+              folder,
+              message,
+            })),
+        ),
       )
     : [];
   const smartFolderMessages = smartFolderEntries.map((entry) => entry.message);
