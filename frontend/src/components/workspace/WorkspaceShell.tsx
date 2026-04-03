@@ -22351,12 +22351,19 @@ export function WorkspaceShell({
     teamActivityEnabled,
     onOpenNotificationNavigation: handleOpenNotificationNavigation,
   });
-  const unreadNotificationIds = new Set(
-    liveNotificationItems
-      .filter((item) => !readNotificationIds.includes(item.id))
-      .map((item) => item.id),
+  const unreadNotificationIds = useMemo(
+    () =>
+      new Set(
+        liveNotificationItems
+          .filter((item) => !readNotificationIds.includes(item.id))
+          .map((item) => item.id),
+      ),
+    [liveNotificationItems, readNotificationIds],
   );
-  const notificationUnreadCount = unreadNotificationIds.size;
+  const notificationUnreadCount = useMemo(
+    () => unreadNotificationIds.size,
+    [unreadNotificationIds],
+  );
   const liveActivityItems = buildVisibleActivityItems({
     mailboxStore,
     orderedMailboxes,
@@ -23135,6 +23142,28 @@ export function WorkspaceShell({
       JSON.stringify(manualPriorityOverrides),
     );
   }, [manualPriorityOverrides, manualPriorityOverridesStorageKey]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const storedValue = window.localStorage.getItem(notificationReadStorageKey);
+
+    if (!storedValue) {
+      setReadNotificationIds([]);
+      return;
+    }
+
+    try {
+      const parsed = JSON.parse(storedValue) as string[];
+      setReadNotificationIds(
+        Array.isArray(parsed) ? parsed.filter((value) => typeof value === "string") : [],
+      );
+    } catch {
+      setReadNotificationIds([]);
+    }
+  }, [notificationReadStorageKey]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
