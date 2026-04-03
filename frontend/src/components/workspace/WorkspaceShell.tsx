@@ -7032,7 +7032,9 @@ function MailboxView({
   onRecordMessageOwnershipInteraction: (messageId: string) => void;
   senderCategoryLearning: SenderCategoryLearningStore;
   messageOwnershipInteractions: MessageOwnershipInteractionStore;
+  hasRealInternalCollaborationTeammates: boolean;
   currentUserId: string;
+  currentUserName: string;
   currentUserEmail: string;
   workspaceCollaborationPeople: Array<{ id: string; name: string; email: string }>;
   focusPreferences: UserConfig["focusPreferences"];
@@ -7240,7 +7242,8 @@ function MailboxView({
       status: "active" as const,
     })),
   ];
-  const currentUserName = orderedMailboxes[0]?.title ?? "You";
+  const shouldBypassCollaborationStartModal =
+    !hasRealInternalCollaborationTeammates;
   const activeComposeMailbox =
     orderedMailboxes.find((candidate) => candidate.id === composeMailboxId) ?? mailbox;
   const composeSignatureOptions = orderedMailboxes
@@ -9405,6 +9408,81 @@ function MailboxView({
     return messageId ? [messageId] : selectedMessageIds;
   };
 
+  const createCollaborationForMessage = (
+    messageId: string,
+    options?: {
+      selectedPersonId?: string;
+      requestType?: "needs_review" | "needs_action" | "note_only";
+      note?: string;
+    },
+  ) => {
+    const selectedPerson = collaborationSelectablePeople.find(
+      (person) => person.id === (options?.selectedPersonId ?? collaborationPersonId),
+    ) ?? {
+      id: currentUserId,
+      name: currentUserName,
+      email: currentUserEmail,
+      kind: "internal" as const,
+      status: "active" as const,
+    };
+
+    const nextTimestamp = Date.now();
+    const trimmedNote = (options?.note ?? collaborationNote).trim();
+    const initialMentionCandidates = getCollaborationMentionTargets(
+      [
+        {
+          id: selectedPerson.id,
+          name: selectedPerson.name,
+          email: selectedPerson.email,
+          kind: selectedPerson.kind,
+          status: selectedPerson.status,
+        },
+      ],
+      collaborationPeople,
+    );
+    const initialMessages = trimmedNote
+      ? [
+          {
+            id: `${messageId}-collaboration-${nextTimestamp}`,
+            authorId: currentUserId,
+            authorName: currentUserName,
+            text: trimmedNote,
+            timestamp: nextTimestamp,
+            visibility: "internal" as const,
+            mentions: extractCollaborationMentions(
+              trimmedNote,
+              initialMentionCandidates,
+              currentUserId,
+            ),
+          },
+        ]
+      : [];
+
+    updateMessageById(messageId, (message) => ({
+      ...message,
+      isShared: true,
+      collaboration: {
+        state: options?.requestType ?? collaborationRequestType,
+        requestedBy: currentUserName,
+        requestedUserId: selectedPerson.id,
+        requestedUserName: selectedPerson.name,
+        createdAt: nextTimestamp,
+        updatedAt: nextTimestamp,
+        participants: [
+          {
+            id: selectedPerson.id,
+            name: selectedPerson.name,
+            email: selectedPerson.email,
+            kind: selectedPerson.kind,
+            status: selectedPerson.status,
+          },
+        ],
+        previewText: trimmedNote || undefined,
+        messages: initialMessages,
+      },
+    }));
+  };
+
   const openShareCollaboration = (messageId: string) => {
     const message = getMessageById(messageId);
 
@@ -9418,6 +9496,17 @@ function MailboxView({
     setDetailActionsMenuState(null);
     setIsMoreMenuOpen(false);
     setIsSortMenuOpen(false);
+
+    if (shouldBypassCollaborationStartModal) {
+      createCollaborationForMessage(messageId, {
+        selectedPersonId: currentUserId,
+        requestType: "needs_review",
+        note: "",
+      });
+      setPendingCollaborationOpenMessageId(messageId);
+      return;
+    }
+
     setShareCollaborationMessageId(messageId);
     setCollaborationRequestType("needs_review");
     setCollaborationPersonId("");
@@ -9557,72 +9646,7 @@ function MailboxView({
     if (!shareCollaborationMessageId) {
       return;
     }
-
-    const selectedPerson = collaborationSelectablePeople.find(
-      (person) => person.id === collaborationPersonId,
-    ) ?? {
-      id: currentUserId,
-      name: currentUserName,
-      email: currentUserEmail,
-      kind: "internal" as const,
-      status: "active" as const,
-    };
-
-    const nextTimestamp = Date.now();
-    const trimmedNote = collaborationNote.trim();
-    const initialMentionCandidates = getCollaborationMentionTargets(
-      [
-        {
-          id: selectedPerson.id,
-          name: selectedPerson.name,
-          email: selectedPerson.email,
-          kind: selectedPerson.kind,
-          status: selectedPerson.status,
-        },
-      ],
-      collaborationPeople,
-    );
-    const initialMessages = trimmedNote
-      ? [
-          {
-            id: `${shareCollaborationMessageId}-collaboration-${nextTimestamp}`,
-            authorId: currentUserId,
-            authorName: currentUserName,
-            text: trimmedNote,
-            timestamp: nextTimestamp,
-            visibility: "internal" as const,
-            mentions: extractCollaborationMentions(
-              trimmedNote,
-              initialMentionCandidates,
-              currentUserId,
-            ),
-          },
-        ]
-      : [];
-
-    updateMessageById(shareCollaborationMessageId, (message) => ({
-      ...message,
-      isShared: true,
-      collaboration: {
-        state: collaborationRequestType,
-        requestedBy: currentUserName,
-        requestedUserId: selectedPerson.id,
-        requestedUserName: selectedPerson.name,
-        createdAt: nextTimestamp,
-        updatedAt: nextTimestamp,
-        participants: [
-          {
-            id: selectedPerson.id,
-            name: selectedPerson.name,
-            email: selectedPerson.email,
-            kind: selectedPerson.kind,
-            status: selectedPerson.status,
-          },
-        ],
-        previewText: trimmedNote || undefined,
-        messages: initialMessages,
-      },
-    }));
+    createCollaborationForMessage(shareCollaborationMessageId);
     closeShareCollaboration();
   };
 
@@ -20948,6 +20972,8 @@ export function WorkspaceShell({
   const primaryInboxTitle = orderedMailboxes[0]?.title ?? inboxDisplayConfig.main.title;
   const primaryWorkspaceEmail = orderedMailboxes[0]?.email ?? "team@cuevion.com";
   const activeWorkspaceEmail = authenticatedUser?.email ?? primaryWorkspaceEmail;
+  const activeWorkspaceUserName =
+    authenticatedUser?.name ?? orderedMailboxes[0]?.title ?? "You";
   const currentWorkspaceUserId = normalizeSenderLearningKey(activeWorkspaceEmail);
   const teamPendingInvitationStorageKey =
     buildTeamPendingInvitationStorageKey(currentWorkspaceUserId);
@@ -21395,6 +21421,10 @@ export function WorkspaceShell({
   ].filter(
     (person, index, people) =>
       people.findIndex((candidate) => candidate.id === person.id) === index,
+  );
+  const hasRealInternalCollaborationTeammates = memberOfEntries.some(
+    (member) =>
+      normalizeSenderLearningKey(member.email) !== currentWorkspaceUserId,
   );
   const [isSmartFolderModalOpen, setIsSmartFolderModalOpen] = useState(false);
   const [editingSmartFolderId, setEditingSmartFolderId] = useState<string | null>(null);
@@ -24736,7 +24766,11 @@ export function WorkspaceShell({
                   onRecordMessageOwnershipInteraction={handleRecordMessageOwnershipInteraction}
                   senderCategoryLearning={senderCategoryLearning}
                   messageOwnershipInteractions={messageOwnershipInteractions}
+                  hasRealInternalCollaborationTeammates={
+                    hasRealInternalCollaborationTeammates
+                  }
                   currentUserId={currentWorkspaceUserId}
+                  currentUserName={activeWorkspaceUserName}
                   currentUserEmail={activeWorkspaceEmail}
                   workspaceCollaborationPeople={workspaceCollaborationPeople}
                   focusPreferences={activeFocusPreferences}
