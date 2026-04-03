@@ -6280,6 +6280,31 @@ function buildGroupedNotificationItems(items: VisibleNotificationItem[]) {
   return groupedItems;
 }
 
+function getNotificationPriorityScore(item: VisibleNotificationItem) {
+  switch (item.kind) {
+    case "mention":
+      return 3;
+    case "reply":
+      return 2;
+    case "collaboration":
+    default:
+      return 1;
+  }
+}
+
+function buildPrioritizedNotificationItems(items: VisibleNotificationItem[]) {
+  return [...items].sort((firstItem, secondItem) => {
+    const priorityDelta =
+      getNotificationPriorityScore(secondItem) - getNotificationPriorityScore(firstItem);
+
+    if (priorityDelta !== 0) {
+      return priorityDelta;
+    }
+
+    return secondItem.sortTimestamp - firstItem.sortTimestamp;
+  });
+}
+
 function formatVisibleActivityTimestamp(timestamp: number) {
   const diffMs = Date.now() - timestamp;
   const minuteMs = 60 * 1000;
@@ -22444,14 +22469,18 @@ export function WorkspaceShell({
     () => buildGroupedNotificationItems(liveNotificationItems),
     [liveNotificationItems],
   );
+  const prioritizedNotificationItems = useMemo(
+    () => buildPrioritizedNotificationItems(groupedNotificationItems),
+    [groupedNotificationItems],
+  );
   const unreadNotificationIds = useMemo(
     () =>
       new Set(
-        groupedNotificationItems
+        prioritizedNotificationItems
           .filter((item) => item.sourceIds.some((sourceId) => !readNotificationIds.includes(sourceId)))
           .map((item) => item.id),
       ),
-    [groupedNotificationItems, readNotificationIds],
+    [prioritizedNotificationItems, readNotificationIds],
   );
   const notificationUnreadCount = useMemo(
     () => unreadNotificationIds.size,
@@ -24488,7 +24517,7 @@ export function WorkspaceShell({
                   onOpenPrimaryInbox={handleOpenSenderContext}
                   onOpenInboxes={() => handleOpenInboxes("Connected")}
                   onOpenForYou={() => handleOpenForYou("Promo")}
-                  notificationPreviewItems={groupedNotificationItems}
+                  notificationPreviewItems={prioritizedNotificationItems}
                   primaryInboxTitle={primaryInboxTitle}
                   primaryInboxEmailCount={primaryInboxEmailCount}
                   priorityInboxCount={livePriorityInboxItems.length}
@@ -24522,7 +24551,7 @@ export function WorkspaceShell({
                   onOpenLearningRequest={handleOpenLearningRequest}
                   onOpenSenderContext={handleOpenSenderContext}
                   activityItems={liveActivityItems}
-                  notificationItems={groupedNotificationItems}
+                  notificationItems={prioritizedNotificationItems}
                   unreadNotificationIds={unreadNotificationIds}
                   onOpenNotificationItem={handleOpenNotificationItem}
                   aiSuggestionsEnabled={aiSuggestionsEnabled}
