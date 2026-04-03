@@ -7186,6 +7186,9 @@ function MailboxView({
   const [shareCollaborationMessageId, setShareCollaborationMessageId] = useState<
     string | null
   >(null);
+  const [pendingCollaborationOpenMessageId, setPendingCollaborationOpenMessageId] = useState<
+    string | null
+  >(null);
   const [collaborationRequestType, setCollaborationRequestType] = useState<
     "needs_review" | "needs_action" | "note_only"
   >("needs_review");
@@ -8293,6 +8296,9 @@ function MailboxView({
     );
   };
   const shareCollaborationMessage = getMessageById(shareCollaborationMessageId);
+  const pendingCollaborationOpenMessage = getMessageById(
+    pendingCollaborationOpenMessageId,
+  );
   const activeCollaborationMessage = getMessageById(activeCollaborationMessageId);
   const activeCollaborationParticipants = activeCollaborationMessage?.collaboration
     ? getCollaborationParticipants(activeCollaborationMessage.collaboration)
@@ -9449,6 +9455,22 @@ function MailboxView({
     setHighlightedCollaborationMessageId(null);
     setFocusCollaborationComposer(false);
   };
+
+  useEffect(() => {
+    if (
+      !pendingCollaborationOpenMessageId ||
+      !pendingCollaborationOpenMessage?.collaboration
+    ) {
+      return;
+    }
+
+    openCollaborationOverlay(pendingCollaborationOpenMessageId);
+    setPendingCollaborationOpenMessageId(null);
+  }, [
+    openCollaborationOverlay,
+    pendingCollaborationOpenMessage,
+    pendingCollaborationOpenMessageId,
+  ]);
 
   const syncCollaborationMentionState = (
     value: string,
@@ -13884,7 +13906,9 @@ function MailboxView({
                       type="button"
                       onClick={() => {
                         createMessageCollaboration();
-                        openCollaborationOverlay(shareCollaborationMessage.id);
+                        setPendingCollaborationOpenMessageId(
+                          shareCollaborationMessage.id,
+                        );
                       }}
                       className="inline-flex h-10 items-center justify-center rounded-full bg-pine px-5 text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[color:rgba(251,248,242,0.98)] transition-[background-color,transform] duration-150 hover:bg-moss active:scale-[0.99] focus-visible:outline-none"
                     >
