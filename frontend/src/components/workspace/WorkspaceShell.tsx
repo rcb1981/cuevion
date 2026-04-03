@@ -13981,95 +13981,102 @@ function MailboxView({
                                 .join(", ") || "all participants"
                             }`}
                       </div>
-                      <textarea
-                        ref={collaborationReplyInputRef}
-                        value={collaborationReplyDraft}
-                        onChange={(event) => {
-                          setCollaborationReplyDraft(event.target.value);
-                          syncCollaborationMentionState(event.target.value, event.target);
-                        }}
-                        onClick={(event) =>
-                          syncCollaborationMentionState(
-                            event.currentTarget.value,
-                            event.currentTarget,
-                          )
-                        }
-                        onKeyUp={(event) =>
-                          syncCollaborationMentionState(
-                            event.currentTarget.value,
-                            event.currentTarget,
-                          )
-                        }
-                        onKeyDown={(event) => {
-                          if (visibleCollaborationMentionCandidates.length === 0) {
-                            return;
+                      <div className="relative">
+                        <textarea
+                          ref={collaborationReplyInputRef}
+                          value={collaborationReplyDraft}
+                          onChange={(event) => {
+                            setCollaborationReplyDraft(event.target.value);
+                            syncCollaborationMentionState(event.target.value, event.target);
+                          }}
+                          onClick={(event) =>
+                            syncCollaborationMentionState(
+                              event.currentTarget.value,
+                              event.currentTarget,
+                            )
                           }
+                          onKeyUp={(event) =>
+                            syncCollaborationMentionState(
+                              event.currentTarget.value,
+                              event.currentTarget,
+                            )
+                          }
+                          onKeyDown={(event) => {
+                            if (visibleCollaborationMentionCandidates.length === 0) {
+                              return;
+                            }
 
-                          if (event.key === "ArrowDown") {
-                            event.preventDefault();
-                            setCollaborationMentionIndex((current) =>
-                              current >= visibleCollaborationMentionCandidates.length - 1
-                                ? 0
-                                : current + 1,
-                            );
-                            return;
-                          }
+                            if (event.key === "ArrowDown") {
+                              event.preventDefault();
+                              setCollaborationMentionIndex((current) =>
+                                current >= visibleCollaborationMentionCandidates.length - 1
+                                  ? 0
+                                  : current + 1,
+                              );
+                              return;
+                            }
 
-                          if (event.key === "ArrowUp") {
-                            event.preventDefault();
-                            setCollaborationMentionIndex((current) =>
-                              current <= 0
-                                ? visibleCollaborationMentionCandidates.length - 1
-                                : current - 1,
-                            );
-                            return;
-                          }
+                            if (event.key === "ArrowUp") {
+                              event.preventDefault();
+                              setCollaborationMentionIndex((current) =>
+                                current <= 0
+                                  ? visibleCollaborationMentionCandidates.length - 1
+                                  : current - 1,
+                              );
+                              return;
+                            }
 
-                          if (event.key === "Enter" || event.key === "Tab") {
-                            event.preventDefault();
-                            applyCollaborationMention(
-                              visibleCollaborationMentionCandidates[collaborationMentionIndex] ??
-                                visibleCollaborationMentionCandidates[0],
-                            );
-                            return;
-                          }
+                            if (event.key === "Enter" || event.key === "Tab") {
+                              event.preventDefault();
+                              applyCollaborationMention(
+                                visibleCollaborationMentionCandidates[collaborationMentionIndex] ??
+                                  visibleCollaborationMentionCandidates[0],
+                              );
+                              return;
+                            }
 
-                          if (event.key === "Escape") {
-                            setCollaborationMentionIndex(0);
+                            if (event.key === "Escape") {
+                              setCollaborationMentionIndex(0);
+                            }
+                          }}
+                          rows={4}
+                          placeholder={
+                            collaborationReplyVisibility === "internal"
+                              ? "Add an internal note"
+                              : "Reply to everyone in this collaboration"
                           }
-                        }}
-                        rows={4}
-                        placeholder={
-                          collaborationReplyVisibility === "internal"
-                            ? "Add an internal note"
-                            : "Reply to everyone in this collaboration"
-                        }
-                        className="w-full resize-none rounded-[18px] bg-[var(--workspace-card-subtle)] px-4 py-3 text-[0.92rem] leading-7 text-[var(--workspace-text-soft)] outline-none placeholder:text-[var(--workspace-text-faint)]"
-                      />
-                      {visibleCollaborationMentionCandidates.length > 0 ? (
-                        <div className="rounded-[18px] bg-[var(--workspace-card-subtle)] p-2">
-                          {visibleCollaborationMentionCandidates.map((candidate, index) => (
-                            <button
-                              key={`collaboration-mention-${candidate.id}`}
-                              type="button"
-                              onMouseDown={(event) => {
-                                event.preventDefault();
-                                applyCollaborationMention(candidate);
-                              }}
-                              className={`flex w-full items-center justify-between rounded-[12px] px-3 py-2 text-left text-[0.82rem] transition-colors duration-150 focus-visible:outline-none ${
-                                index === collaborationMentionIndex
-                                  ? "bg-[var(--workspace-hover-surface-strong)] text-[var(--workspace-text)]"
-                                  : "text-[var(--workspace-text-soft)] hover:bg-[var(--workspace-hover-surface)]"
-                              }`}
-                            >
-                              <span>{candidate.name}</span>
-                              <span className="text-[0.76rem] text-[var(--workspace-text-faint)]">
-                                @{candidate.handle}
-                              </span>
-                            </button>
-                          ))}
-                        </div>
-                      ) : null}
+                          className="w-full resize-none rounded-[18px] bg-[var(--workspace-card-subtle)] px-4 py-3 text-[0.92rem] leading-7 text-[var(--workspace-text-soft)] outline-none placeholder:text-[var(--workspace-text-faint)]"
+                        />
+                        {visibleCollaborationMentionCandidates.length > 0 ? (
+                          <div className="absolute left-3 right-3 top-[calc(100%-0.75rem)] z-10 rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] p-2 shadow-[0_18px_40px_rgba(61,44,32,0.12),0_6px_16px_rgba(61,44,32,0.08)]">
+                            <div className="px-3 pb-1.5 pt-0.5 text-[0.62rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                              Mention someone
+                            </div>
+                            <div className="max-h-[220px] space-y-1 overflow-y-auto pr-1">
+                              {visibleCollaborationMentionCandidates.map((candidate, index) => (
+                                <button
+                                  key={`collaboration-mention-${candidate.id}`}
+                                  type="button"
+                                  onMouseDown={(event) => {
+                                    event.preventDefault();
+                                    applyCollaborationMention(candidate);
+                                  }}
+                                  className={`flex w-full items-center justify-between rounded-[12px] px-3 py-2 text-left text-[0.82rem] transition-colors duration-150 focus-visible:outline-none ${
+                                    index === collaborationMentionIndex
+                                      ? "bg-[var(--workspace-hover-surface-strong)] text-[var(--workspace-text)]"
+                                      : "text-[var(--workspace-text-soft)] hover:bg-[var(--workspace-hover-surface)]"
+                                  }`}
+                                >
+                                  <span className="truncate pr-3">{candidate.name}</span>
+                                  <span className="flex-none text-[0.76rem] text-[var(--workspace-text-faint)]">
+                                    @{candidate.handle}
+                                  </span>
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        ) : null}
+                      </div>
                     </label>
                     </div>
                   </div>
