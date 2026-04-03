@@ -13528,10 +13528,10 @@ function MailboxView({
                 <div
                   data-theme={themeMode}
                   data-collaboration-thread-modal
-                  className="w-full max-w-[700px] overflow-hidden rounded-[28px] border border-[var(--workspace-border)] bg-[var(--workspace-modal-bg)] p-6 shadow-[0_28px_80px_rgba(61,44,32,0.18),0_10px_26px_rgba(61,44,32,0.1)]"
+                  className="flex max-h-[calc(100dvh-2rem)] w-full max-w-[700px] min-h-0 flex-col overflow-hidden rounded-[28px] border border-[var(--workspace-border)] bg-[var(--workspace-modal-bg)] p-4 shadow-[0_28px_80px_rgba(61,44,32,0.18),0_10px_26px_rgba(61,44,32,0.1)] sm:max-h-[calc(100dvh-3rem)] sm:p-5 md:max-h-[calc(100dvh-4rem)] md:p-6"
                   onMouseDown={(event) => event.stopPropagation()}
                 >
-                  <div className="flex items-start justify-between gap-4">
+                  <div className="flex shrink-0 items-start justify-between gap-4">
                     <div className="space-y-2">
                       <h2 className="text-[1.45rem] font-medium tracking-tight text-[var(--workspace-text)]">
                         Collaboration
@@ -13543,6 +13543,8 @@ function MailboxView({
                     <CloseActionButton onClick={closeCollaborationOverlay} />
                   </div>
 
+                  <div className="mt-4 min-h-0 flex-1 overflow-y-auto pr-1">
+                    <div className="space-y-5">
                     <section className="space-y-3">
                       <div className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
                         Participants
@@ -13736,7 +13738,6 @@ function MailboxView({
                       ) : null}
                     </section>
 
-                  <div className="mt-6 space-y-5">
                     <section className="space-y-3">
                       <div className="flex items-center justify-between gap-3">
                         <div className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
@@ -13937,9 +13938,10 @@ function MailboxView({
                         </div>
                       ) : null}
                     </label>
+                    </div>
                   </div>
 
-                  <div className="mt-6 flex items-center justify-end gap-3">
+                  <div className="mt-4 flex shrink-0 flex-wrap items-center justify-end gap-3 border-t border-[var(--workspace-border-soft)] pt-4">
                     <button
                       type="button"
                       onClick={() => sendCollaborationReply(activeCollaborationMessage.id)}
