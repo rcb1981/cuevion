@@ -9535,7 +9535,6 @@ function MailboxView({
     if (!shareCollaborationMessageId) {
       return;
     }
-    const nextMessageId = shareCollaborationMessageId;
 
     const selectedPerson = collaborationSelectablePeople.find(
       (person) => person.id === collaborationPersonId,
@@ -9603,7 +9602,6 @@ function MailboxView({
       },
     }));
     closeShareCollaboration();
-    openCollaborationOverlay(nextMessageId);
   };
 
   const sendCollaborationReply = (messageId: string) => {
@@ -13884,7 +13882,10 @@ function MailboxView({
                   <div className="mt-6 flex items-center justify-end gap-3">
                     <button
                       type="button"
-                      onClick={createMessageCollaboration}
+                      onClick={() => {
+                        createMessageCollaboration();
+                        openCollaborationOverlay(shareCollaborationMessage.id);
+                      }}
                       className="inline-flex h-10 items-center justify-center rounded-full bg-pine px-5 text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[color:rgba(251,248,242,0.98)] transition-[background-color,transform] duration-150 hover:bg-moss active:scale-[0.99] focus-visible:outline-none"
                     >
                       Start collaboration
