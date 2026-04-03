@@ -6119,6 +6119,31 @@ function buildVisibleNotificationItems({
             .filter((entry) => entry.authorId !== currentUserId && entry.authorName !== currentUserName)
             .filter((entry) => entry.timestamp !== message.collaboration?.createdAt)
             .forEach((entry) => {
+              const mentionsCurrentUser = (entry.mentions ?? []).filter(
+                (mention) =>
+                  mention.notify &&
+                  (mention.id === currentUserId ||
+                    normalizeSenderLearningKey(mention.email) === currentUserId),
+              );
+
+              if (mentionsCurrentUser.length > 0) {
+                items.push({
+                  id: `notification:mention:${message.id}:${entry.id}:${currentUserId}`,
+                  title: `${entry.authorName} mentioned you`,
+                  detail: subjectDetail,
+                  time: formatVisibleActivityTimestamp(entry.timestamp),
+                  sortTimestamp: entry.timestamp,
+                  action: () =>
+                    onOpenNotificationNavigation({
+                      type: "mention",
+                      mailboxId: mailbox.id,
+                      messageId: message.id,
+                      collaborationMessageId: entry.id,
+                    }),
+                });
+                return;
+              }
+
               items.push({
                 id: `notification:reply:${message.id}:${entry.id}`,
                 title:
