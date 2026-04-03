@@ -1699,7 +1699,10 @@ function extractCollaborationMentions(
         name: candidate.name,
         email: candidate.email,
         handle: candidate.handle,
-        notify: candidate.status !== "declined" && candidate.id !== authorId,
+        notify:
+          candidate.status !== "declined" &&
+          normalizeSenderLearningKey(candidate.email) !==
+            normalizeSenderLearningKey(authorId),
       });
       seenHandles.add(handle);
     }
@@ -21871,8 +21874,93 @@ export function WorkspaceShell({
               : isGuestInviteUser
                 ? "joined"
                 : hasAlreadyJoinedInvite
-                    ? "joined"
+                ? "joined"
                     : "accept";
+
+  const updateInviteWorkspaceMessageById = (
+    messageId: string,
+    updater: (message: MailMessage) => MailMessage,
+    fallbackMessage?: MailMessage | null,
+  ) => {
+    setMailboxStore((currentStore) => {
+      const updatedMessagesByMailbox = new Map<InboxId, MailMessage>();
+      let didMatchExistingMessage = false;
+      const nextStore = Object.entries(currentStore).reduce<MailboxStore>(
+        (nextCollectionsByMailbox, [mailboxId, collections]) => {
+          const updateCollection = (messages: MailMessage[]) =>
+            messages.map((message) => {
+              if (message.id !== messageId) {
+                return message;
+              }
+
+              didMatchExistingMessage = true;
+              const updatedMessage = updater(message);
+              updatedMessagesByMailbox.set(mailboxId as InboxId, updatedMessage);
+              return updatedMessage;
+            });
+
+          nextCollectionsByMailbox[mailboxId as InboxId] = {
+            Inbox: updateCollection(collections.Inbox),
+            Drafts: updateCollection(collections.Drafts),
+            Sent: updateCollection(collections.Sent),
+            Archive: updateCollection(collections.Archive),
+            Filtered: updateCollection(collections.Filtered),
+            Spam: updateCollection(collections.Spam),
+            Trash: updateCollection(collections.Trash),
+          };
+
+          return nextCollectionsByMailbox;
+        },
+        {} as MailboxStore,
+      );
+
+      if (!didMatchExistingMessage && fallbackMessage && orderedMailboxes[0]) {
+        const fallbackMailboxId = orderedMailboxes[0].id;
+        const fallbackCollections = nextStore[fallbackMailboxId];
+
+        if (fallbackCollections) {
+          const updatedFallbackMessage = updater(fallbackMessage);
+          nextStore[fallbackMailboxId] = {
+            ...fallbackCollections,
+            Inbox: [updatedFallbackMessage, ...fallbackCollections.Inbox],
+          };
+          updatedMessagesByMailbox.set(fallbackMailboxId, updatedFallbackMessage);
+        }
+      }
+
+      const liveInboxSnapshots = readLiveInboxSnapshots();
+
+      updatedMessagesByMailbox.forEach((updatedMessage, mailboxId) => {
+        const snapshot = liveInboxSnapshots[mailboxId];
+
+        if (!snapshot) {
+          return;
+        }
+
+        const existingIndex = snapshot.messages.findIndex(
+          (message) => message.id === updatedMessage.id,
+        );
+        const persistedMessage = {
+          ...(updatedMessage as unknown as PersistedLiveInboxMessageSnapshot),
+          isShared: updatedMessage.isShared,
+          collaboration: updatedMessage.collaboration,
+        };
+        const nextSnapshotMessages =
+          existingIndex >= 0
+            ? snapshot.messages.map((message, index) =>
+                index === existingIndex ? persistedMessage : message,
+              )
+            : [persistedMessage, ...snapshot.messages];
+
+        saveLiveInboxSnapshot({
+          ...snapshot,
+          messages: nextSnapshotMessages,
+        });
+      });
+
+      return nextStore;
+    });
+  };
 
   const joinCollaborationFromInvite = () => {
     if (!collaborationInviteRoute || !authenticatedUser || !inviteMessage?.collaboration) {
@@ -21976,7 +22064,7 @@ export function WorkspaceShell({
       normalizeSenderLearningKey(authenticatedUser.email),
     );
 
-    updateWorkspaceMessageById(inviteMessage.id, (message) =>
+    updateInviteWorkspaceMessageById(inviteMessage.id, (message) =>
       message.collaboration
         ? {
             ...message,
@@ -22004,6 +22092,7 @@ export function WorkspaceShell({
             },
           }
         : message,
+      inviteMessage,
     );
 
     setInviteReplyDraft("");
@@ -22020,37 +22109,14 @@ export function WorkspaceShell({
     }
 
     const nextTimestamp = Date.now();
+    const mentionCandidates = getCollaborationMentionTargets(inviteParticipants, []);
+    const mentions = extractCollaborationMentions(
+      trimmedReply,
+      mentionCandidates,
+      normalizeSenderLearningKey(externalReviewAuthorEmail),
+    );
 
-    if (!storedInviteMessage && decodedInvitePayload?.message && orderedMailboxes[0]) {
-      setMailboxStore((currentStore) => {
-        const mailboxId = orderedMailboxes[0].id;
-        const mailboxCollections = currentStore[mailboxId];
-
-        if (!mailboxCollections) {
-          return currentStore;
-        }
-
-        const alreadyExists = canonicalFolderOrder.some((folder) =>
-          currentStore[mailboxId][folder].some(
-            (message) => message.id === decodedInvitePayload.message.id,
-          ),
-        );
-
-        if (alreadyExists) {
-          return currentStore;
-        }
-
-        return {
-          ...currentStore,
-          [mailboxId]: {
-            ...mailboxCollections,
-            Inbox: [decodedInvitePayload.message, ...mailboxCollections.Inbox],
-          },
-        };
-      });
-    }
-
-    updateWorkspaceMessageById(inviteMessage.id, (message) =>
+    updateInviteWorkspaceMessageById(inviteMessage.id, (message) =>
       message.collaboration
         ? {
             ...message,
@@ -22072,12 +22138,13 @@ export function WorkspaceShell({
                   text: trimmedReply,
                   timestamp: nextTimestamp,
                   visibility: "shared",
-                  mentions: [],
+                  mentions,
                 },
               ],
             },
           }
         : message,
+      inviteMessage,
     );
 
     setInviteReplyDraft("");
@@ -22099,7 +22166,8 @@ export function WorkspaceShell({
     }
 
     const nextMatches = getCollaborationMentionTargets(inviteParticipants, []).filter(
-      (candidate) => candidate.handle.toLowerCase().includes(nextQuery.query.toLowerCase()),
+      (candidate) =>
+        doesCollaborationMentionCandidateMatchQuery(candidate, nextQuery.query),
     );
 
     if (nextMatches.length === 0) {
@@ -23749,7 +23817,7 @@ export function WorkspaceShell({
     );
     const visibleInviteMentionCandidates = inviteMentionQuery
       ? inviteMentionCandidates.filter((candidate) =>
-          candidate.handle.toLowerCase().includes(inviteMentionQuery.query.toLowerCase()),
+          doesCollaborationMentionCandidateMatchQuery(candidate, inviteMentionQuery.query),
         )
       : [];
     const isInviteErrorState =
