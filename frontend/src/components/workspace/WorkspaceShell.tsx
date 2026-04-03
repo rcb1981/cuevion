@@ -13783,13 +13783,16 @@ function MailboxView({
                         <span className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
                           Internal collaboration
                         </span>
+                        <span className="text-[0.68rem] leading-5 text-[var(--workspace-text-faint)]">
+                          Optional
+                        </span>
                       </div>
                       <div className="grid gap-2.5 md:grid-cols-3">
                         {collaborationSelectablePeople.map((person) => (
                           <div key={person.id} className="relative min-w-0">
                             <button
                               type="button"
-                              onClick={() => setCollaborationPersonId(currentUserId)}
+                              onClick={() => setCollaborationPersonId(person.id)}
                               className={`w-full min-w-0 rounded-[18px] border px-4 py-3 pr-10 text-left transition-[background-color,border-color,color] duration-150 focus-visible:outline-none ${
                                 collaborationPersonId === person.id
                                   ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-card-featured-start),var(--workspace-card-featured-end))]"
@@ -13813,7 +13816,7 @@ function MailboxView({
                                 onClick={(event) => {
                                   event.stopPropagation();
                                   if (collaborationPersonId === person.id) {
-                                    setCollaborationPersonId(currentUserId);
+                                    setCollaborationPersonId("");
                                   }
                                 }}
                                 className="absolute right-2 top-2 inline-flex h-6 w-6 items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] text-[0.82rem] leading-none text-[var(--workspace-text-faint)] transition-[background-color,border-color,color] duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface-strong)] hover:text-[var(--workspace-text)] focus-visible:outline-none"
@@ -13823,6 +13826,9 @@ function MailboxView({
                             ) : null}
                           </div>
                         ))}
+                      </div>
+                      <div className="text-[0.78rem] leading-6 text-[color:rgba(120,111,100,0.68)]">
+                        Start solo and invite external participants after creation, or add an internal teammate now.
                       </div>
                     </label>
 
