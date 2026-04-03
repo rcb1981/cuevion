@@ -1352,6 +1352,26 @@ function getMentionQueryAtCursor(value: string, cursorPosition: number | null) {
   };
 }
 
+function doesCollaborationMentionCandidateMatchQuery(
+  candidate: ReturnType<typeof getCollaborationMentionTargets>[number],
+  query: string,
+) {
+  const normalizedQuery = query.toLowerCase().replace(/[^a-z0-9]+/g, "");
+
+  if (!normalizedQuery) {
+    return true;
+  }
+
+  const normalizedName = candidate.name.toLowerCase().replace(/[^a-z0-9]+/g, "");
+  const normalizedEmail = candidate.email.toLowerCase().replace(/[^a-z0-9]+/g, "");
+
+  return (
+    candidate.handle.toLowerCase().includes(normalizedQuery) ||
+    normalizedName.includes(normalizedQuery) ||
+    normalizedEmail.includes(normalizedQuery)
+  );
+}
+
 function renderTextWithMentions(
   value: string,
   mentionMap: Map<string, MailMessageCollaborationMention>,
@@ -8096,9 +8116,10 @@ function MailboxView({
   );
   const visibleCollaborationMentionCandidates = collaborationMentionQuery
     ? collaborationMentionCandidates.filter((candidate) =>
-        candidate.handle
-          .toLowerCase()
-          .includes(collaborationMentionQuery.query.toLowerCase()),
+        doesCollaborationMentionCandidateMatchQuery(
+          candidate,
+          collaborationMentionQuery.query,
+        ),
       )
     : [];
   const visibleCollaborationMessages = activeCollaborationMessage?.collaboration
@@ -9230,7 +9251,7 @@ function MailboxView({
     }
 
     const nextMatches = collaborationMentionCandidates.filter((candidate) =>
-      candidate.handle.toLowerCase().includes(nextQuery.query.toLowerCase()),
+      doesCollaborationMentionCandidateMatchQuery(candidate, nextQuery.query),
     );
 
     if (nextMatches.length === 0) {
