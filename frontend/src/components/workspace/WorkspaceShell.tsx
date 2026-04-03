@@ -9414,7 +9414,7 @@ function MailboxView({
     setIsSortMenuOpen(false);
     setShareCollaborationMessageId(messageId);
     setCollaborationRequestType("needs_review");
-    setCollaborationPersonId(currentUserId);
+    setCollaborationPersonId("");
     setCollaborationNote("");
   };
 
@@ -9535,6 +9535,7 @@ function MailboxView({
     if (!shareCollaborationMessageId) {
       return;
     }
+    const nextMessageId = shareCollaborationMessageId;
 
     const selectedPerson = collaborationSelectablePeople.find(
       (person) => person.id === collaborationPersonId,
@@ -9602,6 +9603,7 @@ function MailboxView({
       },
     }));
     closeShareCollaboration();
+    openCollaborationOverlay(nextMessageId);
   };
 
   const sendCollaborationReply = (messageId: string) => {
