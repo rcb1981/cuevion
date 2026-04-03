@@ -1386,10 +1386,36 @@ function doesCollaborationMentionCandidateMatchQuery(
   );
 }
 
+function doesCollaborationMentionTargetUser(
+  mention: MailMessageCollaborationMention,
+  userId: string,
+  userEmail: string,
+) {
+  const normalizedUserId = normalizeSenderLearningKey(userId);
+  const normalizedUserEmail = normalizeSenderLearningKey(userEmail);
+
+  return (
+    mention.notify &&
+    (normalizeSenderLearningKey(mention.id) === normalizedUserId ||
+      normalizeSenderLearningKey(mention.email) === normalizedUserEmail)
+  );
+}
+
+function doesCollaborationMessageMentionUser(
+  message: Pick<MailMessageCollaborationMessage, "mentions">,
+  userId: string,
+  userEmail: string,
+) {
+  return (message.mentions ?? []).some((mention) =>
+    doesCollaborationMentionTargetUser(mention, userId, userEmail),
+  );
+}
+
 function renderTextWithMentions(
   value: string,
   mentionMap: Map<string, MailMessageCollaborationMention>,
   themeMode: "light" | "dark",
+  isHighlightedMention?: (mention: MailMessageCollaborationMention) => boolean,
 ) {
   const segments: ReactNode[] = [];
   const mentionPattern = /@([a-z0-9._-]+)/gi;
@@ -1407,12 +1433,27 @@ function renderTextWithMentions(
     }
 
     if (matchedMention) {
+      const isCurrentUserMention = isHighlightedMention?.(matchedMention) ?? false;
       segments.push(
         <span
           key={`${matchedMention.id}-${matchStart}`}
-          className="rounded-[8px] px-1 py-0.5"
+          className={`rounded-[8px] px-1 py-0.5 ${
+            isCurrentUserMention ? "font-medium shadow-[inset_0_0_0_1px_rgba(83,116,89,0.12)]" : ""
+          }`}
           style={
-            themeMode === "light"
+            isCurrentUserMention
+              ? themeMode === "light"
+                ? {
+                    backgroundColor: "rgba(148, 184, 154, 0.4)",
+                    color: "rgba(34, 63, 41, 0.98)",
+                    WebkitTextFillColor: "rgba(34, 63, 41, 0.98)",
+                  }
+                : {
+                    backgroundColor: "rgba(126, 167, 132, 0.26)",
+                    color: "rgba(234, 243, 236, 0.98)",
+                    WebkitTextFillColor: "rgba(234, 243, 236, 0.98)",
+                  }
+              : themeMode === "light"
               ? {
                   backgroundColor: "rgba(171, 198, 177, 0.34)",
                   color: "rgba(42, 74, 50, 0.98)",
@@ -8339,6 +8380,9 @@ function MailboxView({
       closeCollaborationOverlay();
       setHighlightedCollaborationMessageId(null);
     } else {
+      if (notificationNavigationRequest.collaborationMessageId) {
+        setCollaborationHistoryExpanded(true);
+      }
       setHighlightedCollaborationMessageId(
         notificationNavigationRequest.collaborationMessageId ?? null,
       );
@@ -8365,6 +8409,20 @@ function MailboxView({
 
     highlightedMessage.scrollIntoView({ behavior: "smooth", block: "center" });
   }, [activeCollaborationMessageId, highlightedCollaborationMessageId]);
+
+  useEffect(() => {
+    if (!highlightedCollaborationMessageId || typeof window === "undefined") {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      setHighlightedCollaborationMessageId((current) =>
+        current === highlightedCollaborationMessageId ? null : current,
+      );
+    }, 2200);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [highlightedCollaborationMessageId]);
 
   useEffect(() => {
     if (!activeCollaborationMessageId || typeof window === "undefined") {
@@ -14066,12 +14124,23 @@ function MailboxView({
                               ref={(node) => {
                                 collaborationMessageRefs.current[entry.id] = node;
                               }}
-                              className={`rounded-[16px] bg-[var(--workspace-card)] px-3.5 py-2.5 transition-colors duration-200 ${
+                              className={`rounded-[16px] bg-[var(--workspace-card)] px-3.5 py-2.5 transition-[background-color,box-shadow,border-color] duration-300 ${
                                 highlightedCollaborationMessageId === entry.id
-                                  ? "bg-[color:rgba(126,155,128,0.12)]"
+                                  ? "bg-[color:rgba(126,155,128,0.12)] shadow-[0_0_0_1px_rgba(126,155,128,0.18)]"
                                   : ""
                               }`}
                             >
+                              {doesCollaborationMessageMentionUser(
+                                entry,
+                                currentUserId,
+                                currentUserEmail,
+                              ) ? (
+                                <div className="mb-2 flex items-center gap-2">
+                                  <span className="inline-flex items-center rounded-full border border-[color:rgba(126,155,128,0.2)] bg-[color:rgba(126,155,128,0.12)] px-2.5 py-1 text-[0.58rem] font-medium uppercase tracking-[0.14em] text-[color:rgba(71,95,76,0.86)]">
+                                    Mentioned you
+                                  </span>
+                                </div>
+                              ) : null}
                               <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[0.78rem] leading-5 text-[var(--workspace-text)]">
                                 <span>{entry.authorName}</span>
                                 <span
@@ -14099,6 +14168,12 @@ function MailboxView({
                                     ]),
                                   ),
                                   themeMode,
+                                  (mention) =>
+                                    doesCollaborationMentionTargetUser(
+                                      mention,
+                                      currentUserId,
+                                      currentUserEmail,
+                                    ),
                                 )}
                               </div>
                             </div>
