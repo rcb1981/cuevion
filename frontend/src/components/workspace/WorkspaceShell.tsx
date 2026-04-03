@@ -833,20 +833,20 @@ const smartFolderLabelClassificationMap: Record<string, CuevionInternalClassific
   business: ["business", "business_reminder"],
   demo: ["demo", "high_priority_demo"],
   finance: ["finance", "royalty_statement"],
-  info: ["info"],
+  other: ["unknown"],
   promo: ["promo", "promo_reminder"],
   reply: ["reply"],
-  update: ["workflow_update", "distributor_update", "business_reminder", "info"],
+  update: ["workflow_update", "distributor_update", "info"],
 };
 
 const smartFolderLabelOptions = [
   { value: "business", label: "Business" },
   { value: "demo", label: "Demo" },
   { value: "finance", label: "Finance" },
-  { value: "info", label: "Info" },
+  { value: "other", label: "Other" },
   { value: "promo", label: "Promo" },
   { value: "reply", label: "Reply" },
-  { value: "update", label: "Updates" },
+  { value: "update", label: "Update" },
 ] as const;
 
 function getSmartFolderRuleMatchValue(message: MailMessage, field: SmartFolderRuleField) {
@@ -868,6 +868,92 @@ function getSmartFolderRuleMatchValue(message: MailMessage, field: SmartFolderRu
   return atIndex === -1 ? normalizedSender : normalizedSender.slice(atIndex + 1);
 }
 
+function isBroadcastPromoMessage(
+  message: Pick<MailMessage, "subject" | "snippet" | "sender" | "from" | "body">,
+) {
+  const searchableText = [
+    message.subject,
+    message.snippet,
+    message.sender,
+    message.from,
+    ...(message.body ?? []),
+  ]
+    .join(" ")
+    .toLowerCase();
+
+  return includesAnyKeyword(searchableText, [
+    "newsletter",
+    "nieuws",
+    "newsberichten",
+    "read online",
+    "read this email online",
+    "view in browser",
+    "view online",
+    "unsubscribe",
+    "campaign monitor",
+    "mailchimp",
+  ]);
+}
+
+function resolveVisibleClassification(
+  message: Pick<
+    MailMessage,
+    "internalClassification" | "signal" | "ui_signal" | "subject" | "snippet" | "sender" | "from" | "body"
+  >,
+): CuevionInternalClassification {
+  const signalClassification = (() => {
+    switch (message.ui_signal ?? message.signal) {
+      case "DEMO":
+      case "For review":
+      case "Shortlist":
+        return "demo" as const;
+      case "FINANCE":
+      case "Finance":
+        return "finance" as const;
+      case "PROMO":
+      case "Promo":
+        return "promo" as const;
+      case "BUSINESS":
+      case "Priority":
+      case "Active":
+        return "business" as const;
+      case "UPDATE":
+      case "Update":
+      case "Timing":
+        return "workflow_update" as const;
+      case "REPLY":
+      case "Follow-up":
+        return "reply" as const;
+      default:
+        return message.internalClassification ?? "unknown";
+    }
+  })();
+
+  if (
+    (message.internalClassification === "promo" || signalClassification === "promo") &&
+    isBroadcastPromoMessage(message)
+  ) {
+    return "workflow_update";
+  }
+
+  if (
+    !message.internalClassification &&
+    signalClassification === "finance" &&
+    isMarketingNewsletterUpdateMessage(message)
+  ) {
+    return "workflow_update";
+  }
+
+  if (
+    message.internalClassification &&
+    message.internalClassification !== "unknown"
+  ) {
+    return message.internalClassification;
+  }
+
+  return signalClassification;
+}
+
 function doesMessageMatchSmartFolderRule(message: MailMessage, rule: SmartFolderRule) {
   const ruleValue = rule.value.trim().toLowerCase();
 
@@ -876,7 +962,7 @@ function doesMessageMatchSmartFolderRule(message: MailMessage, rule: SmartFolder
   }
 
   if (rule.field === "Label") {
-    const classification = (message.internalClassification ?? "unknown")
+    const classification = resolveVisibleClassification(message)
       .trim()
       .toLowerCase();
     const matchingClassifications =
@@ -7383,82 +7469,8 @@ function MailboxView({
   }, [isComposeOpen, pendingComposeAttachmentPickerOpen]);
 
   const mailboxCollections = mailboxStore[mailbox.id] ?? createEmptyMailboxCollections();
-  const isBroadcastPromoMessage = (message: MailMessage) => {
-    const searchableText = [
-      message.subject,
-      message.snippet,
-      message.sender,
-      message.from,
-      ...(message.body ?? []),
-    ]
-      .join(" ")
-      .toLowerCase();
-
-    return includesAnyKeyword(searchableText, [
-      "newsletter",
-      "nieuws",
-      "newsberichten",
-      "read online",
-      "read this email online",
-      "view in browser",
-      "view online",
-      "unsubscribe",
-      "campaign monitor",
-      "mailchimp",
-    ]);
-  };
   const resolveVisibilityClassificationForMessage = (message: MailMessage) => {
-    const signalClassification = (() => {
-      switch (message.ui_signal ?? message.signal) {
-        case "DEMO":
-        case "For review":
-        case "Shortlist":
-          return "demo" as const;
-        case "FINANCE":
-        case "Finance":
-          return "finance" as const;
-        case "PROMO":
-        case "Promo":
-          return "promo" as const;
-        case "BUSINESS":
-        case "Priority":
-        case "Active":
-          return "business" as const;
-        case "UPDATE":
-        case "Update":
-        case "Timing":
-          return "workflow_update" as const;
-        case "REPLY":
-        case "Follow-up":
-          return "reply" as const;
-        default:
-          return message.internalClassification;
-      }
-    })();
-
-    if (
-      (message.internalClassification === "promo" || signalClassification === "promo") &&
-      isBroadcastPromoMessage(message)
-    ) {
-      return "workflow_update" as const;
-    }
-
-    if (
-      !message.internalClassification &&
-      signalClassification === "finance" &&
-      isMarketingNewsletterUpdateMessage(message)
-    ) {
-      return "workflow_update" as const;
-    }
-
-    if (
-      message.internalClassification &&
-      message.internalClassification !== "unknown"
-    ) {
-      return message.internalClassification;
-    }
-
-    return signalClassification;
+    return resolveVisibleClassification(message);
   };
   const resolveFocusPreferenceLevelForMessage = (message: MailMessage) => {
     const visibilityClassification = resolveVisibilityClassificationForMessage(message);
