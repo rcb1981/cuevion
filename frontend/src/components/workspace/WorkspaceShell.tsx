@@ -1356,17 +1356,20 @@ function doesCollaborationMentionCandidateMatchQuery(
   candidate: ReturnType<typeof getCollaborationMentionTargets>[number],
   query: string,
 ) {
-  const normalizedQuery = query.toLowerCase().replace(/[^a-z0-9]+/g, "");
+  const normalizeMentionMatchToken = (value: string) =>
+    value.toLowerCase().replace(/[^a-z0-9]+/g, "");
+  const normalizedQuery = normalizeMentionMatchToken(query);
 
   if (!normalizedQuery) {
     return true;
   }
 
-  const normalizedName = candidate.name.toLowerCase().replace(/[^a-z0-9]+/g, "");
-  const normalizedEmail = candidate.email.toLowerCase().replace(/[^a-z0-9]+/g, "");
+  const normalizedHandle = normalizeMentionMatchToken(candidate.handle);
+  const normalizedName = normalizeMentionMatchToken(candidate.name);
+  const normalizedEmail = normalizeMentionMatchToken(candidate.email);
 
   return (
-    candidate.handle.toLowerCase().includes(normalizedQuery) ||
+    normalizedHandle.includes(normalizedQuery) ||
     normalizedName.includes(normalizedQuery) ||
     normalizedEmail.includes(normalizedQuery)
   );
@@ -8116,10 +8119,7 @@ function MailboxView({
   );
   const visibleCollaborationMentionCandidates = collaborationMentionQuery
     ? collaborationMentionCandidates.filter((candidate) =>
-        doesCollaborationMentionCandidateMatchQuery(
-          candidate,
-          collaborationMentionQuery.query,
-        ),
+        doesCollaborationMentionCandidateMatchQuery(candidate, collaborationMentionQuery.query),
       )
     : [];
   const visibleCollaborationMessages = activeCollaborationMessage?.collaboration
@@ -14069,7 +14069,7 @@ function MailboxView({
                           className="w-full resize-none rounded-[18px] bg-[var(--workspace-card-subtle)] px-4 py-3 text-[0.92rem] leading-7 text-[var(--workspace-text-soft)] outline-none placeholder:text-[var(--workspace-text-faint)]"
                         />
                         {visibleCollaborationMentionCandidates.length > 0 ? (
-                          <div className="absolute left-3 right-3 top-[calc(100%-0.75rem)] z-10 rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] p-2 shadow-[0_18px_40px_rgba(61,44,32,0.12),0_6px_16px_rgba(61,44,32,0.08)]">
+                          <div className="absolute bottom-[calc(100%-0.75rem)] left-3 right-3 z-10 rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] p-2 shadow-[0_18px_40px_rgba(61,44,32,0.12),0_6px_16px_rgba(61,44,32,0.08)]">
                             <div className="px-3 pb-1.5 pt-0.5 text-[0.62rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
                               Mention someone
                             </div>
