@@ -507,6 +507,12 @@ type NotificationNavigationRequest = {
 };
 type VisibleNotificationItem = {
   id: string;
+  sourceIds: string[];
+  kind: "collaboration" | "reply" | "mention";
+  mailboxId: InboxId;
+  messageId: string;
+  collaborationMessageId?: string;
+  actorName?: string;
   title: string;
   detail: string;
   time: string;
@@ -6092,6 +6098,11 @@ function buildVisibleNotificationItems({
           if (!isOwnCollaborationStart) {
             items.push({
               id: `notification:created:${message.id}:${message.collaboration.createdAt}`,
+              sourceIds: [`notification:created:${message.id}:${message.collaboration.createdAt}`],
+              kind: "collaboration",
+              mailboxId: mailbox.id,
+              messageId: message.id,
+              actorName: message.collaboration.requestedBy,
               title: `${message.collaboration.requestedBy} started a collaboration`,
               detail: subjectDetail,
               time: formatVisibleActivityTimestamp(message.collaboration.createdAt),
@@ -6113,6 +6124,11 @@ function buildVisibleNotificationItems({
           ) {
             items.push({
               id: `notification:resolved:${message.id}:${message.collaboration.resolvedAt}`,
+              sourceIds: [`notification:resolved:${message.id}:${message.collaboration.resolvedAt}`],
+              kind: "collaboration",
+              mailboxId: mailbox.id,
+              messageId: message.id,
+              actorName: message.collaboration.resolvedByUserName,
               title: `${message.collaboration.resolvedByUserName} marked this as done`,
               detail: subjectDetail,
               time: formatVisibleActivityTimestamp(message.collaboration.resolvedAt),
@@ -6141,6 +6157,12 @@ function buildVisibleNotificationItems({
               if (mentionsCurrentUser.length > 0) {
                 items.push({
                   id: `notification:mention:${message.id}:${entry.id}:${currentUserId}`,
+                  sourceIds: [`notification:mention:${message.id}:${entry.id}:${currentUserId}`],
+                  kind: "mention",
+                  mailboxId: mailbox.id,
+                  messageId: message.id,
+                  collaborationMessageId: entry.id,
+                  actorName: entry.authorName,
                   title: `${entry.authorName} mentioned you`,
                   detail: subjectDetail,
                   time: formatVisibleActivityTimestamp(entry.timestamp),
@@ -6158,6 +6180,12 @@ function buildVisibleNotificationItems({
 
               items.push({
                 id: `notification:reply:${message.id}:${entry.id}`,
+                sourceIds: [`notification:reply:${message.id}:${entry.id}`],
+                kind: "reply",
+                mailboxId: mailbox.id,
+                messageId: message.id,
+                collaborationMessageId: entry.id,
+                actorName: entry.authorName,
                 title:
                   getCollaborationMessageVisibility(entry) === "internal"
                     ? `${entry.authorName} replied internally`
@@ -6189,6 +6217,67 @@ function buildVisibleNotificationItems({
       return true;
     })
     .slice(0, 24);
+}
+
+function buildGroupedNotificationItems(items: VisibleNotificationItem[]) {
+  const groupedItems: VisibleNotificationItem[] = [];
+  const groupingWindowMs = 15 * 60 * 1000;
+  let index = 0;
+
+  while (index < items.length) {
+    const currentItem = items[index];
+
+    if (
+      currentItem.kind === "collaboration" ||
+      currentItem.kind === "mention"
+    ) {
+      groupedItems.push(currentItem);
+      index += 1;
+      continue;
+    }
+
+    const relatedItems = [currentItem];
+    let nextIndex = index + 1;
+
+    while (nextIndex < items.length) {
+      const candidate = items[nextIndex];
+
+      if (
+        candidate.kind !== currentItem.kind ||
+        candidate.mailboxId !== currentItem.mailboxId ||
+        candidate.messageId !== currentItem.messageId ||
+        currentItem.sortTimestamp - candidate.sortTimestamp > groupingWindowMs
+      ) {
+        break;
+      }
+
+      relatedItems.push(candidate);
+      nextIndex += 1;
+    }
+
+    if (relatedItems.length === 1) {
+      groupedItems.push(currentItem);
+      index += 1;
+      continue;
+    }
+
+    const leadActor = relatedItems[0]?.actorName ?? "Someone";
+    const otherCount = relatedItems.length - 1;
+    groupedItems.push({
+      ...currentItem,
+      id: `group:${currentItem.kind}:${currentItem.mailboxId}:${currentItem.messageId}:${relatedItems
+        .map((item) => item.id)
+        .join("|")}`,
+      sourceIds: relatedItems.flatMap((item) => item.sourceIds),
+      title:
+        otherCount === 1
+          ? `${leadActor} and 1 other replied`
+          : `${leadActor} and ${otherCount} others replied`,
+    });
+    index = nextIndex;
+  }
+
+  return groupedItems;
 }
 
 function formatVisibleActivityTimestamp(timestamp: number) {
@@ -22351,14 +22440,18 @@ export function WorkspaceShell({
     teamActivityEnabled,
     onOpenNotificationNavigation: handleOpenNotificationNavigation,
   });
+  const groupedNotificationItems = useMemo(
+    () => buildGroupedNotificationItems(liveNotificationItems),
+    [liveNotificationItems],
+  );
   const unreadNotificationIds = useMemo(
     () =>
       new Set(
-        liveNotificationItems
-          .filter((item) => !readNotificationIds.includes(item.id))
+        groupedNotificationItems
+          .filter((item) => item.sourceIds.some((sourceId) => !readNotificationIds.includes(sourceId)))
           .map((item) => item.id),
       ),
-    [liveNotificationItems, readNotificationIds],
+    [groupedNotificationItems, readNotificationIds],
   );
   const notificationUnreadCount = useMemo(
     () => unreadNotificationIds.size,
@@ -22373,7 +22466,7 @@ export function WorkspaceShell({
   });
   const handleOpenNotificationItem = (item: VisibleNotificationItem) => {
     setReadNotificationIds((current) =>
-      current.includes(item.id) ? current : [...current, item.id],
+      Array.from(new Set([...current, ...item.sourceIds])),
     );
     item.action();
   };
@@ -24395,7 +24488,7 @@ export function WorkspaceShell({
                   onOpenPrimaryInbox={handleOpenSenderContext}
                   onOpenInboxes={() => handleOpenInboxes("Connected")}
                   onOpenForYou={() => handleOpenForYou("Promo")}
-                  notificationPreviewItems={liveNotificationItems}
+                  notificationPreviewItems={groupedNotificationItems}
                   primaryInboxTitle={primaryInboxTitle}
                   primaryInboxEmailCount={primaryInboxEmailCount}
                   priorityInboxCount={livePriorityInboxItems.length}
@@ -24429,7 +24522,7 @@ export function WorkspaceShell({
                   onOpenLearningRequest={handleOpenLearningRequest}
                   onOpenSenderContext={handleOpenSenderContext}
                   activityItems={liveActivityItems}
-                  notificationItems={liveNotificationItems}
+                  notificationItems={groupedNotificationItems}
                   unreadNotificationIds={unreadNotificationIds}
                   onOpenNotificationItem={handleOpenNotificationItem}
                   aiSuggestionsEnabled={aiSuggestionsEnabled}
