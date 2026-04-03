@@ -21464,6 +21464,7 @@ export function WorkspaceShell({
   >("pending");
   const [externalReviewHistoryExpanded, setExternalReviewHistoryExpanded] = useState(false);
   const [isExternalReviewMessageOpen, setIsExternalReviewMessageOpen] = useState(false);
+  const [inviteMessageOverride, setInviteMessageOverride] = useState<MailMessage | null>(null);
   const [inviteReplyDraft, setInviteReplyDraft] = useState("");
   const [inviteReplyVisibility, setInviteReplyVisibility] =
     useState<MailMessageCollaborationVisibility>(
@@ -21814,9 +21815,13 @@ export function WorkspaceShell({
         .flatMap((collections) => canonicalFolderOrder.flatMap((folder) => collections[folder]))
         .find((message) => message.id === collaborationInviteRoute.messageId) ?? null
     : null;
-  const inviteMessage = storedInviteMessage?.collaboration
-    ? storedInviteMessage
-    : decodedInviteMessage ?? storedInviteMessage;
+  const inviteMessage =
+    (inviteMessageOverride &&
+    collaborationInviteRoute &&
+    inviteMessageOverride.id === collaborationInviteRoute.messageId
+      ? inviteMessageOverride
+      : null) ??
+    (storedInviteMessage?.collaboration ? storedInviteMessage : decodedInviteMessage ?? storedInviteMessage);
   const inviteCollaboration = inviteMessage?.collaboration ?? null;
   const inviteParticipants = inviteCollaboration
     ? getCollaborationParticipants(inviteCollaboration)
@@ -21962,6 +21967,22 @@ export function WorkspaceShell({
     });
   };
 
+  useEffect(() => {
+    if (!collaborationInviteRoute) {
+      setInviteMessageOverride(null);
+      return;
+    }
+
+    if (
+      storedInviteMessage?.collaboration &&
+      inviteMessageOverride?.id === storedInviteMessage.id &&
+      storedInviteMessage.collaboration.updatedAt >=
+        (inviteMessageOverride.collaboration?.updatedAt ?? 0)
+    ) {
+      setInviteMessageOverride(null);
+    }
+  }, [collaborationInviteRoute, inviteMessageOverride, storedInviteMessage]);
+
   const joinCollaborationFromInvite = () => {
     if (!collaborationInviteRoute || !authenticatedUser || !inviteMessage?.collaboration) {
       return;
@@ -22063,6 +22084,33 @@ export function WorkspaceShell({
       mentionCandidates,
       normalizeSenderLearningKey(authenticatedUser.email),
     );
+    const nextInviteMessage: MailMessage = {
+      ...inviteMessage,
+      isShared: true,
+      collaboration: {
+        ...inviteMessage.collaboration,
+        state:
+          inviteMessage.collaboration.state === "resolved"
+            ? "needs_review"
+            : inviteMessage.collaboration.state,
+        updatedAt: nextTimestamp,
+        previewText: trimmedReply,
+        messages: [
+          ...inviteMessage.collaboration.messages,
+          {
+            id: `${inviteMessage.id}-invite-reply-${nextTimestamp}`,
+            authorId: normalizeSenderLearningKey(authenticatedUser.email),
+            authorName: authenticatedUser.name,
+            text: trimmedReply,
+            timestamp: nextTimestamp,
+            visibility: inviteReplyVisibility,
+            mentions,
+          },
+        ],
+      },
+    };
+
+    setInviteMessageOverride(nextInviteMessage);
 
     updateInviteWorkspaceMessageById(inviteMessage.id, (message) =>
       message.collaboration
@@ -22115,6 +22163,33 @@ export function WorkspaceShell({
       mentionCandidates,
       normalizeSenderLearningKey(externalReviewAuthorEmail),
     );
+    const nextInviteMessage: MailMessage = {
+      ...inviteMessage,
+      isShared: true,
+      collaboration: {
+        ...inviteMessage.collaboration,
+        state:
+          inviteMessage.collaboration.state === "resolved"
+            ? "needs_review"
+            : inviteMessage.collaboration.state,
+        updatedAt: nextTimestamp,
+        previewText: trimmedReply,
+        messages: [
+          ...inviteMessage.collaboration.messages,
+          {
+            id: `${inviteMessage.id}-external-review-reply-${nextTimestamp}`,
+            authorId: normalizeSenderLearningKey(externalReviewAuthorEmail),
+            authorName: externalReviewAuthorName,
+            text: trimmedReply,
+            timestamp: nextTimestamp,
+            visibility: "shared",
+            mentions,
+          },
+        ],
+      },
+    };
+
+    setInviteMessageOverride(nextInviteMessage);
 
     updateInviteWorkspaceMessageById(inviteMessage.id, (message) =>
       message.collaboration
