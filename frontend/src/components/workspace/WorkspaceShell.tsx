@@ -1112,6 +1112,110 @@ function withComposeSignatureMarkup(
   return container.innerHTML;
 }
 
+const unsafeEmailHtmlSelectors = [
+  "script",
+  "style",
+  "link",
+  "meta",
+  "base",
+  "iframe",
+  "frame",
+  "frameset",
+  "object",
+  "embed",
+  "applet",
+  "form",
+  "input",
+  "button",
+  "textarea",
+  "select",
+  "option",
+].join(",");
+
+const unsafeEmailUrlPattern =
+  /^\s*(javascript:|vbscript:|data:text\/html|data:application\/javascript)/i;
+const unsafeInlineStylePattern =
+  /expression\s*\(|url\s*\(\s*['"]?\s*(javascript:|vbscript:|data:text\/html)/i;
+
+function sanitizeMessageBodyHtml(bodyHtml: string) {
+  const normalizedHtml = bodyHtml.trim();
+
+  if (!normalizedHtml) {
+    return null;
+  }
+
+  if (typeof DOMParser === "undefined") {
+    return normalizedHtml;
+  }
+
+  const parsedDocument = new DOMParser().parseFromString(normalizedHtml, "text/html");
+  const body = parsedDocument.body;
+
+  body.querySelectorAll(unsafeEmailHtmlSelectors).forEach((node) => {
+    node.remove();
+  });
+
+  body.querySelectorAll("*").forEach((element) => {
+    Array.from(element.attributes).forEach((attribute) => {
+      const attributeName = attribute.name.toLowerCase();
+      const attributeValue = attribute.value;
+
+      if (attributeName.startsWith("on")) {
+        element.removeAttribute(attribute.name);
+        return;
+      }
+
+      if (
+        ["href", "src", "srcset", "poster", "xlink:href", "action", "formaction"].includes(
+          attributeName,
+        ) &&
+        unsafeEmailUrlPattern.test(attributeValue)
+      ) {
+        element.removeAttribute(attribute.name);
+        return;
+      }
+
+      if (attributeName === "style" && unsafeInlineStylePattern.test(attributeValue)) {
+        element.removeAttribute(attribute.name);
+      }
+    });
+
+    if (element instanceof HTMLAnchorElement) {
+      element.setAttribute("target", "_blank");
+      element.setAttribute("rel", "noopener noreferrer");
+    }
+
+    if (element instanceof HTMLImageElement) {
+      element.setAttribute("loading", "lazy");
+      element.setAttribute("decoding", "async");
+    }
+  });
+
+  const sanitizedHtml = body.innerHTML.trim();
+  const hasRenderableContent =
+    body.textContent?.replace(/\s+/g, "").length ||
+    body.querySelector("img, table, blockquote, hr, ul, ol");
+
+  return hasRenderableContent ? sanitizedHtml : null;
+}
+
+function resolveMessageBodyRenderMode(
+  message: Pick<MailMessage, "body" | "bodyHtml">,
+): { mode: "html"; html: string } | { mode: "plain" } {
+  const sanitizedHtml = message.bodyHtml
+    ? sanitizeMessageBodyHtml(message.bodyHtml)
+    : null;
+
+  if (sanitizedHtml) {
+    return {
+      mode: "html",
+      html: sanitizedHtml,
+    };
+  }
+
+  return { mode: "plain" };
+}
+
 function buildComposeBody({
   mode,
   sourceMessage,
@@ -8106,6 +8210,7 @@ function MailboxView({
               : threadMessage.body.slice(0, quoteStartIndex);
           const quotedParagraphs =
             quoteStartIndex === -1 ? [] : threadMessage.body.slice(quoteStartIndex);
+          const bodyRenderMode = resolveMessageBodyRenderMode(threadMessage);
 
           return (
             <div
@@ -8135,12 +8240,12 @@ function MailboxView({
                 </div>
               </div>
               <div className="mt-3 space-y-3">
-                {threadMessage.bodyHtml ? (
+                {bodyRenderMode.mode === "html" ? (
                   <div
                     className={`whitespace-pre-wrap text-[0.94rem] ${
                       density === "full" ? "leading-8" : "leading-7"
                     } text-[var(--workspace-text-soft)] [&_a]:text-[color:rgba(70,109,73,0.96)] [&_a]:underline [&_div[data-compose-signature-divider='true']]:my-2 [&_div[data-compose-signature-divider='true']]:h-px [&_div[data-compose-signature-divider='true']]:w-full [&_div[data-compose-signature-divider='true']]:bg-[color:rgba(121,151,120,0.18)] [&_div[data-compose-signature-logo='true']]:pt-1 [&_div[data-compose-signature-logo='true']_img]:max-h-[76px] [&_div[data-compose-signature-logo='true']_img]:w-auto [&_div[data-compose-signature-logo='true']_img]:max-w-full [&_div[data-compose-signature-logo='true']_img]:object-contain [&_div[data-compose-signature-row='true']]:flex [&_div[data-compose-signature-row='true']]:items-start [&_div[data-compose-signature-row='true']]:gap-4 [&_div[data-compose-signature-right='true']]:min-w-0 [&_div[data-compose-signature-right='true']]:flex-1 [&_div[data-compose-signature-spacer='true']]:min-h-[1.75rem] [&_div[data-compose-signature-text='true']]:whitespace-pre-wrap [&_div[data-compose-signature-text='true']]:text-[0.86rem] [&_div[data-compose-signature-text='true']]:leading-[1.45] [&_div[data-compose-signature-text='true']_div]:min-h-[1.2rem] [&_div[data-compose-signature-text='true']_p]:min-h-[1.2rem] [&_div[data-compose-quote='true']]:pt-3`}
-                    dangerouslySetInnerHTML={{ __html: threadMessage.bodyHtml }}
+                    dangerouslySetInnerHTML={{ __html: bodyRenderMode.html }}
                   />
                 ) : (
                   <>
