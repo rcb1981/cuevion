@@ -1276,15 +1276,17 @@ function buildEmailStageDocument(
   themeMode: "light" | "dark",
 ) {
   const stageTextColor =
-    themeMode === "dark" ? "rgba(229, 236, 230, 0.96)" : "rgba(54, 62, 56, 0.96)";
+    themeMode === "dark" ? "rgba(229, 236, 230, 0.96)" : "rgba(43, 49, 45, 0.98)";
   const stageLinkColor =
-    themeMode === "dark" ? "rgba(176, 209, 183, 0.96)" : "rgba(63, 102, 69, 0.96)";
+    themeMode === "dark" ? "rgba(176, 209, 183, 0.96)" : "rgba(44, 89, 116, 0.98)";
   const stageQuoteBorder =
-    themeMode === "dark" ? "rgba(128, 156, 128, 0.28)" : "rgba(121, 151, 120, 0.2)";
+    themeMode === "dark" ? "rgba(128, 156, 128, 0.28)" : "rgba(108, 136, 108, 0.24)";
   const stageQuoteSurface =
-    themeMode === "dark" ? "rgba(82, 98, 84, 0.18)" : "rgba(112, 138, 112, 0.06)";
+    themeMode === "dark" ? "rgba(82, 98, 84, 0.18)" : "rgba(112, 138, 112, 0.05)";
   const stageRuleColor =
     themeMode === "dark" ? "rgba(128, 156, 128, 0.14)" : "rgba(121, 151, 120, 0.14)";
+  const stageSecondaryTextColor =
+    themeMode === "dark" ? "rgba(209, 217, 211, 0.88)" : "rgba(80, 74, 68, 0.92)";
 
   return `<!DOCTYPE html>
 <html>
@@ -1314,6 +1316,15 @@ function buildEmailStageDocument(
       .email-stage > * {
         max-width: 100%;
       }
+      .email-stage,
+      .email-stage p,
+      .email-stage div,
+      .email-stage span,
+      .email-stage td,
+      .email-stage th,
+      .email-stage li {
+        color: inherit;
+      }
       img {
         max-width: 100%;
         height: auto;
@@ -1324,6 +1335,8 @@ function buildEmailStageDocument(
       a {
         color: ${stageLinkColor};
         word-break: break-all;
+        text-decoration-color: color-mix(in srgb, ${stageLinkColor} 72%, transparent);
+        text-underline-offset: 2px;
       }
       blockquote,
       [data-email-quote="true"],
@@ -1332,7 +1345,7 @@ function buildEmailStageDocument(
         padding: 0.4rem 0 0.1rem 0.85rem;
         border-left: 2px solid ${stageQuoteBorder};
         background: ${stageQuoteSurface};
-        color: inherit;
+        color: ${stageSecondaryTextColor};
       }
       hr {
         border: 0;
@@ -8834,8 +8847,8 @@ function MailboxView({
                         `${threadMessage.id}-${paragraph}`,
                         `break-words text-[0.94rem] ${density === "full" ? "leading-7" : "leading-6.5"} ${
                           isHistoricalThreadMessage
-                            ? "text-[color:rgba(114,108,100,0.92)] dark:text-[color:rgba(194,200,196,0.82)]"
-                            : "text-[var(--workspace-text-soft)]"
+                            ? "text-[color:rgba(97,90,82,0.94)] dark:text-[color:rgba(194,200,196,0.82)]"
+                            : "text-[color:rgba(53,48,43,0.98)] dark:text-[var(--workspace-text-soft)]"
                         }`,
                       ),
                     )}
@@ -8854,7 +8867,7 @@ function MailboxView({
                             renderPlainMessageParagraph(
                               paragraph,
                               `${threadMessage.id}-quoted-${paragraph}`,
-                              `break-words text-[0.83rem] ${density === "full" ? "leading-6.25" : "leading-5.75"} text-[color:rgba(111,104,96,0.78)] dark:text-[color:rgba(176,182,178,0.68)]`,
+                              `break-words text-[0.83rem] ${density === "full" ? "leading-6.25" : "leading-5.75"} text-[color:rgba(90,84,77,0.88)] dark:text-[color:rgba(176,182,178,0.68)]`,
                             ),
                           )}
                         </div>
