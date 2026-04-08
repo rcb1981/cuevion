@@ -1,3 +1,6 @@
+// Inactive production workspace shell.
+// The active Vercel build uses `frontend/src/components/workspace/WorkspaceShell.tsx`.
+// Update this root copy only if the deployment architecture is intentionally unified.
 import {
   memo,
   useEffect,

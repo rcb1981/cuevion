@@ -1,3 +1,6 @@
+// Inactive production app shell.
+// The live Vercel app runs from `frontend/src/App.tsx`; keep this root copy as
+// non-production unless the deployment root is intentionally changed.
 import { useEffect, useState } from "react";
 import { OnboardingFlow } from "./components/onboarding/OnboardingFlow";
 import { WorkspaceTransition } from "./components/workspace/WorkspaceTransition";
