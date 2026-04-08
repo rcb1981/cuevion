@@ -1009,6 +1009,20 @@ function hasUnseenMentionForCurrentUser(
   );
 }
 
+function readAISuggestionsEnabledPreference() {
+  if (typeof window === "undefined") {
+    return true;
+  }
+
+  const storedValue = window.localStorage.getItem(AI_SUGGESTIONS_STORAGE_KEY);
+
+  if (storedValue === null) {
+    return true;
+  }
+
+  return storedValue === "true";
+}
+
 function canViewerSeeCollaborationMessage(
   entry: MailMessageCollaborationMessage,
   viewerType: "workspace" | "external",
@@ -1942,7 +1956,12 @@ function resolveCuevionCategorization(
 function resolveMailMessageSuggestion(
   message: MailMessageSeed,
   categorization: Pick<MailMessage, "category" | "categorySource" | "categoryConfidence">,
+  isAIEnabled: boolean,
 ): MailMessageSuggestion | undefined {
+  if (!isAIEnabled) {
+    return undefined;
+  }
+
   if (message.suggestionDismissed) {
     return undefined;
   }
@@ -1978,7 +1997,12 @@ function resolveMailMessageBehaviorSuggestion(
   message: MailMessageSeed,
   categorization: Pick<MailMessage, "category" | "categorySource" | "categoryConfidence">,
   senderCategoryLearning: SenderCategoryLearningStore,
+  isAIEnabled: boolean,
 ): MailMessageBehaviorSuggestion | undefined {
+  if (!isAIEnabled) {
+    return undefined;
+  }
+
   if (message.behaviorSuggestionDismissed) {
     return undefined;
   }
@@ -2018,6 +2042,7 @@ function normalizeMailMessage(
   messageOwnershipInteractions: MessageOwnershipInteractionStore,
   currentUserId: string,
   mailboxStore?: MailboxStore,
+  isAIEnabled = true,
 ): MailMessage {
   const {
     category: _category,
@@ -2058,11 +2083,12 @@ function normalizeMailMessage(
     priorityScore,
     focusSignal: resolveMessageFocusSignal(priorityScore, owner, currentUserId),
     ...categorization,
-    suggestion: resolveMailMessageSuggestion(message, categorization),
+    suggestion: resolveMailMessageSuggestion(message, categorization, isAIEnabled),
     behaviorSuggestion: resolveMailMessageBehaviorSuggestion(
       message,
       categorization,
       senderCategoryLearning,
+      isAIEnabled,
     ),
   };
 }
@@ -2898,6 +2924,7 @@ function createInitialMailboxStore(
   messageOwnershipInteractions: MessageOwnershipInteractionStore,
   currentUserId: string,
   workspaceDataMode: WorkspaceDataMode,
+  isAIEnabled = true,
 ): MailboxStore {
   const orderedMailboxMap = new Map(
     orderedMailboxes.map((mailbox) => [mailbox.id, mailbox] as const),
@@ -2937,6 +2964,8 @@ function createInitialMailboxStore(
         senderCategoryLearning,
         messageOwnershipInteractions,
         currentUserId,
+        undefined,
+        isAIEnabled,
       ),
     );
     const inboxMessagesByFolder = normalizedInboxMessages.reduce<{
@@ -2976,7 +3005,7 @@ function createInitialMailboxStore(
             "Once the team signs off, this can be sent immediately.",
           ],
           attachments: ["notes.txt"],
-        }, inboxId, senderCategoryLearning, messageOwnershipInteractions, currentUserId),
+        }, inboxId, senderCategoryLearning, messageOwnershipInteractions, currentUserId, undefined, isAIEnabled),
       ],
       Sent: [
         normalizeMailMessage({
@@ -2994,7 +3023,7 @@ function createInitialMailboxStore(
             "Once everyone confirms, this thread is ready to move forward.",
           ],
           attachments: ["release-notes.pdf"],
-        }, inboxId, senderCategoryLearning, messageOwnershipInteractions, currentUserId),
+        }, inboxId, senderCategoryLearning, messageOwnershipInteractions, currentUserId, undefined, isAIEnabled),
       ],
       Archive: [
         normalizeMailMessage({
@@ -3011,7 +3040,7 @@ function createInitialMailboxStore(
             "All assets were delivered successfully to DSP partners and are now archived.",
           ],
           attachments: ["delivery-report.pdf"],
-        }, inboxId, senderCategoryLearning, messageOwnershipInteractions, currentUserId),
+        }, inboxId, senderCategoryLearning, messageOwnershipInteractions, currentUserId, undefined, isAIEnabled),
       ],
       Filtered: inboxMessagesByFolder.filtered,
       Spam: [
@@ -3029,7 +3058,7 @@ function createInitialMailboxStore(
             "This message was moved out of active workflow and treated as unwanted future outreach.",
           ],
           attachments: [],
-        }, inboxId, senderCategoryLearning, messageOwnershipInteractions, currentUserId),
+        }, inboxId, senderCategoryLearning, messageOwnershipInteractions, currentUserId, undefined, isAIEnabled),
       ],
       Trash: [
         normalizeMailMessage({
@@ -3046,7 +3075,7 @@ function createInitialMailboxStore(
             "This thread was removed from the active workflow after the updated list replaced it.",
           ],
           attachments: [],
-        }, inboxId, senderCategoryLearning, messageOwnershipInteractions, currentUserId),
+        }, inboxId, senderCategoryLearning, messageOwnershipInteractions, currentUserId, undefined, isAIEnabled),
       ],
     };
 
@@ -3059,6 +3088,7 @@ function createInitialMailboxStore(
     senderCategoryLearning,
     messageOwnershipInteractions,
     currentUserId,
+    isAIEnabled,
   );
 }
 
@@ -3089,6 +3119,7 @@ function normalizeMailboxStore(
   senderCategoryLearning: SenderCategoryLearningStore,
   messageOwnershipInteractions: MessageOwnershipInteractionStore,
   currentUserId: string,
+  isAIEnabled = true,
 ): MailboxStore {
   const mailboxOrder = [
     ...orderedMailboxes.map((mailbox) => mailbox.id),
@@ -3147,6 +3178,7 @@ function normalizeMailboxStore(
             messageOwnershipInteractions,
             currentUserId,
             store,
+            isAIEnabled,
           ),
         );
       }
@@ -6600,7 +6632,7 @@ function MailboxView({
       signature: undefined,
       attachments: composeAttachments,
       cc: composeCc.trim() || undefined,
-    }, activeComposeMailbox.id, senderCategoryLearning, messageOwnershipInteractions, currentUserId, mailboxStore);
+    }, activeComposeMailbox.id, senderCategoryLearning, messageOwnershipInteractions, currentUserId, mailboxStore, aiSuggestionsEnabled);
 
     setMailboxStore((currentStore) => ({
       ...currentStore,
@@ -6657,7 +6689,7 @@ function MailboxView({
       signature: undefined,
       attachments: composeAttachments,
       cc: composeCc.trim() || undefined,
-    }, activeComposeMailbox.id, senderCategoryLearning, messageOwnershipInteractions, currentUserId, mailboxStore);
+    }, activeComposeMailbox.id, senderCategoryLearning, messageOwnershipInteractions, currentUserId, mailboxStore, aiSuggestionsEnabled);
 
     setMailboxStore((currentStore) => ({
       ...currentStore,
@@ -16214,6 +16246,7 @@ function ForYouView({
   const reviewUncertainCompletionTimeoutRef = useRef<number | null>(null);
   const [reviewUncertainCompletionFeedback, setReviewUncertainCompletionFeedback] =
     useState<"idle" | "done">("idle");
+  const isAIEnabled = aiSuggestionsEnabled;
   const closeLearningModal = () => {
     if (pasteRuleSaveTimeoutRef.current !== null) {
       window.clearTimeout(pasteRuleSaveTimeoutRef.current);
@@ -16247,11 +16280,15 @@ function ForYouView({
         "Train how Cuevion should treat future emails from a sender or domain",
       handler: () => setActiveLearningModal("paste-rule"),
     },
-    {
-      title: "Check uncertain emails",
-      subtitle: "Resolve messages Cuevion is not fully sure about",
-      handler: openReviewUncertainModal,
-    },
+    ...(isAIEnabled
+      ? [
+          {
+            title: "Check uncertain emails",
+            subtitle: "Resolve messages Cuevion is not fully sure about",
+            handler: openReviewUncertainModal,
+          },
+        ]
+      : []),
     {
       title: "Recent learning decisions",
       subtitle: "Revisit recent choices Cuevion learned from.",
@@ -16259,6 +16296,7 @@ function ForYouView({
     },
   ];
   const { learningSuggestionPool, uncertainEmailPool } = buildForYouLearningPools(
+    isAIEnabled,
     mailboxStore,
     resolveMailDateMs,
     (category, mailboxId) =>
@@ -16481,14 +16519,17 @@ function ForYouView({
   }, [activeUncertainEmailIndex, uncertainEmailPool.length]);
 
   useEffect(() => {
-    if (!aiSuggestionsEnabled) {
-      setActiveLearningModal(null);
-      return;
+    if (
+      !isAIEnabled &&
+      (activeLearningModal === "review-uncertain" ||
+        activeLearningModal === "refine-cuevion")
+    ) {
+      closeLearningModal();
     }
-  }, [aiSuggestionsEnabled]);
+  }, [activeLearningModal, isAIEnabled]);
 
   useEffect(() => {
-    if (!aiSuggestionsEnabled || !learningLaunchRequest) {
+    if (!learningLaunchRequest) {
       return;
     }
 
@@ -16500,12 +16541,22 @@ function ForYouView({
     }
 
     if (learningLaunchRequest.modal === "review-uncertain") {
+      if (!isAIEnabled) {
+        onConsumeLearningLaunchRequest();
+        return;
+      }
+
       openReviewUncertainModal();
       onConsumeLearningLaunchRequest();
       return;
     }
 
     if (learningLaunchRequest.modal === "refine-cuevion") {
+      if (!isAIEnabled) {
+        onConsumeLearningLaunchRequest();
+        return;
+      }
+
       openRefineCuevionModal();
       onConsumeLearningLaunchRequest();
       return;
@@ -16514,7 +16565,7 @@ function ForYouView({
     setActiveLearningModal(learningLaunchRequest.modal);
     onConsumeLearningLaunchRequest();
   }, [
-    aiSuggestionsEnabled,
+    isAIEnabled,
     learningLaunchRequest,
     onConsumeLearningLaunchRequest,
     recentLearningDecisions,
@@ -16557,7 +16608,7 @@ function ForYouView({
               Run a fast active learning session to shape how Cuevion classifies, prioritizes and routes future email.
             </div>
           </div>
-          {aiSuggestionsEnabled ? (
+          {isAIEnabled ? (
             <button
               type="button"
               onClick={openRefineCuevionModal}
@@ -16565,11 +16616,14 @@ function ForYouView({
             >
               Refine Cuevion
             </button>
-          ) : null}
+          ) : (
+            <div className="text-[0.84rem] leading-7 text-[var(--workspace-text-faint)]">
+              AI is off. Manual learning and recent decision history remain available.
+            </div>
+          )}
         </div>
       </section>
 
-      {aiSuggestionsEnabled ? (
       <section className="rounded-[30px] border border-[var(--workspace-border)] bg-[var(--workspace-card)] p-6 shadow-panel">
         <div className="space-y-5">
           <div className="space-y-2">
@@ -16602,9 +16656,8 @@ function ForYouView({
           </div>
         </div>
       </section>
-      ) : null}
 
-      {aiSuggestionsEnabled && activeLearningModal === "paste-rule" && modalHost
+      {activeLearningModal === "paste-rule" && modalHost
         ? createPortal(
         <WorkspaceModalLayer>
             <div
@@ -16803,7 +16856,7 @@ function ForYouView({
         modalHost,
       ) : null}
 
-      {aiSuggestionsEnabled &&
+      {isAIEnabled &&
       activeLearningModal === "review-uncertain" &&
       modalHost
         ? createPortal(
@@ -17024,7 +17077,7 @@ function ForYouView({
         modalHost,
       ) : null}
 
-      {aiSuggestionsEnabled && activeLearningModal === "recent-decisions" && modalHost
+      {activeLearningModal === "recent-decisions" && modalHost
         ? createPortal(
         <WorkspaceModalLayer>
             <div
@@ -17091,7 +17144,7 @@ function ForYouView({
         modalHost,
       ) : null}
 
-      {aiSuggestionsEnabled && activeLearningModal === "edit-recent-decision" && modalHost
+      {activeLearningModal === "edit-recent-decision" && modalHost
         ? createPortal(
         <WorkspaceModalLayer>
             <div
@@ -17462,7 +17515,7 @@ function ForYouView({
         modalHost,
       ) : null}
 
-      {aiSuggestionsEnabled && activeLearningModal === "refine-cuevion" && modalHost
+      {isAIEnabled && activeLearningModal === "refine-cuevion" && modalHost
         ? createPortal(
         <WorkspaceModalLayer>
             <div
@@ -17816,11 +17869,13 @@ export function WorkspaceShell({
         messageOwnershipInteractions,
         currentWorkspaceUserId,
         workspaceDataMode,
+        readAISuggestionsEnabledPreference(),
       ),
       orderedMailboxes,
       senderCategoryLearning,
       messageOwnershipInteractions,
       currentWorkspaceUserId,
+      readAISuggestionsEnabledPreference(),
     ),
   );
   const primaryInboxEmailCount = getMailboxFolderBadgeCount(
@@ -17931,17 +17986,7 @@ export function WorkspaceShell({
   });
   const [lastViewedGuidance, setLastViewedGuidance] = useState<string | null>(null);
   const [aiSuggestionsEnabled, setAiSuggestionsEnabled] = useState(() => {
-    if (typeof window === "undefined") {
-      return true;
-    }
-
-    const storedValue = window.localStorage.getItem(AI_SUGGESTIONS_STORAGE_KEY);
-
-    if (storedValue === null) {
-      return true;
-    }
-
-    return storedValue === "true";
+    return readAISuggestionsEnabledPreference();
   });
   const [inboxChangesEnabled, setInboxChangesEnabled] = useState(() => {
     if (typeof window === "undefined") {
@@ -19117,6 +19162,7 @@ export function WorkspaceShell({
               messageOwnershipInteractions,
               currentWorkspaceUserId,
               currentStore,
+              aiSuggestionsEnabled,
             ),
           ),
         },
@@ -19128,6 +19174,7 @@ export function WorkspaceShell({
         senderCategoryLearning,
         messageOwnershipInteractions,
         currentWorkspaceUserId,
+        aiSuggestionsEnabled,
       );
     });
   };
@@ -19271,6 +19318,7 @@ export function WorkspaceShell({
         senderCategoryLearning,
         messageOwnershipInteractions,
         currentWorkspaceUserId,
+        aiSuggestionsEnabled,
       );
     });
     setMailboxResetToken((current) => current + 1);
@@ -19324,6 +19372,7 @@ export function WorkspaceShell({
               messageOwnershipInteractions,
               currentWorkspaceUserId,
               currentStore,
+              aiSuggestionsEnabled,
             ),
           ),
         };
@@ -19335,6 +19384,7 @@ export function WorkspaceShell({
         senderCategoryLearning,
         messageOwnershipInteractions,
         currentWorkspaceUserId,
+        aiSuggestionsEnabled,
       );
     });
   }, [
@@ -19342,6 +19392,7 @@ export function WorkspaceShell({
     senderCategoryLearning,
     messageOwnershipInteractions,
     currentWorkspaceUserId,
+    aiSuggestionsEnabled,
   ]);
 
   useEffect(() => {
@@ -19449,6 +19500,7 @@ export function WorkspaceShell({
             messageOwnershipInteractions,
             currentWorkspaceUserId,
             mailboxStore,
+            aiSuggestionsEnabled,
           ),
         });
 
@@ -19485,6 +19537,7 @@ export function WorkspaceShell({
         senderCategoryLearning,
         messageOwnershipInteractions,
         currentWorkspaceUserId,
+        aiSuggestionsEnabled,
       );
     });
     setOutOfOfficeReplyLog(nextReplyLog);
@@ -19496,6 +19549,7 @@ export function WorkspaceShell({
     orderedMailboxes,
     outOfOfficeReplyLog,
     senderCategoryLearning,
+    aiSuggestionsEnabled,
   ]);
 
   useEffect(() => {
@@ -19506,9 +19560,10 @@ export function WorkspaceShell({
         senderCategoryLearning,
         messageOwnershipInteractions,
         currentWorkspaceUserId,
+        aiSuggestionsEnabled,
       ),
     );
-  }, [currentWorkspaceUserId, mailboxOrderKey, messageOwnershipInteractions, senderCategoryLearning]);
+  }, [currentWorkspaceUserId, mailboxOrderKey, messageOwnershipInteractions, senderCategoryLearning, aiSuggestionsEnabled]);
 
   useEffect(() => {
     if (!window.matchMedia) {

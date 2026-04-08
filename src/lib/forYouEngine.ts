@@ -119,6 +119,7 @@ export function isRefineCuevionEligible(message: ForYouDerivationMessage) {
 }
 
 export function buildForYouLearningPools<TMessage extends ForYouDerivationMessage>(
+  isAIEnabled: boolean,
   mailboxStore: ForYouMailboxStore<TMessage>,
   resolveMailDateMs: (message: TMessage) => number,
   resolveMailboxLabel: (
@@ -129,6 +130,13 @@ export function buildForYouLearningPools<TMessage extends ForYouDerivationMessag
   learningSuggestionPool: ForYouLearningSuggestion[];
   uncertainEmailPool: ForYouUncertainEmail[];
 } {
+  if (!isAIEnabled) {
+    return {
+      learningSuggestionPool: [],
+      uncertainEmailPool: [],
+    };
+  }
+
   const inboxMessages = Object.entries(mailboxStore).flatMap(([mailboxId, collections]) =>
     collections.Inbox.map((message) => ({
       mailboxId: mailboxId as InboxId,
