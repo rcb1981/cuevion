@@ -1376,28 +1376,47 @@ function EmailHtmlStage({
       setHeight(nextHeight);
     };
 
-    const handleLoad = () => {
-      updateHeight();
+    let resizeObserver: ResizeObserver | null = null;
+    let animationFrameId = 0;
 
-      const observedBody = iframe.contentDocument?.body;
-
-      if (!observedBody || typeof ResizeObserver === "undefined") {
-        return;
-      }
-
-      const resizeObserver = new ResizeObserver(() => {
+    const scheduleHeightUpdate = () => {
+      cancelAnimationFrame(animationFrameId);
+      animationFrameId = requestAnimationFrame(() => {
         updateHeight();
       });
-
-      resizeObserver.observe(observedBody);
-      return () => resizeObserver.disconnect();
     };
 
-    const cleanup = handleLoad();
+    const handleLoad = () => {
+      scheduleHeightUpdate();
+
+      const observedBody = iframe.contentDocument?.body;
+      const observedDocumentElement = iframe.contentDocument?.documentElement;
+
+      if (typeof ResizeObserver !== "undefined") {
+        resizeObserver?.disconnect();
+        resizeObserver = new ResizeObserver(() => {
+          scheduleHeightUpdate();
+        });
+
+        if (observedBody) {
+          resizeObserver.observe(observedBody);
+        }
+
+        if (observedDocumentElement) {
+          resizeObserver.observe(observedDocumentElement);
+        }
+      }
+
+      iframe.contentWindow?.addEventListener("resize", scheduleHeightUpdate);
+    };
+
+    handleLoad();
     iframe.addEventListener("load", handleLoad);
 
     return () => {
-      cleanup?.();
+      cancelAnimationFrame(animationFrameId);
+      resizeObserver?.disconnect();
+      iframe.contentWindow?.removeEventListener("resize", scheduleHeightUpdate);
       iframe.removeEventListener("load", handleLoad);
     };
   }, [html, themeMode]);
@@ -1408,6 +1427,7 @@ function EmailHtmlStage({
       title="Email content"
       sandbox="allow-popups allow-popups-to-escape-sandbox"
       srcDoc={buildEmailStageDocument(html, themeMode)}
+      scrolling="no"
       className="block w-full overflow-hidden rounded-[10px] border-0 bg-transparent"
       style={{ height }}
     />
