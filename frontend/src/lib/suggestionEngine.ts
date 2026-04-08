@@ -91,43 +91,16 @@ const REPLY_SUPPRESSION_TEXT_PATTERNS = [
   "manage preferences",
 ];
 
-const DIRECT_REPLY_PATTERNS = [
+const EXPLICIT_REPLY_PATTERNS = [
   "can you",
   "could you",
-  "would you",
-  "please confirm",
-  "please reply",
-  "please advise",
   "let me know",
-  "need your response",
-  "get back to",
-  "are you able",
-  "do you approve",
-  "can we",
-  "when can",
-  "please share",
-  "please send",
-  "please review and confirm",
-  "does this work",
+  "please confirm",
   "what do you think",
-];
-
-const COLLABORATION_REPLY_PATTERNS = [
-  "approve",
-  "approval",
-  "feedback",
-  "thoughts",
-  "input",
-  "confirm timing",
-  "confirm availability",
-  "next step",
-  "deadline",
-  "cutoff",
-  "as soon as possible",
-  "today",
-  "tomorrow",
-  "before friday",
-  "before monday",
+  "do you agree",
+  "need your input",
+  "reply",
+  "respond",
 ];
 
 const REVIEW_PATTERNS = [
@@ -178,6 +151,35 @@ const INFORMATIONAL_PATTERNS = [
   "newsletter",
 ];
 
+const PROMOTIONAL_PATTERNS = [
+  "sale",
+  "offer",
+  "discount",
+  "launch",
+  "exclusive",
+  "buy now",
+  "shop now",
+  "register now",
+  "limited time",
+  "join us",
+  "discover",
+  "new release",
+  "stream now",
+];
+
+const GENERIC_STATEMENT_PATTERNS = [
+  "just sharing",
+  "for reference",
+  "heads up",
+  "noted",
+  "thanks",
+  "thank you",
+  "fyi",
+  "see below",
+  "sharing below",
+  "business call",
+];
+
 function normalizeSuggestionText(message: SuggestionDerivationMessage) {
   return `${message.subject} ${message.snippet} ${message.body.join(" ")}`
     .toLowerCase()
@@ -198,6 +200,10 @@ function hasAnyPattern(text: string, patterns: string[]) {
 
 function hasQuestionSignal(text: string) {
   return (text.match(/\?/g) ?? []).length;
+}
+
+function countLinks(text: string) {
+  return (text.match(/https?:\/\/|www\./g) ?? []).length;
 }
 
 function isNonInteractiveSignal(message: SuggestionDerivationMessage) {
@@ -243,15 +249,24 @@ export function resolveSuggestedMessageAction(
   const normalizedText = normalizeSuggestionText(message);
   const questionCount = hasQuestionSignal(normalizedText);
   const attachmentCount = message.attachments?.length ?? 0;
+  const linkCount = countLinks(normalizedText);
   const replySuppressed = shouldSuppressReplySuggestion(message, category);
-  const replyScore =
-    (replySuppressed ? 0 : countPatternMatches(normalizedText, DIRECT_REPLY_PATTERNS)) +
-    (replySuppressed ? 0 : countPatternMatches(normalizedText, COLLABORATION_REPLY_PATTERNS)) +
-    (replySuppressed ? 0 : Math.min(questionCount, 2));
+  const hasExplicitReplyIntent =
+    !replySuppressed &&
+    (questionCount > 0 || hasAnyPattern(normalizedText, EXPLICIT_REPLY_PATTERNS));
   let reviewScore = countPatternMatches(normalizedText, REVIEW_PATTERNS);
+  const promotionalScore = countPatternMatches(normalizedText, PROMOTIONAL_PATTERNS);
+  const genericStatementScore = countPatternMatches(
+    normalizedText,
+    GENERIC_STATEMENT_PATTERNS,
+  );
   let informationalScore =
     countPatternMatches(normalizedText, INFORMATIONAL_PATTERNS) +
     countPatternMatches(normalizedText, REPLY_SUPPRESSION_TEXT_PATTERNS);
+  const isMostlyLinks =
+    linkCount >= 2 || (linkCount >= 1 && normalizedText.length > 0 && linkCount * 28 >= normalizedText.length);
+  const isLowSignalGenericMessage =
+    normalizedText.length < 24 || genericStatementScore > 0;
 
   if (
     attachmentCount > 0 &&
@@ -265,27 +280,34 @@ export function resolveSuggestedMessageAction(
     informationalScore += 2;
   }
 
-  if (replyScore >= 3) {
+  if (promotionalScore > 0) {
+    informationalScore += promotionalScore;
+  }
+
+  if (isMostlyLinks || promotionalScore >= 2 || (isLowSignalGenericMessage && reviewScore === 0)) {
     return {
-      type: "reply",
+      type: "none",
       confidence: 0.9,
-      reason: "Direct ask or clear response expected",
+      reason: "Mostly links, promotional language, or low-signal statement",
     };
   }
 
-  if (replyScore >= 2 && reviewScore <= replyScore) {
+  if (hasExplicitReplyIntent) {
     return {
       type: "reply",
-      confidence: 0.78,
-      reason: "Contains question or coordination request",
+      confidence: questionCount > 0 ? 0.9 : 0.84,
+      reason: "Contains an explicit request for a response",
     };
   }
 
-  if (reviewScore >= 2) {
+  if (reviewScore >= 1 || category === "Primary") {
     return {
       type: "review",
-      confidence: attachmentCount > 0 ? 0.83 : 0.72,
-      reason: "Contains material to inspect before acting",
+      confidence: attachmentCount > 0 || reviewScore >= 2 ? 0.8 : 0.64,
+      reason:
+        reviewScore >= 1
+          ? "Needs a quick human check before deciding"
+          : "No explicit reply intent, but worth reviewing",
     };
   }
 
@@ -296,14 +318,6 @@ export function resolveSuggestedMessageAction(
       reason: replySuppressed
         ? "Looks automated, confirmational, or informational"
         : "Looks informational without a clear ask",
-    };
-  }
-
-  if (category === "Primary") {
-    return {
-      type: "review",
-      confidence: 0.58,
-      reason: "Needs a quick human check before deciding",
     };
   }
 
