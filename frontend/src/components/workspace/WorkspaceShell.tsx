@@ -1157,6 +1157,19 @@ function resolveEmailImageSourceType(sourceValue: string | null) {
   return "invalid" as const;
 }
 
+function isDecorativeEmbeddedImageAlt(altText: string) {
+  const normalizedAlt = altText.trim().toLowerCase();
+
+  if (!normalizedAlt) {
+    return true;
+  }
+
+  return (
+    normalizedAlt.length <= 18 ||
+    /logo|brand|icon|spacer|divider|banner/.test(normalizedAlt)
+  );
+}
+
 type SanitizedMessageHtmlResult = {
   html: string | null;
   remoteImageCount: number;
@@ -1228,34 +1241,32 @@ function renderPlainMessageParagraph(
 }
 
 function renderMessageMetaSummary(
-  message: Pick<MailMessage, "from" | "to" | "timestamp">,
+  message: Pick<MailMessage, "from" | "to" | "cc" | "timestamp">,
 ) {
+  const metaRows = [
+    { label: "From", value: message.from, tone: "text-[var(--workspace-text)]" },
+    { label: "To", value: message.to, tone: "text-[var(--workspace-text-soft)]" },
+    ...(message.cc
+      ? [{ label: "Cc", value: message.cc, tone: "text-[var(--workspace-text-soft)]" }]
+      : []),
+    { label: "Received", value: message.timestamp, tone: "text-[var(--workspace-text-soft)]" },
+  ];
+
   return (
-    <div className="grid gap-3 md:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)]">
-      <div className="min-w-0 space-y-2">
-        <div className="text-[0.64rem] font-medium uppercase tracking-[0.18em] text-[var(--workspace-text-faint)]">
-          From
+    <div className="space-y-3">
+      {metaRows.map((row) => (
+        <div
+          key={row.label}
+          className="grid gap-1.5 border-b border-[color:rgba(121,151,120,0.08)] pb-3 last:border-b-0 last:pb-0"
+        >
+          <div className="text-[0.64rem] font-medium uppercase tracking-[0.18em] text-[var(--workspace-text-faint)]">
+            {row.label}
+          </div>
+          <div className={`break-words text-[0.9rem] leading-[1.65] ${row.tone}`}>
+            {row.value}
+          </div>
         </div>
-        <div className="truncate text-[0.92rem] text-[var(--workspace-text)]">
-          {message.from}
-        </div>
-      </div>
-      <div className="min-w-0 space-y-2">
-        <div className="text-[0.64rem] font-medium uppercase tracking-[0.18em] text-[var(--workspace-text-faint)]">
-          To
-        </div>
-        <div className="truncate text-[0.9rem] text-[var(--workspace-text-soft)]">
-          {message.to}
-        </div>
-      </div>
-      <div className="space-y-2 md:col-span-2">
-        <div className="text-[0.64rem] font-medium uppercase tracking-[0.18em] text-[var(--workspace-text-faint)]">
-          Received
-        </div>
-        <div className="text-[0.84rem] text-[var(--workspace-text-soft)]">
-          {message.timestamp}
-        </div>
-      </div>
+      ))}
     </div>
   );
 }
@@ -1358,12 +1369,18 @@ function sanitizeMessageBodyHtml(
         }
 
         const placeholder = parsedDocument.createElement("div");
+        const isDecorativeCid = imageSourceType === "cid" && isDecorativeEmbeddedImageAlt(fallbackAlt);
         placeholder.setAttribute("data-email-image-placeholder", "true");
         placeholder.setAttribute("data-email-image-source", imageSourceType);
         placeholder.setAttribute("data-email-image-alt", fallbackAlt);
+        if (isDecorativeCid) {
+          placeholder.setAttribute("data-email-image-role", "decorative");
+        }
         placeholder.textContent =
           imageSourceType === "cid"
-            ? `Embedded image: ${fallbackAlt}`
+            ? isDecorativeCid
+              ? "Embedded logo"
+              : `Embedded image: ${fallbackAlt}`
             : "Image unavailable";
         element.replaceWith(placeholder);
       }
@@ -8603,7 +8620,7 @@ function MailboxView({
                     <div
                       className={`whitespace-pre-wrap text-[0.95rem] ${
                         density === "full" ? "leading-8" : "leading-[1.9]"
-                      } text-[var(--workspace-text-soft)] [&_*]:max-w-full [&_a]:text-[color:rgba(70,109,73,0.96)] [&_a]:underline [&_a]:underline-offset-2 [&_blockquote]:my-5 [&_blockquote]:border-l-2 [&_blockquote]:border-[color:rgba(121,151,120,0.28)] [&_blockquote]:pl-4 [&_blockquote]:text-[color:rgba(104,98,89,0.88)] [&_br+br]:content-[''] [&_div]:max-w-full [&_div]:leading-[inherit] [&_div[data-compose-signature-divider='true']]:my-3 [&_div[data-compose-signature-divider='true']]:h-px [&_div[data-compose-signature-divider='true']]:w-full [&_div[data-compose-signature-divider='true']]:bg-[color:rgba(121,151,120,0.18)] [&_div[data-compose-signature-logo='true']]:pt-1 [&_div[data-compose-signature-logo='true']_img]:max-h-[76px] [&_div[data-compose-signature-logo='true']_img]:w-auto [&_div[data-compose-signature-logo='true']_img]:max-w-full [&_div[data-compose-signature-logo='true']_img]:object-contain [&_div[data-compose-signature-row='true']]:flex [&_div[data-compose-signature-row='true']]:items-start [&_div[data-compose-signature-row='true']]:gap-4 [&_div[data-compose-signature-right='true']]:min-w-0 [&_div[data-compose-signature-right='true']]:flex-1 [&_div[data-compose-signature-spacer='true']]:min-h-[1.75rem] [&_div[data-compose-signature-text='true']]:whitespace-pre-wrap [&_div[data-compose-signature-text='true']]:text-[0.86rem] [&_div[data-compose-signature-text='true']]:leading-[1.45] [&_div[data-compose-signature-text='true']_div]:min-h-[1.2rem] [&_div[data-compose-signature-text='true']_p]:min-h-[1.2rem] [&_div[data-compose-quote='true']]:pt-3 [&_[data-email-image-placeholder='true']]:my-2 [&_[data-email-image-placeholder='true']]:inline-flex [&_[data-email-image-placeholder='true']]:max-w-full [&_[data-email-image-placeholder='true']]:items-center [&_[data-email-image-placeholder='true']]:gap-2 [&_[data-email-image-placeholder='true']]:rounded-full [&_[data-email-image-placeholder='true']]:border [&_[data-email-image-placeholder='true']]:border-[color:rgba(121,151,120,0.12)] [&_[data-email-image-placeholder='true']]:bg-[color:rgba(86,114,87,0.035)] [&_[data-email-image-placeholder='true']]:px-3 [&_[data-email-image-placeholder='true']]:py-1.5 [&_[data-email-image-placeholder='true']]:text-[0.72rem] [&_[data-email-image-placeholder='true']]:leading-5 [&_[data-email-image-placeholder='true']]:text-[var(--workspace-text-faint)] [&_[data-email-image-placeholder='true'][data-email-image-source='remote']]:border-[color:rgba(99,129,100,0.16)] [&_[data-email-image-placeholder='true'][data-email-image-source='remote']]:bg-[color:rgba(86,114,87,0.03)] [&_[data-email-image-placeholder='true'][data-email-image-source='cid']]:border-dashed [&_[data-email-image-placeholder='true'][data-email-image-source='cid']]:opacity-80 [&_[data-email-quote='true']]:my-4 [&_[data-email-quote='true']]:rounded-[14px] [&_[data-email-quote='true']]:border [&_[data-email-quote='true']]:border-[color:rgba(121,151,120,0.2)] [&_[data-email-quote='true']]:bg-[color:rgba(86,114,87,0.06)] [&_[data-email-quote='true']]:px-4 [&_[data-email-quote='true']]:py-3 [&_[data-email-quote='true']]:text-[color:rgba(108,101,93,0.92)] [&_h1]:my-4 [&_h1]:text-[1.6rem] [&_h1]:font-medium [&_h1]:leading-tight [&_h1]:text-[var(--workspace-text)] [&_h2]:my-4 [&_h2]:text-[1.35rem] [&_h2]:font-medium [&_h2]:leading-tight [&_h2]:text-[var(--workspace-text)] [&_h3]:my-3 [&_h3]:text-[1.12rem] [&_h3]:font-medium [&_h3]:leading-snug [&_h3]:text-[var(--workspace-text)] [&_hr]:my-5 [&_hr]:border-0 [&_hr]:border-t [&_hr]:border-[color:rgba(121,151,120,0.18)] [&_iframe]:max-w-full [&_img]:h-auto [&_img]:max-w-full [&_img]:rounded-[12px] [&_img[data-image-source-type='remote']]:block [&_img[data-image-source-type='remote']]:bg-transparent [&_li]:my-1.5 [&_ol]:my-4 [&_ol]:pl-6 [&_p]:my-3 [&_p]:leading-[inherit] [&_pre]:overflow-x-auto [&_pre]:rounded-[14px] [&_pre]:bg-[color:rgba(44,52,45,0.05)] [&_pre]:p-3 [&_table]:my-4 [&_table]:w-full [&_table]:table-auto [&_table]:border-collapse [&_tbody]:align-top [&_td]:border [&_td]:border-[color:rgba(121,151,120,0.14)] [&_td]:px-3 [&_td]:py-2 [&_th]:border [&_th]:border-[color:rgba(121,151,120,0.14)] [&_th]:bg-[color:rgba(121,151,120,0.06)] [&_th]:px-3 [&_th]:py-2 [&_ul]:my-4 [&_ul]:pl-6`}
+                      } text-[var(--workspace-text-soft)] [&_*]:max-w-full [&_a]:text-[color:rgba(70,109,73,0.96)] [&_a]:underline [&_a]:underline-offset-2 [&_blockquote]:my-5 [&_blockquote]:border-l-2 [&_blockquote]:border-[color:rgba(121,151,120,0.28)] [&_blockquote]:pl-4 [&_blockquote]:text-[color:rgba(104,98,89,0.88)] [&_br+br]:content-[''] [&_div]:max-w-full [&_div]:leading-[inherit] [&_div[data-compose-signature-divider='true']]:my-3 [&_div[data-compose-signature-divider='true']]:h-px [&_div[data-compose-signature-divider='true']]:w-full [&_div[data-compose-signature-divider='true']]:bg-[color:rgba(121,151,120,0.18)] [&_div[data-compose-signature-logo='true']]:pt-1 [&_div[data-compose-signature-logo='true']_img]:max-h-[76px] [&_div[data-compose-signature-logo='true']_img]:w-auto [&_div[data-compose-signature-logo='true']_img]:max-w-full [&_div[data-compose-signature-logo='true']_img]:object-contain [&_div[data-compose-signature-row='true']]:flex [&_div[data-compose-signature-row='true']]:items-start [&_div[data-compose-signature-row='true']]:gap-4 [&_div[data-compose-signature-right='true']]:min-w-0 [&_div[data-compose-signature-right='true']]:flex-1 [&_div[data-compose-signature-spacer='true']]:min-h-[1.75rem] [&_div[data-compose-signature-text='true']]:whitespace-pre-wrap [&_div[data-compose-signature-text='true']]:text-[0.86rem] [&_div[data-compose-signature-text='true']]:leading-[1.45] [&_div[data-compose-signature-text='true']_div]:min-h-[1.2rem] [&_div[data-compose-signature-text='true']_p]:min-h-[1.2rem] [&_div[data-compose-quote='true']]:pt-3 [&_[data-email-image-placeholder='true']]:my-2 [&_[data-email-image-placeholder='true']]:inline-flex [&_[data-email-image-placeholder='true']]:max-w-full [&_[data-email-image-placeholder='true']]:items-center [&_[data-email-image-placeholder='true']]:gap-2 [&_[data-email-image-placeholder='true']]:rounded-full [&_[data-email-image-placeholder='true']]:border [&_[data-email-image-placeholder='true']]:border-[color:rgba(121,151,120,0.12)] [&_[data-email-image-placeholder='true']]:bg-[color:rgba(86,114,87,0.035)] [&_[data-email-image-placeholder='true']]:px-3 [&_[data-email-image-placeholder='true']]:py-1.5 [&_[data-email-image-placeholder='true']]:text-[0.72rem] [&_[data-email-image-placeholder='true']]:leading-5 [&_[data-email-image-placeholder='true']]:text-[var(--workspace-text-faint)] [&_[data-email-image-placeholder='true'][data-email-image-source='remote']]:border-[color:rgba(99,129,100,0.16)] [&_[data-email-image-placeholder='true'][data-email-image-source='remote']]:bg-[color:rgba(86,114,87,0.03)] [&_[data-email-image-placeholder='true'][data-email-image-source='cid']]:border-dashed [&_[data-email-image-placeholder='true'][data-email-image-source='cid']]:opacity-80 [&_[data-email-image-placeholder='true'][data-email-image-role='decorative']]:my-1 [&_[data-email-image-placeholder='true'][data-email-image-role='decorative']]:border-transparent [&_[data-email-image-placeholder='true'][data-email-image-role='decorative']]:bg-transparent [&_[data-email-image-placeholder='true'][data-email-image-role='decorative']]:px-0 [&_[data-email-image-placeholder='true'][data-email-image-role='decorative']]:py-0 [&_[data-email-image-placeholder='true'][data-email-image-role='decorative']]:text-[0.64rem] [&_[data-email-image-placeholder='true'][data-email-image-role='decorative']]:uppercase [&_[data-email-image-placeholder='true'][data-email-image-role='decorative']]:tracking-[0.14em] [&_[data-email-quote='true']]:my-4 [&_[data-email-quote='true']]:rounded-[14px] [&_[data-email-quote='true']]:border [&_[data-email-quote='true']]:border-[color:rgba(121,151,120,0.2)] [&_[data-email-quote='true']]:bg-[color:rgba(86,114,87,0.06)] [&_[data-email-quote='true']]:px-4 [&_[data-email-quote='true']]:py-3 [&_[data-email-quote='true']]:text-[color:rgba(108,101,93,0.92)] [&_h1]:my-4 [&_h1]:text-[1.6rem] [&_h1]:font-medium [&_h1]:leading-tight [&_h1]:text-[var(--workspace-text)] [&_h2]:my-4 [&_h2]:text-[1.35rem] [&_h2]:font-medium [&_h2]:leading-tight [&_h2]:text-[var(--workspace-text)] [&_h3]:my-3 [&_h3]:text-[1.12rem] [&_h3]:font-medium [&_h3]:leading-snug [&_h3]:text-[var(--workspace-text)] [&_hr]:my-5 [&_hr]:border-0 [&_hr]:border-t [&_hr]:border-[color:rgba(121,151,120,0.18)] [&_iframe]:max-w-full [&_img]:h-auto [&_img]:max-w-full [&_img]:rounded-[12px] [&_img[data-image-source-type='remote']]:block [&_img[data-image-source-type='remote']]:bg-transparent [&_li]:my-1.5 [&_ol]:my-4 [&_ol]:pl-6 [&_p]:my-3 [&_p]:leading-[inherit] [&_pre]:overflow-x-auto [&_pre]:rounded-[14px] [&_pre]:bg-[color:rgba(44,52,45,0.05)] [&_pre]:p-3 [&_table]:my-4 [&_table]:w-full [&_table]:table-auto [&_table]:border-collapse [&_tbody]:align-top [&_td]:border [&_td]:border-[color:rgba(121,151,120,0.14)] [&_td]:px-3 [&_td]:py-2 [&_th]:border [&_th]:border-[color:rgba(121,151,120,0.14)] [&_th]:bg-[color:rgba(121,151,120,0.06)] [&_th]:px-3 [&_th]:py-2 [&_ul]:my-4 [&_ul]:pl-6`}
                       dangerouslySetInnerHTML={{ __html: bodyRenderMode.html }}
                     />
                   </div>
@@ -12538,13 +12555,8 @@ function MailboxView({
 
 	              <div className="rounded-[22px] border border-[var(--workspace-border-soft)] bg-[linear-gradient(180deg,rgba(255,255,255,0.76),rgba(247,243,236,0.92))] px-5 py-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.24)] dark:bg-[linear-gradient(180deg,rgba(48,57,50,0.56),rgba(31,38,33,0.76))]">
                 <div className="flex flex-wrap items-start justify-between gap-4">
-                  <div className="min-w-0 space-y-1.5">
-                    <div className="text-[0.64rem] font-medium uppercase tracking-[0.18em] text-[var(--workspace-text-faint)]">
-                      Message details
-                    </div>
-                    <div className="text-[1rem] font-medium tracking-[-0.018em] text-[var(--workspace-text)]">
-                      {fullWidthMessage.subject}
-                    </div>
+                  <div className="text-[0.64rem] font-medium uppercase tracking-[0.18em] text-[var(--workspace-text-faint)]">
+                    Message details
                   </div>
                   <div className="rounded-full border border-[color:rgba(121,151,120,0.16)] bg-[color:rgba(255,255,255,0.42)] px-3 py-1.5 text-[0.68rem] uppercase tracking-[0.14em] text-[var(--workspace-text-faint)] dark:bg-[color:rgba(255,255,255,0.04)]">
                     Email
@@ -13400,13 +13412,8 @@ function MailboxView({
 	                        ) : null}
 	                        <div className="rounded-[22px] border border-[var(--workspace-border-soft)] bg-[linear-gradient(180deg,rgba(255,255,255,0.76),rgba(247,243,236,0.92))] px-4 py-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.22)] dark:bg-[linear-gradient(180deg,rgba(48,57,50,0.56),rgba(31,38,33,0.76))]">
                             <div className="flex flex-wrap items-start justify-between gap-4">
-                              <div className="min-w-0 space-y-1.5">
-                                <div className="text-[0.64rem] font-medium uppercase tracking-[0.18em] text-[var(--workspace-text-faint)]">
-                                  Message details
-                                </div>
-                                <div className="text-[0.98rem] font-medium tracking-[-0.018em] text-[var(--workspace-text)]">
-                                  {selectedMessage.subject}
-                                </div>
+                              <div className="text-[0.64rem] font-medium uppercase tracking-[0.18em] text-[var(--workspace-text-faint)]">
+                                Message details
                               </div>
                               <div className="rounded-full border border-[color:rgba(121,151,120,0.16)] bg-[color:rgba(255,255,255,0.42)] px-3 py-1.5 text-[0.68rem] uppercase tracking-[0.14em] text-[var(--workspace-text-faint)] dark:bg-[color:rgba(255,255,255,0.04)]">
                                 Email
