@@ -12233,12 +12233,6 @@ function MailboxView({
 
               {renderMessageCollaboration(fullWidthMessage)}
 
-              {fullWidthMessage.focusSignal === "attention" ? (
-                <div className="text-[0.88rem] leading-6 text-[color:rgba(88,82,74,0.92)]">
-                  Needs your attention
-                </div>
-              ) : null}
-
               <div className="space-y-2">
                 {shouldShowMessageSummary(fullWidthMessage.snippet, fullWidthMessage.body) ? (
                   <div className="mt-3 w-[94%] text-[0.9rem] leading-[1.95] text-[color:rgba(95,88,80,0.9)]">
@@ -13127,12 +13121,6 @@ function MailboxView({
 	                  {aiSuggestionsEnabled ? renderAIDecisionBlock(selectedMessage) : null}
 
                     {renderMessageCollaboration(selectedMessage)}
-
-	                  {selectedMessage.focusSignal === "attention" ? (
-	                    <div className="text-[0.88rem] leading-6 text-[color:rgba(88,82,74,0.92)]">
-	                      Needs your attention
-                    </div>
-                  ) : null}
 
                   <div className="space-y-2">
                     {shouldShowMessageSummary(selectedMessage.snippet, selectedMessage.body) ? (
