@@ -1157,6 +1157,13 @@ function resolveEmailImageSourceType(sourceValue: string | null) {
   return "invalid" as const;
 }
 
+type SanitizedMessageHtmlResult = {
+  html: string | null;
+  remoteImageCount: number;
+  cidImageCount: number;
+  invalidImageCount: number;
+};
+
 function buildPlainLinkHref(value: string) {
   if (/^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$/i.test(value)) {
     return `mailto:${value}`;
@@ -1220,19 +1227,36 @@ function renderPlainMessageParagraph(
   );
 }
 
-function sanitizeMessageBodyHtml(bodyHtml: string) {
+function sanitizeMessageBodyHtml(
+  bodyHtml: string,
+  options?: { allowRemoteImages?: boolean },
+): SanitizedMessageHtmlResult {
   const normalizedHtml = bodyHtml.trim();
 
   if (!normalizedHtml) {
-    return null;
+    return {
+      html: null,
+      remoteImageCount: 0,
+      cidImageCount: 0,
+      invalidImageCount: 0,
+    };
   }
 
   if (typeof DOMParser === "undefined") {
-    return normalizedHtml;
+    return {
+      html: normalizedHtml,
+      remoteImageCount: 0,
+      cidImageCount: 0,
+      invalidImageCount: 0,
+    };
   }
 
   const parsedDocument = new DOMParser().parseFromString(normalizedHtml, "text/html");
   const body = parsedDocument.body;
+  let remoteImageCount = 0;
+  let cidImageCount = 0;
+  let invalidImageCount = 0;
+  const allowRemoteImages = options?.allowRemoteImages ?? false;
 
   body.querySelectorAll(unsafeEmailHtmlSelectors).forEach((node) => {
     node.remove();
@@ -1270,17 +1294,44 @@ function sanitizeMessageBodyHtml(bodyHtml: string) {
 
     if (element instanceof HTMLImageElement) {
       const imageSourceType = resolveEmailImageSourceType(element.getAttribute("src"));
+      const fallbackAlt = element.getAttribute("alt")?.trim() || "Inline image";
 
       element.setAttribute("loading", "lazy");
       element.setAttribute("decoding", "async");
       element.setAttribute("data-image-source-type", imageSourceType);
+      element.setAttribute("data-image-alt", fallbackAlt);
 
-      if (imageSourceType === "cid" || imageSourceType === "invalid" || imageSourceType === "missing") {
-        const fallbackAlt = element.getAttribute("alt")?.trim() || "Inline image";
+      if (imageSourceType === "remote") {
+        remoteImageCount += 1;
+        element.setAttribute("referrerpolicy", "no-referrer");
+
+        if (!allowRemoteImages) {
+          const placeholder = parsedDocument.createElement("div");
+          placeholder.setAttribute("data-email-image-placeholder", "true");
+          placeholder.setAttribute("data-email-image-source", "remote");
+          placeholder.setAttribute("data-email-image-alt", fallbackAlt);
+          placeholder.textContent = fallbackAlt ? `Remote image: ${fallbackAlt}` : "Remote image";
+          element.replaceWith(placeholder);
+        }
+      } else if (
+        imageSourceType === "cid" ||
+        imageSourceType === "invalid" ||
+        imageSourceType === "missing"
+      ) {
+        if (imageSourceType === "cid") {
+          cidImageCount += 1;
+        } else {
+          invalidImageCount += 1;
+        }
+
         const placeholder = parsedDocument.createElement("div");
         placeholder.setAttribute("data-email-image-placeholder", "true");
+        placeholder.setAttribute("data-email-image-source", imageSourceType);
+        placeholder.setAttribute("data-email-image-alt", fallbackAlt);
         placeholder.textContent =
-          imageSourceType === "cid" ? fallbackAlt : "Image unavailable";
+          imageSourceType === "cid"
+            ? `Embedded image: ${fallbackAlt}`
+            : "Image unavailable";
         element.replaceWith(placeholder);
       }
     }
@@ -1337,24 +1388,56 @@ function sanitizeMessageBodyHtml(bodyHtml: string) {
     body.textContent?.replace(/\s+/g, "").length ||
     body.querySelector("img, table, blockquote, hr, ul, ol");
 
-  return hasRenderableContent ? sanitizedHtml : null;
+  return {
+    html: hasRenderableContent ? sanitizedHtml : null,
+    remoteImageCount,
+    cidImageCount,
+    invalidImageCount,
+  };
 }
 
 function resolveMessageBodyRenderMode(
   message: Pick<MailMessage, "body" | "bodyHtml">,
-): { mode: "html"; html: string } | { mode: "plain" } {
-  const sanitizedHtml = message.bodyHtml
-    ? sanitizeMessageBodyHtml(message.bodyHtml)
-    : null;
+  options?: { allowRemoteImages?: boolean },
+):
+  | {
+      mode: "html";
+      html: string;
+      remoteImageCount: number;
+      cidImageCount: number;
+      invalidImageCount: number;
+    }
+  | {
+      mode: "plain";
+      remoteImageCount: number;
+      cidImageCount: number;
+      invalidImageCount: number;
+    } {
+  const sanitizedHtmlResult = message.bodyHtml
+    ? sanitizeMessageBodyHtml(message.bodyHtml, options)
+    : {
+        html: null,
+        remoteImageCount: 0,
+        cidImageCount: 0,
+        invalidImageCount: 0,
+      };
 
-  if (sanitizedHtml) {
+  if (sanitizedHtmlResult.html) {
     return {
       mode: "html",
-      html: sanitizedHtml,
+      html: sanitizedHtmlResult.html,
+      remoteImageCount: sanitizedHtmlResult.remoteImageCount,
+      cidImageCount: sanitizedHtmlResult.cidImageCount,
+      invalidImageCount: sanitizedHtmlResult.invalidImageCount,
     };
   }
 
-  return { mode: "plain" };
+  return {
+    mode: "plain",
+    remoteImageCount: sanitizedHtmlResult.remoteImageCount,
+    cidImageCount: sanitizedHtmlResult.cidImageCount,
+    invalidImageCount: sanitizedHtmlResult.invalidImageCount,
+  };
 }
 
 function buildComposeBody({
@@ -7264,6 +7347,7 @@ function MailboxView({
   const [sortOrder, setSortOrder] = useState<MailSortOrder>("desc");
   const [activeFolder, setActiveFolder] = useState<MailFolder>("Inbox");
   const [isSharedView, setIsSharedView] = useState(false);
+  const [revealedRemoteImageMessageIds, setRevealedRemoteImageMessageIds] = useState<string[]>([]);
   const [activeSmartFolderId, setActiveSmartFolderId] = useState<string | null>(null);
   const [preferredMailListPaneWidth, setPreferredMailListPaneWidth] = useState(() => {
     if (typeof window === "undefined") {
@@ -8410,6 +8494,13 @@ function MailboxView({
         return resolveMailDateMs(firstMessage) - resolveMailDateMs(secondMessage);
       });
   };
+  const canShowRemoteImagesForMessage = (messageId: string) =>
+    revealedRemoteImageMessageIds.includes(messageId);
+  const revealRemoteImagesForMessage = (messageId: string) => {
+    setRevealedRemoteImageMessageIds((currentIds) =>
+      currentIds.includes(messageId) ? currentIds : [...currentIds, messageId],
+    );
+  };
   const renderThreadTimeline = (message: MailMessage | null, density: "split" | "full") => {
     const threadMessages = getThreadMessages(message);
 
@@ -8432,11 +8523,16 @@ function MailboxView({
               : threadMessage.body.slice(0, quoteStartIndex);
           const quotedParagraphs =
             quoteStartIndex === -1 ? [] : threadMessage.body.slice(quoteStartIndex);
-          const bodyRenderMode = resolveMessageBodyRenderMode(threadMessage);
+          const remoteImagesAllowed = canShowRemoteImagesForMessage(threadMessage.id);
+          const bodyRenderMode = resolveMessageBodyRenderMode(threadMessage, {
+            allowRemoteImages: remoteImagesAllowed,
+          });
           const normalizedBodyDebug = normalizeMessageBodyContent(
             threadMessage.body,
             threadMessage.bodyHtml,
           );
+          const hasHiddenRemoteImages =
+            bodyRenderMode.remoteImageCount > 0 && !remoteImagesAllowed;
 
           return (
             <div
@@ -8466,17 +8562,35 @@ function MailboxView({
                 </div>
               </div>
               <div className="mt-3 space-y-3">
+                {hasHiddenRemoteImages ? (
+                  <div className="flex flex-wrap items-center justify-between gap-3 rounded-[14px] border border-[color:rgba(121,151,120,0.18)] bg-[color:rgba(86,114,87,0.06)] px-4 py-3 text-[0.82rem] text-[var(--workspace-text-soft)]">
+                    <div>
+                      {bodyRenderMode.remoteImageCount === 1
+                        ? "This email contains a remote image."
+                        : `This email contains ${bodyRenderMode.remoteImageCount} remote images.`}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => revealRemoteImagesForMessage(threadMessage.id)}
+                      className="inline-flex items-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-3 py-1.5 text-[0.68rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text)] transition-[background-color,border-color] duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)] focus-visible:outline-none"
+                    >
+                      Show images
+                    </button>
+                  </div>
+                ) : null}
                 {bodyRenderMode.mode === "html" ? (
                   <div
                     className="email-html-content mx-auto w-full max-w-[46rem]"
                     data-render-mode={bodyRenderMode.mode}
                     data-has-body-html={threadMessage.bodyHtml ? "true" : "false"}
                     data-html-source={normalizedBodyDebug.htmlSource}
+                    data-remote-images={bodyRenderMode.remoteImageCount}
+                    data-cid-images={bodyRenderMode.cidImageCount}
                   >
                     <div
                       className={`whitespace-pre-wrap text-[0.95rem] ${
                         density === "full" ? "leading-8" : "leading-[1.9]"
-                      } text-[var(--workspace-text-soft)] [&_*]:max-w-full [&_a]:text-[color:rgba(70,109,73,0.96)] [&_a]:underline [&_a]:underline-offset-2 [&_blockquote]:my-5 [&_blockquote]:border-l-2 [&_blockquote]:border-[color:rgba(121,151,120,0.28)] [&_blockquote]:pl-4 [&_blockquote]:text-[color:rgba(104,98,89,0.88)] [&_br+br]:content-[''] [&_div]:max-w-full [&_div]:leading-[inherit] [&_div[data-compose-signature-divider='true']]:my-3 [&_div[data-compose-signature-divider='true']]:h-px [&_div[data-compose-signature-divider='true']]:w-full [&_div[data-compose-signature-divider='true']]:bg-[color:rgba(121,151,120,0.18)] [&_div[data-compose-signature-logo='true']]:pt-1 [&_div[data-compose-signature-logo='true']_img]:max-h-[76px] [&_div[data-compose-signature-logo='true']_img]:w-auto [&_div[data-compose-signature-logo='true']_img]:max-w-full [&_div[data-compose-signature-logo='true']_img]:object-contain [&_div[data-compose-signature-row='true']]:flex [&_div[data-compose-signature-row='true']]:items-start [&_div[data-compose-signature-row='true']]:gap-4 [&_div[data-compose-signature-right='true']]:min-w-0 [&_div[data-compose-signature-right='true']]:flex-1 [&_div[data-compose-signature-spacer='true']]:min-h-[1.75rem] [&_div[data-compose-signature-text='true']]:whitespace-pre-wrap [&_div[data-compose-signature-text='true']]:text-[0.86rem] [&_div[data-compose-signature-text='true']]:leading-[1.45] [&_div[data-compose-signature-text='true']_div]:min-h-[1.2rem] [&_div[data-compose-signature-text='true']_p]:min-h-[1.2rem] [&_div[data-compose-quote='true']]:pt-3 [&_[data-email-image-placeholder='true']]:my-4 [&_[data-email-image-placeholder='true']]:rounded-[12px] [&_[data-email-image-placeholder='true']]:border [&_[data-email-image-placeholder='true']]:border-[color:rgba(121,151,120,0.18)] [&_[data-email-image-placeholder='true']]:bg-[color:rgba(86,114,87,0.06)] [&_[data-email-image-placeholder='true']]:px-4 [&_[data-email-image-placeholder='true']]:py-3 [&_[data-email-image-placeholder='true']]:text-[0.82rem] [&_[data-email-image-placeholder='true']]:text-[var(--workspace-text-faint)] [&_[data-email-quote='true']]:my-4 [&_[data-email-quote='true']]:rounded-[14px] [&_[data-email-quote='true']]:border [&_[data-email-quote='true']]:border-[color:rgba(121,151,120,0.2)] [&_[data-email-quote='true']]:bg-[color:rgba(86,114,87,0.06)] [&_[data-email-quote='true']]:px-4 [&_[data-email-quote='true']]:py-3 [&_[data-email-quote='true']]:text-[color:rgba(108,101,93,0.92)] [&_h1]:my-4 [&_h1]:text-[1.6rem] [&_h1]:font-medium [&_h1]:leading-tight [&_h1]:text-[var(--workspace-text)] [&_h2]:my-4 [&_h2]:text-[1.35rem] [&_h2]:font-medium [&_h2]:leading-tight [&_h2]:text-[var(--workspace-text)] [&_h3]:my-3 [&_h3]:text-[1.12rem] [&_h3]:font-medium [&_h3]:leading-snug [&_h3]:text-[var(--workspace-text)] [&_hr]:my-5 [&_hr]:border-0 [&_hr]:border-t [&_hr]:border-[color:rgba(121,151,120,0.18)] [&_iframe]:max-w-full [&_img]:h-auto [&_img]:max-w-full [&_img]:rounded-[12px] [&_img[data-image-source-type='remote']]:block [&_img[data-image-source-type='remote']]:bg-transparent [&_li]:my-1.5 [&_ol]:my-4 [&_ol]:pl-6 [&_p]:my-3 [&_p]:leading-[inherit] [&_pre]:overflow-x-auto [&_pre]:rounded-[14px] [&_pre]:bg-[color:rgba(44,52,45,0.05)] [&_pre]:p-3 [&_table]:my-4 [&_table]:w-full [&_table]:table-auto [&_table]:border-collapse [&_tbody]:align-top [&_td]:border [&_td]:border-[color:rgba(121,151,120,0.14)] [&_td]:px-3 [&_td]:py-2 [&_th]:border [&_th]:border-[color:rgba(121,151,120,0.14)] [&_th]:bg-[color:rgba(121,151,120,0.06)] [&_th]:px-3 [&_th]:py-2 [&_ul]:my-4 [&_ul]:pl-6`}
+                      } text-[var(--workspace-text-soft)] [&_*]:max-w-full [&_a]:text-[color:rgba(70,109,73,0.96)] [&_a]:underline [&_a]:underline-offset-2 [&_blockquote]:my-5 [&_blockquote]:border-l-2 [&_blockquote]:border-[color:rgba(121,151,120,0.28)] [&_blockquote]:pl-4 [&_blockquote]:text-[color:rgba(104,98,89,0.88)] [&_br+br]:content-[''] [&_div]:max-w-full [&_div]:leading-[inherit] [&_div[data-compose-signature-divider='true']]:my-3 [&_div[data-compose-signature-divider='true']]:h-px [&_div[data-compose-signature-divider='true']]:w-full [&_div[data-compose-signature-divider='true']]:bg-[color:rgba(121,151,120,0.18)] [&_div[data-compose-signature-logo='true']]:pt-1 [&_div[data-compose-signature-logo='true']_img]:max-h-[76px] [&_div[data-compose-signature-logo='true']_img]:w-auto [&_div[data-compose-signature-logo='true']_img]:max-w-full [&_div[data-compose-signature-logo='true']_img]:object-contain [&_div[data-compose-signature-row='true']]:flex [&_div[data-compose-signature-row='true']]:items-start [&_div[data-compose-signature-row='true']]:gap-4 [&_div[data-compose-signature-right='true']]:min-w-0 [&_div[data-compose-signature-right='true']]:flex-1 [&_div[data-compose-signature-spacer='true']]:min-h-[1.75rem] [&_div[data-compose-signature-text='true']]:whitespace-pre-wrap [&_div[data-compose-signature-text='true']]:text-[0.86rem] [&_div[data-compose-signature-text='true']]:leading-[1.45] [&_div[data-compose-signature-text='true']_div]:min-h-[1.2rem] [&_div[data-compose-signature-text='true']_p]:min-h-[1.2rem] [&_div[data-compose-quote='true']]:pt-3 [&_[data-email-image-placeholder='true']]:my-4 [&_[data-email-image-placeholder='true']]:rounded-[12px] [&_[data-email-image-placeholder='true']]:border [&_[data-email-image-placeholder='true']]:border-[color:rgba(121,151,120,0.18)] [&_[data-email-image-placeholder='true']]:bg-[color:rgba(86,114,87,0.06)] [&_[data-email-image-placeholder='true']]:px-4 [&_[data-email-image-placeholder='true']]:py-3 [&_[data-email-image-placeholder='true']]:text-[0.82rem] [&_[data-email-image-placeholder='true']]:text-[var(--workspace-text-faint)] [&_[data-email-image-placeholder='true'][data-email-image-source='remote']]:border-[color:rgba(99,129,100,0.22)] [&_[data-email-image-placeholder='true'][data-email-image-source='remote']]:bg-[color:rgba(86,114,87,0.05)] [&_[data-email-image-placeholder='true'][data-email-image-source='cid']]:border-dashed [&_[data-email-quote='true']]:my-4 [&_[data-email-quote='true']]:rounded-[14px] [&_[data-email-quote='true']]:border [&_[data-email-quote='true']]:border-[color:rgba(121,151,120,0.2)] [&_[data-email-quote='true']]:bg-[color:rgba(86,114,87,0.06)] [&_[data-email-quote='true']]:px-4 [&_[data-email-quote='true']]:py-3 [&_[data-email-quote='true']]:text-[color:rgba(108,101,93,0.92)] [&_h1]:my-4 [&_h1]:text-[1.6rem] [&_h1]:font-medium [&_h1]:leading-tight [&_h1]:text-[var(--workspace-text)] [&_h2]:my-4 [&_h2]:text-[1.35rem] [&_h2]:font-medium [&_h2]:leading-tight [&_h2]:text-[var(--workspace-text)] [&_h3]:my-3 [&_h3]:text-[1.12rem] [&_h3]:font-medium [&_h3]:leading-snug [&_h3]:text-[var(--workspace-text)] [&_hr]:my-5 [&_hr]:border-0 [&_hr]:border-t [&_hr]:border-[color:rgba(121,151,120,0.18)] [&_iframe]:max-w-full [&_img]:h-auto [&_img]:max-w-full [&_img]:rounded-[12px] [&_img[data-image-source-type='remote']]:block [&_img[data-image-source-type='remote']]:bg-transparent [&_li]:my-1.5 [&_ol]:my-4 [&_ol]:pl-6 [&_p]:my-3 [&_p]:leading-[inherit] [&_pre]:overflow-x-auto [&_pre]:rounded-[14px] [&_pre]:bg-[color:rgba(44,52,45,0.05)] [&_pre]:p-3 [&_table]:my-4 [&_table]:w-full [&_table]:table-auto [&_table]:border-collapse [&_tbody]:align-top [&_td]:border [&_td]:border-[color:rgba(121,151,120,0.14)] [&_td]:px-3 [&_td]:py-2 [&_th]:border [&_th]:border-[color:rgba(121,151,120,0.14)] [&_th]:bg-[color:rgba(121,151,120,0.06)] [&_th]:px-3 [&_th]:py-2 [&_ul]:my-4 [&_ul]:pl-6`}
                       dangerouslySetInnerHTML={{ __html: bodyRenderMode.html }}
                     />
                   </div>
