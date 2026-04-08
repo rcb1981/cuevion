@@ -46,6 +46,30 @@ import {
   connectInboxWithImap,
   type LiveInboxMessageSnapshot,
 } from "../../lib/inboxConnectionApi";
+import {
+  buildSenderLearningStoreKey,
+  formatLearningRuleTimestamp,
+  normalizeSenderLearningKey,
+  resolveCuevionCategoryFromForYouSelection,
+  resolveCuevionCategoryFromMailboxId,
+  resolveForYouCategoryFromLearningEntry,
+  resolveMailboxActionFromForYouSelection,
+  resolveMailboxActionFromMailboxId,
+  resolvePasteRuleInputType,
+  resolveSenderLearningEntry,
+  type CuevionMessageCategory,
+  type LearningDecisionPrioritySelection,
+  type LearningDecisionSourceContext,
+  type SenderCategoryLearningEntry,
+  type SenderCategoryLearningStore,
+} from "../../lib/learningEngine";
+import {
+  buildForYouLearningPools,
+  buildRecentLearningDecisions,
+  type ForYouLearningSuggestion,
+  type ForYouRecentLearningDecision,
+  type ForYouUncertainEmail,
+} from "../../lib/forYouEngine";
 
 const primaryNavigationItems = [
   { section: "Dashboard", label: "Dashboard", shortLabel: "Dash" },
@@ -194,7 +218,6 @@ type SmartFolderDefinition = {
   rules: SmartFolderRule[];
 };
 
-type CuevionMessageCategory = "Primary" | "Promo" | "Updates";
 type CuevionCategorySource = "system" | "user" | "learned";
 type CuevionCategoryConfidence = "low" | "medium" | "high";
 type MailMessageSuggestion = {
@@ -214,23 +237,6 @@ type MailMessageOwner = {
 type MailMessagePriorityScore = "low" | "medium" | "high";
 type MailMessageFocusSignal = "attention" | null;
 type ManualPriorityOverride = "priority" | "removed";
-type LearningDecisionSourceContext =
-  | "refine"
-  | "uncertain"
-  | "paste_sender_or_domain";
-type LearningDecisionPrioritySelection = "Important" | "Normal" | "Show Less" | "Spam";
-type SenderCategoryLearningEntry = {
-  learnedCategory: CuevionMessageCategory;
-  learnedFromCount: number;
-  autoCategoryEnabled?: boolean;
-  mailboxAction?: "keep" | "move";
-  sourceContext?: LearningDecisionSourceContext;
-  sourcePrioritySelection?: LearningDecisionPrioritySelection;
-  sourceMailboxId?: InboxId | null;
-  sourceCurrentMailboxId?: InboxId | null;
-  updatedAt?: string;
-};
-type SenderCategoryLearningStore = Record<string, SenderCategoryLearningEntry>;
 type MessageOwnershipInteractionEntry = {
   userId: string;
   count: number;
@@ -376,29 +382,6 @@ type MailFolder = "Inbox" | "Drafts" | "Sent" | "Archive" | "Filtered" | "Spam" 
 type MailSortOrder = "desc" | "asc";
 type MailboxCollections = Record<MailFolder, MailMessage[]>;
 type MailboxStore = Record<string, MailboxCollections>;
-type ForYouLearningSuggestion = {
-  key: string;
-  sender: string;
-  senderAddress: string;
-  subject: string;
-  createdAt: string;
-  uncertainty: number;
-  senderFrequency: number;
-  snippet: string[];
-  reason: string;
-  visualLabel?: string;
-  mailboxId: InboxId | null;
-};
-type ForYouUncertainEmail = {
-  key: string;
-  sender: string;
-  senderAddress: string;
-  mailboxId: InboxId | null;
-  subject: string;
-  preview: string[];
-  reason: string;
-  currentMailboxLabel: string;
-};
 type NotificationNavigationRequest = {
   mailboxId: InboxId;
   messageId: string;
@@ -909,63 +892,6 @@ const cuevionCategoryByInternalClassification: Record<
   high_priority_demo: "Primary",
   unknown: "Primary",
 };
-
-function normalizeSenderLearningKey(value: string) {
-  const normalizedValue = value.trim().toLowerCase();
-  const emailMatch = normalizedValue.match(/([a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,})/i);
-
-  return emailMatch?.[1] ?? normalizedValue;
-}
-
-function normalizeSenderLearningDomain(value: string) {
-  const normalizedValue = value.trim().toLowerCase();
-  const domainValue = normalizedValue.includes("@")
-    ? normalizedValue.split("@")[1] ?? ""
-    : normalizedValue;
-
-  return domainValue.trim();
-}
-
-function buildSenderLearningStoreKey(
-  value: string,
-  matchType: "sender" | "domain" = "sender",
-) {
-  if (matchType === "domain") {
-    const domainKey = normalizeSenderLearningDomain(value);
-    return domainKey ? `domain:${domainKey}` : "";
-  }
-
-  return normalizeSenderLearningKey(value);
-}
-
-function resolveSenderLearningEntry(
-  senderAddress: string,
-  senderCategoryLearning: SenderCategoryLearningStore,
-) {
-  const senderKey = buildSenderLearningStoreKey(senderAddress, "sender");
-  const senderEntry = senderCategoryLearning[senderKey];
-
-  if (senderEntry) {
-    return {
-      entry: senderEntry,
-      key: senderKey,
-      matchType: "sender" as const,
-    };
-  }
-
-  const domainKey = buildSenderLearningStoreKey(senderAddress, "domain");
-  const domainEntry = senderCategoryLearning[domainKey];
-
-  if (domainEntry) {
-    return {
-      entry: domainEntry,
-      key: domainKey,
-      matchType: "domain" as const,
-    };
-  }
-
-  return null;
-}
 
 function formatSharedContextHint(sharedContext?: MailMessageSharedContext) {
   switch (sharedContext?.reason) {
@@ -1566,49 +1492,6 @@ function getAIDecisionCopy(message: MailMessage) {
   };
 }
 
-function resolvePasteRuleInputType(value: string) {
-  const trimmedValue = value.trim().toLowerCase();
-
-  if (!trimmedValue) {
-    return null;
-  }
-
-  const emailPattern = /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i;
-  const domainPattern = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/i;
-
-  if (emailPattern.test(trimmedValue)) {
-    return "sender" as const;
-  }
-
-  if (domainPattern.test(trimmedValue)) {
-    return "domain" as const;
-  }
-
-  return "invalid" as const;
-}
-
-function formatLearningRuleLabel(learningKey: string) {
-  if (learningKey.startsWith("domain:")) {
-    return `Domain: ${learningKey.replace("domain:", "")}`;
-  }
-
-  return learningKey;
-}
-
-function formatLearningRuleAction(entry: SenderCategoryLearningEntry) {
-  if (entry.learnedCategory === "Promo") {
-    return "future emails to Promo";
-  }
-
-  if (entry.learnedCategory === "Updates") {
-    return entry.mailboxAction === "keep"
-      ? "future emails to Updates"
-      : "moved out of Inbox";
-  }
-
-  return entry.mailboxAction === "move" ? "future emails to Primary" : "kept in Inbox";
-}
-
 function getForYouCategoryLabel(
   category: "Important" | "Review" | "Promo" | "Demo" | "Spam",
 ) {
@@ -1617,171 +1500,6 @@ function getForYouCategoryLabel(
 
 function getTeamAccessLevelLabel(level: TeamAccessLevel) {
   return level === "Review" ? "Shared" : level;
-}
-
-function formatLearningRuleTimestamp(value?: string) {
-  if (!value) {
-    return "Recently";
-  }
-
-  const timestamp = new Date(value).getTime();
-
-  if (Number.isNaN(timestamp)) {
-    return "Recently";
-  }
-
-  const diffMs = Date.now() - timestamp;
-  const diffMinutes = Math.max(0, Math.round(diffMs / (60 * 1000)));
-
-  if (diffMinutes < 60) {
-    return diffMinutes <= 1 ? "NOW" : `${diffMinutes} MIN AGO`;
-  }
-
-  const diffHours = Math.round(diffMinutes / 60);
-
-  if (diffHours < 24) {
-    return `${diffHours} HOUR${diffHours === 1 ? "" : "S"} AGO`;
-  }
-
-  return new Date(value).toLocaleDateString("en-US", {
-    month: "short",
-    day: "numeric",
-  }).toUpperCase();
-}
-
-function resolveForYouCategoryFromLearningEntry(
-  entry: SenderCategoryLearningEntry,
-): "Important" | "Review" | "Promo" | "Demo" | "Spam" {
-  if (entry.learnedCategory === "Promo") {
-    return "Promo";
-  }
-
-  if (entry.learnedCategory === "Updates") {
-    return entry.mailboxAction === "move" ? "Review" : "Review";
-  }
-
-  return "Important";
-}
-
-function resolveCuevionCategoryFromForYouSelection(
-  selection: "Important" | "Review" | "Promo" | "Demo" | "Spam" | null,
-): CuevionMessageCategory {
-  if (selection === "Promo") {
-    return "Promo";
-  }
-
-  if (selection === "Review" || selection === "Spam") {
-    return "Updates";
-  }
-
-  return "Primary";
-}
-
-function resolveMailboxActionFromForYouSelection(
-  selection: "Important" | "Normal" | "Show Less" | "Spam" | "Review" | "Promo" | "Demo" | null,
-  category: CuevionMessageCategory,
-  explicitMailboxAction?: "keep" | "move" | null,
-) {
-  if (explicitMailboxAction) {
-    return explicitMailboxAction;
-  }
-
-  if (selection === "Spam" || selection === "Show Less" || selection === "Review") {
-    return "move" as const;
-  }
-
-  if (category === "Promo" || category === "Updates") {
-    return "move" as const;
-  }
-
-  return "keep" as const;
-}
-
-function resolveCuevionCategoryFromMailboxId(mailboxId: InboxId | null): CuevionMessageCategory {
-  if (mailboxId === "promo") {
-    return "Promo";
-  }
-
-  if (mailboxId === "demo" || mailboxId === "business") {
-    return "Updates";
-  }
-
-  return "Primary";
-}
-
-function resolveMailboxActionFromMailboxId(mailboxId: InboxId | null): "keep" | "move" {
-  return mailboxId === "main" ? "keep" : "move";
-}
-
-function inferLearningDecisionSourceContext(
-  entry: SenderCategoryLearningEntry,
-  ruleType: "sender" | "domain",
-): LearningDecisionSourceContext | null {
-  if (entry.sourceContext) {
-    return entry.sourceContext;
-  }
-
-  if (entry.sourceCurrentMailboxId !== undefined) {
-    return "uncertain";
-  }
-
-  if (ruleType === "domain") {
-    return "paste_sender_or_domain";
-  }
-
-  return "refine";
-}
-
-function inferLearningDecisionMailboxId(
-  entry: SenderCategoryLearningEntry,
-): InboxId | null {
-  if (entry.sourceMailboxId !== undefined) {
-    return entry.sourceMailboxId;
-  }
-
-  if (entry.learnedCategory === "Promo") {
-    return "promo";
-  }
-
-  if (entry.mailboxAction === "keep") {
-    return "main";
-  }
-
-  return null;
-}
-
-function inferLearningDecisionPrioritySelection(
-  entry: SenderCategoryLearningEntry,
-): LearningDecisionPrioritySelection | null {
-  if (entry.sourcePrioritySelection) {
-    return entry.sourcePrioritySelection;
-  }
-
-  if (entry.learnedCategory === "Promo") {
-    return "Normal";
-  }
-
-  if (entry.learnedCategory === "Updates" && entry.mailboxAction === "move") {
-    return "Show Less";
-  }
-
-  if (entry.learnedCategory === "Primary" && entry.mailboxAction === "keep") {
-    return "Important";
-  }
-
-  return null;
-}
-
-function formatForYouReason(message: MailMessage, mailboxLabel: string) {
-  if (message.category === "Promo") {
-    return `Cuevion placed this in ${mailboxLabel}, but is not confident yet.`;
-  }
-
-  if (message.category === "Updates") {
-    return `Cuevion thinks this belongs in ${mailboxLabel}, but still needs confirmation.`;
-  }
-
-  return `Cuevion placed this in ${mailboxLabel}, but still needs confirmation.`;
 }
 
 function resolveOrderedMailboxTitle(
@@ -1829,95 +1547,6 @@ function resolveMailboxTitleForCategory(
   }
 
   return resolveOrderedMailboxTitle(orderedMailboxes, fallbackMailboxId);
-}
-
-function buildForYouLearningPools(
-  mailboxStore: MailboxStore,
-  orderedMailboxes: OrderedMailbox[],
-): {
-  learningSuggestionPool: ForYouLearningSuggestion[];
-  uncertainEmailPool: ForYouUncertainEmail[];
-} {
-  const inboxMessages = Object.entries(mailboxStore).flatMap(([mailboxId, collections]) =>
-    collections.Inbox.map((message) => ({
-      mailboxId: mailboxId as InboxId,
-      message,
-    })),
-  );
-  const senderFrequencyByKey = inboxMessages.reduce<Record<string, number>>(
-    (frequencyMap, entry) => {
-      const senderKey = normalizeSenderLearningKey(entry.message.from);
-      return {
-        ...frequencyMap,
-        [senderKey]: (frequencyMap[senderKey] ?? 0) + 1,
-      };
-    },
-    {},
-  );
-  const realUncertainMessages = inboxMessages
-    .filter(({ message }) => isRefineCuevionEligible(message) || isReviewUncertainEligible(message))
-    .sort((firstEntry, secondEntry) => {
-      const firstLow = firstEntry.message.categoryConfidence === "low" ? 1 : 0;
-      const secondLow = secondEntry.message.categoryConfidence === "low" ? 1 : 0;
-
-      if (secondLow !== firstLow) {
-        return secondLow - firstLow;
-      }
-
-      return (
-        resolveMailDateMs(secondEntry.message) - resolveMailDateMs(firstEntry.message)
-      );
-    });
-  const learningSuggestionPool = realUncertainMessages
-    .filter(({ message }) => isRefineCuevionEligible(message))
-    .map(({ mailboxId, message }): ForYouLearningSuggestion => {
-      const senderFrequency =
-        senderFrequencyByKey[normalizeSenderLearningKey(message.from)] ?? 1;
-      const mailboxLabel = resolveMailboxTitleForCategory(
-        message.category,
-        orderedMailboxes,
-        mailboxId,
-      );
-
-      return {
-        key: message.id,
-        sender: message.sender,
-        senderAddress: message.from,
-        subject: message.subject,
-        createdAt: message.createdAt ?? new Date(resolveMailDateMs(message)).toISOString(),
-        uncertainty: 94,
-        senderFrequency,
-        snippet: message.body.slice(0, 2).length > 0 ? message.body.slice(0, 2) : [message.snippet],
-        reason: formatForYouReason(message, mailboxLabel),
-        mailboxId,
-      };
-    });
-  const uncertainEmailPool = realUncertainMessages
-    .filter(({ message }) => isReviewUncertainEligible(message))
-    .slice(0, 5)
-    .map(({ mailboxId, message }): ForYouUncertainEmail => {
-      const mailboxLabel = resolveMailboxTitleForCategory(
-        message.category,
-        orderedMailboxes,
-        mailboxId,
-      );
-
-      return {
-        key: message.id,
-        sender: message.sender,
-        senderAddress: message.from,
-        mailboxId,
-        subject: message.subject,
-        preview: message.body.slice(0, 2).length > 0 ? message.body.slice(0, 2) : [message.snippet],
-        reason: formatForYouReason(message, mailboxLabel),
-        currentMailboxLabel: mailboxLabel,
-      };
-    });
-
-  return {
-    learningSuggestionPool,
-    uncertainEmailPool,
-  };
 }
 
 function resolveImplicitOwner(
@@ -2307,28 +1936,6 @@ function resolveCuevionCategorization(
     ...systemCategorization,
     categoryConfidence: lowerCategoryConfidence(systemCategorization.categoryConfidence),
   };
-}
-
-function isReviewUncertainEligible(message: MailMessage) {
-  return (
-    message.categorySource === "system" &&
-    message.suggestion?.type === "confirm_category"
-  );
-}
-
-function isRefineCuevionEligible(message: MailMessage) {
-  if (message.categorySource !== "system") {
-    return false;
-  }
-
-  if (message.categoryConfidence === "low") {
-    return true;
-  }
-
-  return (
-    message.categoryConfidence === "medium" &&
-    (message.priorityScore === "high" || message.unread || message.isShared)
-  );
 }
 
 function resolveMailMessageSuggestion(
@@ -16652,7 +16259,9 @@ function ForYouView({
   ];
   const { learningSuggestionPool, uncertainEmailPool } = buildForYouLearningPools(
     mailboxStore,
-    orderedMailboxes,
+    resolveMailDateMs,
+    (category, mailboxId) =>
+      resolveMailboxTitleForCategory(category, orderedMailboxes, mailboxId),
   );
   const learningBatchSize = 10;
   const pendingLearningSuggestions = learningSuggestionPool.filter(
@@ -16776,35 +16385,7 @@ function ForYouView({
   const activeUncertainEmail = uncertainEmailPool[safeUncertainEmailIndex];
   const isLastUncertainEmail = safeUncertainEmailIndex === totalUncertainEmails - 1;
   const hasValidUncertainSelection = selectedUncertainMailboxId !== null;
-  const recentLearningDecisions = Object.entries(senderCategoryLearning)
-    .map(([learningKey, entry]) => ({
-      key: learningKey,
-      sender: formatLearningRuleLabel(learningKey),
-      action: formatLearningRuleAction(entry),
-      timestamp: formatLearningRuleTimestamp(entry.updatedAt),
-      ruleType: learningKey.startsWith("domain:") ? ("domain" as const) : ("sender" as const),
-      ruleValue: learningKey.startsWith("domain:")
-        ? learningKey.replace("domain:", "")
-        : learningKey,
-      learnedCategory: entry.learnedCategory,
-      mailboxAction: entry.mailboxAction ?? (entry.learnedCategory === "Primary" ? "keep" : "move"),
-      sourceContext: inferLearningDecisionSourceContext(
-        entry,
-        learningKey.startsWith("domain:") ? "domain" : "sender",
-      ),
-      sourcePrioritySelection: inferLearningDecisionPrioritySelection(entry),
-      sourceMailboxId: inferLearningDecisionMailboxId(entry),
-      sourceCurrentMailboxId: entry.sourceCurrentMailboxId ?? null,
-      updatedAt: entry.updatedAt,
-    }))
-    .sort((firstDecision, secondDecision) => {
-      const firstTime = firstDecision.updatedAt ? new Date(firstDecision.updatedAt).getTime() : 0;
-      const secondTime = secondDecision.updatedAt
-        ? new Date(secondDecision.updatedAt).getTime()
-        : 0;
-
-      return secondTime - firstTime;
-    });
+  const recentLearningDecisions = buildRecentLearningDecisions(senderCategoryLearning);
   const activeRecentDecision = recentLearningDecisions[activeRecentDecisionIndex];
   const activeRecentDecisionCurrentMailboxLabel =
     activeRecentDecision?.sourceCurrentMailboxId === "main"
@@ -16814,7 +16395,7 @@ function ForYouView({
         )?.title ?? "Inbox";
   const initializeRecentDecisionEditor = (
     decision:
-      | (typeof recentLearningDecisions)[number]
+      | ForYouRecentLearningDecision
       | undefined,
   ) => {
     if (!decision) {
