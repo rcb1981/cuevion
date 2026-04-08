@@ -1245,9 +1245,9 @@ function renderCompactMessageMetaHeader(
 ) {
   const metaRows = [
     { label: "From", value: message.from, tone: "text-[var(--workspace-text)]" },
-    { label: "To", value: message.to, tone: "text-[var(--workspace-text-soft)]" },
+    { label: "To", value: message.to, tone: "text-[var(--workspace-text)]" },
     ...(message.cc
-      ? [{ label: "Cc", value: message.cc, tone: "text-[var(--workspace-text-soft)]" }]
+      ? [{ label: "Cc", value: message.cc, tone: "text-[var(--workspace-text)]" }]
       : []),
     { label: "Received", value: message.timestamp, tone: "text-[var(--workspace-text-faint)]" },
   ];
@@ -9109,7 +9109,13 @@ function MailboxView({
                       : "mt-1.5 bg-transparent px-0 py-0 text-[var(--workspace-text)] dark:text-[color:rgba(228,235,230,0.94)]"
                 }`}
               >
-                <div className={isHtmlMessage ? "space-y-1.5" : "space-y-2.5"}>
+                <div
+                  className={
+                    isHtmlMessage
+                      ? "space-y-1.5 text-[var(--workspace-text)]"
+                      : "space-y-2.5 text-[var(--workspace-text)]"
+                  }
+                >
                 {hasHiddenRemoteImages ? (
                   <div className="flex flex-wrap items-center justify-between gap-3 rounded-[10px] border border-[color:rgba(129,144,122,0.08)] bg-[color:rgba(252,249,242,0.72)] px-3 py-2 text-[0.74rem] text-[var(--workspace-text-soft)] dark:border-[color:rgba(121,151,120,0.1)] dark:bg-[color:rgba(86,114,87,0.03)]">
                     <div>
@@ -13068,21 +13074,21 @@ function MailboxView({
 
               <div className="space-y-3">
                 <div className="space-y-1.5 pb-1">
-                  <div className="text-[0.84rem] leading-[1.45] text-[var(--workspace-text-soft)] break-words">
+                  <div className="text-[0.84rem] leading-[1.45] text-[var(--workspace-text)] break-words">
                     <span className="text-[var(--workspace-text-faint)]">From:</span>{" "}
                     <span className="text-[var(--workspace-text)]">{fullWidthMessage.from}</span>
                   </div>
-                  <div className="text-[0.84rem] leading-[1.45] text-[var(--workspace-text-soft)] break-words">
+                  <div className="text-[0.84rem] leading-[1.45] text-[var(--workspace-text)] break-words">
                     <span className="text-[var(--workspace-text-faint)]">To:</span>{" "}
                     <span>{fullWidthMessage.to}</span>
                   </div>
                   {fullWidthMessage.cc ? (
-                    <div className="text-[0.84rem] leading-[1.45] text-[var(--workspace-text-soft)] break-words">
+                    <div className="text-[0.84rem] leading-[1.45] text-[var(--workspace-text)] break-words">
                       <span className="text-[var(--workspace-text-faint)]">Cc:</span>{" "}
                       <span>{fullWidthMessage.cc}</span>
                     </div>
                   ) : null}
-                  <div className="text-[0.8rem] leading-[1.45] text-[var(--workspace-text-soft)] break-words">
+                  <div className="text-[0.8rem] leading-[1.45] text-[var(--workspace-text-faint)] break-words">
                     <span className="text-[var(--workspace-text-faint)]">Received:</span>{" "}
                     <span>{fullWidthMessage.timestamp}</span>
                   </div>
@@ -13930,21 +13936,21 @@ function MailboxView({
 	                          </button>
 	                        ) : null}
                           <div className="space-y-1.5 pb-1">
-                            <div className="text-[0.84rem] leading-[1.45] text-[var(--workspace-text-soft)] break-words">
+                            <div className="text-[0.84rem] leading-[1.45] text-[var(--workspace-text)] break-words">
                               <span className="text-[var(--workspace-text-faint)]">From:</span>{" "}
                               <span className="text-[var(--workspace-text)]">{selectedMessage.from}</span>
                             </div>
-                            <div className="text-[0.84rem] leading-[1.45] text-[var(--workspace-text-soft)] break-words">
+                            <div className="text-[0.84rem] leading-[1.45] text-[var(--workspace-text)] break-words">
                               <span className="text-[var(--workspace-text-faint)]">To:</span>{" "}
                               <span>{selectedMessage.to}</span>
                             </div>
                             {selectedMessage.cc ? (
-                              <div className="text-[0.84rem] leading-[1.45] text-[var(--workspace-text-soft)] break-words">
+                              <div className="text-[0.84rem] leading-[1.45] text-[var(--workspace-text)] break-words">
                                 <span className="text-[var(--workspace-text-faint)]">Cc:</span>{" "}
                                 <span>{selectedMessage.cc}</span>
                               </div>
                             ) : null}
-                            <div className="text-[0.8rem] leading-[1.45] text-[var(--workspace-text-soft)] break-words">
+                            <div className="text-[0.8rem] leading-[1.45] text-[var(--workspace-text-faint)] break-words">
                               <span className="text-[var(--workspace-text-faint)]">Received:</span>{" "}
                               <span>{selectedMessage.timestamp}</span>
                             </div>
