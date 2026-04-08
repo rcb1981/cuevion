@@ -1326,7 +1326,7 @@ function buildEmailStageDocument(
         color: ${stageTextColor} !important;
       }
       .email-stage--light,
-      .email-stage--light *:not(a):not(a *) {
+      .email-stage--light * {
         color: ${stageTextColor} !important;
         -webkit-text-fill-color: ${stageTextColor} !important;
         opacity: 1 !important;
@@ -1341,8 +1341,10 @@ function buildEmailStageDocument(
       table {
         max-width: 100%;
       }
-      a, a * {
+      .email-stage a,
+      .email-stage a * {
         color: ${stageLinkColor} !important;
+        -webkit-text-fill-color: ${stageLinkColor} !important;
         word-break: break-all;
         text-decoration-color: color-mix(in srgb, ${stageLinkColor} 72%, transparent);
         text-underline-offset: 2px;
@@ -1412,8 +1414,8 @@ function EmailHtmlStage({
   const [stageFailed, setStageFailed] = useState(false);
   const fallbackClassName =
     themeMode === "dark"
-      ? "overflow-hidden bg-transparent text-[color:rgba(229,236,230,0.96)] [&_*:not(a):not(a_*)]:!text-[color:rgba(229,236,230,0.96)] [&_*:not(a):not(a_*)]:opacity-100 [&_*:not(a):not(a_*)]:[filter:none] [&_*:not(a):not(a_*)]:[mix-blend-mode:normal] [&_*:not(a):not(a_*)]:[text-shadow:none] [&_a]:!text-[color:rgba(176,209,183,0.96)] [&_a_*]:!text-[color:rgba(176,209,183,0.96)]"
-      : "overflow-hidden bg-transparent text-[color:rgba(34,38,36,0.99)] [&_*:not(a):not(a_*)]:!text-[color:rgba(34,38,36,0.99)] [&_*:not(a):not(a_*)]:[-webkit-text-fill-color:rgba(34,38,36,0.99)] [&_*:not(a):not(a_*)]:opacity-100 [&_*:not(a):not(a_*)]:[filter:none] [&_*:not(a):not(a_*)]:[mix-blend-mode:normal] [&_*:not(a):not(a_*)]:[text-shadow:none] [&_a]:!text-[color:rgba(44,89,116,0.98)] [&_a]:[-webkit-text-fill-color:rgba(44,89,116,0.98)] [&_a_*]:!text-[color:rgba(44,89,116,0.98)] [&_a_*]:[-webkit-text-fill-color:rgba(44,89,116,0.98)]";
+      ? "overflow-hidden bg-transparent text-[color:rgba(229,236,230,0.96)] [&_*]:!text-[color:rgba(229,236,230,0.96)] [&_*]:opacity-100 [&_*]:[filter:none] [&_*]:[mix-blend-mode:normal] [&_*]:[text-shadow:none] [&_a]:!text-[color:rgba(176,209,183,0.96)] [&_a]:[-webkit-text-fill-color:rgba(176,209,183,0.96)] [&_a_*]:!text-[color:rgba(176,209,183,0.96)] [&_a_*]:[-webkit-text-fill-color:rgba(176,209,183,0.96)]"
+      : "overflow-hidden bg-transparent text-[color:rgba(34,38,36,0.99)] [&_*]:!text-[color:rgba(34,38,36,0.99)] [&_*]:[-webkit-text-fill-color:rgba(34,38,36,0.99)] [&_*]:opacity-100 [&_*]:[filter:none] [&_*]:[mix-blend-mode:normal] [&_*]:[text-shadow:none] [&_a]:!text-[color:rgba(44,89,116,0.98)] [&_a]:[-webkit-text-fill-color:rgba(44,89,116,0.98)] [&_a_*]:!text-[color:rgba(44,89,116,0.98)] [&_a_*]:[-webkit-text-fill-color:rgba(44,89,116,0.98)]";
 
   const updateHeight = () => {
     const iframe = iframeRef.current;
