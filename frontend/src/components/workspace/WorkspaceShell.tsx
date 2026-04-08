@@ -12558,7 +12558,26 @@ function MailboxView({
               {renderMessageCollaboration(fullWidthMessage)}
 
               <div className="space-y-3">
-                {renderCompactMessageMetaHeader(fullWidthMessage)}
+                <div className="space-y-1.5 pb-1">
+                  <div className="text-[0.84rem] leading-[1.45] text-[var(--workspace-text-soft)] break-words">
+                    <span className="text-[var(--workspace-text-faint)]">From:</span>{" "}
+                    <span className="text-[var(--workspace-text)]">{fullWidthMessage.from}</span>
+                  </div>
+                  <div className="text-[0.84rem] leading-[1.45] text-[var(--workspace-text-soft)] break-words">
+                    <span className="text-[var(--workspace-text-faint)]">To:</span>{" "}
+                    <span>{fullWidthMessage.to}</span>
+                  </div>
+                  {fullWidthMessage.cc ? (
+                    <div className="text-[0.84rem] leading-[1.45] text-[var(--workspace-text-soft)] break-words">
+                      <span className="text-[var(--workspace-text-faint)]">Cc:</span>{" "}
+                      <span>{fullWidthMessage.cc}</span>
+                    </div>
+                  ) : null}
+                  <div className="text-[0.8rem] leading-[1.45] text-[var(--workspace-text-soft)] break-words">
+                    <span className="text-[var(--workspace-text-faint)]">Received:</span>{" "}
+                    <span>{fullWidthMessage.timestamp}</span>
+                  </div>
+                </div>
 
                 {renderBehaviorSuggestion(fullWidthMessage)}
 
@@ -13398,7 +13417,26 @@ function MailboxView({
 	                            {linkedReviewLabel}
 	                          </button>
 	                        ) : null}
-                          {renderCompactMessageMetaHeader(selectedMessage)}
+                          <div className="space-y-1.5 pb-1">
+                            <div className="text-[0.84rem] leading-[1.45] text-[var(--workspace-text-soft)] break-words">
+                              <span className="text-[var(--workspace-text-faint)]">From:</span>{" "}
+                              <span className="text-[var(--workspace-text)]">{selectedMessage.from}</span>
+                            </div>
+                            <div className="text-[0.84rem] leading-[1.45] text-[var(--workspace-text-soft)] break-words">
+                              <span className="text-[var(--workspace-text-faint)]">To:</span>{" "}
+                              <span>{selectedMessage.to}</span>
+                            </div>
+                            {selectedMessage.cc ? (
+                              <div className="text-[0.84rem] leading-[1.45] text-[var(--workspace-text-soft)] break-words">
+                                <span className="text-[var(--workspace-text-faint)]">Cc:</span>{" "}
+                                <span>{selectedMessage.cc}</span>
+                              </div>
+                            ) : null}
+                            <div className="text-[0.8rem] leading-[1.45] text-[var(--workspace-text-soft)] break-words">
+                              <span className="text-[var(--workspace-text-faint)]">Received:</span>{" "}
+                              <span>{selectedMessage.timestamp}</span>
+                            </div>
+                          </div>
                       </div>
 	                      <div className="flex items-center gap-4">
 	                        {aiSuggestionsEnabled ? (
