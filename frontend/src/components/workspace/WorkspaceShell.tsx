@@ -1325,13 +1325,14 @@ function buildEmailStageDocument(
       .email-stage--dark * {
         color: ${stageTextColor} !important;
       }
-      .email-stage--light {
+      .email-stage--light,
+      .email-stage--light *:not(a):not(a *) {
         color: ${stageTextColor} !important;
         -webkit-text-fill-color: ${stageTextColor} !important;
-      }
-      .email-stage--light * {
-        color: ${stageTextColor} !important;
-        -webkit-text-fill-color: ${stageTextColor} !important;
+        opacity: 1 !important;
+        filter: none !important;
+        mix-blend-mode: normal !important;
+        text-shadow: none !important;
       }
       img {
         max-width: 100%;
@@ -1411,8 +1412,8 @@ function EmailHtmlStage({
   const [stageFailed, setStageFailed] = useState(false);
   const fallbackClassName =
     themeMode === "dark"
-      ? "overflow-hidden bg-transparent text-[color:rgba(229,236,230,0.96)] [&_*]:!text-[color:rgba(229,236,230,0.96)] [&_a]:!text-[color:rgba(176,209,183,0.96)] [&_a_*]:!text-[color:rgba(176,209,183,0.96)]"
-      : "overflow-hidden bg-transparent text-[color:rgba(34,38,36,0.99)] [&_*]:!text-[color:rgba(34,38,36,0.99)] [&_*]:[-webkit-text-fill-color:rgba(34,38,36,0.99)] [&_a]:!text-[color:rgba(44,89,116,0.98)] [&_a]:[-webkit-text-fill-color:rgba(44,89,116,0.98)] [&_a_*]:!text-[color:rgba(44,89,116,0.98)] [&_a_*]:[-webkit-text-fill-color:rgba(44,89,116,0.98)]";
+      ? "overflow-hidden bg-transparent text-[color:rgba(229,236,230,0.96)] [&_*:not(a):not(a_*)]:!text-[color:rgba(229,236,230,0.96)] [&_*:not(a):not(a_*)]:opacity-100 [&_*:not(a):not(a_*)]:[filter:none] [&_*:not(a):not(a_*)]:[mix-blend-mode:normal] [&_*:not(a):not(a_*)]:[text-shadow:none] [&_a]:!text-[color:rgba(176,209,183,0.96)] [&_a_*]:!text-[color:rgba(176,209,183,0.96)]"
+      : "overflow-hidden bg-transparent text-[color:rgba(34,38,36,0.99)] [&_*:not(a):not(a_*)]:!text-[color:rgba(34,38,36,0.99)] [&_*:not(a):not(a_*)]:[-webkit-text-fill-color:rgba(34,38,36,0.99)] [&_*:not(a):not(a_*)]:opacity-100 [&_*:not(a):not(a_*)]:[filter:none] [&_*:not(a):not(a_*)]:[mix-blend-mode:normal] [&_*:not(a):not(a_*)]:[text-shadow:none] [&_a]:!text-[color:rgba(44,89,116,0.98)] [&_a]:[-webkit-text-fill-color:rgba(44,89,116,0.98)] [&_a_*]:!text-[color:rgba(44,89,116,0.98)] [&_a_*]:[-webkit-text-fill-color:rgba(44,89,116,0.98)]";
 
   const updateHeight = () => {
     const iframe = iframeRef.current;
@@ -1506,6 +1507,10 @@ function normalizeImportedEmailHtmlForReading(
   element.style.removeProperty("color");
   element.style.setProperty("color", "rgba(34, 38, 36, 0.99)", "important");
   element.style.setProperty("-webkit-text-fill-color", "rgba(34, 38, 36, 0.99)", "important");
+  element.style.setProperty("opacity", "1", "important");
+  element.style.setProperty("filter", "none", "important");
+  element.style.setProperty("mix-blend-mode", "normal", "important");
+  element.style.setProperty("text-shadow", "none", "important");
 }
 
 function sanitizeMessageBodyHtml(
