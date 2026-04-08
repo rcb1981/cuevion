@@ -1271,6 +1271,37 @@ function renderMessageMetaSummary(
   );
 }
 
+function renderCompactMessageMetaHeader(
+  message: Pick<MailMessage, "from" | "to" | "cc" | "timestamp">,
+) {
+  const metaRows = [
+    { label: "From", value: message.from, tone: "text-[var(--workspace-text)]" },
+    { label: "To", value: message.to, tone: "text-[var(--workspace-text-soft)]" },
+    ...(message.cc
+      ? [{ label: "Cc", value: message.cc, tone: "text-[var(--workspace-text-soft)]" }]
+      : []),
+    { label: "Received", value: message.timestamp, tone: "text-[var(--workspace-text-faint)]" },
+  ];
+
+  return (
+    <div className="space-y-2.5 border-b border-[color:rgba(121,151,120,0.1)] pb-4">
+      {metaRows.map((row) => (
+        <div
+          key={row.label}
+          className="grid grid-cols-[3.9rem_minmax(0,1fr)] items-start gap-x-3 gap-y-1"
+        >
+          <div className="pt-[0.08rem] text-[0.62rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+            {row.label}
+          </div>
+          <div className={`min-w-0 break-words text-[0.88rem] leading-[1.5] ${row.tone}`}>
+            {row.value}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function sanitizeMessageBodyHtml(
   bodyHtml: string,
   options?: { allowRemoteImages?: boolean },
@@ -12553,25 +12584,13 @@ function MailboxView({
 	                );
 	              })()}
 
-	              <div className="rounded-[22px] border border-[var(--workspace-border-soft)] bg-[linear-gradient(180deg,rgba(255,255,255,0.76),rgba(247,243,236,0.92))] px-5 py-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.24)] dark:bg-[linear-gradient(180deg,rgba(48,57,50,0.56),rgba(31,38,33,0.76))]">
-                <div className="flex flex-wrap items-start justify-between gap-4">
-                  <div className="text-[0.64rem] font-medium uppercase tracking-[0.18em] text-[var(--workspace-text-faint)]">
-                    Message details
-                  </div>
-                  <div className="rounded-full border border-[color:rgba(121,151,120,0.16)] bg-[color:rgba(255,255,255,0.42)] px-3 py-1.5 text-[0.68rem] uppercase tracking-[0.14em] text-[var(--workspace-text-faint)] dark:bg-[color:rgba(255,255,255,0.04)]">
-                    Email
-                  </div>
-                </div>
-                <div className="mt-4 border-t border-[color:rgba(121,151,120,0.12)] pt-4">
-                  {renderMessageMetaSummary(fullWidthMessage)}
-                </div>
-              </div>
-
               {aiSuggestionsEnabled ? renderAIDecisionBlock(fullWidthMessage) : null}
 
               {renderMessageCollaboration(fullWidthMessage)}
 
               <div className="space-y-3">
+                {renderCompactMessageMetaHeader(fullWidthMessage)}
+
                 {renderBehaviorSuggestion(fullWidthMessage)}
 
                 {fullWidthMessage.isShared && fullWidthMessage.sharedContext ? (
