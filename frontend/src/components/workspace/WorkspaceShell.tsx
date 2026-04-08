@@ -3618,7 +3618,7 @@ function normalizeMailMessage(
           isAutoReply: message.isAutoReply,
           attachments: normalizedAttachments,
           category: categorization.category,
-        })
+        }, senderCategoryLearning)
       : undefined,
   };
 }

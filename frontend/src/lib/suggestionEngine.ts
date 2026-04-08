@@ -217,6 +217,79 @@ function isNonInteractiveSignal(message: SuggestionDerivationMessage) {
   );
 }
 
+function resolveLearningMessageActionOverride(
+  message: SuggestionDerivationMessage,
+  senderCategoryLearning: SenderCategoryLearningStore | undefined,
+): MessageActionSuggestion | undefined {
+  if (!senderCategoryLearning) {
+    return undefined;
+  }
+
+  const learningMatch = resolveSenderLearningEntry(message.from, senderCategoryLearning);
+
+  if (!learningMatch) {
+    return undefined;
+  }
+
+  const entry = learningMatch.entry;
+
+  if (
+    entry.learnedCategory === "Promo" ||
+    entry.sourcePrioritySelection === "Show Less" ||
+    entry.sourcePrioritySelection === "Spam"
+  ) {
+    return {
+      type: "none",
+      confidence: 0.95,
+      reason: "Learned as low-value or non-actionable mail",
+    };
+  }
+
+  if (
+    entry.learnedCategory === "Primary" &&
+    entry.mailboxAction === "keep" &&
+    entry.sourcePrioritySelection === "Important"
+  ) {
+    return {
+      type: "reply",
+      confidence: 0.92,
+      reason: "Learned as a sender that usually needs a response",
+    };
+  }
+
+  if (
+    entry.learnedCategory === "Primary" &&
+    entry.mailboxAction === "keep"
+  ) {
+    return {
+      type: "none",
+      confidence: 0.82,
+      reason: "Learned to stay in inbox without requiring action",
+    };
+  }
+
+  if (
+    entry.sourceContext === "uncertain" ||
+    (entry.learnedCategory === "Updates" && entry.mailboxAction === "move")
+  ) {
+    return {
+      type: "review",
+      confidence: 0.86,
+      reason: "Learned as mail that should be reviewed rather than replied to",
+    };
+  }
+
+  if (entry.learnedCategory === "Updates") {
+    return {
+      type: "none",
+      confidence: 0.84,
+      reason: "Learned as informational mail",
+    };
+  }
+
+  return undefined;
+}
+
 export function shouldSuppressReplySuggestion(
   message: SuggestionDerivationMessage,
   category?: CuevionMessageCategory,
@@ -237,6 +310,7 @@ export function shouldSuppressReplySuggestion(
 export function resolveSuggestedMessageAction(
   message: SuggestionDerivationMessage,
   category: CuevionMessageCategory,
+  senderCategoryLearning?: SenderCategoryLearningStore,
 ): MessageActionSuggestion {
   if (isNonInteractiveSignal(message)) {
     return {
@@ -251,9 +325,26 @@ export function resolveSuggestedMessageAction(
   const attachmentCount = message.attachments?.length ?? 0;
   const linkCount = countLinks(normalizedText);
   const replySuppressed = shouldSuppressReplySuggestion(message, category);
+
+  if (replySuppressed) {
+    return {
+      type: "none",
+      confidence: 0.94,
+      reason: "Looks automated, confirmational, or informational",
+    };
+  }
+
+  const learningOverride = resolveLearningMessageActionOverride(
+    message,
+    senderCategoryLearning,
+  );
+
+  if (learningOverride) {
+    return learningOverride;
+  }
+
   const hasExplicitReplyIntent =
-    !replySuppressed &&
-    (questionCount > 0 || hasAnyPattern(normalizedText, EXPLICIT_REPLY_PATTERNS));
+    questionCount > 0 || hasAnyPattern(normalizedText, EXPLICIT_REPLY_PATTERNS);
   let reviewScore = countPatternMatches(normalizedText, REVIEW_PATTERNS);
   const promotionalScore = countPatternMatches(normalizedText, PROMOTIONAL_PATTERNS);
   const genericStatementScore = countPatternMatches(
@@ -274,10 +365,6 @@ export function resolveSuggestedMessageAction(
       /attached|attachment|please check|review|revised|draft/.test(normalizedText))
   ) {
     reviewScore += 1;
-  }
-
-  if (replySuppressed) {
-    informationalScore += 2;
   }
 
   if (promotionalScore > 0) {
@@ -315,9 +402,7 @@ export function resolveSuggestedMessageAction(
     return {
       type: "none",
       confidence: 0.86,
-      reason: replySuppressed
-        ? "Looks automated, confirmational, or informational"
-        : "Looks informational without a clear ask",
+      reason: "Looks informational without a clear ask",
     };
   }
 
@@ -330,8 +415,13 @@ export function resolveSuggestedMessageAction(
 
 export function resolveMessageSuggestionBanner(
   message: SuggestionDerivationMessage & { category: CuevionMessageCategory },
+  senderCategoryLearning?: SenderCategoryLearningStore,
 ) : MessageSuggestionBanner | undefined {
-  const actionSuggestion = resolveSuggestedMessageAction(message, message.category);
+  const actionSuggestion = resolveSuggestedMessageAction(
+    message,
+    message.category,
+    senderCategoryLearning,
+  );
 
   if (actionSuggestion.type === "reply") {
     return {
