@@ -71,6 +71,13 @@ import {
   type ForYouUncertainEmail,
 } from "../../lib/forYouEngine";
 import { applyLearningDecision } from "../../lib/applyLearningDecision";
+import {
+  getAIDecisionCopy,
+  resolveMailMessageBehaviorSuggestion,
+  resolveMailMessageSuggestion,
+  type MailMessageBehaviorSuggestion,
+  type MailMessageSuggestion,
+} from "../../lib/suggestionEngine";
 
 const primaryNavigationItems = [
   { section: "Dashboard", label: "Dashboard", shortLabel: "Dash" },
@@ -221,15 +228,6 @@ type SmartFolderDefinition = {
 
 type CuevionCategorySource = "system" | "user" | "learned";
 type CuevionCategoryConfidence = "low" | "medium" | "high";
-type MailMessageSuggestion = {
-  type: "confirm_category";
-  proposedCategory: CuevionMessageCategory;
-};
-type MailMessageBehaviorSuggestion = {
-  type: "auto_category";
-  sender: string;
-  category: CuevionMessageCategory;
-};
 type MailMessageOwner = {
   userId: string;
   confidence: "low" | "medium" | "high";
@@ -847,7 +845,6 @@ function getQuotedParagraphStartIndex(paragraphs: string[]) {
 }
 const LEARNED_CATEGORY_MIN_COUNT = 2;
 const HIGH_CONFIDENCE_LEARNING_COUNT = 3;
-const AUTO_CATEGORY_BEHAVIOR_MIN_COUNT = 2;
 const categoryConfidenceRank: Record<CuevionCategoryConfidence, number> = {
   low: 0,
   medium: 1,
@@ -1327,186 +1324,6 @@ function shouldShowMessageSummary(snippet: string, body: string[]) {
   return normalizedSnippet !== firstBodyParagraph;
 }
 
-function getAIDecisionCopy(message: MailMessage) {
-  const subjectText = message.subject.toLowerCase();
-  const snippetText = message.snippet.toLowerCase();
-  const bodyText = message.body.join(" ").toLowerCase();
-  const searchableText = `${subjectText} ${snippetText} ${bodyText}`.replace(/\s+/g, " ");
-  const compactText = searchableText.trim();
-  const bodyLength = bodyText.trim().length;
-  const questionCount = (searchableText.match(/\?/g) ?? []).length;
-  const attachmentCount = message.attachments?.length ?? 0;
-
-  const countMatches = (patterns: string[]) =>
-    patterns.reduce(
-      (score, pattern) => score + (searchableText.includes(pattern) ? 1 : 0),
-      0,
-    );
-
-  const replySignals = [
-    "can you",
-    "could you",
-    "please confirm",
-    "let me know",
-    "please send",
-    "are you able",
-    "do you approve",
-    "can we",
-    "waiting on",
-    "before friday",
-    "deadline",
-    "cutoff",
-    "as soon as possible",
-    "today",
-    "confirm",
-    "reply",
-    "please advise",
-    "get back to",
-    "need your response",
-    "approve",
-    "able to",
-    "when can",
-    "please share",
-    "schedule",
-    "timing",
-  ];
-  const reviewSignals = [
-    "review",
-    "attached",
-    "agreement",
-    "contract",
-    "draft",
-    "version",
-    "changes",
-    "revised",
-    "legal",
-    "terms",
-    "comments",
-    "please check",
-    "see attached",
-    "markup",
-    "asset package",
-    "materials",
-    "one-sheet",
-    "split sheet",
-    "package",
-    "document",
-  ];
-  const informationalSignals = [
-    "update",
-    "snapshot",
-    "fyi",
-    "for your information",
-    "report",
-    "performance",
-    "summary",
-    "recap",
-    "status",
-    "confirmed",
-    "confirmation",
-    "completed",
-    "queued",
-    "accepted",
-    "delivered",
-    "went live",
-    "now live",
-    "tracking",
-    "results",
-  ];
-
-  let replyScore = countMatches(replySignals);
-  let reviewScore = countMatches(reviewSignals);
-  let informationalScore = countMatches(informationalSignals);
-
-  if (questionCount > 0) {
-    replyScore += Math.min(questionCount, 2);
-  }
-
-  if (
-    attachmentCount > 0 &&
-    (reviewScore > 0 || /attached|attachment|please check|review|revised|draft/.test(searchableText))
-  ) {
-    reviewScore += 1;
-  }
-
-  if (
-    informationalScore > 0 &&
-    !/can you|could you|please confirm|please send|let me know|\?/.test(searchableText)
-  ) {
-    informationalScore += 1;
-  }
-
-  if (compactText.length < 36 || bodyLength < 18) {
-    return {
-      primary: "Cuevion isn't fully sure",
-      secondary: "Not enough context to decide yet",
-    };
-  }
-
-  const topScore = Math.max(replyScore, reviewScore, informationalScore);
-  const sortedScores = [replyScore, reviewScore, informationalScore].sort((a, b) => b - a);
-  const secondScore = sortedScores[1] ?? 0;
-  const hasMixedSignals =
-    topScore > 0 &&
-    secondScore > 0 &&
-    topScore - secondScore <= 1 &&
-    !(replyScore >= 3 && replyScore > reviewScore);
-
-  if (hasMixedSignals || topScore === 0) {
-    return {
-      primary: "Not completely clear what this needs",
-      secondary: "This seems a bit mixed - a quick check may help",
-    };
-  }
-
-  if (replyScore >= reviewScore && replyScore >= informationalScore && replyScore >= 2) {
-    if (/confirm|timing|schedule|deadline|cutoff|today|before friday/.test(searchableText)) {
-      return {
-        primary: "You might want to reply to confirm timing",
-        secondary: "It looks like they are waiting for confirmation",
-      };
-    }
-
-    return {
-      primary: "A quick reply may help move this forward",
-      secondary: "This message seems to expect a response",
-    };
-  }
-
-  if (reviewScore >= informationalScore && reviewScore >= 2) {
-    if (/agreement|contract|terms|legal|draft|revised|version/.test(searchableText)) {
-      return {
-        primary: "This looks like something to inspect before taking action",
-        secondary: "There are details here that likely need your input",
-      };
-    }
-
-    return {
-      primary: "You may want to take a quick look at this first",
-      secondary: "This appears to include material that needs checking",
-    };
-  }
-
-  if (informationalScore >= 2) {
-    if (/update|snapshot|report|summary|recap|performance/.test(searchableText)) {
-      return {
-        primary: "This appears to be an update",
-        secondary: "This reads more like a status update than a request",
-      };
-    }
-
-    return {
-      primary: "No immediate action seems necessary",
-      secondary: "There is no clear request or next step here",
-    };
-  }
-
-  return {
-    primary: "This could use a quick look before deciding",
-    secondary: "It is not obvious what the next step is yet",
-  };
-}
-
 function getForYouCategoryLabel(
   category: "Important" | "Review" | "Promo" | "Demo" | "Spam",
 ) {
@@ -1950,88 +1767,6 @@ function resolveCuevionCategorization(
   return {
     ...systemCategorization,
     categoryConfidence: lowerCategoryConfidence(systemCategorization.categoryConfidence),
-  };
-}
-
-function resolveMailMessageSuggestion(
-  message: MailMessageSeed,
-  categorization: Pick<MailMessage, "category" | "categorySource" | "categoryConfidence">,
-  isAIEnabled: boolean,
-): MailMessageSuggestion | undefined {
-  if (!isAIEnabled) {
-    return undefined;
-  }
-
-  if (message.suggestionDismissed) {
-    return undefined;
-  }
-
-  if (message.suggestion) {
-    return message.suggestion;
-  }
-
-  if (
-    categorization.categorySource !== "system" ||
-    categorization.categoryConfidence !== "low"
-  ) {
-    return undefined;
-  }
-
-  if (
-    message.signal === "Draft" ||
-    message.signal === "Sent" ||
-    message.signal === "Archived" ||
-    message.signal === "Spam" ||
-    message.signal === "Trash"
-  ) {
-    return undefined;
-  }
-
-  return {
-    type: "confirm_category",
-    proposedCategory: categorization.category,
-  };
-}
-
-function resolveMailMessageBehaviorSuggestion(
-  message: MailMessageSeed,
-  categorization: Pick<MailMessage, "category" | "categorySource" | "categoryConfidence">,
-  senderCategoryLearning: SenderCategoryLearningStore,
-  isAIEnabled: boolean,
-): MailMessageBehaviorSuggestion | undefined {
-  if (!isAIEnabled) {
-    return undefined;
-  }
-
-  if (message.behaviorSuggestionDismissed) {
-    return undefined;
-  }
-
-  const senderLearningMatch = resolveSenderLearningEntry(
-    message.from,
-    senderCategoryLearning,
-  );
-  const senderLearning = senderLearningMatch?.entry;
-
-  if (
-    !senderLearning ||
-    senderLearning.learnedFromCount < AUTO_CATEGORY_BEHAVIOR_MIN_COUNT ||
-    senderLearning.autoCategoryEnabled
-  ) {
-    return undefined;
-  }
-
-  if (
-    categorization.categorySource !== "user" &&
-    categorization.categorySource !== "learned"
-  ) {
-    return undefined;
-  }
-
-  return {
-    type: "auto_category",
-    sender: senderLearningMatch?.key ?? normalizeSenderLearningKey(message.from),
-    category: senderLearning.learnedCategory,
   };
 }
 
