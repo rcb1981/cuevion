@@ -1227,6 +1227,39 @@ function renderPlainMessageParagraph(
   );
 }
 
+function renderMessageMetaSummary(
+  message: Pick<MailMessage, "from" | "to" | "timestamp">,
+) {
+  return (
+    <div className="grid gap-3 md:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)]">
+      <div className="min-w-0 space-y-2">
+        <div className="text-[0.64rem] font-medium uppercase tracking-[0.18em] text-[var(--workspace-text-faint)]">
+          From
+        </div>
+        <div className="truncate text-[0.92rem] text-[var(--workspace-text)]">
+          {message.from}
+        </div>
+      </div>
+      <div className="min-w-0 space-y-2">
+        <div className="text-[0.64rem] font-medium uppercase tracking-[0.18em] text-[var(--workspace-text-faint)]">
+          To
+        </div>
+        <div className="truncate text-[0.9rem] text-[var(--workspace-text-soft)]">
+          {message.to}
+        </div>
+      </div>
+      <div className="space-y-2 md:col-span-2">
+        <div className="text-[0.64rem] font-medium uppercase tracking-[0.18em] text-[var(--workspace-text-faint)]">
+          Received
+        </div>
+        <div className="text-[0.84rem] text-[var(--workspace-text-soft)]">
+          {message.timestamp}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function sanitizeMessageBodyHtml(
   bodyHtml: string,
   options?: { allowRemoteImages?: boolean },
@@ -8527,10 +8560,6 @@ function MailboxView({
           const bodyRenderMode = resolveMessageBodyRenderMode(threadMessage, {
             allowRemoteImages: remoteImagesAllowed,
           });
-          const normalizedBodyDebug = normalizeMessageBodyContent(
-            threadMessage.body,
-            threadMessage.bodyHtml,
-          );
           const hasHiddenRemoteImages =
             bodyRenderMode.remoteImageCount > 0 && !remoteImagesAllowed;
 
@@ -8561,7 +8590,8 @@ function MailboxView({
                   {threadMessage.timestamp}
                 </div>
               </div>
-              <div className="mt-3 space-y-3">
+              <div className="mt-3 rounded-[18px] border border-[color:rgba(121,151,120,0.12)] bg-[color:rgba(255,255,255,0.48)] px-4 py-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.16)] dark:bg-[color:rgba(34,41,36,0.36)]">
+                <div className="space-y-3">
                 {hasHiddenRemoteImages ? (
                   <div className="flex flex-wrap items-center justify-between gap-3 rounded-[14px] border border-[color:rgba(121,151,120,0.18)] bg-[color:rgba(86,114,87,0.06)] px-4 py-3 text-[0.82rem] text-[var(--workspace-text-soft)]">
                     <div>
@@ -8581,11 +8611,6 @@ function MailboxView({
                 {bodyRenderMode.mode === "html" ? (
                   <div
                     className="email-html-content mx-auto w-full max-w-[46rem]"
-                    data-render-mode={bodyRenderMode.mode}
-                    data-has-body-html={threadMessage.bodyHtml ? "true" : "false"}
-                    data-html-source={normalizedBodyDebug.htmlSource}
-                    data-remote-images={bodyRenderMode.remoteImageCount}
-                    data-cid-images={bodyRenderMode.cidImageCount}
                   >
                     <div
                       className={`whitespace-pre-wrap text-[0.95rem] ${
@@ -8595,11 +8620,7 @@ function MailboxView({
                     />
                   </div>
                 ) : (
-                  <div
-                    data-render-mode="plain"
-                    data-has-body-html={threadMessage.bodyHtml ? "true" : "false"}
-                    data-html-source={normalizedBodyDebug.htmlSource}
-                  >
+                  <div>
                     {leadingParagraphs.map((paragraph) =>
                       renderPlainMessageParagraph(
                         paragraph,
@@ -8614,17 +8635,27 @@ function MailboxView({
                         <SignatureBlock signature={threadMessage.signature} />
                       </div>
                     ) : null}
-                    {quotedParagraphs.map((paragraph) =>
-                      renderPlainMessageParagraph(
-                        paragraph,
-                        `${threadMessage.id}-quoted-${paragraph}`,
-                        `text-[0.94rem] ${
-                          density === "full" ? "leading-8" : "leading-7"
-                        } text-[var(--workspace-text-soft)]`,
-                      ),
-                    )}
+                    {quotedParagraphs.length > 0 ? (
+                      <div className="mt-4 rounded-[14px] border border-[color:rgba(121,151,120,0.18)] bg-[color:rgba(86,114,87,0.05)] px-4 py-3">
+                        <div className="mb-2 text-[0.62rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                          Earlier message
+                        </div>
+                        <div className="space-y-2">
+                          {quotedParagraphs.map((paragraph) =>
+                            renderPlainMessageParagraph(
+                              paragraph,
+                              `${threadMessage.id}-quoted-${paragraph}`,
+                              `text-[0.88rem] ${
+                                density === "full" ? "leading-7" : "leading-6"
+                              } text-[color:rgba(111,104,96,0.92)]`,
+                            ),
+                          )}
+                        </div>
+                      </div>
+                    ) : null}
                   </div>
                 )}
+                </div>
               </div>
             </div>
           );
@@ -12517,34 +12548,20 @@ function MailboxView({
 	                );
 	              })()}
 
-	              <div className="rounded-[20px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-5 py-4">
-                <div className="space-y-0.5 text-[0.9rem] leading-[1.5] text-[var(--workspace-text-soft)]">
-                  <div>
-                    <span className="text-[var(--workspace-text-faint)]">Subject</span>{" "}
-                    {fullWidthMessage.subject}
-                  </div>
-                  <div>
-                    <span className="text-[var(--workspace-text-faint)]">From</span>{" "}
-                    {fullWidthMessage.from}
-                  </div>
-                  <div>
-                    <span className="text-[var(--workspace-text-faint)]">To</span>{" "}
-                    {fullWidthMessage.to}
-                  </div>
-                  <div>
-                    <span className="text-[var(--workspace-text-faint)]">Time</span>{" "}
-                    {fullWidthMessage.timestamp}
-                  </div>
+	              <div className="rounded-[20px] border border-[var(--workspace-border-soft)] bg-[linear-gradient(180deg,rgba(255,255,255,0.72),rgba(248,244,238,0.92))] px-5 py-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.22)] dark:bg-[linear-gradient(180deg,rgba(47,56,49,0.58),rgba(33,40,35,0.74))]">
+                <div className="mb-3 text-[0.64rem] font-medium uppercase tracking-[0.18em] text-[var(--workspace-text-faint)]">
+                  Message details
                 </div>
+                {renderMessageMetaSummary(fullWidthMessage)}
               </div>
 
               {aiSuggestionsEnabled ? renderAIDecisionBlock(fullWidthMessage) : null}
 
               {renderMessageCollaboration(fullWidthMessage)}
 
-              <div className="space-y-2">
+              <div className="space-y-3">
                 {shouldShowMessageSummary(fullWidthMessage.snippet, fullWidthMessage.body) ? (
-                  <div className="mt-3 w-[94%] text-[0.9rem] leading-[1.95] text-[color:rgba(95,88,80,0.9)]">
+                  <div className="rounded-[18px] border border-[color:rgba(121,151,120,0.12)] bg-[color:rgba(255,255,255,0.44)] px-4 py-3 text-[0.88rem] leading-[1.85] text-[color:rgba(95,88,80,0.9)] dark:bg-[color:rgba(34,41,36,0.34)]">
                     {fullWidthMessage.snippet}
                   </div>
                 ) : null}
@@ -12552,7 +12569,7 @@ function MailboxView({
                 {renderBehaviorSuggestion(fullWidthMessage)}
 
                     {fullWidthMessage.isShared && fullWidthMessage.sharedContext ? (
-                      <div className="w-[94%] text-[0.82rem] leading-6 text-[color:rgba(120,111,100,0.68)]">
+                      <div className="rounded-[16px] border border-[color:rgba(121,151,120,0.12)] bg-[color:rgba(255,255,255,0.38)] px-4 py-3 text-[0.82rem] leading-6 text-[color:rgba(120,111,100,0.68)] dark:bg-[color:rgba(34,41,36,0.28)]">
                         {formatSharedContextDetail(fullWidthMessage.sharedContext)}
                       </div>
                     ) : null}
@@ -13386,24 +13403,12 @@ function MailboxView({
 	                            {linkedReviewLabel}
 	                          </button>
 	                        ) : null}
-	                        <div className="space-y-0.5 text-[0.88rem] leading-[1.5] text-[var(--workspace-text-soft)]">
-	                          <div>
-	                            <span className="text-[var(--workspace-text-faint)]">Subject</span>{" "}
-                            {selectedMessage.subject}
+	                        <div className="rounded-[18px] border border-[var(--workspace-border-soft)] bg-[linear-gradient(180deg,rgba(255,255,255,0.68),rgba(248,244,238,0.9))] px-4 py-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.2)] dark:bg-[linear-gradient(180deg,rgba(47,56,49,0.56),rgba(33,40,35,0.72))]">
+                            <div className="mb-3 text-[0.64rem] font-medium uppercase tracking-[0.18em] text-[var(--workspace-text-faint)]">
+                              Message details
+                            </div>
+                            {renderMessageMetaSummary(selectedMessage)}
                           </div>
-                          <div>
-                            <span className="text-[var(--workspace-text-faint)]">From</span>{" "}
-                            {selectedMessage.from}
-                          </div>
-                          <div>
-                            <span className="text-[var(--workspace-text-faint)]">To</span>{" "}
-                            {selectedMessage.to}
-                          </div>
-                          <div>
-                            <span className="text-[var(--workspace-text-faint)]">Time</span>{" "}
-                            {selectedMessage.timestamp}
-                          </div>
-                        </div>
                       </div>
 	                      <div className="flex items-center gap-4">
 	                        {aiSuggestionsEnabled ? (
@@ -13431,9 +13436,9 @@ function MailboxView({
 
                     {renderMessageCollaboration(selectedMessage)}
 
-                  <div className="space-y-2">
+                  <div className="space-y-3">
                     {shouldShowMessageSummary(selectedMessage.snippet, selectedMessage.body) ? (
-                      <div className="mt-3 w-[94%] text-[0.9rem] leading-[1.95] text-[color:rgba(95,88,80,0.9)]">
+                      <div className="rounded-[18px] border border-[color:rgba(121,151,120,0.12)] bg-[color:rgba(255,255,255,0.44)] px-4 py-3 text-[0.88rem] leading-[1.85] text-[color:rgba(95,88,80,0.9)] dark:bg-[color:rgba(34,41,36,0.34)]">
                         {selectedMessage.snippet}
                       </div>
                     ) : null}
@@ -13441,7 +13446,7 @@ function MailboxView({
                     {renderBehaviorSuggestion(selectedMessage)}
 
                     {selectedMessage.isShared && selectedMessage.sharedContext ? (
-                      <div className="w-[94%] text-[0.82rem] leading-6 text-[color:rgba(120,111,100,0.68)]">
+                      <div className="rounded-[16px] border border-[color:rgba(121,151,120,0.12)] bg-[color:rgba(255,255,255,0.38)] px-4 py-3 text-[0.82rem] leading-6 text-[color:rgba(120,111,100,0.68)] dark:bg-[color:rgba(34,41,36,0.28)]">
                         {formatSharedContextDetail(selectedMessage.sharedContext)}
                       </div>
                     ) : null}
