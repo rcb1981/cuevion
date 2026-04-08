@@ -1262,6 +1262,81 @@ function getQuotedParagraphStartIndex(paragraphs: string[]) {
       /^On .+ wrote:$/.test(paragraph) || paragraph === "Forwarded message:",
   );
 }
+
+function looksLikeRenderedHtmlMarkup(value: string) {
+  return /<(html|body|table|div|p|span|br|img|a|style|head|meta)\b/i.test(value);
+}
+
+function looksLikeEscapedHtmlMarkup(value: string) {
+  return /&(lt|gt|nbsp|amp);/i.test(value);
+}
+
+function decodeHtmlEntities(value: string) {
+  if (typeof document === "undefined") {
+    return value;
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.innerHTML = value;
+  return textarea.value;
+}
+
+function normalizeMessageBodyContent(
+  body: string[],
+  bodyHtml?: string,
+): {
+  body: string[];
+  bodyHtml?: string;
+  htmlSource: "bodyHtml" | "escapedBodyHtml" | "body" | "escapedBody" | "none";
+} {
+  const normalizedBodyHtml = bodyHtml?.trim() ?? "";
+  const joinedBody = body.join("\n\n").trim();
+  const decodedBodyHtml = looksLikeEscapedHtmlMarkup(normalizedBodyHtml)
+    ? decodeHtmlEntities(normalizedBodyHtml).trim()
+    : "";
+  const decodedJoinedBody = looksLikeEscapedHtmlMarkup(joinedBody)
+    ? decodeHtmlEntities(joinedBody).trim()
+    : "";
+
+  let resolvedBodyHtml = "";
+  let htmlSource: "bodyHtml" | "escapedBodyHtml" | "body" | "escapedBody" | "none" = "none";
+
+  if (normalizedBodyHtml && looksLikeRenderedHtmlMarkup(normalizedBodyHtml)) {
+    resolvedBodyHtml = normalizedBodyHtml;
+    htmlSource = "bodyHtml";
+  } else if (decodedBodyHtml && looksLikeRenderedHtmlMarkup(decodedBodyHtml)) {
+    resolvedBodyHtml = decodedBodyHtml;
+    htmlSource = "escapedBodyHtml";
+  } else if (joinedBody && looksLikeRenderedHtmlMarkup(joinedBody)) {
+    resolvedBodyHtml = joinedBody;
+    htmlSource = "body";
+  } else if (decodedJoinedBody && looksLikeRenderedHtmlMarkup(decodedJoinedBody)) {
+    resolvedBodyHtml = decodedJoinedBody;
+    htmlSource = "escapedBody";
+  }
+
+  if (!resolvedBodyHtml) {
+    return {
+      body,
+      bodyHtml: normalizedBodyHtml || undefined,
+      htmlSource,
+    };
+  }
+
+  const plainParagraphsFromHtml = extractComposeParagraphs(resolvedBodyHtml);
+  const cleanBodyParagraphs = body
+    .map((paragraph) => paragraph.trim())
+    .filter((paragraph) => paragraph.length > 0 && !looksLikeRenderedHtmlMarkup(paragraph));
+
+  return {
+    body:
+      plainParagraphsFromHtml.length > 0
+        ? plainParagraphsFromHtml
+        : cleanBodyParagraphs,
+    bodyHtml: resolvedBodyHtml,
+    htmlSource,
+  };
+}
 const LEARNED_CATEGORY_MIN_COUNT = 2;
 const HIGH_CONFIDENCE_LEARNING_COUNT = 3;
 const AUTO_CATEGORY_BEHAVIOR_MIN_COUNT = 2;
@@ -3517,6 +3592,10 @@ function normalizeMailMessage(
     behaviorSuggestionDismissed: _behaviorSuggestionDismissed,
     ...baseMessage
   } = message;
+  const normalizedBodyContent = normalizeMessageBodyContent(
+    baseMessage.body,
+    baseMessage.bodyHtml,
+  );
   const categorization = resolveCuevionCategorization(
     message,
     mailboxId,
@@ -3545,6 +3624,8 @@ function normalizeMailMessage(
 
   return {
     ...baseMessage,
+    body: normalizedBodyContent.body,
+    bodyHtml: normalizedBodyContent.bodyHtml,
     threadId: resolveMailThreadId(message),
     signal: resolvedSignal,
     attachments: normalizedAttachments,
@@ -8211,6 +8292,10 @@ function MailboxView({
           const quotedParagraphs =
             quoteStartIndex === -1 ? [] : threadMessage.body.slice(quoteStartIndex);
           const bodyRenderMode = resolveMessageBodyRenderMode(threadMessage);
+          const normalizedBodyDebug = normalizeMessageBodyContent(
+            threadMessage.body,
+            threadMessage.bodyHtml,
+          );
 
           return (
             <div
@@ -8241,7 +8326,12 @@ function MailboxView({
               </div>
               <div className="mt-3 space-y-3">
                 {bodyRenderMode.mode === "html" ? (
-                  <div className="email-html-content mx-auto w-full max-w-[46rem]">
+                  <div
+                    className="email-html-content mx-auto w-full max-w-[46rem]"
+                    data-render-mode={bodyRenderMode.mode}
+                    data-has-body-html={threadMessage.bodyHtml ? "true" : "false"}
+                    data-html-source={normalizedBodyDebug.htmlSource}
+                  >
                     <div
                       className={`whitespace-pre-wrap text-[0.95rem] ${
                         density === "full" ? "leading-8" : "leading-[1.9]"
@@ -8250,7 +8340,11 @@ function MailboxView({
                     />
                   </div>
                 ) : (
-                  <>
+                  <div
+                    data-render-mode="plain"
+                    data-has-body-html={threadMessage.bodyHtml ? "true" : "false"}
+                    data-html-source={normalizedBodyDebug.htmlSource}
+                  >
                     {leadingParagraphs.map((paragraph) => (
                       <p
                         key={`${threadMessage.id}-${paragraph}`}
@@ -8276,7 +8370,7 @@ function MailboxView({
                         {paragraph}
                       </p>
                     ))}
-                  </>
+                  </div>
                 )}
               </div>
             </div>
@@ -21152,6 +21246,7 @@ export function WorkspaceShell({
           cc: message.cc,
           timestamp: message.timestamp,
           body: message.body,
+          bodyHtml: message.bodyHtml,
           isShared: persistedMessage.isShared ?? existingMessage?.isShared,
           collaboration:
             persistedMessage.collaboration ?? existingMessage?.collaboration,

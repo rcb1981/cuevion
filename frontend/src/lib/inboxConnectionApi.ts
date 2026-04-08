@@ -12,6 +12,7 @@ export type LiveInboxMessageSnapshot = {
   timestamp: string;
   createdAt: string;
   body: string[];
+  bodyHtml?: string;
   unread?: boolean;
   ui_signal?: string;
 };
