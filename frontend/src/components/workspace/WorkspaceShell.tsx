@@ -1325,23 +1325,13 @@ function buildEmailStageDocument(
       .email-stage--dark * {
         color: ${stageTextColor} !important;
       }
-      .email-stage--light,
-      .email-stage--light div,
-      .email-stage--light p,
-      .email-stage--light span,
-      .email-stage--light td,
-      .email-stage--light th,
-      .email-stage--light table,
-      .email-stage--light tbody,
-      .email-stage--light tr,
-      .email-stage--light li,
-      .email-stage--light ul,
-      .email-stage--light ol,
-      .email-stage--light strong,
-      .email-stage--light em,
-      .email-stage--light font {
+      .email-stage--light {
         color: ${stageTextColor} !important;
-        -webkit-text-fill-color: currentColor !important;
+        -webkit-text-fill-color: ${stageTextColor} !important;
+      }
+      .email-stage--light * {
+        color: ${stageTextColor} !important;
+        -webkit-text-fill-color: ${stageTextColor} !important;
       }
       img {
         max-width: 100%;
@@ -1509,8 +1499,9 @@ function normalizeImportedEmailHtmlForReading(
     element.removeAttribute("color");
   }
 
-  element.style.setProperty("color", "inherit", "important");
-  element.style.setProperty("-webkit-text-fill-color", "currentColor", "important");
+  element.style.removeProperty("color");
+  element.style.setProperty("color", "rgba(34, 38, 36, 0.99)", "important");
+  element.style.setProperty("-webkit-text-fill-color", "rgba(34, 38, 36, 0.99)", "important");
 }
 
 function sanitizeMessageBodyHtml(
