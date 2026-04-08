@@ -1484,6 +1484,70 @@ function shouldResetImportedHtmlTextColor(element: HTMLElement) {
   );
 }
 
+const allowedImportedEmailInlineStyleProperties = new Set([
+  "text-align",
+  "font-weight",
+  "font-style",
+  "text-decoration",
+  "white-space",
+  "width",
+  "height",
+  "max-width",
+  "min-width",
+  "border",
+  "border-top",
+  "border-right",
+  "border-bottom",
+  "border-left",
+  "border-collapse",
+  "border-spacing",
+  "padding",
+  "padding-top",
+  "padding-right",
+  "padding-bottom",
+  "padding-left",
+  "margin",
+  "margin-top",
+  "margin-right",
+  "margin-bottom",
+  "margin-left",
+  "vertical-align",
+  "display",
+  "table-layout",
+]);
+
+function shouldPreserveImportedEmailInlineStyle(propertyName: string, propertyValue: string) {
+  return allowedImportedEmailInlineStyleProperties.has(propertyName) && propertyValue.length > 0;
+}
+
+function filterImportedEmailInlineStyles(element: HTMLElement) {
+  if (!element.hasAttribute("style")) {
+    return;
+  }
+
+  const nextDeclarations: string[] = [];
+
+  Array.from(element.style).forEach((propertyName) => {
+    const propertyValue = element.style.getPropertyValue(propertyName).trim();
+
+    if (!propertyValue || !shouldPreserveImportedEmailInlineStyle(propertyName, propertyValue)) {
+      return;
+    }
+
+    const priority = element.style.getPropertyPriority(propertyName);
+    nextDeclarations.push(
+      `${propertyName}: ${propertyValue}${priority ? " !important" : ""};`,
+    );
+  });
+
+  if (nextDeclarations.length === 0) {
+    element.removeAttribute("style");
+    return;
+  }
+
+  element.setAttribute("style", nextDeclarations.join(" "));
+}
+
 function normalizeImportedEmailHtmlForReading(
   element: HTMLElement,
   themeMode: "light" | "dark",
@@ -1552,6 +1616,9 @@ function sanitizeMessageBodyHtml(
   });
 
   body.querySelectorAll("*").forEach((element) => {
+    const hadGmailQuoteClass =
+      element instanceof HTMLElement && element.className.toLowerCase().includes("gmail_quote");
+
     Array.from(element.attributes).forEach((attribute) => {
       const attributeName = attribute.name.toLowerCase();
       const attributeValue = attribute.value;
@@ -1571,13 +1638,20 @@ function sanitizeMessageBodyHtml(
         return;
       }
 
-      if (["bgcolor", "background", "text", "link", "vlink", "alink"].includes(attributeName)) {
+      if (
+        [
+          "class",
+          "color",
+          "bgcolor",
+          "background",
+          "text",
+          "link",
+          "vlink",
+          "alink",
+        ].includes(attributeName)
+      ) {
         element.removeAttribute(attribute.name);
         return;
-      }
-
-      if (attributeName === "style" && unsafeInlineStylePattern.test(attributeValue)) {
-        element.removeAttribute(attribute.name);
       }
     });
 
@@ -1637,6 +1711,8 @@ function sanitizeMessageBodyHtml(
     }
 
     if (element instanceof HTMLElement) {
+      filterImportedEmailInlineStyles(element);
+
       const computedBackground = element.style.backgroundColor.toLowerCase();
       const computedTextColor = element.style.color.toLowerCase();
       const computedBackgroundImage = element.style.backgroundImage.toLowerCase();
@@ -1682,7 +1758,7 @@ function sanitizeMessageBodyHtml(
 
       if (
         element.getAttribute("data-compose-quote") === "true" ||
-        element.className.toLowerCase().includes("gmail_quote")
+        hadGmailQuoteClass
       ) {
         element.setAttribute("data-email-quote", "true");
         element.style.background = "transparent";
