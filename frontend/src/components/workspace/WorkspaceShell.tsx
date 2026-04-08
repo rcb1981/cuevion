@@ -1325,11 +1325,22 @@ function buildEmailStageDocument(
       .email-stage--dark * {
         color: ${stageTextColor} !important;
       }
-      .email-stage--light {
-        color: ${stageTextColor};
-      }
-      .email-stage--light * {
-        color: inherit !important;
+      .email-stage--light,
+      .email-stage--light div,
+      .email-stage--light p,
+      .email-stage--light span,
+      .email-stage--light td,
+      .email-stage--light th,
+      .email-stage--light table,
+      .email-stage--light tbody,
+      .email-stage--light tr,
+      .email-stage--light li,
+      .email-stage--light ul,
+      .email-stage--light ol,
+      .email-stage--light strong,
+      .email-stage--light em,
+      .email-stage--light font {
+        color: ${stageTextColor} !important;
         -webkit-text-fill-color: currentColor !important;
       }
       img {
@@ -1480,16 +1491,14 @@ function normalizeImportedEmailHtmlForReading(
   element: HTMLElement,
   themeMode: "light" | "dark",
 ) {
-  if (themeMode !== "light") {
+  if (themeMode !== "light" || !shouldResetImportedHtmlTextColor(element)) {
     return;
   }
 
-  if (!shouldResetImportedHtmlTextColor(element)) {
-    return;
-  }
-
-  const inlineTextColor = element.style.color.trim().toLowerCase();
-
+  element.style.removeProperty("opacity");
+  element.style.removeProperty("filter");
+  element.style.removeProperty("mix-blend-mode");
+  element.style.removeProperty("text-shadow");
   element.style.removeProperty("-webkit-text-fill-color");
 
   if (element instanceof HTMLAnchorElement) {
@@ -1500,12 +1509,8 @@ function normalizeImportedEmailHtmlForReading(
     element.removeAttribute("color");
   }
 
-  if (
-    inlineTextColor &&
-    !/transparent|initial|inherit|currentcolor/i.test(inlineTextColor)
-  ) {
-    element.style.color = "inherit";
-  }
+  element.style.setProperty("color", "inherit", "important");
+  element.style.setProperty("-webkit-text-fill-color", "currentColor", "important");
 }
 
 function sanitizeMessageBodyHtml(
