@@ -1305,6 +1305,10 @@ function buildEmailStageDocument(
         word-break: break-word;
         line-height: 1.58;
       }
+      ${themeMode === "dark" ? `* {
+        background-color: transparent !important;
+        background-image: none !important;
+      }` : ""}
       .email-stage {
         box-sizing: border-box;
         width: 100%;
@@ -1316,14 +1320,8 @@ function buildEmailStageDocument(
       .email-stage > * {
         max-width: 100%;
       }
-      .email-stage,
-      .email-stage p,
-      .email-stage div,
-      .email-stage span,
-      .email-stage td,
-      .email-stage th,
-      .email-stage li {
-        color: inherit !important;
+      .email-stage * {
+        color: ${stageTextColor} !important;
       }
       img {
         max-width: 100%;
@@ -1332,7 +1330,7 @@ function buildEmailStageDocument(
       table {
         max-width: 100%;
       }
-      a {
+      a, a * {
         color: ${stageLinkColor} !important;
         word-break: break-all;
         text-decoration-color: color-mix(in srgb, ${stageLinkColor} 72%, transparent);
@@ -1369,8 +1367,8 @@ function buildEmailStageDocument(
         padding: 0.12rem 0.45rem;
         border-radius: 999px;
         border: 1px dashed rgba(121, 151, 120, 0.1);
-        background: rgba(86, 114, 87, 0.018);
-        color: rgba(120, 111, 100, 0.72);
+        background: rgba(86, 114, 87, 0.018) !important;
+        color: rgba(120, 111, 100, 0.72) !important;
         font: 500 10px/1.35 ui-sans-serif, system-ui, sans-serif;
         letter-spacing: 0.04em;
       }
@@ -1666,6 +1664,161 @@ function sanitizeMessageBodyHtml(
   };
 }
 
+function isComposeGeneratedHtml(value: string) {
+  return /data-compose-(quote|signature|signature-text|signature-logo|signature-divider|signature-row|signature-right|signature-spacer)/i.test(
+    value,
+  );
+}
+
+function sanitizeComposeGeneratedHtml(
+  bodyHtml: string,
+  options?: { allowRemoteImages?: boolean },
+): SanitizedMessageHtmlResult {
+  const normalizedHtml = bodyHtml.trim();
+
+  if (!normalizedHtml) {
+    return {
+      html: null,
+      remoteImageCount: 0,
+      cidImageCount: 0,
+      invalidImageCount: 0,
+    };
+  }
+
+  if (typeof DOMParser === "undefined") {
+    return {
+      html: normalizedHtml,
+      remoteImageCount: 0,
+      cidImageCount: 0,
+      invalidImageCount: 0,
+    };
+  }
+
+  const parsedDocument = new DOMParser().parseFromString(normalizedHtml, "text/html");
+  const body = parsedDocument.body;
+  let remoteImageCount = 0;
+  let cidImageCount = 0;
+  let invalidImageCount = 0;
+  const allowRemoteImages = options?.allowRemoteImages ?? false;
+
+  body.querySelectorAll(unsafeEmailHtmlSelectors).forEach((node) => {
+    node.remove();
+  });
+
+  body.querySelectorAll("*").forEach((element) => {
+    Array.from(element.attributes).forEach((attribute) => {
+      const attributeName = attribute.name.toLowerCase();
+      const attributeValue = attribute.value;
+
+      if (attributeName.startsWith("on")) {
+        element.removeAttribute(attribute.name);
+        return;
+      }
+
+      if (
+        ["href", "src", "srcset", "poster", "xlink:href", "action", "formaction"].includes(
+          attributeName,
+        ) &&
+        unsafeEmailUrlPattern.test(attributeValue)
+      ) {
+        element.removeAttribute(attribute.name);
+        return;
+      }
+
+      if (
+        ["bgcolor", "background", "color", "text", "link", "vlink", "alink"].includes(
+          attributeName,
+        )
+      ) {
+        element.removeAttribute(attribute.name);
+        return;
+      }
+
+      if (attributeName === "style" && unsafeInlineStylePattern.test(attributeValue)) {
+        element.removeAttribute(attribute.name);
+      }
+    });
+
+    if (element instanceof HTMLAnchorElement) {
+      element.setAttribute("target", "_blank");
+      element.setAttribute("rel", "noopener noreferrer");
+    }
+
+    if (element instanceof HTMLImageElement) {
+      const imageSourceType = resolveEmailImageSourceType(element.getAttribute("src"));
+      const fallbackAlt = element.getAttribute("alt")?.trim() || "Inline image";
+
+      element.setAttribute("loading", "lazy");
+      element.setAttribute("decoding", "async");
+      element.setAttribute("data-image-source-type", imageSourceType);
+      element.setAttribute("data-image-alt", fallbackAlt);
+
+      if (imageSourceType === "remote") {
+        remoteImageCount += 1;
+        element.setAttribute("referrerpolicy", "no-referrer");
+
+        if (!allowRemoteImages) {
+          const placeholder = parsedDocument.createElement("div");
+          placeholder.setAttribute("data-email-image-placeholder", "true");
+          placeholder.setAttribute("data-email-image-source", "remote");
+          placeholder.setAttribute("data-email-image-alt", fallbackAlt);
+          placeholder.textContent = fallbackAlt ? `Remote image: ${fallbackAlt}` : "Remote image";
+          element.replaceWith(placeholder);
+        }
+      } else if (
+        imageSourceType === "cid" ||
+        imageSourceType === "invalid" ||
+        imageSourceType === "missing"
+      ) {
+        if (imageSourceType === "cid") {
+          cidImageCount += 1;
+        } else {
+          invalidImageCount += 1;
+        }
+
+        const placeholder = parsedDocument.createElement("div");
+        placeholder.setAttribute("data-email-image-placeholder", "true");
+        placeholder.setAttribute("data-email-image-source", imageSourceType);
+        placeholder.setAttribute("data-email-image-alt", fallbackAlt);
+        placeholder.textContent =
+          imageSourceType === "cid" ? `Embedded image: ${fallbackAlt}` : "Image unavailable";
+        element.replaceWith(placeholder);
+      }
+    }
+
+    if (element instanceof HTMLElement) {
+      element.style.background = "transparent";
+      element.style.backgroundColor = "transparent";
+      element.style.backgroundImage = "none";
+      element.style.color = "inherit";
+      element.style.opacity = "";
+      element.style.boxShadow = "none";
+
+      if (
+        element.getAttribute("data-compose-quote") === "true" ||
+        element.className.toLowerCase().includes("gmail_quote") ||
+        element.tagName === "BLOCKQUOTE"
+      ) {
+        element.setAttribute("data-email-quote", "true");
+        element.style.background = "transparent";
+        element.style.color = "inherit";
+      }
+    }
+  });
+
+  const sanitizedHtml = body.innerHTML.trim();
+  const hasRenderableContent =
+    body.textContent?.replace(/\s+/g, "").length ||
+    body.querySelector("img, table, blockquote, hr, ul, ol");
+
+  return {
+    html: hasRenderableContent ? sanitizedHtml : null,
+    remoteImageCount,
+    cidImageCount,
+    invalidImageCount,
+  };
+}
+
 function resolveMessageBodyRenderMode(
   message: Pick<MailMessage, "body" | "bodyHtml">,
   options?: { allowRemoteImages?: boolean },
@@ -1678,13 +1831,22 @@ function resolveMessageBodyRenderMode(
       invalidImageCount: number;
     }
   | {
+      mode: "compose_html";
+      html: string;
+      remoteImageCount: number;
+      cidImageCount: number;
+      invalidImageCount: number;
+    }
+  | {
       mode: "plain";
       remoteImageCount: number;
       cidImageCount: number;
       invalidImageCount: number;
     } {
   const sanitizedHtmlResult = message.bodyHtml
-    ? sanitizeMessageBodyHtml(message.bodyHtml, options)
+    ? isComposeGeneratedHtml(message.bodyHtml)
+      ? sanitizeComposeGeneratedHtml(message.bodyHtml, options)
+      : sanitizeMessageBodyHtml(message.bodyHtml, options)
     : {
         html: null,
         remoteImageCount: 0,
@@ -1694,7 +1856,10 @@ function resolveMessageBodyRenderMode(
 
   if (sanitizedHtmlResult.html) {
     return {
-      mode: "html",
+      mode:
+        message.bodyHtml && isComposeGeneratedHtml(message.bodyHtml)
+          ? "compose_html"
+          : "html",
       html: sanitizedHtmlResult.html,
       remoteImageCount: sanitizedHtmlResult.remoteImageCount,
       cidImageCount: sanitizedHtmlResult.cidImageCount,
@@ -8848,6 +9013,11 @@ function MailboxView({
                   >
                     <EmailHtmlStage html={bodyRenderMode.html} themeMode={themeMode} />
                   </div>
+                ) : bodyRenderMode.mode === "compose_html" ? (
+                  <div
+                    className={`w-full whitespace-pre-wrap text-[0.94rem] ${density === "full" ? "leading-7" : "leading-6.5"} text-[color:rgba(34,31,29,0.99)] dark:text-[color:rgba(228,235,230,0.94)] [&_a]:text-[color:rgba(44,89,116,0.98)] dark:[&_a]:text-[color:rgba(176,209,183,0.96)] [&_a]:underline [&_a]:underline-offset-2 [&_div]:min-h-[1.35rem] [&_[data-compose-quote='true']]:mt-3 [&_[data-compose-quote='true']]:rounded-[6px] [&_[data-compose-quote='true']]:border-l-2 [&_[data-compose-quote='true']]:border-[color:rgba(132,148,118,0.18)] [&_[data-compose-quote='true']]:bg-[color:rgba(249,245,237,0.42)] [&_[data-compose-quote='true']]:px-2.5 [&_[data-compose-quote='true']]:py-2 dark:[&_[data-compose-quote='true']]:border-[color:rgba(121,151,120,0.16)] dark:[&_[data-compose-quote='true']]:bg-[color:rgba(86,114,87,0.08)] [&_[data-compose-quote='true']_*]:text-[color:rgba(82,76,70,0.92)] dark:[&_[data-compose-quote='true']_*]:text-[color:rgba(196,202,198,0.82)] [&_[data-compose-signature='true']]:mt-3 [&_[data-compose-signature='true']]:space-y-0 [&_[data-compose-signature-divider='true']]:my-2 [&_[data-compose-signature-divider='true']]:h-px [&_[data-compose-signature-divider='true']]:w-full [&_[data-compose-signature-divider='true']]:bg-[color:rgba(121,151,120,0.18)] [&_[data-compose-signature-logo='true']]:pt-1 [&_[data-compose-signature-logo='true']_img]:max-h-[76px] [&_[data-compose-signature-logo='true']_img]:w-auto [&_[data-compose-signature-logo='true']_img]:max-w-full [&_[data-compose-signature-logo='true']_img]:object-contain [&_[data-compose-signature-right='true']]:min-w-0 [&_[data-compose-signature-right='true']]:flex-1 [&_[data-compose-signature-row='true']]:flex [&_[data-compose-signature-row='true']]:items-start [&_[data-compose-signature-row='true']]:gap-4 [&_[data-compose-signature-spacer='true']]:min-h-[1.2rem] [&_[data-compose-signature-text='true']]:whitespace-pre-wrap [&_[data-compose-signature-text='true']]:text-[0.86rem] [&_[data-compose-signature-text='true']]:leading-[1.45] [&_[data-compose-signature-text='true']_*]:text-[color:rgba(82,76,70,0.9)] dark:[&_[data-compose-signature-text='true']_*]:text-[color:rgba(196,202,198,0.82)]`}
+                    dangerouslySetInnerHTML={{ __html: bodyRenderMode.html }}
+                  />
                 ) : (
                   <div>
                     {leadingParagraphs.map((paragraph) =>
