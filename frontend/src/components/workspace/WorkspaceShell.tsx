@@ -1136,6 +1136,89 @@ const unsafeEmailUrlPattern =
   /^\s*(javascript:|vbscript:|data:text\/html|data:application\/javascript)/i;
 const unsafeInlineStylePattern =
   /expression\s*\(|url\s*\(\s*['"]?\s*(javascript:|vbscript:|data:text\/html)/i;
+const plainLinkPattern =
+  /((?:https?:\/\/|www\.)[^\s<]+|(?:[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}))/gi;
+
+function resolveEmailImageSourceType(sourceValue: string | null) {
+  const normalizedSource = sourceValue?.trim() ?? "";
+
+  if (!normalizedSource) {
+    return "missing" as const;
+  }
+
+  if (/^cid:/i.test(normalizedSource)) {
+    return "cid" as const;
+  }
+
+  if (/^https?:\/\//i.test(normalizedSource)) {
+    return "remote" as const;
+  }
+
+  return "invalid" as const;
+}
+
+function buildPlainLinkHref(value: string) {
+  if (/^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$/i.test(value)) {
+    return `mailto:${value}`;
+  }
+
+  if (/^www\./i.test(value)) {
+    return `https://${value}`;
+  }
+
+  return value;
+}
+
+function renderPlainMessageParagraph(
+  paragraph: string,
+  paragraphKey: string,
+  className: string,
+) {
+  const matches = Array.from(paragraph.matchAll(plainLinkPattern));
+
+  if (matches.length === 0) {
+    return (
+      <p key={paragraphKey} className={className}>
+        {paragraph}
+      </p>
+    );
+  }
+
+  const content: ReactNode[] = [];
+  let lastIndex = 0;
+
+  matches.forEach((match, index) => {
+    const matchedValue = match[0];
+    const matchStart = match.index ?? 0;
+
+    if (matchStart > lastIndex) {
+      content.push(paragraph.slice(lastIndex, matchStart));
+    }
+
+    content.push(
+      <a
+        key={`${paragraphKey}-link-${index}`}
+        href={buildPlainLinkHref(matchedValue)}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="text-[color:rgba(70,109,73,0.96)] underline underline-offset-2"
+      >
+        {matchedValue}
+      </a>,
+    );
+    lastIndex = matchStart + matchedValue.length;
+  });
+
+  if (lastIndex < paragraph.length) {
+    content.push(paragraph.slice(lastIndex));
+  }
+
+  return (
+    <p key={paragraphKey} className={className}>
+      {content}
+    </p>
+  );
+}
 
 function sanitizeMessageBodyHtml(bodyHtml: string) {
   const normalizedHtml = bodyHtml.trim();
@@ -1186,8 +1269,66 @@ function sanitizeMessageBodyHtml(bodyHtml: string) {
     }
 
     if (element instanceof HTMLImageElement) {
+      const imageSourceType = resolveEmailImageSourceType(element.getAttribute("src"));
+
       element.setAttribute("loading", "lazy");
       element.setAttribute("decoding", "async");
+      element.setAttribute("data-image-source-type", imageSourceType);
+
+      if (imageSourceType === "cid" || imageSourceType === "invalid" || imageSourceType === "missing") {
+        const fallbackAlt = element.getAttribute("alt")?.trim() || "Inline image";
+        const placeholder = parsedDocument.createElement("div");
+        placeholder.setAttribute("data-email-image-placeholder", "true");
+        placeholder.textContent =
+          imageSourceType === "cid" ? fallbackAlt : "Image unavailable";
+        element.replaceWith(placeholder);
+      }
+    }
+
+    if (element instanceof HTMLElement) {
+      const computedBackground = element.style.backgroundColor.toLowerCase();
+      const computedTextColor = element.style.color.toLowerCase();
+
+      if (
+        computedBackground &&
+        /rgb\(255,\s*255,\s*255\)|rgba\(255,\s*255,\s*255|#fff(?:fff)?|white/.test(
+          computedBackground,
+        )
+      ) {
+        element.style.backgroundColor = "transparent";
+      }
+
+      if (
+        computedTextColor &&
+        /rgb\(0,\s*0,\s*0\)|rgba\(0,\s*0,\s*0|#000(?:000)?|black/.test(computedTextColor)
+      ) {
+        element.style.color = "rgba(84, 78, 71, 0.96)";
+      }
+
+      if (element.tagName === "TABLE") {
+        element.style.width = "100%";
+        element.style.maxWidth = "100%";
+        element.style.tableLayout = element.style.tableLayout || "auto";
+        element.style.borderCollapse = "collapse";
+      }
+
+      if (element.tagName === "TD" || element.tagName === "TH") {
+        element.style.verticalAlign = element.style.verticalAlign || "top";
+        if (!element.style.padding) {
+          element.style.padding = "0.55rem 0.7rem";
+        }
+      }
+
+      if (element.tagName === "BLOCKQUOTE") {
+        element.style.background = "rgba(86, 114, 87, 0.06)";
+      }
+
+      if (
+        element.getAttribute("data-compose-quote") === "true" ||
+        element.className.toLowerCase().includes("gmail_quote")
+      ) {
+        element.setAttribute("data-email-quote", "true");
+      }
     }
   });
 
@@ -8335,7 +8476,7 @@ function MailboxView({
                     <div
                       className={`whitespace-pre-wrap text-[0.95rem] ${
                         density === "full" ? "leading-8" : "leading-[1.9]"
-                      } text-[var(--workspace-text-soft)] [&_*]:max-w-full [&_a]:text-[color:rgba(70,109,73,0.96)] [&_a]:underline [&_a]:underline-offset-2 [&_blockquote]:my-5 [&_blockquote]:border-l-2 [&_blockquote]:border-[color:rgba(121,151,120,0.28)] [&_blockquote]:pl-4 [&_blockquote]:text-[color:rgba(104,98,89,0.88)] [&_br+br]:content-[''] [&_div]:max-w-full [&_div]:leading-[inherit] [&_div[data-compose-signature-divider='true']]:my-3 [&_div[data-compose-signature-divider='true']]:h-px [&_div[data-compose-signature-divider='true']]:w-full [&_div[data-compose-signature-divider='true']]:bg-[color:rgba(121,151,120,0.18)] [&_div[data-compose-signature-logo='true']]:pt-1 [&_div[data-compose-signature-logo='true']_img]:max-h-[76px] [&_div[data-compose-signature-logo='true']_img]:w-auto [&_div[data-compose-signature-logo='true']_img]:max-w-full [&_div[data-compose-signature-logo='true']_img]:object-contain [&_div[data-compose-signature-row='true']]:flex [&_div[data-compose-signature-row='true']]:items-start [&_div[data-compose-signature-row='true']]:gap-4 [&_div[data-compose-signature-right='true']]:min-w-0 [&_div[data-compose-signature-right='true']]:flex-1 [&_div[data-compose-signature-spacer='true']]:min-h-[1.75rem] [&_div[data-compose-signature-text='true']]:whitespace-pre-wrap [&_div[data-compose-signature-text='true']]:text-[0.86rem] [&_div[data-compose-signature-text='true']]:leading-[1.45] [&_div[data-compose-signature-text='true']_div]:min-h-[1.2rem] [&_div[data-compose-signature-text='true']_p]:min-h-[1.2rem] [&_div[data-compose-quote='true']]:pt-3 [&_h1]:my-4 [&_h1]:text-[1.6rem] [&_h1]:font-medium [&_h1]:leading-tight [&_h1]:text-[var(--workspace-text)] [&_h2]:my-4 [&_h2]:text-[1.35rem] [&_h2]:font-medium [&_h2]:leading-tight [&_h2]:text-[var(--workspace-text)] [&_h3]:my-3 [&_h3]:text-[1.12rem] [&_h3]:font-medium [&_h3]:leading-snug [&_h3]:text-[var(--workspace-text)] [&_hr]:my-5 [&_hr]:border-0 [&_hr]:border-t [&_hr]:border-[color:rgba(121,151,120,0.18)] [&_iframe]:max-w-full [&_img]:h-auto [&_img]:max-w-full [&_img]:rounded-[12px] [&_li]:my-1.5 [&_ol]:my-4 [&_ol]:pl-6 [&_p]:my-3 [&_p]:leading-[inherit] [&_pre]:overflow-x-auto [&_pre]:rounded-[14px] [&_pre]:bg-[color:rgba(44,52,45,0.05)] [&_pre]:p-3 [&_table]:my-4 [&_table]:w-full [&_table]:table-auto [&_table]:border-collapse [&_td]:border [&_td]:border-[color:rgba(121,151,120,0.14)] [&_td]:px-3 [&_td]:py-2 [&_th]:border [&_th]:border-[color:rgba(121,151,120,0.14)] [&_th]:bg-[color:rgba(121,151,120,0.06)] [&_th]:px-3 [&_th]:py-2 [&_ul]:my-4 [&_ul]:pl-6`}
+                      } text-[var(--workspace-text-soft)] [&_*]:max-w-full [&_a]:text-[color:rgba(70,109,73,0.96)] [&_a]:underline [&_a]:underline-offset-2 [&_blockquote]:my-5 [&_blockquote]:border-l-2 [&_blockquote]:border-[color:rgba(121,151,120,0.28)] [&_blockquote]:pl-4 [&_blockquote]:text-[color:rgba(104,98,89,0.88)] [&_br+br]:content-[''] [&_div]:max-w-full [&_div]:leading-[inherit] [&_div[data-compose-signature-divider='true']]:my-3 [&_div[data-compose-signature-divider='true']]:h-px [&_div[data-compose-signature-divider='true']]:w-full [&_div[data-compose-signature-divider='true']]:bg-[color:rgba(121,151,120,0.18)] [&_div[data-compose-signature-logo='true']]:pt-1 [&_div[data-compose-signature-logo='true']_img]:max-h-[76px] [&_div[data-compose-signature-logo='true']_img]:w-auto [&_div[data-compose-signature-logo='true']_img]:max-w-full [&_div[data-compose-signature-logo='true']_img]:object-contain [&_div[data-compose-signature-row='true']]:flex [&_div[data-compose-signature-row='true']]:items-start [&_div[data-compose-signature-row='true']]:gap-4 [&_div[data-compose-signature-right='true']]:min-w-0 [&_div[data-compose-signature-right='true']]:flex-1 [&_div[data-compose-signature-spacer='true']]:min-h-[1.75rem] [&_div[data-compose-signature-text='true']]:whitespace-pre-wrap [&_div[data-compose-signature-text='true']]:text-[0.86rem] [&_div[data-compose-signature-text='true']]:leading-[1.45] [&_div[data-compose-signature-text='true']_div]:min-h-[1.2rem] [&_div[data-compose-signature-text='true']_p]:min-h-[1.2rem] [&_div[data-compose-quote='true']]:pt-3 [&_[data-email-image-placeholder='true']]:my-4 [&_[data-email-image-placeholder='true']]:rounded-[12px] [&_[data-email-image-placeholder='true']]:border [&_[data-email-image-placeholder='true']]:border-[color:rgba(121,151,120,0.18)] [&_[data-email-image-placeholder='true']]:bg-[color:rgba(86,114,87,0.06)] [&_[data-email-image-placeholder='true']]:px-4 [&_[data-email-image-placeholder='true']]:py-3 [&_[data-email-image-placeholder='true']]:text-[0.82rem] [&_[data-email-image-placeholder='true']]:text-[var(--workspace-text-faint)] [&_[data-email-quote='true']]:my-4 [&_[data-email-quote='true']]:rounded-[14px] [&_[data-email-quote='true']]:border [&_[data-email-quote='true']]:border-[color:rgba(121,151,120,0.2)] [&_[data-email-quote='true']]:bg-[color:rgba(86,114,87,0.06)] [&_[data-email-quote='true']]:px-4 [&_[data-email-quote='true']]:py-3 [&_[data-email-quote='true']]:text-[color:rgba(108,101,93,0.92)] [&_h1]:my-4 [&_h1]:text-[1.6rem] [&_h1]:font-medium [&_h1]:leading-tight [&_h1]:text-[var(--workspace-text)] [&_h2]:my-4 [&_h2]:text-[1.35rem] [&_h2]:font-medium [&_h2]:leading-tight [&_h2]:text-[var(--workspace-text)] [&_h3]:my-3 [&_h3]:text-[1.12rem] [&_h3]:font-medium [&_h3]:leading-snug [&_h3]:text-[var(--workspace-text)] [&_hr]:my-5 [&_hr]:border-0 [&_hr]:border-t [&_hr]:border-[color:rgba(121,151,120,0.18)] [&_iframe]:max-w-full [&_img]:h-auto [&_img]:max-w-full [&_img]:rounded-[12px] [&_img[data-image-source-type='remote']]:block [&_img[data-image-source-type='remote']]:bg-transparent [&_li]:my-1.5 [&_ol]:my-4 [&_ol]:pl-6 [&_p]:my-3 [&_p]:leading-[inherit] [&_pre]:overflow-x-auto [&_pre]:rounded-[14px] [&_pre]:bg-[color:rgba(44,52,45,0.05)] [&_pre]:p-3 [&_table]:my-4 [&_table]:w-full [&_table]:table-auto [&_table]:border-collapse [&_tbody]:align-top [&_td]:border [&_td]:border-[color:rgba(121,151,120,0.14)] [&_td]:px-3 [&_td]:py-2 [&_th]:border [&_th]:border-[color:rgba(121,151,120,0.14)] [&_th]:bg-[color:rgba(121,151,120,0.06)] [&_th]:px-3 [&_th]:py-2 [&_ul]:my-4 [&_ul]:pl-6`}
                       dangerouslySetInnerHTML={{ __html: bodyRenderMode.html }}
                     />
                   </div>
@@ -8345,31 +8486,29 @@ function MailboxView({
                     data-has-body-html={threadMessage.bodyHtml ? "true" : "false"}
                     data-html-source={normalizedBodyDebug.htmlSource}
                   >
-                    {leadingParagraphs.map((paragraph) => (
-                      <p
-                        key={`${threadMessage.id}-${paragraph}`}
-                        className={`text-[0.94rem] ${
+                    {leadingParagraphs.map((paragraph) =>
+                      renderPlainMessageParagraph(
+                        paragraph,
+                        `${threadMessage.id}-${paragraph}`,
+                        `text-[0.94rem] ${
                           density === "full" ? "leading-8" : "leading-7"
-                        } text-[var(--workspace-text-soft)]`}
-                      >
-                        {paragraph}
-                      </p>
-                    ))}
+                        } text-[var(--workspace-text-soft)]`,
+                      ),
+                    )}
                     {threadMessage.signature ? (
                       <div className="pt-1">
                         <SignatureBlock signature={threadMessage.signature} />
                       </div>
                     ) : null}
-                    {quotedParagraphs.map((paragraph) => (
-                      <p
-                        key={`${threadMessage.id}-quoted-${paragraph}`}
-                        className={`text-[0.94rem] ${
+                    {quotedParagraphs.map((paragraph) =>
+                      renderPlainMessageParagraph(
+                        paragraph,
+                        `${threadMessage.id}-quoted-${paragraph}`,
+                        `text-[0.94rem] ${
                           density === "full" ? "leading-8" : "leading-7"
-                        } text-[var(--workspace-text-soft)]`}
-                      >
-                        {paragraph}
-                      </p>
-                    ))}
+                        } text-[var(--workspace-text-soft)]`,
+                      ),
+                    )}
                   </div>
                 )}
               </div>
