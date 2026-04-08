@@ -1409,6 +1409,10 @@ function EmailHtmlStage({
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const [height, setHeight] = useState(320);
   const [stageFailed, setStageFailed] = useState(false);
+  const fallbackClassName =
+    themeMode === "dark"
+      ? "overflow-hidden bg-transparent text-[color:rgba(229,236,230,0.96)] [&_*]:!text-[color:rgba(229,236,230,0.96)] [&_a]:!text-[color:rgba(176,209,183,0.96)] [&_a_*]:!text-[color:rgba(176,209,183,0.96)]"
+      : "overflow-hidden bg-transparent text-[color:rgba(34,38,36,0.99)] [&_*]:!text-[color:rgba(34,38,36,0.99)] [&_*]:[-webkit-text-fill-color:rgba(34,38,36,0.99)] [&_a]:!text-[color:rgba(44,89,116,0.98)] [&_a]:[-webkit-text-fill-color:rgba(44,89,116,0.98)] [&_a_*]:!text-[color:rgba(44,89,116,0.98)] [&_a_*]:[-webkit-text-fill-color:rgba(44,89,116,0.98)]";
 
   const updateHeight = () => {
     const iframe = iframeRef.current;
@@ -1451,7 +1455,7 @@ function EmailHtmlStage({
   if (stageFailed) {
     return (
       <div
-        className="overflow-hidden bg-transparent"
+        className={fallbackClassName}
         dangerouslySetInnerHTML={{ __html: html }}
       />
     );
