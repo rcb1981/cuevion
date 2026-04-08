@@ -2150,18 +2150,6 @@ function isMessageInSharedView(message: MailMessage) {
   return Boolean(message.isShared && !message.sharedContext);
 }
 
-function shouldShowMessageSummary(snippet: string, body: string[]) {
-  const normalizedSnippet = snippet.trim().toLowerCase();
-
-  if (!normalizedSnippet) {
-    return false;
-  }
-
-  const firstBodyParagraph = body[0]?.trim().toLowerCase() ?? "";
-
-  return normalizedSnippet !== firstBodyParagraph;
-}
-
 function getAIDecisionCopy(message: MailMessage) {
   const subjectText = message.subject.toLowerCase();
   const snippetText = message.snippet.toLowerCase();
@@ -8590,7 +8578,7 @@ function MailboxView({
                   {threadMessage.timestamp}
                 </div>
               </div>
-              <div className="mt-3 rounded-[18px] border border-[color:rgba(121,151,120,0.12)] bg-[color:rgba(255,255,255,0.48)] px-4 py-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.16)] dark:bg-[color:rgba(34,41,36,0.36)]">
+              <div className="mt-3 rounded-[18px] border border-[color:rgba(121,151,120,0.1)] bg-[linear-gradient(180deg,rgba(255,255,255,0.54),rgba(247,243,236,0.72))] px-4 py-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.16)] dark:bg-[linear-gradient(180deg,rgba(34,41,36,0.34),rgba(28,34,30,0.46))]">
                 <div className="space-y-3">
                 {hasHiddenRemoteImages ? (
                   <div className="flex flex-wrap items-center justify-between gap-3 rounded-[14px] border border-[color:rgba(121,151,120,0.18)] bg-[color:rgba(86,114,87,0.06)] px-4 py-3 text-[0.82rem] text-[var(--workspace-text-soft)]">
@@ -8615,7 +8603,7 @@ function MailboxView({
                     <div
                       className={`whitespace-pre-wrap text-[0.95rem] ${
                         density === "full" ? "leading-8" : "leading-[1.9]"
-                      } text-[var(--workspace-text-soft)] [&_*]:max-w-full [&_a]:text-[color:rgba(70,109,73,0.96)] [&_a]:underline [&_a]:underline-offset-2 [&_blockquote]:my-5 [&_blockquote]:border-l-2 [&_blockquote]:border-[color:rgba(121,151,120,0.28)] [&_blockquote]:pl-4 [&_blockquote]:text-[color:rgba(104,98,89,0.88)] [&_br+br]:content-[''] [&_div]:max-w-full [&_div]:leading-[inherit] [&_div[data-compose-signature-divider='true']]:my-3 [&_div[data-compose-signature-divider='true']]:h-px [&_div[data-compose-signature-divider='true']]:w-full [&_div[data-compose-signature-divider='true']]:bg-[color:rgba(121,151,120,0.18)] [&_div[data-compose-signature-logo='true']]:pt-1 [&_div[data-compose-signature-logo='true']_img]:max-h-[76px] [&_div[data-compose-signature-logo='true']_img]:w-auto [&_div[data-compose-signature-logo='true']_img]:max-w-full [&_div[data-compose-signature-logo='true']_img]:object-contain [&_div[data-compose-signature-row='true']]:flex [&_div[data-compose-signature-row='true']]:items-start [&_div[data-compose-signature-row='true']]:gap-4 [&_div[data-compose-signature-right='true']]:min-w-0 [&_div[data-compose-signature-right='true']]:flex-1 [&_div[data-compose-signature-spacer='true']]:min-h-[1.75rem] [&_div[data-compose-signature-text='true']]:whitespace-pre-wrap [&_div[data-compose-signature-text='true']]:text-[0.86rem] [&_div[data-compose-signature-text='true']]:leading-[1.45] [&_div[data-compose-signature-text='true']_div]:min-h-[1.2rem] [&_div[data-compose-signature-text='true']_p]:min-h-[1.2rem] [&_div[data-compose-quote='true']]:pt-3 [&_[data-email-image-placeholder='true']]:my-4 [&_[data-email-image-placeholder='true']]:rounded-[12px] [&_[data-email-image-placeholder='true']]:border [&_[data-email-image-placeholder='true']]:border-[color:rgba(121,151,120,0.18)] [&_[data-email-image-placeholder='true']]:bg-[color:rgba(86,114,87,0.06)] [&_[data-email-image-placeholder='true']]:px-4 [&_[data-email-image-placeholder='true']]:py-3 [&_[data-email-image-placeholder='true']]:text-[0.82rem] [&_[data-email-image-placeholder='true']]:text-[var(--workspace-text-faint)] [&_[data-email-image-placeholder='true'][data-email-image-source='remote']]:border-[color:rgba(99,129,100,0.22)] [&_[data-email-image-placeholder='true'][data-email-image-source='remote']]:bg-[color:rgba(86,114,87,0.05)] [&_[data-email-image-placeholder='true'][data-email-image-source='cid']]:border-dashed [&_[data-email-quote='true']]:my-4 [&_[data-email-quote='true']]:rounded-[14px] [&_[data-email-quote='true']]:border [&_[data-email-quote='true']]:border-[color:rgba(121,151,120,0.2)] [&_[data-email-quote='true']]:bg-[color:rgba(86,114,87,0.06)] [&_[data-email-quote='true']]:px-4 [&_[data-email-quote='true']]:py-3 [&_[data-email-quote='true']]:text-[color:rgba(108,101,93,0.92)] [&_h1]:my-4 [&_h1]:text-[1.6rem] [&_h1]:font-medium [&_h1]:leading-tight [&_h1]:text-[var(--workspace-text)] [&_h2]:my-4 [&_h2]:text-[1.35rem] [&_h2]:font-medium [&_h2]:leading-tight [&_h2]:text-[var(--workspace-text)] [&_h3]:my-3 [&_h3]:text-[1.12rem] [&_h3]:font-medium [&_h3]:leading-snug [&_h3]:text-[var(--workspace-text)] [&_hr]:my-5 [&_hr]:border-0 [&_hr]:border-t [&_hr]:border-[color:rgba(121,151,120,0.18)] [&_iframe]:max-w-full [&_img]:h-auto [&_img]:max-w-full [&_img]:rounded-[12px] [&_img[data-image-source-type='remote']]:block [&_img[data-image-source-type='remote']]:bg-transparent [&_li]:my-1.5 [&_ol]:my-4 [&_ol]:pl-6 [&_p]:my-3 [&_p]:leading-[inherit] [&_pre]:overflow-x-auto [&_pre]:rounded-[14px] [&_pre]:bg-[color:rgba(44,52,45,0.05)] [&_pre]:p-3 [&_table]:my-4 [&_table]:w-full [&_table]:table-auto [&_table]:border-collapse [&_tbody]:align-top [&_td]:border [&_td]:border-[color:rgba(121,151,120,0.14)] [&_td]:px-3 [&_td]:py-2 [&_th]:border [&_th]:border-[color:rgba(121,151,120,0.14)] [&_th]:bg-[color:rgba(121,151,120,0.06)] [&_th]:px-3 [&_th]:py-2 [&_ul]:my-4 [&_ul]:pl-6`}
+                      } text-[var(--workspace-text-soft)] [&_*]:max-w-full [&_a]:text-[color:rgba(70,109,73,0.96)] [&_a]:underline [&_a]:underline-offset-2 [&_blockquote]:my-5 [&_blockquote]:border-l-2 [&_blockquote]:border-[color:rgba(121,151,120,0.28)] [&_blockquote]:pl-4 [&_blockquote]:text-[color:rgba(104,98,89,0.88)] [&_br+br]:content-[''] [&_div]:max-w-full [&_div]:leading-[inherit] [&_div[data-compose-signature-divider='true']]:my-3 [&_div[data-compose-signature-divider='true']]:h-px [&_div[data-compose-signature-divider='true']]:w-full [&_div[data-compose-signature-divider='true']]:bg-[color:rgba(121,151,120,0.18)] [&_div[data-compose-signature-logo='true']]:pt-1 [&_div[data-compose-signature-logo='true']_img]:max-h-[76px] [&_div[data-compose-signature-logo='true']_img]:w-auto [&_div[data-compose-signature-logo='true']_img]:max-w-full [&_div[data-compose-signature-logo='true']_img]:object-contain [&_div[data-compose-signature-row='true']]:flex [&_div[data-compose-signature-row='true']]:items-start [&_div[data-compose-signature-row='true']]:gap-4 [&_div[data-compose-signature-right='true']]:min-w-0 [&_div[data-compose-signature-right='true']]:flex-1 [&_div[data-compose-signature-spacer='true']]:min-h-[1.75rem] [&_div[data-compose-signature-text='true']]:whitespace-pre-wrap [&_div[data-compose-signature-text='true']]:text-[0.86rem] [&_div[data-compose-signature-text='true']]:leading-[1.45] [&_div[data-compose-signature-text='true']_div]:min-h-[1.2rem] [&_div[data-compose-signature-text='true']_p]:min-h-[1.2rem] [&_div[data-compose-quote='true']]:pt-3 [&_[data-email-image-placeholder='true']]:my-2 [&_[data-email-image-placeholder='true']]:inline-flex [&_[data-email-image-placeholder='true']]:max-w-full [&_[data-email-image-placeholder='true']]:items-center [&_[data-email-image-placeholder='true']]:gap-2 [&_[data-email-image-placeholder='true']]:rounded-full [&_[data-email-image-placeholder='true']]:border [&_[data-email-image-placeholder='true']]:border-[color:rgba(121,151,120,0.12)] [&_[data-email-image-placeholder='true']]:bg-[color:rgba(86,114,87,0.035)] [&_[data-email-image-placeholder='true']]:px-3 [&_[data-email-image-placeholder='true']]:py-1.5 [&_[data-email-image-placeholder='true']]:text-[0.72rem] [&_[data-email-image-placeholder='true']]:leading-5 [&_[data-email-image-placeholder='true']]:text-[var(--workspace-text-faint)] [&_[data-email-image-placeholder='true'][data-email-image-source='remote']]:border-[color:rgba(99,129,100,0.16)] [&_[data-email-image-placeholder='true'][data-email-image-source='remote']]:bg-[color:rgba(86,114,87,0.03)] [&_[data-email-image-placeholder='true'][data-email-image-source='cid']]:border-dashed [&_[data-email-image-placeholder='true'][data-email-image-source='cid']]:opacity-80 [&_[data-email-quote='true']]:my-4 [&_[data-email-quote='true']]:rounded-[14px] [&_[data-email-quote='true']]:border [&_[data-email-quote='true']]:border-[color:rgba(121,151,120,0.2)] [&_[data-email-quote='true']]:bg-[color:rgba(86,114,87,0.06)] [&_[data-email-quote='true']]:px-4 [&_[data-email-quote='true']]:py-3 [&_[data-email-quote='true']]:text-[color:rgba(108,101,93,0.92)] [&_h1]:my-4 [&_h1]:text-[1.6rem] [&_h1]:font-medium [&_h1]:leading-tight [&_h1]:text-[var(--workspace-text)] [&_h2]:my-4 [&_h2]:text-[1.35rem] [&_h2]:font-medium [&_h2]:leading-tight [&_h2]:text-[var(--workspace-text)] [&_h3]:my-3 [&_h3]:text-[1.12rem] [&_h3]:font-medium [&_h3]:leading-snug [&_h3]:text-[var(--workspace-text)] [&_hr]:my-5 [&_hr]:border-0 [&_hr]:border-t [&_hr]:border-[color:rgba(121,151,120,0.18)] [&_iframe]:max-w-full [&_img]:h-auto [&_img]:max-w-full [&_img]:rounded-[12px] [&_img[data-image-source-type='remote']]:block [&_img[data-image-source-type='remote']]:bg-transparent [&_li]:my-1.5 [&_ol]:my-4 [&_ol]:pl-6 [&_p]:my-3 [&_p]:leading-[inherit] [&_pre]:overflow-x-auto [&_pre]:rounded-[14px] [&_pre]:bg-[color:rgba(44,52,45,0.05)] [&_pre]:p-3 [&_table]:my-4 [&_table]:w-full [&_table]:table-auto [&_table]:border-collapse [&_tbody]:align-top [&_td]:border [&_td]:border-[color:rgba(121,151,120,0.14)] [&_td]:px-3 [&_td]:py-2 [&_th]:border [&_th]:border-[color:rgba(121,151,120,0.14)] [&_th]:bg-[color:rgba(121,151,120,0.06)] [&_th]:px-3 [&_th]:py-2 [&_ul]:my-4 [&_ul]:pl-6`}
                       dangerouslySetInnerHTML={{ __html: bodyRenderMode.html }}
                     />
                   </div>
@@ -8636,7 +8624,7 @@ function MailboxView({
                       </div>
                     ) : null}
                     {quotedParagraphs.length > 0 ? (
-                      <div className="mt-4 rounded-[14px] border border-[color:rgba(121,151,120,0.18)] bg-[color:rgba(86,114,87,0.05)] px-4 py-3">
+                      <div className="mt-4 rounded-[14px] border border-[color:rgba(121,151,120,0.14)] bg-[color:rgba(86,114,87,0.035)] px-4 py-3">
                         <div className="mb-2 text-[0.62rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
                           Earlier message
                         </div>
@@ -12548,11 +12536,23 @@ function MailboxView({
 	                );
 	              })()}
 
-	              <div className="rounded-[20px] border border-[var(--workspace-border-soft)] bg-[linear-gradient(180deg,rgba(255,255,255,0.72),rgba(248,244,238,0.92))] px-5 py-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.22)] dark:bg-[linear-gradient(180deg,rgba(47,56,49,0.58),rgba(33,40,35,0.74))]">
-                <div className="mb-3 text-[0.64rem] font-medium uppercase tracking-[0.18em] text-[var(--workspace-text-faint)]">
-                  Message details
+	              <div className="rounded-[22px] border border-[var(--workspace-border-soft)] bg-[linear-gradient(180deg,rgba(255,255,255,0.76),rgba(247,243,236,0.92))] px-5 py-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.24)] dark:bg-[linear-gradient(180deg,rgba(48,57,50,0.56),rgba(31,38,33,0.76))]">
+                <div className="flex flex-wrap items-start justify-between gap-4">
+                  <div className="min-w-0 space-y-1.5">
+                    <div className="text-[0.64rem] font-medium uppercase tracking-[0.18em] text-[var(--workspace-text-faint)]">
+                      Message details
+                    </div>
+                    <div className="text-[1rem] font-medium tracking-[-0.018em] text-[var(--workspace-text)]">
+                      {fullWidthMessage.subject}
+                    </div>
+                  </div>
+                  <div className="rounded-full border border-[color:rgba(121,151,120,0.16)] bg-[color:rgba(255,255,255,0.42)] px-3 py-1.5 text-[0.68rem] uppercase tracking-[0.14em] text-[var(--workspace-text-faint)] dark:bg-[color:rgba(255,255,255,0.04)]">
+                    Email
+                  </div>
                 </div>
-                {renderMessageMetaSummary(fullWidthMessage)}
+                <div className="mt-4 border-t border-[color:rgba(121,151,120,0.12)] pt-4">
+                  {renderMessageMetaSummary(fullWidthMessage)}
+                </div>
               </div>
 
               {aiSuggestionsEnabled ? renderAIDecisionBlock(fullWidthMessage) : null}
@@ -12560,19 +12560,14 @@ function MailboxView({
               {renderMessageCollaboration(fullWidthMessage)}
 
               <div className="space-y-3">
-                {shouldShowMessageSummary(fullWidthMessage.snippet, fullWidthMessage.body) ? (
-                  <div className="rounded-[18px] border border-[color:rgba(121,151,120,0.12)] bg-[color:rgba(255,255,255,0.44)] px-4 py-3 text-[0.88rem] leading-[1.85] text-[color:rgba(95,88,80,0.9)] dark:bg-[color:rgba(34,41,36,0.34)]">
-                    {fullWidthMessage.snippet}
-                  </div>
-                ) : null}
-
                 {renderBehaviorSuggestion(fullWidthMessage)}
 
-                    {fullWidthMessage.isShared && fullWidthMessage.sharedContext ? (
-                      <div className="rounded-[16px] border border-[color:rgba(121,151,120,0.12)] bg-[color:rgba(255,255,255,0.38)] px-4 py-3 text-[0.82rem] leading-6 text-[color:rgba(120,111,100,0.68)] dark:bg-[color:rgba(34,41,36,0.28)]">
-                        {formatSharedContextDetail(fullWidthMessage.sharedContext)}
-                      </div>
-                    ) : null}
+                {fullWidthMessage.isShared && fullWidthMessage.sharedContext ? (
+                  <div className="flex items-center gap-2 text-[0.74rem] leading-6 text-[color:rgba(120,111,100,0.72)]">
+                    <span className="h-1.5 w-1.5 rounded-full bg-[color:rgba(108,141,108,0.72)]" />
+                    <span>{formatSharedContextDetail(fullWidthMessage.sharedContext)}</span>
+                  </div>
+                ) : null}
 
                 {renderThreadTimeline(fullWidthMessage, "full")}
               </div>
@@ -13403,11 +13398,23 @@ function MailboxView({
 	                            {linkedReviewLabel}
 	                          </button>
 	                        ) : null}
-	                        <div className="rounded-[18px] border border-[var(--workspace-border-soft)] bg-[linear-gradient(180deg,rgba(255,255,255,0.68),rgba(248,244,238,0.9))] px-4 py-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.2)] dark:bg-[linear-gradient(180deg,rgba(47,56,49,0.56),rgba(33,40,35,0.72))]">
-                            <div className="mb-3 text-[0.64rem] font-medium uppercase tracking-[0.18em] text-[var(--workspace-text-faint)]">
-                              Message details
+	                        <div className="rounded-[22px] border border-[var(--workspace-border-soft)] bg-[linear-gradient(180deg,rgba(255,255,255,0.76),rgba(247,243,236,0.92))] px-4 py-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.22)] dark:bg-[linear-gradient(180deg,rgba(48,57,50,0.56),rgba(31,38,33,0.76))]">
+                            <div className="flex flex-wrap items-start justify-between gap-4">
+                              <div className="min-w-0 space-y-1.5">
+                                <div className="text-[0.64rem] font-medium uppercase tracking-[0.18em] text-[var(--workspace-text-faint)]">
+                                  Message details
+                                </div>
+                                <div className="text-[0.98rem] font-medium tracking-[-0.018em] text-[var(--workspace-text)]">
+                                  {selectedMessage.subject}
+                                </div>
+                              </div>
+                              <div className="rounded-full border border-[color:rgba(121,151,120,0.16)] bg-[color:rgba(255,255,255,0.42)] px-3 py-1.5 text-[0.68rem] uppercase tracking-[0.14em] text-[var(--workspace-text-faint)] dark:bg-[color:rgba(255,255,255,0.04)]">
+                                Email
+                              </div>
                             </div>
-                            {renderMessageMetaSummary(selectedMessage)}
+                            <div className="mt-4 border-t border-[color:rgba(121,151,120,0.12)] pt-4">
+                              {renderMessageMetaSummary(selectedMessage)}
+                            </div>
                           </div>
                       </div>
 	                      <div className="flex items-center gap-4">
@@ -13437,16 +13444,11 @@ function MailboxView({
                     {renderMessageCollaboration(selectedMessage)}
 
                   <div className="space-y-3">
-                    {shouldShowMessageSummary(selectedMessage.snippet, selectedMessage.body) ? (
-                      <div className="rounded-[18px] border border-[color:rgba(121,151,120,0.12)] bg-[color:rgba(255,255,255,0.44)] px-4 py-3 text-[0.88rem] leading-[1.85] text-[color:rgba(95,88,80,0.9)] dark:bg-[color:rgba(34,41,36,0.34)]">
-                        {selectedMessage.snippet}
-                      </div>
-                    ) : null}
-
                     {renderBehaviorSuggestion(selectedMessage)}
 
                     {selectedMessage.isShared && selectedMessage.sharedContext ? (
-                      <div className="rounded-[16px] border border-[color:rgba(121,151,120,0.12)] bg-[color:rgba(255,255,255,0.38)] px-4 py-3 text-[0.82rem] leading-6 text-[color:rgba(120,111,100,0.68)] dark:bg-[color:rgba(34,41,36,0.28)]">
+                      <div className="flex items-center gap-2 text-[0.74rem] leading-6 text-[color:rgba(120,111,100,0.72)]">
+                        <span className="h-1.5 w-1.5 rounded-full bg-[color:rgba(108,141,108,0.72)]" />
                         {formatSharedContextDetail(selectedMessage.sharedContext)}
                       </div>
                     ) : null}
