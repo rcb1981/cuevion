@@ -5769,7 +5769,7 @@ function MailboxView({
     sortedMessages.some((message) => message.id === messageId),
   );
   const isMultiSelectActive = visibleSelectedMessageIds.length > 1;
-  const selectedMessage =
+  const selectedMessageCandidate =
     sortedMessages.find(
       (message) =>
         message.id === selectedMessageId &&
@@ -5781,9 +5781,37 @@ function MailboxView({
     sortedMessages.find((message) => message.id === selectedMessageId) ??
     sortedMessages[0] ??
     null;
-  const fullWidthMessage =
+  const normalizeMessageForDetailPane = (
+    message: MailMessage | null,
+    fallbackMailboxId: InboxId,
+  ) => {
+    if (!message) {
+      return null;
+    }
+
+    const messageLocation = currentMessageLocationById[message.id];
+
+    return normalizeMailMessage(
+      message,
+      messageLocation?.mailboxId ?? fallbackMailboxId,
+      senderCategoryLearning,
+      messageOwnershipInteractions,
+      currentUserId,
+      mailboxStore,
+      aiSuggestionsEnabled,
+    );
+  };
+  const selectedMessage = normalizeMessageForDetailPane(
+    selectedMessageCandidate,
+    mailbox.id,
+  );
+  const fullWidthMessageCandidate =
     folderMessages.find((message) => message.id === selectedMessageId) ??
     selectedMessage;
+  const fullWidthMessage = normalizeMessageForDetailPane(
+    fullWidthMessageCandidate,
+    mailbox.id,
+  );
   const getThreadMessages = (message: MailMessage | null) => {
     if (!message) {
       return [];
@@ -6655,27 +6683,39 @@ function MailboxView({
   ) => {
     setMailboxStore((currentStore) =>
       Object.entries(currentStore).reduce<MailboxStore>((nextStore, [mailboxId, collections]) => {
+        const typedMailboxId = mailboxId as InboxId;
+        const normalizeUpdatedMessage = (message: MailMessage) =>
+          normalizeMailMessage(
+            updater(message),
+            typedMailboxId,
+            senderCategoryLearning,
+            messageOwnershipInteractions,
+            currentUserId,
+            currentStore,
+            aiSuggestionsEnabled,
+          );
+
         nextStore[mailboxId as InboxId] = {
           Inbox: collections.Inbox.map((message) =>
-            message.id === messageId ? updater(message) : message,
+            message.id === messageId ? normalizeUpdatedMessage(message) : message,
           ),
           Drafts: collections.Drafts.map((message) =>
-            message.id === messageId ? updater(message) : message,
+            message.id === messageId ? normalizeUpdatedMessage(message) : message,
           ),
           Sent: collections.Sent.map((message) =>
-            message.id === messageId ? updater(message) : message,
+            message.id === messageId ? normalizeUpdatedMessage(message) : message,
           ),
           Archive: collections.Archive.map((message) =>
-            message.id === messageId ? updater(message) : message,
+            message.id === messageId ? normalizeUpdatedMessage(message) : message,
           ),
           Filtered: collections.Filtered.map((message) =>
-            message.id === messageId ? updater(message) : message,
+            message.id === messageId ? normalizeUpdatedMessage(message) : message,
           ),
           Spam: collections.Spam.map((message) =>
-            message.id === messageId ? updater(message) : message,
+            message.id === messageId ? normalizeUpdatedMessage(message) : message,
           ),
           Trash: collections.Trash.map((message) =>
-            message.id === messageId ? updater(message) : message,
+            message.id === messageId ? normalizeUpdatedMessage(message) : message,
           ),
         };
 
@@ -17903,27 +17943,39 @@ export function WorkspaceShell({
   ) => {
     setMailboxStore((currentStore) =>
       Object.entries(currentStore).reduce<MailboxStore>((nextStore, [mailboxId, collections]) => {
+        const typedMailboxId = mailboxId as InboxId;
+        const normalizeUpdatedMessage = (message: MailMessage) =>
+          normalizeMailMessage(
+            updater(message),
+            typedMailboxId,
+            senderCategoryLearning,
+            messageOwnershipInteractions,
+            currentWorkspaceUserId,
+            currentStore,
+            aiSuggestionsEnabled,
+          );
+
         nextStore[mailboxId as InboxId] = {
           Inbox: collections.Inbox.map((message) =>
-            message.id === messageId ? updater(message) : message,
+            message.id === messageId ? normalizeUpdatedMessage(message) : message,
           ),
           Drafts: collections.Drafts.map((message) =>
-            message.id === messageId ? updater(message) : message,
+            message.id === messageId ? normalizeUpdatedMessage(message) : message,
           ),
           Sent: collections.Sent.map((message) =>
-            message.id === messageId ? updater(message) : message,
+            message.id === messageId ? normalizeUpdatedMessage(message) : message,
           ),
           Archive: collections.Archive.map((message) =>
-            message.id === messageId ? updater(message) : message,
+            message.id === messageId ? normalizeUpdatedMessage(message) : message,
           ),
           Filtered: collections.Filtered.map((message) =>
-            message.id === messageId ? updater(message) : message,
+            message.id === messageId ? normalizeUpdatedMessage(message) : message,
           ),
           Spam: collections.Spam.map((message) =>
-            message.id === messageId ? updater(message) : message,
+            message.id === messageId ? normalizeUpdatedMessage(message) : message,
           ),
           Trash: collections.Trash.map((message) =>
-            message.id === messageId ? updater(message) : message,
+            message.id === messageId ? normalizeUpdatedMessage(message) : message,
           ),
         };
 
@@ -18368,15 +18420,34 @@ export function WorkspaceShell({
         return currentStore;
       }
 
+      const normalizedInviteMessage = normalizeMailMessage(
+        decodedInvitePayload.message,
+        mailboxId,
+        senderCategoryLearning,
+        messageOwnershipInteractions,
+        currentWorkspaceUserId,
+        currentStore,
+        aiSuggestionsEnabled,
+      );
+
       return {
         ...currentStore,
         [mailboxId]: {
           ...mailboxCollections,
-          Inbox: [decodedInvitePayload.message, ...mailboxCollections.Inbox],
+          Inbox: [normalizedInviteMessage, ...mailboxCollections.Inbox],
         },
       };
     });
-  }, [collaborationInviteRoute, decodedInvitePayload, orderedMailboxes, storedInviteMessage]);
+  }, [
+    aiSuggestionsEnabled,
+    collaborationInviteRoute,
+    currentWorkspaceUserId,
+    decodedInvitePayload,
+    messageOwnershipInteractions,
+    orderedMailboxes,
+    senderCategoryLearning,
+    storedInviteMessage,
+  ]);
 
   useEffect(() => {
     if (!activeMailbox) {
