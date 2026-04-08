@@ -72,11 +72,12 @@ import {
 } from "../../lib/forYouEngine";
 import { applyLearningDecision } from "../../lib/applyLearningDecision";
 import {
-  getAIDecisionCopy,
   resolveMailMessageBehaviorSuggestion,
   resolveMailMessageSuggestion,
+  resolveMessageSuggestionBanner,
   type MailMessageBehaviorSuggestion,
   type MailMessageSuggestion,
+  type MessageSuggestionBanner,
 } from "../../lib/suggestionEngine";
 
 const primaryNavigationItems = [
@@ -348,6 +349,7 @@ type MailMessage = {
   action?: string;
   suggestion?: MailMessageSuggestion;
   behaviorSuggestion?: MailMessageBehaviorSuggestion;
+  aiSuggestionBanner?: MessageSuggestionBanner;
 };
 
 type MailMessageSeed = Omit<
@@ -357,6 +359,7 @@ type MailMessageSeed = Omit<
   | "categoryConfidence"
   | "priorityScore"
   | "behaviorSuggestion"
+  | "aiSuggestionBanner"
   | "attachments"
 > & {
   threadId?: string;
@@ -1825,6 +1828,19 @@ function normalizeMailMessage(
       senderCategoryLearning,
       isAIEnabled,
     ),
+    aiSuggestionBanner: isAIEnabled
+      ? resolveMessageSuggestionBanner({
+          from: message.from,
+          sender: message.sender,
+          subject: message.subject,
+          snippet: message.snippet,
+          body: message.body,
+          signal: message.signal,
+          isAutoReply: message.isAutoReply,
+          attachments: normalizedAttachments,
+          category: categorization.category,
+        })
+      : undefined,
   };
 }
 
@@ -6028,8 +6044,12 @@ function MailboxView({
   };
 
   const renderAIDecisionBlock = (message: MailMessage) => {
-    const decision = getAIDecisionCopy(message);
+    const decision = message.aiSuggestionBanner;
     const isLightMode = themeMode === "light";
+
+    if (!decision) {
+      return null;
+    }
 
     return (
       <div

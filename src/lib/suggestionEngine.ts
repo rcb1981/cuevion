@@ -25,6 +25,13 @@ export type MessageActionSuggestion = {
   reason?: string;
 };
 
+export type MessageSuggestionBanner = {
+  type: "reply" | "review";
+  primary: string;
+  secondary: string;
+  confidence: number;
+};
+
 type SuggestionDerivationMessage = {
   from: string;
   sender: string;
@@ -307,39 +314,32 @@ export function resolveSuggestedMessageAction(
   };
 }
 
-export function getAIDecisionCopy(
+export function resolveMessageSuggestionBanner(
   message: SuggestionDerivationMessage & { category: CuevionMessageCategory },
-) {
+) : MessageSuggestionBanner | undefined {
   const actionSuggestion = resolveSuggestedMessageAction(message, message.category);
 
   if (actionSuggestion.type === "reply") {
     return {
+      type: "reply",
       primary: "A quick reply may help move this forward",
       secondary:
         actionSuggestion.reason ?? "This message seems to expect a response",
+      confidence: actionSuggestion.confidence,
     };
   }
 
   if (actionSuggestion.type === "review") {
     return {
+      type: "review",
       primary: "You may want to take a quick look at this first",
       secondary:
         actionSuggestion.reason ?? "This appears to include material that needs checking",
+      confidence: actionSuggestion.confidence,
     };
   }
 
-  if (shouldSuppressReplySuggestion(message, message.category)) {
-    return {
-      primary: "No immediate reply seems necessary",
-      secondary: "This reads like an automated or informational message",
-    };
-  }
-
-  return {
-    primary: "No immediate action seems necessary",
-    secondary:
-      actionSuggestion.reason ?? "There is no clear request or next step here",
-  };
+  return undefined;
 }
 
 export function resolveMailMessageSuggestion(
