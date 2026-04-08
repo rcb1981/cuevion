@@ -1277,6 +1277,14 @@ function buildEmailStageDocument(
 ) {
   const stageTextColor =
     themeMode === "dark" ? "rgba(229, 236, 230, 0.96)" : "rgba(54, 62, 56, 0.96)";
+  const stageLinkColor =
+    themeMode === "dark" ? "rgba(176, 209, 183, 0.96)" : "rgba(63, 102, 69, 0.96)";
+  const stageQuoteBorder =
+    themeMode === "dark" ? "rgba(128, 156, 128, 0.28)" : "rgba(121, 151, 120, 0.2)";
+  const stageQuoteSurface =
+    themeMode === "dark" ? "rgba(82, 98, 84, 0.18)" : "rgba(112, 138, 112, 0.06)";
+  const stageRuleColor =
+    themeMode === "dark" ? "rgba(128, 156, 128, 0.14)" : "rgba(121, 151, 120, 0.14)";
 
   return `<!DOCTYPE html>
 <html>
@@ -1293,6 +1301,7 @@ function buildEmailStageDocument(
         color: ${stageTextColor};
         overflow-wrap: anywhere;
         word-break: break-word;
+        line-height: 1.58;
       }
       .email-stage {
         box-sizing: border-box;
@@ -1313,20 +1322,34 @@ function buildEmailStageDocument(
         max-width: 100%;
       }
       a {
+        color: ${stageLinkColor};
         word-break: break-all;
+      }
+      blockquote,
+      [data-email-quote="true"],
+      .gmail_quote {
+        margin: 0.85rem 0 0;
+        padding: 0.4rem 0 0.1rem 0.85rem;
+        border-left: 2px solid ${stageQuoteBorder};
+        background: ${stageQuoteSurface};
+        color: inherit;
+      }
+      hr {
+        border: 0;
+        border-top: 1px solid ${stageRuleColor};
       }
       [data-email-image-placeholder="true"] {
         display: inline-flex;
         align-items: center;
         gap: 0.35rem;
         max-width: 100%;
-        margin: 0.25rem 0;
-        padding: 0.2rem 0.5rem;
+        margin: 0.15rem 0;
+        padding: 0.12rem 0.45rem;
         border-radius: 999px;
         border: 1px dashed rgba(121, 151, 120, 0.1);
-        background: rgba(86, 114, 87, 0.02);
-        color: rgba(120, 111, 100, 0.78);
-        font: 500 11px/1.4 ui-sans-serif, system-ui, sans-serif;
+        background: rgba(86, 114, 87, 0.018);
+        color: rgba(120, 111, 100, 0.72);
+        font: 500 10px/1.35 ui-sans-serif, system-ui, sans-serif;
         letter-spacing: 0.04em;
       }
       [data-email-image-role="decorative"] {
@@ -1536,14 +1559,22 @@ function sanitizeMessageBodyHtml(
     if (element instanceof HTMLElement) {
       const computedBackground = element.style.backgroundColor.toLowerCase();
       const computedTextColor = element.style.color.toLowerCase();
+      const computedBackgroundImage = element.style.backgroundImage.toLowerCase();
 
       if (
         computedBackground &&
-        /rgb\(255,\s*255,\s*255\)|rgba\(255,\s*255,\s*255|#fff(?:fff)?|white/.test(
+        /rgb\(255,\s*255,\s*255\)|rgba\(255,\s*255,\s*255|rgb\(248,\s*248,\s*248\)|rgb\(250,\s*250,\s*250\)|#fff(?:fff)?|#f8f8f8|#fafafa|white/.test(
           computedBackground,
         )
       ) {
         element.style.backgroundColor = "transparent";
+      }
+
+      if (
+        computedBackgroundImage &&
+        /(linear-gradient|radial-gradient)/.test(computedBackgroundImage)
+      ) {
+        element.style.backgroundImage = "none";
       }
 
       if (
@@ -1568,7 +1599,7 @@ function sanitizeMessageBodyHtml(
       }
 
       if (element.tagName === "BLOCKQUOTE") {
-        element.style.background = "rgba(86, 114, 87, 0.06)";
+        element.style.background = "rgba(86, 114, 87, 0.04)";
       }
 
       if (
@@ -8723,31 +8754,33 @@ function MailboxView({
               key={threadMessage.id}
               className={`${
                 isHtmlMessage
-                  ? "w-full max-w-none rounded-[8px] px-0 py-1"
+                  ? isLatestThreadMessage
+                    ? "w-full max-w-none px-0 py-0.5"
+                    : "w-full max-w-none px-0 py-0.5 opacity-[0.9]"
                   : isHistoricalThreadMessage
-                    ? "max-w-[91%] rounded-[14px] border px-3 py-2.5"
-                    : "max-w-[94%] rounded-[16px] border px-3.5 py-3"
+                    ? "max-w-[88%] rounded-[12px] border px-2.5 py-2"
+                    : "max-w-[96%] rounded-[12px] border px-2.5 py-2.5"
               } ${
                 density === "full"
                   ? isHtmlMessage
-                    ? "md:px-0 md:py-1"
+                    ? "md:px-0 md:py-0.5"
                     : isHistoricalThreadMessage
-                      ? "md:px-3.5 md:py-3"
-                      : "md:px-4 md:py-3.5"
+                      ? "md:px-3 md:py-2.5"
+                      : "md:px-3 md:py-3"
                   : ""
               } ${
                 isCurrentUser
                   ? isHtmlMessage
                     ? "ml-auto bg-transparent"
-                    : "ml-auto border-[color:rgba(117,152,123,0.14)] bg-[linear-gradient(180deg,rgba(238,246,239,0.76),rgba(229,239,231,0.66))] shadow-[inset_0_1px_0_rgba(255,255,255,0.1)]"
+                    : "ml-auto border-[color:rgba(117,152,123,0.1)] bg-[color:rgba(232,242,234,0.44)] shadow-[inset_0_1px_0_rgba(255,255,255,0.08)] dark:bg-[color:rgba(64,79,67,0.26)]"
                   : isHtmlMessage
                     ? "bg-transparent"
-                    : "border-[color:rgba(121,151,120,0.09)] bg-[linear-gradient(180deg,rgba(255,255,255,0.34),rgba(247,243,236,0.46))] shadow-[inset_0_1px_0_rgba(255,255,255,0.08)] dark:bg-[linear-gradient(180deg,rgba(35,42,37,0.24),rgba(29,35,31,0.3))]"
+                    : "border-[color:rgba(121,151,120,0.08)] bg-[color:rgba(255,255,255,0.2)] shadow-[inset_0_1px_0_rgba(255,255,255,0.06)] dark:bg-[color:rgba(35,42,37,0.16)]"
               }`}
             >
-              <div className={`flex flex-wrap items-center justify-between ${isHtmlMessage ? "gap-2 px-1.5" : "gap-3"}`}>
+              <div className={`flex flex-wrap items-center justify-between ${isHtmlMessage ? "gap-2 px-0.5" : "gap-2.5"}`}>
                 <div className="flex items-center gap-2">
-                  <div className={`font-medium tracking-[-0.012em] text-[var(--workspace-text)] ${isHistoricalThreadMessage ? "text-[0.8rem]" : "text-[0.84rem]"}`}>
+                  <div className={`font-medium tracking-[-0.012em] text-[var(--workspace-text)] ${isHistoricalThreadMessage ? "text-[0.78rem]" : "text-[0.84rem]"}`}>
                     {isCurrentUser ? "You" : threadMessage.sender}
                   </div>
                   {threadMessage.isAutoReply &&
@@ -8757,22 +8790,22 @@ function MailboxView({
                     </span>
                   ) : null}
                 </div>
-                <div className={`uppercase tracking-[0.12em] text-[var(--workspace-text-faint)] ${isHistoricalThreadMessage ? "text-[0.64rem]" : "text-[0.7rem]"}`}>
+                <div className={`uppercase tracking-[0.12em] text-[var(--workspace-text-faint)] ${isHistoricalThreadMessage ? "text-[0.62rem]" : "text-[0.68rem]"}`}>
                   {threadMessage.timestamp}
                 </div>
               </div>
               <div
                 className={`${
                   isHtmlMessage
-                    ? "mt-2 overflow-visible bg-transparent px-0 py-0"
+                    ? "mt-1.5 overflow-visible bg-transparent px-0 py-0"
                     : isHistoricalThreadMessage
-                      ? "mt-2 rounded-[12px] border border-[color:rgba(121,151,120,0.07)] bg-[linear-gradient(180deg,rgba(255,255,255,0.44),rgba(250,247,242,0.54))] px-3.5 py-3 dark:bg-[linear-gradient(180deg,rgba(31,37,33,0.28),rgba(26,31,28,0.36))]"
-                      : "mt-2.5 rounded-[14px] border border-[color:rgba(121,151,120,0.07)] bg-[linear-gradient(180deg,rgba(255,255,255,0.52),rgba(250,247,242,0.62))] px-4 py-3.5 dark:bg-[linear-gradient(180deg,rgba(31,37,33,0.3),rgba(26,31,28,0.4))]"
+                      ? "mt-1.5 rounded-[10px] border border-[color:rgba(121,151,120,0.06)] bg-[color:rgba(255,255,255,0.16)] px-3 py-2.5 dark:bg-[color:rgba(31,37,33,0.16)]"
+                      : "mt-1.5 rounded-[10px] border border-[color:rgba(121,151,120,0.06)] bg-[color:rgba(255,255,255,0.12)] px-3.5 py-3 dark:bg-[color:rgba(31,37,33,0.14)]"
                 }`}
               >
-                <div className={isHtmlMessage ? "space-y-2" : "space-y-3"}>
+                <div className={isHtmlMessage ? "space-y-1.5" : "space-y-2.5"}>
                 {hasHiddenRemoteImages ? (
-                  <div className="flex flex-wrap items-center justify-between gap-3 rounded-[12px] border border-[color:rgba(121,151,120,0.14)] bg-[color:rgba(86,114,87,0.04)] px-3.5 py-2.5 text-[0.78rem] text-[var(--workspace-text-soft)]">
+                  <div className="flex flex-wrap items-center justify-between gap-3 rounded-[10px] border border-[color:rgba(121,151,120,0.1)] bg-[color:rgba(86,114,87,0.03)] px-3 py-2 text-[0.74rem] text-[var(--workspace-text-soft)]">
                     <div>
                       {bodyRenderMode.remoteImageCount === 1
                         ? "This email contains a remote image."
@@ -8789,7 +8822,7 @@ function MailboxView({
                 ) : null}
                 {bodyRenderMode.mode === "html" ? (
                   <div
-                    className={`email-html-content w-full ${density === "full" ? "min-h-[12rem]" : ""}`}
+                    className={`email-html-content w-full ${density === "full" ? "min-h-[12rem]" : ""} ${isHistoricalThreadMessage ? "opacity-[0.94]" : ""}`}
                   >
                     <EmailHtmlStage html={bodyRenderMode.html} themeMode={themeMode} />
                   </div>
@@ -8799,9 +8832,11 @@ function MailboxView({
                       renderPlainMessageParagraph(
                         paragraph,
                         `${threadMessage.id}-${paragraph}`,
-                        `break-words text-[0.94rem] ${
-                          density === "full" ? "leading-7" : "leading-6.5"
-                        } text-[var(--workspace-text-soft)]`,
+                        `break-words text-[0.94rem] ${density === "full" ? "leading-7" : "leading-6.5"} ${
+                          isHistoricalThreadMessage
+                            ? "text-[color:rgba(114,108,100,0.92)] dark:text-[color:rgba(194,200,196,0.82)]"
+                            : "text-[var(--workspace-text-soft)]"
+                        }`,
                       ),
                     )}
                     {threadMessage.signature ? (
@@ -8810,18 +8845,16 @@ function MailboxView({
                       </div>
                     ) : null}
                     {quotedParagraphs.length > 0 ? (
-                      <div className="mt-4 rounded-[14px] border border-[color:rgba(121,151,120,0.14)] bg-[color:rgba(86,114,87,0.035)] px-4 py-3">
-                        <div className="mb-2 text-[0.62rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                      <div className="mt-3 rounded-[10px] border-l-2 border-[color:rgba(121,151,120,0.16)] bg-[color:rgba(86,114,87,0.025)] px-3 py-2.5 dark:bg-[color:rgba(86,114,87,0.08)]">
+                        <div className="mb-1.5 text-[0.58rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
                           Earlier message
                         </div>
-                        <div className="space-y-2">
+                        <div className="space-y-1.5">
                           {quotedParagraphs.map((paragraph) =>
                             renderPlainMessageParagraph(
                               paragraph,
                               `${threadMessage.id}-quoted-${paragraph}`,
-                              `break-words text-[0.86rem] ${
-                                density === "full" ? "leading-6.5" : "leading-6"
-                              } text-[color:rgba(111,104,96,0.88)]`,
+                              `break-words text-[0.83rem] ${density === "full" ? "leading-6.25" : "leading-5.75"} text-[color:rgba(111,104,96,0.78)] dark:text-[color:rgba(176,182,178,0.68)]`,
                             ),
                           )}
                         </div>
