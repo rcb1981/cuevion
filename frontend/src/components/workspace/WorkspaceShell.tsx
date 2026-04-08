@@ -50,6 +50,15 @@ import {
   type SendInboxAttachmentRequest,
   type LiveInboxMessageSnapshot,
 } from "../../lib/inboxConnectionApi";
+import * as learningEngine from "../../lib/learningEngine";
+import * as forYouEngine from "../../lib/forYouEngine";
+import * as suggestionEngine from "../../lib/suggestionEngine";
+import { applyLearningDecision } from "../../lib/applyLearningDecision";
+import type {
+  MailMessageBehaviorSuggestion as EngineMailMessageBehaviorSuggestion,
+  MailMessageSuggestion as EngineMailMessageSuggestion,
+  MessageSuggestionBanner,
+} from "../../lib/suggestionEngine";
 
 const primaryNavigationItems = [
   { section: "Dashboard", label: "Dashboard", shortLabel: "Dash" },
@@ -288,15 +297,8 @@ type SmartFolderDefinition = {
 type CuevionMessageCategory = "Primary" | "Promo" | "Updates";
 type CuevionCategorySource = "system" | "user" | "learned";
 type CuevionCategoryConfidence = "low" | "medium" | "high";
-type MailMessageSuggestion = {
-  type: "confirm_category";
-  proposedCategory: CuevionMessageCategory;
-};
-type MailMessageBehaviorSuggestion = {
-  type: "auto_category";
-  sender: string;
-  category: CuevionMessageCategory;
-};
+type MailMessageSuggestion = EngineMailMessageSuggestion;
+type MailMessageBehaviorSuggestion = EngineMailMessageBehaviorSuggestion;
 type MailMessageOwner = {
   userId: string;
   confidence: "low" | "medium" | "high";
@@ -438,6 +440,7 @@ type MailMessage = {
   action?: string;
   suggestion?: MailMessageSuggestion;
   behaviorSuggestion?: MailMessageBehaviorSuggestion;
+  aiSuggestionBanner?: MessageSuggestionBanner;
 };
 
 type MailMessageSeed = Omit<
@@ -447,6 +450,7 @@ type MailMessageSeed = Omit<
   | "categoryConfidence"
   | "priorityScore"
   | "behaviorSuggestion"
+  | "aiSuggestionBanner"
   | "attachments"
 > & {
   threadId?: string;
@@ -3542,6 +3546,7 @@ function normalizeMailMessage(
   messageOwnershipInteractions: MessageOwnershipInteractionStore,
   currentUserId: string,
   mailboxStore?: MailboxStore,
+  isAIEnabled = true,
 ): MailMessage {
   const {
     category: _category,
@@ -3591,12 +3596,30 @@ function normalizeMailMessage(
     priorityScore,
     focusSignal: resolveMessageFocusSignal(priorityScore, owner, currentUserId),
     ...categorization,
-    suggestion: resolveMailMessageSuggestion(message, categorization),
-    behaviorSuggestion: resolveMailMessageBehaviorSuggestion(
+    suggestion: suggestionEngine.resolveMailMessageSuggestion(
+      message,
+      categorization,
+      isAIEnabled,
+    ),
+    behaviorSuggestion: suggestionEngine.resolveMailMessageBehaviorSuggestion(
       message,
       categorization,
       senderCategoryLearning,
+      isAIEnabled,
     ),
+    aiSuggestionBanner: isAIEnabled
+      ? suggestionEngine.resolveMessageSuggestionBanner({
+          from: message.from,
+          sender: message.sender,
+          subject: message.subject,
+          snippet: message.snippet,
+          body: message.body,
+          signal: resolvedSignal,
+          isAutoReply: message.isAutoReply,
+          attachments: normalizedAttachments,
+          category: categorization.category,
+        })
+      : undefined,
   };
 }
 
@@ -8524,8 +8547,12 @@ function MailboxView({
   };
 
   const renderAIDecisionBlock = (message: MailMessage) => {
-    const decision = getAIDecisionCopy(message);
+    const decision = message.aiSuggestionBanner;
     const isLightMode = themeMode === "light";
+
+    if (!decision) {
+      return null;
+    }
 
     return (
       <div
@@ -19444,9 +19471,12 @@ function ForYouView({
       handler: () => setActiveLearningModal("recent-decisions"),
     },
   ];
-  const { learningSuggestionPool, uncertainEmailPool } = buildForYouLearningPools(
+  const { learningSuggestionPool, uncertainEmailPool } = forYouEngine.buildForYouLearningPools(
+    aiSuggestionsEnabled,
     mailboxStore,
-    orderedMailboxes,
+    resolveMailDateMs,
+    (category, mailboxId) =>
+      resolveMailboxTitleForCategory(category, orderedMailboxes, mailboxId),
   );
   const learningBatchSize = 10;
   const pendingLearningSuggestions = learningSuggestionPool.filter(
@@ -19570,35 +19600,9 @@ function ForYouView({
   const activeUncertainEmail = uncertainEmailPool[safeUncertainEmailIndex];
   const isLastUncertainEmail = safeUncertainEmailIndex === totalUncertainEmails - 1;
   const hasValidUncertainSelection = selectedUncertainMailboxId !== null;
-  const recentLearningDecisions = Object.entries(senderCategoryLearning)
-    .map(([learningKey, entry]) => ({
-      key: learningKey,
-      sender: formatLearningRuleLabel(learningKey),
-      action: formatLearningRuleAction(entry),
-      timestamp: formatLearningRuleTimestamp(entry.updatedAt),
-      ruleType: learningKey.startsWith("domain:") ? ("domain" as const) : ("sender" as const),
-      ruleValue: learningKey.startsWith("domain:")
-        ? learningKey.replace("domain:", "")
-        : learningKey,
-      learnedCategory: entry.learnedCategory,
-      mailboxAction: entry.mailboxAction ?? (entry.learnedCategory === "Primary" ? "keep" : "move"),
-      sourceContext: inferLearningDecisionSourceContext(
-        entry,
-        learningKey.startsWith("domain:") ? "domain" : "sender",
-      ),
-      sourcePrioritySelection: inferLearningDecisionPrioritySelection(entry),
-      sourceMailboxId: inferLearningDecisionMailboxId(entry),
-      sourceCurrentMailboxId: entry.sourceCurrentMailboxId ?? null,
-      updatedAt: entry.updatedAt,
-    }))
-    .sort((firstDecision, secondDecision) => {
-      const firstTime = firstDecision.updatedAt ? new Date(firstDecision.updatedAt).getTime() : 0;
-      const secondTime = secondDecision.updatedAt
-        ? new Date(secondDecision.updatedAt).getTime()
-        : 0;
-
-      return secondTime - firstTime;
-    });
+  const recentLearningDecisions = forYouEngine.buildRecentLearningDecisions(
+    senderCategoryLearning,
+  );
   const activeRecentDecision = recentLearningDecisions[activeRecentDecisionIndex];
   const activeRecentDecisionCurrentMailboxLabel =
     activeRecentDecision?.sourceCurrentMailboxId === "main"
@@ -22866,7 +22870,7 @@ export function WorkspaceShell({
     senderAddress: string,
     category: CuevionMessageCategory,
   ) => {
-    const senderKey = buildSenderLearningStoreKey(senderAddress, "sender");
+    const senderKey = learningEngine.buildSenderLearningStoreKey(senderAddress, "sender");
 
     if (!senderKey) {
       return;
@@ -22902,7 +22906,7 @@ export function WorkspaceShell({
   };
 
   const handleEnableAutoCategoryForSender = (senderAddress: string) => {
-    const senderKey = buildSenderLearningStoreKey(senderAddress, "sender");
+    const senderKey = learningEngine.buildSenderLearningStoreKey(senderAddress, "sender");
 
     if (!senderKey) {
       return;
@@ -22937,39 +22941,22 @@ export function WorkspaceShell({
       sourceCurrentMailboxId?: InboxId | null;
     },
   ) => {
-    const learningKey = buildSenderLearningStoreKey(ruleValue, ruleType);
-
-    if (!learningKey) {
-      return;
-    }
-
     setSenderCategoryLearning((current) => {
-      const existingEntry = current[learningKey];
+      const result = applyLearningDecision({
+        senderCategoryLearning: current,
+        mailboxStore,
+        ruleValue,
+        ruleType,
+        category,
+        mailboxAction,
+        sourceContext: options?.sourceContext,
+        sourcePrioritySelection: options?.sourcePrioritySelection,
+        sourceMailboxId: options?.sourceMailboxId,
+        sourceCurrentMailboxId: options?.sourceCurrentMailboxId,
+        learnedFromCountFloor: HIGH_CONFIDENCE_LEARNING_COUNT,
+      });
 
-      return {
-        ...current,
-        [learningKey]: {
-          learnedCategory: category,
-          learnedFromCount: Math.max(
-            existingEntry?.learnedFromCount ?? 0,
-            HIGH_CONFIDENCE_LEARNING_COUNT,
-          ),
-          autoCategoryEnabled: existingEntry?.autoCategoryEnabled ?? true,
-          mailboxAction,
-          sourceContext: options?.sourceContext ?? existingEntry?.sourceContext,
-          sourcePrioritySelection:
-            options?.sourcePrioritySelection ?? existingEntry?.sourcePrioritySelection,
-          sourceMailboxId:
-            options?.sourceMailboxId !== undefined
-              ? options.sourceMailboxId
-              : existingEntry?.sourceMailboxId,
-          sourceCurrentMailboxId:
-            options?.sourceCurrentMailboxId !== undefined
-              ? options.sourceCurrentMailboxId
-              : existingEntry?.sourceCurrentMailboxId,
-          updatedAt: new Date().toISOString(),
-        },
-      };
+      return result?.nextSenderCategoryLearning ?? current;
     });
   };
 
