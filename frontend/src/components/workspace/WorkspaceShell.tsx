@@ -8785,10 +8785,10 @@ function MailboxView({
                 isCurrentUser
                   ? isHtmlMessage
                     ? "ml-auto bg-transparent"
-                    : "ml-auto border-[color:rgba(117,152,123,0.1)] bg-[color:rgba(232,242,234,0.44)] shadow-[inset_0_1px_0_rgba(255,255,255,0.08)] dark:bg-[color:rgba(64,79,67,0.26)]"
+                    : "ml-auto border-[color:rgba(117,152,123,0.1)] bg-[color:rgba(245,249,243,0.94)] shadow-[0_6px_18px_rgba(150,171,145,0.08),inset_0_1px_0_rgba(255,255,255,0.58)] dark:bg-[color:rgba(64,79,67,0.26)]"
                   : isHtmlMessage
                     ? "bg-transparent"
-                    : "border-[color:rgba(121,151,120,0.08)] bg-[color:rgba(255,255,255,0.2)] shadow-[inset_0_1px_0_rgba(255,255,255,0.06)] dark:bg-[color:rgba(35,42,37,0.16)]"
+                    : "border-[color:rgba(129,144,122,0.09)] bg-[color:rgba(255,253,249,0.88)] shadow-[0_5px_16px_rgba(164,147,125,0.04),inset_0_1px_0_rgba(255,255,255,0.52)] dark:bg-[color:rgba(35,42,37,0.16)]"
               }`}
             >
               <div className={`flex flex-wrap items-center justify-between ${isHtmlMessage ? "gap-2 px-0.5" : "gap-2.5"}`}>
@@ -8812,13 +8812,13 @@ function MailboxView({
                   isHtmlMessage
                     ? "mt-1.5 overflow-visible bg-transparent px-0 py-0"
                     : isHistoricalThreadMessage
-                      ? "mt-1.5 rounded-[10px] border border-[color:rgba(121,151,120,0.06)] bg-[color:rgba(255,255,255,0.16)] px-3 py-2.5 dark:bg-[color:rgba(31,37,33,0.16)]"
-                      : "mt-1.5 rounded-[10px] border border-[color:rgba(121,151,120,0.06)] bg-[color:rgba(255,255,255,0.12)] px-3.5 py-3 dark:bg-[color:rgba(31,37,33,0.14)]"
+                      ? "mt-1.5 rounded-[10px] border border-[color:rgba(129,144,122,0.07)] bg-[color:rgba(255,251,246,0.7)] px-3 py-2.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.42)] dark:bg-[color:rgba(31,37,33,0.16)]"
+                      : "mt-1.5 rounded-[10px] border border-[color:rgba(129,144,122,0.07)] bg-[color:rgba(255,255,252,0.82)] px-3.5 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.54)] dark:bg-[color:rgba(31,37,33,0.14)]"
                 }`}
               >
                 <div className={isHtmlMessage ? "space-y-1.5" : "space-y-2.5"}>
                 {hasHiddenRemoteImages ? (
-                  <div className="flex flex-wrap items-center justify-between gap-3 rounded-[10px] border border-[color:rgba(121,151,120,0.1)] bg-[color:rgba(86,114,87,0.03)] px-3 py-2 text-[0.74rem] text-[var(--workspace-text-soft)]">
+                  <div className="flex flex-wrap items-center justify-between gap-3 rounded-[10px] border border-[color:rgba(129,144,122,0.08)] bg-[color:rgba(252,249,242,0.88)] px-3 py-2 text-[0.74rem] text-[var(--workspace-text-soft)] dark:border-[color:rgba(121,151,120,0.1)] dark:bg-[color:rgba(86,114,87,0.03)]">
                     <div>
                       {bodyRenderMode.remoteImageCount === 1
                         ? "This email contains a remote image."
@@ -8858,7 +8858,7 @@ function MailboxView({
                       </div>
                     ) : null}
                     {quotedParagraphs.length > 0 ? (
-                      <div className="mt-3 rounded-[10px] border-l-2 border-[color:rgba(121,151,120,0.16)] bg-[color:rgba(86,114,87,0.025)] px-3 py-2.5 dark:bg-[color:rgba(86,114,87,0.08)]">
+                      <div className="mt-3 rounded-[8px] border-l-2 border-[color:rgba(132,148,118,0.18)] bg-[color:rgba(249,245,237,0.76)] px-2.5 py-2 dark:border-[color:rgba(121,151,120,0.16)] dark:bg-[color:rgba(86,114,87,0.08)]">
                         <div className="mb-1.5 text-[0.58rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
                           Earlier message
                         </div>
@@ -12459,7 +12459,7 @@ function MailboxView({
         </div>
 
         {isComposeOpen ? (
-          <div className="min-h-0 flex-1 overflow-y-auto rounded-[24px] border border-[var(--workspace-border-soft)] bg-[linear-gradient(180deg,var(--workspace-card-featured-start),var(--workspace-card-featured-end))] p-5 md:p-6">
+		          <div className="min-h-0 flex-1 overflow-y-auto rounded-[24px] border border-[color:rgba(128,142,121,0.14)] bg-[linear-gradient(180deg,rgba(255,255,253,0.98),rgba(250,246,239,0.96))] p-5 shadow-[0_10px_28px_rgba(164,147,125,0.06)] dark:border-[var(--workspace-border-soft)] dark:bg-[linear-gradient(180deg,var(--workspace-card-featured-start),var(--workspace-card-featured-end))] md:p-6">
             <div className="space-y-5">
               <div className="flex items-center justify-between gap-4">
                 <h2 className="text-[1.3rem] font-medium tracking-tight text-[var(--workspace-text)] md:text-[1.45rem]">
@@ -13586,13 +13586,16 @@ function MailboxView({
               </div>
             </div>
 
-            <div className="flex h-full min-h-0 min-w-0 self-stretch flex-col overflow-hidden rounded-[24px] border border-[var(--workspace-border-soft)] bg-[linear-gradient(180deg,var(--workspace-card-featured-start),var(--workspace-card-featured-end))]">
+            <div className="flex h-full min-h-0 min-w-0 self-stretch flex-col overflow-hidden rounded-[24px] border border-[color:rgba(128,142,121,0.14)] bg-[linear-gradient(180deg,rgba(255,255,253,0.98),rgba(249,245,238,0.97))] shadow-[0_12px_34px_rgba(164,147,125,0.06)] dark:border-[var(--workspace-border-soft)] dark:bg-[linear-gradient(180deg,var(--workspace-card-featured-start),var(--workspace-card-featured-end))]">
               {/* Native macOS overlay scrollbars can ignore custom thumb styling; keep the real
                   reading-pane scroller dark and opt it into dark color-scheme directly. */}
               <div
-                className="cuevion-dark-scroll cuevion-soft-scroll min-h-0 flex-1 overflow-y-auto bg-[var(--workspace-card-featured-end)] p-5 pr-4 md:p-6 md:pr-5"
+                className="cuevion-dark-scroll cuevion-soft-scroll min-h-0 flex-1 overflow-y-auto bg-[rgba(255,252,248,0.74)] p-5 pr-4 dark:bg-[var(--workspace-card-featured-end)] md:p-6 md:pr-5"
                 style={{
-                  backgroundColor: "var(--workspace-card-featured-end)",
+                  backgroundColor:
+                    themeMode === "dark"
+                      ? "var(--workspace-card-featured-end)"
+                      : "rgba(255,252,248,0.74)",
                   colorScheme: themeMode,
                   scrollbarWidth: "thin",
                   scrollbarColor:
