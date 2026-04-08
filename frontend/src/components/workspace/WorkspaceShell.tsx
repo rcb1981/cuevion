@@ -59,6 +59,7 @@ import type {
   MailMessageSuggestion as EngineMailMessageSuggestion,
   MessageSuggestionBanner,
 } from "../../lib/suggestionEngine";
+import type { ForYouLearningSuggestion } from "../../lib/forYouEngine";
 
 const primaryNavigationItems = [
   { section: "Dashboard", label: "Dashboard", shortLabel: "Dash" },
@@ -475,29 +476,6 @@ type MailFolder = "Inbox" | "Drafts" | "Sent" | "Archive" | "Filtered" | "Spam" 
 type MailSortOrder = "desc" | "asc";
 type MailboxCollections = Record<MailFolder, MailMessage[]>;
 type MailboxStore = Record<string, MailboxCollections>;
-type ForYouLearningSuggestion = {
-  key: string;
-  sender: string;
-  senderAddress: string;
-  subject: string;
-  createdAt: string;
-  uncertainty: number;
-  senderFrequency: number;
-  snippet: string[];
-  reason: string;
-  visualLabel?: string;
-  mailboxId: InboxId | null;
-};
-type ForYouUncertainEmail = {
-  key: string;
-  sender: string;
-  senderAddress: string;
-  mailboxId: InboxId | null;
-  subject: string;
-  preview: string[];
-  reason: string;
-  currentMailboxLabel: string;
-};
 type NotificationNavigationRequest = {
   mailboxId: InboxId;
   messageId: string;
@@ -2134,18 +2112,6 @@ function inferLearningDecisionPrioritySelection(
   return null;
 }
 
-function formatForYouReason(message: MailMessage, mailboxLabel: string) {
-  if (message.category === "Promo") {
-    return `Cuevion placed this in ${mailboxLabel}, but is not confident yet.`;
-  }
-
-  if (message.category === "Updates") {
-    return `Cuevion thinks this belongs in ${mailboxLabel}, but still needs confirmation.`;
-  }
-
-  return `Cuevion placed this in ${mailboxLabel}, but still needs confirmation.`;
-}
-
 function resolveOrderedMailboxTitle(
   orderedMailboxes: OrderedMailbox[],
   mailboxId: InboxId | null,
@@ -2191,95 +2157,6 @@ function resolveMailboxTitleForCategory(
   }
 
   return resolveOrderedMailboxTitle(orderedMailboxes, fallbackMailboxId);
-}
-
-function buildForYouLearningPools(
-  mailboxStore: MailboxStore,
-  orderedMailboxes: OrderedMailbox[],
-): {
-  learningSuggestionPool: ForYouLearningSuggestion[];
-  uncertainEmailPool: ForYouUncertainEmail[];
-} {
-  const inboxMessages = Object.entries(mailboxStore).flatMap(([mailboxId, collections]) =>
-    collections.Inbox.map((message) => ({
-      mailboxId: mailboxId as InboxId,
-      message,
-    })),
-  );
-  const senderFrequencyByKey = inboxMessages.reduce<Record<string, number>>(
-    (frequencyMap, entry) => {
-      const senderKey = normalizeSenderLearningKey(entry.message.from);
-      return {
-        ...frequencyMap,
-        [senderKey]: (frequencyMap[senderKey] ?? 0) + 1,
-      };
-    },
-    {},
-  );
-  const realUncertainMessages = inboxMessages
-    .filter(({ message }) => isRefineCuevionEligible(message) || isReviewUncertainEligible(message))
-    .sort((firstEntry, secondEntry) => {
-      const firstLow = firstEntry.message.categoryConfidence === "low" ? 1 : 0;
-      const secondLow = secondEntry.message.categoryConfidence === "low" ? 1 : 0;
-
-      if (secondLow !== firstLow) {
-        return secondLow - firstLow;
-      }
-
-      return (
-        resolveMailDateMs(secondEntry.message) - resolveMailDateMs(firstEntry.message)
-      );
-    });
-  const learningSuggestionPool = realUncertainMessages
-    .filter(({ message }) => isRefineCuevionEligible(message))
-    .map(({ mailboxId, message }): ForYouLearningSuggestion => {
-      const senderFrequency =
-        senderFrequencyByKey[normalizeSenderLearningKey(message.from)] ?? 1;
-      const mailboxLabel = resolveMailboxTitleForCategory(
-        message.category,
-        orderedMailboxes,
-        mailboxId,
-      );
-
-      return {
-        key: message.id,
-        sender: message.sender,
-        senderAddress: message.from,
-        subject: message.subject,
-        createdAt: message.createdAt ?? new Date(resolveMailDateMs(message)).toISOString(),
-        uncertainty: 94,
-        senderFrequency,
-        snippet: message.body.slice(0, 2).length > 0 ? message.body.slice(0, 2) : [message.snippet],
-        reason: formatForYouReason(message, mailboxLabel),
-        mailboxId,
-      };
-    });
-  const uncertainEmailPool = realUncertainMessages
-    .filter(({ message }) => isReviewUncertainEligible(message))
-    .slice(0, 5)
-    .map(({ mailboxId, message }): ForYouUncertainEmail => {
-      const mailboxLabel = resolveMailboxTitleForCategory(
-        message.category,
-        orderedMailboxes,
-        mailboxId,
-      );
-
-      return {
-        key: message.id,
-        sender: message.sender,
-        senderAddress: message.from,
-        mailboxId,
-        subject: message.subject,
-        preview: message.body.slice(0, 2).length > 0 ? message.body.slice(0, 2) : [message.snippet],
-        reason: formatForYouReason(message, mailboxLabel),
-        currentMailboxLabel: mailboxLabel,
-      };
-    });
-
-  return {
-    learningSuggestionPool,
-    uncertainEmailPool,
-  };
 }
 
 function resolveImplicitOwner(
@@ -3443,28 +3320,6 @@ function resolveCuevionCategorization(
     ...systemCategorization,
     categoryConfidence: lowerCategoryConfidence(systemCategorization.categoryConfidence),
   };
-}
-
-function isReviewUncertainEligible(message: MailMessage) {
-  return (
-    message.categorySource === "system" &&
-    message.suggestion?.type === "confirm_category"
-  );
-}
-
-function isRefineCuevionEligible(message: MailMessage) {
-  if (message.categorySource !== "system") {
-    return false;
-  }
-
-  if (message.categoryConfidence === "low") {
-    return true;
-  }
-
-  return (
-    message.categoryConfidence === "medium" &&
-    (message.priorityScore === "high" || message.unread || message.isShared)
-  );
 }
 
 function resolveMailMessageSuggestion(
@@ -22858,62 +22713,52 @@ export function WorkspaceShell({
     senderAddress: string,
     category: CuevionMessageCategory,
   ) => {
-    const senderKey = learningEngine.buildSenderLearningStoreKey(senderAddress, "sender");
-
-    if (!senderKey) {
-      return;
-    }
-
     setSenderCategoryLearning((current) => {
-      const existingEntry = current[senderKey];
+      const existingEntry =
+        learningEngine.resolveSenderLearningEntry(senderAddress, current)?.entry;
+      const result = applyLearningDecision({
+        senderCategoryLearning: current,
+        mailboxStore,
+        ruleValue: senderAddress,
+        ruleType: "sender",
+        category,
+        learnedFromCount:
+          existingEntry?.learnedCategory === category
+            ? existingEntry.learnedFromCount + 1
+            : 1,
+        autoCategoryEnabled: existingEntry?.autoCategoryEnabled,
+        mailboxAction: existingEntry?.mailboxAction,
+      });
 
-      if (existingEntry?.learnedCategory === category) {
-        return {
-          ...current,
-          [senderKey]: {
-            learnedCategory: category,
-            learnedFromCount: existingEntry.learnedFromCount + 1,
-            autoCategoryEnabled: existingEntry.autoCategoryEnabled,
-            mailboxAction: existingEntry.mailboxAction,
-            updatedAt: new Date().toISOString(),
-          },
-        };
-      }
-
-      return {
-        ...current,
-        [senderKey]: {
-          learnedCategory: category,
-          learnedFromCount: 1,
-          autoCategoryEnabled: existingEntry?.autoCategoryEnabled,
-          mailboxAction: existingEntry?.mailboxAction,
-          updatedAt: new Date().toISOString(),
-        },
-      };
+      return result?.nextSenderCategoryLearning ?? current;
     });
   };
 
   const handleEnableAutoCategoryForSender = (senderAddress: string) => {
-    const senderKey = learningEngine.buildSenderLearningStoreKey(senderAddress, "sender");
-
-    if (!senderKey) {
-      return;
-    }
-
     setSenderCategoryLearning((current) => {
-      const existingEntry = current[senderKey];
+      const existingEntry =
+        learningEngine.resolveSenderLearningEntry(senderAddress, current)?.entry;
 
       if (!existingEntry) {
         return current;
       }
 
-      return {
-        ...current,
-        [senderKey]: {
-          ...existingEntry,
-          autoCategoryEnabled: true,
-        },
-      };
+      const result = applyLearningDecision({
+        senderCategoryLearning: current,
+        mailboxStore,
+        ruleValue: senderAddress,
+        ruleType: "sender",
+        category: existingEntry.learnedCategory,
+        learnedFromCount: existingEntry.learnedFromCount,
+        autoCategoryEnabled: true,
+        mailboxAction: existingEntry.mailboxAction,
+        sourceContext: existingEntry.sourceContext,
+        sourcePrioritySelection: existingEntry.sourcePrioritySelection,
+        sourceMailboxId: existingEntry.sourceMailboxId,
+        sourceCurrentMailboxId: existingEntry.sourceCurrentMailboxId,
+      });
+
+      return result?.nextSenderCategoryLearning ?? current;
     });
   };
 

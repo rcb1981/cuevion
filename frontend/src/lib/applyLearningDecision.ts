@@ -30,6 +30,7 @@ export type ApplyLearningDecisionInput = {
   ruleValue: string;
   ruleType: "sender" | "domain";
   category: CuevionMessageCategory;
+  learnedFromCount?: number;
   mailboxAction?: "keep" | "move";
   sourceContext?: LearningDecisionSourceContext;
   sourcePrioritySelection?: LearningDecisionPrioritySelection | null;
@@ -94,10 +95,9 @@ export function applyLearningDecision(
   const existingEntry = input.senderCategoryLearning[learningKey];
   const nextEntry: SenderCategoryLearningEntry = {
     learnedCategory: input.category,
-    learnedFromCount: Math.max(
-      existingEntry?.learnedFromCount ?? 0,
-      input.learnedFromCountFloor ?? 3,
-    ),
+    learnedFromCount:
+      input.learnedFromCount ??
+      Math.max(existingEntry?.learnedFromCount ?? 0, input.learnedFromCountFloor ?? 3),
     autoCategoryEnabled: input.autoCategoryEnabled ?? existingEntry?.autoCategoryEnabled ?? true,
     mailboxAction:
       input.mailboxAction ?? existingEntry?.mailboxAction ?? (input.category === "Primary" ? "keep" : "move"),
