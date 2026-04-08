@@ -1323,7 +1323,7 @@ function buildEmailStageDocument(
       .email-stage td,
       .email-stage th,
       .email-stage li {
-        color: inherit;
+        color: inherit !important;
       }
       img {
         max-width: 100%;
@@ -1333,7 +1333,7 @@ function buildEmailStageDocument(
         max-width: 100%;
       }
       a {
-        color: ${stageLinkColor};
+        color: ${stageLinkColor} !important;
         word-break: break-all;
         text-decoration-color: color-mix(in srgb, ${stageLinkColor} 72%, transparent);
         text-underline-offset: 2px;
@@ -1344,8 +1344,17 @@ function buildEmailStageDocument(
         margin: 0.85rem 0 0;
         padding: 0.4rem 0 0.1rem 0.85rem;
         border-left: 2px solid ${stageQuoteBorder};
-        background: ${stageQuoteSurface};
-        color: ${stageSecondaryTextColor};
+        background: ${stageQuoteSurface} !important;
+        color: ${stageSecondaryTextColor} !important;
+      }
+      blockquote *,
+      [data-email-quote="true"] *,
+      .gmail_quote * {
+        color: ${stageSecondaryTextColor} !important;
+      }
+      [data-email-quote="true"],
+      .gmail_quote {
+        background: ${stageQuoteSurface} !important;
       }
       hr {
         border: 0;
@@ -1509,6 +1518,15 @@ function sanitizeMessageBodyHtml(
         return;
       }
 
+      if (
+        ["bgcolor", "background", "color", "text", "link", "vlink", "alink"].includes(
+          attributeName,
+        )
+      ) {
+        element.removeAttribute(attribute.name);
+        return;
+      }
+
       if (attributeName === "style" && unsafeInlineStylePattern.test(attributeValue)) {
         element.removeAttribute(attribute.name);
       }
@@ -1583,6 +1601,10 @@ function sanitizeMessageBodyHtml(
         element.style.backgroundColor = "transparent";
       }
 
+      if (computedBackground && !/transparent|initial|inherit/.test(computedBackground)) {
+        element.style.backgroundColor = "transparent";
+      }
+
       if (
         computedBackgroundImage &&
         /(linear-gradient|radial-gradient)/.test(computedBackgroundImage)
@@ -1592,9 +1614,13 @@ function sanitizeMessageBodyHtml(
 
       if (
         computedTextColor &&
-        /rgb\(0,\s*0,\s*0\)|rgba\(0,\s*0,\s*0|#000(?:000)?|black/.test(computedTextColor)
+        !/transparent|initial|inherit|currentcolor/i.test(computedTextColor)
       ) {
-        element.style.color = "rgba(84, 78, 71, 0.96)";
+        if (element instanceof HTMLAnchorElement) {
+          element.style.color = "";
+        } else {
+          element.style.color = "inherit";
+        }
       }
 
       if (element.tagName === "TABLE") {
@@ -1612,7 +1638,8 @@ function sanitizeMessageBodyHtml(
       }
 
       if (element.tagName === "BLOCKQUOTE") {
-        element.style.background = "rgba(86, 114, 87, 0.04)";
+        element.style.background = "transparent";
+        element.style.color = "inherit";
       }
 
       if (
@@ -1620,6 +1647,8 @@ function sanitizeMessageBodyHtml(
         element.className.toLowerCase().includes("gmail_quote")
       ) {
         element.setAttribute("data-email-quote", "true");
+        element.style.background = "transparent";
+        element.style.color = "inherit";
       }
     }
   });
