@@ -1275,10 +1275,8 @@ function buildEmailStageDocument(
   html: string,
   themeMode: "light" | "dark",
 ) {
-  const stageBackground =
-    themeMode === "dark" ? "rgba(26, 31, 28, 0.92)" : "rgba(255, 255, 255, 0.96)";
-  const stageBorder =
-    themeMode === "dark" ? "rgba(121, 151, 120, 0.12)" : "rgba(121, 151, 120, 0.1)";
+  const stageTextColor =
+    themeMode === "dark" ? "rgba(229, 236, 230, 0.96)" : "rgba(54, 62, 56, 0.96)";
 
   return `<!DOCTYPE html>
 <html>
@@ -1292,16 +1290,17 @@ function buildEmailStageDocument(
         background: transparent;
       }
       body {
+        color: ${stageTextColor};
         overflow-wrap: anywhere;
         word-break: break-word;
       }
       .email-stage {
         box-sizing: border-box;
         width: 100%;
-        background: ${stageBackground};
-        border: 1px solid ${stageBorder};
-        border-radius: 10px;
-        overflow: hidden;
+        background: transparent;
+        border: 0;
+        border-radius: 0;
+        overflow: visible;
       }
       .email-stage > * {
         max-width: 100%;
@@ -1399,7 +1398,7 @@ function EmailHtmlStage({
   if (stageFailed) {
     return (
       <div
-        className="overflow-hidden rounded-[10px] border border-[color:rgba(121,151,120,0.1)] bg-[color:rgba(255,255,255,0.96)] dark:bg-[color:rgba(26,31,28,0.92)]"
+        className="overflow-hidden bg-transparent"
         dangerouslySetInnerHTML={{ __html: html }}
       />
     );
@@ -1413,7 +1412,7 @@ function EmailHtmlStage({
       srcDoc={buildEmailStageDocument(html, themeMode)}
       scrolling="no"
       onLoad={updateHeight}
-      className="block w-full overflow-hidden rounded-[10px] border-0 bg-transparent"
+      className="block w-full overflow-hidden border-0 bg-transparent"
       style={{ height }}
     />
   );
@@ -8695,13 +8694,15 @@ function MailboxView({
     }
 
     return (
-      <div className={density === "full" ? "space-y-4" : "space-y-3"}>
-        {threadMessages.map((threadMessage) => {
+      <div className={density === "full" ? "space-y-3" : "space-y-2.5"}>
+        {threadMessages.map((threadMessage, threadIndex) => {
           const isCurrentUser =
             normalizeSenderLearningKey(threadMessage.from) ===
               normalizeSenderLearningKey(mailbox.email) ||
             threadMessage.signal === "Sent" ||
             threadMessage.sender === "You";
+          const isLatestThreadMessage = threadIndex === threadMessages.length - 1;
+          const isHistoricalThreadMessage = !isLatestThreadMessage;
           const quoteStartIndex = getQuotedParagraphStartIndex(threadMessage.body);
           const leadingParagraphs =
             quoteStartIndex === -1
@@ -8720,27 +8721,33 @@ function MailboxView({
           return (
             <div
               key={threadMessage.id}
-              className={`max-w-[92%] ${
-                isHtmlMessage ? "rounded-[14px] px-2 py-2" : "rounded-[18px] border px-3.5 py-3.5"
+              className={`${
+                isHtmlMessage
+                  ? "w-full max-w-none rounded-[8px] px-0 py-1"
+                  : isHistoricalThreadMessage
+                    ? "max-w-[91%] rounded-[14px] border px-3 py-2.5"
+                    : "max-w-[94%] rounded-[16px] border px-3.5 py-3"
               } ${
                 density === "full"
                   ? isHtmlMessage
-                    ? "md:px-2.5 md:py-2.5"
-                    : "md:px-4.5 md:py-4.5"
+                    ? "md:px-0 md:py-1"
+                    : isHistoricalThreadMessage
+                      ? "md:px-3.5 md:py-3"
+                      : "md:px-4 md:py-3.5"
                   : ""
               } ${
                 isCurrentUser
                   ? isHtmlMessage
                     ? "ml-auto bg-transparent"
-                    : "ml-auto border-[color:rgba(117,152,123,0.18)] bg-[linear-gradient(180deg,rgba(238,246,239,0.9),rgba(229,239,231,0.82))] shadow-[inset_0_1px_0_rgba(255,255,255,0.14)]"
+                    : "ml-auto border-[color:rgba(117,152,123,0.14)] bg-[linear-gradient(180deg,rgba(238,246,239,0.76),rgba(229,239,231,0.66))] shadow-[inset_0_1px_0_rgba(255,255,255,0.1)]"
                   : isHtmlMessage
                     ? "bg-transparent"
-                    : "border-[color:rgba(121,151,120,0.12)] bg-[linear-gradient(180deg,rgba(255,255,255,0.48),rgba(247,243,236,0.62))] shadow-[inset_0_1px_0_rgba(255,255,255,0.14)] dark:bg-[linear-gradient(180deg,rgba(35,42,37,0.3),rgba(29,35,31,0.4))]"
+                    : "border-[color:rgba(121,151,120,0.09)] bg-[linear-gradient(180deg,rgba(255,255,255,0.34),rgba(247,243,236,0.46))] shadow-[inset_0_1px_0_rgba(255,255,255,0.08)] dark:bg-[linear-gradient(180deg,rgba(35,42,37,0.24),rgba(29,35,31,0.3))]"
               }`}
             >
-              <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className={`flex flex-wrap items-center justify-between ${isHtmlMessage ? "gap-2 px-1.5" : "gap-3"}`}>
                 <div className="flex items-center gap-2">
-                  <div className="text-[0.84rem] font-medium tracking-[-0.012em] text-[var(--workspace-text)]">
+                  <div className={`font-medium tracking-[-0.012em] text-[var(--workspace-text)] ${isHistoricalThreadMessage ? "text-[0.8rem]" : "text-[0.84rem]"}`}>
                     {isCurrentUser ? "You" : threadMessage.sender}
                   </div>
                   {threadMessage.isAutoReply &&
@@ -8750,18 +8757,20 @@ function MailboxView({
                     </span>
                   ) : null}
                 </div>
-                <div className="text-[0.7rem] uppercase tracking-[0.12em] text-[var(--workspace-text-faint)]">
+                <div className={`uppercase tracking-[0.12em] text-[var(--workspace-text-faint)] ${isHistoricalThreadMessage ? "text-[0.64rem]" : "text-[0.7rem]"}`}>
                   {threadMessage.timestamp}
                 </div>
               </div>
               <div
-                className={`mt-2.5 ${
+                className={`${
                   isHtmlMessage
-                    ? "overflow-hidden rounded-[10px] bg-transparent px-0 py-0"
-                    : "rounded-[16px] border border-[color:rgba(121,151,120,0.08)] bg-[linear-gradient(180deg,rgba(255,255,255,0.64),rgba(250,247,242,0.74))] px-4 py-3.5 dark:bg-[linear-gradient(180deg,rgba(31,37,33,0.34),rgba(26,31,28,0.44))]"
+                    ? "mt-2 overflow-visible bg-transparent px-0 py-0"
+                    : isHistoricalThreadMessage
+                      ? "mt-2 rounded-[12px] border border-[color:rgba(121,151,120,0.07)] bg-[linear-gradient(180deg,rgba(255,255,255,0.44),rgba(250,247,242,0.54))] px-3.5 py-3 dark:bg-[linear-gradient(180deg,rgba(31,37,33,0.28),rgba(26,31,28,0.36))]"
+                      : "mt-2.5 rounded-[14px] border border-[color:rgba(121,151,120,0.07)] bg-[linear-gradient(180deg,rgba(255,255,255,0.52),rgba(250,247,242,0.62))] px-4 py-3.5 dark:bg-[linear-gradient(180deg,rgba(31,37,33,0.3),rgba(26,31,28,0.4))]"
                 }`}
               >
-                <div className="space-y-3">
+                <div className={isHtmlMessage ? "space-y-2" : "space-y-3"}>
                 {hasHiddenRemoteImages ? (
                   <div className="flex flex-wrap items-center justify-between gap-3 rounded-[12px] border border-[color:rgba(121,151,120,0.14)] bg-[color:rgba(86,114,87,0.04)] px-3.5 py-2.5 text-[0.78rem] text-[var(--workspace-text-soft)]">
                     <div>
@@ -8780,7 +8789,7 @@ function MailboxView({
                 ) : null}
                 {bodyRenderMode.mode === "html" ? (
                   <div
-                    className="email-html-content w-full"
+                    className={`email-html-content w-full ${density === "full" ? "min-h-[12rem]" : ""}`}
                   >
                     <EmailHtmlStage html={bodyRenderMode.html} themeMode={themeMode} />
                   </div>
