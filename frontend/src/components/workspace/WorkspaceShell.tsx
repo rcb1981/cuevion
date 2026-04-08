@@ -1275,6 +1275,8 @@ function buildEmailStageDocument(
   html: string,
   themeMode: "light" | "dark",
 ) {
+  const stageWrapperClass =
+    themeMode === "dark" ? "email-stage email-stage--dark" : "email-stage email-stage--light";
   const stageTextColor =
     themeMode === "dark" ? "rgba(229, 236, 230, 0.96)" : "rgba(34, 38, 36, 0.99)";
   const stageLinkColor =
@@ -1320,8 +1322,15 @@ function buildEmailStageDocument(
       .email-stage > * {
         max-width: 100%;
       }
-      .email-stage * {
+      .email-stage--dark * {
         color: ${stageTextColor} !important;
+      }
+      .email-stage--light {
+        color: ${stageTextColor};
+      }
+      .email-stage--light * {
+        color: inherit !important;
+        -webkit-text-fill-color: currentColor !important;
       }
       img {
         max-width: 100%;
@@ -1384,7 +1393,7 @@ function buildEmailStageDocument(
     </style>
   </head>
   <body>
-    <div class="email-stage">${html}</div>
+    <div class="${stageWrapperClass}">${html}</div>
   </body>
 </html>`;
 }
@@ -1461,9 +1470,47 @@ function EmailHtmlStage({
   );
 }
 
+function shouldResetImportedHtmlTextColor(element: HTMLElement) {
+  return !element.closest(
+    "[data-compose-quote='true'], [data-compose-signature='true'], [data-compose-signature-text='true'], [data-compose-signature-logo='true'], [data-compose-signature-divider='true'], [data-compose-signature-row='true'], [data-compose-signature-right='true'], [data-compose-signature-spacer='true']",
+  );
+}
+
+function normalizeImportedEmailHtmlForReading(
+  element: HTMLElement,
+  themeMode: "light" | "dark",
+) {
+  if (themeMode !== "light") {
+    return;
+  }
+
+  if (!shouldResetImportedHtmlTextColor(element)) {
+    return;
+  }
+
+  const inlineTextColor = element.style.color.trim().toLowerCase();
+
+  element.style.removeProperty("-webkit-text-fill-color");
+
+  if (element instanceof HTMLAnchorElement) {
+    return;
+  }
+
+  if (element.hasAttribute("color")) {
+    element.removeAttribute("color");
+  }
+
+  if (
+    inlineTextColor &&
+    !/transparent|initial|inherit|currentcolor/i.test(inlineTextColor)
+  ) {
+    element.style.color = "inherit";
+  }
+}
+
 function sanitizeMessageBodyHtml(
   bodyHtml: string,
-  options?: { allowRemoteImages?: boolean },
+  options?: { allowRemoteImages?: boolean; themeMode?: "light" | "dark" },
 ): SanitizedMessageHtmlResult {
   const normalizedHtml = bodyHtml.trim();
 
@@ -1491,6 +1538,7 @@ function sanitizeMessageBodyHtml(
   let cidImageCount = 0;
   let invalidImageCount = 0;
   const allowRemoteImages = options?.allowRemoteImages ?? false;
+  const themeMode = options?.themeMode ?? "light";
 
   body.querySelectorAll(unsafeEmailHtmlSelectors).forEach((node) => {
     node.remove();
@@ -1516,11 +1564,7 @@ function sanitizeMessageBodyHtml(
         return;
       }
 
-      if (
-        ["bgcolor", "background", "color", "text", "link", "vlink", "alink"].includes(
-          attributeName,
-        )
-      ) {
+      if (["bgcolor", "background", "text", "link", "vlink", "alink"].includes(attributeName)) {
         element.removeAttribute(attribute.name);
         return;
       }
@@ -1610,17 +1654,6 @@ function sanitizeMessageBodyHtml(
         element.style.backgroundImage = "none";
       }
 
-      if (
-        computedTextColor &&
-        !/transparent|initial|inherit|currentcolor/i.test(computedTextColor)
-      ) {
-        if (element instanceof HTMLAnchorElement) {
-          element.style.color = "";
-        } else {
-          element.style.color = "inherit";
-        }
-      }
-
       if (element.tagName === "TABLE") {
         element.style.width = "100%";
         element.style.maxWidth = "100%";
@@ -1648,6 +1681,8 @@ function sanitizeMessageBodyHtml(
         element.style.background = "transparent";
         element.style.color = "inherit";
       }
+
+      normalizeImportedEmailHtmlForReading(element, themeMode);
     }
   });
 
@@ -1821,7 +1856,7 @@ function sanitizeComposeGeneratedHtml(
 
 function resolveMessageBodyRenderMode(
   message: Pick<MailMessage, "body" | "bodyHtml">,
-  options?: { allowRemoteImages?: boolean },
+  options?: { allowRemoteImages?: boolean; themeMode?: "light" | "dark" },
 ):
   | {
       mode: "html";
@@ -8951,6 +8986,7 @@ function MailboxView({
           const remoteImagesAllowed = canShowRemoteImagesForMessage(threadMessage.id);
           const bodyRenderMode = resolveMessageBodyRenderMode(threadMessage, {
             allowRemoteImages: remoteImagesAllowed,
+            themeMode,
           });
           const hasHiddenRemoteImages =
             bodyRenderMode.remoteImageCount > 0 && !remoteImagesAllowed;
@@ -9024,11 +9060,7 @@ function MailboxView({
                       renderPlainMessageParagraph(
                         paragraph,
                         `${threadMessage.id}-${paragraph}`,
-                        `break-words text-[0.94rem] ${density === "full" ? "leading-7" : "leading-6.5"} ${
-                          isHistoricalThreadMessage
-                            ? "text-[var(--workspace-text-muted)] dark:text-[color:rgba(205,211,207,0.86)]"
-                            : "text-[var(--workspace-text)] dark:text-[color:rgba(228,235,230,0.94)]"
-                        }`,
+                        `break-words text-[0.94rem] ${density === "full" ? "leading-7" : "leading-6.5"} text-[var(--workspace-text)] dark:text-[color:rgba(228,235,230,0.94)]`,
                       ),
                     )}
                     {threadMessage.signature ? (
