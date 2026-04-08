@@ -1240,37 +1240,6 @@ function renderPlainMessageParagraph(
   );
 }
 
-function renderMessageMetaSummary(
-  message: Pick<MailMessage, "from" | "to" | "cc" | "timestamp">,
-) {
-  const metaRows = [
-    { label: "From", value: message.from, tone: "text-[var(--workspace-text)]" },
-    { label: "To", value: message.to, tone: "text-[var(--workspace-text-soft)]" },
-    ...(message.cc
-      ? [{ label: "Cc", value: message.cc, tone: "text-[var(--workspace-text-soft)]" }]
-      : []),
-    { label: "Received", value: message.timestamp, tone: "text-[var(--workspace-text-soft)]" },
-  ];
-
-  return (
-    <div className="space-y-3">
-      {metaRows.map((row) => (
-        <div
-          key={row.label}
-          className="grid gap-1.5 border-b border-[color:rgba(121,151,120,0.08)] pb-3 last:border-b-0 last:pb-0"
-        >
-          <div className="text-[0.64rem] font-medium uppercase tracking-[0.18em] text-[var(--workspace-text-faint)]">
-            {row.label}
-          </div>
-          <div className={`break-words text-[0.9rem] leading-[1.65] ${row.tone}`}>
-            {row.value}
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
 function renderCompactMessageMetaHeader(
   message: Pick<MailMessage, "from" | "to" | "cc" | "timestamp">,
 ) {
@@ -13416,7 +13385,7 @@ function MailboxView({
 
 	                      return (
 	                    <div className="flex items-start justify-between gap-4">
-	                      <div className="space-y-3">
+	                      <div className="min-w-0 flex-1 space-y-3">
 	                        <h2 className="text-[1.3rem] font-medium tracking-tight text-[var(--workspace-text)] md:text-[1.45rem]">
 	                          {selectedMessage.subject}
 	                        </h2>
@@ -13429,19 +13398,7 @@ function MailboxView({
 	                            {linkedReviewLabel}
 	                          </button>
 	                        ) : null}
-	                        <div className="rounded-[22px] border border-[var(--workspace-border-soft)] bg-[linear-gradient(180deg,rgba(255,255,255,0.76),rgba(247,243,236,0.92))] px-4 py-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.22)] dark:bg-[linear-gradient(180deg,rgba(48,57,50,0.56),rgba(31,38,33,0.76))]">
-                            <div className="flex flex-wrap items-start justify-between gap-4">
-                              <div className="text-[0.64rem] font-medium uppercase tracking-[0.18em] text-[var(--workspace-text-faint)]">
-                                Message details
-                              </div>
-                              <div className="rounded-full border border-[color:rgba(121,151,120,0.16)] bg-[color:rgba(255,255,255,0.42)] px-3 py-1.5 text-[0.68rem] uppercase tracking-[0.14em] text-[var(--workspace-text-faint)] dark:bg-[color:rgba(255,255,255,0.04)]">
-                                Email
-                              </div>
-                            </div>
-                            <div className="mt-4 border-t border-[color:rgba(121,151,120,0.12)] pt-4">
-                              {renderMessageMetaSummary(selectedMessage)}
-                            </div>
-                          </div>
+                          {renderCompactMessageMetaHeader(selectedMessage)}
                       </div>
 	                      <div className="flex items-center gap-4">
 	                        {aiSuggestionsEnabled ? (
