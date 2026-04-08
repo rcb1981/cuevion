@@ -9045,7 +9045,7 @@ function MailboxView({
                 ) : null}
                 {bodyRenderMode.mode === "html" ? (
                   <div
-                    className={`email-html-content w-full ${density === "full" ? "min-h-[12rem]" : ""} ${isHistoricalThreadMessage ? "opacity-[0.94]" : ""}`}
+                    className={`email-html-content w-full ${density === "full" ? "min-h-[12rem]" : ""}`}
                   >
                     <EmailHtmlStage html={bodyRenderMode.html} themeMode={themeMode} />
                   </div>
