@@ -70,6 +70,7 @@ import {
   type ForYouRecentLearningDecision,
   type ForYouUncertainEmail,
 } from "../../lib/forYouEngine";
+import { applyLearningDecision } from "../../lib/applyLearningDecision";
 
 const primaryNavigationItems = [
   { section: "Dashboard", label: "Dashboard", shortLabel: "Dash" },
@@ -19030,39 +19031,22 @@ export function WorkspaceShell({
       sourceCurrentMailboxId?: InboxId | null;
     },
   ) => {
-    const learningKey = buildSenderLearningStoreKey(ruleValue, ruleType);
-
-    if (!learningKey) {
-      return;
-    }
-
     setSenderCategoryLearning((current) => {
-      const existingEntry = current[learningKey];
+      const decisionResult = applyLearningDecision({
+        senderCategoryLearning: current,
+        mailboxStore,
+        ruleValue,
+        ruleType,
+        category,
+        mailboxAction,
+        sourceContext: options?.sourceContext,
+        sourcePrioritySelection: options?.sourcePrioritySelection,
+        sourceMailboxId: options?.sourceMailboxId,
+        sourceCurrentMailboxId: options?.sourceCurrentMailboxId,
+        learnedFromCountFloor: HIGH_CONFIDENCE_LEARNING_COUNT,
+      });
 
-      return {
-        ...current,
-        [learningKey]: {
-          learnedCategory: category,
-          learnedFromCount: Math.max(
-            existingEntry?.learnedFromCount ?? 0,
-            HIGH_CONFIDENCE_LEARNING_COUNT,
-          ),
-          autoCategoryEnabled: existingEntry?.autoCategoryEnabled ?? true,
-          mailboxAction,
-          sourceContext: options?.sourceContext ?? existingEntry?.sourceContext,
-          sourcePrioritySelection:
-            options?.sourcePrioritySelection ?? existingEntry?.sourcePrioritySelection,
-          sourceMailboxId:
-            options?.sourceMailboxId !== undefined
-              ? options.sourceMailboxId
-              : existingEntry?.sourceMailboxId,
-          sourceCurrentMailboxId:
-            options?.sourceCurrentMailboxId !== undefined
-              ? options.sourceCurrentMailboxId
-              : existingEntry?.sourceCurrentMailboxId,
-          updatedAt: new Date().toISOString(),
-        },
-      };
+      return decisionResult?.nextSenderCategoryLearning ?? current;
     });
   };
 
