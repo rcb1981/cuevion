@@ -1276,7 +1276,7 @@ function buildEmailStageDocument(
   themeMode: "light" | "dark",
 ) {
   const stageTextColor =
-    themeMode === "dark" ? "rgba(229, 236, 230, 0.96)" : "rgba(43, 49, 45, 0.98)";
+    themeMode === "dark" ? "rgba(229, 236, 230, 0.96)" : "rgba(34, 38, 36, 0.99)";
   const stageLinkColor =
     themeMode === "dark" ? "rgba(176, 209, 183, 0.96)" : "rgba(44, 89, 116, 0.98)";
   const stageQuoteBorder =
@@ -1286,7 +1286,7 @@ function buildEmailStageDocument(
   const stageRuleColor =
     themeMode === "dark" ? "rgba(128, 156, 128, 0.14)" : "rgba(121, 151, 120, 0.14)";
   const stageSecondaryTextColor =
-    themeMode === "dark" ? "rgba(209, 217, 211, 0.88)" : "rgba(80, 74, 68, 0.92)";
+    themeMode === "dark" ? "rgba(214, 221, 216, 0.92)" : "rgba(74, 68, 62, 0.94)";
 
   return `<!DOCTYPE html>
 <html>
@@ -8827,8 +8827,8 @@ function MailboxView({
                         `${threadMessage.id}-${paragraph}`,
                         `break-words text-[0.94rem] ${density === "full" ? "leading-7" : "leading-6.5"} ${
                           isHistoricalThreadMessage
-                            ? "text-[color:rgba(97,90,82,0.94)] dark:text-[color:rgba(194,200,196,0.82)]"
-                            : "text-[color:rgba(53,48,43,0.98)] dark:text-[var(--workspace-text-soft)]"
+                            ? "text-[color:rgba(82,76,70,0.95)] dark:text-[color:rgba(205,211,207,0.86)]"
+                            : "text-[color:rgba(34,31,29,0.99)] dark:text-[color:rgba(228,235,230,0.94)]"
                         }`,
                       ),
                     )}
@@ -8847,7 +8847,7 @@ function MailboxView({
                             renderPlainMessageParagraph(
                               paragraph,
                               `${threadMessage.id}-quoted-${paragraph}`,
-                              `break-words text-[0.83rem] ${density === "full" ? "leading-6.25" : "leading-5.75"} text-[color:rgba(90,84,77,0.88)] dark:text-[color:rgba(176,182,178,0.68)]`,
+                              `break-words text-[0.83rem] ${density === "full" ? "leading-6.25" : "leading-5.75"} text-[color:rgba(82,76,70,0.9)] dark:text-[color:rgba(196,202,198,0.82)]`,
                             ),
                           )}
                         </div>
