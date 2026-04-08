@@ -9020,10 +9020,10 @@ function MailboxView({
               <div
                 className={`${
                   isHtmlMessage
-                    ? "mt-1.5 overflow-visible bg-transparent px-0 py-0"
+                    ? "mt-1.5 overflow-visible bg-transparent px-0 py-0 text-[var(--workspace-text)] dark:text-[color:rgba(228,235,230,0.94)]"
                     : isHistoricalThreadMessage
-                      ? "mt-1.5 bg-transparent px-0 py-0"
-                      : "mt-1.5 bg-transparent px-0 py-0"
+                      ? "mt-1.5 bg-transparent px-0 py-0 text-[var(--workspace-text)] dark:text-[color:rgba(228,235,230,0.94)]"
+                      : "mt-1.5 bg-transparent px-0 py-0 text-[var(--workspace-text)] dark:text-[color:rgba(228,235,230,0.94)]"
                 }`}
               >
                 <div className={isHtmlMessage ? "space-y-1.5" : "space-y-2.5"}>
