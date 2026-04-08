@@ -1356,15 +1356,16 @@ function EmailHtmlStage({
 }) {
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const [height, setHeight] = useState(320);
+  const [stageFailed, setStageFailed] = useState(false);
 
-  useEffect(() => {
+  const updateHeight = () => {
     const iframe = iframeRef.current;
 
     if (!iframe) {
       return;
     }
 
-    const updateHeight = () => {
+    try {
       const documentElement = iframe.contentDocument?.documentElement;
       const body = iframe.contentDocument?.body;
       const nextHeight = Math.max(
@@ -1373,53 +1374,36 @@ function EmailHtmlStage({
         220,
       );
 
-      setHeight(nextHeight);
-    };
+      setHeight((currentHeight) =>
+        Math.abs(currentHeight - nextHeight) > 1 ? nextHeight : currentHeight,
+      );
+    } catch {
+      setStageFailed(true);
+    }
+  };
 
-    let resizeObserver: ResizeObserver | null = null;
-    let animationFrameId = 0;
+  useEffect(() => {
+    if (stageFailed) {
+      return;
+    }
 
-    const scheduleHeightUpdate = () => {
-      cancelAnimationFrame(animationFrameId);
-      animationFrameId = requestAnimationFrame(() => {
-        updateHeight();
-      });
-    };
-
-    const handleLoad = () => {
-      scheduleHeightUpdate();
-
-      const observedBody = iframe.contentDocument?.body;
-      const observedDocumentElement = iframe.contentDocument?.documentElement;
-
-      if (typeof ResizeObserver !== "undefined") {
-        resizeObserver?.disconnect();
-        resizeObserver = new ResizeObserver(() => {
-          scheduleHeightUpdate();
-        });
-
-        if (observedBody) {
-          resizeObserver.observe(observedBody);
-        }
-
-        if (observedDocumentElement) {
-          resizeObserver.observe(observedDocumentElement);
-        }
-      }
-
-      iframe.contentWindow?.addEventListener("resize", scheduleHeightUpdate);
-    };
-
-    handleLoad();
-    iframe.addEventListener("load", handleLoad);
+    const firstPass = window.setTimeout(updateHeight, 0);
+    const secondPass = window.setTimeout(updateHeight, 180);
 
     return () => {
-      cancelAnimationFrame(animationFrameId);
-      resizeObserver?.disconnect();
-      iframe.contentWindow?.removeEventListener("resize", scheduleHeightUpdate);
-      iframe.removeEventListener("load", handleLoad);
+      window.clearTimeout(firstPass);
+      window.clearTimeout(secondPass);
     };
-  }, [html, themeMode]);
+  }, [html, themeMode, stageFailed]);
+
+  if (stageFailed) {
+    return (
+      <div
+        className="overflow-hidden rounded-[10px] border border-[color:rgba(121,151,120,0.1)] bg-[color:rgba(255,255,255,0.96)] dark:bg-[color:rgba(26,31,28,0.92)]"
+        dangerouslySetInnerHTML={{ __html: html }}
+      />
+    );
+  }
 
   return (
     <iframe
@@ -1428,6 +1412,7 @@ function EmailHtmlStage({
       sandbox="allow-popups allow-popups-to-escape-sandbox"
       srcDoc={buildEmailStageDocument(html, themeMode)}
       scrolling="no"
+      onLoad={updateHeight}
       className="block w-full overflow-hidden rounded-[10px] border-0 bg-transparent"
       style={{ height }}
     />
