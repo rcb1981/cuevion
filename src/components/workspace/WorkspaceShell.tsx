@@ -430,6 +430,7 @@ const canonicalFolderOrder: MailFolder[] = [
 const AI_SUGGESTIONS_STORAGE_KEY = "cuevion-ai-suggestions-enabled";
 const INBOX_CHANGES_STORAGE_KEY = "cuevion-inbox-changes-enabled";
 const TEAM_ACTIVITY_STORAGE_KEY = "cuevion-team-activity-enabled";
+const COLLABORATION_MENTION_SEEN_STORAGE_KEY = "cuevion-collaboration-mention-seen";
 const WORKSPACE_THEME_MODE_STORAGE_KEY = "cuevion-workspace-theme-mode";
 const CATEGORY_LEARNING_STORAGE_KEY = "cuevion-sender-category-learning";
 const MESSAGE_OWNERSHIP_STORAGE_KEY = "cuevion-message-ownership";
@@ -1006,6 +1007,79 @@ function getCollaborationMessageVisibility(
   entry: MailMessageCollaborationMessage,
 ): MailMessageCollaborationVisibility {
   return entry.visibility ?? "shared";
+}
+
+function getCollaborationMentionSeenKey(
+  messageId: string,
+  collaborationMessageId: string,
+  currentUserKey: string,
+) {
+  return `${currentUserKey}:${messageId}:${collaborationMessageId}`;
+}
+
+function isMentionForCurrentUser(
+  entry: Pick<MailMessageCollaborationMessage, "mentions">,
+  currentUserId: string,
+  currentUserEmail: string,
+) {
+  const normalizedCurrentUserId = currentUserId.trim().toLowerCase();
+  const normalizedCurrentUserEmail = currentUserEmail.trim().toLowerCase();
+
+  return (entry.mentions ?? []).some((mention) => {
+    const normalizedMentionId = mention.id.trim().toLowerCase();
+    const normalizedMentionEmail = mention.email.trim().toLowerCase();
+
+    return (
+      mention.notify &&
+      ((normalizedCurrentUserId.length > 0 && normalizedMentionId === normalizedCurrentUserId) ||
+        (normalizedCurrentUserEmail.length > 0 &&
+          normalizedMentionEmail === normalizedCurrentUserEmail))
+    );
+  });
+}
+
+function getUnseenMentionMessageIdsForCurrentUser(
+  message: Pick<MailMessage, "id" | "collaboration">,
+  currentUserId: string,
+  currentUserEmail: string,
+  seenMentionNotificationKeys: string[],
+) {
+  if (!message.collaboration) {
+    return [];
+  }
+
+  const currentUserKey =
+    currentUserEmail.trim().toLowerCase() || currentUserId.trim().toLowerCase();
+
+  if (!currentUserKey) {
+    return [];
+  }
+
+  return message.collaboration.messages
+    .filter((entry) => isMentionForCurrentUser(entry, currentUserId, currentUserEmail))
+    .filter(
+      (entry) =>
+        !seenMentionNotificationKeys.includes(
+          getCollaborationMentionSeenKey(message.id, entry.id, currentUserKey),
+        ),
+    )
+    .map((entry) => entry.id);
+}
+
+function hasUnseenMentionForCurrentUser(
+  message: Pick<MailMessage, "id" | "collaboration">,
+  currentUserId: string,
+  currentUserEmail: string,
+  seenMentionNotificationKeys: string[],
+) {
+  return (
+    getUnseenMentionMessageIdsForCurrentUser(
+      message,
+      currentUserId,
+      currentUserEmail,
+      seenMentionNotificationKeys,
+    ).length > 0
+  );
 }
 
 function canViewerSeeCollaborationMessage(
@@ -4867,55 +4941,139 @@ function TopCards({
 function buildVisibleNotificationItems({
   teamActivityEnabled,
   onOpenNotificationNavigation,
+  mailboxStore,
+  currentUserId,
+  currentUserEmail,
+  seenMentionNotificationKeys,
 }: {
   teamActivityEnabled: boolean;
   onOpenNotificationNavigation: (
     request: Omit<NotificationNavigationRequest, "requestKey">,
   ) => void;
+  mailboxStore: MailboxStore;
+  currentUserId: string;
+  currentUserEmail: string;
+  seenMentionNotificationKeys: string[];
 }) {
-  const notificationItems = [
-    {
-      eventType: "collaboration_invite_received" as const,
-      category: "team-activity" as const,
-      title: "You were invited to a collaboration",
-      detail: "Emma invited you to inspect DSP delivery note",
-      time: "NOW",
-      action: () =>
-        onOpenNotificationNavigation({
-          type: "invite",
-          mailboxId: "main",
-          messageId: "main-5",
-          inviteeEmail: "david@cuevion.com",
-        }),
-    },
-    {
-      eventType: "collaboration_reply_received" as const,
-      category: "team-activity" as const,
-      title: "Emma replied",
-      detail: "DSP delivery note",
-      time: "7 MIN AGO",
-      action: () =>
-        onOpenNotificationNavigation({
-          type: "reply",
-          mailboxId: "main",
-          messageId: "main-5",
-        }),
-    },
-    {
-      eventType: "collaboration_mention_received" as const,
-      category: "team-activity" as const,
-      title: "You were mentioned by David",
-      detail: "Artwork confirmation for vinyl repress",
-      time: "12 MIN AGO",
-      action: () =>
-        onOpenNotificationNavigation({
-          type: "mention",
-          mailboxId: "main",
-          messageId: "main-18",
-          collaborationMessageId: "main-18-collaboration-mention",
-        }),
-    },
-  ];
+  const normalizedCurrentUserId = currentUserId.trim().toLowerCase();
+  const normalizedCurrentUserEmail = currentUserEmail.trim().toLowerCase();
+  const currentUserKey = normalizedCurrentUserEmail || normalizedCurrentUserId;
+  const notificationItems = Object.entries(mailboxStore)
+    .flatMap(([mailboxId, collections]) =>
+      canonicalFolderOrder.flatMap((folder) =>
+        collections[folder].map((message) => ({
+          mailboxId: mailboxId as InboxId,
+          message,
+        })),
+      ),
+    )
+    .reduce<Array<{
+      eventType:
+        | "collaboration_invite_received"
+        | "collaboration_reply_received"
+        | "collaboration_mention_received";
+      category: "team-activity";
+      title: string;
+      detail: string;
+      time: string;
+      timestamp: number;
+      isMentionForCurrentUser: boolean;
+      action: () => void;
+    }>>((items, { mailboxId, message }) => {
+      const collaboration = message.collaboration;
+
+      if (!collaboration) {
+        return items;
+      }
+
+      const hasInviteForCurrentUser =
+        currentUserKey.length > 0 &&
+        (collaboration.requestedUserId.trim().toLowerCase() === normalizedCurrentUserId ||
+          getCollaborationParticipants(collaboration).some(
+            (participant) =>
+              participant.email.trim().toLowerCase() === normalizedCurrentUserEmail &&
+              participant.status === "invited",
+          ));
+      const currentUserParticipantIds = new Set(
+        getCollaborationParticipants(collaboration)
+          .filter(
+            (participant) =>
+              participant.email.trim().toLowerCase() === normalizedCurrentUserEmail,
+          )
+          .map((participant) => participant.id.trim().toLowerCase())
+          .filter(Boolean),
+      );
+
+      if (hasInviteForCurrentUser) {
+        items.push({
+          eventType: "collaboration_invite_received",
+          category: "team-activity",
+          title: "You were invited to a collaboration",
+          detail: message.subject,
+          time: formatLearningRuleTimestamp(new Date(collaboration.createdAt).toISOString()),
+          timestamp: collaboration.createdAt,
+          isMentionForCurrentUser: false,
+          action: () =>
+            onOpenNotificationNavigation({
+              type: "invite",
+              mailboxId,
+              messageId: message.id,
+              inviteeEmail: currentUserEmail || undefined,
+            }),
+        });
+      }
+
+      collaboration.messages.forEach((entry) => {
+        if (
+          entry.authorId.trim().toLowerCase() === normalizedCurrentUserId ||
+          currentUserParticipantIds.has(entry.authorId.trim().toLowerCase())
+        ) {
+          return;
+        }
+
+        const isMention = isMentionForCurrentUser(entry, currentUserId, currentUserEmail);
+
+        if (
+          isMention &&
+          currentUserKey &&
+          seenMentionNotificationKeys.includes(
+            getCollaborationMentionSeenKey(message.id, entry.id, currentUserKey),
+          )
+        ) {
+          return;
+        }
+
+        items.push({
+          eventType: isMention
+            ? "collaboration_mention_received"
+            : "collaboration_reply_received",
+          category: "team-activity",
+          title: isMention
+            ? `You were mentioned by ${entry.authorName}`
+            : `${entry.authorName} replied`,
+          detail: message.subject,
+          time: formatLearningRuleTimestamp(new Date(entry.timestamp).toISOString()),
+          timestamp: entry.timestamp,
+          isMentionForCurrentUser: isMention,
+          action: () =>
+            onOpenNotificationNavigation({
+              type: isMention ? "mention" : "reply",
+              mailboxId,
+              messageId: message.id,
+              collaborationMessageId: entry.id,
+            }),
+        });
+      });
+
+      return items;
+    }, [])
+    .sort((firstItem, secondItem) => {
+      if (firstItem.isMentionForCurrentUser !== secondItem.isMentionForCurrentUser) {
+        return firstItem.isMentionForCurrentUser ? -1 : 1;
+      }
+
+      return secondItem.timestamp - firstItem.timestamp;
+    });
 
   return notificationItems.filter((item, index, items) => {
     if (item.category === "team-activity" && !teamActivityEnabled) {
@@ -4953,9 +5111,18 @@ function NotificationsPreviewBlock({
               key={`${item.title}-${item.time}`}
               type="button"
               onClick={item.action}
-              className="flex w-full items-start justify-between gap-4 rounded-[20px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-3.5 text-left transition-[background-color,background-image,border-color,transform] duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)] focus-visible:border-[var(--workspace-border-hover)] focus-visible:bg-[linear-gradient(180deg,var(--workspace-card-featured-start),var(--workspace-card-featured-end))] focus-visible:outline-none"
+              className={`flex w-full items-start justify-between gap-4 rounded-[20px] border px-4 py-3.5 text-left transition-[background-color,background-image,border-color,transform] duration-150 focus-visible:outline-none ${
+                item.isMentionForCurrentUser
+                  ? "border-[color:rgba(95,138,91,0.34)] bg-[linear-gradient(180deg,rgba(232,243,231,0.92),rgba(226,238,225,0.82))] hover:border-[color:rgba(86,126,82,0.42)] hover:bg-[linear-gradient(180deg,rgba(236,246,234,0.96),rgba(228,240,227,0.88))] focus-visible:border-[color:rgba(86,126,82,0.46)] focus-visible:bg-[linear-gradient(180deg,rgba(236,246,234,0.98),rgba(228,240,227,0.92))] dark:border-[color:rgba(128,167,124,0.34)] dark:bg-[linear-gradient(180deg,rgba(70,94,72,0.34),rgba(55,75,57,0.28))] dark:hover:border-[color:rgba(144,184,140,0.42)] dark:hover:bg-[linear-gradient(180deg,rgba(81,108,83,0.38),rgba(60,82,63,0.32))]"
+                  : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)] focus-visible:border-[var(--workspace-border-hover)] focus-visible:bg-[linear-gradient(180deg,var(--workspace-card-featured-start),var(--workspace-card-featured-end))]"
+              }`}
             >
               <div className="min-w-0 space-y-1">
+                {item.isMentionForCurrentUser ? (
+                  <div className="inline-flex items-center rounded-full border border-[color:rgba(95,138,91,0.26)] bg-[color:rgba(126,155,128,0.12)] px-2 py-0.5 text-[0.58rem] font-medium uppercase tracking-[0.14em] text-[color:rgba(82,97,85,0.86)] dark:border-[color:rgba(128,167,124,0.26)] dark:bg-[color:rgba(128,167,124,0.16)] dark:text-[color:rgba(226,239,223,0.92)]">
+                    Mention
+                  </div>
+                ) : null}
                 <div className="truncate text-[0.95rem] font-medium tracking-[-0.012em] text-[var(--workspace-text)]">
                   {item.title}
                 </div>
@@ -5070,6 +5237,10 @@ function DashboardView({
   onOpenForYou,
   onOpenNotificationNavigation,
   teamActivityEnabled,
+  mailboxStore,
+  currentUserId,
+  currentUserEmail,
+  seenMentionNotificationKeys,
   primaryInboxTitle,
   primaryInboxEmailCount,
   connectedInboxCount,
@@ -5083,6 +5254,10 @@ function DashboardView({
     request: Omit<NotificationNavigationRequest, "requestKey">,
   ) => void;
   teamActivityEnabled: boolean;
+  mailboxStore: MailboxStore;
+  currentUserId: string;
+  currentUserEmail: string;
+  seenMentionNotificationKeys: string[];
   primaryInboxTitle: string;
   primaryInboxEmailCount: number;
   connectedInboxCount: number;
@@ -5102,6 +5277,10 @@ function DashboardView({
     ? buildVisibleNotificationItems({
         teamActivityEnabled,
         onOpenNotificationNavigation,
+        mailboxStore,
+        currentUserId,
+        currentUserEmail,
+        seenMentionNotificationKeys,
       })
     : [];
 
@@ -5433,6 +5612,8 @@ function MailboxView({
   aiSuggestionsEnabled,
   notificationNavigationRequest,
   onConsumeNotificationNavigation,
+  seenMentionNotificationKeys,
+  onMarkMentionNotificationsSeen,
   manualPriorityOverrides,
   onSetManualPriority,
   getLinkedReviewForMessage,
@@ -5476,6 +5657,8 @@ function MailboxView({
   aiSuggestionsEnabled: boolean;
   notificationNavigationRequest?: NotificationNavigationRequest | null;
   onConsumeNotificationNavigation?: (requestKey: number) => void;
+  seenMentionNotificationKeys: string[];
+  onMarkMentionNotificationsSeen: (messageId: string, collaborationMessageIds: string[]) => void;
   manualPriorityOverrides: Partial<Record<string, ManualPriorityOverride>>;
   onSetManualPriority: (messageId: string, shouldBePriority: boolean) => void;
   getLinkedReviewForMessage: (messageId: string) => ReviewItem | null;
@@ -7170,6 +7353,20 @@ function MailboxView({
     messageId: string,
     options?: { focusComposer?: boolean },
   ) => {
+    const targetMessage = getMessageById(messageId);
+    const unseenMentionMessageIds = targetMessage
+      ? getUnseenMentionMessageIdsForCurrentUser(
+          targetMessage,
+          currentUserId,
+          currentUserEmail,
+          seenMentionNotificationKeys,
+        )
+      : [];
+
+    if (unseenMentionMessageIds.length > 0) {
+      onMarkMentionNotificationsSeen(messageId, unseenMentionMessageIds);
+    }
+
     setSelectionState([messageId], messageId, messageId);
     setActiveCollaborationMessageId(messageId);
     setFocusCollaborationComposer(Boolean(options?.focusComposer));
@@ -10104,6 +10301,12 @@ function MailboxView({
                   <div className="space-y-2">
                     {sortedMessages.map((message) => {
                       const active = visibleSelectedMessageIds.includes(message.id);
+                      const hasUnseenMention = hasUnseenMentionForCurrentUser(
+                        message,
+                        currentUserId,
+                        currentUserEmail,
+                        seenMentionNotificationKeys,
+                      );
                       const compactSnippet =
                         message.snippet.length > MAIL_LIST_PREVIEW_CHARACTER_CAP
                           ? message.snippet
@@ -10196,6 +10399,8 @@ function MailboxView({
                           className={`grid min-h-[92px] w-full cursor-pointer grid-cols-[minmax(0,1fr)_max-content] gap-3 rounded-[18px] border px-4 py-2.5 text-left transition-[background-color,background-image,border-color,box-shadow,transform] duration-150 ${
                             active
                               ? "border-[var(--workspace-border-hover)] bg-[linear-gradient(180deg,var(--workspace-selected-surface-start),var(--workspace-selected-surface-end))] shadow-[0_10px_24px_rgba(31,42,36,0.08),inset_0_1px_0_rgba(255,255,255,0.08)]"
+                              : hasUnseenMention
+                                ? "border-[color:rgba(95,138,91,0.28)] bg-[linear-gradient(180deg,rgba(245,249,243,0.94),rgba(240,246,238,0.88))] hover:border-[color:rgba(86,126,82,0.34)] hover:bg-[linear-gradient(180deg,rgba(247,250,245,0.98),rgba(242,247,240,0.92))]"
                               : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)]"
                           } focus-visible:border-[var(--workspace-border-hover)] focus-visible:outline-none`}
                         >
@@ -10220,6 +10425,11 @@ function MailboxView({
                                 ) : null}
                                 {message.unread ? (
                                   <span className={unreadAttentionDotClass} />
+                                ) : null}
+                                {hasUnseenMention ? (
+                                  <span className="inline-flex h-4 min-w-[1rem] flex-none items-center justify-center rounded-full border border-[color:rgba(95,138,91,0.26)] bg-[color:rgba(126,155,128,0.12)] px-1 text-[0.62rem] font-medium leading-none text-[color:rgba(82,97,85,0.88)]">
+                                    @
+                                  </span>
                                 ) : null}
                                 {message.flagged ? (
                                   <span
@@ -11692,6 +11902,10 @@ function WorkbenchView({
   aiSuggestionsEnabled,
   inboxChangesEnabled,
   teamActivityEnabled,
+  mailboxStore,
+  currentUserId,
+  currentUserEmail,
+  seenMentionNotificationKeys,
   modalHost,
   pendingTeamInvitation,
   memberOfEntries,
@@ -11710,6 +11924,10 @@ function WorkbenchView({
   aiSuggestionsEnabled: boolean;
   inboxChangesEnabled: boolean;
   teamActivityEnabled: boolean;
+  mailboxStore: MailboxStore;
+  currentUserId: string;
+  currentUserEmail: string;
+  seenMentionNotificationKeys: string[];
   modalHost: HTMLElement | null;
   pendingTeamInvitation: PendingTeamInvitation;
   memberOfEntries: TeamMembershipEntry[];
@@ -11848,6 +12066,10 @@ function WorkbenchView({
     ? buildVisibleNotificationItems({
         teamActivityEnabled,
         onOpenNotificationNavigation,
+        mailboxStore,
+        currentUserId,
+        currentUserEmail,
+        seenMentionNotificationKeys,
       })
     : [];
   const [teamMembers, setTeamMembers] = useState<TeamMemberEntry[]>(() => showDemoContent ? [
@@ -12028,9 +12250,18 @@ function WorkbenchView({
                   key={`${item.title}-${item.time}`}
                   type="button"
                   onClick={item.action}
-                  className="flex w-full items-start justify-between gap-4 rounded-[18px] px-2 py-3 text-left transition-colors duration-200 first:mt-[-0.25rem] first:pt-3 last:mb-[-0.25rem] hover:bg-[var(--workspace-surface-hover)] focus-visible:bg-[var(--workspace-surface-selected)] focus-visible:outline-none"
+                  className={`flex w-full items-start justify-between gap-4 rounded-[18px] border px-3 py-3 text-left transition-colors duration-200 first:mt-[-0.25rem] first:pt-3 last:mb-[-0.25rem] focus-visible:outline-none ${
+                    item.isMentionForCurrentUser
+                      ? "border-[color:rgba(95,138,91,0.28)] bg-[color:rgba(126,155,128,0.1)] hover:bg-[color:rgba(126,155,128,0.14)] focus-visible:bg-[color:rgba(126,155,128,0.16)]"
+                      : "border-transparent hover:bg-[var(--workspace-surface-hover)] focus-visible:bg-[var(--workspace-surface-selected)]"
+                  }`}
                 >
                   <div className="min-w-0 space-y-0.5">
+                    {item.isMentionForCurrentUser ? (
+                      <div className="inline-flex items-center rounded-full border border-[color:rgba(95,138,91,0.22)] bg-[color:rgba(126,155,128,0.1)] px-2 py-0.5 text-[0.58rem] font-medium uppercase tracking-[0.14em] text-[color:rgba(82,97,85,0.84)]">
+                        Mention
+                      </div>
+                    ) : null}
                     <div className="text-[0.92rem] font-medium tracking-[-0.014em] text-[var(--workspace-text)]">
                       {item.title}
                     </div>
@@ -17972,6 +18203,29 @@ export function WorkspaceShell({
         return {};
       }
     });
+  const [seenMentionNotificationKeys, setSeenMentionNotificationKeys] = useState<string[]>(
+    () => {
+      if (typeof window === "undefined") {
+        return [];
+      }
+
+      const storedValue = window.localStorage.getItem(
+        COLLABORATION_MENTION_SEEN_STORAGE_KEY,
+      );
+
+      if (!storedValue) {
+        return [];
+      }
+
+      try {
+        const parsed = JSON.parse(storedValue) as string[];
+
+        return Array.isArray(parsed) ? parsed : [];
+      } catch {
+        return [];
+      }
+    },
+  );
   const [mailboxStore, setMailboxStore] = useState<MailboxStore>(() =>
     normalizeMailboxStore(
       createInitialMailboxStore(
@@ -18181,6 +18435,13 @@ export function WorkspaceShell({
       JSON.stringify(savedManagedInboxes),
     );
   }, [savedManagedInboxes]);
+
+  useEffect(() => {
+    window.localStorage.setItem(
+      COLLABORATION_MENTION_SEEN_STORAGE_KEY,
+      JSON.stringify(seenMentionNotificationKeys),
+    );
+  }, [seenMentionNotificationKeys]);
 
   useEffect(() => {
     if (!activeMailbox) {
@@ -19030,6 +19291,30 @@ export function WorkspaceShell({
     setNotificationNavigationRequest({
       ...request,
       requestKey: Date.now(),
+    });
+  };
+
+  const markMentionNotificationsSeen = (
+    messageId: string,
+    collaborationMessageIds: string[],
+  ) => {
+    const currentUserKey =
+      activeWorkspaceEmail.trim().toLowerCase() || currentWorkspaceUserId.trim().toLowerCase();
+
+    if (!currentUserKey || collaborationMessageIds.length === 0) {
+      return;
+    }
+
+    setSeenMentionNotificationKeys((currentKeys) => {
+      const nextKeys = new Set(currentKeys);
+
+      collaborationMessageIds.forEach((collaborationMessageId) => {
+        nextKeys.add(
+          getCollaborationMentionSeenKey(messageId, collaborationMessageId, currentUserKey),
+        );
+      });
+
+      return Array.from(nextKeys);
     });
   };
 
@@ -20282,12 +20567,14 @@ export function WorkspaceShell({
                   inboxSignatures={inboxSignatures}
                   themeMode={resolvedTheme}
                   aiSuggestionsEnabled={aiSuggestionsEnabled}
-	                  notificationNavigationRequest={notificationNavigationRequest}
-	                  onConsumeNotificationNavigation={(requestKey) =>
-	                    setNotificationNavigationRequest((current) =>
-	                      current?.requestKey === requestKey ? null : current,
-	                    )
-	                  }
+                  notificationNavigationRequest={notificationNavigationRequest}
+                  onConsumeNotificationNavigation={(requestKey) =>
+                    setNotificationNavigationRequest((current) =>
+                      current?.requestKey === requestKey ? null : current,
+                    )
+                  }
+                  seenMentionNotificationKeys={seenMentionNotificationKeys}
+                  onMarkMentionNotificationsSeen={markMentionNotificationsSeen}
                   manualPriorityOverrides={manualPriorityOverrides}
                   onSetManualPriority={handleSetManualPriority}
                   getLinkedReviewForMessage={getLinkedReviewForMessage}
@@ -20306,6 +20593,10 @@ export function WorkspaceShell({
                   onOpenForYou={() => handleOpenForYou("Promo")}
                   onOpenNotificationNavigation={handleOpenNotificationNavigation}
                   teamActivityEnabled={teamActivityEnabled}
+                  mailboxStore={mailboxStore}
+                  currentUserId={currentWorkspaceUserId}
+                  currentUserEmail={activeWorkspaceEmail}
+                  seenMentionNotificationKeys={seenMentionNotificationKeys}
                   primaryInboxTitle={primaryInboxTitle}
                   primaryInboxEmailCount={primaryInboxEmailCount}
                   connectedInboxCount={connectedInboxCount}
@@ -20342,6 +20633,10 @@ export function WorkspaceShell({
                   aiSuggestionsEnabled={aiSuggestionsEnabled}
                   inboxChangesEnabled={inboxChangesEnabled}
                   teamActivityEnabled={teamActivityEnabled}
+                  mailboxStore={mailboxStore}
+                  currentUserId={currentWorkspaceUserId}
+                  currentUserEmail={activeWorkspaceEmail}
+                  seenMentionNotificationKeys={seenMentionNotificationKeys}
                   modalHost={workspaceModalHostRef.current}
                   pendingTeamInvitation={pendingTeamInvitation}
                   memberOfEntries={memberOfEntries}
