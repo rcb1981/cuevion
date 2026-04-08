@@ -1271,6 +1271,149 @@ function renderCompactMessageMetaHeader(
   );
 }
 
+function buildEmailStageDocument(
+  html: string,
+  themeMode: "light" | "dark",
+) {
+  const stageBackground =
+    themeMode === "dark" ? "rgba(26, 31, 28, 0.92)" : "rgba(255, 255, 255, 0.96)";
+  const stageBorder =
+    themeMode === "dark" ? "rgba(121, 151, 120, 0.12)" : "rgba(121, 151, 120, 0.1)";
+
+  return `<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      html, body {
+        margin: 0;
+        padding: 0;
+        background: transparent;
+      }
+      body {
+        overflow-wrap: anywhere;
+        word-break: break-word;
+      }
+      .email-stage {
+        box-sizing: border-box;
+        width: 100%;
+        background: ${stageBackground};
+        border: 1px solid ${stageBorder};
+        border-radius: 10px;
+        overflow: hidden;
+      }
+      .email-stage > * {
+        max-width: 100%;
+      }
+      img {
+        max-width: 100%;
+        height: auto;
+      }
+      table {
+        max-width: 100%;
+      }
+      a {
+        word-break: break-all;
+      }
+      [data-email-image-placeholder="true"] {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+        max-width: 100%;
+        margin: 0.25rem 0;
+        padding: 0.2rem 0.5rem;
+        border-radius: 999px;
+        border: 1px dashed rgba(121, 151, 120, 0.1);
+        background: rgba(86, 114, 87, 0.02);
+        color: rgba(120, 111, 100, 0.78);
+        font: 500 11px/1.4 ui-sans-serif, system-ui, sans-serif;
+        letter-spacing: 0.04em;
+      }
+      [data-email-image-role="decorative"] {
+        padding: 0;
+        border: 0;
+        background: transparent;
+        font-size: 9px;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        opacity: 0.75;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="email-stage">${html}</div>
+  </body>
+</html>`;
+}
+
+function EmailHtmlStage({
+  html,
+  themeMode,
+}: {
+  html: string;
+  themeMode: "light" | "dark";
+}) {
+  const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  const [height, setHeight] = useState(320);
+
+  useEffect(() => {
+    const iframe = iframeRef.current;
+
+    if (!iframe) {
+      return;
+    }
+
+    const updateHeight = () => {
+      const documentElement = iframe.contentDocument?.documentElement;
+      const body = iframe.contentDocument?.body;
+      const nextHeight = Math.max(
+        documentElement?.scrollHeight ?? 0,
+        body?.scrollHeight ?? 0,
+        220,
+      );
+
+      setHeight(nextHeight);
+    };
+
+    const handleLoad = () => {
+      updateHeight();
+
+      const observedBody = iframe.contentDocument?.body;
+
+      if (!observedBody || typeof ResizeObserver === "undefined") {
+        return;
+      }
+
+      const resizeObserver = new ResizeObserver(() => {
+        updateHeight();
+      });
+
+      resizeObserver.observe(observedBody);
+      return () => resizeObserver.disconnect();
+    };
+
+    const cleanup = handleLoad();
+    iframe.addEventListener("load", handleLoad);
+
+    return () => {
+      cleanup?.();
+      iframe.removeEventListener("load", handleLoad);
+    };
+  }, [html, themeMode]);
+
+  return (
+    <iframe
+      ref={iframeRef}
+      title="Email content"
+      sandbox="allow-popups allow-popups-to-escape-sandbox"
+      srcDoc={buildEmailStageDocument(html, themeMode)}
+      className="block w-full overflow-hidden rounded-[10px] border-0 bg-transparent"
+      style={{ height }}
+    />
+  );
+}
+
 function sanitizeMessageBodyHtml(
   bodyHtml: string,
   options?: { allowRemoteImages?: boolean },
@@ -8634,12 +8777,7 @@ function MailboxView({
                   <div
                     className="email-html-content w-full"
                   >
-                    <div
-                      className={`whitespace-pre-wrap text-[0.95rem] ${
-                        density === "full" ? "leading-8" : "leading-[1.9]"
-                      } break-words bg-transparent text-[var(--workspace-text-soft)] [overflow-wrap:anywhere] [&_*]:max-w-full [&_a]:break-all [&_a]:text-[color:rgba(70,109,73,0.96)] [&_a]:underline [&_a]:underline-offset-2 [&_blockquote]:my-5 [&_blockquote]:border-l-2 [&_blockquote]:border-[color:rgba(121,151,120,0.18)] [&_blockquote]:pl-4 [&_blockquote]:text-[color:rgba(104,98,89,0.82)] [&_br+br]:content-[''] [&_div]:max-w-full [&_div]:leading-[inherit] [&_div[data-compose-signature-divider='true']]:my-3 [&_div[data-compose-signature-divider='true']]:h-px [&_div[data-compose-signature-divider='true']]:w-full [&_div[data-compose-signature-divider='true']]:bg-[color:rgba(121,151,120,0.12)] [&_div[data-compose-signature-logo='true']]:pt-1 [&_div[data-compose-signature-logo='true']_img]:max-h-[76px] [&_div[data-compose-signature-logo='true']_img]:w-auto [&_div[data-compose-signature-logo='true']_img]:max-w-full [&_div[data-compose-signature-logo='true']_img]:object-contain [&_div[data-compose-signature-row='true']]:flex [&_div[data-compose-signature-row='true']]:items-start [&_div[data-compose-signature-row='true']]:gap-4 [&_div[data-compose-signature-right='true']]:min-w-0 [&_div[data-compose-signature-right='true']]:flex-1 [&_div[data-compose-signature-spacer='true']]:min-h-[1.75rem] [&_div[data-compose-signature-text='true']]:whitespace-pre-wrap [&_div[data-compose-signature-text='true']]:text-[0.86rem] [&_div[data-compose-signature-text='true']]:leading-[1.45] [&_div[data-compose-signature-text='true']_div]:min-h-[1.2rem] [&_div[data-compose-signature-text='true']_p]:min-h-[1.2rem] [&_div[data-compose-quote='true']]:pt-3 [&_[data-email-image-placeholder='true']]:my-1 [&_[data-email-image-placeholder='true']]:inline-flex [&_[data-email-image-placeholder='true']]:max-w-full [&_[data-email-image-placeholder='true']]:items-center [&_[data-email-image-placeholder='true']]:gap-1.5 [&_[data-email-image-placeholder='true']]:rounded-full [&_[data-email-image-placeholder='true']]:border [&_[data-email-image-placeholder='true']]:border-[color:rgba(121,151,120,0.06)] [&_[data-email-image-placeholder='true']]:bg-[color:rgba(86,114,87,0.018)] [&_[data-email-image-placeholder='true']]:px-2.5 [&_[data-email-image-placeholder='true']]:py-1 [&_[data-email-image-placeholder='true']]:text-[0.66rem] [&_[data-email-image-placeholder='true']]:leading-5 [&_[data-email-image-placeholder='true']]:text-[var(--workspace-text-faint)] [&_[data-email-image-placeholder='true'][data-email-image-source='remote']]:border-[color:rgba(99,129,100,0.08)] [&_[data-email-image-placeholder='true'][data-email-image-source='remote']]:bg-[color:rgba(86,114,87,0.016)] [&_[data-email-image-placeholder='true'][data-email-image-source='cid']]:border-dashed [&_[data-email-image-placeholder='true'][data-email-image-source='cid']]:opacity-65 [&_[data-email-image-placeholder='true'][data-email-image-role='decorative']]:my-0 [&_[data-email-image-placeholder='true'][data-email-image-role='decorative']]:border-transparent [&_[data-email-image-placeholder='true'][data-email-image-role='decorative']]:bg-transparent [&_[data-email-image-placeholder='true'][data-email-image-role='decorative']]:px-0 [&_[data-email-image-placeholder='true'][data-email-image-role='decorative']]:py-0 [&_[data-email-image-placeholder='true'][data-email-image-role='decorative']]:text-[0.56rem] [&_[data-email-image-placeholder='true'][data-email-image-role='decorative']]:uppercase [&_[data-email-image-placeholder='true'][data-email-image-role='decorative']]:tracking-[0.16em] [&_[data-email-quote='true']]:my-4 [&_[data-email-quote='true']]:rounded-[10px] [&_[data-email-quote='true']]:border [&_[data-email-quote='true']]:border-[color:rgba(121,151,120,0.1)] [&_[data-email-quote='true']]:bg-[color:rgba(86,114,87,0.03)] [&_[data-email-quote='true']]:px-4 [&_[data-email-quote='true']]:py-3 [&_[data-email-quote='true']]:text-[color:rgba(108,101,93,0.86)] [&_h1]:my-4 [&_h1]:text-[1.52rem] [&_h1]:font-medium [&_h1]:leading-tight [&_h1]:text-[var(--workspace-text)] [&_h2]:my-4 [&_h2]:text-[1.28rem] [&_h2]:font-medium [&_h2]:leading-tight [&_h2]:text-[var(--workspace-text)] [&_h3]:my-3 [&_h3]:text-[1.08rem] [&_h3]:font-medium [&_h3]:leading-snug [&_h3]:text-[var(--workspace-text)] [&_hr]:my-5 [&_hr]:border-0 [&_hr]:border-t [&_hr]:border-[color:rgba(121,151,120,0.1)] [&_iframe]:max-w-full [&_img]:h-auto [&_img]:max-w-full [&_img]:rounded-[8px] [&_img[data-image-source-type='remote']]:block [&_img[data-image-source-type='remote']]:bg-transparent [&_li]:my-1.5 [&_ol]:my-4 [&_ol]:pl-6 [&_p]:my-2 [&_p]:leading-[inherit] [&_pre]:overflow-x-auto [&_pre]:rounded-[10px] [&_pre]:bg-[color:rgba(44,52,45,0.03)] [&_pre]:p-3 [&_table]:my-2 [&_table]:w-full [&_table]:table-auto [&_table]:border-collapse [&_table]:bg-transparent [&_tbody]:align-top [&_td]:border [&_td]:border-[color:rgba(121,151,120,0.08)] [&_td]:px-2.5 [&_td]:py-2 [&_th]:border [&_th]:border-[color:rgba(121,151,120,0.08)] [&_th]:bg-[color:rgba(121,151,120,0.03)] [&_th]:px-2.5 [&_th]:py-2 [&_ul]:my-4 [&_ul]:pl-6`}
-                      dangerouslySetInnerHTML={{ __html: bodyRenderMode.html }}
-                    />
+                    <EmailHtmlStage html={bodyRenderMode.html} themeMode={themeMode} />
                   </div>
                 ) : (
                   <div>
