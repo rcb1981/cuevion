@@ -1599,31 +1599,25 @@ function EmailHtmlStage({
       return fallbackHeight;
     }
 
-    const stageRootVisualHeight = Math.ceil(stageRootRect.height);
-    const stageRootSupportsContentBottom =
-      stageRootVisualHeight >= contentBottom &&
-      stageRootVisualHeight <= contentBottom + 220;
     const safeContentHeight = contentBottom + measurementSafetyBuffer;
-    const fallbackCandidates = [
-      stageRootSupportsContentBottom ? stageRootVisualHeight : 0,
+    const scrollCandidates = [
       stageRoot.scrollHeight,
-      stageRoot.offsetHeight,
       body.scrollHeight,
-      body.offsetHeight,
       docEl.scrollHeight,
-      docEl.offsetHeight,
     ]
       .map((value) => Math.ceil(value ?? 0))
-      .filter((value) => Number.isFinite(value) && value >= safeContentHeight);
-    const tightCandidates = fallbackCandidates.filter(
-      (value) => value <= safeContentHeight + 96,
+      .filter((value) => Number.isFinite(value) && value > 0);
+    const safeScrollCandidates = scrollCandidates.filter(
+      (value) => value >= safeContentHeight,
     );
-    const nextHeight =
-      tightCandidates.length > 0
-        ? Math.min(...tightCandidates)
-        : fallbackCandidates.length > 0
-          ? Math.min(...fallbackCandidates)
-          : safeContentHeight;
+    const nearContentCandidates = safeScrollCandidates.filter(
+      (value) => value <= safeContentHeight + 160,
+    );
+    const nextHeight = nearContentCandidates.length > 0
+      ? Math.min(...nearContentCandidates)
+      : safeScrollCandidates.length > 0
+        ? Math.max(safeContentHeight, Math.min(...safeScrollCandidates))
+        : safeContentHeight;
 
     return Math.max(320, nextHeight);
   };
@@ -9310,6 +9304,179 @@ function MailboxView({
       currentIds.includes(messageId) ? currentIds : [...currentIds, messageId],
     );
   };
+  const compactMessageParagraphs = (paragraphs: string[]) =>
+    paragraphs.map((paragraph) => paragraph.trim()).filter(Boolean);
+  const renderThreadMessage = (
+    threadMessage: MailMessage,
+    density: "split" | "full",
+    options?: { historical?: boolean },
+  ) => {
+    const isCurrentUser =
+      normalizeSenderLearningKey(threadMessage.from) ===
+        normalizeSenderLearningKey(mailbox.email) ||
+      threadMessage.signal === "Sent" ||
+      threadMessage.sender === "You";
+    const isHistoricalThreadMessage = options?.historical ?? false;
+    const quoteStartIndex = getQuotedParagraphStartIndex(threadMessage.body);
+    const leadingParagraphs = compactMessageParagraphs(
+      quoteStartIndex === -1
+        ? threadMessage.body
+        : threadMessage.body.slice(0, quoteStartIndex),
+    );
+    const quotedParagraphs = compactMessageParagraphs(
+      quoteStartIndex === -1 ? [] : threadMessage.body.slice(quoteStartIndex),
+    );
+    const remoteImagesAllowed = canShowRemoteImagesForMessage(threadMessage.id);
+    const bodyRenderMode = resolveMessageBodyRenderMode(threadMessage, {
+      allowRemoteImages: remoteImagesAllowed,
+      themeMode,
+    });
+    const hasHiddenRemoteImages =
+      bodyRenderMode.remoteImageCount > 0 && !remoteImagesAllowed;
+    const isHtmlMessage = bodyRenderMode.mode === "html";
+    const plainParagraphClassName = `break-words text-[0.94rem] ${
+      density === "full" ? "leading-7" : "leading-6.5"
+    } text-[color:rgba(34,38,36,0.99)] dark:text-[color:rgba(228,235,230,0.94)]`;
+    const plainContentClassName =
+      "text-[color:rgba(34,38,36,0.99)] dark:text-[color:rgba(228,235,230,0.94)]";
+
+    return (
+      <div
+        key={threadMessage.id}
+        className={`w-full ${
+          isHistoricalThreadMessage
+            ? "border-t border-[color:rgba(129,144,122,0.12)] pt-3 dark:border-[color:rgba(121,151,120,0.14)]"
+            : "pt-0"
+        } ${isCurrentUser ? "pl-4 md:pl-8" : ""}`}
+      >
+        <div className={`flex flex-wrap items-center justify-between ${isHtmlMessage ? "gap-2 px-0.5" : "gap-2"}`}>
+          <div className="flex items-center gap-2">
+            <div className={`font-medium tracking-[-0.012em] text-[var(--workspace-text)] ${isHistoricalThreadMessage ? "text-[0.78rem]" : "text-[0.84rem]"}`}>
+              {isCurrentUser ? "You" : threadMessage.sender}
+            </div>
+            {threadMessage.isAutoReply &&
+            threadMessage.autoReplyType === "out_of_office" ? (
+              <span className="inline-flex items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-2.5 py-1 text-[0.6rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)]">
+                Automatic reply
+              </span>
+            ) : null}
+          </div>
+          <div className={`uppercase tracking-[0.12em] text-[var(--workspace-text-faint)] ${isHistoricalThreadMessage ? "text-[0.62rem]" : "text-[0.68rem]"}`}>
+            {threadMessage.timestamp}
+          </div>
+        </div>
+        <div
+          className={`${
+            isHtmlMessage
+              ? "mt-1.5 overflow-visible bg-transparent px-0 py-0 text-[var(--workspace-text)] dark:text-[color:rgba(228,235,230,0.94)]"
+              : bodyRenderMode.mode === "plain"
+                ? "mt-1.5 bg-transparent px-0 py-0 text-[color:rgba(34,38,36,0.99)] dark:text-[color:rgba(228,235,230,0.94)]"
+                : "mt-1.5 bg-transparent px-0 py-0 text-[var(--workspace-text)] dark:text-[color:rgba(228,235,230,0.94)]"
+          }`}
+        >
+          <div
+            className={
+              isHtmlMessage
+                ? "space-y-1.5 text-[var(--workspace-text)]"
+                : bodyRenderMode.mode === "plain"
+                  ? "space-y-2.5 text-[color:rgba(34,38,36,0.99)] dark:text-[color:rgba(228,235,230,0.94)]"
+                  : "space-y-2.5 text-[var(--workspace-text)]"
+            }
+          >
+            {hasHiddenRemoteImages ? (
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded-[10px] border border-[color:rgba(129,144,122,0.08)] bg-[color:rgba(252,249,242,0.72)] px-3 py-2 text-[0.74rem] text-[var(--workspace-text-soft)] dark:border-[color:rgba(121,151,120,0.1)] dark:bg-[color:rgba(86,114,87,0.03)]">
+                <div>
+                  {bodyRenderMode.remoteImageCount === 1
+                    ? "This email contains a remote image."
+                    : `This email contains ${bodyRenderMode.remoteImageCount} remote images.`}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => revealRemoteImagesForMessage(threadMessage.id)}
+                  className="inline-flex items-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-3 py-1.5 text-[0.68rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text)] transition-[background-color,border-color] duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)] focus-visible:outline-none"
+                >
+                  Show images
+                </button>
+              </div>
+            ) : null}
+            <details className="mt-3 rounded-[10px] border border-[color:rgba(129,144,122,0.12)] bg-white px-3 py-2 text-[0.72rem] text-black">
+              <summary className="cursor-pointer font-medium">Render debug</summary>
+              <div className="mt-2 space-y-1">
+                <div>messageId: {threadMessage.id}</div>
+                <div>renderMode: {bodyRenderMode.mode}</div>
+                <div>isHtmlMessage: {String(isHtmlMessage)}</div>
+                <div>hasBodyHtml: {String(Boolean(threadMessage.bodyHtml))}</div>
+                <div>
+                  isComposeGeneratedHtml:{" "}
+                  {String(
+                    Boolean(
+                      threadMessage.bodyHtml &&
+                        isComposeGeneratedHtml(threadMessage.bodyHtml),
+                    ),
+                  )}
+                </div>
+              </div>
+              {threadMessage.bodyHtml ? (
+                <pre className="mt-2 max-h-[18rem] overflow-auto rounded-[8px] bg-[rgba(0,0,0,0.04)] p-3 text-[0.68rem] leading-5 text-black whitespace-pre-wrap break-words">
+                  {threadMessage.bodyHtml.slice(0, 500)}
+                </pre>
+              ) : null}
+            </details>
+            {bodyRenderMode.mode === "html" ? (
+              <div className="email-html-content w-full overflow-visible">
+                <EmailHtmlStage
+                  html={bodyRenderMode.html}
+                  themeMode={themeMode}
+                  emailStyles={bodyRenderMode.emailStyles}
+                  isExternalHtml={bodyRenderMode.mode === "html"}
+                />
+              </div>
+            ) : bodyRenderMode.mode === "compose_html" ? (
+              <div
+                className={`w-full whitespace-pre-wrap text-[0.94rem] ${density === "full" ? "leading-7" : "leading-6.5"} text-[var(--workspace-text)] dark:text-[var(--workspace-text)] [&_a]:text-[color:rgba(44,89,116,0.98)] dark:[&_a]:text-[color:rgba(176,209,183,0.96)] [&_a]:underline [&_a]:underline-offset-2 [&_div]:min-h-[1.35rem] [&_[data-compose-quote='true']]:mt-3 [&_[data-compose-quote='true']]:rounded-[6px] [&_[data-compose-quote='true']]:border-l-2 [&_[data-compose-quote='true']]:border-[color:rgba(132,148,118,0.18)] [&_[data-compose-quote='true']]:bg-[color:rgba(249,245,237,0.42)] [&_[data-compose-quote='true']]:px-2.5 [&_[data-compose-quote='true']]:py-2 dark:[&_[data-compose-quote='true']]:border-[color:rgba(121,151,120,0.16)] dark:[&_[data-compose-quote='true']]:bg-[color:rgba(86,114,87,0.08)] [&_[data-compose-quote='true']_*]:text-[color:rgba(82,76,70,0.92)] dark:[&_[data-compose-quote='true']_*]:text-[color:rgba(196,202,198,0.82)] [&_[data-compose-signature='true']]:mt-3 [&_[data-compose-signature='true']]:space-y-0 [&_[data-compose-signature-divider='true']]:my-2 [&_[data-compose-signature-divider='true']]:h-px [&_[data-compose-signature-divider='true']]:w-full [&_[data-compose-signature-divider='true']]:bg-[color:rgba(121,151,120,0.18)] [&_[data-compose-signature-logo='true']]:pt-1 [&_[data-compose-signature-logo='true']_img]:max-h-[76px] [&_[data-compose-signature-logo='true']_img]:w-auto [&_[data-compose-signature-logo='true']_img]:max-w-full [&_[data-compose-signature-logo='true']_img]:object-contain [&_[data-compose-signature-right='true']]:min-w-0 [&_[data-compose-signature-right='true']]:flex-1 [&_[data-compose-signature-row='true']]:flex [&_[data-compose-signature-row='true']]:items-start [&_[data-compose-signature-row='true']]:gap-4 [&_[data-compose-signature-spacer='true']]:min-h-[1.2rem] [&_[data-compose-signature-text='true']]:whitespace-pre-wrap [&_[data-compose-signature-text='true']]:text-[0.86rem] [&_[data-compose-signature-text='true']]:leading-[1.45] [&_[data-compose-signature-text='true']_*]:text-[var(--workspace-text-muted)] dark:[&_[data-compose-signature-text='true']_*]:text-[color:rgba(196,202,198,0.82)]`}
+                dangerouslySetInnerHTML={{ __html: bodyRenderMode.html }}
+              />
+            ) : (
+              <div>
+                {leadingParagraphs.map((paragraph) =>
+                  renderPlainMessageParagraph(
+                    paragraph,
+                    `${threadMessage.id}-${paragraph}`,
+                    plainParagraphClassName,
+                    plainContentClassName,
+                    themeMode,
+                  ),
+                )}
+                {threadMessage.signature ? (
+                  <div className="pt-1">
+                    <SignatureBlock signature={threadMessage.signature} />
+                  </div>
+                ) : null}
+                {quotedParagraphs.length > 0 ? (
+                  <div className="mt-3 rounded-[6px] border-l-2 border-[color:rgba(132,148,118,0.18)] bg-[color:rgba(249,245,237,0.5)] px-2.5 py-2 dark:border-[color:rgba(121,151,120,0.16)] dark:bg-[color:rgba(86,114,87,0.08)]">
+                    <div className="mb-1.5 text-[0.58rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                      Earlier message
+                    </div>
+                    <div className="space-y-1.5">
+                      {quotedParagraphs.map((paragraph) =>
+                        renderPlainMessageParagraph(
+                          paragraph,
+                          `${threadMessage.id}-quoted-${paragraph}`,
+                          `break-words text-[0.83rem] ${density === "full" ? "leading-6.25" : "leading-5.75"} text-[color:rgba(82,76,70,0.9)] dark:text-[color:rgba(196,202,198,0.82)]`,
+                          "text-[color:rgba(82,76,70,0.9)] dark:text-[color:rgba(196,202,198,0.82)]",
+                          themeMode,
+                        ),
+                      )}
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  };
   const renderThreadTimeline = (message: MailMessage | null, density: "split" | "full") => {
     const threadMessages = getThreadMessages(message);
 
@@ -9319,176 +9486,11 @@ function MailboxView({
 
     return (
       <div className={density === "full" ? "space-y-3" : "space-y-2.5"}>
-        {threadMessages.map((threadMessage, threadIndex) => {
-          const isCurrentUser =
-            normalizeSenderLearningKey(threadMessage.from) ===
-              normalizeSenderLearningKey(mailbox.email) ||
-            threadMessage.signal === "Sent" ||
-            threadMessage.sender === "You";
-          const isLatestThreadMessage = threadIndex === threadMessages.length - 1;
-          const isHistoricalThreadMessage = !isLatestThreadMessage;
-          const quoteStartIndex = getQuotedParagraphStartIndex(threadMessage.body);
-          const leadingParagraphs =
-            quoteStartIndex === -1
-              ? threadMessage.body
-              : threadMessage.body.slice(0, quoteStartIndex);
-          const quotedParagraphs =
-            quoteStartIndex === -1 ? [] : threadMessage.body.slice(quoteStartIndex);
-          const remoteImagesAllowed = canShowRemoteImagesForMessage(threadMessage.id);
-          const bodyRenderMode = resolveMessageBodyRenderMode(threadMessage, {
-            allowRemoteImages: remoteImagesAllowed,
-            themeMode,
-          });
-          const hasHiddenRemoteImages =
-            bodyRenderMode.remoteImageCount > 0 && !remoteImagesAllowed;
-          const isHtmlMessage = bodyRenderMode.mode === "html";
-          const plainParagraphClassName = `break-words text-[0.94rem] ${
-            density === "full" ? "leading-7" : "leading-6.5"
-          } text-[color:rgba(34,38,36,0.99)] dark:text-[color:rgba(228,235,230,0.94)]`;
-          const plainContentClassName =
-            "text-[color:rgba(34,38,36,0.99)] dark:text-[color:rgba(228,235,230,0.94)]";
-
-          return (
-            <div
-              key={threadMessage.id}
-              className={`w-full ${
-                isHistoricalThreadMessage
-                  ? "border-t border-[color:rgba(129,144,122,0.12)] pt-3 dark:border-[color:rgba(121,151,120,0.14)]"
-                  : "pt-0"
-              } ${isCurrentUser ? "pl-4 md:pl-8" : ""}`}
-            >
-              <div className={`flex flex-wrap items-center justify-between ${isHtmlMessage ? "gap-2 px-0.5" : "gap-2"}`}>
-                <div className="flex items-center gap-2">
-                  <div className={`font-medium tracking-[-0.012em] text-[var(--workspace-text)] ${isHistoricalThreadMessage ? "text-[0.78rem]" : "text-[0.84rem]"}`}>
-                    {isCurrentUser ? "You" : threadMessage.sender}
-                  </div>
-                  {threadMessage.isAutoReply &&
-                  threadMessage.autoReplyType === "out_of_office" ? (
-                    <span className="inline-flex items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-2.5 py-1 text-[0.6rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)]">
-                      Automatic reply
-                    </span>
-                  ) : null}
-                </div>
-                <div className={`uppercase tracking-[0.12em] text-[var(--workspace-text-faint)] ${isHistoricalThreadMessage ? "text-[0.62rem]" : "text-[0.68rem]"}`}>
-                  {threadMessage.timestamp}
-                </div>
-              </div>
-              <div
-                className={`${
-                  isHtmlMessage
-                    ? "mt-1.5 overflow-visible bg-transparent px-0 py-0 text-[var(--workspace-text)] dark:text-[color:rgba(228,235,230,0.94)]"
-                    : bodyRenderMode.mode === "plain"
-                      ? "mt-1.5 bg-transparent px-0 py-0 text-[color:rgba(34,38,36,0.99)] dark:text-[color:rgba(228,235,230,0.94)]"
-                    : isHistoricalThreadMessage
-                      ? "mt-1.5 bg-transparent px-0 py-0 text-[var(--workspace-text)] dark:text-[color:rgba(228,235,230,0.94)]"
-                      : "mt-1.5 bg-transparent px-0 py-0 text-[var(--workspace-text)] dark:text-[color:rgba(228,235,230,0.94)]"
-                }`}
-              >
-                <div
-                  className={
-                    isHtmlMessage
-                      ? "space-y-1.5 text-[var(--workspace-text)]"
-                      : bodyRenderMode.mode === "plain"
-                        ? "space-y-2.5 text-[color:rgba(34,38,36,0.99)] dark:text-[color:rgba(228,235,230,0.94)]"
-                        : "space-y-2.5 text-[var(--workspace-text)]"
-                  }
-                >
-                {hasHiddenRemoteImages ? (
-                  <div className="flex flex-wrap items-center justify-between gap-3 rounded-[10px] border border-[color:rgba(129,144,122,0.08)] bg-[color:rgba(252,249,242,0.72)] px-3 py-2 text-[0.74rem] text-[var(--workspace-text-soft)] dark:border-[color:rgba(121,151,120,0.1)] dark:bg-[color:rgba(86,114,87,0.03)]">
-                    <div>
-                      {bodyRenderMode.remoteImageCount === 1
-                        ? "This email contains a remote image."
-                        : `This email contains ${bodyRenderMode.remoteImageCount} remote images.`}
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => revealRemoteImagesForMessage(threadMessage.id)}
-                      className="inline-flex items-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-3 py-1.5 text-[0.68rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text)] transition-[background-color,border-color] duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)] focus-visible:outline-none"
-                    >
-                      Show images
-                    </button>
-                  </div>
-                ) : null}
-                <details className="mt-3 rounded-[10px] border border-[color:rgba(129,144,122,0.12)] bg-white px-3 py-2 text-[0.72rem] text-black">
-                  <summary className="cursor-pointer font-medium">Render debug</summary>
-                  <div className="mt-2 space-y-1">
-                    <div>messageId: {threadMessage.id}</div>
-                    <div>renderMode: {bodyRenderMode.mode}</div>
-                    <div>isHtmlMessage: {String(isHtmlMessage)}</div>
-                    <div>hasBodyHtml: {String(Boolean(threadMessage.bodyHtml))}</div>
-                    <div>
-                      isComposeGeneratedHtml:{" "}
-                      {String(
-                        Boolean(
-                          threadMessage.bodyHtml &&
-                            isComposeGeneratedHtml(threadMessage.bodyHtml),
-                        ),
-                      )}
-                    </div>
-                  </div>
-                  {threadMessage.bodyHtml ? (
-                    <pre className="mt-2 max-h-[18rem] overflow-auto rounded-[8px] bg-[rgba(0,0,0,0.04)] p-3 text-[0.68rem] leading-5 text-black whitespace-pre-wrap break-words">
-                      {threadMessage.bodyHtml.slice(0, 500)}
-                    </pre>
-                  ) : null}
-                </details>
-                {bodyRenderMode.mode === "html" ? (
-                  <div
-                    className="email-html-content w-full overflow-visible"
-                  >
-                    <EmailHtmlStage
-                      html={bodyRenderMode.html}
-                      themeMode={themeMode}
-                      emailStyles={bodyRenderMode.emailStyles}
-                      isExternalHtml={bodyRenderMode.mode === "html"}
-                    />
-                  </div>
-                ) : bodyRenderMode.mode === "compose_html" ? (
-                  <div
-                    className={`w-full whitespace-pre-wrap text-[0.94rem] ${density === "full" ? "leading-7" : "leading-6.5"} text-[var(--workspace-text)] dark:text-[var(--workspace-text)] [&_a]:text-[color:rgba(44,89,116,0.98)] dark:[&_a]:text-[color:rgba(176,209,183,0.96)] [&_a]:underline [&_a]:underline-offset-2 [&_div]:min-h-[1.35rem] [&_[data-compose-quote='true']]:mt-3 [&_[data-compose-quote='true']]:rounded-[6px] [&_[data-compose-quote='true']]:border-l-2 [&_[data-compose-quote='true']]:border-[color:rgba(132,148,118,0.18)] [&_[data-compose-quote='true']]:bg-[color:rgba(249,245,237,0.42)] [&_[data-compose-quote='true']]:px-2.5 [&_[data-compose-quote='true']]:py-2 dark:[&_[data-compose-quote='true']]:border-[color:rgba(121,151,120,0.16)] dark:[&_[data-compose-quote='true']]:bg-[color:rgba(86,114,87,0.08)] [&_[data-compose-quote='true']_*]:text-[color:rgba(82,76,70,0.92)] dark:[&_[data-compose-quote='true']_*]:text-[color:rgba(196,202,198,0.82)] [&_[data-compose-signature='true']]:mt-3 [&_[data-compose-signature='true']]:space-y-0 [&_[data-compose-signature-divider='true']]:my-2 [&_[data-compose-signature-divider='true']]:h-px [&_[data-compose-signature-divider='true']]:w-full [&_[data-compose-signature-divider='true']]:bg-[color:rgba(121,151,120,0.18)] [&_[data-compose-signature-logo='true']]:pt-1 [&_[data-compose-signature-logo='true']_img]:max-h-[76px] [&_[data-compose-signature-logo='true']_img]:w-auto [&_[data-compose-signature-logo='true']_img]:max-w-full [&_[data-compose-signature-logo='true']_img]:object-contain [&_[data-compose-signature-right='true']]:min-w-0 [&_[data-compose-signature-right='true']]:flex-1 [&_[data-compose-signature-row='true']]:flex [&_[data-compose-signature-row='true']]:items-start [&_[data-compose-signature-row='true']]:gap-4 [&_[data-compose-signature-spacer='true']]:min-h-[1.2rem] [&_[data-compose-signature-text='true']]:whitespace-pre-wrap [&_[data-compose-signature-text='true']]:text-[0.86rem] [&_[data-compose-signature-text='true']]:leading-[1.45] [&_[data-compose-signature-text='true']_*]:text-[var(--workspace-text-muted)] dark:[&_[data-compose-signature-text='true']_*]:text-[color:rgba(196,202,198,0.82)]`}
-                    dangerouslySetInnerHTML={{ __html: bodyRenderMode.html }}
-                  />
-                ) : (
-                  <div>
-                    {leadingParagraphs.map((paragraph) =>
-                      renderPlainMessageParagraph(
-                        paragraph,
-                        `${threadMessage.id}-${paragraph}`,
-                        plainParagraphClassName,
-                        plainContentClassName,
-                        themeMode,
-                      ),
-                    )}
-                    {threadMessage.signature ? (
-                      <div className="pt-1">
-                        <SignatureBlock signature={threadMessage.signature} />
-                      </div>
-                    ) : null}
-                    {quotedParagraphs.length > 0 ? (
-                      <div className="mt-3 rounded-[6px] border-l-2 border-[color:rgba(132,148,118,0.18)] bg-[color:rgba(249,245,237,0.5)] px-2.5 py-2 dark:border-[color:rgba(121,151,120,0.16)] dark:bg-[color:rgba(86,114,87,0.08)]">
-                        <div className="mb-1.5 text-[0.58rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
-                          Earlier message
-                        </div>
-                        <div className="space-y-1.5">
-                          {quotedParagraphs.map((paragraph) =>
-                            renderPlainMessageParagraph(
-                              paragraph,
-                              `${threadMessage.id}-quoted-${paragraph}`,
-                              `break-words text-[0.83rem] ${density === "full" ? "leading-6.25" : "leading-5.75"} text-[color:rgba(82,76,70,0.9)] dark:text-[color:rgba(196,202,198,0.82)]`,
-                              "text-[color:rgba(82,76,70,0.9)] dark:text-[color:rgba(196,202,198,0.82)]",
-                              themeMode,
-                            ),
-                          )}
-                        </div>
-                      </div>
-                    ) : null}
-                  </div>
-                )}
-                </div>
-              </div>
-            </div>
-          );
-        })}
+        {threadMessages.map((threadMessage, threadIndex) =>
+          renderThreadMessage(threadMessage, density, {
+            historical: threadIndex !== threadMessages.length - 1,
+          }),
+        )}
       </div>
     );
   };
@@ -14301,10 +14303,49 @@ function MailboxView({
                       </div>
                     ) : null}
 
-                    {renderThreadTimeline(selectedMessage, "split")}
+                    {renderThreadMessage(selectedMessage, "split")}
                     {renderMessageActions(selectedMessage, "split")}
                   </div>
 
+                  <div className="space-y-3">
+                    <div className="text-[0.72rem] font-medium uppercase tracking-[0.18em] text-[var(--workspace-text-faint)]">
+                      Attachments
+                    </div>
+                    <div className="flex flex-wrap gap-3">
+                      {(selectedMessage.attachments ?? []).map((attachment) =>
+                        renderAttachmentItem(attachment),
+                      )}
+                      {!selectedMessage.attachments?.length ? (
+                        <div className="text-[0.82rem] leading-6 text-[var(--workspace-text-faint)]">
+                          No attachments
+                        </div>
+                      ) : null}
+                    </div>
+                  </div>
+                  {(() => {
+                    const earlierThreadMessages = getThreadMessages(selectedMessage).filter(
+                      (threadMessage) => threadMessage.id !== selectedMessage.id,
+                    );
+
+                    if (earlierThreadMessages.length === 0) {
+                      return null;
+                    }
+
+                    return (
+                      <div className="space-y-3">
+                        <div className="text-[0.72rem] font-medium uppercase tracking-[0.18em] text-[var(--workspace-text-faint)]">
+                          Earlier messages
+                        </div>
+                        <div className="space-y-2.5">
+                          {earlierThreadMessages.map((threadMessage) =>
+                            renderThreadMessage(threadMessage, "split", {
+                              historical: true,
+                            }),
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })()}
                   {selectedMessage.id === "main-1" ? (
                     <div className="grid gap-4 md:grid-cols-2">
                       <div className="overflow-hidden rounded-[20px] border border-[var(--workspace-border-soft)] bg-[linear-gradient(180deg,var(--workspace-preview-surface-start),var(--workspace-preview-surface-end))]">
@@ -14323,22 +14364,6 @@ function MailboxView({
                       </div>
                     </div>
                   ) : null}
-
-                  <div className="space-y-3">
-                    <div className="text-[0.72rem] font-medium uppercase tracking-[0.18em] text-[var(--workspace-text-faint)]">
-                      Attachments
-                    </div>
-                    <div className="flex flex-wrap gap-3">
-                      {(selectedMessage.attachments ?? []).map((attachment) =>
-                        renderAttachmentItem(attachment),
-                      )}
-                      {!selectedMessage.attachments?.length ? (
-                        <div className="text-[0.82rem] leading-6 text-[var(--workspace-text-faint)]">
-                          No attachments
-                        </div>
-                      ) : null}
-                    </div>
-                  </div>
                   </div>
                 ) : !isSharedView && !activeSmartFolder && activeFolder === "Filtered" ? (
                   <div className="text-[0.92rem] leading-7 text-[var(--workspace-text-soft)]">
