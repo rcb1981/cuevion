@@ -308,6 +308,37 @@ def get_message_body(message: Message) -> str:
     return clean_text(payload.decode(charset, errors="ignore"))
 
 
+def get_html_body(message: Message) -> str:
+    """Extract the raw HTML body from an email message.
+    Returns empty string if no HTML part exists.
+    Does NOT run clean_text() — HTML must be returned as-is."""
+    if message.is_multipart():
+        for part in message.walk():
+            content_type = part.get_content_type()
+            disposition = str(part.get("Content-Disposition") or "")
+
+            if "attachment" in disposition.lower():
+                continue
+
+            if content_type == "text/html":
+                payload = part.get_payload(decode=True)
+
+                if payload is None:
+                    continue
+
+                charset = part.get_content_charset() or "utf-8"
+                return payload.decode(charset, errors="ignore").replace("\r\n", "\n").strip()
+    else:
+        if message.get_content_type() == "text/html":
+            payload = message.get_payload(decode=True)
+
+            if payload is not None:
+                charset = message.get_content_charset() or "utf-8"
+                return payload.decode(charset, errors="ignore").replace("\r\n", "\n").strip()
+
+    return ""
+
+
 def format_timestamp(date_header: str) -> tuple[str, str]:
     if not date_header:
         fallback_timestamp = datetime.now(timezone.utc).isoformat()
@@ -624,6 +655,7 @@ def to_message_preview(
     cc_header = decode_mime_words(message.get("Cc", ""))
     sender_name, sender_email = parseaddr(from_header)
     body = get_message_body(message)
+    html_body = get_html_body(message)
     snippet = clean_text(body.replace("\n", " "))[:220]
     created_at, display_timestamp = format_timestamp(message.get("Date", ""))
     stable_id_source = f"{subject}|{from_header}|{display_timestamp}"
@@ -659,6 +691,7 @@ def to_message_preview(
       "action": preview_routing.get("action"),
       "v7_final_priority": preview_routing.get("v7_final_priority"),
       "category": preview_routing.get("category"),
+      **({"bodyHtml": html_body} if html_body else {}),
     }
 
 
