@@ -2267,6 +2267,33 @@ function resolveMessageBodyRenderMode(
   };
 }
 
+function normalizeNativeMessageHtmlForPane(html: string) {
+  if (typeof document === "undefined") {
+    return html;
+  }
+
+  const container = document.createElement("div");
+  container.innerHTML = html;
+
+  container.querySelectorAll("div, span, font, p, li, td, th, table").forEach((node) => {
+    if (!(node instanceof HTMLElement)) {
+      return;
+    }
+
+    node.style.removeProperty("color");
+    node.style.removeProperty("opacity");
+    node.style.removeProperty("background");
+    node.style.removeProperty("background-color");
+    node.style.removeProperty("-webkit-text-fill-color");
+
+    if (!node.getAttribute("style")?.trim()) {
+      node.removeAttribute("style");
+    }
+  });
+
+  return container.innerHTML;
+}
+
 function buildComposeBody({
   mode,
   sourceMessage,
@@ -9343,6 +9370,10 @@ function MailboxView({
       allowRemoteImages: remoteImagesAllowed,
       themeMode,
     });
+    const normalizedNativeHtml =
+      bodyRenderMode.mode === "native_html"
+        ? normalizeNativeMessageHtmlForPane(bodyRenderMode.html)
+        : null;
     const hasHiddenRemoteImages =
       bodyRenderMode.remoteImageCount > 0 && !remoteImagesAllowed;
     const isExternalHtmlMessage = bodyRenderMode.mode === "html";
@@ -9435,7 +9466,7 @@ function MailboxView({
                 className={`w-full whitespace-pre-wrap text-[0.94rem] ${
                   density === "full" ? "leading-[1.82]" : "leading-[1.72]"
                 } ${nativeBodyTextClass} ${nativeBodyInheritanceClass} ${nativeLinkClass} ${nativeQuoteClass} [&_img]:max-w-full [&_img]:h-auto [&_small]:text-[color:rgba(108,99,89,0.9)] dark:[&_small]:text-[color:rgba(205,211,207,0.84)] [&_small_*]:text-inherit [&_[data-email-image-placeholder='true']]:text-[color:rgba(108,99,89,0.9)] dark:[&_[data-email-image-placeholder='true']]:text-[color:rgba(205,211,207,0.84)]`}
-                dangerouslySetInnerHTML={{ __html: bodyRenderMode.html }}
+                dangerouslySetInnerHTML={{ __html: normalizedNativeHtml ?? bodyRenderMode.html }}
               />
             ) : bodyRenderMode.mode === "compose_html" ? (
               <div
