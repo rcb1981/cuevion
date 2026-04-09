@@ -1427,10 +1427,43 @@ function EmailHtmlStage({
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const [height, setHeight] = useState(320);
   const [stageFailed, setStageFailed] = useState(false);
-  const fallbackClassName =
-    themeMode === "dark"
-      ? "overflow-hidden bg-transparent text-[color:rgba(229,236,230,0.96)] [&_*]:!text-[color:rgba(229,236,230,0.96)] [&_*]:opacity-100 [&_*]:[filter:none] [&_*]:[mix-blend-mode:normal] [&_*]:[text-shadow:none] [&_a]:!text-[color:rgba(176,209,183,0.96)] [&_a]:[-webkit-text-fill-color:rgba(176,209,183,0.96)] [&_a_*]:!text-[color:rgba(176,209,183,0.96)] [&_a_*]:[-webkit-text-fill-color:rgba(176,209,183,0.96)]"
-      : "overflow-hidden bg-transparent text-[color:rgba(34,38,36,0.99)] [&_*]:!text-[color:rgba(34,38,36,0.99)] [&_*]:[-webkit-text-fill-color:rgba(34,38,36,0.99)] [&_*]:opacity-100 [&_*]:[filter:none] [&_*]:[mix-blend-mode:normal] [&_*]:[text-shadow:none] [&_a]:!text-[color:rgba(44,89,116,0.98)] [&_a]:[-webkit-text-fill-color:rgba(44,89,116,0.98)] [&_a_*]:!text-[color:rgba(44,89,116,0.98)] [&_a_*]:[-webkit-text-fill-color:rgba(44,89,116,0.98)]";
+  const fallbackClassName = "w-full overflow-visible bg-transparent";
+
+  const getImportedEmailContentBottom = (body: HTMLBodyElement, stageRoot: HTMLElement | null) => {
+    const bodyTop = body.getBoundingClientRect().top;
+    let maxBottom = 0;
+
+    const pushBottom = (element: Element | null) => {
+      if (!(element instanceof HTMLElement)) {
+        return;
+      }
+
+      const rect = element.getBoundingClientRect();
+
+      if (rect.height <= 0 && element.scrollHeight <= 0 && element.offsetHeight <= 0) {
+        return;
+      }
+
+      maxBottom = Math.max(
+        maxBottom,
+        Math.ceil(rect.bottom - bodyTop),
+        element.scrollHeight,
+        element.offsetHeight,
+      );
+    };
+
+    pushBottom(stageRoot);
+    Array.from(body.children).forEach((node) => {
+      pushBottom(node);
+    });
+    body.querySelectorAll(
+      "table, tbody, tr, td, th, div, section, article, main, header, footer, blockquote",
+    ).forEach((node) => {
+      pushBottom(node);
+    });
+
+    return maxBottom;
+  };
 
   const updateHeight = () => {
     const iframe = iframeRef.current;
@@ -1443,12 +1476,14 @@ function EmailHtmlStage({
       const documentElement = iframe.contentDocument?.documentElement;
       const body = iframe.contentDocument?.body;
       const stageRoot = body?.firstElementChild as HTMLElement | null;
+      const contentBottom = body ? getImportedEmailContentBottom(body, stageRoot) : 0;
       const nextHeight = Math.max(
         documentElement?.scrollHeight ?? 0,
         documentElement?.offsetHeight ?? 0,
         body?.scrollHeight ?? 0,
         body?.offsetHeight ?? 0,
         Math.ceil(stageRoot?.getBoundingClientRect().height ?? 0),
+        contentBottom,
         220,
       );
 
