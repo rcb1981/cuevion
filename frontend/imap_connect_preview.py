@@ -1,4 +1,5 @@
 import hashlib
+import html
 import imaplib
 import logging
 import re
@@ -127,6 +128,19 @@ def clean_text(value: str | None) -> str:
         normalized = normalized.replace("\n\n\n", "\n\n")
 
     return normalized.strip()
+
+
+def html_to_text(value: str | None) -> str:
+    if not value:
+        return ""
+
+    normalized = value.replace("\r\n", "\n")
+    normalized = re.sub(r"(?is)<(script|style)\b.*?>.*?</\1>", " ", normalized)
+    normalized = re.sub(r"(?i)<br\s*/?>", "\n", normalized)
+    normalized = re.sub(r"(?i)</(p|div|li|tr|table|h[1-6])>", "\n", normalized)
+    normalized = re.sub(r"(?s)<[^>]+>", " ", normalized)
+    normalized = html.unescape(normalized)
+    return clean_text(normalized)
 
 
 def connect_mailbox_with_settings(
@@ -270,6 +284,11 @@ def fetch_recent_messages(mailbox, folder: str = "INBOX", limit: int = DEFAULT_F
 
 
 def get_message_body(message: Message) -> str:
+    html_body = get_html_body(message)
+
+    if html_body:
+        return html_to_text(html_body)
+
     if message.is_multipart():
         for part in message.walk():
             content_type = part.get_content_type()
