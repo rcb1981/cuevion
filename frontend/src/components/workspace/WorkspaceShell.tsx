@@ -9172,7 +9172,7 @@ function MailboxView({
                       renderPlainMessageParagraph(
                         paragraph,
                         `${threadMessage.id}-${paragraph}`,
-                        `break-words text-[0.94rem] ${density === "full" ? "leading-7" : "leading-6.5"} text-[var(--workspace-text)] dark:text-[color:rgba(228,235,230,0.94)]`,
+                        `break-words text-[0.94rem] ${density === "full" ? "leading-7" : "leading-6.5"} text-[color:rgba(34,38,36,0.99)]`,
                       ),
                     )}
                     {threadMessage.signature ? (
