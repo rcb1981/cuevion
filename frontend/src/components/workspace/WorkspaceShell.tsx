@@ -9104,6 +9104,8 @@ function MailboxView({
                 className={`${
                   isHtmlMessage
                     ? "mt-1.5 overflow-visible bg-transparent px-0 py-0 text-[var(--workspace-text)] dark:text-[color:rgba(228,235,230,0.94)]"
+                    : bodyRenderMode.mode === "plain"
+                      ? "mt-1.5 bg-transparent px-0 py-0 text-[color:rgba(34,38,36,0.99)] dark:text-[color:rgba(228,235,230,0.94)]"
                     : isHistoricalThreadMessage
                       ? "mt-1.5 bg-transparent px-0 py-0 text-[var(--workspace-text)] dark:text-[color:rgba(228,235,230,0.94)]"
                       : "mt-1.5 bg-transparent px-0 py-0 text-[var(--workspace-text)] dark:text-[color:rgba(228,235,230,0.94)]"
@@ -9113,7 +9115,9 @@ function MailboxView({
                   className={
                     isHtmlMessage
                       ? "space-y-1.5 text-[var(--workspace-text)]"
-                      : "space-y-2.5 text-[var(--workspace-text)]"
+                      : bodyRenderMode.mode === "plain"
+                        ? "space-y-2.5 text-[color:rgba(34,38,36,0.99)] dark:text-[color:rgba(228,235,230,0.94)]"
+                        : "space-y-2.5 text-[var(--workspace-text)]"
                   }
                 >
                 {hasHiddenRemoteImages ? (
@@ -9167,7 +9171,7 @@ function MailboxView({
                     dangerouslySetInnerHTML={{ __html: bodyRenderMode.html }}
                   />
                 ) : (
-                  <div className="text-[color:rgba(34,38,36,0.99)] opacity-100 dark:text-[color:rgba(228,235,230,0.94)] [&_*]:opacity-100">
+                  <div>
                     {leadingParagraphs.map((paragraph) =>
                       renderPlainMessageParagraph(
                         paragraph,
