@@ -9132,22 +9132,34 @@ function MailboxView({
                     </button>
                   </div>
                 ) : null}
+                <details className="mt-3 rounded-[10px] border border-[color:rgba(129,144,122,0.12)] bg-white px-3 py-2 text-[0.72rem] text-black">
+                  <summary className="cursor-pointer font-medium">Render debug</summary>
+                  <div className="mt-2 space-y-1">
+                    <div>messageId: {threadMessage.id}</div>
+                    <div>renderMode: {bodyRenderMode.mode}</div>
+                    <div>isHtmlMessage: {String(isHtmlMessage)}</div>
+                    <div>hasBodyHtml: {String(Boolean(threadMessage.bodyHtml))}</div>
+                    <div>
+                      isComposeGeneratedHtml:{" "}
+                      {String(
+                        Boolean(
+                          threadMessage.bodyHtml &&
+                            isComposeGeneratedHtml(threadMessage.bodyHtml),
+                        ),
+                      )}
+                    </div>
+                  </div>
+                  {threadMessage.bodyHtml ? (
+                    <pre className="mt-2 max-h-[18rem] overflow-auto rounded-[8px] bg-[rgba(0,0,0,0.04)] p-3 text-[0.68rem] leading-5 text-black whitespace-pre-wrap break-words">
+                      {threadMessage.bodyHtml.slice(0, 500)}
+                    </pre>
+                  ) : null}
+                </details>
                 {bodyRenderMode.mode === "html" ? (
                   <div
                     className={`email-html-content w-full ${density === "full" ? "min-h-[12rem]" : ""}`}
                   >
                     <EmailHtmlStage html={bodyRenderMode.html} themeMode={themeMode} />
-                    <details className="mt-3 rounded-[10px] border border-[color:rgba(129,144,122,0.12)] bg-white px-3 py-2 text-[0.72rem] text-black">
-                      <summary className="cursor-pointer font-medium">HTML debug</summary>
-                      <div className="mt-2 space-y-1">
-                        <div>messageId: {threadMessage.id}</div>
-                        <div>isHtmlMessage: {String(isHtmlMessage)}</div>
-                        <div>renderMode: {bodyRenderMode.mode}</div>
-                      </div>
-                      <pre className="mt-2 max-h-[24rem] overflow-auto rounded-[8px] bg-[rgba(0,0,0,0.04)] p-3 text-[0.68rem] leading-5 text-black whitespace-pre-wrap break-words">
-                        {bodyRenderMode.html.slice(0, 4000)}
-                      </pre>
-                    </details>
                   </div>
                 ) : bodyRenderMode.mode === "compose_html" ? (
                   <div
