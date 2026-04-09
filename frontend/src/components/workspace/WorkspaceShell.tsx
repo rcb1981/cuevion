@@ -1429,7 +1429,7 @@ function EmailHtmlStage({
   const [stageFailed, setStageFailed] = useState(false);
   const fallbackClassName = "w-full overflow-visible bg-transparent";
 
-  const getImportedEmailContentBottom = (body: HTMLBodyElement, stageRoot: HTMLElement | null) => {
+  const getImportedEmailContentBottom = (body: HTMLElement, stageRoot: HTMLElement | null) => {
     const bodyTop = body.getBoundingClientRect().top;
     let maxBottom = 0;
 
