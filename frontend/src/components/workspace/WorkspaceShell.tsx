@@ -1199,13 +1199,15 @@ function renderPlainMessageParagraph(
 ) {
   const matches = Array.from(paragraph.matchAll(plainLinkPattern));
   const resolvedContentClassName = contentClassName ?? className;
+  const plainBodyTextColor =
+    themeMode === "dark" ? "rgba(234, 239, 235, 0.94)" : "rgba(39, 43, 40, 0.96)";
+  const plainLinkTextColor =
+    themeMode === "dark" ? "rgba(169, 204, 179, 0.94)" : "rgba(54, 92, 113, 0.94)";
   const plainTextStyle = {
-    color:
-      themeMode === "dark" ? "rgba(228,235,230,0.94)" : "rgba(34,38,36,0.99)",
+    color: plainBodyTextColor,
   };
   const plainLinkStyle = {
-    color:
-      themeMode === "dark" ? "rgba(176,209,183,0.96)" : "rgba(44,89,116,0.98)",
+    color: plainLinkTextColor,
   };
 
   if (matches.length === 0) {
@@ -1243,7 +1245,7 @@ function renderPlainMessageParagraph(
         href={buildPlainLinkHref(matchedValue)}
         target="_blank"
         rel="noopener noreferrer"
-        className="break-all text-[color:rgba(44,89,116,0.98)] underline underline-offset-2 dark:text-[color:rgba(176,209,183,0.96)]"
+        className="break-all underline decoration-[0.08em] underline-offset-[0.18em]"
         style={plainLinkStyle}
       >
         {matchedValue}
@@ -9345,11 +9347,18 @@ function MailboxView({
       bodyRenderMode.remoteImageCount > 0 && !remoteImagesAllowed;
     const isExternalHtmlMessage = bodyRenderMode.mode === "html";
     const isNativeHtmlMessage = bodyRenderMode.mode === "native_html";
+    const nativeBodyTextClass =
+      "text-[color:rgba(39,43,40,0.96)] dark:text-[color:rgba(234,239,235,0.94)]";
+    const nativeSecondaryTextClass =
+      "text-[color:rgba(100,92,82,0.86)] dark:text-[color:rgba(199,206,201,0.8)]";
+    const nativeLinkClass =
+      "[&_a]:text-[color:rgba(54,92,113,0.94)] dark:[&_a]:text-[color:rgba(169,204,179,0.94)] [&_a]:underline [&_a]:decoration-[0.08em] [&_a]:underline-offset-[0.18em]";
+    const nativeQuoteClass =
+      "[&_blockquote]:mt-3 [&_blockquote]:border-l-2 [&_blockquote]:border-[color:rgba(126,140,121,0.2)] [&_blockquote]:bg-[color:rgba(247,243,235,0.46)] [&_blockquote]:px-3 [&_blockquote]:py-2.5 dark:[&_blockquote]:border-[color:rgba(121,151,120,0.16)] dark:[&_blockquote]:bg-[color:rgba(92,110,94,0.12)] [&_blockquote_*]:text-[color:rgba(90,83,74,0.88)] dark:[&_blockquote_*]:text-[color:rgba(201,207,203,0.8)] [&_[data-email-quote='true']]:mt-3 [&_[data-email-quote='true']]:border-l-2 [&_[data-email-quote='true']]:border-[color:rgba(126,140,121,0.2)] [&_[data-email-quote='true']]:bg-[color:rgba(247,243,235,0.46)] [&_[data-email-quote='true']]:px-3 [&_[data-email-quote='true']]:py-2.5 dark:[&_[data-email-quote='true']]:border-[color:rgba(121,151,120,0.16)] dark:[&_[data-email-quote='true']]:bg-[color:rgba(92,110,94,0.12)] [&_[data-email-quote='true']_*]:text-[color:rgba(90,83,74,0.88)] dark:[&_[data-email-quote='true']_*]:text-[color:rgba(201,207,203,0.8)]";
     const plainParagraphClassName = `break-words text-[0.94rem] ${
-      density === "full" ? "leading-7" : "leading-6.5"
-    } text-[color:rgba(34,38,36,0.99)] dark:text-[color:rgba(228,235,230,0.94)]`;
-    const plainContentClassName =
-      "text-[color:rgba(34,38,36,0.99)] dark:text-[color:rgba(228,235,230,0.94)]";
+      density === "full" ? "leading-[1.82]" : "leading-[1.72]"
+    } ${nativeBodyTextClass}`;
+    const plainContentClassName = nativeBodyTextClass;
 
     return (
       <div
@@ -9390,7 +9399,7 @@ function MailboxView({
               isExternalHtmlMessage
                 ? "space-y-1.5 text-[var(--workspace-text)]"
                 : bodyRenderMode.mode === "plain" || isNativeHtmlMessage
-                  ? "space-y-2.5 text-[color:rgba(34,38,36,0.99)] dark:text-[color:rgba(228,235,230,0.94)]"
+                  ? `space-y-3 ${nativeBodyTextClass}`
                   : "space-y-2.5 text-[var(--workspace-text)]"
             }
           >
@@ -9422,8 +9431,8 @@ function MailboxView({
             ) : bodyRenderMode.mode === "native_html" ? (
               <div
                 className={`w-full whitespace-pre-wrap text-[0.94rem] ${
-                  density === "full" ? "leading-7" : "leading-6.5"
-                } text-[color:rgba(34,38,36,0.99)] dark:text-[color:rgba(228,235,230,0.94)] [&_a]:text-[color:rgba(44,89,116,0.98)] dark:[&_a]:text-[color:rgba(176,209,183,0.96)] [&_a]:underline [&_a]:underline-offset-2 [&_blockquote]:mt-3 [&_blockquote]:border-l-2 [&_blockquote]:border-[color:rgba(132,148,118,0.18)] [&_blockquote]:bg-[color:rgba(249,245,237,0.32)] [&_blockquote]:px-2.5 [&_blockquote]:py-2 dark:[&_blockquote]:border-[color:rgba(121,151,120,0.16)] dark:[&_blockquote]:bg-[color:rgba(86,114,87,0.08)] [&_blockquote_*]:text-[color:rgba(82,76,70,0.92)] dark:[&_blockquote_*]:text-[color:rgba(196,202,198,0.82)] [&_[data-email-quote='true']]:mt-3 [&_[data-email-quote='true']]:border-l-2 [&_[data-email-quote='true']]:border-[color:rgba(132,148,118,0.18)] [&_[data-email-quote='true']]:bg-[color:rgba(249,245,237,0.32)] [&_[data-email-quote='true']]:px-2.5 [&_[data-email-quote='true']]:py-2 dark:[&_[data-email-quote='true']]:border-[color:rgba(121,151,120,0.16)] dark:[&_[data-email-quote='true']]:bg-[color:rgba(86,114,87,0.08)] [&_[data-email-quote='true']_*]:text-[color:rgba(82,76,70,0.92)] dark:[&_[data-email-quote='true']_*]:text-[color:rgba(196,202,198,0.82)] [&_img]:max-w-full [&_img]:h-auto`}
+                  density === "full" ? "leading-[1.82]" : "leading-[1.72]"
+                } ${nativeBodyTextClass} ${nativeLinkClass} ${nativeQuoteClass} [&_img]:max-w-full [&_img]:h-auto [&_small]:text-[color:rgba(100,92,82,0.86)] dark:[&_small]:text-[color:rgba(199,206,201,0.8)] [&_small_*]:text-[color:rgba(100,92,82,0.86)] dark:[&_small_*]:text-[color:rgba(199,206,201,0.8)]`}
                 dangerouslySetInnerHTML={{ __html: bodyRenderMode.html }}
               />
             ) : bodyRenderMode.mode === "compose_html" ? (
@@ -9448,8 +9457,8 @@ function MailboxView({
                   </div>
                 ) : null}
                 {quotedParagraphs.length > 0 ? (
-                  <div className="mt-3 rounded-[6px] border-l-2 border-[color:rgba(132,148,118,0.18)] bg-[color:rgba(249,245,237,0.5)] px-2.5 py-2 dark:border-[color:rgba(121,151,120,0.16)] dark:bg-[color:rgba(86,114,87,0.08)]">
-                    <div className="mb-1.5 text-[0.58rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                  <div className="mt-3 rounded-[8px] border-l-2 border-[color:rgba(126,140,121,0.2)] bg-[color:rgba(247,243,235,0.46)] px-3 py-2.5 dark:border-[color:rgba(121,151,120,0.16)] dark:bg-[color:rgba(92,110,94,0.12)]">
+                    <div className={`mb-1.5 text-[0.58rem] font-medium uppercase tracking-[0.16em] ${nativeSecondaryTextClass}`}>
                       Earlier message
                     </div>
                     <div className="space-y-1.5">
@@ -9457,8 +9466,8 @@ function MailboxView({
                         renderPlainMessageParagraph(
                           paragraph,
                           `${threadMessage.id}-quoted-${paragraph}`,
-                          `break-words text-[0.83rem] ${density === "full" ? "leading-6.25" : "leading-5.75"} text-[color:rgba(82,76,70,0.9)] dark:text-[color:rgba(196,202,198,0.82)]`,
-                          "text-[color:rgba(82,76,70,0.9)] dark:text-[color:rgba(196,202,198,0.82)]",
+                          `break-words text-[0.84rem] ${density === "full" ? "leading-[1.72]" : "leading-[1.64]"} ${nativeSecondaryTextClass}`,
+                          nativeSecondaryTextClass,
                           themeMode,
                         ),
                       )}
