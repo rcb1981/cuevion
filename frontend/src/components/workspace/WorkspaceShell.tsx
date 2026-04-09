@@ -2275,27 +2275,8 @@ function normalizeNativeMessageHtmlForPane(html: string) {
   const container = document.createElement("div");
   container.innerHTML = html;
   container.querySelectorAll("style").forEach((node) => node.remove());
-  const relevantTags = new Set([
-    "HTML",
-    "BODY",
-    "TABLE",
-    "TBODY",
-    "TR",
-    "TD",
-    "TH",
-    "DIV",
-    "SPAN",
-    "P",
-    "FONT",
-    "LI",
-    "A",
-  ]);
   const normalizeNode = (node: Element) => {
     if (!(node instanceof HTMLElement)) {
-      return;
-    }
-
-    if (!relevantTags.has(node.tagName)) {
       return;
     }
 
@@ -2315,11 +2296,8 @@ function normalizeNativeMessageHtmlForPane(html: string) {
     }
   };
 
-  Array.from(container.children).forEach((node) => {
+  container.querySelectorAll("*").forEach((node) => {
     normalizeNode(node);
-    node.querySelectorAll("*").forEach((descendant) => {
-      normalizeNode(descendant);
-    });
   });
 
   return container.innerHTML;
