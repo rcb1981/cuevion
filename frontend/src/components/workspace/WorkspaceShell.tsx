@@ -9425,6 +9425,16 @@ function MailboxView({
 
     return true;
   });
+  const threadMessageCountByThreadId = useMemo(() => {
+    const counts = new Map<string, number>();
+
+    folderMessages.forEach((message) => {
+      const threadId = resolveMailThreadId(message);
+      counts.set(threadId, (counts.get(threadId) ?? 0) + 1);
+    });
+
+    return counts;
+  }, [folderMessages]);
   const sortedMessages = [...visibleMessages].sort((firstMessage, secondMessage) => {
     const firstTime = resolveMailDateMs(firstMessage);
     const secondTime = resolveMailDateMs(secondMessage);
@@ -14238,6 +14248,15 @@ function MailboxView({
                         : "text-[color:rgba(120,111,100,0.34)]";
                       const snippetTextClass = "text-[color:rgba(111,103,94,0.82)]";
                       const timeTextClass = "text-[color:rgba(120,111,100,0.74)]";
+                      const metadataIndicatorClass =
+                        themeMode === "dark"
+                          ? "text-[color:rgba(204,196,187,0.76)]"
+                          : "text-[color:rgba(120,111,100,0.76)]";
+                      const attachmentCount = message.attachments?.length ?? 0;
+                      const hasAttachmentIndicator = attachmentCount > 0;
+                      const threadMessageCount =
+                        threadMessageCountByThreadId.get(resolveMailThreadId(message)) ?? 1;
+                      const hasThreadCountIndicator = threadMessageCount > 1;
                       return (
                         <button
                           key={message.id}
@@ -14394,8 +14413,55 @@ function MailboxView({
                               ) : null}
                             </div>
                           </div>
-                          <div className={`flex-none self-start pt-0 text-right text-[0.64rem] font-medium uppercase tracking-[0.12em] ${timeTextClass}`}>
-                            {message.time}
+                          <div className="flex-none self-start pt-0 text-right">
+                            <div
+                              className={`text-[0.64rem] font-medium uppercase tracking-[0.12em] ${timeTextClass}`}
+                            >
+                              {message.time}
+                            </div>
+                            {hasAttachmentIndicator || hasThreadCountIndicator ? (
+                              <div
+                                className={`mt-1 flex items-center justify-end gap-1.5 text-[0.72rem] font-medium ${metadataIndicatorClass}`}
+                              >
+                                {hasAttachmentIndicator ? (
+                                  <span
+                                    aria-label={
+                                      attachmentCount === 1
+                                        ? "1 attachment"
+                                        : `${attachmentCount} attachments`
+                                    }
+                                    title={
+                                      attachmentCount === 1
+                                        ? "1 attachment"
+                                        : `${attachmentCount} attachments`
+                                    }
+                                    className="inline-flex items-center justify-center"
+                                  >
+                                    <svg
+                                      aria-hidden="true"
+                                      viewBox="0 0 16 16"
+                                      className="h-3.5 w-3.5"
+                                      fill="none"
+                                      stroke="currentColor"
+                                      strokeWidth="1.5"
+                                      strokeLinecap="round"
+                                      strokeLinejoin="round"
+                                    >
+                                      <path d="M5.75 8.75 9.9 4.6a2.1 2.1 0 1 1 2.97 2.97l-5.18 5.18a3.15 3.15 0 1 1-4.46-4.46l5.01-5.01" />
+                                    </svg>
+                                  </span>
+                                ) : null}
+                                {hasThreadCountIndicator ? (
+                                  <span
+                                    aria-label={`${threadMessageCount} messages in conversation`}
+                                    title={`${threadMessageCount} messages in conversation`}
+                                    className="leading-none"
+                                  >
+                                    {threadMessageCount}
+                                  </span>
+                                ) : null}
+                              </div>
+                            ) : null}
                           </div>
                         </button>
                       );
