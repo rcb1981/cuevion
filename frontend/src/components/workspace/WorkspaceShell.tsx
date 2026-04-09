@@ -1193,13 +1193,15 @@ function renderPlainMessageParagraph(
   paragraph: string,
   paragraphKey: string,
   className: string,
+  contentClassName?: string,
 ) {
   const matches = Array.from(paragraph.matchAll(plainLinkPattern));
+  const resolvedContentClassName = contentClassName ?? className;
 
   if (matches.length === 0) {
     return (
       <p key={paragraphKey} className={className}>
-        {paragraph}
+        <span className={resolvedContentClassName}>{paragraph}</span>
       </p>
     );
   }
@@ -1212,7 +1214,14 @@ function renderPlainMessageParagraph(
     const matchStart = match.index ?? 0;
 
     if (matchStart > lastIndex) {
-      content.push(paragraph.slice(lastIndex, matchStart));
+      content.push(
+        <span
+          key={`${paragraphKey}-text-${index}`}
+          className={resolvedContentClassName}
+        >
+          {paragraph.slice(lastIndex, matchStart)}
+        </span>,
+      );
     }
 
     content.push(
@@ -1230,7 +1239,14 @@ function renderPlainMessageParagraph(
   });
 
   if (lastIndex < paragraph.length) {
-    content.push(paragraph.slice(lastIndex));
+    content.push(
+      <span
+        key={`${paragraphKey}-text-tail`}
+        className={resolvedContentClassName}
+      >
+        {paragraph.slice(lastIndex)}
+      </span>,
+    );
   }
 
   return (
@@ -9082,11 +9098,7 @@ function MailboxView({
                 isHistoricalThreadMessage
                   ? "border-t border-[color:rgba(129,144,122,0.12)] pt-3 dark:border-[color:rgba(121,151,120,0.14)]"
                   : "pt-0"
-              } ${isCurrentUser ? "pl-4 md:pl-8" : ""} ${
-                bodyRenderMode.mode === "plain"
-                  ? "text-[color:rgba(34,38,36,0.99)] dark:text-[color:rgba(228,235,230,0.94)]"
-                  : ""
-              }`}
+              } ${isCurrentUser ? "pl-4 md:pl-8" : ""}`}
             >
               <div className={`flex flex-wrap items-center justify-between ${isHtmlMessage ? "gap-2 px-0.5" : "gap-2"}`}>
                 <div className="flex items-center gap-2">
@@ -9181,6 +9193,7 @@ function MailboxView({
                         paragraph,
                         `${threadMessage.id}-${paragraph}`,
                         `break-words text-[0.94rem] ${density === "full" ? "leading-7" : "leading-6.5"} text-[color:rgba(34,38,36,0.99)] dark:text-[color:rgba(228,235,230,0.94)]`,
+                        "text-[color:rgba(34,38,36,0.99)] dark:text-[color:rgba(228,235,230,0.94)]",
                       ),
                     )}
                     {threadMessage.signature ? (
@@ -9199,6 +9212,7 @@ function MailboxView({
                               paragraph,
                               `${threadMessage.id}-quoted-${paragraph}`,
                               `break-words text-[0.83rem] ${density === "full" ? "leading-6.25" : "leading-5.75"} text-[color:rgba(82,76,70,0.9)] dark:text-[color:rgba(196,202,198,0.82)]`,
+                              "text-[color:rgba(82,76,70,0.9)] dark:text-[color:rgba(196,202,198,0.82)]",
                             ),
                           )}
                         </div>
