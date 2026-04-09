@@ -2203,6 +2203,14 @@ function resolveMessageBodyRenderMode(
       invalidImageCount: number;
     }
   | {
+      mode: "native_html";
+      html: string;
+      emailStyles: string;
+      remoteImageCount: number;
+      cidImageCount: number;
+      invalidImageCount: number;
+    }
+  | {
       mode: "compose_html";
       html: string;
       emailStyles: string;
@@ -2229,11 +2237,18 @@ function resolveMessageBodyRenderMode(
       };
 
   if (sanitizedHtmlResult.html) {
+    const messageBodyHtml = message.bodyHtml ?? "";
+    const isComposeHtml =
+      messageBodyHtml.length > 0 && isComposeGeneratedHtml(messageBodyHtml);
+    const isExternalHtml =
+      sanitizedHtmlResult.emailStyles.trim().length > 0 ||
+      sanitizedHtmlResult.remoteImageCount > 0 ||
+      /<(table|img|svg|canvas|video|audio|iframe)\b/i.test(
+        sanitizedHtmlResult.html,
+      );
+
     return {
-      mode:
-        message.bodyHtml && isComposeGeneratedHtml(message.bodyHtml)
-          ? "compose_html"
-          : "html",
+      mode: isComposeHtml ? "compose_html" : isExternalHtml ? "html" : "native_html",
       html: sanitizedHtmlResult.html,
       emailStyles: sanitizedHtmlResult.emailStyles,
       remoteImageCount: sanitizedHtmlResult.remoteImageCount,
@@ -9328,7 +9343,8 @@ function MailboxView({
     });
     const hasHiddenRemoteImages =
       bodyRenderMode.remoteImageCount > 0 && !remoteImagesAllowed;
-    const isHtmlMessage = bodyRenderMode.mode === "html";
+    const isExternalHtmlMessage = bodyRenderMode.mode === "html";
+    const isNativeHtmlMessage = bodyRenderMode.mode === "native_html";
     const plainParagraphClassName = `break-words text-[0.94rem] ${
       density === "full" ? "leading-7" : "leading-6.5"
     } text-[color:rgba(34,38,36,0.99)] dark:text-[color:rgba(228,235,230,0.94)]`;
@@ -9344,7 +9360,7 @@ function MailboxView({
             : "pt-0"
         } ${isCurrentUser ? "pl-4 md:pl-8" : ""}`}
       >
-        <div className={`flex flex-wrap items-center justify-between ${isHtmlMessage ? "gap-2 px-0.5" : "gap-2"}`}>
+        <div className={`flex flex-wrap items-center justify-between ${isExternalHtmlMessage ? "gap-2 px-0.5" : "gap-2"}`}>
           <div className="flex items-center gap-2">
             <div className={`font-medium tracking-[-0.012em] text-[var(--workspace-text)] ${isHistoricalThreadMessage ? "text-[0.78rem]" : "text-[0.84rem]"}`}>
               {isCurrentUser ? "You" : threadMessage.sender}
@@ -9362,18 +9378,18 @@ function MailboxView({
         </div>
         <div
           className={`${
-            isHtmlMessage
+            isExternalHtmlMessage
               ? "mt-1.5 overflow-visible bg-transparent px-0 py-0 text-[var(--workspace-text)] dark:text-[color:rgba(228,235,230,0.94)]"
-              : bodyRenderMode.mode === "plain"
+              : bodyRenderMode.mode === "plain" || isNativeHtmlMessage
                 ? "mt-1.5 bg-transparent px-0 py-0 text-[color:rgba(34,38,36,0.99)] dark:text-[color:rgba(228,235,230,0.94)]"
                 : "mt-1.5 bg-transparent px-0 py-0 text-[var(--workspace-text)] dark:text-[color:rgba(228,235,230,0.94)]"
           }`}
         >
           <div
             className={
-              isHtmlMessage
+              isExternalHtmlMessage
                 ? "space-y-1.5 text-[var(--workspace-text)]"
-                : bodyRenderMode.mode === "plain"
+                : bodyRenderMode.mode === "plain" || isNativeHtmlMessage
                   ? "space-y-2.5 text-[color:rgba(34,38,36,0.99)] dark:text-[color:rgba(228,235,230,0.94)]"
                   : "space-y-2.5 text-[var(--workspace-text)]"
             }
@@ -9394,29 +9410,6 @@ function MailboxView({
                 </button>
               </div>
             ) : null}
-            <details className="mt-3 rounded-[10px] border border-[color:rgba(129,144,122,0.12)] bg-white px-3 py-2 text-[0.72rem] text-black">
-              <summary className="cursor-pointer font-medium">Render debug</summary>
-              <div className="mt-2 space-y-1">
-                <div>messageId: {threadMessage.id}</div>
-                <div>renderMode: {bodyRenderMode.mode}</div>
-                <div>isHtmlMessage: {String(isHtmlMessage)}</div>
-                <div>hasBodyHtml: {String(Boolean(threadMessage.bodyHtml))}</div>
-                <div>
-                  isComposeGeneratedHtml:{" "}
-                  {String(
-                    Boolean(
-                      threadMessage.bodyHtml &&
-                        isComposeGeneratedHtml(threadMessage.bodyHtml),
-                    ),
-                  )}
-                </div>
-              </div>
-              {threadMessage.bodyHtml ? (
-                <pre className="mt-2 max-h-[18rem] overflow-auto rounded-[8px] bg-[rgba(0,0,0,0.04)] p-3 text-[0.68rem] leading-5 text-black whitespace-pre-wrap break-words">
-                  {threadMessage.bodyHtml.slice(0, 500)}
-                </pre>
-              ) : null}
-            </details>
             {bodyRenderMode.mode === "html" ? (
               <div className="email-html-content w-full overflow-visible">
                 <EmailHtmlStage
@@ -9426,6 +9419,13 @@ function MailboxView({
                   isExternalHtml={bodyRenderMode.mode === "html"}
                 />
               </div>
+            ) : bodyRenderMode.mode === "native_html" ? (
+              <div
+                className={`w-full whitespace-pre-wrap text-[0.94rem] ${
+                  density === "full" ? "leading-7" : "leading-6.5"
+                } text-[color:rgba(34,38,36,0.99)] dark:text-[color:rgba(228,235,230,0.94)] [&_a]:text-[color:rgba(44,89,116,0.98)] dark:[&_a]:text-[color:rgba(176,209,183,0.96)] [&_a]:underline [&_a]:underline-offset-2 [&_blockquote]:mt-3 [&_blockquote]:border-l-2 [&_blockquote]:border-[color:rgba(132,148,118,0.18)] [&_blockquote]:bg-[color:rgba(249,245,237,0.32)] [&_blockquote]:px-2.5 [&_blockquote]:py-2 dark:[&_blockquote]:border-[color:rgba(121,151,120,0.16)] dark:[&_blockquote]:bg-[color:rgba(86,114,87,0.08)] [&_blockquote_*]:text-[color:rgba(82,76,70,0.92)] dark:[&_blockquote_*]:text-[color:rgba(196,202,198,0.82)] [&_[data-email-quote='true']]:mt-3 [&_[data-email-quote='true']]:border-l-2 [&_[data-email-quote='true']]:border-[color:rgba(132,148,118,0.18)] [&_[data-email-quote='true']]:bg-[color:rgba(249,245,237,0.32)] [&_[data-email-quote='true']]:px-2.5 [&_[data-email-quote='true']]:py-2 dark:[&_[data-email-quote='true']]:border-[color:rgba(121,151,120,0.16)] dark:[&_[data-email-quote='true']]:bg-[color:rgba(86,114,87,0.08)] [&_[data-email-quote='true']_*]:text-[color:rgba(82,76,70,0.92)] dark:[&_[data-email-quote='true']_*]:text-[color:rgba(196,202,198,0.82)] [&_img]:max-w-full [&_img]:h-auto`}
+                dangerouslySetInnerHTML={{ __html: bodyRenderMode.html }}
+              />
             ) : bodyRenderMode.mode === "compose_html" ? (
               <div
                 className={`w-full whitespace-pre-wrap text-[0.94rem] ${density === "full" ? "leading-7" : "leading-6.5"} text-[var(--workspace-text)] dark:text-[var(--workspace-text)] [&_a]:text-[color:rgba(44,89,116,0.98)] dark:[&_a]:text-[color:rgba(176,209,183,0.96)] [&_a]:underline [&_a]:underline-offset-2 [&_div]:min-h-[1.35rem] [&_[data-compose-quote='true']]:mt-3 [&_[data-compose-quote='true']]:rounded-[6px] [&_[data-compose-quote='true']]:border-l-2 [&_[data-compose-quote='true']]:border-[color:rgba(132,148,118,0.18)] [&_[data-compose-quote='true']]:bg-[color:rgba(249,245,237,0.42)] [&_[data-compose-quote='true']]:px-2.5 [&_[data-compose-quote='true']]:py-2 dark:[&_[data-compose-quote='true']]:border-[color:rgba(121,151,120,0.16)] dark:[&_[data-compose-quote='true']]:bg-[color:rgba(86,114,87,0.08)] [&_[data-compose-quote='true']_*]:text-[color:rgba(82,76,70,0.92)] dark:[&_[data-compose-quote='true']_*]:text-[color:rgba(196,202,198,0.82)] [&_[data-compose-signature='true']]:mt-3 [&_[data-compose-signature='true']]:space-y-0 [&_[data-compose-signature-divider='true']]:my-2 [&_[data-compose-signature-divider='true']]:h-px [&_[data-compose-signature-divider='true']]:w-full [&_[data-compose-signature-divider='true']]:bg-[color:rgba(121,151,120,0.18)] [&_[data-compose-signature-logo='true']]:pt-1 [&_[data-compose-signature-logo='true']_img]:max-h-[76px] [&_[data-compose-signature-logo='true']_img]:w-auto [&_[data-compose-signature-logo='true']_img]:max-w-full [&_[data-compose-signature-logo='true']_img]:object-contain [&_[data-compose-signature-right='true']]:min-w-0 [&_[data-compose-signature-right='true']]:flex-1 [&_[data-compose-signature-row='true']]:flex [&_[data-compose-signature-row='true']]:items-start [&_[data-compose-signature-row='true']]:gap-4 [&_[data-compose-signature-spacer='true']]:min-h-[1.2rem] [&_[data-compose-signature-text='true']]:whitespace-pre-wrap [&_[data-compose-signature-text='true']]:text-[0.86rem] [&_[data-compose-signature-text='true']]:leading-[1.45] [&_[data-compose-signature-text='true']_*]:text-[var(--workspace-text-muted)] dark:[&_[data-compose-signature-text='true']_*]:text-[color:rgba(196,202,198,0.82)]`}
