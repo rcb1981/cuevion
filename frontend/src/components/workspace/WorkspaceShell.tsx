@@ -1337,13 +1337,10 @@ function buildEmailStageDocument(
         word-break: break-word;
         line-height: 1.58;
       }
-      ${themeMode === "dark" ? `* {
-        background-color: transparent !important;
-        background-image: none !important;
-      }` : ""}
       .email-stage {
         box-sizing: border-box;
         width: 100%;
+        color: ${stageTextColor};
         background: transparent;
         border: 0;
         border-radius: 0;
@@ -1351,18 +1348,6 @@ function buildEmailStageDocument(
       }
       .email-stage > * {
         max-width: 100%;
-      }
-      .email-stage--dark * {
-        color: ${stageTextColor} !important;
-      }
-      .email-stage--light,
-      .email-stage--light * {
-        color: ${stageTextColor} !important;
-        -webkit-text-fill-color: ${stageTextColor} !important;
-        opacity: 1 !important;
-        filter: none !important;
-        mix-blend-mode: normal !important;
-        text-shadow: none !important;
       }
       img {
         max-width: 100%;
@@ -1508,22 +1493,24 @@ function EmailHtmlStage({
   );
 }
 
-function shouldResetImportedHtmlTextColor(element: HTMLElement) {
-  return !element.closest(
-    "[data-compose-quote='true'], [data-compose-signature='true'], [data-compose-signature-text='true'], [data-compose-signature-logo='true'], [data-compose-signature-divider='true'], [data-compose-signature-row='true'], [data-compose-signature-right='true'], [data-compose-signature-spacer='true']",
-  );
-}
-
 const allowedImportedEmailInlineStyleProperties = new Set([
   "text-align",
+  "color",
   "font-weight",
   "font-style",
+  "font-family",
+  "font-size",
+  "line-height",
+  "letter-spacing",
   "text-decoration",
+  "text-transform",
   "white-space",
   "width",
   "height",
   "max-width",
   "min-width",
+  "max-height",
+  "min-height",
   "border",
   "border-top",
   "border-right",
@@ -1544,6 +1531,13 @@ const allowedImportedEmailInlineStyleProperties = new Set([
   "vertical-align",
   "display",
   "table-layout",
+  "background",
+  "background-color",
+  "background-image",
+  "background-repeat",
+  "background-position",
+  "background-size",
+  "border-radius",
 ]);
 
 function shouldPreserveImportedEmailInlineStyle(propertyName: string, propertyValue: string) {
@@ -1578,37 +1572,6 @@ function filterImportedEmailInlineStyles(element: HTMLElement) {
   element.setAttribute("style", nextDeclarations.join(" "));
 }
 
-function normalizeImportedEmailHtmlForReading(
-  element: HTMLElement,
-  themeMode: "light" | "dark",
-) {
-  if (themeMode !== "light" || !shouldResetImportedHtmlTextColor(element)) {
-    return;
-  }
-
-  element.style.removeProperty("opacity");
-  element.style.removeProperty("filter");
-  element.style.removeProperty("mix-blend-mode");
-  element.style.removeProperty("text-shadow");
-  element.style.removeProperty("-webkit-text-fill-color");
-
-  if (element instanceof HTMLAnchorElement) {
-    return;
-  }
-
-  if (element.hasAttribute("color")) {
-    element.removeAttribute("color");
-  }
-
-  element.style.removeProperty("color");
-  element.style.setProperty("color", "rgba(34, 38, 36, 0.99)", "important");
-  element.style.setProperty("-webkit-text-fill-color", "rgba(34, 38, 36, 0.99)", "important");
-  element.style.setProperty("opacity", "1", "important");
-  element.style.setProperty("filter", "none", "important");
-  element.style.setProperty("mix-blend-mode", "normal", "important");
-  element.style.setProperty("text-shadow", "none", "important");
-}
-
 function sanitizeMessageBodyHtml(
   bodyHtml: string,
   options?: { allowRemoteImages?: boolean; themeMode?: "light" | "dark" },
@@ -1639,7 +1602,6 @@ function sanitizeMessageBodyHtml(
   let cidImageCount = 0;
   let invalidImageCount = 0;
   const allowRemoteImages = options?.allowRemoteImages ?? false;
-  const themeMode = options?.themeMode ?? "light";
 
   body.querySelectorAll(unsafeEmailHtmlSelectors).forEach((node) => {
     node.remove();
@@ -1671,10 +1633,6 @@ function sanitizeMessageBodyHtml(
       if (
         [
           "class",
-          "color",
-          "bgcolor",
-          "background",
-          "text",
           "link",
           "vlink",
           "alink",
@@ -1743,30 +1701,6 @@ function sanitizeMessageBodyHtml(
     if (element instanceof HTMLElement) {
       filterImportedEmailInlineStyles(element);
 
-      const computedBackground = element.style.backgroundColor.toLowerCase();
-      const computedTextColor = element.style.color.toLowerCase();
-      const computedBackgroundImage = element.style.backgroundImage.toLowerCase();
-
-      if (
-        computedBackground &&
-        /rgb\(255,\s*255,\s*255\)|rgba\(255,\s*255,\s*255|rgb\(248,\s*248,\s*248\)|rgb\(250,\s*250,\s*250\)|#fff(?:fff)?|#f8f8f8|#fafafa|white/.test(
-          computedBackground,
-        )
-      ) {
-        element.style.backgroundColor = "transparent";
-      }
-
-      if (computedBackground && !/transparent|initial|inherit/.test(computedBackground)) {
-        element.style.backgroundColor = "transparent";
-      }
-
-      if (
-        computedBackgroundImage &&
-        /(linear-gradient|radial-gradient)/.test(computedBackgroundImage)
-      ) {
-        element.style.backgroundImage = "none";
-      }
-
       if (element.tagName === "TABLE") {
         element.style.width = "100%";
         element.style.maxWidth = "100%";
@@ -1794,8 +1728,6 @@ function sanitizeMessageBodyHtml(
         element.style.background = "transparent";
         element.style.color = "inherit";
       }
-
-      normalizeImportedEmailHtmlForReading(element, themeMode);
     }
   });
 
