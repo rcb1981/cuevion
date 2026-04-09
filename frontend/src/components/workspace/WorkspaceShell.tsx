@@ -1393,6 +1393,172 @@ function buildEmailStageDocument(
   // Additional styles for EXTERNAL HTML emails:
   // Minimal overrides – let the email's own CSS drive colors, layout, backgrounds.
   // We only provide safe fallbacks for unspecified properties.
+
+  // Dark mode only: text inside explicitly light-background cells (identified by
+  // bgcolor attribute starting with #f or #e, covering #ffffff/#f5f5f5/#eeeeee etc.)
+  // or inline background/background-color declarations) must be dark enough to read.
+  // Dark background values like #1a1a2e/#333333 start with #1/#3 and are never matched,
+  // so branded dark header sections are untouched.
+  const externalHtmlDarkLightBgFix =
+    themeMode === "dark"
+      ? `
+      .email-stage--dark td[bgcolor^="#f"],
+      .email-stage--dark td[bgcolor^="#F"],
+      .email-stage--dark td[bgcolor^="#e"],
+      .email-stage--dark td[bgcolor^="#E"],
+      .email-stage--dark td[bgcolor="white"],
+      .email-stage--dark table[bgcolor^="#f"],
+      .email-stage--dark table[bgcolor^="#F"],
+      .email-stage--dark table[bgcolor^="#e"],
+      .email-stage--dark table[bgcolor^="#E"],
+      .email-stage--dark td[style*="background-color:#f"],
+      .email-stage--dark td[style*="background-color: #f"],
+      .email-stage--dark td[style*="background-color:#F"],
+      .email-stage--dark td[style*="background-color: #F"],
+      .email-stage--dark td[style*="background-color:#e"],
+      .email-stage--dark td[style*="background-color: #e"],
+      .email-stage--dark td[style*="background-color:#E"],
+      .email-stage--dark td[style*="background-color: #E"],
+      .email-stage--dark td[style*="background-color:white"],
+      .email-stage--dark td[style*="background-color: white"],
+      .email-stage--dark td[style*="background:#f"],
+      .email-stage--dark td[style*="background: #f"],
+      .email-stage--dark td[style*="background:#F"],
+      .email-stage--dark td[style*="background: #F"],
+      .email-stage--dark td[style*="background:#e"],
+      .email-stage--dark td[style*="background: #e"],
+      .email-stage--dark td[style*="background:#E"],
+      .email-stage--dark td[style*="background: #E"],
+      .email-stage--dark td[style*="background:white"],
+      .email-stage--dark td[style*="background: white"],
+      .email-stage--dark div[style*="background-color:#f"],
+      .email-stage--dark div[style*="background-color: #f"],
+      .email-stage--dark div[style*="background-color:#F"],
+      .email-stage--dark div[style*="background-color: #F"],
+      .email-stage--dark div[style*="background-color:#e"],
+      .email-stage--dark div[style*="background-color: #e"],
+      .email-stage--dark div[style*="background-color:#E"],
+      .email-stage--dark div[style*="background-color: #E"],
+      .email-stage--dark div[style*="background-color:white"],
+      .email-stage--dark div[style*="background-color: white"],
+      .email-stage--dark div[style*="background:#f"],
+      .email-stage--dark div[style*="background: #f"],
+      .email-stage--dark div[style*="background:#F"],
+      .email-stage--dark div[style*="background: #F"],
+      .email-stage--dark div[style*="background:#e"],
+      .email-stage--dark div[style*="background: #e"],
+      .email-stage--dark div[style*="background:#E"],
+      .email-stage--dark div[style*="background: #E"],
+      .email-stage--dark div[style*="background:white"],
+      .email-stage--dark div[style*="background: white"] {
+        color: rgba(28, 32, 28, 0.88);
+      }
+      .email-stage--dark td[bgcolor^="#f"] *:not(a),
+      .email-stage--dark td[bgcolor^="#F"] *:not(a),
+      .email-stage--dark td[bgcolor^="#e"] *:not(a),
+      .email-stage--dark td[bgcolor^="#E"] *:not(a),
+      .email-stage--dark td[bgcolor="white"] *:not(a),
+      .email-stage--dark table[bgcolor^="#f"] *:not(a),
+      .email-stage--dark table[bgcolor^="#F"] *:not(a),
+      .email-stage--dark table[bgcolor^="#e"] *:not(a),
+      .email-stage--dark table[bgcolor^="#E"] *:not(a),
+      .email-stage--dark td[style*="background-color:#f"] *:not(a),
+      .email-stage--dark td[style*="background-color: #f"] *:not(a),
+      .email-stage--dark td[style*="background-color:#F"] *:not(a),
+      .email-stage--dark td[style*="background-color: #F"] *:not(a),
+      .email-stage--dark td[style*="background-color:#e"] *:not(a),
+      .email-stage--dark td[style*="background-color: #e"] *:not(a),
+      .email-stage--dark td[style*="background-color:#E"] *:not(a),
+      .email-stage--dark td[style*="background-color: #E"] *:not(a),
+      .email-stage--dark td[style*="background-color:white"] *:not(a),
+      .email-stage--dark td[style*="background-color: white"] *:not(a),
+      .email-stage--dark td[style*="background:#f"] *:not(a),
+      .email-stage--dark td[style*="background: #f"] *:not(a),
+      .email-stage--dark td[style*="background:#F"] *:not(a),
+      .email-stage--dark td[style*="background: #F"] *:not(a),
+      .email-stage--dark td[style*="background:#e"] *:not(a),
+      .email-stage--dark td[style*="background: #e"] *:not(a),
+      .email-stage--dark td[style*="background:#E"] *:not(a),
+      .email-stage--dark td[style*="background: #E"] *:not(a),
+      .email-stage--dark td[style*="background:white"] *:not(a),
+      .email-stage--dark td[style*="background: white"] *:not(a),
+      .email-stage--dark div[style*="background-color:#f"] *:not(a),
+      .email-stage--dark div[style*="background-color: #f"] *:not(a),
+      .email-stage--dark div[style*="background-color:#F"] *:not(a),
+      .email-stage--dark div[style*="background-color: #F"] *:not(a),
+      .email-stage--dark div[style*="background-color:#e"] *:not(a),
+      .email-stage--dark div[style*="background-color: #e"] *:not(a),
+      .email-stage--dark div[style*="background-color:#E"] *:not(a),
+      .email-stage--dark div[style*="background-color: #E"] *:not(a),
+      .email-stage--dark div[style*="background-color:white"] *:not(a),
+      .email-stage--dark div[style*="background-color: white"] *:not(a),
+      .email-stage--dark div[style*="background:#f"] *:not(a),
+      .email-stage--dark div[style*="background: #f"] *:not(a),
+      .email-stage--dark div[style*="background:#F"] *:not(a),
+      .email-stage--dark div[style*="background: #F"] *:not(a),
+      .email-stage--dark div[style*="background:#e"] *:not(a),
+      .email-stage--dark div[style*="background: #e"] *:not(a),
+      .email-stage--dark div[style*="background:#E"] *:not(a),
+      .email-stage--dark div[style*="background: #E"] *:not(a),
+      .email-stage--dark div[style*="background:white"] *:not(a),
+      .email-stage--dark div[style*="background: white"] *:not(a) {
+        color: rgba(28, 32, 28, 0.88) !important;
+        -webkit-text-fill-color: rgba(28, 32, 28, 0.88) !important;
+      }
+      .email-stage--dark td[bgcolor^="#f"] a,
+      .email-stage--dark td[bgcolor^="#F"] a,
+      .email-stage--dark td[bgcolor^="#e"] a,
+      .email-stage--dark td[bgcolor^="#E"] a,
+      .email-stage--dark td[bgcolor="white"] a,
+      .email-stage--dark table[bgcolor^="#f"] a,
+      .email-stage--dark table[bgcolor^="#F"] a,
+      .email-stage--dark table[bgcolor^="#e"] a,
+      .email-stage--dark table[bgcolor^="#E"] a,
+      .email-stage--dark td[style*="background-color:#f"] a,
+      .email-stage--dark td[style*="background-color: #f"] a,
+      .email-stage--dark td[style*="background-color:#F"] a,
+      .email-stage--dark td[style*="background-color: #F"] a,
+      .email-stage--dark td[style*="background-color:#e"] a,
+      .email-stage--dark td[style*="background-color: #e"] a,
+      .email-stage--dark td[style*="background-color:#E"] a,
+      .email-stage--dark td[style*="background-color: #E"] a,
+      .email-stage--dark td[style*="background-color:white"] a,
+      .email-stage--dark td[style*="background-color: white"] a,
+      .email-stage--dark td[style*="background:#f"] a,
+      .email-stage--dark td[style*="background: #f"] a,
+      .email-stage--dark td[style*="background:#F"] a,
+      .email-stage--dark td[style*="background: #F"] a,
+      .email-stage--dark td[style*="background:#e"] a,
+      .email-stage--dark td[style*="background: #e"] a,
+      .email-stage--dark td[style*="background:#E"] a,
+      .email-stage--dark td[style*="background: #E"] a,
+      .email-stage--dark td[style*="background:white"] a,
+      .email-stage--dark td[style*="background: white"] a,
+      .email-stage--dark div[style*="background-color:#f"] a,
+      .email-stage--dark div[style*="background-color: #f"] a,
+      .email-stage--dark div[style*="background-color:#F"] a,
+      .email-stage--dark div[style*="background-color: #F"] a,
+      .email-stage--dark div[style*="background-color:#e"] a,
+      .email-stage--dark div[style*="background-color: #e"] a,
+      .email-stage--dark div[style*="background-color:#E"] a,
+      .email-stage--dark div[style*="background-color: #E"] a,
+      .email-stage--dark div[style*="background-color:white"] a,
+      .email-stage--dark div[style*="background-color: white"] a,
+      .email-stage--dark div[style*="background:#f"] a,
+      .email-stage--dark div[style*="background: #f"] a,
+      .email-stage--dark div[style*="background:#F"] a,
+      .email-stage--dark div[style*="background: #F"] a,
+      .email-stage--dark div[style*="background:#e"] a,
+      .email-stage--dark div[style*="background: #e"] a,
+      .email-stage--dark div[style*="background:#E"] a,
+      .email-stage--dark div[style*="background: #E"] a,
+      .email-stage--dark div[style*="background:white"] a,
+      .email-stage--dark div[style*="background: white"] a {
+        color: ${stageLinkColor} !important;
+        -webkit-text-fill-color: ${stageLinkColor} !important;
+      }`
+      : "";
+
   const externalHtmlStageStyles = `
       body {
         color: ${stageTextColor};
@@ -1410,7 +1576,7 @@ function buildEmailStageDocument(
         margin: 0.85rem 0 0;
         padding: 0.4rem 0 0.1rem 0.85rem;
         border-left: 2px solid ${stageQuoteBorder};
-      }`;
+      }${externalHtmlDarkLightBgFix}`;
 
   // Additional styles for COMPOSE HTML emails:
   // Full theme-aware overrides since compose content is unstyled by design.
