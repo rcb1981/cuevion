@@ -2274,7 +2274,10 @@ function normalizeNativeMessageHtmlForPane(html: string) {
 
   const container = document.createElement("div");
   container.innerHTML = html;
+  container.querySelectorAll("style").forEach((node) => node.remove());
   const relevantTags = new Set([
+    "HTML",
+    "BODY",
     "TABLE",
     "TBODY",
     "TR",
@@ -2285,6 +2288,7 @@ function normalizeNativeMessageHtmlForPane(html: string) {
     "P",
     "FONT",
     "LI",
+    "A",
   ]);
   const normalizeNode = (node: Element) => {
     if (!(node instanceof HTMLElement)) {
@@ -2300,6 +2304,11 @@ function normalizeNativeMessageHtmlForPane(html: string) {
     node.style.removeProperty("background");
     node.style.removeProperty("background-color");
     node.style.removeProperty("-webkit-text-fill-color");
+    node.removeAttribute("text");
+    node.removeAttribute("link");
+    node.removeAttribute("alink");
+    node.removeAttribute("vlink");
+    node.removeAttribute("bgcolor");
 
     if (!node.getAttribute("style")?.trim()) {
       node.removeAttribute("style");
@@ -9465,12 +9474,6 @@ function MailboxView({
                   : "space-y-2.5 text-[var(--workspace-text)]"
             }
           >
-            {/* TEMP DEBUG: remove after verifying the active reading-pane render path. */}
-            {
-              <div className="rounded-[6px] border border-dashed border-[color:rgba(129,144,122,0.2)] px-2 py-1 text-[10px] uppercase tracking-[0.14em] text-[var(--workspace-text-faint)]">
-                mode={bodyRenderMode.mode} ext={String(isExternalHtmlMessage)} native={String(isNativeHtmlMessage)} compose={String(isComposeGeneratedBodyHtml)}
-              </div>
-            }
             {hasHiddenRemoteImages ? (
               <div className="flex flex-wrap items-center justify-between gap-3 rounded-[10px] border border-[color:rgba(129,144,122,0.08)] bg-[color:rgba(252,249,242,0.72)] px-3 py-2 text-[0.74rem] text-[var(--workspace-text-soft)] dark:border-[color:rgba(121,151,120,0.1)] dark:bg-[color:rgba(86,114,87,0.03)]">
                 <div>
