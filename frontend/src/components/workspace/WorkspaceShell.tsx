@@ -1495,7 +1495,8 @@ function EmailHtmlStage({
   const cleanupRef = useRef<(() => void) | null>(null);
   const [height, setHeight] = useState(320);
   const fallbackClassName = "w-full overflow-visible bg-transparent";
-  const fallbackHeight = 2800;
+  const fallbackHeight = 2200;
+  const measurementSafetyBuffer = 40;
 
   const measureContentHeight = (iframeDoc: Document): number => {
     const docEl = iframeDoc.documentElement;
@@ -1505,15 +1506,77 @@ function EmailHtmlStage({
       return fallbackHeight;
     }
 
-    const measured = Math.max(
-      docEl.scrollHeight ?? 0,
-      body.scrollHeight ?? 0,
-      docEl.offsetHeight ?? 0,
-      body.offsetHeight ?? 0,
-      body.getBoundingClientRect().height ?? 0,
+    const stageRoot =
+      body.firstElementChild instanceof HTMLElement ? body.firstElementChild : body;
+    const stageRootRect = stageRoot.getBoundingClientRect();
+    const contentBottomCandidates = [Math.ceil(stageRootRect.height)];
+
+    const visibleElements = Array.from(stageRoot.querySelectorAll("*"));
+
+    visibleElements.forEach((node) => {
+      if (!(node instanceof HTMLElement)) {
+        return;
+      }
+
+      const computedStyle = iframeDoc.defaultView?.getComputedStyle(node);
+
+      if (
+        computedStyle?.display === "none" ||
+        computedStyle?.visibility === "hidden"
+      ) {
+        return;
+      }
+
+      const rect = node.getBoundingClientRect();
+
+      if (rect.width <= 0 && rect.height <= 0) {
+        return;
+      }
+
+      contentBottomCandidates.push(Math.ceil(rect.bottom - stageRootRect.top));
+    });
+
+    const contentRange = iframeDoc.createRange();
+    contentRange.selectNodeContents(stageRoot);
+    const contentRangeRect = contentRange.getBoundingClientRect();
+
+    if (contentRangeRect.width > 0 || contentRangeRect.height > 0) {
+      contentBottomCandidates.push(
+        Math.ceil(contentRangeRect.bottom - stageRootRect.top),
+      );
+    }
+
+    const contentBottom = Math.max(
+      0,
+      ...contentBottomCandidates.filter((value) => Number.isFinite(value) && value > 0),
     );
 
-    return measured > 0 ? Math.ceil(measured) : fallbackHeight;
+    if (contentBottom <= 0) {
+      return fallbackHeight;
+    }
+
+    const safeContentHeight = contentBottom + measurementSafetyBuffer;
+    const heightCandidates = [
+      stageRoot.scrollHeight,
+      stageRoot.offsetHeight,
+      body.scrollHeight,
+      body.offsetHeight,
+      docEl.scrollHeight,
+      docEl.offsetHeight,
+    ]
+      .map((value) => Math.ceil(value ?? 0))
+      .filter((value) => Number.isFinite(value) && value >= safeContentHeight);
+    const tightCandidates = heightCandidates.filter(
+      (value) => value <= safeContentHeight + 160,
+    );
+    const nextHeight =
+      tightCandidates.length > 0
+        ? Math.min(...tightCandidates)
+        : heightCandidates.length > 0
+          ? Math.min(...heightCandidates)
+          : safeContentHeight;
+
+    return Math.max(320, nextHeight);
   };
 
   const updateHeight = () => {
