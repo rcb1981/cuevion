@@ -1344,6 +1344,7 @@ function buildEmailStageDocument(
       }
       body {
         /* Fallback only – external emails control their own background/color */
+        display: block !important;
         font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
         font-size: 14px;
         line-height: 1.5;
@@ -1396,6 +1397,7 @@ function buildEmailStageDocument(
       }
       .email-stage {
         box-sizing: border-box;
+        display: block;
         width: 100%;
         height: auto !important;
         overflow: visible !important;
@@ -1418,12 +1420,13 @@ function buildEmailStageDocument(
       }
       .email-stage {
         box-sizing: border-box;
+        display: block;
         width: 100%;
         color: ${stageTextColor};
         background: transparent;
         border: 0;
         border-radius: 0;
-        overflow: visible;
+        overflow: visible !important;
         overflow-wrap: break-word;
       }
       .email-stage a,
@@ -1489,54 +1492,28 @@ function EmailHtmlStage({
   isExternalHtml?: boolean;
 }) {
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  const cleanupRef = useRef<(() => void) | null>(null);
   const [height, setHeight] = useState(320);
-  const [stageFailed, setStageFailed] = useState(false);
   const fallbackClassName = "w-full overflow-visible bg-transparent";
+  const fallbackHeight = 2800;
 
   const measureContentHeight = (iframeDoc: Document): number => {
     const docEl = iframeDoc.documentElement;
     const body = iframeDoc.body;
 
     if (!body) {
-      return 220;
+      return fallbackHeight;
     }
 
-    // Temporarily make the iframe very wide so fixed-width table emails
-    // don't affect vertical height measurement (wide email = less vertical wrapping).
-    // We restore it immediately after reading.
-    const prevWidth = docEl.style.overflowX;
-    docEl.style.overflowX = "visible";
-
-    // scrollHeight is the most reliable measure for total content height,
-    // accounting for overflow, tables, and absolutely-positioned elements.
     const measured = Math.max(
       docEl.scrollHeight ?? 0,
-      docEl.offsetHeight ?? 0,
       body.scrollHeight ?? 0,
+      docEl.offsetHeight ?? 0,
       body.offsetHeight ?? 0,
+      body.getBoundingClientRect().height ?? 0,
     );
 
-    // Also walk direct children of the stage wrapper to catch
-    // elements with large margins that don't contribute to scrollHeight.
-    const stageWrapper = body.firstElementChild as HTMLElement | null;
-    let childrenBottom = 0;
-
-    if (stageWrapper) {
-      const bodyRect = body.getBoundingClientRect();
-
-      body.querySelectorAll(
-        "table, tbody, div, section, article, header, footer",
-      ).forEach((node) => {
-        if (!(node instanceof HTMLElement)) return;
-        const rect = node.getBoundingClientRect();
-        if (rect.height <= 0) return;
-        childrenBottom = Math.max(childrenBottom, Math.ceil(rect.bottom - bodyRect.top));
-      });
-    }
-
-    docEl.style.overflowX = prevWidth;
-
-    return Math.max(measured, childrenBottom, 220);
+    return measured > 0 ? Math.ceil(measured) : fallbackHeight;
   };
 
   const updateHeight = () => {
@@ -1550,43 +1527,76 @@ function EmailHtmlStage({
       const iframeDoc = iframe.contentDocument;
 
       if (!iframeDoc || !iframeDoc.body) {
+        setHeight((currentHeight) => Math.max(currentHeight, fallbackHeight));
         return;
       }
 
       const nextHeight = measureContentHeight(iframeDoc);
 
       setHeight((currentHeight) =>
-        Math.abs(currentHeight - nextHeight) > 1 ? nextHeight : currentHeight,
+        Math.abs(currentHeight - nextHeight) > 1
+          ? Math.max(nextHeight, 320)
+          : currentHeight,
       );
     } catch {
-      setStageFailed(true);
+      setHeight((currentHeight) => Math.max(currentHeight, fallbackHeight));
     }
   };
 
-  useEffect(() => {
-    if (stageFailed) {
+  const attachMeasurementListeners = () => {
+    cleanupRef.current?.();
+
+    const iframe = iframeRef.current;
+
+    if (!iframe) {
       return;
     }
 
-    const firstPass = window.setTimeout(updateHeight, 120);
-    const secondPass = window.setTimeout(updateHeight, 420);
-    const thirdPass = window.setTimeout(updateHeight, 1200);
+    const iframeDoc = iframe.contentDocument;
+
+    if (!iframeDoc?.body) {
+      setHeight((currentHeight) => Math.max(currentHeight, fallbackHeight));
+      return;
+    }
+
+    const timeoutIds: number[] = [];
+    const scheduleMeasure = (delay = 0) => {
+      const timeoutId = window.setTimeout(updateHeight, delay);
+      timeoutIds.push(timeoutId);
+    };
+    const images = Array.from(iframeDoc.images);
+    const handleImageEvent = () => {
+      scheduleMeasure(0);
+      scheduleMeasure(120);
+    };
+
+    images.forEach((image) => {
+      image.addEventListener("load", handleImageEvent);
+      image.addEventListener("error", handleImageEvent);
+    });
+
+    scheduleMeasure(0);
+    scheduleMeasure(120);
+    scheduleMeasure(400);
+    scheduleMeasure(1200);
+
+    cleanupRef.current = () => {
+      timeoutIds.forEach((timeoutId) => window.clearTimeout(timeoutId));
+      images.forEach((image) => {
+        image.removeEventListener("load", handleImageEvent);
+        image.removeEventListener("error", handleImageEvent);
+      });
+    };
+  };
+
+  useEffect(() => {
+    attachMeasurementListeners();
 
     return () => {
-      window.clearTimeout(firstPass);
-      window.clearTimeout(secondPass);
-      window.clearTimeout(thirdPass);
+      cleanupRef.current?.();
+      cleanupRef.current = null;
     };
-  }, [html, themeMode, emailStyles, isExternalHtml, stageFailed]);
-
-  if (stageFailed) {
-    return (
-      <div
-        className={fallbackClassName}
-        dangerouslySetInnerHTML={{ __html: html }}
-      />
-    );
-  }
+  }, [html, themeMode, emailStyles, isExternalHtml]);
 
   return (
     <iframe
@@ -1595,9 +1605,9 @@ function EmailHtmlStage({
       sandbox="allow-popups allow-popups-to-escape-sandbox"
       srcDoc={buildEmailStageDocument(html, themeMode, { emailStyles, isExternalHtml })}
       scrolling="no"
-      onLoad={updateHeight}
-      className="block w-full overflow-visible border-0 bg-transparent"
-      style={{ height }}
+      onLoad={attachMeasurementListeners}
+      className={`${fallbackClassName} block w-full border-0`}
+      style={{ height, overflow: "visible" }}
     />
   );
 }
@@ -9312,7 +9322,7 @@ function MailboxView({
                 </details>
                 {bodyRenderMode.mode === "html" ? (
                   <div
-                    className={`email-html-content w-full ${density === "full" ? "min-h-[12rem]" : ""}`}
+                    className={`email-html-content w-full overflow-visible ${density === "full" ? "min-h-[12rem]" : ""}`}
                   >
                     <EmailHtmlStage
                       html={bodyRenderMode.html}
