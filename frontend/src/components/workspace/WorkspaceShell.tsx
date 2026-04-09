@@ -1496,7 +1496,7 @@ function EmailHtmlStage({
   const [height, setHeight] = useState(320);
   const fallbackClassName = "w-full overflow-visible bg-transparent";
   const fallbackHeight = 2200;
-  const measurementSafetyBuffer = 40;
+  const measurementSafetyBuffer = 20;
 
   const measureContentHeight = (iframeDoc: Document): number => {
     const docEl = iframeDoc.documentElement;
@@ -1509,9 +1509,37 @@ function EmailHtmlStage({
     const stageRoot =
       body.firstElementChild instanceof HTMLElement ? body.firstElementChild : body;
     const stageRootRect = stageRoot.getBoundingClientRect();
-    const contentBottomCandidates = [Math.ceil(stageRootRect.height)];
+    const meaningfulSelector = [
+      "table",
+      "section",
+      "article",
+      "main",
+      "header",
+      "footer",
+      "div",
+      "p",
+      "blockquote",
+      "pre",
+      "ul",
+      "ol",
+      "li",
+      "img",
+      "a",
+      "button",
+      "hr",
+      "td",
+      "th",
+      "tr",
+      "h1",
+      "h2",
+      "h3",
+      "h4",
+      "h5",
+      "h6",
+    ].join(",");
+    const contentBottomCandidates: number[] = [];
 
-    const visibleElements = Array.from(stageRoot.querySelectorAll("*"));
+    const visibleElements = Array.from(stageRoot.querySelectorAll(meaningfulSelector));
 
     visibleElements.forEach((node) => {
       if (!(node instanceof HTMLElement)) {
@@ -1522,14 +1550,30 @@ function EmailHtmlStage({
 
       if (
         computedStyle?.display === "none" ||
-        computedStyle?.visibility === "hidden"
+        computedStyle?.visibility === "hidden" ||
+        computedStyle?.position === "absolute" ||
+        computedStyle?.position === "fixed"
       ) {
         return;
       }
 
       const rect = node.getBoundingClientRect();
 
-      if (rect.width <= 0 && rect.height <= 0) {
+      if (rect.height < 6 || rect.width <= 0) {
+        return;
+      }
+
+      const hasMeaningfulText = (node.textContent ?? "").trim().length > 0;
+      const isMediaElement = node instanceof HTMLImageElement;
+      const isStructuralElement =
+        node instanceof HTMLTableElement ||
+        node instanceof HTMLTableRowElement ||
+        node instanceof HTMLTableCellElement ||
+        /^(DIV|SECTION|ARTICLE|MAIN|HEADER|FOOTER|BLOCKQUOTE|PRE|HR)$/.test(
+          node.tagName,
+        );
+
+      if (!hasMeaningfulText && !isMediaElement && !isStructuralElement) {
         return;
       }
 
@@ -1540,7 +1584,7 @@ function EmailHtmlStage({
     contentRange.selectNodeContents(stageRoot);
     const contentRangeRect = contentRange.getBoundingClientRect();
 
-    if (contentRangeRect.width > 0 || contentRangeRect.height > 0) {
+    if (contentRangeRect.height > 0) {
       contentBottomCandidates.push(
         Math.ceil(contentRangeRect.bottom - stageRootRect.top),
       );
@@ -1556,7 +1600,7 @@ function EmailHtmlStage({
     }
 
     const safeContentHeight = contentBottom + measurementSafetyBuffer;
-    const heightCandidates = [
+    const fallbackCandidates = [
       stageRoot.scrollHeight,
       stageRoot.offsetHeight,
       body.scrollHeight,
@@ -1566,14 +1610,14 @@ function EmailHtmlStage({
     ]
       .map((value) => Math.ceil(value ?? 0))
       .filter((value) => Number.isFinite(value) && value >= safeContentHeight);
-    const tightCandidates = heightCandidates.filter(
-      (value) => value <= safeContentHeight + 160,
+    const tightCandidates = fallbackCandidates.filter(
+      (value) => value <= safeContentHeight + 96,
     );
     const nextHeight =
       tightCandidates.length > 0
         ? Math.min(...tightCandidates)
-        : heightCandidates.length > 0
-          ? Math.min(...heightCandidates)
+        : fallbackCandidates.length > 0
+          ? Math.min(...fallbackCandidates)
           : safeContentHeight;
 
     return Math.max(320, nextHeight);
@@ -9385,7 +9429,7 @@ function MailboxView({
                 </details>
                 {bodyRenderMode.mode === "html" ? (
                   <div
-                    className={`email-html-content w-full overflow-visible ${density === "full" ? "min-h-[12rem]" : ""}`}
+                    className="email-html-content w-full overflow-visible"
                   >
                     <EmailHtmlStage
                       html={bodyRenderMode.html}
