@@ -14250,7 +14250,7 @@ function MailboxView({
                       const timeTextClass = "text-[color:rgba(120,111,100,0.74)]";
                       const metadataIndicatorClass =
                         themeMode === "dark"
-                          ? "text-[color:rgba(204,196,187,0.76)]"
+                          ? "text-[color:rgba(220,212,202,0.84)]"
                           : "text-[color:rgba(120,111,100,0.76)]";
                       const attachmentCount = message.attachments?.length ?? 0;
                       const hasAttachmentIndicator = attachmentCount > 0;
@@ -14455,7 +14455,7 @@ function MailboxView({
                                   <span
                                     aria-label={`${threadMessageCount} messages in conversation`}
                                     title={`${threadMessageCount} messages in conversation`}
-                                    className="leading-none"
+                                    className="leading-none before:mr-1 before:content-['·']"
                                   >
                                     {threadMessageCount}
                                   </span>
