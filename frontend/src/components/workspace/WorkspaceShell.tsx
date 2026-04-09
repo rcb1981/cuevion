@@ -1194,14 +1194,25 @@ function renderPlainMessageParagraph(
   paragraphKey: string,
   className: string,
   contentClassName?: string,
+  themeMode: "light" | "dark" = "light",
 ) {
   const matches = Array.from(paragraph.matchAll(plainLinkPattern));
   const resolvedContentClassName = contentClassName ?? className;
+  const plainTextStyle = {
+    color:
+      themeMode === "dark" ? "rgba(228,235,230,0.94)" : "rgba(34,38,36,0.99)",
+  };
+  const plainLinkStyle = {
+    color:
+      themeMode === "dark" ? "rgba(176,209,183,0.96)" : "rgba(44,89,116,0.98)",
+  };
 
   if (matches.length === 0) {
     return (
       <p key={paragraphKey} className={className}>
-        <span className={resolvedContentClassName}>{paragraph}</span>
+        <span className={resolvedContentClassName} style={plainTextStyle}>
+          {paragraph}
+        </span>
       </p>
     );
   }
@@ -1218,6 +1229,7 @@ function renderPlainMessageParagraph(
         <span
           key={`${paragraphKey}-text-${index}`}
           className={resolvedContentClassName}
+          style={plainTextStyle}
         >
           {paragraph.slice(lastIndex, matchStart)}
         </span>,
@@ -1231,6 +1243,7 @@ function renderPlainMessageParagraph(
         target="_blank"
         rel="noopener noreferrer"
         className="break-all text-[color:rgba(44,89,116,0.98)] underline underline-offset-2 dark:text-[color:rgba(176,209,183,0.96)]"
+        style={plainLinkStyle}
       >
         {matchedValue}
       </a>,
@@ -1243,6 +1256,7 @@ function renderPlainMessageParagraph(
       <span
         key={`${paragraphKey}-text-tail`}
         className={resolvedContentClassName}
+        style={plainTextStyle}
       >
         {paragraph.slice(lastIndex)}
       </span>,
@@ -9090,6 +9104,11 @@ function MailboxView({
           const hasHiddenRemoteImages =
             bodyRenderMode.remoteImageCount > 0 && !remoteImagesAllowed;
           const isHtmlMessage = bodyRenderMode.mode === "html";
+          const plainParagraphClassName = `break-words text-[0.94rem] ${
+            density === "full" ? "leading-7" : "leading-6.5"
+          } text-[color:rgba(34,38,36,0.99)] dark:text-[color:rgba(228,235,230,0.94)]`;
+          const plainContentClassName =
+            "text-[color:rgba(34,38,36,0.99)] dark:text-[color:rgba(228,235,230,0.94)]";
 
           return (
             <div
@@ -9192,8 +9211,9 @@ function MailboxView({
                       renderPlainMessageParagraph(
                         paragraph,
                         `${threadMessage.id}-${paragraph}`,
-                        `break-words text-[0.94rem] ${density === "full" ? "leading-7" : "leading-6.5"} text-[color:rgba(34,38,36,0.99)] dark:text-[color:rgba(228,235,230,0.94)]`,
-                        "text-[color:rgba(34,38,36,0.99)] dark:text-[color:rgba(228,235,230,0.94)]",
+                        plainParagraphClassName,
+                        plainContentClassName,
+                        themeMode,
                       ),
                     )}
                     {threadMessage.signature ? (
@@ -9213,6 +9233,7 @@ function MailboxView({
                               `${threadMessage.id}-quoted-${paragraph}`,
                               `break-words text-[0.83rem] ${density === "full" ? "leading-6.25" : "leading-5.75"} text-[color:rgba(82,76,70,0.9)] dark:text-[color:rgba(196,202,198,0.82)]`,
                               "text-[color:rgba(82,76,70,0.9)] dark:text-[color:rgba(196,202,198,0.82)]",
+                              themeMode,
                             ),
                           )}
                         </div>
