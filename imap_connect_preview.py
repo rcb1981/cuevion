@@ -210,6 +210,39 @@ def get_message_body(message: Message) -> str:
     return clean_text(payload.decode(charset, errors="ignore"))
 
 
+def get_html_body(message: Message) -> str:
+    """Extract the raw HTML body from an email message without cleaning/stripping it.
+    Returns empty string if no HTML part exists."""
+    if message.is_multipart():
+        for part in message.walk():
+            content_type = part.get_content_type()
+            disposition = str(part.get("Content-Disposition") or "")
+
+            if "attachment" in disposition.lower():
+                continue
+
+            if content_type == "text/html":
+                payload = part.get_payload(decode=True)
+
+                if payload is None:
+                    continue
+
+                charset = part.get_content_charset() or "utf-8"
+                # Return raw HTML — do NOT run clean_text() as that would corrupt HTML
+                decoded = payload.decode(charset, errors="ignore")
+                return decoded.replace("\r\n", "\n").strip()
+    else:
+        if message.get_content_type() == "text/html":
+            payload = message.get_payload(decode=True)
+
+            if payload is not None:
+                charset = message.get_content_charset() or "utf-8"
+                decoded = payload.decode(charset, errors="ignore")
+                return decoded.replace("\r\n", "\n").strip()
+
+    return ""
+
+
 def format_timestamp(date_header: str) -> tuple[str, str]:
     if not date_header:
         fallback_timestamp = datetime.now(timezone.utc).isoformat()
@@ -531,6 +564,7 @@ def to_message_preview(
     cc_header = decode_mime_words(message.get("Cc", ""))
     sender_name, sender_email = parseaddr(from_header)
     body = get_message_body(message)
+    html_body = get_html_body(message)
     snippet = clean_text(body.replace("\n", " "))[:220]
     created_at, display_timestamp = format_timestamp(message.get("Date", ""))
     stable_id_source = f"{subject}|{from_header}|{display_timestamp}|{index}"
@@ -538,7 +572,7 @@ def to_message_preview(
         stable_id_source.encode("utf-8"),
     ).hexdigest()
 
-    return {
+    result: dict[str, Any] = {
       "id": message_id.strip("<>"),
       "sender": sender_name or sender_email or from_header,
       "subject": subject,
@@ -553,6 +587,11 @@ def to_message_preview(
       "imapUid": imap_uid,
       "ui_signal": resolve_ui_signal(message, email_address),
     }
+
+    if html_body:
+        result["bodyHtml"] = html_body
+
+    return result
 
 
 def build_connect_preview_response(payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:

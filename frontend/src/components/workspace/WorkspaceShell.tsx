@@ -1334,6 +1334,13 @@ function buildEmailStageDocument(
       html, body {
         margin: 0;
         padding: 0;
+        /* Override any email CSS that restricts height or hides overflow —
+           these would cause incorrect iframe height measurement and visual clipping.
+           Must come after the email's own styles, hence the !important. */
+        height: auto !important;
+        min-height: unset !important;
+        max-height: none !important;
+        overflow: visible !important;
       }
       body {
         /* Fallback only – external emails control their own background/color */
@@ -1390,7 +1397,8 @@ function buildEmailStageDocument(
       .email-stage {
         box-sizing: border-box;
         width: 100%;
-        overflow: visible;
+        height: auto !important;
+        overflow: visible !important;
       }
       /* Quote sections keep a subtle visual treatment */
       [data-email-quote="true"],
@@ -1588,7 +1596,7 @@ function EmailHtmlStage({
       srcDoc={buildEmailStageDocument(html, themeMode, { emailStyles, isExternalHtml })}
       scrolling="no"
       onLoad={updateHeight}
-      className="block w-full overflow-hidden border-0 bg-transparent"
+      className="block w-full overflow-visible border-0 bg-transparent"
       style={{ height }}
     />
   );
