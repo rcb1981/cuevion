@@ -8379,6 +8379,7 @@ function MailboxView({
   const [searchQuery, setSearchQuery] = useState("");
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const mailListViewportRef = useRef<HTMLDivElement | null>(null);
+  const readingPaneViewportRef = useRef<HTMLDivElement | null>(null);
   const inboxInteractionViewportRef = useRef<HTMLDivElement | null>(null);
   const splitPaneContainerRef = useRef<HTMLDivElement | null>(null);
   const [isComposeOpen, setIsComposeOpen] = useState(false);
@@ -9451,6 +9452,11 @@ function MailboxView({
   const fullWidthMessage =
     folderMessages.find((message) => message.id === selectedMessageId) ??
     selectedMessage;
+
+  useEffect(() => {
+    readingPaneViewportRef.current?.scrollTo({ top: 0, left: 0 });
+  }, [selectedMessage?.id]);
+
   const advanceSelectionAfterAction = (processedMessageIds: string[]) => {
     if (processedMessageIds.length === 0) {
       return;
@@ -14412,6 +14418,7 @@ function MailboxView({
               {/* Native macOS overlay scrollbars can ignore custom thumb styling; keep the real
                   reading-pane scroller dark and opt it into dark color-scheme directly. */}
               <div
+                ref={readingPaneViewportRef}
                 className="cuevion-dark-scroll cuevion-soft-scroll min-h-0 flex-1 overflow-y-auto bg-transparent p-5 pr-4 md:p-6 md:pr-5"
                 style={{
                   colorScheme: themeMode,
