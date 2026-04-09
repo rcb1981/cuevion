@@ -1200,7 +1200,7 @@ function renderPlainMessageParagraph(
   const matches = Array.from(paragraph.matchAll(plainLinkPattern));
   const resolvedContentClassName = contentClassName ?? className;
   const plainBodyTextColor =
-    themeMode === "dark" ? "rgba(236, 241, 237, 0.95)" : "rgba(43, 47, 43, 0.97)";
+    themeMode === "dark" ? "rgba(236, 241, 237, 0.95)" : "rgba(34, 38, 35, 0.98)";
   const plainLinkTextColor =
     themeMode === "dark" ? "rgba(176, 209, 186, 0.96)" : "rgba(50, 88, 110, 0.96)";
   const plainTextStyle = {
@@ -9348,9 +9348,9 @@ function MailboxView({
     const isExternalHtmlMessage = bodyRenderMode.mode === "html";
     const isNativeHtmlMessage = bodyRenderMode.mode === "native_html";
     const nativeBodyTextClass =
-      "text-[color:rgba(43,47,43,0.97)] dark:text-[color:rgba(236,241,237,0.95)]";
+      "text-[color:rgba(34,38,35,0.98)] dark:text-[color:rgba(236,241,237,0.95)]";
     const nativeBodyInheritanceClass =
-      "[&_p]:text-inherit [&_div]:text-inherit [&_span]:text-inherit [&_strong]:text-inherit [&_em]:text-inherit [&_li]:text-inherit [&_td]:text-inherit [&_th]:text-inherit [&_ul]:text-inherit [&_ol]:text-inherit [&_small]:text-inherit [&_*]:[color:inherit]";
+      "[&_p]:!text-inherit [&_div]:!text-inherit [&_span]:!text-inherit [&_font]:!text-inherit [&_strong]:!text-inherit [&_em]:!text-inherit [&_b]:!text-inherit [&_i]:!text-inherit [&_li]:!text-inherit [&_td]:!text-inherit [&_th]:!text-inherit [&_ul]:!text-inherit [&_ol]:!text-inherit [&_small]:!text-inherit [&_p]:[color:inherit!important] [&_div]:[color:inherit!important] [&_span]:[color:inherit!important] [&_font]:[color:inherit!important] [&_strong]:[color:inherit!important] [&_em]:[color:inherit!important] [&_b]:[color:inherit!important] [&_i]:[color:inherit!important] [&_li]:[color:inherit!important] [&_td]:[color:inherit!important] [&_th]:[color:inherit!important] [&_small]:[color:inherit!important] [&_p]:[-webkit-text-fill-color:inherit!important] [&_div]:[-webkit-text-fill-color:inherit!important] [&_span]:[-webkit-text-fill-color:inherit!important] [&_font]:[-webkit-text-fill-color:inherit!important] [&_strong]:[-webkit-text-fill-color:inherit!important] [&_em]:[-webkit-text-fill-color:inherit!important] [&_b]:[-webkit-text-fill-color:inherit!important] [&_i]:[-webkit-text-fill-color:inherit!important] [&_li]:[-webkit-text-fill-color:inherit!important] [&_td]:[-webkit-text-fill-color:inherit!important] [&_th]:[-webkit-text-fill-color:inherit!important] [&_small]:[-webkit-text-fill-color:inherit!important] [&_p]:opacity-100 [&_div]:opacity-100 [&_span]:opacity-100 [&_font]:opacity-100 [&_strong]:opacity-100 [&_em]:opacity-100 [&_b]:opacity-100 [&_i]:opacity-100 [&_li]:opacity-100 [&_td]:opacity-100 [&_th]:opacity-100 [&_small]:opacity-100";
     const nativeSecondaryTextClass =
       "text-[color:rgba(108,99,89,0.9)] dark:text-[color:rgba(205,211,207,0.84)]";
     const nativeLinkClass =
