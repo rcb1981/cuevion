@@ -14190,7 +14190,7 @@ function MailboxView({
               </div>
             </div>
 
-            <div className="flex h-full min-h-0 min-w-0 self-stretch flex-col overflow-hidden rounded-[24px] border border-[color:rgba(128,142,121,0.14)] bg-[linear-gradient(180deg,rgba(255,255,253,0.98),rgba(249,245,238,0.97))] shadow-[0_12px_34px_rgba(164,147,125,0.06)] dark:border-[var(--workspace-border-soft)] dark:bg-[linear-gradient(180deg,var(--workspace-card-featured-start),var(--workspace-card-featured-end))]">
+            <div className="flex min-h-0 min-w-0 flex-col overflow-hidden rounded-[24px] border border-[color:rgba(128,142,121,0.14)] bg-[linear-gradient(180deg,rgba(255,255,253,0.98),rgba(249,245,238,0.97))] shadow-[0_12px_34px_rgba(164,147,125,0.06)] dark:border-[var(--workspace-border-soft)] dark:bg-[linear-gradient(180deg,var(--workspace-card-featured-start),var(--workspace-card-featured-end))]">
               {/* Native macOS overlay scrollbars can ignore custom thumb styling; keep the real
                   reading-pane scroller dark and opt it into dark color-scheme directly. */}
               <div
