@@ -9444,6 +9444,11 @@ function MailboxView({
           }`}
         >
           <div
+            style={
+              bodyRenderMode.mode === "plain" || isNativeHtmlMessage
+                ? { color: themeMode === "dark" ? "rgba(236,241,237,0.95)" : "#1f2a24" }
+                : undefined
+            }
             className={
               isExternalHtmlMessage
                 ? "space-y-1.5 text-[var(--workspace-text)]"
@@ -9479,6 +9484,7 @@ function MailboxView({
               </div>
             ) : bodyRenderMode.mode === "native_html" ? (
               <div
+                style={{ color: themeMode === "dark" ? "rgba(236,241,237,0.95)" : "#1f2a24" }}
                 className={`w-full whitespace-pre-wrap text-[0.94rem] ${
                   density === "full" ? "leading-[1.82]" : "leading-[1.72]"
                 } ${nativeBodyTextClass} ${nativeBodyInheritanceClass} ${nativeLinkClass} ${nativeQuoteClass} [&_img]:max-w-full [&_img]:h-auto [&_small]:text-[color:rgba(108,99,89,0.9)] dark:[&_small]:text-[color:rgba(205,211,207,0.84)] [&_small_*]:text-inherit [&_[data-email-image-placeholder='true']]:text-[color:rgba(108,99,89,0.9)] dark:[&_[data-email-image-placeholder='true']]:text-[color:rgba(205,211,207,0.84)]`}
