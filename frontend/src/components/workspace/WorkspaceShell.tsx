@@ -9400,6 +9400,9 @@ function MailboxView({
       bodyRenderMode.remoteImageCount > 0 && !remoteImagesAllowed;
     const isExternalHtmlMessage = bodyRenderMode.mode === "html";
     const isNativeHtmlMessage = bodyRenderMode.mode === "native_html";
+    const isComposeGeneratedBodyHtml = Boolean(
+      threadMessage.bodyHtml && isComposeGeneratedHtml(threadMessage.bodyHtml),
+    );
     const nativeBodyTextClass =
       "text-[color:rgba(34,38,35,0.98)] dark:text-[color:rgba(236,241,237,0.95)]";
     const nativeBodyInheritanceClass =
@@ -9441,6 +9444,10 @@ function MailboxView({
           </div>
         </div>
         <div
+          data-render-mode={bodyRenderMode.mode}
+          data-render-external-html={String(isExternalHtmlMessage)}
+          data-render-native-html={String(isNativeHtmlMessage)}
+          data-render-compose-generated={String(isComposeGeneratedBodyHtml)}
           className={`${
             isExternalHtmlMessage
               ? "mt-1.5 overflow-visible bg-transparent px-0 py-0 text-[var(--workspace-text)] dark:text-[color:rgba(228,235,230,0.94)]"
@@ -9458,6 +9465,12 @@ function MailboxView({
                   : "space-y-2.5 text-[var(--workspace-text)]"
             }
           >
+            {/* TEMP DEBUG: remove after verifying the active reading-pane render path. */}
+            {
+              <div className="rounded-[6px] border border-dashed border-[color:rgba(129,144,122,0.2)] px-2 py-1 text-[10px] uppercase tracking-[0.14em] text-[var(--workspace-text-faint)]">
+                mode={bodyRenderMode.mode} ext={String(isExternalHtmlMessage)} native={String(isNativeHtmlMessage)} compose={String(isComposeGeneratedBodyHtml)}
+              </div>
+            }
             {hasHiddenRemoteImages ? (
               <div className="flex flex-wrap items-center justify-between gap-3 rounded-[10px] border border-[color:rgba(129,144,122,0.08)] bg-[color:rgba(252,249,242,0.72)] px-3 py-2 text-[0.74rem] text-[var(--workspace-text-soft)] dark:border-[color:rgba(121,151,120,0.1)] dark:bg-[color:rgba(86,114,87,0.03)]">
                 <div>
