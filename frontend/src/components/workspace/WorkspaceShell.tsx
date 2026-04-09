@@ -9082,7 +9082,11 @@ function MailboxView({
                 isHistoricalThreadMessage
                   ? "border-t border-[color:rgba(129,144,122,0.12)] pt-3 dark:border-[color:rgba(121,151,120,0.14)]"
                   : "pt-0"
-              } ${isCurrentUser ? "pl-4 md:pl-8" : ""}`}
+              } ${isCurrentUser ? "pl-4 md:pl-8" : ""} ${
+                bodyRenderMode.mode === "plain"
+                  ? "text-[color:rgba(34,38,36,0.99)] dark:text-[color:rgba(228,235,230,0.94)]"
+                  : ""
+              }`}
             >
               <div className={`flex flex-wrap items-center justify-between ${isHtmlMessage ? "gap-2 px-0.5" : "gap-2"}`}>
                 <div className="flex items-center gap-2">
