@@ -339,6 +339,38 @@ def get_html_body(message: Message) -> str:
     return ""
 
 
+def get_message_attachments(message: Message) -> list[dict[str, Any]]:
+    attachments: list[dict[str, Any]] = []
+
+    if not message.is_multipart():
+        return attachments
+
+    for index, part in enumerate(message.walk()):
+        if part.is_multipart():
+            continue
+
+        disposition = str(part.get("Content-Disposition") or "").lower()
+        filename = decode_mime_words(part.get_filename())
+
+        if "attachment" not in disposition and not filename:
+            continue
+
+        payload = part.get_payload(decode=True)
+        mime_type = part.get_content_type() or None
+        size = len(payload) if payload is not None else None
+
+        attachments.append(
+            {
+                "id": f"attachment-{index}",
+                "name": filename or "Attachment",
+                **({"mimeType": mime_type} if mime_type else {}),
+                **({"size": size} if size is not None else {}),
+            }
+        )
+
+    return attachments
+
+
 def format_timestamp(date_header: str) -> tuple[str, str]:
     if not date_header:
         fallback_timestamp = datetime.now(timezone.utc).isoformat()
@@ -656,6 +688,7 @@ def to_message_preview(
     sender_name, sender_email = parseaddr(from_header)
     body = get_message_body(message)
     html_body = get_html_body(message)
+    attachments = get_message_attachments(message)
     snippet = clean_text(body.replace("\n", " "))[:220]
     created_at, display_timestamp = format_timestamp(message.get("Date", ""))
     stable_id_source = f"{subject}|{from_header}|{display_timestamp}"
@@ -682,6 +715,7 @@ def to_message_preview(
       "timestamp": display_timestamp,
       "createdAt": created_at,
       "body": body.split("\n\n") if body else [snippet or "No message preview available."],
+      "attachments": attachments,
       "unread": unread,
       "imapUid": imap_uid,
       "signal": preview_routing.get("signal"),

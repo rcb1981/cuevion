@@ -1,5 +1,12 @@
 import type { OnboardingState, ProviderId } from "../types/onboarding";
 
+export type LiveInboxAttachmentSnapshot = {
+  id: string;
+  name: string;
+  mimeType?: string;
+  size?: number;
+};
+
 export type LiveInboxMessageSnapshot = {
   id: string;
   imapUid?: string;
@@ -13,6 +20,7 @@ export type LiveInboxMessageSnapshot = {
   createdAt: string;
   body: string[];
   bodyHtml?: string;
+  attachments?: LiveInboxAttachmentSnapshot[];
   unread?: boolean;
   ui_signal?: string;
 };

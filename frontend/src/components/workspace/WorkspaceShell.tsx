@@ -22665,6 +22665,7 @@ export function WorkspaceShell({
           timestamp: message.timestamp,
           body: message.body,
           bodyHtml: message.bodyHtml,
+          attachments: message.attachments,
           isShared: persistedMessage.isShared ?? existingMessage?.isShared,
           collaboration:
             persistedMessage.collaboration ?? existingMessage?.collaboration,
