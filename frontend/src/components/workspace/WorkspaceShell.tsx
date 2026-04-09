@@ -1333,8 +1333,6 @@ function buildEmailStageDocument(
       }
       body {
         color: ${stageTextColor};
-        overflow-wrap: anywhere;
-        word-break: break-word;
         line-height: 1.58;
       }
       .email-stage {
@@ -1345,6 +1343,7 @@ function buildEmailStageDocument(
         border: 0;
         border-radius: 0;
         overflow: visible;
+        overflow-wrap: break-word;
       }
       .email-stage > * {
         max-width: 100%;
@@ -1355,6 +1354,7 @@ function buildEmailStageDocument(
       }
       table {
         max-width: 100%;
+        width: auto;
       }
       .email-stage a,
       .email-stage a * {
@@ -1442,9 +1442,13 @@ function EmailHtmlStage({
     try {
       const documentElement = iframe.contentDocument?.documentElement;
       const body = iframe.contentDocument?.body;
+      const stageRoot = body?.firstElementChild as HTMLElement | null;
       const nextHeight = Math.max(
         documentElement?.scrollHeight ?? 0,
+        documentElement?.offsetHeight ?? 0,
         body?.scrollHeight ?? 0,
+        body?.offsetHeight ?? 0,
+        Math.ceil(stageRoot?.getBoundingClientRect().height ?? 0),
         220,
       );
 
@@ -1461,12 +1465,14 @@ function EmailHtmlStage({
       return;
     }
 
-    const firstPass = window.setTimeout(updateHeight, 0);
-    const secondPass = window.setTimeout(updateHeight, 180);
+    const firstPass = window.setTimeout(updateHeight, 120);
+    const secondPass = window.setTimeout(updateHeight, 420);
+    const thirdPass = window.setTimeout(updateHeight, 1200);
 
     return () => {
       window.clearTimeout(firstPass);
       window.clearTimeout(secondPass);
+      window.clearTimeout(thirdPass);
     };
   }, [html, themeMode, stageFailed]);
 
@@ -1538,6 +1544,10 @@ const allowedImportedEmailInlineStyleProperties = new Set([
   "background-position",
   "background-size",
   "border-radius",
+  "overflow",
+  "overflow-x",
+  "overflow-y",
+  "box-shadow",
 ]);
 
 function shouldPreserveImportedEmailInlineStyle(propertyName: string, propertyValue: string) {
@@ -1702,17 +1712,14 @@ function sanitizeMessageBodyHtml(
       filterImportedEmailInlineStyles(element);
 
       if (element.tagName === "TABLE") {
-        element.style.width = "100%";
-        element.style.maxWidth = "100%";
+        if (!element.style.maxWidth) {
+          element.style.maxWidth = "100%";
+        }
         element.style.tableLayout = element.style.tableLayout || "auto";
-        element.style.borderCollapse = "collapse";
       }
 
       if (element.tagName === "TD" || element.tagName === "TH") {
         element.style.verticalAlign = element.style.verticalAlign || "top";
-        if (!element.style.padding) {
-          element.style.padding = "0.55rem 0.7rem";
-        }
       }
 
       if (element.tagName === "BLOCKQUOTE") {
