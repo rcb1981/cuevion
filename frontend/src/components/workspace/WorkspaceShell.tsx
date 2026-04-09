@@ -1496,7 +1496,7 @@ function EmailHtmlStage({
   const [height, setHeight] = useState(320);
   const fallbackClassName = "w-full overflow-visible bg-transparent";
   const fallbackHeight = 2200;
-  const measurementSafetyBuffer = 20;
+  const measurementSafetyBuffer = 24;
 
   const measureContentHeight = (iframeDoc: Document): number => {
     const docEl = iframeDoc.documentElement;
@@ -1599,8 +1599,13 @@ function EmailHtmlStage({
       return fallbackHeight;
     }
 
+    const stageRootVisualHeight = Math.ceil(stageRootRect.height);
+    const stageRootSupportsContentBottom =
+      stageRootVisualHeight >= contentBottom &&
+      stageRootVisualHeight <= contentBottom + 220;
     const safeContentHeight = contentBottom + measurementSafetyBuffer;
     const fallbackCandidates = [
+      stageRootSupportsContentBottom ? stageRootVisualHeight : 0,
       stageRoot.scrollHeight,
       stageRoot.offsetHeight,
       body.scrollHeight,
@@ -14190,11 +14195,11 @@ function MailboxView({
               </div>
             </div>
 
-            <div className="flex min-h-0 min-w-0 flex-col overflow-hidden rounded-[24px] border border-[color:rgba(128,142,121,0.14)] bg-[linear-gradient(180deg,rgba(255,255,253,0.98),rgba(249,245,238,0.97))] shadow-[0_12px_34px_rgba(164,147,125,0.06)] dark:border-[var(--workspace-border-soft)] dark:bg-[linear-gradient(180deg,var(--workspace-card-featured-start),var(--workspace-card-featured-end))]">
+            <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto overflow-x-hidden rounded-[24px] border border-[color:rgba(128,142,121,0.14)] bg-[linear-gradient(180deg,rgba(255,255,253,0.98),rgba(249,245,238,0.97))] shadow-[0_12px_34px_rgba(164,147,125,0.06)] dark:border-[var(--workspace-border-soft)] dark:bg-[linear-gradient(180deg,var(--workspace-card-featured-start),var(--workspace-card-featured-end))]">
               {/* Native macOS overlay scrollbars can ignore custom thumb styling; keep the real
                   reading-pane scroller dark and opt it into dark color-scheme directly. */}
               <div
-                className="cuevion-dark-scroll cuevion-soft-scroll min-h-0 flex-1 overflow-y-auto bg-[rgba(255,252,248,0.74)] p-5 pr-4 dark:bg-[var(--workspace-card-featured-end)] md:p-6 md:pr-5"
+                className="cuevion-dark-scroll cuevion-soft-scroll bg-[rgba(255,252,248,0.74)] p-5 pr-4 dark:bg-[var(--workspace-card-featured-end)] md:p-6 md:pr-5"
                 style={{
                   backgroundColor:
                     themeMode === "dark"
