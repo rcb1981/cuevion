@@ -9382,7 +9382,7 @@ function MailboxView({
                 <div
                   className={
                     isHtmlMessage
-                      ? "inline-flex max-w-full flex-col items-start gap-1.5 text-[var(--workspace-text)]"
+                      ? "space-y-1.5 text-[var(--workspace-text)]"
                       : bodyRenderMode.mode === "plain"
                         ? "space-y-2.5 text-[color:rgba(34,38,36,0.99)] dark:text-[color:rgba(228,235,230,0.94)]"
                         : "space-y-2.5 text-[var(--workspace-text)]"
@@ -9429,7 +9429,7 @@ function MailboxView({
                 </details>
                 {bodyRenderMode.mode === "html" ? (
                   <div
-                    className="email-html-content max-w-full overflow-visible self-start"
+                    className="email-html-content w-full overflow-visible"
                   >
                     <EmailHtmlStage
                       html={bodyRenderMode.html}
