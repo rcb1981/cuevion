@@ -1511,6 +1511,9 @@ function EmailHtmlStage({
     const stageRootRect = stageRoot.getBoundingClientRect();
     const meaningfulSelector = [
       "table",
+      "thead",
+      "tbody",
+      "tfoot",
       "section",
       "article",
       "main",
@@ -1524,6 +1527,7 @@ function EmailHtmlStage({
       "ol",
       "li",
       "img",
+      "span",
       "a",
       "button",
       "hr",
@@ -1567,9 +1571,10 @@ function EmailHtmlStage({
       const isMediaElement = node instanceof HTMLImageElement;
       const isStructuralElement =
         node instanceof HTMLTableElement ||
+        node instanceof HTMLTableSectionElement ||
         node instanceof HTMLTableRowElement ||
         node instanceof HTMLTableCellElement ||
-        /^(DIV|SECTION|ARTICLE|MAIN|HEADER|FOOTER|BLOCKQUOTE|PRE|HR)$/.test(
+        /^(DIV|SECTION|ARTICLE|MAIN|HEADER|FOOTER|BLOCKQUOTE|PRE|HR|SPAN)$/.test(
           node.tagName,
         );
 
@@ -1607,17 +1612,7 @@ function EmailHtmlStage({
     ]
       .map((value) => Math.ceil(value ?? 0))
       .filter((value) => Number.isFinite(value) && value > 0);
-    const safeScrollCandidates = scrollCandidates.filter(
-      (value) => value >= safeContentHeight,
-    );
-    const nearContentCandidates = safeScrollCandidates.filter(
-      (value) => value <= safeContentHeight + 160,
-    );
-    const nextHeight = nearContentCandidates.length > 0
-      ? Math.min(...nearContentCandidates)
-      : safeScrollCandidates.length > 0
-        ? Math.max(safeContentHeight, Math.min(...safeScrollCandidates))
-        : safeContentHeight;
+    const nextHeight = Math.max(safeContentHeight, ...scrollCandidates);
 
     return Math.max(320, nextHeight);
   };
@@ -14197,16 +14192,12 @@ function MailboxView({
               </div>
             </div>
 
-            <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto overflow-x-hidden rounded-[24px] border border-[color:rgba(128,142,121,0.14)] bg-[linear-gradient(180deg,rgba(255,255,253,0.98),rgba(249,245,238,0.97))] shadow-[0_12px_34px_rgba(164,147,125,0.06)] dark:border-[var(--workspace-border-soft)] dark:bg-[linear-gradient(180deg,var(--workspace-card-featured-start),var(--workspace-card-featured-end))]">
+            <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-[24px] border border-[color:rgba(128,142,121,0.14)] bg-[linear-gradient(180deg,rgba(255,255,253,0.98),rgba(249,245,238,0.97))] shadow-[0_12px_34px_rgba(164,147,125,0.06)] dark:border-[var(--workspace-border-soft)] dark:bg-[linear-gradient(180deg,var(--workspace-card-featured-start),var(--workspace-card-featured-end))]">
               {/* Native macOS overlay scrollbars can ignore custom thumb styling; keep the real
                   reading-pane scroller dark and opt it into dark color-scheme directly. */}
               <div
-                className="cuevion-dark-scroll cuevion-soft-scroll bg-[rgba(255,252,248,0.74)] p-5 pr-4 dark:bg-[var(--workspace-card-featured-end)] md:p-6 md:pr-5"
+                className="cuevion-dark-scroll cuevion-soft-scroll min-h-0 flex-1 overflow-y-auto bg-transparent p-5 pr-4 md:p-6 md:pr-5"
                 style={{
-                  backgroundColor:
-                    themeMode === "dark"
-                      ? "var(--workspace-card-featured-end)"
-                      : "rgba(255,252,248,0.74)",
                   colorScheme: themeMode,
                   scrollbarWidth: "thin",
                   scrollbarColor:
@@ -14304,23 +14295,6 @@ function MailboxView({
                     ) : null}
 
                     {renderThreadMessage(selectedMessage, "split")}
-                    {renderMessageActions(selectedMessage, "split")}
-                  </div>
-
-                  <div className="space-y-3">
-                    <div className="text-[0.72rem] font-medium uppercase tracking-[0.18em] text-[var(--workspace-text-faint)]">
-                      Attachments
-                    </div>
-                    <div className="flex flex-wrap gap-3">
-                      {(selectedMessage.attachments ?? []).map((attachment) =>
-                        renderAttachmentItem(attachment),
-                      )}
-                      {!selectedMessage.attachments?.length ? (
-                        <div className="text-[0.82rem] leading-6 text-[var(--workspace-text-faint)]">
-                          No attachments
-                        </div>
-                      ) : null}
-                    </div>
                   </div>
                   {(() => {
                     const earlierThreadMessages = getThreadMessages(selectedMessage).filter(
@@ -14379,6 +14353,28 @@ function MailboxView({
                   </div>
                 )}
               </div>
+              {selectedMessage && !isMultiSelectActive ? (
+                <div className="shrink-0 border-t border-[color:rgba(129,144,122,0.12)] bg-transparent px-5 py-4 dark:border-[color:rgba(121,151,120,0.14)] md:px-6 md:py-5">
+                  <div className="space-y-3">
+                    {renderMessageActions(selectedMessage, "split")}
+                    <div className="space-y-2">
+                      <div className="text-[0.72rem] font-medium uppercase tracking-[0.18em] text-[var(--workspace-text-faint)]">
+                        Attachments
+                      </div>
+                      <div className="flex flex-wrap gap-3">
+                        {(selectedMessage.attachments ?? []).map((attachment) =>
+                          renderAttachmentItem(attachment),
+                        )}
+                        {!selectedMessage.attachments?.length ? (
+                          <div className="text-[0.82rem] leading-6 text-[var(--workspace-text-faint)]">
+                            No attachments
+                          </div>
+                        ) : null}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ) : null}
             </div>
           </div>
         )}
