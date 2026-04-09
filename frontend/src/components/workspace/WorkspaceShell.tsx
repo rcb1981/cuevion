@@ -1172,6 +1172,7 @@ function isDecorativeEmbeddedImageAlt(altText: string) {
 
 type SanitizedMessageHtmlResult = {
   html: string | null;
+  emailStyles: string;
   remoteImageCount: number;
   cidImageCount: number;
   invalidImageCount: number;
@@ -1304,9 +1305,17 @@ function renderCompactMessageMetaHeader(
 function buildEmailStageDocument(
   html: string,
   themeMode: "light" | "dark",
+  options?: { emailStyles?: string; isExternalHtml?: boolean },
 ) {
+  const isExternalHtml = options?.isExternalHtml ?? false;
+  const emailStyles = options?.emailStyles ?? "";
+
   const stageWrapperClass =
     themeMode === "dark" ? "email-stage email-stage--dark" : "email-stage email-stage--light";
+
+  // Fallback colors used only when the email doesn't specify its own.
+  // For external HTML we use more neutral fallbacks and avoid !important overrides
+  // so the email's own styles win. For compose HTML we still apply full theme colours.
   const stageTextColor =
     themeMode === "dark" ? "rgba(229, 236, 230, 0.96)" : "rgba(34, 38, 36, 0.99)";
   const stageLinkColor =
@@ -1320,20 +1329,84 @@ function buildEmailStageDocument(
   const stageSecondaryTextColor =
     themeMode === "dark" ? "rgba(214, 221, 216, 0.92)" : "rgba(74, 68, 62, 0.94)";
 
-  return `<!DOCTYPE html>
-<html>
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <style>
+  // Base styles applied to ALL email types (safety-net + image scaling)
+  const baseStageStyles = `
       html, body {
         margin: 0;
         padding: 0;
-        background: transparent;
       }
+      body {
+        /* Fallback only – external emails control their own background/color */
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
+        font-size: 14px;
+        line-height: 1.5;
+      }
+      /* Scale oversized images gracefully */
+      img {
+        max-width: 100%;
+        height: auto;
+      }
+      /* Allow links to wrap on narrow viewports */
+      a {
+        word-break: break-word;
+        overflow-wrap: break-word;
+      }
+      hr {
+        border: 0;
+        border-top: 1px solid ${stageRuleColor};
+      }
+      /* Image placeholder badges (shown when remote images are blocked) */
+      [data-email-image-placeholder="true"] {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+        max-width: 100%;
+        margin: 0.15rem 0;
+        padding: 0.12rem 0.45rem;
+        border-radius: 999px;
+        border: 1px dashed rgba(121, 151, 120, 0.1);
+        background: rgba(86, 114, 87, 0.018) !important;
+        color: rgba(120, 111, 100, 0.72) !important;
+        font: 500 10px/1.35 ui-sans-serif, system-ui, sans-serif;
+        letter-spacing: 0.04em;
+      }
+      [data-email-image-role="decorative"] {
+        padding: 0;
+        border: 0;
+        background: transparent;
+        font-size: 9px;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        opacity: 0.75;
+      }`;
+
+  // Additional styles for EXTERNAL HTML emails:
+  // Minimal overrides – let the email's own CSS drive colors, layout, backgrounds.
+  // We only provide safe fallbacks for unspecified properties.
+  const externalHtmlStageStyles = `
+      body {
+        color: ${stageTextColor};
+      }
+      .email-stage {
+        box-sizing: border-box;
+        width: 100%;
+        overflow: visible;
+      }
+      /* Quote sections keep a subtle visual treatment */
+      [data-email-quote="true"],
+      .gmail_quote {
+        margin: 0.85rem 0 0;
+        padding: 0.4rem 0 0.1rem 0.85rem;
+        border-left: 2px solid ${stageQuoteBorder};
+      }`;
+
+  // Additional styles for COMPOSE HTML emails:
+  // Full theme-aware overrides since compose content is unstyled by design.
+  const composeHtmlStageStyles = `
       body {
         color: ${stageTextColor};
         line-height: 1.58;
+        background: transparent;
       }
       .email-stage {
         box-sizing: border-box;
@@ -1344,17 +1417,6 @@ function buildEmailStageDocument(
         border-radius: 0;
         overflow: visible;
         overflow-wrap: break-word;
-      }
-      .email-stage > * {
-        max-width: 100%;
-      }
-      img {
-        max-width: 100%;
-        height: auto;
-      }
-      table {
-        max-width: 100%;
-        width: auto;
       }
       .email-stage a,
       .email-stage a * {
@@ -1381,34 +1443,24 @@ function buildEmailStageDocument(
       [data-email-quote="true"],
       .gmail_quote {
         background: ${stageQuoteSurface} !important;
-      }
-      hr {
-        border: 0;
-        border-top: 1px solid ${stageRuleColor};
-      }
-      [data-email-image-placeholder="true"] {
-        display: inline-flex;
-        align-items: center;
-        gap: 0.35rem;
-        max-width: 100%;
-        margin: 0.15rem 0;
-        padding: 0.12rem 0.45rem;
-        border-radius: 999px;
-        border: 1px dashed rgba(121, 151, 120, 0.1);
-        background: rgba(86, 114, 87, 0.018) !important;
-        color: rgba(120, 111, 100, 0.72) !important;
-        font: 500 10px/1.35 ui-sans-serif, system-ui, sans-serif;
-        letter-spacing: 0.04em;
-      }
-      [data-email-image-role="decorative"] {
-        padding: 0;
-        border: 0;
-        background: transparent;
-        font-size: 9px;
-        letter-spacing: 0.12em;
-        text-transform: uppercase;
-        opacity: 0.75;
-      }
+      }`;
+
+  const stageSpecificStyles = isExternalHtml ? externalHtmlStageStyles : composeHtmlStageStyles;
+
+  // For external HTML: inject the email's own styles BEFORE our overrides so our
+  // safety-net rules can still take effect but don't overwrite the email's design.
+  const emailStyleBlock = emailStyles.trim()
+    ? `\n    <style id="email-original-styles">\n      ${emailStyles}\n    </style>`
+    : "";
+
+  return `<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />${emailStyleBlock}
+    <style id="stage-styles">
+      ${baseStageStyles}
+      ${stageSpecificStyles}
     </style>
   </head>
   <body>
@@ -1420,49 +1472,63 @@ function buildEmailStageDocument(
 function EmailHtmlStage({
   html,
   themeMode,
+  emailStyles,
+  isExternalHtml,
 }: {
   html: string;
   themeMode: "light" | "dark";
+  emailStyles?: string;
+  isExternalHtml?: boolean;
 }) {
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const [height, setHeight] = useState(320);
   const [stageFailed, setStageFailed] = useState(false);
   const fallbackClassName = "w-full overflow-visible bg-transparent";
 
-  const getImportedEmailContentBottom = (body: HTMLElement, stageRoot: HTMLElement | null) => {
-    const bodyTop = body.getBoundingClientRect().top;
-    let maxBottom = 0;
+  const measureContentHeight = (iframeDoc: Document): number => {
+    const docEl = iframeDoc.documentElement;
+    const body = iframeDoc.body;
 
-    const pushBottom = (element: Element | null) => {
-      if (!(element instanceof HTMLElement)) {
-        return;
-      }
+    if (!body) {
+      return 220;
+    }
 
-      const rect = element.getBoundingClientRect();
+    // Temporarily make the iframe very wide so fixed-width table emails
+    // don't affect vertical height measurement (wide email = less vertical wrapping).
+    // We restore it immediately after reading.
+    const prevWidth = docEl.style.overflowX;
+    docEl.style.overflowX = "visible";
 
-      if (rect.height <= 0 && element.scrollHeight <= 0 && element.offsetHeight <= 0) {
-        return;
-      }
+    // scrollHeight is the most reliable measure for total content height,
+    // accounting for overflow, tables, and absolutely-positioned elements.
+    const measured = Math.max(
+      docEl.scrollHeight ?? 0,
+      docEl.offsetHeight ?? 0,
+      body.scrollHeight ?? 0,
+      body.offsetHeight ?? 0,
+    );
 
-      maxBottom = Math.max(
-        maxBottom,
-        Math.ceil(rect.bottom - bodyTop),
-        element.scrollHeight,
-        element.offsetHeight,
-      );
-    };
+    // Also walk direct children of the stage wrapper to catch
+    // elements with large margins that don't contribute to scrollHeight.
+    const stageWrapper = body.firstElementChild as HTMLElement | null;
+    let childrenBottom = 0;
 
-    pushBottom(stageRoot);
-    Array.from(body.children).forEach((node) => {
-      pushBottom(node);
-    });
-    body.querySelectorAll(
-      "table, tbody, tr, td, th, div, section, article, main, header, footer, blockquote",
-    ).forEach((node) => {
-      pushBottom(node);
-    });
+    if (stageWrapper) {
+      const bodyRect = body.getBoundingClientRect();
 
-    return maxBottom;
+      body.querySelectorAll(
+        "table, tbody, div, section, article, header, footer",
+      ).forEach((node) => {
+        if (!(node instanceof HTMLElement)) return;
+        const rect = node.getBoundingClientRect();
+        if (rect.height <= 0) return;
+        childrenBottom = Math.max(childrenBottom, Math.ceil(rect.bottom - bodyRect.top));
+      });
+    }
+
+    docEl.style.overflowX = prevWidth;
+
+    return Math.max(measured, childrenBottom, 220);
   };
 
   const updateHeight = () => {
@@ -1473,19 +1539,13 @@ function EmailHtmlStage({
     }
 
     try {
-      const documentElement = iframe.contentDocument?.documentElement;
-      const body = iframe.contentDocument?.body;
-      const stageRoot = body?.firstElementChild as HTMLElement | null;
-      const contentBottom = body ? getImportedEmailContentBottom(body, stageRoot) : 0;
-      const nextHeight = Math.max(
-        documentElement?.scrollHeight ?? 0,
-        documentElement?.offsetHeight ?? 0,
-        body?.scrollHeight ?? 0,
-        body?.offsetHeight ?? 0,
-        Math.ceil(stageRoot?.getBoundingClientRect().height ?? 0),
-        contentBottom,
-        220,
-      );
+      const iframeDoc = iframe.contentDocument;
+
+      if (!iframeDoc || !iframeDoc.body) {
+        return;
+      }
+
+      const nextHeight = measureContentHeight(iframeDoc);
 
       setHeight((currentHeight) =>
         Math.abs(currentHeight - nextHeight) > 1 ? nextHeight : currentHeight,
@@ -1509,7 +1569,7 @@ function EmailHtmlStage({
       window.clearTimeout(secondPass);
       window.clearTimeout(thirdPass);
     };
-  }, [html, themeMode, stageFailed]);
+  }, [html, themeMode, emailStyles, isExternalHtml, stageFailed]);
 
   if (stageFailed) {
     return (
@@ -1525,7 +1585,7 @@ function EmailHtmlStage({
       ref={iframeRef}
       title="Email content"
       sandbox="allow-popups allow-popups-to-escape-sandbox"
-      srcDoc={buildEmailStageDocument(html, themeMode)}
+      srcDoc={buildEmailStageDocument(html, themeMode, { emailStyles, isExternalHtml })}
       scrolling="no"
       onLoad={updateHeight}
       className="block w-full overflow-hidden border-0 bg-transparent"
@@ -1541,11 +1601,20 @@ const allowedImportedEmailInlineStyleProperties = new Set([
   "font-style",
   "font-family",
   "font-size",
+  "font",
   "line-height",
   "letter-spacing",
   "text-decoration",
+  "text-decoration-color",
+  "text-decoration-line",
+  "text-decoration-style",
   "text-transform",
+  "text-indent",
+  "text-overflow",
   "white-space",
+  "word-break",
+  "word-spacing",
+  "overflow-wrap",
   "width",
   "height",
   "max-width",
@@ -1557,6 +1626,13 @@ const allowedImportedEmailInlineStyleProperties = new Set([
   "border-right",
   "border-bottom",
   "border-left",
+  "border-color",
+  "border-style",
+  "border-width",
+  "border-top-color",
+  "border-right-color",
+  "border-bottom-color",
+  "border-left-color",
   "border-collapse",
   "border-spacing",
   "padding",
@@ -1571,6 +1647,8 @@ const allowedImportedEmailInlineStyleProperties = new Set([
   "margin-left",
   "vertical-align",
   "display",
+  "float",
+  "clear",
   "table-layout",
   "background",
   "background-color",
@@ -1578,11 +1656,22 @@ const allowedImportedEmailInlineStyleProperties = new Set([
   "background-repeat",
   "background-position",
   "background-size",
+  "background-attachment",
   "border-radius",
+  "border-top-left-radius",
+  "border-top-right-radius",
+  "border-bottom-left-radius",
+  "border-bottom-right-radius",
   "overflow",
   "overflow-x",
   "overflow-y",
   "box-shadow",
+  "opacity",
+  "visibility",
+  "list-style",
+  "list-style-type",
+  "list-style-position",
+  "cursor",
 ]);
 
 function shouldPreserveImportedEmailInlineStyle(propertyName: string, propertyValue: string) {
@@ -1617,6 +1706,34 @@ function filterImportedEmailInlineStyles(element: HTMLElement) {
   element.setAttribute("style", nextDeclarations.join(" "));
 }
 
+function sanitizeEmailStyleContent(cssContent: string): string {
+  return cssContent
+    // Remove CSS expressions (IE-era attack vector)
+    .replace(/expression\s*\([^)]*\)/gi, "")
+    // Remove javascript: / vbscript: inside url()
+    .replace(/url\s*\(\s*['"]?\s*(javascript:|vbscript:)[^)]*\)/gi, "")
+    // Remove IE behaviour property
+    .replace(/\bbehavior\s*:[^;{]+/gi, "")
+    // Remove remote @import statements
+    .replace(/@import\s+(?:url\s*\(\s*['"]?|['"])\s*https?:[^)'"]+[)'"]\s*;?/gi, "")
+    // Remove -moz-binding (Firefox XBL)
+    .replace(/-moz-binding\s*:[^;{]+/gi, "");
+}
+
+function extractEmailStyles(parsedDocument: Document): string {
+  const styleBlocks: string[] = [];
+
+  // Collect <style> elements from <head> and <body>
+  parsedDocument.querySelectorAll("style").forEach((styleEl) => {
+    const content = styleEl.textContent ?? "";
+    if (content.trim()) {
+      styleBlocks.push(sanitizeEmailStyleContent(content));
+    }
+  });
+
+  return styleBlocks.join("\n");
+}
+
 function sanitizeMessageBodyHtml(
   bodyHtml: string,
   options?: { allowRemoteImages?: boolean; themeMode?: "light" | "dark" },
@@ -1626,6 +1743,7 @@ function sanitizeMessageBodyHtml(
   if (!normalizedHtml) {
     return {
       html: null,
+      emailStyles: "",
       remoteImageCount: 0,
       cidImageCount: 0,
       invalidImageCount: 0,
@@ -1635,6 +1753,7 @@ function sanitizeMessageBodyHtml(
   if (typeof DOMParser === "undefined") {
     return {
       html: normalizedHtml,
+      emailStyles: "",
       remoteImageCount: 0,
       cidImageCount: 0,
       invalidImageCount: 0,
@@ -1648,8 +1767,25 @@ function sanitizeMessageBodyHtml(
   let invalidImageCount = 0;
   const allowRemoteImages = options?.allowRemoteImages ?? false;
 
-  body.querySelectorAll(unsafeEmailHtmlSelectors).forEach((node) => {
+  // Extract and sanitize all <style> blocks (from head + body) BEFORE removing any elements.
+  // This preserves class-based and rule-based CSS that drives the visual layout of real HTML emails.
+  const emailStyles = extractEmailStyles(parsedDocument);
+
+  // Remove genuinely unsafe elements. Note: <style> is intentionally kept in the body so
+  // that the browser inside the iframe will also pick them up (belt-and-suspenders).
+  // They were already extracted above for injection into the iframe <head>.
+  const unsafeSelectorsWithoutStyle = unsafeEmailHtmlSelectors
+    .split(",")
+    .filter((s) => s.trim() !== "style")
+    .join(",");
+
+  body.querySelectorAll(unsafeSelectorsWithoutStyle).forEach((node) => {
     node.remove();
+  });
+
+  // Sanitize <style> element content inside the body instead of removing them
+  body.querySelectorAll("style").forEach((styleEl) => {
+    styleEl.textContent = sanitizeEmailStyleContent(styleEl.textContent ?? "");
   });
 
   body.querySelectorAll("*").forEach((element) => {
@@ -1675,14 +1811,11 @@ function sanitizeMessageBodyHtml(
         return;
       }
 
-      if (
-        [
-          "class",
-          "link",
-          "vlink",
-          "alink",
-        ].includes(attributeName)
-      ) {
+      // Keep "class" – it is essential for class-based CSS in real HTML emails.
+      // Keep HTML presentational attributes (bgcolor, align, valign, width, height, etc.)
+      // that are used extensively in table-based email layouts.
+      // Only remove obsolete link-color attributes that have no modern use:
+      if (["link", "vlink", "alink"].includes(attributeName)) {
         element.removeAttribute(attribute.name);
         return;
       }
@@ -1746,29 +1879,22 @@ function sanitizeMessageBodyHtml(
     if (element instanceof HTMLElement) {
       filterImportedEmailInlineStyles(element);
 
+      // Don't force table layout – let the email's own styles and attributes control it.
+      // Only set a fallback if neither inline style nor html attribute provide a value.
       if (element.tagName === "TABLE") {
-        if (!element.style.maxWidth) {
+        // Preserve explicit width attributes (used in table-based layouts) but cap very wide tables.
+        const explicitWidth = element.getAttribute("width");
+        if (explicitWidth && !element.style.maxWidth) {
           element.style.maxWidth = "100%";
         }
-        element.style.tableLayout = element.style.tableLayout || "auto";
       }
 
-      if (element.tagName === "TD" || element.tagName === "TH") {
-        element.style.verticalAlign = element.style.verticalAlign || "top";
-      }
-
-      if (element.tagName === "BLOCKQUOTE") {
-        element.style.background = "transparent";
-        element.style.color = "inherit";
-      }
-
+      // Mark compose-style and Gmail quoted sections for quote styling
       if (
         element.getAttribute("data-compose-quote") === "true" ||
         hadGmailQuoteClass
       ) {
         element.setAttribute("data-email-quote", "true");
-        element.style.background = "transparent";
-        element.style.color = "inherit";
       }
     }
   });
@@ -1780,6 +1906,7 @@ function sanitizeMessageBodyHtml(
 
   return {
     html: hasRenderableContent ? sanitizedHtml : null,
+    emailStyles,
     remoteImageCount,
     cidImageCount,
     invalidImageCount,
@@ -1801,6 +1928,7 @@ function sanitizeComposeGeneratedHtml(
   if (!normalizedHtml) {
     return {
       html: null,
+      emailStyles: "",
       remoteImageCount: 0,
       cidImageCount: 0,
       invalidImageCount: 0,
@@ -1810,6 +1938,7 @@ function sanitizeComposeGeneratedHtml(
   if (typeof DOMParser === "undefined") {
     return {
       html: normalizedHtml,
+      emailStyles: "",
       remoteImageCount: 0,
       cidImageCount: 0,
       invalidImageCount: 0,
@@ -1935,6 +2064,7 @@ function sanitizeComposeGeneratedHtml(
 
   return {
     html: hasRenderableContent ? sanitizedHtml : null,
+    emailStyles: "",
     remoteImageCount,
     cidImageCount,
     invalidImageCount,
@@ -1948,6 +2078,7 @@ function resolveMessageBodyRenderMode(
   | {
       mode: "html";
       html: string;
+      emailStyles: string;
       remoteImageCount: number;
       cidImageCount: number;
       invalidImageCount: number;
@@ -1955,6 +2086,7 @@ function resolveMessageBodyRenderMode(
   | {
       mode: "compose_html";
       html: string;
+      emailStyles: string;
       remoteImageCount: number;
       cidImageCount: number;
       invalidImageCount: number;
@@ -1971,6 +2103,7 @@ function resolveMessageBodyRenderMode(
       : sanitizeMessageBodyHtml(message.bodyHtml, options)
     : {
         html: null,
+        emailStyles: "",
         remoteImageCount: 0,
         cidImageCount: 0,
         invalidImageCount: 0,
@@ -1983,6 +2116,7 @@ function resolveMessageBodyRenderMode(
           ? "compose_html"
           : "html",
       html: sanitizedHtmlResult.html,
+      emailStyles: sanitizedHtmlResult.emailStyles,
       remoteImageCount: sanitizedHtmlResult.remoteImageCount,
       cidImageCount: sanitizedHtmlResult.cidImageCount,
       invalidImageCount: sanitizedHtmlResult.invalidImageCount,
@@ -9172,7 +9306,12 @@ function MailboxView({
                   <div
                     className={`email-html-content w-full ${density === "full" ? "min-h-[12rem]" : ""}`}
                   >
-                    <EmailHtmlStage html={bodyRenderMode.html} themeMode={themeMode} />
+                    <EmailHtmlStage
+                      html={bodyRenderMode.html}
+                      themeMode={themeMode}
+                      emailStyles={bodyRenderMode.emailStyles}
+                      isExternalHtml={bodyRenderMode.mode === "html"}
+                    />
                   </div>
                 ) : bodyRenderMode.mode === "compose_html" ? (
                   <div
