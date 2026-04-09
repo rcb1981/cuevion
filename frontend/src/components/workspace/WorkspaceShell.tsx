@@ -1221,7 +1221,7 @@ function renderPlainMessageParagraph(
         href={buildPlainLinkHref(matchedValue)}
         target="_blank"
         rel="noopener noreferrer"
-        className="break-all text-[color:rgba(70,109,73,0.96)] underline underline-offset-2"
+        className="break-all text-[color:rgba(44,89,116,0.98)] underline underline-offset-2 dark:text-[color:rgba(176,209,183,0.96)]"
       >
         {matchedValue}
       </a>,
@@ -9167,12 +9167,12 @@ function MailboxView({
                     dangerouslySetInnerHTML={{ __html: bodyRenderMode.html }}
                   />
                 ) : (
-                  <div>
+                  <div className="text-[color:rgba(34,38,36,0.99)] opacity-100 dark:text-[color:rgba(228,235,230,0.94)] [&_*]:opacity-100">
                     {leadingParagraphs.map((paragraph) =>
                       renderPlainMessageParagraph(
                         paragraph,
                         `${threadMessage.id}-${paragraph}`,
-                        `break-words text-[0.94rem] ${density === "full" ? "leading-7" : "leading-6.5"} text-[color:rgba(34,38,36,0.99)]`,
+                        `break-words text-[0.94rem] ${density === "full" ? "leading-7" : "leading-6.5"} text-[color:rgba(34,38,36,0.99)] dark:text-[color:rgba(228,235,230,0.94)]`,
                       ),
                     )}
                     {threadMessage.signature ? (
