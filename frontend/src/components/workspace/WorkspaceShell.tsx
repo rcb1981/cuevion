@@ -9425,6 +9425,33 @@ function MailboxView({
 
     return true;
   });
+
+  // Thread-level dedup for the inbox list: show only the most recent message per
+  // conversation thread. Messages are grouped by resolveMailThreadId (threadId first,
+  // then normalized subject as fallback), and only the newest one (by resolveMailDateMs)
+  // is kept as the representative row. Older messages in the same thread are hidden from
+  // the list but remain fully accessible in the reading pane / thread view.
+  //
+  // Scoped strictly to the Inbox folder — Sent, Drafts, Archive, etc. are unaffected.
+  // Smart-folder and shared-view modes are also excluded.
+  const threadDedupedMessages =
+    activeFolder === "Inbox" && !isSharedView && !activeSmartFolder
+      ? (() => {
+          const latestByThread = new Map<string, MailMessage>();
+          visibleMessages.forEach((message) => {
+            const threadId = resolveMailThreadId(message);
+            const existing = latestByThread.get(threadId);
+            if (
+              !existing ||
+              resolveMailDateMs(message) > resolveMailDateMs(existing)
+            ) {
+              latestByThread.set(threadId, message);
+            }
+          });
+          return Array.from(latestByThread.values());
+        })()
+      : visibleMessages;
+
   const threadMessageCountByThreadId = useMemo(() => {
     const counts = new Map<string, number>();
 
@@ -9448,7 +9475,7 @@ function MailboxView({
 
     return threadsWithAttachments;
   }, [folderMessages]);
-  const sortedMessages = [...visibleMessages].sort((firstMessage, secondMessage) => {
+  const sortedMessages = [...threadDedupedMessages].sort((firstMessage, secondMessage) => {
     const firstTime = resolveMailDateMs(firstMessage);
     const secondTime = resolveMailDateMs(secondMessage);
 
