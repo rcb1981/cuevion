@@ -23353,7 +23353,29 @@ export function WorkspaceShell({
       }
     }
 
-    return uniqueEntries;
+    // Thread-level dedup: keep only the latest message per conversation thread,
+    // mirroring the Inbox view's dedupeLatestMessagePerThread logic. Without this,
+    // an original email and its reply both appear as separate Priority rows because
+    // they have different message ids but share the same thread identity.
+    const latestByThread = new Map<string, typeof uniqueEntries[number]>();
+
+    for (const entry of uniqueEntries) {
+      const threadKey = resolveThreadKey({
+        threadId: entry.message.threadId,
+        subject: entry.message.subject,
+        from: entry.message.from ?? entry.message.sender ?? "",
+      });
+      const existing = latestByThread.get(threadKey);
+
+      if (
+        !existing ||
+        resolveMailDateMs(entry.message) >= resolveMailDateMs(existing.message)
+      ) {
+        latestByThread.set(threadKey, entry);
+      }
+    }
+
+    return Array.from(latestByThread.values());
   })();
   const livePriorityInboxItems: ReviewItem[] = livePriorityInboxEntries.map(
     ({ mailboxId, mailboxTitle, message }) => ({
