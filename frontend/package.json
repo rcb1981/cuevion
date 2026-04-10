@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "node -e \"require('./node_modules/sucrase/register/ts.js'); require('./src/lib/inboxEngine.test.ts')\""
   },
   "dependencies": {
     "react": "^18.3.1",
