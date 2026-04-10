@@ -535,6 +535,16 @@ const canonicalFolderOrder: MailFolder[] = [
   "Drafts",
   "Inbox",
 ];
+/** Maximum messages kept in the persisted inbox snapshot per mailbox.
+ *  When exceeded, the oldest fully-read threads are pruned on each sync. */
+const INBOX_SNAPSHOT_MAX_MESSAGES = 800;
+/** Threads whose newest message is older than this are eligible for pruning
+ *  (age-based hard cut, applied before the count cap). */
+const INBOX_SNAPSHOT_MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000; // 90 days
+/** Threads with any activity within this window are protected from pruning
+ *  even if the count cap would otherwise reach them. */
+const INBOX_SNAPSHOT_RECENT_GUARD_MS = 14 * 24 * 60 * 60 * 1000; // 14 days
+
 const AI_SUGGESTIONS_STORAGE_KEY = "cuevion-ai-suggestions-enabled";
 const INBOX_CHANGES_STORAGE_KEY = "cuevion-inbox-changes-enabled";
 const TEAM_ACTIVITY_STORAGE_KEY = "cuevion-team-activity-enabled";
@@ -4471,6 +4481,110 @@ function normalizeThreadSubject(subject: string) {
 
 function resolveMailThreadId(message: Pick<MailMessageSeed, "threadId" | "subject">) {
   return message.threadId?.trim() || normalizeThreadSubject(message.subject);
+}
+
+/**
+ * Prunes a flat list of inbox messages to stay within INBOX_SNAPSHOT_MAX_MESSAGES.
+ *
+ * Invariants:
+ *  - Unread messages are never pruned.
+ *  - Threads with any message newer than INBOX_SNAPSHOT_RECENT_GUARD_MS are
+ *    never pruned ("recently active" guard).
+ *  - Entire threads are removed at a time — never individual messages — to
+ *    avoid creating partial / broken conversation views.
+ *  - Threads whose newest message exceeds INBOX_SNAPSHOT_MAX_AGE_MS are
+ *    always removed first (age-based eviction), then the count cap is applied.
+ *  - Within each eviction tier, oldest threads are removed before newer ones.
+ *  - Original message order is preserved in the output.
+ *
+ * Generic over T so it works on both LiveInboxMessageSnapshot (snapshot layer)
+ * and MailMessage (in-memory layer) without requiring separate implementations.
+ */
+function pruneInboxSnapshot<
+  T extends {
+    unread?: boolean | null;
+    subject?: string | null;
+    createdAt?: string | null;
+  },
+>(messages: T[], nowMs: number): T[] {
+  if (messages.length <= INBOX_SNAPSHOT_MAX_MESSAGES) {
+    return messages; // fast path: already within budget
+  }
+
+  // Resolve a stable thread-group key for a message.
+  // LiveInboxMessageSnapshot has no threadId field, so we always fall back to
+  // normalised subject. MailMessage carries threadId and prefers it.
+  const getThreadKey = (m: T): string => {
+    const tid = (m as unknown as { threadId?: string }).threadId?.trim();
+    if (tid) return `t:${tid}`;
+    return `s:${normalizeThreadSubject((m.subject ?? "") as string)}`;
+  };
+
+  // Resolve a numeric timestamp from createdAt (ISO string).
+  // Falls back to 0 when the field is absent or unparseable; such messages are
+  // treated as ancient and become the first pruning candidates.
+  const getDateMs = (m: T): number => {
+    if (m.createdAt) {
+      const ms = new Date(m.createdAt as string).getTime();
+      if (!Number.isNaN(ms) && ms > 0) return ms;
+    }
+    return 0;
+  };
+
+  // Group messages by thread key and compute per-thread metadata in one pass.
+  type ThreadBucket = { key: string; items: T[]; newestMs: number };
+  const buckets = new Map<string, ThreadBucket>();
+
+  for (const message of messages) {
+    const key = getThreadKey(message);
+    let bucket = buckets.get(key);
+    if (!bucket) {
+      bucket = { key, items: [], newestMs: 0 };
+      buckets.set(key, bucket);
+    }
+    bucket.items.push(message);
+    const ms = getDateMs(message);
+    if (ms > bucket.newestMs) bucket.newestMs = ms;
+  }
+
+  // Classify each thread as protected or eligible for pruning.
+  const protectedKeys = new Set<string>();
+  const eligible: Array<{ key: string; newestMs: number; count: number }> = [];
+
+  for (const [key, bucket] of buckets) {
+    const hasUnread = bucket.items.some((m) => m.unread === true);
+    const ageMs = bucket.newestMs > 0 ? nowMs - bucket.newestMs : Infinity;
+    const isRecentlyActive = ageMs < INBOX_SNAPSHOT_RECENT_GUARD_MS;
+
+    if (hasUnread || isRecentlyActive) {
+      protectedKeys.add(key);
+    } else {
+      eligible.push({ key, newestMs: bucket.newestMs, count: bucket.items.length });
+    }
+  }
+
+  // Sort eligible threads oldest-first so we can evict from the front.
+  eligible.sort((a, b) => a.newestMs - b.newestMs);
+
+  // Start the kept set with all protected threads and count their messages.
+  const keepKeys = new Set(protectedKeys);
+  let keptCount = [...buckets.entries()]
+    .filter(([key]) => protectedKeys.has(key))
+    .reduce((sum, [, b]) => sum + b.items.length, 0);
+
+  // Fill remaining budget from newest eligible to oldest, skipping any thread
+  // whose age exceeds the hard max-age threshold.
+  for (let i = eligible.length - 1; i >= 0; i--) {
+    const thread = eligible[i];
+    if (keptCount >= INBOX_SNAPSHOT_MAX_MESSAGES) break;
+    const ageMs = thread.newestMs > 0 ? nowMs - thread.newestMs : Infinity;
+    if (ageMs > INBOX_SNAPSHOT_MAX_AGE_MS) continue; // hard age cut — skip
+    keepKeys.add(thread.key);
+    keptCount += thread.count;
+  }
+
+  // Rebuild the list in original order to preserve sort stability downstream.
+  return messages.filter((m) => keepKeys.has(getThreadKey(m)));
 }
 
 function maxCategoryConfidence(
@@ -22674,7 +22788,15 @@ export function WorkspaceShell({
         ),
     );
 
-    return [...updatedPersistedMessages, ...genuinelyNewMessages];
+    // Prune the merged snapshot before persisting to localStorage. This keeps
+    // the snapshot bounded over time without ever touching the in-memory inbox
+    // mid-session (no visible message disappearance for the current user).
+    // Protected threads (unread or recently active) are never pruned; entire
+    // threads are removed as a unit so the reading pane stays consistent.
+    return pruneInboxSnapshot(
+      [...updatedPersistedMessages, ...genuinelyNewMessages],
+      Date.now(),
+    );
   };
   const mergeLiveInboxMessages = (
     mailboxId: InboxId,
