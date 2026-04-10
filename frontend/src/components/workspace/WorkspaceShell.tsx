@@ -22635,7 +22635,7 @@ export function WorkspaceShell({
       return true;
     });
 
-    return uniqueIncomingMessages.map((message) => {
+    const normalizedIncoming = uniqueIncomingMessages.map((message) => {
       const persistedMessage = message as PersistedLiveInboxMessageSnapshot;
       const existingMessage = findMatchingMessageByIdentity(persistedMessage, currentInboxIndexes);
       const unread =
@@ -22671,6 +22671,36 @@ export function WorkspaceShell({
         currentStore,
       );
     });
+
+    // Upsert: walk the current inbox and replace any entry whose canonical identity
+    // (imapUid → id → preview) matches a normalized incoming message. This prevents
+    // the stale row (e.g. classification "Other") from surviving alongside the updated
+    // row (e.g. classification "Reply") when the server assigns a new id to the same
+    // physical email. Consumed incoming messages are tracked so they are not appended
+    // a second time. Current inbox entries with no incoming counterpart are dropped,
+    // preserving full-replace semantics for removal.
+    const incomingIndexes = buildMessageIdentityIndexes(normalizedIncoming);
+    const consumedIncomingKeys = new Set<string>();
+
+    const updatedCurrentMessages = currentInboxMessages
+      .map((current) => {
+        const incoming = findMatchingMessageByIdentity(current, incomingIndexes);
+        if (!incoming) return null;
+        getCanonicalMessageIdentityKeys(incoming).forEach((key) =>
+          consumedIncomingKeys.add(key),
+        );
+        return incoming;
+      })
+      .filter((msg): msg is MailMessage => msg !== null);
+
+    const genuinelyNewMessages = normalizedIncoming.filter(
+      (msg) =>
+        !getCanonicalMessageIdentityKeys(msg).some((key) =>
+          consumedIncomingKeys.has(key),
+        ),
+    );
+
+    return [...updatedCurrentMessages, ...genuinelyNewMessages];
   };
   const primaryInboxEmailCount = getMailboxFolderBadgeCount(
     mailboxStore[orderedMailboxes[0]?.id ?? "main"],
