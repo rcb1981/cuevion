@@ -13654,7 +13654,7 @@ function MailboxView({
                   </div>
                 ) : null}
 
-                {renderThreadTimeline(fullWidthMessage, "full")}
+                {renderThreadMessage(fullWidthMessage, "full")}
               </div>
 
               <div className="rounded-[20px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-5 py-4">
@@ -14590,30 +14590,6 @@ function MailboxView({
 
                     {renderThreadMessage(selectedMessage, "split")}
                   </div>
-                  {(() => {
-                    const earlierThreadMessages = getThreadMessages(selectedMessage).filter(
-                      (threadMessage) => threadMessage.id !== selectedMessage.id,
-                    );
-
-                    if (earlierThreadMessages.length === 0) {
-                      return null;
-                    }
-
-                    return (
-                      <div className="space-y-3">
-                        <div className="text-[0.72rem] font-medium uppercase tracking-[0.18em] text-[var(--workspace-text-faint)]">
-                          Earlier messages
-                        </div>
-                        <div className="space-y-2.5">
-                          {earlierThreadMessages.map((threadMessage) =>
-                            renderThreadMessage(threadMessage, "split", {
-                              historical: true,
-                            }),
-                          )}
-                        </div>
-                      </div>
-                    );
-                  })()}
                   {selectedMessage.id === "main-1" ? (
                     <div className="grid gap-4 md:grid-cols-2">
                       <div className="overflow-hidden rounded-[20px] border border-[var(--workspace-border-soft)] bg-[linear-gradient(180deg,var(--workspace-preview-surface-start),var(--workspace-preview-surface-end))]">
@@ -22646,7 +22622,20 @@ export function WorkspaceShell({
   ) => {
     const currentInboxIndexes = buildMessageIdentityIndexes(currentInboxMessages);
 
-    return incomingMessages.map((message) => {
+    // Deduplicate the incoming batch before mapping. The server can send the same
+    // email twice in one snapshot (e.g. old "Other" + new "Reply" after reclassification).
+    // Identity priority: imapUid > id > preview (subject|from|timestamp). First occurrence wins.
+    const seenIncomingKeys = new Set<string>();
+    const uniqueIncomingMessages = incomingMessages.filter((message) => {
+      const keys = getCanonicalMessageIdentityKeys(message);
+      if (keys.some((key) => seenIncomingKeys.has(key))) {
+        return false;
+      }
+      keys.forEach((key) => seenIncomingKeys.add(key));
+      return true;
+    });
+
+    return uniqueIncomingMessages.map((message) => {
       const persistedMessage = message as PersistedLiveInboxMessageSnapshot;
       const existingMessage = findMatchingMessageByIdentity(persistedMessage, currentInboxIndexes);
       const unread =
