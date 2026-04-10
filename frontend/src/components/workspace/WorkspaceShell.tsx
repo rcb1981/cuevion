@@ -9425,6 +9425,20 @@ function MailboxView({
 
     return true;
   });
+  const latestMessageByThreadId = useMemo(() => {
+    const latestMessages = new Map<string, MailMessage>();
+
+    folderMessages.forEach((message) => {
+      const threadId = resolveMailThreadId(message);
+      const currentLatest = latestMessages.get(threadId);
+
+      if (!currentLatest || resolveMailDateMs(message) >= resolveMailDateMs(currentLatest)) {
+        latestMessages.set(threadId, message);
+      }
+    });
+
+    return latestMessages;
+  }, [folderMessages]);
   const threadMessageCountByThreadId = useMemo(() => {
     const counts = new Map<string, number>();
 
@@ -9435,7 +9449,27 @@ function MailboxView({
 
     return counts;
   }, [folderMessages]);
-  const sortedMessages = [...visibleMessages].sort((firstMessage, secondMessage) => {
+  const threadHasAttachmentsByThreadId = useMemo(() => {
+    const threadsWithAttachments = new Map<string, boolean>();
+
+    folderMessages.forEach((message) => {
+      if ((message.attachments?.length ?? 0) === 0) {
+        return;
+      }
+
+      threadsWithAttachments.set(resolveMailThreadId(message), true);
+    });
+
+    return threadsWithAttachments;
+  }, [folderMessages]);
+  const visibleThreadMessages = useMemo(() => {
+    const visibleThreadIds = new Set(visibleMessages.map((message) => resolveMailThreadId(message)));
+
+    return Array.from(visibleThreadIds)
+      .map((threadId) => latestMessageByThreadId.get(threadId))
+      .filter((message): message is MailMessage => Boolean(message));
+  }, [latestMessageByThreadId, visibleMessages]);
+  const sortedMessages = [...visibleThreadMessages].sort((firstMessage, secondMessage) => {
     const firstTime = resolveMailDateMs(firstMessage);
     const secondTime = resolveMailDateMs(secondMessage);
 
@@ -9443,14 +9477,41 @@ function MailboxView({
       ? secondTime - firstTime
       : firstTime - secondTime;
   });
-  const visibleSelectedMessageIds = selectedMessageIds.filter((messageId) =>
-    sortedMessages.some((message) => message.id === messageId),
+  const visibleSelectedMessageIds = Array.from(
+    new Set(
+      selectedMessageIds
+        .map((messageId) => {
+          const sourceMessage =
+            folderMessages.find((message) => message.id === messageId) ??
+            sortedMessages.find((message) => message.id === messageId);
+
+          if (!sourceMessage) {
+            return null;
+          }
+
+          return latestMessageByThreadId.get(resolveMailThreadId(sourceMessage))?.id ?? null;
+        })
+        .filter((messageId): messageId is string =>
+          Boolean(messageId && sortedMessages.some((message) => message.id === messageId)),
+        ),
+    ),
   );
   const isMultiSelectActive = visibleSelectedMessageIds.length > 1;
+  const selectedThreadRepresentativeId = selectedMessageId
+    ? (() => {
+        const sourceMessage =
+          folderMessages.find((message) => message.id === selectedMessageId) ??
+          sortedMessages.find((message) => message.id === selectedMessageId);
+
+        return sourceMessage
+          ? latestMessageByThreadId.get(resolveMailThreadId(sourceMessage))?.id ?? selectedMessageId
+          : selectedMessageId;
+      })()
+    : null;
   const selectedMessage =
     sortedMessages.find(
       (message) =>
-        message.id === selectedMessageId &&
+        message.id === selectedThreadRepresentativeId &&
         visibleSelectedMessageIds.includes(message.id),
     ) ??
     sortedMessages.find((message) =>
@@ -14252,11 +14313,11 @@ function MailboxView({
                         themeMode === "dark"
                           ? "text-[color:rgba(220,212,202,0.84)]"
                           : "text-[color:rgba(120,111,100,0.76)]";
-                      const attachmentCount = message.attachments?.length ?? 0;
-                      const hasAttachmentIndicator = attachmentCount > 0;
                       const threadMessageCount =
                         threadMessageCountByThreadId.get(resolveMailThreadId(message)) ?? 1;
                       const hasThreadCountIndicator = threadMessageCount > 1;
+                      const hasThreadAttachmentIndicator =
+                        threadHasAttachmentsByThreadId.get(resolveMailThreadId(message)) ?? false;
                       return (
                         <button
                           key={message.id}
@@ -14419,22 +14480,14 @@ function MailboxView({
                             >
                               {message.time}
                             </div>
-                            {hasAttachmentIndicator || hasThreadCountIndicator ? (
+                            {hasThreadAttachmentIndicator || hasThreadCountIndicator ? (
                               <div
                                 className={`mt-1 flex items-center justify-end gap-1.5 text-[0.72rem] font-medium ${metadataIndicatorClass}`}
                               >
-                                {hasAttachmentIndicator ? (
+                                {hasThreadAttachmentIndicator ? (
                                   <span
-                                    aria-label={
-                                      attachmentCount === 1
-                                        ? "1 attachment"
-                                        : `${attachmentCount} attachments`
-                                    }
-                                    title={
-                                      attachmentCount === 1
-                                        ? "1 attachment"
-                                        : `${attachmentCount} attachments`
-                                    }
+                                    aria-label="Conversation has attachments"
+                                    title="Conversation has attachments"
                                     className="inline-flex items-center justify-center"
                                   >
                                     <svg
