@@ -1563,6 +1563,33 @@ function buildEmailStageDocument(
       }`
       : "";
 
+  // Light-mode only: neutralize washed-out inline colors and opacity-based
+  // fading that external email markup (e.g. quoted/replied sections) carries as
+  // inline styles. Scoped strictly to .email-stage--light so dark mode and
+  // compose rendering are completely unaffected.
+  const externalHtmlLightReadabilityFix =
+    themeMode === "light"
+      ? `
+      .email-stage--light body,
+      .email-stage--light p,
+      .email-stage--light div,
+      .email-stage--light span,
+      .email-stage--light td,
+      .email-stage--light th,
+      .email-stage--light li,
+      .email-stage--light a {
+        color: rgba(34, 38, 36, 0.96) !important;
+      }
+      .email-stage--light blockquote {
+        color: rgba(90, 98, 94, 0.88) !important;
+        border-left: 2px solid rgba(180, 190, 185, 0.6) !important;
+        padding-left: 12px !important;
+      }
+      .email-stage--light [style*="opacity"] {
+        opacity: 1 !important;
+      }`
+      : "";
+
   const externalHtmlStageStyles = `
       body {
         color: ${stageTextColor};
@@ -1580,7 +1607,7 @@ function buildEmailStageDocument(
         margin: 0.85rem 0 0;
         padding: 0.4rem 0 0.1rem 0.85rem;
         border-left: 2px solid ${stageQuoteBorder};
-      }${externalHtmlDarkLightBgFix}`;
+      }${externalHtmlLightReadabilityFix}${externalHtmlDarkLightBgFix}`;
 
   // Additional styles for COMPOSE HTML emails:
   // Full theme-aware overrides since compose content is unstyled by design.
