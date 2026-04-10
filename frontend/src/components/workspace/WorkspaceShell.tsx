@@ -22620,7 +22620,9 @@ export function WorkspaceShell({
     const persistedSnapshotIndexes = buildMessageIdentityIndexes(persistedSnapshotMessages);
     const currentInboxIndexes = buildMessageIdentityIndexes(currentInboxMessages);
 
-    return incomingMessages.map((message) => {
+    // Enrich each incoming message with collaboration/shared data carried forward
+    // from the persisted snapshot or the current in-memory inbox.
+    const enrichedIncoming = incomingMessages.map((message) => {
       const persistedSnapshotMessage = findMatchingMessageByIdentity(
         message,
         persistedSnapshotIndexes,
@@ -22643,6 +22645,36 @@ export function WorkspaceShell({
         isShared: persistedSnapshotMessage?.isShared ?? currentInboxMessage?.isShared,
       } as PersistedLiveInboxMessageSnapshot;
     });
+
+    // Upsert-only snapshot merge: walk the existing persisted snapshot and replace
+    // any entry matched by an enriched incoming message; preserve all other persisted
+    // entries. Genuinely new messages are appended at the end.
+    //
+    // This ensures the snapshot stored in localStorage accumulates all previously
+    // seen messages rather than being overwritten with only the latest IMAP fetch
+    // window (~20-25 messages). Without this, older messages that fall outside the
+    // server's return window are lost on the next page load when the snapshot is the
+    // sole source of truth for re-hydrating the inbox.
+    const incomingIndexes = buildMessageIdentityIndexes(enrichedIncoming);
+    const consumedIncomingKeys = new Set<string>();
+
+    const updatedPersistedMessages = persistedSnapshotMessages.map((persisted) => {
+      const incoming = findMatchingMessageByIdentity(persisted, incomingIndexes);
+      if (!incoming) return persisted; // upsert-only: preserve messages absent from this fetch
+      getCanonicalMessageIdentityKeys(incoming).forEach((key) =>
+        consumedIncomingKeys.add(key),
+      );
+      return incoming;
+    });
+
+    const genuinelyNewMessages = enrichedIncoming.filter(
+      (msg) =>
+        !getCanonicalMessageIdentityKeys(msg).some((key) =>
+          consumedIncomingKeys.has(key),
+        ),
+    );
+
+    return [...updatedPersistedMessages, ...genuinelyNewMessages];
   };
   const mergeLiveInboxMessages = (
     mailboxId: InboxId,
@@ -22702,26 +22734,24 @@ export function WorkspaceShell({
       );
     });
 
-    // Upsert: walk the current inbox and replace any entry whose canonical identity
-    // (imapUid → id → preview) matches a normalized incoming message. This prevents
-    // the stale row (e.g. classification "Other") from surviving alongside the updated
-    // row (e.g. classification "Reply") when the server assigns a new id to the same
-    // physical email. Consumed incoming messages are tracked so they are not appended
-    // a second time. Current inbox entries with no incoming counterpart are dropped,
-    // preserving full-replace semantics for removal.
+    // Upsert-only merge: walk the current inbox and replace any entry whose canonical
+    // identity (imapUid → id → preview) matches a normalized incoming message. Entries
+    // with no match in the incoming batch are preserved as-is — the IMAP server returns
+    // only the latest ~20-25 messages, so absence from the fetch window does not mean
+    // the message was deleted. Genuinely new messages (not yet in the inbox) are
+    // appended. Messages are never removed during a sync; only explicit user actions
+    // (move-to-trash, archive, etc.) should remove them.
     const incomingIndexes = buildMessageIdentityIndexes(normalizedIncoming);
     const consumedIncomingKeys = new Set<string>();
 
-    const updatedCurrentMessages = currentInboxMessages
-      .map((current) => {
-        const incoming = findMatchingMessageByIdentity(current, incomingIndexes);
-        if (!incoming) return null;
-        getCanonicalMessageIdentityKeys(incoming).forEach((key) =>
-          consumedIncomingKeys.add(key),
-        );
-        return incoming;
-      })
-      .filter((msg): msg is MailMessage => msg !== null);
+    const updatedCurrentMessages = currentInboxMessages.map((current) => {
+      const incoming = findMatchingMessageByIdentity(current, incomingIndexes);
+      if (!incoming) return current; // upsert-only: preserve messages absent from this fetch
+      getCanonicalMessageIdentityKeys(incoming).forEach((key) =>
+        consumedIncomingKeys.add(key),
+      );
+      return incoming;
+    });
 
     const genuinelyNewMessages = normalizedIncoming.filter(
       (msg) =>
