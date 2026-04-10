@@ -9437,13 +9437,13 @@ function MailboxView({
   // Scoped strictly to the Inbox folder — Sent, Drafts, Archive, etc. are unaffected.
   // Smart-folder and shared-view modes are also excluded.
   const threadDedupedMessages =
-    activeFolder === "Inbox" && !isSharedView && !activeSmartFolder
-      ? dedupeLatestMessagePerThread(visibleMessages.map((m) => ({
-          ...m,
-          threadId: resolveMailThreadId(m),
-          from: m.from ?? m.sender ?? "",
-        })))
-      : visibleMessages;
+    dedupeLatestMessagePerThread(
+      visibleMessages.map((m) => ({
+        ...m,
+        threadId: resolveMailThreadId(m),
+        from: m.from ?? m.sender ?? "",
+      }))
+    );
 
   const threadMessageCountByThreadId = useMemo(() => {
     const counts = new Map<string, number>();
