@@ -54,6 +54,7 @@ import * as learningEngine from "../../lib/learningEngine";
 import * as forYouEngine from "../../lib/forYouEngine";
 import * as suggestionEngine from "../../lib/suggestionEngine";
 import { dedupeLatestMessagePerThread } from "../../lib/inboxEngine";
+import { resolveThreadKey } from "../../lib/inboxEngine";
 import { applyLearningDecision } from "../../lib/applyLearningDecision";
 import type {
   MailMessageBehaviorSuggestion as EngineMailMessageBehaviorSuggestion,
@@ -9437,7 +9438,11 @@ function MailboxView({
   // Smart-folder and shared-view modes are also excluded.
   const threadDedupedMessages =
     activeFolder === "Inbox" && !isSharedView && !activeSmartFolder
-      ? dedupeLatestMessagePerThread(visibleMessages)
+      ? dedupeLatestMessagePerThread(visibleMessages.map((m) => ({
+          ...m,
+          threadId: resolveMailThreadId(m),
+          from: m.from ?? m.sender ?? "",
+        })))
       : visibleMessages;
 
   const threadMessageCountByThreadId = useMemo(() => {
@@ -9458,7 +9463,8 @@ function MailboxView({
         return;
       }
 
-      threadsWithAttachments.set(resolveMailThreadId(message), true);
+      const threadId = resolveMailThreadId(message);
+      threadsWithAttachments.set(threadId, true);
     });
 
     return threadsWithAttachments;
