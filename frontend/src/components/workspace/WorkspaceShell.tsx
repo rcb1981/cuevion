@@ -9436,14 +9436,23 @@ function MailboxView({
   //
   // Scoped strictly to the Inbox folder — Sent, Drafts, Archive, etc. are unaffected.
   // Smart-folder and shared-view modes are also excluded.
+  const uniqueMessages = Array.from(
+    new Map(
+      visibleMessages.map((m) => [
+        m.imapUid || m.id,
+        m,
+      ])
+    ).values()
+  );
+
   const threadDedupedMessages =
     dedupeLatestMessagePerThread(
-      visibleMessages.map((m) => ({
+      uniqueMessages.map((m) => ({
         ...m,
         threadId: resolveMailThreadId(m),
         from: m.from ?? m.sender ?? "",
       }))
-    );
+    )
 
   const threadMessageCountByThreadId = useMemo(() => {
     const counts = new Map<string, number>();
