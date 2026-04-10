@@ -1563,33 +1563,6 @@ function buildEmailStageDocument(
       }`
       : "";
 
-  // Light-mode only: neutralize washed-out inline colors and opacity-based
-  // fading that external email markup (e.g. quoted/replied sections) carries as
-  // inline styles. Scoped strictly to .email-stage--light so dark mode and
-  // compose rendering are completely unaffected.
-  const externalHtmlLightReadabilityFix =
-    themeMode === "light"
-      ? `
-      .email-stage--light body,
-      .email-stage--light p,
-      .email-stage--light div,
-      .email-stage--light span,
-      .email-stage--light td,
-      .email-stage--light th,
-      .email-stage--light li,
-      .email-stage--light a {
-        color: rgba(34, 38, 36, 0.96) !important;
-      }
-      .email-stage--light blockquote {
-        color: rgba(90, 98, 94, 0.88) !important;
-        border-left: 2px solid rgba(180, 190, 185, 0.6) !important;
-        padding-left: 12px !important;
-      }
-      .email-stage--light [style*="opacity"] {
-        opacity: 1 !important;
-      }`
-      : "";
-
   const externalHtmlStageStyles = `
       body {
         color: ${stageTextColor};
@@ -1607,7 +1580,7 @@ function buildEmailStageDocument(
         margin: 0.85rem 0 0;
         padding: 0.4rem 0 0.1rem 0.85rem;
         border-left: 2px solid ${stageQuoteBorder};
-      }${externalHtmlLightReadabilityFix}${externalHtmlDarkLightBgFix}`;
+      }${externalHtmlDarkLightBgFix}`;
 
   // Additional styles for COMPOSE HTML emails:
   // Full theme-aware overrides since compose content is unstyled by design.
@@ -1663,6 +1636,29 @@ function buildEmailStageDocument(
     ? `\n    <style id="email-original-styles">\n      ${emailStyles}\n    </style>`
     : "";
 
+  // Light-mode readability fix for external HTML: injected directly into the email
+  // content HTML (not only into the head) so it appears AFTER any <style> blocks
+  // that the email itself may carry in its body — ensuring cascade-order victory for
+  // same-specificity rules. Direct element selectors (no wrapper-class prefix) keep
+  // specificity low and unambiguous; !important beats non-!important inline styles.
+  // Dark mode is completely unaffected: this block is only emitted for light mode.
+  const lightModeContentFix =
+    isExternalHtml && themeMode === "light"
+      ? `<style id="cuevion-light-fix">
+body, p, div, span, td, th, li, a, font {
+  color: rgba(34, 38, 36, 0.96) !important;
+}
+blockquote {
+  color: rgba(90, 98, 94, 0.88) !important;
+  border-left: 2px solid rgba(180, 190, 185, 0.6) !important;
+  padding-left: 12px !important;
+}
+[style*="opacity"] {
+  opacity: 1 !important;
+}
+</style>`
+      : "";
+
   return `<!DOCTYPE html>
 <html>
   <head>
@@ -1674,7 +1670,7 @@ function buildEmailStageDocument(
     </style>
   </head>
   <body>
-    <div class="${stageWrapperClass}">${html}</div>
+    <div class="${stageWrapperClass}">${lightModeContentFix}${html}</div>
   </body>
 </html>`;
 }
