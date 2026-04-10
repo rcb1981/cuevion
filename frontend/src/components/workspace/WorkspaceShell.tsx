@@ -9425,20 +9425,6 @@ function MailboxView({
 
     return true;
   });
-  const latestMessageByThreadId = useMemo(() => {
-    const latestMessages = new Map<string, MailMessage>();
-
-    folderMessages.forEach((message) => {
-      const threadId = resolveMailThreadId(message);
-      const currentLatest = latestMessages.get(threadId);
-
-      if (!currentLatest || resolveMailDateMs(message) >= resolveMailDateMs(currentLatest)) {
-        latestMessages.set(threadId, message);
-      }
-    });
-
-    return latestMessages;
-  }, [folderMessages]);
   const threadMessageCountByThreadId = useMemo(() => {
     const counts = new Map<string, number>();
 
@@ -9462,14 +9448,7 @@ function MailboxView({
 
     return threadsWithAttachments;
   }, [folderMessages]);
-  const visibleThreadMessages = useMemo(() => {
-    const visibleThreadIds = new Set(visibleMessages.map((message) => resolveMailThreadId(message)));
-
-    return Array.from(visibleThreadIds)
-      .map((threadId) => latestMessageByThreadId.get(threadId))
-      .filter((message): message is MailMessage => Boolean(message));
-  }, [latestMessageByThreadId, visibleMessages]);
-  const sortedMessages = [...visibleThreadMessages].sort((firstMessage, secondMessage) => {
+  const sortedMessages = [...visibleMessages].sort((firstMessage, secondMessage) => {
     const firstTime = resolveMailDateMs(firstMessage);
     const secondTime = resolveMailDateMs(secondMessage);
 
@@ -9477,41 +9456,14 @@ function MailboxView({
       ? secondTime - firstTime
       : firstTime - secondTime;
   });
-  const visibleSelectedMessageIds = Array.from(
-    new Set(
-      selectedMessageIds
-        .map((messageId) => {
-          const sourceMessage =
-            folderMessages.find((message) => message.id === messageId) ??
-            sortedMessages.find((message) => message.id === messageId);
-
-          if (!sourceMessage) {
-            return null;
-          }
-
-          return latestMessageByThreadId.get(resolveMailThreadId(sourceMessage))?.id ?? null;
-        })
-        .filter((messageId): messageId is string =>
-          Boolean(messageId && sortedMessages.some((message) => message.id === messageId)),
-        ),
-    ),
+  const visibleSelectedMessageIds = selectedMessageIds.filter((messageId) =>
+    sortedMessages.some((message) => message.id === messageId),
   );
   const isMultiSelectActive = visibleSelectedMessageIds.length > 1;
-  const selectedThreadRepresentativeId = selectedMessageId
-    ? (() => {
-        const sourceMessage =
-          folderMessages.find((message) => message.id === selectedMessageId) ??
-          sortedMessages.find((message) => message.id === selectedMessageId);
-
-        return sourceMessage
-          ? latestMessageByThreadId.get(resolveMailThreadId(sourceMessage))?.id ?? selectedMessageId
-          : selectedMessageId;
-      })()
-    : null;
   const selectedMessage =
     sortedMessages.find(
       (message) =>
-        message.id === selectedThreadRepresentativeId &&
+        message.id === selectedMessageId &&
         visibleSelectedMessageIds.includes(message.id),
     ) ??
     sortedMessages.find((message) =>
