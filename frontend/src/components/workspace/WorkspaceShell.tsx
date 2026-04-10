@@ -53,6 +53,7 @@ import {
 import * as learningEngine from "../../lib/learningEngine";
 import * as forYouEngine from "../../lib/forYouEngine";
 import * as suggestionEngine from "../../lib/suggestionEngine";
+import { dedupeLatestMessagePerThread } from "../../lib/inboxEngine";
 import { applyLearningDecision } from "../../lib/applyLearningDecision";
 import type {
   MailMessageBehaviorSuggestion as EngineMailMessageBehaviorSuggestion,
@@ -9436,20 +9437,7 @@ function MailboxView({
   // Smart-folder and shared-view modes are also excluded.
   const threadDedupedMessages =
     activeFolder === "Inbox" && !isSharedView && !activeSmartFolder
-      ? (() => {
-          const latestByThread = new Map<string, MailMessage>();
-          visibleMessages.forEach((message) => {
-            const threadId = resolveMailThreadId(message);
-            const existing = latestByThread.get(threadId);
-            if (
-              !existing ||
-              resolveMailDateMs(message) > resolveMailDateMs(existing)
-            ) {
-              latestByThread.set(threadId, message);
-            }
-          });
-          return Array.from(latestByThread.values());
-        })()
+      ? dedupeLatestMessagePerThread(visibleMessages)
       : visibleMessages;
 
   const threadMessageCountByThreadId = useMemo(() => {
