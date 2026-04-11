@@ -1637,23 +1637,29 @@ function buildEmailStageDocument(
     : "";
 
   // Light-mode readability fix for external HTML: injected directly into the email
-  // content HTML (not only into the head) so it appears AFTER any <style> blocks
-  // that the email itself may carry in its body — ensuring cascade-order victory for
-  // same-specificity rules. Direct element selectors (no wrapper-class prefix) keep
-  // specificity low and unambiguous; !important beats non-!important inline styles.
+  // content HTML AFTER the email's own markup, so this <style> block appears later
+  // in cascade order than any body-level <style> blocks the email carries.
+  // Uses html+body prefix (specificity 0,0,3) to beat common email selectors such as
+  // "body blockquote *" (0,0,2). Also covers Apple Mail's [type="cite"] and Gmail's
+  // .gmail_quote. -webkit-text-fill-color is added for WebKit engines.
   // Dark mode is completely unaffected: this block is only emitted for light mode.
   const lightModeContentFix =
     isExternalHtml && themeMode === "light"
       ? `<style id="cuevion-light-fix">
-body, p, div, span, td, th, li, a, font {
-  color: rgba(34, 38, 36, 0.96) !important;
-}
-blockquote {
+html body blockquote,
+html body [type="cite"],
+html body .gmail_quote,
+html body [data-email-quote="true"] {
   color: rgba(90, 98, 94, 0.88) !important;
-  border-left: 2px solid rgba(180, 190, 185, 0.6) !important;
-  padding-left: 12px !important;
+  -webkit-text-fill-color: rgba(90, 98, 94, 0.88) !important;
+  opacity: 1 !important;
 }
-[style*="opacity"] {
+html body blockquote *,
+html body [type="cite"] *,
+html body .gmail_quote *,
+html body [data-email-quote="true"] * {
+  color: inherit !important;
+  -webkit-text-fill-color: inherit !important;
   opacity: 1 !important;
 }
 </style>`
@@ -2478,6 +2484,7 @@ function normalizeNativeMessageHtmlForPane(html: string) {
     node.style.removeProperty("background");
     node.style.removeProperty("background-color");
     node.style.removeProperty("-webkit-text-fill-color");
+    node.removeAttribute("color");
     node.removeAttribute("text");
     node.removeAttribute("link");
     node.removeAttribute("alink");
