@@ -1861,6 +1861,34 @@ function EmailHtmlStage({
       return;
     }
 
+    // Force-fix quoted content colors in light mode via DOM mutation.
+    // This is done after the iframe loads so it runs after all CSS (including
+    // inline !important styles from the email) has been applied. Using
+    // element.style.setProperty(..., 'important') creates inline !important
+    // declarations that override EVERYTHING in the CSS cascade.
+    if (themeMode === "light" && isExternalHtml) {
+      try {
+        const quoteColor = "rgba(80, 74, 68, 0.92)";
+        const quoteElements = Array.from(
+          iframeDoc.querySelectorAll<HTMLElement>(
+            'blockquote, [type="cite"], .gmail_quote, [data-email-quote="true"]',
+          ),
+        );
+        quoteElements.forEach((el) => {
+          el.style.setProperty("color", quoteColor, "important");
+          el.style.setProperty("-webkit-text-fill-color", quoteColor, "important");
+          el.style.setProperty("opacity", "1", "important");
+          el.querySelectorAll<HTMLElement>("*").forEach((child) => {
+            child.style.setProperty("color", "inherit", "important");
+            child.style.setProperty("-webkit-text-fill-color", "inherit", "important");
+            child.style.setProperty("opacity", "1", "important");
+          });
+        });
+      } catch {
+        // Cross-origin guard – should never trigger for srcDoc iframes
+      }
+    }
+
     const timeoutIds: number[] = [];
     const scheduleMeasure = (delay = 0) => {
       const timeoutId = window.setTimeout(updateHeight, delay);
