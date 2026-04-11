@@ -332,3 +332,24 @@ input {
   border: 2px solid transparent;
   background-clip: padding-box;
 }
+
+/* Native email rendering: force -webkit-text-fill-color to inherit so email inline styles
+   cannot override the text color set by the container. Applied to all themes. */
+.cuevion-email-native * {
+  -webkit-text-fill-color: inherit !important;
+}
+
+/* Light mode: ensure blockquotes and Apple Mail [type="cite"] quotes have readable dark text */
+.cuevion-email-native-light blockquote,
+.cuevion-email-native-light [type="cite"] {
+  color: rgba(94, 87, 78, 0.9) !important;
+  -webkit-text-fill-color: rgba(94, 87, 78, 0.9) !important;
+  opacity: 1 !important;
+}
+
+.cuevion-email-native-light blockquote *,
+.cuevion-email-native-light [type="cite"] * {
+  color: inherit !important;
+  -webkit-text-fill-color: inherit !important;
+  opacity: 1 !important;
+}
