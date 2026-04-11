@@ -9759,9 +9759,10 @@ function MailboxView({
               </div>
             ) : bodyRenderMode.mode === "native_html" ? (
               <>
-                {themeMode === "light" && (
-                  <style>{`.native-email-${threadMessage.id} blockquote,.native-email-${threadMessage.id} [type="cite"]{color:rgba(94,87,78,0.9)!important;-webkit-text-fill-color:rgba(94,87,78,0.9)!important;opacity:1!important}.native-email-${threadMessage.id} blockquote *,.native-email-${threadMessage.id} [type="cite"] *{color:inherit!important;-webkit-text-fill-color:inherit!important;opacity:1!important}`}</style>
-                )}
+                <style>{themeMode === "light"
+                  ? `.native-email-${threadMessage.id} * { -webkit-text-fill-color: inherit !important; opacity: 1 !important; } .native-email-${threadMessage.id} blockquote, .native-email-${threadMessage.id} [type="cite"] { color: rgba(94,87,78,0.9) !important; -webkit-text-fill-color: rgba(94,87,78,0.9) !important; opacity: 1 !important; } .native-email-${threadMessage.id} blockquote *, .native-email-${threadMessage.id} [type="cite"] * { color: inherit !important; -webkit-text-fill-color: inherit !important; opacity: 1 !important; }`
+                  : `.native-email-${threadMessage.id} * { -webkit-text-fill-color: inherit !important; }`
+                }</style>
                 <div
                   style={{ color: themeMode === "dark" ? "rgba(236,241,237,0.95)" : "#1f2a24" }}
                   className={`native-email-${threadMessage.id} w-full whitespace-pre-wrap text-[0.94rem] ${
