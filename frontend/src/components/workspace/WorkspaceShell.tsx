@@ -9758,13 +9758,18 @@ function MailboxView({
                 />
               </div>
             ) : bodyRenderMode.mode === "native_html" ? (
-              <div
-                style={{ color: themeMode === "dark" ? "rgba(236,241,237,0.95)" : "#1f2a24" }}
-                className={`w-full whitespace-pre-wrap text-[0.94rem] ${
-                  density === "full" ? "leading-[1.82]" : "leading-[1.72]"
-                } ${nativeBodyTextClass} ${nativeBodyInheritanceClass} ${nativeLinkClass} ${nativeQuoteClass} [&_img]:max-w-full [&_img]:h-auto [&_small]:text-[color:rgba(108,99,89,0.9)] dark:[&_small]:text-[color:rgba(205,211,207,0.84)] [&_small_*]:text-inherit [&_[data-email-image-placeholder='true']]:text-[color:rgba(108,99,89,0.9)] dark:[&_[data-email-image-placeholder='true']]:text-[color:rgba(205,211,207,0.84)]`}
-                dangerouslySetInnerHTML={{ __html: normalizedNativeHtml ?? bodyRenderMode.html }}
-              />
+              <>
+                {themeMode === "light" && (
+                  <style>{`.native-email-${threadMessage.id} blockquote,.native-email-${threadMessage.id} [type="cite"]{color:rgba(94,87,78,0.9)!important;-webkit-text-fill-color:rgba(94,87,78,0.9)!important;opacity:1!important}.native-email-${threadMessage.id} blockquote *,.native-email-${threadMessage.id} [type="cite"] *{color:inherit!important;-webkit-text-fill-color:inherit!important;opacity:1!important}`}</style>
+                )}
+                <div
+                  style={{ color: themeMode === "dark" ? "rgba(236,241,237,0.95)" : "#1f2a24" }}
+                  className={`native-email-${threadMessage.id} w-full whitespace-pre-wrap text-[0.94rem] ${
+                    density === "full" ? "leading-[1.82]" : "leading-[1.72]"
+                  } ${nativeBodyTextClass} ${nativeBodyInheritanceClass} ${nativeLinkClass} ${nativeQuoteClass} [&_img]:max-w-full [&_img]:h-auto [&_small]:text-[color:rgba(108,99,89,0.9)] dark:[&_small]:text-[color:rgba(205,211,207,0.84)] [&_small_*]:text-inherit [&_[data-email-image-placeholder='true']]:text-[color:rgba(108,99,89,0.9)] dark:[&_[data-email-image-placeholder='true']]:text-[color:rgba(205,211,207,0.84)]`}
+                  dangerouslySetInnerHTML={{ __html: normalizedNativeHtml ?? bodyRenderMode.html }}
+                />
+              </>
             ) : bodyRenderMode.mode === "compose_html" ? (
               <div
                 className={`w-full whitespace-pre-wrap text-[0.94rem] ${density === "full" ? "leading-7" : "leading-6.5"} text-[var(--workspace-text)] dark:text-[var(--workspace-text)] [&_a]:text-[color:rgba(44,89,116,0.98)] dark:[&_a]:text-[color:rgba(176,209,183,0.96)] [&_a]:underline [&_a]:underline-offset-2 [&_div]:min-h-[1.35rem] [&_[data-compose-quote='true']]:mt-3 [&_[data-compose-quote='true']]:rounded-[6px] [&_[data-compose-quote='true']]:border-l-2 [&_[data-compose-quote='true']]:border-[color:rgba(132,148,118,0.18)] [&_[data-compose-quote='true']]:bg-[color:rgba(249,245,237,0.42)] [&_[data-compose-quote='true']]:px-2.5 [&_[data-compose-quote='true']]:py-2 dark:[&_[data-compose-quote='true']]:border-[color:rgba(121,151,120,0.16)] dark:[&_[data-compose-quote='true']]:bg-[color:rgba(86,114,87,0.08)] [&_[data-compose-quote='true']_*]:text-[color:rgba(82,76,70,0.92)] dark:[&_[data-compose-quote='true']_*]:text-[color:rgba(196,202,198,0.82)] [&_[data-compose-signature='true']]:mt-3 [&_[data-compose-signature='true']]:space-y-0 [&_[data-compose-signature-divider='true']]:my-2 [&_[data-compose-signature-divider='true']]:h-px [&_[data-compose-signature-divider='true']]:w-full [&_[data-compose-signature-divider='true']]:bg-[color:rgba(121,151,120,0.18)] [&_[data-compose-signature-logo='true']]:pt-1 [&_[data-compose-signature-logo='true']_img]:max-h-[76px] [&_[data-compose-signature-logo='true']_img]:w-auto [&_[data-compose-signature-logo='true']_img]:max-w-full [&_[data-compose-signature-logo='true']_img]:object-contain [&_[data-compose-signature-right='true']]:min-w-0 [&_[data-compose-signature-right='true']]:flex-1 [&_[data-compose-signature-row='true']]:flex [&_[data-compose-signature-row='true']]:items-start [&_[data-compose-signature-row='true']]:gap-4 [&_[data-compose-signature-spacer='true']]:min-h-[1.2rem] [&_[data-compose-signature-text='true']]:whitespace-pre-wrap [&_[data-compose-signature-text='true']]:text-[0.86rem] [&_[data-compose-signature-text='true']]:leading-[1.45] [&_[data-compose-signature-text='true']_*]:text-[var(--workspace-text-muted)] dark:[&_[data-compose-signature-text='true']_*]:text-[color:rgba(196,202,198,0.82)]`}
