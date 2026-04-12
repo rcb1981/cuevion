@@ -460,9 +460,7 @@ def resolve_preview_routing(
         body_lower = body.lower()
         sender_lower = sender_email.lower()
         artist_hint = sender_name or ""
-        if not artist_hint:
-            artist_hint = str(result.get("artist") or "")
-            
+
         extracted_links = extract_all_links(
             body,
             "",
