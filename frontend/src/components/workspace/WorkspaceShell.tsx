@@ -1695,7 +1695,8 @@ function EmailHtmlStage({
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const cleanupRef = useRef<(() => void) | null>(null);
   const [height, setHeight] = useState(320);
-  const fallbackClassName = "w-full overflow-visible bg-transparent";
+  const [contentWidth, setContentWidth] = useState<number | null>(null);
+  const fallbackClassName = "overflow-visible bg-transparent";
   const fallbackHeight = 2200;
   const measurementSafetyBuffer = 24;
 
@@ -1840,6 +1841,16 @@ function EmailHtmlStage({
           ? Math.max(nextHeight, 320)
           : currentHeight,
       );
+
+      // Measure content width — if the email is wider than the iframe container,
+      // expand the iframe so the parent overflow-x-auto wrapper can scroll horizontally.
+      const naturalWidth = iframeDoc.documentElement.scrollWidth;
+      const containerWidth = iframe.parentElement?.clientWidth ?? 0;
+      if (naturalWidth > 0 && containerWidth > 0 && naturalWidth > containerWidth) {
+        setContentWidth(naturalWidth);
+      } else {
+        setContentWidth(null);
+      }
     } catch {
       setHeight((currentHeight) => Math.max(currentHeight, fallbackHeight));
     }
@@ -1936,8 +1947,13 @@ function EmailHtmlStage({
       srcDoc={buildEmailStageDocument(html, themeMode, { emailStyles, isExternalHtml })}
       scrolling="no"
       onLoad={attachMeasurementListeners}
-      className={`${fallbackClassName} block w-full border-0`}
-      style={{ height, overflow: "visible" }}
+      className={`${fallbackClassName} block border-0`}
+      style={{
+        height,
+        overflow: "visible",
+        width: contentWidth ? `${contentWidth}px` : "100%",
+        minWidth: "100%",
+      }}
     />
   );
 }
@@ -9749,7 +9765,7 @@ function MailboxView({
               </div>
             ) : null}
             {bodyRenderMode.mode === "html" ? (
-              <div className="email-html-content w-full overflow-visible">
+              <div className="email-html-content w-full overflow-x-auto">
                 <EmailHtmlStage
                   html={bodyRenderMode.html}
                   themeMode={themeMode}
