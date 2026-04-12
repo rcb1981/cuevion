@@ -1350,11 +1350,15 @@ function buildEmailStageDocument(
         padding: 0;
         /* Override any email CSS that restricts height or hides overflow —
            these would cause incorrect iframe height measurement and visual clipping.
-           Must come after the email's own styles, hence the !important. */
+           Must come after the email's own styles, hence the !important.
+           overflow-x: auto lets wide emails (e.g. table-based invoices) scroll
+           horizontally inside the iframe rather than being silently cut off.
+           The browser forces overflow-y to auto too; since the iframe height is
+           set dynamically to the full content height, no vertical scrollbar appears. */
         height: auto !important;
         min-height: unset !important;
         max-height: none !important;
-        overflow: visible !important;
+        overflow-x: auto !important;
       }
       body {
         /* Fallback only – external emails control their own background/color */
@@ -1695,8 +1699,7 @@ function EmailHtmlStage({
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const cleanupRef = useRef<(() => void) | null>(null);
   const [height, setHeight] = useState(320);
-  const [contentWidth, setContentWidth] = useState<number | null>(null);
-  const fallbackClassName = "overflow-visible bg-transparent";
+  const fallbackClassName = "w-full overflow-visible bg-transparent";
   const fallbackHeight = 2200;
   const measurementSafetyBuffer = 24;
 
@@ -1842,15 +1845,6 @@ function EmailHtmlStage({
           : currentHeight,
       );
 
-      // Measure content width — if the email is wider than the iframe container,
-      // expand the iframe so the parent overflow-x-auto wrapper can scroll horizontally.
-      const naturalWidth = iframeDoc.documentElement.scrollWidth;
-      const containerWidth = iframe.parentElement?.clientWidth ?? 0;
-      if (naturalWidth > 0 && containerWidth > 0 && naturalWidth > containerWidth) {
-        setContentWidth(naturalWidth);
-      } else {
-        setContentWidth(null);
-      }
     } catch {
       setHeight((currentHeight) => Math.max(currentHeight, fallbackHeight));
     }
@@ -1945,15 +1939,9 @@ function EmailHtmlStage({
       title="Email content"
       sandbox="allow-popups allow-popups-to-escape-sandbox"
       srcDoc={buildEmailStageDocument(html, themeMode, { emailStyles, isExternalHtml })}
-      scrolling="no"
       onLoad={attachMeasurementListeners}
       className={`${fallbackClassName} block border-0`}
-      style={{
-        height,
-        overflow: "visible",
-        width: contentWidth ? `${contentWidth}px` : "100%",
-        minWidth: "100%",
-      }}
+      style={{ height, overflow: "visible" }}
     />
   );
 }
@@ -14600,7 +14588,7 @@ function MailboxView({
                   reading-pane scroller dark and opt it into dark color-scheme directly. */}
               <div
                 ref={readingPaneViewportRef}
-                className="cuevion-dark-scroll cuevion-soft-scroll min-h-0 flex-1 overflow-y-auto bg-transparent p-5 pr-4 md:p-6 md:pr-5"
+                className="cuevion-dark-scroll cuevion-soft-scroll min-h-0 flex-1 overflow-y-auto overflow-x-auto bg-transparent p-5 pr-4 md:p-6 md:pr-5"
                 style={{
                   colorScheme: themeMode,
                   scrollbarWidth: "thin",
