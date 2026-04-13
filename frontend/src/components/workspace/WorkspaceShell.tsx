@@ -9301,32 +9301,10 @@ function MailboxView({
       resolveFocusPreferenceLevelForMessage(message) === "low"
     );
   };
-  const isVisiblePriorityMessageForMessage = (message: MailMessage) => {
-    const override = manualPriorityOverrides[message.id];
-    const adjustedMessage = getPriorityVisibilityAdjustedMessage(message);
-
-    if (override === "priority") {
-      return true;
-    }
-
-    if (override === "removed") {
-      return false;
-    }
-
-    if (!hasProtectedPriorityVisibility(message)) {
-      const visibilityMode = resolveOnboardingVisibilityMode(message);
-
-      if (visibilityMode === "show_priority") {
-        return true;
-      }
-
-      if (visibilityMode === "show_normal" || visibilityMode === "show_low") {
-        return false;
-      }
-    }
-
-    return isMessageVisiblePriority(adjustedMessage, override);
-  };
+  const isVisiblePriorityMessageForMessage = (message: MailMessage) =>
+    // Delegate to the same badge function that drives the visible Priority
+    // indicator in the list — ensures menus and badge always agree.
+    getVisiblePriorityBadgeForMessage(message) === "PRIORITY";
   const lowSignalInboxMessages = mailboxCollections.Inbox.filter(
     (message) =>
       !message.collaboration &&
