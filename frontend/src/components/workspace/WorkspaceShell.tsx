@@ -15172,6 +15172,18 @@ function MailboxView({
                   >
                     This is important
                   </button>
+                  {contextMenuMessage && isVisiblePriorityMessage(contextMenuMessage) ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onSetManualPriority(contextMenuMessage.id, false);
+                        closeMenus();
+                      }}
+                      className={contextMenuItemClass}
+                    >
+                      Not priority
+                    </button>
+                  ) : null}
                 </div>
                 <div className="my-2 h-px bg-[var(--workspace-divider)]" />
                 <div className="space-y-1">
@@ -15313,6 +15325,18 @@ function MailboxView({
                   >
                     This is important
                   </button>
+                  {selectedMessage && isVisiblePriorityMessage(selectedMessage) ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onSetManualPriority(selectedMessage.id, false);
+                        closeMenus();
+                      }}
+                      className={contextMenuItemClass}
+                    >
+                      Not priority
+                    </button>
+                  ) : null}
                 </div>
 
                 <div className="my-2 h-px bg-[var(--workspace-divider)]" />
