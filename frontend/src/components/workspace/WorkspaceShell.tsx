@@ -15160,10 +15160,16 @@ function MailboxView({
                   {contextMenuMessage && isVisiblePriorityMessage(contextMenuMessage) ? (
                     <button
                       type="button"
-                      onClick={() => {
-                        console.log("[DBG:not-priority] click (context-learning)", { id: contextMenuMessage.id, subject: contextMenuMessage.subject });
+                      onMouseDown={(e) => {
+                        // Fire on mousedown so the action runs before handleDismiss
+                        // (window mousedown) can close the portal and unmount this button.
+                        e.nativeEvent.stopImmediatePropagation();
+                        console.log("[DBG:not-priority] mousedown (context-learning)", { id: contextMenuMessage.id, subject: contextMenuMessage.subject });
                         onSetManualPriority(contextMenuMessage.id, false);
                         closeMenus();
+                      }}
+                      onClick={() => {
+                        console.log("[DBG:not-priority] click (context-learning) - also fired");
                       }}
                       className={contextMenuItemClass}
                     >
@@ -15314,10 +15320,16 @@ function MailboxView({
                   {selectedMessage && isVisiblePriorityMessage(selectedMessage) ? (
                     <button
                       type="button"
-                      onClick={() => {
-                        console.log("[DBG:not-priority] click (reading-learning)", { id: selectedMessage.id, subject: selectedMessage.subject });
+                      onMouseDown={(e) => {
+                        // Fire on mousedown so the action runs before handleDismiss
+                        // (window mousedown) can close the portal and unmount this button.
+                        e.nativeEvent.stopImmediatePropagation();
+                        console.log("[DBG:not-priority] mousedown (reading-learning)", { id: selectedMessage.id, subject: selectedMessage.subject });
                         onSetManualPriority(selectedMessage.id, false);
                         closeMenus();
+                      }}
+                      onClick={() => {
+                        console.log("[DBG:not-priority] click (reading-learning) - also fired");
                       }}
                       className={contextMenuItemClass}
                     >
