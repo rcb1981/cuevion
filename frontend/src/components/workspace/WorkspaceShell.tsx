@@ -10329,6 +10329,16 @@ function MailboxView({
                 <button
                   type="button"
                   onClick={() => {
+                    console.log("[DBG:more-menu] priority toggle", {
+                      trigger: "renderMessageActions",
+                      placement,
+                      messageId: message.id,
+                      messageSubject: message.subject,
+                      selectedMessageId,
+                      selectedMessageSubject: selectedMessage?.subject,
+                      fullWidthMessageId: fullWidthMessage?.id,
+                      fullWidthMessageSubject: fullWidthMessage?.subject,
+                    });
                     onSetManualPriority(message.id, !messageIsVisiblePriority);
                     setDetailActionsMenuState(null);
                   }}
@@ -13290,15 +13300,25 @@ function MailboxView({
                     <button
                       type="button"
                       onClick={() => {
+                        const targetMsg = fullWidthMessage ?? selectedMessage;
+                        console.log("[DBG:top-toolbar] priority toggle", {
+                          trigger: "top-toolbar",
+                          targetId: targetMsg.id,
+                          targetSubject: targetMsg.subject,
+                          selectedMessageId,
+                          selectedMessageSubject: selectedMessage?.subject,
+                          fullWidthMessageId: fullWidthMessage?.id,
+                          fullWidthMessageSubject: fullWidthMessage?.subject,
+                        });
                         onSetManualPriority(
-                          selectedMessage.id,
-                          !isVisiblePriorityMessage(selectedMessage),
+                          targetMsg.id,
+                          !isVisiblePriorityMessage(targetMsg),
                         );
                         closeMenus();
                       }}
                       className={contextMenuMainItemClass}
                     >
-                      {isVisiblePriorityMessage(selectedMessage)
+                      {isVisiblePriorityMessage(fullWidthMessage ?? selectedMessage)
                         ? "Remove priority"
                         : "Mark as priority"}
                     </button>
@@ -14709,7 +14729,7 @@ function MailboxView({
               {selectedMessage && !isMultiSelectActive ? (
                 <div className="shrink-0 border-t border-[color:rgba(129,144,122,0.12)] bg-transparent px-5 py-4 dark:border-[color:rgba(121,151,120,0.14)] md:px-6 md:py-5">
                   <div className="space-y-3">
-                    {renderMessageActions(selectedMessage, "split")}
+                    {renderMessageActions(fullWidthMessage ?? selectedMessage, "split")}
                     <div className="space-y-2">
                       <div className="text-[0.72rem] font-medium uppercase tracking-[0.18em] text-[var(--workspace-text-faint)]">
                         Attachments
@@ -15161,10 +15181,17 @@ function MailboxView({
                     <button
                       type="button"
                       onMouseDown={(e) => {
-                        // Fire on mousedown so the action runs before handleDismiss
-                        // (window mousedown) can close the portal and unmount this button.
                         e.nativeEvent.stopImmediatePropagation();
-                        console.log("[DBG:not-priority] mousedown (context-learning)", { id: contextMenuMessage.id, subject: contextMenuMessage.subject });
+                        console.log("[DBG:not-priority] mousedown (context-learning)", {
+                          trigger: "context-learning",
+                          targetId: contextMenuMessage.id,
+                          targetSubject: contextMenuMessage.subject,
+                          contextMenuStateId: contextMenuState?.messageId,
+                          selectedMessageId,
+                          selectedMessageSubject: selectedMessage?.subject,
+                          fullWidthMessageId: fullWidthMessage?.id,
+                          fullWidthMessageSubject: fullWidthMessage?.subject,
+                        });
                         onSetManualPriority(contextMenuMessage.id, false);
                         closeMenus();
                       }}
@@ -15288,10 +15315,22 @@ function MailboxView({
                 // selectedMessage falls back to sortedMessages[0] — a completely
                 // different message. Using fullWidthMessage for the full-message
                 // trigger ensures the action targets what is actually rendered.
-                const readingLearningTargetMessage =
-                  activeReadingLearningTrigger === "full-message"
-                    ? (fullWidthMessage ?? selectedMessage)
-                    : selectedMessage;
+                // fullWidthMessage resolves selectedMessageId directly from
+                // folderMessages (no thread-dedup fallback). selectedMessage
+                // falls back to sortedMessages[0] when the selected message was
+                // deduped away — producing a completely different message.
+                // Use fullWidthMessage for both triggers so the action always
+                // targets the message the user actually selected.
+                const readingLearningTargetMessage = fullWidthMessage ?? selectedMessage;
+                console.log("[DBG:reading-learning] portal render", {
+                  trigger: activeReadingLearningTrigger,
+                  targetId: readingLearningTargetMessage?.id,
+                  targetSubject: readingLearningTargetMessage?.subject,
+                  selectedMessageId,
+                  selectedMessageSubject: selectedMessage?.subject,
+                  fullWidthMessageId: fullWidthMessage?.id,
+                  fullWidthMessageSubject: fullWidthMessage?.subject,
+                });
                 return (
               <div
                 ref={readingLearningMenuRef}
@@ -15335,10 +15374,16 @@ function MailboxView({
                     <button
                       type="button"
                       onMouseDown={(e) => {
-                        // Fire on mousedown so the action runs before handleDismiss
-                        // (window mousedown) can close the portal and unmount this button.
                         e.nativeEvent.stopImmediatePropagation();
-                        console.log("[DBG:not-priority] mousedown (reading-learning)", { id: readingLearningTargetMessage.id, subject: readingLearningTargetMessage.subject });
+                        console.log("[DBG:not-priority] mousedown (reading-learning)", {
+                          trigger: activeReadingLearningTrigger,
+                          targetId: readingLearningTargetMessage.id,
+                          targetSubject: readingLearningTargetMessage.subject,
+                          selectedMessageId,
+                          selectedMessageSubject: selectedMessage?.subject,
+                          fullWidthMessageId: fullWidthMessage?.id,
+                          fullWidthMessageSubject: fullWidthMessage?.subject,
+                        });
                         onSetManualPriority(readingLearningTargetMessage.id, false);
                         closeMenus();
                       }}
