@@ -15279,6 +15279,20 @@ function MailboxView({
           : null}
         {aiSuggestionsEnabled && isReadingLearningMenuOpen && readingLearningMenuPosition
           ? createPortal(
+              (() => {
+                // The full-width view renders fullWidthMessage (found directly by
+                // selectedMessageId in folderMessages, bypassing thread dedup).
+                // The split reading pane renders selectedMessage (found in
+                // thread-deduped sortedMessages).
+                // When selectedMessageId points to a message that was deduped away,
+                // selectedMessage falls back to sortedMessages[0] — a completely
+                // different message. Using fullWidthMessage for the full-message
+                // trigger ensures the action targets what is actually rendered.
+                const readingLearningTargetMessage =
+                  activeReadingLearningTrigger === "full-message"
+                    ? (fullWidthMessage ?? selectedMessage)
+                    : selectedMessage;
+                return (
               <div
                 ref={readingLearningMenuRef}
                 data-theme={themeMode}
@@ -15317,15 +15331,15 @@ function MailboxView({
                   >
                     This is important
                   </button>
-                  {selectedMessage && isVisiblePriorityMessage(selectedMessage) ? (
+                  {readingLearningTargetMessage && isVisiblePriorityMessage(readingLearningTargetMessage) ? (
                     <button
                       type="button"
                       onMouseDown={(e) => {
                         // Fire on mousedown so the action runs before handleDismiss
                         // (window mousedown) can close the portal and unmount this button.
                         e.nativeEvent.stopImmediatePropagation();
-                        console.log("[DBG:not-priority] mousedown (reading-learning)", { id: selectedMessage.id, subject: selectedMessage.subject });
-                        onSetManualPriority(selectedMessage.id, false);
+                        console.log("[DBG:not-priority] mousedown (reading-learning)", { id: readingLearningTargetMessage.id, subject: readingLearningTargetMessage.subject });
+                        onSetManualPriority(readingLearningTargetMessage.id, false);
                         closeMenus();
                       }}
                       onClick={() => {
@@ -15390,7 +15404,9 @@ function MailboxView({
                     Move future emails like this to Spam
                   </button>
                 </div>
-              </div>,
+              </div>
+                );
+              })(),
               document.body,
             )
           : null}
