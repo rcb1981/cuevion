@@ -24279,7 +24279,15 @@ export function WorkspaceShell({
       return;
     }
 
-    const baseIsPriority = isMessageVisiblePriority(sourceMessage);
+    // Must read the current override so the guard matches the badge display path.
+    // isMessageVisiblePriority alone uses getLocalAutoPriorityScore and misses
+    // server-signal Priority messages with a low local score.
+    // resolveVisiblePrioritySignal covers signal === "Priority" (and the removed
+    // case); isMessageVisiblePriority covers the score-based path.
+    const currentOverride = manualPriorityOverrides[messageId];
+    const baseIsPriority =
+      resolveVisiblePrioritySignal(sourceMessage, currentOverride) === "Priority" ||
+      isMessageVisiblePriority(sourceMessage, currentOverride);
 
     setManualPriorityOverrides((current) => {
       const next = { ...current };
