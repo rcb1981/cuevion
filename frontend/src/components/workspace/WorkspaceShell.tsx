@@ -9269,18 +9269,22 @@ function MailboxView({
       override !== "priority"
     ) {
       if (focusPreferenceLevel === "low") {
+        if (override !== undefined) console.log("[DBG:badge] message", message.id, "→ LOW (demo/focusLow)", { override });
         return "LOW";
       }
 
       if (focusPreferenceLevel === "high") {
+        if (override !== undefined) console.log("[DBG:badge] message", message.id, "→ PRIORITY (demo/focusHigh)", { override });
         return "PRIORITY";
       }
     }
 
-    return getVisiblePriorityBadge(
+    const result = getVisiblePriorityBadge(
       getPriorityVisibilityAdjustedMessage(message),
       override,
     );
+    if (override !== undefined) console.log("[DBG:badge] message", message.id, "→", result, { override, signal: message.signal });
+    return result;
   };
   const shouldForceFilteredDemoVisibility = (message: MailMessage) => {
     const visibilityClassification = resolveVisibilityClassificationForMessage(message);
@@ -9464,7 +9468,10 @@ function MailboxView({
     }
 
     if (activeFilter === "Priority") {
-      return isVisiblePriorityMessage(message);
+      const included = isVisiblePriorityMessage(message);
+      const dbgOverride = manualPriorityOverrides[message.id];
+      if (dbgOverride !== undefined) console.log("[DBG:filter] Priority filter for", message.id, "→ included=", included, { override: dbgOverride, signal: message.signal });
+      return included;
     }
 
     if (activeFilter === "Review") {
@@ -15154,6 +15161,7 @@ function MailboxView({
                     <button
                       type="button"
                       onClick={() => {
+                        console.log("[DBG:not-priority] click (context-learning)", { id: contextMenuMessage.id, subject: contextMenuMessage.subject });
                         onSetManualPriority(contextMenuMessage.id, false);
                         closeMenus();
                       }}
@@ -15307,6 +15315,7 @@ function MailboxView({
                     <button
                       type="button"
                       onClick={() => {
+                        console.log("[DBG:not-priority] click (reading-learning)", { id: selectedMessage.id, subject: selectedMessage.subject });
                         onSetManualPriority(selectedMessage.id, false);
                         closeMenus();
                       }}
@@ -24275,7 +24284,16 @@ export function WorkspaceShell({
   const handleSetManualPriority = (messageId: string, shouldBePriority: boolean) => {
     const sourceMessage = getWorkspaceMessageById(messageId);
 
+    console.log("[DBG:handleSetManualPriority] entry", {
+      messageId,
+      shouldBePriority,
+      sourceFound: Boolean(sourceMessage),
+      sourceId: sourceMessage?.id,
+      sourceSubject: sourceMessage?.subject,
+    });
+
     if (!sourceMessage) {
+      console.log("[DBG:handleSetManualPriority] ABORT: source message not found");
       return;
     }
 
@@ -24288,6 +24306,14 @@ export function WorkspaceShell({
     const baseIsPriority =
       resolveVisiblePrioritySignal(sourceMessage, currentOverride) === "Priority" ||
       isMessageVisiblePriority(sourceMessage, currentOverride);
+
+    console.log("[DBG:handleSetManualPriority] guard", {
+      currentOverride,
+      signalResult: resolveVisiblePrioritySignal(sourceMessage, currentOverride),
+      scoreResult: isMessageVisiblePriority(sourceMessage, currentOverride),
+      baseIsPriority,
+      messageSignal: sourceMessage.signal,
+    });
 
     setManualPriorityOverrides((current) => {
       const next = { ...current };
@@ -24303,6 +24329,12 @@ export function WorkspaceShell({
       } else {
         delete next[messageId];
       }
+
+      console.log("[DBG:handleSetManualPriority] override update", {
+        prev: current[messageId],
+        next: next[messageId],
+        fullNext: next,
+      });
 
       return next;
     });
@@ -25175,6 +25207,10 @@ export function WorkspaceShell({
       return;
     }
 
+    console.log("[DBG:persist] manualPriorityOverrides → localStorage", {
+      key: manualPriorityOverridesStorageKey,
+      value: manualPriorityOverrides,
+    });
     window.localStorage.setItem(
       manualPriorityOverridesStorageKey,
       JSON.stringify(manualPriorityOverrides),
