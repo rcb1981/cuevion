@@ -15150,16 +15150,18 @@ function MailboxView({
                   >
                     Show more like this
                   </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      console.log("learning_this_is_important");
-                      closeMenus();
-                    }}
-                    className={contextMenuItemClass}
-                  >
-                    This is important
-                  </button>
+                  {contextMenuMessage && !isVisiblePriorityMessage(contextMenuMessage) ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onSetManualPriority(contextMenuMessage.id, true);
+                        closeMenus();
+                      }}
+                      className={contextMenuItemClass}
+                    >
+                      This is important
+                    </button>
+                  ) : null}
                   {contextMenuMessage && isVisiblePriorityMessage(contextMenuMessage) ? (
                     <button
                       type="button"
@@ -15321,16 +15323,18 @@ function MailboxView({
                   >
                     Show more like this
                   </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      console.log("reading_learning_this_is_important");
-                      closeMenus();
-                    }}
-                    className={contextMenuItemClass}
-                  >
-                    This is important
-                  </button>
+                  {readingLearningTargetMessage && !isVisiblePriorityMessage(readingLearningTargetMessage) ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onSetManualPriority(readingLearningTargetMessage.id, true);
+                        closeMenus();
+                      }}
+                      className={contextMenuItemClass}
+                    >
+                      This is important
+                    </button>
+                  ) : null}
                   {readingLearningTargetMessage && isVisiblePriorityMessage(readingLearningTargetMessage) ? (
                     <button
                       type="button"
