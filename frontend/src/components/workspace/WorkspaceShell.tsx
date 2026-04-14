@@ -4063,6 +4063,13 @@ function getVisiblePriorityBadge(
   message: Pick<MailMessage, "priorityScore" | "signal">,
   override?: ManualPriorityOverride,
 ) {
+  // "removed" means the user explicitly un-prioritised this message.
+  // Never return PRIORITY regardless of signal or score.
+  if (override === "removed") {
+    if (message.priorityScore === "low") return "LOW";
+    return "NORMAL";
+  }
+
   if (override === "priority" || message.signal === "Priority") {
     return "PRIORITY";
   }
@@ -9266,25 +9273,22 @@ function MailboxView({
     if (
       isDemoMessage &&
       !hasProtectedPriorityVisibility(message) &&
-      override !== "priority"
+      override !== "priority" &&
+      override !== "removed"
     ) {
       if (focusPreferenceLevel === "low") {
-        if (override !== undefined) console.log("[DBG:badge] message", message.id, "→ LOW (demo/focusLow)", { override });
         return "LOW";
       }
 
       if (focusPreferenceLevel === "high") {
-        if (override !== undefined) console.log("[DBG:badge] message", message.id, "→ PRIORITY (demo/focusHigh)", { override });
         return "PRIORITY";
       }
     }
 
-    const result = getVisiblePriorityBadge(
+    return getVisiblePriorityBadge(
       getPriorityVisibilityAdjustedMessage(message),
       override,
     );
-    if (override !== undefined) console.log("[DBG:badge] message", message.id, "→", result, { override, signal: message.signal });
-    return result;
   };
   const shouldForceFilteredDemoVisibility = (message: MailMessage) => {
     const visibilityClassification = resolveVisibilityClassificationForMessage(message);
@@ -9469,8 +9473,6 @@ function MailboxView({
 
     if (activeFilter === "Priority") {
       const included = isVisiblePriorityMessage(message);
-      const dbgOverride = manualPriorityOverrides[message.id];
-      if (dbgOverride !== undefined) console.log("[DBG:filter] Priority filter for", message.id, "→ included=", included, { override: dbgOverride, signal: message.signal });
       return included;
     }
 
@@ -10329,16 +10331,6 @@ function MailboxView({
                 <button
                   type="button"
                   onClick={() => {
-                    console.log("[DBG:more-menu] priority toggle", {
-                      trigger: "renderMessageActions",
-                      placement,
-                      messageId: message.id,
-                      messageSubject: message.subject,
-                      selectedMessageId,
-                      selectedMessageSubject: selectedMessage?.subject,
-                      fullWidthMessageId: fullWidthMessage?.id,
-                      fullWidthMessageSubject: fullWidthMessage?.subject,
-                    });
                     onSetManualPriority(message.id, !messageIsVisiblePriority);
                     setDetailActionsMenuState(null);
                   }}
@@ -13301,15 +13293,6 @@ function MailboxView({
                       type="button"
                       onClick={() => {
                         const targetMsg = fullWidthMessage ?? selectedMessage;
-                        console.log("[DBG:top-toolbar] priority toggle", {
-                          trigger: "top-toolbar",
-                          targetId: targetMsg.id,
-                          targetSubject: targetMsg.subject,
-                          selectedMessageId,
-                          selectedMessageSubject: selectedMessage?.subject,
-                          fullWidthMessageId: fullWidthMessage?.id,
-                          fullWidthMessageSubject: fullWidthMessage?.subject,
-                        });
                         onSetManualPriority(
                           targetMsg.id,
                           !isVisiblePriorityMessage(targetMsg),
@@ -15182,21 +15165,8 @@ function MailboxView({
                       type="button"
                       onMouseDown={(e) => {
                         e.nativeEvent.stopImmediatePropagation();
-                        console.log("[DBG:not-priority] mousedown (context-learning)", {
-                          trigger: "context-learning",
-                          targetId: contextMenuMessage.id,
-                          targetSubject: contextMenuMessage.subject,
-                          contextMenuStateId: contextMenuState?.messageId,
-                          selectedMessageId,
-                          selectedMessageSubject: selectedMessage?.subject,
-                          fullWidthMessageId: fullWidthMessage?.id,
-                          fullWidthMessageSubject: fullWidthMessage?.subject,
-                        });
                         onSetManualPriority(contextMenuMessage.id, false);
                         closeMenus();
-                      }}
-                      onClick={() => {
-                        console.log("[DBG:not-priority] click (context-learning) - also fired");
                       }}
                       className={contextMenuItemClass}
                     >
@@ -15322,15 +15292,6 @@ function MailboxView({
                 // Use fullWidthMessage for both triggers so the action always
                 // targets the message the user actually selected.
                 const readingLearningTargetMessage = fullWidthMessage ?? selectedMessage;
-                console.log("[DBG:reading-learning] portal render", {
-                  trigger: activeReadingLearningTrigger,
-                  targetId: readingLearningTargetMessage?.id,
-                  targetSubject: readingLearningTargetMessage?.subject,
-                  selectedMessageId,
-                  selectedMessageSubject: selectedMessage?.subject,
-                  fullWidthMessageId: fullWidthMessage?.id,
-                  fullWidthMessageSubject: fullWidthMessage?.subject,
-                });
                 return (
               <div
                 ref={readingLearningMenuRef}
@@ -15375,20 +15336,8 @@ function MailboxView({
                       type="button"
                       onMouseDown={(e) => {
                         e.nativeEvent.stopImmediatePropagation();
-                        console.log("[DBG:not-priority] mousedown (reading-learning)", {
-                          trigger: activeReadingLearningTrigger,
-                          targetId: readingLearningTargetMessage.id,
-                          targetSubject: readingLearningTargetMessage.subject,
-                          selectedMessageId,
-                          selectedMessageSubject: selectedMessage?.subject,
-                          fullWidthMessageId: fullWidthMessage?.id,
-                          fullWidthMessageSubject: fullWidthMessage?.subject,
-                        });
                         onSetManualPriority(readingLearningTargetMessage.id, false);
                         closeMenus();
-                      }}
-                      onClick={() => {
-                        console.log("[DBG:not-priority] click (reading-learning) - also fired");
                       }}
                       className={contextMenuItemClass}
                     >
@@ -24357,16 +24306,7 @@ export function WorkspaceShell({
   const handleSetManualPriority = (messageId: string, shouldBePriority: boolean) => {
     const sourceMessage = getWorkspaceMessageById(messageId);
 
-    console.log("[DBG:handleSetManualPriority] entry", {
-      messageId,
-      shouldBePriority,
-      sourceFound: Boolean(sourceMessage),
-      sourceId: sourceMessage?.id,
-      sourceSubject: sourceMessage?.subject,
-    });
-
     if (!sourceMessage) {
-      console.log("[DBG:handleSetManualPriority] ABORT: source message not found");
       return;
     }
 
@@ -24378,10 +24318,6 @@ export function WorkspaceShell({
     setManualPriorityOverrides((current) => {
       const next = { ...current };
       next[messageId] = shouldBePriority ? "priority" : "removed";
-      console.log("[DBG:handleSetManualPriority] override update", {
-        prev: current[messageId],
-        next: next[messageId],
-      });
       return next;
     });
 
@@ -25253,10 +25189,6 @@ export function WorkspaceShell({
       return;
     }
 
-    console.log("[DBG:persist] manualPriorityOverrides → localStorage", {
-      key: manualPriorityOverridesStorageKey,
-      value: manualPriorityOverrides,
-    });
     window.localStorage.setItem(
       manualPriorityOverridesStorageKey,
       JSON.stringify(manualPriorityOverrides),
