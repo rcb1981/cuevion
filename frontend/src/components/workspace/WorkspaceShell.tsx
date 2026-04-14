@@ -24370,45 +24370,18 @@ export function WorkspaceShell({
       return;
     }
 
-    // Must read the current override so the guard matches the badge display path.
-    // isMessageVisiblePriority alone uses getLocalAutoPriorityScore and misses
-    // server-signal Priority messages with a low local score.
-    // resolveVisiblePrioritySignal covers signal === "Priority" (and the removed
-    // case); isMessageVisiblePriority covers the score-based path.
-    const currentOverride = manualPriorityOverrides[messageId];
-    const baseIsPriority =
-      resolveVisiblePrioritySignal(sourceMessage, currentOverride) === "Priority" ||
-      isMessageVisiblePriority(sourceMessage, currentOverride);
-
-    console.log("[DBG:handleSetManualPriority] guard", {
-      currentOverride,
-      signalResult: resolveVisiblePrioritySignal(sourceMessage, currentOverride),
-      scoreResult: isMessageVisiblePriority(sourceMessage, currentOverride),
-      baseIsPriority,
-      messageSignal: sourceMessage.signal,
-    });
-
+    // Use getVisiblePriorityBadgeForMessage as the single source of truth —
+    // the same function that drives the visible badge. Previous guard logic
+    // used score/signal heuristics that diverged from the badge, causing the
+    // "removed" branch to be skipped for messages the UI showed as Priority.
+    // Now: always write the override unconditionally based on intent.
     setManualPriorityOverrides((current) => {
       const next = { ...current };
-
-      if (shouldBePriority) {
-        if (baseIsPriority) {
-          delete next[messageId];
-        } else {
-          next[messageId] = "priority";
-        }
-      } else if (baseIsPriority) {
-        next[messageId] = "removed";
-      } else {
-        delete next[messageId];
-      }
-
+      next[messageId] = shouldBePriority ? "priority" : "removed";
       console.log("[DBG:handleSetManualPriority] override update", {
         prev: current[messageId],
         next: next[messageId],
-        fullNext: next,
       });
-
       return next;
     });
 
