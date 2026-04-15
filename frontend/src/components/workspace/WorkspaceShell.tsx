@@ -8458,6 +8458,34 @@ function MailboxView({
     return window.matchMedia("(min-width: 1280px)").matches;
   });
   const [searchQuery, setSearchQuery] = useState("");
+  // Per-folder/view selection memory. Keyed by a composite of
+  // folder + isSharedView + smartFolderId so each view retains its own
+  // last selection independently. Stored in a ref so updates are
+  // synchronous and never trigger re-renders.
+  const lastFolderSelectionRef = useRef<Partial<Record<string, string>>>({});
+  const getFolderViewKey = (
+    folder: MailFolder,
+    sharedView: boolean,
+    smartFolderId: string | null,
+  ) => `${folder}|${sharedView}|${smartFolderId ?? ""}`;
+  // Given a target folder's messages and its view key, return the id to
+  // select: the remembered one if still present, otherwise the date-sorted top.
+  const resolveNextMessageId = (
+    targetMessages: MailMessage[],
+    targetFolder: MailFolder,
+    targetSharedView: boolean,
+    targetSmartFolderId: string | null,
+  ): string | null => {
+    const key = getFolderViewKey(targetFolder, targetSharedView, targetSmartFolderId);
+    const remembered = lastFolderSelectionRef.current[key];
+    if (remembered && targetMessages.some((m) => m.id === remembered)) {
+      return remembered;
+    }
+    return (
+      [...targetMessages].sort((a, b) => resolveMailDateMs(b) - resolveMailDateMs(a))[0]
+        ?.id ?? null
+    );
+  };
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const mailListViewportRef = useRef<HTMLDivElement | null>(null);
   const readingPaneViewportRef = useRef<HTMLDivElement | null>(null);
@@ -10748,13 +10776,16 @@ function MailboxView({
     }
   }, [selectedMessageIds, selectionAnchorId]);
 
-  // Notify the parent whenever the primary selection changes so it can remember
-  // it across MailboxView unmount/remount cycles (navigating away and back).
+  // Persist the selection whenever it changes:
+  // - into lastFolderSelectionRef (per folder/view, within this MailboxView mount)
+  // - into onMessageSelected (per mailbox, across unmount/remount cycles)
   useEffect(() => {
     if (selectedMessageId) {
+      const key = getFolderViewKey(activeFolder, isSharedView, activeSmartFolderId);
+      lastFolderSelectionRef.current[key] = selectedMessageId;
       onMessageSelected?.(selectedMessageId);
     }
-  }, [selectedMessageId, onMessageSelected]);
+  }, [selectedMessageId, activeFolder, isSharedView, activeSmartFolderId, onMessageSelected]);
 
   useEffect(() => {
     return () => {
@@ -12737,15 +12768,19 @@ function MailboxView({
       folder?.scope === "selected" && folder.selectedInboxIds.length > 0
         ? folder.selectedInboxIds
         : orderedMailboxes.map((candidate) => candidate.id);
-    const nextMessageId =
-      folder
-        ? scopeMailboxIds
-            .flatMap((mailboxId) =>
-              (mailboxStore[mailboxId]?.Inbox ?? [])
-                .filter((message) => doesMessageMatchSmartFolder(message, folder))
-                .map((message) => message.id),
-            )[0] ?? null
-        : null;
+    const candidateMessages = folder
+      ? scopeMailboxIds.flatMap((mailboxId) =>
+          (["Inbox", "Filtered"] as const).flatMap(
+            (f) =>
+              ((mailboxId === mailbox.id
+                ? messageCollections[f]
+                : mailboxStore[mailboxId]?.[f]) ?? []).filter((message) =>
+                doesMessageMatchSmartFolder(message, folder),
+              ),
+          ),
+        )
+      : [];
+    const nextMessageId = resolveNextMessageId(candidateMessages, "Inbox", false, folderId);
 
     setActiveSmartFolderId(folderId);
     setIsSharedView(false);
@@ -12760,7 +12795,7 @@ function MailboxView({
   };
 
   const switchToFolder = (folder: MailFolder) => {
-    const nextMessageId = messageCollections[folder][0]?.id ?? null;
+    const nextMessageId = resolveNextMessageId(messageCollections[folder], folder, false, null);
 
     setActiveSmartFolderId(null);
     setIsSharedView(false);
@@ -12775,7 +12810,7 @@ function MailboxView({
   };
 
   const switchToSharedView = () => {
-    const nextMessageId = workspaceSharedMessages[0]?.id ?? null;
+    const nextMessageId = resolveNextMessageId(workspaceSharedMessages, "Inbox", true, null);
 
     setActiveSmartFolderId(null);
     setIsSharedView(true);
@@ -14773,7 +14808,7 @@ function MailboxView({
             if (deletingActiveFolder) {
               setActiveSmartFolderId(null);
               setActiveFolder("Inbox");
-              const nextMessageId = messageCollections.Inbox[0]?.id ?? null;
+              const nextMessageId = resolveNextMessageId(messageCollections.Inbox, "Inbox", false, null);
               setSelectionState(
                 nextMessageId ? [nextMessageId] : [],
                 nextMessageId,
