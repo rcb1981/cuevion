@@ -8379,6 +8379,8 @@ function MailboxView({
   onSyncMailbox,
   isSyncingMailbox,
   onSyncUnreadOverrides,
+  initialSelectedMessageId = null,
+  onMessageSelected,
 }: {
   mailbox: OrderedMailbox;
   orderedMailboxes: OrderedMailbox[];
@@ -8428,6 +8430,8 @@ function MailboxView({
   onSyncMailbox: () => void;
   isSyncingMailbox: boolean;
   onSyncUnreadOverrides: (messages: MessageIdentitySource[], unread: boolean) => void;
+  initialSelectedMessageId?: string | null;
+  onMessageSelected?: (messageId: string) => void;
 }) {
   const [activeFilter, setActiveFilter] = useState<MailFilter>("All");
   const [sortOrder, setSortOrder] = useState<MailSortOrder>("desc");
@@ -8498,14 +8502,23 @@ function MailboxView({
     learningChooserOpen: boolean;
     learningChooserMode: "type" | "sender" | null;
   } | null>(null);
-  const [selectedMessageId, setSelectedMessageId] = useState<string | null>(
-    mailboxStore[mailbox.id]?.Inbox[0]?.id ?? null,
-  );
-  const [selectedMessageIds, setSelectedMessageIds] = useState<string[]>(
-    mailboxStore[mailbox.id]?.Inbox[0]?.id ? [mailboxStore[mailbox.id].Inbox[0].id] : [],
+  const [selectedMessageId, setSelectedMessageId] = useState<string | null>(() => {
+    const inboxMessages = mailboxStore[mailbox.id]?.Inbox ?? [];
+    // Restore last selection if the message is still present in the inbox.
+    if (initialSelectedMessageId && inboxMessages.some((m) => m.id === initialSelectedMessageId)) {
+      return initialSelectedMessageId;
+    }
+    // Otherwise select the top of the date-sorted inbox (matches sortedMessages[0]).
+    const sorted = [...inboxMessages].sort(
+      (a, b) => resolveMailDateMs(b) - resolveMailDateMs(a),
+    );
+    return sorted[0]?.id ?? null;
+  });
+  const [selectedMessageIds, setSelectedMessageIds] = useState<string[]>(() =>
+    selectedMessageId ? [selectedMessageId] : [],
   );
   const [selectionAnchorId, setSelectionAnchorId] = useState<string | null>(
-    mailboxStore[mailbox.id]?.Inbox[0]?.id ?? null,
+    () => selectedMessageId,
   );
   const [resolvingSuggestionIds, setResolvingSuggestionIds] = useState<string[]>([]);
   const [resolvingBehaviorSuggestionIds, setResolvingBehaviorSuggestionIds] = useState<
@@ -10734,6 +10747,14 @@ function MailboxView({
       setSelectionAnchorId(null);
     }
   }, [selectedMessageIds, selectionAnchorId]);
+
+  // Notify the parent whenever the primary selection changes so it can remember
+  // it across MailboxView unmount/remount cycles (navigating away and back).
+  useEffect(() => {
+    if (selectedMessageId) {
+      onMessageSelected?.(selectedMessageId);
+    }
+  }, [selectedMessageId, onMessageSelected]);
 
   useEffect(() => {
     return () => {
@@ -22883,6 +22904,10 @@ export function WorkspaceShell({
     (mailbox) => mailbox.connected,
   ).length;
   const [mailboxResetToken, setMailboxResetToken] = useState(0);
+  // Remembers the last selected message id per mailbox so MailboxView can
+  // restore it when the user navigates away and back. Stored in a ref to
+  // avoid triggering re-renders in the outer shell.
+  const lastMailboxSelectionRef = useRef<Partial<Record<string, string>>>({});
   const [activeSection, setActiveSection] =
     useState<WorkspaceSection>("Dashboard");
   const [reviewFilter, setReviewFilter] = useState<ReviewFilter>("All priority");
@@ -26446,6 +26471,10 @@ export function WorkspaceShell({
                   onSyncMailbox={handleSyncActiveMailbox}
                   isSyncingMailbox={syncingMailboxId === activeMailbox.id}
                   onSyncUnreadOverrides={syncUnreadOverrides}
+                  initialSelectedMessageId={lastMailboxSelectionRef.current[activeMailbox.id] ?? null}
+                  onMessageSelected={(messageId) => {
+                    lastMailboxSelectionRef.current[activeMailbox.id] = messageId;
+                  }}
                 />
               </div>
             ) : activeSection === "Dashboard" ? (
