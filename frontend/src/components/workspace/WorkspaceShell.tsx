@@ -1222,11 +1222,25 @@ function renderPlainMessageParagraph(
     color: plainLinkTextColor,
   };
 
+  // Converts a plain-text run into React nodes, turning each \n into an explicit
+  // <br> element. This guarantees visible line breaks regardless of any ancestor
+  // CSS white-space value and removes the dependency on CSS pre-wrap alone.
+  const renderTextRun = (text: string, keyPrefix: string): ReactNode => {
+    const lines = text.split("\n");
+    if (lines.length === 1) return text;
+    const nodes: ReactNode[] = [];
+    lines.forEach((line, i) => {
+      if (i > 0) nodes.push(<br key={`${keyPrefix}-br-${i}`} />);
+      if (line) nodes.push(line);
+    });
+    return nodes;
+  };
+
   if (matches.length === 0) {
     return (
       <p key={paragraphKey} className={className} style={{ whiteSpace: "pre-wrap" }}>
         <span className={resolvedContentClassName} style={plainTextStyle}>
-          {paragraph}
+          {renderTextRun(paragraph, paragraphKey)}
         </span>
       </p>
     );
@@ -1246,7 +1260,7 @@ function renderPlainMessageParagraph(
           className={resolvedContentClassName}
           style={plainTextStyle}
         >
-          {paragraph.slice(lastIndex, matchStart)}
+          {renderTextRun(paragraph.slice(lastIndex, matchStart), `${paragraphKey}-text-${index}`)}
         </span>,
       );
     }
@@ -1273,7 +1287,7 @@ function renderPlainMessageParagraph(
         className={resolvedContentClassName}
         style={plainTextStyle}
       >
-        {paragraph.slice(lastIndex)}
+        {renderTextRun(paragraph.slice(lastIndex), `${paragraphKey}-tail`)}
       </span>,
     );
   }
@@ -2551,15 +2565,28 @@ function buildComposeBody({
 }
 
 function extractComposePlainText(html: string) {
-  if (typeof document === "undefined") {
-    return html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
-  }
-
-  const container = document.createElement("div");
-  container.innerHTML = html;
-
-  const textContent = container.innerText.replace(/\u00a0/g, " ");
-  return textContent.replace(/\n{3,}/g, "\n\n").trim();
+  // Use deterministic regex-based HTML-to-text conversion (mirroring the Python
+  // backend html_to_text) instead of innerText.  innerText is layout-dependent and
+  // can omit \n for block-level element boundaries when the element is detached from
+  // the document (e.g. during SSR, Vite build, or hydration).  The regex approach
+  // produces consistent \n separators for <br> and closing block tags in all contexts.
+  return html
+    .replace(/\r\n/g, "\n")
+    .replace(/<(script|style)\b[\s\S]*?<\/\1>/gi, " ")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/(p|div|li|tr|table|h[1-6])>/gi, "\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(Number(code)))
+    .replace(/&[a-z][a-z\d]*;/gi, " ")
+    .replace(/\u00a0/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 function extractComposeParagraphs(html: string) {
