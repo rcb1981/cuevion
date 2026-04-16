@@ -7,6 +7,7 @@ export type LiveInboxSnapshot = {
   email: string;
   fetchedAt: string;
   messages: LiveInboxMessageSnapshot[];
+  uidValidity?: string | null;
 };
 
 type LiveInboxSnapshotStore = Record<string, LiveInboxSnapshot>;

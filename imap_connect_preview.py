@@ -645,10 +645,30 @@ def build_connect_preview_response(payload: dict[str, Any]) -> tuple[int, dict[s
             for index, (message, unread, imap_uid) in enumerate(messages)
         ]
 
-        return 200, {
-            "ok": True,
-            "messages": previews,
-        }
+        inbox_uid_set = None
+        uid_validity = None
+        try:
+            uid_status, uid_data = mailbox.uid("search", None, "ALL")
+            if uid_status == "OK" and uid_data and uid_data[0]:
+                raw = uid_data[0]
+                uid_str = raw.decode("utf-8", errors="ignore") if isinstance(raw, bytes) else str(raw)
+                inbox_uid_set = uid_str.split() if uid_str.strip() else []
+            sv_status, sv_data = mailbox.status(folder, "(UIDVALIDITY)")
+            if sv_status == "OK" and sv_data and sv_data[0]:
+                sv_str = sv_data[0].decode("utf-8", errors="ignore") if isinstance(sv_data[0], bytes) else str(sv_data[0])
+                uidv_match = re.search(r"UIDVALIDITY\s+(\d+)", sv_str)
+                if uidv_match:
+                    uid_validity = uidv_match.group(1)
+        except Exception:
+            inbox_uid_set = None
+            uid_validity = None
+
+        response_body: dict[str, Any] = {"ok": True, "messages": previews}
+        if inbox_uid_set is not None:
+            response_body["inboxUidSet"] = inbox_uid_set
+        if uid_validity is not None:
+            response_body["uidValidity"] = uid_validity
+        return 200, response_body
     except imaplib.IMAP4.error as exc:
         logger.exception(
             "IMAP connection failed with IMAP4 error",

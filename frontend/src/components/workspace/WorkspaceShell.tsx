@@ -22777,6 +22777,9 @@ export function WorkspaceShell({
     incomingMessages: LiveInboxMessageSnapshot[],
     persistedSnapshotMessages: PersistedLiveInboxMessageSnapshot[],
     currentInboxMessages: MailMessage[],
+    inboxUidSet?: string[] | null,
+    incomingUidValidity?: string | null,
+    storedUidValidity?: string | null,
   ) => {
     const persistedSnapshotIndexes = buildMessageIdentityIndexes(persistedSnapshotMessages);
     const currentInboxIndexes = buildMessageIdentityIndexes(currentInboxMessages);
@@ -22807,7 +22810,36 @@ export function WorkspaceShell({
       } as PersistedLiveInboxMessageSnapshot;
     });
 
-    // Upsert-only snapshot merge: walk the existing persisted snapshot and replace
+    // Archive eviction: when the backend supplies the full set of current INBOX UIDs,
+    // evict persisted snapshot messages that are no longer in the server's INBOX.
+    // This prevents archived (or moved/deleted) messages from accumulating forever in
+    // localStorage and continuing to appear as Inbox messages on reload.
+    //
+    // Safety guards:
+    //   - Only evict when inboxUidSet AND incomingUidValidity are both present (backend
+    //     returned trustworthy IMAP metadata).
+    //   - Never evict when the server returned zero UIDs but also returned >0 messages —
+    //     that would indicate a partial/failed UID fetch, not a truly empty inbox.
+    //   - Messages without an imapUid are always preserved (cannot confirm server truth).
+    //   - If UIDVALIDITY changed, wipe the entire snapshot to avoid stale UID comparisons.
+    let survivingPersistedMessages = persistedSnapshotMessages;
+    if (
+      inboxUidSet != null &&
+      incomingUidValidity != null &&
+      !(inboxUidSet.length === 0 && incomingMessages.length > 0)
+    ) {
+      if (storedUidValidity != null && storedUidValidity !== incomingUidValidity) {
+        // UIDVALIDITY changed — the entire UID space was reset; discard all persisted messages.
+        survivingPersistedMessages = [];
+      } else {
+        const inboxUidSetLookup = new Set(inboxUidSet);
+        survivingPersistedMessages = persistedSnapshotMessages.filter(
+          (msg) => !msg.imapUid || inboxUidSetLookup.has(msg.imapUid),
+        );
+      }
+    }
+
+    // Upsert-only snapshot merge: walk the surviving persisted snapshot and replace
     // any entry matched by an enriched incoming message; preserve all other persisted
     // entries. Genuinely new messages are appended at the end.
     //
@@ -22819,7 +22851,7 @@ export function WorkspaceShell({
     const incomingIndexes = buildMessageIdentityIndexes(enrichedIncoming);
     const consumedIncomingKeys = new Set<string>();
 
-    const updatedPersistedMessages = persistedSnapshotMessages.map((persisted) => {
+    const updatedPersistedMessages = survivingPersistedMessages.map((persisted) => {
       const incoming = findMatchingMessageByIdentity(persisted, incomingIndexes);
       if (!incoming) return persisted; // upsert-only: preserve messages absent from this fetch
       getCanonicalMessageIdentityKeys(incoming).forEach((key) =>
@@ -24822,14 +24854,18 @@ export function WorkspaceShell({
       }
 
       const messages = response.messages ?? [];
+      const persistedSnapshot = readLiveInboxSnapshots()[managedMailbox.id];
       const persistedSnapshotMessages =
-        (readLiveInboxSnapshots()[managedMailbox.id]?.messages as PersistedLiveInboxMessageSnapshot[]) ??
-        [];
+        (persistedSnapshot?.messages as PersistedLiveInboxMessageSnapshot[]) ?? [];
+      const storedUidValidity = persistedSnapshot?.uidValidity ?? null;
       const currentInboxMessages = mailboxStore[managedMailbox.id as InboxId]?.Inbox ?? [];
       const mergedMessages = mergePersistedLiveInboxSnapshotMessages(
         messages,
         persistedSnapshotMessages,
         currentInboxMessages,
+        response.inboxUidSet,
+        response.uidValidity,
+        storedUidValidity,
       );
       const mergeStartedAt = performance.now();
       saveLiveInboxSnapshot({
@@ -24837,6 +24873,7 @@ export function WorkspaceShell({
         email: managedMailbox.email.trim().toLowerCase(),
         fetchedAt: new Date().toISOString(),
         messages: mergedMessages,
+        uidValidity: response.uidValidity ?? null,
       });
       applyLiveInboxMessagesToMailboxStore(
         managedMailbox.id as InboxId,

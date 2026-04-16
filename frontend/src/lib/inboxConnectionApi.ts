@@ -41,6 +41,8 @@ export type ConnectInboxRequest = {
 type ConnectInboxResponse = {
   ok: boolean;
   messages?: LiveInboxMessageSnapshot[];
+  inboxUidSet?: string[] | null;
+  uidValidity?: string | null;
   error?: {
     code?: string;
     message?: string;
