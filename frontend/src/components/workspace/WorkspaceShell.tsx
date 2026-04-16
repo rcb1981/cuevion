@@ -1224,7 +1224,7 @@ function renderPlainMessageParagraph(
 
   if (matches.length === 0) {
     return (
-      <p key={paragraphKey} className={className}>
+      <p key={paragraphKey} className={`whitespace-pre-wrap ${className}`}>
         <span className={resolvedContentClassName} style={plainTextStyle}>
           {paragraph}
         </span>
@@ -1279,7 +1279,7 @@ function renderPlainMessageParagraph(
   }
 
   return (
-    <p key={paragraphKey} className={className}>
+    <p key={paragraphKey} className={`whitespace-pre-wrap ${className}`}>
       {content}
     </p>
   );
