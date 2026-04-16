@@ -22784,13 +22784,19 @@ export function WorkspaceShell({
     const persistedSnapshotIndexes = buildMessageIdentityIndexes(persistedSnapshotMessages);
     const currentInboxIndexes = buildMessageIdentityIndexes(currentInboxMessages);
 
+    // When UIDVALIDITY changes, the entire UID space was reset. Do not carry any
+    // persisted-snapshot-derived data into enrichedIncoming — treat it as a fresh build.
+    const uidValidityChanged =
+      storedUidValidity != null &&
+      incomingUidValidity != null &&
+      storedUidValidity !== incomingUidValidity;
+
     // Enrich each incoming message with collaboration/shared data carried forward
     // from the persisted snapshot or the current in-memory inbox.
     const enrichedIncoming = incomingMessages.map((message) => {
-      const persistedSnapshotMessage = findMatchingMessageByIdentity(
-        message,
-        persistedSnapshotIndexes,
-      );
+      const persistedSnapshotMessage = uidValidityChanged
+        ? undefined
+        : findMatchingMessageByIdentity(message, persistedSnapshotIndexes);
       const currentInboxMessage = findMatchingMessageByIdentity(message, currentInboxIndexes);
 
       if (
@@ -22828,7 +22834,7 @@ export function WorkspaceShell({
       incomingUidValidity != null &&
       !(inboxUidSet.length === 0 && incomingMessages.length > 0)
     ) {
-      if (storedUidValidity != null && storedUidValidity !== incomingUidValidity) {
+      if (uidValidityChanged) {
         // UIDVALIDITY changed — the entire UID space was reset; discard all persisted messages.
         survivingPersistedMessages = [];
       } else {
