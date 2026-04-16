@@ -832,7 +832,15 @@ def build_connect_preview_response(payload: dict[str, Any]) -> tuple[int, dict[s
         inbox_uid_set = None
         uid_validity = None
         try:
-            uid_status, uid_data = mailbox.uid("search", None, "ALL")
+            if provider == "google":
+                try:
+                    uid_status, uid_data = mailbox.uid("search", None, 'X-GM-LABELS "\\\\Inbox"')
+                except Exception:
+                    uid_status, uid_data = "FAILED", []
+                if uid_status != "OK":
+                    uid_status, uid_data = mailbox.uid("search", None, "ALL")
+            else:
+                uid_status, uid_data = mailbox.uid("search", None, "ALL")
             if uid_status == "OK" and uid_data and uid_data[0]:
                 raw = uid_data[0]
                 uid_str = raw.decode("utf-8", errors="ignore") if isinstance(raw, bytes) else str(raw)
