@@ -24773,6 +24773,7 @@ export function WorkspaceShell({
   const applyLiveInboxMessagesToMailboxStore = (
     mailboxId: InboxId,
     messages: LiveInboxMessageSnapshot[],
+    evictImapUids?: Set<string>,
   ) => {
     const targetMailbox = orderedMailboxes.find((entry) => entry.id === mailboxId);
 
@@ -24784,6 +24785,17 @@ export function WorkspaceShell({
       const currentCollections =
         currentStore[targetMailbox.id] ?? createEmptyMailboxCollections();
 
+      // When a trusted server-side UID eviction set is provided, remove messages
+      // whose imapUid is no longer present in the server's INBOX from the in-memory
+      // store before the upsert merge. This ensures archived messages (which
+      // mergeLiveInboxMessages would otherwise preserve as upsert-only) are also
+      // cleared from the render-time Filtered view within the current session.
+      // Messages without an imapUid are always preserved.
+      const currentInbox =
+        evictImapUids && evictImapUids.size > 0
+          ? currentCollections.Inbox.filter((msg) => !msg.imapUid || !evictImapUids.has(msg.imapUid))
+          : currentCollections.Inbox;
+
       const nextStore = {
         ...currentStore,
         [targetMailbox.id]: {
@@ -24791,7 +24803,7 @@ export function WorkspaceShell({
           Inbox: mergeLiveInboxMessages(
             targetMailbox.id,
             messages,
-            currentCollections.Inbox,
+            currentInbox,
             currentStore,
           ),
         },
@@ -24881,9 +24893,34 @@ export function WorkspaceShell({
         messages: mergedMessages,
         uidValidity: response.uidValidity ?? null,
       });
+      // Compute the in-memory eviction set using the same guard conditions applied
+      // in mergePersistedLiveInboxSnapshotMessages. Only evict when the server
+      // supplied a trusted UID set and UIDVALIDITY. A UIDVALIDITY change evicts all
+      // UID-bearing messages from the in-memory store, matching snapshot behaviour.
+      let evictImapUids: Set<string> | undefined;
+      if (
+        response.inboxUidSet != null &&
+        response.uidValidity != null &&
+        !(response.inboxUidSet.length === 0 && messages.length > 0)
+      ) {
+        if (storedUidValidity != null && storedUidValidity !== response.uidValidity) {
+          // UIDVALIDITY changed — all prior UIDs are invalid; evict everything UID-bearing.
+          evictImapUids = new Set(
+            currentInboxMessages.flatMap((msg) => (msg.imapUid ? [msg.imapUid] : [])),
+          );
+        } else {
+          const inboxUidSetLookup = new Set(response.inboxUidSet);
+          evictImapUids = new Set(
+            currentInboxMessages.flatMap((msg) =>
+              msg.imapUid && !inboxUidSetLookup.has(msg.imapUid) ? [msg.imapUid] : [],
+            ),
+          );
+        }
+      }
       applyLiveInboxMessagesToMailboxStore(
         managedMailbox.id as InboxId,
         mergedMessages,
+        evictImapUids,
       );
       console.info("[SYNC-TIMING] refreshMailboxById complete", {
         mailboxId,
