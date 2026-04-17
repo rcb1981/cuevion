@@ -4240,6 +4240,107 @@ function getVisiblePriorityBadge(
   return "NORMAL";
 }
 
+function resolveFocusPreferenceLevelForPriorityMessage(
+  message: MailMessage,
+  focusPreferences: UserConfig["focusPreferences"],
+) {
+  switch (resolveVisibleClassification(message)) {
+    case "demo":
+    case "high_priority_demo":
+      return focusPreferences.demos;
+    case "promo":
+      return focusPreferences.promo;
+    case "promo_reminder":
+      return focusPreferences.promoReminders;
+    case "finance":
+      return focusPreferences.finance;
+    case "royalty_statement":
+      return focusPreferences.royalties;
+    case "business":
+      return focusPreferences.business;
+    case "business_reminder":
+      return focusPreferences.paymentReminders;
+    case "distributor_update":
+      return focusPreferences.distribution;
+    case "workflow_update":
+    case "info":
+      return focusPreferences.updates;
+    default:
+      return null;
+  }
+}
+
+function hasProtectedPriorityVisibility(message: MailMessage) {
+  return (
+    message.internalClassification === "reply" ||
+    Boolean(message.isShared) ||
+    Boolean(message.sharedContext)
+  );
+}
+
+function getPriorityVisibilityAdjustedMessage(
+  message: MailMessage,
+  focusPreferences: UserConfig["focusPreferences"],
+) {
+  if (hasProtectedPriorityVisibility(message)) {
+    return message;
+  }
+
+  const focusPreferenceLevel = resolveFocusPreferenceLevelForPriorityMessage(
+    message,
+    focusPreferences,
+  );
+
+  if (focusPreferenceLevel === "high") {
+    return { ...message, signal: undefined, priorityScore: "high" as const };
+  }
+
+  if (focusPreferenceLevel === "medium") {
+    return { ...message, signal: undefined, priorityScore: "medium" as const };
+  }
+
+  if (focusPreferenceLevel === "low") {
+    return { ...message, signal: undefined, priorityScore: "low" as const };
+  }
+
+  return message;
+}
+
+function getVisiblePriorityBadgeForWorkspaceMessage(
+  message: MailMessage,
+  override: ManualPriorityOverride | undefined,
+  focusPreferences: UserConfig["focusPreferences"],
+) {
+  const focusPreferenceLevel = resolveFocusPreferenceLevelForPriorityMessage(
+    message,
+    focusPreferences,
+  );
+  const visibilityClassification = resolveVisibleClassification(message);
+  const isDemoMessage =
+    visibilityClassification === "demo" ||
+    visibilityClassification === "high_priority_demo";
+
+  if (
+    isDemoMessage &&
+    !hasProtectedPriorityVisibility(message) &&
+    override !== "priority" &&
+    override !== "removed"
+  ) {
+    if (focusPreferenceLevel === "low") {
+      return "LOW" as const;
+    }
+
+    if (focusPreferenceLevel === "high") {
+      return "PRIORITY" as const;
+    }
+  }
+
+  return getVisiblePriorityBadge(
+    getPriorityVisibilityAdjustedMessage(message, focusPreferences),
+    override,
+  );
+}
+
 function getVisibleCategoryLabel(
   message: Pick<
     MailMessage,
@@ -9469,30 +9570,10 @@ function MailboxView({
     };
   };
   const getVisiblePriorityBadgeForMessage = (message: MailMessage) => {
-    const override = manualPriorityOverrides[message.id];
-    const focusPreferenceLevel = resolveFocusPreferenceLevelForMessage(message);
-    const isDemoMessage =
-      resolveVisibilityClassificationForMessage(message) === "demo" ||
-      resolveVisibilityClassificationForMessage(message) === "high_priority_demo";
-
-    if (
-      isDemoMessage &&
-      !hasProtectedPriorityVisibility(message) &&
-      override !== "priority" &&
-      override !== "removed"
-    ) {
-      if (focusPreferenceLevel === "low") {
-        return "LOW";
-      }
-
-      if (focusPreferenceLevel === "high") {
-        return "PRIORITY";
-      }
-    }
-
-    return getVisiblePriorityBadge(
-      getPriorityVisibilityAdjustedMessage(message),
-      override,
+    return getVisiblePriorityBadgeForWorkspaceMessage(
+      message,
+      manualPriorityOverrides[message.id],
+      focusPreferences,
     );
   };
   const shouldForceFilteredDemoVisibility = (message: MailMessage) => {
@@ -23756,29 +23837,11 @@ export function WorkspaceShell({
     Boolean(message.isShared) ||
     Boolean(message.sharedContext);
   const getPriorityPageVisiblePriorityBadge = (message: MailMessage) => {
-    const override = manualPriorityOverrides[message.id];
-
-    if (override === "priority") {
-      return "PRIORITY" as const;
-    }
-
-    if (override === "removed") {
-      return "NORMAL" as const;
-    }
-
-    if (!hasPriorityPageProtectedVisibility(message)) {
-      const focusPreferenceLevel = resolvePriorityPageFocusPreferenceLevel(message);
-
-      if (focusPreferenceLevel === "high") {
-        return "PRIORITY" as const;
-      }
-
-      if (focusPreferenceLevel === "medium" || focusPreferenceLevel === "low") {
-        return "NORMAL" as const;
-      }
-    }
-
-    return getVisiblePriorityBadge(message, override);
+    return getVisiblePriorityBadgeForWorkspaceMessage(
+      message,
+      manualPriorityOverrides[message.id],
+      activeFocusPreferences,
+    );
   };
   const isPriorityPageVisiblePriorityMessage = (message: MailMessage) => {
     return getPriorityPageVisiblePriorityBadge(message) === "PRIORITY";
