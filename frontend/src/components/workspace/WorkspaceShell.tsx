@@ -686,6 +686,50 @@ function appendLinkifiedText(
   }
 }
 
+function linkifyBareUrlsInHtmlTextNodes(documentRef: Document, root: HTMLElement) {
+  const linkPattern = /((?:https?:\/\/|www\.)[^\s<]+)/i;
+  const textNodesToReplace: Text[] = [];
+  const walker = documentRef.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      const parentElement = node.parentElement;
+
+      if (
+        !parentElement ||
+        parentElement.closest(
+          "a, style, script, textarea, [data-email-image-placeholder='true']",
+        )
+      ) {
+        return NodeFilter.FILTER_REJECT;
+      }
+
+      return linkPattern.test(node.textContent ?? "")
+        ? NodeFilter.FILTER_ACCEPT
+        : NodeFilter.FILTER_REJECT;
+    },
+  });
+
+  let currentNode = walker.nextNode();
+
+  while (currentNode) {
+    if (currentNode instanceof Text) {
+      textNodesToReplace.push(currentNode);
+    }
+    currentNode = walker.nextNode();
+  }
+
+  textNodesToReplace.forEach((textNode) => {
+    const parentNode = textNode.parentNode;
+
+    if (!parentNode) {
+      return;
+    }
+
+    const fragment = documentRef.createDocumentFragment();
+    appendLinkifiedText(documentRef, fragment, textNode.textContent ?? "");
+    parentNode.replaceChild(fragment, textNode);
+  });
+}
+
 function sanitizeSignatureHtml(input: string) {
   if (typeof document === "undefined") {
     return input;
@@ -2321,6 +2365,8 @@ function sanitizeMessageBodyHtml(
       }
     }
   });
+
+  linkifyBareUrlsInHtmlTextNodes(parsedDocument, body);
 
   const sanitizedHtml = body.innerHTML.trim();
   const hasRenderableContent =
