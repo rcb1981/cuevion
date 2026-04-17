@@ -23438,7 +23438,13 @@ export function WorkspaceShell({
     });
 
     const normalizedIncoming = uniqueIncomingMessages.map((message) => {
-      const persistedMessage = message as PersistedLiveInboxMessageSnapshot;
+      const persistedMessage = message as PersistedLiveInboxMessageSnapshot &
+        Partial<
+          Pick<
+            MailMessageSeed,
+            "signal" | "internalClassification" | "category" | "final_visibility" | "action"
+          >
+        >;
       const existingMessage = findMatchingMessageByIdentity(persistedMessage, currentInboxIndexes);
       const unread =
         resolveUnreadOverride(messageUnreadOverrides, persistedMessage) ??
@@ -23454,7 +23460,12 @@ export function WorkspaceShell({
           createdAt: message.createdAt,
           imapUid: message.imapUid,
           unread,
+          signal: persistedMessage.signal,
           ui_signal: message.ui_signal,
+          internalClassification: persistedMessage.internalClassification,
+          category: persistedMessage.category,
+          final_visibility: persistedMessage.final_visibility,
+          action: persistedMessage.action,
           from: message.from,
           to: message.to,
           cc: message.cc,
