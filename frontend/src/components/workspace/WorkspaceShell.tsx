@@ -1069,7 +1069,7 @@ function buildComposeQuoteHtml(mode: ComposeMode, sourceMessage: MailMessage) {
     const sourceRenderMode = resolveMessageBodyRenderMode(sourceMessage);
 
     if (sourceRenderMode.mode !== "plain") {
-      return `<div data-compose-quote-wrapper="true"><div style="height:1px; margin:10px 0; background:rgba(120,140,120,0.12);"></div><div data-compose-quote="true"><div>${escapeComposeHtml(
+      return `<div data-compose-quote-wrapper="true"><div style="height:1px; margin:8px 0; background:rgba(255,255,255,0.06);"></div><div data-compose-quote="true"><div>${escapeComposeHtml(
         attributionHeader,
       )}</div><div><br></div>${sanitizeComposeQuotedHtmlTextColors(
         sourceRenderMode.html,
