@@ -81,6 +81,16 @@ function ComingSoonLanding() {
   );
 }
 
+function isPublicLandingHost() {
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  const hostname = window.location.hostname.toLowerCase();
+
+  return hostname === "cuevion.com" || hostname === "www.cuevion.com";
+}
+
 function normalizeOnboardingState(value: Partial<OnboardingState>): OnboardingState {
   return {
     ...initialOnboardingState,
@@ -389,11 +399,9 @@ function CollaborationInviteAuthGate({
 }
 
 export default function App() {
-  const hostname =
-    typeof window !== "undefined" ? window.location.hostname.toLowerCase() : "";
-  const shouldShowFullApp = hostname.includes("vercel.app");
+  const shouldShowLandingPage = isPublicLandingHost();
 
-  if (!shouldShowFullApp) {
+  if (shouldShowLandingPage) {
     return <ComingSoonLanding />;
   }
 
