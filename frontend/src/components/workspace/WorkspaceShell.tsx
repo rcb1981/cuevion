@@ -16322,6 +16322,7 @@ function MailboxView({
 
 function WorkbenchView({
   section,
+  orderedMailboxes,
   onOpenDemoInbox,
   onOpenLearningRequest,
   onOpenSenderContext,
@@ -16342,6 +16343,7 @@ function WorkbenchView({
   workspacePersistenceKey,
 }: {
   section: WorkbenchSection;
+  orderedMailboxes: OrderedMailbox[];
   onOpenDemoInbox: () => void;
   onOpenLearningRequest: (request: NonNullable<LearningLaunchRequest>) => void;
   onOpenSenderContext: () => void;
@@ -16470,14 +16472,17 @@ function WorkbenchView({
   const [selectedTeamAccessLevel, setSelectedTeamAccessLevel] = useState<TeamAccessLevel>(
     "Admin",
   );
+  const teamInboxOptions = orderedMailboxes
+    .map((mailbox) => mailbox.title.trim())
+    .filter((title) => title.length > 0);
   const [selectedTeamInboxAccess, setSelectedTeamInboxAccess] = useState<string[]>(() =>
-    showDemoContent ? ["Primary inbox", "Demo inbox", "Promo inbox"] : [],
+    [...teamInboxOptions],
   );
   const [inviteFullName, setInviteFullName] = useState("");
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteAccessLevel, setInviteAccessLevel] = useState<TeamAccessLevel>("Editor");
   const [inviteInboxAccess, setInviteInboxAccess] = useState<string[]>(() =>
-    showDemoContent ? ["Primary inbox"] : [],
+    teamInboxOptions.slice(0, 1),
   );
   const getInitials = (name: string) =>
     name
@@ -16486,7 +16491,6 @@ function WorkbenchView({
       .slice(0, 2)
       .map((part) => part[0]?.toUpperCase() ?? "")
       .join("");
-  const teamInboxOptions = ["Primary inbox", "Demo inbox", "Promo inbox"];
   const formatInboxSelectionLabel = (inboxes: string[]) => {
     if (inboxes.length === 0) {
       return "no inboxes";
@@ -16562,8 +16566,22 @@ function WorkbenchView({
     }
 
     setSelectedTeamAccessLevel(activeTeamMember.accessLevel);
-    setSelectedTeamInboxAccess(activeTeamMember.selectedInboxes);
-  }, [activeTeamMemberIndex]);
+    setSelectedTeamInboxAccess(() => {
+      const nextInboxes = activeTeamMember.selectedInboxes.filter((inbox) =>
+        teamInboxOptions.includes(inbox),
+      );
+
+      return nextInboxes.length > 0 ? nextInboxes : teamInboxOptions.slice(0, 1);
+    });
+  }, [activeTeamMemberIndex, activeTeamMember, teamInboxOptions]);
+
+  useEffect(() => {
+    setInviteInboxAccess((current) => {
+      const nextInboxes = current.filter((inbox) => teamInboxOptions.includes(inbox));
+
+      return nextInboxes.length > 0 ? nextInboxes : teamInboxOptions.slice(0, 1);
+    });
+  }, [teamInboxOptions]);
 
   return (
     <>
@@ -17226,7 +17244,7 @@ function WorkbenchView({
                       setInviteFullName("");
                       setInviteEmail("");
                       setInviteAccessLevel("Editor");
-                      setInviteInboxAccess(["Primary inbox"]);
+                      setInviteInboxAccess(teamInboxOptions.slice(0, 1));
                       setIsInviteMemberOpen(false);
                       setTeamFeedbackMessage("Workspace invite created");
                       console.log("confirm_invite_team_member");
@@ -26805,6 +26823,7 @@ export function WorkspaceShell({
               <div className="min-h-0 flex-1 overflow-y-auto pr-1">
                 <WorkbenchView
                   section={activeSection}
+                  orderedMailboxes={orderedMailboxes}
                   onOpenDemoInbox={handleOpenDemoInbox}
                   onOpenLearningRequest={handleOpenLearningRequest}
                   onOpenSenderContext={handleOpenSenderContext}
