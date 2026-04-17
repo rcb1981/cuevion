@@ -33,6 +33,14 @@ type PersistedOnboardingSession = {
   state: OnboardingState;
 };
 type WorkspaceDataMode = "demo" | "live";
+type StoredManagedWorkspaceInbox = {
+  title?: string;
+  email?: string;
+};
+type StoredTeamMemberEntry = {
+  email?: string;
+  name?: string;
+};
 
 function buildUserConfig(state: OnboardingState): UserConfig {
   return {
@@ -92,23 +100,8 @@ function normalizeOnboardingState(value: Partial<OnboardingState>): OnboardingSt
   };
 }
 
-const existingCuevionUsers: AuthenticatedCuevionUser[] = [
-  {
-    email: "emma@cuevion.com",
-    name: "Emma Stone",
-    userType: "member",
-  },
-  {
-    email: "david@cuevion.com",
-    name: "David Cole",
-    userType: "member",
-  },
-  {
-    email: "mila@cuevion.com",
-    name: "Mila Hart",
-    userType: "member",
-  },
-];
+const buildTeamMembersStorageKey = (workspaceKey: string) =>
+  `cuevion-team-members:${workspaceKey}`;
 
 function isValidAuthEmail(value: string) {
   return /^[^\s@]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}$/.test(
@@ -246,9 +239,81 @@ function parsePersistedOnboardingSession(): PersistedOnboardingSession | null {
   }
 }
 
+function parseStoredManagedWorkspaceInboxes(): StoredManagedWorkspaceInbox[] {
+  const storedValue = window.localStorage.getItem(MANAGED_INBOXES_STORAGE_KEY);
+
+  if (!storedValue) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(storedValue) as StoredManagedWorkspaceInbox[];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function resolveWorkspaceInviteUsers(
+  onboardingState: OnboardingState,
+): AuthenticatedCuevionUser[] {
+  const managedInboxes = parseStoredManagedWorkspaceInboxes();
+  const primaryManagedInbox = managedInboxes.find(
+    (mailbox) => typeof mailbox.email === "string" && mailbox.email.trim().length > 0,
+  );
+  const primaryInboxId = onboardingState.selectedInboxes[0];
+  const fallbackPrimaryEmail = primaryInboxId
+    ? onboardingState.inboxConnections[primaryInboxId]?.email?.trim().toLowerCase() ?? ""
+    : "";
+  const workspaceEmail = (
+    primaryManagedInbox?.email?.trim().toLowerCase() || fallbackPrimaryEmail
+  ).trim();
+  const recognizedUsers = new Map<string, AuthenticatedCuevionUser>();
+
+  if (workspaceEmail) {
+    recognizedUsers.set(workspaceEmail, {
+      email: workspaceEmail,
+      name:
+        primaryManagedInbox?.title?.trim() || formatUserNameFromEmail(workspaceEmail),
+      userType: "member",
+    });
+
+    const teamMembersStorageKey = buildTeamMembersStorageKey(workspaceEmail);
+    const storedTeamMembers = window.localStorage.getItem(teamMembersStorageKey);
+
+    if (storedTeamMembers) {
+      try {
+        const parsed = JSON.parse(storedTeamMembers) as StoredTeamMemberEntry[];
+
+        if (Array.isArray(parsed)) {
+          parsed.forEach((member) => {
+            const memberEmail = member.email?.trim().toLowerCase() ?? "";
+
+            if (!memberEmail || !isValidAuthEmail(memberEmail)) {
+              return;
+            }
+
+            recognizedUsers.set(memberEmail, {
+              email: memberEmail,
+              name: member.name?.trim() || formatUserNameFromEmail(memberEmail),
+              userType: "member",
+            });
+          });
+        }
+      } catch {
+        // Ignore malformed local state and fall back to guest auth.
+      }
+    }
+  }
+
+  return Array.from(recognizedUsers.values());
+}
+
 function CollaborationInviteAuthGate({
+  recognizedUsers,
   onAuthenticate,
 }: {
+  recognizedUsers: AuthenticatedCuevionUser[];
   onAuthenticate: (user: AuthenticatedCuevionUser) => void;
 }) {
   const [email, setEmail] = useState("");
@@ -300,7 +365,7 @@ function CollaborationInviteAuthGate({
                   return;
                 }
 
-                const matchedUser = existingCuevionUsers.find(
+                const matchedUser = recognizedUsers.find(
                   (user) => user.email === normalizedEmail,
                 );
 
@@ -370,6 +435,7 @@ export default function App() {
   const [userConfig, setUserConfig] = useState<UserConfig | null>(() =>
     persistedOnboardingSession?.state ? buildUserConfig(persistedOnboardingSession.state) : null,
   );
+  const recognizedInviteUsers = resolveWorkspaceInviteUsers(onboardingState);
 
   useEffect(() => {
     if (authenticatedUser) {
@@ -419,6 +485,7 @@ export default function App() {
     if (collaborationInviteRoute.mode === "invite" && !authenticatedUser) {
       return (
         <CollaborationInviteAuthGate
+          recognizedUsers={recognizedInviteUsers}
           onAuthenticate={(user) => {
             const pendingInvite = window.localStorage.getItem(
               PENDING_COLLAB_INVITE_STORAGE_KEY,
