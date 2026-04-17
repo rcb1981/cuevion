@@ -1422,6 +1422,7 @@ function buildEmailStageDocument(
         min-height: unset !important;
         max-height: none !important;
         overflow-x: auto !important;
+        overflow-y: visible !important;
       }
       body {
         /* Fallback only – external emails control their own background/color */
