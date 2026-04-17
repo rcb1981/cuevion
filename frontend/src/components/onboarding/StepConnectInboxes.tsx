@@ -12,6 +12,7 @@ import { connectInboxWithImap } from "../../lib/inboxConnectionApi";
 import {
   getPasswordLabel,
   isImapCredentialsProvider,
+  usesEmailAsImapUsername,
 } from "../../lib/inboxProviderDefaults";
 import { onboardingText } from "../../copy/onboardingCopy";
 import type {
@@ -213,7 +214,7 @@ export function StepConnectInboxes({
       port: connection.customImap.port.trim(),
       ssl: connection.customImap.ssl,
       username:
-        connection.provider === "google"
+        usesEmailAsImapUsername(connection.provider)
           ? connection.email.trim()
           : connection.customImap.username.trim(),
       password: connection.customImap.password,
@@ -412,7 +413,7 @@ export function StepConnectInboxes({
                           {onboardingText.connect.username}
                         </label>
                         <div className="w-full rounded-2xl border border-ink/10 bg-white px-4 py-3 text-ink/70">
-                          {connection.email.trim() || "Uses the Gmail address above"}
+                          {connection.email.trim() || "Uses the inbox email above"}
                         </div>
                       </div>
                     )}

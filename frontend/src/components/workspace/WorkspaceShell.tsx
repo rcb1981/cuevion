@@ -39,6 +39,7 @@ import {
   applyProviderDefaults,
   getPasswordLabel,
   isImapCredentialsProvider,
+  usesEmailAsImapUsername,
 } from "../../lib/inboxProviderDefaults";
 import {
   readLiveInboxSnapshots,
@@ -18192,7 +18193,7 @@ function ManagedInboxEditor({
                   {onboardingText.connect.username}
                 </label>
                 <div className="rounded-2xl border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3 text-[0.94rem] text-[var(--workspace-text)]">
-                  {mailbox.email.trim() || "Uses the Gmail address above"}
+                  {mailbox.email.trim() || "Uses the inbox email above"}
                 </div>
               </div>
             )}
@@ -18381,7 +18382,7 @@ const ManageInboxesView = memo(function ManageInboxesView({
             email: value as string,
             connected: false,
             customImap:
-              mailbox.provider === "google"
+              usesEmailAsImapUsername(mailbox.provider)
                 ? {
                     ...mailbox.customImap,
                     username: String(value).trim(),
@@ -25132,7 +25133,7 @@ export function WorkspaceShell({
         port: resolvedImapSettings.port.trim(),
         ssl: resolvedImapSettings.ssl,
         username:
-          managedMailbox.provider === "google"
+          usesEmailAsImapUsername(managedMailbox.provider)
             ? managedMailbox.email.trim()
             : resolvedImapSettings.username.trim(),
         password: resolvedImapSettings.password,

@@ -1,7 +1,11 @@
 import type { CustomImapSettings, ProviderId } from "../types/onboarding";
 
 export function isImapCredentialsProvider(provider: ProviderId | null) {
-  return provider === "custom_imap" || provider === "google";
+  return (
+    provider === "custom_imap" ||
+    provider === "google" ||
+    provider === "microsoft"
+  );
 }
 
 export function createDefaultGoogleImapSettings(
@@ -16,6 +20,22 @@ export function createDefaultGoogleImapSettings(
   };
 }
 
+export function createDefaultMicrosoftImapSettings(
+  email = "",
+): CustomImapSettings {
+  return {
+    host: "outlook.office365.com",
+    port: "993",
+    ssl: true,
+    username: email.trim(),
+    password: "",
+  };
+}
+
+export function usesEmailAsImapUsername(provider: ProviderId | null) {
+  return provider === "google" || provider === "microsoft";
+}
+
 export function applyProviderDefaults(
   provider: ProviderId | null,
   currentSettings: CustomImapSettings,
@@ -24,6 +44,13 @@ export function applyProviderDefaults(
   if (provider === "google") {
     return {
       ...createDefaultGoogleImapSettings(email),
+      password: currentSettings.password,
+    };
+  }
+
+  if (provider === "microsoft") {
+    return {
+      ...createDefaultMicrosoftImapSettings(email),
       password: currentSettings.password,
     };
   }

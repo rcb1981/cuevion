@@ -10,6 +10,7 @@ import type { LiveInboxMessageSnapshot } from "../../lib/inboxConnectionApi";
 import {
   applyProviderDefaults,
   isImapCredentialsProvider,
+  usesEmailAsImapUsername,
 } from "../../lib/inboxProviderDefaults";
 import { mapRoleToInternal, type InternalRole } from "../../lib/roleMapping";
 import { saveLiveInboxSnapshot } from "../../lib/liveInboxSnapshots";
@@ -536,7 +537,7 @@ export function OnboardingFlow({
           connected: false,
           email,
           customImap:
-            getInboxConnection(current, inboxId).provider === "google"
+            usesEmailAsImapUsername(getInboxConnection(current, inboxId).provider)
               ? {
                   ...getInboxConnection(current, inboxId).customImap,
                   username: email.trim(),

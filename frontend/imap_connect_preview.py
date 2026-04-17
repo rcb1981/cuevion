@@ -14,6 +14,8 @@ from typing import Any
 
 DEFAULT_GMAIL_HOST = "imap.gmail.com"
 DEFAULT_GMAIL_PORT = 993
+DEFAULT_MICROSOFT_HOST = "outlook.office365.com"
+DEFAULT_MICROSOFT_PORT = 993
 DEFAULT_FETCH_LIMIT = 20
 MAX_FETCH_LIMIT = 25
 logger = logging.getLogger(__name__)
@@ -752,7 +754,7 @@ def to_message_preview(
 
 def build_connect_preview_response(payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
     request_start = time.perf_counter()
-    provider = payload.get("provider")
+    provider = str(payload.get("provider") or "").strip().lower()
     email_address = str(payload.get("email") or "").strip()
     password = str(payload.get("password") or "")
     host = str(payload.get("host") or "").strip()
@@ -767,6 +769,11 @@ def build_connect_preview_response(payload: dict[str, Any]) -> tuple[int, dict[s
     if provider == "google":
         host = host or DEFAULT_GMAIL_HOST
         port = port or DEFAULT_GMAIL_PORT
+        ssl_enabled = True
+        username = email_address
+    elif provider in {"microsoft", "outlook"}:
+        host = host or DEFAULT_MICROSOFT_HOST
+        port = port or DEFAULT_MICROSOFT_PORT
         ssl_enabled = True
         username = email_address
 
