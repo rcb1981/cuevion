@@ -16507,8 +16507,12 @@ function WorkbenchView({
     return `${inboxes.slice(0, -1).join(", ")} and ${inboxes[inboxes.length - 1]}`;
   };
   const getTeamRoleDescription = (member: TeamMemberEntry) => {
+    if (member.accessLevel === "Review") {
+      return "Access to shared collaborations only";
+    }
+
     if (member.accessLevel === "Limited") {
-      return "Invite-only access for shared collaborations only";
+      return "Access to specific invited emails only";
     }
 
     const formattedInboxes = formatInboxSelectionLabel(member.selectedInboxes);
@@ -16707,8 +16711,10 @@ function WorkbenchView({
                     Shared by {pendingTeamInvitation.inviter}
                   </div>
                   <div className="text-[0.82rem] leading-6 text-[var(--workspace-text-soft)]">
-                    {pendingTeamInvitation.accessLevel === "Limited"
-                      ? "Invite-only access for shared collaborations only"
+                    {pendingTeamInvitation.accessLevel === "Review"
+                      ? "Access to shared collaborations only"
+                      : pendingTeamInvitation.accessLevel === "Limited"
+                      ? "Access to specific invited emails only"
                       : `${getTeamAccessLevelLabel(pendingTeamInvitation.accessLevel)} access for ${formatInboxSelectionLabel(
                           pendingTeamInvitation.selectedInboxes,
                         )}`}
