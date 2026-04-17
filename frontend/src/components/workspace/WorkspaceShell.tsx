@@ -9590,8 +9590,19 @@ function MailboxView({
       case "promo_reminder":
         return "Promo";
       case "business":
-      case "business_reminder":
-        return "Business";
+      case "business_reminder": {
+        // Display-only override: when the resolved classification is "business" but
+        // the message content itself reads as promo-like (e.g. a custom IMAP promo
+        // inbox where the signal was set to a business value), show "Promo" instead.
+        // We re-run the heuristic with signal cleared so the content drives the
+        // result without the stored signal shortcutting it.
+        const heuristic = inferHeuristicSignal({
+          ...message,
+          signal: undefined,
+          isAutoReply: false,
+        });
+        return heuristic === "Promo" ? "Promo" : "Business";
+      }
       case "workflow_update":
       case "distributor_update":
       case "info":
