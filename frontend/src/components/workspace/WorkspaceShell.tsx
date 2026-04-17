@@ -9016,13 +9016,21 @@ function MailboxView({
     message: MailMessage,
     mode: ComposeMode,
   ) => {
-    const sourceMailboxId = currentMessageLocationById[message.id]?.mailboxId ?? mailbox.id;
-    const originalSender = message.from.trim();
-    const originalToRecipients = message.to
+    // For reply / reply_all, always address and quote the most recent message in
+    // the thread.  `message` here is the root message whose row was selected in the
+    // list; getThreadMessages returns the full thread sorted oldest-first, so .at(-1)
+    // gives the latest entry.  For forward we keep the selected message as-is.
+    const effectiveMessage =
+      mode === "reply" || mode === "reply_all"
+        ? getThreadMessages(message).at(-1) ?? message
+        : message;
+    const sourceMailboxId = currentMessageLocationById[effectiveMessage.id]?.mailboxId ?? mailbox.id;
+    const originalSender = effectiveMessage.from.trim();
+    const originalToRecipients = effectiveMessage.to
       .split(",")
       .map((value) => value.trim())
       .filter(Boolean);
-    const originalCcRecipients = (message.cc ?? "")
+    const originalCcRecipients = (effectiveMessage.cc ?? "")
       .split(",")
       .map((value) => value.trim())
       .filter(Boolean);
@@ -9073,27 +9081,27 @@ function MailboxView({
         ? sourceInboxSignature
         : null;
     setComposeMode(mode);
-    setComposeSourceMessage(message);
+    setComposeSourceMessage(effectiveMessage);
     setComposeTo(mode === "forward" ? "" : originalSender);
     setComposeCc(mode === "reply_all" ? replyAllCcRecipients.join(", ") : "");
     setComposeSubject(
       mode === "reply" || mode === "reply_all"
-        ? message.subject.startsWith("Re:")
-          ? message.subject
-          : `Re: ${message.subject}`
-        : message.subject.startsWith("Fwd:")
-          ? message.subject
-          : `Fwd: ${message.subject}`,
+        ? effectiveMessage.subject.startsWith("Re:")
+          ? effectiveMessage.subject
+          : `Re: ${effectiveMessage.subject}`
+        : effectiveMessage.subject.startsWith("Fwd:")
+          ? effectiveMessage.subject
+          : `Fwd: ${effectiveMessage.subject}`,
     );
     setComposeSignatureSelection(nextComposeSignature ? sourceMailboxId : "none");
     setComposeBody(
       buildComposeBody({
         mode,
-        sourceMessage: message,
+        sourceMessage: effectiveMessage,
         signature: nextComposeSignature,
       }),
     );
-    setComposeAttachments((message.attachments ?? []).map((attachment) => normalizeMailAttachment(attachment)));
+    setComposeAttachments((effectiveMessage.attachments ?? []).map((attachment) => normalizeMailAttachment(attachment)));
     setIsComposeOpen(true);
   };
 
