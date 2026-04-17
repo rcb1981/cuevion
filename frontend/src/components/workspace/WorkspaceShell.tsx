@@ -3580,7 +3580,15 @@ function getForYouCategoryLabel(
 }
 
 function getTeamAccessLevelLabel(level: TeamAccessLevel) {
-  return level === "Review" ? "Shared" : level;
+  if (level === "Review") {
+    return "Shared";
+  }
+
+  if (level === "Limited") {
+    return "Invite-only";
+  }
+
+  return level;
 }
 
 function formatLearningRuleTimestamp(value?: string) {
@@ -16496,12 +16504,14 @@ function WorkbenchView({
   };
   const getTeamRoleDescription = (member: TeamMemberEntry) => {
     if (member.accessLevel === "Limited") {
-      return "Limited access for shared collaborations only";
+      return "Invite-only access for shared collaborations only";
     }
 
     const formattedInboxes = formatInboxSelectionLabel(member.selectedInboxes);
     return `${getTeamAccessLevelLabel(member.accessLevel)} access for ${formattedInboxes}`;
   };
+  const isInboxAccessVisibleForLevel = (accessLevel: TeamAccessLevel) =>
+    accessLevel === "Admin" || accessLevel === "Editor";
   const getTeamInboxAccessLabel = (member: TeamMemberEntry) =>
     member.selectedInboxes.length > 0 ? member.selectedInboxes.join(", ") : "No inbox access";
   const defaultTeamAccessState = activeTeamMember
@@ -16515,7 +16525,7 @@ function WorkbenchView({
       };
   const hasTeamAccessChanges = activeTeamMember
     ? selectedTeamAccessLevel !== defaultTeamAccessState.level ||
-      [...(selectedTeamAccessLevel === "Limited" ? [] : selectedTeamInboxAccess)]
+      [...(isInboxAccessVisibleForLevel(selectedTeamAccessLevel) ? selectedTeamInboxAccess : [])]
         .sort()
         .join("|") !==
         [...defaultTeamAccessState.inboxes].sort().join("|")
@@ -16523,7 +16533,7 @@ function WorkbenchView({
   const canSubmitInvite =
     inviteFullName.trim().length > 0 &&
     inviteEmail.trim().length > 0 &&
-    (inviteAccessLevel === "Limited" || inviteInboxAccess.length > 0);
+    (!isInboxAccessVisibleForLevel(inviteAccessLevel) || inviteInboxAccess.length > 0);
 
   useEffect(() => {
     if (!teamFeedbackMessage) {
@@ -16680,7 +16690,7 @@ function WorkbenchView({
                   </div>
                   <div className="text-[0.82rem] leading-6 text-[var(--workspace-text-soft)]">
                     {pendingTeamInvitation.accessLevel === "Limited"
-                      ? "Limited access for shared collaborations only"
+                      ? "Invite-only access for shared collaborations only"
                       : `${getTeamAccessLevelLabel(pendingTeamInvitation.accessLevel)} access for ${formatInboxSelectionLabel(
                           pendingTeamInvitation.selectedInboxes,
                         )}`}
@@ -16700,7 +16710,7 @@ function WorkbenchView({
                       onAcceptPendingTeamInvitation();
                       setTeamFeedbackMessage(
                         pendingTeamInvitation.accessLevel === "Limited"
-                          ? "You now have collaboration-only access"
+                          ? "You now have invite-only collaboration access"
                           : `You now have access to ${formatInboxSelectionLabel(
                               pendingTeamInvitation.selectedInboxes,
                             )}`,
@@ -16893,10 +16903,10 @@ function WorkbenchView({
                   </div>
                 </div>
 
-                {inviteAccessLevel === "Limited" ? null : (
+                {isInboxAccessVisibleForLevel(inviteAccessLevel) ? (
                   <div className="mt-5 space-y-3">
                     <div className="text-[0.7rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
-                      Inbox access
+                      Inbox Access
                     </div>
                     <div className="flex flex-wrap gap-2">
                       {teamInboxOptions.map((inboxLabel) => {
@@ -16931,7 +16941,7 @@ function WorkbenchView({
                       })}
                     </div>
                   </div>
-                )}
+                ) : null}
 
                 <div className="mt-6 flex items-center justify-end gap-3">
                   <button
@@ -17209,7 +17219,7 @@ function WorkbenchView({
                           email: inviteEmail.trim(),
                           accessLevel: inviteAccessLevel,
                           selectedInboxes:
-                            inviteAccessLevel === "Limited" ? [] : [...inviteInboxAccess],
+                            isInboxAccessVisibleForLevel(inviteAccessLevel) ? [...inviteInboxAccess] : [],
                           status: "Invited",
                         },
                       ]);
@@ -17314,10 +17324,10 @@ function WorkbenchView({
                   </div>
                 </div>
 
-                {selectedTeamAccessLevel === "Limited" ? null : (
+                {isInboxAccessVisibleForLevel(selectedTeamAccessLevel) ? (
                   <div className="mt-5 space-y-3">
                     <div className="text-[0.7rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
-                      Inbox access
+                      Inbox Access
                     </div>
                     <div className="flex flex-wrap gap-2 transition-opacity duration-200">
                       {teamInboxOptions.map((inboxLabel) => {
@@ -17352,7 +17362,7 @@ function WorkbenchView({
                       })}
                     </div>
                   </div>
-                )}
+                ) : null}
 
                 {hasTeamAccessChanges ? (
                   <div className="mt-3 text-[0.72rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)]">
@@ -17378,7 +17388,7 @@ function WorkbenchView({
                                 ...member,
                                 accessLevel: selectedTeamAccessLevel,
                                 selectedInboxes:
-                                  selectedTeamAccessLevel === "Limited"
+                                  !isInboxAccessVisibleForLevel(selectedTeamAccessLevel)
                                     ? []
                                     : [...selectedTeamInboxAccess],
                               }
