@@ -1035,6 +1035,17 @@ function buildReplyQuotedBodyText(body: string[]) {
 }
 
 function buildComposeQuoteHtml(mode: ComposeMode, sourceMessage: MailMessage) {
+  if (mode === "reply" || mode === "reply_all") {
+    const attributionHeader = `On ${sourceMessage.timestamp}, ${sourceMessage.from} wrote:`;
+    const sourceRenderMode = resolveMessageBodyRenderMode(sourceMessage);
+
+    if (sourceRenderMode.mode !== "plain") {
+      return `<div data-compose-quote="true"><div>${escapeComposeHtml(
+        attributionHeader,
+      )}</div><div><br></div>${sourceRenderMode.html}</div>`;
+    }
+  }
+
   const quotedMessage =
     mode === "reply" || mode === "reply_all"
       ? `On ${sourceMessage.timestamp}, ${sourceMessage.from} wrote:\n\n${buildReplyQuotedBodyText(
