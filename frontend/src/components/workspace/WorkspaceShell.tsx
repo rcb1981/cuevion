@@ -4080,7 +4080,17 @@ function inferHeuristicSignal(
 }
 
 function inferInternalClassification(
-  message: Pick<MailMessageSeed, "signal" | "internalClassification">,
+  message: Pick<
+    MailMessageSeed,
+    | "signal"
+    | "internalClassification"
+    | "sender"
+    | "subject"
+    | "snippet"
+    | "from"
+    | "body"
+    | "isAutoReply"
+  >,
   mailboxId: InboxId,
 ): CuevionInternalClassification {
   if (message.internalClassification) {
@@ -4101,8 +4111,18 @@ function inferInternalClassification(
     case "Follow-up":
       return mailboxId === "promo" ? "promo" : "reply";
     case "Priority":
-    case "Active":
-      return mailboxId === "promo" ? "promo" : "business";
+    case "Active": {
+      if (mailboxId === "promo") {
+        return "promo";
+      }
+
+      const contentHeuristicSignal = inferHeuristicSignal({
+        ...message,
+        signal: undefined,
+      });
+
+      return contentHeuristicSignal === "Promo" ? "promo" : "business";
+    }
     case "Promo":
       return "promo";
     default:
