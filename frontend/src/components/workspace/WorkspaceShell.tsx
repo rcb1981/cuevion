@@ -9016,23 +9016,24 @@ function MailboxView({
     message: MailMessage,
     mode: ComposeMode,
   ) => {
+    const threadMessages = getThreadMessages(message);
     // For reply / reply_all, always address and quote the most recent message in
     // the thread.  `message` here is the root message whose row was selected in the
-    // list; getThreadMessages returns the full thread sorted oldest-first, so .at(-1)
-    // gives the latest entry.  For forward we keep the selected message as-is.
+    // list; getThreadMessages returns the full thread sorted oldest-first, so the
+    // last entry is the latest message. For forward we keep the selected message as-is.
     const effectiveMessage =
       mode === "reply" || mode === "reply_all"
-        ? getThreadMessages(message).at(-1) ?? message
+        ? threadMessages[threadMessages.length - 1] ?? message
         : message;
     const sourceMailboxId = currentMessageLocationById[effectiveMessage.id]?.mailboxId ?? mailbox.id;
     const originalSender = effectiveMessage.from.trim();
     const originalToRecipients = effectiveMessage.to
       .split(",")
-      .map((value) => value.trim())
+      .map((value: string) => value.trim())
       .filter(Boolean);
     const originalCcRecipients = (effectiveMessage.cc ?? "")
       .split(",")
-      .map((value) => value.trim())
+      .map((value: string) => value.trim())
       .filter(Boolean);
     const replyAllCcRecipients: string[] = [];
 
@@ -9101,7 +9102,11 @@ function MailboxView({
         signature: nextComposeSignature,
       }),
     );
-    setComposeAttachments((effectiveMessage.attachments ?? []).map((attachment) => normalizeMailAttachment(attachment)));
+    setComposeAttachments(
+      (effectiveMessage.attachments ?? []).map((attachment: MailAttachment) =>
+        normalizeMailAttachment(attachment),
+      ),
+    );
     setIsComposeOpen(true);
   };
 
