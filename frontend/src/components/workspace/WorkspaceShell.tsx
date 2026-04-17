@@ -1027,12 +1027,19 @@ function buildComposeParagraphsHtml(value: string) {
     .join("");
 }
 
+function buildReplyQuotedBodyText(body: string[]) {
+  return body
+    .map((paragraph) => stripQuoteParagraphPrefix(paragraph))
+    .filter((paragraph) => paragraph.length > 0)
+    .join("\n\n");
+}
+
 function buildComposeQuoteHtml(mode: ComposeMode, sourceMessage: MailMessage) {
   const quotedMessage =
     mode === "reply" || mode === "reply_all"
-      ? `On ${sourceMessage.timestamp}, ${sourceMessage.from} wrote:\n${sourceMessage.body
-          .map((paragraph) => `> ${paragraph}`)
-          .join("\n>\n")}`
+      ? `On ${sourceMessage.timestamp}, ${sourceMessage.from} wrote:\n\n${buildReplyQuotedBodyText(
+          sourceMessage.body,
+        )}`
       : `Forwarded message:\n\nFrom: ${sourceMessage.from}\nTo: ${sourceMessage.to}${
           sourceMessage.cc ? `\nCc: ${sourceMessage.cc}` : ""
         }\nTime: ${sourceMessage.timestamp}\nSubject: ${sourceMessage.subject}\n\n${sourceMessage.body.join("\n\n")}`;
