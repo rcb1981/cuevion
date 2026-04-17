@@ -4405,6 +4405,11 @@ function getVisibleCategoryLabel(
   }
 
   const classification = message.internalClassification;
+  const heuristicCategorySignal = inferHeuristicSignal({
+    ...message,
+    signal: undefined,
+    isAutoReply: false,
+  });
 
   switch (classification) {
     case "demo":
@@ -4441,9 +4446,11 @@ function getVisibleCategoryLabel(
     case "Promo":
       return "Promo";
     case "BUSINESS":
+      return "Business";
+    case "PRIORITY":
     case "Priority":
     case "Active":
-      return "Business";
+      return heuristicCategorySignal === "Promo" ? "Promo" : "Business";
     case "UPDATE":
     case "Update":
     case "Timing":
