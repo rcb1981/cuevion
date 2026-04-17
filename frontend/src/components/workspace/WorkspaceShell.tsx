@@ -2609,6 +2609,68 @@ function getQuotedParagraphStartIndex(paragraphs: string[]) {
   );
 }
 
+/** Strip the leading `>` / `> ` quote prefix from every line of a paragraph. */
+function stripQuoteParagraphPrefix(paragraph: string): string {
+  return paragraph
+    .split("\n")
+    .map((line) => line.replace(/^(>\s*)+/, ""))
+    .join("\n")
+    .trim();
+}
+
+interface ParsedQuoteSection {
+  header: string;      // cleaned attribution line ("On … wrote:" or "Forwarded message:")
+  sender: string;      // extracted display name or address
+  date: string;        // extracted date/time string
+  paragraphs: string[]; // body paragraphs with quote prefix stripped
+}
+
+/** Extract sender display name and date from an "On {date}, {sender} wrote:" header. */
+function parseQuoteHeaderMeta(header: string): { sender: string; date: string } {
+  if (header === "Forwarded message:") return { sender: "Forwarded message", date: "" };
+  const m = header.match(/^On (.+) wrote:$/);
+  if (!m) return { sender: header, date: "" };
+  const inner = m[1]; // e.g. "Mon, Apr 15, 2024 at 2:30 PM, John Doe <john@example.com>"
+  const lastComma = inner.lastIndexOf(",");
+  if (lastComma === -1) return { sender: inner.trim(), date: "" };
+  const rawSender = inner.slice(lastComma + 1).trim();
+  const rawDate = inner.slice(0, lastComma).trim();
+  // Extract display name from "Name <email>", fall back to raw address
+  const nameMatch = rawSender.match(/^(.+?)\s*<[^>]+>$/);
+  const sender = nameMatch ? nameMatch[1].trim() : rawSender;
+  return { sender, date: rawDate };
+}
+
+/**
+ * Split the flat quotedParagraphs array (which may contain nested reply chains
+ * with `>` prefixes) into discrete thread sections, each starting with an
+ * "On … wrote:" attribution line.  `>` prefixes are stripped from all content
+ * lines so paragraphs can be rendered cleanly.
+ */
+function parseQuotedSections(quotedParagraphs: string[]): ParsedQuoteSection[] {
+  const isQuoteHeader = (p: string): boolean => {
+    const s = stripQuoteParagraphPrefix(p);
+    return /^On .+ wrote:$/.test(s) || s === "Forwarded message:";
+  };
+
+  const sections: ParsedQuoteSection[] = [];
+  let current: ParsedQuoteSection | null = null;
+
+  for (const paragraph of quotedParagraphs) {
+    if (isQuoteHeader(paragraph)) {
+      if (current) sections.push(current);
+      const header = stripQuoteParagraphPrefix(paragraph);
+      const { sender, date } = parseQuoteHeaderMeta(header);
+      current = { header, sender, date, paragraphs: [] };
+    } else if (current) {
+      const stripped = stripQuoteParagraphPrefix(paragraph);
+      if (stripped) current.paragraphs.push(stripped);
+    }
+  }
+  if (current) sections.push(current);
+  return sections;
+}
+
 function looksLikeRenderedHtmlMarkup(value: string) {
   return /<(html|body|table|div|p|span|br|img|a|style|head|meta)\b/i.test(value);
 }
@@ -9714,6 +9776,7 @@ function MailboxView({
     const quotedParagraphs = compactMessageParagraphs(
       quoteStartIndex === -1 ? [] : threadMessage.body.slice(quoteStartIndex),
     );
+    const quotedSections = parseQuotedSections(quotedParagraphs);
     const remoteImagesAllowed = canShowRemoteImagesForMessage(threadMessage.id);
     const bodyRenderMode = resolveMessageBodyRenderMode(threadMessage, {
       allowRemoteImages: remoteImagesAllowed,
@@ -9845,22 +9908,36 @@ function MailboxView({
                     <SignatureBlock signature={threadMessage.signature} />
                   </div>
                 ) : null}
-                {quotedParagraphs.length > 0 ? (
-                  <div className="mt-3 rounded-[8px] border-l-2 border-[color:rgba(126,140,121,0.2)] bg-[color:rgba(247,243,235,0.46)] px-3 py-2.5 dark:border-[color:rgba(121,151,120,0.16)] dark:bg-[color:rgba(92,110,94,0.12)]">
-                    <div className={`mb-1.5 text-[0.58rem] font-medium uppercase tracking-[0.16em] ${nativeSecondaryTextClass}`}>
-                      Earlier message
-                    </div>
-                    <div className="space-y-1.5">
-                      {quotedParagraphs.map((paragraph) =>
-                        renderPlainMessageParagraph(
-                          paragraph,
-                          `${threadMessage.id}-quoted-${paragraph}`,
-                          `break-words text-[0.84rem] ${density === "full" ? "leading-[1.72]" : "leading-[1.64]"} ${nativeSecondaryTextClass}`,
-                          nativeSecondaryTextClass,
-                          themeMode,
-                        ),
-                      )}
-                    </div>
+                {quotedSections.length > 0 ? (
+                  <div className="mt-3 space-y-2">
+                    {quotedSections.map((section, sectionIdx) => (
+                      <div
+                        key={sectionIdx}
+                        className="rounded-[8px] border-l-2 border-[color:rgba(126,140,121,0.2)] bg-[color:rgba(247,243,235,0.46)] px-3 py-2.5 dark:border-[color:rgba(121,151,120,0.16)] dark:bg-[color:rgba(92,110,94,0.12)]"
+                      >
+                        <div className={`mb-1.5 flex flex-wrap items-baseline gap-x-1.5 ${nativeSecondaryTextClass}`}>
+                          <span className="text-[0.72rem] font-semibold leading-none tracking-[-0.01em]">
+                            {section.sender}
+                          </span>
+                          {section.date ? (
+                            <span className="text-[0.64rem] leading-none opacity-55">
+                              {section.date}
+                            </span>
+                          ) : null}
+                        </div>
+                        <div className="space-y-1.5">
+                          {section.paragraphs.map((paragraph) =>
+                            renderPlainMessageParagraph(
+                              paragraph,
+                              `${threadMessage.id}-qs-${sectionIdx}-${paragraph}`,
+                              `break-words text-[0.84rem] ${density === "full" ? "leading-[1.72]" : "leading-[1.64]"} ${nativeSecondaryTextClass}`,
+                              nativeSecondaryTextClass,
+                              themeMode,
+                            ),
+                          )}
+                        </div>
+                      </div>
+                    ))}
                   </div>
                 ) : null}
               </div>
