@@ -1967,6 +1967,8 @@ function EmailHtmlStage({
     const handleImageEvent = () => {
       scheduleMeasure(0);
       scheduleMeasure(120);
+      scheduleMeasure(400);
+      scheduleMeasure(1200);
     };
 
     images.forEach((image) => {
@@ -1978,6 +1980,8 @@ function EmailHtmlStage({
     scheduleMeasure(120);
     scheduleMeasure(400);
     scheduleMeasure(1200);
+    scheduleMeasure(2400);
+    scheduleMeasure(4800);
 
     cleanupRef.current = () => {
       timeoutIds.forEach((timeoutId) => window.clearTimeout(timeoutId));
