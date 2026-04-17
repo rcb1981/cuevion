@@ -46,8 +46,10 @@ import {
   saveLiveInboxSnapshot,
 } from "../../lib/liveInboxSnapshots";
 import {
+  buildConnectInboxRequest,
   connectInboxWithImap,
   sendGmailMessage,
+  type ConnectInboxResponse,
   type SendInboxAttachmentRequest,
   type LiveInboxMessageSnapshot,
 } from "../../lib/inboxConnectionApi";
@@ -18017,6 +18019,8 @@ function ManagedInboxEditor({
   editable,
   isExisting,
   isPrimary = false,
+  connectionError = null,
+  isApplying = false,
   onEditAction,
   onRemoveAction,
   removeDisabled = false,
@@ -18028,6 +18032,8 @@ function ManagedInboxEditor({
   editable: boolean;
   isExisting: boolean;
   isPrimary?: boolean;
+  connectionError?: string | null;
+  isApplying?: boolean;
   onEditAction?: () => void;
   onRemoveAction?: () => void;
   removeDisabled?: boolean;
@@ -18236,6 +18242,12 @@ function ManagedInboxEditor({
         </div>
       ) : null}
 
+      {connectionError ? (
+        <div className="mt-3 text-sm text-[color:rgba(146,82,73,0.92)]">
+          {connectionError}
+        </div>
+      ) : null}
+
       <div className="mt-6 flex justify-end gap-3">
         {editable && onCancelAction && onApplyAction ? (
           <>
@@ -18249,10 +18261,10 @@ function ManagedInboxEditor({
             <button
               type="button"
               onClick={onApplyAction}
-              disabled={!isManagedInboxReady(mailbox)}
+              disabled={!isManagedInboxReady(mailbox) || isApplying}
               className={`${settingsPrimaryActionClass} w-[7.5rem]`}
             >
-              Apply
+              {isApplying ? "Connecting..." : "Apply"}
             </button>
           </>
         ) : onEditAction ? (
@@ -18299,17 +18311,25 @@ const ManageInboxesView = memo(function ManageInboxesView({
   const [draftManagedInboxes, setDraftManagedInboxes] = useState<ManagedWorkspaceInbox[]>(
     savedManagedInboxes.map(cloneManagedWorkspaceInbox),
   );
+  const [connectionErrors, setConnectionErrors] = useState<
+    Partial<Record<string, string>>
+  >({});
   const [isDiscardConfirmationOpen, setIsDiscardConfirmationOpen] = useState(false);
   const [editingInboxId, setEditingInboxId] = useState<string | null>(null);
   const [pendingInboxApplyId, setPendingInboxApplyId] = useState<string | null>(null);
   const [pendingInboxRemovalId, setPendingInboxRemovalId] = useState<string | null>(null);
+  const [validatingInboxId, setValidatingInboxId] = useState<string | null>(null);
+  const [isApplyingAll, setIsApplyingAll] = useState(false);
   const [successToastMessage, setSuccessToastMessage] = useState<string | null>(null);
 
   useEffect(() => {
     setDraftManagedInboxes(savedManagedInboxes.map(cloneManagedWorkspaceInbox));
+    setConnectionErrors({});
     setEditingInboxId(null);
     setPendingInboxApplyId(null);
     setPendingInboxRemovalId(null);
+    setValidatingInboxId(null);
+    setIsApplyingAll(false);
   }, [savedManagedInboxes]);
 
   useEffect(() => {
@@ -18327,11 +18347,96 @@ const ManageInboxesView = memo(function ManageInboxesView({
   const hasUnsavedChanges =
     JSON.stringify(draftManagedInboxes) !== JSON.stringify(savedManagedInboxes);
 
+  const clearConnectionError = (inboxId: string) => {
+    setConnectionErrors((current) => {
+      if (!current[inboxId]) {
+        return current;
+      }
+
+      const next = { ...current };
+      delete next[inboxId];
+      return next;
+    });
+  };
+
+  const validateManagedInbox = async (
+    mailbox: ManagedWorkspaceInbox,
+  ): Promise<ConnectInboxResponse> => {
+    if (!mailbox.provider || !isImapCredentialsProvider(mailbox.provider)) {
+      return { ok: true, messages: [] };
+    }
+
+    const response = await connectInboxWithImap(
+      buildConnectInboxRequest({
+        provider: mailbox.provider,
+        email: mailbox.email,
+        customImap: mailbox.customImap,
+      }),
+    );
+
+    if (response.ok) {
+      saveLiveInboxSnapshot({
+        inboxId: mailbox.id,
+        email: mailbox.email.trim().toLowerCase(),
+        fetchedAt: new Date().toISOString(),
+        messages: response.messages ?? [],
+        uidValidity: response.uidValidity ?? null,
+      });
+    }
+
+    return response;
+  };
+
+  const isMailboxPersistedWithoutChanges = (mailbox: ManagedWorkspaceInbox) => {
+    const savedMailbox = savedManagedInboxes.find(
+      (candidate) => candidate.id === mailbox.id,
+    );
+
+    if (!savedMailbox) {
+      return false;
+    }
+
+    return JSON.stringify(cloneManagedWorkspaceInbox(savedMailbox)) === JSON.stringify(mailbox);
+  };
+
+  const connectManagedInbox = async (inboxId: string) => {
+    const mailbox = draftManagedInboxes.find((candidate) => candidate.id === inboxId);
+
+    if (!mailbox || !isManagedInboxReady(mailbox)) {
+      return false;
+    }
+
+    setValidatingInboxId(inboxId);
+    clearConnectionError(inboxId);
+
+    try {
+      const response = await validateManagedInbox(mailbox);
+
+      if (!response.ok) {
+        setConnectionErrors((current) => ({
+          ...current,
+          [inboxId]: response.error?.message ?? "Could not connect to inbox.",
+        }));
+        return false;
+      }
+
+      setDraftManagedInboxes((current) =>
+        current.map((candidate) =>
+          candidate.id === inboxId ? { ...candidate, connected: true } : candidate,
+        ),
+      );
+      return true;
+    } finally {
+      setValidatingInboxId(null);
+    }
+  };
+
   const updateDraftInbox = (
     inboxId: string,
     field: "title" | "email" | "provider" | keyof CustomImapSettings,
     value: string | boolean | ProviderId | null,
   ) => {
+    clearConnectionError(inboxId);
     setDraftManagedInboxes((current) =>
       current.map((mailbox) => {
         if (mailbox.id !== inboxId) {
@@ -18422,13 +18527,18 @@ const ManageInboxesView = memo(function ManageInboxesView({
   };
 
   const handleApplyInbox = (inboxId: string) => {
+    if (validatingInboxId || isApplyingAll) {
+      return;
+    }
+
     if (inboxId.startsWith("draft-")) {
-      setDraftManagedInboxes((current) =>
-        current.map((mailbox) =>
-          mailbox.id === inboxId ? { ...mailbox, connected: true } : mailbox,
-        ),
-      );
-      setEditingInboxId(null);
+      void (async () => {
+        const didConnect = await connectManagedInbox(inboxId);
+
+        if (didConnect) {
+          setEditingInboxId(null);
+        }
+      })();
       return;
     }
 
@@ -18483,6 +18593,8 @@ const ManageInboxesView = memo(function ManageInboxesView({
                 editable={editingInboxId === mailbox.id}
                 isExisting={!mailbox.id.startsWith("draft-")}
                 isPrimary={mailbox.id === "main"}
+                connectionError={connectionErrors[mailbox.id] ?? null}
+                isApplying={validatingInboxId === mailbox.id}
                 onEditAction={
                   editingInboxId === mailbox.id
                     ? undefined
@@ -18517,44 +18629,83 @@ const ManageInboxesView = memo(function ManageInboxesView({
           canGoBack
           onBack={handleClose}
           onNext={() => {
-            const nextMailboxes = draftManagedInboxes
-              .filter(
-                (mailbox) =>
-                  !mailbox.id.startsWith("draft-") ||
-                  Boolean(mailbox.provider) ||
-                  mailbox.title.trim().length > 0 ||
-                  mailbox.email.trim().length > 0,
-              )
-              .map((mailbox, index) => ({
-                ...mailbox,
-                id: mailbox.id.startsWith("draft-")
-                  ? `custom:${(mailbox.title.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "inbox")}-${Date.now().toString(36)}-${index}`
-                  : mailbox.id,
-              }));
-            const addedMailboxes = nextMailboxes.filter(
-              (mailbox) =>
-                !savedManagedInboxes.some((savedMailbox) => savedMailbox.id === mailbox.id),
-            );
-            const didApply = onApply(nextMailboxes);
+            void (async () => {
+              const nextMailboxes = draftManagedInboxes
+                .filter(
+                  (mailbox) =>
+                    !mailbox.id.startsWith("draft-") ||
+                    Boolean(mailbox.provider) ||
+                    mailbox.title.trim().length > 0 ||
+                    mailbox.email.trim().length > 0,
+                )
+                .map((mailbox, index) => ({
+                  ...mailbox,
+                  id: mailbox.id.startsWith("draft-")
+                    ? `custom:${(mailbox.title.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "inbox")}-${Date.now().toString(36)}-${index}`
+                    : mailbox.id,
+                }));
 
-            if (!didApply) {
-              return;
-            }
-
-            if (addedMailboxes.length === 1) {
-              setSuccessToastMessage(
-                `Inbox '${addedMailboxes[0].title.trim() || "Inbox"}' added`,
+              const readyMailboxes = nextMailboxes.filter((mailbox) =>
+                isManagedInboxReady(mailbox),
               );
-              return;
-            }
+              const mailboxesNeedingValidation = readyMailboxes.filter(
+                (mailbox) => !isMailboxPersistedWithoutChanges(mailbox),
+              );
 
-            if (addedMailboxes.length > 1) {
-              setSuccessToastMessage(`${addedMailboxes.length} inboxes added`);
-              return;
-            }
+              if (mailboxesNeedingValidation.length > 0) {
+                setIsApplyingAll(true);
+              }
 
-            setSuccessToastMessage("Inbox changes applied");
+              try {
+                for (const mailbox of mailboxesNeedingValidation) {
+                  setValidatingInboxId(mailbox.id);
+                  clearConnectionError(mailbox.id);
+
+                  const response = await validateManagedInbox(mailbox);
+
+                  if (!response.ok) {
+                    setConnectionErrors((current) => ({
+                      ...current,
+                      [mailbox.id]:
+                        response.error?.message ?? "Could not connect to inbox.",
+                    }));
+                    setEditingInboxId(mailbox.id);
+                    return;
+                  }
+
+                  mailbox.connected = true;
+                }
+              } finally {
+                setValidatingInboxId(null);
+                setIsApplyingAll(false);
+              }
+
+              const addedMailboxes = nextMailboxes.filter(
+                (mailbox) =>
+                  !savedManagedInboxes.some((savedMailbox) => savedMailbox.id === mailbox.id),
+              );
+              const didApply = onApply(nextMailboxes);
+
+              if (!didApply) {
+                return;
+              }
+
+              if (addedMailboxes.length === 1) {
+                setSuccessToastMessage(
+                  `Inbox '${addedMailboxes[0].title.trim() || "Inbox"}' added`,
+                );
+                return;
+              }
+
+              if (addedMailboxes.length > 1) {
+                setSuccessToastMessage(`${addedMailboxes.length} inboxes added`);
+                return;
+              }
+
+              setSuccessToastMessage("Inbox changes applied");
+            })();
           }}
+          isNextDisabled={isApplyingAll || validatingInboxId !== null}
           nextLabel="Apply"
         />
       <SettingsConfirmationModal
@@ -18578,8 +18729,19 @@ const ManageInboxesView = memo(function ManageInboxesView({
         confirmLabel="Apply"
         onCancel={() => setPendingInboxApplyId(null)}
         onConfirm={() => {
-          setEditingInboxId(null);
-          setPendingInboxApplyId(null);
+          void (async () => {
+            if (!pendingInboxApplyId) {
+              return;
+            }
+
+            const inboxId = pendingInboxApplyId;
+            setPendingInboxApplyId(null);
+            const didConnect = await connectManagedInbox(inboxId);
+
+            if (didConnect) {
+              setEditingInboxId(null);
+            }
+          })();
         }}
       />
       <SettingsConfirmationModal
@@ -25116,28 +25278,17 @@ export function WorkspaceShell({
       return;
     }
 
-    const resolvedImapSettings = applyProviderDefaults(
-      managedMailbox.provider,
-      managedMailbox.customImap,
-      managedMailbox.email,
-    );
-
     setSyncingMailboxId(mailboxId);
 
     try {
       const syncStartedAt = performance.now();
-      const response = await connectInboxWithImap({
-        provider: managedMailbox.provider,
-        email: managedMailbox.email.trim(),
-        host: resolvedImapSettings.host.trim(),
-        port: resolvedImapSettings.port.trim(),
-        ssl: resolvedImapSettings.ssl,
-        username:
-          usesEmailAsImapUsername(managedMailbox.provider)
-            ? managedMailbox.email.trim()
-            : resolvedImapSettings.username.trim(),
-        password: resolvedImapSettings.password,
-      });
+      const response = await connectInboxWithImap(
+        buildConnectInboxRequest({
+          provider: managedMailbox.provider,
+          email: managedMailbox.email,
+          customImap: managedMailbox.customImap,
+        }),
+      );
       const requestDurationMs = performance.now() - syncStartedAt;
 
       if (!response.ok) {
@@ -25230,7 +25381,7 @@ export function WorkspaceShell({
         id: mailbox.id.trim(),
         title: mailbox.title.trim() || mailbox.email.trim() || "Custom Inbox",
         email: mailbox.email.trim(),
-        connected: true,
+        connected: mailbox.connected,
       }))
       .filter((mailbox) => mailbox.id.length > 0);
 

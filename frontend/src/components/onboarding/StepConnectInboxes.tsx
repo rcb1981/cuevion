@@ -8,11 +8,13 @@ import type {
   ConnectInboxRequest,
   LiveInboxMessageSnapshot,
 } from "../../lib/inboxConnectionApi";
-import { connectInboxWithImap } from "../../lib/inboxConnectionApi";
+import {
+  buildConnectInboxRequest as buildImapConnectRequest,
+  connectInboxWithImap,
+} from "../../lib/inboxConnectionApi";
 import {
   getPasswordLabel,
   isImapCredentialsProvider,
-  usesEmailAsImapUsername,
 } from "../../lib/inboxProviderDefaults";
 import { onboardingText } from "../../copy/onboardingCopy";
 import type {
@@ -207,21 +209,14 @@ export function StepConnectInboxes({
     console.log("[DEBUG] StepConnectInboxes selectedInboxes:", selectedInboxes);
     console.log("[DEBUG] Sending to backend selectedInboxes:", selectedInboxes);
 
-    const request: ConnectInboxRequest = {
+    const request: ConnectInboxRequest = buildImapConnectRequest({
       provider: connection.provider as ProviderId,
-      email: connection.email.trim(),
-      host: connection.customImap.host.trim(),
-      port: connection.customImap.port.trim(),
-      ssl: connection.customImap.ssl,
-      username:
-        usesEmailAsImapUsername(connection.provider)
-          ? connection.email.trim()
-          : connection.customImap.username.trim(),
-      password: connection.customImap.password,
+      email: connection.email,
+      customImap: connection.customImap,
       internalRole,
       focusPreferences,
       selectedInboxes,
-    };
+    });
 
     const response = await connectInboxWithImap(request);
 

@@ -1,4 +1,12 @@
-import type { OnboardingState, ProviderId } from "../types/onboarding";
+import {
+  applyProviderDefaults,
+  usesEmailAsImapUsername,
+} from "./inboxProviderDefaults";
+import type {
+  CustomImapSettings,
+  OnboardingState,
+  ProviderId,
+} from "../types/onboarding";
 
 export type LiveInboxAttachmentSnapshot = {
   id: string;
@@ -38,7 +46,7 @@ export type ConnectInboxRequest = {
   selectedInboxes?: string[] | null;
 };
 
-type ConnectInboxResponse = {
+export type ConnectInboxResponse = {
   ok: boolean;
   messages?: LiveInboxMessageSnapshot[];
   inboxUidSet?: string[] | null;
@@ -48,6 +56,37 @@ type ConnectInboxResponse = {
     message?: string;
   };
 };
+
+export function buildConnectInboxRequest(options: {
+  provider: ProviderId;
+  email: string;
+  customImap: CustomImapSettings;
+  internalRole?: string | null;
+  focusPreferences?: OnboardingState["focusPreferences"] | null;
+  selectedInboxes?: string[] | null;
+}): ConnectInboxRequest {
+  const email = options.email.trim();
+  const resolvedImapSettings = applyProviderDefaults(
+    options.provider,
+    options.customImap,
+    email,
+  );
+
+  return {
+    provider: options.provider,
+    email,
+    host: resolvedImapSettings.host.trim(),
+    port: resolvedImapSettings.port.trim(),
+    ssl: resolvedImapSettings.ssl,
+    username: usesEmailAsImapUsername(options.provider)
+      ? email
+      : resolvedImapSettings.username.trim(),
+    password: resolvedImapSettings.password,
+    internalRole: options.internalRole,
+    focusPreferences: options.focusPreferences,
+    selectedInboxes: options.selectedInboxes,
+  };
+}
 
 export type SendInboxAttachmentRequest = {
   name: string;
