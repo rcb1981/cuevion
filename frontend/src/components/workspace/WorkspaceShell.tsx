@@ -16522,6 +16522,14 @@ function WorkbenchView({
     accessLevel === "Admin" || accessLevel === "Editor";
   const getTeamInboxAccessLabel = (member: TeamMemberEntry) =>
     member.selectedInboxes.length > 0 ? member.selectedInboxes.join(", ") : "No inbox access";
+  const inviteAccessLevelDescription =
+    inviteAccessLevel === "Admin"
+      ? "Full workspace access"
+      : inviteAccessLevel === "Editor"
+        ? "Can access and work in selected inboxes"
+        : inviteAccessLevel === "Review"
+          ? "Access to shared collaborations only"
+          : "Access to specific invited emails only";
   const defaultTeamAccessState = activeTeamMember
     ? {
         level: activeTeamMember.accessLevel,
@@ -16924,6 +16932,9 @@ function WorkbenchView({
                         {getTeamAccessLevelLabel(level)}
                       </button>
                     ))}
+                  </div>
+                  <div className="text-[0.82rem] leading-6 text-[var(--workspace-text-soft)]">
+                    {inviteAccessLevelDescription}
                   </div>
                 </div>
 
