@@ -4056,10 +4056,17 @@ function inferHeuristicSignal(
     searchableText,
     metaBillingKeywords,
   );
+  // A promo keyword in the subject is a strong, intentional signal — do not let
+  // isMetaBillingSystemMail suppress it.  Billing keywords are detected from the
+  // full body/footer and are too broad ("ads", "advertentie") to override an
+  // explicit subject like "Area53 Promo: …".  For everything else (promo detected
+  // only in snippet/body) keep the existing billing-guard behaviour unchanged.
+  const subjectText = (message.subject ?? "").toLowerCase();
+  const isPromoInSubject = includesAnyKeyword(subjectText, promoKeywords);
   const isPromo =
     includesAnyKeyword(searchableText, promoKeywords) &&
     !isGoogleSecurityAuthMail &&
-    !isMetaBillingSystemMail;
+    (!isMetaBillingSystemMail || isPromoInSubject);
   const isPriority =
     includesAnyKeyword(searchableText, priorityKeywords) && !isPromo;
   const isUpdate =
