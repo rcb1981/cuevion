@@ -3982,6 +3982,14 @@ function inferHeuristicSignal(
     "announcement",
     "register now",
     "limited time",
+    // Dutch promo indicators — required for custom IMAP promo inboxes (e.g. Area53)
+    // where emails use Dutch promotional vocabulary not covered by the English list.
+    "afmelden",       // unsubscribe
+    "uitschrijven",   // unsubscribe (verb form)
+    "nieuwsbrief",    // newsletter
+    "aanbieding",     // offer/deal
+    "korting",        // discount
+    "promotie",       // promotion
   ];
   const googleSecurityKeywords = [
     "verification",
