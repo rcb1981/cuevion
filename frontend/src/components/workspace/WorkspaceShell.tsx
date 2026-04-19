@@ -258,6 +258,27 @@ function doesMessageMatchCanonicalIdentitySet(
   return getCanonicalMessageIdentityKeys(message).some((key) => identityKeys.has(key));
 }
 
+function dedupeSmartFolderEntriesByCanonicalIdentity<
+  T extends { mailboxId: InboxId; message: MailMessage }
+>(entries: T[]) {
+  const seenIdentityKeysByMailbox = new Map<InboxId, Set<string>>();
+
+  return entries.filter((entry) => {
+    const seenIdentityKeys =
+      seenIdentityKeysByMailbox.get(entry.mailboxId) ?? new Set<string>();
+    const identityKeys = getCanonicalMessageIdentityKeys(entry.message);
+    const isDuplicateInstance = identityKeys.some((key) => seenIdentityKeys.has(key));
+
+    if (isDuplicateInstance) {
+      return false;
+    }
+
+    identityKeys.forEach((key) => seenIdentityKeys.add(key));
+    seenIdentityKeysByMailbox.set(entry.mailboxId, seenIdentityKeys);
+    return true;
+  });
+}
+
 function resolveUnreadOverride(
   overrides: MessageUnreadOverrideStore,
   message: MessageIdentitySource,
@@ -9986,26 +10007,28 @@ function MailboxView({
       ? activeSmartFolder.selectedInboxIds
       : orderedMailboxes.map((candidate) => candidate.id);
   const smartFolderEntries = activeSmartFolder
-    ? smartFolderScopeMailboxIds.flatMap((mailboxId) =>
-        smartFolderSourceFolders.flatMap((folder) =>
-          ((mailboxId === mailbox.id
-            ? messageCollections[folder]
-            : mailboxStore[mailboxId]?.[folder]) ?? [])
-            .filter((message) =>
-              doesMessageMatchSmartFolder(
+    ? dedupeSmartFolderEntriesByCanonicalIdentity(
+        smartFolderScopeMailboxIds.flatMap((mailboxId) =>
+          smartFolderSourceFolders.flatMap((folder) =>
+            ((mailboxId === mailbox.id
+              ? messageCollections[folder]
+              : mailboxStore[mailboxId]?.[folder]) ?? [])
+              .filter((message) =>
+                doesMessageMatchSmartFolder(
+                  message,
+                  activeSmartFolder,
+                  {
+                    mailboxContext:
+                      orderedMailboxes.find((candidate) => candidate.id === mailboxId) ?? null,
+                  },
+                ),
+              )
+              .map((message) => ({
+                mailboxId,
+                folder,
                 message,
-                activeSmartFolder,
-                {
-                  mailboxContext:
-                    orderedMailboxes.find((candidate) => candidate.id === mailboxId) ?? null,
-                },
-              ),
-            )
-            .map((message) => ({
-              mailboxId,
-              folder,
-              message,
-            })),
+              })),
+          ),
         ),
       )
     : [];
