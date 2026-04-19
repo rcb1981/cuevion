@@ -940,16 +940,6 @@ function createEmptySmartFolderRule(): SmartFolderRule {
   };
 }
 
-const smartFolderLabelClassificationMap: Record<string, CuevionInternalClassification[]> = {
-  business: ["business", "business_reminder"],
-  demo: ["demo", "high_priority_demo"],
-  finance: ["finance", "royalty_statement"],
-  other: ["unknown"],
-  promo: ["promo", "promo_reminder"],
-  reply: ["reply"],
-  update: ["workflow_update", "distributor_update", "info"],
-};
-
 const smartFolderLabelOptions = [
   { value: "business", label: "Business" },
   { value: "demo", label: "Demo" },
@@ -960,7 +950,13 @@ const smartFolderLabelOptions = [
   { value: "update", label: "Update" },
 ] as const;
 
-function getSmartFolderRuleMatchValue(message: MailMessage, field: SmartFolderRuleField) {
+function getSmartFolderRuleMatchValue(
+  message: MailMessage,
+  field: SmartFolderRuleField,
+  options?: {
+    mailboxContext?: Pick<ManagedWorkspaceInbox | OrderedMailbox, "id" | "title" | "email"> | null;
+  },
+) {
   if (field === "From") {
     return message.from;
   }
@@ -970,7 +966,7 @@ function getSmartFolderRuleMatchValue(message: MailMessage, field: SmartFolderRu
   }
 
   if (field === "Label") {
-    return message.internalClassification ?? "unknown";
+    return resolveVisibleSmartFolderLabelValue(message, options);
   }
 
   const normalizedSender = message.from.trim().toLowerCase();
@@ -1065,34 +1061,26 @@ function resolveVisibleClassification(
   return signalClassification;
 }
 
-function doesMessageMatchSmartFolderRule(message: MailMessage, rule: SmartFolderRule) {
+function doesMessageMatchSmartFolderRule(
+  message: MailMessage,
+  rule: SmartFolderRule,
+  options?: {
+    mailboxContext?: Pick<ManagedWorkspaceInbox | OrderedMailbox, "id" | "title" | "email"> | null;
+  },
+) {
   const ruleValue = rule.value.trim().toLowerCase();
 
   if (!ruleValue) {
     return false;
   }
 
-  if (rule.field === "Label") {
-    const classification = resolveVisibleClassification(message)
-      .trim()
-      .toLowerCase();
-    const matchingClassifications =
-      smartFolderLabelClassificationMap[
-        ruleValue as keyof typeof smartFolderLabelClassificationMap
-      ];
-
-    if (!matchingClassifications) {
-      return false;
-    }
-
-    return matchingClassifications.includes(
-      classification as CuevionInternalClassification,
-    );
-  }
-
-  const matchValue = getSmartFolderRuleMatchValue(message, rule.field)
+  const matchValue = getSmartFolderRuleMatchValue(message, rule.field, options)
     .trim()
     .toLowerCase();
+
+  if (rule.field === "Label") {
+    return matchValue === ruleValue;
+  }
 
   return matchValue.includes(ruleValue);
 }
@@ -1158,13 +1146,9 @@ function doesMessageMatchSmartFolder(
     mailboxContext?: Pick<ManagedWorkspaceInbox | OrderedMailbox, "id" | "title" | "email"> | null;
   },
 ) {
-  return folder.rules.some((rule) => {
-    if (rule.field === "Label") {
-      return resolveVisibleSmartFolderLabelValue(message, options) === rule.value.trim().toLowerCase();
-    }
-
-    return doesMessageMatchSmartFolderRule(message, rule);
-  });
+  return folder.rules.some((rule) =>
+    doesMessageMatchSmartFolderRule(message, rule, options),
+  );
 }
 
 function hasSignatureContent(signature: InboxSignatureSettings) {
