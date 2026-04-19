@@ -229,6 +229,35 @@ function findMatchingMessageByIdentity<T>(
   return indexes.byPreviewIdentity.get(buildStablePreviewIdentity(message));
 }
 
+function buildCanonicalIdentityKeySetForMessageIds(
+  store: MailboxStore,
+  messageIds: string[],
+) {
+  const messageIdSet = new Set(messageIds);
+  const identityKeys = new Set<string>();
+
+  Object.values(store).forEach((collections) => {
+    canonicalFolderOrder.forEach((folder) => {
+      collections[folder].forEach((message) => {
+        if (!messageIdSet.has(message.id)) {
+          return;
+        }
+
+        getCanonicalMessageIdentityKeys(message).forEach((key) => identityKeys.add(key));
+      });
+    });
+  });
+
+  return identityKeys;
+}
+
+function doesMessageMatchCanonicalIdentitySet(
+  message: MessageIdentitySource,
+  identityKeys: Set<string>,
+) {
+  return getCanonicalMessageIdentityKeys(message).some((key) => identityKeys.has(key));
+}
+
 function resolveUnreadOverride(
   overrides: MessageUnreadOverrideStore,
   message: MessageIdentitySource,
@@ -12561,10 +12590,12 @@ function MailboxView({
       return;
     }
 
-    const messageIdSet = new Set(messageIds);
+    const identityKeySet = buildCanonicalIdentityKeySetForMessageIds(mailboxStore, messageIds);
     const messagesToMove = Object.values(mailboxStore).flatMap((collections) =>
       canonicalFolderOrder.flatMap((folder) =>
-        collections[folder].filter((message) => messageIdSet.has(message.id)),
+        collections[folder].filter((message) =>
+          doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
+        ),
       ),
     );
 
@@ -12575,7 +12606,9 @@ function MailboxView({
     setMailboxStore((currentStore) => {
       const currentMessagesToMove = Object.values(currentStore).flatMap((collections) =>
         canonicalFolderOrder.flatMap((folder) =>
-          collections[folder].filter((message) => messageIdSet.has(message.id)),
+          collections[folder].filter((message) =>
+            doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
+          ),
         ),
       );
 
@@ -12591,51 +12624,79 @@ function MailboxView({
             typedMailboxId === targetMailboxId && targetFolder === "Inbox"
               ? [
                   ...currentMessagesToMove,
-                  ...collections.Inbox.filter((message) => !messageIdSet.has(message.id)),
+                  ...collections.Inbox.filter(
+                    (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
+                  ),
                 ]
-              : collections.Inbox.filter((message) => !messageIdSet.has(message.id)),
+              : collections.Inbox.filter(
+                  (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
+                ),
           Drafts:
             typedMailboxId === targetMailboxId && targetFolder === "Drafts"
               ? [
                   ...currentMessagesToMove,
-                  ...collections.Drafts.filter((message) => !messageIdSet.has(message.id)),
+                  ...collections.Drafts.filter(
+                    (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
+                  ),
                 ]
-              : collections.Drafts.filter((message) => !messageIdSet.has(message.id)),
+              : collections.Drafts.filter(
+                  (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
+                ),
           Sent:
             typedMailboxId === targetMailboxId && targetFolder === "Sent"
               ? [
                   ...currentMessagesToMove,
-                  ...collections.Sent.filter((message) => !messageIdSet.has(message.id)),
+                  ...collections.Sent.filter(
+                    (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
+                  ),
                 ]
-              : collections.Sent.filter((message) => !messageIdSet.has(message.id)),
+              : collections.Sent.filter(
+                  (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
+                ),
           Archive:
             typedMailboxId === targetMailboxId && targetFolder === "Archive"
               ? [
                   ...currentMessagesToMove,
-                  ...collections.Archive.filter((message) => !messageIdSet.has(message.id)),
+                  ...collections.Archive.filter(
+                    (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
+                  ),
                 ]
-              : collections.Archive.filter((message) => !messageIdSet.has(message.id)),
+              : collections.Archive.filter(
+                  (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
+                ),
           Filtered:
             typedMailboxId === targetMailboxId && targetFolder === "Filtered"
               ? [
                   ...currentMessagesToMove,
-                  ...collections.Filtered.filter((message) => !messageIdSet.has(message.id)),
+                  ...collections.Filtered.filter(
+                    (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
+                  ),
                 ]
-              : collections.Filtered.filter((message) => !messageIdSet.has(message.id)),
+              : collections.Filtered.filter(
+                  (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
+                ),
           Spam:
             typedMailboxId === targetMailboxId && targetFolder === "Spam"
               ? [
                   ...currentMessagesToMove,
-                  ...collections.Spam.filter((message) => !messageIdSet.has(message.id)),
+                  ...collections.Spam.filter(
+                    (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
+                  ),
                 ]
-              : collections.Spam.filter((message) => !messageIdSet.has(message.id)),
+              : collections.Spam.filter(
+                  (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
+                ),
           Trash:
             typedMailboxId === targetMailboxId && targetFolder === "Trash"
               ? [
                   ...currentMessagesToMove,
-                  ...collections.Trash.filter((message) => !messageIdSet.has(message.id)),
+                  ...collections.Trash.filter(
+                    (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
+                  ),
                 ]
-              : collections.Trash.filter((message) => !messageIdSet.has(message.id)),
+              : collections.Trash.filter(
+                  (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
+                ),
         };
 
         return nextStore;
@@ -12682,7 +12743,10 @@ function MailboxView({
     if (targetFolder === "Filtered") {
       const groupedMessagesToMove = Object.entries(groupedMessageIds).flatMap(([mailboxId, ids]) => {
         const typedMailboxId = mailboxId as InboxId;
-        const messageIdSet = new Set(ids ?? []);
+        const identityKeySet = buildCanonicalIdentityKeySetForMessageIds(
+          mailboxStore,
+          ids ?? [],
+        );
         const mailboxCollections = mailboxStore[typedMailboxId];
 
         if (!mailboxCollections) {
@@ -12690,7 +12754,9 @@ function MailboxView({
         }
 
         return canonicalFolderOrder.flatMap((folder) =>
-          mailboxCollections[folder].filter((message) => messageIdSet.has(message.id)),
+          mailboxCollections[folder].filter((message) =>
+            doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
+          ),
         );
       });
 
@@ -12702,10 +12768,15 @@ function MailboxView({
 
       Object.entries(groupedMessageIds).forEach(([mailboxId, ids]) => {
         const typedMailboxId = mailboxId as InboxId;
-        const messageIdSet = new Set(ids ?? []);
+        const identityKeySet = buildCanonicalIdentityKeySetForMessageIds(
+          currentStore,
+          ids ?? [],
+        );
         const mailboxCollections = currentStore[typedMailboxId];
         const messagesToMove = canonicalFolderOrder.flatMap((folder) =>
-          mailboxCollections[folder].filter((message) => messageIdSet.has(message.id)),
+          mailboxCollections[folder].filter((message) =>
+            doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
+          ),
         );
 
         if (messagesToMove.length === 0) {
@@ -12717,51 +12788,79 @@ function MailboxView({
             targetFolder === "Inbox"
               ? [
                   ...messagesToMove,
-                  ...mailboxCollections.Inbox.filter((message) => !messageIdSet.has(message.id)),
+                  ...mailboxCollections.Inbox.filter(
+                    (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
+                  ),
                 ]
-              : mailboxCollections.Inbox.filter((message) => !messageIdSet.has(message.id)),
+              : mailboxCollections.Inbox.filter(
+                  (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
+                ),
           Drafts:
             targetFolder === "Drafts"
               ? [
                   ...messagesToMove,
-                  ...mailboxCollections.Drafts.filter((message) => !messageIdSet.has(message.id)),
+                  ...mailboxCollections.Drafts.filter(
+                    (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
+                  ),
                 ]
-              : mailboxCollections.Drafts.filter((message) => !messageIdSet.has(message.id)),
+              : mailboxCollections.Drafts.filter(
+                  (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
+                ),
           Sent:
             targetFolder === "Sent"
               ? [
                   ...messagesToMove,
-                  ...mailboxCollections.Sent.filter((message) => !messageIdSet.has(message.id)),
+                  ...mailboxCollections.Sent.filter(
+                    (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
+                  ),
                 ]
-              : mailboxCollections.Sent.filter((message) => !messageIdSet.has(message.id)),
+              : mailboxCollections.Sent.filter(
+                  (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
+                ),
           Archive:
             targetFolder === "Archive"
               ? [
                   ...messagesToMove,
-                  ...mailboxCollections.Archive.filter((message) => !messageIdSet.has(message.id)),
+                  ...mailboxCollections.Archive.filter(
+                    (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
+                  ),
                 ]
-              : mailboxCollections.Archive.filter((message) => !messageIdSet.has(message.id)),
+              : mailboxCollections.Archive.filter(
+                  (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
+                ),
           Filtered:
             targetFolder === "Filtered"
               ? [
                   ...messagesToMove,
-                  ...mailboxCollections.Filtered.filter((message) => !messageIdSet.has(message.id)),
+                  ...mailboxCollections.Filtered.filter(
+                    (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
+                  ),
                 ]
-              : mailboxCollections.Filtered.filter((message) => !messageIdSet.has(message.id)),
+              : mailboxCollections.Filtered.filter(
+                  (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
+                ),
           Spam:
             targetFolder === "Spam"
               ? [
                   ...messagesToMove,
-                  ...mailboxCollections.Spam.filter((message) => !messageIdSet.has(message.id)),
+                  ...mailboxCollections.Spam.filter(
+                    (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
+                  ),
                 ]
-              : mailboxCollections.Spam.filter((message) => !messageIdSet.has(message.id)),
+              : mailboxCollections.Spam.filter(
+                  (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
+                ),
           Trash:
             targetFolder === "Trash"
               ? [
                   ...messagesToMove,
-                  ...mailboxCollections.Trash.filter((message) => !messageIdSet.has(message.id)),
+                  ...mailboxCollections.Trash.filter(
+                    (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
+                  ),
                 ]
-              : mailboxCollections.Trash.filter((message) => !messageIdSet.has(message.id)),
+              : mailboxCollections.Trash.filter(
+                  (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
+                ),
         };
       });
 
@@ -12792,9 +12891,12 @@ function MailboxView({
     }
 
     const sourceMessages = mailboxStore[sourceMailboxId][sourceFolder];
-    const messageIdSet = new Set(messageIds);
+    const identityKeySet = buildCanonicalIdentityKeySetForMessageIds(
+      mailboxStore,
+      messageIds,
+    );
     const targetMessages = sourceMessages.filter((message) =>
-      messageIdSet.has(message.id),
+      doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
     );
 
     if (targetMessages.length === 0) {
@@ -12812,12 +12914,12 @@ function MailboxView({
       if (sourceMailboxId === targetMailboxId) {
         const currentMailboxCollections = currentStore[sourceMailboxId];
         const nextSourceMessages = currentMailboxCollections[sourceFolder].filter(
-          (message) => !messageIdSet.has(message.id),
+          (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
         );
         const nextTargetMessages = [
           ...targetMessages,
           ...currentMailboxCollections[targetFolder].filter(
-            (message) => !messageIdSet.has(message.id),
+            (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
           ),
         ];
 
@@ -12827,13 +12929,13 @@ function MailboxView({
             targetFolder === "Inbox"
               ? nextTargetMessages
               : currentMailboxCollections.Inbox.filter(
-                  (message) => !messageIdSet.has(message.id),
+                  (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
                 ),
           Filtered:
             targetFolder === "Filtered"
               ? nextTargetMessages
               : currentMailboxCollections.Filtered.filter(
-                  (message) => !messageIdSet.has(message.id),
+                  (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
                 ),
           [sourceFolder]: nextSourceMessages,
           [targetFolder]: nextTargetMessages,
@@ -12845,7 +12947,7 @@ function MailboxView({
       nextStore[sourceMailboxId] = {
         ...currentStore[sourceMailboxId],
         [sourceFolder]: currentStore[sourceMailboxId][sourceFolder].filter(
-          (message) => !messageIdSet.has(message.id),
+          (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
         ),
       };
       nextStore[targetMailboxId] = {
@@ -12853,7 +12955,7 @@ function MailboxView({
         [targetFolder]: [
           ...targetMessages,
           ...currentStore[targetMailboxId][targetFolder].filter(
-            (message) => !messageIdSet.has(message.id),
+            (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
           ),
         ],
       };
