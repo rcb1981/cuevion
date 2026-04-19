@@ -17745,7 +17745,7 @@ const settingsDangerActionClass =
 const focusPreferenceOptions: FocusPreferenceLevel[] = ["high", "medium", "low"];
 const focusPreferenceOptionLabels: Record<FocusPreferenceLevel, string> = {
   low: "Low",
-  medium: "Medium",
+  medium: "Normal",
   high: "High",
 };
 type FocusPreferences = UserConfig["focusPreferences"];
