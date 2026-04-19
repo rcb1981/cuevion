@@ -10006,6 +10006,22 @@ function MailboxView({
     activeSmartFolder?.scope === "selected" && activeSmartFolder.selectedInboxIds.length > 0
       ? activeSmartFolder.selectedInboxIds
       : orderedMailboxes.map((candidate) => candidate.id);
+  const isArchivedInCuevionForMailbox = (
+    mailboxId: InboxId,
+    message: MailMessage,
+  ) => {
+    const archiveMessages =
+      mailboxId === mailbox.id
+        ? messageCollections.Archive
+        : mailboxStore[mailboxId]?.Archive ?? [];
+
+    return archiveMessages.some((archivedMessage) =>
+      doesMessageMatchCanonicalIdentitySet(
+        archivedMessage,
+        new Set(getCanonicalMessageIdentityKeys(message)),
+      ),
+    );
+  };
   const smartFolderEntries = activeSmartFolder
     ? dedupeSmartFolderEntriesByCanonicalIdentity(
         smartFolderScopeMailboxIds.flatMap((mailboxId) =>
@@ -10023,6 +10039,7 @@ function MailboxView({
                   },
                 ),
               )
+              .filter((message) => !isArchivedInCuevionForMailbox(mailboxId, message))
               .map((message) => ({
                 mailboxId,
                 folder,
