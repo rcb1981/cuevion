@@ -9968,14 +9968,15 @@ function MailboxView({
     ).values()
   );
 
-  const threadDedupedMessages =
-    dedupeLatestMessagePerThread(
-      uniqueMessages.map((m) => ({
-        ...m,
-        threadId: resolveMailThreadId(m),
-        from: m.from ?? m.sender ?? "",
-      }))
-    )
+  const threadDedupedMessages = activeSmartFolder
+    ? uniqueMessages
+    : dedupeLatestMessagePerThread(
+        uniqueMessages.map((m) => ({
+          ...m,
+          threadId: resolveMailThreadId(m),
+          from: m.from ?? m.sender ?? "",
+        })),
+      );
 
   const threadMessageCountByThreadId = useMemo(() => {
     const counts = new Map<string, number>();
