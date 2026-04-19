@@ -4616,6 +4616,23 @@ function shouldDisplayMessageInFilteredFolderForWorkspaceMessage(
   );
 }
 
+function getMailboxReadyInboxMessagesForWorkspaceMailbox(
+  mailboxCollections: MailboxCollections,
+  manualPriorityOverrides: Partial<Record<string, ManualPriorityOverride>>,
+  focusPreferences: UserConfig["focusPreferences"],
+  options?: { preferPromoMailboxContext?: boolean },
+) {
+  return mailboxCollections.Inbox.filter(
+    (message) =>
+      !shouldDisplayMessageInFilteredFolderForWorkspaceMessage(
+        message,
+        manualPriorityOverrides[message.id],
+        focusPreferences,
+        options,
+      ),
+  );
+}
+
 function getVisibleCategoryLabel(
   message: Pick<
     MailMessage,
@@ -9098,6 +9115,7 @@ function MailboxView({
   const [trashEmptiedToastMessage, setTrashEmptiedToastMessage] = useState<string | null>(null);
   const dragPreviewCleanupRef = useRef<(() => void) | null>(null);
   const lastPriorityTraceIdRef = useRef<string | null>(null);
+  const lastPriorityTargetMessageIdRef = useRef<string | null>(null);
   const [composeTo, setComposeTo] = useState("");
   const [composeCc, setComposeCc] = useState("");
   const [composeBcc, setComposeBcc] = useState("");
@@ -9930,8 +9948,10 @@ function MailboxView({
     });
   };
   const visibleMailboxCollections: Record<MailFolder, MailMessage[]> = {
-    Inbox: mailboxCollections.Inbox.filter(
-      (message) => !lowSignalInboxMessageIds.has(message.id),
+    Inbox: getMailboxReadyInboxMessagesForWorkspaceMailbox(
+      mailboxCollections,
+      manualPriorityOverrides,
+      focusPreferences,
     ),
     Drafts: mailboxCollections.Drafts,
     Sent: mailboxCollections.Sent,
@@ -10405,6 +10425,70 @@ function MailboxView({
           : "no-selection";
   const fullWidthMessage = selectedMessageFromFolder ?? selectedMessage;
   const renderTargetMessage = isFullMessageOpen ? fullWidthMessage : selectedMessage;
+  const priorityTraceTargetMessageId = lastPriorityTargetMessageIdRef.current;
+  const priorityTraceTargetLocation =
+    priorityTraceTargetMessageId
+      ? currentMailboxMessageLocationById[priorityTraceTargetMessageId] ?? null
+      : null;
+  const toTraceMessageRows = (messages: MailMessage[]) =>
+    messages.map((message) => ({
+      id: message.id,
+      subject: message.subject,
+    }));
+
+  useEffect(() => {
+    if (mailbox.id !== "main" && mailbox.id !== "promo") {
+      return;
+    }
+
+    console.groupCollapsed(`[MailboxPriorityStateTrace] mailbox=${mailbox.id}`);
+    console.log("selectedMailboxId", mailbox.id);
+    console.log("activeFolder", activeFolder);
+    console.log("mailboxStore.Inbox", toTraceMessageRows(mailboxStore[mailbox.id]?.Inbox ?? []));
+    console.log(
+      "mailboxStore.Filtered",
+      toTraceMessageRows(mailboxStore[mailbox.id]?.Filtered ?? []),
+    );
+    console.log("messageCollections.Inbox", toTraceMessageRows(messageCollections.Inbox));
+    console.log("messageCollections.Filtered", toTraceMessageRows(messageCollections.Filtered));
+    console.log("visibleMessages", toTraceMessageRows(visibleMessages));
+    console.log("threadRepresentativeRows", toTraceMessageRows(threadDedupedMessages));
+    console.log("sortedMessages", toTraceMessageRows(sortedMessages));
+    console.log("selectedMessageId", selectedMessageId);
+    console.log(
+      "selectedMessage",
+      selectedMessage
+        ? {
+            id: selectedMessage.id,
+            subject: selectedMessage.subject,
+          }
+        : null,
+    );
+    console.log(
+      "fullWidthMessage",
+      fullWidthMessage
+        ? {
+            id: fullWidthMessage.id,
+            subject: fullWidthMessage.subject,
+          }
+        : null,
+    );
+    console.log("currentMailboxMessageLocationById", currentMailboxMessageLocationById);
+    console.groupEnd();
+  }, [
+    activeFolder,
+    currentMailboxMessageLocationById,
+    fullWidthMessage,
+    mailbox.id,
+    mailboxStore,
+    messageCollections.Filtered,
+    messageCollections.Inbox,
+    selectedMessage,
+    selectedMessageId,
+    sortedMessages,
+    threadDedupedMessages,
+    visibleMessages,
+  ]);
 
   useEffect(() => {
     const traceId = lastPriorityTraceIdRef.current;
@@ -10418,16 +10502,52 @@ function MailboxView({
       selectedMailboxId: mailbox.id,
       activeFolder,
       selectedMessageId,
+      priorityTraceTargetMessageId,
+      priorityTraceTargetLocation,
       selectedMessageExistsInMailboxStoreInbox:
         (mailboxStore[mailbox.id]?.Inbox ?? []).some(
+          (message) => message.id === selectedMessageId,
+        ),
+      selectedMessageExistsInMailboxStoreFiltered:
+        (mailboxStore[mailbox.id]?.Filtered ?? []).some(
           (message) => message.id === selectedMessageId,
         ),
       selectedMessageExistsInMessageCollectionsInbox: messageCollections.Inbox.some(
         (message) => message.id === selectedMessageId,
       ),
+      selectedMessageExistsInMessageCollectionsFiltered: messageCollections.Filtered.some(
+        (message) => message.id === selectedMessageId,
+      ),
+      selectedMessageExistsInVisibleMessages: visibleMessages.some(
+        (message) => message.id === selectedMessageId,
+      ),
       selectedMessageExistsInSortedMessages: sortedMessages.some(
         (message) => message.id === selectedMessageId,
       ),
+      clickedPriorityTargetExistsInMailboxStoreInbox:
+        priorityTraceTargetMessageId !== null &&
+        (mailboxStore[mailbox.id]?.Inbox ?? []).some(
+          (message) => message.id === priorityTraceTargetMessageId,
+        ),
+      clickedPriorityTargetExistsInMailboxStoreFiltered:
+        priorityTraceTargetMessageId !== null &&
+        (mailboxStore[mailbox.id]?.Filtered ?? []).some(
+          (message) => message.id === priorityTraceTargetMessageId,
+        ),
+      clickedPriorityTargetExistsInMessageCollectionsInbox:
+        priorityTraceTargetMessageId !== null &&
+        messageCollections.Inbox.some((message) => message.id === priorityTraceTargetMessageId),
+      clickedPriorityTargetExistsInMessageCollectionsFiltered:
+        priorityTraceTargetMessageId !== null &&
+        messageCollections.Filtered.some(
+          (message) => message.id === priorityTraceTargetMessageId,
+        ),
+      clickedPriorityTargetExistsInVisibleMessages:
+        priorityTraceTargetMessageId !== null &&
+        visibleMessages.some((message) => message.id === priorityTraceTargetMessageId),
+      clickedPriorityTargetExistsInSortedMessages:
+        priorityTraceTargetMessageId !== null &&
+        sortedMessages.some((message) => message.id === priorityTraceTargetMessageId),
       selectedMessageFallbackBranch,
       selectedMessage: selectedMessage
         ? {
@@ -10455,11 +10575,15 @@ function MailboxView({
     mailbox.id,
     mailboxStore,
     messageCollections.Inbox,
+    messageCollections.Filtered,
+    priorityTraceTargetLocation,
+    priorityTraceTargetMessageId,
     renderTargetMessage,
     selectedMessage,
     selectedMessageFallbackBranch,
     selectedMessageId,
     sortedMessages,
+    visibleMessages,
   ]);
 
   useEffect(() => {
@@ -10803,6 +10927,7 @@ function MailboxView({
 
     if (notificationNavigationRequest.source === "priority" && traceId) {
       lastPriorityTraceIdRef.current = traceId;
+      lastPriorityTargetMessageIdRef.current = notificationNavigationRequest.messageId;
     }
 
     if (!targetFolder || !targetMessage) {
@@ -10813,16 +10938,28 @@ function MailboxView({
           notificationNavigationRequest,
           activeFolder,
           selectedMessageIdAfterNavigation: selectedMessageId,
-          selectedMessageExistsInMailboxStoreInbox:
+          clickedPriorityTargetExistsInMailboxStoreInbox:
             (mailboxStore[mailbox.id]?.Inbox ?? []).some(
               (message) => message.id === notificationNavigationRequest.messageId,
             ),
-          selectedMessageExistsInMessageCollectionsInbox: messageCollections.Inbox.some(
+          clickedPriorityTargetExistsInMailboxStoreFiltered:
+            (mailboxStore[mailbox.id]?.Filtered ?? []).some(
+              (message) => message.id === notificationNavigationRequest.messageId,
+            ),
+          clickedPriorityTargetExistsInMessageCollectionsInbox: messageCollections.Inbox.some(
             (message) => message.id === notificationNavigationRequest.messageId,
           ),
-          selectedMessageExistsInSortedMessages: sortedMessages.some(
+          clickedPriorityTargetExistsInMessageCollectionsFiltered:
+            messageCollections.Filtered.some(
+              (message) => message.id === notificationNavigationRequest.messageId,
+            ),
+          clickedPriorityTargetExistsInVisibleMessages: visibleMessages.some(
             (message) => message.id === notificationNavigationRequest.messageId,
           ),
+          clickedPriorityTargetExistsInSortedMessages: sortedMessages.some(
+            (message) => message.id === notificationNavigationRequest.messageId,
+          ),
+          representativeRowSet: toTraceMessageRows(threadDedupedMessages),
           fallbackBranchIfRenderedNow: selectedMessageFallbackBranch,
         });
         return;
@@ -10893,11 +11030,14 @@ function MailboxView({
     mailboxStore,
     mailbox.id,
     messageCollections.Inbox,
+    messageCollections.Filtered,
     notificationNavigationRequest,
     onConsumeNotificationNavigation,
     selectedMessageFallbackBranch,
     selectedMessageId,
     sortedMessages,
+    threadDedupedMessages,
+    visibleMessages,
   ]);
 
   useEffect(() => {
@@ -25094,7 +25234,18 @@ export function WorkspaceShell({
     }> = [];
 
     for (const candidate of orderedMailboxes) {
-      for (const message of mailboxStore[candidate.id]?.Inbox ?? []) {
+      const candidateFocusPreferences =
+        effectiveFocusPreferencesByMailbox[candidate.id] ?? activeFocusPreferences;
+      const candidateVisibleInboxMessages = getMailboxReadyInboxMessagesForWorkspaceMailbox(
+        mailboxStore[candidate.id] ?? createEmptyMailboxCollections(),
+        manualPriorityOverrides,
+        candidateFocusPreferences,
+        {
+          preferPromoMailboxContext: isPromoMailboxContext(candidate),
+        },
+      );
+
+      for (const message of candidateVisibleInboxMessages) {
         if (seenMessageIds.has(message.id)) {
           continue;
         }
