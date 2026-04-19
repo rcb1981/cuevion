@@ -572,6 +572,8 @@ const MAIL_OUT_OF_OFFICE_STORAGE_KEY = "cuevion-mail-out-of-office";
 const OUT_OF_OFFICE_REPLY_LOG_STORAGE_KEY = "cuevion-out-of-office-reply-log";
 const MANAGED_INBOXES_STORAGE_KEY = "cuevion-managed-inboxes";
 const MAILBOX_TITLE_OVERRIDES_STORAGE_KEY = "cuevion-mailbox-title-overrides";
+const MAILBOX_FOCUS_PREFERENCE_OVERRIDES_STORAGE_KEY =
+  "cuevion-mailbox-focus-preference-overrides";
 const OUT_OF_OFFICE_SUPPRESSION_WINDOW_MS = 24 * 60 * 60 * 1000;
 const SMART_FOLDERS_STORAGE_KEY = "cuevion-smart-folders";
 const MAIL_LIST_PANE_WIDTH_STORAGE_KEY = "cuevion-mail-list-pane-width";
@@ -628,6 +630,10 @@ function buildManualPriorityOverridesStorageKey(
 
 function buildNotificationReadStorageKey(workspaceUserId: string) {
   return `${CUEVION_NOTIFICATION_READ_STORAGE_KEY}:${workspaceUserId}`;
+}
+
+function buildMailboxFocusPreferenceOverridesStorageKey(workspaceUserId: string) {
+  return `${MAILBOX_FOCUS_PREFERENCE_OVERRIDES_STORAGE_KEY}:${workspaceUserId}`;
 }
 
 function createEmptySignatureSettings(): InboxSignatureSettings {
@@ -17668,8 +17674,24 @@ const focusPreferenceOptionLabels: Record<FocusPreferenceLevel, string> = {
   medium: "Medium",
   high: "High",
 };
+type FocusPreferences = UserConfig["focusPreferences"];
+type FocusPreferenceField = keyof FocusPreferences;
+type FocusPreferenceOverrides = Partial<FocusPreferences>;
+type MailboxFocusPreferenceOverridesStore = Partial<Record<InboxId, FocusPreferenceOverrides>>;
+const focusPreferenceFields: FocusPreferenceField[] = [
+  "demos",
+  "promo",
+  "finance",
+  "legal",
+  "business",
+  "updates",
+  "distribution",
+  "royalties",
+  "promoReminders",
+  "paymentReminders",
+];
 const focusPreferenceFieldLabels: Record<
-  keyof UserConfig["focusPreferences"],
+  FocusPreferenceField,
   string
 > = {
   demos: "Demos",
@@ -17685,7 +17707,7 @@ const focusPreferenceFieldLabels: Record<
 };
 const focusPreferenceGroups: Array<{
   title: string;
-  fields: Array<keyof UserConfig["focusPreferences"]>;
+  fields: FocusPreferenceField[];
 }> = [
   {
     title: "Primary",
@@ -17700,6 +17722,71 @@ const focusPreferenceGroups: Array<{
     fields: ["updates", "distribution", "promoReminders", "paymentReminders"],
   },
 ];
+
+function normalizeFocusPreferenceOverrides(
+  value: unknown,
+): FocusPreferenceOverrides {
+  if (!value || typeof value !== "object") {
+    return {};
+  }
+
+  return focusPreferenceFields.reduce<FocusPreferenceOverrides>((nextValue, field) => {
+    const fieldValue = (value as Partial<Record<FocusPreferenceField, unknown>>)[field];
+
+    if (
+      fieldValue === "high" ||
+      fieldValue === "medium" ||
+      fieldValue === "low"
+    ) {
+      nextValue[field] = fieldValue;
+    }
+
+    return nextValue;
+  }, {});
+}
+
+function normalizeMailboxFocusPreferenceOverridesStore(
+  value: unknown,
+): MailboxFocusPreferenceOverridesStore {
+  if (!value || typeof value !== "object") {
+    return {};
+  }
+
+  return Object.entries(value as Record<string, unknown>).reduce<
+    MailboxFocusPreferenceOverridesStore
+  >((nextValue, [mailboxId, mailboxOverrides]) => {
+    const normalizedOverrides = normalizeFocusPreferenceOverrides(mailboxOverrides);
+
+    if (Object.keys(normalizedOverrides).length > 0) {
+      nextValue[mailboxId as InboxId] = normalizedOverrides;
+    }
+
+    return nextValue;
+  }, {});
+}
+
+function resolveEffectiveFocusPreferences(
+  baseFocusPreferences: FocusPreferences,
+  overrides?: FocusPreferenceOverrides | null,
+): FocusPreferences {
+  return {
+    ...baseFocusPreferences,
+    ...normalizeFocusPreferenceOverrides(overrides),
+  };
+}
+
+function buildFocusPreferenceOverrides(
+  baseFocusPreferences: FocusPreferences,
+  nextFocusPreferences: FocusPreferences,
+): FocusPreferenceOverrides {
+  return focusPreferenceFields.reduce<FocusPreferenceOverrides>((nextValue, field) => {
+    if (nextFocusPreferences[field] !== baseFocusPreferences[field]) {
+      nextValue[field] = nextFocusPreferences[field];
+    }
+
+    return nextValue;
+  }, {});
+}
 const teamInvitationPrimaryActionClass =
   settingsPrimaryActionClass;
 const teamInvitationSecondaryActionClass =
@@ -19863,27 +19950,54 @@ const InboxBehaviorSettingsCard = memo(function InboxBehaviorSettingsCard({
 
 const FocusPreferencesSettingsCard = memo(function FocusPreferencesSettingsCard({
   themeMode,
-  focusPreferences,
+  managedInboxes,
+  baseFocusPreferences,
+  focusPreferenceOverrides,
   onApplyFocusPreferences,
   isApplying,
 }: {
   themeMode: "light" | "dark";
-  focusPreferences: UserConfig["focusPreferences"];
-  onApplyFocusPreferences: (nextValue: UserConfig["focusPreferences"]) => void;
+  managedInboxes: ManagedWorkspaceInbox[];
+  baseFocusPreferences: FocusPreferences;
+  focusPreferenceOverrides: MailboxFocusPreferenceOverridesStore;
+  onApplyFocusPreferences: (inboxId: InboxId, nextValue: FocusPreferences) => void;
   isApplying: boolean;
 }) {
-  const [draftFocusPreferences, setDraftFocusPreferences] = useState(focusPreferences);
+  const [activeInboxId, setActiveInboxId] = useState<InboxId | null>(
+    (managedInboxes[0]?.id as InboxId | undefined) ?? null,
+  );
+  const [draftFocusPreferenceOverrides, setDraftFocusPreferenceOverrides] =
+    useState<MailboxFocusPreferenceOverridesStore>(focusPreferenceOverrides);
   const [isConfirmOpen, setIsConfirmOpen] = useState(false);
-  const hasUnsavedChanges =
-    JSON.stringify(draftFocusPreferences) !== JSON.stringify(focusPreferences);
+
+  useEffect(() => {
+    if (!managedInboxes.some((mailbox) => mailbox.id === activeInboxId)) {
+      setActiveInboxId((managedInboxes[0]?.id as InboxId | undefined) ?? null);
+    }
+  }, [activeInboxId, managedInboxes]);
 
   useEffect(() => {
     if (isConfirmOpen) {
       return;
     }
 
-    setDraftFocusPreferences(focusPreferences);
-  }, [focusPreferences, isConfirmOpen]);
+    setDraftFocusPreferenceOverrides(focusPreferenceOverrides);
+  }, [focusPreferenceOverrides, isConfirmOpen]);
+
+  const activeInbox =
+    activeInboxId === null
+      ? null
+      : managedInboxes.find((mailbox) => mailbox.id === activeInboxId) ?? null;
+  const savedActiveOverrides =
+    activeInboxId === null ? {} : focusPreferenceOverrides[activeInboxId] ?? {};
+  const draftActiveOverrides =
+    activeInboxId === null ? {} : draftFocusPreferenceOverrides[activeInboxId] ?? {};
+  const activeFocusPreferences = resolveEffectiveFocusPreferences(
+    baseFocusPreferences,
+    draftActiveOverrides,
+  );
+  const hasUnsavedChanges =
+    JSON.stringify(draftActiveOverrides) !== JSON.stringify(savedActiveOverrides);
 
   return (
     <section className="flex h-full flex-col space-y-2.5">
@@ -19899,6 +20013,55 @@ const FocusPreferencesSettingsCard = memo(function FocusPreferencesSettingsCard(
         </div>
 
         <div className="space-y-4">
+          <div className="rounded-[20px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-3.5">
+            <div className="mb-3 flex items-center justify-between gap-3">
+              <div className="text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                Inbox
+              </div>
+              <div className="text-[0.72rem] leading-6 text-[var(--workspace-text-faint)]">
+                Mailbox overrides fall back to workspace defaults when unchanged.
+              </div>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {managedInboxes.map((mailbox, index) => {
+                const hasDraftChanges =
+                  JSON.stringify(draftFocusPreferenceOverrides[mailbox.id as InboxId] ?? {}) !==
+                  JSON.stringify(focusPreferenceOverrides[mailbox.id as InboxId] ?? {});
+                const isSelected = mailbox.id === activeInboxId;
+
+                return (
+                  <button
+                    key={`focus-preferences-inbox-${mailbox.id}`}
+                    type="button"
+                    onClick={() => setActiveInboxId(mailbox.id as InboxId)}
+                    className={`min-w-[14rem] rounded-[18px] border px-3.5 py-3 text-left transition-[background-color,border-color,box-shadow,transform] duration-150 focus-visible:outline-none ${
+                      isSelected
+                        ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_8px_24px_rgba(118,170,112,0.08)]"
+                        : "border-[var(--workspace-border)] bg-[var(--workspace-card)] hover:border-[var(--workspace-border-hover)] hover:bg-[var(--workspace-hover-surface)]"
+                    }`}
+                  >
+                    <div className="flex items-center gap-2">
+                      <div className="text-[0.86rem] font-medium text-[var(--workspace-text)]">
+                        {mailbox.title}
+                      </div>
+                      {index === 0 ? (
+                        <span className={primaryBadgeClass}>Primary</span>
+                      ) : null}
+                      {hasDraftChanges ? (
+                        <span className="rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-2 py-0.5 text-[0.58rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)]">
+                          Draft
+                        </span>
+                      ) : null}
+                    </div>
+                    <div className="mt-1 text-[0.76rem] leading-6 text-[var(--workspace-text-faint)]">
+                      {mailbox.email.trim() || "No email connected yet"}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
           {focusPreferenceGroups.map((group, index) => (
             <div
               key={`focus-group-${group.title}`}
@@ -19928,13 +20091,35 @@ const FocusPreferencesSettingsCard = memo(function FocusPreferencesSettingsCard(
                           key={`${field}-${option}`}
                           type="button"
                           onClick={() =>
-                            setDraftFocusPreferences((current) => ({
-                              ...current,
-                              [field]: option,
-                            }))
+                            setDraftFocusPreferenceOverrides((current) => {
+                              if (!activeInboxId) {
+                                return current;
+                              }
+
+                              const nextEffectiveFocusPreferences = {
+                                ...resolveEffectiveFocusPreferences(
+                                  baseFocusPreferences,
+                                  current[activeInboxId],
+                                ),
+                                [field]: option,
+                              };
+                              const nextOverrides = buildFocusPreferenceOverrides(
+                                baseFocusPreferences,
+                                nextEffectiveFocusPreferences,
+                              );
+                              const nextValue = { ...current };
+
+                              if (Object.keys(nextOverrides).length > 0) {
+                                nextValue[activeInboxId] = nextOverrides;
+                              } else {
+                                delete nextValue[activeInboxId];
+                              }
+
+                              return nextValue;
+                            })
                           }
                           className={settingsPillButtonClass(
-                            draftFocusPreferences[field] === option,
+                            activeFocusPreferences[field] === option,
                           )}
                         >
                           {focusPreferenceOptionLabels[option]}
@@ -19961,7 +20146,24 @@ const FocusPreferencesSettingsCard = memo(function FocusPreferencesSettingsCard(
                 <div className="flex items-center justify-end gap-3">
                   <button
                     type="button"
-                    onClick={() => setDraftFocusPreferences(focusPreferences)}
+                    onClick={() =>
+                      setDraftFocusPreferenceOverrides((current) => {
+                        if (!activeInboxId) {
+                          return current;
+                        }
+
+                        const nextValue = { ...current };
+                        const savedOverrides = focusPreferenceOverrides[activeInboxId];
+
+                        if (savedOverrides && Object.keys(savedOverrides).length > 0) {
+                          nextValue[activeInboxId] = savedOverrides;
+                        } else {
+                          delete nextValue[activeInboxId];
+                        }
+
+                        return nextValue;
+                      })
+                    }
                     disabled={isApplying}
                     className={settingsPairedSecondaryActionClass}
                   >
@@ -20000,11 +20202,11 @@ const FocusPreferencesSettingsCard = memo(function FocusPreferencesSettingsCard(
           setIsConfirmOpen(false);
         }}
         onConfirm={() => {
-          if (isApplying) {
+          if (isApplying || !activeInboxId || !activeInbox) {
             return;
           }
 
-          onApplyFocusPreferences(draftFocusPreferences);
+          onApplyFocusPreferences(activeInboxId, activeFocusPreferences);
           setIsConfirmOpen(false);
         }}
       />
@@ -20541,7 +20743,8 @@ const AccountSettingsCard = memo(function AccountSettingsCard({
 function SettingsView({
   workspaceName,
   savedManagedInboxes,
-  focusPreferences,
+  baseFocusPreferences,
+  focusPreferenceOverrides,
   themeMode,
   workspaceMode,
   inboxSignatures,
@@ -20562,7 +20765,8 @@ function SettingsView({
 }: {
   workspaceName: string;
   savedManagedInboxes: ManagedWorkspaceInbox[];
-  focusPreferences: UserConfig["focusPreferences"];
+  baseFocusPreferences: FocusPreferences;
+  focusPreferenceOverrides: MailboxFocusPreferenceOverridesStore;
   themeMode: "light" | "dark";
   workspaceMode: SettingsMode;
   inboxSignatures: InboxSignatureStore;
@@ -20575,7 +20779,7 @@ function SettingsView({
   teamActivityEnabled: boolean;
   onToggleTeamActivity: () => void;
   onSaveWorkspaceName: (name: string) => void;
-  onApplyFocusPreferences: (nextValue: UserConfig["focusPreferences"]) => void;
+  onApplyFocusPreferences: (inboxId: InboxId, nextValue: FocusPreferences) => void;
   isApplyingFocusPreferences: boolean;
   onApplyManagedInboxes: (nextMailboxes: ManagedWorkspaceInbox[]) => boolean;
   onSaveInboxSignature: (inboxId: InboxId, signature: InboxSignatureSettings) => void;
@@ -20690,7 +20894,9 @@ function SettingsView({
         <div className="space-y-6">
           <FocusPreferencesSettingsCard
             themeMode={themeMode}
-            focusPreferences={focusPreferences}
+            managedInboxes={savedManagedInboxes}
+            baseFocusPreferences={baseFocusPreferences}
+            focusPreferenceOverrides={focusPreferenceOverrides}
             onApplyFocusPreferences={onApplyFocusPreferences}
             isApplying={isApplyingFocusPreferences}
           />
@@ -23204,6 +23410,8 @@ export function WorkspaceShell({
     mailboxOrderKey,
   );
   const notificationReadStorageKey = buildNotificationReadStorageKey(currentWorkspaceUserId);
+  const mailboxFocusPreferenceOverridesStorageKey =
+    buildMailboxFocusPreferenceOverridesStorageKey(currentWorkspaceUserId);
   const liveMailboxSyncKey = orderedMailboxes
     .map((mailbox) => `${mailbox.id}:${mailbox.email}:${mailbox.title}`)
     .join("|");
@@ -23865,9 +24073,26 @@ export function WorkspaceShell({
   const [reviewInboxHandoff, setReviewInboxHandoff] = useState<ReviewInboxHandoff | null>(null);
   const [reviewInboxHandoffFeedback, setReviewInboxHandoffFeedback] = useState<string | null>(null);
   const [completedPriorityReviewIds, setCompletedPriorityReviewIds] = useState<string[]>([]);
-  const [activeFocusPreferences, setActiveFocusPreferences] = useState(
-    userConfig.focusPreferences,
-  );
+  const [mailboxFocusPreferenceOverrides, setMailboxFocusPreferenceOverrides] =
+    useState<MailboxFocusPreferenceOverridesStore>(() => {
+      if (typeof window === "undefined") {
+        return {};
+      }
+
+      const storedValue = window.localStorage.getItem(
+        mailboxFocusPreferenceOverridesStorageKey,
+      );
+
+      if (!storedValue) {
+        return {};
+      }
+
+      try {
+        return normalizeMailboxFocusPreferenceOverridesStore(JSON.parse(storedValue));
+      } catch {
+        return {};
+      }
+    });
   const [isApplyingFocusPreferences, setIsApplyingFocusPreferences] = useState(false);
   const [manualPriorityOverrides, setManualPriorityOverrides] = useState<
     Partial<Record<string, ManualPriorityOverride>>
@@ -23889,10 +24114,42 @@ export function WorkspaceShell({
     }
   });
   const isGuestInviteUser = authenticatedUser?.userType === "guest";
+  const activeFocusPreferences = activeMailbox
+    ? resolveEffectiveFocusPreferences(
+        userConfig.focusPreferences,
+        mailboxFocusPreferenceOverrides[activeMailbox.id],
+      )
+    : userConfig.focusPreferences;
 
   useEffect(() => {
-    setActiveFocusPreferences(userConfig.focusPreferences);
-  }, [userConfig.focusPreferences]);
+    window.localStorage.setItem(
+      mailboxFocusPreferenceOverridesStorageKey,
+      JSON.stringify(mailboxFocusPreferenceOverrides),
+    );
+  }, [mailboxFocusPreferenceOverrides, mailboxFocusPreferenceOverridesStorageKey]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const storedValue = window.localStorage.getItem(
+      mailboxFocusPreferenceOverridesStorageKey,
+    );
+
+    if (!storedValue) {
+      setMailboxFocusPreferenceOverrides({});
+      return;
+    }
+
+    try {
+      setMailboxFocusPreferenceOverrides(
+        normalizeMailboxFocusPreferenceOverridesStore(JSON.parse(storedValue)),
+      );
+    } catch {
+      setMailboxFocusPreferenceOverrides({});
+    }
+  }, [mailboxFocusPreferenceOverridesStorageKey]);
 
   const updateWorkspaceMessageById = (
     messageId: string,
@@ -25263,10 +25520,25 @@ export function WorkspaceShell({
   };
 
   const handleApplyFocusPreferences = (
-    nextFocusPreferences: UserConfig["focusPreferences"],
+    inboxId: InboxId,
+    nextFocusPreferences: FocusPreferences,
   ) => {
     setIsApplyingFocusPreferences(true);
-    setActiveFocusPreferences(nextFocusPreferences);
+    setMailboxFocusPreferenceOverrides((current) => {
+      const nextOverrides = buildFocusPreferenceOverrides(
+        userConfig.focusPreferences,
+        nextFocusPreferences,
+      );
+      const nextValue = { ...current };
+
+      if (Object.keys(nextOverrides).length > 0) {
+        nextValue[inboxId] = nextOverrides;
+      } else {
+        delete nextValue[inboxId];
+      }
+
+      return nextValue;
+    });
 
     window.setTimeout(() => {
       setMailboxStore((currentStore) =>
@@ -27190,7 +27462,8 @@ export function WorkspaceShell({
                 <SettingsView
                   workspaceName={workspaceName}
                   savedManagedInboxes={savedManagedInboxes}
-                  focusPreferences={activeFocusPreferences}
+                  baseFocusPreferences={userConfig.focusPreferences}
+                  focusPreferenceOverrides={mailboxFocusPreferenceOverrides}
                   themeMode={resolvedTheme}
                   workspaceMode={workspaceMode}
                   inboxSignatures={inboxSignatures}
