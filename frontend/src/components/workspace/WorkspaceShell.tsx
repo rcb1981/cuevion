@@ -25007,15 +25007,25 @@ export function WorkspaceShell({
     message.internalClassification === "reply" ||
     Boolean(message.isShared) ||
     Boolean(message.sharedContext);
-  const getPriorityPageVisiblePriorityBadge = (message: MailMessage) => {
+  const getPriorityPageVisiblePriorityBadge = (message: MailMessage, mailboxId: InboxId) => {
+    // Use the mailbox-specific effective focus preferences so that the Priority
+    // page and the MailboxView agree on whether a message is PRIORITY or LOW.
+    // When activeMailbox is null (e.g. user is on the Priority page),
+    // activeFocusPreferences falls back to the base userConfig preferences with
+    // no per-mailbox overrides applied — diverging from what the MailboxView
+    // renders.  Using effectiveFocusPreferencesByMailbox[mailboxId] here
+    // ensures the two agree: a message that is LOW in its mailbox context will
+    // not be listed on the Priority page, preventing navigation from resolving
+    // to the wrong message (sortedMessages[0]) when the message is filtered out
+    // of messageCollections.Inbox by the MailboxView.
     return getVisiblePriorityBadgeForWorkspaceMessage(
       message,
       manualPriorityOverrides[message.id],
-      activeFocusPreferences,
+      effectiveFocusPreferencesByMailbox[mailboxId] ?? activeFocusPreferences,
     );
   };
-  const isPriorityPageVisiblePriorityMessage = (message: MailMessage) => {
-    return getPriorityPageVisiblePriorityBadge(message) === "PRIORITY";
+  const isPriorityPageVisiblePriorityMessage = (message: MailMessage, mailboxId: InboxId) => {
+    return getPriorityPageVisiblePriorityBadge(message, mailboxId) === "PRIORITY";
   };
   const livePriorityInboxEntries = (() => {
     const seenMessageIds = new Set<string>();
@@ -25063,8 +25073,8 @@ export function WorkspaceShell({
       }
     }
 
-    return Array.from(latestByThread.values()).filter(({ message }) =>
-      isPriorityPageVisiblePriorityMessage(message),
+    return Array.from(latestByThread.values()).filter(({ message, mailboxId }) =>
+      isPriorityPageVisiblePriorityMessage(message, mailboxId),
     );
   })();
   const livePriorityInboxItems: ReviewItem[] = livePriorityInboxEntries.map(
