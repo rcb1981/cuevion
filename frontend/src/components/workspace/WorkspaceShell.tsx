@@ -10369,11 +10369,14 @@ function MailboxView({
       ? secondTime - firstTime
       : firstTime - secondTime;
   });
+  const selectedMessageFromFolder =
+    folderMessages.find((message) => message.id === selectedMessageId) ?? null;
   const visibleSelectedMessageIds = selectedMessageIds.filter((messageId) =>
     sortedMessages.some((message) => message.id === messageId),
   );
   const isMultiSelectActive = visibleSelectedMessageIds.length > 1;
   const selectedMessage =
+    selectedMessageFromFolder ??
     sortedMessages.find(
       (message) =>
         message.id === selectedMessageId &&
@@ -10385,9 +10388,48 @@ function MailboxView({
     sortedMessages.find((message) => message.id === selectedMessageId) ??
     sortedMessages[0] ??
     null;
-  const fullWidthMessage =
-    folderMessages.find((message) => message.id === selectedMessageId) ??
-    selectedMessage;
+  const fullWidthMessage = selectedMessageFromFolder ?? selectedMessage;
+  const renderTargetMessage = isFullMessageOpen ? fullWidthMessage : selectedMessage;
+
+  useEffect(() => {
+    if (lastNavigationSource !== "priority") {
+      return;
+    }
+
+    console.log("[PriorityOpenTrace] render-selection", {
+      selectedMailboxId: mailbox.id,
+      activeFolder,
+      selectedMessageId,
+      selectedMessageIdImmediatelyAfterStateUpdate: selectedMessageId,
+      selectedMessage: selectedMessage
+        ? {
+            id: selectedMessage.id,
+            subject: selectedMessage.subject,
+          }
+        : null,
+      fullWidthMessage: fullWidthMessage
+        ? {
+            id: fullWidthMessage.id,
+            subject: fullWidthMessage.subject,
+          }
+        : null,
+      actualSelectedMessageUsedByRender: renderTargetMessage
+        ? {
+            id: renderTargetMessage.id,
+            subject: renderTargetMessage.subject,
+          }
+        : null,
+    });
+  }, [
+    activeFolder,
+    fullWidthMessage,
+    isFullMessageOpen,
+    lastNavigationSource,
+    mailbox.id,
+    renderTargetMessage,
+    selectedMessage,
+    selectedMessageId,
+  ]);
 
   useEffect(() => {
     readingPaneViewportRef.current?.scrollTo({ top: 0, left: 0 });
@@ -10728,8 +10770,29 @@ function MailboxView({
       : null;
 
     if (!targetFolder || !targetMessage) {
+      if (notificationNavigationRequest.source === "priority") {
+        console.log("[PriorityOpenTrace] notification-navigation-miss", {
+          selectedMailboxId: mailbox.id,
+          notificationNavigationRequest,
+        });
+      }
       onConsumeNotificationNavigation?.(notificationNavigationRequest.requestKey);
       return;
+    }
+
+    if (notificationNavigationRequest.source === "priority") {
+      console.log("[PriorityOpenTrace] notification-navigation-resolved", {
+        selectedMailboxId: mailbox.id,
+        notificationNavigationRequest,
+        resolvedSourceLocation: {
+          mailboxId: mailbox.id,
+          folder: targetFolder,
+        },
+        resolvedMessage: {
+          id: targetMessage.id,
+          subject: targetMessage.subject,
+        },
+      });
     }
 
     setActiveSmartFolderId(null);
@@ -10742,6 +10805,13 @@ function MailboxView({
       notificationNavigationRequest.messageId,
       notificationNavigationRequest.messageId,
     );
+    if (notificationNavigationRequest.source === "priority") {
+      console.log("[PriorityOpenTrace] selection-state-requested", {
+        selectedMailboxId: mailbox.id,
+        selectedMessageIdImmediatelyAfterStateUpdate:
+          notificationNavigationRequest.messageId,
+      });
+    }
     requestAnimationFrame(() => {
       const targetRow = mailListViewportRef.current?.querySelector<HTMLElement>(
         `[data-message-row-id="${CSS.escape(notificationNavigationRequest.messageId)}"]`,
@@ -26001,8 +26071,29 @@ export function WorkspaceShell({
           : getWorkspaceMessageById(reviewItem.sourceId);
 
       if (!sourceLocation || !targetMailbox || !targetMessage) {
+        console.log("[PriorityOpenTrace] click-unresolved", {
+          clickedReviewItemTitle: reviewItem.title,
+          clickedReviewItemId: reviewItem.id,
+          clickedReviewItemSourceId: reviewItem.sourceId,
+          clickedMailboxId: priorityMailboxId,
+          resolvedMailboxId: sourceLocation?.mailboxId ?? null,
+          resolvedFolder: sourceLocation?.folder ?? null,
+          resolvedMessageId: targetMessage?.id ?? null,
+          resolvedSubject: targetMessage?.subject ?? null,
+        });
         return;
       }
+
+      console.log("[PriorityOpenTrace] click", {
+        clickedReviewItemTitle: reviewItem.title,
+        clickedReviewItemId: reviewItem.id,
+        clickedReviewItemSourceId: reviewItem.sourceId,
+        clickedMailboxId: priorityMailboxId,
+        resolvedMailboxId: sourceLocation.mailboxId,
+        resolvedFolder: sourceLocation.folder,
+        resolvedMessageId: targetMessage.id,
+        resolvedSubject: targetMessage.subject,
+      });
 
       openMailboxFromContext(targetMailbox);
       setNotificationNavigationRequest({
