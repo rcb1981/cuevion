@@ -10093,6 +10093,101 @@ function MailboxView({
       renderContext.preferPromoMailboxContext,
     );
   };
+  useEffect(() => {
+    if (!activeSmartFolder) {
+      return;
+    }
+
+    const traceRows = smartFolderEntries.map((entry, index) => {
+      const canonicalKeys = getCanonicalMessageIdentityKeys(entry.message);
+
+      return {
+        row: index + 1,
+        mailboxId: entry.mailboxId,
+        folder: entry.folder,
+        id: entry.message.id,
+        imapUid: entry.message.imapUid ?? null,
+        previewIdentity: buildStablePreviewIdentity(entry.message),
+        canonicalKeys,
+        subject: entry.message.subject,
+        from: entry.message.from,
+        timestamp: entry.message.timestamp,
+        visibleCategoryLabel: getSmartFolderVisibleCategoryLabelForMessage(entry.message),
+        visiblePriorityBadge: getSmartFolderVisiblePriorityBadgeForMessage(entry.message),
+        internalClassification: entry.message.internalClassification ?? null,
+        signal: entry.message.signal ?? null,
+        uiSignal: entry.message.ui_signal ?? null,
+      };
+    });
+    const duplicatePreviewGroups = Object.entries(
+      traceRows.reduce<Record<string, number[]>>((groups, row) => {
+        const key = `${row.mailboxId}::${row.previewIdentity}`;
+        groups[key] = [...(groups[key] ?? []), row.row];
+        return groups;
+      }, {}),
+    )
+      .filter(([, rows]) => rows.length > 1)
+      .map(([previewIdentityKey, rows]) => ({
+        previewIdentityKey,
+        rows,
+      }));
+    const duplicateImapUidGroups = Object.entries(
+      traceRows.reduce<Record<string, number[]>>((groups, row) => {
+        if (!row.imapUid) {
+          return groups;
+        }
+
+        const key = `${row.mailboxId}::${row.imapUid}`;
+        groups[key] = [...(groups[key] ?? []), row.row];
+        return groups;
+      }, {}),
+    )
+      .filter(([, rows]) => rows.length > 1)
+      .map(([imapUidKey, rows]) => ({
+        imapUidKey,
+        rows,
+      }));
+
+    console.groupCollapsed(
+      `[SmartFolderRows] ${activeSmartFolder.name} (${traceRows.length} rows)`,
+    );
+    console.table(
+      traceRows.map((row) => ({
+        row: row.row,
+        mailboxId: row.mailboxId,
+        folder: row.folder,
+        id: row.id,
+        imapUid: row.imapUid,
+        previewIdentity: row.previewIdentity,
+        subject: row.subject,
+        from: row.from,
+        timestamp: row.timestamp,
+        visibleCategoryLabel: row.visibleCategoryLabel,
+        visiblePriorityBadge: row.visiblePriorityBadge,
+        internalClassification: row.internalClassification,
+        signal: row.signal,
+        uiSignal: row.uiSignal,
+      })),
+    );
+    console.log(
+      "[SmartFolderRows] canonicalKeysByRow",
+      traceRows.map((row) => ({
+        row: row.row,
+        mailboxId: row.mailboxId,
+        folder: row.folder,
+        id: row.id,
+        canonicalKeys: row.canonicalKeys,
+      })),
+    );
+    console.log("[SmartFolderRows] duplicatePreviewGroups", duplicatePreviewGroups);
+    console.log("[SmartFolderRows] duplicateImapUidGroups", duplicateImapUidGroups);
+    console.groupEnd();
+  }, [
+    activeSmartFolder,
+    smartFolderEntries,
+    getSmartFolderVisibleCategoryLabelForMessage,
+    getSmartFolderVisiblePriorityBadgeForMessage,
+  ]);
   const getManualPriorityOverride = (messageId: string) =>
     manualPriorityOverrides[messageId];
   const getVisibleMessageSignal = (message: MailMessage) =>
