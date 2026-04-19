@@ -542,6 +542,7 @@ type NotificationNavigationRequest = {
   mailboxId: InboxId;
   messageId: string;
   sourceMailboxId?: InboxId;
+  traceId?: string;
   type: "invite" | "reply" | "mention";
   source?: "priority";
   collaborationMessageId?: string;
@@ -9096,6 +9097,7 @@ function MailboxView({
   const [isEmptyTrashConfirmationOpen, setIsEmptyTrashConfirmationOpen] = useState(false);
   const [trashEmptiedToastMessage, setTrashEmptiedToastMessage] = useState<string | null>(null);
   const dragPreviewCleanupRef = useRef<(() => void) | null>(null);
+  const lastPriorityTraceIdRef = useRef<string | null>(null);
   const [composeTo, setComposeTo] = useState("");
   const [composeCc, setComposeCc] = useState("");
   const [composeBcc, setComposeBcc] = useState("");
@@ -10375,32 +10377,58 @@ function MailboxView({
     sortedMessages.some((message) => message.id === messageId),
   );
   const isMultiSelectActive = visibleSelectedMessageIds.length > 1;
-  const selectedMessage =
-    selectedMessageFromFolder ??
+  const selectedMessageFromVisiblePrimary =
     sortedMessages.find(
       (message) =>
         message.id === selectedMessageId &&
         visibleSelectedMessageIds.includes(message.id),
-    ) ??
-    sortedMessages.find((message) =>
-      visibleSelectedMessageIds.includes(message.id),
-    ) ??
-    sortedMessages.find((message) => message.id === selectedMessageId) ??
-    sortedMessages[0] ??
+    ) ?? null;
+  const selectedMessageFromVisibleSelection =
+    sortedMessages.find((message) => visibleSelectedMessageIds.includes(message.id)) ?? null;
+  const selectedMessageFromCurrentId =
+    sortedMessages.find((message) => message.id === selectedMessageId) ?? null;
+  const selectedMessageFallbackTop = sortedMessages[0] ?? null;
+  const selectedMessage =
+    selectedMessageFromVisiblePrimary ??
+    selectedMessageFromVisibleSelection ??
+    selectedMessageFromCurrentId ??
+    selectedMessageFallbackTop ??
     null;
+  const selectedMessageFallbackBranch = selectedMessageFromVisiblePrimary
+    ? "selectedMessageId-visible-primary"
+    : selectedMessageFromVisibleSelection
+      ? "visible-selection-fallback"
+      : selectedMessageFromCurrentId
+        ? "selectedMessageId-thread-deduped"
+        : selectedMessageFallbackTop
+          ? "sortedMessages-top-fallback"
+          : "no-selection";
   const fullWidthMessage = selectedMessageFromFolder ?? selectedMessage;
   const renderTargetMessage = isFullMessageOpen ? fullWidthMessage : selectedMessage;
 
   useEffect(() => {
-    if (lastNavigationSource !== "priority") {
+    const traceId = lastPriorityTraceIdRef.current;
+
+    if (!traceId) {
       return;
     }
 
     console.log("[PriorityOpenTrace] render-selection", {
+      traceId,
       selectedMailboxId: mailbox.id,
       activeFolder,
       selectedMessageId,
-      selectedMessageIdImmediatelyAfterStateUpdate: selectedMessageId,
+      selectedMessageExistsInMailboxStoreInbox:
+        (mailboxStore[mailbox.id]?.Inbox ?? []).some(
+          (message) => message.id === selectedMessageId,
+        ),
+      selectedMessageExistsInMessageCollectionsInbox: messageCollections.Inbox.some(
+        (message) => message.id === selectedMessageId,
+      ),
+      selectedMessageExistsInSortedMessages: sortedMessages.some(
+        (message) => message.id === selectedMessageId,
+      ),
+      selectedMessageFallbackBranch,
       selectedMessage: selectedMessage
         ? {
             id: selectedMessage.id,
@@ -10424,11 +10452,14 @@ function MailboxView({
     activeFolder,
     fullWidthMessage,
     isFullMessageOpen,
-    lastNavigationSource,
     mailbox.id,
+    mailboxStore,
+    messageCollections.Inbox,
     renderTargetMessage,
     selectedMessage,
+    selectedMessageFallbackBranch,
     selectedMessageId,
+    sortedMessages,
   ]);
 
   useEffect(() => {
@@ -10768,13 +10799,33 @@ function MailboxView({
           (message) => message.id === notificationNavigationRequest.messageId,
         ) ?? null
       : null;
+    const traceId = notificationNavigationRequest.traceId ?? null;
+
+    if (notificationNavigationRequest.source === "priority" && traceId) {
+      lastPriorityTraceIdRef.current = traceId;
+    }
 
     if (!targetFolder || !targetMessage) {
       if (notificationNavigationRequest.source === "priority") {
         console.log("[PriorityOpenTrace] notification-navigation-miss", {
+          traceId,
           selectedMailboxId: mailbox.id,
           notificationNavigationRequest,
+          activeFolder,
+          selectedMessageIdAfterNavigation: selectedMessageId,
+          selectedMessageExistsInMailboxStoreInbox:
+            (mailboxStore[mailbox.id]?.Inbox ?? []).some(
+              (message) => message.id === notificationNavigationRequest.messageId,
+            ),
+          selectedMessageExistsInMessageCollectionsInbox: messageCollections.Inbox.some(
+            (message) => message.id === notificationNavigationRequest.messageId,
+          ),
+          selectedMessageExistsInSortedMessages: sortedMessages.some(
+            (message) => message.id === notificationNavigationRequest.messageId,
+          ),
+          fallbackBranchIfRenderedNow: selectedMessageFallbackBranch,
         });
+        return;
       }
       onConsumeNotificationNavigation?.(notificationNavigationRequest.requestKey);
       return;
@@ -10782,6 +10833,7 @@ function MailboxView({
 
     if (notificationNavigationRequest.source === "priority") {
       console.log("[PriorityOpenTrace] notification-navigation-resolved", {
+        traceId,
         selectedMailboxId: mailbox.id,
         notificationNavigationRequest,
         resolvedSourceLocation: {
@@ -10807,7 +10859,9 @@ function MailboxView({
     );
     if (notificationNavigationRequest.source === "priority") {
       console.log("[PriorityOpenTrace] selection-state-requested", {
+        traceId,
         selectedMailboxId: mailbox.id,
+        activeFolderAfterNavigation: targetFolder,
         selectedMessageIdImmediatelyAfterStateUpdate:
           notificationNavigationRequest.messageId,
       });
@@ -10838,8 +10892,12 @@ function MailboxView({
   }, [
     mailboxStore,
     mailbox.id,
+    messageCollections.Inbox,
     notificationNavigationRequest,
     onConsumeNotificationNavigation,
+    selectedMessageFallbackBranch,
+    selectedMessageId,
+    sortedMessages,
   ]);
 
   useEffect(() => {
@@ -26068,6 +26126,7 @@ export function WorkspaceShell({
 
   const handleOpenPriorityItem = (reviewItem: ReviewItem) => {
     if (reviewItem.id.startsWith("live-priority-")) {
+      const traceId = `priority-open-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const priorityMailboxId = getReviewItemSourceMailboxId(reviewItem);
       const sourceLocation = priorityMailboxId
         ? getMailboxMessageLocationById(priorityMailboxId, reviewItem.sourceId)
@@ -26082,6 +26141,7 @@ export function WorkspaceShell({
 
       if (!sourceLocation || !targetMailbox || !targetMessage) {
         console.log("[PriorityOpenTrace] click-unresolved", {
+          traceId,
           clickedReviewItemTitle: reviewItem.title,
           clickedReviewItemId: reviewItem.id,
           clickedReviewItemSourceId: reviewItem.sourceId,
@@ -26095,6 +26155,7 @@ export function WorkspaceShell({
       }
 
       console.log("[PriorityOpenTrace] click", {
+        traceId,
         clickedReviewItemTitle: reviewItem.title,
         clickedReviewItemId: reviewItem.id,
         clickedReviewItemSourceId: reviewItem.sourceId,
@@ -26110,6 +26171,7 @@ export function WorkspaceShell({
         mailboxId: sourceLocation.mailboxId,
         messageId: reviewItem.sourceId,
         sourceMailboxId: priorityMailboxId ?? sourceLocation.mailboxId,
+        traceId,
         type: "reply",
         source: "priority",
         focusReplyComposer: false,
