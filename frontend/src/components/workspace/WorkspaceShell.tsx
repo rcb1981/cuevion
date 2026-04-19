@@ -1046,8 +1046,74 @@ function doesMessageMatchSmartFolderRule(message: MailMessage, rule: SmartFolder
   return matchValue.includes(ruleValue);
 }
 
-function doesMessageMatchSmartFolder(message: MailMessage, folder: SmartFolderDefinition) {
-  return folder.rules.some((rule) => doesMessageMatchSmartFolderRule(message, rule));
+function resolveVisibleSmartFolderLabelValue(
+  message: MailMessage,
+  options?: {
+    mailboxContext?: Pick<ManagedWorkspaceInbox | OrderedMailbox, "id" | "title" | "email"> | null;
+  },
+) {
+  const visibilityClassification = resolveVisibleClassification(message);
+  const preferPromoMailboxContext =
+    options?.mailboxContext ? isPromoMailboxContext(options.mailboxContext) : false;
+
+  switch (visibilityClassification) {
+    case "demo":
+    case "high_priority_demo":
+      return "demo" as const;
+    case "finance":
+    case "royalty_statement":
+      return "finance" as const;
+    case "promo":
+    case "promo_reminder":
+      return "promo" as const;
+    case "business":
+    case "business_reminder": {
+      const heuristic = inferHeuristicSignal({
+        ...message,
+        signal: undefined,
+        isAutoReply: false,
+      });
+      return heuristic === "Promo" ? ("promo" as const) : ("business" as const);
+    }
+    case "workflow_update":
+    case "info": {
+      if (preferPromoMailboxContext) {
+        const heuristic = inferHeuristicSignal({
+          ...message,
+          signal: undefined,
+          isAutoReply: false,
+        });
+
+        if (heuristic === "Promo") {
+          return "promo" as const;
+        }
+      }
+
+      return "update" as const;
+    }
+    case "distributor_update":
+      return "update" as const;
+    case "reply":
+      return "reply" as const;
+    default:
+      return "other" as const;
+  }
+}
+
+function doesMessageMatchSmartFolder(
+  message: MailMessage,
+  folder: SmartFolderDefinition,
+  options?: {
+    mailboxContext?: Pick<ManagedWorkspaceInbox | OrderedMailbox, "id" | "title" | "email"> | null;
+  },
+) {
+  return folder.rules.some((rule) => {
+    if (rule.field === "Label") {
+      return resolveVisibleSmartFolderLabelValue(message, options) === rule.value.trim().toLowerCase();
+    }
+
+    return doesMessageMatchSmartFolderRule(message, rule);
+  });
 }
 
 function hasSignatureContent(signature: InboxSignatureSettings) {
@@ -9882,7 +9948,16 @@ function MailboxView({
           ((mailboxId === mailbox.id
             ? messageCollections[folder]
             : mailboxStore[mailboxId]?.[folder]) ?? [])
-            .filter((message) => doesMessageMatchSmartFolder(message, activeSmartFolder))
+            .filter((message) =>
+              doesMessageMatchSmartFolder(
+                message,
+                activeSmartFolder,
+                {
+                  mailboxContext:
+                    orderedMailboxes.find((candidate) => candidate.id === mailboxId) ?? null,
+                },
+              ),
+            )
             .map((message) => ({
               mailboxId,
               folder,
@@ -13220,7 +13295,14 @@ function MailboxView({
               ((mailboxId === mailbox.id
                 ? messageCollections[f]
                 : mailboxStore[mailboxId]?.[f]) ?? []).filter((message) =>
-                doesMessageMatchSmartFolder(message, folder),
+                doesMessageMatchSmartFolder(
+                  message,
+                  folder,
+                  {
+                    mailboxContext:
+                      orderedMailboxes.find((candidate) => candidate.id === mailboxId) ?? null,
+                  },
+                ),
               ),
           ),
         )
