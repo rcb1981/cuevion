@@ -8853,6 +8853,7 @@ function MailboxView({
   currentUserEmail,
   workspaceCollaborationPeople,
   focusPreferences,
+  effectiveFocusPreferencesByMailbox,
   mailboxStore,
   setMailboxStore,
   inboxSignatures,
@@ -8904,6 +8905,7 @@ function MailboxView({
   currentUserEmail: string;
   workspaceCollaborationPeople: Array<{ id: string; name: string; email: string }>;
   focusPreferences: UserConfig["focusPreferences"];
+  effectiveFocusPreferencesByMailbox: Partial<Record<InboxId, FocusPreferences>>;
   mailboxStore: MailboxStore;
   setMailboxStore: Dispatch<SetStateAction<MailboxStore>>;
   inboxSignatures: InboxSignatureStore;
@@ -9708,19 +9710,22 @@ function MailboxView({
   }, [isComposeOpen, pendingComposeAttachmentPickerOpen]);
 
   const mailboxCollections = mailboxStore[mailbox.id] ?? createEmptyMailboxCollections();
-  const managedMailboxForView =
-    managedInboxes.find((candidate) => candidate.id === mailbox.id) ?? null;
-  const isPromoMailboxView =
-    isPromoMailboxContext(managedMailboxForView ?? mailbox);
   const resolveVisibilityClassificationForMessage = (message: MailMessage) => {
     return resolveVisibleClassification(message);
   };
   const resolveFocusPreferenceLevelForMessage = (message: MailMessage) => {
-    return resolveFocusPreferenceLevelForPriorityMessage(message, focusPreferences, {
-      preferPromoMailboxContext: isPromoMailboxView,
-    });
+    const renderContext = resolveRenderContextForMessage(message);
+
+    return resolveFocusPreferenceLevelForPriorityMessage(
+      message,
+      renderContext.focusPreferences,
+      {
+        preferPromoMailboxContext: renderContext.preferPromoMailboxContext,
+      },
+    );
   };
   const getVisibleCategoryLabelForMessage = (message: MailMessage) => {
+    const renderContext = resolveRenderContextForMessage(message);
     const visibilityClassification = resolveVisibilityClassificationForMessage(message);
 
     switch (visibilityClassification) {
@@ -9749,7 +9754,7 @@ function MailboxView({
       }
       case "workflow_update":
       case "info": {
-        if (isPromoMailboxView) {
+        if (renderContext.preferPromoMailboxContext) {
           const heuristic = inferHeuristicSignal({
             ...message,
             signal: undefined,
@@ -9815,12 +9820,14 @@ function MailboxView({
     };
   };
   const getVisiblePriorityBadgeForMessage = (message: MailMessage) => {
+    const renderContext = resolveRenderContextForMessage(message);
+
     return getVisiblePriorityBadgeForWorkspaceMessage(
       message,
       manualPriorityOverrides[message.id],
-      focusPreferences,
+      renderContext.focusPreferences,
       {
-        preferPromoMailboxContext: isPromoMailboxView,
+        preferPromoMailboxContext: renderContext.preferPromoMailboxContext,
       },
     );
   };
@@ -9981,6 +9988,23 @@ function MailboxView({
     : isSharedView
       ? workspaceMessageLocationById
       : currentMailboxMessageLocationById;
+  function resolveRenderContextForMessage(message: MailMessage) {
+    const sourceMailboxId = activeSmartFolder
+      ? currentMessageLocationById[message.id]?.mailboxId ?? mailbox.id
+      : mailbox.id;
+    const mailboxContext =
+      orderedMailboxes.find((candidate) => candidate.id === sourceMailboxId) ??
+      managedInboxes.find((candidate) => candidate.id === sourceMailboxId) ??
+      mailbox;
+    const resolvedFocusPreferences =
+      effectiveFocusPreferencesByMailbox[sourceMailboxId] ?? focusPreferences;
+
+    return {
+      mailboxContext,
+      focusPreferences: resolvedFocusPreferences,
+      preferPromoMailboxContext: isPromoMailboxContext(mailboxContext),
+    };
+  }
   const getManualPriorityOverride = (messageId: string) =>
     manualPriorityOverrides[messageId];
   const getVisibleMessageSignal = (message: MailMessage) =>
@@ -24302,6 +24326,15 @@ export function WorkspaceShell({
         mailboxFocusPreferenceOverrides[activeMailbox.id],
       )
     : userConfig.focusPreferences;
+  const effectiveFocusPreferencesByMailbox = orderedMailboxes.reduce<
+    Partial<Record<InboxId, FocusPreferences>>
+  >((nextValue, candidate) => {
+    nextValue[candidate.id] = resolveEffectiveFocusPreferences(
+      userConfig.focusPreferences,
+      mailboxFocusPreferenceOverrides[candidate.id],
+    );
+    return nextValue;
+  }, {});
 
   useEffect(() => {
     window.localStorage.setItem(
@@ -27608,6 +27641,7 @@ export function WorkspaceShell({
                   currentUserEmail={activeWorkspaceEmail}
                   workspaceCollaborationPeople={workspaceCollaborationPeople}
                   focusPreferences={activeFocusPreferences}
+                  effectiveFocusPreferencesByMailbox={effectiveFocusPreferencesByMailbox}
                   mailboxStore={mailboxStore}
                   setMailboxStore={setMailboxStore}
                   inboxSignatures={inboxSignatures}
