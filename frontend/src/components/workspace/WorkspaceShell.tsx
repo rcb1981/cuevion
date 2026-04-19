@@ -4431,6 +4431,49 @@ function getVisiblePriorityBadgeForWorkspaceMessage(
   );
 }
 
+function shouldForceFilteredDemoVisibilityForWorkspaceMessage(
+  message: MailMessage,
+  override: ManualPriorityOverride | undefined,
+  focusPreferences: UserConfig["focusPreferences"],
+) {
+  const visibilityClassification = resolveVisibleClassification(message);
+
+  if (
+    visibilityClassification !== "demo" &&
+    visibilityClassification !== "high_priority_demo"
+  ) {
+    return false;
+  }
+
+  if (hasProtectedPriorityVisibility(message)) {
+    return false;
+  }
+
+  return (
+    override !== "priority" &&
+    resolveFocusPreferenceLevelForPriorityMessage(message, focusPreferences) === "low"
+  );
+}
+
+function shouldDisplayMessageInFilteredFolderForWorkspaceMessage(
+  message: MailMessage,
+  override: ManualPriorityOverride | undefined,
+  focusPreferences: UserConfig["focusPreferences"],
+) {
+  if (message.collaboration) {
+    return false;
+  }
+
+  return (
+    getVisiblePriorityBadgeForWorkspaceMessage(message, override, focusPreferences) === "LOW" ||
+    shouldForceFilteredDemoVisibilityForWorkspaceMessage(
+      message,
+      override,
+      focusPreferences,
+    )
+  );
+}
+
 function getVisibleCategoryLabel(
   message: Pick<
     MailMessage,
@@ -25567,11 +25610,12 @@ export function WorkspaceShell({
     nextFocusPreferences: FocusPreferences,
   ) => {
     setIsApplyingFocusPreferences(true);
+    const nextOverrides = buildFocusPreferenceOverrides(
+      userConfig.focusPreferences,
+      nextFocusPreferences,
+    );
+
     setMailboxFocusPreferenceOverrides((current) => {
-      const nextOverrides = buildFocusPreferenceOverrides(
-        userConfig.focusPreferences,
-        nextFocusPreferences,
-      );
       const nextValue = { ...current };
 
       if (Object.keys(nextOverrides).length > 0) {
@@ -25584,15 +25628,61 @@ export function WorkspaceShell({
     });
 
     window.setTimeout(() => {
-      setMailboxStore((currentStore) =>
-        normalizeMailboxStore(
-          currentStore,
+      setMailboxStore((currentStore) => {
+        const mailboxCollections = currentStore[inboxId];
+
+        if (!mailboxCollections) {
+          return normalizeMailboxStore(
+            currentStore,
+            orderedMailboxes,
+            senderCategoryLearning,
+            messageOwnershipInteractions,
+            currentWorkspaceUserId,
+          );
+        }
+
+        const combinedInboxMessages = [
+          ...mailboxCollections.Inbox,
+          ...mailboxCollections.Filtered,
+        ];
+        const nextInboxMessages: MailMessage[] = [];
+        const nextFilteredMessages: MailMessage[] = [];
+
+        combinedInboxMessages.forEach((message) => {
+          if (shouldRouteMessageToFilteredFolder(message, senderCategoryLearning)) {
+            nextFilteredMessages.push(message);
+            return;
+          }
+
+          if (
+            shouldDisplayMessageInFilteredFolderForWorkspaceMessage(
+              message,
+              manualPriorityOverrides[message.id],
+              nextFocusPreferences,
+            )
+          ) {
+            nextFilteredMessages.push(message);
+            return;
+          }
+
+          nextInboxMessages.push(message);
+        });
+
+        return normalizeMailboxStore(
+          {
+            ...currentStore,
+            [inboxId]: {
+              ...mailboxCollections,
+              Inbox: nextInboxMessages,
+              Filtered: nextFilteredMessages,
+            },
+          },
           orderedMailboxes,
           senderCategoryLearning,
           messageOwnershipInteractions,
           currentWorkspaceUserId,
-        ),
-      );
+        );
+      });
       setIsApplyingFocusPreferences(false);
     }, 260);
   };
