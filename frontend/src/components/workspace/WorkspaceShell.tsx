@@ -541,6 +541,7 @@ type MailboxStore = Record<string, MailboxCollections>;
 type NotificationNavigationRequest = {
   mailboxId: InboxId;
   messageId: string;
+  sourceMailboxId?: InboxId;
   type: "invite" | "reply" | "mention";
   source?: "priority";
   collaborationMessageId?: string;
@@ -3881,6 +3882,14 @@ function inferLearningDecisionMailboxId(
   }
 
   return null;
+}
+
+function getReviewItemSourceMailboxId(reviewItem: ReviewItem): InboxId | null {
+  const mailboxLink = reviewItem.linkedEntityIds.find((entityId) =>
+    entityId.startsWith("mailbox:"),
+  );
+
+  return (mailboxLink?.slice("mailbox:".length) as InboxId | undefined) ?? null;
 }
 
 function inferLearningDecisionPrioritySelection(
@@ -10101,13 +10110,55 @@ function MailboxView({
 
     const traceRows = smartFolderEntries.map((entry, index) => {
       const canonicalKeys = getCanonicalMessageIdentityKeys(entry.message);
+      const canonicalIdentityKey = getCanonicalMessageIdentityKey(entry.message);
+      const mailboxCollectionsForTrace =
+        mailboxStore[entry.mailboxId] ?? createEmptyMailboxCollections();
+      const identityKeySet = new Set(canonicalKeys);
+      const archiveMatches = mailboxCollectionsForTrace.Archive.filter((candidate) =>
+        doesMessageMatchCanonicalIdentitySet(candidate, identityKeySet),
+      );
+      const rawInboxMatches = mailboxCollectionsForTrace.Inbox.filter((candidate) =>
+        doesMessageMatchCanonicalIdentitySet(candidate, identityKeySet),
+      );
+      const rawFilteredMatches = mailboxCollectionsForTrace.Filtered.filter((candidate) =>
+        doesMessageMatchCanonicalIdentitySet(candidate, identityKeySet),
+      );
+      const matchesActiveSmartFolder = doesMessageMatchSmartFolder(
+        entry.message,
+        activeSmartFolder,
+        {
+          mailboxContext:
+            orderedMailboxes.find((candidate) => candidate.id === entry.mailboxId) ?? null,
+        },
+      );
+      const isExcludedByCuevionArchiveState = isArchivedInCuevionForMailbox(
+        entry.mailboxId,
+        entry.message,
+      );
+      const normalMailboxUiWouldExcludeDueToArchiveState = isExcludedByCuevionArchiveState;
+      const inclusionReason = matchesActiveSmartFolder
+        ? isExcludedByCuevionArchiveState
+          ? "Unexpected: matched smart-folder rule but should have been excluded by Cuevion archive state"
+          : archiveMatches.length > 0
+            ? "Included because smart-folder candidate source still matched and Archive canonical match was not excluding it"
+            : rawInboxMatches.length > 0
+              ? "Included because raw Inbox source still contains the canonical message and no Cuevion archive exclusion matched"
+              : rawFilteredMatches.length > 0
+                ? "Included because raw Filtered source still contains the canonical message and no Cuevion archive exclusion matched"
+                : "Included because smart-folder candidate source matched with no archive-state exclusion"
+        : "Unexpected: row present even though current smart-folder rule no longer matches";
 
       return {
         row: index + 1,
         mailboxId: entry.mailboxId,
         folder: entry.folder,
+        sourceCollection:
+          entry.mailboxId === mailbox.id
+            ? `messageCollections.${entry.folder}`
+            : `mailboxStore.${entry.mailboxId}.${entry.folder}`,
         id: entry.message.id,
         imapUid: entry.message.imapUid ?? null,
+        canonicalIdentityKey,
         previewIdentity: buildStablePreviewIdentity(entry.message),
         canonicalKeys,
         subject: entry.message.subject,
@@ -10118,6 +10169,11 @@ function MailboxView({
         internalClassification: entry.message.internalClassification ?? null,
         signal: entry.message.signal ?? null,
         uiSignal: entry.message.ui_signal ?? null,
+        existsInArchiveCollection: archiveMatches.length > 0,
+        stillExistsInRawInboxCollection: rawInboxMatches.length > 0,
+        stillExistsInRawFilteredCollection: rawFilteredMatches.length > 0,
+        normalMailboxUiWouldExcludeDueToArchiveState,
+        inclusionReason,
       };
     });
     const duplicatePreviewGroups = Object.entries(
@@ -10157,8 +10213,10 @@ function MailboxView({
         row: row.row,
         mailboxId: row.mailboxId,
         folder: row.folder,
+        sourceCollection: row.sourceCollection,
         id: row.id,
         imapUid: row.imapUid,
+        canonicalIdentityKey: row.canonicalIdentityKey,
         previewIdentity: row.previewIdentity,
         subject: row.subject,
         from: row.from,
@@ -10168,6 +10226,12 @@ function MailboxView({
         internalClassification: row.internalClassification,
         signal: row.signal,
         uiSignal: row.uiSignal,
+        existsInArchiveCollection: row.existsInArchiveCollection,
+        stillExistsInRawInboxCollection: row.stillExistsInRawInboxCollection,
+        stillExistsInRawFilteredCollection: row.stillExistsInRawFilteredCollection,
+        normalMailboxUiWouldExcludeDueToArchiveState:
+          row.normalMailboxUiWouldExcludeDueToArchiveState,
+        inclusionReason: row.inclusionReason,
       })),
     );
     console.log(
@@ -10176,7 +10240,17 @@ function MailboxView({
         row: row.row,
         mailboxId: row.mailboxId,
         folder: row.folder,
+        sourceCollection: row.sourceCollection,
         id: row.id,
+        imapUid: row.imapUid,
+        subject: row.subject,
+        canonicalIdentityKey: row.canonicalIdentityKey,
+        existsInArchiveCollection: row.existsInArchiveCollection,
+        stillExistsInRawInboxCollection: row.stillExistsInRawInboxCollection,
+        stillExistsInRawFilteredCollection: row.stillExistsInRawFilteredCollection,
+        normalMailboxUiWouldExcludeDueToArchiveState:
+          row.normalMailboxUiWouldExcludeDueToArchiveState,
+        inclusionReason: row.inclusionReason,
         canonicalKeys: row.canonicalKeys,
       })),
     );
@@ -24715,6 +24789,10 @@ export function WorkspaceShell({
     Object.values(mailboxStore)
       .flatMap((collections) => canonicalFolderOrder.flatMap((folder) => collections[folder]))
       .find((message) => message.id === messageId) ?? null;
+  const getMailboxMessageById = (mailboxId: InboxId, messageId: string) =>
+    canonicalFolderOrder
+      .flatMap((folder) => mailboxStore[mailboxId]?.[folder] ?? [])
+      .find((message) => message.id === messageId) ?? null;
   const getWorkspaceMessageLocationById = (messageId: string) => {
     for (const mailbox of orderedMailboxes) {
       const mailboxCollections = mailboxStore[mailbox.id];
@@ -24727,6 +24805,21 @@ export function WorkspaceShell({
         if (mailboxCollections[folder].some((message) => message.id === messageId)) {
           return { mailboxId: mailbox.id, folder };
         }
+      }
+    }
+
+    return null;
+  };
+  const getMailboxMessageLocationById = (mailboxId: InboxId, messageId: string) => {
+    const mailboxCollections = mailboxStore[mailboxId];
+
+    if (!mailboxCollections) {
+      return null;
+    }
+
+    for (const folder of canonicalFolderOrder) {
+      if (mailboxCollections[folder].some((message) => message.id === messageId)) {
+        return { mailboxId, folder };
       }
     }
 
@@ -24924,7 +25017,7 @@ export function WorkspaceShell({
       },
       sourceType: "mail_message",
       sourceId: message.id,
-      linkedEntityIds: [],
+      linkedEntityIds: [`mailbox:${mailboxId}`],
       createdAt: message.createdAt ?? message.timestamp,
       updatedAt: message.createdAt ?? message.timestamp,
     }),
@@ -25772,7 +25865,10 @@ export function WorkspaceShell({
     request: Omit<NotificationNavigationRequest, "requestKey">,
   ) => {
     const targetMailbox = orderedMailboxes.find((mailbox) => mailbox.id === request.mailboxId);
-    const targetMessage = getWorkspaceMessageById(request.messageId);
+    const targetMessage = getMailboxMessageById(
+      request.sourceMailboxId ?? request.mailboxId,
+      request.messageId,
+    );
 
     if (!targetMailbox || !targetMessage) {
       return;
@@ -25892,12 +25988,19 @@ export function WorkspaceShell({
 
   const handleOpenPriorityItem = (reviewItem: ReviewItem) => {
     if (reviewItem.id.startsWith("live-priority-")) {
-      const sourceLocation = getWorkspaceMessageLocationById(reviewItem.sourceId);
+      const priorityMailboxId = getReviewItemSourceMailboxId(reviewItem);
+      const sourceLocation = priorityMailboxId
+        ? getMailboxMessageLocationById(priorityMailboxId, reviewItem.sourceId)
+        : getWorkspaceMessageLocationById(reviewItem.sourceId);
       const targetMailbox = sourceLocation
         ? orderedMailboxes.find((mailbox) => mailbox.id === sourceLocation.mailboxId) ?? null
         : null;
+      const targetMessage =
+        priorityMailboxId && sourceLocation
+          ? getMailboxMessageById(priorityMailboxId, reviewItem.sourceId)
+          : getWorkspaceMessageById(reviewItem.sourceId);
 
-      if (!sourceLocation || !targetMailbox) {
+      if (!sourceLocation || !targetMailbox || !targetMessage) {
         return;
       }
 
@@ -25905,6 +26008,7 @@ export function WorkspaceShell({
       setNotificationNavigationRequest({
         mailboxId: sourceLocation.mailboxId,
         messageId: reviewItem.sourceId,
+        sourceMailboxId: priorityMailboxId ?? sourceLocation.mailboxId,
         type: "reply",
         source: "priority",
         focusReplyComposer: false,
