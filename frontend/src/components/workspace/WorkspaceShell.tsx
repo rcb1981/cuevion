@@ -4333,8 +4333,27 @@ function getVisiblePriorityBadge(
 function resolveFocusPreferenceLevelForPriorityMessage(
   message: MailMessage,
   focusPreferences: UserConfig["focusPreferences"],
+  options?: { preferPromoMailboxContext?: boolean },
 ) {
-  switch (resolveVisibleClassification(message)) {
+  const visibilityClassification = resolveVisibleClassification(message);
+
+  if (
+    options?.preferPromoMailboxContext &&
+    (visibilityClassification === "workflow_update" ||
+      visibilityClassification === "info")
+  ) {
+    const heuristicCategorySignal = inferHeuristicSignal({
+      ...message,
+      signal: undefined,
+      isAutoReply: false,
+    });
+
+    if (heuristicCategorySignal === "Promo") {
+      return focusPreferences.promo;
+    }
+  }
+
+  switch (visibilityClassification) {
     case "demo":
     case "high_priority_demo":
       return focusPreferences.demos;
@@ -4371,6 +4390,7 @@ function hasProtectedPriorityVisibility(message: MailMessage) {
 function getPriorityVisibilityAdjustedMessage(
   message: MailMessage,
   focusPreferences: UserConfig["focusPreferences"],
+  options?: { preferPromoMailboxContext?: boolean },
 ) {
   if (hasProtectedPriorityVisibility(message)) {
     return message;
@@ -4379,6 +4399,7 @@ function getPriorityVisibilityAdjustedMessage(
   const focusPreferenceLevel = resolveFocusPreferenceLevelForPriorityMessage(
     message,
     focusPreferences,
+    options,
   );
 
   if (focusPreferenceLevel === "high") {
@@ -4400,10 +4421,12 @@ function getVisiblePriorityBadgeForWorkspaceMessage(
   message: MailMessage,
   override: ManualPriorityOverride | undefined,
   focusPreferences: UserConfig["focusPreferences"],
+  options?: { preferPromoMailboxContext?: boolean },
 ) {
   const focusPreferenceLevel = resolveFocusPreferenceLevelForPriorityMessage(
     message,
     focusPreferences,
+    options,
   );
   const visibilityClassification = resolveVisibleClassification(message);
   const isDemoMessage =
@@ -4426,7 +4449,7 @@ function getVisiblePriorityBadgeForWorkspaceMessage(
   }
 
   return getVisiblePriorityBadge(
-    getPriorityVisibilityAdjustedMessage(message, focusPreferences),
+    getPriorityVisibilityAdjustedMessage(message, focusPreferences, options),
     override,
   );
 }
@@ -4435,6 +4458,7 @@ function shouldForceFilteredDemoVisibilityForWorkspaceMessage(
   message: MailMessage,
   override: ManualPriorityOverride | undefined,
   focusPreferences: UserConfig["focusPreferences"],
+  options?: { preferPromoMailboxContext?: boolean },
 ) {
   const visibilityClassification = resolveVisibleClassification(message);
 
@@ -4451,7 +4475,7 @@ function shouldForceFilteredDemoVisibilityForWorkspaceMessage(
 
   return (
     override !== "priority" &&
-    resolveFocusPreferenceLevelForPriorityMessage(message, focusPreferences) === "low"
+    resolveFocusPreferenceLevelForPriorityMessage(message, focusPreferences, options) === "low"
   );
 }
 
@@ -4459,17 +4483,24 @@ function shouldDisplayMessageInFilteredFolderForWorkspaceMessage(
   message: MailMessage,
   override: ManualPriorityOverride | undefined,
   focusPreferences: UserConfig["focusPreferences"],
+  options?: { preferPromoMailboxContext?: boolean },
 ) {
   if (message.collaboration) {
     return false;
   }
 
   return (
-    getVisiblePriorityBadgeForWorkspaceMessage(message, override, focusPreferences) === "LOW" ||
+    getVisiblePriorityBadgeForWorkspaceMessage(
+      message,
+      override,
+      focusPreferences,
+      options,
+    ) === "LOW" ||
     shouldForceFilteredDemoVisibilityForWorkspaceMessage(
       message,
       override,
       focusPreferences,
+      options,
     )
   );
 }
@@ -9619,32 +9650,9 @@ function MailboxView({
     return resolveVisibleClassification(message);
   };
   const resolveFocusPreferenceLevelForMessage = (message: MailMessage) => {
-    const visibilityClassification = resolveVisibilityClassificationForMessage(message);
-
-    switch (visibilityClassification) {
-      case "demo":
-      case "high_priority_demo":
-        return focusPreferences.demos;
-      case "promo":
-        return focusPreferences.promo;
-      case "promo_reminder":
-        return focusPreferences.promoReminders;
-      case "finance":
-        return focusPreferences.finance;
-      case "royalty_statement":
-        return focusPreferences.royalties;
-      case "business":
-        return focusPreferences.business;
-      case "business_reminder":
-        return focusPreferences.paymentReminders;
-      case "distributor_update":
-        return focusPreferences.distribution;
-      case "workflow_update":
-      case "info":
-        return focusPreferences.updates;
-      default:
-        return null;
-    }
+    return resolveFocusPreferenceLevelForPriorityMessage(message, focusPreferences, {
+      preferPromoMailboxContext: isPromoMailboxView,
+    });
   };
   const getVisibleCategoryLabelForMessage = (message: MailMessage) => {
     const visibilityClassification = resolveVisibilityClassificationForMessage(message);
@@ -9745,6 +9753,9 @@ function MailboxView({
       message,
       manualPriorityOverrides[message.id],
       focusPreferences,
+      {
+        preferPromoMailboxContext: isPromoMailboxView,
+      },
     );
   };
   const shouldForceFilteredDemoVisibility = (message: MailMessage) => {
@@ -25627,6 +25638,14 @@ export function WorkspaceShell({
       return nextValue;
     });
 
+    const focusPreferenceMailbox =
+      savedManagedInboxes.find((mailbox) => mailbox.id === inboxId) ??
+      orderedMailboxes.find((mailbox) => mailbox.id === inboxId) ??
+      null;
+    const shouldPreferPromoMailboxContext = focusPreferenceMailbox
+      ? isPromoMailboxContext(focusPreferenceMailbox)
+      : false;
+
     window.setTimeout(() => {
       setMailboxStore((currentStore) => {
         const mailboxCollections = currentStore[inboxId];
@@ -25659,6 +25678,9 @@ export function WorkspaceShell({
               message,
               manualPriorityOverrides[message.id],
               nextFocusPreferences,
+              {
+                preferPromoMailboxContext: shouldPreferPromoMailboxContext,
+              },
             )
           ) {
             nextFilteredMessages.push(message);
