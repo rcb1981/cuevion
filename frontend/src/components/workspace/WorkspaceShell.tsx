@@ -545,6 +545,7 @@ const canonicalFolderOrder: MailFolder[] = [
   "Drafts",
   "Inbox",
 ];
+const smartFolderSourceFolders = ["Inbox", "Filtered"] as const;
 // INBOX_SNAPSHOT_MAX_MESSAGES, INBOX_SNAPSHOT_MAX_AGE_MS, and
 // INBOX_SNAPSHOT_RECENT_GUARD_MS are imported from inboxEngine.ts above.
 
@@ -9957,7 +9958,7 @@ function MailboxView({
       : orderedMailboxes.map((candidate) => candidate.id);
   const smartFolderEntries = activeSmartFolder
     ? smartFolderScopeMailboxIds.flatMap((mailboxId) =>
-        (["Inbox", "Filtered"] as const).flatMap((folder) =>
+        smartFolderSourceFolders.flatMap((folder) =>
           ((mailboxId === mailbox.id
             ? messageCollections[folder]
             : mailboxStore[mailboxId]?.[folder]) ?? [])
@@ -12822,6 +12823,18 @@ function MailboxView({
 
         nextStore[sourceMailboxId] = {
           ...currentMailboxCollections,
+          Inbox:
+            targetFolder === "Inbox"
+              ? nextTargetMessages
+              : currentMailboxCollections.Inbox.filter(
+                  (message) => !messageIdSet.has(message.id),
+                ),
+          Filtered:
+            targetFolder === "Filtered"
+              ? nextTargetMessages
+              : currentMailboxCollections.Filtered.filter(
+                  (message) => !messageIdSet.has(message.id),
+                ),
           [sourceFolder]: nextSourceMessages,
           [targetFolder]: nextTargetMessages,
         };
