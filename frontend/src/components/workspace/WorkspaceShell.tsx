@@ -9568,6 +9568,10 @@ function MailboxView({
   }, [isComposeOpen, pendingComposeAttachmentPickerOpen]);
 
   const mailboxCollections = mailboxStore[mailbox.id] ?? createEmptyMailboxCollections();
+  const managedMailboxForView =
+    managedInboxes.find((candidate) => candidate.id === mailbox.id) ?? null;
+  const isPromoMailboxView =
+    isPromoMailboxContext(managedMailboxForView ?? mailbox);
   const resolveVisibilityClassificationForMessage = (message: MailMessage) => {
     return resolveVisibleClassification(message);
   };
@@ -9600,7 +9604,9 @@ function MailboxView({
     }
   };
   const getVisibleCategoryLabelForMessage = (message: MailMessage) => {
-    switch (resolveVisibilityClassificationForMessage(message)) {
+    const visibilityClassification = resolveVisibilityClassificationForMessage(message);
+
+    switch (visibilityClassification) {
       case "demo":
       case "high_priority_demo":
         return "Demo";
@@ -9625,8 +9631,22 @@ function MailboxView({
         return heuristic === "Promo" ? "Promo" : "Business";
       }
       case "workflow_update":
+      case "info": {
+        if (isPromoMailboxView) {
+          const heuristic = inferHeuristicSignal({
+            ...message,
+            signal: undefined,
+            isAutoReply: false,
+          });
+
+          if (heuristic === "Promo") {
+            return "Promo";
+          }
+        }
+
+        return "Update";
+      }
       case "distributor_update":
-      case "info":
         return "Update";
       case "reply":
         return "Reply";
@@ -18019,6 +18039,29 @@ function toOrderedMailboxFromManagedInbox(
     detail: fallbackInfo.detail,
     state: fallbackInfo.state,
   };
+}
+
+function isPromoMailboxContext(
+  mailbox: Pick<ManagedWorkspaceInbox | OrderedMailbox, "id" | "title" | "email">,
+) {
+  const searchableText = [mailbox.id, mailbox.title, mailbox.email].join(" ").toLowerCase();
+
+  return (
+    mailbox.id === "promo" ||
+    includesAnyKeyword(searchableText, [
+      " promo ",
+      "promo@",
+      "promo.",
+      "promo-",
+      "promotions",
+      "promo inbox",
+      "promotional",
+      "servicing",
+      "servicing@",
+      "radio plug",
+      "press plug",
+    ])
+  );
 }
 const WorkspaceSettingsCard = memo(function WorkspaceSettingsCard({
   savedWorkspaceName,
