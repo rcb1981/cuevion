@@ -9959,14 +9959,16 @@ function MailboxView({
   //
   // Scoped strictly to the Inbox folder — Sent, Drafts, Archive, etc. are unaffected.
   // Smart-folder and shared-view modes are also excluded.
-  const uniqueMessages = Array.from(
-    new Map(
-      visibleMessages.map((m) => [
-        m.imapUid || m.id,
-        m,
-      ])
-    ).values()
-  );
+  const uniqueMessages = activeSmartFolder
+    ? visibleMessages
+    : Array.from(
+        new Map(
+          visibleMessages.map((m) => [
+            m.imapUid || m.id,
+            m,
+          ]),
+        ).values(),
+      );
 
   const threadDedupedMessages = activeSmartFolder
     ? uniqueMessages
