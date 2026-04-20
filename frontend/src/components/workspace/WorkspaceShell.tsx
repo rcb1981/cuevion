@@ -11479,6 +11479,15 @@ function MailboxView({
                       return;
                     }
 
+                    // In smart folder context the message may belong to a non-active
+                    // mailbox or a different source folder. Use the cross-workspace
+                    // mover which resolves the actual source via currentMessageLocationById,
+                    // preventing a silent no-op when the source differs from mailbox.id/activeFolder.
+                    if (activeSmartFolder) {
+                      moveMessagesToFolderAcrossWorkspace("Archive", [message.id]);
+                      return;
+                    }
+
                     moveMessages(mailbox.id, activeFolder, mailbox.id, "Archive", [message.id]);
                   }}
                   className={menuItemClass}
@@ -13789,6 +13798,15 @@ function MailboxView({
 
     if (isSharedView) {
       moveMessagesAcrossWorkspace(mailbox.id, "Archive", actionableSelectionIds);
+      return;
+    }
+
+    // In smart folder context messages can come from multiple mailboxes or
+    // different source folders. Use the cross-workspace mover which resolves
+    // each message to its actual source via currentMessageLocationById,
+    // preventing a silent no-op for messages not in mailbox.id/activeFolder.
+    if (activeSmartFolder) {
+      moveMessagesToFolderAcrossWorkspace("Archive", actionableSelectionIds);
       return;
     }
 
@@ -16169,6 +16187,14 @@ function MailboxView({
                               "Archive",
                               contextMenuSelectionIds,
                             );
+                            return;
+                          }
+
+                          // In smart folder context messages can come from multiple
+                          // mailboxes or different source folders. Use the cross-workspace
+                          // mover so the archive lands in the message's actual mailbox.
+                          if (activeSmartFolder) {
+                            moveMessagesToFolderAcrossWorkspace("Archive", contextMenuSelectionIds);
                             return;
                           }
 
