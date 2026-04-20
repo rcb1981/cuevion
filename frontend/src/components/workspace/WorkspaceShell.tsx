@@ -4582,18 +4582,33 @@ function getPriorityVisibilityAdjustedMessage(
     };
   }
 
-  // focusPreferenceLevel is null: the message's category has no user preference
-  // (classification resolved to "unknown" / no matching key). In this case the
-  // backend never emits a "Priority" signal for unclassified messages — that
-  // signal value was assigned by inferHeuristicSignal (a keyword scan). Letting
-  // it survive would cause any "Other" mail with urgency keywords to show as
-  // PRIORITY regardless of the user's intent. Strip it so the badge falls back
-  // to priorityScore and final_visibility instead.
+  // focusPreferenceLevel is null: the message's classification is "unknown" (no
+  // matching preference key). These are plain "Other" mails — test messages,
+  // unrecognised senders, etc. The product rule is: Other defaults to NORMAL,
+  // not PRIORITY and not LOW.
   //
-  // Note: legitimate backend "Priority" signals only appear on finance /
-  // royalty_statement messages (map_to_stable_signal), which always have a
-  // non-null focusPreferenceLevel and therefore never reach this branch.
-  return { ...message, signal: undefined };
+  // Three fields can independently elevate badge to PRIORITY for these messages:
+  //   1. signal = "Priority"  — set by inferHeuristicSignal keyword scan
+  //   2. final_visibility = "show_priority" — set by backend without user prefs
+  //   3. priorityScore = "high" — set because cuevionCategoryByInternalClassification
+  //      maps "unknown" → "Primary", and resolveMessagePriorityScore returns "high"
+  //      whenever category === "Primary" with any owner interaction confidence.
+  //
+  // All three must be cleared / normalised. priorityScore is set to "medium" so
+  // getVisiblePriorityBadge returns "NORMAL" (the "medium" arm). "low" would
+  // produce "LOW" badge, violating the product rule.
+  //
+  // Protected messages (replies, shared) are guarded above by
+  // hasProtectedPriorityVisibility and never reach this branch. All categorised
+  // signals (finance, business, promo, updates …) are handled in the earlier
+  // arms and also never reach this branch.
+  return {
+    ...message,
+    signal: undefined,
+    final_visibility: undefined,
+    action: undefined,
+    priorityScore: "medium" as const,
+  };
 }
 
 function getVisiblePriorityBadgeForWorkspaceMessage(
