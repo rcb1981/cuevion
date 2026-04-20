@@ -26965,6 +26965,13 @@ export function WorkspaceShell({
           provider: managedMailbox.provider,
           email: managedMailbox.email,
           customImap: managedMailbox.customImap,
+          // Pass the current effective focus preferences for this mailbox so the
+          // backend's decide_message_behavior() computes final_visibility, action,
+          // and v7_final_priority using the user's actual settings rather than
+          // default/anonymous rules. effectiveFocusPreferencesByMailbox already
+          // applies any per-mailbox overrides on top of the global base prefs,
+          // matching the same source used by the visible priority render path.
+          focusPreferences: effectiveFocusPreferencesByMailbox[mailboxId],
         }),
       );
       const requestDurationMs = performance.now() - syncStartedAt;
