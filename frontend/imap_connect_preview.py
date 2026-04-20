@@ -529,6 +529,15 @@ def resolve_preview_routing(
             "check my track",
             "track for your label",
         ]
+        promo_pitch_keywords = [
+            "upcoming track",
+            "for your radioshow",
+            "for your radio show",
+            "for your podcast",
+            "for your sets",
+            "hope you'll love it for your sets",
+            "private soundcloud",
+        ]
         finance_keywords = [
             "invoice",
             "receipt",
@@ -577,9 +586,16 @@ def resolve_preview_routing(
         is_promo_mailbox_context = any(
             keyword in local_part for keyword in ["promo", "press", "servicing"]
         )
+        has_subject_promo_marker = subject_lower.startswith("promo:") or "[promo]" in subject_lower
         has_promo_provider_signal = any(
             keyword in classification_text or keyword in sender_lower
             for keyword in promo_keywords
+        )
+        has_promo_pitch_signal = any(
+            keyword in classification_text for keyword in promo_pitch_keywords
+        )
+        has_private_soundcloud_signal = bool(extracted_links.get("soundcloud")) and any(
+            keyword in classification_text for keyword in ["private", "upcoming track", "for your sets"]
         )
         result = {
             "category": "unknown",
@@ -618,7 +634,11 @@ def resolve_preview_routing(
             result["category"] = "info"
         elif any(keyword in classification_text for keyword in finance_keywords):
             result["category"] = "finance"
+        elif has_subject_promo_marker:
+            result["category"] = "promo"
         elif is_promo_mailbox_context and has_promo_provider_signal:
+            result["category"] = "promo"
+        elif is_promo_mailbox_context and has_promo_pitch_signal and has_private_soundcloud_signal:
             result["category"] = "promo"
         elif usable_demo_links:
             result["category"] = "demo"
