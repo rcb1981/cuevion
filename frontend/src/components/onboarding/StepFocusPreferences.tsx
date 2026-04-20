@@ -24,6 +24,12 @@ const reminderOptions: Array<{
 
 const preferenceLevels: FocusPreferenceLevel[] = ["high", "medium", "low"];
 
+const preferenceLevelLabels: Record<FocusPreferenceLevel, string> = {
+  high: "Priority",
+  medium: "Normal",
+  low: "Low",
+};
+
 interface StepFocusPreferencesProps {
   value: OnboardingState["focusPreferences"];
   onChange: (
@@ -72,7 +78,7 @@ export function StepFocusPreferences({
                           : "border-ink/10 bg-white/70 text-ink/56 hover:border-moss/24 hover:text-ink"
                       }`}
                     >
-                      {level}
+                      {preferenceLevelLabels[level]}
                     </button>
                   );
                 })}

@@ -18714,7 +18714,7 @@ const focusPreferenceOptions: FocusPreferenceLevel[] = ["high", "medium", "low"]
 const focusPreferenceOptionLabels: Record<FocusPreferenceLevel, string> = {
   low: "Low",
   medium: "Normal",
-  high: "High",
+  high: "Priority",
 };
 type FocusPreferences = UserConfig["focusPreferences"];
 type FocusPreferenceField = keyof FocusPreferences;
