@@ -9095,6 +9095,11 @@ function MailboxView({
     );
     return sorted[0]?.id ?? null;
   });
+  // Tracks the imapUid of the currently-navigated-to message so that
+  // selectedMessageFromFolder can still find it if a background IMAP sync
+  // reassigns its id (e.g. SHA1 → imap-uid-X via preview identity match).
+  // Cleared on every manual selection change; only set by the nav useEffect.
+  const [selectedMessageImapUid, setSelectedMessageImapUid] = useState<string | null>(null);
   const [selectedMessageIds, setSelectedMessageIds] = useState<string[]>(() =>
     selectedMessageId ? [selectedMessageId] : [],
   );
@@ -10392,7 +10397,16 @@ function MailboxView({
       : firstTime - secondTime;
   });
   const selectedMessageFromFolder =
-    folderMessages.find((message) => message.id === selectedMessageId) ?? null;
+    // Primary: match by id (the common fast path).
+    folderMessages.find((message) => message.id === selectedMessageId) ??
+    // Fallback: match by imapUid. Handles the race where a background IMAP
+    // sync reassigns a message's id (SHA1 snapshot id → imap-uid-X) after the
+    // navigation useEffect already fixed selectedMessageId to the old id.
+    // selectedMessageImapUid is set by the nav useEffect and cleared on every
+    // manual selection, so this only fires during that narrow sync-race window.
+    (selectedMessageImapUid
+      ? folderMessages.find((m) => m.imapUid === selectedMessageImapUid) ?? null
+      : null);
   const visibleSelectedMessageIds = selectedMessageIds.filter((messageId) =>
     sortedMessages.some((message) => message.id === messageId),
   );
@@ -10994,6 +11008,14 @@ function MailboxView({
       notificationNavigationRequest.messageId,
       notificationNavigationRequest.messageId,
     );
+    // Record the target message's imapUid so selectedMessageFromFolder can
+    // still locate it if a background IMAP sync reassigns its id afterwards
+    // (e.g. SHA1 fallback id → imap-uid-X after the first live fetch).
+    // setSelectionState above clears selectedMessageImapUid first; we overwrite
+    // here only for navigation-driven selections.
+    if (targetMessage.imapUid) {
+      setSelectedMessageImapUid(targetMessage.imapUid);
+    }
     if (notificationNavigationRequest.source === "priority") {
       console.log("[PriorityOpenTrace] selection-state-requested", {
         traceId,
@@ -12042,6 +12064,9 @@ function MailboxView({
   ) => {
     setSelectedMessageIds(nextSelectedMessageIds);
     setSelectedMessageId(nextPrimaryMessageId);
+    // Clear the imapUid fallback on every explicit selection change so stale
+    // navigation identity doesn't bleed into unrelated future selections.
+    setSelectedMessageImapUid(null);
     if (nextAnchorId !== undefined) {
       setSelectionAnchorId(nextAnchorId);
     }
