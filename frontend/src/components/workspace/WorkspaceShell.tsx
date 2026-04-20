@@ -9853,8 +9853,13 @@ function MailboxView({
       },
     );
   }
+  const shouldPreferCurrentMailboxPromoContext = isPromoMailboxContext(mailbox);
   const resolveFocusPreferenceLevelForMessage = (message: MailMessage) => {
-    return resolveFocusPreferenceLevelForMessageInContext(message, focusPreferences, false);
+    return resolveFocusPreferenceLevelForMessageInContext(
+      message,
+      focusPreferences,
+      shouldPreferCurrentMailboxPromoContext,
+    );
   };
   const getVisibleCategoryLabelForMessage = (message: MailMessage) => {
     return getVisibleCategoryLabelForMessageInContext(message, false);
@@ -9903,7 +9908,11 @@ function MailboxView({
     };
   };
   const getVisiblePriorityBadgeForMessage = (message: MailMessage) => {
-    return getVisiblePriorityBadgeForMessageInContext(message, focusPreferences, false);
+    return getVisiblePriorityBadgeForMessageInContext(
+      message,
+      focusPreferences,
+      shouldPreferCurrentMailboxPromoContext,
+    );
   };
   const shouldForceFilteredDemoVisibility = (message: MailMessage) => {
     const visibilityClassification = resolveVisibilityClassificationForMessage(message);
@@ -9956,6 +9965,9 @@ function MailboxView({
       mailboxCollections,
       manualPriorityOverrides,
       focusPreferences,
+      {
+        preferPromoMailboxContext: shouldPreferCurrentMailboxPromoContext,
+      },
     ),
     Drafts: mailboxCollections.Drafts,
     Sent: mailboxCollections.Sent,
