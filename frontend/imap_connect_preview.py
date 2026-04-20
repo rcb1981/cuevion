@@ -525,6 +525,27 @@ def resolve_preview_routing(
             "check my track",
             "track for your label",
         ]
+        update_keywords = [
+            "update",
+            "updated",
+            "status",
+            "fyi",
+            "recap",
+            "summary",
+            "confirmed",
+            "scheduled",
+            "completed",
+            "resolved",
+            "sent",
+            "delivered",
+            "newsletter",
+            "in brief newsletter",
+            "webinar",
+            "on demand",
+            "register",
+            "replay",
+            "join us",
+        ]
         promo_pitch_keywords = [
             "upcoming track",
             "for your radioshow",
@@ -593,6 +614,9 @@ def resolve_preview_routing(
         has_private_soundcloud_signal = bool(extracted_links.get("soundcloud")) and any(
             keyword in classification_text for keyword in ["private", "upcoming track", "for your sets"]
         )
+        has_clear_update_newsletter_signal = any(
+            keyword in classification_text for keyword in update_keywords
+        )
         result = {
             "category": "unknown",
             "priority": "NORMAL",
@@ -628,8 +652,10 @@ def resolve_preview_routing(
             and any(keyword in classification_text for keyword in google_security_keywords)
         ):
             result["category"] = "info"
-        elif any(keyword in classification_text for keyword in finance_keywords):
+        elif any(keyword in classification_text for keyword in finance_keywords) and not has_clear_update_newsletter_signal:
             result["category"] = "finance"
+        elif has_clear_update_newsletter_signal:
+            result["category"] = "workflow_update"
         elif has_subject_promo_marker:
             result["category"] = "promo"
         elif is_promo_mailbox_context and has_promo_provider_signal:

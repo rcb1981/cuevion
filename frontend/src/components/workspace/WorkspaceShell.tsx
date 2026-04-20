@@ -4184,7 +4184,9 @@ function inferHeuristicSignal(
     !isGoogleSecurityAuthMail &&
     (!isMetaBillingSystemMail || isPromoInSubject);
   const isPriority =
-    includesAnyKeyword(searchableText, priorityKeywords) && !isPromo;
+    includesAnyKeyword(searchableText, priorityKeywords) &&
+    !isPromo &&
+    !hasClearMarketingNewsletterSignal;
   const isUpdate =
     message.isAutoReply ||
     isGoogleSecurityAuthMail ||
@@ -4193,6 +4195,10 @@ function inferHeuristicSignal(
 
   if (isMetaBillingSystemMail && !hasClearMarketingNewsletterSignal) {
     return "Finance";
+  }
+
+  if (hasClearMarketingNewsletterSignal && !isPromo) {
+    return "Update";
   }
 
   if (isPriority) {
@@ -4270,6 +4276,24 @@ function refineUnknownInternalClassification(
   }
 
   const searchableText = [message.subject, message.snippet].join(" ").toLowerCase();
+  const hasClearMarketingNewsletterSignal = includesAnyKeyword(searchableText, [
+    "watch",
+    "summit",
+    "on demand",
+    "newsletter",
+    "in brief newsletter",
+    "marketing",
+    "event",
+    "sessions",
+    "webinar",
+    "register",
+    "replay",
+    "join us",
+  ]);
+
+  if (hasClearMarketingNewsletterSignal) {
+    return "workflow_update";
+  }
 
   if (
     includesAnyKeyword(searchableText, [
