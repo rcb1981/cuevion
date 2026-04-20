@@ -22,11 +22,7 @@ logger = logging.getLogger(__name__)
 
 
 def map_to_ui_signal(result: dict[str, Any]) -> str:
-    priority = result.get("v7_final_priority")
     category = result.get("category")
-
-    if priority == "PRIORITY":
-        return "PRIORITY"
 
     if category in ["promo", "promo_reminder"]:
         return "PROMO"
