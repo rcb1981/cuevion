@@ -22685,6 +22685,7 @@ function ForYouView({
   learningLaunchRequest,
   onConsumeLearningLaunchRequest,
   aiSuggestionsEnabled,
+  connectedInboxCount,
 }: {
   context?: ForYouContext;
   onOpenTarget: (target: WorkspaceTarget) => void;
@@ -22707,6 +22708,7 @@ function ForYouView({
   learningLaunchRequest: LearningLaunchRequest;
   onConsumeLearningLaunchRequest: () => void;
   aiSuggestionsEnabled: boolean;
+  connectedInboxCount: number;
 }) {
   const [activeLearningModal, setActiveLearningModal] = useState<
     | "paste-rule"
@@ -22806,7 +22808,9 @@ function ForYouView({
       subtitle: "Revisit recent choices Cuevion learned from.",
       handler: () => setActiveLearningModal("recent-decisions"),
     },
-  ];
+  ].filter((action) =>
+    action.title !== "Check uncertain emails" || connectedInboxCount >= 2,
+  );
   const { learningSuggestionPool, uncertainEmailPool } = forYouEngine.buildForYouLearningPools(
     aiSuggestionsEnabled,
     mailboxStore,
@@ -28602,6 +28606,7 @@ export function WorkspaceShell({
                   learningLaunchRequest={learningLaunchRequest}
                   onConsumeLearningLaunchRequest={() => setLearningLaunchRequest(null)}
                   aiSuggestionsEnabled={aiSuggestionsEnabled}
+                  connectedInboxCount={connectedInboxCount}
                 />
               </div>
 	            )}
