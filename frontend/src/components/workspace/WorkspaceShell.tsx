@@ -24773,7 +24773,12 @@ export function WorkspaceShell({
           createdAt: message.createdAt,
           imapUid: message.imapUid,
           unread,
+          signal: message.signal,
           ui_signal: message.ui_signal,
+          internalClassification:
+            message.internalClassification as CuevionInternalClassification | undefined,
+          final_visibility: message.final_visibility,
+          action: message.action,
           from: message.from,
           to: message.to,
           cc: message.cc,

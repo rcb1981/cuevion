@@ -30,7 +30,11 @@ export type LiveInboxMessageSnapshot = {
   bodyHtml?: string;
   attachments?: LiveInboxAttachmentSnapshot[];
   unread?: boolean;
+  signal?: string;
   ui_signal?: string;
+  internalClassification?: string;
+  final_visibility?: string;
+  action?: string;
 };
 
 export type ConnectInboxRequest = {

@@ -475,6 +475,15 @@ def resolve_preview_routing(
             user_link_settings=USER_LINK_SETTINGS,
         )
         promo_keywords = [
+            "[promo]",
+            "promobox",
+            "promo box",
+            "digital promo sound",
+            "labelworx",
+            "area53",
+            "promo campaign",
+            "promo mailout",
+            "servicing",
             "out now",
             "out soon",
             "new release",
@@ -559,6 +568,10 @@ def resolve_preview_routing(
             "suspicious activity",
         ]
         classification_text = f"{subject_lower} {body_lower}"
+        has_promo_provider_signal = any(
+            keyword in classification_text or keyword in sender_lower
+            for keyword in promo_keywords
+        )
         result = {
             "category": "unknown",
             "priority": "NORMAL",
@@ -603,7 +616,7 @@ def resolve_preview_routing(
             result["category"] = "demo"
         elif any(keyword in classification_text for keyword in meta_ads_keywords):
             result["category"] = "finance"
-        elif any(keyword in classification_text for keyword in promo_keywords):
+        elif has_promo_provider_signal:
             result["category"] = "promo"
         elif any(keyword in classification_text for keyword in business_keywords):
             result["category"] = "business"
