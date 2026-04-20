@@ -597,7 +597,6 @@ const canonicalFolderOrder: MailFolder[] = [
   "Drafts",
   "Inbox",
 ];
-const smartFolderSourceFolders = ["Inbox", "Filtered"] as const;
 // INBOX_SNAPSHOT_MAX_MESSAGES, INBOX_SNAPSHOT_MAX_AGE_MS, and
 // INBOX_SNAPSHOT_RECENT_GUARD_MS are imported from inboxEngine.ts above.
 
@@ -10026,6 +10025,32 @@ function MailboxView({
     activeSmartFolder?.scope === "selected" && activeSmartFolder.selectedInboxIds.length > 0
       ? activeSmartFolder.selectedInboxIds
       : orderedMailboxes.map((candidate) => candidate.id);
+  const getSmartFolderMailboxCollections = (mailboxId: InboxId) =>
+    mailboxId === mailbox.id
+      ? mailboxCollections
+      : mailboxStore[mailboxId] ?? createEmptyMailboxCollections();
+  const getSmartFolderMailboxContext = (mailboxId: InboxId) =>
+    orderedMailboxes.find((candidate) => candidate.id === mailboxId) ??
+    managedInboxes.find((candidate) => candidate.id === mailboxId) ??
+    (mailboxId === mailbox.id ? mailbox : null);
+  const getSmartFolderVisibleInboxRowSet = (mailboxId: InboxId) => {
+    if (mailboxId === mailbox.id) {
+      return messageCollections.Inbox;
+    }
+
+    const mailboxContext = getSmartFolderMailboxContext(mailboxId);
+
+    return getMailboxReadyInboxMessagesForWorkspaceMailbox(
+      getSmartFolderMailboxCollections(mailboxId),
+      manualPriorityOverrides,
+      effectiveFocusPreferencesByMailbox[mailboxId] ?? focusPreferences,
+      {
+        preferPromoMailboxContext: mailboxContext
+          ? isPromoMailboxContext(mailboxContext)
+          : false,
+      },
+    );
+  };
   const isArchivedInCuevionForMailbox = (
     mailboxId: InboxId,
     message: MailMessage,
@@ -10045,27 +10070,22 @@ function MailboxView({
   const smartFolderEntries = activeSmartFolder
     ? dedupeSmartFolderEntriesByCanonicalIdentity(
         smartFolderScopeMailboxIds.flatMap((mailboxId) =>
-          smartFolderSourceFolders.flatMap((folder) =>
-            ((mailboxId === mailbox.id
-              ? messageCollections[folder]
-              : mailboxStore[mailboxId]?.[folder]) ?? [])
-              .filter((message) =>
-                doesMessageMatchSmartFolder(
-                  message,
-                  activeSmartFolder,
-                  {
-                    mailboxContext:
-                      orderedMailboxes.find((candidate) => candidate.id === mailboxId) ?? null,
-                  },
-                ),
-              )
-              .filter((message) => !isArchivedInCuevionForMailbox(mailboxId, message))
-              .map((message) => ({
-                mailboxId,
-                folder,
+          getSmartFolderVisibleInboxRowSet(mailboxId)
+            .filter((message) =>
+              doesMessageMatchSmartFolder(
                 message,
-              })),
-          ),
+                activeSmartFolder,
+                {
+                  mailboxContext: getSmartFolderMailboxContext(mailboxId),
+                },
+              ),
+            )
+            .filter((message) => !isArchivedInCuevionForMailbox(mailboxId, message))
+            .map((message) => ({
+              mailboxId,
+              folder: "Inbox" as const,
+              message,
+            })),
         ),
       )
     : [];
@@ -10138,8 +10158,8 @@ function MailboxView({
     const traceRows = smartFolderEntries.map((entry, index) => {
       const canonicalKeys = getCanonicalMessageIdentityKeys(entry.message);
       const canonicalIdentityKey = getCanonicalMessageIdentityKey(entry.message);
-      const mailboxCollectionsForTrace =
-        mailboxStore[entry.mailboxId] ?? createEmptyMailboxCollections();
+      const mailboxCollectionsForTrace = getSmartFolderMailboxCollections(entry.mailboxId);
+      const visibleInboxRowSetForMailbox = getSmartFolderVisibleInboxRowSet(entry.mailboxId);
       const identityKeySet = new Set(canonicalKeys);
       const archiveMatches = mailboxCollectionsForTrace.Archive.filter((candidate) =>
         doesMessageMatchCanonicalIdentitySet(candidate, identityKeySet),
@@ -10150,39 +10170,49 @@ function MailboxView({
       const rawFilteredMatches = mailboxCollectionsForTrace.Filtered.filter((candidate) =>
         doesMessageMatchCanonicalIdentitySet(candidate, identityKeySet),
       );
+      const visibleInboxRowMatches = visibleInboxRowSetForMailbox.filter((candidate) =>
+        doesMessageMatchCanonicalIdentitySet(candidate, identityKeySet),
+      );
       const matchesActiveSmartFolder = doesMessageMatchSmartFolder(
         entry.message,
         activeSmartFolder,
         {
-          mailboxContext:
-            orderedMailboxes.find((candidate) => candidate.id === entry.mailboxId) ?? null,
+          mailboxContext: getSmartFolderMailboxContext(entry.mailboxId),
         },
       );
       const isExcludedByCuevionArchiveState = isArchivedInCuevionForMailbox(
         entry.mailboxId,
         entry.message,
       );
-      const normalMailboxUiWouldExcludeDueToArchiveState = isExcludedByCuevionArchiveState;
+      const existsInCurrentMailboxMessageCollectionsInbox =
+        entry.mailboxId === mailbox.id &&
+        messageCollections.Inbox.some((candidate) =>
+          doesMessageMatchCanonicalIdentitySet(candidate, identityKeySet),
+        );
+      const existsInCurrentMailboxMessageCollectionsFiltered =
+        entry.mailboxId === mailbox.id &&
+        messageCollections.Filtered.some((candidate) =>
+          doesMessageMatchCanonicalIdentitySet(candidate, identityKeySet),
+        );
+      const existsInMailboxVisibleInboxRowSet = visibleInboxRowMatches.length > 0;
+      const exactSourceCollectionUsedBySmartFolder = `visibleInboxRowSet.${entry.mailboxId}`;
       const inclusionReason = matchesActiveSmartFolder
         ? isExcludedByCuevionArchiveState
           ? "Unexpected: matched smart-folder rule but should have been excluded by Cuevion archive state"
-          : archiveMatches.length > 0
-            ? "Included because smart-folder candidate source still matched and Archive canonical match was not excluding it"
-            : rawInboxMatches.length > 0
-              ? "Included because raw Inbox source still contains the canonical message and no Cuevion archive exclusion matched"
-              : rawFilteredMatches.length > 0
-                ? "Included because raw Filtered source still contains the canonical message and no Cuevion archive exclusion matched"
-                : "Included because smart-folder candidate source matched with no archive-state exclusion"
+          : existsInMailboxVisibleInboxRowSet
+            ? "Included because the message is still present in the mailbox Inbox-ready visible row set and matches the smart-folder rule"
+            : rawFilteredMatches.length > 0
+              ? "Unexpected: raw Filtered still contains the canonical message, but the smart folder should now only read the mailbox Inbox-ready visible row set"
+              : rawInboxMatches.length > 0
+                ? "Unexpected: raw Inbox still contains the canonical message, but it is absent from the mailbox Inbox-ready visible row set"
+                : "Unexpected: matched smart-folder rule without a corresponding mailbox Inbox-ready visible row"
         : "Unexpected: row present even though current smart-folder rule no longer matches";
 
       return {
         row: index + 1,
         mailboxId: entry.mailboxId,
         folder: entry.folder,
-        sourceCollection:
-          entry.mailboxId === mailbox.id
-            ? `messageCollections.${entry.folder}`
-            : `mailboxStore.${entry.mailboxId}.${entry.folder}`,
+        sourceCollection: exactSourceCollectionUsedBySmartFolder,
         id: entry.message.id,
         imapUid: entry.message.imapUid ?? null,
         canonicalIdentityKey,
@@ -10196,23 +10226,27 @@ function MailboxView({
         internalClassification: entry.message.internalClassification ?? null,
         signal: entry.message.signal ?? null,
         uiSignal: entry.message.ui_signal ?? null,
-        existsInArchiveCollection: archiveMatches.length > 0,
-        stillExistsInRawInboxCollection: rawInboxMatches.length > 0,
-        stillExistsInRawFilteredCollection: rawFilteredMatches.length > 0,
-        normalMailboxUiWouldExcludeDueToArchiveState,
+        existsInMailboxStoreInbox: rawInboxMatches.length > 0,
+        existsInMailboxStoreArchive: archiveMatches.length > 0,
+        existsInMailboxStoreFiltered: rawFilteredMatches.length > 0,
+        existsInMessageCollectionsInbox: existsInCurrentMailboxMessageCollectionsInbox,
+        existsInMessageCollectionsFiltered: existsInCurrentMailboxMessageCollectionsFiltered,
+        existsInMailboxVisibleInboxRowSet,
+        normalMailboxUiWouldExcludeDueToArchiveState:
+          !existsInMailboxVisibleInboxRowSet || isExcludedByCuevionArchiveState,
         inclusionReason,
       };
     });
-    const duplicatePreviewGroups = Object.entries(
+    const duplicateMessageIdGroups = Object.entries(
       traceRows.reduce<Record<string, number[]>>((groups, row) => {
-        const key = `${row.mailboxId}::${row.previewIdentity}`;
+        const key = `${row.mailboxId}::${row.id}`;
         groups[key] = [...(groups[key] ?? []), row.row];
         return groups;
       }, {}),
     )
       .filter(([, rows]) => rows.length > 1)
-      .map(([previewIdentityKey, rows]) => ({
-        previewIdentityKey,
+      .map(([messageIdKey, rows]) => ({
+        messageIdKey,
         rows,
       }));
     const duplicateImapUidGroups = Object.entries(
@@ -10231,7 +10265,30 @@ function MailboxView({
         imapUidKey,
         rows,
       }));
-
+    const duplicateCanonicalIdentityGroups = Object.entries(
+      traceRows.reduce<Record<string, number[]>>((groups, row) => {
+        const key = `${row.mailboxId}::${row.canonicalIdentityKey}`;
+        groups[key] = [...(groups[key] ?? []), row.row];
+        return groups;
+      }, {}),
+    )
+      .filter(([, rows]) => rows.length > 1)
+      .map(([canonicalIdentityKey, rows]) => ({
+        canonicalIdentityKey,
+        rows,
+      }));
+    const duplicatePreviewGroups = Object.entries(
+      traceRows.reduce<Record<string, number[]>>((groups, row) => {
+        const key = `${row.mailboxId}::${row.previewIdentity}`;
+        groups[key] = [...(groups[key] ?? []), row.row];
+        return groups;
+      }, {}),
+    )
+      .filter(([, rows]) => rows.length > 1)
+      .map(([previewIdentityKey, rows]) => ({
+        previewIdentityKey,
+        rows,
+      }));
     console.groupCollapsed(
       `[SmartFolderRows] ${activeSmartFolder.name} (${traceRows.length} rows)`,
     );
@@ -10250,12 +10307,16 @@ function MailboxView({
         timestamp: row.timestamp,
         visibleCategoryLabel: row.visibleCategoryLabel,
         visiblePriorityBadge: row.visiblePriorityBadge,
+        visibleSmartFolderLabel: row.visibleCategoryLabel,
         internalClassification: row.internalClassification,
         signal: row.signal,
         uiSignal: row.uiSignal,
-        existsInArchiveCollection: row.existsInArchiveCollection,
-        stillExistsInRawInboxCollection: row.stillExistsInRawInboxCollection,
-        stillExistsInRawFilteredCollection: row.stillExistsInRawFilteredCollection,
+        existsInMailboxStoreInbox: row.existsInMailboxStoreInbox,
+        existsInMailboxStoreArchive: row.existsInMailboxStoreArchive,
+        existsInMailboxStoreFiltered: row.existsInMailboxStoreFiltered,
+        existsInMessageCollectionsInbox: row.existsInMessageCollectionsInbox,
+        existsInMessageCollectionsFiltered: row.existsInMessageCollectionsFiltered,
+        existsInMailboxVisibleInboxRowSet: row.existsInMailboxVisibleInboxRowSet,
         normalMailboxUiWouldExcludeDueToArchiveState:
           row.normalMailboxUiWouldExcludeDueToArchiveState,
         inclusionReason: row.inclusionReason,
@@ -10272,14 +10333,23 @@ function MailboxView({
         imapUid: row.imapUid,
         subject: row.subject,
         canonicalIdentityKey: row.canonicalIdentityKey,
-        existsInArchiveCollection: row.existsInArchiveCollection,
-        stillExistsInRawInboxCollection: row.stillExistsInRawInboxCollection,
-        stillExistsInRawFilteredCollection: row.stillExistsInRawFilteredCollection,
+        visibleSmartFolderLabel: row.visibleCategoryLabel,
+        existsInMailboxStoreInbox: row.existsInMailboxStoreInbox,
+        existsInMailboxStoreArchive: row.existsInMailboxStoreArchive,
+        existsInMailboxStoreFiltered: row.existsInMailboxStoreFiltered,
+        existsInMessageCollectionsInbox: row.existsInMessageCollectionsInbox,
+        existsInMessageCollectionsFiltered: row.existsInMessageCollectionsFiltered,
+        existsInMailboxVisibleInboxRowSet: row.existsInMailboxVisibleInboxRowSet,
         normalMailboxUiWouldExcludeDueToArchiveState:
           row.normalMailboxUiWouldExcludeDueToArchiveState,
         inclusionReason: row.inclusionReason,
         canonicalKeys: row.canonicalKeys,
       })),
+    );
+    console.log("[SmartFolderRows] duplicateMessageIdGroups", duplicateMessageIdGroups);
+    console.log(
+      "[SmartFolderRows] duplicateCanonicalIdentityGroups",
+      duplicateCanonicalIdentityGroups,
     );
     console.log("[SmartFolderRows] duplicatePreviewGroups", duplicatePreviewGroups);
     console.log("[SmartFolderRows] duplicateImapUidGroups", duplicateImapUidGroups);
@@ -13968,20 +14038,14 @@ function MailboxView({
         : orderedMailboxes.map((candidate) => candidate.id);
     const candidateMessages = folder
       ? scopeMailboxIds.flatMap((mailboxId) =>
-          (["Inbox", "Filtered"] as const).flatMap(
-            (f) =>
-              ((mailboxId === mailbox.id
-                ? messageCollections[f]
-                : mailboxStore[mailboxId]?.[f]) ?? []).filter((message) =>
-                doesMessageMatchSmartFolder(
-                  message,
-                  folder,
-                  {
-                    mailboxContext:
-                      orderedMailboxes.find((candidate) => candidate.id === mailboxId) ?? null,
-                  },
-                ),
-              ),
+          getSmartFolderVisibleInboxRowSet(mailboxId).filter((message) =>
+            doesMessageMatchSmartFolder(
+              message,
+              folder,
+              {
+                mailboxContext: getSmartFolderMailboxContext(mailboxId),
+              },
+            ),
           ),
         )
       : [];
