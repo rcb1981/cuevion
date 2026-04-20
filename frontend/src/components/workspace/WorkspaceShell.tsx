@@ -19136,6 +19136,38 @@ const WorkspaceSettingsCard = memo(function WorkspaceSettingsCard({
 
 const inputFieldClass =
   "w-full rounded-[16px] border border-[var(--workspace-border)] bg-[var(--workspace-input-bg)] px-4 py-3 text-[0.94rem] text-[var(--workspace-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.08)] outline-none transition-[background-color,border-color,color] duration-150 placeholder:text-[var(--workspace-text-faint)] focus:border-[color:rgba(103,141,103,0.5)] focus:bg-[var(--workspace-input-focus-bg)]";
+const inputFieldErrorClass =
+  `${inputFieldClass} border-[color:rgba(146,82,73,0.34)] bg-[color:rgba(82,49,44,0.18)] shadow-[inset_0_1px_0_rgba(255,255,255,0.05)] focus:border-[color:rgba(170,106,95,0.5)] focus:bg-[color:rgba(88,52,47,0.24)]`;
+
+function getManagedInboxMissingRequiredFields(mailbox: ManagedWorkspaceInbox) {
+  const missingFields: Array<
+    "email" | "host" | "port" | "username" | "password"
+  > = [];
+
+  if (!mailbox.email.trim()) {
+    missingFields.push("email");
+  }
+
+  if (isImapCredentialsProvider(mailbox.provider)) {
+    if (!mailbox.customImap.host.trim()) {
+      missingFields.push("host");
+    }
+
+    if (!mailbox.customImap.port.trim()) {
+      missingFields.push("port");
+    }
+
+    if (mailbox.provider === "custom_imap" && !mailbox.customImap.username.trim()) {
+      missingFields.push("username");
+    }
+
+    if (!mailbox.customImap.password.trim()) {
+      missingFields.push("password");
+    }
+  }
+
+  return missingFields;
+}
 
 function ManagedInboxEditor({
   mailbox,
@@ -19147,6 +19179,7 @@ function ManagedInboxEditor({
   onEditAction,
   onRemoveAction,
   removeDisabled = false,
+  showValidationErrors = false,
   onApplyAction,
   onCancelAction,
   onChange,
@@ -19160,6 +19193,7 @@ function ManagedInboxEditor({
   onEditAction?: () => void;
   onRemoveAction?: () => void;
   removeDisabled?: boolean;
+  showValidationErrors?: boolean;
   onApplyAction?: () => void;
   onCancelAction?: () => void;
   onChange: (
@@ -19168,6 +19202,39 @@ function ManagedInboxEditor({
     value: string | boolean | ProviderId | null,
   ) => void;
 }) {
+  const emailInputRef = useRef<HTMLInputElement | null>(null);
+  const hostInputRef = useRef<HTMLInputElement | null>(null);
+  const portInputRef = useRef<HTMLInputElement | null>(null);
+  const usernameInputRef = useRef<HTMLInputElement | null>(null);
+  const passwordInputRef = useRef<HTMLInputElement | null>(null);
+  const missingRequiredFields = getManagedInboxMissingRequiredFields(mailbox);
+  const missingFieldSet = new Set(missingRequiredFields);
+  const shouldShowFieldErrors = editable && showValidationErrors;
+
+  useEffect(() => {
+    if (!shouldShowFieldErrors || missingRequiredFields.length === 0) {
+      return;
+    }
+
+    const firstMissingField = missingRequiredFields[0];
+    const firstMissingFieldRef =
+      firstMissingField === "email"
+        ? emailInputRef
+        : firstMissingField === "host"
+          ? hostInputRef
+          : firstMissingField === "port"
+            ? portInputRef
+            : firstMissingField === "username"
+              ? usernameInputRef
+              : passwordInputRef;
+
+    firstMissingFieldRef.current?.focus();
+    firstMissingFieldRef.current?.scrollIntoView({
+      block: "center",
+      behavior: "smooth",
+    });
+  }, [missingRequiredFields, shouldShowFieldErrors]);
+
   return (
     <section
       className={`rounded-[30px] border bg-[var(--workspace-card)] p-6 shadow-panel transition ${
@@ -19249,16 +19316,26 @@ function ManagedInboxEditor({
         {editable ? (
           <input
             type="email"
+            ref={emailInputRef}
             value={mailbox.email}
             onChange={(event) => onChange(mailbox.id, "email", event.target.value)}
             placeholder="name@company.com"
-            className={inputFieldClass}
+            className={
+              shouldShowFieldErrors && missingFieldSet.has("email")
+                ? inputFieldErrorClass
+                : inputFieldClass
+            }
           />
         ) : (
           <div className="rounded-2xl border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-3 text-[0.94rem] text-[var(--workspace-text)]">
             {mailbox.email.trim() || "Not set"}
           </div>
         )}
+        {shouldShowFieldErrors && missingFieldSet.has("email") ? (
+          <div className="mt-2 text-[0.78rem] leading-6 text-[color:rgba(208,160,151,0.92)]">
+            Enter an email address
+          </div>
+        ) : null}
       </div>
 
       {isImapCredentialsProvider(mailbox.provider) ? (
@@ -19271,15 +19348,25 @@ function ManagedInboxEditor({
               {editable ? (
                 <input
                   type="text"
+                  ref={hostInputRef}
                   value={mailbox.customImap.host}
                   onChange={(event) => onChange(mailbox.id, "host", event.target.value)}
-                  className={inputFieldClass}
+                  className={
+                    shouldShowFieldErrors && missingFieldSet.has("host")
+                      ? inputFieldErrorClass
+                      : inputFieldClass
+                  }
                 />
               ) : (
                 <div className="rounded-2xl border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3 text-[0.94rem] text-[var(--workspace-text)]">
                   {mailbox.customImap.host.trim() || "Not set"}
                 </div>
               )}
+              {shouldShowFieldErrors && missingFieldSet.has("host") ? (
+                <div className="mt-2 text-[0.78rem] leading-6 text-[color:rgba(208,160,151,0.92)]">
+                  Enter an IMAP host
+                </div>
+              ) : null}
             </div>
             <div>
               <label className="mb-2 block text-sm font-medium text-[var(--workspace-text-soft)]">
@@ -19288,15 +19375,25 @@ function ManagedInboxEditor({
               {editable ? (
                 <input
                   type="text"
+                  ref={portInputRef}
                   value={mailbox.customImap.port}
                   onChange={(event) => onChange(mailbox.id, "port", event.target.value)}
-                  className={inputFieldClass}
+                  className={
+                    shouldShowFieldErrors && missingFieldSet.has("port")
+                      ? inputFieldErrorClass
+                      : inputFieldClass
+                  }
                 />
               ) : (
                 <div className="rounded-2xl border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3 text-[0.94rem] text-[var(--workspace-text)]">
                   {mailbox.customImap.port.trim() || "Not set"}
                 </div>
               )}
+              {shouldShowFieldErrors && missingFieldSet.has("port") ? (
+                <div className="mt-2 text-[0.78rem] leading-6 text-[color:rgba(208,160,151,0.92)]">
+                  Enter a port
+                </div>
+              ) : null}
             </div>
             {mailbox.provider === "custom_imap" ? (
               <div>
@@ -19306,15 +19403,25 @@ function ManagedInboxEditor({
                 {editable ? (
                   <input
                     type="text"
+                    ref={usernameInputRef}
                     value={mailbox.customImap.username}
                     onChange={(event) => onChange(mailbox.id, "username", event.target.value)}
-                    className={inputFieldClass}
+                    className={
+                      shouldShowFieldErrors && missingFieldSet.has("username")
+                        ? inputFieldErrorClass
+                        : inputFieldClass
+                    }
                   />
                 ) : (
                   <div className="rounded-2xl border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3 text-[0.94rem] text-[var(--workspace-text)]">
                     {mailbox.customImap.username.trim() || "Not set"}
                   </div>
                 )}
+                {shouldShowFieldErrors && missingFieldSet.has("username") ? (
+                  <div className="mt-2 text-[0.78rem] leading-6 text-[color:rgba(208,160,151,0.92)]">
+                    Enter a username
+                  </div>
+                ) : null}
               </div>
             ) : (
               <div>
@@ -19333,15 +19440,25 @@ function ManagedInboxEditor({
               {editable ? (
                 <input
                   type="password"
+                  ref={passwordInputRef}
                   value={mailbox.customImap.password}
                   onChange={(event) => onChange(mailbox.id, "password", event.target.value)}
-                  className={inputFieldClass}
+                  className={
+                    shouldShowFieldErrors && missingFieldSet.has("password")
+                      ? inputFieldErrorClass
+                      : inputFieldClass
+                  }
                 />
               ) : (
                 <div className="rounded-2xl border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3 text-[0.94rem] text-[var(--workspace-text)]">
                   {mailbox.customImap.password.trim().length > 0 ? "Saved" : "Not set"}
                 </div>
               )}
+              {shouldShowFieldErrors && missingFieldSet.has("password") ? (
+                <div className="mt-2 text-[0.78rem] leading-6 text-[color:rgba(208,160,151,0.92)]">
+                  Enter a password
+                </div>
+              ) : null}
             </div>
           </div>
 
@@ -19384,7 +19501,7 @@ function ManagedInboxEditor({
             <button
               type="button"
               onClick={onApplyAction}
-              disabled={!isManagedInboxReady(mailbox) || isApplying}
+              disabled={isApplying}
               className={`${settingsPrimaryActionClass} w-[7.5rem]`}
             >
               {isApplying ? "Connecting..." : "Apply"}
@@ -19442,6 +19559,7 @@ const ManageInboxesView = memo(function ManageInboxesView({
   const [pendingInboxApplyId, setPendingInboxApplyId] = useState<string | null>(null);
   const [pendingInboxRemovalId, setPendingInboxRemovalId] = useState<string | null>(null);
   const [validatingInboxId, setValidatingInboxId] = useState<string | null>(null);
+  const [validationErrorInboxId, setValidationErrorInboxId] = useState<string | null>(null);
   const [isApplyingAll, setIsApplyingAll] = useState(false);
   const [successToastMessage, setSuccessToastMessage] = useState<string | null>(null);
 
@@ -19452,6 +19570,7 @@ const ManageInboxesView = memo(function ManageInboxesView({
     setPendingInboxApplyId(null);
     setPendingInboxRemovalId(null);
     setValidatingInboxId(null);
+    setValidationErrorInboxId(null);
     setIsApplyingAll(false);
   }, [savedManagedInboxes]);
 
@@ -19548,6 +19667,7 @@ const ManageInboxesView = memo(function ManageInboxesView({
           candidate.id === inboxId ? { ...candidate, connected: true } : candidate,
         ),
       );
+      setValidationErrorInboxId((current) => (current === inboxId ? null : current));
       return true;
     } finally {
       setValidatingInboxId(null);
@@ -19560,6 +19680,7 @@ const ManageInboxesView = memo(function ManageInboxesView({
     value: string | boolean | ProviderId | null,
   ) => {
     clearConnectionError(inboxId);
+    setValidationErrorInboxId((current) => (current === inboxId ? null : current));
     setDraftManagedInboxes((current) =>
       current.map((mailbox) => {
         if (mailbox.id !== inboxId) {
@@ -19654,6 +19775,16 @@ const ManageInboxesView = memo(function ManageInboxesView({
       return;
     }
 
+    const mailbox = draftManagedInboxes.find((candidate) => candidate.id === inboxId);
+
+    if (!mailbox || !isManagedInboxReady(mailbox)) {
+      setValidationErrorInboxId(inboxId);
+      setEditingInboxId(inboxId);
+      return;
+    }
+
+    setValidationErrorInboxId(null);
+
     if (inboxId.startsWith("draft-")) {
       void (async () => {
         const didConnect = await connectManagedInbox(inboxId);
@@ -19673,6 +19804,7 @@ const ManageInboxesView = memo(function ManageInboxesView({
       setDraftManagedInboxes((current) =>
         current.filter((mailbox) => mailbox.id !== inboxId),
       );
+      setValidationErrorInboxId((current) => (current === inboxId ? null : current));
       setEditingInboxId((current) => (current === inboxId ? null : current));
       return;
     }
@@ -19687,6 +19819,7 @@ const ManageInboxesView = memo(function ManageInboxesView({
       );
     }
 
+    setValidationErrorInboxId((current) => (current === inboxId ? null : current));
     setEditingInboxId((current) => (current === inboxId ? null : current));
   };
 
@@ -19718,6 +19851,7 @@ const ManageInboxesView = memo(function ManageInboxesView({
                 isPrimary={mailbox.id === "main"}
                 connectionError={connectionErrors[mailbox.id] ?? null}
                 isApplying={validatingInboxId === mailbox.id}
+                showValidationErrors={validationErrorInboxId === mailbox.id}
                 onEditAction={
                   editingInboxId === mailbox.id
                     ? undefined
@@ -19767,6 +19901,16 @@ const ManageInboxesView = memo(function ManageInboxesView({
                     ? `custom:${(mailbox.title.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "inbox")}-${Date.now().toString(36)}-${index}`
                     : mailbox.id,
                 }));
+
+              const firstInvalidMailbox = nextMailboxes.find(
+                (mailbox) => !isManagedInboxReady(mailbox),
+              );
+
+              if (firstInvalidMailbox) {
+                setValidationErrorInboxId(firstInvalidMailbox.id);
+                setEditingInboxId(firstInvalidMailbox.id);
+                return;
+              }
 
               const readyMailboxes = nextMailboxes.filter((mailbox) =>
                 isManagedInboxReady(mailbox),
@@ -22799,7 +22943,7 @@ function ForYouView({
       handler: () => setActiveLearningModal("paste-rule"),
     },
     {
-      title: "Check uncertain emails",
+      title: "Inbox destination review",
       subtitle: "Resolve messages Cuevion is not fully sure about",
       handler: openReviewUncertainModal,
     },
@@ -22809,7 +22953,7 @@ function ForYouView({
       handler: () => setActiveLearningModal("recent-decisions"),
     },
   ].filter((action) =>
-    action.title !== "Check uncertain emails" || connectedInboxCount >= 2,
+    action.title !== "Inbox destination review" || connectedInboxCount >= 2,
   );
   const { learningSuggestionPool, uncertainEmailPool } = forYouEngine.buildForYouLearningPools(
     aiSuggestionsEnabled,
