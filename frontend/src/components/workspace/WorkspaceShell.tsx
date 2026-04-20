@@ -4411,7 +4411,7 @@ function resolveVisiblePrioritySignal(
 }
 
 function getVisiblePriorityBadge(
-  message: Pick<MailMessage, "priorityScore" | "signal">,
+  message: Pick<MailMessage, "priorityScore" | "signal" | "final_visibility" | "action">,
   override?: ManualPriorityOverride,
 ) {
   // "removed" means the user explicitly un-prioritised this message.
@@ -4423,6 +4423,18 @@ function getVisiblePriorityBadge(
 
   if (override === "priority" || message.signal === "Priority") {
     return "PRIORITY";
+  }
+
+  if (message.final_visibility === "show_priority") {
+    return "PRIORITY";
+  }
+
+  if (message.final_visibility === "show_low" || message.action === "show_in_quiet_view") {
+    return "LOW";
+  }
+
+  if (message.final_visibility === "show_normal") {
+    return "NORMAL";
   }
 
   if (message.signal === "For review" || message.priorityScore === "medium") {
@@ -5052,6 +5064,8 @@ function isMessageVisiblePriority(
     | "from"
     | "sender"
     | "isAutoReply"
+    | "final_visibility"
+    | "action"
   >,
   override?: ManualPriorityOverride,
 ) {
@@ -5060,6 +5074,18 @@ function isMessageVisiblePriority(
   }
 
   if (override === "removed") {
+    return false;
+  }
+
+  if (message.final_visibility === "show_priority") {
+    return true;
+  }
+
+  if (
+    message.final_visibility === "show_normal" ||
+    message.final_visibility === "show_low" ||
+    message.action === "show_in_quiet_view"
+  ) {
     return false;
   }
 
