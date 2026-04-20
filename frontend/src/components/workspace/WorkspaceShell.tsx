@@ -9862,7 +9862,10 @@ function MailboxView({
     );
   };
   const getVisibleCategoryLabelForMessage = (message: MailMessage) => {
-    return getVisibleCategoryLabelForMessageInContext(message, false);
+    return getVisibleCategoryLabelForMessageInContext(
+      message,
+      shouldPreferCurrentMailboxPromoContext,
+    );
   };
   const resolveOnboardingVisibilityMode = (message: MailMessage) => {
     const preferenceLevel = resolveFocusPreferenceLevelForMessage(message);
