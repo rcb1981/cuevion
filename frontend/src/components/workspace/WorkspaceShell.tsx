@@ -4524,19 +4524,52 @@ function getPriorityVisibilityAdjustedMessage(
     options,
   );
 
+  // When a user preference is found for this message's category, it becomes the
+  // sole source of truth. Clear signal, final_visibility, and action so that stale
+  // backend decisions (made without the user's focus preferences) cannot override
+  // what the user explicitly configured.
   if (focusPreferenceLevel === "high") {
-    return { ...message, signal: undefined, priorityScore: "high" as const };
+    return {
+      ...message,
+      signal: undefined,
+      final_visibility: undefined,
+      action: undefined,
+      priorityScore: "high" as const,
+    };
   }
 
   if (focusPreferenceLevel === "medium") {
-    return { ...message, signal: undefined, priorityScore: "medium" as const };
+    return {
+      ...message,
+      signal: undefined,
+      final_visibility: undefined,
+      action: undefined,
+      priorityScore: "medium" as const,
+    };
   }
 
   if (focusPreferenceLevel === "low") {
-    return { ...message, signal: undefined, priorityScore: "low" as const };
+    return {
+      ...message,
+      signal: undefined,
+      final_visibility: undefined,
+      action: undefined,
+      priorityScore: "low" as const,
+    };
   }
 
-  return message;
+  // focusPreferenceLevel is null: the message's category has no user preference
+  // (classification resolved to "unknown" / no matching key). In this case the
+  // backend never emits a "Priority" signal for unclassified messages — that
+  // signal value was assigned by inferHeuristicSignal (a keyword scan). Letting
+  // it survive would cause any "Other" mail with urgency keywords to show as
+  // PRIORITY regardless of the user's intent. Strip it so the badge falls back
+  // to priorityScore and final_visibility instead.
+  //
+  // Note: legitimate backend "Priority" signals only appear on finance /
+  // royalty_statement messages (map_to_stable_signal), which always have a
+  // non-null focusPreferenceLevel and therefore never reach this branch.
+  return { ...message, signal: undefined };
 }
 
 function getVisiblePriorityBadgeForWorkspaceMessage(
