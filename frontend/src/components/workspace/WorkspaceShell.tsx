@@ -4106,6 +4106,12 @@ function inferHeuristicSignal(
     "aanbieding",     // offer/deal
     "korting",        // discount
     "promotie",       // promotion
+    // Music promo-servicing signals — track pitch and distribution platform
+    // identifiers that appear in promo emails but not in English/Dutch word lists.
+    "soundcloud.com",  // private SoundCloud track share links (track pitches)
+    "inflyte",         // Inflyte promo distribution platform
+    "fatdrop",         // Fatdrop promo distribution platform
+    "for your sets",   // DJ promo phrase ("hope you'll love it for your sets")
   ];
   const googleSecurityKeywords = [
     "verification",
@@ -5586,6 +5592,15 @@ function normalizeMailMessage(
     bodyHtml: normalizedBodyContent.bodyHtml,
     threadId: resolveMailThreadId(message),
     signal: resolvedSignal,
+    // The backend emits ui_signal = "NEW" for every unclassified (unknown-category)
+    // message. "NEW" is not handled in any frontend switch and falls through to the
+    // "unknown" default, but its presence as a truthy string causes
+    //   (message.ui_signal ?? message.signal)
+    // to evaluate to "NEW" instead of the heuristic signal computed above.
+    // That blocks correct promo (and other) classification for messages where the
+    // backend could not assign a category but the frontend keyword scan can.
+    // Strip it here so the heuristic signal takes effect downstream.
+    ui_signal: baseMessage.ui_signal === "NEW" ? undefined : baseMessage.ui_signal,
     attachments: normalizedAttachments,
     internalClassification,
     suggestionDismissed: message.suggestionDismissed,
