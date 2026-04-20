@@ -476,8 +476,14 @@ def resolve_preview_routing(
         )
         promo_keywords = [
             "[promo]",
+            "promo music",
+            "promos",
+            "promos for",
+            "vip promos",
             "promobox",
             "promo box",
+            "inflyte",
+            "fatdrop",
             "digital promo sound",
             "labelworx",
             "area53",
@@ -568,6 +574,9 @@ def resolve_preview_routing(
             "suspicious activity",
         ]
         classification_text = f"{subject_lower} {body_lower}"
+        is_promo_mailbox_context = any(
+            keyword in local_part for keyword in ["promo", "press", "servicing"]
+        )
         has_promo_provider_signal = any(
             keyword in classification_text or keyword in sender_lower
             for keyword in promo_keywords
@@ -609,6 +618,8 @@ def resolve_preview_routing(
             result["category"] = "info"
         elif any(keyword in classification_text for keyword in finance_keywords):
             result["category"] = "finance"
+        elif is_promo_mailbox_context and has_promo_provider_signal:
+            result["category"] = "promo"
         elif usable_demo_links:
             result["category"] = "demo"
             result["usable_demo_links"] = usable_demo_links
