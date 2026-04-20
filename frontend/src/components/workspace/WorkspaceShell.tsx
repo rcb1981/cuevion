@@ -22939,17 +22939,17 @@ function ForYouView({
     {
       title: "Paste sender or domain",
       subtitle:
-        "Train how Cuevion should treat future emails from a sender or domain",
+        "Train how Cuevion should handle future emails from a sender or domain.",
       handler: () => setActiveLearningModal("paste-rule"),
     },
     {
       title: "Inbox destination review",
-      subtitle: "Resolve messages Cuevion is not fully sure about",
+      subtitle: "Review messages Cuevion is still learning where to place.",
       handler: openReviewUncertainModal,
     },
     {
       title: "Recent learning decisions",
-      subtitle: "Revisit recent choices Cuevion learned from.",
+      subtitle: "Review recent decisions Cuevion has learned from.",
       handler: () => setActiveLearningModal("recent-decisions"),
     },
   ].filter((action) =>
@@ -23254,7 +23254,7 @@ function ForYouView({
         <div className="flex flex-col items-center justify-center gap-5 px-4 py-8 text-center md:px-8 md:py-10">
           <div className="max-w-[34rem] space-y-2">
             <div className="text-[0.92rem] leading-7 text-[var(--workspace-text-soft)]">
-              Run a fast active learning session to shape how Cuevion classifies, prioritizes and routes future email.
+              Run a focused learning session to improve how Cuevion classifies, prioritizes, and routes future email.
             </div>
           </div>
           {aiSuggestionsEnabled ? (
@@ -23277,7 +23277,7 @@ function ForYouView({
               Teach Cuevion
             </div>
             <p className="max-w-[34rem] text-[0.92rem] leading-7 text-[var(--workspace-text-soft)]">
-              Teach Cuevion how to treat future email with a few direct training actions.
+              Guide Cuevion with quick actions that improve future email decisions.
             </p>
           </div>
 
