@@ -1,9 +1,13 @@
 import {
   applyProviderDefaults,
+  getProviderConnectionMethod,
+  isOAuthConnectionProvider,
   usesEmailAsImapUsername,
 } from "./inboxProviderDefaults";
 import type {
   CustomImapSettings,
+  InboxConnectionMethod,
+  InboxConnectionStatus,
   OnboardingState,
   ProviderId,
 } from "../types/onboarding";
@@ -61,6 +65,41 @@ export type ConnectInboxResponse = {
   };
 };
 
+export type OAuthInboxRequest = {
+  provider: ProviderId;
+  email: string;
+  internalRole?: string | null;
+  focusPreferences?: OnboardingState["focusPreferences"] | null;
+  selectedInboxes?: string[] | null;
+};
+
+export type OAuthInboxResponse = {
+  ok: boolean;
+  connectionStatus: InboxConnectionStatus;
+  connectionMethod: Extract<InboxConnectionMethod, "oauth">;
+  authorizationUrl?: string | null;
+  message?: string | null;
+  error?: {
+    code?: string;
+    message?: string;
+  };
+};
+
+export type InboxConnectionAttemptResult = {
+  ok: boolean;
+  connected: boolean;
+  connectionStatus: InboxConnectionStatus;
+  connectionMethod: InboxConnectionMethod | null;
+  connectionMessage?: string | null;
+  oauthAuthorizationUrl?: string | null;
+  messages?: LiveInboxMessageSnapshot[];
+  uidValidity?: string | null;
+  error?: {
+    code?: string;
+    message?: string;
+  };
+};
+
 export function buildConnectInboxRequest(options: {
   provider: ProviderId;
   email: string;
@@ -86,6 +125,22 @@ export function buildConnectInboxRequest(options: {
       ? email
       : resolvedImapSettings.username.trim(),
     password: resolvedImapSettings.password,
+    internalRole: options.internalRole,
+    focusPreferences: options.focusPreferences,
+    selectedInboxes: options.selectedInboxes,
+  };
+}
+
+export function buildOAuthInboxRequest(options: {
+  provider: ProviderId;
+  email: string;
+  internalRole?: string | null;
+  focusPreferences?: OnboardingState["focusPreferences"] | null;
+  selectedInboxes?: string[] | null;
+}): OAuthInboxRequest {
+  return {
+    provider: options.provider,
+    email: options.email.trim(),
     internalRole: options.internalRole,
     focusPreferences: options.focusPreferences,
     selectedInboxes: options.selectedInboxes,
@@ -168,6 +223,130 @@ export async function connectInboxWithImap(
       },
     };
   }
+}
+
+export async function connectInboxWithOAuth(
+  request: OAuthInboxRequest,
+): Promise<OAuthInboxResponse> {
+  try {
+    const response = await fetch("/api/inboxes/connect-oauth", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(request),
+    });
+
+    const payload = (await response.json()) as Partial<OAuthInboxResponse>;
+
+    if (!response.ok) {
+      return {
+        ok: false,
+        connectionMethod: "oauth",
+        connectionStatus: "oauth_required",
+        authorizationUrl: null,
+        message: null,
+        error: payload.error ?? {
+          code: "oauth_unavailable",
+          message: "OAuth could not be started.",
+        },
+      };
+    }
+
+    return {
+      ok: true,
+      connectionMethod: "oauth",
+      connectionStatus: payload.connectionStatus ?? "oauth_required",
+      authorizationUrl: payload.authorizationUrl ?? null,
+      message: payload.message ?? null,
+      error: payload.error,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      connectionMethod: "oauth",
+      connectionStatus: "connection_failed",
+      authorizationUrl: null,
+      message: null,
+      error: {
+        code: "oauth_unavailable",
+        message:
+          error instanceof Error ? error.message : "OAuth could not be started.",
+      },
+    };
+  }
+}
+
+export async function beginInboxConnection(options: {
+  provider: ProviderId;
+  email: string;
+  customImap: CustomImapSettings;
+  internalRole?: string | null;
+  focusPreferences?: OnboardingState["focusPreferences"] | null;
+  selectedInboxes?: string[] | null;
+}): Promise<InboxConnectionAttemptResult> {
+  const connectionMethod = getProviderConnectionMethod(options.provider);
+
+  if (isOAuthConnectionProvider(options.provider)) {
+    const response = await connectInboxWithOAuth(
+      buildOAuthInboxRequest({
+        provider: options.provider,
+        email: options.email,
+        internalRole: options.internalRole,
+        focusPreferences: options.focusPreferences,
+        selectedInboxes: options.selectedInboxes,
+      }),
+    );
+
+    if (!response.ok) {
+      return {
+        ok: false,
+        connected: false,
+        connectionMethod,
+        connectionStatus: "connection_failed",
+        connectionMessage: response.error?.message ?? "OAuth could not be started.",
+        oauthAuthorizationUrl: null,
+        error: response.error,
+      };
+    }
+
+    return {
+      ok: true,
+      connected: response.connectionStatus === "connected",
+      connectionMethod,
+      connectionStatus: response.connectionStatus,
+      connectionMessage: response.message ?? null,
+      oauthAuthorizationUrl: response.authorizationUrl ?? null,
+      messages: [],
+    };
+  }
+
+  const response = await connectInboxWithImap(
+    buildConnectInboxRequest(options),
+  );
+
+  if (!response.ok) {
+    return {
+      ok: false,
+      connected: false,
+      connectionMethod,
+      connectionStatus: "connection_failed",
+      connectionMessage: response.error?.message ?? "Could not connect to inbox.",
+      oauthAuthorizationUrl: null,
+      error: response.error,
+    };
+  }
+
+  return {
+    ok: true,
+    connected: true,
+    connectionMethod,
+    connectionStatus: "connected",
+    connectionMessage: null,
+    oauthAuthorizationUrl: null,
+    messages: response.messages ?? [],
+    uidValidity: response.uidValidity ?? null,
+  };
 }
 
 export async function sendGmailMessage(

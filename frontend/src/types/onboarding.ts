@@ -38,6 +38,13 @@ export type ProviderId =
   | "icloud"
   | "yahoo"
   | "custom_imap";
+export type InboxConnectionMethod = "imap" | "oauth";
+export type InboxConnectionStatus =
+  | "not_connected"
+  | "oauth_required"
+  | "waiting_for_authentication"
+  | "connected"
+  | "connection_failed";
 export type FocusPreferenceLevel = "high" | "medium" | "low";
 
 export interface CustomImapSettings {
@@ -52,6 +59,10 @@ export interface InboxConnection {
   provider: ProviderId | null;
   email: string;
   connected: boolean;
+  connectionMethod: InboxConnectionMethod | null;
+  connectionStatus: InboxConnectionStatus;
+  connectionMessage?: string | null;
+  oauthAuthorizationUrl?: string | null;
   customImap: CustomImapSettings;
 }
 

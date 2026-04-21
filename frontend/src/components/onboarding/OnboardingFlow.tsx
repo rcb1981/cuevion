@@ -9,7 +9,10 @@ import {
 import type { LiveInboxMessageSnapshot } from "../../lib/inboxConnectionApi";
 import {
   applyProviderDefaults,
+  getDefaultConnectionStatus,
+  getProviderConnectionMethod,
   isImapCredentialsProvider,
+  isOAuthConnectionProvider,
   usesEmailAsImapUsername,
 } from "../../lib/inboxProviderDefaults";
 import { mapRoleToInternal, type InternalRole } from "../../lib/roleMapping";
@@ -314,11 +317,19 @@ export function OnboardingFlow({
     if (step === 5) {
       return state.selectedInboxes.every((inboxId) => {
         const connection = getInboxConnection(state, inboxId);
-        if (
-          !connection.connected ||
-          !connection.provider ||
-          !connection.email.trim()
-        ) {
+        if (!connection.provider || !connection.email.trim()) {
+          return false;
+        }
+
+        if (isOAuthConnectionProvider(connection.provider)) {
+          return (
+            connection.connectionStatus === "oauth_required" ||
+            connection.connectionStatus === "waiting_for_authentication" ||
+            connection.connectionStatus === "connected"
+          );
+        }
+
+        if (!connection.connected) {
           return false;
         }
 
@@ -516,6 +527,10 @@ export function OnboardingFlow({
         [inboxId]: {
           ...getInboxConnection(current, inboxId),
           connected: false,
+          connectionMethod: getProviderConnectionMethod(provider),
+          connectionStatus: getDefaultConnectionStatus(provider),
+          connectionMessage: null,
+          oauthAuthorizationUrl: null,
           provider,
           customImap: applyProviderDefaults(
             provider,
@@ -535,6 +550,11 @@ export function OnboardingFlow({
         [inboxId]: {
           ...getInboxConnection(current, inboxId),
           connected: false,
+          connectionStatus: getDefaultConnectionStatus(
+            getInboxConnection(current, inboxId).provider,
+          ),
+          connectionMessage: null,
+          oauthAuthorizationUrl: null,
           email,
           customImap:
             usesEmailAsImapUsername(getInboxConnection(current, inboxId).provider)
@@ -560,6 +580,11 @@ export function OnboardingFlow({
         [inboxId]: {
           ...getInboxConnection(current, inboxId),
           connected: false,
+          connectionStatus: getDefaultConnectionStatus(
+            getInboxConnection(current, inboxId).provider,
+          ),
+          connectionMessage: null,
+          oauthAuthorizationUrl: null,
           customImap: {
             ...getInboxConnection(current, inboxId).customImap,
             [field]: value,
@@ -577,6 +602,11 @@ export function OnboardingFlow({
         [inboxId]: {
           ...getInboxConnection(current, inboxId),
           connected: false,
+          connectionStatus: getDefaultConnectionStatus(
+            getInboxConnection(current, inboxId).provider,
+          ),
+          connectionMessage: null,
+          oauthAuthorizationUrl: null,
           customImap: {
             ...settings,
           },
@@ -587,6 +617,18 @@ export function OnboardingFlow({
 
   const connectInbox = (
     inboxId: InboxId,
+    result: {
+      connected: boolean;
+      connectionMethod: ReturnType<typeof getProviderConnectionMethod>;
+      connectionStatus:
+        | "not_connected"
+        | "oauth_required"
+        | "waiting_for_authentication"
+        | "connected"
+        | "connection_failed";
+      connectionMessage?: string | null;
+      oauthAuthorizationUrl?: string | null;
+    },
     messages: LiveInboxMessageSnapshot[] = [],
   ) => {
     onStateChange((current) => ({
@@ -595,14 +637,18 @@ export function OnboardingFlow({
         ...current.inboxConnections,
         [inboxId]: {
           ...getInboxConnection(current, inboxId),
-          connected: true,
+          connected: result.connected,
+          connectionMethod: result.connectionMethod,
+          connectionStatus: result.connectionStatus,
+          connectionMessage: result.connectionMessage ?? null,
+          oauthAuthorizationUrl: result.oauthAuthorizationUrl ?? null,
         },
       },
     }));
 
     const connection = state.inboxConnections[inboxId];
 
-    if (connection?.email.trim()) {
+    if (result.connected && connection?.email.trim()) {
       saveLiveInboxSnapshot({
         inboxId,
         email: connection.email.trim().toLowerCase(),

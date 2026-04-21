@@ -1,11 +1,36 @@
-import type { CustomImapSettings, ProviderId } from "../types/onboarding";
+import type {
+  CustomImapSettings,
+  InboxConnectionMethod,
+  InboxConnectionStatus,
+  ProviderId,
+} from "../types/onboarding";
 
 export function isImapCredentialsProvider(provider: ProviderId | null) {
-  return (
-    provider === "custom_imap" ||
-    provider === "google" ||
-    provider === "microsoft"
-  );
+  return provider === "custom_imap" || provider === "microsoft";
+}
+
+export function isOAuthConnectionProvider(provider: ProviderId | null) {
+  return provider === "google";
+}
+
+export function getProviderConnectionMethod(
+  provider: ProviderId | null,
+): InboxConnectionMethod | null {
+  if (!provider) {
+    return null;
+  }
+
+  return isOAuthConnectionProvider(provider) ? "oauth" : "imap";
+}
+
+export function getDefaultConnectionStatus(
+  provider: ProviderId | null,
+): InboxConnectionStatus {
+  if (provider === "google") {
+    return "oauth_required";
+  }
+
+  return "not_connected";
 }
 
 export function createDefaultGoogleImapSettings(
@@ -33,7 +58,7 @@ export function createDefaultMicrosoftImapSettings(
 }
 
 export function usesEmailAsImapUsername(provider: ProviderId | null) {
-  return provider === "google" || provider === "microsoft";
+  return provider === "microsoft";
 }
 
 export function applyProviderDefaults(
@@ -43,8 +68,11 @@ export function applyProviderDefaults(
 ): CustomImapSettings {
   if (provider === "google") {
     return {
-      ...createDefaultGoogleImapSettings(email),
-      password: currentSettings.password,
+      host: "",
+      port: "",
+      ssl: true,
+      username: "",
+      password: "",
     };
   }
 

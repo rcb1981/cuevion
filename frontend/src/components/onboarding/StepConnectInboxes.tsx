@@ -5,22 +5,22 @@ import {
   specializedInboxOptions,
 } from "../../data/onboardingOptions";
 import type {
-  ConnectInboxRequest,
+  InboxConnectionAttemptResult,
   LiveInboxMessageSnapshot,
 } from "../../lib/inboxConnectionApi";
-import {
-  buildConnectInboxRequest as buildImapConnectRequest,
-  connectInboxWithImap,
-} from "../../lib/inboxConnectionApi";
+import { beginInboxConnection } from "../../lib/inboxConnectionApi";
 import {
   getPasswordLabel,
+  getProviderConnectionMethod,
   isImapCredentialsProvider,
+  isOAuthConnectionProvider,
 } from "../../lib/inboxProviderDefaults";
 import { onboardingText } from "../../copy/onboardingCopy";
 import type {
   CustomInboxDefinition,
   CustomImapSettings,
   InboxConnection,
+  InboxConnectionStatus,
   InboxId,
   OnboardingState,
   ProviderId,
@@ -49,6 +49,13 @@ interface StepConnectInboxesProps {
   onReuseCustomImap: (inboxId: InboxId, settings: CustomImapSettings) => void;
   onConnectInbox: (
     inboxId: InboxId,
+    result: {
+      connected: boolean;
+      connectionMethod: ReturnType<typeof getProviderConnectionMethod>;
+      connectionStatus: InboxConnectionStatus;
+      connectionMessage?: string | null;
+      oauthAuthorizationUrl?: string | null;
+    },
     messages?: LiveInboxMessageSnapshot[],
   ) => void;
 }
@@ -64,9 +71,52 @@ function hasReusableSettings(settings: CustomImapSettings) {
   return Boolean(settings.host && settings.port && settings.username);
 }
 
+function getConnectionStatusLabel(connection: InboxConnection) {
+  if (connection.connectionStatus === "connected") {
+    return onboardingText.connect.connected;
+  }
+
+  if (connection.connectionStatus === "oauth_required") {
+    return onboardingText.connect.oauthRequired;
+  }
+
+  if (connection.connectionStatus === "waiting_for_authentication") {
+    return onboardingText.connect.waitingForAuthentication;
+  }
+
+  if (connection.connectionStatus === "connection_failed") {
+    return onboardingText.connect.connectionFailed;
+  }
+
+  return onboardingText.connect.notConnected;
+}
+
+function getConnectionStatusClassName(connection: InboxConnection) {
+  if (connection.connectionStatus === "connected") {
+    return "border-[var(--workspace-status-success-border)] bg-[var(--workspace-status-success-bg)] text-[var(--workspace-status-success-text)]";
+  }
+
+  if (
+    connection.connectionStatus === "oauth_required" ||
+    connection.connectionStatus === "waiting_for_authentication"
+  ) {
+    return "border-moss/18 bg-sand/55 text-moss";
+  }
+
+  if (connection.connectionStatus === "connection_failed") {
+    return "border-amber-900/16 bg-amber-50/70 text-amber-900/75";
+  }
+
+  return "border-ink/10 bg-white/72 text-ink/55";
+}
+
 function isConnectionReady(connection: InboxConnection) {
   if (!connection.provider || !connection.email.trim()) {
     return false;
+  }
+
+  if (isOAuthConnectionProvider(connection.provider)) {
+    return true;
   }
 
   if (!isImapCredentialsProvider(connection.provider)) {
@@ -140,14 +190,21 @@ function getConnectionFeedback(connection: InboxConnection): ConnectionFeedback 
 }
 
 function buildConnectionError(
-  code?: string,
-  message?: string,
+  result: InboxConnectionAttemptResult,
 ): ConnectionFeedback {
-  if (code === "invalid_credentials") {
-    return { password: message || onboardingText.connect.incorrectPassword };
+  if (result.error?.code === "invalid_credentials") {
+    return {
+      password:
+        result.error?.message || onboardingText.connect.incorrectPassword,
+    };
   }
 
-  return { general: message || onboardingText.connect.couldNotConnect };
+  return {
+    general:
+      result.error?.message ||
+      result.connectionMessage ||
+      onboardingText.connect.couldNotConnect,
+  };
 }
 
 export function StepConnectInboxes({
@@ -209,7 +266,7 @@ export function StepConnectInboxes({
     console.log("[DEBUG] StepConnectInboxes selectedInboxes:", selectedInboxes);
     console.log("[DEBUG] Sending to backend selectedInboxes:", selectedInboxes);
 
-    const request: ConnectInboxRequest = buildImapConnectRequest({
+    const result = await beginInboxConnection({
       provider: connection.provider as ProviderId,
       email: connection.email,
       customImap: connection.customImap,
@@ -218,19 +275,38 @@ export function StepConnectInboxes({
       selectedInboxes,
     });
 
-    const response = await connectInboxWithImap(request);
+    if (
+      result.connectionStatus === "waiting_for_authentication" &&
+      result.oauthAuthorizationUrl
+    ) {
+      window.location.assign(result.oauthAuthorizationUrl);
+    }
 
-    if (response.ok) {
-      onConnectInbox(inboxId, response.messages ?? []);
+    if (result.ok) {
+      onConnectInbox(
+        inboxId,
+        {
+          connected: result.connected,
+          connectionMethod: result.connectionMethod,
+          connectionStatus: result.connectionStatus,
+          connectionMessage: result.connectionMessage ?? null,
+          oauthAuthorizationUrl: result.oauthAuthorizationUrl ?? null,
+        },
+        result.messages ?? [],
+      );
       clearConnectionFeedback(inboxId);
     } else {
       setConnectionErrors((current) => ({
         ...current,
-        [inboxId]: buildConnectionError(
-          response.error?.code,
-          response.error?.message,
-        ),
+        [inboxId]: buildConnectionError(result),
       }));
+      onConnectInbox(inboxId, {
+        connected: false,
+        connectionMethod: result.connectionMethod,
+        connectionStatus: "connection_failed",
+        connectionMessage: result.connectionMessage ?? null,
+        oauthAuthorizationUrl: null,
+      });
     }
 
     setLoadingInboxId(null);
@@ -280,11 +356,11 @@ export function StepConnectInboxes({
                     {onboardingText.connect.inboxHint}
                   </p>
                 </div>
-                {connection.connected ? (
-                  <span className="rounded-full border border-[var(--workspace-status-success-border)] bg-[var(--workspace-status-success-bg)] px-3 py-1 text-xs font-medium text-[var(--workspace-status-success-text)]">
-                    {onboardingText.connect.connected}
-                  </span>
-                ) : null}
+                <span
+                  className={`rounded-full border px-3 py-1 text-xs font-medium ${getConnectionStatusClassName(connection)}`}
+                >
+                  {getConnectionStatusLabel(connection)}
+                </span>
               </div>
 
               <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
@@ -453,6 +529,21 @@ export function StepConnectInboxes({
                     {onboardingText.connect.ssl}
                   </label>
                 </div>
+              ) : isOAuthConnectionProvider(connection.provider) ? (
+                <div className="mt-6 space-y-3 rounded-[24px] border border-moss/10 bg-[linear-gradient(180deg,rgba(246,248,241,0.88),rgba(255,252,247,0.96))] p-5">
+                  <div className="space-y-1">
+                    <p className="text-sm font-semibold text-ink">
+                      {onboardingText.connect.googleOAuthTitle}
+                    </p>
+                    <p className="text-sm text-ink/68">
+                      {onboardingText.connect.googleOAuthDescription}
+                    </p>
+                  </div>
+                  <div className="rounded-2xl border border-moss/10 bg-white/72 px-4 py-3 text-sm text-ink/64">
+                    {connection.connectionMessage?.trim() ||
+                      onboardingText.connect.googleOAuthPending}
+                  </div>
+                </div>
               ) : null}
 
               <div className="mt-6 flex justify-end">
@@ -464,7 +555,9 @@ export function StepConnectInboxes({
                 >
                   {isLoading
                     ? onboardingText.connect.testingConnection
-                    : onboardingText.connect.connectInbox}
+                    : isOAuthConnectionProvider(connection.provider)
+                      ? onboardingText.connect.continueWithGoogle
+                      : onboardingText.connect.connectInbox}
                 </button>
               </div>
 
