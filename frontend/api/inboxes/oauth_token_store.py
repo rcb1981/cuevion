@@ -7,6 +7,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
+GMAIL_OAUTH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60
+
 
 def _resolve_runtime_store_path() -> Path:
     configured_path = os.getenv("CUEVION_GMAIL_TOKEN_STORE_PATH", "").strip()
@@ -17,22 +19,14 @@ def _resolve_runtime_store_path() -> Path:
 
 
 def _resolve_durable_store_config() -> dict | None:
-    rest_url = (
-        os.getenv("KV_REST_API_URL", "").strip()
-        or os.getenv("UPSTASH_REDIS_REST_URL", "").strip()
-    )
-    rest_token = (
-        os.getenv("KV_REST_API_TOKEN", "").strip()
-        or os.getenv("UPSTASH_REDIS_REST_TOKEN", "").strip()
-    )
+    rest_url = os.getenv("KV_REST_API_URL", "").strip()
+    rest_token = os.getenv("KV_REST_API_TOKEN", "").strip()
 
     if not rest_url or not rest_token:
         return None
 
     return {
-        "backend": "vercel_kv_rest"
-        if os.getenv("KV_REST_API_URL", "").strip()
-        else "upstash_redis_rest",
+        "backend": "vercel_kv_rest",
         "rest_url": rest_url.rstrip("/"),
         "rest_token": rest_token,
     }
@@ -84,8 +78,8 @@ def _resolve_expiry(token_payload: dict) -> tuple[str | None, int | None]:
     return expires_at.isoformat(), expires_in
 
 
-def _build_store_key(provider: str, email: str) -> str:
-    return f"cuevion:oauth_tokens:{provider}:{email.strip().lower()}"
+def _build_store_key(state_or_mailbox_id: str) -> str:
+    return f"cuevion:gmail:oauthtoken:{state_or_mailbox_id.strip().lower()}"
 
 
 def build_google_token_record(
@@ -206,7 +200,7 @@ def _write_durable_record(
     payload, error = _perform_rest_request(
         config,
         "POST",
-        f"/set/{quote(store_key, safe='')}",
+        f"/set/{quote(store_key, safe='')}?EX={GMAIL_OAUTH_TOKEN_TTL_SECONDS}",
         json.dumps(record, separators=(",", ":"), sort_keys=True).encode("utf-8"),
     )
     if error:
@@ -256,7 +250,7 @@ def persist_google_token_record(
         }
 
     normalized_email = email.strip().lower()
-    store_key = _build_store_key("google", normalized_email)
+    store_key = _build_store_key(normalized_email)
     durable_config = _resolve_durable_store_config()
     existing_record = None
 
@@ -316,12 +310,13 @@ def persist_google_token_record(
 
 def get_google_token_record(email: str) -> dict | None:
     normalized_email = email.strip().lower()
-    store_key = _build_store_key("google", normalized_email)
+    store_key = _build_store_key(normalized_email)
     durable_config = _resolve_durable_store_config()
 
     if durable_config:
         record, _ = _read_durable_record(durable_config, store_key)
-        return record
+        if isinstance(record, dict):
+            return record
 
     runtime_store = _read_runtime_store(_resolve_runtime_store_path())
     record = runtime_store.get(store_key)
@@ -329,11 +324,26 @@ def get_google_token_record(email: str) -> dict | None:
 
 
 def get_google_token_record_with_metadata(email: str) -> dict | None:
-    record = get_google_token_record(email)
+    normalized_email = email.strip().lower()
+    store_key = _build_store_key(normalized_email)
+    durable_config = _resolve_durable_store_config()
+
+    if durable_config:
+        record, _ = _read_durable_record(durable_config, store_key)
+        if isinstance(record, dict):
+            return {
+                **record,
+                "_storage_backend": durable_config["backend"],
+                "_storage_durable": True,
+            }
+
+    runtime_store = _read_runtime_store(_resolve_runtime_store_path())
+    record = runtime_store.get(store_key)
     if not isinstance(record, dict):
         return None
 
     return {
         **record,
-        "_storage_durable": is_google_token_store_durable(),
+        "_storage_backend": "runtime_tmp_file",
+        "_storage_durable": False,
     }

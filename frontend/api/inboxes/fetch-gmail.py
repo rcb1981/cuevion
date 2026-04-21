@@ -14,7 +14,6 @@ if str(CURRENT_DIR) not in sys.path:
 
 from oauth_token_store import (
     get_google_token_record_with_metadata,
-    is_google_token_store_durable,
 )
 
 GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1/users/me"
@@ -134,17 +133,6 @@ class handler(BaseHTTPRequestHandler):
             )
             return
 
-        if not is_google_token_store_durable():
-            _send_json(
-                self,
-                503,
-                _build_error(
-                    "gmail_token_store_unavailable",
-                    "Durable Gmail token storage is not configured in this runtime.",
-                ),
-            )
-            return
-
         token_record = get_google_token_record_with_metadata(email_address)
         if not token_record:
             _send_json(
@@ -165,17 +153,6 @@ class handler(BaseHTTPRequestHandler):
                 _build_error(
                     "gmail_token_missing",
                     "The stored Gmail token record is incomplete.",
-                ),
-            )
-            return
-
-        if token_record.get("_storage_durable") is not True:
-            _send_json(
-                self,
-                503,
-                _build_error(
-                    "gmail_token_store_unavailable",
-                    "Gmail fetch requires durable stored OAuth tokens. The current token record is not in durable storage.",
                 ),
             )
             return

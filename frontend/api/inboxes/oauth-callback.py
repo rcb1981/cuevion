@@ -14,6 +14,7 @@ from urllib.request import Request, urlopen
 
 GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
 STATE_MAX_AGE_SECONDS = 15 * 60
+GMAIL_OAUTH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60
 
 
 def base64url_encode(value: bytes) -> str:
@@ -78,22 +79,14 @@ def _resolve_runtime_store_path() -> Path:
 
 
 def _resolve_durable_store_config() -> dict | None:
-    rest_url = (
-        os.getenv("KV_REST_API_URL", "").strip()
-        or os.getenv("UPSTASH_REDIS_REST_URL", "").strip()
-    )
-    rest_token = (
-        os.getenv("KV_REST_API_TOKEN", "").strip()
-        or os.getenv("UPSTASH_REDIS_REST_TOKEN", "").strip()
-    )
+    rest_url = os.getenv("KV_REST_API_URL", "").strip()
+    rest_token = os.getenv("KV_REST_API_TOKEN", "").strip()
 
     if not rest_url or not rest_token:
         return None
 
     return {
-        "backend": "vercel_kv_rest"
-        if os.getenv("KV_REST_API_URL", "").strip()
-        else "upstash_redis_rest",
+        "backend": "vercel_kv_rest",
         "rest_url": rest_url.rstrip("/"),
         "rest_token": rest_token,
     }
@@ -141,8 +134,8 @@ def _resolve_expiry(token_payload: dict) -> tuple[str | None, int | None]:
     return expires_at.isoformat(), expires_in
 
 
-def _build_store_key(provider: str, email: str) -> str:
-    return f"cuevion:oauth_tokens:{provider}:{email.strip().lower()}"
+def _build_store_key(state_or_mailbox_id: str) -> str:
+    return f"cuevion:gmail:oauthtoken:{state_or_mailbox_id.strip().lower()}"
 
 
 def build_google_token_record(
@@ -263,7 +256,7 @@ def _write_durable_record(
     payload, error = _perform_rest_request(
         config,
         "POST",
-        f"/set/{quote(store_key, safe='')}",
+        f"/set/{quote(store_key, safe='')}?EX={GMAIL_OAUTH_TOKEN_TTL_SECONDS}",
         json.dumps(record, separators=(",", ":"), sort_keys=True).encode("utf-8"),
     )
     if error:
@@ -313,7 +306,7 @@ def persist_google_token_record(
         }
 
     normalized_email = email.strip().lower()
-    store_key = _build_store_key("google", normalized_email)
+    store_key = _build_store_key(normalized_email)
     durable_config = _resolve_durable_store_config()
     existing_record = None
 
