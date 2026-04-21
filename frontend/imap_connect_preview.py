@@ -4,6 +4,7 @@ import imaplib
 import logging
 import re
 import time
+from dataclasses import replace
 from datetime import datetime, timezone
 from email import message_from_bytes
 from email.header import decode_header
@@ -703,7 +704,8 @@ def resolve_preview_routing(
                 engine_result=engine_result,
                 user_config=(
                     V7_USER_CONFIG if internal_role is None and focus_preferences is None
-                    else V7_USER_CONFIG._replace(
+                    else replace(
+                        V7_USER_CONFIG,
                         role=internal_role or V7_USER_CONFIG.role
                     )
                 ),
