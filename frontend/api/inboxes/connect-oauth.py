@@ -1,4 +1,5 @@
 import json
+import importlib.util
 import os
 import re
 import sys
@@ -9,6 +10,16 @@ from urllib.parse import urlencode
 CURRENT_DIR = Path(__file__).resolve().parent
 if str(CURRENT_DIR) not in sys.path:
     sys.path.insert(0, str(CURRENT_DIR))
+
+if "oauth_google" not in sys.modules:
+    oauth_google_spec = importlib.util.spec_from_file_location(
+        "oauth_google",
+        CURRENT_DIR / "oauth_google.py",
+    )
+    if oauth_google_spec and oauth_google_spec.loader:
+        oauth_google_module = importlib.util.module_from_spec(oauth_google_spec)
+        sys.modules["oauth_google"] = oauth_google_module
+        oauth_google_spec.loader.exec_module(oauth_google_module)
 
 from oauth_google import (
     GOOGLE_AUTHORIZATION_ENDPOINT,
