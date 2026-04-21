@@ -7,12 +7,14 @@ import type { OnboardingState } from "./types/onboarding";
 import type { UserConfig } from "./types/userConfig";
 
 const ONBOARDING_STATE_STORAGE_KEY = "label-inbox-ai-onboarding-state";
+const ONBOARDING_DRAFT_STATE_STORAGE_KEY = "label-inbox-ai-onboarding-draft-state";
 const CATEGORY_LEARNING_STORAGE_KEY = "cuevion-sender-category-learning";
 const MESSAGE_OWNERSHIP_STORAGE_KEY = "cuevion-message-ownership";
 const MANAGED_INBOXES_STORAGE_KEY = "cuevion-managed-inboxes";
 const CUEVION_AUTH_STORAGE_KEY = "label-inbox-ai-auth-user";
 const PENDING_COLLAB_INVITE_STORAGE_KEY = "label-inbox-ai-pending-collab-invite";
 const PENDING_COLLAB_INVITE_URL_STORAGE_KEY = "label-inbox-ai-pending-collab-invite-url";
+const OAUTH_CALLBACK_RESULT_STORAGE_KEY = "cuevion-oauth-callback-result";
 
 type AuthenticatedCuevionUser = {
   email: string;
@@ -32,14 +34,33 @@ type PersistedOnboardingSession = {
   completed: true;
   state: OnboardingState;
 };
+type PersistedOnboardingDraft = {
+  state: OnboardingState;
+};
 type WorkspaceDataMode = "demo" | "live";
 type StoredManagedWorkspaceInbox = {
+  id?: string;
   title?: string;
   email?: string;
+  provider?: string | null;
+  connected?: boolean;
+  connectionMethod?: string | null;
+  connectionStatus?: string;
+  connectionMessage?: string | null;
+  oauthAuthorizationUrl?: string | null;
+  customImap?: unknown;
 };
 type StoredTeamMemberEntry = {
   email?: string;
   name?: string;
+};
+type OAuthCallbackStorageResult = {
+  provider?: string;
+  email?: string;
+  connectionMethod?: string;
+  connectionStatus?: string;
+  connected?: boolean;
+  message?: string | null;
 };
 
 function buildUserConfig(state: OnboardingState): UserConfig {
@@ -199,6 +220,7 @@ function clearOnboardingDependentWorkspaceState() {
   window.localStorage.removeItem(CATEGORY_LEARNING_STORAGE_KEY);
   window.localStorage.removeItem(MESSAGE_OWNERSHIP_STORAGE_KEY);
   window.localStorage.removeItem(MANAGED_INBOXES_STORAGE_KEY);
+  window.localStorage.removeItem(ONBOARDING_DRAFT_STATE_STORAGE_KEY);
 }
 
 function resolveWorkspaceDataMode(): WorkspaceDataMode {
@@ -249,6 +271,30 @@ function parsePersistedOnboardingSession(): PersistedOnboardingSession | null {
   }
 }
 
+function parsePersistedOnboardingDraft(): PersistedOnboardingDraft | null {
+  const storedState = window.localStorage.getItem(ONBOARDING_DRAFT_STATE_STORAGE_KEY);
+
+  if (!storedState) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(storedState) as Partial<PersistedOnboardingDraft>;
+
+    if (!parsed || !parsed.state) {
+      window.localStorage.removeItem(ONBOARDING_DRAFT_STATE_STORAGE_KEY);
+      return null;
+    }
+
+    return {
+      state: normalizeOnboardingState(parsed.state),
+    };
+  } catch {
+    window.localStorage.removeItem(ONBOARDING_DRAFT_STATE_STORAGE_KEY);
+    return null;
+  }
+}
+
 function parseStoredManagedWorkspaceInboxes(): StoredManagedWorkspaceInbox[] {
   const storedValue = window.localStorage.getItem(MANAGED_INBOXES_STORAGE_KEY);
 
@@ -262,6 +308,140 @@ function parseStoredManagedWorkspaceInboxes(): StoredManagedWorkspaceInbox[] {
   } catch {
     return [];
   }
+}
+
+function normalizeOAuthCallbackStorageResult(
+  value: unknown,
+): OAuthCallbackStorageResult | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const result = value as OAuthCallbackStorageResult;
+
+  if (result.provider !== "google" || typeof result.email !== "string") {
+    return null;
+  }
+
+  return {
+    provider: "google",
+    email: result.email.trim().toLowerCase(),
+    connectionMethod: "oauth",
+    connectionStatus:
+      result.connectionStatus === "connected" ||
+      result.connectionStatus === "authenticated_pending_activation" ||
+      result.connectionStatus === "connection_failed" ||
+      result.connectionStatus === "oauth_required" ||
+      result.connectionStatus === "waiting_for_authentication"
+        ? result.connectionStatus
+        : "connection_failed",
+    connected: result.connected === true,
+    message: typeof result.message === "string" ? result.message : null,
+  };
+}
+
+function applyOAuthCallbackResultToOnboardingState(
+  state: OnboardingState,
+  callbackResult: OAuthCallbackStorageResult,
+): OnboardingState {
+  const normalizedEmail = callbackResult.email?.trim().toLowerCase() ?? "";
+
+  if (!normalizedEmail) {
+    return state;
+  }
+
+  let didUpdate = false;
+  const nextConnections = Object.fromEntries(
+    Object.entries(state.inboxConnections).map(([inboxId, connection]) => {
+      if (
+        connection.provider !== "google" ||
+        connection.email.trim().toLowerCase() !== normalizedEmail
+      ) {
+        return [inboxId, connection];
+      }
+
+      didUpdate = true;
+      const isConnected = callbackResult.connectionStatus === "connected";
+      const connectionStatus = isConnected
+        ? "connected"
+        : callbackResult.connectionStatus ===
+            "authenticated_pending_activation"
+          ? "authenticated_pending_activation"
+          : "connection_failed";
+      const connectionMessage =
+        callbackResult.message ??
+        (isConnected
+          ? "Google authentication completed."
+          : connectionStatus === "authenticated_pending_activation"
+            ? "Google authentication completed. Final mailbox activation requires secure mailbox token storage."
+            : "Google authentication failed.");
+      return [
+        inboxId,
+        {
+          ...connection,
+          connected:
+            callbackResult.connected === true &&
+            callbackResult.connectionStatus === "connected",
+          connectionMethod: "oauth",
+          connectionStatus,
+          connectionMessage,
+          oauthAuthorizationUrl: null,
+        },
+      ];
+    }),
+  ) as OnboardingState["inboxConnections"];
+
+  return didUpdate
+    ? {
+        ...state,
+        inboxConnections: nextConnections,
+      }
+    : state;
+}
+
+function applyOAuthCallbackResultToManagedInboxes(
+  inboxes: StoredManagedWorkspaceInbox[],
+  callbackResult: OAuthCallbackStorageResult,
+) {
+  const normalizedEmail = callbackResult.email?.trim().toLowerCase() ?? "";
+
+  if (!normalizedEmail) {
+    return inboxes;
+  }
+
+  return inboxes.map((mailbox) => {
+    if (
+      mailbox.provider !== "google" ||
+      mailbox.email?.trim().toLowerCase() !== normalizedEmail
+    ) {
+      return mailbox;
+    }
+
+    const isConnected = callbackResult.connectionStatus === "connected";
+    const connectionStatus = isConnected
+      ? "connected"
+      : callbackResult.connectionStatus === "authenticated_pending_activation"
+        ? "authenticated_pending_activation"
+        : "connection_failed";
+    const connectionMessage =
+      callbackResult.message ??
+      (isConnected
+        ? "Google authentication completed."
+        : connectionStatus === "authenticated_pending_activation"
+          ? "Google authentication completed. Final mailbox activation requires secure mailbox token storage."
+          : "Google authentication failed.");
+
+    return {
+      ...mailbox,
+      connected:
+        callbackResult.connected === true &&
+        callbackResult.connectionStatus === "connected",
+      connectionMethod: "oauth",
+      connectionStatus,
+      connectionMessage,
+      oauthAuthorizationUrl: null,
+    };
+  });
 }
 
 function resolveWorkspaceInviteUsers(
@@ -417,6 +597,9 @@ export default function App() {
 
       return parsePersistedOnboardingSession();
     });
+  const [persistedOnboardingDraft] = useState<PersistedOnboardingDraft | null>(() =>
+    persistedOnboardingSession ? null : parsePersistedOnboardingDraft(),
+  );
   const [view, setView] = useState<"onboarding" | "transition" | "workspace">(
     () => (persistedOnboardingSession ? "workspace" : "onboarding"),
   );
@@ -438,7 +621,10 @@ export default function App() {
   const [collaborationInviteRoute, setCollaborationInviteRoute] =
     useState<CollaborationInviteRoute | null>(() => parseCollaborationInviteRoute());
   const [onboardingState, setOnboardingState] = useState<OnboardingState>(
-    () => persistedOnboardingSession?.state ?? initialOnboardingState,
+    () =>
+      persistedOnboardingSession?.state ??
+      persistedOnboardingDraft?.state ??
+      initialOnboardingState,
   );
   const [userConfig, setUserConfig] = useState<UserConfig | null>(() =>
     persistedOnboardingSession?.state ? buildUserConfig(persistedOnboardingSession.state) : null,
@@ -456,6 +642,22 @@ export default function App() {
 
     window.localStorage.removeItem(CUEVION_AUTH_STORAGE_KEY);
   }, [authenticatedUser]);
+
+  useEffect(() => {
+    if (persistedOnboardingSession) {
+      window.localStorage.removeItem(ONBOARDING_DRAFT_STATE_STORAGE_KEY);
+      return;
+    }
+
+    if (view !== "onboarding") {
+      return;
+    }
+
+    window.localStorage.setItem(
+      ONBOARDING_DRAFT_STATE_STORAGE_KEY,
+      JSON.stringify({ state: onboardingState }),
+    );
+  }, [onboardingState, persistedOnboardingSession, view]);
 
   useEffect(() => {
     const nextInviteRoute = parseCollaborationInviteRoute();
@@ -488,6 +690,64 @@ export default function App() {
 
     return () => window.clearTimeout(timer);
   }, [view]);
+
+  useEffect(() => {
+    const storedCallbackResult = window.localStorage.getItem(
+      OAUTH_CALLBACK_RESULT_STORAGE_KEY,
+    );
+
+    if (!storedCallbackResult) {
+      return;
+    }
+
+    window.localStorage.removeItem(OAUTH_CALLBACK_RESULT_STORAGE_KEY);
+
+    let parsedCallbackResult: OAuthCallbackStorageResult | null = null;
+    try {
+      parsedCallbackResult = normalizeOAuthCallbackStorageResult(
+        JSON.parse(storedCallbackResult),
+      );
+    } catch {
+      parsedCallbackResult = null;
+    }
+
+    if (!parsedCallbackResult) {
+      return;
+    }
+
+    setOnboardingState((current) => {
+      const nextState = applyOAuthCallbackResultToOnboardingState(
+        current,
+        parsedCallbackResult as OAuthCallbackStorageResult,
+      );
+
+      if (
+        persistedOnboardingSession &&
+        JSON.stringify(nextState) !== JSON.stringify(persistedOnboardingSession.state)
+      ) {
+        const nextSession: PersistedOnboardingSession = {
+          completed: true,
+          state: nextState,
+        };
+        window.localStorage.setItem(
+          ONBOARDING_STATE_STORAGE_KEY,
+          JSON.stringify(nextSession),
+        );
+        setPersistedOnboardingSession(nextSession);
+      }
+
+      return nextState;
+    });
+
+    const nextManagedInboxes = applyOAuthCallbackResultToManagedInboxes(
+      parseStoredManagedWorkspaceInboxes(),
+      parsedCallbackResult,
+    );
+    window.localStorage.setItem(
+      MANAGED_INBOXES_STORAGE_KEY,
+      JSON.stringify(nextManagedInboxes),
+    );
+  }, [persistedOnboardingSession]);
 
   if (collaborationInviteRoute) {
     if (collaborationInviteRoute.mode === "invite" && !authenticatedUser) {
@@ -562,6 +822,7 @@ export default function App() {
           ONBOARDING_STATE_STORAGE_KEY,
           JSON.stringify(completedSession),
         );
+        window.localStorage.removeItem(ONBOARDING_DRAFT_STATE_STORAGE_KEY);
         setPersistedOnboardingSession(completedSession);
         setUserConfig(nextUserConfig);
         setView("transition");

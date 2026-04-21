@@ -228,6 +228,7 @@ export const onboardingCopy = {
       notConnected: "Not connected",
       oauthRequired: "OAuth required",
       waitingForAuthentication: "Waiting for authentication",
+      authenticatedPendingActivation: "Authenticated pending activation",
       connectionFailed: "Connection failed",
       invalidEmail: "Enter a valid email address",
       incorrectPassword: "Password is incorrect",
@@ -239,6 +240,8 @@ export const onboardingCopy = {
         "Use secure Google authentication for Gmail and Google Workspace. Manual IMAP passwords are no longer used in this path.",
       googleOAuthPending:
         "Authentication will continue in Google once the runtime OAuth endpoint is available.",
+      googleOAuthActivationPending:
+        "Google authentication completed. Final mailbox activation requires secure mailbox token storage.",
       reusePreviousServerSettings: "Reuse previous server settings",
       reuse: "Reuse",
       host: "Host",

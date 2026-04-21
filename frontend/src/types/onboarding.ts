@@ -43,6 +43,7 @@ export type InboxConnectionStatus =
   | "not_connected"
   | "oauth_required"
   | "waiting_for_authentication"
+  | "authenticated_pending_activation"
   | "connected"
   | "connection_failed";
 export type FocusPreferenceLevel = "high" | "medium" | "low";

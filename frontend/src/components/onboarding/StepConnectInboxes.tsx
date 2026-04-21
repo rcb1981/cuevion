@@ -84,6 +84,10 @@ function getConnectionStatusLabel(connection: InboxConnection) {
     return onboardingText.connect.waitingForAuthentication;
   }
 
+  if (connection.connectionStatus === "authenticated_pending_activation") {
+    return onboardingText.connect.authenticatedPendingActivation;
+  }
+
   if (connection.connectionStatus === "connection_failed") {
     return onboardingText.connect.connectionFailed;
   }
@@ -98,7 +102,8 @@ function getConnectionStatusClassName(connection: InboxConnection) {
 
   if (
     connection.connectionStatus === "oauth_required" ||
-    connection.connectionStatus === "waiting_for_authentication"
+    connection.connectionStatus === "waiting_for_authentication" ||
+    connection.connectionStatus === "authenticated_pending_activation"
   ) {
     return "border-moss/18 bg-sand/55 text-moss";
   }
@@ -543,7 +548,10 @@ export function StepConnectInboxes({
                   </div>
                   <div className="rounded-2xl border border-moss/10 bg-white/72 px-4 py-3 text-sm text-ink/64">
                     {connection.connectionMessage?.trim() ||
-                      onboardingText.connect.googleOAuthPending}
+                      (connection.connectionStatus ===
+                      "authenticated_pending_activation"
+                        ? onboardingText.connect.googleOAuthActivationPending
+                        : onboardingText.connect.googleOAuthPending)}
                   </div>
                 </div>
               ) : null}

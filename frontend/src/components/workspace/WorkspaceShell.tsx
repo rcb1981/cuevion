@@ -19077,6 +19077,10 @@ function getMailboxSyncUnavailableMessage(mailbox: ManagedWorkspaceInbox | null)
       return "Google authentication is still pending. Finish OAuth before syncing.";
     }
 
+    if (mailbox.connectionStatus === "authenticated_pending_activation") {
+      return onboardingText.connect.googleOAuthActivationPending;
+    }
+
     if (mailbox.connectionStatus === "connected") {
       return "Google OAuth sync is not available in this runtime yet.";
     }
@@ -19143,6 +19147,8 @@ function toOrderedMailboxFromManagedInbox(
       ? fallbackInfo.detail
       : mailbox.connectionStatus === "waiting_for_authentication"
         ? onboardingText.connect.waitingForAuthentication
+        : mailbox.connectionStatus === "authenticated_pending_activation"
+          ? onboardingText.connect.authenticatedPendingActivation
         : mailbox.connectionStatus === "oauth_required"
           ? onboardingText.connect.oauthRequired
           : mailbox.connectionStatus === "connection_failed"
@@ -19411,6 +19417,10 @@ function getManagedInboxStatusLabel(mailbox: ManagedWorkspaceInbox) {
     return onboardingText.connect.waitingForAuthentication;
   }
 
+  if (mailbox.connectionStatus === "authenticated_pending_activation") {
+    return onboardingText.connect.authenticatedPendingActivation;
+  }
+
   if (mailbox.connectionStatus === "connection_failed") {
     return onboardingText.connect.connectionFailed;
   }
@@ -19425,7 +19435,8 @@ function getManagedInboxStatusClassName(mailbox: ManagedWorkspaceInbox) {
 
   if (
     mailbox.connectionStatus === "oauth_required" ||
-    mailbox.connectionStatus === "waiting_for_authentication"
+    mailbox.connectionStatus === "waiting_for_authentication" ||
+    mailbox.connectionStatus === "authenticated_pending_activation"
   ) {
     return "border-moss/18 bg-[var(--workspace-card-subtle)] text-moss";
   }
@@ -19760,7 +19771,9 @@ function ManagedInboxEditor({
           </div>
           <div className="rounded-2xl border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3 text-[0.9rem] text-[var(--workspace-text-muted)]">
             {mailbox.connectionMessage?.trim() ||
-              onboardingText.connect.googleOAuthPending}
+              (mailbox.connectionStatus === "authenticated_pending_activation"
+                ? onboardingText.connect.googleOAuthActivationPending
+                : onboardingText.connect.googleOAuthPending)}
           </div>
         </div>
       ) : null}

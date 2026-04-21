@@ -325,6 +325,7 @@ export function OnboardingFlow({
           return (
             connection.connectionStatus === "oauth_required" ||
             connection.connectionStatus === "waiting_for_authentication" ||
+            connection.connectionStatus === "authenticated_pending_activation" ||
             connection.connectionStatus === "connected"
           );
         }
@@ -624,6 +625,7 @@ export function OnboardingFlow({
         | "not_connected"
         | "oauth_required"
         | "waiting_for_authentication"
+        | "authenticated_pending_activation"
         | "connected"
         | "connection_failed";
       connectionMessage?: string | null;
