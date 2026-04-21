@@ -1,18 +1,71 @@
+import base64
+import hashlib
+import hmac
 import json
 import os
-import sys
+import time
 from http.server import BaseHTTPRequestHandler
-from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import Request, urlopen
 
-CURRENT_DIR = Path(__file__).resolve().parent
-if str(CURRENT_DIR) not in sys.path:
-    sys.path.insert(0, str(CURRENT_DIR))
-
-from oauth_google import GOOGLE_TOKEN_ENDPOINT, verify_signed_state
 from oauth_token_store import persist_google_token_record
+
+GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
+STATE_MAX_AGE_SECONDS = 15 * 60
+
+
+def base64url_encode(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+
+
+def base64url_decode(value: str) -> bytes:
+    padding = "=" * (-len(value) % 4)
+    return base64.urlsafe_b64decode(f"{value}{padding}".encode("ascii"))
+
+
+def verify_signed_state(
+    state: str,
+    signing_secret: str,
+    expected_provider: str = "google",
+) -> tuple[dict | None, str | None]:
+    if not state or "." not in state:
+        return None, "invalid_state"
+
+    encoded_payload, signature = state.split(".", 1)
+    expected_signature = base64url_encode(
+        hmac.new(
+            signing_secret.encode("utf-8"),
+            encoded_payload.encode("utf-8"),
+            hashlib.sha256,
+        ).digest(),
+    )
+
+    if not hmac.compare_digest(signature, expected_signature):
+        return None, "invalid_state"
+
+    try:
+        payload = json.loads(base64url_decode(encoded_payload).decode("utf-8"))
+    except (ValueError, json.JSONDecodeError, UnicodeDecodeError):
+        return None, "invalid_state"
+
+    if payload.get("provider") != expected_provider:
+        return None, "invalid_state"
+
+    issued_at = payload.get("issued_at")
+    if not isinstance(issued_at, int):
+        return None, "invalid_state"
+
+    if int(time.time()) - issued_at > STATE_MAX_AGE_SECONDS:
+        return None, "expired_state"
+
+    if not isinstance(payload.get("code_verifier"), str) or not payload.get("code_verifier"):
+        return None, "invalid_state"
+
+    if not isinstance(payload.get("email"), str):
+        return None, "invalid_state"
+
+    return payload, None
 
 OAUTH_CALLBACK_RESULT_STORAGE_KEY = "cuevion-oauth-callback-result"
 
