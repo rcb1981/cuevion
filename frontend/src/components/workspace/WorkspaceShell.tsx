@@ -19067,6 +19067,34 @@ function isManagedInboxConfigurationComplete(mailbox: ManagedWorkspaceInbox) {
   return isManagedInboxReady(mailbox);
 }
 
+function getMailboxSyncUnavailableMessage(mailbox: ManagedWorkspaceInbox | null) {
+  if (!mailbox || !mailbox.provider) {
+    return "Select and configure an inbox before syncing.";
+  }
+
+  if (isOAuthConnectionProvider(mailbox.provider)) {
+    if (mailbox.connectionStatus === "waiting_for_authentication") {
+      return "Google authentication is still pending. Finish OAuth before syncing.";
+    }
+
+    if (mailbox.connectionStatus === "connected") {
+      return "Google OAuth sync is not available in this runtime yet.";
+    }
+
+    return "Google OAuth is required before this inbox can sync.";
+  }
+
+  if (!mailbox.connected) {
+    return "Reconnect this inbox before syncing.";
+  }
+
+  if (!isImapCredentialsProvider(mailbox.provider)) {
+    return "This inbox cannot sync in the current runtime.";
+  }
+
+  return null;
+}
+
 function toManagedWorkspaceInbox(
   mailbox: OrderedMailbox,
   onboardingState: OnboardingState,
@@ -25193,6 +25221,8 @@ export function WorkspaceShell({
   const [learningLaunchRequest, setLearningLaunchRequest] =
     useState<LearningLaunchRequest>(null);
   const [syncingMailboxId, setSyncingMailboxId] = useState<InboxId | null>(null);
+  const [mailboxSyncFeedbackMessage, setMailboxSyncFeedbackMessage] =
+    useState<string | null>(null);
   const [workspaceName, setWorkspaceName] = useState("Cuevion Studio");
   const [inboxSignatures, setInboxSignatures] = useState<InboxSignatureStore>(() => {
     if (typeof window === "undefined") {
@@ -25318,6 +25348,17 @@ export function WorkspaceShell({
 
     return storedValue === "true";
   });
+  useEffect(() => {
+    if (!mailboxSyncFeedbackMessage) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      setMailboxSyncFeedbackMessage(null);
+    }, 2400);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [mailboxSyncFeedbackMessage]);
   const [pendingTeamInvitation, setPendingTeamInvitation] =
     useState<PendingTeamInvitation>(() => {
       if (typeof window === "undefined") {
@@ -27323,6 +27364,15 @@ export function WorkspaceShell({
       return;
     }
 
+    const managedMailbox =
+      savedManagedInboxes.find((mailbox) => mailbox.id === activeMailbox.id) ?? null;
+    const syncUnavailableMessage = getMailboxSyncUnavailableMessage(managedMailbox);
+
+    if (syncUnavailableMessage) {
+      setMailboxSyncFeedbackMessage(syncUnavailableMessage);
+      return;
+    }
+
     await refreshMailboxById(activeMailbox.id);
   };
 
@@ -29109,14 +29159,21 @@ export function WorkspaceShell({
 	            )}
 	          </div>
 	        </div>
-	        {reviewInboxHandoffFeedback ? (
-	          <div className="pointer-events-none fixed bottom-6 right-6 z-[340]">
-	            <div className="rounded-[18px] border border-[color:rgba(111,148,111,0.26)] bg-[color:rgba(34,32,28,0.94)] px-4 py-3 text-[0.84rem] leading-6 text-[color:rgba(214,232,218,0.96)] shadow-panel">
-	              {reviewInboxHandoffFeedback}
-	            </div>
-	          </div>
-	        ) : null}
-	      </div>
+		        {reviewInboxHandoffFeedback ? (
+		          <div className="pointer-events-none fixed bottom-6 right-6 z-[340]">
+		            <div className="rounded-[18px] border border-[color:rgba(111,148,111,0.26)] bg-[color:rgba(34,32,28,0.94)] px-4 py-3 text-[0.84rem] leading-6 text-[color:rgba(214,232,218,0.96)] shadow-panel">
+		              {reviewInboxHandoffFeedback}
+		            </div>
+		          </div>
+		        ) : null}
+		        {mailboxSyncFeedbackMessage ? (
+		          <div className="pointer-events-none fixed bottom-6 right-6 z-[341]">
+		            <div className="rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3 text-[0.84rem] leading-6 text-[var(--workspace-text)] shadow-panel">
+		              {mailboxSyncFeedbackMessage}
+		            </div>
+		          </div>
+		        ) : null}
+		      </div>
 	      <SmartFolderModal
 	        open={isSmartFolderModalOpen}
         themeMode={resolvedTheme}
