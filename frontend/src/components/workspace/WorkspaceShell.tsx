@@ -19041,6 +19041,32 @@ function buildManagedWorkspaceInboxes(
   );
 }
 
+function mergeManagedWorkspaceInboxes(
+  currentMailboxes: ManagedWorkspaceInbox[],
+  onboardingMailboxes: ManagedWorkspaceInbox[],
+): ManagedWorkspaceInbox[] {
+  const currentById = new Map(
+    currentMailboxes.map((mailbox) => [mailbox.id, mailbox] as const),
+  );
+  const onboardingIds = new Set(onboardingMailboxes.map((mailbox) => mailbox.id));
+  const merged: ManagedWorkspaceInbox[] = onboardingMailboxes.map((mailbox) =>
+    normalizeManagedWorkspaceInbox(
+      cloneManagedWorkspaceInbox({
+        ...(currentById.get(mailbox.id) ?? mailbox),
+        ...mailbox,
+      }),
+    ),
+  );
+
+  currentMailboxes.forEach((mailbox) => {
+    if (!onboardingIds.has(mailbox.id)) {
+      merged.push(normalizeManagedWorkspaceInbox(cloneManagedWorkspaceInbox(mailbox)));
+    }
+  });
+
+  return merged;
+}
+
 function isManagedInboxReady(mailbox: ManagedWorkspaceInbox) {
   if (!mailbox.provider || !mailbox.email.trim()) {
     return false;
@@ -25480,7 +25506,9 @@ export function WorkspaceShell({
     }
 
     lastOnboardingMailboxSeedKeyRef.current = onboardingMailboxSeedKey;
-    setSavedManagedInboxes(buildManagedWorkspaceInboxes(onboardingState));
+    setSavedManagedInboxes((current) =>
+      mergeManagedWorkspaceInboxes(current, buildManagedWorkspaceInboxes(onboardingState)),
+    );
   }, [onboardingMailboxSeedKey, onboardingState]);
 
   useEffect(() => {
