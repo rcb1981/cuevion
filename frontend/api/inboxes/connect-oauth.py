@@ -1,21 +1,62 @@
+import base64
+import hashlib
+import hmac
 import json
 import os
 import re
-import sys
+import secrets
+import time
 from http.server import BaseHTTPRequestHandler
-from pathlib import Path
 from urllib.parse import urlencode
 
-CURRENT_DIR = Path(__file__).resolve().parent
-if str(CURRENT_DIR) not in sys.path:
-    sys.path.insert(0, str(CURRENT_DIR))
+GOOGLE_AUTHORIZATION_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth"
+DEFAULT_GOOGLE_SCOPES = [
+    "openid",
+    "email",
+    "profile",
+    "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/gmail.send",
+]
 
-from oauth_google import (
-    GOOGLE_AUTHORIZATION_ENDPOINT,
-    build_code_challenge,
-    build_signed_state,
-    resolve_google_scopes,
-)
+
+def base64url_encode(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
+
+
+def build_signed_state(provider: str, email: str, signing_secret: str) -> tuple[str, str]:
+    code_verifier = base64url_encode(secrets.token_bytes(48))
+    state_payload = {
+        "provider": provider,
+        "email": email,
+        "issued_at": int(time.time()),
+        "nonce": secrets.token_urlsafe(16),
+        "code_verifier": code_verifier,
+    }
+    encoded_payload = base64url_encode(
+        json.dumps(state_payload, separators=(",", ":")).encode("utf-8"),
+    )
+    signature = base64url_encode(
+        hmac.new(
+            signing_secret.encode("utf-8"),
+            encoded_payload.encode("utf-8"),
+            hashlib.sha256,
+        ).digest(),
+    )
+    return f"{encoded_payload}.{signature}", code_verifier
+
+
+def build_code_challenge(code_verifier: str) -> str:
+    return base64url_encode(
+        hashlib.sha256(code_verifier.encode("utf-8")).digest(),
+    )
+
+
+def resolve_google_scopes() -> list[str]:
+    configured_scopes = os.getenv("GOOGLE_OAUTH_SCOPES", "").strip()
+    if not configured_scopes:
+        return DEFAULT_GOOGLE_SCOPES
+
+    return [scope for scope in configured_scopes.split() if scope]
 
 
 class handler(BaseHTTPRequestHandler):
