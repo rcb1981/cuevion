@@ -179,6 +179,7 @@ class handler(BaseHTTPRequestHandler):
         message_refs = list_payload.get("messages") if isinstance(list_payload, dict) else None
         if not isinstance(message_refs, list):
             message_refs = []
+        decode_parse_errors = []
         debug = {
             "listed_message_refs": len(message_refs),
             "fetched_message_payloads": 0,
@@ -189,6 +190,7 @@ class handler(BaseHTTPRequestHandler):
             "skipped_missing_raw": 0,
             "skipped_decode_parse_error": 0,
             "skipped_preview_error": 0,
+            "decode_parse_errors": decode_parse_errors,
         }
 
         try:
@@ -237,8 +239,10 @@ class handler(BaseHTTPRequestHandler):
 
                 message_bytes = base64url_decode(raw_message)
                 parsed_message = message_from_bytes(message_bytes)
-            except Exception:
+            except Exception as error:
                 debug["skipped_decode_parse_error"] += 1
+                if len(decode_parse_errors) < 5:
+                    decode_parse_errors.append(str(error)[:200])
                 continue
             debug["decoded_messages"] += 1
 
