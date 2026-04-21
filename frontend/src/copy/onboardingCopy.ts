@@ -241,7 +241,7 @@ export const onboardingCopy = {
       googleOAuthPending:
         "Authentication will continue in Google once the runtime OAuth endpoint is available.",
       googleOAuthActivationPending:
-        "Google authentication completed. Final mailbox activation requires secure mailbox token storage.",
+        "Google authentication completed. Tokens are stored only in the current server runtime. Final mailbox activation requires durable secure mailbox token storage.",
       reusePreviousServerSettings: "Reuse previous server settings",
       reuse: "Reuse",
       host: "Host",

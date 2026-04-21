@@ -19006,7 +19006,9 @@ function normalizeManagedWorkspaceInbox(
 ): ManagedWorkspaceInbox {
   const connectionMethod = getProviderConnectionMethod(mailbox.provider);
   const isGoogleOAuthMailbox = isOAuthConnectionProvider(mailbox.provider);
-  const connected = isGoogleOAuthMailbox ? false : mailbox.connected;
+  const connected = isGoogleOAuthMailbox
+    ? mailbox.connected === true && mailbox.connectionStatus === "connected"
+    : mailbox.connected;
 
   return {
     ...mailbox,

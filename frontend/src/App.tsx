@@ -373,7 +373,7 @@ function applyOAuthCallbackResultToOnboardingState(
         (isConnected
           ? "Google authentication completed."
           : connectionStatus === "authenticated_pending_activation"
-            ? "Google authentication completed. Final mailbox activation requires secure mailbox token storage."
+            ? "Google authentication completed. Tokens are stored only in the current server runtime. Final mailbox activation requires durable secure mailbox token storage."
             : "Google authentication failed.");
       return [
         inboxId,
@@ -428,7 +428,7 @@ function applyOAuthCallbackResultToManagedInboxes(
       (isConnected
         ? "Google authentication completed."
         : connectionStatus === "authenticated_pending_activation"
-          ? "Google authentication completed. Final mailbox activation requires secure mailbox token storage."
+          ? "Google authentication completed. Tokens are stored only in the current server runtime. Final mailbox activation requires durable secure mailbox token storage."
           : "Google authentication failed.");
 
     return {

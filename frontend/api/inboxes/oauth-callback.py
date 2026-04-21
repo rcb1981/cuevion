@@ -6,6 +6,7 @@ from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import Request, urlopen
 
 from oauth_google import GOOGLE_TOKEN_ENDPOINT, verify_signed_state
+from oauth_token_store import is_google_token_store_durable, persist_google_token_record
 
 OAUTH_CALLBACK_RESULT_STORAGE_KEY = "cuevion-oauth-callback-result"
 
@@ -238,13 +239,60 @@ class handler(BaseHTTPRequestHandler):
             )
             return
 
+        persisted_record, persistence_error = persist_google_token_record(
+            email=email,
+            token_payload=token_payload,
+        )
+
+        if persistence_error:
+            self._send_callback_page(
+                _build_callback_payload(
+                    provider=provider,
+                    email=email,
+                    connection_status="authenticated_pending_activation",
+                    message=(
+                        persistence_error["message"]
+                        or "Google authentication completed. Tokens are stored only in the current server runtime. Final mailbox activation requires durable secure mailbox token storage."
+                    ),
+                    connected=False,
+                )
+            )
+            return
+
+        if not persisted_record:
+            self._send_callback_page(
+                _build_callback_payload(
+                    provider=provider,
+                    email=email,
+                    connection_status="authenticated_pending_activation",
+                    message="Google authentication completed. Tokens are stored only in the current server runtime. Final mailbox activation requires durable secure mailbox token storage.",
+                    connected=False,
+                )
+            )
+            return
+
+        if not is_google_token_store_durable():
+            self._send_callback_page(
+                _build_callback_payload(
+                    provider=provider,
+                    email=email,
+                    connection_status="authenticated_pending_activation",
+                    message=(
+                        "Google authentication completed. Tokens are stored only in the current server runtime. "
+                        "Final mailbox activation requires durable secure mailbox token storage."
+                    ),
+                    connected=False,
+                )
+            )
+            return
+
         self._send_callback_page(
             _build_callback_payload(
                 provider=provider,
                 email=email,
-                connection_status="authenticated_pending_activation",
-                message="Google authentication completed. Final mailbox activation requires secure mailbox token storage.",
-                connected=False,
+                connection_status="connected",
+                message="Google account connected. Durable mailbox token storage is active.",
+                connected=True,
             )
         )
 
