@@ -19959,63 +19959,61 @@ const ManageInboxesView = memo(function ManageInboxesView({
     setValidatingInboxId(inboxId);
     clearConnectionError(inboxId);
 
-    try {
-      const response = await validateManagedInbox(mailbox);
+    const response = await validateManagedInbox(mailbox);
 
-      if (!response.ok) {
-        setConnectionErrors((current) => ({
-          ...current,
-          [inboxId]:
-            response.error?.message ??
-            response.connectionMessage ??
-            "Could not connect to inbox.",
-        }));
-        setDraftManagedInboxes((current) =>
-          current.map((candidate) =>
-            candidate.id === inboxId
-              ? {
-                  ...candidate,
-                  connected: false,
-                  connectionMethod: response.connectionMethod,
-                  connectionStatus: "connection_failed",
-                  connectionMessage: response.connectionMessage ?? null,
-                  oauthAuthorizationUrl: null,
-                }
-              : candidate,
-          ),
-        );
-        return false;
-      }
-
-      const authorizationUrl =
-        response.connectionStatus === "waiting_for_authentication"
-          ? response.oauthAuthorizationUrl
-          : null;
-
+    if (!response.ok) {
+      setConnectionErrors((current) => ({
+        ...current,
+        [inboxId]:
+          response.error?.message ??
+          response.connectionMessage ??
+          "Could not connect to inbox.",
+      }));
       setDraftManagedInboxes((current) =>
         current.map((candidate) =>
           candidate.id === inboxId
             ? {
                 ...candidate,
-                connected: response.connected,
+                connected: false,
                 connectionMethod: response.connectionMethod,
-                connectionStatus: response.connectionStatus,
+                connectionStatus: "connection_failed",
                 connectionMessage: response.connectionMessage ?? null,
-                oauthAuthorizationUrl: response.oauthAuthorizationUrl ?? null,
+                oauthAuthorizationUrl: null,
               }
             : candidate,
         ),
       );
-      setValidationErrorInboxId((current) => (current === inboxId ? null : current));
-
-      if (authorizationUrl) {
-        window.location.assign(authorizationUrl);
-      }
-
-      return true;
-    } finally {
       setValidatingInboxId(null);
+      return false;
     }
+
+    const authorizationUrl =
+      response.connectionStatus === "waiting_for_authentication"
+        ? response.oauthAuthorizationUrl
+        : null;
+
+    setDraftManagedInboxes((current) =>
+      current.map((candidate) =>
+        candidate.id === inboxId
+          ? {
+              ...candidate,
+              connected: response.connected,
+              connectionMethod: response.connectionMethod,
+              connectionStatus: response.connectionStatus,
+              connectionMessage: response.connectionMessage ?? null,
+              oauthAuthorizationUrl: response.oauthAuthorizationUrl ?? null,
+            }
+          : candidate,
+      ),
+    );
+    setValidationErrorInboxId((current) => (current === inboxId ? null : current));
+    setValidatingInboxId(null);
+
+    if (authorizationUrl) {
+      window.location.assign(authorizationUrl);
+    }
+
+    return true;
   };
 
   const updateDraftInbox = (

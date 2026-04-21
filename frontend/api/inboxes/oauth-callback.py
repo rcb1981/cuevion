@@ -6,7 +6,7 @@ from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import Request, urlopen
 
 from oauth_google import GOOGLE_TOKEN_ENDPOINT, verify_signed_state
-from oauth_token_store import is_google_token_store_durable, persist_google_token_record
+from oauth_token_store import persist_google_token_record
 
 OAUTH_CALLBACK_RESULT_STORAGE_KEY = "cuevion-oauth-callback-result"
 
@@ -271,14 +271,14 @@ class handler(BaseHTTPRequestHandler):
             )
             return
 
-        if not is_google_token_store_durable():
+        if persisted_record.get("_storage_durable") is not True:
             self._send_callback_page(
                 _build_callback_payload(
                     provider=provider,
                     email=email,
                     connection_status="authenticated_pending_activation",
                     message=(
-                        "Google authentication completed. Tokens are stored only in the current server runtime. "
+                        "Google authentication completed. Tokens are stored only in the current server runtime bridge. "
                         "Final mailbox activation requires durable secure mailbox token storage."
                     ),
                     connected=False,
