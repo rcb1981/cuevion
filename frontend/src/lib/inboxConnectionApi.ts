@@ -245,7 +245,16 @@ export async function connectInboxWithOAuth(
       body: JSON.stringify(request),
     });
 
-    const payload = (await response.json()) as Partial<OAuthInboxResponse>;
+    const rawPayload = await response.text();
+    let payload: Partial<OAuthInboxResponse> | null = null;
+
+    if (rawPayload.trim()) {
+      try {
+        payload = JSON.parse(rawPayload) as Partial<OAuthInboxResponse>;
+      } catch {
+        payload = null;
+      }
+    }
 
     if (!response.ok) {
       return {
@@ -254,20 +263,21 @@ export async function connectInboxWithOAuth(
         connectionStatus: "oauth_required",
         authorizationUrl: null,
         message: null,
-        error: payload.error ?? {
-          code: "oauth_unavailable",
-          message: "OAuth could not be started.",
-        },
+        error:
+          payload?.error ?? {
+            code: "oauth_unavailable",
+            message: rawPayload.trim() || "OAuth could not be started.",
+          },
       };
     }
 
     return {
       ok: true,
       connectionMethod: "oauth",
-      connectionStatus: payload.connectionStatus ?? "oauth_required",
-      authorizationUrl: payload.authorizationUrl ?? null,
-      message: payload.message ?? null,
-      error: payload.error,
+      connectionStatus: payload?.connectionStatus ?? "oauth_required",
+      authorizationUrl: payload?.authorizationUrl ?? null,
+      message: payload?.message ?? null,
+      error: payload?.error,
     };
   } catch (error) {
     return {
