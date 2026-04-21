@@ -179,6 +179,17 @@ class handler(BaseHTTPRequestHandler):
         message_refs = list_payload.get("messages") if isinstance(list_payload, dict) else None
         if not isinstance(message_refs, list):
             message_refs = []
+        debug = {
+            "listed_message_refs": len(message_refs),
+            "fetched_message_payloads": 0,
+            "raw_messages_present": 0,
+            "decoded_messages": 0,
+            "previews_created": 0,
+            "skipped_missing_message_id": 0,
+            "skipped_missing_raw": 0,
+            "skipped_decode_parse_error": 0,
+            "skipped_preview_error": 0,
+        }
 
         try:
             from imap_connect_preview import to_message_preview
@@ -199,6 +210,7 @@ class handler(BaseHTTPRequestHandler):
         for index, message_ref in enumerate(message_refs):
             message_id = str((message_ref or {}).get("id") or "").strip()
             if not message_id:
+                debug["skipped_missing_message_id"] += 1
                 continue
 
             message_payload, message_error = _gmail_request(
@@ -212,10 +224,13 @@ class handler(BaseHTTPRequestHandler):
                     _build_error(message_error["code"], message_error["message"]),
                 )
                 return
+            debug["fetched_message_payloads"] += 1
 
             raw_message = message_payload.get("raw") if isinstance(message_payload, dict) else None
             if not isinstance(raw_message, str) or not raw_message:
+                debug["skipped_missing_raw"] += 1
                 continue
+            debug["raw_messages_present"] += 1
 
             try:
                 from oauth_google import base64url_decode
@@ -223,7 +238,9 @@ class handler(BaseHTTPRequestHandler):
                 message_bytes = base64url_decode(raw_message)
                 parsed_message = message_from_bytes(message_bytes)
             except Exception:
+                debug["skipped_decode_parse_error"] += 1
                 continue
+            debug["decoded_messages"] += 1
 
             label_ids = message_payload.get("labelIds") if isinstance(message_payload, dict) else None
             unread = isinstance(label_ids, list) and "UNREAD" in label_ids
@@ -231,17 +248,22 @@ class handler(BaseHTTPRequestHandler):
             if gmail_internal_id:
                 inbox_uid_set.append(gmail_internal_id)
 
-            previews.append(
-                to_message_preview(
-                    parsed_message,
-                    index,
-                    email_address,
-                    unread,
-                    gmail_internal_id,
-                    internal_role=internal_role,
-                    focus_preferences=focus_preferences,
-                ),
-            )
+            try:
+                previews.append(
+                    to_message_preview(
+                        parsed_message,
+                        index,
+                        email_address,
+                        unread,
+                        gmail_internal_id,
+                        internal_role=internal_role,
+                        focus_preferences=focus_preferences,
+                    ),
+                )
+                debug["previews_created"] += 1
+            except Exception:
+                debug["skipped_preview_error"] += 1
+                continue
 
         _send_json(
             self,
@@ -251,6 +273,7 @@ class handler(BaseHTTPRequestHandler):
                 "messages": previews,
                 "inboxUidSet": inbox_uid_set,
                 "uidValidity": "gmail-api",
+                "debug": debug,
             },
         )
 
