@@ -1,3 +1,4 @@
+import base64
 import json
 import sys
 from datetime import datetime, timezone
@@ -19,6 +20,11 @@ from oauth_token_store import (
 GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1/users/me"
 DEFAULT_FETCH_LIMIT = 20
 MAX_FETCH_LIMIT = 25
+
+
+def _base64url_decode(value: str) -> bytes:
+    padding = "=" * (-len(value) % 4)
+    return base64.urlsafe_b64decode(f"{value}{padding}".encode("ascii"))
 
 
 def _send_json(handler: BaseHTTPRequestHandler, status_code: int, payload: dict):
@@ -235,9 +241,7 @@ class handler(BaseHTTPRequestHandler):
             debug["raw_messages_present"] += 1
 
             try:
-                from oauth_google import base64url_decode
-
-                message_bytes = base64url_decode(raw_message)
+                message_bytes = _base64url_decode(raw_message)
                 parsed_message = message_from_bytes(message_bytes)
             except Exception as error:
                 debug["skipped_decode_parse_error"] += 1
