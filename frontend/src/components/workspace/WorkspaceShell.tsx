@@ -19972,12 +19972,10 @@ const ManageInboxesView = memo(function ManageInboxesView({
         return false;
       }
 
-      if (
-        response.connectionStatus === "waiting_for_authentication" &&
-        response.oauthAuthorizationUrl
-      ) {
-        window.location.assign(response.oauthAuthorizationUrl);
-      }
+      const authorizationUrl =
+        response.connectionStatus === "waiting_for_authentication"
+          ? response.oauthAuthorizationUrl
+          : null;
 
       setDraftManagedInboxes((current) =>
         current.map((candidate) =>
@@ -19994,6 +19992,11 @@ const ManageInboxesView = memo(function ManageInboxesView({
         ),
       );
       setValidationErrorInboxId((current) => (current === inboxId ? null : current));
+
+      if (authorizationUrl) {
+        window.location.assign(authorizationUrl);
+      }
+
       return true;
     } finally {
       setValidatingInboxId(null);
@@ -20297,18 +20300,20 @@ const ManageInboxesView = memo(function ManageInboxesView({
                     return;
                   }
 
-                  if (
-                    response.connectionStatus === "waiting_for_authentication" &&
-                    response.oauthAuthorizationUrl
-                  ) {
-                    window.location.assign(response.oauthAuthorizationUrl);
-                  }
+                  const authorizationUrl =
+                    response.connectionStatus === "waiting_for_authentication"
+                      ? response.oauthAuthorizationUrl
+                      : null;
 
                   mailbox.connected = response.connected;
                   mailbox.connectionMethod = response.connectionMethod;
                   mailbox.connectionStatus = response.connectionStatus;
                   mailbox.connectionMessage = response.connectionMessage ?? null;
                   mailbox.oauthAuthorizationUrl = response.oauthAuthorizationUrl ?? null;
+
+                  if (authorizationUrl) {
+                    window.location.assign(authorizationUrl);
+                  }
                 }
               } finally {
                 setValidatingInboxId(null);

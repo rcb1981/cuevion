@@ -275,12 +275,10 @@ export function StepConnectInboxes({
       selectedInboxes,
     });
 
-    if (
-      result.connectionStatus === "waiting_for_authentication" &&
-      result.oauthAuthorizationUrl
-    ) {
-      window.location.assign(result.oauthAuthorizationUrl);
-    }
+    const authorizationUrl =
+      result.connectionStatus === "waiting_for_authentication"
+        ? result.oauthAuthorizationUrl
+        : null;
 
     if (result.ok) {
       onConnectInbox(
@@ -310,6 +308,10 @@ export function StepConnectInboxes({
     }
 
     setLoadingInboxId(null);
+
+    if (authorizationUrl) {
+      window.location.assign(authorizationUrl);
+    }
   };
 
   return (
