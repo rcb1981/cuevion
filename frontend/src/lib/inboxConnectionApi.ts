@@ -85,6 +85,14 @@ export type OAuthInboxResponse = {
   };
 };
 
+export type FetchGmailInboxRequest = {
+  provider: ProviderId;
+  email: string;
+  internalRole?: string | null;
+  focusPreferences?: OnboardingState["focusPreferences"] | null;
+  limit?: number | null;
+};
+
 export type InboxConnectionAttemptResult = {
   ok: boolean;
   connected: boolean;
@@ -405,5 +413,55 @@ export async function sendGmailMessage(
     };
   } finally {
     window.clearTimeout(timeoutId);
+  }
+}
+
+export async function fetchGmailInbox(
+  request: FetchGmailInboxRequest,
+): Promise<ConnectInboxResponse> {
+  const requestStartedAt = performance.now();
+
+  try {
+    const response = await fetch("/api/inboxes/fetch-gmail", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(request),
+    });
+
+    const payload = (await response.json()) as ConnectInboxResponse;
+    console.info("[SYNC-TIMING] fetchGmailInbox response", {
+      ok: response.ok,
+      email: request.email,
+      durationMs: Math.round(performance.now() - requestStartedAt),
+      messageCount: payload.messages?.length ?? 0,
+    });
+
+    if (!response.ok) {
+      return {
+        ok: false,
+        error: payload.error ?? {
+          code: "gmail_fetch_failed",
+          message: "Could not fetch Gmail inbox.",
+        },
+      };
+    }
+
+    return payload;
+  } catch (error) {
+    console.error("[SYNC-TIMING] fetchGmailInbox failed", {
+      email: request.email,
+      durationMs: Math.round(performance.now() - requestStartedAt),
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return {
+      ok: false,
+      error: {
+        code: "gmail_fetch_failed",
+        message:
+          error instanceof Error ? error.message : "Could not fetch Gmail inbox.",
+      },
+    };
   }
 }

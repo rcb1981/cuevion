@@ -53,6 +53,7 @@ import {
   beginInboxConnection,
   buildConnectInboxRequest,
   connectInboxWithImap,
+  fetchGmailInbox,
   sendGmailMessage,
   type SendInboxAttachmentRequest,
   type LiveInboxMessageSnapshot,
@@ -19084,7 +19085,9 @@ function getMailboxSyncUnavailableMessage(mailbox: ManagedWorkspaceInbox | null)
     }
 
     if (mailbox.connectionStatus === "connected") {
-      return "Google OAuth sync is not available in this runtime yet.";
+      return mailbox.provider === "google"
+        ? null
+        : "OAuth sync is not available for this inbox provider in the current runtime.";
     }
 
     return "Google OAuth is required before this inbox can sync.";
@@ -25507,7 +25510,10 @@ export function WorkspaceShell({
       !managedMailbox ||
       !managedMailbox.connected ||
       !managedMailbox.provider ||
-      !isImapCredentialsProvider(managedMailbox.provider)
+      (
+        managedMailbox.provider !== "google" &&
+        !isImapCredentialsProvider(managedMailbox.provider)
+      )
     ) {
       return;
     }
@@ -25528,7 +25534,10 @@ export function WorkspaceShell({
       !managedMailbox ||
       !managedMailbox.connected ||
       !managedMailbox.provider ||
-      !isImapCredentialsProvider(managedMailbox.provider)
+      (
+        managedMailbox.provider !== "google" &&
+        !isImapCredentialsProvider(managedMailbox.provider)
+      )
     ) {
       return;
     }
@@ -27274,12 +27283,16 @@ export function WorkspaceShell({
       (mailbox) => mailbox.id === mailboxId,
     );
 
-    if (
-      !managedMailbox ||
-      !managedMailbox.connected ||
-      !managedMailbox.provider ||
-      !isImapCredentialsProvider(managedMailbox.provider)
-    ) {
+    if (!managedMailbox || !managedMailbox.connected || !managedMailbox.provider) {
+      return;
+    }
+
+    const canUseGmailOAuthFetch =
+      managedMailbox.provider === "google" &&
+      managedMailbox.connectionStatus === "connected";
+    const canUseImapFetch = isImapCredentialsProvider(managedMailbox.provider);
+
+    if (!canUseGmailOAuthFetch && !canUseImapFetch) {
       return;
     }
 
@@ -27287,20 +27300,26 @@ export function WorkspaceShell({
 
     try {
       const syncStartedAt = performance.now();
-      const response = await connectInboxWithImap(
-        buildConnectInboxRequest({
-          provider: managedMailbox.provider,
-          email: managedMailbox.email,
-          customImap: managedMailbox.customImap,
-          // Pass the current effective focus preferences for this mailbox so the
-          // backend's decide_message_behavior() computes final_visibility, action,
-          // and v7_final_priority using the user's actual settings rather than
-          // default/anonymous rules. effectiveFocusPreferencesByMailbox already
-          // applies any per-mailbox overrides on top of the global base prefs,
-          // matching the same source used by the visible priority render path.
-          focusPreferences: effectiveFocusPreferencesByMailbox[mailboxId],
-        }),
-      );
+      const response = canUseGmailOAuthFetch
+        ? await fetchGmailInbox({
+            provider: managedMailbox.provider,
+            email: managedMailbox.email,
+            focusPreferences: effectiveFocusPreferencesByMailbox[mailboxId],
+          })
+        : await connectInboxWithImap(
+            buildConnectInboxRequest({
+              provider: managedMailbox.provider,
+              email: managedMailbox.email,
+              customImap: managedMailbox.customImap,
+              // Pass the current effective focus preferences for this mailbox so the
+              // backend's decide_message_behavior() computes final_visibility, action,
+              // and v7_final_priority using the user's actual settings rather than
+              // default/anonymous rules. effectiveFocusPreferencesByMailbox already
+              // applies any per-mailbox overrides on top of the global base prefs,
+              // matching the same source used by the visible priority render path.
+              focusPreferences: effectiveFocusPreferencesByMailbox[mailboxId],
+            }),
+          );
       const requestDurationMs = performance.now() - syncStartedAt;
 
       if (!response.ok) {
@@ -27310,6 +27329,11 @@ export function WorkspaceShell({
           requestDurationMs: Math.round(requestDurationMs),
           error: response.error?.message ?? response.error?.code ?? "unknown",
         });
+        if (canUseGmailOAuthFetch) {
+          setMailboxSyncFeedbackMessage(
+            response.error?.message ?? "Could not fetch Gmail inbox.",
+          );
+        }
         return;
       }
 

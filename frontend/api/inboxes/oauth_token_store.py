@@ -326,3 +326,14 @@ def get_google_token_record(email: str) -> dict | None:
     runtime_store = _read_runtime_store(_resolve_runtime_store_path())
     record = runtime_store.get(store_key)
     return record if isinstance(record, dict) else None
+
+
+def get_google_token_record_with_metadata(email: str) -> dict | None:
+    record = get_google_token_record(email)
+    if not isinstance(record, dict):
+        return None
+
+    return {
+        **record,
+        "_storage_durable": is_google_token_store_durable(),
+    }
