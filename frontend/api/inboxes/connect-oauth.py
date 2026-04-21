@@ -1,61 +1,21 @@
-import base64
-import hashlib
-import hmac
 import json
 import os
-import secrets
-import time
+import re
+import sys
 from http.server import BaseHTTPRequestHandler
+from pathlib import Path
 from urllib.parse import urlencode
 
-GOOGLE_AUTHORIZATION_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth"
-DEFAULT_GOOGLE_SCOPES = [
-    "openid",
-    "email",
-    "profile",
-    "https://www.googleapis.com/auth/gmail.readonly",
-    "https://www.googleapis.com/auth/gmail.send",
-]
+CURRENT_DIR = Path(__file__).resolve().parent
+if str(CURRENT_DIR) not in sys.path:
+    sys.path.insert(0, str(CURRENT_DIR))
 
-
-def _base64url_encode(value: bytes) -> str:
-    return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
-
-
-def _build_signed_state(provider: str, email: str, signing_secret: str) -> tuple[str, str]:
-    code_verifier = _base64url_encode(secrets.token_bytes(48))
-    state_payload = {
-        "provider": provider,
-        "email": email,
-        "issued_at": int(time.time()),
-        "nonce": secrets.token_urlsafe(16),
-        "code_verifier": code_verifier,
-    }
-    encoded_payload = _base64url_encode(
-        json.dumps(state_payload, separators=(",", ":")).encode("utf-8"),
-    )
-    signature = _base64url_encode(
-        hmac.new(
-            signing_secret.encode("utf-8"),
-            encoded_payload.encode("utf-8"),
-            hashlib.sha256,
-        ).digest(),
-    )
-    return f"{encoded_payload}.{signature}", code_verifier
-
-
-def _build_code_challenge(code_verifier: str) -> str:
-    return _base64url_encode(
-        hashlib.sha256(code_verifier.encode("utf-8")).digest(),
-    )
-
-
-def _resolve_google_scopes() -> list[str]:
-    configured_scopes = os.getenv("GOOGLE_OAUTH_SCOPES", "").strip()
-    if not configured_scopes:
-        return DEFAULT_GOOGLE_SCOPES
-
-    return [scope for scope in configured_scopes.split() if scope]
+from oauth_google import (
+    GOOGLE_AUTHORIZATION_ENDPOINT,
+    build_code_challenge,
+    build_signed_state,
+    resolve_google_scopes,
+)
 
 
 class handler(BaseHTTPRequestHandler):
@@ -92,6 +52,7 @@ class handler(BaseHTTPRequestHandler):
 
         provider = payload.get("provider")
         email = str(payload.get("email", "")).strip().lower()
+        email_pattern = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
         if provider != "google":
             self._send_json(
@@ -101,6 +62,19 @@ class handler(BaseHTTPRequestHandler):
                     "error": {
                         "code": "unsupported_provider",
                         "message": "OAuth is not configured for this provider.",
+                    },
+                },
+            )
+            return
+
+        if not email_pattern.match(email):
+            self._send_json(
+                400,
+                {
+                    "ok": False,
+                    "error": {
+                        "code": "invalid_request",
+                        "message": "A valid Gmail or Google Workspace email is required.",
                     },
                 },
             )
@@ -142,7 +116,7 @@ class handler(BaseHTTPRequestHandler):
             )
             return
 
-        authorization_state, code_verifier = _build_signed_state(
+        authorization_state, code_verifier = build_signed_state(
             provider,
             email,
             oauth_state_secret,
@@ -151,13 +125,13 @@ class handler(BaseHTTPRequestHandler):
             "client_id": google_client_id,
             "redirect_uri": google_redirect_uri,
             "response_type": "code",
-            "scope": " ".join(_resolve_google_scopes()),
+            "scope": " ".join(resolve_google_scopes()),
             "access_type": "offline",
             "include_granted_scopes": "true",
             "prompt": "consent",
             "login_hint": email,
             "state": authorization_state,
-            "code_challenge": _build_code_challenge(code_verifier),
+            "code_challenge": build_code_challenge(code_verifier),
             "code_challenge_method": "S256",
         }
         authorization_url = (

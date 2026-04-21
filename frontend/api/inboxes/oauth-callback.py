@@ -1,9 +1,15 @@
 import json
 import os
+import sys
 from http.server import BaseHTTPRequestHandler
+from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import Request, urlopen
+
+CURRENT_DIR = Path(__file__).resolve().parent
+if str(CURRENT_DIR) not in sys.path:
+    sys.path.insert(0, str(CURRENT_DIR))
 
 from oauth_google import GOOGLE_TOKEN_ENDPOINT, verify_signed_state
 from oauth_token_store import persist_google_token_record

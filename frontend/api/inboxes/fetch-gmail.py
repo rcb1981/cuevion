@@ -1,10 +1,16 @@
 import json
+import sys
 from datetime import datetime, timezone
 from email import message_from_bytes
 from http.server import BaseHTTPRequestHandler
+from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
+
+CURRENT_DIR = Path(__file__).resolve().parent
+if str(CURRENT_DIR) not in sys.path:
+    sys.path.insert(0, str(CURRENT_DIR))
 
 from oauth_token_store import (
     get_google_token_record_with_metadata,
