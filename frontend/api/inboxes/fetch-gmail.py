@@ -19,8 +19,8 @@ from oauth_token_store import (
 )
 
 GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1/users/me"
-DEFAULT_FETCH_LIMIT = 20
-MAX_FETCH_LIMIT = 25
+DEFAULT_FETCH_LIMIT = 50
+MAX_FETCH_LIMIT = 100
 
 
 def _base64url_decode(value: str) -> bytes:
