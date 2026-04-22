@@ -21527,6 +21527,7 @@ const InboxBehaviorSettingsCard = memo(function InboxBehaviorSettingsCard({
 const FocusPreferencesSettingsCard = memo(function FocusPreferencesSettingsCard({
   themeMode,
   managedInboxes,
+  primaryManagedInboxId,
   baseFocusPreferences,
   focusPreferenceOverrides,
   onApplyFocusPreferences,
@@ -21534,23 +21535,28 @@ const FocusPreferencesSettingsCard = memo(function FocusPreferencesSettingsCard(
 }: {
   themeMode: "light" | "dark";
   managedInboxes: ManagedWorkspaceInbox[];
+  primaryManagedInboxId: string | null;
   baseFocusPreferences: FocusPreferences;
   focusPreferenceOverrides: MailboxFocusPreferenceOverridesStore;
   onApplyFocusPreferences: (inboxId: InboxId, nextValue: FocusPreferences) => void;
   isApplying: boolean;
 }) {
+  const orderedManagedInboxes = orderManagedWorkspaceInboxes(
+    managedInboxes,
+    primaryManagedInboxId,
+  );
   const [activeInboxId, setActiveInboxId] = useState<InboxId | null>(
-    (managedInboxes[0]?.id as InboxId | undefined) ?? null,
+    (orderedManagedInboxes[0]?.id as InboxId | undefined) ?? null,
   );
   const [draftFocusPreferenceOverrides, setDraftFocusPreferenceOverrides] =
     useState<MailboxFocusPreferenceOverridesStore>(focusPreferenceOverrides);
   const [isConfirmOpen, setIsConfirmOpen] = useState(false);
 
   useEffect(() => {
-    if (!managedInboxes.some((mailbox) => mailbox.id === activeInboxId)) {
-      setActiveInboxId((managedInboxes[0]?.id as InboxId | undefined) ?? null);
+    if (!orderedManagedInboxes.some((mailbox) => mailbox.id === activeInboxId)) {
+      setActiveInboxId((orderedManagedInboxes[0]?.id as InboxId | undefined) ?? null);
     }
-  }, [activeInboxId, managedInboxes]);
+  }, [activeInboxId, orderedManagedInboxes]);
 
   useEffect(() => {
     if (isConfirmOpen) {
@@ -21563,7 +21569,7 @@ const FocusPreferencesSettingsCard = memo(function FocusPreferencesSettingsCard(
   const activeInbox =
     activeInboxId === null
       ? null
-      : managedInboxes.find((mailbox) => mailbox.id === activeInboxId) ?? null;
+      : orderedManagedInboxes.find((mailbox) => mailbox.id === activeInboxId) ?? null;
   const savedActiveOverrides =
     activeInboxId === null ? {} : focusPreferenceOverrides[activeInboxId] ?? {};
   const draftActiveOverrides =
@@ -21599,7 +21605,7 @@ const FocusPreferencesSettingsCard = memo(function FocusPreferencesSettingsCard(
               </div>
             </div>
             <div className="flex flex-wrap gap-2">
-              {managedInboxes.map((mailbox, index) => {
+              {orderedManagedInboxes.map((mailbox) => {
                 const hasDraftChanges =
                   JSON.stringify(draftFocusPreferenceOverrides[mailbox.id as InboxId] ?? {}) !==
                   JSON.stringify(focusPreferenceOverrides[mailbox.id as InboxId] ?? {});
@@ -21620,7 +21626,7 @@ const FocusPreferencesSettingsCard = memo(function FocusPreferencesSettingsCard(
                       <div className="text-[0.86rem] font-medium text-[var(--workspace-text)]">
                         {mailbox.title}
                       </div>
-                      {index === 0 ? (
+                      {mailbox.id === primaryManagedInboxId ? (
                         <span className={primaryBadgeClass}>Primary</span>
                       ) : null}
                       {hasDraftChanges ? (
@@ -22477,6 +22483,7 @@ function SettingsView({
           <FocusPreferencesSettingsCard
             themeMode={themeMode}
             managedInboxes={savedManagedInboxes}
+            primaryManagedInboxId={primaryManagedInboxId}
             baseFocusPreferences={baseFocusPreferences}
             focusPreferenceOverrides={focusPreferenceOverrides}
             onApplyFocusPreferences={onApplyFocusPreferences}
