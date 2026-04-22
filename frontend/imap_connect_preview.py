@@ -663,6 +663,8 @@ def resolve_preview_routing(
             result["category"] = "promo"
         elif is_promo_mailbox_context and has_promo_pitch_signal and has_private_soundcloud_signal:
             result["category"] = "promo"
+        elif has_promo_provider_signal:
+            result["category"] = "promo"
         elif usable_demo_links:
             result["category"] = "demo"
             result["usable_demo_links"] = usable_demo_links
@@ -670,8 +672,6 @@ def resolve_preview_routing(
             result["category"] = "demo"
         elif any(keyword in classification_text for keyword in meta_ads_keywords):
             result["category"] = "finance"
-        elif has_promo_provider_signal:
-            result["category"] = "promo"
         elif any(keyword in classification_text for keyword in business_keywords):
             result["category"] = "business"
 
