@@ -1079,7 +1079,10 @@ function resolveVisibleClassification(
   })();
 
   if (
-    signalClassification === "promo" &&
+    (signalClassification === "promo" ||
+      signalClassification === "business" ||
+      message.internalClassification === "business" ||
+      message.internalClassification === "business_reminder") &&
     isBroadcastPromoMessage(message)
   ) {
     return "workflow_update";
