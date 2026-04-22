@@ -355,3 +355,34 @@ def normalize_collaboration_invite_record(value: Any) -> dict | None:
 def is_active_collaboration_invite_record(value: Any) -> bool:
     normalized_invite = normalize_collaboration_invite_record(value)
     return bool(normalized_invite and normalized_invite["status"] == "active")
+
+
+def build_external_collaboration_thread_view(value: Any) -> dict | None:
+    normalized_thread = normalize_collaboration_thread_record(value)
+    if not normalized_thread:
+        return None
+
+    external_participants: list[dict] = []
+    for participant in normalized_thread["collaboration"]["participants"]:
+        external_participants.append(
+            {
+                key: participant_value
+                for key, participant_value in participant.items()
+                if key != "externalReviewToken"
+            }
+        )
+
+    external_messages = [
+        message
+        for message in normalized_thread["collaboration"]["messages"]
+        if message.get("visibility") in {None, "shared"}
+    ]
+
+    return {
+        **normalized_thread,
+        "collaboration": {
+            **normalized_thread["collaboration"],
+            "participants": external_participants,
+            "messages": external_messages,
+        },
+    }

@@ -167,6 +167,47 @@ export type MutateCollaborationThreadResponse =
       code: "unavailable";
     };
 
+type FetchCollaborationInviteOptions = {
+  viewer?: "workspace" | "external";
+};
+
+type FetchCollaborationInviteResponse =
+  | {
+      ok: true;
+      invite: CollaborationInvite;
+      thread: CollaborationThread;
+    }
+  | {
+      ok: false;
+      code: "invalid_invite" | "expired_invite" | "unavailable";
+    };
+
+type MutateCollaborationInviteRequest = {
+  token: string;
+  expectedUpdatedAt?: number;
+  action: {
+    type: "reply";
+    text: string;
+    authorName?: string;
+    mentions?: CollaborationMention[];
+  };
+};
+
+export type MutateCollaborationInviteResponse =
+  | {
+      ok: true;
+      thread: CollaborationThread;
+    }
+  | {
+      ok: false;
+      code: "stale_thread";
+      thread: CollaborationThread;
+    }
+  | {
+      ok: false;
+      code: "invalid_invite" | "expired_invite" | "unavailable";
+    };
+
 export async function fetchCollaborationThreadsGetMany(
   request: FetchCollaborationThreadsGetManyRequest,
 ): Promise<Record<string, CollaborationThread>> {
@@ -310,6 +351,126 @@ export async function issueCollaborationInvite(
         code: "unavailable",
         message: "Could not issue collaboration invite.",
       },
+    };
+  }
+}
+
+export async function fetchCollaborationInvite(
+  token: string,
+  options?: FetchCollaborationInviteOptions,
+): Promise<FetchCollaborationInviteResponse> {
+  try {
+    const url = new URL(`/api/collaboration/invite/${encodeURIComponent(token)}`, window.location.origin);
+    if (options?.viewer) {
+      url.searchParams.set("viewer", options.viewer);
+    }
+
+    const response = await fetch(`${url.pathname}${url.search}`, {
+      method: "GET",
+      headers: {
+        "Content-Type": "application/json",
+      },
+    });
+
+    const payload = (await response.json()) as
+      | {
+          ok?: boolean;
+          invite?: CollaborationInvite;
+          thread?: CollaborationThread;
+          error?: {
+            code?: string;
+          };
+        }
+      | undefined;
+
+    if (response.ok && payload?.ok && payload.invite && payload.thread) {
+      return {
+        ok: true,
+        invite: payload.invite,
+        thread: payload.thread,
+      };
+    }
+
+    const errorCode = payload?.error?.code;
+    if (errorCode === "invalid_invite" || errorCode === "expired_invite") {
+      return {
+        ok: false,
+        code: errorCode,
+      };
+    }
+
+    return {
+      ok: false,
+      code: "unavailable",
+    };
+  } catch {
+    return {
+      ok: false,
+      code: "unavailable",
+    };
+  }
+}
+
+export async function mutateCollaborationInvite(
+  request: MutateCollaborationInviteRequest,
+): Promise<MutateCollaborationInviteResponse> {
+  try {
+    const response = await fetch(
+      `/api/collaboration/invite/${encodeURIComponent(request.token)}/action`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          expectedUpdatedAt: request.expectedUpdatedAt,
+          action: request.action,
+        }),
+      },
+    );
+
+    const payload = (await response.json()) as
+      | {
+          ok?: boolean;
+          code?: string;
+          thread?: CollaborationThread;
+          error?: {
+            code?: string;
+          };
+        }
+      | undefined;
+
+    if (response.ok && payload?.ok && payload.thread) {
+      return {
+        ok: true,
+        thread: payload.thread,
+      };
+    }
+
+    if (payload?.code === "stale_thread" && payload.thread) {
+      return {
+        ok: false,
+        code: "stale_thread",
+        thread: payload.thread,
+      };
+    }
+
+    const errorCode = payload?.error?.code;
+    if (errorCode === "invalid_invite" || errorCode === "expired_invite") {
+      return {
+        ok: false,
+        code: errorCode,
+      };
+    }
+
+    return {
+      ok: false,
+      code: "unavailable",
+    };
+  } catch {
+    return {
+      ok: false,
+      code: "unavailable",
     };
   }
 }

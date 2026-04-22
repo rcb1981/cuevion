@@ -60,8 +60,10 @@ import {
 } from "../../lib/inboxConnectionApi";
 import {
   createCollaborationThread,
+  fetchCollaborationInvite,
   fetchCollaborationThreadsGetMany,
   issueCollaborationInvite,
+  mutateCollaborationInvite,
   mutateCollaborationThread,
   type CollaborationThread,
 } from "../../lib/collaborationApi";
@@ -11947,6 +11949,54 @@ function MailboxView({
       collaboration: thread.collaboration as MailMessageCollaboration,
       isShared: thread.isShared,
     }));
+  };
+
+  const buildMailMessageFromCollaborationThread = (
+    thread: CollaborationThread,
+  ): MailMessage => ({
+    id: thread.sourceMessage.id,
+    sender: thread.sourceMessage.sender,
+    subject: thread.sourceMessage.subject,
+    snippet: thread.sourceMessage.snippet,
+    time: thread.sourceMessage.timestamp,
+    createdAt: thread.sourceMessage.timestamp,
+    from: thread.sourceMessage.from,
+    to: "",
+    timestamp: thread.sourceMessage.timestamp,
+    body: [...thread.sourceMessage.body],
+    bodyHtml: thread.sourceMessage.bodyHtml,
+    isShared: thread.isShared,
+    collaboration: thread.collaboration as MailMessageCollaboration,
+    priorityScore: "medium",
+    category: "Primary",
+    categorySource: "system",
+    categoryConfidence: "medium",
+  });
+
+  const buildExternalSafeInviteMessage = (message: MailMessage): MailMessage =>
+    message.collaboration
+      ? {
+          ...message,
+          collaboration: {
+            ...message.collaboration,
+            participants: (message.collaboration.participants ?? []).map((participant) => ({
+              id: participant.id,
+              name: participant.name,
+              email: participant.email,
+              kind: participant.kind,
+              status: participant.status,
+            })),
+            messages: message.collaboration.messages.filter(
+              (entry) => getCollaborationMessageVisibility(entry) === "shared",
+            ),
+          },
+        }
+      : message;
+
+  const applyCanonicalCollaborationThreadToInviteRoute = (
+    thread: CollaborationThread,
+  ) => {
+    setInviteMessageOverride(buildMailMessageFromCollaborationThread(thread));
   };
 
   const buildCollaborationSourceMessageSnapshot = (message: MailMessage) => ({
@@ -25605,6 +25655,10 @@ export function WorkspaceShell({
   const [externalReviewHistoryExpanded, setExternalReviewHistoryExpanded] = useState(false);
   const [isExternalReviewMessageOpen, setIsExternalReviewMessageOpen] = useState(false);
   const [inviteMessageOverride, setInviteMessageOverride] = useState<MailMessage | null>(null);
+  const [inviteLookupState, setInviteLookupState] = useState<
+    "idle" | "loading" | "ready" | "invalid" | "expired" | "unavailable"
+  >("idle");
+  const [inviteLookupInviteeEmail, setInviteLookupInviteeEmail] = useState<string | null>(null);
   const [inviteReplyDraft, setInviteReplyDraft] = useState("");
   const [inviteReplyVisibility, setInviteReplyVisibility] =
     useState<MailMessageCollaborationVisibility>(
@@ -26051,6 +26105,9 @@ export function WorkspaceShell({
     : null;
   const isExternalReviewRoute = collaborationInviteRoute?.mode === "external_review";
   const decodedInviteMessage = decodedInvitePayload?.message ?? null;
+  const decodedExternalInviteMessage = decodedInviteMessage
+    ? buildExternalSafeInviteMessage(decodedInviteMessage)
+    : null;
   const storedInviteMessage = collaborationInviteRoute
     ? Object.values(mailboxStore)
         .flatMap((collections) => canonicalFolderOrder.flatMap((folder) => collections[folder]))
@@ -26059,15 +26116,21 @@ export function WorkspaceShell({
   const inviteMessage =
     (inviteMessageOverride &&
     collaborationInviteRoute &&
-    inviteMessageOverride.id === collaborationInviteRoute.messageId
+    (!collaborationInviteRoute.messageId ||
+      inviteMessageOverride.id === collaborationInviteRoute.messageId)
       ? inviteMessageOverride
       : null) ??
-    (storedInviteMessage?.collaboration ? storedInviteMessage : decodedInviteMessage ?? storedInviteMessage);
+    (isExternalReviewRoute
+      ? decodedExternalInviteMessage
+      : storedInviteMessage?.collaboration
+        ? storedInviteMessage
+        : decodedInviteMessage ?? storedInviteMessage);
   const inviteCollaboration = inviteMessage?.collaboration ?? null;
   const inviteParticipants = inviteCollaboration
     ? getCollaborationParticipants(inviteCollaboration)
     : [];
   const externalReviewAuthorEmail =
+    inviteLookupInviteeEmail?.toLowerCase() ??
     collaborationInviteRoute?.inviteeEmail?.toLowerCase() ??
     decodedInvitePayload?.inviteeEmail?.toLowerCase() ??
     "";
@@ -26101,11 +26164,17 @@ export function WorkspaceShell({
   );
   const inviteRouteState = !collaborationInviteRoute
     ? null
-    : collaborationInviteRoute.status === "expired"
+    : collaborationInviteRoute.status === "expired" || inviteLookupState === "expired"
       ? "expired"
+      : inviteLookupState === "invalid"
+        ? "invalid"
+        : inviteLookupState === "loading" && !inviteMessage
+          ? "loading"
       : !collaborationInviteRoute.messageId || !collaborationInviteRoute.inviteeEmail
         ? "invalid"
-        : !inviteMessage || !inviteCollaboration
+        : (inviteLookupState === "unavailable" && !decodedInvitePayload?.message && !storedInviteMessage) ||
+            !inviteMessage ||
+            !inviteCollaboration
           ? "unavailable"
           : isExternalReviewRoute
             ? "joined"
@@ -26210,7 +26279,59 @@ export function WorkspaceShell({
 
   useEffect(() => {
     if (!collaborationInviteRoute) {
+      setInviteLookupState("idle");
+      setInviteLookupInviteeEmail(null);
+      return;
+    }
+
+    let isCancelled = false;
+    setInviteLookupState("loading");
+
+    void (async () => {
+      const result = await fetchCollaborationInvite(
+        collaborationInviteRoute.inviteToken,
+        {
+          viewer: collaborationInviteRoute.mode === "external_review" ? "external" : "workspace",
+        },
+      );
+
+      if (isCancelled) {
+        return;
+      }
+
+      if (result.ok) {
+        setInviteLookupState("ready");
+        setInviteLookupInviteeEmail(result.invite.inviteeEmail);
+        applyCanonicalCollaborationThreadToInviteRoute(result.thread);
+        return;
+      }
+
+      setInviteLookupInviteeEmail(null);
+      if (result.code === "invalid_invite") {
+        setInviteLookupState("invalid");
+        return;
+      }
+
+      if (result.code === "expired_invite") {
+        setInviteLookupState("expired");
+        return;
+      }
+
+      setInviteLookupState("unavailable");
+    })();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [collaborationInviteRoute]);
+
+  useEffect(() => {
+    if (!collaborationInviteRoute) {
       setInviteMessageOverride(null);
+      return;
+    }
+
+    if (collaborationInviteRoute.mode === "external_review") {
       return;
     }
 
@@ -26393,10 +26514,16 @@ export function WorkspaceShell({
   const sendExternalReviewReply = () => {
     const trimmedReply = inviteReplyDraft.trim();
 
-    if (!trimmedReply || !inviteMessage?.collaboration || !externalReviewAuthorEmail) {
+    if (
+      !trimmedReply ||
+      !inviteMessage?.collaboration ||
+      !externalReviewAuthorEmail ||
+      !collaborationInviteRoute
+    ) {
       return;
     }
 
+    const expectedUpdatedAt = inviteMessage.collaboration.updatedAt;
     const nextTimestamp = Date.now();
     const mentionCandidates = getCollaborationMentionTargets(inviteParticipants, []);
     const mentions = extractCollaborationMentions(
@@ -26432,41 +26559,32 @@ export function WorkspaceShell({
 
     setInviteMessageOverride(nextInviteMessage);
 
-    updateInviteWorkspaceMessageById(inviteMessage.id, (message) =>
-      message.collaboration
-        ? {
-            ...message,
-            isShared: true,
-            collaboration: {
-              ...message.collaboration,
-              state:
-                message.collaboration.state === "resolved"
-                  ? "needs_review"
-                  : message.collaboration.state,
-              updatedAt: nextTimestamp,
-              previewText: trimmedReply,
-              messages: [
-                ...message.collaboration.messages,
-                {
-                  id: `${inviteMessage.id}-external-review-reply-${nextTimestamp}`,
-                  authorId: normalizeSenderLearningKey(externalReviewAuthorEmail),
-                  authorName: externalReviewAuthorName,
-                  text: trimmedReply,
-                  timestamp: nextTimestamp,
-                  visibility: "shared",
-                  mentions,
-                },
-              ],
-            },
-          }
-        : message,
-      inviteMessage,
-    );
-
     setInviteReplyDraft("");
     setInviteReplyVisibility("shared");
     setInviteMentionIndex(0);
     setInviteReplySelection(null);
+
+    void (async () => {
+      const result = await mutateCollaborationInvite({
+        token: collaborationInviteRoute.inviteToken,
+        expectedUpdatedAt,
+        action: {
+          type: "reply",
+          text: trimmedReply,
+          authorName: externalReviewAuthorName,
+          mentions,
+        },
+      });
+
+      if (result.ok) {
+        applyCanonicalCollaborationThreadToInviteRoute(result.thread);
+        return;
+      }
+
+      if (result.code === "stale_thread") {
+        applyCanonicalCollaborationThreadToInviteRoute(result.thread);
+      }
+    })();
   };
 
   const syncInviteMentionState = (
@@ -28440,7 +28558,9 @@ export function WorkspaceShell({
       : null;
 
     const inviteStateTitle =
-      inviteRouteState === "expired"
+      inviteRouteState === "loading"
+        ? "Loading collaboration"
+        : inviteRouteState === "expired"
         ? "This invite has expired"
         : inviteRouteState === "invalid"
           ? "This invite link is invalid"
@@ -28454,7 +28574,9 @@ export function WorkspaceShell({
                 ? "Invitation declined"
                 : "You’ve been invited to collaborate";
     const inviteStateDescription =
-      inviteRouteState === "expired"
+      inviteRouteState === "loading"
+        ? "Fetching the latest collaboration state."
+        : inviteRouteState === "expired"
         ? "Ask the sender to share a fresh collaboration invite."
         : inviteRouteState === "invalid"
           ? "The link is missing required collaboration details."
@@ -28472,7 +28594,8 @@ export function WorkspaceShell({
       if (
         inviteRouteState === "expired" ||
         inviteRouteState === "invalid" ||
-        inviteRouteState === "unavailable"
+        inviteRouteState === "unavailable" ||
+        inviteRouteState === "loading"
       ) {
         return (
           <main
