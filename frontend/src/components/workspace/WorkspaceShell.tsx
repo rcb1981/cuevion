@@ -58,6 +58,7 @@ import {
   type SendInboxAttachmentRequest,
   type LiveInboxMessageSnapshot,
 } from "../../lib/inboxConnectionApi";
+import { fetchCollaborationThreadsGetMany } from "../../lib/collaborationApi";
 import * as learningEngine from "../../lib/learningEngine";
 import * as forYouEngine from "../../lib/forYouEngine";
 import * as suggestionEngine from "../../lib/suggestionEngine";
@@ -24738,6 +24739,7 @@ export function WorkspaceShell({
         return {};
       }
     });
+  const lastServerCollaborationOverlayKeyRef = useRef<string>("");
   const [readNotificationIds, setReadNotificationIds] = useState<string[]>(() => {
     if (typeof window === "undefined") {
       return [];
@@ -27332,6 +27334,158 @@ export function WorkspaceShell({
     messageOwnershipInteractions,
     currentWorkspaceUserId,
   ]);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || collaborationInviteRoute) {
+      return;
+    }
+
+    const mailboxRequests = orderedMailboxes
+      .map((mailbox) => {
+        const collections = mailboxStore[mailbox.id];
+        if (!collections) {
+          return null;
+        }
+
+        const dedupedMessageIds = Array.from(
+          new Set(
+            canonicalFolderOrder.flatMap((folder) =>
+              collections[folder]
+                .map((message) => message.id)
+                .filter((messageId): messageId is string => typeof messageId === "string" && messageId.length > 0),
+            ),
+          ),
+        ).slice(0, 200);
+
+        if (dedupedMessageIds.length === 0) {
+          return null;
+        }
+
+        return {
+          mailboxId: mailbox.id,
+          messageIds: dedupedMessageIds,
+        };
+      })
+      .filter(
+        (
+          request,
+        ): request is {
+          mailboxId: InboxId;
+          messageIds: string[];
+        } => Boolean(request),
+      );
+
+    if (mailboxRequests.length === 0) {
+      lastServerCollaborationOverlayKeyRef.current = "";
+      return;
+    }
+
+    const overlayRequestKey = JSON.stringify({
+      workspaceId: currentWorkspaceUserId,
+      mailboxRequests,
+    });
+
+    if (lastServerCollaborationOverlayKeyRef.current === overlayRequestKey) {
+      return;
+    }
+
+    lastServerCollaborationOverlayKeyRef.current = overlayRequestKey;
+    let cancelled = false;
+
+    const hydrateServerCollaborationThreads = async () => {
+      const threadResponses = await Promise.all(
+        mailboxRequests.map(async (request) => ({
+          mailboxId: request.mailboxId,
+          threadsByMessageId: await fetchCollaborationThreadsGetMany({
+            workspaceId: currentWorkspaceUserId,
+            mailboxId: request.mailboxId,
+            messageIds: request.messageIds,
+          }),
+        })),
+      );
+
+      if (cancelled) {
+        return;
+      }
+
+      const threadsByMessageId = threadResponses.reduce<Record<string, { collaboration: MailMessageCollaboration; isShared: boolean }>>(
+        (nextValue, response) => {
+          Object.values(response.threadsByMessageId).forEach((thread) => {
+            if (!thread?.messageId || !thread.collaboration) {
+              return;
+            }
+
+            nextValue[thread.messageId] = {
+              collaboration: thread.collaboration as MailMessageCollaboration,
+              isShared: thread.isShared,
+            };
+          });
+
+          return nextValue;
+        },
+        {},
+      );
+
+      if (Object.keys(threadsByMessageId).length === 0) {
+        return;
+      }
+
+      setMailboxStore((currentStore) => {
+        let didChange = false;
+
+        const nextStore = Object.entries(currentStore).reduce<MailboxStore>(
+          (nextCollectionsByMailbox, [mailboxId, collections]) => {
+            const overlayCollection = (messages: MailMessage[]) =>
+              messages.map((message) => {
+                const serverThread = threadsByMessageId[message.id];
+
+                if (!serverThread) {
+                  return message;
+                }
+
+                const collaborationChanged =
+                  JSON.stringify(message.collaboration ?? null) !==
+                  JSON.stringify(serverThread.collaboration);
+                const sharedChanged =
+                  Boolean(message.isShared) !== Boolean(serverThread.isShared);
+
+                if (!collaborationChanged && !sharedChanged) {
+                  return message;
+                }
+
+                didChange = true;
+                return {
+                  ...message,
+                  collaboration: serverThread.collaboration,
+                  isShared: serverThread.isShared,
+                };
+              });
+
+            nextCollectionsByMailbox[mailboxId as InboxId] = {
+              Inbox: overlayCollection(collections.Inbox),
+              Drafts: overlayCollection(collections.Drafts),
+              Sent: overlayCollection(collections.Sent),
+              Archive: overlayCollection(collections.Archive),
+              Filtered: overlayCollection(collections.Filtered),
+              Spam: overlayCollection(collections.Spam),
+              Trash: overlayCollection(collections.Trash),
+            };
+
+            return nextCollectionsByMailbox;
+          },
+          {} as MailboxStore,
+        );
+
+        return didChange ? nextStore : currentStore;
+      });
+    };
+
+    void hydrateServerCollaborationThreads();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [collaborationInviteRoute, currentWorkspaceUserId, mailboxStore, orderedMailboxes]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
