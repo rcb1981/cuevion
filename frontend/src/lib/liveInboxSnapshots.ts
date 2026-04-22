@@ -1,8 +1,10 @@
 import type { LiveInboxMessageSnapshot } from "./inboxConnectionApi";
 
 const LIVE_INBOX_SNAPSHOTS_STORAGE_KEY = "cuevion-live-inbox-snapshots";
+const LIVE_INBOX_SNAPSHOT_SCHEMA_VERSION = 2;
 
 export type LiveInboxSnapshot = {
+  schemaVersion?: number;
   inboxId: string;
   email: string;
   fetchedAt: string;
@@ -15,6 +17,13 @@ type LiveInboxSnapshotStore = Record<string, LiveInboxSnapshot>;
 function isSnapshotUiSignalComplete(snapshot: LiveInboxSnapshot) {
   return snapshot.messages.every(
     (message) => typeof message.ui_signal === "string" && message.ui_signal.length > 0,
+  );
+}
+
+function isCurrentLiveInboxSnapshot(snapshot: LiveInboxSnapshot) {
+  return (
+    snapshot.schemaVersion === LIVE_INBOX_SNAPSHOT_SCHEMA_VERSION &&
+    isSnapshotUiSignalComplete(snapshot)
   );
 }
 
@@ -32,7 +41,7 @@ export function readLiveInboxSnapshots(): LiveInboxSnapshotStore {
   try {
     const parsed = JSON.parse(storedValue) as LiveInboxSnapshotStore;
     const nextSnapshots = Object.fromEntries(
-      Object.entries(parsed).filter(([, snapshot]) => isSnapshotUiSignalComplete(snapshot)),
+      Object.entries(parsed).filter(([, snapshot]) => isCurrentLiveInboxSnapshot(snapshot)),
     ) as LiveInboxSnapshotStore;
 
     if (Object.keys(nextSnapshots).length !== Object.keys(parsed).length) {
@@ -54,7 +63,10 @@ export function saveLiveInboxSnapshot(snapshot: LiveInboxSnapshot) {
   }
 
   const currentSnapshots = readLiveInboxSnapshots();
-  currentSnapshots[snapshot.inboxId] = snapshot;
+  currentSnapshots[snapshot.inboxId] = {
+    ...snapshot,
+    schemaVersion: LIVE_INBOX_SNAPSHOT_SCHEMA_VERSION,
+  };
   window.localStorage.setItem(
     LIVE_INBOX_SNAPSHOTS_STORAGE_KEY,
     JSON.stringify(currentSnapshots),
