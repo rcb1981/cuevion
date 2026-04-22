@@ -4,10 +4,11 @@ import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
 GMAIL_OAUTH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60
+GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
 
 
 def _resolve_runtime_store_path() -> Path:
@@ -237,47 +238,39 @@ def _persist_runtime_record(store_key: str, record: dict) -> tuple[dict | None, 
     return persisted_record if isinstance(persisted_record, dict) else None, None
 
 
-def persist_google_token_record(
-    *,
-    email: str,
-    token_payload: dict,
-) -> tuple[dict | None, dict | None]:
-    access_token = token_payload.get("access_token")
-    if not isinstance(access_token, str) or not access_token.strip():
-        return None, {
-            "code": "invalid_token_payload",
-            "message": "Google returned an incomplete token response.",
-        }
-
-    normalized_email = email.strip().lower()
+def _load_existing_google_record(
+    normalized_email: str,
+) -> tuple[str, dict | None, dict | None, dict | None]:
     store_key = _build_store_key(normalized_email)
     durable_config = _resolve_durable_store_config()
-    existing_record = None
 
     if durable_config:
         existing_record, existing_error = _read_durable_record(durable_config, store_key)
         if existing_error:
-            return None, existing_error
-    else:
-        existing_store = _read_runtime_store(_resolve_runtime_store_path())
-        existing_record = existing_store.get(store_key)
+            return store_key, durable_config, None, existing_error
+        return store_key, durable_config, existing_record, None
 
-    next_record = build_google_token_record(
-        email=normalized_email,
-        token_payload=token_payload,
-        existing_record=existing_record if isinstance(existing_record, dict) else None,
-    )
+    existing_store = _read_runtime_store(_resolve_runtime_store_path())
+    return store_key, None, existing_store.get(store_key), None
 
+
+def _persist_google_record(
+    *,
+    normalized_email: str,
+    store_key: str,
+    durable_config: dict | None,
+    record: dict,
+) -> tuple[dict | None, dict | None]:
     if durable_config:
         persisted_record, error = _write_durable_record(
             durable_config,
             store_key,
-            next_record,
+            record,
         )
         storage_backend = durable_config["backend"]
         storage_durable = True
     else:
-        persisted_record, error = _persist_runtime_record(store_key, next_record)
+        persisted_record, error = _persist_runtime_record(store_key, record)
         storage_backend = "runtime_tmp_file"
         storage_durable = False
 
@@ -306,6 +299,145 @@ def persist_google_token_record(
         "_storage_backend": storage_backend,
         "_storage_durable": storage_durable,
     }, None
+
+
+def _exchange_google_refresh_token(
+    *,
+    refresh_token: str,
+) -> tuple[dict | None, dict | None]:
+    google_client_id = os.getenv("GOOGLE_CLIENT_ID", "").strip()
+    google_client_secret = os.getenv("GOOGLE_CLIENT_SECRET", "").strip()
+
+    if not google_client_id or not google_client_secret:
+        return None, {
+            "code": "gmail_refresh_not_configured",
+            "message": "Google OAuth refresh is not fully configured.",
+        }
+
+    request_payload = urlencode(
+        {
+            "client_id": google_client_id,
+            "client_secret": google_client_secret,
+            "refresh_token": refresh_token,
+            "grant_type": "refresh_token",
+        }
+    ).encode("utf-8")
+    request = Request(
+        GOOGLE_TOKEN_ENDPOINT,
+        data=request_payload,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+
+    try:
+        with urlopen(request, timeout=20) as response:
+            payload = response.read().decode("utf-8")
+            return json.loads(payload) if payload else {}, None
+    except HTTPError as error:
+        error_body = error.read().decode("utf-8", errors="replace")
+        try:
+            parsed_error = json.loads(error_body) if error_body else {}
+        except json.JSONDecodeError:
+            parsed_error = {}
+
+        return None, {
+            "code": "gmail_refresh_failed",
+            "message": (
+                parsed_error.get("error_description")
+                or parsed_error.get("error")
+                or "Google token refresh failed."
+            ),
+        }
+    except URLError as error:
+        return None, {
+            "code": "gmail_refresh_unavailable",
+            "message": (
+                str(error.reason)
+                if getattr(error, "reason", None)
+                else "Could not reach Google."
+            ),
+        }
+
+
+def persist_google_token_record(
+    *,
+    email: str,
+    token_payload: dict,
+) -> tuple[dict | None, dict | None]:
+    access_token = token_payload.get("access_token")
+    if not isinstance(access_token, str) or not access_token.strip():
+        return None, {
+            "code": "invalid_token_payload",
+            "message": "Google returned an incomplete token response.",
+        }
+
+    normalized_email = email.strip().lower()
+    store_key, durable_config, existing_record, existing_error = _load_existing_google_record(
+        normalized_email
+    )
+    if existing_error:
+        return None, existing_error
+
+    next_record = build_google_token_record(
+        email=normalized_email,
+        token_payload=token_payload,
+        existing_record=existing_record if isinstance(existing_record, dict) else None,
+    )
+
+    return _persist_google_record(
+        normalized_email=normalized_email,
+        store_key=store_key,
+        durable_config=durable_config,
+        record=next_record,
+    )
+
+
+def refresh_google_token_record(email: str) -> tuple[dict | None, dict | None]:
+    normalized_email = email.strip().lower()
+    store_key, durable_config, existing_record, existing_error = _load_existing_google_record(
+        normalized_email
+    )
+    if existing_error:
+        return None, existing_error
+
+    if not isinstance(existing_record, dict):
+        return None, {
+            "code": "gmail_token_missing",
+            "message": "No stored Gmail token is available for this mailbox.",
+        }
+
+    refresh_token = existing_record.get("refresh_token")
+    if not isinstance(refresh_token, str) or not refresh_token.strip():
+        return None, {
+            "code": "gmail_refresh_token_missing",
+            "message": "The stored Gmail token record does not include a refresh token.",
+        }
+
+    refreshed_payload, refresh_error = _exchange_google_refresh_token(
+        refresh_token=refresh_token.strip(),
+    )
+    if refresh_error:
+        return None, refresh_error
+
+    access_token = refreshed_payload.get("access_token") if isinstance(refreshed_payload, dict) else None
+    if not isinstance(access_token, str) or not access_token.strip():
+        return None, {
+            "code": "gmail_refresh_failed",
+            "message": "Google returned an incomplete refresh token response.",
+        }
+
+    next_record = build_google_token_record(
+        email=normalized_email,
+        token_payload=refreshed_payload if isinstance(refreshed_payload, dict) else {},
+        existing_record=existing_record,
+    )
+
+    return _persist_google_record(
+        normalized_email=normalized_email,
+        store_key=store_key,
+        durable_config=durable_config,
+        record=next_record,
+    )
 
 
 def get_google_token_record(email: str) -> dict | None:

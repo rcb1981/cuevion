@@ -15,6 +15,7 @@ if str(CURRENT_DIR) not in sys.path:
 
 from oauth_token_store import (
     get_google_token_record_with_metadata,
+    refresh_google_token_record,
 )
 
 GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1/users/me"
@@ -164,15 +165,27 @@ class handler(BaseHTTPRequestHandler):
             return
 
         if _is_token_expired(token_record):
-            _send_json(
-                self,
-                401,
-                _build_error(
-                    "gmail_token_expired",
-                    "The stored Gmail token has expired. Gmail refresh is not available in this runtime yet.",
-                ),
-            )
-            return
+            refreshed_record, refresh_error = refresh_google_token_record(email_address)
+            if refresh_error:
+                _send_json(
+                    self,
+                    401,
+                    _build_error(refresh_error["code"], refresh_error["message"]),
+                )
+                return
+
+            token_record = refreshed_record or token_record
+            access_token = token_record.get("access_token")
+            if not isinstance(access_token, str) or not access_token.strip():
+                _send_json(
+                    self,
+                    401,
+                    _build_error(
+                        "gmail_token_missing",
+                        "The refreshed Gmail token record is incomplete.",
+                    ),
+                )
+                return
 
         list_payload, list_error = _gmail_request(
             access_token,
