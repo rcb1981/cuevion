@@ -15,12 +15,16 @@ const CUEVION_AUTH_STORAGE_KEY = "label-inbox-ai-auth-user";
 const PENDING_COLLAB_INVITE_STORAGE_KEY = "label-inbox-ai-pending-collab-invite";
 const PENDING_COLLAB_INVITE_URL_STORAGE_KEY = "label-inbox-ai-pending-collab-invite-url";
 const OAUTH_CALLBACK_RESULT_STORAGE_KEY = "cuevion-oauth-callback-result";
+const BETA_SESSION_ENDPOINT = "/api/beta/session";
+const BETA_LOGIN_ENDPOINT = "/api/beta/login";
 
 type AuthenticatedCuevionUser = {
   email: string;
   name: string;
   userType: "member" | "guest";
 };
+
+type BetaAccessRoute = "login" | "app";
 
 type CollaborationInviteRoute = {
   mode: "invite" | "external_review";
@@ -112,6 +116,23 @@ function isPublicLandingHost() {
   return hostname === "cuevion.com" || hostname === "www.cuevion.com";
 }
 
+function resolveBetaAccessRoute(): BetaAccessRoute {
+  if (typeof window === "undefined") {
+    return "login";
+  }
+
+  return window.location.pathname === "/app" ? "app" : "login";
+}
+
+function replaceBetaAccessRoute(route: BetaAccessRoute) {
+  const nextPath = route === "app" ? "/app" : "/login";
+  if (window.location.pathname === nextPath) {
+    return;
+  }
+
+  window.history.replaceState(null, "", `${nextPath}${window.location.search}${window.location.hash}`);
+}
+
 function normalizeOnboardingState(value: Partial<OnboardingState>): OnboardingState {
   return {
     ...initialOnboardingState,
@@ -172,6 +193,126 @@ function normalizeAuthenticatedUser(value: unknown): AuthenticatedCuevionUser | 
     name: nextValue.name,
     userType: nextValue.userType === "guest" ? "guest" : "member",
   };
+}
+
+type BetaAccessGateProps = {
+  error: string | null;
+  loading: boolean;
+  onSubmit: (credentials: {
+    name: string;
+    email: string;
+    inviteCode: string;
+  }) => Promise<void>;
+};
+
+function BetaAccessGate({
+  error,
+  loading,
+  onSubmit,
+}: BetaAccessGateProps) {
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [inviteCode, setInviteCode] = useState("");
+  const [localError, setLocalError] = useState<string | null>(null);
+
+  return (
+    <div className="min-h-screen bg-[linear-gradient(180deg,#f6efe7_0%,#efe5da_100%)] px-6 py-10 text-[color:#2f2a24] dark:bg-[linear-gradient(180deg,#171411_0%,#221c17_100%)] dark:text-[color:#f1e9de]">
+      <div className="mx-auto flex min-h-[calc(100vh-5rem)] max-w-[560px] items-center justify-center">
+        <div className="w-full rounded-[32px] border border-[rgba(120,104,89,0.14)] bg-[rgba(255,252,247,0.82)] p-8 shadow-[0_28px_80px_rgba(61,44,32,0.12)] backdrop-blur dark:border-[rgba(255,255,255,0.08)] dark:bg-[rgba(33,28,24,0.82)]">
+          <div className="space-y-3 text-center">
+            <div className="text-[0.72rem] font-medium uppercase tracking-[0.22em] text-[rgba(120,104,89,0.7)] dark:text-[rgba(214,201,189,0.64)]">
+              Private beta
+            </div>
+            <h1 className="text-[1.7rem] font-medium tracking-[-0.03em]">
+              Sign in to Cuevion
+            </h1>
+            <p className="text-[0.96rem] leading-7 text-[rgba(88,80,71,0.84)] dark:text-[rgba(222,211,200,0.76)]">
+              Enter your beta invite details to open the active Cuevion app.
+            </p>
+          </div>
+
+          <div className="mt-8 space-y-3">
+            <input
+              value={name}
+              onChange={(event) => {
+                setName(event.target.value);
+                setLocalError(null);
+              }}
+              placeholder="Your name"
+              autoCorrect="off"
+              spellCheck={false}
+              className="w-full rounded-[20px] border border-[rgba(120,104,89,0.16)] bg-[rgba(255,255,255,0.78)] px-4 py-3 text-[0.98rem] leading-7 outline-none placeholder:text-[rgba(120,104,89,0.56)] dark:border-[rgba(255,255,255,0.08)] dark:bg-[rgba(44,38,33,0.86)] dark:placeholder:text-[rgba(210,196,183,0.42)]"
+            />
+            <input
+              value={email}
+              onChange={(event) => {
+                setEmail(event.target.value);
+                setLocalError(null);
+              }}
+              placeholder="name@company.com"
+              autoCorrect="off"
+              autoCapitalize="none"
+              spellCheck={false}
+              className="w-full rounded-[20px] border border-[rgba(120,104,89,0.16)] bg-[rgba(255,255,255,0.78)] px-4 py-3 text-[0.98rem] leading-7 outline-none placeholder:text-[rgba(120,104,89,0.56)] dark:border-[rgba(255,255,255,0.08)] dark:bg-[rgba(44,38,33,0.86)] dark:placeholder:text-[rgba(210,196,183,0.42)]"
+            />
+            <input
+              value={inviteCode}
+              onChange={(event) => {
+                setInviteCode(event.target.value);
+                setLocalError(null);
+              }}
+              placeholder="Invite code"
+              autoCorrect="off"
+              autoCapitalize="none"
+              spellCheck={false}
+              className="w-full rounded-[20px] border border-[rgba(120,104,89,0.16)] bg-[rgba(255,255,255,0.78)] px-4 py-3 text-[0.98rem] leading-7 outline-none placeholder:text-[rgba(120,104,89,0.56)] dark:border-[rgba(255,255,255,0.08)] dark:bg-[rgba(44,38,33,0.86)] dark:placeholder:text-[rgba(210,196,183,0.42)]"
+            />
+            {localError || error ? (
+              <div className="text-[0.84rem] leading-6 text-[rgba(132,77,63,0.94)] dark:text-[rgba(244,186,168,0.84)]">
+                {localError ?? error}
+              </div>
+            ) : null}
+          </div>
+
+          <div className="mt-6 flex justify-end">
+            <button
+              type="button"
+              disabled={loading}
+              onClick={() => {
+                const trimmedName = name.trim();
+                const normalizedEmail = email.trim().toLowerCase();
+                const trimmedInviteCode = inviteCode.trim();
+
+                if (!trimmedName) {
+                  setLocalError("Enter your name to continue.");
+                  return;
+                }
+
+                if (!isValidAuthEmail(normalizedEmail)) {
+                  setLocalError("Enter a valid email address to continue.");
+                  return;
+                }
+
+                if (!trimmedInviteCode) {
+                  setLocalError("Enter your invite code to continue.");
+                  return;
+                }
+
+                void onSubmit({
+                  name: trimmedName,
+                  email: normalizedEmail,
+                  inviteCode: trimmedInviteCode,
+                });
+              }}
+              className="inline-flex h-10 items-center justify-center rounded-full border border-[rgba(66,99,69,0.52)] bg-[linear-gradient(180deg,rgba(103,141,103,0.98),rgba(69,103,72,0.98))] px-5 text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[rgba(251,248,242,0.98)] shadow-[inset_0_1px_0_rgba(255,255,255,0.1),0_8px_18px_rgba(66,99,69,0.12)] transition-[background-image,border-color,transform,box-shadow] duration-150 hover:border-[rgba(58,88,62,0.6)] hover:bg-[linear-gradient(180deg,rgba(93,130,95,0.98),rgba(61,95,65,0.98))] active:scale-[0.99] focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {loading ? "Checking access..." : "Open beta"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 function parseCollaborationInviteRoute(): CollaborationInviteRoute | null {
@@ -612,6 +753,15 @@ export default function App() {
   const [view, setView] = useState<"onboarding" | "transition" | "workspace">(
     () => (persistedOnboardingSession ? "workspace" : "onboarding"),
   );
+  const [betaAccessRoute, setBetaAccessRoute] = useState<BetaAccessRoute>(() =>
+    resolveBetaAccessRoute(),
+  );
+  const [betaSessionUser, setBetaSessionUser] = useState<AuthenticatedCuevionUser | null>(null);
+  const [betaSessionStatus, setBetaSessionStatus] = useState<
+    "loading" | "authenticated" | "unauthenticated"
+  >("loading");
+  const [betaLoginError, setBetaLoginError] = useState<string | null>(null);
+  const [betaLoginPending, setBetaLoginPending] = useState(false);
   const [authenticatedUser, setAuthenticatedUser] = useState<AuthenticatedCuevionUser | null>(
     () => {
       const storedAuthUser = window.localStorage.getItem(CUEVION_AUTH_STORAGE_KEY);
@@ -639,6 +789,7 @@ export default function App() {
     persistedOnboardingSession?.state ? buildUserConfig(persistedOnboardingSession.state) : null,
   );
   const recognizedInviteUsers = resolveWorkspaceInviteUsers(onboardingState);
+  const activeCollaborationUser = authenticatedUser ?? betaSessionUser;
 
   useEffect(() => {
     if (authenticatedUser) {
@@ -687,6 +838,99 @@ export default function App() {
     window.localStorage.removeItem(PENDING_COLLAB_INVITE_STORAGE_KEY);
     window.localStorage.removeItem(PENDING_COLLAB_INVITE_URL_STORAGE_KEY);
   }, []);
+
+  useEffect(() => {
+    const handlePopState = () => {
+      setBetaAccessRoute(resolveBetaAccessRoute());
+    };
+
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
+
+  useEffect(() => {
+    if (collaborationInviteRoute) {
+      setBetaSessionStatus("unauthenticated");
+      setBetaSessionUser(null);
+      return;
+    }
+
+    let cancelled = false;
+
+    const loadBetaSession = async () => {
+      setBetaSessionStatus("loading");
+
+      try {
+        const response = await fetch(BETA_SESSION_ENDPOINT, {
+          method: "GET",
+          credentials: "include",
+          cache: "no-store",
+        });
+        const payload = (await response.json()) as {
+          user?: unknown;
+          error?: { message?: string };
+        };
+
+        if (cancelled) {
+          return;
+        }
+
+        if (!response.ok) {
+          setBetaSessionUser(null);
+          setBetaSessionStatus("unauthenticated");
+          return;
+        }
+
+        const nextUser = normalizeAuthenticatedUser(payload.user);
+        if (!nextUser || nextUser.userType !== "member") {
+          setBetaSessionUser(null);
+          setBetaSessionStatus("unauthenticated");
+          return;
+        }
+
+        setBetaSessionUser(nextUser);
+        setBetaSessionStatus("authenticated");
+      } catch {
+        if (cancelled) {
+          return;
+        }
+
+        setBetaSessionUser(null);
+        setBetaSessionStatus("unauthenticated");
+      }
+    };
+
+    void loadBetaSession();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [collaborationInviteRoute]);
+
+  useEffect(() => {
+    if (shouldShowLandingPage || collaborationInviteRoute || betaSessionStatus === "loading") {
+      return;
+    }
+
+    if (betaSessionUser) {
+      if (betaAccessRoute !== "app") {
+        replaceBetaAccessRoute("app");
+        setBetaAccessRoute("app");
+      }
+      return;
+    }
+
+    if (betaAccessRoute !== "login") {
+      replaceBetaAccessRoute("login");
+      setBetaAccessRoute("login");
+    }
+  }, [
+    betaAccessRoute,
+    betaSessionStatus,
+    betaSessionUser,
+    collaborationInviteRoute,
+    shouldShowLandingPage,
+  ]);
 
   useEffect(() => {
     if (view !== "transition") {
@@ -758,8 +1002,52 @@ export default function App() {
     );
   }, [persistedOnboardingSession]);
 
+  const handleBetaLogin = async (credentials: {
+    name: string;
+    email: string;
+    inviteCode: string;
+  }) => {
+    setBetaLoginPending(true);
+    setBetaLoginError(null);
+
+    try {
+      const response = await fetch(BETA_LOGIN_ENDPOINT, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        credentials: "include",
+        body: JSON.stringify(credentials),
+      });
+      const payload = (await response.json()) as {
+        user?: unknown;
+        error?: { message?: string };
+      };
+
+      if (!response.ok) {
+        setBetaLoginError(payload.error?.message ?? "Access could not be granted.");
+        return;
+      }
+
+      const nextUser = normalizeAuthenticatedUser(payload.user);
+      if (!nextUser || nextUser.userType !== "member") {
+        setBetaLoginError("Access could not be granted.");
+        return;
+      }
+
+      setBetaSessionUser(nextUser);
+      setBetaSessionStatus("authenticated");
+      replaceBetaAccessRoute("app");
+      setBetaAccessRoute("app");
+    } catch {
+      setBetaLoginError("Access could not be granted.");
+    } finally {
+      setBetaLoginPending(false);
+    }
+  };
+
   if (collaborationInviteRoute) {
-    if (collaborationInviteRoute.mode === "invite" && !authenticatedUser) {
+    if (collaborationInviteRoute.mode === "invite" && !activeCollaborationUser) {
       return (
         <CollaborationInviteAuthGate
           recognizedUsers={recognizedInviteUsers}
@@ -796,9 +1084,38 @@ export default function App() {
       <WorkspaceShell
         userConfig={userConfig ?? buildUserConfig(onboardingState)}
         onboardingState={onboardingState}
-        authenticatedUser={collaborationInviteRoute.mode === "invite" ? authenticatedUser : null}
+        authenticatedUser={
+          collaborationInviteRoute.mode === "invite" ? activeCollaborationUser : null
+        }
         collaborationInviteRoute={collaborationInviteRoute}
         workspaceDataMode={workspaceDataMode}
+      />
+    );
+  }
+
+  if (betaSessionStatus === "loading") {
+    return (
+      <div className="min-h-screen bg-[linear-gradient(180deg,#f6efe7_0%,#efe5da_100%)] px-6 py-10 text-[color:#2f2a24] dark:bg-[linear-gradient(180deg,#171411_0%,#221c17_100%)] dark:text-[color:#f1e9de]">
+        <div className="mx-auto flex min-h-[calc(100vh-5rem)] max-w-[560px] items-center justify-center text-center">
+          <div className="space-y-3">
+            <div className="text-[0.72rem] font-medium uppercase tracking-[0.22em] text-[rgba(120,104,89,0.7)] dark:text-[rgba(214,201,189,0.64)]">
+              Private beta
+            </div>
+            <p className="text-[0.98rem] leading-7 text-[rgba(88,80,71,0.84)] dark:text-[rgba(222,211,200,0.76)]">
+              Verifying access…
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!betaSessionUser || betaAccessRoute === "login") {
+    return (
+      <BetaAccessGate
+        error={betaLoginError}
+        loading={betaLoginPending}
+        onSubmit={handleBetaLogin}
       />
     );
   }
