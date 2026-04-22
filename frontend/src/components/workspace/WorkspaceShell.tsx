@@ -2796,12 +2796,17 @@ function resolveMessageBodyRenderMode(
     const messageBodyHtml = message.bodyHtml ?? "";
     const isComposeHtml =
       messageBodyHtml.length > 0 && isComposeGeneratedHtml(messageBodyHtml);
+    const hasRichHtmlMarkup =
+      /<(table|svg|canvas|video|audio|iframe)\b/i.test(
+        sanitizedHtmlResult.html,
+      ) ||
+      /<img\b(?:(?!data-image-source-type="inline").)*>/i.test(
+        sanitizedHtmlResult.html,
+      );
     const isExternalHtml =
       sanitizedHtmlResult.emailStyles.trim().length > 0 ||
       sanitizedHtmlResult.remoteImageCount > 0 ||
-      /<(table|img|svg|canvas|video|audio|iframe)\b/i.test(
-        sanitizedHtmlResult.html,
-      );
+      hasRichHtmlMarkup;
 
     return {
       mode: isComposeHtml ? "compose_html" : isExternalHtml ? "html" : "native_html",
