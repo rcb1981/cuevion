@@ -1388,6 +1388,10 @@ function resolveEmailImageSourceType(sourceValue: string | null) {
     return "remote" as const;
   }
 
+  if (/^data:image\//i.test(normalizedSource)) {
+    return "inline" as const;
+  }
+
   return "invalid" as const;
 }
 
