@@ -61,6 +61,7 @@ import {
 import {
   createCollaborationThread,
   fetchCollaborationThreadsGetMany,
+  issueCollaborationInvite,
   mutateCollaborationThread,
   type CollaborationThread,
 } from "../../lib/collaborationApi";
@@ -12559,68 +12560,87 @@ function MailboxView({
       return;
     }
 
+    const currentMessage = getMessageById(messageId);
     let inviteLink = "";
 
-    updateMessageById(messageId, (message) => {
-      if (!message.collaboration) {
-        return message;
+    if (currentMessage?.collaboration) {
+      const issueResult = await issueCollaborationInvite({
+        workspaceId: currentUserId,
+        mailboxId: mailbox.id,
+        messageId,
+        inviteeEmail: normalizedEmail,
+        createdByUserId: currentUserId,
+        createdByUserName: currentUserName,
+      });
+
+      if (issueResult.ok) {
+        inviteLink = issueResult.inviteUrl;
+        applyCanonicalCollaborationThreadToMessage(messageId, issueResult.thread);
       }
+    }
 
-      const nextTimestamp = Date.now();
-      const existingParticipants = message.collaboration.participants ?? [];
-      const existingParticipant = existingParticipants.find(
-        (participant) => participant.email.toLowerCase() === normalizedEmail,
-      );
-      const sharedExternalReviewToken = existingParticipants.find(
-        (participant) => participant.kind === "external" && participant.externalReviewToken,
-      )?.externalReviewToken;
-      const inviteToken =
-        existingParticipant?.externalReviewToken ||
-        sharedExternalReviewToken ||
-        buildCollaborationInviteToken(message, normalizedEmail);
-      const nextParticipant: MailMessageCollaborationParticipant = existingParticipant
-        ? {
-            ...existingParticipant,
-            kind: "external",
-            externalReviewToken: inviteToken,
-            status:
-              existingParticipant.status === "declined"
-                ? "invited"
-                : existingParticipant.status,
-          }
-        : {
-            id: normalizeSenderLearningKey(normalizedEmail),
-            name: formatCollaborationParticipantNameFromEmail(normalizedEmail),
-            email: normalizedEmail,
-            kind: "external",
-            status: "invited",
-            externalReviewToken: inviteToken,
-          };
-      const nextParticipants = existingParticipant
-        ? existingParticipants.map((participant) =>
-            participant.email.toLowerCase() === normalizedEmail ? nextParticipant : participant,
-          )
-        : [...existingParticipants, nextParticipant];
+    if (!inviteLink) {
+      updateMessageById(messageId, (message) => {
+        if (!message.collaboration) {
+          return message;
+        }
 
-      inviteLink =
-        buildExternalCollaborationReviewLinkFromToken(
-          message.id,
-          normalizedEmail,
-          inviteToken,
+        const nextTimestamp = Date.now();
+        const existingParticipants = message.collaboration.participants ?? [];
+        const existingParticipant = existingParticipants.find(
+          (participant) => participant.email.toLowerCase() === normalizedEmail,
         );
+        const sharedExternalReviewToken = existingParticipants.find(
+          (participant) => participant.kind === "external" && participant.externalReviewToken,
+        )?.externalReviewToken;
+        const inviteToken =
+          existingParticipant?.externalReviewToken ||
+          sharedExternalReviewToken ||
+          buildCollaborationInviteToken(message, normalizedEmail);
+        const nextParticipant: MailMessageCollaborationParticipant = existingParticipant
+          ? {
+              ...existingParticipant,
+              kind: "external",
+              externalReviewToken: inviteToken,
+              status:
+                existingParticipant.status === "declined"
+                  ? "invited"
+                  : existingParticipant.status,
+            }
+          : {
+              id: normalizeSenderLearningKey(normalizedEmail),
+              name: formatCollaborationParticipantNameFromEmail(normalizedEmail),
+              email: normalizedEmail,
+              kind: "external",
+              status: "invited",
+              externalReviewToken: inviteToken,
+            };
+        const nextParticipants = existingParticipant
+          ? existingParticipants.map((participant) =>
+              participant.email.toLowerCase() === normalizedEmail ? nextParticipant : participant,
+            )
+          : [...existingParticipants, nextParticipant];
 
-      const nextMessage = {
-        ...message,
-        isShared: true,
-        collaboration: {
-          ...message.collaboration,
-          updatedAt: nextTimestamp,
-          participants: nextParticipants,
-        },
-      };
+        inviteLink =
+          buildExternalCollaborationReviewLinkFromToken(
+            message.id,
+            normalizedEmail,
+            inviteToken,
+          );
 
-      return nextMessage;
-    });
+        const nextMessage = {
+          ...message,
+          isShared: true,
+          collaboration: {
+            ...message.collaboration,
+            updatedAt: nextTimestamp,
+            participants: nextParticipants,
+          },
+        };
+
+        return nextMessage;
+      });
+    }
 
     if (!inviteLink) {
       setExternalInviteEmailFeedback("Could not prepare the invite link.");
@@ -12670,69 +12690,94 @@ function MailboxView({
     const existingInviteMessage = getMessageById(messageId);
     let inviteLink = "";
     let inviteParticipantName = formatCollaborationParticipantNameFromEmail(normalizedEmail);
-
-    updateMessageById(messageId, (message) => {
-      if (!message.collaboration) {
-        return message;
-      }
-
-      const nextTimestamp = Date.now();
-      const existingParticipants = message.collaboration.participants ?? [];
-      const existingParticipant = existingParticipants.find(
+    if (existingInviteMessage?.collaboration) {
+      const existingParticipant = (existingInviteMessage.collaboration.participants ?? []).find(
         (participant) => participant.email.toLowerCase() === normalizedEmail,
       );
-      const sharedExternalReviewToken = existingParticipants.find(
-        (participant) => participant.kind === "external" && participant.externalReviewToken,
-      )?.externalReviewToken;
-      const inviteToken =
-        existingParticipant?.externalReviewToken ||
-        sharedExternalReviewToken ||
-        buildCollaborationInviteToken(message, normalizedEmail);
       inviteParticipantName =
         existingParticipant?.name ||
         formatCollaborationParticipantNameFromEmail(normalizedEmail) ||
         normalizedEmail;
-      const nextParticipant: MailMessageCollaborationParticipant = existingParticipant
-        ? {
-            ...existingParticipant,
-            kind: "external",
-            externalReviewToken: inviteToken,
-            status:
-              existingParticipant.status === "declined"
-                ? "invited"
-                : existingParticipant.status,
-          }
-        : {
-            id: normalizeSenderLearningKey(normalizedEmail),
-            name: inviteParticipantName,
-            email: normalizedEmail,
-            kind: "external",
-            status: "invited",
-            externalReviewToken: inviteToken,
-          };
-      const nextParticipants = existingParticipant
-        ? existingParticipants.map((participant) =>
-            participant.email.toLowerCase() === normalizedEmail ? nextParticipant : participant,
-          )
-        : [...existingParticipants, nextParticipant];
 
-      inviteLink =
-        buildExternalCollaborationReviewLinkFromToken(
-          message.id,
-          normalizedEmail,
-          inviteToken,
+      const issueResult = await issueCollaborationInvite({
+        workspaceId: currentUserId,
+        mailboxId: mailbox.id,
+        messageId,
+        inviteeEmail: normalizedEmail,
+        createdByUserId: currentUserId,
+        createdByUserName: currentUserName,
+      });
+
+      if (issueResult.ok) {
+        inviteLink = issueResult.inviteUrl;
+        applyCanonicalCollaborationThreadToMessage(messageId, issueResult.thread);
+      }
+    }
+
+    if (!inviteLink) {
+      updateMessageById(messageId, (message) => {
+        if (!message.collaboration) {
+          return message;
+        }
+
+        const nextTimestamp = Date.now();
+        const existingParticipants = message.collaboration.participants ?? [];
+        const existingParticipant = existingParticipants.find(
+          (participant) => participant.email.toLowerCase() === normalizedEmail,
         );
+        const sharedExternalReviewToken = existingParticipants.find(
+          (participant) => participant.kind === "external" && participant.externalReviewToken,
+        )?.externalReviewToken;
+        const inviteToken =
+          existingParticipant?.externalReviewToken ||
+          sharedExternalReviewToken ||
+          buildCollaborationInviteToken(message, normalizedEmail);
+        inviteParticipantName =
+          existingParticipant?.name ||
+          formatCollaborationParticipantNameFromEmail(normalizedEmail) ||
+          normalizedEmail;
+        const nextParticipant: MailMessageCollaborationParticipant = existingParticipant
+          ? {
+              ...existingParticipant,
+              kind: "external",
+              externalReviewToken: inviteToken,
+              status:
+                existingParticipant.status === "declined"
+                  ? "invited"
+                  : existingParticipant.status,
+            }
+          : {
+              id: normalizeSenderLearningKey(normalizedEmail),
+              name: inviteParticipantName,
+              email: normalizedEmail,
+              kind: "external",
+              status: "invited",
+              externalReviewToken: inviteToken,
+            };
+        const nextParticipants = existingParticipant
+          ? existingParticipants.map((participant) =>
+              participant.email.toLowerCase() === normalizedEmail ? nextParticipant : participant,
+            )
+          : [...existingParticipants, nextParticipant];
 
-      return {
-        ...message,
-        isShared: true,
-        collaboration: {
-          ...message.collaboration,
-          updatedAt: nextTimestamp,
-          participants: nextParticipants,
-        },
-      };
-    });
+        inviteLink =
+          buildExternalCollaborationReviewLinkFromToken(
+            message.id,
+            normalizedEmail,
+            inviteToken,
+          );
+
+        return {
+          ...message,
+          isShared: true,
+          collaboration: {
+            ...message.collaboration,
+            updatedAt: nextTimestamp,
+            participants: nextParticipants,
+          },
+        };
+      });
+    }
 
     const sourceMessage = getMessageById(messageId) ?? existingInviteMessage;
 

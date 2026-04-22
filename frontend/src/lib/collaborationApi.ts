@@ -57,6 +57,22 @@ export type CollaborationThread = {
   };
 };
 
+export type CollaborationInvite = {
+  v: 1;
+  token: string;
+  workspaceId: string;
+  mailboxId: string;
+  messageId: string;
+  inviteeEmail: string;
+  participantId: string;
+  status: "active" | "revoked" | "expired";
+  createdAt: number;
+  updatedAt: number;
+  createdByUserId: string;
+  createdByUserName: string;
+  expiresAt?: number;
+};
+
 export type FetchCollaborationThreadsGetManyRequest = {
   workspaceId: string;
   mailboxId?: string;
@@ -84,6 +100,30 @@ type CreateCollaborationThreadResponse = {
     message?: string;
   };
 };
+
+type IssueCollaborationInviteRequest = {
+  workspaceId: string;
+  mailboxId: string;
+  messageId: string;
+  inviteeEmail: string;
+  createdByUserId: string;
+  createdByUserName: string;
+};
+
+type IssueCollaborationInviteResponse =
+  | {
+      ok: true;
+      invite: CollaborationInvite;
+      thread: CollaborationThread;
+      inviteUrl: string;
+    }
+  | {
+      ok: false;
+      error?: {
+        code?: string;
+        message?: string;
+      };
+    };
 
 type MutateCollaborationThreadRequest = {
   workspaceId: string;
@@ -230,6 +270,46 @@ export async function mutateCollaborationThread(
     return {
       ok: false,
       code: "unavailable",
+    };
+  }
+}
+
+export async function issueCollaborationInvite(
+  request: IssueCollaborationInviteRequest,
+): Promise<IssueCollaborationInviteResponse> {
+  try {
+    const response = await fetch("/api/collaboration/invite/issue", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(request),
+    });
+
+    const payload = (await response.json()) as IssueCollaborationInviteResponse;
+
+    if (
+      !response.ok ||
+      !payload.ok ||
+      !payload.invite ||
+      !payload.thread ||
+      typeof payload.inviteUrl !== "string" ||
+      payload.inviteUrl.length === 0
+    ) {
+      return {
+        ok: false,
+        error: payload && "error" in payload ? payload.error : undefined,
+      };
+    }
+
+    return payload;
+  } catch {
+    return {
+      ok: false,
+      error: {
+        code: "unavailable",
+        message: "Could not issue collaboration invite.",
+      },
     };
   }
 }

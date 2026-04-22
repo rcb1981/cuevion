@@ -350,3 +350,8 @@ def normalize_collaboration_invite_record(value: Any) -> dict | None:
         normalized_invite["expiresAt"] = expires_at
 
     return normalized_invite
+
+
+def is_active_collaboration_invite_record(value: Any) -> bool:
+    normalized_invite = normalize_collaboration_invite_record(value)
+    return bool(normalized_invite and normalized_invite["status"] == "active")
