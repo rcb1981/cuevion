@@ -16144,6 +16144,31 @@ function MailboxView({
 	                    {(() => {
 	                      const linkedReview = getLinkedReviewForMessage(selectedMessage.id);
 	                      const linkedReviewLabel = getLinkedReviewBadgeLabel(selectedMessage.id);
+                        const shouldLogSelectedBumaStemraDiagnostic =
+                          selectedMessage.subject
+                            .toLowerCase()
+                            .includes("nieuws van bumastemra");
+                        const selectedResolvedVisibleClassification =
+                          resolveVisibilityClassificationForMessage(selectedMessage);
+                        const selectedResolvedVisibleCategoryLabel =
+                          getVisibleCategoryLabelForMessage(selectedMessage);
+
+                        if (shouldLogSelectedBumaStemraDiagnostic) {
+                          console.debug(
+                            "cuevion_bumastemra_selected_message_diagnostic",
+                            {
+                              selectedSubjectDisplayed: selectedMessage.subject,
+                              selectedMessageId: selectedMessage.id,
+                              selectedThreadId: resolveMailThreadId(selectedMessage),
+                              selectedInternalClassification:
+                                selectedMessage.internalClassification,
+                              selectedSignal: selectedMessage.signal,
+                              selectedUiSignal: selectedMessage.ui_signal,
+                              selectedResolvedVisibleClassification,
+                              selectedResolvedVisibleCategoryLabel,
+                            },
+                          );
+                        }
 
 	                      return (
 	                    <div className="flex items-start justify-between gap-4">
