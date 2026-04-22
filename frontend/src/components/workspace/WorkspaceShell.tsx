@@ -15783,10 +15783,11 @@ function MailboxView({
                       const demoFocusPreferenceLevel = activeSmartFolder
                         ? resolveSmartFolderFocusPreferenceLevelForMessage(message)
                         : resolveFocusPreferenceLevelForMessage(message);
+                      const resolvedVisibleClassification =
+                        resolveVisibilityClassificationForMessage(message);
                       const hasOnboardingControlledDemoBadge =
-                        (resolveVisibilityClassificationForMessage(message) === "demo" ||
-                          resolveVisibilityClassificationForMessage(message) ===
-                            "high_priority_demo") &&
+                        (resolvedVisibleClassification === "demo" ||
+                          resolvedVisibleClassification === "high_priority_demo") &&
                         !hasProtectedPriorityVisibility(message) &&
                         getManualPriorityOverride(message.id) !== "priority";
                       const visibleSignal = getVisibleMessageSignal(message);
@@ -15796,6 +15797,25 @@ function MailboxView({
                       const categoryLabel = activeSmartFolder
                         ? getSmartFolderVisibleCategoryLabelForMessage(message)
                         : getVisibleCategoryLabelForMessage(message);
+                      const shouldLogBumaStemraDiagnostic =
+                        message.sender.toLowerCase().includes("bumastemra") ||
+                        message.from.toLowerCase().includes("bumastemra") ||
+                        message.subject.toLowerCase().includes("nieuws van bumastemra");
+
+                      if (shouldLogBumaStemraDiagnostic) {
+                        console.debug("cuevion_bumastemra_row_diagnostic", {
+                          subject: message.subject,
+                          snippet: message.snippet,
+                          sender: message.sender,
+                          from: message.from,
+                          body: message.body,
+                          internalClassification: message.internalClassification,
+                          signal: message.signal,
+                          ui_signal: message.ui_signal,
+                          resolvedVisibleClassification,
+                          resolvedVisibleCategoryLabel: categoryLabel,
+                        });
+                      }
                       const signal =
                         message.signal === "Sent"
                           ? ""
