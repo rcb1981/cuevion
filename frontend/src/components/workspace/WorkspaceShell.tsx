@@ -11951,54 +11951,6 @@ function MailboxView({
     }));
   };
 
-  const buildMailMessageFromCollaborationThread = (
-    thread: CollaborationThread,
-  ): MailMessage => ({
-    id: thread.sourceMessage.id,
-    sender: thread.sourceMessage.sender,
-    subject: thread.sourceMessage.subject,
-    snippet: thread.sourceMessage.snippet,
-    time: thread.sourceMessage.timestamp,
-    createdAt: thread.sourceMessage.timestamp,
-    from: thread.sourceMessage.from,
-    to: "",
-    timestamp: thread.sourceMessage.timestamp,
-    body: [...thread.sourceMessage.body],
-    bodyHtml: thread.sourceMessage.bodyHtml,
-    isShared: thread.isShared,
-    collaboration: thread.collaboration as MailMessageCollaboration,
-    priorityScore: "medium",
-    category: "Primary",
-    categorySource: "system",
-    categoryConfidence: "medium",
-  });
-
-  const buildExternalSafeInviteMessage = (message: MailMessage): MailMessage =>
-    message.collaboration
-      ? {
-          ...message,
-          collaboration: {
-            ...message.collaboration,
-            participants: (message.collaboration.participants ?? []).map((participant) => ({
-              id: participant.id,
-              name: participant.name,
-              email: participant.email,
-              kind: participant.kind,
-              status: participant.status,
-            })),
-            messages: message.collaboration.messages.filter(
-              (entry) => getCollaborationMessageVisibility(entry) === "shared",
-            ),
-          },
-        }
-      : message;
-
-  const applyCanonicalCollaborationThreadToInviteRoute = (
-    thread: CollaborationThread,
-  ) => {
-    setInviteMessageOverride(buildMailMessageFromCollaborationThread(thread));
-  };
-
   const buildCollaborationSourceMessageSnapshot = (message: MailMessage) => ({
     id: message.id,
     subject: message.subject,
@@ -25667,6 +25619,51 @@ export function WorkspaceShell({
   const [inviteMentionIndex, setInviteMentionIndex] = useState(0);
   const [inviteReplySelection, setInviteReplySelection] = useState<number | null>(null);
   const inviteReplyInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const buildExternalSafeInviteMessage = (message: MailMessage): MailMessage =>
+    message.collaboration
+      ? {
+          ...message,
+          collaboration: {
+            ...message.collaboration,
+            participants: (message.collaboration.participants ?? []).map(
+              (participant: MailMessageCollaborationParticipant) => ({
+                id: participant.id,
+                name: participant.name,
+                email: participant.email,
+                kind: participant.kind,
+                status: participant.status,
+              }),
+            ),
+            messages: message.collaboration.messages.filter(
+              (entry: MailMessageCollaborationMessage) =>
+                getCollaborationMessageVisibility(entry) === "shared",
+            ),
+          },
+        }
+      : message;
+  const applyCanonicalCollaborationThreadToInviteRoute = (
+    thread: CollaborationThread,
+  ) => {
+    setInviteMessageOverride({
+      id: thread.sourceMessage.id,
+      sender: thread.sourceMessage.sender,
+      subject: thread.sourceMessage.subject,
+      snippet: thread.sourceMessage.snippet,
+      time: thread.sourceMessage.timestamp,
+      createdAt: thread.sourceMessage.timestamp,
+      from: thread.sourceMessage.from,
+      to: "",
+      timestamp: thread.sourceMessage.timestamp,
+      body: [...thread.sourceMessage.body],
+      bodyHtml: thread.sourceMessage.bodyHtml,
+      isShared: thread.isShared,
+      collaboration: thread.collaboration as MailMessageCollaboration,
+      priorityScore: "medium",
+      category: "Primary",
+      categorySource: "system",
+      categoryConfidence: "medium",
+    });
+  };
   const [notificationNavigationRequest, setNotificationNavigationRequest] =
     useState<NotificationNavigationRequest | null>(null);
   const [reviewInboxHandoff, setReviewInboxHandoff] = useState<ReviewInboxHandoff | null>(null);
@@ -26136,7 +26133,8 @@ export function WorkspaceShell({
     "";
   const externalReviewInviteParticipant = externalReviewAuthorEmail
     ? (inviteCollaboration?.participants ?? []).find(
-        (participant) => participant.email.toLowerCase() === externalReviewAuthorEmail,
+        (participant: MailMessageCollaborationParticipant) =>
+          participant.email.toLowerCase() === externalReviewAuthorEmail,
       ) ?? null
     : null;
   const externalReviewAuthorName = externalReviewInviteParticipant?.name
@@ -26147,14 +26145,14 @@ export function WorkspaceShell({
       : "External reviewer";
   const acceptedInviteParticipant = authenticatedUser
     ? (inviteCollaboration?.participants ?? []).find(
-        (participant) =>
+        (participant: MailMessageCollaborationParticipant) =>
           participant.email.toLowerCase() === authenticatedUser.email.toLowerCase() &&
           participant.status === "active",
       ) ?? null
     : null;
   const declinedInviteParticipant = authenticatedUser
     ? (inviteCollaboration?.participants ?? []).find(
-        (participant) =>
+        (participant: MailMessageCollaborationParticipant) =>
           participant.email.toLowerCase() === authenticatedUser.email.toLowerCase() &&
           participant.status === "declined",
       ) ?? null
@@ -28508,7 +28506,7 @@ export function WorkspaceShell({
         ? "external"
         : "workspace";
     const inviteVisibleMessages = inviteCollaboration
-      ? inviteCollaboration.messages.filter((entry) =>
+      ? inviteCollaboration.messages.filter((entry: MailMessageCollaborationMessage) =>
           canViewerSeeCollaborationMessage(entry, inviteViewerType),
         )
       : [];
@@ -28733,7 +28731,7 @@ export function WorkspaceShell({
                             </div>
                           ) : null}
                           <div className="max-h-[360px] space-y-2 overflow-y-auto pr-1">
-                            {visibleExternalReviewMessages.map((entry) => (
+                            {visibleExternalReviewMessages.map((entry: MailMessageCollaborationMessage) => (
                               <div
                                 key={entry.id}
                                 className="rounded-[16px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-3.5 py-2.5"
@@ -28759,7 +28757,7 @@ export function WorkspaceShell({
                                   {renderTextWithMentions(
                                     entry.text,
                                     new Map(
-                                      (entry.mentions ?? []).map((mention) => [
+                                      (entry.mentions ?? []).map((mention: MailMessageCollaborationMention) => [
                                         mention.handle.toLowerCase(),
                                         mention,
                                       ]),
@@ -28871,7 +28869,7 @@ export function WorkspaceShell({
                         </div>
                         <div className="mt-4 max-h-[420px] space-y-3 overflow-y-auto pr-1 text-[0.94rem] leading-7 text-[var(--workspace-text-soft)]">
                           {externalReviewMessageBody.length > 0
-                            ? externalReviewMessageBody.map((paragraph, index) => (
+                            ? externalReviewMessageBody.map((paragraph: string, index: number) => (
                                 <p key={`external-review-mail-body-${index}`}>{paragraph}</p>
                               ))
                             : (
@@ -29040,7 +29038,7 @@ export function WorkspaceShell({
                 </div>
               ) : null}
               <div className="space-y-4">
-                {inviteVisibleMessages.map((entry) => (
+                {inviteVisibleMessages.map((entry: MailMessageCollaborationMessage) => (
                   <div key={entry.id} className="space-y-1">
                     <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[0.82rem] leading-6 text-[var(--workspace-text)]">
                       <span>{entry.authorName}</span>
@@ -29060,7 +29058,7 @@ export function WorkspaceShell({
                       {renderTextWithMentions(
                         entry.text,
                         new Map(
-                          (entry.mentions ?? []).map((mention) => [
+                          (entry.mentions ?? []).map((mention: MailMessageCollaborationMention) => [
                             mention.handle.toLowerCase(),
                             mention,
                           ]),
