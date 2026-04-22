@@ -188,6 +188,17 @@ function buildStablePreviewIdentity(message: MessageIdentitySource) {
   return `${message.subject ?? ""}|${message.from ?? ""}|${message.timestamp ?? ""}`;
 }
 
+function parseImapUidFromMessageId(messageId?: string | null) {
+  const normalizedMessageId = messageId?.trim();
+
+  if (!normalizedMessageId?.startsWith("imap-uid-")) {
+    return null;
+  }
+
+  const imapUid = normalizedMessageId.slice("imap-uid-".length).trim();
+  return imapUid || null;
+}
+
 function getCanonicalMessageIdentityKey(message: MessageIdentitySource) {
   if (message.imapUid) {
     return `imap:${message.imapUid}`;
@@ -241,6 +252,18 @@ function findMatchingMessageByIdentity<T>(
   }
 
   return indexes.byPreviewIdentity.get(buildStablePreviewIdentity(message));
+}
+
+function buildCollaborationThreadIdentitySource(
+  thread: CollaborationThread,
+): MessageIdentitySource {
+  return {
+    id: thread.messageId || thread.sourceMessage?.id,
+    imapUid: parseImapUidFromMessageId(thread.messageId || thread.sourceMessage?.id),
+    subject: thread.sourceMessage?.subject,
+    from: thread.sourceMessage?.from,
+    timestamp: thread.sourceMessage?.timestamp,
+  };
 }
 
 function buildCanonicalIdentityKeySetForMessageIds(
@@ -27837,36 +27860,60 @@ export function WorkspaceShell({
         return;
       }
 
-      const threadsByMessageId = threadResponses.reduce<Record<string, { collaboration: MailMessageCollaboration; isShared: boolean }>>(
+      const serverThreads = threadResponses.reduce<CollaborationThread[]>(
         (nextValue, response) => {
           Object.values(response.threadsByMessageId).forEach((thread) => {
             if (!thread?.messageId || !thread.collaboration) {
               return;
             }
 
-            nextValue[thread.messageId] = {
-              collaboration: thread.collaboration as MailMessageCollaboration,
-              isShared: thread.isShared,
-            };
+            nextValue.push(thread);
           });
 
           return nextValue;
         },
-        {},
+        [],
       );
 
-      if (Object.keys(threadsByMessageId).length === 0) {
+      if (serverThreads.length === 0) {
         return;
       }
 
       setMailboxStore((currentStore) => {
         let didChange = false;
+        const currentMessages = Object.values(currentStore).flatMap((collections) =>
+          canonicalFolderOrder.flatMap((folder) => collections[folder]),
+        );
+        const currentMessageIndexes = buildMessageIdentityIndexes(currentMessages);
+        const threadsByResolvedMessageId = serverThreads.reduce<
+          Record<string, { collaboration: MailMessageCollaboration; isShared: boolean }>
+        >((nextValue, thread) => {
+          const matchedMessage = findMatchingMessageByIdentity(
+            buildCollaborationThreadIdentitySource(thread),
+            currentMessageIndexes,
+          );
+
+          if (!matchedMessage?.id) {
+            return nextValue;
+          }
+
+          nextValue[matchedMessage.id] = {
+            collaboration: thread.collaboration as MailMessageCollaboration,
+            isShared: thread.isShared,
+          };
+
+          return nextValue;
+        }, {});
+
+        if (Object.keys(threadsByResolvedMessageId).length === 0) {
+          return currentStore;
+        }
 
         const nextStore = Object.entries(currentStore).reduce<MailboxStore>(
           (nextCollectionsByMailbox, [mailboxId, collections]) => {
             const overlayCollection = (messages: MailMessage[]) =>
               messages.map((message) => {
-                const serverThread = threadsByMessageId[message.id];
+                const serverThread = threadsByResolvedMessageId[message.id];
 
                 if (!serverThread) {
                   return message;
