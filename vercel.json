@@ -4,5 +4,15 @@
     "api/**/*.py": {
       "excludeFiles": "{venv/**,frontend/**,__pycache__/**,dist/**,node_modules/**}"
     }
-  }
+  },
+  "rewrites": [
+    {
+      "source": "/login",
+      "destination": "/"
+    },
+    {
+      "source": "/app",
+      "destination": "/"
+    }
+  ]
 }
