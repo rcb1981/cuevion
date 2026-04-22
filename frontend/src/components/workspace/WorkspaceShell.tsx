@@ -9952,7 +9952,10 @@ function MailboxView({
       }
       case "workflow_update":
       case "info": {
-        if (preferPromoMailboxContext) {
+        if (
+          preferPromoMailboxContext &&
+          !isBroadcastPromoMessage(message)
+        ) {
           const heuristic = inferHeuristicSignal({
             ...message,
             signal: undefined,
