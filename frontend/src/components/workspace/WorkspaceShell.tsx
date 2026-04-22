@@ -26606,6 +26606,19 @@ export function WorkspaceShell({
     setInviteReplySelection(null);
 
     void (async () => {
+      const applyCanonicalExternalReplyResult = (thread: CollaborationThread) => {
+        applyCanonicalCollaborationThreadToInviteRoute(thread);
+        updateInviteWorkspaceMessageById(
+          inviteMessage.id,
+          (message) => ({
+            ...message,
+            collaboration: thread.collaboration as MailMessageCollaboration,
+            isShared: thread.isShared,
+          }),
+          inviteMessage,
+        );
+      };
+
       const result = await mutateCollaborationInvite({
         token: collaborationInviteRoute.inviteToken,
         expectedUpdatedAt,
@@ -26618,13 +26631,26 @@ export function WorkspaceShell({
       });
 
       if (result.ok) {
-        applyCanonicalCollaborationThreadToInviteRoute(result.thread);
+        applyCanonicalExternalReplyResult(result.thread);
         return;
       }
 
       if (result.code === "stale_thread") {
-        applyCanonicalCollaborationThreadToInviteRoute(result.thread);
+        applyCanonicalExternalReplyResult(result.thread);
+        return;
       }
+
+      if (result.code === "invalid_invite") {
+        setInviteLookupState("invalid");
+        return;
+      }
+
+      if (result.code === "expired_invite") {
+        setInviteLookupState("expired");
+        return;
+      }
+
+      setInviteLookupState("unavailable");
     })();
   };
 
