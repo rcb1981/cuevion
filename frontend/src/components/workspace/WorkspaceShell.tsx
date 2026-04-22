@@ -15877,11 +15877,30 @@ function MailboxView({
                         themeMode === "dark"
                           ? "text-[color:rgba(220,212,202,0.84)]"
                           : "text-[color:rgba(120,111,100,0.76)]";
+                      const threadId = resolveMailThreadId(message);
+                      const threadMessagesForRow = folderMessages
+                        .filter((candidate) => resolveMailThreadId(candidate) === threadId)
+                        .sort(
+                          (firstMessage, secondMessage) =>
+                            resolveMailDateMs(secondMessage) - resolveMailDateMs(firstMessage),
+                        );
                       const threadMessageCount =
-                        threadMessageCountByThreadId.get(resolveMailThreadId(message)) ?? 1;
+                        threadMessageCountByThreadId.get(threadId) ?? 1;
                       const hasThreadCountIndicator = threadMessageCount > 1;
                       const hasThreadAttachmentIndicator =
-                        threadHasAttachmentsByThreadId.get(resolveMailThreadId(message)) ?? false;
+                        threadHasAttachmentsByThreadId.get(threadId) ?? false;
+
+                      if (shouldLogBumaStemraDiagnostic) {
+                        console.debug("cuevion_bumastemra_row_thread_diagnostic", {
+                          rowSubjectDisplayed: message.subject,
+                          messageObjectSubjectUsedForBadge: message.subject,
+                          messageId: message.id,
+                          threadId,
+                          representativeThreadMessageId: message.id,
+                          latestThreadMessageId:
+                            threadMessagesForRow[0]?.id ?? message.id,
+                        });
+                      }
                       return (
                         <button
                           key={message.id}
