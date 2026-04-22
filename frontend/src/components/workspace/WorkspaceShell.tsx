@@ -1007,7 +1007,7 @@ function isBroadcastPromoMessage(
     .join(" ")
     .toLowerCase();
 
-  return includesAnyKeyword(searchableText, [
+  const broadcastPromoKeywords = [
     "newsletter",
     "nieuws",
     "newsberichten",
@@ -1018,7 +1018,30 @@ function isBroadcastPromoMessage(
     "unsubscribe",
     "campaign monitor",
     "mailchimp",
-  ]);
+  ] as const;
+  const matchedKeywords = broadcastPromoKeywords.filter((keyword) =>
+    searchableText.includes(keyword),
+  );
+  const isBroadcastPromo = matchedKeywords.length > 0;
+  const shouldLogBumaStemraDiagnostic =
+    message.sender.toLowerCase().includes("bumastemra") ||
+    message.from.toLowerCase().includes("bumastemra") ||
+    message.subject.toLowerCase().includes("nieuws van bumastemra");
+
+  if (shouldLogBumaStemraDiagnostic) {
+    console.debug("cuevion_bumastemra_broadcast_diagnostic", {
+      subject: message.subject,
+      snippet: message.snippet,
+      sender: message.sender,
+      from: message.from,
+      body: message.body,
+      searchableText,
+      isBroadcastPromoMessage: isBroadcastPromo,
+      matchedKeywords,
+    });
+  }
+
+  return isBroadcastPromo;
 }
 
 function resolveVisibleClassification(
@@ -1056,7 +1079,7 @@ function resolveVisibleClassification(
   })();
 
   if (
-    (message.internalClassification === "promo" || signalClassification === "promo") &&
+    signalClassification === "promo" &&
     isBroadcastPromoMessage(message)
   ) {
     return "workflow_update";
