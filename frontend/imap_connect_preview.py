@@ -548,6 +548,7 @@ def resolve_preview_routing(
             "join us",
         ]
         promo_pitch_keywords = [
+            "upcoming single",
             "upcoming track",
             "for your radioshow",
             "for your radio show",
@@ -604,7 +605,11 @@ def resolve_preview_routing(
         is_promo_mailbox_context = any(
             keyword in local_part for keyword in ["promo", "press", "servicing"]
         )
-        has_subject_promo_marker = subject_lower.startswith("promo:") or "[promo]" in subject_lower
+        has_subject_promo_marker = (
+            subject_lower == "promo"
+            or subject_lower.startswith("promo:")
+            or "[promo]" in subject_lower
+        )
         has_promo_provider_signal = any(
             keyword in classification_text or keyword in sender_lower
             for keyword in promo_keywords
