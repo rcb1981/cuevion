@@ -17,6 +17,9 @@ export type LiveInboxAttachmentSnapshot = {
   name: string;
   mimeType?: string;
   size?: number;
+  contentId?: string;
+  disposition?: string;
+  inlineSrc?: string;
 };
 
 export type LiveInboxMessageSnapshot = {

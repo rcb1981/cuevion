@@ -2,6 +2,7 @@ import hashlib
 import html
 import imaplib
 import logging
+import base64
 import re
 import time
 from dataclasses import replace
@@ -368,14 +369,22 @@ def get_message_attachments(message: Message) -> list[dict[str, Any]]:
             continue
 
         disposition = str(part.get("Content-Disposition") or "").lower()
+        disposition_type = disposition.split(";", 1)[0].strip() or None
         filename = decode_mime_words(part.get_filename())
+        content_id_header = str(part.get("Content-Id") or part.get("Content-ID") or "").strip()
+        content_id = content_id_header.strip("<>") if content_id_header else ""
 
-        if "attachment" not in disposition and not filename:
+        if "attachment" not in disposition and "inline" not in disposition and not filename and not content_id:
             continue
 
         payload = part.get_payload(decode=True)
         mime_type = part.get_content_type() or None
         size = len(payload) if payload is not None else None
+        inline_src = None
+
+        if payload is not None and mime_type and mime_type.startswith("image/") and content_id:
+            encoded_payload = base64.b64encode(payload).decode("ascii")
+            inline_src = f"data:{mime_type};base64,{encoded_payload}"
 
         attachments.append(
             {
@@ -383,6 +392,9 @@ def get_message_attachments(message: Message) -> list[dict[str, Any]]:
                 "name": filename or "Attachment",
                 **({"mimeType": mime_type} if mime_type else {}),
                 **({"size": size} if size is not None else {}),
+                **({"contentId": content_id} if content_id else {}),
+                **({"disposition": disposition_type} if disposition_type else {}),
+                **({"inlineSrc": inline_src} if inline_src else {}),
             }
         )
 

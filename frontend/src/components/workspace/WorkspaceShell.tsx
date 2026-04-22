@@ -464,6 +464,9 @@ type MailAttachment = {
   name: string;
   mimeType?: string;
   size?: number;
+  contentId?: string;
+  disposition?: string;
+  inlineSrc?: string;
   file?: File;
 };
 type MailAttachmentInput = string | MailAttachment;
@@ -1396,6 +1399,38 @@ function resolveEmailImageSourceType(sourceValue: string | null) {
   }
 
   return "invalid" as const;
+}
+
+function normalizeCidReference(sourceValue: string | null) {
+  const normalizedSource = sourceValue?.trim() ?? "";
+
+  if (!/^cid:/i.test(normalizedSource)) {
+    return "";
+  }
+
+  return normalizedSource.replace(/^cid:/i, "").trim().replace(/^<|>$/g, "").toLowerCase();
+}
+
+function buildCidImageSourceMap(
+  attachments?: Pick<MailAttachment, "contentId" | "inlineSrc" | "mimeType">[],
+) {
+  const cidImageSourceMap = new Map<string, string>();
+
+  (attachments ?? []).forEach((attachment) => {
+    const normalizedContentId = attachment.contentId?.trim().replace(/^<|>$/g, "").toLowerCase();
+
+    if (
+      !normalizedContentId ||
+      !attachment.inlineSrc ||
+      !attachment.mimeType?.toLowerCase().startsWith("image/")
+    ) {
+      return;
+    }
+
+    cidImageSourceMap.set(normalizedContentId, attachment.inlineSrc);
+  });
+
+  return cidImageSourceMap;
 }
 
 function isDecorativeEmbeddedImageAlt(altText: string) {
@@ -2336,7 +2371,11 @@ function extractEmailStyles(parsedDocument: Document): string {
 
 function sanitizeMessageBodyHtml(
   bodyHtml: string,
-  options?: { allowRemoteImages?: boolean; themeMode?: "light" | "dark" },
+  options?: {
+    allowRemoteImages?: boolean;
+    themeMode?: "light" | "dark";
+    attachments?: Pick<MailAttachment, "contentId" | "inlineSrc" | "mimeType">[];
+  },
 ): SanitizedMessageHtmlResult {
   const normalizedHtml = bodyHtml.trim();
 
@@ -2366,6 +2405,7 @@ function sanitizeMessageBodyHtml(
   let cidImageCount = 0;
   let invalidImageCount = 0;
   const allowRemoteImages = options?.allowRemoteImages ?? false;
+  const cidImageSourceMap = buildCidImageSourceMap(options?.attachments);
 
   // Extract and sanitize all <style> blocks (from head + body) BEFORE removing any elements.
   // This preserves class-based and rule-based CSS that drives the visual layout of real HTML emails.
@@ -2427,6 +2467,17 @@ function sanitizeMessageBodyHtml(
     }
 
     if (element instanceof HTMLImageElement) {
+      const sourceValue = element.getAttribute("src");
+      const cidReference = normalizeCidReference(sourceValue);
+
+      if (cidReference) {
+        const rewrittenCidSource = cidImageSourceMap.get(cidReference);
+
+        if (rewrittenCidSource) {
+          element.setAttribute("src", rewrittenCidSource);
+        }
+      }
+
       const imageSourceType = resolveEmailImageSourceType(element.getAttribute("src"));
       const fallbackAlt = element.getAttribute("alt")?.trim() || "Inline image";
 
@@ -2523,7 +2574,10 @@ function isComposeGeneratedHtml(value: string) {
 
 function sanitizeComposeGeneratedHtml(
   bodyHtml: string,
-  options?: { allowRemoteImages?: boolean },
+  options?: {
+    allowRemoteImages?: boolean;
+    attachments?: Pick<MailAttachment, "contentId" | "inlineSrc" | "mimeType">[];
+  },
 ): SanitizedMessageHtmlResult {
   const normalizedHtml = bodyHtml.trim();
 
@@ -2553,6 +2607,7 @@ function sanitizeComposeGeneratedHtml(
   let cidImageCount = 0;
   let invalidImageCount = 0;
   const allowRemoteImages = options?.allowRemoteImages ?? false;
+  const cidImageSourceMap = buildCidImageSourceMap(options?.attachments);
 
   body.querySelectorAll(unsafeEmailHtmlSelectors).forEach((node) => {
     node.remove();
@@ -2598,6 +2653,17 @@ function sanitizeComposeGeneratedHtml(
     }
 
     if (element instanceof HTMLImageElement) {
+      const sourceValue = element.getAttribute("src");
+      const cidReference = normalizeCidReference(sourceValue);
+
+      if (cidReference) {
+        const rewrittenCidSource = cidImageSourceMap.get(cidReference);
+
+        if (rewrittenCidSource) {
+          element.setAttribute("src", rewrittenCidSource);
+        }
+      }
+
       const imageSourceType = resolveEmailImageSourceType(element.getAttribute("src"));
       const fallbackAlt = element.getAttribute("alt")?.trim() || "Inline image";
 
@@ -2674,7 +2740,7 @@ function sanitizeComposeGeneratedHtml(
 }
 
 function resolveMessageBodyRenderMode(
-  message: Pick<MailMessage, "body" | "bodyHtml">,
+  message: Pick<MailMessage, "body" | "bodyHtml" | "attachments">,
   options?: { allowRemoteImages?: boolean; themeMode?: "light" | "dark" },
 ):
   | {
@@ -2709,8 +2775,15 @@ function resolveMessageBodyRenderMode(
     } {
   const sanitizedHtmlResult = message.bodyHtml
     ? isComposeGeneratedHtml(message.bodyHtml)
-      ? sanitizeComposeGeneratedHtml(message.bodyHtml, options)
-      : sanitizeMessageBodyHtml(message.bodyHtml, options)
+      ? sanitizeComposeGeneratedHtml(message.bodyHtml, {
+          allowRemoteImages: options?.allowRemoteImages,
+          attachments: message.attachments,
+        })
+      : sanitizeMessageBodyHtml(message.bodyHtml, {
+          allowRemoteImages: options?.allowRemoteImages,
+          themeMode: options?.themeMode,
+          attachments: message.attachments,
+        })
     : {
         html: null,
         emailStyles: "",

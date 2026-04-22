@@ -1,7 +1,7 @@
 import type { LiveInboxMessageSnapshot } from "./inboxConnectionApi";
 
 const LIVE_INBOX_SNAPSHOTS_STORAGE_KEY = "cuevion-live-inbox-snapshots";
-const LIVE_INBOX_SNAPSHOT_SCHEMA_VERSION = 2;
+const LIVE_INBOX_SNAPSHOT_SCHEMA_VERSION = 3;
 
 export type LiveInboxSnapshot = {
   schemaVersion?: number;
