@@ -77,6 +77,13 @@ export type FetchCollaborationThreadsGetManyRequest = {
   workspaceId: string;
   mailboxId?: string;
   messageIds: string[];
+  messages?: Array<{
+    id: string;
+    imapUid?: string;
+    subject?: string;
+    from?: string;
+    timestamp?: string;
+  }>;
 };
 
 type FetchCollaborationThreadsGetManyResponse = {

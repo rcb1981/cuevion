@@ -27832,40 +27832,57 @@ export function WorkspaceShell({
       return;
     }
 
-    const mailboxRequests = orderedMailboxes
-      .map((mailbox) => {
+    type CollaborationMailboxRequest = {
+      mailboxId: InboxId;
+      messageIds: string[];
+      messages: Array<{
+        id: string;
+        imapUid?: string;
+        subject?: string;
+        from?: string;
+        timestamp?: string;
+      }>;
+    };
+
+    const mailboxRequests: CollaborationMailboxRequest[] = orderedMailboxes.flatMap((mailbox) => {
         const collections = mailboxStore[mailbox.id];
         if (!collections) {
-          return null;
+          return [];
         }
 
-        const dedupedMessageIds = Array.from(
-          new Set(
-            canonicalFolderOrder.flatMap((folder) =>
-              collections[folder]
-                .map((message) => message.id)
-                .filter((messageId): messageId is string => typeof messageId === "string" && messageId.length > 0),
-            ),
-          ),
-        ).slice(0, 200);
+        const dedupedMessages = Array.from(
+          canonicalFolderOrder.reduce<Map<string, MailMessage>>((nextValue, folder) => {
+            collections[folder].forEach((message) => {
+              if (!message.id || nextValue.has(message.id)) {
+                return;
+              }
+
+              nextValue.set(message.id, message);
+            });
+
+            return nextValue;
+          }, new Map()),
+        )
+          .map(([, message]) => message)
+          .slice(0, 200);
+        const dedupedMessageIds = dedupedMessages.map((message) => message.id);
 
         if (dedupedMessageIds.length === 0) {
-          return null;
+          return [];
         }
 
-        return {
+        return [{
           mailboxId: mailbox.id,
           messageIds: dedupedMessageIds,
-        };
-      })
-      .filter(
-        (
-          request,
-        ): request is {
-          mailboxId: InboxId;
-          messageIds: string[];
-        } => Boolean(request),
-      );
+          messages: dedupedMessages.map((message) => ({
+            id: message.id,
+            imapUid: message.imapUid ?? undefined,
+            subject: message.subject,
+            from: message.from,
+            timestamp: message.timestamp,
+          })),
+        }];
+      });
 
     if (mailboxRequests.length === 0) {
       lastServerCollaborationOverlayKeyRef.current = "";
@@ -27892,6 +27909,7 @@ export function WorkspaceShell({
             workspaceId: currentWorkspaceUserId,
             mailboxId: request.mailboxId,
             messageIds: request.messageIds,
+            messages: request.messages,
           }),
         })),
       );

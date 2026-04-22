@@ -1,5 +1,6 @@
 import json
 import sys
+import hashlib
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from time import time
@@ -111,10 +112,85 @@ def _normalize_participants(value) -> list[dict] | None:
     return normalized_participants
 
 
+def _normalize_message_lookup_records(value) -> list[dict]:
+    if not isinstance(value, list):
+        return []
+
+    normalized_records: list[dict] = []
+    seen_message_ids: set[str] = set()
+    for record in value:
+        if not isinstance(record, dict):
+            continue
+
+        message_id = str(record.get("id") or "").strip()
+        if not message_id or message_id in seen_message_ids:
+            continue
+
+        seen_message_ids.add(message_id)
+        normalized_record = {"id": message_id}
+
+        imap_uid = str(record.get("imapUid") or "").strip()
+        if imap_uid:
+            normalized_record["imapUid"] = imap_uid
+
+        subject = str(record.get("subject") or "").strip()
+        if subject:
+            normalized_record["subject"] = subject
+
+        from_value = str(record.get("from") or "").strip()
+        if from_value:
+            normalized_record["from"] = from_value
+
+        timestamp = str(record.get("timestamp") or "").strip()
+        if timestamp:
+            normalized_record["timestamp"] = timestamp
+
+        normalized_records.append(normalized_record)
+        if len(normalized_records) >= MAX_COLLABORATION_THREAD_BATCH_SIZE:
+            break
+
+    return normalized_records
+
+
+def _build_legacy_preview_message_id(subject: str, from_value: str, timestamp: str) -> str | None:
+    normalized_subject = subject.strip()
+    normalized_from = from_value.strip()
+    normalized_timestamp = timestamp.strip()
+
+    if not normalized_subject or not normalized_from or not normalized_timestamp:
+        return None
+
+    stable_id_source = f"{normalized_subject}|{normalized_from}|{normalized_timestamp}"
+    return hashlib.sha1(stable_id_source.encode("utf-8")).hexdigest()
+
+
+def _resolve_thread_for_lookup_record(workspace_id: str, lookup_record: dict) -> dict | None:
+    direct_thread = get_thread(workspace_id, lookup_record["id"])
+    if direct_thread is not None:
+        return direct_thread
+
+    imap_uid = str(lookup_record.get("imapUid") or "").strip()
+    if imap_uid:
+        imap_thread = get_thread(workspace_id, f"imap-uid-{imap_uid}")
+        if imap_thread is not None:
+            return imap_thread
+
+    legacy_preview_message_id = _build_legacy_preview_message_id(
+        str(lookup_record.get("subject") or ""),
+        str(lookup_record.get("from") or ""),
+        str(lookup_record.get("timestamp") or ""),
+    )
+    if legacy_preview_message_id:
+        return get_thread(workspace_id, legacy_preview_message_id)
+
+    return None
+
+
 def _handle_get_many(handler: BaseHTTPRequestHandler, payload: dict):
     workspace_id = str(payload.get("workspaceId") or "").strip().lower()
     mailbox_id = payload.get("mailboxId")
     message_ids = payload.get("messageIds")
+    message_lookup_records = _normalize_message_lookup_records(payload.get("messages"))
 
     if not workspace_id:
         _send_json(handler, 400, _build_error("invalid_request", "workspaceId is required.", {"threadsByMessageId": {}}))
@@ -145,6 +221,18 @@ def _handle_get_many(handler: BaseHTTPRequestHandler, payload: dict):
         normalized_message_ids = normalized_message_ids[:MAX_COLLABORATION_THREAD_BATCH_SIZE]
 
     threads_by_message_id = get_threads_many(workspace_id, normalized_message_ids)
+
+    if message_lookup_records:
+        for lookup_record in message_lookup_records:
+            if lookup_record["id"] in threads_by_message_id:
+                continue
+
+            resolved_thread = _resolve_thread_for_lookup_record(workspace_id, lookup_record)
+            if resolved_thread is None:
+                continue
+
+            threads_by_message_id[lookup_record["id"]] = resolved_thread
+
     _send_json(handler, 200, {"ok": True, "threadsByMessageId": threads_by_message_id})
 
 
