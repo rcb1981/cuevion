@@ -12510,7 +12510,7 @@ function MailboxView({
 
     const currentMessage = getMessageById(messageId);
     if (currentMessage?.collaboration) {
-      const issueResult = await issueCollaborationInvite({
+      let issueResult = await issueCollaborationInvite({
         workspaceId: currentUserId,
         mailboxId: mailbox.id,
         messageId,
@@ -12518,6 +12518,28 @@ function MailboxView({
         createdByUserId: currentUserId,
         createdByUserName: currentUserName,
       });
+
+      if (!issueResult.ok) {
+        const createResult = await createCollaborationThread({
+          workspaceId: currentUserId,
+          mailboxId: mailbox.id,
+          sourceMessage: buildCollaborationSourceMessageSnapshot(currentMessage),
+          collaboration: currentMessage.collaboration as CollaborationThread["collaboration"],
+          isShared: currentMessage.isShared === true,
+        });
+
+        if (createResult.ok && createResult.thread) {
+          applyCanonicalCollaborationThreadToMessage(messageId, createResult.thread);
+          issueResult = await issueCollaborationInvite({
+            workspaceId: currentUserId,
+            mailboxId: mailbox.id,
+            messageId,
+            inviteeEmail: participant.email.toLowerCase(),
+            createdByUserId: currentUserId,
+            createdByUserName: currentUserName,
+          });
+        }
+      }
 
       if (issueResult.ok) {
         inviteUrl = issueResult.inviteUrl;
