@@ -118,14 +118,14 @@ function isPublicLandingHost() {
 
 function resolveBetaAccessRoute(): BetaAccessRoute {
   if (typeof window === "undefined") {
-    return "login";
+    return "app";
   }
 
-  return window.location.pathname === "/app" ? "app" : "login";
+  return "app";
 }
 
 function replaceBetaAccessRoute(route: BetaAccessRoute) {
-  const nextPath = route === "app" ? "/app" : "/login";
+  const nextPath = "/";
   if (window.location.pathname === nextPath) {
     return;
   }
@@ -913,16 +913,14 @@ export default function App() {
     }
 
     if (betaSessionUser) {
-      if (betaAccessRoute !== "app") {
+      if (window.location.pathname !== "/") {
         replaceBetaAccessRoute("app");
-        setBetaAccessRoute("app");
       }
-      return;
-    }
-
-    if (betaAccessRoute !== "login") {
+    } else if (window.location.pathname !== "/") {
       replaceBetaAccessRoute("login");
-      setBetaAccessRoute("login");
+    }
+    if (betaAccessRoute !== "app") {
+      setBetaAccessRoute("app");
     }
   }, [
     betaAccessRoute,
@@ -1110,7 +1108,7 @@ export default function App() {
     );
   }
 
-  if (!betaSessionUser || betaAccessRoute === "login") {
+  if (!betaSessionUser) {
     return (
       <BetaAccessGate
         error={betaLoginError}
