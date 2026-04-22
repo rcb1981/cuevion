@@ -12498,7 +12498,7 @@ function MailboxView({
     })();
   };
 
-  const openStoredExternalReviewLink = (
+  const openStoredExternalReviewLink = async (
     messageId: string,
     participant: MailMessageCollaborationParticipant,
   ) => {
@@ -12506,11 +12506,32 @@ function MailboxView({
       return;
     }
 
-    const inviteUrl = buildExternalCollaborationReviewLinkFromToken(
-      messageId,
-      participant.email,
-      participant.externalReviewToken,
-    );
+    let inviteUrl = "";
+
+    const currentMessage = getMessageById(messageId);
+    if (currentMessage?.collaboration) {
+      const issueResult = await issueCollaborationInvite({
+        workspaceId: currentUserId,
+        mailboxId: mailbox.id,
+        messageId,
+        inviteeEmail: participant.email.toLowerCase(),
+        createdByUserId: currentUserId,
+        createdByUserName: currentUserName,
+      });
+
+      if (issueResult.ok) {
+        inviteUrl = issueResult.inviteUrl;
+        applyCanonicalCollaborationThreadToMessage(messageId, issueResult.thread);
+      }
+    }
+
+    if (!inviteUrl) {
+      inviteUrl = buildExternalCollaborationReviewLinkFromToken(
+        messageId,
+        participant.email,
+        participant.externalReviewToken,
+      );
+    }
 
     setExternalCollaborationEmail("");
     setExternalCollaborationInviteUrl(inviteUrl);
@@ -17097,7 +17118,7 @@ function MailboxView({
                           <button
                             type="button"
                             onClick={() =>
-                              openStoredExternalReviewLink(
+                              void openStoredExternalReviewLink(
                                 activeCollaborationMessage.id,
                                 primaryExternalReviewParticipant,
                               )
