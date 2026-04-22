@@ -3,6 +3,7 @@ import hashlib
 import hmac
 import json
 import os
+import sys
 import tempfile
 import time
 from datetime import datetime, timedelta, timezone
@@ -13,8 +14,17 @@ from urllib.parse import parse_qs, quote, urlencode, urlparse
 from urllib.request import Request, urlopen
 
 GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
+MICROSOFT_TOKEN_ENDPOINT_TEMPLATE = (
+    "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
+)
 STATE_MAX_AGE_SECONDS = 15 * 60
 GMAIL_OAUTH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60
+
+CURRENT_DIR = Path(__file__).resolve().parent
+if str(CURRENT_DIR) not in sys.path:
+    sys.path.insert(0, str(CURRENT_DIR))
+
+from oauth_token_store import persist_microsoft_token_record
 
 
 def base64url_encode(value: bytes) -> str:
@@ -29,7 +39,7 @@ def base64url_decode(value: str) -> bytes:
 def verify_signed_state(
     state: str,
     signing_secret: str,
-    expected_provider: str = "google",
+    expected_provider: str | None = "google",
 ) -> tuple[dict | None, str | None]:
     if not state or "." not in state:
         return None, "invalid_state"
@@ -51,7 +61,7 @@ def verify_signed_state(
     except (ValueError, json.JSONDecodeError, UnicodeDecodeError):
         return None, "invalid_state"
 
-    if payload.get("provider") != expected_provider:
+    if expected_provider is not None and payload.get("provider") != expected_provider:
         return None, "invalid_state"
 
     issued_at = payload.get("issued_at")
@@ -475,6 +485,85 @@ def _exchange_google_code(
         }
 
 
+def _exchange_microsoft_code(
+    *,
+    code: str,
+    code_verifier: str,
+    client_id: str,
+    client_secret: str,
+    redirect_uri: str,
+    tenant: str,
+) -> tuple[dict | None, dict | None]:
+    request_payload = urlencode(
+        {
+            "code": code,
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "redirect_uri": redirect_uri,
+            "grant_type": "authorization_code",
+            "code_verifier": code_verifier,
+        }
+    ).encode("utf-8")
+    request = Request(
+        MICROSOFT_TOKEN_ENDPOINT_TEMPLATE.format(tenant=tenant),
+        data=request_payload,
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+
+    try:
+        with urlopen(request, timeout=20) as response:
+            return json.loads(response.read().decode("utf-8")), None
+    except HTTPError as error:
+        error_body = error.read().decode("utf-8", errors="replace")
+        try:
+            parsed_error = json.loads(error_body) if error_body else {}
+        except json.JSONDecodeError:
+            parsed_error = {}
+        return None, {
+            "code": "token_exchange_failed",
+            "message": (
+                parsed_error.get("error_description")
+                or parsed_error.get("error")
+                or "Microsoft token exchange failed."
+            ),
+        }
+    except URLError as error:
+        return None, {
+            "code": "token_exchange_unavailable",
+            "message": (
+                str(error.reason)
+                if getattr(error, "reason", None)
+                else "Could not reach Microsoft."
+            ),
+        }
+
+
+def _verify_signed_state_with_secrets(state: str) -> tuple[dict | None, str | None]:
+    shared_secret = os.getenv("CUEVION_OAUTH_STATE_SECRET", "").strip()
+    google_client_secret = os.getenv("GOOGLE_CLIENT_SECRET", "").strip()
+    microsoft_client_secret = os.getenv("MICROSOFT_CLIENT_SECRET", "").strip()
+    candidate_secrets: list[str] = []
+
+    for secret in (shared_secret, google_client_secret, microsoft_client_secret):
+        if secret and secret not in candidate_secrets:
+            candidate_secrets.append(secret)
+
+    saw_expired_state = False
+    for secret in candidate_secrets:
+        payload, error = verify_signed_state(
+            state,
+            secret,
+            expected_provider=None,
+        )
+        if payload is not None:
+            return payload, None
+        if error == "expired_state":
+            saw_expired_state = True
+
+    return None, "expired_state" if saw_expired_state else "invalid_state"
+
+
 class handler(BaseHTTPRequestHandler):
     def _send_callback_page(self, payload: dict):
         page = _render_callback_bridge_page(
@@ -493,17 +582,15 @@ class handler(BaseHTTPRequestHandler):
         params = parse_qs(parsed_url.query)
         oauth_error = params.get("error", [None])[0]
         state = params.get("state", [None])[0]
-        google_client_secret = os.getenv("GOOGLE_CLIENT_SECRET", "").strip()
-        oauth_state_secret = (
-            os.getenv("CUEVION_OAUTH_STATE_SECRET", "").strip() or google_client_secret
-        )
+        state_payload, state_error = _verify_signed_state_with_secrets(state or "")
 
-        state_payload, state_error = verify_signed_state(
-            state or "",
-            oauth_state_secret,
+        provider = (
+            state_payload.get("provider")
+            if isinstance(state_payload, dict)
+            and state_payload.get("provider") in {"google", "microsoft"}
+            else "google"
         )
-
-        provider = "google"
+        provider_name = "Microsoft" if provider == "microsoft" else "Google"
         email = (
             state_payload.get("email", "")
             if state_payload is not None
@@ -516,7 +603,7 @@ class handler(BaseHTTPRequestHandler):
                     provider=provider,
                     email=email,
                     connection_status="connection_failed",
-                    message="Google authentication could not be verified. Please try again.",
+                    message=f"{provider_name} authentication could not be verified. Please try again.",
                     connected=False,
                 )
             )
@@ -528,7 +615,7 @@ class handler(BaseHTTPRequestHandler):
                     provider=provider,
                     email=email,
                     connection_status="connection_failed",
-                    message="Google authentication was cancelled or denied.",
+                    message=f"{provider_name} authentication was cancelled or denied.",
                     connected=False,
                 )
             )
@@ -541,34 +628,66 @@ class handler(BaseHTTPRequestHandler):
                     provider=provider,
                     email=email,
                     connection_status="connection_failed",
-                    message="Google did not return an authorization code.",
+                    message=f"{provider_name} did not return an authorization code.",
                     connected=False,
                 )
             )
             return
 
-        google_client_id = os.getenv("GOOGLE_CLIENT_ID", "").strip()
-        google_redirect_uri = os.getenv("GOOGLE_OAUTH_REDIRECT_URI", "").strip()
+        if provider == "google":
+            google_client_id = os.getenv("GOOGLE_CLIENT_ID", "").strip()
+            google_client_secret = os.getenv("GOOGLE_CLIENT_SECRET", "").strip()
+            google_redirect_uri = os.getenv("GOOGLE_OAUTH_REDIRECT_URI", "").strip()
 
-        if not google_client_id or not google_client_secret or not google_redirect_uri:
-            self._send_callback_page(
-                _build_callback_payload(
-                    provider=provider,
-                    email=email,
-                    connection_status="connection_failed",
-                    message="Google OAuth callback is not fully configured.",
-                    connected=False,
+            if not google_client_id or not google_client_secret or not google_redirect_uri:
+                self._send_callback_page(
+                    _build_callback_payload(
+                        provider=provider,
+                        email=email,
+                        connection_status="connection_failed",
+                        message="Google OAuth callback is not fully configured.",
+                        connected=False,
+                    )
                 )
-            )
-            return
+                return
 
-        token_payload, token_error = _exchange_google_code(
-            code=authorization_code,
-            code_verifier=state_payload["code_verifier"],
-            client_id=google_client_id,
-            client_secret=google_client_secret,
-            redirect_uri=google_redirect_uri,
-        )
+            token_payload, token_error = _exchange_google_code(
+                code=authorization_code,
+                code_verifier=state_payload["code_verifier"],
+                client_id=google_client_id,
+                client_secret=google_client_secret,
+                redirect_uri=google_redirect_uri,
+            )
+        else:
+            microsoft_client_id = os.getenv("MICROSOFT_CLIENT_ID", "").strip()
+            microsoft_client_secret = os.getenv("MICROSOFT_CLIENT_SECRET", "").strip()
+            microsoft_redirect_uri = os.getenv("MICROSOFT_OAUTH_REDIRECT_URI", "").strip()
+            microsoft_tenant = os.getenv("MICROSOFT_OAUTH_TENANT", "").strip() or "common"
+
+            if (
+                not microsoft_client_id
+                or not microsoft_client_secret
+                or not microsoft_redirect_uri
+            ):
+                self._send_callback_page(
+                    _build_callback_payload(
+                        provider=provider,
+                        email=email,
+                        connection_status="connection_failed",
+                        message="Microsoft OAuth callback is not fully configured.",
+                        connected=False,
+                    )
+                )
+                return
+
+            token_payload, token_error = _exchange_microsoft_code(
+                code=authorization_code,
+                code_verifier=state_payload["code_verifier"],
+                client_id=microsoft_client_id,
+                client_secret=microsoft_client_secret,
+                redirect_uri=microsoft_redirect_uri,
+                tenant=microsoft_tenant,
+            )
 
         if token_error:
             self._send_callback_page(
@@ -588,16 +707,22 @@ class handler(BaseHTTPRequestHandler):
                     provider=provider,
                     email=email,
                     connection_status="connection_failed",
-                    message="Google returned an incomplete token response.",
+                    message=f"{provider_name} returned an incomplete token response.",
                     connected=False,
                 )
             )
             return
 
-        persisted_record, persistence_error = persist_google_token_record(
-            email=email,
-            token_payload=token_payload,
-        )
+        if provider == "google":
+            persisted_record, persistence_error = persist_google_token_record(
+                email=email,
+                token_payload=token_payload,
+            )
+        else:
+            persisted_record, persistence_error = persist_microsoft_token_record(
+                email=email,
+                token_payload=token_payload,
+            )
 
         if persistence_error:
             self._send_callback_page(
@@ -607,7 +732,7 @@ class handler(BaseHTTPRequestHandler):
                     connection_status="authenticated_pending_activation",
                     message=(
                         persistence_error["message"]
-                        or "Google authentication completed. Tokens are stored only in the current server runtime. Final mailbox activation requires durable secure mailbox token storage."
+                        or f"{provider_name} authentication completed. Tokens are stored only in the current server runtime. Final mailbox activation requires durable secure mailbox token storage."
                     ),
                     connected=False,
                 )
@@ -620,7 +745,7 @@ class handler(BaseHTTPRequestHandler):
                     provider=provider,
                     email=email,
                     connection_status="authenticated_pending_activation",
-                    message="Google authentication completed. Tokens are stored only in the current server runtime. Final mailbox activation requires durable secure mailbox token storage.",
+                    message=f"{provider_name} authentication completed. Tokens are stored only in the current server runtime. Final mailbox activation requires durable secure mailbox token storage.",
                     connected=False,
                 )
             )
@@ -633,7 +758,7 @@ class handler(BaseHTTPRequestHandler):
                     email=email,
                     connection_status="authenticated_pending_activation",
                     message=(
-                        "Google authentication completed. Tokens are stored only in the current server runtime bridge. "
+                        f"{provider_name} authentication completed. Tokens are stored only in the current server runtime bridge. "
                         "Final mailbox activation requires durable secure mailbox token storage."
                     ),
                     connected=False,
@@ -646,7 +771,7 @@ class handler(BaseHTTPRequestHandler):
                 provider=provider,
                 email=email,
                 connection_status="connected",
-                message="Google account connected. Durable mailbox token storage is active.",
+                message=f"{provider_name} account connected. Durable mailbox token storage is active.",
                 connected=True,
             )
         )
@@ -661,7 +786,7 @@ class handler(BaseHTTPRequestHandler):
                     "ok": False,
                     "error": {
                         "code": "method_not_allowed",
-                        "message": "Use GET for Google OAuth callbacks",
+                        "message": "Use GET for OAuth callbacks",
                     },
                 }
             ).encode("utf-8")

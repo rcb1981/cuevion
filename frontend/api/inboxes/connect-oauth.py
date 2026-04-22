@@ -10,12 +10,22 @@ from http.server import BaseHTTPRequestHandler
 from urllib.parse import urlencode
 
 GOOGLE_AUTHORIZATION_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth"
+MICROSOFT_AUTHORIZATION_ENDPOINT_TEMPLATE = (
+    "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/authorize"
+)
 DEFAULT_GOOGLE_SCOPES = [
     "openid",
     "email",
     "profile",
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/gmail.send",
+]
+DEFAULT_MICROSOFT_SCOPES = [
+    "openid",
+    "email",
+    "profile",
+    "offline_access",
+    "https://graph.microsoft.com/Mail.Read",
 ]
 
 
@@ -59,6 +69,14 @@ def resolve_google_scopes() -> list[str]:
     return [scope for scope in configured_scopes.split() if scope]
 
 
+def resolve_microsoft_scopes() -> list[str]:
+    configured_scopes = os.getenv("MICROSOFT_OAUTH_SCOPES", "").strip()
+    if not configured_scopes:
+        return DEFAULT_MICROSOFT_SCOPES
+
+    return [scope for scope in configured_scopes.split() if scope]
+
+
 class handler(BaseHTTPRequestHandler):
     def _send_json(self, status_code: int, payload: dict):
         response_body = json.dumps(payload).encode("utf-8")
@@ -96,7 +114,7 @@ class handler(BaseHTTPRequestHandler):
             email = str(payload.get("email", "")).strip().lower()
             email_pattern = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
-            if provider != "google":
+            if provider not in {"google", "microsoft"}:
                 self._send_json(
                     400,
                     {
@@ -110,49 +128,71 @@ class handler(BaseHTTPRequestHandler):
                 return
 
             if not email_pattern.match(email):
+                email_message = (
+                    "A valid Gmail or Google Workspace email is required."
+                    if provider == "google"
+                    else "A valid Microsoft 365 or Outlook email is required."
+                )
                 self._send_json(
                     400,
                     {
                         "ok": False,
                         "error": {
                             "code": "invalid_request",
-                            "message": "A valid Gmail or Google Workspace email is required.",
+                            "message": email_message,
                         },
                     },
                 )
                 return
 
-            google_client_id = os.getenv("GOOGLE_CLIENT_ID", "").strip()
-            google_client_secret = os.getenv("GOOGLE_CLIENT_SECRET", "").strip()
-            google_redirect_uri = os.getenv("GOOGLE_OAUTH_REDIRECT_URI", "").strip()
-            oauth_state_secret = (
-                os.getenv("CUEVION_OAUTH_STATE_SECRET", "").strip() or google_client_secret
-            )
+            if provider == "google":
+                client_id = os.getenv("GOOGLE_CLIENT_ID", "").strip()
+                client_secret = os.getenv("GOOGLE_CLIENT_SECRET", "").strip()
+                redirect_uri = os.getenv("GOOGLE_OAUTH_REDIRECT_URI", "").strip()
+                oauth_state_secret = (
+                    os.getenv("CUEVION_OAUTH_STATE_SECRET", "").strip() or client_secret
+                )
+            else:
+                client_id = os.getenv("MICROSOFT_CLIENT_ID", "").strip()
+                client_secret = os.getenv("MICROSOFT_CLIENT_SECRET", "").strip()
+                redirect_uri = os.getenv("MICROSOFT_OAUTH_REDIRECT_URI", "").strip()
+                oauth_state_secret = (
+                    os.getenv("CUEVION_OAUTH_STATE_SECRET", "").strip() or client_secret
+                )
 
-            if not google_client_id or not google_client_secret or not google_redirect_uri:
+            if not client_id or not client_secret or not redirect_uri:
+                config_message = (
+                    "Google OAuth is not configured. Set GOOGLE_CLIENT_ID, "
+                    "GOOGLE_CLIENT_SECRET, and GOOGLE_OAUTH_REDIRECT_URI."
+                    if provider == "google"
+                    else "Microsoft OAuth is not configured. Set MICROSOFT_CLIENT_ID, "
+                    "MICROSOFT_CLIENT_SECRET, and MICROSOFT_OAUTH_REDIRECT_URI."
+                )
                 self._send_json(
                     503,
                     {
                         "ok": False,
                         "error": {
                             "code": "oauth_not_configured",
-                            "message": (
-                                "Google OAuth is not configured. Set GOOGLE_CLIENT_ID, "
-                                "GOOGLE_CLIENT_SECRET, and GOOGLE_OAUTH_REDIRECT_URI."
-                            ),
+                            "message": config_message,
                         },
                     },
                 )
                 return
 
-            if not google_redirect_uri.startswith(("https://", "http://")):
+            if not redirect_uri.startswith(("https://", "http://")):
+                redirect_message = (
+                    "GOOGLE_OAUTH_REDIRECT_URI must be an absolute URL."
+                    if provider == "google"
+                    else "MICROSOFT_OAUTH_REDIRECT_URI must be an absolute URL."
+                )
                 self._send_json(
                     503,
                     {
                         "ok": False,
                         "error": {
                             "code": "oauth_invalid_redirect_uri",
-                            "message": "GOOGLE_OAUTH_REDIRECT_URI must be an absolute URL.",
+                            "message": redirect_message,
                         },
                     },
                 )
@@ -163,22 +203,43 @@ class handler(BaseHTTPRequestHandler):
                 email,
                 oauth_state_secret,
             )
-            authorization_params = {
-                "client_id": google_client_id,
-                "redirect_uri": google_redirect_uri,
-                "response_type": "code",
-                "scope": " ".join(resolve_google_scopes()),
-                "access_type": "offline",
-                "include_granted_scopes": "true",
-                "prompt": "consent",
-                "login_hint": email,
-                "state": authorization_state,
-                "code_challenge": build_code_challenge(code_verifier),
-                "code_challenge_method": "S256",
-            }
-            authorization_url = (
-                f"{GOOGLE_AUTHORIZATION_ENDPOINT}?{urlencode(authorization_params)}"
-            )
+            if provider == "google":
+                authorization_params = {
+                    "client_id": client_id,
+                    "redirect_uri": redirect_uri,
+                    "response_type": "code",
+                    "scope": " ".join(resolve_google_scopes()),
+                    "access_type": "offline",
+                    "include_granted_scopes": "true",
+                    "prompt": "consent",
+                    "login_hint": email,
+                    "state": authorization_state,
+                    "code_challenge": build_code_challenge(code_verifier),
+                    "code_challenge_method": "S256",
+                }
+                authorization_url = (
+                    f"{GOOGLE_AUTHORIZATION_ENDPOINT}?{urlencode(authorization_params)}"
+                )
+                message = "Continue with Google to finish authentication."
+            else:
+                microsoft_tenant = os.getenv("MICROSOFT_OAUTH_TENANT", "").strip() or "common"
+                authorization_params = {
+                    "client_id": client_id,
+                    "redirect_uri": redirect_uri,
+                    "response_type": "code",
+                    "response_mode": "query",
+                    "scope": " ".join(resolve_microsoft_scopes()),
+                    "prompt": "select_account",
+                    "login_hint": email,
+                    "state": authorization_state,
+                    "code_challenge": build_code_challenge(code_verifier),
+                    "code_challenge_method": "S256",
+                }
+                authorization_url = (
+                    f"{MICROSOFT_AUTHORIZATION_ENDPOINT_TEMPLATE.format(tenant=microsoft_tenant)}"
+                    f"?{urlencode(authorization_params)}"
+                )
+                message = "Continue with Microsoft to finish authentication."
 
             self._send_json(
                 200,
@@ -187,7 +248,7 @@ class handler(BaseHTTPRequestHandler):
                     "connectionMethod": "oauth",
                     "connectionStatus": "waiting_for_authentication",
                     "authorizationUrl": authorization_url,
-                    "message": "Continue with Google to finish authentication.",
+                    "message": message,
                 },
             )
         except Exception:

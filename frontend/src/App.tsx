@@ -319,12 +319,17 @@ function normalizeOAuthCallbackStorageResult(
 
   const result = value as OAuthCallbackStorageResult;
 
-  if (result.provider !== "google" || typeof result.email !== "string") {
+  if (
+    (result.provider !== "google" && result.provider !== "microsoft") ||
+    typeof result.email !== "string"
+  ) {
     return null;
   }
 
+  const provider = result.provider;
+
   return {
-    provider: "google",
+    provider,
     email: result.email.trim().toLowerCase(),
     connectionMethod: "oauth",
     connectionStatus:
@@ -350,11 +355,13 @@ function applyOAuthCallbackResultToOnboardingState(
     return state;
   }
 
+  const providerName =
+    callbackResult.provider === "microsoft" ? "Microsoft" : "Google";
   let didUpdate = false;
   const nextConnections = Object.fromEntries(
     Object.entries(state.inboxConnections).map(([inboxId, connection]) => {
       if (
-        connection.provider !== "google" ||
+        connection.provider !== callbackResult.provider ||
         connection.email.trim().toLowerCase() !== normalizedEmail
       ) {
         return [inboxId, connection];
@@ -371,10 +378,10 @@ function applyOAuthCallbackResultToOnboardingState(
       const connectionMessage =
         callbackResult.message ??
         (isConnected
-          ? "Google authentication completed."
+          ? `${providerName} authentication completed.`
           : connectionStatus === "authenticated_pending_activation"
-            ? "Google authentication completed. Tokens are stored only in the current server runtime. Final mailbox activation requires durable secure mailbox token storage."
-            : "Google authentication failed.");
+            ? `${providerName} authentication completed. Tokens are stored only in the current server runtime. Final mailbox activation requires durable secure mailbox token storage.`
+            : `${providerName} authentication failed.`);
       return [
         inboxId,
         {
@@ -409,9 +416,11 @@ function applyOAuthCallbackResultToManagedInboxes(
     return inboxes;
   }
 
+  const providerName =
+    callbackResult.provider === "microsoft" ? "Microsoft" : "Google";
   return inboxes.map((mailbox) => {
     if (
-      mailbox.provider !== "google" ||
+      mailbox.provider !== callbackResult.provider ||
       mailbox.email?.trim().toLowerCase() !== normalizedEmail
     ) {
       return mailbox;
@@ -426,10 +435,10 @@ function applyOAuthCallbackResultToManagedInboxes(
     const connectionMessage =
       callbackResult.message ??
       (isConnected
-        ? "Google authentication completed."
+        ? `${providerName} authentication completed.`
         : connectionStatus === "authenticated_pending_activation"
-          ? "Google authentication completed. Tokens are stored only in the current server runtime. Final mailbox activation requires durable secure mailbox token storage."
-          : "Google authentication failed.");
+          ? `${providerName} authentication completed. Tokens are stored only in the current server runtime. Final mailbox activation requires durable secure mailbox token storage.`
+          : `${providerName} authentication failed.`);
 
     return {
       ...mailbox,

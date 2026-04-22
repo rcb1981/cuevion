@@ -6,11 +6,11 @@ import type {
 } from "../types/onboarding";
 
 export function isImapCredentialsProvider(provider: ProviderId | null) {
-  return provider === "custom_imap" || provider === "microsoft";
+  return provider === "custom_imap";
 }
 
 export function isOAuthConnectionProvider(provider: ProviderId | null) {
-  return provider === "google";
+  return provider === "google" || provider === "microsoft";
 }
 
 export function getProviderConnectionMethod(
@@ -26,7 +26,7 @@ export function getProviderConnectionMethod(
 export function getDefaultConnectionStatus(
   provider: ProviderId | null,
 ): InboxConnectionStatus {
-  if (provider === "google") {
+  if (provider === "google" || provider === "microsoft") {
     return "oauth_required";
   }
 

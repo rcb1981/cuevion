@@ -83,6 +83,10 @@ def _build_store_key(state_or_mailbox_id: str) -> str:
     return f"cuevion:gmail:oauthtoken:{state_or_mailbox_id.strip().lower()}"
 
 
+def _build_microsoft_store_key(state_or_mailbox_id: str) -> str:
+    return f"cuevion:microsoft:oauthtoken:{state_or_mailbox_id.strip().lower()}"
+
+
 def build_google_token_record(
     *,
     email: str,
@@ -104,6 +108,44 @@ def build_google_token_record(
 
     return {
         "provider": "google",
+        "email": email,
+        "access_token": token_payload.get("access_token"),
+        "refresh_token": refresh_token,
+        "token_type": token_type if isinstance(token_type, str) else None,
+        "scope": scope if isinstance(scope, str) else None,
+        "expires_at": expires_at,
+        "expires_in": expires_in,
+        "updated_at": now,
+        "created_at": (
+            existing_record.get("created_at")
+            if isinstance(existing_record, dict)
+            and isinstance(existing_record.get("created_at"), str)
+            else now
+        ),
+    }
+
+
+def build_microsoft_token_record(
+    *,
+    email: str,
+    token_payload: dict,
+    existing_record: dict | None = None,
+) -> dict:
+    expires_at, expires_in = _resolve_expiry(token_payload)
+    refresh_token = token_payload.get("refresh_token")
+    if not isinstance(refresh_token, str) or not refresh_token.strip():
+        refresh_token = (
+            existing_record.get("refresh_token")
+            if isinstance(existing_record, dict)
+            else None
+        )
+
+    scope = token_payload.get("scope")
+    token_type = token_payload.get("token_type")
+    now = datetime.now(timezone.utc).isoformat()
+
+    return {
+        "provider": "microsoft",
         "email": email,
         "access_token": token_payload.get("access_token"),
         "refresh_token": refresh_token,
@@ -390,6 +432,77 @@ def persist_google_token_record(
         durable_config=durable_config,
         record=next_record,
     )
+
+
+def persist_microsoft_token_record(
+    *,
+    email: str,
+    token_payload: dict,
+) -> tuple[dict | None, dict | None]:
+    access_token = token_payload.get("access_token")
+    if not isinstance(access_token, str) or not access_token.strip():
+        return None, {
+            "code": "invalid_token_payload",
+            "message": "Microsoft returned an incomplete token response.",
+        }
+
+    normalized_email = email.strip().lower()
+    store_key = _build_microsoft_store_key(normalized_email)
+    durable_config = _resolve_durable_store_config()
+    existing_record = None
+
+    if durable_config:
+        existing_record, existing_error = _read_durable_record(durable_config, store_key)
+        if existing_error:
+            return None, existing_error
+    else:
+        existing_store = _read_runtime_store(_resolve_runtime_store_path())
+        existing_record = existing_store.get(store_key)
+
+    next_record = build_microsoft_token_record(
+        email=normalized_email,
+        token_payload=token_payload,
+        existing_record=existing_record if isinstance(existing_record, dict) else None,
+    )
+
+    if durable_config:
+        persisted_record, error = _write_durable_record(
+            durable_config,
+            store_key,
+            next_record,
+        )
+        storage_backend = durable_config["backend"]
+        storage_durable = True
+    else:
+        persisted_record, error = _persist_runtime_record(store_key, next_record)
+        storage_backend = "runtime_tmp_file"
+        storage_durable = False
+
+    if error:
+        return None, error
+
+    if not isinstance(persisted_record, dict):
+        return None, {
+            "code": "token_persistence_failed",
+            "message": "Microsoft authentication succeeded, but mailbox token storage could not be verified.",
+        }
+
+    if (
+        persisted_record.get("provider") != "microsoft"
+        or persisted_record.get("email") != normalized_email
+        or not isinstance(persisted_record.get("access_token"), str)
+        or not persisted_record.get("access_token")
+    ):
+        return None, {
+            "code": "token_persistence_failed",
+            "message": "Microsoft authentication succeeded, but the stored mailbox token record is incomplete.",
+        }
+
+    return {
+        **persisted_record,
+        "_storage_backend": storage_backend,
+        "_storage_durable": storage_durable,
+    }, None
 
 
 def refresh_google_token_record(email: str) -> tuple[dict | None, dict | None]:
