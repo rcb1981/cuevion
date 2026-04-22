@@ -212,7 +212,7 @@ export async function fetchCollaborationThreadsGetMany(
   request: FetchCollaborationThreadsGetManyRequest,
 ): Promise<Record<string, CollaborationThread>> {
   try {
-    const response = await fetch("/api/collaboration/threads/get-many", {
+    const response = await fetch("/api/collaboration/thread?op=get-many", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -236,7 +236,7 @@ export async function createCollaborationThread(
   request: CreateCollaborationThreadRequest,
 ): Promise<CreateCollaborationThreadResponse> {
   try {
-    const response = await fetch("/api/collaboration/thread/create", {
+    const response = await fetch("/api/collaboration/thread?op=create", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -272,7 +272,7 @@ export async function mutateCollaborationThread(
   request: MutateCollaborationThreadRequest,
 ): Promise<MutateCollaborationThreadResponse> {
   try {
-    const response = await fetch("/api/collaboration/thread/action", {
+    const response = await fetch("/api/collaboration/thread?op=action", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -319,7 +319,7 @@ export async function issueCollaborationInvite(
   request: IssueCollaborationInviteRequest,
 ): Promise<IssueCollaborationInviteResponse> {
   try {
-    const response = await fetch("/api/collaboration/invite/issue", {
+    const response = await fetch("/api/collaboration/invite?op=issue", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -360,7 +360,9 @@ export async function fetchCollaborationInvite(
   options?: FetchCollaborationInviteOptions,
 ): Promise<FetchCollaborationInviteResponse> {
   try {
-    const url = new URL(`/api/collaboration/invite/${encodeURIComponent(token)}`, window.location.origin);
+    const url = new URL("/api/collaboration/invite", window.location.origin);
+    url.searchParams.set("op", "lookup");
+    url.searchParams.set("token", token);
     if (options?.viewer) {
       url.searchParams.set("viewer", options.viewer);
     }
@@ -415,8 +417,11 @@ export async function mutateCollaborationInvite(
   request: MutateCollaborationInviteRequest,
 ): Promise<MutateCollaborationInviteResponse> {
   try {
+    const url = new URL("/api/collaboration/invite", window.location.origin);
+    url.searchParams.set("op", "action");
+    url.searchParams.set("token", request.token);
     const response = await fetch(
-      `/api/collaboration/invite/${encodeURIComponent(request.token)}/action`,
+      `${url.pathname}${url.search}`,
       {
         method: "POST",
         headers: {
