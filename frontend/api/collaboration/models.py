@@ -44,6 +44,20 @@ def _normalize_bool(value: Any) -> bool:
     return value is True
 
 
+def _normalize_string_list(value: Any) -> list[str] | None:
+    if not isinstance(value, list):
+        return None
+
+    normalized_values: list[str] = []
+    for entry in value:
+        normalized_entry = _normalize_string(entry)
+        if normalized_entry is None:
+            return None
+        normalized_values.append(normalized_entry)
+
+    return normalized_values
+
+
 def normalize_collaboration_mention_record(value: Any) -> dict | None:
     if not isinstance(value, dict):
         return None
@@ -211,6 +225,46 @@ def normalize_collaboration_record(value: Any) -> dict | None:
     return normalized_collaboration
 
 
+def normalize_source_message_snapshot(value: Any) -> dict | None:
+    if not isinstance(value, dict):
+        return None
+
+    message_id = _normalize_string(value.get("id"))
+    subject = _normalize_string(value.get("subject"))
+    sender = _normalize_string(value.get("sender"))
+    from_value = _normalize_string(value.get("from"))
+    timestamp = _normalize_string(value.get("timestamp"))
+    snippet = _normalize_string(value.get("snippet"))
+    body = _normalize_string_list(value.get("body"))
+
+    if (
+        not message_id
+        or subject is None
+        or sender is None
+        or from_value is None
+        or timestamp is None
+        or snippet is None
+        or body is None
+    ):
+        return None
+
+    normalized_source_message = {
+        "id": message_id,
+        "subject": subject,
+        "sender": sender,
+        "from": from_value,
+        "timestamp": timestamp,
+        "snippet": snippet,
+        "body": body,
+    }
+
+    body_html = _normalize_string(value.get("bodyHtml"))
+    if body_html:
+        normalized_source_message["bodyHtml"] = body_html
+
+    return normalized_source_message
+
+
 def normalize_collaboration_thread_record(value: Any) -> dict | None:
     if not isinstance(value, dict):
         return None
@@ -219,6 +273,7 @@ def normalize_collaboration_thread_record(value: Any) -> dict | None:
     workspace_id = _normalize_string(value.get("workspaceId"))
     mailbox_id = _normalize_string(value.get("mailboxId"))
     message_id = _normalize_string(value.get("messageId"))
+    source_message = normalize_source_message_snapshot(value.get("sourceMessage"))
     collaboration = normalize_collaboration_record(value.get("collaboration"))
 
     if (
@@ -226,6 +281,7 @@ def normalize_collaboration_thread_record(value: Any) -> dict | None:
         or not workspace_id
         or not mailbox_id
         or not message_id
+        or source_message is None
         or collaboration is None
     ):
         return None
@@ -235,6 +291,7 @@ def normalize_collaboration_thread_record(value: Any) -> dict | None:
         "workspaceId": workspace_id,
         "mailboxId": mailbox_id,
         "messageId": message_id,
+        "sourceMessage": source_message,
         "isShared": _normalize_bool(value.get("isShared")),
         "collaboration": collaboration,
     }

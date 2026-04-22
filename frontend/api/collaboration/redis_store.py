@@ -48,9 +48,11 @@ def _perform_rest_request(
     config: dict,
     method: str,
     path: str,
+    body: bytes | None = None,
 ) -> tuple[dict | None, dict | None]:
     request = Request(
         f"{config['rest_url']}{path}",
+        data=body,
         headers={
             "Authorization": f"Bearer {config['rest_token']}",
             "Content-Type": "application/json",
@@ -169,3 +171,131 @@ def get_threads_many(workspace_id: str, message_ids: list[str]) -> dict[str, dic
         threads_by_message_id[message_id] = normalized_thread
 
     return threads_by_message_id
+
+
+def get_thread(workspace_id: str, message_id: str) -> dict | None:
+    normalized_workspace_id = workspace_id.strip().lower()
+    normalized_message_id = message_id.strip()
+
+    if not normalized_workspace_id or not normalized_message_id:
+        return None
+
+    config = _resolve_durable_store_config()
+    if not config:
+        return None
+
+    record, error = _read_durable_record(
+        config,
+        build_thread_key(normalized_workspace_id, normalized_message_id),
+    )
+    if error or not record:
+        return None
+
+    normalized_thread = normalize_collaboration_thread_record(record)
+    if not normalized_thread:
+        return None
+
+    if (
+        normalized_thread["workspaceId"] != normalized_workspace_id
+        or normalized_thread["messageId"] != normalized_message_id
+    ):
+        return None
+
+    return normalized_thread
+
+
+def _write_durable_record(config: dict, store_key: str, record: dict) -> tuple[dict | None, dict | None]:
+    encoded_record = json.dumps(record, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    payload, error = _perform_rest_request(
+        config,
+        "POST",
+        f"/set/{quote(store_key, safe='')}",
+        body=encoded_record,
+    )
+    if error:
+        return None, error
+
+    if not isinstance(payload, dict) or payload.get("result") != "OK":
+        return None, {
+            "code": "collaboration_store_unavailable",
+            "message": "Collaboration store did not confirm the write.",
+        }
+
+    return payload, None
+
+
+def save_thread(thread_record: dict) -> tuple[dict | None, dict | None]:
+    normalized_thread = normalize_collaboration_thread_record(thread_record)
+    if not normalized_thread:
+        return None, {
+            "code": "invalid_thread",
+            "message": "Thread record is invalid.",
+        }
+
+    config = _resolve_durable_store_config()
+    if not config:
+        return None, {
+            "code": "collaboration_store_unavailable",
+            "message": "Collaboration store is not configured.",
+        }
+
+    _, error = _write_durable_record(
+        config,
+        build_thread_key(normalized_thread["workspaceId"], normalized_thread["messageId"]),
+        normalized_thread,
+    )
+    if error:
+        return None, error
+
+    return normalized_thread, None
+
+
+def create_thread_if_missing(thread_record: dict) -> tuple[dict | None, dict | None]:
+    normalized_thread = normalize_collaboration_thread_record(thread_record)
+    if not normalized_thread:
+        return None, {
+            "code": "invalid_thread",
+            "message": "Thread record is invalid.",
+        }
+
+    existing_thread = get_thread(
+        normalized_thread["workspaceId"],
+        normalized_thread["messageId"],
+    )
+    if existing_thread:
+        return existing_thread, None
+
+    return save_thread(normalized_thread)
+
+
+def save_thread_if_expected(
+    thread_record: dict,
+    expected_updated_at: int | None = None,
+) -> tuple[dict | None, dict | None]:
+    normalized_thread = normalize_collaboration_thread_record(thread_record)
+    if not normalized_thread:
+        return None, {
+            "code": "invalid_thread",
+            "message": "Thread record is invalid.",
+        }
+
+    existing_thread = get_thread(
+        normalized_thread["workspaceId"],
+        normalized_thread["messageId"],
+    )
+    if not existing_thread:
+        return None, {
+            "code": "thread_not_found",
+            "message": "Canonical collaboration thread was not found.",
+        }
+
+    if (
+        expected_updated_at is not None
+        and existing_thread["collaboration"]["updatedAt"] != expected_updated_at
+    ):
+        return existing_thread, {
+            "code": "stale_thread",
+            "message": "Canonical collaboration thread is newer than the local version.",
+        }
+
+    return save_thread(normalized_thread)

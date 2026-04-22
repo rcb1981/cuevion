@@ -58,7 +58,12 @@ import {
   type SendInboxAttachmentRequest,
   type LiveInboxMessageSnapshot,
 } from "../../lib/inboxConnectionApi";
-import { fetchCollaborationThreadsGetMany } from "../../lib/collaborationApi";
+import {
+  createCollaborationThread,
+  fetchCollaborationThreadsGetMany,
+  mutateCollaborationThread,
+  type CollaborationThread,
+} from "../../lib/collaborationApi";
 import * as learningEngine from "../../lib/learningEngine";
 import * as forYouEngine from "../../lib/forYouEngine";
 import * as suggestionEngine from "../../lib/suggestionEngine";
@@ -11932,6 +11937,28 @@ function MailboxView({
     return messageId ? [messageId] : selectedMessageIds;
   };
 
+  const applyCanonicalCollaborationThreadToMessage = (
+    messageId: string,
+    thread: CollaborationThread,
+  ) => {
+    updateMessageById(messageId, (message) => ({
+      ...message,
+      collaboration: thread.collaboration as MailMessageCollaboration,
+      isShared: thread.isShared,
+    }));
+  };
+
+  const buildCollaborationSourceMessageSnapshot = (message: MailMessage) => ({
+    id: message.id,
+    subject: message.subject,
+    sender: message.sender,
+    from: message.from,
+    timestamp: message.timestamp,
+    snippet: message.snippet,
+    body: message.body,
+    bodyHtml: message.bodyHtml,
+  });
+
   const createCollaborationForMessage = (
     messageId: string,
     options?: {
@@ -11940,6 +11967,11 @@ function MailboxView({
       note?: string;
     },
   ) => {
+    const sourceMessage = getMessageById(messageId);
+    if (!sourceMessage) {
+      return;
+    }
+
     const selectedPerson = collaborationSelectablePeople.find(
       (person) => person.id === (options?.selectedPersonId ?? collaborationPersonId),
     ) ?? {
@@ -11982,29 +12014,47 @@ function MailboxView({
         ]
       : [];
 
+    const canonicalCollaboration: CollaborationThread["collaboration"] = {
+      state: options?.requestType ?? collaborationRequestType,
+      requestedBy: currentUserName,
+      requestedUserId: selectedPerson.id,
+      requestedUserName: selectedPerson.name,
+      createdAt: nextTimestamp,
+      updatedAt: nextTimestamp,
+      participants: [
+        {
+          id: selectedPerson.id,
+          name: selectedPerson.name,
+          email: selectedPerson.email,
+          kind: selectedPerson.kind,
+          status: selectedPerson.status,
+        },
+      ],
+      previewText: trimmedNote || undefined,
+      messages: initialMessages,
+    };
+
     updateMessageById(messageId, (message) => ({
       ...message,
       isShared: true,
-      collaboration: {
-        state: options?.requestType ?? collaborationRequestType,
-        requestedBy: currentUserName,
-        requestedUserId: selectedPerson.id,
-        requestedUserName: selectedPerson.name,
-        createdAt: nextTimestamp,
-        updatedAt: nextTimestamp,
-        participants: [
-          {
-            id: selectedPerson.id,
-            name: selectedPerson.name,
-            email: selectedPerson.email,
-            kind: selectedPerson.kind,
-            status: selectedPerson.status,
-          },
-        ],
-        previewText: trimmedNote || undefined,
-        messages: initialMessages,
-      },
+      collaboration: canonicalCollaboration,
     }));
+
+    void (async () => {
+      const result = await createCollaborationThread({
+        workspaceId: currentUserId,
+        mailboxId: mailbox.id,
+        sourceMessage: buildCollaborationSourceMessageSnapshot(sourceMessage),
+        collaboration: canonicalCollaboration,
+        isShared: true,
+      });
+
+      if (!result.ok || !result.thread) {
+        return;
+      }
+
+      applyCanonicalCollaborationThreadToMessage(messageId, result.thread);
+    })();
   };
 
   const openShareCollaboration = (messageId: string) => {
@@ -12142,6 +12192,8 @@ function MailboxView({
   };
 
   const markMessageCollaborationDone = (messageId: string) => {
+    const currentMessage = getMessageById(messageId);
+    const expectedUpdatedAt = currentMessage?.collaboration?.updatedAt;
     const nextTimestamp = Date.now();
 
     updateMessageById(messageId, (message) =>
@@ -12164,6 +12216,53 @@ function MailboxView({
     if (activeCollaborationMessageId === messageId) {
       closeCollaborationOverlay();
     }
+
+    void (async () => {
+      const result = await mutateCollaborationThread({
+        workspaceId: currentUserId,
+        messageId,
+        expectedUpdatedAt,
+        action: {
+          type: "resolve",
+          resolvedByUserId: currentUserId,
+          resolvedByUserName: currentUserName,
+        },
+      });
+
+      if (result.ok) {
+        applyCanonicalCollaborationThreadToMessage(messageId, result.thread);
+        return;
+      }
+
+      if (result.code === "stale_thread") {
+        applyCanonicalCollaborationThreadToMessage(messageId, result.thread);
+      }
+    })();
+  };
+
+  const reopenMessageCollaboration = (messageId: string) => {
+    const currentMessage = getMessageById(messageId);
+    const expectedUpdatedAt = currentMessage?.collaboration?.updatedAt;
+
+    void (async () => {
+      const result = await mutateCollaborationThread({
+        workspaceId: currentUserId,
+        messageId,
+        expectedUpdatedAt,
+        action: {
+          type: "reopen",
+        },
+      });
+
+      if (result.ok) {
+        applyCanonicalCollaborationThreadToMessage(messageId, result.thread);
+        return;
+      }
+
+      if (result.code === "stale_thread") {
+        applyCanonicalCollaborationThreadToMessage(messageId, result.thread);
+      }
+    })();
   };
 
   const createMessageCollaboration = () => {
@@ -12181,6 +12280,8 @@ function MailboxView({
       return;
     }
 
+    const currentMessage = getMessageById(messageId);
+    const expectedUpdatedAt = currentMessage?.collaboration?.updatedAt;
     const nextTimestamp = Date.now();
     const mentions = extractCollaborationMentions(
       trimmedReply,
@@ -12222,6 +12323,31 @@ function MailboxView({
     setCollaborationMentionIndex(0);
     setCollaborationReplySelection(null);
     closeCollaborationOverlay();
+
+    void (async () => {
+      const result = await mutateCollaborationThread({
+        workspaceId: currentUserId,
+        messageId,
+        expectedUpdatedAt,
+        action: {
+          type: "reply",
+          authorId: currentUserId,
+          authorName: currentUserName,
+          text: trimmedReply,
+          visibility: collaborationReplyVisibility,
+          mentions,
+        },
+      });
+
+      if (result.ok) {
+        applyCanonicalCollaborationThreadToMessage(messageId, result.thread);
+        return;
+      }
+
+      if (result.code === "stale_thread") {
+        applyCanonicalCollaborationThreadToMessage(messageId, result.thread);
+      }
+    })();
   };
 
   const addParticipantToCollaboration = (
@@ -12241,6 +12367,10 @@ function MailboxView({
       return;
     }
 
+    const currentMessage = getMessageById(messageId);
+    const expectedUpdatedAt = currentMessage?.collaboration?.updatedAt;
+    let nextParticipantsForCanonicalWrite: MailMessageCollaborationParticipant[] | null = null;
+
     updateMessageById(messageId, (message) => {
       if (!message.collaboration) {
         return message;
@@ -12257,26 +12387,53 @@ function MailboxView({
         return message;
       }
 
+      nextParticipantsForCanonicalWrite = [
+        ...existingParticipants,
+        {
+          id: selectedParticipant.id,
+          name: selectedParticipant.name,
+          email: selectedParticipant.email,
+          kind: selectedParticipant.kind,
+          status: "active" as const,
+        },
+      ];
+
       return {
         ...message,
         collaboration: {
           ...message.collaboration,
           updatedAt: nextTimestamp,
-          participants: [
-            ...existingParticipants,
-            {
-              id: selectedParticipant.id,
-              name: selectedParticipant.name,
-              email: selectedParticipant.email,
-              kind: selectedParticipant.kind,
-              status: "active" as const,
-            },
-          ],
+          participants: nextParticipantsForCanonicalWrite,
         },
       };
     });
 
     setCollaborationParticipantPersonId("");
+
+    if (!nextParticipantsForCanonicalWrite) {
+      return;
+    }
+
+    void (async () => {
+      const result = await mutateCollaborationThread({
+        workspaceId: currentUserId,
+        messageId,
+        expectedUpdatedAt,
+        action: {
+          type: "participants_set",
+          participants: nextParticipantsForCanonicalWrite,
+        },
+      });
+
+      if (result.ok) {
+        applyCanonicalCollaborationThreadToMessage(messageId, result.thread);
+        return;
+      }
+
+      if (result.code === "stale_thread") {
+        applyCanonicalCollaborationThreadToMessage(messageId, result.thread);
+      }
+    })();
   };
 
   const removeParticipantFromCollaboration = (
@@ -12289,22 +12446,53 @@ function MailboxView({
       return;
     }
 
+    const currentMessage = getMessageById(messageId);
+    const expectedUpdatedAt = currentMessage?.collaboration?.updatedAt;
+    let nextParticipantsForCanonicalWrite: MailMessageCollaborationParticipant[] | null = null;
+
     updateMessageById(messageId, (message) => {
       if (!message.collaboration) {
         return message;
       }
+
+      nextParticipantsForCanonicalWrite = (message.collaboration.participants ?? []).filter(
+        (participant) => participant.email.toLowerCase() !== normalizedEmail,
+      );
 
       return {
         ...message,
         collaboration: {
           ...message.collaboration,
           updatedAt: Date.now(),
-          participants: (message.collaboration.participants ?? []).filter(
-            (participant) => participant.email.toLowerCase() !== normalizedEmail,
-          ),
+          participants: nextParticipantsForCanonicalWrite,
         },
       };
     });
+
+    if (!nextParticipantsForCanonicalWrite) {
+      return;
+    }
+
+    void (async () => {
+      const result = await mutateCollaborationThread({
+        workspaceId: currentUserId,
+        messageId,
+        expectedUpdatedAt,
+        action: {
+          type: "participants_set",
+          participants: nextParticipantsForCanonicalWrite,
+        },
+      });
+
+      if (result.ok) {
+        applyCanonicalCollaborationThreadToMessage(messageId, result.thread);
+        return;
+      }
+
+      if (result.code === "stale_thread") {
+        applyCanonicalCollaborationThreadToMessage(messageId, result.thread);
+      }
+    })();
   };
 
   const openStoredExternalReviewLink = (
@@ -17108,6 +17296,17 @@ function MailboxView({
                   </div>
 
                   <div className="mt-4 flex shrink-0 flex-wrap items-center justify-end gap-3 border-t border-[var(--workspace-border-soft)] pt-4">
+                    {activeCollaborationMessage.collaboration.state === "resolved" ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          reopenMessageCollaboration(activeCollaborationMessage.id);
+                        }}
+                        className={modalSecondaryActionButtonClass}
+                      >
+                        Reopen collaboration
+                      </button>
+                    ) : null}
                     <button
                       type="button"
                       onClick={() => sendCollaborationReply(activeCollaborationMessage.id)}
