@@ -16146,6 +16146,20 @@ function MailboxView({
                           resolveVisibilityClassificationForMessage(selectedMessage);
                         const selectedResolvedVisibleCategoryLabel =
                           getVisibleCategoryLabelForMessage(selectedMessage);
+                        const selectedResolvedFocusPreferenceLevelForPriorityMessage =
+                          resolveFocusPreferenceLevelForMessage(selectedMessage);
+                        const selectedVisiblePriorityBadge =
+                          getVisiblePriorityBadgeForMessage(selectedMessage);
+                        const selectedShouldDisplayInFilteredFolder =
+                          shouldDisplayMessageInFilteredFolderForWorkspaceMessage(
+                            selectedMessage,
+                            manualPriorityOverrides[selectedMessage.id],
+                            focusPreferences,
+                            {
+                              preferPromoMailboxContext:
+                                shouldPreferCurrentMailboxPromoContext,
+                            },
+                          );
 
                         if (shouldLogSelectedBumaStemraDiagnostic) {
                           console.debug(
@@ -16160,6 +16174,12 @@ function MailboxView({
                               selectedUiSignal: selectedMessage.ui_signal,
                               selectedResolvedVisibleClassification,
                               selectedResolvedVisibleCategoryLabel,
+                              focusPreferencesBusiness: focusPreferences.business,
+                              focusPreferencesUpdates: focusPreferences.updates,
+                              resolvedFocusPreferenceLevelForPriorityMessage:
+                                selectedResolvedFocusPreferenceLevelForPriorityMessage,
+                              selectedVisiblePriorityBadge,
+                              selectedShouldDisplayInFilteredFolder,
                             },
                           );
                         }
