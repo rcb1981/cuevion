@@ -188,6 +188,32 @@ function buildStablePreviewIdentity(message: MessageIdentitySource) {
   return `${message.subject ?? ""}|${message.from ?? ""}|${message.timestamp ?? ""}`;
 }
 
+function resolvePreferredCollaborationSnapshotState(
+  snapshotCollaboration?: MailMessageCollaboration,
+  currentCollaboration?: MailMessageCollaboration,
+  snapshotIsShared?: boolean,
+  currentIsShared?: boolean,
+) {
+  if (snapshotCollaboration && currentCollaboration) {
+    if (snapshotCollaboration.updatedAt > currentCollaboration.updatedAt) {
+      return {
+        collaboration: snapshotCollaboration,
+        isShared: snapshotIsShared ?? currentIsShared,
+      };
+    }
+
+    return {
+      collaboration: currentCollaboration,
+      isShared: currentIsShared,
+    };
+  }
+
+  return {
+    collaboration: snapshotCollaboration ?? currentCollaboration,
+    isShared: snapshotIsShared ?? currentIsShared,
+  };
+}
+
 function parseImapUidFromMessageId(messageId?: string | null) {
   const normalizedMessageId = messageId?.trim();
 
@@ -11915,15 +11941,24 @@ function MailboxView({
     setMailboxStore((currentStore) =>
       Object.entries(currentStore).reduce<MailboxStore>((nextStore, [mailboxId, collections]) => {
         const syncFolder = (messages: MailMessage[]) =>
-          messages.map((message) =>
-            message.id === messageId
-              ? {
-                  ...message,
-                  collaboration: snapshotMessage.collaboration ?? message.collaboration,
-                  isShared: snapshotMessage.isShared ?? message.isShared,
-                }
-              : message,
-          );
+          messages.map((message) => {
+            if (message.id !== messageId) {
+              return message;
+            }
+
+            const preferredSnapshotState = resolvePreferredCollaborationSnapshotState(
+              snapshotMessage.collaboration,
+              message.collaboration,
+              snapshotMessage.isShared,
+              message.isShared,
+            );
+
+            return {
+              ...message,
+              collaboration: preferredSnapshotState.collaboration,
+              isShared: preferredSnapshotState.isShared,
+            };
+          });
 
         nextStore[mailboxId as InboxId] = {
           Inbox: syncFolder(collections.Inbox),
@@ -25242,6 +25277,12 @@ export function WorkspaceShell({
     const normalizedIncoming = uniqueIncomingMessages.map((message) => {
       const persistedMessage = message as PersistedLiveInboxMessageSnapshot;
       const existingMessage = findMatchingMessageByIdentity(persistedMessage, currentInboxIndexes);
+      const preferredSnapshotState = resolvePreferredCollaborationSnapshotState(
+        persistedMessage.collaboration,
+        existingMessage?.collaboration,
+        persistedMessage.isShared,
+        existingMessage?.isShared,
+      );
       const unread =
         resolveUnreadOverride(messageUnreadOverrides, persistedMessage) ??
         existingMessage?.unread ??
@@ -25269,9 +25310,8 @@ export function WorkspaceShell({
           body: message.body,
           bodyHtml: message.bodyHtml,
           attachments: message.attachments,
-          isShared: persistedMessage.isShared ?? existingMessage?.isShared,
-          collaboration:
-            persistedMessage.collaboration ?? existingMessage?.collaboration,
+          isShared: preferredSnapshotState.isShared,
+          collaboration: preferredSnapshotState.collaboration,
         },
         mailboxId,
         senderCategoryLearning,
