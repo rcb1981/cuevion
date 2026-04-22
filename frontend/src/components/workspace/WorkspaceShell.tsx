@@ -9965,14 +9965,8 @@ function MailboxView({
       case "promo_reminder":
         return "Promo";
       case "business":
-      case "business_reminder": {
-        const heuristic = inferHeuristicSignal({
-          ...message,
-          signal: undefined,
-          isAutoReply: false,
-        });
-        return heuristic === "Promo" ? "Promo" : "Business";
-      }
+      case "business_reminder":
+        return "Business";
       case "workflow_update":
       case "info": {
         if (
