@@ -628,6 +628,7 @@ const MAIL_SIGNATURES_STORAGE_KEY = "cuevion-mail-signatures";
 const MAIL_OUT_OF_OFFICE_STORAGE_KEY = "cuevion-mail-out-of-office";
 const OUT_OF_OFFICE_REPLY_LOG_STORAGE_KEY = "cuevion-out-of-office-reply-log";
 const MANAGED_INBOXES_STORAGE_KEY = "cuevion-managed-inboxes";
+const PRIMARY_MANAGED_INBOX_ID_STORAGE_KEY = "cuevion-primary-managed-inbox-id";
 const MAILBOX_TITLE_OVERRIDES_STORAGE_KEY = "cuevion-mailbox-title-overrides";
 const MAILBOX_FOCUS_PREFERENCE_OVERRIDES_STORAGE_KEY =
   "cuevion-mailbox-focus-preference-overrides";
@@ -691,6 +692,18 @@ function buildNotificationReadStorageKey(workspaceUserId: string) {
 
 function buildMailboxFocusPreferenceOverridesStorageKey(workspaceUserId: string) {
   return `${MAILBOX_FOCUS_PREFERENCE_OVERRIDES_STORAGE_KEY}:${workspaceUserId}`;
+}
+
+function buildPrimaryManagedInboxStorageKey(
+  workspaceUserId: string,
+  managedInboxes: ManagedWorkspaceInbox[],
+) {
+  const managedInboxSetKey = managedInboxes
+    .map((mailbox) => `${mailbox.id}:${mailbox.email.trim().toLowerCase()}`)
+    .sort()
+    .join("|");
+
+  return `${PRIMARY_MANAGED_INBOX_ID_STORAGE_KEY}:${workspaceUserId}:${managedInboxSetKey}`;
 }
 
 function createEmptySignatureSettings(): InboxSignatureSettings {
@@ -19031,6 +19044,49 @@ function normalizeManagedWorkspaceInbox(
   };
 }
 
+function isSelectablePrimaryManagedInbox(mailbox: ManagedWorkspaceInbox) {
+  return mailbox.connected === true && mailbox.connectionStatus === "connected";
+}
+
+function resolvePrimaryManagedInboxId(
+  mailboxes: ManagedWorkspaceInbox[],
+  preferredInboxId: string | null,
+) {
+  if (preferredInboxId) {
+    const preferredMailbox = mailboxes.find((mailbox) => mailbox.id === preferredInboxId);
+
+    if (preferredMailbox && isSelectablePrimaryManagedInbox(preferredMailbox)) {
+      return preferredMailbox.id;
+    }
+  }
+
+  const firstConnectedMailbox = mailboxes.find(isSelectablePrimaryManagedInbox);
+  if (firstConnectedMailbox) {
+    return firstConnectedMailbox.id;
+  }
+
+  return mailboxes[0]?.id ?? null;
+}
+
+function orderManagedWorkspaceInboxes(
+  mailboxes: ManagedWorkspaceInbox[],
+  primaryInboxId: string | null,
+) {
+  if (!primaryInboxId) {
+    return mailboxes;
+  }
+
+  const primaryMailbox = mailboxes.find((mailbox) => mailbox.id === primaryInboxId);
+  if (!primaryMailbox) {
+    return mailboxes;
+  }
+
+  return [
+    primaryMailbox,
+    ...mailboxes.filter((mailbox) => mailbox.id !== primaryInboxId),
+  ];
+}
+
 function buildManagedWorkspaceInboxes(
   onboardingState: OnboardingState,
 ): ManagedWorkspaceInbox[] {
@@ -19484,10 +19540,12 @@ function ManagedInboxEditor({
   editable,
   isExisting,
   isPrimary = false,
+  canSetPrimary = false,
   connectionError = null,
   isApplying = false,
   onEditAction,
   onRemoveAction,
+  onSetPrimaryAction,
   removeDisabled = false,
   showValidationErrors = false,
   onApplyAction,
@@ -19498,10 +19556,12 @@ function ManagedInboxEditor({
   editable: boolean;
   isExisting: boolean;
   isPrimary?: boolean;
+  canSetPrimary?: boolean;
   connectionError?: string | null;
   isApplying?: boolean;
   onEditAction?: () => void;
   onRemoveAction?: () => void;
+  onSetPrimaryAction?: () => void;
   removeDisabled?: boolean;
   showValidationErrors?: boolean;
   onApplyAction?: () => void;
@@ -19836,6 +19896,15 @@ function ManagedInboxEditor({
           </>
         ) : onEditAction ? (
           <>
+            {!isPrimary && canSetPrimary && onSetPrimaryAction ? (
+              <button
+                type="button"
+                onClick={onSetPrimaryAction}
+                className={settingsSubtleActionClass}
+              >
+                Set as primary
+              </button>
+            ) : null}
             {isExisting && !isPrimary && onRemoveAction ? (
               <button
                 type="button"
@@ -19866,13 +19935,17 @@ function ManagedInboxEditor({
 
 const ManageInboxesView = memo(function ManageInboxesView({
   savedManagedInboxes,
+  primaryManagedInboxId,
   onBack,
   onApply,
+  onSetPrimaryInbox,
   themeMode,
 }: {
   savedManagedInboxes: ManagedWorkspaceInbox[];
+  primaryManagedInboxId: string | null;
   onBack: () => void;
   onApply: (nextMailboxes: ManagedWorkspaceInbox[]) => boolean;
+  onSetPrimaryInbox: (inboxId: string) => void;
   themeMode: "light" | "dark";
 }) {
   const [draftManagedInboxes, setDraftManagedInboxes] = useState<ManagedWorkspaceInbox[]>(
@@ -19915,6 +19988,7 @@ const ManageInboxesView = memo(function ManageInboxesView({
 
   const hasUnsavedChanges =
     JSON.stringify(draftManagedInboxes) !== JSON.stringify(savedManagedInboxes);
+  const connectedInboxCount = draftManagedInboxes.filter(isSelectablePrimaryManagedInbox).length;
 
   const clearConnectionError = (inboxId: string) => {
     setConnectionErrors((current) => {
@@ -20243,7 +20317,12 @@ const ManageInboxesView = memo(function ManageInboxesView({
                 mailbox={mailbox}
                 editable={editingInboxId === mailbox.id}
                 isExisting={!mailbox.id.startsWith("draft-")}
-                isPrimary={mailbox.id === "main"}
+                isPrimary={mailbox.id === primaryManagedInboxId}
+                canSetPrimary={
+                  connectedInboxCount > 1 &&
+                  isSelectablePrimaryManagedInbox(mailbox) &&
+                  mailbox.id !== primaryManagedInboxId
+                }
                 connectionError={connectionErrors[mailbox.id] ?? null}
                 isApplying={validatingInboxId === mailbox.id}
                 showValidationErrors={validationErrorInboxId === mailbox.id}
@@ -20258,6 +20337,7 @@ const ManageInboxesView = memo(function ManageInboxesView({
                     : () => setPendingInboxRemovalId(mailbox.id)
                 }
                 removeDisabled={savedManagedInboxes.length <= 1}
+                onSetPrimaryAction={() => onSetPrimaryInbox(mailbox.id)}
                 onApplyAction={() => handleApplyInbox(mailbox.id)}
                 onCancelAction={() => handleCancelInbox(mailbox.id)}
                 onChange={updateDraftInbox}
@@ -22239,6 +22319,7 @@ const AccountSettingsCard = memo(function AccountSettingsCard({
 function SettingsView({
   workspaceName,
   savedManagedInboxes,
+  primaryManagedInboxId,
   baseFocusPreferences,
   focusPreferenceOverrides,
   themeMode,
@@ -22256,11 +22337,13 @@ function SettingsView({
   onApplyFocusPreferences,
   isApplyingFocusPreferences,
   onApplyManagedInboxes,
+  onSetPrimaryManagedInbox,
   onSaveInboxSignature,
   onSaveInboxOutOfOffice,
 }: {
   workspaceName: string;
   savedManagedInboxes: ManagedWorkspaceInbox[];
+  primaryManagedInboxId: string | null;
   baseFocusPreferences: FocusPreferences;
   focusPreferenceOverrides: MailboxFocusPreferenceOverridesStore;
   themeMode: "light" | "dark";
@@ -22278,6 +22361,7 @@ function SettingsView({
   onApplyFocusPreferences: (inboxId: InboxId, nextValue: FocusPreferences) => void;
   isApplyingFocusPreferences: boolean;
   onApplyManagedInboxes: (nextMailboxes: ManagedWorkspaceInbox[]) => boolean;
+  onSetPrimaryManagedInbox: (inboxId: string) => void;
   onSaveInboxSignature: (inboxId: InboxId, signature: InboxSignatureSettings) => void;
   onSaveInboxOutOfOffice: (
     inboxId: InboxId,
@@ -22347,8 +22431,10 @@ function SettingsView({
     return (
       <ManageInboxesView
         savedManagedInboxes={savedManagedInboxes}
+        primaryManagedInboxId={primaryManagedInboxId}
         onBack={() => setSettingsPage("root")}
         onApply={onApplyManagedInboxes}
+        onSetPrimaryInbox={onSetPrimaryManagedInbox}
         themeMode={themeMode}
       />
     );
@@ -24857,6 +24943,32 @@ export function WorkspaceShell({
       return buildManagedWorkspaceInboxes(onboardingState);
     }
   });
+  const primaryManagedInboxStorageOwnerKey = authenticatedUser?.email?.trim()
+    ? normalizeSenderLearningKey(authenticatedUser.email)
+    : "guest";
+  const primaryManagedInboxStorageKey = buildPrimaryManagedInboxStorageKey(
+    primaryManagedInboxStorageOwnerKey,
+    savedManagedInboxes,
+  );
+  const [primaryManagedInboxId, setPrimaryManagedInboxId] = useState<string | null>(() => {
+    const initialManagedInboxes = buildManagedWorkspaceInboxes(onboardingState);
+    const initialPrimaryManagedInboxStorageOwnerKey = authenticatedUser?.email?.trim()
+      ? normalizeSenderLearningKey(authenticatedUser.email)
+      : "guest";
+
+    if (typeof window === "undefined") {
+      return resolvePrimaryManagedInboxId(initialManagedInboxes, null);
+    }
+
+    const storedPrimaryInboxId = window.localStorage.getItem(
+      buildPrimaryManagedInboxStorageKey(
+        initialPrimaryManagedInboxStorageOwnerKey,
+        savedManagedInboxes,
+      ),
+    );
+
+    return resolvePrimaryManagedInboxId(savedManagedInboxes, storedPrimaryInboxId);
+  });
   const onboardingMailboxSeedKey = JSON.stringify({
     selectedInboxes: onboardingState.selectedInboxes,
     customInboxes: onboardingState.customInboxes,
@@ -24870,12 +24982,18 @@ export function WorkspaceShell({
     })),
   });
   const lastOnboardingMailboxSeedKeyRef = useRef(onboardingMailboxSeedKey);
-  const orderedMailboxes = savedManagedInboxes.map((mailbox) => ({
-    ...toOrderedMailboxFromManagedInbox(mailbox),
-  })).map((mailbox) => ({
-    ...mailbox,
-    title: mailboxTitleOverrides[mailbox.id]?.trim() || mailbox.title,
-  }));
+  const orderedManagedInboxes = orderManagedWorkspaceInboxes(
+    savedManagedInboxes,
+    primaryManagedInboxId,
+  );
+  const orderedMailboxes = orderedManagedInboxes
+    .map((mailbox) => ({
+      ...toOrderedMailboxFromManagedInbox(mailbox),
+    }))
+    .map((mailbox) => ({
+      ...mailbox,
+      title: mailboxTitleOverrides[mailbox.id]?.trim() || mailbox.title,
+    }));
   const primaryInboxTitle = orderedMailboxes[0]?.title ?? inboxDisplayConfig.main.title;
   const primaryWorkspaceEmail = orderedMailboxes[0]?.email ?? "team@cuevion.com";
   const activeWorkspaceEmail = authenticatedUser?.email ?? primaryWorkspaceEmail;
@@ -25517,6 +25635,25 @@ export function WorkspaceShell({
       JSON.stringify(savedManagedInboxes),
     );
   }, [savedManagedInboxes]);
+
+  useEffect(() => {
+    const nextPrimaryInboxId = resolvePrimaryManagedInboxId(
+      savedManagedInboxes,
+      primaryManagedInboxId,
+    );
+
+    if (nextPrimaryInboxId !== primaryManagedInboxId) {
+      setPrimaryManagedInboxId(nextPrimaryInboxId);
+      return;
+    }
+
+    if (nextPrimaryInboxId) {
+      window.localStorage.setItem(primaryManagedInboxStorageKey, nextPrimaryInboxId);
+      return;
+    }
+
+    window.localStorage.removeItem(primaryManagedInboxStorageKey);
+  }, [primaryManagedInboxId, primaryManagedInboxStorageKey, savedManagedInboxes]);
 
   useEffect(() => {
     window.localStorage.setItem(
@@ -27461,6 +27598,15 @@ export function WorkspaceShell({
       return false;
     }
 
+    const nextPrimaryInboxId = resolvePrimaryManagedInboxId(
+      validMailboxes,
+      primaryManagedInboxId,
+    );
+    const orderedValidMailboxes = orderManagedWorkspaceInboxes(
+      validMailboxes,
+      nextPrimaryInboxId,
+    );
+
     setMailboxStore((currentStore) => {
       const nextStore = { ...currentStore };
 
@@ -27494,12 +27640,23 @@ export function WorkspaceShell({
         };
       }
 
-      const fallbackMailbox = validMailboxes[0];
+      const fallbackMailbox = orderedValidMailboxes[0];
 
       return fallbackMailbox ? toOrderedMailboxFromManagedInbox(fallbackMailbox) : null;
     });
+    setPrimaryManagedInboxId(nextPrimaryInboxId);
     setSavedManagedInboxes(validMailboxes);
     return true;
+  };
+
+  const handleSetPrimaryManagedInbox = (inboxId: string) => {
+    const mailbox = savedManagedInboxes.find((candidate) => candidate.id === inboxId);
+
+    if (!mailbox || !isSelectablePrimaryManagedInbox(mailbox)) {
+      return;
+    }
+
+    setPrimaryManagedInboxId(inboxId);
   };
 
   useEffect(() => {
@@ -29164,6 +29321,7 @@ export function WorkspaceShell({
                 <SettingsView
                   workspaceName={workspaceName}
                   savedManagedInboxes={savedManagedInboxes}
+                  primaryManagedInboxId={primaryManagedInboxId}
                   baseFocusPreferences={userConfig.focusPreferences}
                   focusPreferenceOverrides={mailboxFocusPreferenceOverrides}
                   themeMode={resolvedTheme}
@@ -29187,6 +29345,7 @@ export function WorkspaceShell({
                   onApplyFocusPreferences={handleApplyFocusPreferences}
                   isApplyingFocusPreferences={isApplyingFocusPreferences}
                   onApplyManagedInboxes={handleApplyManagedInboxes}
+                  onSetPrimaryManagedInbox={handleSetPrimaryManagedInbox}
                   onSaveInboxSignature={(inboxId, signature) => {
                     setInboxSignatures((current) => ({
                       ...current,
