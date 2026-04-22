@@ -1007,7 +1007,7 @@ function isBroadcastPromoMessage(
     .join(" ")
     .toLowerCase();
 
-  const broadcastPromoKeywords = [
+  return includesAnyKeyword(searchableText, [
     "newsletter",
     "nieuws",
     "newsberichten",
@@ -1018,30 +1018,7 @@ function isBroadcastPromoMessage(
     "unsubscribe",
     "campaign monitor",
     "mailchimp",
-  ] as const;
-  const matchedKeywords = broadcastPromoKeywords.filter((keyword) =>
-    searchableText.includes(keyword),
-  );
-  const isBroadcastPromo = matchedKeywords.length > 0;
-  const shouldLogBumaStemraDiagnostic =
-    message.sender.toLowerCase().includes("bumastemra") ||
-    message.from.toLowerCase().includes("bumastemra") ||
-    message.subject.toLowerCase().includes("nieuws van bumastemra");
-
-  if (shouldLogBumaStemraDiagnostic) {
-    console.debug("cuevion_bumastemra_broadcast_diagnostic", {
-      subject: message.subject,
-      snippet: message.snippet,
-      sender: message.sender,
-      from: message.from,
-      body: message.body,
-      searchableText,
-      isBroadcastPromoMessage: isBroadcastPromo,
-      matchedKeywords,
-    });
-  }
-
-  return isBroadcastPromo;
+  ]);
 }
 
 function resolveVisibleClassification(
@@ -9279,8 +9256,6 @@ function MailboxView({
   const [isEmptyTrashConfirmationOpen, setIsEmptyTrashConfirmationOpen] = useState(false);
   const [trashEmptiedToastMessage, setTrashEmptiedToastMessage] = useState<string | null>(null);
   const dragPreviewCleanupRef = useRef<(() => void) | null>(null);
-  const lastPriorityTraceIdRef = useRef<string | null>(null);
-  const lastPriorityTargetMessageIdRef = useRef<string | null>(null);
   const [composeTo, setComposeTo] = useState("");
   const [composeCc, setComposeCc] = useState("");
   const [composeBcc, setComposeBcc] = useState("");
@@ -9697,7 +9672,6 @@ function MailboxView({
         });
       }
 
-      console.debug("cuevion_reply_all_cc", replyAllCcRecipients);
     }
 
     setDetailActionsMenuState(null);
@@ -10323,216 +10297,6 @@ function MailboxView({
       renderContext.preferPromoMailboxContext,
     );
   };
-  useEffect(() => {
-    if (!activeSmartFolder) {
-      return;
-    }
-
-    const traceRows = smartFolderEntries.map((entry, index) => {
-      const canonicalKeys = getCanonicalMessageIdentityKeys(entry.message);
-      const canonicalIdentityKey = getCanonicalMessageIdentityKey(entry.message);
-      const mailboxCollectionsForTrace = getSmartFolderMailboxCollections(entry.mailboxId);
-      const visibleInboxRowSetForMailbox = getSmartFolderVisibleInboxRowSet(entry.mailboxId);
-      const identityKeySet = new Set(canonicalKeys);
-      const archiveMatches = mailboxCollectionsForTrace.Archive.filter((candidate) =>
-        doesMessageMatchCanonicalIdentitySet(candidate, identityKeySet),
-      );
-      const rawInboxMatches = mailboxCollectionsForTrace.Inbox.filter((candidate) =>
-        doesMessageMatchCanonicalIdentitySet(candidate, identityKeySet),
-      );
-      const rawFilteredMatches = mailboxCollectionsForTrace.Filtered.filter((candidate) =>
-        doesMessageMatchCanonicalIdentitySet(candidate, identityKeySet),
-      );
-      const visibleInboxRowMatches = visibleInboxRowSetForMailbox.filter((candidate) =>
-        doesMessageMatchCanonicalIdentitySet(candidate, identityKeySet),
-      );
-      const matchesActiveSmartFolder = doesMessageMatchSmartFolder(
-        entry.message,
-        activeSmartFolder,
-        {
-          mailboxContext: getSmartFolderMailboxContext(entry.mailboxId),
-        },
-      );
-      const isExcludedByCuevionArchiveState = isArchivedInCuevionForMailbox(
-        entry.mailboxId,
-        entry.message,
-      );
-      const existsInCurrentMailboxMessageCollectionsInbox =
-        entry.mailboxId === mailbox.id &&
-        messageCollections.Inbox.some((candidate) =>
-          doesMessageMatchCanonicalIdentitySet(candidate, identityKeySet),
-        );
-      const existsInCurrentMailboxMessageCollectionsFiltered =
-        entry.mailboxId === mailbox.id &&
-        messageCollections.Filtered.some((candidate) =>
-          doesMessageMatchCanonicalIdentitySet(candidate, identityKeySet),
-        );
-      const existsInMailboxVisibleInboxRowSet = visibleInboxRowMatches.length > 0;
-      const exactSourceCollectionUsedBySmartFolder = `visibleInboxRowSet.${entry.mailboxId}`;
-      const inclusionReason = matchesActiveSmartFolder
-        ? isExcludedByCuevionArchiveState
-          ? "Unexpected: matched smart-folder rule but should have been excluded by Cuevion archive state"
-          : existsInMailboxVisibleInboxRowSet
-            ? "Included because the message is still present in the mailbox Inbox-ready visible row set and matches the smart-folder rule"
-            : rawFilteredMatches.length > 0
-              ? "Unexpected: raw Filtered still contains the canonical message, but the smart folder should now only read the mailbox Inbox-ready visible row set"
-              : rawInboxMatches.length > 0
-                ? "Unexpected: raw Inbox still contains the canonical message, but it is absent from the mailbox Inbox-ready visible row set"
-                : "Unexpected: matched smart-folder rule without a corresponding mailbox Inbox-ready visible row"
-        : "Unexpected: row present even though current smart-folder rule no longer matches";
-
-      return {
-        row: index + 1,
-        mailboxId: entry.mailboxId,
-        folder: entry.folder,
-        sourceCollection: exactSourceCollectionUsedBySmartFolder,
-        id: entry.message.id,
-        imapUid: entry.message.imapUid ?? null,
-        canonicalIdentityKey,
-        previewIdentity: buildStablePreviewIdentity(entry.message),
-        canonicalKeys,
-        subject: entry.message.subject,
-        from: entry.message.from,
-        timestamp: entry.message.timestamp,
-        visibleCategoryLabel: getSmartFolderVisibleCategoryLabelForMessage(entry.message),
-        visiblePriorityBadge: getSmartFolderVisiblePriorityBadgeForMessage(entry.message),
-        internalClassification: entry.message.internalClassification ?? null,
-        signal: entry.message.signal ?? null,
-        uiSignal: entry.message.ui_signal ?? null,
-        existsInMailboxStoreInbox: rawInboxMatches.length > 0,
-        existsInMailboxStoreArchive: archiveMatches.length > 0,
-        existsInMailboxStoreFiltered: rawFilteredMatches.length > 0,
-        existsInMessageCollectionsInbox: existsInCurrentMailboxMessageCollectionsInbox,
-        existsInMessageCollectionsFiltered: existsInCurrentMailboxMessageCollectionsFiltered,
-        existsInMailboxVisibleInboxRowSet,
-        normalMailboxUiWouldExcludeDueToArchiveState:
-          !existsInMailboxVisibleInboxRowSet || isExcludedByCuevionArchiveState,
-        inclusionReason,
-      };
-    });
-    const duplicateMessageIdGroups = Object.entries(
-      traceRows.reduce<Record<string, number[]>>((groups, row) => {
-        const key = `${row.mailboxId}::${row.id}`;
-        groups[key] = [...(groups[key] ?? []), row.row];
-        return groups;
-      }, {}),
-    )
-      .filter(([, rows]) => rows.length > 1)
-      .map(([messageIdKey, rows]) => ({
-        messageIdKey,
-        rows,
-      }));
-    const duplicateImapUidGroups = Object.entries(
-      traceRows.reduce<Record<string, number[]>>((groups, row) => {
-        if (!row.imapUid) {
-          return groups;
-        }
-
-        const key = `${row.mailboxId}::${row.imapUid}`;
-        groups[key] = [...(groups[key] ?? []), row.row];
-        return groups;
-      }, {}),
-    )
-      .filter(([, rows]) => rows.length > 1)
-      .map(([imapUidKey, rows]) => ({
-        imapUidKey,
-        rows,
-      }));
-    const duplicateCanonicalIdentityGroups = Object.entries(
-      traceRows.reduce<Record<string, number[]>>((groups, row) => {
-        const key = `${row.mailboxId}::${row.canonicalIdentityKey}`;
-        groups[key] = [...(groups[key] ?? []), row.row];
-        return groups;
-      }, {}),
-    )
-      .filter(([, rows]) => rows.length > 1)
-      .map(([canonicalIdentityKey, rows]) => ({
-        canonicalIdentityKey,
-        rows,
-      }));
-    const duplicatePreviewGroups = Object.entries(
-      traceRows.reduce<Record<string, number[]>>((groups, row) => {
-        const key = `${row.mailboxId}::${row.previewIdentity}`;
-        groups[key] = [...(groups[key] ?? []), row.row];
-        return groups;
-      }, {}),
-    )
-      .filter(([, rows]) => rows.length > 1)
-      .map(([previewIdentityKey, rows]) => ({
-        previewIdentityKey,
-        rows,
-      }));
-    console.groupCollapsed(
-      `[SmartFolderRows] ${activeSmartFolder.name} (${traceRows.length} rows)`,
-    );
-    console.table(
-      traceRows.map((row) => ({
-        row: row.row,
-        mailboxId: row.mailboxId,
-        folder: row.folder,
-        sourceCollection: row.sourceCollection,
-        id: row.id,
-        imapUid: row.imapUid,
-        canonicalIdentityKey: row.canonicalIdentityKey,
-        previewIdentity: row.previewIdentity,
-        subject: row.subject,
-        from: row.from,
-        timestamp: row.timestamp,
-        visibleCategoryLabel: row.visibleCategoryLabel,
-        visiblePriorityBadge: row.visiblePriorityBadge,
-        visibleSmartFolderLabel: row.visibleCategoryLabel,
-        internalClassification: row.internalClassification,
-        signal: row.signal,
-        uiSignal: row.uiSignal,
-        existsInMailboxStoreInbox: row.existsInMailboxStoreInbox,
-        existsInMailboxStoreArchive: row.existsInMailboxStoreArchive,
-        existsInMailboxStoreFiltered: row.existsInMailboxStoreFiltered,
-        existsInMessageCollectionsInbox: row.existsInMessageCollectionsInbox,
-        existsInMessageCollectionsFiltered: row.existsInMessageCollectionsFiltered,
-        existsInMailboxVisibleInboxRowSet: row.existsInMailboxVisibleInboxRowSet,
-        normalMailboxUiWouldExcludeDueToArchiveState:
-          row.normalMailboxUiWouldExcludeDueToArchiveState,
-        inclusionReason: row.inclusionReason,
-      })),
-    );
-    console.log(
-      "[SmartFolderRows] canonicalKeysByRow",
-      traceRows.map((row) => ({
-        row: row.row,
-        mailboxId: row.mailboxId,
-        folder: row.folder,
-        sourceCollection: row.sourceCollection,
-        id: row.id,
-        imapUid: row.imapUid,
-        subject: row.subject,
-        canonicalIdentityKey: row.canonicalIdentityKey,
-        visibleSmartFolderLabel: row.visibleCategoryLabel,
-        existsInMailboxStoreInbox: row.existsInMailboxStoreInbox,
-        existsInMailboxStoreArchive: row.existsInMailboxStoreArchive,
-        existsInMailboxStoreFiltered: row.existsInMailboxStoreFiltered,
-        existsInMessageCollectionsInbox: row.existsInMessageCollectionsInbox,
-        existsInMessageCollectionsFiltered: row.existsInMessageCollectionsFiltered,
-        existsInMailboxVisibleInboxRowSet: row.existsInMailboxVisibleInboxRowSet,
-        normalMailboxUiWouldExcludeDueToArchiveState:
-          row.normalMailboxUiWouldExcludeDueToArchiveState,
-        inclusionReason: row.inclusionReason,
-        canonicalKeys: row.canonicalKeys,
-      })),
-    );
-    console.log("[SmartFolderRows] duplicateMessageIdGroups", duplicateMessageIdGroups);
-    console.log(
-      "[SmartFolderRows] duplicateCanonicalIdentityGroups",
-      duplicateCanonicalIdentityGroups,
-    );
-    console.log("[SmartFolderRows] duplicatePreviewGroups", duplicatePreviewGroups);
-    console.log("[SmartFolderRows] duplicateImapUidGroups", duplicateImapUidGroups);
-    console.groupEnd();
-  }, [
-    activeSmartFolder,
-    smartFolderEntries,
-    getSmartFolderVisibleCategoryLabelForMessage,
-    getSmartFolderVisiblePriorityBadgeForMessage,
-  ]);
   const getManualPriorityOverride = (messageId: string) =>
     manualPriorityOverrides[messageId];
   const getVisibleMessageSignal = (message: MailMessage) =>
@@ -10671,177 +10435,8 @@ function MailboxView({
     selectedMessageFromCurrentId ??
     selectedMessageFallbackTop ??
     null;
-  const selectedMessageFallbackBranch = selectedMessageFromVisiblePrimary
-    ? "selectedMessageId-visible-primary"
-    : selectedMessageFromVisibleSelection
-      ? "visible-selection-fallback"
-      : selectedMessageFromCurrentId
-        ? "selectedMessageId-thread-deduped"
-        : selectedMessageFallbackTop
-          ? "sortedMessages-top-fallback"
-          : "no-selection";
   const fullWidthMessage = selectedMessageFromFolder ?? selectedMessage;
   const renderTargetMessage = isFullMessageOpen ? fullWidthMessage : selectedMessage;
-  const priorityTraceTargetMessageId = lastPriorityTargetMessageIdRef.current;
-  const priorityTraceTargetLocation =
-    priorityTraceTargetMessageId
-      ? currentMailboxMessageLocationById[priorityTraceTargetMessageId] ?? null
-      : null;
-  const toTraceMessageRows = (messages: MailMessage[]) =>
-    messages.map((message) => ({
-      id: message.id,
-      subject: message.subject,
-    }));
-
-  useEffect(() => {
-    if (mailbox.id !== "main" && mailbox.id !== "promo") {
-      return;
-    }
-
-    console.groupCollapsed(`[MailboxPriorityStateTrace] mailbox=${mailbox.id}`);
-    console.log("selectedMailboxId", mailbox.id);
-    console.log("activeFolder", activeFolder);
-    console.log("mailboxStore.Inbox", toTraceMessageRows(mailboxStore[mailbox.id]?.Inbox ?? []));
-    console.log(
-      "mailboxStore.Filtered",
-      toTraceMessageRows(mailboxStore[mailbox.id]?.Filtered ?? []),
-    );
-    console.log("messageCollections.Inbox", toTraceMessageRows(messageCollections.Inbox));
-    console.log("messageCollections.Filtered", toTraceMessageRows(messageCollections.Filtered));
-    console.log("visibleMessages", toTraceMessageRows(visibleMessages));
-    console.log("threadRepresentativeRows", toTraceMessageRows(threadDedupedMessages));
-    console.log("sortedMessages", toTraceMessageRows(sortedMessages));
-    console.log("selectedMessageId", selectedMessageId);
-    console.log(
-      "selectedMessage",
-      selectedMessage
-        ? {
-            id: selectedMessage.id,
-            subject: selectedMessage.subject,
-          }
-        : null,
-    );
-    console.log(
-      "fullWidthMessage",
-      fullWidthMessage
-        ? {
-            id: fullWidthMessage.id,
-            subject: fullWidthMessage.subject,
-          }
-        : null,
-    );
-    console.log("currentMailboxMessageLocationById", currentMailboxMessageLocationById);
-    console.groupEnd();
-  }, [
-    activeFolder,
-    currentMailboxMessageLocationById,
-    fullWidthMessage,
-    mailbox.id,
-    mailboxStore,
-    messageCollections.Filtered,
-    messageCollections.Inbox,
-    selectedMessage,
-    selectedMessageId,
-    sortedMessages,
-    threadDedupedMessages,
-    visibleMessages,
-  ]);
-
-  useEffect(() => {
-    const traceId = lastPriorityTraceIdRef.current;
-
-    if (!traceId) {
-      return;
-    }
-
-    console.log("[PriorityOpenTrace] render-selection", {
-      traceId,
-      selectedMailboxId: mailbox.id,
-      activeFolder,
-      selectedMessageId,
-      priorityTraceTargetMessageId,
-      priorityTraceTargetLocation,
-      selectedMessageExistsInMailboxStoreInbox:
-        (mailboxStore[mailbox.id]?.Inbox ?? []).some(
-          (message) => message.id === selectedMessageId,
-        ),
-      selectedMessageExistsInMailboxStoreFiltered:
-        (mailboxStore[mailbox.id]?.Filtered ?? []).some(
-          (message) => message.id === selectedMessageId,
-        ),
-      selectedMessageExistsInMessageCollectionsInbox: messageCollections.Inbox.some(
-        (message) => message.id === selectedMessageId,
-      ),
-      selectedMessageExistsInMessageCollectionsFiltered: messageCollections.Filtered.some(
-        (message) => message.id === selectedMessageId,
-      ),
-      selectedMessageExistsInVisibleMessages: visibleMessages.some(
-        (message) => message.id === selectedMessageId,
-      ),
-      selectedMessageExistsInSortedMessages: sortedMessages.some(
-        (message) => message.id === selectedMessageId,
-      ),
-      clickedPriorityTargetExistsInMailboxStoreInbox:
-        priorityTraceTargetMessageId !== null &&
-        (mailboxStore[mailbox.id]?.Inbox ?? []).some(
-          (message) => message.id === priorityTraceTargetMessageId,
-        ),
-      clickedPriorityTargetExistsInMailboxStoreFiltered:
-        priorityTraceTargetMessageId !== null &&
-        (mailboxStore[mailbox.id]?.Filtered ?? []).some(
-          (message) => message.id === priorityTraceTargetMessageId,
-        ),
-      clickedPriorityTargetExistsInMessageCollectionsInbox:
-        priorityTraceTargetMessageId !== null &&
-        messageCollections.Inbox.some((message) => message.id === priorityTraceTargetMessageId),
-      clickedPriorityTargetExistsInMessageCollectionsFiltered:
-        priorityTraceTargetMessageId !== null &&
-        messageCollections.Filtered.some(
-          (message) => message.id === priorityTraceTargetMessageId,
-        ),
-      clickedPriorityTargetExistsInVisibleMessages:
-        priorityTraceTargetMessageId !== null &&
-        visibleMessages.some((message) => message.id === priorityTraceTargetMessageId),
-      clickedPriorityTargetExistsInSortedMessages:
-        priorityTraceTargetMessageId !== null &&
-        sortedMessages.some((message) => message.id === priorityTraceTargetMessageId),
-      selectedMessageFallbackBranch,
-      selectedMessage: selectedMessage
-        ? {
-            id: selectedMessage.id,
-            subject: selectedMessage.subject,
-          }
-        : null,
-      fullWidthMessage: fullWidthMessage
-        ? {
-            id: fullWidthMessage.id,
-            subject: fullWidthMessage.subject,
-          }
-        : null,
-      actualSelectedMessageUsedByRender: renderTargetMessage
-        ? {
-            id: renderTargetMessage.id,
-            subject: renderTargetMessage.subject,
-          }
-        : null,
-    });
-  }, [
-    activeFolder,
-    fullWidthMessage,
-    isFullMessageOpen,
-    mailbox.id,
-    mailboxStore,
-    messageCollections.Inbox,
-    messageCollections.Filtered,
-    priorityTraceTargetLocation,
-    priorityTraceTargetMessageId,
-    renderTargetMessage,
-    selectedMessage,
-    selectedMessageFallbackBranch,
-    selectedMessageId,
-    sortedMessages,
-    visibleMessages,
-  ]);
 
   useEffect(() => {
     readingPaneViewportRef.current?.scrollTo({ top: 0, left: 0 });
@@ -11180,65 +10775,9 @@ function MailboxView({
           (message) => message.id === notificationNavigationRequest.messageId,
         ) ?? null
       : null;
-    const traceId = notificationNavigationRequest.traceId ?? null;
-
-    if (notificationNavigationRequest.source === "priority" && traceId) {
-      lastPriorityTraceIdRef.current = traceId;
-      lastPriorityTargetMessageIdRef.current = notificationNavigationRequest.messageId;
-    }
-
     if (!targetFolder || !targetMessage) {
-      if (notificationNavigationRequest.source === "priority") {
-        console.log("[PriorityOpenTrace] notification-navigation-miss", {
-          traceId,
-          selectedMailboxId: mailbox.id,
-          notificationNavigationRequest,
-          activeFolder,
-          selectedMessageIdAfterNavigation: selectedMessageId,
-          clickedPriorityTargetExistsInMailboxStoreInbox:
-            (mailboxStore[mailbox.id]?.Inbox ?? []).some(
-              (message) => message.id === notificationNavigationRequest.messageId,
-            ),
-          clickedPriorityTargetExistsInMailboxStoreFiltered:
-            (mailboxStore[mailbox.id]?.Filtered ?? []).some(
-              (message) => message.id === notificationNavigationRequest.messageId,
-            ),
-          clickedPriorityTargetExistsInMessageCollectionsInbox: messageCollections.Inbox.some(
-            (message) => message.id === notificationNavigationRequest.messageId,
-          ),
-          clickedPriorityTargetExistsInMessageCollectionsFiltered:
-            messageCollections.Filtered.some(
-              (message) => message.id === notificationNavigationRequest.messageId,
-            ),
-          clickedPriorityTargetExistsInVisibleMessages: visibleMessages.some(
-            (message) => message.id === notificationNavigationRequest.messageId,
-          ),
-          clickedPriorityTargetExistsInSortedMessages: sortedMessages.some(
-            (message) => message.id === notificationNavigationRequest.messageId,
-          ),
-          representativeRowSet: toTraceMessageRows(threadDedupedMessages),
-          fallbackBranchIfRenderedNow: selectedMessageFallbackBranch,
-        });
-        return;
-      }
       onConsumeNotificationNavigation?.(notificationNavigationRequest.requestKey);
       return;
-    }
-
-    if (notificationNavigationRequest.source === "priority") {
-      console.log("[PriorityOpenTrace] notification-navigation-resolved", {
-        traceId,
-        selectedMailboxId: mailbox.id,
-        notificationNavigationRequest,
-        resolvedSourceLocation: {
-          mailboxId: mailbox.id,
-          folder: targetFolder,
-        },
-        resolvedMessage: {
-          id: targetMessage.id,
-          subject: targetMessage.subject,
-        },
-      });
     }
 
     setActiveSmartFolderId(null);
@@ -11258,15 +10797,6 @@ function MailboxView({
     // here only for navigation-driven selections.
     if (targetMessage.imapUid) {
       setSelectedMessageImapUid(targetMessage.imapUid);
-    }
-    if (notificationNavigationRequest.source === "priority") {
-      console.log("[PriorityOpenTrace] selection-state-requested", {
-        traceId,
-        selectedMailboxId: mailbox.id,
-        activeFolderAfterNavigation: targetFolder,
-        selectedMessageIdImmediatelyAfterStateUpdate:
-          notificationNavigationRequest.messageId,
-      });
     }
     requestAnimationFrame(() => {
       const targetRow = mailListViewportRef.current?.querySelector<HTMLElement>(
@@ -11298,10 +10828,7 @@ function MailboxView({
     messageCollections.Filtered,
     notificationNavigationRequest,
     onConsumeNotificationNavigation,
-    selectedMessageFallbackBranch,
     selectedMessageId,
-    sortedMessages,
-    threadDedupedMessages,
     visibleMessages,
   ]);
 
@@ -11546,12 +11073,6 @@ function MailboxView({
   };
 
   const handleAttachmentOpen = (attachment: MailAttachment) => {
-    console.debug("cuevion_attachment_open", {
-      name: attachment.name,
-      mimeType: attachment.mimeType,
-      size: attachment.size,
-    });
-
     if (attachment.file) {
       const objectUrl = URL.createObjectURL(attachment.file);
       const downloadAnchor = document.createElement("a");
@@ -15817,23 +15338,6 @@ function MailboxView({
                       const categoryLabel = activeSmartFolder
                         ? getSmartFolderVisibleCategoryLabelForMessage(message)
                         : getVisibleCategoryLabelForMessage(message);
-                      const shouldLogBumaStemraDiagnostic =
-                        message.subject.toLowerCase().includes("nieuws van bumastemra");
-
-                      if (shouldLogBumaStemraDiagnostic) {
-                        console.debug("cuevion_bumastemra_row_diagnostic", {
-                          rowSenderDisplayed: message.sender,
-                          rowSubjectDisplayed: message.subject,
-                          rowSnippetDisplayed: compactSnippet,
-                          messageId: message.id,
-                          threadId: resolveMailThreadId(message),
-                          internalClassification: message.internalClassification,
-                          signal: message.signal,
-                          ui_signal: message.ui_signal,
-                          resolvedVisibleClassification,
-                          resolvedVisibleCategoryLabel: categoryLabel,
-                        });
-                      }
                       const signal =
                         message.signal === "Sent"
                           ? ""
@@ -15873,29 +15377,11 @@ function MailboxView({
                           ? "text-[color:rgba(220,212,202,0.84)]"
                           : "text-[color:rgba(120,111,100,0.76)]";
                       const threadId = resolveMailThreadId(message);
-                      const threadMessagesForRow = folderMessages
-                        .filter((candidate) => resolveMailThreadId(candidate) === threadId)
-                        .sort(
-                          (firstMessage, secondMessage) =>
-                            resolveMailDateMs(secondMessage) - resolveMailDateMs(firstMessage),
-                        );
                       const threadMessageCount =
                         threadMessageCountByThreadId.get(threadId) ?? 1;
                       const hasThreadCountIndicator = threadMessageCount > 1;
                       const hasThreadAttachmentIndicator =
                         threadHasAttachmentsByThreadId.get(threadId) ?? false;
-
-                      if (shouldLogBumaStemraDiagnostic) {
-                        console.debug("cuevion_bumastemra_row_thread_diagnostic", {
-                          rowSubjectDisplayed: message.subject,
-                          messageObjectSubjectUsedForBadge: message.subject,
-                          messageId: message.id,
-                          threadId,
-                          representativeThreadMessageId: message.id,
-                          latestThreadMessageId:
-                            threadMessagesForRow[0]?.id ?? message.id,
-                        });
-                      }
                       return (
                         <button
                           key={message.id}
@@ -16141,52 +15627,6 @@ function MailboxView({
 	                    {(() => {
 	                      const linkedReview = getLinkedReviewForMessage(selectedMessage.id);
 	                      const linkedReviewLabel = getLinkedReviewBadgeLabel(selectedMessage.id);
-                        const shouldLogSelectedBumaStemraDiagnostic =
-                          selectedMessage.subject
-                            .toLowerCase()
-                            .includes("nieuws van bumastemra");
-                        const selectedResolvedVisibleClassification =
-                          resolveVisibilityClassificationForMessage(selectedMessage);
-                        const selectedResolvedVisibleCategoryLabel =
-                          getVisibleCategoryLabelForMessage(selectedMessage);
-                        const selectedResolvedFocusPreferenceLevelForPriorityMessage =
-                          resolveFocusPreferenceLevelForMessage(selectedMessage);
-                        const selectedVisiblePriorityBadge =
-                          getVisiblePriorityBadgeForMessage(selectedMessage);
-                        const selectedShouldDisplayInFilteredFolder =
-                          shouldDisplayMessageInFilteredFolderForWorkspaceMessage(
-                            selectedMessage,
-                            manualPriorityOverrides[selectedMessage.id],
-                            focusPreferences,
-                            {
-                              preferPromoMailboxContext:
-                                shouldPreferCurrentMailboxPromoContext,
-                            },
-                          );
-
-                        if (shouldLogSelectedBumaStemraDiagnostic) {
-                          console.debug(
-                            "cuevion_bumastemra_selected_message_diagnostic",
-                            {
-                              selectedSubjectDisplayed: selectedMessage.subject,
-                              selectedMessageId: selectedMessage.id,
-                              selectedThreadId: resolveMailThreadId(selectedMessage),
-                              selectedInternalClassification:
-                                selectedMessage.internalClassification,
-                              selectedSignal: selectedMessage.signal,
-                              selectedUiSignal: selectedMessage.ui_signal,
-                              selectedResolvedVisibleClassification,
-                              selectedResolvedVisibleCategoryLabel,
-                              focusPreferencesBusiness: focusPreferences.business,
-                              focusPreferencesUpdates: focusPreferences.updates,
-                              resolvedFocusPreferenceLevelForPriorityMessage:
-                                selectedResolvedFocusPreferenceLevelForPriorityMessage,
-                              selectedVisiblePriorityBadge,
-                              selectedShouldDisplayInFilteredFolder,
-                            },
-                          );
-                        }
-
 	                      return (
 	                    <div className="flex items-start justify-between gap-4">
 	                      <div className="min-w-0 flex-1 space-y-3">
@@ -26818,14 +26258,6 @@ export function WorkspaceShell({
       return;
     }
 
-    if (isLocalDevelopmentEnvironment()) {
-      console.debug("cuevion_invite_token_resolved", {
-        inviteToken: collaborationInviteRoute.inviteToken,
-        inviteeEmail: decodedInvitePayload.inviteeEmail,
-        messageId: decodedInvitePayload.message.id,
-      });
-    }
-
     setMailboxStore((currentStore) => {
       const mailboxId = orderedMailboxes[0].id;
       const mailboxCollections = currentStore[mailboxId];
@@ -27236,7 +26668,6 @@ export function WorkspaceShell({
 
   const handleOpenPriorityItem = (reviewItem: ReviewItem) => {
     if (reviewItem.id.startsWith("live-priority-")) {
-      const traceId = `priority-open-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const priorityMailboxId = getReviewItemSourceMailboxId(reviewItem);
       const sourceLocation = priorityMailboxId
         ? getMailboxMessageLocationById(priorityMailboxId, reviewItem.sourceId)
@@ -27250,38 +26681,14 @@ export function WorkspaceShell({
           : getWorkspaceMessageById(reviewItem.sourceId);
 
       if (!sourceLocation || !targetMailbox || !targetMessage) {
-        console.log("[PriorityOpenTrace] click-unresolved", {
-          traceId,
-          clickedReviewItemTitle: reviewItem.title,
-          clickedReviewItemId: reviewItem.id,
-          clickedReviewItemSourceId: reviewItem.sourceId,
-          clickedMailboxId: priorityMailboxId,
-          resolvedMailboxId: sourceLocation?.mailboxId ?? null,
-          resolvedFolder: sourceLocation?.folder ?? null,
-          resolvedMessageId: targetMessage?.id ?? null,
-          resolvedSubject: targetMessage?.subject ?? null,
-        });
         return;
       }
-
-      console.log("[PriorityOpenTrace] click", {
-        traceId,
-        clickedReviewItemTitle: reviewItem.title,
-        clickedReviewItemId: reviewItem.id,
-        clickedReviewItemSourceId: reviewItem.sourceId,
-        clickedMailboxId: priorityMailboxId,
-        resolvedMailboxId: sourceLocation.mailboxId,
-        resolvedFolder: sourceLocation.folder,
-        resolvedMessageId: targetMessage.id,
-        resolvedSubject: targetMessage.subject,
-      });
 
       openMailboxFromContext(targetMailbox);
       setNotificationNavigationRequest({
         mailboxId: sourceLocation.mailboxId,
         messageId: reviewItem.sourceId,
         sourceMailboxId: priorityMailboxId ?? sourceLocation.mailboxId,
-        traceId,
         type: "reply",
         source: "priority",
         focusReplyComposer: false,
