@@ -9571,8 +9571,6 @@ function MailboxView({
       status: "active" as const,
     })),
   ];
-  const shouldBypassCollaborationStartModal =
-    !hasRealInternalCollaborationTeammates;
   const activeComposeMailbox =
     orderedMailboxes.find((candidate) => candidate.id === composeMailboxId) ?? mailbox;
   const composeSignatureOptions = orderedMailboxes
@@ -12313,16 +12311,6 @@ function MailboxView({
     setIsMoreMenuOpen(false);
     setIsSortMenuOpen(false);
 
-    if (shouldBypassCollaborationStartModal) {
-      createCollaborationForMessage(messageId, {
-        selectedPersonId: currentUserId,
-        requestType: "needs_review",
-        note: "",
-      });
-      setPendingCollaborationOpenMessageId(messageId);
-      return;
-    }
-
     setShareCollaborationMessageId(messageId);
     setCollaborationRequestType("needs_review");
     setCollaborationPersonId("");
@@ -12331,6 +12319,8 @@ function MailboxView({
 
   const closeShareCollaboration = () => {
     setShareCollaborationMessageId(null);
+    setCollaborationRequestType("needs_review");
+    setCollaborationPersonId("");
     setCollaborationNote("");
   };
 
