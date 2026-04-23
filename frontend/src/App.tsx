@@ -1296,6 +1296,7 @@ export default function App() {
       <WorkspaceShell
         userConfig={userConfig}
         onboardingState={onboardingState}
+        authenticatedUser={betaSessionUser}
         workspaceDataMode={workspaceDataMode}
       />
     );

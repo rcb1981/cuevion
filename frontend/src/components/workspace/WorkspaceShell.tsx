@@ -8097,6 +8097,7 @@ function WorkspaceSidebar({
   hasPendingTeamInvitation,
   notificationUnreadCount,
   orderedMailboxes,
+  onLogoutClick,
   onChangeSection,
   onOpenMailbox,
 }: {
@@ -8105,6 +8106,7 @@ function WorkspaceSidebar({
   hasPendingTeamInvitation: boolean;
   notificationUnreadCount: number;
   orderedMailboxes: OrderedMailbox[];
+  onLogoutClick: () => void;
   onChangeSection: (view: WorkspaceSection) => void;
   onOpenMailbox: (mailbox: OrderedMailbox) => void;
 }) {
@@ -8325,6 +8327,16 @@ function WorkspaceSidebar({
             <ul className="space-y-2">{primaryNavigationItems.map(renderItem)}</ul>
             <div className="mt-auto pt-8">
               <ul className="space-y-2">{utilityNavigationItems.map(renderItem)}</ul>
+              <button
+                type="button"
+                onClick={onLogoutClick}
+                className="mt-5 flex w-full items-center justify-center rounded-2xl px-3 py-3 text-center text-sm font-medium text-[var(--workspace-sidebar-text-muted)] transition-[background-color,color,box-shadow] duration-100 hover:bg-[var(--workspace-sidebar-hover)] hover:text-[var(--workspace-sidebar-text)] focus:outline-none focus-visible:shadow-[inset_0_0_0_1px_rgba(255,255,255,0.12),0_0_0_1px_rgba(214,230,221,0.16)] xl:justify-start xl:px-4 xl:text-left"
+              >
+                <span className="hidden xl:inline">Log out</span>
+                <span className="text-[11px] uppercase tracking-[0.18em] xl:hidden">
+                  Out
+                </span>
+              </button>
               <div className="pt-5 text-center text-[0.68rem] font-medium tracking-[0.05em] text-[color:rgba(146,122,98,0.78)] xl:px-4 xl:text-left">
                 Version 1.0.0
               </div>
@@ -22704,13 +22716,16 @@ const NotificationsSettingsCard = memo(function NotificationsSettingsCard({
 
 const AccountSettingsCard = memo(function AccountSettingsCard({
   themeMode,
+  accountName,
+  accountEmail,
 }: {
   themeMode: "light" | "dark";
+  accountName: string;
+  accountEmail: string;
 }) {
   const [isManaging, setIsManaging] = useState(false);
-  const [isLogoutConfirmationOpen, setIsLogoutConfirmationOpen] = useState(false);
-  const [savedName, setSavedName] = useState("Milan Vermeer");
-  const [savedEmail, setSavedEmail] = useState("milan@cuevion.com");
+  const [savedName, setSavedName] = useState(accountName);
+  const [savedEmail, setSavedEmail] = useState(accountEmail);
   const [savedPlan, setSavedPlan] = useState<"Single User" | "Team" | "Enterprise">(
     "Single User",
   );
@@ -22729,6 +22744,11 @@ const AccountSettingsCard = memo(function AccountSettingsCard({
       setDraftName(savedName);
     }
   }, [isManaging, savedName]);
+
+  useEffect(() => {
+    setSavedName(accountName);
+    setSavedEmail(accountEmail);
+  }, [accountEmail, accountName]);
 
   const hasUnsavedChanges = draftName !== savedName;
 
@@ -22887,30 +22907,8 @@ const AccountSettingsCard = memo(function AccountSettingsCard({
             </div>
           ) : null}
         </div>
-
-        <div className="mt-4 border-t border-[var(--workspace-border-soft)] pt-4">
-          <button
-            type="button"
-            onClick={() => setIsLogoutConfirmationOpen(true)}
-            className={settingsSubtleActionClass}
-          >
-            Log out
-          </button>
-        </div>
       </div>
 
-      <SettingsConfirmationModal
-        open={isLogoutConfirmationOpen}
-        themeMode={themeMode}
-        title="Log out?"
-        description="You'll be signed out of Cuevion on this device."
-        confirmLabel="Log out"
-        onCancel={() => setIsLogoutConfirmationOpen(false)}
-        onConfirm={() => {
-          setIsLogoutConfirmationOpen(false);
-          console.log("settings_log_out_confirm");
-        }}
-      />
       <SettingsModalShell
         open={isChangeEmailOpen}
         themeMode={themeMode}
@@ -23191,6 +23189,8 @@ const AccountSettingsCard = memo(function AccountSettingsCard({
 
 function SettingsView({
   workspaceName,
+  accountName,
+  accountEmail,
   savedManagedInboxes,
   primaryManagedInboxId,
   baseFocusPreferences,
@@ -23216,6 +23216,8 @@ function SettingsView({
   onSaveInboxOutOfOffice,
 }: {
   workspaceName: string;
+  accountName: string;
+  accountEmail: string;
   savedManagedInboxes: ManagedWorkspaceInbox[];
   primaryManagedInboxId: string | null;
   baseFocusPreferences: FocusPreferences;
@@ -23340,7 +23342,11 @@ function SettingsView({
             onSaveWorkspaceName={onSaveWorkspaceName}
             onManageInboxes={() => setSettingsPage("manage-inboxes")}
           />
-          <AccountSettingsCard themeMode={themeMode} />
+          <AccountSettingsCard
+            themeMode={themeMode}
+            accountName={accountName}
+            accountEmail={accountEmail}
+          />
           <NotificationsSettingsCard
             themeMode={themeMode}
             inboxChangesEnabled={inboxChangesEnabled}
@@ -25873,9 +25879,14 @@ export function WorkspaceShell({
     }));
   const primaryInboxTitle = orderedMailboxes[0]?.title ?? inboxDisplayConfig.main.title;
   const primaryWorkspaceEmail = orderedMailboxes[0]?.email ?? "team@cuevion.com";
-  const activeWorkspaceEmail = authenticatedUser?.email ?? primaryWorkspaceEmail;
+  const accountDisplayName = authenticatedUser?.name ?? orderedMailboxes[0]?.title ?? "You";
+  const accountDisplayEmail = authenticatedUser?.email ?? primaryWorkspaceEmail;
+  const activeWorkspaceEmail =
+    collaborationInviteRoute && authenticatedUser?.email
+      ? authenticatedUser.email
+      : primaryWorkspaceEmail;
   const activeWorkspaceUserName =
-    authenticatedUser?.name ?? orderedMailboxes[0]?.title ?? "You";
+    accountDisplayName;
   const currentWorkspaceUserId = normalizeSenderLearningKey(activeWorkspaceEmail);
   const teamPendingInvitationStorageKey =
     buildTeamPendingInvitationStorageKey(currentWorkspaceUserId);
@@ -26270,6 +26281,7 @@ export function WorkspaceShell({
   const [hasUnsavedManagedInboxSettings, setHasUnsavedManagedInboxSettings] = useState(false);
   const [pendingManagedInboxNavigation, setPendingManagedInboxNavigation] =
     useState<PendingManagedInboxNavigation | null>(null);
+  const [isLogoutConfirmationOpen, setIsLogoutConfirmationOpen] = useState(false);
   const [learningLaunchRequest, setLearningLaunchRequest] =
     useState<LearningLaunchRequest>(null);
   const [syncingMailboxId, setSyncingMailboxId] = useState<InboxId | null>(null);
@@ -30451,6 +30463,7 @@ export function WorkspaceShell({
         hasPendingTeamInvitation={Boolean(pendingTeamInvitation)}
         notificationUnreadCount={notificationUnreadCount}
         orderedMailboxes={orderedMailboxes}
+        onLogoutClick={() => setIsLogoutConfirmationOpen(true)}
         onChangeSection={handleChangeSection}
         onOpenMailbox={(mailbox) =>
           openMailboxFromContext(mailbox, { preserveCurrentContext: false })
@@ -30640,6 +30653,8 @@ export function WorkspaceShell({
               <div className="min-h-0 flex-1 overflow-y-auto px-1.5 pb-1 md:px-2 md:pb-2">
                 <SettingsView
                   workspaceName={workspaceName}
+                  accountName={accountDisplayName}
+                  accountEmail={accountDisplayEmail}
                   savedManagedInboxes={savedManagedInboxes}
                   primaryManagedInboxId={primaryManagedInboxId}
                   baseFocusPreferences={userConfig.focusPreferences}
@@ -30847,6 +30862,18 @@ export function WorkspaceShell({
           setPendingManagedInboxNavigation(null);
           setHasUnsavedManagedInboxSettings(false);
           pendingNavigation.action();
+        }}
+      />
+      <SettingsConfirmationModal
+        open={isLogoutConfirmationOpen}
+        themeMode={resolvedTheme}
+        title="Log out?"
+        description="You'll be signed out of Cuevion on this device."
+        confirmLabel="Log out"
+        onCancel={() => setIsLogoutConfirmationOpen(false)}
+        onConfirm={() => {
+          setIsLogoutConfirmationOpen(false);
+          console.log("settings_log_out_confirm");
         }}
       />
     </main>
