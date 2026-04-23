@@ -12532,6 +12532,8 @@ function MailboxView({
     setIsCollaborationParticipantPickerOpen(false);
     setCollaborationParticipantSearch("");
     setIsCollaborationParticipantPickerOpen(false);
+    setCollaborationParticipantSearch("");
+    setIsCollaborationParticipantPickerOpen(false);
     setExternalCollaborationEmail("");
     setExternalCollaborationInviteUrl("");
     setExternalInviteEmailFeedback(null);
