@@ -1134,7 +1134,8 @@ function resolveVisibleClassification(
     }
 
     if (
-      !message.internalClassification &&
+      (!message.internalClassification ||
+        message.internalClassification === "finance") &&
       signalClassification === "finance" &&
       isMarketingNewsletterUpdate
     ) {
