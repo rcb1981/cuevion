@@ -9236,6 +9236,7 @@ function MailboxView({
   currentUserName,
   currentUserEmail,
   workspaceCollaborationPeople,
+  inviteOnlyCollaborationPeople,
   focusPreferences,
   effectiveFocusPreferencesByMailbox,
   mailboxStore,
@@ -9288,6 +9289,7 @@ function MailboxView({
   currentUserName: string;
   currentUserEmail: string;
   workspaceCollaborationPeople: Array<{ id: string; name: string; email: string }>;
+  inviteOnlyCollaborationPeople: Array<{ id: string; name: string; email: string }>;
   focusPreferences: UserConfig["focusPreferences"];
   effectiveFocusPreferencesByMailbox: Partial<Record<InboxId, FocusPreferences>>;
   mailboxStore: MailboxStore;
@@ -9502,6 +9504,7 @@ function MailboxView({
     useState<string>("");
   const [externalCollaborationEmail, setExternalCollaborationEmail] = useState("");
   const [externalCollaborationInviteUrl, setExternalCollaborationInviteUrl] = useState("");
+  const [pendingExternalInviteEmail, setPendingExternalInviteEmail] = useState("");
   const [collaborationReplyVisibility, setCollaborationReplyVisibility] =
     useState<MailMessageCollaborationVisibility>("internal");
   const collaborationReplyInputRef = useRef<HTMLTextAreaElement | null>(null);
@@ -9539,6 +9542,13 @@ function MailboxView({
       email: person.email,
       kind: "internal" as const,
       status: "active" as const,
+    })),
+    ...inviteOnlyCollaborationPeople.map((person) => ({
+      id: person.id,
+      name: person.name,
+      email: person.email,
+      kind: "external" as const,
+      status: "invited" as const,
     })),
   ];
   const activeComposeMailbox =
@@ -10997,6 +11007,23 @@ function MailboxView({
 
   useEffect(() => {
     if (
+      !pendingExternalInviteEmail ||
+      !activeCollaborationMessage?.collaboration
+    ) {
+      return;
+    }
+
+    const nextEmail = pendingExternalInviteEmail;
+    setPendingExternalInviteEmail("");
+    void sendExternalReviewInviteToEmail(activeCollaborationMessage.id, nextEmail);
+  }, [
+    activeCollaborationMessage?.collaboration?.createdAt,
+    activeCollaborationMessage?.id,
+    pendingExternalInviteEmail,
+  ]);
+
+  useEffect(() => {
+    if (
       !notificationNavigationRequest ||
       notificationNavigationRequest.mailboxId !== mailbox.id
     ) {
@@ -12191,17 +12218,27 @@ function MailboxView({
       kind: "internal" as const,
       status: "active" as const,
     };
+    const initialParticipant =
+      selectedPerson.kind === "external"
+        ? {
+            id: currentUserId,
+            name: currentUserName,
+            email: currentUserEmail,
+            kind: "internal" as const,
+            status: "active" as const,
+          }
+        : selectedPerson;
 
     const nextTimestamp = Date.now();
     const trimmedNote = (options?.note ?? collaborationNote).trim();
     const initialMentionCandidates = getCollaborationMentionTargets(
       [
         {
-          id: selectedPerson.id,
-          name: selectedPerson.name,
-          email: selectedPerson.email,
-          kind: selectedPerson.kind,
-          status: selectedPerson.status,
+          id: initialParticipant.id,
+          name: initialParticipant.name,
+          email: initialParticipant.email,
+          kind: initialParticipant.kind,
+          status: initialParticipant.status,
         },
       ],
       collaborationPeople,
@@ -12233,11 +12270,11 @@ function MailboxView({
       updatedAt: nextTimestamp,
       participants: [
         {
-          id: selectedPerson.id,
-          name: selectedPerson.name,
-          email: selectedPerson.email,
-          kind: selectedPerson.kind,
-          status: selectedPerson.status,
+          id: initialParticipant.id,
+          name: initialParticipant.name,
+          email: initialParticipant.email,
+          kind: initialParticipant.kind,
+          status: initialParticipant.status,
         },
       ],
       previewText: trimmedNote || undefined,
@@ -12471,7 +12508,15 @@ function MailboxView({
     if (!shareCollaborationMessageId) {
       return;
     }
+    const selectedPerson = collaborationSelectablePeople.find(
+      (person) => person.id === collaborationPersonId,
+    );
+    const nextExternalInviteEmail =
+      selectedPerson?.kind === "external" ? selectedPerson.email : "";
     createCollaborationForMessage(shareCollaborationMessageId);
+    if (nextExternalInviteEmail) {
+      setPendingExternalInviteEmail(nextExternalInviteEmail);
+    }
     closeShareCollaboration();
   };
 
@@ -12569,6 +12614,12 @@ function MailboxView({
     );
 
     if (!selectedParticipant) {
+      return;
+    }
+
+    if (selectedParticipant.kind === "external") {
+      setCollaborationParticipantPersonId("");
+      void sendExternalReviewInviteToEmail(messageId, selectedParticipant.email);
       return;
     }
 
@@ -12900,12 +12951,12 @@ function MailboxView({
     setExternalInviteEmailFeedback("Invite link copied.");
   };
 
-  const sendExternalReviewInvite = async (messageId: string) => {
+  const sendExternalReviewInviteToEmail = async (messageId: string, email: string) => {
     if (isSendingExternalInvite) {
       return;
     }
 
-    const normalizedEmail = externalCollaborationEmail.trim().toLowerCase();
+    const normalizedEmail = email.trim().toLowerCase();
 
     if (!normalizedEmail || !isValidCollaborationParticipantEmail(normalizedEmail)) {
       setExternalInviteEmailFeedback("Enter a valid reviewer email.");
@@ -13154,6 +13205,10 @@ function MailboxView({
     } finally {
       setIsSendingExternalInvite(false);
     }
+  };
+
+  const sendExternalReviewInvite = async (messageId: string) => {
+    await sendExternalReviewInviteToEmail(messageId, externalCollaborationEmail);
   };
 
   const setMessagesUnreadState = (
@@ -17737,6 +17792,7 @@ function WorkbenchView({
   pendingTeamInvitation,
   memberOfEntries,
   onAddMemberOfEntry,
+  onTeamMembersChange,
   onAcceptPendingTeamInvitation,
   onDeclinePendingTeamInvitation,
   showDemoContent,
@@ -17758,6 +17814,7 @@ function WorkbenchView({
   pendingTeamInvitation: PendingTeamInvitation;
   memberOfEntries: TeamMembershipEntry[];
   onAddMemberOfEntry: (entry: TeamMembershipEntry) => void;
+  onTeamMembersChange: (members: TeamMemberEntry[]) => void;
   onAcceptPendingTeamInvitation: () => void;
   onDeclinePendingTeamInvitation: () => void;
   showDemoContent: boolean;
@@ -17969,7 +18026,8 @@ function WorkbenchView({
     }
 
     window.localStorage.setItem(teamMembersStorageKey, JSON.stringify(teamMembers));
-  }, [teamMembers, teamMembersStorageKey]);
+    onTeamMembersChange(teamMembers);
+  }, [onTeamMembersChange, teamMembers, teamMembersStorageKey]);
 
   useEffect(() => {
     if (!activeTeamMember) {
@@ -25412,6 +25470,7 @@ export function WorkspaceShell({
   const currentWorkspaceUserId = normalizeSenderLearningKey(activeWorkspaceEmail);
   const teamPendingInvitationStorageKey =
     buildTeamPendingInvitationStorageKey(currentWorkspaceUserId);
+  const teamMembersStorageKey = buildTeamMembersStorageKey(currentWorkspaceUserId);
   const teamMembershipsStorageKey =
     buildTeamMembershipsStorageKey(currentWorkspaceUserId);
   const mailboxOrderKey = orderedMailboxes.map((mailbox) => mailbox.id).join("|");
@@ -25990,6 +26049,23 @@ export function WorkspaceShell({
       return [];
     }
   });
+  const [teamMemberEntries, setTeamMemberEntries] = useState<TeamMemberEntry[]>(() => {
+    if (typeof window === "undefined") {
+      return [];
+    }
+
+    const storedValue = window.localStorage.getItem(teamMembersStorageKey);
+
+    if (!storedValue) {
+      return [];
+    }
+
+    try {
+      return JSON.parse(storedValue) as TeamMemberEntry[];
+    } catch {
+      return [];
+    }
+  });
   const workspaceCollaborationPeople = [
     authenticatedUser
       ? {
@@ -26016,6 +26092,24 @@ export function WorkspaceShell({
       authenticatedUser?.userType !== "guest" &&
       normalizeSenderLearningKey(member.email) !== currentWorkspaceUserId,
   );
+  const inviteOnlyCollaborationPeople = teamMemberEntries
+    .filter(
+      (member) =>
+        member.accessLevel === "Limited" &&
+        member.status !== "Invite cancelled" &&
+        member.status !== "Access removed" &&
+        normalizeSenderLearningKey(member.email) !== currentWorkspaceUserId &&
+        isValidInviteEmail(member.email),
+    )
+    .map((member) => ({
+      id: `invite-only:${normalizeSenderLearningKey(member.email)}`,
+      name: member.name,
+      email: member.email.trim().toLowerCase(),
+    }))
+    .filter(
+      (person, index, people) =>
+        people.findIndex((candidate) => candidate.email === person.email) === index,
+    );
   const [isSmartFolderModalOpen, setIsSmartFolderModalOpen] = useState(false);
   const [editingSmartFolderId, setEditingSmartFolderId] = useState<string | null>(null);
   const [smartFolderDraftName, setSmartFolderDraftName] = useState("");
@@ -30037,6 +30131,7 @@ export function WorkspaceShell({
                   currentUserName={activeWorkspaceUserName}
                   currentUserEmail={activeWorkspaceEmail}
                   workspaceCollaborationPeople={workspaceCollaborationPeople}
+                  inviteOnlyCollaborationPeople={inviteOnlyCollaborationPeople}
                   focusPreferences={activeFocusPreferences}
                   effectiveFocusPreferencesByMailbox={effectiveFocusPreferencesByMailbox}
                   mailboxStore={mailboxStore}
@@ -30118,6 +30213,7 @@ export function WorkspaceShell({
                   onAddMemberOfEntry={(entry) => {
                     setMemberOfEntries((current) => [...current, entry]);
                   }}
+                  onTeamMembersChange={setTeamMemberEntries}
                   onAcceptPendingTeamInvitation={() => {
                     setPendingTeamInvitation(null);
                   }}
