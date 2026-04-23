@@ -1121,32 +1121,65 @@ function resolveVisibleClassification(
     }
   })();
 
-  if (
-    (signalClassification === "promo" ||
-      signalClassification === "business" ||
-      message.internalClassification === "business" ||
-      message.internalClassification === "business_reminder") &&
-    isBroadcastPromoMessage(message)
-  ) {
-    return "workflow_update";
-  }
+  const isMarketingNewsletterUpdate = isMarketingNewsletterUpdateMessage(message);
+  const resolvedClassification = (() => {
+    if (
+      (signalClassification === "promo" ||
+        signalClassification === "business" ||
+        message.internalClassification === "business" ||
+        message.internalClassification === "business_reminder") &&
+      isBroadcastPromoMessage(message)
+    ) {
+      return "workflow_update";
+    }
+
+    if (
+      !message.internalClassification &&
+      signalClassification === "finance" &&
+      isMarketingNewsletterUpdate
+    ) {
+      return "workflow_update";
+    }
+
+    if (
+      message.internalClassification &&
+      message.internalClassification !== "unknown"
+    ) {
+      return message.internalClassification;
+    }
+
+    return signalClassification;
+  })();
+  const deJongLaanDiagnosticText = [
+    message.subject,
+    message.sender,
+    message.from,
+  ]
+    .join(" ")
+    .toLowerCase();
 
   if (
-    !message.internalClassification &&
-    signalClassification === "finance" &&
-    isMarketingNewsletterUpdateMessage(message)
+    includesAnyKeyword(deJongLaanDiagnosticText, [
+      "de jong",
+      "jonglaan",
+      "dejong",
+      "laan",
+    ])
   ) {
-    return "workflow_update";
+    console.info("[Cuevion] De Jong & Laan classification diagnostic", {
+      subject: message.subject,
+      sender: message.sender,
+      from: message.from,
+      signal: message.signal,
+      ui_signal: message.ui_signal,
+      internalClassification: message.internalClassification,
+      signalClassification,
+      isMarketingNewsletterUpdateMessage: isMarketingNewsletterUpdate,
+      resolvedClassification,
+    });
   }
 
-  if (
-    message.internalClassification &&
-    message.internalClassification !== "unknown"
-  ) {
-    return message.internalClassification;
-  }
-
-  return signalClassification;
+  return resolvedClassification;
 }
 
 function doesMessageMatchSmartFolderRule(
