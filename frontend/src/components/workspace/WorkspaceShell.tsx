@@ -116,6 +116,9 @@ type WorkspaceSection =
   | "Settings"
   | "Help"
   | "Contact";
+type PendingManagedInboxNavigation = {
+  action: () => void;
+};
 type WorkspaceDataMode = "demo" | "live";
 type ReviewFilter = "All priority" | "Priority";
 type InboxFilter = "All inboxes" | "Connected";
@@ -20232,6 +20235,7 @@ const ManageInboxesView = memo(function ManageInboxesView({
   onBack,
   onApply,
   onSetPrimaryInbox,
+  onDirtyChange,
   themeMode,
 }: {
   savedManagedInboxes: ManagedWorkspaceInbox[];
@@ -20239,6 +20243,7 @@ const ManageInboxesView = memo(function ManageInboxesView({
   onBack: () => void;
   onApply: (nextMailboxes: ManagedWorkspaceInbox[]) => boolean;
   onSetPrimaryInbox: (inboxId: string) => void;
+  onDirtyChange: (hasUnsavedChanges: boolean) => void;
   themeMode: "light" | "dark";
 }) {
   const [draftManagedInboxes, setDraftManagedInboxes] = useState<ManagedWorkspaceInbox[]>(
@@ -20282,6 +20287,12 @@ const ManageInboxesView = memo(function ManageInboxesView({
   const hasUnsavedChanges =
     JSON.stringify(draftManagedInboxes) !== JSON.stringify(savedManagedInboxes);
   const connectedInboxCount = draftManagedInboxes.filter(isSelectablePrimaryManagedInbox).length;
+
+  useEffect(() => {
+    onDirtyChange(hasUnsavedChanges);
+
+    return () => onDirtyChange(false);
+  }, [hasUnsavedChanges, onDirtyChange]);
 
   const clearConnectionError = (inboxId: string) => {
     setConnectionErrors((current) => {
@@ -22667,6 +22678,7 @@ function SettingsView({
   isApplyingFocusPreferences,
   onApplyManagedInboxes,
   onSetPrimaryManagedInbox,
+  onManagedInboxesDirtyChange,
   onSaveInboxSignature,
   onSaveInboxOutOfOffice,
 }: {
@@ -22691,6 +22703,7 @@ function SettingsView({
   isApplyingFocusPreferences: boolean;
   onApplyManagedInboxes: (nextMailboxes: ManagedWorkspaceInbox[]) => boolean;
   onSetPrimaryManagedInbox: (inboxId: string) => void;
+  onManagedInboxesDirtyChange: (hasUnsavedChanges: boolean) => void;
   onSaveInboxSignature: (inboxId: InboxId, signature: InboxSignatureSettings) => void;
   onSaveInboxOutOfOffice: (
     inboxId: InboxId,
@@ -22764,6 +22777,7 @@ function SettingsView({
         onBack={() => setSettingsPage("root")}
         onApply={onApplyManagedInboxes}
         onSetPrimaryInbox={onSetPrimaryManagedInbox}
+        onDirtyChange={onManagedInboxesDirtyChange}
         themeMode={themeMode}
       />
     );
@@ -25719,6 +25733,9 @@ export function WorkspaceShell({
   const [activeMailbox, setActiveMailbox] = useState<OrderedMailbox | null>(null);
   const [mailboxReturnContext, setMailboxReturnContext] =
     useState<MailboxReturnContext | null>(null);
+  const [hasUnsavedManagedInboxSettings, setHasUnsavedManagedInboxSettings] = useState(false);
+  const [pendingManagedInboxNavigation, setPendingManagedInboxNavigation] =
+    useState<PendingManagedInboxNavigation | null>(null);
   const [learningLaunchRequest, setLearningLaunchRequest] =
     useState<LearningLaunchRequest>(null);
   const [syncingMailboxId, setSyncingMailboxId] = useState<InboxId | null>(null);
@@ -27336,7 +27353,17 @@ export function WorkspaceShell({
     mailboxId: activeMailbox?.id ?? null,
   });
 
-  const openMailboxFromContext = (
+  const requestNavigationAwayFromDirtyManagedInboxes = (action: () => void) => {
+    if (activeSection === "Settings" && hasUnsavedManagedInboxSettings) {
+      setPendingManagedInboxNavigation({ action });
+      return false;
+    }
+
+    action();
+    return true;
+  };
+
+  const openMailboxFromContextWithoutGuard = (
     targetMailbox: OrderedMailbox,
     options?: { preserveCurrentContext?: boolean },
   ) => {
@@ -27347,6 +27374,15 @@ export function WorkspaceShell({
     setActiveTarget(null);
     setActiveSection("Inboxes");
     setActiveMailbox(targetMailbox);
+  };
+
+  const openMailboxFromContext = (
+    targetMailbox: OrderedMailbox,
+    options?: { preserveCurrentContext?: boolean },
+  ) => {
+    return requestNavigationAwayFromDirtyManagedInboxes(() =>
+      openMailboxFromContextWithoutGuard(targetMailbox, options),
+    );
   };
 
   const handleReturnFromMailbox = () => {
@@ -27370,18 +27406,29 @@ export function WorkspaceShell({
   };
 
   const handleChangeSection = (section: WorkspaceSection) => {
-    setActiveSection(section);
-    setActiveTarget(null);
-    setActiveMailbox(null);
-    setMailboxReturnContext(null);
+    if (section === activeSection) {
+      setActiveTarget(null);
+      setActiveMailbox(null);
+      setMailboxReturnContext(null);
+      return;
+    }
+
+    requestNavigationAwayFromDirtyManagedInboxes(() => {
+      setActiveSection(section);
+      setActiveTarget(null);
+      setActiveMailbox(null);
+      setMailboxReturnContext(null);
+    });
   };
 
   const handleOpenPriority = (filter: ReviewFilter) => {
-    setReviewFilter(filter);
-    setActiveSection("Priority");
-    setActiveTarget(null);
-    setActiveMailbox(null);
-    setMailboxReturnContext(null);
+    requestNavigationAwayFromDirtyManagedInboxes(() => {
+      setReviewFilter(filter);
+      setActiveSection("Priority");
+      setActiveTarget(null);
+      setActiveMailbox(null);
+      setMailboxReturnContext(null);
+    });
   };
 
   const handleSetManualPriority = (messageId: string, shouldBePriority: boolean) => {
@@ -27415,30 +27462,36 @@ export function WorkspaceShell({
   };
 
   const handleOpenInboxes = (filter: InboxFilter) => {
-    setInboxFilter(filter);
-    setActiveSection("Inboxes");
-    setActiveTarget(null);
-    setActiveMailbox(null);
-    setMailboxReturnContext(null);
+    requestNavigationAwayFromDirtyManagedInboxes(() => {
+      setInboxFilter(filter);
+      setActiveSection("Inboxes");
+      setActiveTarget(null);
+      setActiveMailbox(null);
+      setMailboxReturnContext(null);
+    });
   };
 
   const handleOpenForYou = (context: ForYouContext) => {
-    setForYouContext(context);
-    setActiveSection("For You");
-    setActiveTarget(null);
-    setActiveMailbox(null);
-    setMailboxReturnContext(null);
+    requestNavigationAwayFromDirtyManagedInboxes(() => {
+      setForYouContext(context);
+      setActiveSection("For You");
+      setActiveTarget(null);
+      setActiveMailbox(null);
+      setMailboxReturnContext(null);
+    });
   };
 
   const handleOpenLearningRequest = (
     request: NonNullable<LearningLaunchRequest>,
   ) => {
-    setForYouContext("Main");
-    setActiveSection("For You");
-    setActiveTarget(null);
-    setActiveMailbox(null);
-    setMailboxReturnContext(null);
-    setLearningLaunchRequest(request);
+    requestNavigationAwayFromDirtyManagedInboxes(() => {
+      setForYouContext("Main");
+      setActiveSection("For You");
+      setActiveTarget(null);
+      setActiveMailbox(null);
+      setMailboxReturnContext(null);
+      setLearningLaunchRequest(request);
+    });
   };
 
   const handleOpenDemoInbox = () => {
@@ -27485,16 +27538,22 @@ export function WorkspaceShell({
           participant.status === "active",
       )
     ) {
-      window.location.assign(
-        buildCollaborationInviteLink(targetMessage, request.inviteeEmail),
-      );
+      const inviteeEmail = request.inviteeEmail;
+
+      requestNavigationAwayFromDirtyManagedInboxes(() => {
+        window.location.assign(
+          buildCollaborationInviteLink(targetMessage, inviteeEmail),
+        );
+      });
       return;
     }
 
-    openMailboxFromContext(targetMailbox);
-    setNotificationNavigationRequest({
-      ...request,
-      requestKey: Date.now(),
+    requestNavigationAwayFromDirtyManagedInboxes(() => {
+      openMailboxFromContextWithoutGuard(targetMailbox);
+      setNotificationNavigationRequest({
+        ...request,
+        requestKey: Date.now(),
+      });
     });
   };
   const liveNotificationItems = buildVisibleNotificationItems({
@@ -27559,23 +27618,25 @@ export function WorkspaceShell({
       return;
     }
 
-    setReviewInboxHandoff({
-      reviewId: reviewItem.id,
-      messageId: reviewItem.sourceId,
-      mailboxId: sourceLocation.mailboxId,
-      threadId: sourceMessage.threadId ?? null,
-      initialFolder: sourceLocation.folder,
-      initialCategory: sourceMessage.category ?? null,
-      startedAt: new Date().toISOString(),
-      source: options?.source ?? "review-detail",
-    });
-    openMailboxFromContext(targetMailbox);
-    setNotificationNavigationRequest({
-      mailboxId: sourceLocation.mailboxId,
-      messageId: reviewItem.sourceId,
-      type: "reply",
-      focusReplyComposer: options?.focusReplyComposer ?? false,
-      requestKey: Date.now(),
+    requestNavigationAwayFromDirtyManagedInboxes(() => {
+      setReviewInboxHandoff({
+        reviewId: reviewItem.id,
+        messageId: reviewItem.sourceId,
+        mailboxId: sourceLocation.mailboxId,
+        threadId: sourceMessage.threadId ?? null,
+        initialFolder: sourceLocation.folder,
+        initialCategory: sourceMessage.category ?? null,
+        startedAt: new Date().toISOString(),
+        source: options?.source ?? "review-detail",
+      });
+      openMailboxFromContextWithoutGuard(targetMailbox);
+      setNotificationNavigationRequest({
+        mailboxId: sourceLocation.mailboxId,
+        messageId: reviewItem.sourceId,
+        type: "reply",
+        focusReplyComposer: options?.focusReplyComposer ?? false,
+        requestKey: Date.now(),
+      });
     });
   };
 
@@ -27604,16 +27665,18 @@ export function WorkspaceShell({
         return;
       }
 
-      openMailboxFromContext(targetMailbox);
-      setNotificationNavigationRequest({
-        mailboxId: sourceLocation.mailboxId,
-        messageId: reviewItem.sourceId,
-        sourceMailboxId: priorityMailboxId ?? sourceLocation.mailboxId,
-        type: "reply",
-        source: "priority",
-        focusReplyComposer: false,
-        openFullMessage: true,
-        requestKey: Date.now(),
+      requestNavigationAwayFromDirtyManagedInboxes(() => {
+        openMailboxFromContextWithoutGuard(targetMailbox);
+        setNotificationNavigationRequest({
+          mailboxId: sourceLocation.mailboxId,
+          messageId: reviewItem.sourceId,
+          sourceMailboxId: priorityMailboxId ?? sourceLocation.mailboxId,
+          type: "reply",
+          source: "priority",
+          focusReplyComposer: false,
+          openFullMessage: true,
+          requestKey: Date.now(),
+        });
       });
       return;
     }
@@ -29988,6 +30051,7 @@ export function WorkspaceShell({
                   isApplyingFocusPreferences={isApplyingFocusPreferences}
                   onApplyManagedInboxes={handleApplyManagedInboxes}
                   onSetPrimaryManagedInbox={handleSetPrimaryManagedInbox}
+                  onManagedInboxesDirtyChange={setHasUnsavedManagedInboxSettings}
                   onSaveInboxSignature={(inboxId, signature) => {
                     setInboxSignatures((current) => ({
                       ...current,
@@ -30045,8 +30109,8 @@ export function WorkspaceShell({
 		          </div>
 		        ) : null}
 		      </div>
-	      <SmartFolderModal
-	        open={isSmartFolderModalOpen}
+      <SmartFolderModal
+        open={isSmartFolderModalOpen}
         themeMode={resolvedTheme}
         connectedInboxes={orderedMailboxes}
         isEditing={editingSmartFolderId !== null}
@@ -30149,6 +30213,25 @@ export function WorkspaceShell({
           });
           setIsSmartFolderModalOpen(false);
           resetSmartFolderDraft();
+        }}
+      />
+      <SettingsConfirmationModal
+        open={Boolean(pendingManagedInboxNavigation)}
+        themeMode={resolvedTheme}
+        title="Discard changes?"
+        description="Your unsaved inbox changes will be lost."
+        confirmLabel="Discard"
+        onCancel={() => setPendingManagedInboxNavigation(null)}
+        onConfirm={() => {
+          const pendingNavigation = pendingManagedInboxNavigation;
+
+          if (!pendingNavigation) {
+            return;
+          }
+
+          setPendingManagedInboxNavigation(null);
+          setHasUnsavedManagedInboxSettings(false);
+          pendingNavigation.action();
         }}
       />
     </main>
