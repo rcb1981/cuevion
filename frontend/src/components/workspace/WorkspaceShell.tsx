@@ -4753,8 +4753,14 @@ function getPriorityVisibilityAdjustedMessage(
     focusPreferenceLevel === "high" &&
     (visibilityClassification === "promo" ||
       visibilityClassification === "promo_reminder");
+  const shouldRespectFinanceNormalPreference =
+    focusPreferenceLevel === "medium" && visibilityClassification === "finance";
 
-  if (hasProtectedPriorityVisibility(message) && !shouldRespectPromoHighPreference) {
+  if (
+    hasProtectedPriorityVisibility(message) &&
+    !shouldRespectPromoHighPreference &&
+    !shouldRespectFinanceNormalPreference
+  ) {
     return message;
   }
 
