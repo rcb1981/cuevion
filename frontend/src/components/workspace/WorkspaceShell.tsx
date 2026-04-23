@@ -9563,14 +9563,17 @@ function MailboxView({
   const [collaborationParticipantPersonIds, setCollaborationParticipantPersonIds] =
     useState<string[]>([]);
   const [collaborationParticipantSearch, setCollaborationParticipantSearch] = useState("");
+  const [startCollaborationInviteEmail, setStartCollaborationInviteEmail] = useState("");
   const [externalCollaborationEmail, setExternalCollaborationEmail] = useState("");
   const [externalCollaborationInviteUrl, setExternalCollaborationInviteUrl] = useState("");
   const [pendingExternalInviteEmails, setPendingExternalInviteEmails] = useState<string[]>([]);
   const [externalInviteInFlightEmails, setExternalInviteInFlightEmails] = useState<string[]>([]);
-  const [shouldFocusExternalInviteOnOpen, setShouldFocusExternalInviteOnOpen] = useState(false);
+  const [isCollaborationInviteComposerOpen, setIsCollaborationInviteComposerOpen] =
+    useState(false);
   const [collaborationReplyVisibility, setCollaborationReplyVisibility] =
     useState<MailMessageCollaborationVisibility>("internal");
   const collaborationReplyInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const startCollaborationInviteEmailInputRef = useRef<HTMLInputElement | null>(null);
   const externalCollaborationEmailInputRef = useRef<HTMLInputElement | null>(null);
   const collaborationMessageRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const [focusCollaborationComposer, setFocusCollaborationComposer] = useState(false);
@@ -11132,13 +11135,12 @@ function MailboxView({
   }, [activeCollaborationMessageId, focusCollaborationComposer]);
 
   useEffect(() => {
-    if (!activeCollaborationMessageId || !shouldFocusExternalInviteOnOpen) {
+    if (!activeCollaborationMessageId || !isCollaborationInviteComposerOpen) {
       return;
     }
 
     externalCollaborationEmailInputRef.current?.focus();
-    setShouldFocusExternalInviteOnOpen(false);
-  }, [activeCollaborationMessageId, shouldFocusExternalInviteOnOpen]);
+  }, [activeCollaborationMessageId, isCollaborationInviteComposerOpen]);
 
   useEffect(() => {
     if (
@@ -12470,6 +12472,7 @@ function MailboxView({
     setCollaborationRequestType("needs_review");
     setCollaborationPersonIds([]);
     setCollaborationMemberSearch("");
+    setStartCollaborationInviteEmail("");
     setCollaborationNote("");
   };
 
@@ -12478,7 +12481,7 @@ function MailboxView({
     setCollaborationRequestType("needs_review");
     setCollaborationPersonIds([]);
     setCollaborationMemberSearch("");
-    setShouldFocusExternalInviteOnOpen(false);
+    setStartCollaborationInviteEmail("");
     setCollaborationNote("");
   };
 
@@ -12508,7 +12511,7 @@ function MailboxView({
     setCollaborationReplySelection(null);
     setHighlightedCollaborationMessageId(null);
     setFocusCollaborationComposer(false);
-    setShouldFocusExternalInviteOnOpen(false);
+    setIsCollaborationInviteComposerOpen(false);
   };
 
   useEffect(() => {
@@ -12661,21 +12664,29 @@ function MailboxView({
     if (!shareCollaborationMessageId) {
       return;
     }
-    const shouldFocusExternalInviteAfterCreate = shouldFocusExternalInviteOnOpen;
     const selectedPeople = collaborationSelectablePeople.filter((person) =>
       collaborationPersonIds.includes(person.id),
     );
-    const nextExternalInviteEmails = selectedPeople
+    const nextExternalInviteEmails = [
+      ...selectedPeople
       .filter((person) => person.kind === "external")
-      .map((person) => person.email);
+      .map((person) => person.email),
+      ...(isValidCollaborationParticipantEmail(startCollaborationInviteEmail)
+        ? [startCollaborationInviteEmail.trim().toLowerCase()]
+        : []),
+    ].filter(
+      (email, index, emails) =>
+        emails.findIndex(
+          (candidate) =>
+            normalizeSenderLearningKey(candidate) === normalizeSenderLearningKey(email),
+        ) === index &&
+        !pendingExternalInviteEmailKeys.has(normalizeSenderLearningKey(email)),
+    );
     createCollaborationForMessage(shareCollaborationMessageId);
     if (nextExternalInviteEmails.length > 0) {
       setPendingExternalInviteEmails(nextExternalInviteEmails);
     }
     closeShareCollaboration();
-    if (shouldFocusExternalInviteAfterCreate) {
-      setShouldFocusExternalInviteOnOpen(true);
-    }
   };
 
   const sendCollaborationReply = (messageId: string) => {
@@ -13137,6 +13148,11 @@ function MailboxView({
     }
 
     const normalizedEmail = email.trim().toLowerCase();
+
+    if (pendingExternalInviteEmailKeys.has(normalizeSenderLearningKey(normalizedEmail))) {
+      setExternalInviteEmailFeedback("Invite already in progress.");
+      return;
+    }
 
     if (!normalizedEmail || !isValidCollaborationParticipantEmail(normalizedEmail)) {
       setExternalInviteEmailFeedback("Enter a valid reviewer email.");
@@ -17358,28 +17374,45 @@ function MailboxView({
                               </div>
                             ) : null}
                           </div>
-                          <button
-                            type="button"
-                            onClick={() => setShouldFocusExternalInviteOnOpen(true)}
-                            className="inline-flex h-10 items-center justify-center rounded-full px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-soft)] transition-colors duration-150 hover:text-[var(--workspace-text)] focus-visible:outline-none"
-                          >
-                            Invite new person
-                          </button>
-                          {shouldFocusExternalInviteOnOpen ? (
-                            <div className="text-[0.76rem] leading-6 text-[var(--workspace-text-faint)]">
-                              Start the collaboration first. The email invite field will be ready in External review.
-                            </div>
-                          ) : null}
                         </div>
                       ) : (
                         <div className="rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-4 text-[0.84rem] leading-6 text-[var(--workspace-text-faint)]">
-                          No team members yet. Start solo and use the existing email invite flow after creation.
+                          No team members yet. Invite someone directly by email below, or start solo.
                         </div>
                       )}
+                      <div className="space-y-2.5">
+                        <div className="flex items-center justify-between gap-3">
+                          <span className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                            Invite by email
+                          </span>
+                          {collaborationTeamPeople.length > 0 ? (
+                            <button
+                              type="button"
+                              onClick={() => startCollaborationInviteEmailInputRef.current?.focus()}
+                              className="inline-flex h-8 items-center justify-center rounded-full px-3 text-[0.66rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-soft)] transition-colors duration-150 hover:text-[var(--workspace-text)] focus-visible:outline-none"
+                            >
+                              Invite new person
+                            </button>
+                          ) : null}
+                        </div>
+                        <input
+                          ref={startCollaborationInviteEmailInputRef}
+                          type="email"
+                          value={startCollaborationInviteEmail}
+                          onChange={(event) => setStartCollaborationInviteEmail(event.target.value)}
+                          placeholder="person@example.com"
+                          className="w-full rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3 text-[0.88rem] leading-6 text-[var(--workspace-text)] outline-none placeholder:text-[var(--workspace-text-faint)]"
+                        />
+                        <div className="text-[0.76rem] leading-6 text-[var(--workspace-text-faint)]">
+                          {isValidCollaborationParticipantEmail(startCollaborationInviteEmail)
+                            ? "This invite will be sent when you start collaboration."
+                            : "Add an email now if you want the collaboration invite sent immediately after start."}
+                        </div>
+                      </div>
                       <div className="text-[0.78rem] leading-6 text-[color:rgba(120,111,100,0.68)]">
                         {collaborationTeamPeople.length > 0
-                          ? "Select one or more teammates now, or invite someone new after creation."
-                          : "Start solo and invite external participants after creation, or add an internal teammate now."}
+                          ? "Select one or more teammates now, and optionally invite someone by email before you start."
+                          : "Invite someone by email now, or leave it empty and start solo."}
                       </div>
                     </label>
 
@@ -17617,106 +17650,18 @@ function MailboxView({
                       ) : null}
                     </section>
 
-                    <section className="space-y-3 rounded-[22px] bg-[var(--workspace-card-subtle)] px-4 py-4">
-                      <div className="space-y-1">
-                        <div className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
-                          External review
-                        </div>
-                        <div className="text-[0.86rem] leading-6 text-[var(--workspace-text-soft)]">
-                          {primaryExternalReviewParticipant
-                            ? "Invite reviewers into the shared review room."
-                            : "Start the shared external review room for this collaboration."}
-                        </div>
-                      </div>
-                      <div className="flex flex-col gap-2 sm:flex-row">
-                        <input
-                          ref={externalCollaborationEmailInputRef}
-                          type="email"
-                          value={externalCollaborationEmail}
-                          onChange={(event) => {
-                            setExternalCollaborationEmail(event.target.value);
-                            if (externalCollaborationInviteUrl) {
-                              setExternalCollaborationInviteUrl("");
-                            }
-                            if (externalReviewCopyFeedback) {
-                              setExternalReviewCopyFeedback("");
-                            }
-                            if (externalInviteEmailFeedback) {
-                              setExternalInviteEmailFeedback(null);
-                            }
-                          }}
-                          placeholder="reviewer@example.com"
-                          className="min-w-0 flex-1 rounded-[16px] bg-[var(--workspace-card)] px-4 py-2.5 text-[0.88rem] leading-6 text-[var(--workspace-text)] outline-none placeholder:text-[var(--workspace-text-faint)]"
-                        />
+                    <section className="space-y-3">
+                      <div className="flex flex-wrap items-center gap-2">
                         <button
                           type="button"
                           onClick={() =>
-                            void sendExternalReviewInvite(activeCollaborationMessage.id)
+                            setIsCollaborationInviteComposerOpen((current) => !current)
                           }
-                          disabled={
-                            isSendingExternalInvite ||
-                            !isValidCollaborationParticipantEmail(externalCollaborationEmail)
-                          }
-                          className={
-                            !isSendingExternalInvite &&
-                            isValidCollaborationParticipantEmail(externalCollaborationEmail)
-                              ? "inline-flex h-11 items-center justify-center rounded-full bg-pine px-5 text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[color:rgba(251,248,242,0.98)] transition-[background-color,transform] duration-150 hover:bg-moss active:scale-[0.99] focus-visible:outline-none"
-                              : "inline-flex h-11 cursor-not-allowed items-center justify-center rounded-full bg-[var(--workspace-card)] px-5 text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-soft)] opacity-45 transition-[opacity] duration-150 focus-visible:outline-none"
-                          }
+                          className="inline-flex h-8 items-center justify-center rounded-full bg-[var(--workspace-card)] px-3 text-[0.66rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-soft)] transition-[background-color,color] duration-150 hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] focus-visible:outline-none"
                         >
-                          {isSendingExternalInvite ? "Sending..." : "Send invite"}
+                          Invite
                         </button>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            void copyExternalInviteLink(activeCollaborationMessage.id)
-                          }
-                          disabled={
-                            !isValidCollaborationParticipantEmail(externalCollaborationEmail)
-                          }
-                          className={
-                            isValidCollaborationParticipantEmail(externalCollaborationEmail)
-                              ? "inline-flex h-11 items-center justify-center rounded-full px-4 text-[0.66rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)] transition-colors duration-150 hover:text-[var(--workspace-text)] focus-visible:outline-none"
-                              : "inline-flex h-11 cursor-not-allowed items-center justify-center rounded-full px-4 text-[0.66rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)] opacity-45 transition-[opacity] duration-150 focus-visible:outline-none"
-                          }
-                        >
-                          Copy link
-                        </button>
-                      </div>
-                      {externalInviteEmailFeedback ? (
-                        <div className="text-[0.78rem] leading-6 text-[var(--workspace-text-faint)]">
-                          {externalInviteEmailFeedback}
-                        </div>
-                      ) : null}
-                      {externalCollaborationInviteUrl ? (
-                        <div className="flex items-center justify-between gap-3 rounded-[16px] bg-[var(--workspace-card)] px-4 py-3">
-                          <div className="text-[0.8rem] leading-6 text-[var(--workspace-text-soft)]">
-                            Review link ready
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              if (typeof navigator === "undefined" || !navigator.clipboard) {
-                                return;
-                              }
-                              void navigator.clipboard.writeText(
-                                externalCollaborationInviteUrl,
-                              );
-                              setExternalReviewCopyFeedback("Link copied");
-                              window.setTimeout(() => {
-                                setExternalReviewCopyFeedback((current) =>
-                                  current === "Link copied" ? "" : current,
-                                );
-                              }, 1800);
-                            }}
-                            className="inline-flex h-8 items-center justify-center rounded-full px-3 text-[0.66rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-soft)] transition-colors duration-150 hover:text-[var(--workspace-text)] focus-visible:outline-none"
-                          >
-                            Copy link
-                          </button>
-                        </div>
-                      ) : null}
-                      {primaryExternalReviewParticipant ? (
-                        <div className="flex justify-start">
+                        {primaryExternalReviewParticipant ? (
                           <button
                             type="button"
                             onClick={() =>
@@ -17725,24 +17670,19 @@ function MailboxView({
                                 primaryExternalReviewParticipant,
                               )
                             }
-                            className="inline-flex h-8 items-center justify-center rounded-full px-3 text-[0.66rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)] transition-colors duration-150 hover:text-[var(--workspace-text)] focus-visible:outline-none"
+                            className="inline-flex h-8 items-center justify-center rounded-full bg-[var(--workspace-card)] px-3 text-[0.66rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-soft)] transition-[background-color,color] duration-150 hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] focus-visible:outline-none"
                           >
                             Open external review
                           </button>
-                        </div>
-                      ) : null}
-                      {externalReviewCopyFeedback ? (
-                        <div className="text-[0.76rem] leading-6 text-[var(--workspace-text-faint)]">
-                          {externalReviewCopyFeedback}
-                        </div>
-                      ) : null}
-                    </section>
-
-                    <section className="space-y-3">
-                      <div className="flex items-center justify-between gap-3">
-                        <div className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
-                          Activity
-                        </div>
+                        ) : (
+                          <button
+                            type="button"
+                            disabled
+                            className="inline-flex h-8 cursor-not-allowed items-center justify-center rounded-full bg-[var(--workspace-card)] px-3 text-[0.66rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-soft)] opacity-45 transition-[opacity] duration-150 focus-visible:outline-none"
+                          >
+                            Open external review
+                          </button>
+                        )}
                         <button
                           type="button"
                           onClick={() => setCollaborationHistoryExpanded((current) => !current)}
@@ -17752,6 +17692,117 @@ function MailboxView({
                             ? "Hide conversation"
                             : `View full conversation (${visibleCollaborationMessages.length})`}
                         </button>
+                      </div>
+                      {isCollaborationInviteComposerOpen ||
+                      externalInviteEmailFeedback ||
+                      externalCollaborationInviteUrl ||
+                      externalReviewCopyFeedback ? (
+                        <div className="space-y-2">
+                          <div className="flex flex-col gap-2 sm:flex-row">
+                            <input
+                              ref={externalCollaborationEmailInputRef}
+                              type="email"
+                              value={externalCollaborationEmail}
+                              onChange={(event) => {
+                                setExternalCollaborationEmail(event.target.value);
+                                if (externalCollaborationInviteUrl) {
+                                  setExternalCollaborationInviteUrl("");
+                                }
+                                if (externalReviewCopyFeedback) {
+                                  setExternalReviewCopyFeedback("");
+                                }
+                                if (externalInviteEmailFeedback) {
+                                  setExternalInviteEmailFeedback(null);
+                                }
+                              }}
+                              placeholder="reviewer@example.com"
+                              className="min-w-0 flex-1 rounded-[16px] bg-[var(--workspace-card)] px-4 py-2.5 text-[0.88rem] leading-6 text-[var(--workspace-text)] outline-none placeholder:text-[var(--workspace-text-faint)]"
+                            />
+                            <button
+                              type="button"
+                              onClick={() =>
+                                void sendExternalReviewInvite(activeCollaborationMessage.id)
+                              }
+                              disabled={
+                                isSendingExternalInvite ||
+                                pendingExternalInviteEmailKeys.has(
+                                  normalizeSenderLearningKey(externalCollaborationEmail),
+                                ) ||
+                                !isValidCollaborationParticipantEmail(externalCollaborationEmail)
+                              }
+                              className={
+                                !isSendingExternalInvite &&
+                                !pendingExternalInviteEmailKeys.has(
+                                  normalizeSenderLearningKey(externalCollaborationEmail),
+                                ) &&
+                                isValidCollaborationParticipantEmail(externalCollaborationEmail)
+                                  ? "inline-flex h-11 items-center justify-center rounded-full bg-pine px-5 text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[color:rgba(251,248,242,0.98)] transition-[background-color,transform] duration-150 hover:bg-moss active:scale-[0.99] focus-visible:outline-none"
+                                  : "inline-flex h-11 cursor-not-allowed items-center justify-center rounded-full bg-[var(--workspace-card)] px-5 text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-soft)] opacity-45 transition-[opacity] duration-150 focus-visible:outline-none"
+                              }
+                            >
+                              {isSendingExternalInvite ? "Sending..." : "Send invite"}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                void copyExternalInviteLink(activeCollaborationMessage.id)
+                              }
+                              disabled={
+                                !isValidCollaborationParticipantEmail(externalCollaborationEmail)
+                              }
+                              className={
+                                isValidCollaborationParticipantEmail(externalCollaborationEmail)
+                                  ? "inline-flex h-11 items-center justify-center rounded-full px-4 text-[0.66rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)] transition-colors duration-150 hover:text-[var(--workspace-text)] focus-visible:outline-none"
+                                  : "inline-flex h-11 cursor-not-allowed items-center justify-center rounded-full px-4 text-[0.66rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)] opacity-45 transition-[opacity] duration-150 focus-visible:outline-none"
+                              }
+                            >
+                              Copy link
+                            </button>
+                          </div>
+                          {externalInviteEmailFeedback ? (
+                            <div className="text-[0.78rem] leading-6 text-[var(--workspace-text-faint)]">
+                              {externalInviteEmailFeedback}
+                            </div>
+                          ) : null}
+                          {externalCollaborationInviteUrl ? (
+                            <div className="flex items-center justify-between gap-3 rounded-[16px] bg-[var(--workspace-card)] px-4 py-3">
+                              <div className="text-[0.8rem] leading-6 text-[var(--workspace-text-soft)]">
+                                Review link ready
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  if (typeof navigator === "undefined" || !navigator.clipboard) {
+                                    return;
+                                  }
+                                  void navigator.clipboard.writeText(
+                                    externalCollaborationInviteUrl,
+                                  );
+                                  setExternalReviewCopyFeedback("Link copied");
+                                  window.setTimeout(() => {
+                                    setExternalReviewCopyFeedback((current) =>
+                                      current === "Link copied" ? "" : current,
+                                    );
+                                  }, 1800);
+                                }}
+                                className="inline-flex h-8 items-center justify-center rounded-full px-3 text-[0.66rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-soft)] transition-colors duration-150 hover:text-[var(--workspace-text)] focus-visible:outline-none"
+                              >
+                                Copy link
+                              </button>
+                            </div>
+                          ) : null}
+                          {externalReviewCopyFeedback ? (
+                            <div className="text-[0.76rem] leading-6 text-[var(--workspace-text-faint)]">
+                              {externalReviewCopyFeedback}
+                            </div>
+                          ) : null}
+                        </div>
+                      ) : null}
+                    </section>
+
+                    <section className="space-y-3">
+                      <div className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                        Activity
                       </div>
                       {visibleCollaborationMessages.length > 0 ? (
                         <div className="max-h-[320px] space-y-2 overflow-y-auto pr-1">
