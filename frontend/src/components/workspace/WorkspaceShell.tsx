@@ -11197,7 +11197,9 @@ function MailboxView({
           current.includes(normalizedEmail) ? current : [...current, normalizedEmail],
         );
         try {
-          await sendExternalReviewInviteToEmail(activeCollaborationMessage.id, nextEmail);
+          await sendExternalReviewInviteToEmail(activeCollaborationMessage.id, nextEmail, {
+            allowInFlightOwnedSend: true,
+          });
         } finally {
           setExternalInviteInFlightEmails((current) =>
             current.filter((email) => email !== normalizedEmail),
@@ -13153,14 +13155,21 @@ function MailboxView({
     setExternalInviteEmailFeedback("Invite link copied.");
   };
 
-  const sendExternalReviewInviteToEmail = async (messageId: string, email: string) => {
+  const sendExternalReviewInviteToEmail = async (
+    messageId: string,
+    email: string,
+    options?: { allowInFlightOwnedSend?: boolean },
+  ) => {
     if (isSendingExternalInvite) {
       return;
     }
 
     const normalizedEmail = email.trim().toLowerCase();
 
-    if (pendingExternalInviteEmailKeys.has(normalizeSenderLearningKey(normalizedEmail))) {
+    if (
+      !options?.allowInFlightOwnedSend &&
+      pendingExternalInviteEmailKeys.has(normalizeSenderLearningKey(normalizedEmail))
+    ) {
       setExternalInviteEmailFeedback("Invite already in progress.");
       return;
     }
