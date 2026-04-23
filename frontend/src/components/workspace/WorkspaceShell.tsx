@@ -8825,48 +8825,16 @@ function NotificationsPreviewBlock({
 
 function ContentBlock({
   title,
-  showDemoContent,
-  onOpenPriority,
-  onOpenInboxes,
-  onOpenForYou,
-  onOpenConversation,
+  items,
 }: {
   title: string;
-  showDemoContent: boolean;
-  onOpenPriority: () => void;
-  onOpenInboxes: () => void;
-  onOpenForYou: () => void;
-  onOpenConversation: () => void;
+  items: Array<{
+    title: string;
+    detail: string;
+    actionLabel: string;
+    onClick: () => void;
+  }>;
 }) {
-  const items = showDemoContent
-    ? [
-        {
-          title: "Armada inbox synced successfully",
-          detail: "2 new messages categorized",
-          actionLabel: "Open inboxes",
-          onClick: onOpenInboxes,
-        },
-        {
-          title: "Demo submission auto-tagged",
-          detail: "Artist profile matched successfully",
-          actionLabel: "Open priority",
-          onClick: onOpenPriority,
-        },
-        {
-          title: "Reminder triggered for Friday release",
-          detail: "Promo follow-up prepared",
-          actionLabel: "Open For You",
-          onClick: onOpenForYou,
-        },
-        {
-          title: "Universal thread updated",
-          detail: "Reply detected in active conversation",
-          actionLabel: "Open conversation",
-          onClick: onOpenConversation,
-        },
-      ]
-    : [];
-
   return (
     <section className="rounded-[30px] border border-[var(--workspace-border)] bg-[var(--workspace-card)] p-6 shadow-panel">
       <div className="mb-5 flex items-center justify-between">
@@ -8912,8 +8880,8 @@ function DashboardView({
   onOpenPriority,
   onOpenPrimaryInbox,
   onOpenInboxes,
-  onOpenForYou,
   notificationPreviewItems,
+  recentActivityItems,
   primaryInboxTitle,
   primaryInboxEmailCount,
   priorityInboxCount,
@@ -8922,8 +8890,8 @@ function DashboardView({
   onOpenPriority: () => void;
   onOpenPrimaryInbox: () => void;
   onOpenInboxes: () => void;
-  onOpenForYou: () => void;
   notificationPreviewItems: VisibleNotificationItem[];
+  recentActivityItems: VisibleActivityItem[];
   primaryInboxTitle: string;
   primaryInboxEmailCount: number;
   priorityInboxCount: number;
@@ -8939,6 +8907,12 @@ function DashboardView({
   evening: "Good evening",
 }[dayPeriod];
   const greeting = userName ? `${greetingLabel}, ${userName}` : greetingLabel;
+  const recentUpdateItems = recentActivityItems.slice(0, 4).map((item) => ({
+    title: item.title,
+    detail: item.detail,
+    actionLabel: "Open conversation",
+    onClick: item.action ?? onOpenInboxes,
+  }));
 
   return (
     <div className="space-y-8">
@@ -8965,11 +8939,7 @@ function DashboardView({
         <NotificationsPreviewBlock items={notificationPreviewItems} />
         <ContentBlock
           title="Recent updates"
-          showDemoContent={false}
-          onOpenPriority={onOpenPriority}
-          onOpenInboxes={onOpenInboxes}
-          onOpenForYou={onOpenForYou}
-          onOpenConversation={onOpenInboxes}
+          items={recentUpdateItems}
         />
       </div>
     </div>
@@ -30100,8 +30070,8 @@ export function WorkspaceShell({
                   onOpenPriority={() => handleOpenPriority("Priority")}
                   onOpenPrimaryInbox={handleOpenSenderContext}
                   onOpenInboxes={() => handleOpenInboxes("Connected")}
-                  onOpenForYou={() => handleOpenForYou("Promo")}
                   notificationPreviewItems={prioritizedNotificationItems}
+                  recentActivityItems={liveActivityItems}
                   primaryInboxTitle={primaryInboxTitle}
                   primaryInboxEmailCount={primaryInboxEmailCount}
                   priorityInboxCount={livePriorityInboxItems.length}
