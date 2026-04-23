@@ -17827,6 +17827,7 @@ function WorkbenchView({
   section,
   orderedMailboxes,
   managedInboxes,
+  currentUserName,
   onOpenDemoInbox,
   onOpenLearningRequest,
   onOpenSenderContext,
@@ -17850,6 +17851,7 @@ function WorkbenchView({
   section: WorkbenchSection;
   orderedMailboxes: OrderedMailbox[];
   managedInboxes: ManagedWorkspaceInbox[];
+  currentUserName: string;
   onOpenDemoInbox: () => void;
   onOpenLearningRequest: (request: NonNullable<LearningLaunchRequest>) => void;
   onOpenSenderContext: () => void;
@@ -18210,7 +18212,8 @@ function WorkbenchView({
       inviteeName: name,
       accessLevel: "Limited",
       createdByUserId: workspacePersistenceKey,
-      createdByUserName: orderedMailboxes[0]?.title.trim() || "Cuevion",
+      createdByUserName:
+        currentUserName.trim() || orderedMailboxes[0]?.title.trim() || "Cuevion",
     });
 
     if (!issueResult.ok) {
@@ -22866,12 +22869,6 @@ const AccountSettingsCard = memo(function AccountSettingsCard({
             value={savedEmail}
             actionLabel={isManaging ? "Change email" : undefined}
             onActionClick={isManaging ? () => setIsChangeEmailOpen(true) : undefined}
-          />
-          <SettingsInfoRow
-            label="Plan"
-            value={savedPlan}
-            actionLabel={isManaging ? "Manage" : undefined}
-            onActionClick={isManaging ? () => setIsManagePlanOpen(true) : undefined}
           />
 
           {isManaging ? (
@@ -30637,6 +30634,7 @@ export function WorkspaceShell({
                   section={activeSection}
                   orderedMailboxes={orderedMailboxes}
                   managedInboxes={savedManagedInboxes}
+                  currentUserName={activeWorkspaceUserName}
                   onOpenDemoInbox={handleOpenDemoInbox}
                   onOpenLearningRequest={handleOpenLearningRequest}
                   onOpenSenderContext={handleOpenSenderContext}
