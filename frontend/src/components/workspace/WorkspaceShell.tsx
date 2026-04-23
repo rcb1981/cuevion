@@ -17264,117 +17264,12 @@ function MailboxView({
 
                   <div className="mt-4 min-h-0 flex-1 overflow-y-auto pr-1">
                     <div className="space-y-5">
-                    <section className="space-y-3">
-                      <div className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
-                        Participants
-                      </div>
-                      {isPreStartCollaboration ? (
-                        <div className="space-y-4">
-                          {collaborationTeamPeople.length > 0 ? (
-                            <div className="space-y-3">
-                              <input
-                                type="search"
-                                value={collaborationMemberSearch}
-                                onChange={(event) => setCollaborationMemberSearch(event.target.value)}
-                                placeholder="Search team members"
-                                className="w-full rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3 text-[0.88rem] leading-6 text-[var(--workspace-text)] outline-none placeholder:text-[var(--workspace-text-faint)]"
-                              />
-                              <div className="max-h-[280px] space-y-2 overflow-y-auto pr-1">
-                                {visibleCollaborationTeamPeople.map((person) => {
-                                  const isSelected = collaborationPersonIds.includes(person.id);
-                                  const accessLevel = collaborationRoleByEmail.get(
-                                    normalizeSenderLearningKey(person.email),
-                                  );
-
-                                  return (
-                                    <button
-                                      key={person.id}
-                                      type="button"
-                                      onClick={() =>
-                                        setCollaborationPersonIds((current) =>
-                                          current.includes(person.id)
-                                            ? current.filter((entry) => entry !== person.id)
-                                            : [...current, person.id],
-                                        )
-                                      }
-                                      className={`flex w-full items-start justify-between gap-3 rounded-[18px] border px-4 py-3 text-left transition-[background-color,border-color,color] duration-150 focus-visible:outline-none ${
-                                        isSelected
-                                          ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-card-featured-start),var(--workspace-card-featured-end))]"
-                                          : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)]"
-                                      }`}
-                                    >
-                                      <div className="min-w-0 flex-1">
-                                        <div className="truncate text-[0.92rem] font-medium leading-6 text-[var(--workspace-text)]">
-                                          {person.name}
-                                        </div>
-                                        <div
-                                          title={person.email}
-                                          className="mt-0.5 truncate text-[0.8rem] leading-5 text-[color:rgba(120,111,100,0.72)]"
-                                        >
-                                          {person.email}
-                                        </div>
-                                        {accessLevel ? (
-                                          <div className="mt-2 inline-flex items-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-2.5 py-1 text-[0.58rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)]">
-                                            {getTeamAccessLevelLabel(accessLevel)}
-                                          </div>
-                                        ) : null}
-                                      </div>
-                                      <div
-                                        className={`mt-0.5 inline-flex h-6 min-w-[3.6rem] items-center justify-center rounded-full border px-2.5 text-[0.58rem] font-medium uppercase tracking-[0.14em] ${
-                                          isSelected
-                                            ? "border-[var(--workspace-accent-border)] bg-[var(--workspace-card)] text-[var(--workspace-text)]"
-                                            : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] text-[var(--workspace-text-faint)]"
-                                        }`}
-                                      >
-                                        {isSelected ? "Selected" : "Select"}
-                                      </div>
-                                    </button>
-                                  );
-                                })}
-                                {visibleCollaborationTeamPeople.length === 0 ? (
-                                  <div className="rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-5 text-[0.84rem] leading-6 text-[var(--workspace-text-faint)]">
-                                    No team members match that search.
-                                  </div>
-                                ) : null}
-                              </div>
-                            </div>
-                          ) : (
-                            <div className="rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-4 text-[0.84rem] leading-6 text-[var(--workspace-text-faint)]">
-                              No team members yet. Invite someone directly by email below, or start solo.
-                            </div>
-                          )}
-                          <div className="space-y-2.5">
-                            <div className="flex items-center justify-between gap-3">
-                              <span className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
-                                Invite by email
-                              </span>
-                              {collaborationTeamPeople.length > 0 ? (
-                                <button
-                                  type="button"
-                                  onClick={() => startCollaborationInviteEmailInputRef.current?.focus()}
-                                  className="inline-flex h-8 items-center justify-center rounded-full px-3 text-[0.66rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-soft)] transition-colors duration-150 hover:text-[var(--workspace-text)] focus-visible:outline-none"
-                                >
-                                  Invite new person
-                                </button>
-                              ) : null}
-                            </div>
-                            <input
-                              ref={startCollaborationInviteEmailInputRef}
-                              type="email"
-                              value={startCollaborationInviteEmail}
-                              onChange={(event) => setStartCollaborationInviteEmail(event.target.value)}
-                              placeholder="person@example.com"
-                              className="w-full rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3 text-[0.88rem] leading-6 text-[var(--workspace-text)] outline-none placeholder:text-[var(--workspace-text-faint)]"
-                            />
-                            <div className="text-[0.76rem] leading-6 text-[var(--workspace-text-faint)]">
-                              {isValidCollaborationParticipantEmail(startCollaborationInviteEmail)
-                                ? "This invite will be sent when you start collaboration."
-                                : "Add an email now if you want the collaboration invite sent immediately after start."}
-                            </div>
+                      {!isPreStartCollaboration ? (
+                      <>
+                        <section className="space-y-3">
+                          <div className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                            Participants
                           </div>
-                        </div>
-                      ) : (
-                        <>
                           <div className="flex flex-wrap gap-2">
                             {activeCollaborationParticipants.map((participant) => (
                               <div
@@ -17513,60 +17408,8 @@ function MailboxView({
                               </div>
                             </div>
                           ) : null}
-                        </>
-                      )}
-                    </section>
-
-                    {isPreStartCollaboration ? (
-                      <>
-                        <section className="space-y-2.5">
-                          <div className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
-                            What needs to happen
-                          </div>
-                          <div className="flex flex-wrap gap-2">
-                            {([
-                              { value: "needs_review", label: "Needs input" },
-                              { value: "needs_action", label: "Take action" },
-                              { value: "note_only", label: "Just a note" },
-                            ] as const).map((option) => (
-                              <button
-                                key={option.value}
-                                type="button"
-                                onClick={() => setCollaborationRequestType(option.value)}
-                                className={`inline-flex h-9 items-center justify-center rounded-full border px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color] duration-150 focus-visible:outline-none ${
-                                  collaborationRequestType === option.value
-                                    ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)]"
-                                    : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[var(--workspace-text-soft)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface-strong)]"
-                                }`}
-                              >
-                                {option.label}
-                              </button>
-                            ))}
-                          </div>
                         </section>
 
-                        <label className="block space-y-2.5">
-                          <span className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
-                            Add a note
-                          </span>
-                          <textarea
-                            value={collaborationNote}
-                            onChange={(event) => setCollaborationNote(event.target.value)}
-                            rows={4}
-                            placeholder="Add context if helpful"
-                            className="w-full resize-none rounded-[20px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3 text-[0.92rem] leading-7 text-[var(--workspace-text-soft)] outline-none placeholder:text-[var(--workspace-text-faint)]"
-                          />
-                          <div className="text-[0.78rem] leading-6 text-[color:rgba(120,111,100,0.68)]">
-                            This note is internal only
-                          </div>
-                        </label>
-
-                        <div className="text-[0.82rem] leading-6 text-[var(--workspace-text-faint)]">
-                          This email will appear in Shared until the collaboration is marked as done.
-                        </div>
-                      </>
-                    ) : (
-                      <>
                         <section className="space-y-3">
                           <div className="flex flex-wrap items-center gap-2">
                         <button
@@ -17934,7 +17777,7 @@ function MailboxView({
                       </div>
                     </label>
                       </>
-                    )}
+                    ) : null}
                     </div>
                   </div>
 
