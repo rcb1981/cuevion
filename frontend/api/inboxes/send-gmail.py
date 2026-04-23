@@ -47,6 +47,10 @@ def _is_valid_address(value: str):
     return bool(value) and "@" in value and not _has_unsafe_header_chars(value)
 
 
+def _is_safe_auth_value(value: str):
+    return bool(value) and not _has_unsafe_header_chars(value)
+
+
 def _is_token_expired(token_record: dict) -> bool:
     expires_at = token_record.get("expires_at")
     if not isinstance(expires_at, str) or not expires_at:
@@ -153,13 +157,17 @@ def _build_message(payload: dict, *, require_password: bool = True):
     body_text = str(payload.get("bodyText", "")).strip() or " "
     attachments = payload.get("attachments") or []
 
-    if provider != "google":
-        raise ValueError("Only Gmail sending is supported by this endpoint.")
+    if provider not in {"google", "custom_imap"}:
+        raise ValueError("Only Gmail and custom SMTP sending are supported by this endpoint.")
     if not mailbox_email or not username or (require_password and not password):
-        raise ValueError("Missing Gmail credentials for this mailbox.")
-    if not _is_valid_address(mailbox_email) or not _is_valid_address(username):
+        raise ValueError("Missing sending credentials for this mailbox.")
+    if not _is_valid_address(mailbox_email):
         raise ValueError("Mailbox credentials are invalid.")
-    if mailbox_email.strip().lower() != username.strip().lower():
+    if provider == "google" and not _is_valid_address(username):
+        raise ValueError("Mailbox credentials are invalid.")
+    if provider == "custom_imap" and not _is_safe_auth_value(username):
+        raise ValueError("Mailbox credentials are invalid.")
+    if provider == "google" and mailbox_email.strip().lower() != username.strip().lower():
         raise ValueError("Gmail username must match the connected mailbox email.")
     if _has_unsafe_header_chars(subject):
         raise ValueError("Subject is invalid.")
@@ -218,6 +226,29 @@ def _build_message(payload: dict, *, require_password: bool = True):
     return username, password, all_recipients, message
 
 
+def _build_custom_smtp_config(payload: dict):
+    host = str(payload.get("smtpHost", "")).strip()
+    raw_port = str(payload.get("smtpPort", "")).strip()
+    security = str(payload.get("smtpSecurity", "")).strip().lower()
+
+    if not host or not raw_port:
+        raise ValueError("SMTP host and port are required for this mailbox.")
+    if security not in {"ssl", "starttls"}:
+        raise ValueError("SMTP security must be SSL/TLS or STARTTLS.")
+    if _has_unsafe_header_chars(host) or any(char.isspace() for char in host):
+        raise ValueError("SMTP host is invalid.")
+
+    try:
+        port = int(raw_port)
+    except ValueError as exc:
+        raise ValueError("SMTP port is invalid.") from exc
+
+    if port < 1 or port > 65535:
+        raise ValueError("SMTP port is invalid.")
+
+    return host, port, security
+
+
 class handler(BaseHTTPRequestHandler):
     def do_POST(self):
         content_length = int(self.headers.get("content-length", "0"))
@@ -240,12 +271,17 @@ class handler(BaseHTTPRequestHandler):
             return
 
         auth_mode = str(payload.get("authMode", "smtp")).strip().lower()
-        use_gmail_oauth = auth_mode == "oauth" and str(payload.get("provider", "")).strip().lower() == "google"
+        provider = str(payload.get("provider", "")).strip().lower()
+        use_gmail_oauth = auth_mode == "oauth" and provider == "google"
+        use_custom_smtp = auth_mode == "smtp" and provider == "custom_imap"
 
         try:
             username, password, recipients, message = _build_message(
                 payload,
                 require_password=not use_gmail_oauth,
+            )
+            custom_smtp_config = (
+                _build_custom_smtp_config(payload) if use_custom_smtp else None
             )
         except ValueError as exc:
             _json_response(
@@ -277,6 +313,61 @@ class handler(BaseHTTPRequestHandler):
                         "error": send_error or {
                             "code": "send_failed",
                             "message": "Gmail could not send this message.",
+                        },
+                    },
+                )
+                return
+
+            _json_response(self, 200, {"ok": True})
+            return
+
+        if use_custom_smtp:
+            smtp_host, smtp_port, smtp_security = custom_smtp_config
+            try:
+                if smtp_security == "ssl":
+                    with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=30) as smtp:
+                        smtp.login(username, password)
+                        smtp.send_message(message, to_addrs=recipients)
+                else:
+                    with smtplib.SMTP(smtp_host, smtp_port, timeout=30) as smtp:
+                        smtp.starttls()
+                        smtp.login(username, password)
+                        smtp.send_message(message, to_addrs=recipients)
+            except smtplib.SMTPAuthenticationError:
+                _json_response(
+                    self,
+                    401,
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "invalid_credentials",
+                            "message": "SMTP rejected the username or password.",
+                        },
+                    },
+                )
+                return
+            except smtplib.SMTPException:
+                _json_response(
+                    self,
+                    502,
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "send_failed",
+                            "message": "SMTP could not send this message.",
+                        },
+                    },
+                )
+                return
+            except Exception:
+                _json_response(
+                    self,
+                    500,
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "server_error",
+                            "message": "Could not send email.",
                         },
                     },
                 )

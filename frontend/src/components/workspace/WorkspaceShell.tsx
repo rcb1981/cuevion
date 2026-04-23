@@ -27,6 +27,7 @@ import type { ReviewItem, ReviewWorkspaceTarget } from "./review/types";
 import type {
   CustomInboxDefinition,
   CustomImapSettings,
+  CustomSmtpSettings,
   FocusPreferenceLevel,
   InboxId,
   InboxConnectionStatus,
@@ -38,6 +39,7 @@ import type { UserConfig } from "../../types/userConfig";
 import { NavigationBar } from "../onboarding/NavigationBar";
 import {
   applyProviderDefaults,
+  createDefaultCustomSmtpSettings,
   getDefaultConnectionStatus,
   getProviderConnectionMethod,
   getPasswordLabel,
@@ -11530,20 +11532,26 @@ function MailboxView({
       (candidate) => candidate.id === activeComposeMailbox.id,
     );
 
-    if (
-      !managedMailbox ||
-      !managedMailbox.connected ||
-      managedMailbox.provider !== "google"
-    ) {
-      setComposeSendError("This mailbox is not ready for Gmail sending.");
+    if (!managedMailbox || !canSendFromManagedMailbox(managedMailbox)) {
+      setComposeSendError("Email sending is not available for this mailbox.");
+      return;
+    }
+    const sendProvider = managedMailbox.provider;
+
+    if (sendProvider !== "google" && sendProvider !== "custom_imap") {
+      setComposeSendError("Email sending is not available for this mailbox.");
       return;
     }
 
     const resolvedImapSettings = applyProviderDefaults(
-      managedMailbox.provider,
+      sendProvider,
       managedMailbox.customImap,
       managedMailbox.email,
     );
+    const resolvedSmtpSettings =
+      sendProvider === "custom_imap"
+        ? resolveCustomSmtpCredentials(managedMailbox)
+        : null;
     const toRecipients = composeTo.trim();
 
     if (!toRecipients) {
@@ -11551,8 +11559,11 @@ function MailboxView({
       return;
     }
 
-    if (!resolvedImapSettings.password.trim()) {
-      setComposeSendError("Gmail credentials are missing for this mailbox.");
+    if (
+      sendProvider !== "google" &&
+      !(resolvedSmtpSettings?.username.trim() && resolvedSmtpSettings.password.trim())
+    ) {
+      setComposeSendError("SMTP credentials are missing for this mailbox.");
       return;
     }
 
@@ -11573,13 +11584,20 @@ function MailboxView({
 
       const bodyPreview = extractComposePlainText(composeBody);
       const sendResponse = await sendGmailMessage({
-        provider: managedMailbox.provider,
+        provider: sendProvider,
+        authMode: sendProvider === "google" ? "oauth" : "smtp",
         email: managedMailbox.email.trim(),
         username:
-          managedMailbox.provider === "google"
+          sendProvider === "google"
             ? managedMailbox.email.trim()
-            : resolvedImapSettings.username.trim(),
-        password: resolvedImapSettings.password,
+            : resolvedSmtpSettings?.username.trim() ?? "",
+        password:
+          sendProvider === "google"
+            ? resolvedImapSettings.password
+            : resolvedSmtpSettings?.password ?? "",
+        smtpHost: resolvedSmtpSettings?.host.trim(),
+        smtpPort: resolvedSmtpSettings?.port.trim(),
+        smtpSecurity: resolvedSmtpSettings?.security,
         from: activeComposeMailbox.email,
         to: toRecipients,
         cc: composeCc.trim() || undefined,
@@ -12836,23 +12854,32 @@ function MailboxView({
       (candidate) => candidate.id === sourceMailboxId,
     );
 
-    if (
-      !managedMailbox ||
-      !managedMailbox.connected ||
-      managedMailbox.provider !== "google"
-    ) {
+    if (!managedMailbox || !canSendFromManagedMailbox(managedMailbox)) {
+      setExternalInviteEmailFeedback("Email sending is not available for this mailbox.");
+      return;
+    }
+    const sendProvider = managedMailbox.provider;
+
+    if (sendProvider !== "google" && sendProvider !== "custom_imap") {
       setExternalInviteEmailFeedback("Email sending is not available for this mailbox.");
       return;
     }
 
     const resolvedImapSettings = applyProviderDefaults(
-      managedMailbox.provider,
+      sendProvider,
       managedMailbox.customImap,
       managedMailbox.email,
     );
+    const resolvedSmtpSettings =
+      sendProvider === "custom_imap"
+        ? resolveCustomSmtpCredentials(managedMailbox)
+        : null;
 
-    if (managedMailbox.provider !== "google" && !resolvedImapSettings.password.trim()) {
-      setExternalInviteEmailFeedback("Gmail credentials are missing for this mailbox.");
+    if (
+      sendProvider !== "google" &&
+      !(resolvedSmtpSettings?.username.trim() && resolvedSmtpSettings.password.trim())
+    ) {
+      setExternalInviteEmailFeedback("SMTP credentials are missing for this mailbox.");
       return;
     }
 
@@ -13001,11 +13028,20 @@ function MailboxView({
 
     try {
       const sendResponse = await sendGmailMessage({
-        provider: managedMailbox.provider,
-        authMode: managedMailbox.provider === "google" ? "oauth" : "smtp",
+        provider: sendProvider,
+        authMode: sendProvider === "google" ? "oauth" : "smtp",
         email: managedMailbox.email.trim(),
-        username: managedMailbox.email.trim(),
-        password: resolvedImapSettings.password,
+        username:
+          sendProvider === "google"
+            ? managedMailbox.email.trim()
+            : resolvedSmtpSettings?.username.trim() ?? "",
+        password:
+          sendProvider === "google"
+            ? resolvedImapSettings.password
+            : resolvedSmtpSettings?.password ?? "",
+        smtpHost: resolvedSmtpSettings?.host.trim(),
+        smtpPort: resolvedSmtpSettings?.port.trim(),
+        smtpSecurity: resolvedSmtpSettings?.security,
         from: sendingMailbox.email,
         to: normalizedEmail,
         subject: inviteSubject,
@@ -19031,6 +19067,7 @@ type ManagedWorkspaceInbox = {
   connectionMessage?: string | null;
   oauthAuthorizationUrl?: string | null;
   customImap: CustomImapSettings;
+  customSmtp: CustomSmtpSettings;
 };
 
 function createManagedCustomImapSettings(): CustomImapSettings {
@@ -19043,6 +19080,56 @@ function createManagedCustomImapSettings(): CustomImapSettings {
   };
 }
 
+function createManagedCustomSmtpSettings(): CustomSmtpSettings {
+  return createDefaultCustomSmtpSettings();
+}
+
+function resolveCustomSmtpCredentials(mailbox: ManagedWorkspaceInbox) {
+  const customSmtp = {
+    ...createManagedCustomSmtpSettings(),
+    ...mailbox.customSmtp,
+  };
+  const username = customSmtp.useSameCredentials
+    ? mailbox.customImap.username
+    : customSmtp.username;
+  const password = customSmtp.useSameCredentials
+    ? mailbox.customImap.password
+    : customSmtp.password;
+
+  return {
+    ...customSmtp,
+    username,
+    password,
+  };
+}
+
+function isCustomSmtpSendReady(mailbox: ManagedWorkspaceInbox) {
+  if (mailbox.provider !== "custom_imap" || !mailbox.connected) {
+    return false;
+  }
+
+  const smtpSettings = resolveCustomSmtpCredentials(mailbox);
+
+  return Boolean(
+    smtpSettings.host.trim() &&
+      smtpSettings.port.trim() &&
+      smtpSettings.username.trim() &&
+      smtpSettings.password.trim(),
+  );
+}
+
+function canSendFromManagedMailbox(mailbox: ManagedWorkspaceInbox | null | undefined) {
+  if (!mailbox || !mailbox.connected) {
+    return false;
+  }
+
+  if (mailbox.provider === "google") {
+    return mailbox.connectionStatus === "connected";
+  }
+
+  return isCustomSmtpSendReady(mailbox);
+}
+
 function normalizeStoredWorkspaceThemeMode(value: unknown): SettingsMode | null {
   return value === "Light" || value === "Dark" || value === "System" ? value : null;
 }
@@ -19052,6 +19139,10 @@ function cloneManagedWorkspaceInbox(mailbox: ManagedWorkspaceInbox): ManagedWork
     ...mailbox,
     customImap: {
       ...mailbox.customImap,
+    },
+    customSmtp: {
+      ...createManagedCustomSmtpSettings(),
+      ...mailbox.customSmtp,
     },
   };
 }
@@ -19081,6 +19172,12 @@ function normalizeManagedWorkspaceInbox(
       : {
           ...createManagedCustomImapSettings(),
           ...mailbox.customImap,
+        },
+    customSmtp: isGoogleOAuthMailbox
+      ? createManagedCustomSmtpSettings()
+      : {
+          ...createManagedCustomSmtpSettings(),
+          ...mailbox.customSmtp,
         },
   };
 }
@@ -19250,6 +19347,12 @@ function toManagedWorkspaceInbox(
       : {
           ...createManagedCustomImapSettings(),
           ...connection.customImap,
+        },
+    customSmtp: isOAuthConnectionProvider(connection.provider)
+      ? createManagedCustomSmtpSettings()
+      : {
+          ...createManagedCustomSmtpSettings(),
+          ...connection.customSmtp,
         },
   };
 }
@@ -19592,6 +19695,7 @@ function ManagedInboxEditor({
   onApplyAction,
   onCancelAction,
   onChange,
+  onSmtpChange,
 }: {
   mailbox: ManagedWorkspaceInbox;
   editable: boolean;
@@ -19612,6 +19716,11 @@ function ManagedInboxEditor({
     field: "title" | "email" | "provider" | keyof CustomImapSettings,
     value: string | boolean | ProviderId | null,
   ) => void;
+  onSmtpChange: (
+    inboxId: string,
+    field: keyof CustomSmtpSettings,
+    value: string | boolean,
+  ) => void;
 }) {
   const emailInputRef = useRef<HTMLInputElement | null>(null);
   const hostInputRef = useRef<HTMLInputElement | null>(null);
@@ -19621,6 +19730,10 @@ function ManagedInboxEditor({
   const missingRequiredFields = getManagedInboxMissingRequiredFields(mailbox);
   const missingFieldSet = new Set(missingRequiredFields);
   const shouldShowFieldErrors = editable && showValidationErrors;
+  const smtpSettings = {
+    ...createManagedCustomSmtpSettings(),
+    ...mailbox.customSmtp,
+  };
 
   useEffect(() => {
     if (!shouldShowFieldErrors || missingRequiredFields.length === 0) {
@@ -19890,6 +20003,145 @@ function ManagedInboxEditor({
             </span>
             {onboardingText.connect.ssl}
           </label>
+          {mailbox.provider === "custom_imap" ? (
+            <div className="space-y-4 border-t border-[var(--workspace-border-soft)] pt-4">
+              <div>
+                <p className="text-sm font-semibold text-[var(--workspace-text)]">
+                  Outgoing SMTP
+                </p>
+                <p className="mt-1 text-sm text-[var(--workspace-text-muted)]">
+                  Enter explicit SMTP send settings. Cuevion does not infer these from IMAP.
+                </p>
+              </div>
+
+              <div className="grid gap-4 md:grid-cols-2">
+                <div>
+                  <label className="mb-2 block text-sm font-medium text-[var(--workspace-text-soft)]">
+                    SMTP host
+                  </label>
+                  {editable ? (
+                    <input
+                      type="text"
+                      value={smtpSettings.host}
+                      onChange={(event) =>
+                        onSmtpChange(mailbox.id, "host", event.target.value)
+                      }
+                      className={inputFieldClass}
+                    />
+                  ) : (
+                    <div className="rounded-2xl border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3 text-[0.94rem] text-[var(--workspace-text)]">
+                      {smtpSettings.host.trim() || "Not set"}
+                    </div>
+                  )}
+                </div>
+                <div>
+                  <label className="mb-2 block text-sm font-medium text-[var(--workspace-text-soft)]">
+                    SMTP port
+                  </label>
+                  {editable ? (
+                    <input
+                      type="text"
+                      value={smtpSettings.port}
+                      onChange={(event) =>
+                        onSmtpChange(mailbox.id, "port", event.target.value)
+                      }
+                      className={inputFieldClass}
+                    />
+                  ) : (
+                    <div className="rounded-2xl border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3 text-[0.94rem] text-[var(--workspace-text)]">
+                      {smtpSettings.port.trim() || "Not set"}
+                    </div>
+                  )}
+                </div>
+                <div>
+                  <label className="mb-2 block text-sm font-medium text-[var(--workspace-text-soft)]">
+                    SMTP security
+                  </label>
+                  {editable ? (
+                    <select
+                      value={smtpSettings.security}
+                      onChange={(event) =>
+                        onSmtpChange(mailbox.id, "security", event.target.value)
+                      }
+                      className={inputFieldClass}
+                    >
+                      <option value="starttls">STARTTLS</option>
+                      <option value="ssl">SSL/TLS</option>
+                    </select>
+                  ) : (
+                    <div className="rounded-2xl border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3 text-[0.94rem] text-[var(--workspace-text)]">
+                      {smtpSettings.security === "ssl" ? "SSL/TLS" : "STARTTLS"}
+                    </div>
+                  )}
+                </div>
+                <label className="flex items-center gap-3 pt-8 text-sm font-medium text-[var(--workspace-text-soft)]">
+                  <span className="relative flex h-4 w-4 items-center justify-center">
+                    <input
+                      type="checkbox"
+                      checked={smtpSettings.useSameCredentials}
+                      onChange={(event) =>
+                        editable
+                          ? onSmtpChange(
+                              mailbox.id,
+                              "useSameCredentials",
+                              event.target.checked,
+                            )
+                          : undefined
+                      }
+                      disabled={!editable}
+                      className={`peer absolute inset-0 m-0 h-full w-full appearance-none rounded-[5px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-input-bg)] outline-none transition checked:border-moss/55 checked:bg-[linear-gradient(180deg,rgba(226,236,229,0.92),rgba(246,249,246,0.98))] ${editable ? "cursor-pointer" : "cursor-default"}`}
+                    />
+                    <span className="pointer-events-none absolute inset-0 flex items-center justify-center text-[10px] font-semibold leading-none text-moss opacity-0 transition peer-checked:opacity-100">
+                      ✓
+                    </span>
+                  </span>
+                  Use same credentials as incoming
+                </label>
+                {!smtpSettings.useSameCredentials ? (
+                  <>
+                    <div>
+                      <label className="mb-2 block text-sm font-medium text-[var(--workspace-text-soft)]">
+                        SMTP username
+                      </label>
+                      {editable ? (
+                        <input
+                          type="text"
+                          value={smtpSettings.username}
+                          onChange={(event) =>
+                            onSmtpChange(mailbox.id, "username", event.target.value)
+                          }
+                          className={inputFieldClass}
+                        />
+                      ) : (
+                        <div className="rounded-2xl border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3 text-[0.94rem] text-[var(--workspace-text)]">
+                          {smtpSettings.username.trim() || "Not set"}
+                        </div>
+                      )}
+                    </div>
+                    <div>
+                      <label className="mb-2 block text-sm font-medium text-[var(--workspace-text-soft)]">
+                        SMTP password
+                      </label>
+                      {editable ? (
+                        <input
+                          type="password"
+                          value={smtpSettings.password}
+                          onChange={(event) =>
+                            onSmtpChange(mailbox.id, "password", event.target.value)
+                          }
+                          className={inputFieldClass}
+                        />
+                      ) : (
+                        <div className="rounded-2xl border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3 text-[0.94rem] text-[var(--workspace-text)]">
+                          {smtpSettings.password.trim().length > 0 ? "Saved" : "Not set"}
+                        </div>
+                      )}
+                    </div>
+                  </>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
         </div>
       ) : isOAuthConnectionProvider(mailbox.provider) ? (
         <div className="mt-6 space-y-3 rounded-[24px] border border-moss/10 bg-[var(--workspace-card-subtle)] p-5">
@@ -20187,6 +20439,12 @@ const ManageInboxesView = memo(function ManageInboxesView({
               mailbox.customImap,
               mailbox.email,
             ),
+            customSmtp: isOAuthConnectionProvider(value as ProviderId | null)
+              ? createManagedCustomSmtpSettings()
+              : {
+                  ...createManagedCustomSmtpSettings(),
+                  ...mailbox.customSmtp,
+                },
           };
         }
 
@@ -20248,6 +20506,28 @@ const ManageInboxesView = memo(function ManageInboxesView({
           oauthAuthorizationUrl: null,
         };
       }),
+      );
+  };
+
+  const updateDraftSmtp = (
+    inboxId: string,
+    field: keyof CustomSmtpSettings,
+    value: string | boolean,
+  ) => {
+    clearConnectionError(inboxId);
+    setDraftManagedInboxes((current) =>
+      current.map((mailbox) =>
+        mailbox.id === inboxId
+          ? {
+              ...mailbox,
+              customSmtp: {
+                ...createManagedCustomSmtpSettings(),
+                ...mailbox.customSmtp,
+                [field]: value,
+              },
+            }
+          : mailbox,
+      ),
     );
   };
 
@@ -20266,6 +20546,7 @@ const ManageInboxesView = memo(function ManageInboxesView({
         connectionMessage: null,
         oauthAuthorizationUrl: null,
         customImap: createManagedCustomImapSettings(),
+        customSmtp: createManagedCustomSmtpSettings(),
       },
     ]);
     setEditingInboxId(nextId);
@@ -20382,6 +20663,7 @@ const ManageInboxesView = memo(function ManageInboxesView({
                 onApplyAction={() => handleApplyInbox(mailbox.id)}
                 onCancelAction={() => handleCancelInbox(mailbox.id)}
                 onChange={updateDraftInbox}
+                onSmtpChange={updateDraftSmtp}
               />
             ))}
 

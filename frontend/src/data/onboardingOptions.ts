@@ -7,6 +7,7 @@ import type {
   RoleId,
 } from "../types/onboarding";
 import { onboardingText } from "../copy/onboardingCopy";
+import { createDefaultCustomSmtpSettings } from "../lib/inboxProviderDefaults";
 
 function normalizeRoleOption(role: {
   id: RoleId;
@@ -76,6 +77,7 @@ export const createInboxConnection = () => ({
     username: "",
     password: "",
   },
+  customSmtp: createDefaultCustomSmtpSettings(),
 });
 
 export function createCustomInboxId(name: string): InboxId {

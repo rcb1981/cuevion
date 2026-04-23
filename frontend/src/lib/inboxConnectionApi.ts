@@ -6,6 +6,7 @@ import {
 } from "./inboxProviderDefaults";
 import type {
   CustomImapSettings,
+  CustomSmtpSecurity,
   InboxConnectionMethod,
   InboxConnectionStatus,
   OnboardingState,
@@ -170,6 +171,9 @@ export type SendGmailMessageRequest = {
   email: string;
   username: string;
   password: string;
+  smtpHost?: string;
+  smtpPort?: string;
+  smtpSecurity?: CustomSmtpSecurity;
   from: string;
   to: string;
   cc?: string;

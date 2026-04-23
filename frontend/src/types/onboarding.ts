@@ -56,6 +56,17 @@ export interface CustomImapSettings {
   password: string;
 }
 
+export type CustomSmtpSecurity = "ssl" | "starttls";
+
+export interface CustomSmtpSettings {
+  host: string;
+  port: string;
+  security: CustomSmtpSecurity;
+  username: string;
+  password: string;
+  useSameCredentials: boolean;
+}
+
 export interface InboxConnection {
   provider: ProviderId | null;
   email: string;
@@ -65,6 +76,7 @@ export interface InboxConnection {
   connectionMessage?: string | null;
   oauthAuthorizationUrl?: string | null;
   customImap: CustomImapSettings;
+  customSmtp: CustomSmtpSettings;
 }
 
 export interface CustomInboxDefinition {

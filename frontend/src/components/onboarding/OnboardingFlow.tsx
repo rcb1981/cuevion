@@ -9,6 +9,7 @@ import {
 import type { LiveInboxMessageSnapshot } from "../../lib/inboxConnectionApi";
 import {
   applyProviderDefaults,
+  createDefaultCustomSmtpSettings,
   getDefaultConnectionStatus,
   getProviderConnectionMethod,
   isImapCredentialsProvider,
@@ -20,6 +21,7 @@ import { saveLiveInboxSnapshot } from "../../lib/liveInboxSnapshots";
 import type {
   CustomInboxDefinition,
   CustomImapSettings,
+  CustomSmtpSettings,
   FocusPreferenceLevel,
   InboxId,
   OnboardingState,
@@ -278,8 +280,23 @@ export function OnboardingFlow({
       } as const
     )[step as 1 | 2 | 3 | 4 | 5] ?? null;
 
-  const getInboxConnection = (current: OnboardingState, inboxId: InboxId) =>
-    current.inboxConnections[inboxId] ?? createInboxConnection();
+  const getInboxConnection = (current: OnboardingState, inboxId: InboxId) => {
+    const connection = current.inboxConnections[inboxId] ?? createInboxConnection();
+    const defaults = createInboxConnection();
+
+    return {
+      ...defaults,
+      ...connection,
+      customImap: {
+        ...defaults.customImap,
+        ...connection.customImap,
+      },
+      customSmtp: {
+        ...createDefaultCustomSmtpSettings(),
+        ...connection.customSmtp,
+      },
+    };
+  };
 
   const canGoNext = useMemo(() => {
     if (step === 1) {
@@ -595,6 +612,26 @@ export function OnboardingFlow({
     }));
   };
 
+  const setCustomSmtp = (
+    inboxId: InboxId,
+    field: keyof CustomSmtpSettings,
+    value: string | boolean,
+  ) => {
+    onStateChange((current) => ({
+      ...current,
+      inboxConnections: {
+        ...current.inboxConnections,
+        [inboxId]: {
+          ...getInboxConnection(current, inboxId),
+          customSmtp: {
+            ...getInboxConnection(current, inboxId).customSmtp,
+            [field]: value,
+          },
+        },
+      },
+    }));
+  };
+
   const reuseCustomImap = (inboxId: InboxId, settings: CustomImapSettings) => {
     onStateChange((current) => ({
       ...current,
@@ -799,6 +836,7 @@ export function OnboardingFlow({
             onProviderChange={setProvider}
             onEmailChange={setEmail}
             onCustomImapChange={setCustomImap}
+            onCustomSmtpChange={setCustomSmtp}
             onReuseCustomImap={reuseCustomImap}
             onConnectInbox={connectInbox}
           />

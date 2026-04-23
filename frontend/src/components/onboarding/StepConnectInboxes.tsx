@@ -1,5 +1,6 @@
 import { useState } from "react";
 import {
+  createInboxConnection,
   mainInboxOptions,
   providerOptions,
   specializedInboxOptions,
@@ -10,6 +11,7 @@ import type {
 } from "../../lib/inboxConnectionApi";
 import { beginInboxConnection } from "../../lib/inboxConnectionApi";
 import {
+  createDefaultCustomSmtpSettings,
   getPasswordLabel,
   getProviderConnectionMethod,
   isImapCredentialsProvider,
@@ -19,6 +21,7 @@ import { onboardingText } from "../../copy/onboardingCopy";
 import type {
   CustomInboxDefinition,
   CustomImapSettings,
+  CustomSmtpSettings,
   InboxConnection,
   InboxConnectionStatus,
   InboxId,
@@ -44,6 +47,11 @@ interface StepConnectInboxesProps {
   onCustomImapChange: (
     inboxId: InboxId,
     field: keyof CustomImapSettings,
+    value: string | boolean,
+  ) => void;
+  onCustomSmtpChange: (
+    inboxId: InboxId,
+    field: keyof CustomSmtpSettings,
     value: string | boolean,
   ) => void;
   onReuseCustomImap: (inboxId: InboxId, settings: CustomImapSettings) => void;
@@ -221,6 +229,7 @@ export function StepConnectInboxes({
   onProviderChange,
   onEmailChange,
   onCustomImapChange,
+  onCustomSmtpChange,
   onReuseCustomImap,
   onConnectInbox,
 }: StepConnectInboxesProps) {
@@ -332,10 +341,18 @@ export function StepConnectInboxes({
 
       <div className="space-y-6">
         {selectedInboxes.map((inboxId, index) => {
-          const connection = inboxConnections[inboxId];
+          const rawConnection = inboxConnections[inboxId] ?? createInboxConnection();
+          const connection = {
+            ...rawConnection,
+            customSmtp: {
+              ...createDefaultCustomSmtpSettings(),
+              ...rawConnection.customSmtp,
+            },
+          };
           const readyToConnect = isConnectionReady(connection);
           const isLoading = loadingInboxId === inboxId;
           const errorMessage = connectionErrors[inboxId];
+          const smtpSettings = connection.customSmtp ?? createDefaultCustomSmtpSettings();
           const reusableSettings = selectedInboxes
             .slice(0, index)
             .map((previousInboxId) => inboxConnections[previousInboxId])
@@ -535,6 +552,126 @@ export function StepConnectInboxes({
                     </span>
                     {onboardingText.connect.ssl}
                   </label>
+                  {connection.provider === "custom_imap" ? (
+                    <div className="space-y-4 border-t border-ink/8 pt-4">
+                      <div>
+                        <p className="text-sm font-semibold text-ink/80">
+                          Outgoing SMTP
+                        </p>
+                        <p className="mt-1 text-sm text-ink/60">
+                          Enter explicit SMTP send settings. Cuevion does not infer these from IMAP.
+                        </p>
+                      </div>
+
+                      <div className="grid gap-4 md:grid-cols-2">
+                        <div>
+                          <label className="mb-2 block text-sm font-medium text-ink/75">
+                            SMTP host
+                          </label>
+                          <input
+                            type="text"
+                            value={smtpSettings.host}
+                            onChange={(event) => {
+                              clearConnectionFeedback(inboxId);
+                              onCustomSmtpChange(inboxId, "host", event.target.value);
+                            }}
+                            className="w-full rounded-2xl border border-ink/10 bg-white px-4 py-3 outline-none transition focus:border-moss"
+                          />
+                        </div>
+                        <div>
+                          <label className="mb-2 block text-sm font-medium text-ink/75">
+                            SMTP port
+                          </label>
+                          <input
+                            type="text"
+                            value={smtpSettings.port}
+                            onChange={(event) => {
+                              clearConnectionFeedback(inboxId);
+                              onCustomSmtpChange(inboxId, "port", event.target.value);
+                            }}
+                            className="w-full rounded-2xl border border-ink/10 bg-white px-4 py-3 outline-none transition focus:border-moss"
+                          />
+                        </div>
+                        <div>
+                          <label className="mb-2 block text-sm font-medium text-ink/75">
+                            SMTP security
+                          </label>
+                          <select
+                            value={smtpSettings.security}
+                            onChange={(event) => {
+                              clearConnectionFeedback(inboxId);
+                              onCustomSmtpChange(inboxId, "security", event.target.value);
+                            }}
+                            className="w-full rounded-2xl border border-ink/10 bg-white px-4 py-3 outline-none transition focus:border-moss"
+                          >
+                            <option value="starttls">STARTTLS</option>
+                            <option value="ssl">SSL/TLS</option>
+                          </select>
+                        </div>
+                        <label className="flex items-center gap-3 pt-8 text-sm font-medium text-ink/75">
+                          <span className="relative flex h-4 w-4 items-center justify-center">
+                            <input
+                              type="checkbox"
+                              checked={smtpSettings.useSameCredentials}
+                              onChange={(event) => {
+                                clearConnectionFeedback(inboxId);
+                                onCustomSmtpChange(
+                                  inboxId,
+                                  "useSameCredentials",
+                                  event.target.checked,
+                                );
+                              }}
+                              className="peer absolute inset-0 m-0 h-full w-full cursor-pointer appearance-none rounded-[5px] border border-ink/18 bg-white/80 outline-none transition checked:border-moss/55 checked:bg-[linear-gradient(180deg,rgba(226,236,229,0.92),rgba(246,249,246,0.98))] focus-visible:border-pine"
+                            />
+                            <span className="pointer-events-none absolute inset-0 flex items-center justify-center text-[10px] font-semibold leading-none text-moss opacity-0 transition peer-checked:opacity-100">
+                              ✓
+                            </span>
+                          </span>
+                          Use same credentials as incoming
+                        </label>
+                        {!smtpSettings.useSameCredentials ? (
+                          <>
+                            <div>
+                              <label className="mb-2 block text-sm font-medium text-ink/75">
+                                SMTP username
+                              </label>
+                              <input
+                                type="text"
+                                value={smtpSettings.username}
+                                onChange={(event) => {
+                                  clearConnectionFeedback(inboxId);
+                                  onCustomSmtpChange(
+                                    inboxId,
+                                    "username",
+                                    event.target.value,
+                                  );
+                                }}
+                                className="w-full rounded-2xl border border-ink/10 bg-white px-4 py-3 outline-none transition focus:border-moss"
+                              />
+                            </div>
+                            <div>
+                              <label className="mb-2 block text-sm font-medium text-ink/75">
+                                SMTP password
+                              </label>
+                              <input
+                                type="password"
+                                value={smtpSettings.password}
+                                onChange={(event) => {
+                                  clearConnectionFeedback(inboxId);
+                                  onCustomSmtpChange(
+                                    inboxId,
+                                    "password",
+                                    event.target.value,
+                                  );
+                                }}
+                                className="w-full rounded-2xl border border-ink/10 bg-white px-4 py-3 outline-none transition focus:border-moss"
+                              />
+                            </div>
+                          </>
+                        ) : null}
+                      </div>
+                    </div>
+                  ) : null}
                 </div>
               ) : isOAuthConnectionProvider(connection.provider) ? (
                 <div className="mt-6 space-y-3 rounded-[24px] border border-moss/10 bg-[linear-gradient(180deg,rgba(246,248,241,0.88),rgba(255,252,247,0.96))] p-5">

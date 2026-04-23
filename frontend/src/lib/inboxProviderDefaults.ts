@@ -1,5 +1,6 @@
 import type {
   CustomImapSettings,
+  CustomSmtpSettings,
   InboxConnectionMethod,
   InboxConnectionStatus,
   ProviderId,
@@ -54,6 +55,17 @@ export function createDefaultMicrosoftImapSettings(
     ssl: true,
     username: email.trim(),
     password: "",
+  };
+}
+
+export function createDefaultCustomSmtpSettings(): CustomSmtpSettings {
+  return {
+    host: "",
+    port: "",
+    security: "starttls",
+    username: "",
+    password: "",
+    useSameCredentials: true,
   };
 }
 
