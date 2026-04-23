@@ -11043,6 +11043,29 @@ function MailboxView({
       return keys;
     }),
   );
+  const collaborationParticipantChipPeople = [
+    ...activeCollaborationParticipants.map((participant) => ({
+      ...participant,
+      pending: false as const,
+    })),
+    ...[...new Set([...pendingExternalInviteEmails, ...externalInviteInFlightEmails])]
+      .map((email) => normalizeSenderLearningKey(email))
+      .filter((emailKey) => !activeCollaborationParticipantKeys.has(emailKey))
+      .map((emailKey) => {
+        const matchingPerson = collaborationSelectablePeople.find(
+          (person) => normalizeSenderLearningKey(person.email) === emailKey,
+        );
+
+        return {
+          id: `pending-external:${emailKey}`,
+          name: matchingPerson?.name ?? formatCollaborationParticipantNameFromEmail(emailKey),
+          email: matchingPerson?.email ?? emailKey,
+          kind: "external" as const,
+          status: "invited" as const,
+          pending: true as const,
+        };
+      }),
+  ];
   const normalizedCollaborationParticipantSearch = collaborationParticipantSearch
     .trim()
     .toLowerCase();
@@ -17303,7 +17326,7 @@ function MailboxView({
                             Participants
                           </div>
                           <div className="flex flex-wrap gap-2">
-                            {activeCollaborationParticipants.map((participant) => (
+                            {collaborationParticipantChipPeople.map((participant) => (
                               <div
                                 key={`participant-${participant.id}`}
                                 className="inline-flex max-w-full items-center gap-2 rounded-full bg-[var(--workspace-card-subtle)] px-3 py-1.5 text-[0.8rem] leading-6 text-[var(--workspace-text-soft)]"
@@ -17312,9 +17335,13 @@ function MailboxView({
                                   {participant.name || participant.email}
                                 </span>
                                 <span className="text-[0.64rem] uppercase tracking-[0.12em] text-[var(--workspace-text-faint)]">
-                                  {participant.kind === "external" ? "EXTERNAL" : "INTERNAL"}
+                                  {participant.pending
+                                    ? "INVITING"
+                                    : participant.kind === "external"
+                                      ? "EXTERNAL"
+                                      : "INTERNAL"}
                                 </span>
-                                {participant.kind === "external" ? (
+                                {participant.kind === "external" && !participant.pending ? (
                                   <button
                                     type="button"
                                     aria-label={`Remove ${participant.name || participant.email}`}
