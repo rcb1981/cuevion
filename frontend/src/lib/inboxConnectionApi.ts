@@ -166,6 +166,7 @@ export type SendInboxAttachmentRequest = {
 
 export type SendGmailMessageRequest = {
   provider: ProviderId;
+  authMode?: "smtp" | "oauth";
   email: string;
   username: string;
   password: string;

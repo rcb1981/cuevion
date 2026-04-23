@@ -12828,7 +12828,13 @@ function MailboxView({
       return;
     }
 
-    const managedMailbox = managedInboxes.find((candidate) => candidate.id === mailbox.id);
+    const existingInviteMessage = getMessageById(messageId);
+    const sourceMailboxId = currentMessageLocationById[messageId]?.mailboxId ?? mailbox.id;
+    const sendingMailbox =
+      orderedMailboxes.find((candidate) => candidate.id === sourceMailboxId) ?? mailbox;
+    const managedMailbox = managedInboxes.find(
+      (candidate) => candidate.id === sourceMailboxId,
+    );
 
     if (
       !managedMailbox ||
@@ -12845,12 +12851,11 @@ function MailboxView({
       managedMailbox.email,
     );
 
-    if (!resolvedImapSettings.password.trim()) {
+    if (managedMailbox.provider !== "google" && !resolvedImapSettings.password.trim()) {
       setExternalInviteEmailFeedback("Gmail credentials are missing for this mailbox.");
       return;
     }
 
-    const existingInviteMessage = getMessageById(messageId);
     let inviteLink = "";
     let inviteParticipantName = formatCollaborationParticipantNameFromEmail(normalizedEmail);
     if (existingInviteMessage?.collaboration) {
@@ -12864,7 +12869,7 @@ function MailboxView({
 
       const issueResult = await issueCollaborationInvite({
         workspaceId: currentUserId,
-        mailboxId: mailbox.id,
+        mailboxId: sourceMailboxId,
         messageId,
         inviteeEmail: normalizedEmail,
         createdByUserId: currentUserId,
@@ -12997,10 +13002,11 @@ function MailboxView({
     try {
       const sendResponse = await sendGmailMessage({
         provider: managedMailbox.provider,
+        authMode: managedMailbox.provider === "google" ? "oauth" : "smtp",
         email: managedMailbox.email.trim(),
         username: managedMailbox.email.trim(),
         password: resolvedImapSettings.password,
-        from: mailbox.email,
+        from: sendingMailbox.email,
         to: normalizedEmail,
         subject: inviteSubject,
         bodyHtml: inviteBodyHtml,
