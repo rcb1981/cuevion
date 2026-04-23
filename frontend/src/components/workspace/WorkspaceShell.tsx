@@ -178,6 +178,13 @@ type TeamMembershipEntry = {
   selectedInboxes: string[];
   status: "Active";
 };
+type CollaborationSelectablePerson = {
+  id: string;
+  name: string;
+  email: string;
+  kind: "internal" | "external";
+  status: "active" | "invited";
+};
 
 function normalizeTeamMemberEntry(value: TeamMemberEntry): TeamMemberEntry {
   return {
@@ -9285,6 +9292,8 @@ function MailboxView({
   currentUserEmail,
   workspaceCollaborationPeople,
   inviteOnlyCollaborationPeople,
+  memberOfEntries,
+  teamMemberEntries,
   focusPreferences,
   effectiveFocusPreferencesByMailbox,
   mailboxStore,
@@ -9338,6 +9347,8 @@ function MailboxView({
   currentUserEmail: string;
   workspaceCollaborationPeople: Array<{ id: string; name: string; email: string }>;
   inviteOnlyCollaborationPeople: Array<{ id: string; name: string; email: string }>;
+  memberOfEntries: TeamMembershipEntry[];
+  teamMemberEntries: TeamMemberEntry[];
   focusPreferences: UserConfig["focusPreferences"];
   effectiveFocusPreferencesByMailbox: Partial<Record<InboxId, FocusPreferences>>;
   mailboxStore: MailboxStore;
@@ -9542,20 +9553,25 @@ function MailboxView({
   const [collaborationRequestType, setCollaborationRequestType] = useState<
     "needs_review" | "needs_action" | "note_only"
   >("needs_review");
-  const [collaborationPersonId, setCollaborationPersonId] = useState<string>("");
+  const [collaborationPersonIds, setCollaborationPersonIds] = useState<string[]>([]);
+  const [collaborationMemberSearch, setCollaborationMemberSearch] = useState("");
   const [collaborationNote, setCollaborationNote] = useState("");
   const [activeCollaborationMessageId, setActiveCollaborationMessageId] = useState<
     string | null
   >(null);
   const [collaborationReplyDraft, setCollaborationReplyDraft] = useState("");
-  const [collaborationParticipantPersonId, setCollaborationParticipantPersonId] =
-    useState<string>("");
+  const [collaborationParticipantPersonIds, setCollaborationParticipantPersonIds] =
+    useState<string[]>([]);
+  const [collaborationParticipantSearch, setCollaborationParticipantSearch] = useState("");
   const [externalCollaborationEmail, setExternalCollaborationEmail] = useState("");
   const [externalCollaborationInviteUrl, setExternalCollaborationInviteUrl] = useState("");
-  const [pendingExternalInviteEmail, setPendingExternalInviteEmail] = useState("");
+  const [pendingExternalInviteEmails, setPendingExternalInviteEmails] = useState<string[]>([]);
+  const [externalInviteInFlightEmails, setExternalInviteInFlightEmails] = useState<string[]>([]);
+  const [shouldFocusExternalInviteOnOpen, setShouldFocusExternalInviteOnOpen] = useState(false);
   const [collaborationReplyVisibility, setCollaborationReplyVisibility] =
     useState<MailMessageCollaborationVisibility>("internal");
   const collaborationReplyInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const externalCollaborationEmailInputRef = useRef<HTMLInputElement | null>(null);
   const collaborationMessageRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const [focusCollaborationComposer, setFocusCollaborationComposer] = useState(false);
   const [highlightedCollaborationMessageId, setHighlightedCollaborationMessageId] = useState<
@@ -9583,7 +9599,7 @@ function MailboxView({
             email: currentUserEmail,
           },
         ];
-  const collaborationSelectablePeople = [
+  const collaborationSelectablePeople: CollaborationSelectablePerson[] = [
     ...collaborationPeople.map((person) => ({
       id: person.id,
       name: person.name,
@@ -9599,6 +9615,35 @@ function MailboxView({
       status: "invited" as const,
     })),
   ];
+  const collaborationRoleByEmail = new Map<string, TeamAccessLevel>();
+  teamMemberEntries.forEach((member) => {
+    collaborationRoleByEmail.set(
+      normalizeSenderLearningKey(member.email),
+      member.accessLevel,
+    );
+  });
+  memberOfEntries.forEach((member) => {
+    const normalizedEmail = normalizeSenderLearningKey(member.email);
+
+    if (!collaborationRoleByEmail.has(normalizedEmail)) {
+      collaborationRoleByEmail.set(normalizedEmail, member.accessLevel);
+    }
+  });
+  const collaborationTeamPeople = collaborationSelectablePeople.filter(
+    (person) => normalizeSenderLearningKey(person.email) !== currentUserId,
+  );
+  const normalizedCollaborationMemberSearch = collaborationMemberSearch.trim().toLowerCase();
+  const visibleCollaborationTeamPeople = collaborationTeamPeople.filter((person) => {
+    if (!normalizedCollaborationMemberSearch) {
+      return true;
+    }
+
+    const accessLevel =
+      collaborationRoleByEmail.get(normalizeSenderLearningKey(person.email)) ?? "";
+    return `${person.name} ${person.email} ${accessLevel}`
+      .toLowerCase()
+      .includes(normalizedCollaborationMemberSearch);
+  });
   const activeComposeMailbox =
     orderedMailboxes.find((candidate) => candidate.id === composeMailboxId) ?? mailbox;
   const composeSignatureOptions = orderedMailboxes
@@ -10967,6 +11012,39 @@ function MailboxView({
   const activeCollaborationParticipants = activeCollaborationMessage?.collaboration
     ? getCollaborationParticipants(activeCollaborationMessage.collaboration)
     : [];
+  const activeCollaborationParticipantKeys = new Set(
+    activeCollaborationParticipants.flatMap((participant) => {
+      const keys: string[] = [];
+
+      if (participant.id) {
+        keys.push(participant.id);
+      }
+      if (participant.email) {
+        keys.push(normalizeSenderLearningKey(participant.email));
+      }
+
+      return keys;
+    }),
+  );
+  const normalizedCollaborationParticipantSearch = collaborationParticipantSearch
+    .trim()
+    .toLowerCase();
+  const visibleCollaborationParticipantOptions = collaborationTeamPeople.filter((person) => {
+    if (!normalizedCollaborationParticipantSearch) {
+      return true;
+    }
+
+    const accessLevel =
+      collaborationRoleByEmail.get(normalizeSenderLearningKey(person.email)) ?? "";
+    return `${person.name} ${person.email} ${accessLevel}`
+      .toLowerCase()
+      .includes(normalizedCollaborationParticipantSearch);
+  });
+  const pendingExternalInviteEmailKeys = new Set(
+    [...pendingExternalInviteEmails, ...externalInviteInFlightEmails].map((email) =>
+      normalizeSenderLearningKey(email),
+    ),
+  );
   const hasRealInternalTeamContext =
     hasRealInternalCollaborationTeammates ||
     activeCollaborationParticipants.some((participant) => {
@@ -11054,20 +11132,43 @@ function MailboxView({
   }, [activeCollaborationMessageId, focusCollaborationComposer]);
 
   useEffect(() => {
+    if (!activeCollaborationMessageId || !shouldFocusExternalInviteOnOpen) {
+      return;
+    }
+
+    externalCollaborationEmailInputRef.current?.focus();
+    setShouldFocusExternalInviteOnOpen(false);
+  }, [activeCollaborationMessageId, shouldFocusExternalInviteOnOpen]);
+
+  useEffect(() => {
     if (
-      !pendingExternalInviteEmail ||
+      pendingExternalInviteEmails.length === 0 ||
       !activeCollaborationMessage?.collaboration
     ) {
       return;
     }
 
-    const nextEmail = pendingExternalInviteEmail;
-    setPendingExternalInviteEmail("");
-    void sendExternalReviewInviteToEmail(activeCollaborationMessage.id, nextEmail);
+    const nextEmails = [...pendingExternalInviteEmails];
+    setPendingExternalInviteEmails([]);
+    void (async () => {
+      for (const nextEmail of nextEmails) {
+        const normalizedEmail = normalizeSenderLearningKey(nextEmail);
+        setExternalInviteInFlightEmails((current) =>
+          current.includes(normalizedEmail) ? current : [...current, normalizedEmail],
+        );
+        try {
+          await sendExternalReviewInviteToEmail(activeCollaborationMessage.id, nextEmail);
+        } finally {
+          setExternalInviteInFlightEmails((current) =>
+            current.filter((email) => email !== normalizedEmail),
+          );
+        }
+      }
+    })();
   }, [
     activeCollaborationMessage?.collaboration?.createdAt,
     activeCollaborationMessage?.id,
-    pendingExternalInviteEmail,
+    pendingExternalInviteEmails,
   ]);
 
   useEffect(() => {
@@ -12247,7 +12348,7 @@ function MailboxView({
   const createCollaborationForMessage = (
     messageId: string,
     options?: {
-      selectedPersonId?: string;
+      selectedPersonIds?: string[];
       requestType?: "needs_review" | "needs_action" | "note_only";
       note?: string;
     },
@@ -12257,40 +12358,39 @@ function MailboxView({
       return;
     }
 
-    const selectedPerson = collaborationSelectablePeople.find(
-      (person) => person.id === (options?.selectedPersonId ?? collaborationPersonId),
-    ) ?? {
+    const selectedPeople = collaborationSelectablePeople.filter((person) =>
+      (options?.selectedPersonIds ?? collaborationPersonIds).includes(person.id),
+    );
+    const currentWorkspaceParticipant: CollaborationSelectablePerson = {
       id: currentUserId,
       name: currentUserName,
       email: currentUserEmail,
-      kind: "internal" as const,
-      status: "active" as const,
+      kind: "internal",
+      status: "active",
     };
-    const initialParticipant =
-      selectedPerson.kind === "external"
-        ? {
-            id: currentUserId,
-            name: currentUserName,
-            email: currentUserEmail,
-            kind: "internal" as const,
-            status: "active" as const,
-          }
-        : selectedPerson;
+    const selectedPerson = selectedPeople[0] ?? currentWorkspaceParticipant;
+    const initialParticipants =
+      selectedPeople.length === 0
+        ? [currentWorkspaceParticipant]
+        : [
+            ...selectedPeople.filter((person) => person.kind === "internal"),
+            ...(selectedPeople.some((person) => person.kind === "external")
+              ? [currentWorkspaceParticipant]
+              : []),
+          ];
 
     const nextTimestamp = Date.now();
     const trimmedNote = (options?.note ?? collaborationNote).trim();
     const initialMessageVisibility: MailMessageCollaborationVisibility =
-      selectedPerson.kind === "external" ? "shared" : "internal";
+      selectedPeople.some((person) => person.kind === "external") ? "shared" : "internal";
     const initialMentionCandidates = getCollaborationMentionTargets(
-      [
-        {
-          id: initialParticipant.id,
-          name: initialParticipant.name,
-          email: initialParticipant.email,
-          kind: initialParticipant.kind,
-          status: initialParticipant.status,
-        },
-      ],
+      initialParticipants.map((participant) => ({
+        id: participant.id,
+        name: participant.name,
+        email: participant.email,
+        kind: participant.kind,
+        status: participant.status,
+      })),
       collaborationPeople,
     );
     const initialMessages = trimmedNote
@@ -12318,15 +12418,13 @@ function MailboxView({
       requestedUserName: selectedPerson.name,
       createdAt: nextTimestamp,
       updatedAt: nextTimestamp,
-      participants: [
-        {
-          id: initialParticipant.id,
-          name: initialParticipant.name,
-          email: initialParticipant.email,
-          kind: initialParticipant.kind,
-          status: initialParticipant.status,
-        },
-      ],
+      participants: initialParticipants.map((participant) => ({
+        id: participant.id,
+        name: participant.name,
+        email: participant.email,
+        kind: participant.kind,
+        status: participant.status,
+      })),
       previewText: trimmedNote || undefined,
       messages: initialMessages,
     };
@@ -12370,14 +12468,17 @@ function MailboxView({
 
     setShareCollaborationMessageId(messageId);
     setCollaborationRequestType("needs_review");
-    setCollaborationPersonId("");
+    setCollaborationPersonIds([]);
+    setCollaborationMemberSearch("");
     setCollaborationNote("");
   };
 
   const closeShareCollaboration = () => {
     setShareCollaborationMessageId(null);
     setCollaborationRequestType("needs_review");
-    setCollaborationPersonId("");
+    setCollaborationPersonIds([]);
+    setCollaborationMemberSearch("");
+    setShouldFocusExternalInviteOnOpen(false);
     setCollaborationNote("");
   };
 
@@ -12395,7 +12496,8 @@ function MailboxView({
 
   const closeCollaborationOverlay = () => {
     setActiveCollaborationMessageId(null);
-    setCollaborationParticipantPersonId("");
+    setCollaborationParticipantPersonIds([]);
+    setCollaborationParticipantSearch("");
     setExternalCollaborationEmail("");
     setExternalCollaborationInviteUrl("");
     setExternalInviteEmailFeedback(null);
@@ -12406,6 +12508,7 @@ function MailboxView({
     setCollaborationReplySelection(null);
     setHighlightedCollaborationMessageId(null);
     setFocusCollaborationComposer(false);
+    setShouldFocusExternalInviteOnOpen(false);
   };
 
   useEffect(() => {
@@ -12558,16 +12661,21 @@ function MailboxView({
     if (!shareCollaborationMessageId) {
       return;
     }
-    const selectedPerson = collaborationSelectablePeople.find(
-      (person) => person.id === collaborationPersonId,
+    const shouldFocusExternalInviteAfterCreate = shouldFocusExternalInviteOnOpen;
+    const selectedPeople = collaborationSelectablePeople.filter((person) =>
+      collaborationPersonIds.includes(person.id),
     );
-    const nextExternalInviteEmail =
-      selectedPerson?.kind === "external" ? selectedPerson.email : "";
+    const nextExternalInviteEmails = selectedPeople
+      .filter((person) => person.kind === "external")
+      .map((person) => person.email);
     createCollaborationForMessage(shareCollaborationMessageId);
-    if (nextExternalInviteEmail) {
-      setPendingExternalInviteEmail(nextExternalInviteEmail);
+    if (nextExternalInviteEmails.length > 0) {
+      setPendingExternalInviteEmails(nextExternalInviteEmails);
     }
     closeShareCollaboration();
+    if (shouldFocusExternalInviteAfterCreate) {
+      setShouldFocusExternalInviteOnOpen(true);
+    }
   };
 
   const sendCollaborationReply = (messageId: string) => {
@@ -12652,69 +12760,91 @@ function MailboxView({
 
   const addParticipantToCollaboration = (
     messageId: string,
-    participantPersonId = collaborationParticipantPersonId,
+    participantPersonIds = collaborationParticipantPersonIds,
   ) => {
-    if (!participantPersonId) {
+    if (participantPersonIds.length === 0) {
       return;
     }
 
     const nextTimestamp = Date.now();
-    const selectedParticipant = collaborationSelectablePeople.find(
-      (person) => person.id === participantPersonId,
+    const selectedParticipants = collaborationSelectablePeople.filter(
+      (person) => participantPersonIds.includes(person.id),
     );
 
-    if (!selectedParticipant) {
-      return;
-    }
-
-    if (selectedParticipant.kind === "external") {
-      setCollaborationParticipantPersonId("");
-      void sendExternalReviewInviteToEmail(messageId, selectedParticipant.email);
+    if (selectedParticipants.length === 0) {
       return;
     }
 
     const currentMessage = getMessageById(messageId);
     const expectedUpdatedAt = currentMessage?.collaboration?.updatedAt;
     let nextParticipantsForCanonicalWrite: MailMessageCollaborationParticipant[] | null = null;
-
-    updateMessageById(messageId, (message) => {
-      if (!message.collaboration) {
-        return message;
-      }
-
-      const existingParticipants = message.collaboration.participants ?? [];
-      const alreadyExists = existingParticipants.some(
+    const selectedExternalInviteEmails = selectedParticipants
+      .filter((participant) => participant.kind === "external")
+      .filter(
         (participant) =>
-          participant.id === selectedParticipant.id ||
-          participant.email.toLowerCase() === selectedParticipant.email.toLowerCase(),
-      );
+          !pendingExternalInviteEmailKeys.has(
+            normalizeSenderLearningKey(participant.email),
+          ),
+      )
+      .map((participant) => participant.email);
+    const selectedInternalParticipants = selectedParticipants.filter(
+      (participant) => participant.kind === "internal",
+    );
 
-      if (alreadyExists) {
-        return message;
-      }
+    if (selectedInternalParticipants.length > 0) {
+      updateMessageById(messageId, (message) => {
+        if (!message.collaboration) {
+          return message;
+        }
 
-      nextParticipantsForCanonicalWrite = [
-        ...existingParticipants,
-        {
-          id: selectedParticipant.id,
-          name: selectedParticipant.name,
-          email: selectedParticipant.email,
-          kind: selectedParticipant.kind,
-          status: "active" as const,
-        },
-      ];
+        const existingParticipants = message.collaboration.participants ?? [];
+        const nextParticipants = [...existingParticipants];
 
-      return {
-        ...message,
-        collaboration: {
-          ...message.collaboration,
-          updatedAt: nextTimestamp,
-          participants: nextParticipantsForCanonicalWrite,
-        },
-      };
-    });
+        selectedInternalParticipants.forEach((selectedParticipant) => {
+          const alreadyExists = nextParticipants.some(
+            (participant) =>
+              participant.id === selectedParticipant.id ||
+              participant.email.toLowerCase() === selectedParticipant.email.toLowerCase(),
+          );
 
-    setCollaborationParticipantPersonId("");
+          if (alreadyExists) {
+            return;
+          }
+
+          nextParticipants.push({
+            id: selectedParticipant.id,
+            name: selectedParticipant.name,
+            email: selectedParticipant.email,
+            kind: selectedParticipant.kind,
+            status: "active" as const,
+          });
+        });
+
+        if (nextParticipants.length === existingParticipants.length) {
+          return message;
+        }
+
+        nextParticipantsForCanonicalWrite = nextParticipants;
+
+        return {
+          ...message,
+          collaboration: {
+            ...message.collaboration,
+            updatedAt: nextTimestamp,
+            participants: nextParticipantsForCanonicalWrite,
+          },
+        };
+      });
+    }
+
+    setCollaborationParticipantPersonIds([]);
+
+    if (selectedExternalInviteEmails.length > 0) {
+      setPendingExternalInviteEmails((current) => [
+        ...current,
+        ...selectedExternalInviteEmails.filter((email) => !current.includes(email)),
+      ]);
+    }
 
     if (!nextParticipantsForCanonicalWrite) {
       return;
@@ -17155,54 +17285,101 @@ function MailboxView({
                     <label className="block space-y-2">
                       <div className="flex items-center justify-between gap-3">
                         <span className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
-                          Internal collaboration
+                          Collaborators
                         </span>
                         <span className="text-[0.68rem] leading-5 text-[var(--workspace-text-faint)]">
                           Optional
                         </span>
                       </div>
-                      <div className="grid gap-2.5 md:grid-cols-3">
-                        {collaborationSelectablePeople.map((person) => (
-                          <div key={person.id} className="relative min-w-0">
-                            <button
-                              type="button"
-                              onClick={() => setCollaborationPersonId(person.id)}
-                              className={`w-full min-w-0 rounded-[18px] border px-4 py-3 pr-10 text-left transition-[background-color,border-color,color] duration-150 focus-visible:outline-none ${
-                                collaborationPersonId === person.id
-                                  ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-card-featured-start),var(--workspace-card-featured-end))]"
-                                  : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)]"
-                              }`}
-                            >
-                              <div className="truncate pr-1 text-[0.92rem] font-medium leading-6 text-[var(--workspace-text)]">
-                                {person.name}
-                              </div>
-                              <div
-                                title={person.email}
-                                className="mt-0.5 truncate pr-1 text-[0.8rem] leading-5 text-[color:rgba(120,111,100,0.72)]"
-                              >
-                                {person.email}
-                              </div>
-                            </button>
-                            {collaborationPersonId === person.id ? (
-                              <button
-                                type="button"
-                                aria-label={`Remove ${person.name}`}
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  if (collaborationPersonId === person.id) {
-                                    setCollaborationPersonId("");
+                      {collaborationTeamPeople.length > 0 ? (
+                        <div className="space-y-3">
+                          <input
+                            type="search"
+                            value={collaborationMemberSearch}
+                            onChange={(event) => setCollaborationMemberSearch(event.target.value)}
+                            placeholder="Search team members"
+                            className="w-full rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3 text-[0.88rem] leading-6 text-[var(--workspace-text)] outline-none placeholder:text-[var(--workspace-text-faint)]"
+                          />
+                          <div className="max-h-[320px] space-y-2 overflow-y-auto pr-1">
+                            {visibleCollaborationTeamPeople.map((person) => {
+                              const isSelected = collaborationPersonIds.includes(person.id);
+                              const accessLevel = collaborationRoleByEmail.get(
+                                normalizeSenderLearningKey(person.email),
+                              );
+
+                              return (
+                                <button
+                                  key={person.id}
+                                  type="button"
+                                  onClick={() =>
+                                    setCollaborationPersonIds((current) =>
+                                      current.includes(person.id)
+                                        ? current.filter((entry) => entry !== person.id)
+                                        : [...current, person.id],
+                                    )
                                   }
-                                }}
-                                className="absolute right-2 top-2 inline-flex h-6 w-6 items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] text-[0.82rem] leading-none text-[var(--workspace-text-faint)] transition-[background-color,border-color,color] duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface-strong)] hover:text-[var(--workspace-text)] focus-visible:outline-none"
-                              >
-                                ×
-                              </button>
+                                  className={`flex w-full items-start justify-between gap-3 rounded-[18px] border px-4 py-3 text-left transition-[background-color,border-color,color] duration-150 focus-visible:outline-none ${
+                                    isSelected
+                                      ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-card-featured-start),var(--workspace-card-featured-end))]"
+                                      : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)]"
+                                  }`}
+                                >
+                                  <div className="min-w-0 flex-1">
+                                    <div className="truncate text-[0.92rem] font-medium leading-6 text-[var(--workspace-text)]">
+                                      {person.name}
+                                    </div>
+                                    <div
+                                      title={person.email}
+                                      className="mt-0.5 truncate text-[0.8rem] leading-5 text-[color:rgba(120,111,100,0.72)]"
+                                    >
+                                      {person.email}
+                                    </div>
+                                    {accessLevel ? (
+                                      <div className="mt-2 inline-flex items-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-2.5 py-1 text-[0.58rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)]">
+                                        {getTeamAccessLevelLabel(accessLevel)}
+                                      </div>
+                                    ) : null}
+                                  </div>
+                                  <div
+                                    className={`mt-0.5 inline-flex h-6 min-w-[3.6rem] items-center justify-center rounded-full border px-2.5 text-[0.58rem] font-medium uppercase tracking-[0.14em] ${
+                                      isSelected
+                                        ? "border-[var(--workspace-accent-border)] bg-[var(--workspace-card)] text-[var(--workspace-text)]"
+                                        : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] text-[var(--workspace-text-faint)]"
+                                    }`}
+                                  >
+                                    {isSelected ? "Selected" : "Select"}
+                                  </div>
+                                </button>
+                              );
+                            })}
+                            {visibleCollaborationTeamPeople.length === 0 ? (
+                              <div className="rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-5 text-[0.84rem] leading-6 text-[var(--workspace-text-faint)]">
+                                No team members match that search.
+                              </div>
                             ) : null}
                           </div>
-                        ))}
-                      </div>
+                          <button
+                            type="button"
+                            onClick={() => setShouldFocusExternalInviteOnOpen(true)}
+                            className="inline-flex h-10 items-center justify-center rounded-full px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-soft)] transition-colors duration-150 hover:text-[var(--workspace-text)] focus-visible:outline-none"
+                          >
+                            Invite new person
+                          </button>
+                          {shouldFocusExternalInviteOnOpen ? (
+                            <div className="text-[0.76rem] leading-6 text-[var(--workspace-text-faint)]">
+                              Start the collaboration first. The email invite field will be ready in External review.
+                            </div>
+                          ) : null}
+                        </div>
+                      ) : (
+                        <div className="rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-4 text-[0.84rem] leading-6 text-[var(--workspace-text-faint)]">
+                          No team members yet. Start solo and use the existing email invite flow after creation.
+                        </div>
+                      )}
                       <div className="text-[0.78rem] leading-6 text-[color:rgba(120,111,100,0.68)]">
-                        Start solo and invite external participants after creation, or add an internal teammate now.
+                        {collaborationTeamPeople.length > 0
+                          ? "Select one or more teammates now, or invite someone new after creation."
+                          : "Start solo and invite external participants after creation, or add an internal teammate now."}
                       </div>
                     </label>
 
@@ -17330,40 +17507,111 @@ function MailboxView({
                           </div>
                         ))}
                       </div>
-                      {collaborationSelectablePeople.some(
-                        (person) =>
-                          !activeCollaborationParticipants.some(
-                            (participant) => participant.id === person.id,
-                          ),
-                      ) ? (
+                      {collaborationTeamPeople.length > 0 ? (
                         <div className="space-y-2 pt-1">
                           <div className="text-[0.68rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)]">
                             Add participant
                           </div>
-                          <div className="flex flex-wrap gap-2">
-                            {collaborationSelectablePeople
-                              .filter(
-                                (person) =>
-                                  !activeCollaborationParticipants.some(
-                                    (participant) => participant.id === person.id,
-                                  ),
-                              )
-                              .map((person) => (
+                          <input
+                            type="search"
+                            value={collaborationParticipantSearch}
+                            onChange={(event) =>
+                              setCollaborationParticipantSearch(event.target.value)
+                            }
+                            placeholder="Search team members"
+                            className="w-full rounded-[16px] bg-[var(--workspace-card)] px-4 py-2.5 text-[0.88rem] leading-6 text-[var(--workspace-text)] outline-none placeholder:text-[var(--workspace-text-faint)]"
+                          />
+                          <div className="max-h-[280px] space-y-2 overflow-y-auto pr-1">
+                            {visibleCollaborationParticipantOptions.map((person) => {
+                              const isExternalInvitePending = pendingExternalInviteEmailKeys.has(
+                                normalizeSenderLearningKey(person.email),
+                              );
+                              const alreadyAdded =
+                                activeCollaborationParticipantKeys.has(person.id) ||
+                                activeCollaborationParticipantKeys.has(
+                                  normalizeSenderLearningKey(person.email),
+                                ) ||
+                                isExternalInvitePending;
+                              const isSelected =
+                                collaborationParticipantPersonIds.includes(person.id);
+                              const accessLevel = collaborationRoleByEmail.get(
+                                normalizeSenderLearningKey(person.email),
+                              );
+
+                              return (
                                 <button
                                   key={`collaboration-person-${person.id}`}
                                   type="button"
-                                  onClick={() => {
-                                    setCollaborationParticipantPersonId(person.id);
-                                    addParticipantToCollaboration(
-                                      activeCollaborationMessage.id,
-                                      person.id,
-                                    );
-                                  }}
-                                  className="inline-flex h-8 items-center justify-center rounded-full bg-[var(--workspace-card)] px-3.5 text-[0.66rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-soft)] transition-[background-color,color] duration-150 hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] focus-visible:outline-none"
+                                  disabled={alreadyAdded}
+                                  onClick={() =>
+                                    setCollaborationParticipantPersonIds((current) =>
+                                      current.includes(person.id)
+                                        ? current.filter((entry) => entry !== person.id)
+                                        : [...current, person.id],
+                                    )
+                                  }
+                                  className={`flex w-full items-start justify-between gap-3 rounded-[16px] border px-3.5 py-3 text-left transition-[background-color,border-color,color] duration-150 focus-visible:outline-none ${
+                                    alreadyAdded
+                                      ? "cursor-not-allowed border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] opacity-70"
+                                      : isSelected
+                                        ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-card-featured-start),var(--workspace-card-featured-end))]"
+                                        : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)]"
+                                  }`}
                                 >
-                                  {person.name}
+                                  <div className="min-w-0 flex-1">
+                                    <div className="truncate text-[0.86rem] font-medium leading-6 text-[var(--workspace-text)]">
+                                      {person.name}
+                                    </div>
+                                    <div className="truncate text-[0.76rem] leading-5 text-[var(--workspace-text-faint)]">
+                                      {person.email}
+                                    </div>
+                                    {accessLevel ? (
+                                      <div className="mt-2 inline-flex items-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-2.5 py-1 text-[0.56rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)]">
+                                        {getTeamAccessLevelLabel(accessLevel)}
+                                      </div>
+                                    ) : null}
+                                  </div>
+                                  <div
+                                    className={`inline-flex min-w-[4.5rem] items-center justify-center rounded-full border px-2.5 py-1 text-[0.56rem] font-medium uppercase tracking-[0.14em] ${
+                                      alreadyAdded
+                                        ? "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[var(--workspace-text-faint)]"
+                                        : isSelected
+                                          ? "border-[var(--workspace-accent-border)] bg-[var(--workspace-card)] text-[var(--workspace-text)]"
+                                          : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] text-[var(--workspace-text-faint)]"
+                                    }`}
+                                  >
+                                    {alreadyAdded
+                                      ? isExternalInvitePending
+                                        ? "Inviting"
+                                        : "Added"
+                                      : isSelected
+                                        ? "Selected"
+                                        : "Select"}
+                                  </div>
                                 </button>
-                              ))}
+                              );
+                            })}
+                            {visibleCollaborationParticipantOptions.length === 0 ? (
+                              <div className="rounded-[16px] bg-[var(--workspace-card)] px-4 py-4 text-[0.8rem] leading-6 text-[var(--workspace-text-faint)]">
+                                No team members match that search.
+                              </div>
+                            ) : null}
+                          </div>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                addParticipantToCollaboration(activeCollaborationMessage.id)
+                              }
+                              disabled={collaborationParticipantPersonIds.length === 0}
+                              className={
+                                collaborationParticipantPersonIds.length > 0
+                                  ? "inline-flex h-9 items-center justify-center rounded-full bg-[var(--workspace-card)] px-4 text-[0.66rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-soft)] transition-[background-color,color] duration-150 hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] focus-visible:outline-none"
+                                  : "inline-flex h-9 cursor-not-allowed items-center justify-center rounded-full bg-[var(--workspace-card)] px-4 text-[0.66rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-soft)] opacity-45 transition-[opacity] duration-150 focus-visible:outline-none"
+                              }
+                            >
+                              Add selected
+                            </button>
                           </div>
                         </div>
                       ) : null}
@@ -17382,6 +17630,7 @@ function MailboxView({
                       </div>
                       <div className="flex flex-col gap-2 sm:flex-row">
                         <input
+                          ref={externalCollaborationEmailInputRef}
                           type="email"
                           value={externalCollaborationEmail}
                           onChange={(event) => {
@@ -30570,6 +30819,8 @@ export function WorkspaceShell({
                   currentUserEmail={activeWorkspaceEmail}
                   workspaceCollaborationPeople={workspaceCollaborationPeople}
                   inviteOnlyCollaborationPeople={inviteOnlyCollaborationPeople}
+                  memberOfEntries={memberOfEntries}
+                  teamMemberEntries={teamMemberEntries}
                   focusPreferences={activeFocusPreferences}
                   effectiveFocusPreferencesByMailbox={effectiveFocusPreferencesByMailbox}
                   mailboxStore={mailboxStore}
