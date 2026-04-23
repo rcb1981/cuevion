@@ -12231,6 +12231,8 @@ function MailboxView({
 
     const nextTimestamp = Date.now();
     const trimmedNote = (options?.note ?? collaborationNote).trim();
+    const initialMessageVisibility: MailMessageCollaborationVisibility =
+      selectedPerson.kind === "external" ? "shared" : "internal";
     const initialMentionCandidates = getCollaborationMentionTargets(
       [
         {
@@ -12251,7 +12253,7 @@ function MailboxView({
             authorName: currentUserName,
             text: trimmedNote,
             timestamp: nextTimestamp,
-            visibility: "internal" as const,
+            visibility: initialMessageVisibility,
             mentions: extractCollaborationMentions(
               trimmedNote,
               initialMentionCandidates,
