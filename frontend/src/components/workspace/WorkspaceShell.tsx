@@ -10941,6 +10941,26 @@ function MailboxView({
   const activeCollaborationParticipants = activeCollaborationMessage?.collaboration
     ? getCollaborationParticipants(activeCollaborationMessage.collaboration)
     : [];
+  const hasRealInternalTeamContext =
+    hasRealInternalCollaborationTeammates ||
+    activeCollaborationParticipants.some((participant) => {
+      if (participant.kind !== "internal" || participant.status !== "active") {
+        return false;
+      }
+
+      const participantId = participant.id ? normalizeSenderLearningKey(participant.id) : "";
+      const participantEmail = participant.email
+        ? normalizeSenderLearningKey(participant.email)
+        : "";
+
+      return (
+        (participantId && participantId !== currentUserId) ||
+        (participantEmail && participantEmail !== normalizeSenderLearningKey(currentUserEmail))
+      );
+    });
+  const resolvedCollaborationReplyVisibility = hasRealInternalTeamContext
+    ? collaborationReplyVisibility
+    : "shared";
   const primaryExternalReviewParticipant =
     activeCollaborationParticipants.find(
       (participant) =>
@@ -10969,6 +10989,12 @@ function MailboxView({
   const visibleCompactCollaborationMessages = collaborationHistoryExpanded
     ? [...visibleCollaborationMessages].sort((first, second) => second.timestamp - first.timestamp)
     : [...visibleCollaborationMessages.slice(-2)].reverse();
+
+  useEffect(() => {
+    if (!hasRealInternalTeamContext && collaborationReplyVisibility === "internal") {
+      setCollaborationReplyVisibility("shared");
+    }
+  }, [collaborationReplyVisibility, hasRealInternalTeamContext]);
 
   useEffect(() => {
     if (!directCanonicalCollaborationRefreshMessage) {
@@ -12329,7 +12355,7 @@ function MailboxView({
     setExternalReviewCopyFeedback("");
     setCollaborationHistoryExpanded(false);
     setCollaborationReplyDraft("");
-    setCollaborationReplyVisibility("internal");
+    setCollaborationReplyVisibility(hasRealInternalTeamContext ? "internal" : "shared");
     setCollaborationReplySelection(null);
     setHighlightedCollaborationMessageId(null);
     setFocusCollaborationComposer(false);
@@ -12504,6 +12530,9 @@ function MailboxView({
       collaborationMentionCandidates,
       currentUserId,
     );
+    const replyVisibility = hasRealInternalTeamContext
+      ? collaborationReplyVisibility
+      : "shared";
 
     updateMessageById(messageId, (message) =>
       message.collaboration
@@ -12526,7 +12555,7 @@ function MailboxView({
                   authorName: currentUserName,
                   text: trimmedReply,
                   timestamp: nextTimestamp,
-                  visibility: collaborationReplyVisibility,
+                  visibility: replyVisibility,
                   mentions,
                 },
               ],
@@ -12535,7 +12564,7 @@ function MailboxView({
         : message,
     );
     setCollaborationReplyDraft("");
-    setCollaborationReplyVisibility("internal");
+    setCollaborationReplyVisibility(hasRealInternalTeamContext ? "internal" : "shared");
     setCollaborationMentionIndex(0);
     setCollaborationReplySelection(null);
     closeCollaborationOverlay();
@@ -12550,7 +12579,7 @@ function MailboxView({
           authorId: currentUserId,
           authorName: currentUserName,
           text: trimmedReply,
-          visibility: collaborationReplyVisibility,
+          visibility: replyVisibility,
           mentions,
         },
       });
@@ -17495,16 +17524,19 @@ function MailboxView({
                         Reply
                       </span>
                       <div className="flex flex-wrap gap-2">
-                        {([
-                          { value: "internal", label: "Internal" },
-                          { value: "shared", label: "Shared" },
-                        ] as const).map((option) => (
+                        {(hasRealInternalTeamContext
+                          ? ([
+                              { value: "internal", label: "Internal" },
+                              { value: "shared", label: "Shared" },
+                            ] as const)
+                          : ([{ value: "shared", label: "Shared" }] as const)
+                        ).map((option) => (
                           <button
                             key={option.value}
                             type="button"
                             onClick={() => setCollaborationReplyVisibility(option.value)}
                             className={`inline-flex h-9 items-center justify-center rounded-full border px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color] duration-150 focus-visible:outline-none ${
-                              collaborationReplyVisibility === option.value
+                              resolvedCollaborationReplyVisibility === option.value
                                 ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)]"
                                 : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[var(--workspace-text-soft)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface-strong)]"
                             }`}
@@ -17514,7 +17546,7 @@ function MailboxView({
                         ))}
                       </div>
                       <div className="pt-0.5 text-[0.78rem] leading-6 text-[color:rgba(120,111,100,0.76)]">
-                        {collaborationReplyVisibility === "internal"
+                        {resolvedCollaborationReplyVisibility === "internal"
                           ? "Only visible inside Cuevion"
                           : `Visible to: ${
                               activeCollaborationParticipants
@@ -17582,7 +17614,7 @@ function MailboxView({
                           }}
                           rows={4}
                           placeholder={
-                            collaborationReplyVisibility === "internal"
+                            resolvedCollaborationReplyVisibility === "internal"
                               ? "Add an internal note"
                               : "Reply to everyone in this collaboration"
                           }
@@ -26021,6 +26053,7 @@ export function WorkspaceShell({
   );
   const hasRealInternalCollaborationTeammates = memberOfEntries.some(
     (member) =>
+      authenticatedUser?.userType !== "guest" &&
       normalizeSenderLearningKey(member.email) !== currentWorkspaceUserId,
   );
   const [isSmartFolderModalOpen, setIsSmartFolderModalOpen] = useState(false);
@@ -26159,7 +26192,9 @@ export function WorkspaceShell({
   const [inviteReplyDraft, setInviteReplyDraft] = useState("");
   const [inviteReplyVisibility, setInviteReplyVisibility] =
     useState<MailMessageCollaborationVisibility>(
-      authenticatedUser?.userType === "guest" ? "shared" : "internal",
+      authenticatedUser?.userType === "guest" || !hasRealInternalCollaborationTeammates
+        ? "shared"
+        : "internal",
     );
   const [inviteMentionIndex, setInviteMentionIndex] = useState(0);
   const [inviteReplySelection, setInviteReplySelection] = useState<number | null>(null);
@@ -26671,6 +26706,35 @@ export function WorkspaceShell({
   const inviteParticipants = inviteCollaboration
     ? getCollaborationParticipants(inviteCollaboration)
     : [];
+  const inviteAuthenticatedUserKey = authenticatedUser
+    ? normalizeSenderLearningKey(authenticatedUser.email)
+    : "";
+  const hasRealInviteInternalTeamContext = Boolean(
+    authenticatedUser &&
+      authenticatedUser.userType !== "guest" &&
+      !isExternalReviewRoute &&
+      (hasRealInternalCollaborationTeammates ||
+        inviteParticipants.some((participant) => {
+          if (participant.kind !== "internal" || participant.status !== "active") {
+            return false;
+          }
+
+          const participantId = participant.id
+            ? normalizeSenderLearningKey(participant.id)
+            : "";
+          const participantEmail = participant.email
+            ? normalizeSenderLearningKey(participant.email)
+            : "";
+
+          return (
+            (participantId && participantId !== inviteAuthenticatedUserKey) ||
+            (participantEmail && participantEmail !== inviteAuthenticatedUserKey)
+          );
+        })),
+  );
+  const resolvedInviteReplyVisibility = hasRealInviteInternalTeamContext
+    ? inviteReplyVisibility
+    : "shared";
   const externalReviewAuthorEmail =
     inviteLookupInviteeEmail?.toLowerCase() ??
     collaborationInviteRoute?.inviteeEmail?.toLowerCase() ??
@@ -26734,6 +26798,12 @@ export function WorkspaceShell({
                 : hasAlreadyJoinedInvite
                 ? "joined"
                     : "accept";
+
+  useEffect(() => {
+    if (!hasRealInviteInternalTeamContext && inviteReplyVisibility === "internal") {
+      setInviteReplyVisibility("shared");
+    }
+  }, [hasRealInviteInternalTeamContext, inviteReplyVisibility]);
 
   const updateInviteWorkspaceMessageById = (
     messageId: string,
@@ -26989,6 +27059,9 @@ export function WorkspaceShell({
       mentionCandidates,
       normalizeSenderLearningKey(authenticatedUser.email),
     );
+    const replyVisibility = hasRealInviteInternalTeamContext
+      ? inviteReplyVisibility
+      : "shared";
     const nextInviteMessage: MailMessage = {
       ...inviteMessage,
       isShared: true,
@@ -27008,7 +27081,7 @@ export function WorkspaceShell({
             authorName: authenticatedUser.name,
             text: trimmedReply,
             timestamp: nextTimestamp,
-            visibility: inviteReplyVisibility,
+            visibility: replyVisibility,
             mentions,
           },
         ],
@@ -27038,7 +27111,7 @@ export function WorkspaceShell({
                   authorName: authenticatedUser.name,
                   text: trimmedReply,
                   timestamp: nextTimestamp,
-                  visibility: inviteReplyVisibility,
+                  visibility: replyVisibility,
                   mentions,
                 },
               ],
@@ -27049,7 +27122,7 @@ export function WorkspaceShell({
     );
 
     setInviteReplyDraft("");
-    setInviteReplyVisibility(isGuestInviteUser ? "shared" : "internal");
+    setInviteReplyVisibility(hasRealInviteInternalTeamContext ? "internal" : "shared");
     setInviteMentionIndex(0);
     setInviteReplySelection(null);
   };
@@ -27255,7 +27328,7 @@ export function WorkspaceShell({
 
     setInviteDecisionState("left");
     setInviteReplyDraft("");
-    setInviteReplyVisibility(isGuestInviteUser ? "shared" : "internal");
+    setInviteReplyVisibility(hasRealInviteInternalTeamContext ? "internal" : "shared");
     setInviteReplySelection(null);
   };
 
@@ -29729,7 +29802,7 @@ export function WorkspaceShell({
                 ))}
                 {inviteVisibleMessages.length === 0 ? (
                   <div className="text-[0.88rem] leading-7 text-[var(--workspace-text-faint)]">
-                    {inviteReplyVisibility === "internal"
+                    {resolvedInviteReplyVisibility === "internal"
                       ? "Start an internal discussion with your team"
                       : "Send a message to all participants"}
                   </div>
@@ -29749,19 +29822,19 @@ export function WorkspaceShell({
                 </span>
                 <div className="flex flex-wrap gap-2">
                   {(
-                    isGuestInviteUser
-                      ? ([{ value: "shared", label: "Shared" }] as const)
-                      : ([
+                    hasRealInviteInternalTeamContext
+                      ? ([
                           { value: "internal", label: "Internal" },
                           { value: "shared", label: "Shared" },
                         ] as const)
+                      : ([{ value: "shared", label: "Shared" }] as const)
                   ).map((option) => (
                     <button
                       key={option.value}
                       type="button"
                       onClick={() => setInviteReplyVisibility(option.value)}
                       className={`inline-flex h-9 items-center justify-center rounded-full border px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color] duration-150 focus-visible:outline-none ${
-                        inviteReplyVisibility === option.value
+                        resolvedInviteReplyVisibility === option.value
                           ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)]"
                           : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[var(--workspace-text-soft)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface-strong)]"
                       }`}
@@ -29771,7 +29844,7 @@ export function WorkspaceShell({
                   ))}
                 </div>
                 <div className="pt-0.5 text-[0.8rem] leading-6 text-[color:rgba(120,111,100,0.76)]">
-                  {inviteReplyVisibility === "internal"
+                  {resolvedInviteReplyVisibility === "internal"
                     ? "Only visible to your team"
                     : `Visible to: ${
                         inviteParticipants
@@ -29830,7 +29903,7 @@ export function WorkspaceShell({
                   }}
                   rows={4}
                   placeholder={
-                    inviteReplyVisibility === "internal"
+                    resolvedInviteReplyVisibility === "internal"
                       ? "Add an internal note for your team"
                       : "Reply to everyone in this collaboration"
                   }
@@ -29866,7 +29939,7 @@ export function WorkspaceShell({
             <div className="mt-6 flex items-center justify-between gap-3">
               <div className="text-[0.8rem] leading-6 text-[var(--workspace-text-faint)]">
                 {isGuestInviteUser
-                  ? inviteReplyVisibility === "shared"
+                  ? resolvedInviteReplyVisibility === "shared"
                     ? "This message will be sent via Cuevion"
                     : "Internal notes stay inside Cuevion"
                   : null}
