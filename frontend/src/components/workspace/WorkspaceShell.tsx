@@ -4847,10 +4847,39 @@ function getVisiblePriorityBadgeForWorkspaceMessage(
     }
   }
 
-  return getVisiblePriorityBadge(
-    getPriorityVisibilityAdjustedMessage(message, focusPreferences, options),
-    override,
+  const adjustedMessage = getPriorityVisibilityAdjustedMessage(
+    message,
+    focusPreferences,
+    options,
   );
+  const finalBadge = getVisiblePriorityBadge(adjustedMessage, override);
+
+  if (
+    (visibilityClassification === "promo" ||
+      visibilityClassification === "promo_reminder") &&
+    finalBadge === "LOW"
+  ) {
+    console.info("[Cuevion] Promo LOW priority diagnostic", {
+      id: message.id,
+      subject: message.subject,
+      sender: message.sender,
+      from: message.from,
+      signal: message.signal,
+      ui_signal: message.ui_signal,
+      internalClassification: message.internalClassification,
+      visibilityClassification,
+      focusPreferenceLevel,
+      manualOverride: override,
+      final_visibility: message.final_visibility,
+      action: message.action,
+      priorityScoreBefore: message.priorityScore,
+      priorityScoreAfter: adjustedMessage.priorityScore,
+      protectedVisibility: hasProtectedPriorityVisibility(message),
+      finalBadge,
+    });
+  }
+
+  return finalBadge;
 }
 
 function shouldForceFilteredDemoVisibilityForWorkspaceMessage(
