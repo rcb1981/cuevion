@@ -9466,6 +9466,7 @@ function MailboxView({
     null,
   );
   const [collaborationHistoryExpanded, setCollaborationHistoryExpanded] = useState(false);
+  const lastActiveCanonicalCollaborationRefreshKeyRef = useRef<string>("");
   const [externalReviewCopyFeedback, setExternalReviewCopyFeedback] = useState("");
   const [externalInviteEmailFeedback, setExternalInviteEmailFeedback] = useState<string | null>(
     null,
@@ -10852,6 +10853,12 @@ function MailboxView({
     pendingCollaborationOpenMessageId,
   );
   const activeCollaborationMessage = getMessageById(activeCollaborationMessageId);
+  const directCanonicalCollaborationRefreshMessage =
+    activeCollaborationMessage?.collaboration
+      ? activeCollaborationMessage
+      : selectedMessage?.collaboration
+        ? selectedMessage
+        : null;
   const activeCollaborationParticipants = activeCollaborationMessage?.collaboration
     ? getCollaborationParticipants(activeCollaborationMessage.collaboration)
     : [];
@@ -10883,6 +10890,28 @@ function MailboxView({
   const visibleCompactCollaborationMessages = collaborationHistoryExpanded
     ? [...visibleCollaborationMessages].sort((first, second) => second.timestamp - first.timestamp)
     : [...visibleCollaborationMessages.slice(-2)].reverse();
+
+  useEffect(() => {
+    if (!directCanonicalCollaborationRefreshMessage) {
+      lastActiveCanonicalCollaborationRefreshKeyRef.current = "";
+      return;
+    }
+
+    const refreshKey = `${mailbox.id}:${directCanonicalCollaborationRefreshMessage.id}`;
+
+    if (lastActiveCanonicalCollaborationRefreshKeyRef.current === refreshKey) {
+      return;
+    }
+
+    lastActiveCanonicalCollaborationRefreshKeyRef.current = refreshKey;
+    void refreshCanonicalCollaborationThreadForMessage(
+      directCanonicalCollaborationRefreshMessage,
+    );
+  }, [
+    directCanonicalCollaborationRefreshMessage?.id,
+    directCanonicalCollaborationRefreshMessage?.collaboration?.createdAt,
+    mailbox.id,
+  ]);
 
   useEffect(() => {
     if (!activeCollaborationMessageId || !focusCollaborationComposer) {
@@ -11003,6 +11032,11 @@ function MailboxView({
 
     const syncActiveCollaborationFromSnapshot = () => {
       syncMessageFromLiveSnapshot(activeCollaborationMessageId);
+      const message = getMessageById(activeCollaborationMessageId);
+
+      if (message?.collaboration) {
+        void refreshCanonicalCollaborationThreadForMessage(message);
+      }
     };
 
     const handleVisibilityChange = () => {
@@ -12007,6 +12041,32 @@ function MailboxView({
       collaboration: thread.collaboration as MailMessageCollaboration,
       isShared: thread.isShared,
     }));
+  };
+
+  const refreshCanonicalCollaborationThreadForMessage = async (
+    message: MailMessage,
+  ) => {
+    const threadsByMessageId = await fetchCollaborationThreadsGetMany({
+      workspaceId: currentUserId,
+      mailboxId: mailbox.id,
+      messageIds: [message.id],
+      messages: [
+        {
+          id: message.id,
+          imapUid: message.imapUid ?? undefined,
+          subject: message.subject,
+          from: message.from,
+          timestamp: message.timestamp,
+        },
+      ],
+    });
+    const thread = threadsByMessageId[message.id] ?? Object.values(threadsByMessageId)[0];
+
+    if (!thread?.collaboration) {
+      return;
+    }
+
+    applyCanonicalCollaborationThreadToMessage(message.id, thread);
   };
 
   const buildCollaborationSourceMessageSnapshot = (message: MailMessage) => ({
