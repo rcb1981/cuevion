@@ -4918,6 +4918,68 @@ function shouldDisplayMessageInFilteredFolderForWorkspaceMessage(
   focusPreferences: UserConfig["focusPreferences"],
   options?: { preferPromoMailboxContext?: boolean },
 ) {
+  const metaDiagnosticText = [
+    message.subject,
+    message.sender,
+    message.from,
+  ]
+    .join(" ")
+    .toLowerCase();
+  const shouldLogMetaDiagnostic = includesAnyKeyword(metaDiagnosticText, [
+    "meta for business",
+    "facebook",
+    "business-updates.facebook.com",
+    "advertenties-ontvangstbewijs",
+  ]);
+
+  if (shouldLogMetaDiagnostic) {
+    const visibilityClassification = resolveVisibleClassification(message);
+    const focusPreferenceLevel = resolveFocusPreferenceLevelForPriorityMessage(
+      message,
+      focusPreferences,
+      options,
+    );
+    const adjustedMessage = getPriorityVisibilityAdjustedMessage(
+      message,
+      focusPreferences,
+      options,
+    );
+    const finalBadge = getVisiblePriorityBadgeForWorkspaceMessage(
+      message,
+      override,
+      focusPreferences,
+      options,
+    );
+    const shouldDisplayInFilteredFolder =
+      !message.collaboration &&
+      (finalBadge === "LOW" ||
+        shouldForceFilteredDemoVisibilityForWorkspaceMessage(
+          message,
+          override,
+          focusPreferences,
+          options,
+        ));
+
+    console.info("[Cuevion] Meta Finance LOW diagnostic", {
+      subject: message.subject,
+      sender: message.sender,
+      from: message.from,
+      signal: message.signal,
+      ui_signal: message.ui_signal,
+      internalClassification: message.internalClassification,
+      visibilityClassification,
+      focusPreferenceLevel,
+      manualOverride: override,
+      final_visibility: message.final_visibility,
+      action: message.action,
+      priorityScoreBefore: message.priorityScore,
+      priorityScoreAfter: adjustedMessage.priorityScore,
+      protectedVisibility: hasProtectedPriorityVisibility(message),
+      finalBadge,
+      shouldDisplayInFilteredFolder,
+    });
+  }
+
   if (message.collaboration) {
     return false;
   }
