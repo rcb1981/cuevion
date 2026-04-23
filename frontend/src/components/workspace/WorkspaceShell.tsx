@@ -9598,7 +9598,8 @@ function MailboxView({
             email: currentUserEmail,
           },
         ];
-  const collaborationSelectablePeople: CollaborationSelectablePerson[] = [
+  const collaborationSelectablePeopleMap = new Map<string, CollaborationSelectablePerson>();
+  [
     ...collaborationPeople.map((person) => ({
       id: person.id,
       name: person.name,
@@ -9606,14 +9607,32 @@ function MailboxView({
       kind: "internal" as const,
       status: "active" as const,
     })),
-    ...inviteOnlyCollaborationPeople.map((person) => ({
-      id: person.id,
-      name: person.name,
-      email: person.email,
-      kind: "external" as const,
-      status: "invited" as const,
-    })),
-  ];
+    ...teamMemberEntries
+      .filter(
+        (member) =>
+          member.status === "Active" &&
+          normalizeSenderLearningKey(member.email) !== currentUserId &&
+          isValidInviteEmail(member.email),
+      )
+      .map((member) => ({
+        id:
+          member.accessLevel === "Limited"
+            ? `invite-only:${normalizeSenderLearningKey(member.email)}`
+            : normalizeSenderLearningKey(member.email),
+        name: member.name,
+        email: member.email.trim().toLowerCase(),
+        kind: member.accessLevel === "Limited" ? ("external" as const) : ("internal" as const),
+        status: "active" as const,
+      })),
+  ].forEach((person) => {
+    const personKey = normalizeSenderLearningKey(person.email);
+    const existingPerson = collaborationSelectablePeopleMap.get(personKey);
+
+    if (!existingPerson || (existingPerson.kind === "external" && person.kind === "internal")) {
+      collaborationSelectablePeopleMap.set(personKey, person);
+    }
+  });
+  const collaborationSelectablePeople = [...collaborationSelectablePeopleMap.values()];
   const collaborationRoleByEmail = new Map<string, TeamAccessLevel>();
   teamMemberEntries.forEach((member) => {
     collaborationRoleByEmail.set(
@@ -11027,10 +11046,7 @@ function MailboxView({
   const normalizedCollaborationParticipantSearch = collaborationParticipantSearch
     .trim()
     .toLowerCase();
-  const directAddableCollaborationPeople = collaborationTeamPeople.filter(
-    (person) => person.kind === "internal",
-  );
-  const visibleCollaborationParticipantOptions = directAddableCollaborationPeople.filter((person) => {
+  const visibleCollaborationParticipantOptions = collaborationTeamPeople.filter((person) => {
     if (!normalizedCollaborationParticipantSearch) {
       return true;
     }
@@ -17321,11 +17337,7 @@ function MailboxView({
                               <div className="text-[0.68rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)]">
                                 Add participant
                               </div>
-                              {directAddableCollaborationPeople.length === 0 ? (
-                                <div className="rounded-[16px] bg-[var(--workspace-card)] px-4 py-4 text-[0.8rem] leading-6 text-[var(--workspace-text-faint)]">
-                                  Only active internal team members can be added here.
-                                </div>
-                              ) : !isCollaborationParticipantPickerOpen ? (
+                              {!isCollaborationParticipantPickerOpen ? (
                                 <button
                                   type="button"
                                   onClick={() => setIsCollaborationParticipantPickerOpen(true)}
