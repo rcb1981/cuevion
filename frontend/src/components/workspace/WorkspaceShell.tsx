@@ -22718,10 +22718,12 @@ const AccountSettingsCard = memo(function AccountSettingsCard({
   themeMode,
   accountName,
   accountEmail,
+  onAccountNameChange,
 }: {
   themeMode: "light" | "dark";
   accountName: string;
   accountEmail: string;
+  onAccountNameChange?: (name: string) => void;
 }) {
   const [isManaging, setIsManaging] = useState(false);
   const [savedName, setSavedName] = useState(accountName);
@@ -22762,7 +22764,15 @@ const AccountSettingsCard = memo(function AccountSettingsCard({
   };
 
   const handleApply = () => {
-    setSavedName(draftName);
+    const nextName = draftName.trim();
+
+    if (!nextName) {
+      return;
+    }
+
+    setSavedName(nextName);
+    setDraftName(nextName);
+    onAccountNameChange?.(nextName);
   };
 
   const handleCloseChangeEmail = () => {
@@ -23214,6 +23224,7 @@ function SettingsView({
   onManagedInboxesDirtyChange,
   onSaveInboxSignature,
   onSaveInboxOutOfOffice,
+  onAccountNameChange,
 }: {
   workspaceName: string;
   accountName: string;
@@ -23244,6 +23255,7 @@ function SettingsView({
     inboxId: InboxId,
     outOfOffice: InboxOutOfOfficeSettings,
   ) => void;
+  onAccountNameChange?: (name: string) => void;
 }) {
   const [settingsPage, setSettingsPage] = useState<"root" | "manage-inboxes">("root");
   const [activeSignatureInboxId, setActiveSignatureInboxId] = useState<string | null>(null);
@@ -23346,6 +23358,7 @@ function SettingsView({
             themeMode={themeMode}
             accountName={accountName}
             accountEmail={accountEmail}
+            onAccountNameChange={onAccountNameChange}
           />
           <NotificationsSettingsCard
             themeMode={themeMode}
@@ -25760,6 +25773,7 @@ export function WorkspaceShell({
   userConfig,
   onboardingState,
   authenticatedUser = null,
+  onAuthenticatedUserNameChange,
   collaborationInviteRoute = null,
   workspaceDataMode = "live",
 }: {
@@ -25767,6 +25781,7 @@ export function WorkspaceShell({
   userConfig: UserConfig;
   onboardingState: OnboardingState;
   authenticatedUser?: AuthenticatedCuevionUser | null;
+  onAuthenticatedUserNameChange?: (name: string) => void;
   collaborationInviteRoute?: CollaborationInviteRoute | null;
   workspaceDataMode?: WorkspaceDataMode;
 }) {
@@ -30694,6 +30709,7 @@ export function WorkspaceShell({
                       [inboxId]: normalizeInboxOutOfOfficeSettings(outOfOffice),
                     }));
                   }}
+                  onAccountNameChange={onAuthenticatedUserNameChange}
                 />
               </div>
             ) : activeSection === "Help" || activeSection === "Contact" ? (

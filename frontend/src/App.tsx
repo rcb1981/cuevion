@@ -17,6 +17,7 @@ const CATEGORY_LEARNING_STORAGE_KEY = "cuevion-sender-category-learning";
 const MESSAGE_OWNERSHIP_STORAGE_KEY = "cuevion-message-ownership";
 const MANAGED_INBOXES_STORAGE_KEY = "cuevion-managed-inboxes";
 const CUEVION_AUTH_STORAGE_KEY = "label-inbox-ai-auth-user";
+const CUEVION_DISPLAY_NAME_OVERRIDES_STORAGE_KEY = "cuevion-display-name-overrides";
 const PENDING_COLLAB_INVITE_STORAGE_KEY = "label-inbox-ai-pending-collab-invite";
 const PENDING_COLLAB_INVITE_URL_STORAGE_KEY = "label-inbox-ai-pending-collab-invite-url";
 const OAUTH_CALLBACK_RESULT_STORAGE_KEY = "cuevion-oauth-callback-result";
@@ -74,6 +75,8 @@ type OAuthCallbackStorageResult = {
   connected?: boolean;
   message?: string | null;
 };
+
+type DisplayNameOverrideStore = Record<string, string>;
 
 function buildUserConfig(state: OnboardingState): UserConfig {
   return {
@@ -469,6 +472,21 @@ function parseStoredManagedWorkspaceInboxes(): StoredManagedWorkspaceInbox[] {
     return Array.isArray(parsed) ? parsed : [];
   } catch {
     return [];
+  }
+}
+
+function parseDisplayNameOverrides(): DisplayNameOverrideStore {
+  const storedValue = window.localStorage.getItem(CUEVION_DISPLAY_NAME_OVERRIDES_STORAGE_KEY);
+
+  if (!storedValue) {
+    return {};
+  }
+
+  try {
+    const parsed = JSON.parse(storedValue) as DisplayNameOverrideStore;
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
   }
 }
 
@@ -913,6 +931,9 @@ export default function App() {
     resolveBetaAccessRoute(),
   );
   const [betaSessionUser, setBetaSessionUser] = useState<AuthenticatedCuevionUser | null>(null);
+  const [displayNameOverrides, setDisplayNameOverrides] = useState<DisplayNameOverrideStore>(() =>
+    parseDisplayNameOverrides(),
+  );
   const [betaSessionStatus, setBetaSessionStatus] = useState<
     "loading" | "authenticated" | "unauthenticated"
   >("loading");
@@ -948,7 +969,16 @@ export default function App() {
     persistedOnboardingSession?.state ? buildUserConfig(persistedOnboardingSession.state) : null,
   );
   const recognizedInviteUsers = resolveWorkspaceInviteUsers(onboardingState);
-  const activeCollaborationUser = authenticatedUser ?? betaSessionUser;
+  const effectiveBetaSessionUser =
+    betaSessionUser && betaSessionUser.userType === "member"
+      ? {
+          ...betaSessionUser,
+          name:
+            displayNameOverrides[betaSessionUser.email.toLowerCase()]?.trim() ||
+            betaSessionUser.name,
+        }
+      : betaSessionUser;
+  const activeCollaborationUser = authenticatedUser ?? effectiveBetaSessionUser;
 
   useEffect(() => {
     if (authenticatedUser) {
@@ -961,6 +991,31 @@ export default function App() {
 
     window.localStorage.removeItem(CUEVION_AUTH_STORAGE_KEY);
   }, [authenticatedUser]);
+
+  useEffect(() => {
+    window.localStorage.setItem(
+      CUEVION_DISPLAY_NAME_OVERRIDES_STORAGE_KEY,
+      JSON.stringify(displayNameOverrides),
+    );
+  }, [displayNameOverrides]);
+
+  const handleBetaSessionDisplayNameChange = (nextName: string) => {
+    if (!betaSessionUser || betaSessionUser.userType !== "member") {
+      return;
+    }
+
+    const trimmedName = nextName.trim();
+
+    if (!trimmedName) {
+      return;
+    }
+
+    const normalizedEmail = betaSessionUser.email.toLowerCase();
+    setDisplayNameOverrides((current) => ({
+      ...current,
+      [normalizedEmail]: trimmedName,
+    }));
+  };
 
   useEffect(() => {
     if (persistedOnboardingSession) {
@@ -1296,7 +1351,8 @@ export default function App() {
       <WorkspaceShell
         userConfig={userConfig}
         onboardingState={onboardingState}
-        authenticatedUser={betaSessionUser}
+        authenticatedUser={effectiveBetaSessionUser}
+        onAuthenticatedUserNameChange={handleBetaSessionDisplayNameChange}
         workspaceDataMode={workspaceDataMode}
       />
     );
