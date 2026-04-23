@@ -18254,7 +18254,10 @@ function WorkbenchView({
           return member;
         }
 
-        const nextStatus = mapTeamInviteStatusToMemberStatus(result.result.invite.status);
+        const nextStatus =
+          result.result.invite.status === "cancelled" && member.status === "Access removed"
+            ? "Access removed"
+            : mapTeamInviteStatusToMemberStatus(result.result.invite.status);
         if (
           member.status === nextStatus &&
           member.teamInviteStatus === result.result.invite.status
@@ -18962,12 +18965,35 @@ function WorkbenchView({
                     }
 
                     if (activeTeamConfirmation === "revoke" && activeTeamMemberIndex !== null) {
+                      if (activeTeamMember?.accessLevel === "Limited" && activeTeamMember.teamInviteToken) {
+                        setIsSendingTeamInvite(true);
+                        try {
+                          const revokeResult = await mutateTeamInvite({
+                            token: activeTeamMember.teamInviteToken,
+                            action: {
+                              type: "cancel",
+                            },
+                          });
+
+                          if (!revokeResult.ok) {
+                            setTeamFeedbackMessage(
+                              revokeResult.error?.message ?? "Could not revoke access",
+                            );
+                            return;
+                          }
+                        } finally {
+                          setIsSendingTeamInvite(false);
+                        }
+                      }
+
                       setTeamMembers((current) =>
                         current.map((member, index) =>
                           index === activeTeamMemberIndex
                             ? {
                                 ...member,
                                 status: "Access removed",
+                                teamInviteStatus:
+                                  member.accessLevel === "Limited" ? "cancelled" : member.teamInviteStatus,
                               }
                             : member,
                         ),
