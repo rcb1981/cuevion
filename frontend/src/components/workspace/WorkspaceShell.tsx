@@ -716,6 +716,8 @@ const canonicalFolderOrder: MailFolder[] = [
 const AI_SUGGESTIONS_STORAGE_KEY = "cuevion-ai-suggestions-enabled";
 const INBOX_CHANGES_STORAGE_KEY = "cuevion-inbox-changes-enabled";
 const TEAM_ACTIVITY_STORAGE_KEY = "cuevion-team-activity-enabled";
+const CUEVION_AUTH_STORAGE_KEY = "label-inbox-ai-auth-user";
+const BETA_LOGOUT_ENDPOINT = "/api/beta/logout";
 const CUEVION_NOTIFICATION_READ_STORAGE_KEY = "cuevion-notification-read";
 const buildTeamMembersStorageKey = (workspaceKey: string) =>
   `cuevion-team-members:${workspaceKey}`;
@@ -30885,9 +30887,23 @@ export function WorkspaceShell({
         description="You'll be signed out of Cuevion on this device."
         confirmLabel="Log out"
         onCancel={() => setIsLogoutConfirmationOpen(false)}
-        onConfirm={() => {
-          setIsLogoutConfirmationOpen(false);
-          console.log("settings_log_out_confirm");
+        onConfirm={async () => {
+          try {
+            const response = await fetch(BETA_LOGOUT_ENDPOINT, {
+              method: "POST",
+              credentials: "include",
+            });
+
+            if (!response.ok) {
+              return;
+            }
+
+            window.localStorage.removeItem(CUEVION_AUTH_STORAGE_KEY);
+            setIsLogoutConfirmationOpen(false);
+            window.location.reload();
+          } catch {
+            return;
+          }
         }}
       />
     </main>

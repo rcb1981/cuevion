@@ -152,3 +152,17 @@ def build_beta_session_cookie(token: str, headers) -> str:
     if _should_use_secure_cookie(headers):
         morsel["secure"] = True
     return morsel.OutputString()
+
+
+def build_beta_session_logout_cookie(headers) -> str:
+    cookie = SimpleCookie()
+    cookie[BETA_SESSION_COOKIE_NAME] = ""
+    morsel = cookie[BETA_SESSION_COOKIE_NAME]
+    morsel["path"] = "/"
+    morsel["httponly"] = True
+    morsel["samesite"] = "Lax"
+    morsel["max-age"] = "0"
+    morsel["expires"] = "Thu, 01 Jan 1970 00:00:00 GMT"
+    if _should_use_secure_cookie(headers):
+        morsel["secure"] = True
+    return morsel.OutputString()
