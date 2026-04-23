@@ -11086,6 +11086,7 @@ function MailboxView({
         (entry) => canViewerSeeCollaborationMessage(entry, "workspace"),
       )
     : [];
+  const hasVisibleCollaborationMessages = visibleCollaborationMessages.length > 0;
   const visibleCompactCollaborationMessages = collaborationHistoryExpanded
     ? [...visibleCollaborationMessages].sort((first, second) => second.timestamp - first.timestamp)
     : [...visibleCollaborationMessages.slice(-2)].reverse();
@@ -17264,7 +17265,16 @@ function MailboxView({
 
                   <div className="mt-4 min-h-0 flex-1 overflow-y-auto pr-1">
                     <div className="space-y-5">
-                      {!isPreStartCollaboration ? (
+                      {isPreStartCollaboration ? (
+                        <div className="rounded-[22px] border border-[var(--workspace-border-soft)] bg-[linear-gradient(180deg,var(--workspace-card),var(--workspace-card-subtle))] px-5 py-6">
+                          <div className="text-[1rem] font-medium tracking-tight text-[var(--workspace-text)]">
+                            Ready to start collaboration
+                          </div>
+                          <div className="mt-1.5 max-w-[32rem] text-[0.84rem] leading-6 text-[var(--workspace-text-faint)]">
+                            Start this thread when you want to bring others into the conversation.
+                          </div>
+                        </div>
+                      ) : (
                       <>
                         <section className="space-y-3">
                           <div className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
@@ -17564,7 +17574,7 @@ function MailboxView({
                       <div className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
                         Activity
                       </div>
-                      {visibleCollaborationMessages.length > 0 ? (
+                      {hasVisibleCollaborationMessages ? (
                         <div className="max-h-[320px] space-y-2 overflow-y-auto pr-1">
                           {visibleCompactCollaborationMessages.map((entry) => (
                             <div
@@ -17628,8 +17638,13 @@ function MailboxView({
                           ))}
                         </div>
                       ) : (
-                        <div className="text-[0.86rem] leading-6 text-[var(--workspace-text-faint)]">
-                          No updates yet.
+                        <div className="space-y-1 rounded-[16px] bg-[var(--workspace-card)] px-4 py-3">
+                          <div className="text-[0.84rem] font-medium leading-6 text-[var(--workspace-text-soft)]">
+                            No messages yet
+                          </div>
+                          <div className="text-[0.78rem] leading-6 text-[var(--workspace-text-faint)]">
+                            Start the conversation below.
+                          </div>
                         </div>
                       )}
                       {activeCollaborationMessage.collaboration?.resolvedAt &&
@@ -17737,7 +17752,7 @@ function MailboxView({
                               setCollaborationMentionIndex(0);
                             }
                           }}
-                          rows={4}
+                          rows={hasVisibleCollaborationMessages ? 4 : 3}
                           placeholder={
                             resolvedCollaborationReplyVisibility === "internal"
                               ? "Add an internal note"
@@ -17777,7 +17792,7 @@ function MailboxView({
                       </div>
                     </label>
                       </>
-                    ) : null}
+                    )}
                     </div>
                   </div>
 
