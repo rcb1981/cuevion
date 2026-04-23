@@ -11027,7 +11027,10 @@ function MailboxView({
   const normalizedCollaborationParticipantSearch = collaborationParticipantSearch
     .trim()
     .toLowerCase();
-  const visibleCollaborationParticipantOptions = collaborationTeamPeople.filter((person) => {
+  const directAddableCollaborationPeople = collaborationTeamPeople.filter(
+    (person) => person.kind === "internal",
+  );
+  const visibleCollaborationParticipantOptions = directAddableCollaborationPeople.filter((person) => {
     if (!normalizedCollaborationParticipantSearch) {
       return true;
     }
@@ -17318,7 +17321,11 @@ function MailboxView({
                               <div className="text-[0.68rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)]">
                                 Add participant
                               </div>
-                              {!isCollaborationParticipantPickerOpen ? (
+                              {directAddableCollaborationPeople.length === 0 ? (
+                                <div className="rounded-[16px] bg-[var(--workspace-card)] px-4 py-4 text-[0.8rem] leading-6 text-[var(--workspace-text-faint)]">
+                                  Only active internal team members can be added here.
+                                </div>
+                              ) : !isCollaborationParticipantPickerOpen ? (
                                 <button
                                   type="button"
                                   onClick={() => setIsCollaborationParticipantPickerOpen(true)}
