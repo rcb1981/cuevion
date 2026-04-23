@@ -4743,15 +4743,20 @@ function getPriorityVisibilityAdjustedMessage(
   focusPreferences: UserConfig["focusPreferences"],
   options?: { preferPromoMailboxContext?: boolean },
 ) {
-  if (hasProtectedPriorityVisibility(message)) {
-    return message;
-  }
-
   const focusPreferenceLevel = resolveFocusPreferenceLevelForPriorityMessage(
     message,
     focusPreferences,
     options,
   );
+  const visibilityClassification = resolveVisibleClassification(message);
+  const shouldRespectPromoHighPreference =
+    focusPreferenceLevel === "high" &&
+    (visibilityClassification === "promo" ||
+      visibilityClassification === "promo_reminder");
+
+  if (hasProtectedPriorityVisibility(message) && !shouldRespectPromoHighPreference) {
+    return message;
+  }
 
   // When a user preference is found for this message's category, it becomes the
   // sole source of truth. Clear signal, final_visibility, and action so that stale
