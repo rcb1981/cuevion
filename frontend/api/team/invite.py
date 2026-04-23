@@ -10,6 +10,8 @@ from urllib.parse import parse_qs, quote, urlsplit
 from urllib.request import Request, urlopen
 
 TEAM_INVITE_SCHEMA_VERSION = 1
+TEAM_ROLES = {"Limited", "Shared", "Editor", "Admin"}
+TEAM_INVITE_ISSUABLE_ROLES = {"Limited"}
 TEAM_INVITE_STATUSES = {"invited", "accepted", "declined", "cancelled"}
 
 
@@ -84,7 +86,7 @@ def _normalize_invite_record(value: dict | None) -> dict | None:
         or not workspace_id
         or not invitee_email
         or not invitee_name
-        or access_level != "Limited"
+        or access_level not in TEAM_INVITE_ISSUABLE_ROLES
         or status not in TEAM_INVITE_STATUSES
         or not created_by_user_id
         or not created_by_user_name
@@ -335,11 +337,15 @@ def _handle_issue(handler: BaseHTTPRequestHandler, payload: dict):
     created_by_user_id = str(payload.get("createdByUserId") or "").strip()
     created_by_user_name = str(payload.get("createdByUserName") or "").strip()
 
+    if access_level not in TEAM_ROLES:
+        _send_json(handler, 400, _build_error("invalid_request", "Unsupported team role."))
+        return
+
     if (
         not workspace_id
         or not invitee_email
         or not invitee_name
-        or access_level != "Limited"
+        or access_level not in TEAM_INVITE_ISSUABLE_ROLES
         or not created_by_user_id
         or not created_by_user_name
     ):

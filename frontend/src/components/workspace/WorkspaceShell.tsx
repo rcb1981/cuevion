@@ -76,6 +76,12 @@ import {
   type TeamInvite,
   type TeamInviteStatus,
 } from "../../lib/teamInviteApi";
+import {
+  TEAM_ROLES,
+  getTeamRoleLabel,
+  normalizeTeamRole,
+  type TeamRole,
+} from "../../lib/teamRoles";
 import * as learningEngine from "../../lib/learningEngine";
 import * as forYouEngine from "../../lib/forYouEngine";
 import * as suggestionEngine from "../../lib/suggestionEngine";
@@ -132,7 +138,7 @@ type InboxFilter = "All inboxes" | "Connected";
 type ForYouContext = "Main" | "Promo";
 type WorkbenchSection = "Activity" | "Notifications" | "Team";
 type UtilitySection = "Help" | "Contact";
-type TeamAccessLevel = "Admin" | "Editor" | "Review" | "Limited";
+type TeamAccessLevel = TeamRole;
 type AuthenticatedCuevionUser = {
   email: string;
   name: string;
@@ -172,6 +178,32 @@ type TeamMembershipEntry = {
   selectedInboxes: string[];
   status: "Active";
 };
+
+function normalizeTeamMemberEntry(value: TeamMemberEntry): TeamMemberEntry {
+  return {
+    ...value,
+    accessLevel: normalizeTeamRole(value.accessLevel),
+  };
+}
+
+function normalizePendingTeamInvitation(value: PendingTeamInvitation): PendingTeamInvitation {
+  if (!value) {
+    return null;
+  }
+
+  return {
+    ...value,
+    accessLevel: normalizeTeamRole(value.accessLevel),
+  };
+}
+
+function normalizeTeamMembershipEntry(value: TeamMembershipEntry): TeamMembershipEntry {
+  return {
+    ...value,
+    accessLevel: normalizeTeamRole(value.accessLevel),
+  };
+}
+
 type ContactTicketStatus = "Open" | "In progress" | "Resolved" | "Cancelled";
 type ContactTicketMessage = {
   senderType: "user" | "cuevion";
@@ -3952,15 +3984,7 @@ function getForYouCategoryLabel(
 }
 
 function getTeamAccessLevelLabel(level: TeamAccessLevel) {
-  if (level === "Review") {
-    return "Shared";
-  }
-
-  if (level === "Limited") {
-    return "Invite-only";
-  }
-
-  return level;
+  return getTeamRoleLabel(level);
 }
 
 function formatLearningRuleTimestamp(value?: string) {
@@ -17880,7 +17904,7 @@ function WorkbenchView({
             {
               name: "David Cole",
               email: "david@cuevion.com",
-              accessLevel: "Review" as const,
+              accessLevel: "Shared" as const,
               selectedInboxes: ["Demo inbox"],
               status: "Invited",
             },
@@ -17910,7 +17934,7 @@ function WorkbenchView({
             {
               name: "David Cole",
               email: "david@cuevion.com",
-              accessLevel: "Review" as const,
+              accessLevel: "Shared" as const,
               selectedInboxes: ["Demo inbox"],
               status: "Invited",
             },
@@ -17926,7 +17950,7 @@ function WorkbenchView({
     }
 
     try {
-      return JSON.parse(storedValue) as TeamMemberEntry[];
+      return (JSON.parse(storedValue) as TeamMemberEntry[]).map(normalizeTeamMemberEntry);
     } catch {
       return [];
     }
@@ -17979,7 +18003,7 @@ function WorkbenchView({
     return `${inboxes.slice(0, -1).join(", ")} and ${inboxes[inboxes.length - 1]}`;
   };
   const getTeamRoleDescription = (member: TeamMemberEntry) => {
-    if (member.accessLevel === "Review") {
+    if (member.accessLevel === "Shared") {
       return "Access to shared collaborations only";
     }
 
@@ -17999,7 +18023,7 @@ function WorkbenchView({
       ? "Full workspace access"
       : inviteAccessLevel === "Editor"
         ? "Can access and work in selected inboxes"
-        : inviteAccessLevel === "Review"
+        : inviteAccessLevel === "Shared"
           ? "Access to shared collaborations only"
           : "Access to specific invited emails only";
   const defaultTeamAccessState = activeTeamMember
@@ -18450,7 +18474,7 @@ function WorkbenchView({
                     Shared by {pendingTeamInvitation.inviter}
                   </div>
                   <div className="text-[0.82rem] leading-6 text-[var(--workspace-text-soft)]">
-                    {pendingTeamInvitation.accessLevel === "Review"
+                    {pendingTeamInvitation.accessLevel === "Shared"
                       ? "Access to shared collaborations only"
                       : pendingTeamInvitation.accessLevel === "Limited"
                       ? "Access to specific invited emails only"
@@ -18651,7 +18675,7 @@ function WorkbenchView({
                     Access level
                   </div>
                   <div className="flex flex-wrap gap-2">
-                    {(["Admin", "Editor", "Review", "Limited"] as const).map((level) => (
+                    {TEAM_ROLES.map((level) => (
                       <button
                         key={`invite-access-${level}`}
                         type="button"
@@ -19185,7 +19209,7 @@ function WorkbenchView({
                     Access level
                   </div>
                   <div className="flex flex-wrap gap-2">
-                    {(["Admin", "Editor", "Review", "Limited"] as const).map((level) => (
+                    {TEAM_ROLES.map((level) => (
                       <button
                         key={`team-access-level-${level}`}
                         type="button"
@@ -26393,7 +26417,7 @@ export function WorkspaceShell({
         return isDemoWorkspace
           ? {
               inviter: "Emma Stone",
-              accessLevel: "Review",
+              accessLevel: "Shared",
               selectedInboxes: ["Demo inbox"],
             }
           : null;
@@ -26405,14 +26429,14 @@ export function WorkspaceShell({
         return isDemoWorkspace
           ? {
               inviter: "Emma Stone",
-              accessLevel: "Review",
+              accessLevel: "Shared",
               selectedInboxes: ["Demo inbox"],
             }
           : null;
       }
 
       try {
-        return JSON.parse(storedValue) as PendingTeamInvitation;
+        return normalizePendingTeamInvitation(JSON.parse(storedValue) as PendingTeamInvitation);
       } catch {
         return null;
       }
@@ -26429,7 +26453,9 @@ export function WorkspaceShell({
     }
 
     try {
-      return JSON.parse(storedValue) as TeamMembershipEntry[];
+      return (JSON.parse(storedValue) as TeamMembershipEntry[]).map(
+        normalizeTeamMembershipEntry,
+      );
     } catch {
       return [];
     }
@@ -26446,7 +26472,7 @@ export function WorkspaceShell({
     }
 
     try {
-      return JSON.parse(storedValue) as TeamMemberEntry[];
+      return (JSON.parse(storedValue) as TeamMemberEntry[]).map(normalizeTeamMemberEntry);
     } catch {
       return [];
     }
