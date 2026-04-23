@@ -17409,11 +17409,15 @@ function MailboxView({
                                   disabled={collaborationParticipantPersonIds.length === 0}
                                   className={
                                     collaborationParticipantPersonIds.length > 0
-                                      ? "inline-flex h-9 items-center justify-center rounded-full bg-[var(--workspace-card)] px-4 text-[0.66rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-soft)] transition-[background-color,color] duration-150 hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] focus-visible:outline-none"
+                                      ? "inline-flex h-9 items-center justify-center rounded-full bg-pine px-4 text-[0.66rem] font-medium uppercase tracking-[0.14em] text-[color:rgba(251,248,242,0.98)] transition-[background-color,transform] duration-150 hover:bg-moss active:scale-[0.99] focus-visible:outline-none"
                                       : "inline-flex h-9 cursor-not-allowed items-center justify-center rounded-full bg-[var(--workspace-card)] px-4 text-[0.66rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-soft)] opacity-45 transition-[opacity] duration-150 focus-visible:outline-none"
                                   }
                                 >
-                                  Add selected
+                                  {`Add selected${
+                                    collaborationParticipantPersonIds.length > 0
+                                      ? ` (${collaborationParticipantPersonIds.length})`
+                                      : ""
+                                  }`}
                                 </button>
                               </div>
                             </div>
