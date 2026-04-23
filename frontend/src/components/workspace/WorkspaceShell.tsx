@@ -69,6 +69,13 @@ import {
   mutateCollaborationThread,
   type CollaborationThread,
 } from "../../lib/collaborationApi";
+import {
+  fetchTeamInvite,
+  issueTeamInvite,
+  mutateTeamInvite,
+  type TeamInvite,
+  type TeamInviteStatus,
+} from "../../lib/teamInviteApi";
 import * as learningEngine from "../../lib/learningEngine";
 import * as forYouEngine from "../../lib/forYouEngine";
 import * as suggestionEngine from "../../lib/suggestionEngine";
@@ -146,6 +153,7 @@ type PendingTeamInvitation = {
 type TeamMemberStatus =
   | "Active"
   | "Invited"
+  | "Declined"
   | "Access removed"
   | "Invite cancelled";
 type TeamMemberEntry = {
@@ -154,6 +162,8 @@ type TeamMemberEntry = {
   accessLevel: TeamAccessLevel;
   selectedInboxes: string[];
   status: TeamMemberStatus;
+  teamInviteToken?: string;
+  teamInviteStatus?: TeamInviteStatus;
 };
 type TeamMembershipEntry = {
   name: string;
@@ -17780,6 +17790,7 @@ function MailboxView({
 function WorkbenchView({
   section,
   orderedMailboxes,
+  managedInboxes,
   onOpenDemoInbox,
   onOpenLearningRequest,
   onOpenSenderContext,
@@ -17802,6 +17813,7 @@ function WorkbenchView({
 }: {
   section: WorkbenchSection;
   orderedMailboxes: OrderedMailbox[];
+  managedInboxes: ManagedWorkspaceInbox[];
   onOpenDemoInbox: () => void;
   onOpenLearningRequest: (request: NonNullable<LearningLaunchRequest>) => void;
   onOpenSenderContext: () => void;
@@ -17926,6 +17938,7 @@ function WorkbenchView({
     "invite" | "revoke" | "cancel-invite" | "resend-invite" | "remove-member" | null
   >(null);
   const [teamFeedbackMessage, setTeamFeedbackMessage] = useState<string | null>(null);
+  const [isSendingTeamInvite, setIsSendingTeamInvite] = useState(false);
   const activeTeamMember =
     activeTeamMemberIndex !== null ? teamMembers[activeTeamMemberIndex] : null;
   const [selectedTeamAccessLevel, setSelectedTeamAccessLevel] = useState<TeamAccessLevel>(
@@ -18008,7 +18021,258 @@ function WorkbenchView({
   const canSubmitInvite =
     inviteFullName.trim().length > 0 &&
     inviteEmail.trim().length > 0 &&
+    isValidInviteEmail(inviteEmail) &&
     (!isInboxAccessVisibleForLevel(inviteAccessLevel) || inviteInboxAccess.length > 0);
+  const mapTeamInviteStatusToMemberStatus = (status: TeamInviteStatus): TeamMemberStatus =>
+    status === "accepted"
+      ? "Active"
+      : status === "declined"
+        ? "Declined"
+        : status === "cancelled"
+          ? "Invite cancelled"
+          : "Invited";
+  const getPrimaryTeamInviteMailbox = () => {
+    const primaryMailbox = orderedMailboxes[0];
+
+    if (!primaryMailbox) {
+      return null;
+    }
+
+    const managedMailbox =
+      managedInboxes.find((candidate) => candidate.id === primaryMailbox.id) ??
+      managedInboxes.find(
+        (candidate) =>
+          candidate.email.trim().toLowerCase() === primaryMailbox.email.trim().toLowerCase(),
+      );
+
+    if (!managedMailbox || !canSendFromManagedMailbox(managedMailbox)) {
+      return null;
+    }
+
+    return {
+      orderedMailbox: primaryMailbox,
+      managedMailbox,
+    };
+  };
+  const sendTeamInviteEmail = async ({
+    invite,
+    inviteUrl,
+  }: {
+    invite: TeamInvite;
+    inviteUrl: string;
+  }) => {
+    const primaryMailbox = getPrimaryTeamInviteMailbox();
+
+    if (!primaryMailbox) {
+      return {
+        ok: false,
+        message: "Email sending is not available for the primary mailbox.",
+      };
+    }
+
+    const { orderedMailbox, managedMailbox } = primaryMailbox;
+    const sendProvider = managedMailbox.provider;
+
+    if (sendProvider !== "google" && sendProvider !== "custom_imap") {
+      return {
+        ok: false,
+        message: "Email sending is not available for the primary mailbox.",
+      };
+    }
+
+    const resolvedImapSettings = applyProviderDefaults(
+      sendProvider,
+      managedMailbox.customImap,
+      managedMailbox.email,
+    );
+    const resolvedSmtpSettings =
+      sendProvider === "custom_imap"
+        ? resolveCustomSmtpCredentials(managedMailbox)
+        : null;
+
+    if (
+      sendProvider !== "google" &&
+      !(resolvedSmtpSettings?.username.trim() && resolvedSmtpSettings.password.trim())
+    ) {
+      return {
+        ok: false,
+        message: "SMTP credentials are missing for the primary mailbox.",
+      };
+    }
+
+    const escapeInviteHtml = (value: string) =>
+      value
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    const inviteBodyText = [
+      `Hi ${invite.inviteeName},`,
+      "",
+      `${invite.createdByUserName} invited you to Cuevion with invite-only collaboration access.`,
+      "",
+      "Open in Cuevion:",
+      inviteUrl,
+      "",
+      "Fallback URL:",
+      inviteUrl,
+      "",
+      "www.cuevion.com",
+    ].join("\n");
+    const inviteBodyHtml = `<div style="font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#261f17;line-height:1.6;"><p>Hi ${escapeInviteHtml(
+      invite.inviteeName,
+    )},</p><p>${escapeInviteHtml(
+      invite.createdByUserName,
+    )} invited you to Cuevion with invite-only collaboration access.</p><p><a href="${escapeInviteHtml(
+      inviteUrl,
+    )}">Open in Cuevion</a></p><p style="word-break:break-word;">${escapeInviteHtml(
+      inviteUrl,
+    )}</p></div>`;
+
+    const sendResponse = await sendGmailMessage({
+      provider: sendProvider,
+      authMode: sendProvider === "google" ? "oauth" : "smtp",
+      email: managedMailbox.email.trim(),
+      username:
+        sendProvider === "google"
+          ? managedMailbox.email.trim()
+          : resolvedSmtpSettings?.username.trim() ?? "",
+      password:
+        sendProvider === "google"
+          ? resolvedImapSettings.password
+          : resolvedSmtpSettings?.password ?? "",
+      smtpHost: resolvedSmtpSettings?.host.trim(),
+      smtpPort: resolvedSmtpSettings?.port.trim(),
+      smtpSecurity: resolvedSmtpSettings?.security,
+      from: orderedMailbox.email,
+      to: invite.inviteeEmail,
+      subject: `${invite.createdByUserName} invited you to Cuevion`,
+      bodyHtml: inviteBodyHtml,
+      bodyText: inviteBodyText,
+    });
+
+    return {
+      ok: sendResponse.ok,
+      message: sendResponse.error?.message ?? "Could not send invite email.",
+    };
+  };
+  const issueAndSendInviteOnlyTeamInvite = async ({
+    name,
+    email,
+    existingMemberIndex,
+    cancelIssuedInviteOnSendFailure = true,
+  }: {
+    name: string;
+    email: string;
+    existingMemberIndex?: number;
+    cancelIssuedInviteOnSendFailure?: boolean;
+  }) => {
+    const issueResult = await issueTeamInvite({
+      workspaceId: workspacePersistenceKey,
+      inviteeEmail: email,
+      inviteeName: name,
+      accessLevel: "Limited",
+      createdByUserId: workspacePersistenceKey,
+      createdByUserName: orderedMailboxes[0]?.title.trim() || "Cuevion",
+    });
+
+    if (!issueResult.ok) {
+      setTeamFeedbackMessage(issueResult.error?.message ?? "Could not create team invite");
+      return false;
+    }
+
+    const sendResult = await sendTeamInviteEmail({
+      invite: issueResult.invite,
+      inviteUrl: issueResult.inviteUrl,
+    });
+
+    if (!sendResult.ok) {
+      if (cancelIssuedInviteOnSendFailure) {
+        await mutateTeamInvite({
+          token: issueResult.invite.token,
+          action: {
+            type: "cancel",
+          },
+        });
+      }
+      setTeamFeedbackMessage(sendResult.message);
+      return false;
+    }
+
+    const nextMember: TeamMemberEntry = {
+      name,
+      email,
+      accessLevel: "Limited",
+      selectedInboxes: [],
+      status: mapTeamInviteStatusToMemberStatus(issueResult.invite.status),
+      teamInviteToken: issueResult.invite.token,
+      teamInviteStatus: issueResult.invite.status,
+    };
+
+    setTeamMembers((current) => {
+      if (typeof existingMemberIndex === "number") {
+        return current.map((member, index) =>
+          index === existingMemberIndex ? nextMember : member,
+        );
+      }
+
+      return [...current, nextMember];
+    });
+    setTeamFeedbackMessage("Workspace invite sent");
+    return true;
+  };
+  const syncInviteOnlyTeamInviteStatuses = async () => {
+    const tokenEntries = teamMembers.flatMap((member, index) =>
+      member.accessLevel === "Limited" && member.teamInviteToken
+        ? [
+            {
+              index,
+              token: member.teamInviteToken,
+            },
+          ]
+        : [],
+    );
+
+    if (tokenEntries.length === 0) {
+      return;
+    }
+
+    const results = await Promise.all(
+      tokenEntries.map(async (entry) => ({
+        ...entry,
+        result: await fetchTeamInvite(entry.token),
+      })),
+    );
+
+    setTeamMembers((current) => {
+      let didChange = false;
+      const nextMembers = current.map((member, index) => {
+        const result = results.find((entry) => entry.index === index);
+
+        if (!result?.result.ok) {
+          return member;
+        }
+
+        const nextStatus = mapTeamInviteStatusToMemberStatus(result.result.invite.status);
+        if (
+          member.status === nextStatus &&
+          member.teamInviteStatus === result.result.invite.status
+        ) {
+          return member;
+        }
+
+        didChange = true;
+        return {
+          ...member,
+          status: nextStatus,
+          teamInviteStatus: result.result.invite.status,
+        };
+      });
+
+      return didChange ? nextMembers : current;
+    });
+  };
 
   useEffect(() => {
     if (!teamFeedbackMessage) {
@@ -18030,6 +18294,10 @@ function WorkbenchView({
     window.localStorage.setItem(teamMembersStorageKey, JSON.stringify(teamMembers));
     onTeamMembersChange(teamMembers);
   }, [onTeamMembersChange, teamMembers, teamMembersStorageKey]);
+
+  useEffect(() => {
+    void syncInviteOnlyTeamInviteStatuses();
+  }, [teamMembers]);
 
   useEffect(() => {
     if (!activeTeamMember) {
@@ -18336,7 +18604,9 @@ function WorkbenchView({
                     Invite member
                   </h2>
                   <p className="text-[0.88rem] leading-6 text-[var(--workspace-text-soft)]">
-                    Creates a workspace invite inside Cuevion. No email is sent yet.
+                    {inviteAccessLevel === "Limited"
+                      ? "Sends invite-only collaboration access by email."
+                      : "Creates a workspace invite inside Cuevion. No email is sent yet."}
                   </p>
                 </div>
                 <button
@@ -18666,8 +18936,12 @@ function WorkbenchView({
                     : activeTeamConfirmation === "cancel-invite"
                       ? "Are you sure you want to cancel this invitation?"
                     : activeTeamConfirmation === "resend-invite"
-                        ? "Reopen this workspace invite in Cuevion? No email will be sent."
-                        : "Create this workspace invite in Cuevion? No email will be sent."}
+                        ? activeTeamMember?.accessLevel === "Limited"
+                          ? "Send this workspace invite again by email?"
+                          : "Reopen this workspace invite in Cuevion? No email will be sent."
+                        : inviteAccessLevel === "Limited"
+                          ? "Send this workspace invite by email?"
+                          : "Create this workspace invite in Cuevion? No email will be sent."}
                 </p>
               </div>
 
@@ -18681,7 +18955,12 @@ function WorkbenchView({
                 </button>
                 <button
                   type="button"
-                  onClick={() => {
+                  disabled={isSendingTeamInvite}
+                  onClick={async () => {
+                    if (isSendingTeamInvite) {
+                      return;
+                    }
+
                     if (activeTeamConfirmation === "revoke" && activeTeamMemberIndex !== null) {
                       setTeamMembers((current) =>
                         current.map((member, index) =>
@@ -18707,6 +18986,34 @@ function WorkbenchView({
                     }
 
                     if (activeTeamConfirmation === "invite") {
+                      if (inviteAccessLevel === "Limited") {
+                        const name = inviteFullName.trim();
+                        const email = inviteEmail.trim().toLowerCase();
+
+                        setIsSendingTeamInvite(true);
+                        try {
+                          const didSendInvite = await issueAndSendInviteOnlyTeamInvite({
+                            name,
+                            email,
+                          });
+
+                          if (!didSendInvite) {
+                            return;
+                          }
+
+                          setInviteFullName("");
+                          setInviteEmail("");
+                          setInviteAccessLevel("Editor");
+                          setInviteInboxAccess(teamInboxOptions.slice(0, 1));
+                          setIsInviteMemberOpen(false);
+                          console.log("confirm_invite_team_member");
+                        } finally {
+                          setIsSendingTeamInvite(false);
+                        }
+                        setActiveTeamConfirmation(null);
+                        return;
+                      }
+
                       setTeamMembers((current) => [
                         ...current,
                         {
@@ -18729,12 +19036,35 @@ function WorkbenchView({
                       activeTeamConfirmation === "cancel-invite" &&
                       activeTeamMemberIndex !== null
                     ) {
+                      if (activeTeamMember?.accessLevel === "Limited" && activeTeamMember.teamInviteToken) {
+                        setIsSendingTeamInvite(true);
+                        try {
+                          const cancelResult = await mutateTeamInvite({
+                            token: activeTeamMember.teamInviteToken,
+                            action: {
+                              type: "cancel",
+                            },
+                          });
+
+                          if (!cancelResult.ok) {
+                            setTeamFeedbackMessage(
+                              cancelResult.error?.message ?? "Could not cancel invite",
+                            );
+                            return;
+                          }
+                        } finally {
+                          setIsSendingTeamInvite(false);
+                        }
+                      }
+
                       setTeamMembers((current) =>
                         current.map((member, index) =>
                           index === activeTeamMemberIndex
                             ? {
                                 ...member,
                                 status: "Invite cancelled",
+                                teamInviteStatus:
+                                  member.accessLevel === "Limited" ? "cancelled" : member.teamInviteStatus,
                               }
                             : member,
                         ),
@@ -18745,6 +19075,29 @@ function WorkbenchView({
                       activeTeamMemberIndex !== null &&
                       activeTeamMember
                     ) {
+                      if (activeTeamMember.accessLevel === "Limited") {
+                        setIsSendingTeamInvite(true);
+                        try {
+                          const didSendInvite = await issueAndSendInviteOnlyTeamInvite({
+                            name: activeTeamMember.name,
+                            email: activeTeamMember.email.trim().toLowerCase(),
+                            existingMemberIndex: activeTeamMemberIndex,
+                            cancelIssuedInviteOnSendFailure:
+                              activeTeamMember.teamInviteStatus !== "invited",
+                          });
+
+                          if (!didSendInvite) {
+                            return;
+                          }
+
+                          console.log(`confirm_resend_invite_${activeTeamMember.name}`);
+                        } finally {
+                          setIsSendingTeamInvite(false);
+                        }
+                        setActiveTeamConfirmation(null);
+                        return;
+                      }
+
                       setTeamMembers((current) =>
                         current.map((member, index) =>
                           index === activeTeamMemberIndex
@@ -18768,9 +19121,13 @@ function WorkbenchView({
 
                     setActiveTeamConfirmation(null);
                   }}
-                  className={mailboxPrimaryActionButtonClass}
+                  className={
+                    isSendingTeamInvite
+                      ? `${mailboxPrimaryActionButtonClass} cursor-default opacity-60`
+                      : mailboxPrimaryActionButtonClass
+                  }
                 >
-                  Confirm
+                  {isSendingTeamInvite ? "Sending..." : "Confirm"}
                 </button>
               </div>
             </div>
@@ -30199,6 +30556,7 @@ export function WorkspaceShell({
                 <WorkbenchView
                   section={activeSection}
                   orderedMailboxes={orderedMailboxes}
+                  managedInboxes={savedManagedInboxes}
                   onOpenDemoInbox={handleOpenDemoInbox}
                   onOpenLearningRequest={handleOpenLearningRequest}
                   onOpenSenderContext={handleOpenSenderContext}

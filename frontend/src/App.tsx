@@ -3,6 +3,11 @@ import { OnboardingFlow } from "./components/onboarding/OnboardingFlow";
 import { WorkspaceTransition } from "./components/workspace/WorkspaceTransition";
 import { WorkspaceShell } from "./components/workspace/WorkspaceShell";
 import { initialOnboardingState } from "./data/onboardingOptions";
+import {
+  fetchTeamInvite,
+  mutateTeamInvite,
+  type TeamInvite,
+} from "./lib/teamInviteApi";
 import type { OnboardingState } from "./types/onboarding";
 import type { UserConfig } from "./types/userConfig";
 
@@ -32,6 +37,9 @@ type CollaborationInviteRoute = {
   messageId?: string;
   inviteeEmail?: string;
   status?: string;
+};
+type TeamInviteRoute = {
+  inviteToken: string;
 };
 
 type PersistedOnboardingSession = {
@@ -339,6 +347,19 @@ function parseCollaborationInviteRoute(): CollaborationInviteRoute | null {
     messageId: messageId ?? undefined,
     inviteeEmail: inviteeEmail?.toLowerCase(),
     status,
+  };
+}
+
+function parseTeamInviteRoute(): TeamInviteRoute | null {
+  const params = new URLSearchParams(window.location.search);
+  const inviteToken = params.get("team_invite");
+
+  if (!inviteToken) {
+    return null;
+  }
+
+  return {
+    inviteToken,
   };
 }
 
@@ -728,6 +749,141 @@ function CollaborationInviteAuthGate({
   );
 }
 
+function TeamInviteRouteView({ route }: { route: TeamInviteRoute }) {
+  const [invite, setInvite] = useState<TeamInvite | null>(null);
+  const [status, setStatus] = useState<"loading" | "ready" | "unavailable" | "updating">(
+    "loading",
+  );
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadInvite = async () => {
+      setStatus("loading");
+      setError(null);
+
+      const result = await fetchTeamInvite(route.inviteToken);
+
+      if (cancelled) {
+        return;
+      }
+
+      if (!result.ok) {
+        setInvite(null);
+        setError(result.error?.message ?? "This team invite is no longer available.");
+        setStatus("unavailable");
+        return;
+      }
+
+      setInvite(result.invite);
+      setStatus("ready");
+    };
+
+    void loadInvite();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [route.inviteToken]);
+
+  const handleInviteAction = async (actionType: "accept" | "decline") => {
+    if (!invite || status === "updating") {
+      return;
+    }
+
+    setStatus("updating");
+    setError(null);
+
+    const result = await mutateTeamInvite({
+      token: invite.token,
+      action: {
+        type: actionType,
+      },
+    });
+
+    if (!result.ok) {
+      setError(result.error?.message ?? "Could not update this team invite.");
+      setStatus("ready");
+      return;
+    }
+
+    setInvite(result.invite);
+    setStatus("ready");
+  };
+
+  const inviteStatusLabel =
+    invite?.status === "accepted"
+      ? "Accepted"
+      : invite?.status === "declined"
+        ? "Declined"
+        : invite?.status === "cancelled"
+          ? "Invite cancelled"
+          : "Invited";
+
+  return (
+    <div className="min-h-screen bg-[linear-gradient(180deg,#f6efe7_0%,#efe5da_100%)] px-6 py-10 text-[color:#2f2a24] dark:bg-[linear-gradient(180deg,#171411_0%,#221c17_100%)] dark:text-[color:#f1e9de]">
+      <div className="mx-auto flex min-h-[calc(100vh-5rem)] max-w-[560px] items-center justify-center">
+        <div className="w-full rounded-[32px] border border-[rgba(120,104,89,0.14)] bg-[rgba(255,252,247,0.82)] p-8 shadow-[0_28px_80px_rgba(61,44,32,0.12)] backdrop-blur dark:border-[rgba(255,255,255,0.08)] dark:bg-[rgba(33,28,24,0.82)]">
+          <div className="space-y-3 text-center">
+            <div className="text-[0.72rem] font-medium uppercase tracking-[0.22em] text-[rgba(120,104,89,0.7)] dark:text-[rgba(214,201,189,0.64)]">
+              Team invite
+            </div>
+            <h1 className="text-[1.7rem] font-medium tracking-[-0.03em]">
+              {status === "loading"
+                ? "Loading invite"
+                : invite
+                  ? "Cuevion team invite"
+                  : "Invite unavailable"}
+            </h1>
+            <p className="text-[0.96rem] leading-7 text-[rgba(88,80,71,0.84)] dark:text-[rgba(222,211,200,0.76)]">
+              {invite
+                ? `${invite.createdByUserName} invited ${invite.inviteeName} to invite-only collaboration access.`
+                : "This invite could not be opened."}
+            </p>
+          </div>
+
+          <div className="mt-8 space-y-3">
+            {invite ? (
+              <div className="rounded-[20px] border border-[rgba(120,104,89,0.14)] bg-[rgba(255,255,255,0.52)] px-4 py-4 text-[0.9rem] leading-7 text-[rgba(88,80,71,0.86)] dark:border-[rgba(255,255,255,0.08)] dark:bg-[rgba(44,38,33,0.7)] dark:text-[rgba(222,211,200,0.76)]">
+                <div>Status: {inviteStatusLabel}</div>
+                <div>Email: {invite.inviteeEmail}</div>
+                <div>Access: Invite-only</div>
+              </div>
+            ) : null}
+            {error ? (
+              <div className="text-[0.84rem] leading-6 text-[rgba(132,77,63,0.94)] dark:text-[rgba(244,186,168,0.84)]">
+                {error}
+              </div>
+            ) : null}
+          </div>
+
+          {invite?.status === "invited" ? (
+            <div className="mt-6 flex justify-end gap-3">
+              <button
+                type="button"
+                disabled={status === "updating"}
+                onClick={() => void handleInviteAction("decline")}
+                className="inline-flex h-10 items-center justify-center rounded-full border border-[rgba(120,104,89,0.16)] bg-[rgba(255,255,255,0.72)] px-5 text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[rgba(88,80,71,0.78)] transition-[background-color,border-color,transform] duration-150 hover:border-[rgba(120,104,89,0.26)] hover:bg-[rgba(255,255,255,0.92)] active:scale-[0.99] focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-60 dark:border-[rgba(255,255,255,0.08)] dark:bg-[rgba(44,38,33,0.86)] dark:text-[rgba(222,211,200,0.76)]"
+              >
+                Decline
+              </button>
+              <button
+                type="button"
+                disabled={status === "updating"}
+                onClick={() => void handleInviteAction("accept")}
+                className="inline-flex h-10 items-center justify-center rounded-full border border-[rgba(66,99,69,0.52)] bg-[linear-gradient(180deg,rgba(103,141,103,0.98),rgba(69,103,72,0.98))] px-5 text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[rgba(251,248,242,0.98)] shadow-[inset_0_1px_0_rgba(255,255,255,0.1),0_8px_18px_rgba(66,99,69,0.12)] transition-[background-image,border-color,transform,box-shadow] duration-150 hover:border-[rgba(58,88,62,0.6)] hover:bg-[linear-gradient(180deg,rgba(93,130,95,0.98),rgba(61,95,65,0.98))] active:scale-[0.99] focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                Accept
+              </button>
+            </div>
+          ) : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const shouldShowLandingPage = isPublicLandingHost();
 
@@ -779,6 +935,9 @@ export default function App() {
   );
   const [collaborationInviteRoute, setCollaborationInviteRoute] =
     useState<CollaborationInviteRoute | null>(() => parseCollaborationInviteRoute());
+  const [teamInviteRoute, setTeamInviteRoute] = useState<TeamInviteRoute | null>(() =>
+    parseTeamInviteRoute(),
+  );
   const [onboardingState, setOnboardingState] = useState<OnboardingState>(
     () =>
       persistedOnboardingSession?.state ??
@@ -821,7 +980,9 @@ export default function App() {
 
   useEffect(() => {
     const nextInviteRoute = parseCollaborationInviteRoute();
+    const nextTeamInviteRoute = parseTeamInviteRoute();
     setCollaborationInviteRoute(nextInviteRoute);
+    setTeamInviteRoute(nextTeamInviteRoute);
 
     if (nextInviteRoute) {
       window.localStorage.setItem(
@@ -842,6 +1003,8 @@ export default function App() {
   useEffect(() => {
     const handlePopState = () => {
       setBetaAccessRoute(resolveBetaAccessRoute());
+      setCollaborationInviteRoute(parseCollaborationInviteRoute());
+      setTeamInviteRoute(parseTeamInviteRoute());
     };
 
     window.addEventListener("popstate", handlePopState);
@@ -849,7 +1012,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (collaborationInviteRoute) {
+    if (collaborationInviteRoute || teamInviteRoute) {
       setBetaSessionStatus("unauthenticated");
       setBetaSessionUser(null);
       return;
@@ -905,10 +1068,15 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [collaborationInviteRoute]);
+  }, [collaborationInviteRoute, teamInviteRoute]);
 
   useEffect(() => {
-    if (shouldShowLandingPage || collaborationInviteRoute || betaSessionStatus === "loading") {
+    if (
+      shouldShowLandingPage ||
+      collaborationInviteRoute ||
+      teamInviteRoute ||
+      betaSessionStatus === "loading"
+    ) {
       return;
     }
 
@@ -927,6 +1095,7 @@ export default function App() {
     betaSessionStatus,
     betaSessionUser,
     collaborationInviteRoute,
+    teamInviteRoute,
     shouldShowLandingPage,
   ]);
 
@@ -1043,6 +1212,10 @@ export default function App() {
       setBetaLoginPending(false);
     }
   };
+
+  if (teamInviteRoute) {
+    return <TeamInviteRouteView route={teamInviteRoute} />;
+  }
 
   if (collaborationInviteRoute) {
     if (collaborationInviteRoute.mode === "invite" && !activeCollaborationUser) {
