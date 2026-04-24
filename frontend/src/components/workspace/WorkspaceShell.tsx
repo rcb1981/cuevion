@@ -30051,7 +30051,7 @@ export function WorkspaceShell({
         externalReviewBodyRenderMode?.mode === "native_html"
           ? normalizeNativeMessageHtmlForPane(externalReviewBodyRenderMode.html)
           : null;
-      const externalReviewMessageTimestamp = inviteMessage?.createdAt ?? inviteMessage?.timestamp;
+      const externalReviewMessageTimestamp = inviteMessage ? resolveMailDateMs(inviteMessage) : 0;
 
       return (
         <>
@@ -30276,7 +30276,7 @@ export function WorkspaceShell({
                             Received
                           </div>
                           <div className="mt-1 text-[0.94rem] text-[var(--workspace-text)]">
-                            {externalReviewMessageTimestamp
+                            {externalReviewMessageTimestamp > 0
                               ? new Date(externalReviewMessageTimestamp).toLocaleString("en-US", {
                                   month: "short",
                                   day: "numeric",
@@ -30311,7 +30311,7 @@ export function WorkspaceShell({
                                     ? "rgba(236,241,237,0.95)"
                                     : "#1f2a24",
                               }}
-                              className={`cuevion-email-native ${resolvedTheme === "light" ? "cuevion-email-native-light" : ""} w-full whitespace-pre-wrap text-[0.94rem] leading-[1.82]`}
+                              className={`cuevion-email-native ${resolvedTheme === "light" ? "cuevion-email-native-light" : ""} w-full whitespace-pre-wrap text-[0.94rem] leading-[1.82] [&_a]:text-[color:rgba(71,95,76,0.96)] dark:[&_a]:text-[color:rgba(176,209,186,0.96)] [&_a]:[-webkit-text-fill-color:rgba(71,95,76,0.96)] dark:[&_a]:[-webkit-text-fill-color:rgba(176,209,186,0.96)] [&_a]:underline [&_a]:underline-offset-2`}
                               dangerouslySetInnerHTML={{
                                 __html:
                                   normalizedExternalReviewNativeHtml ??
