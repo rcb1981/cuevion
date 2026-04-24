@@ -12117,7 +12117,7 @@ function MailboxView({
       setIsCollaborationParticipantPickerOpen(false);
     };
 
-    const handleDismiss = (event: MouseEvent) => {
+    const handleDismiss = (event: globalThis.MouseEvent) => {
       if (
         event.target instanceof Node &&
         collaborationParticipantPickerRef.current?.contains(event.target)
