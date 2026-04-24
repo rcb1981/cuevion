@@ -17906,7 +17906,7 @@ function MailboxView({
                         onClick={() => {
                           reopenMessageCollaboration(activeCollaborationMessage.id);
                         }}
-                        className={modalSecondaryActionButtonClass}
+                        className={`${mailboxPrimaryActionButtonClass} h-10 px-5 text-[0.72rem] tracking-[0.16em]`}
                       >
                         Reopen collaboration
                       </button>
@@ -17930,7 +17930,7 @@ function MailboxView({
                           onClick={() => {
                             markMessageCollaborationDone(activeCollaborationMessage.id);
                           }}
-                          className={modalSecondaryActionButtonClass}
+                          className={`${mailboxPrimaryActionButtonClass} h-10 px-5 text-[0.72rem] tracking-[0.16em]`}
                         >
                           Mark as done
                         </button>
