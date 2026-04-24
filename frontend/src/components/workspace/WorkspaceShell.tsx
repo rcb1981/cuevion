@@ -9571,6 +9571,7 @@ function MailboxView({
   const collaborationReplyInputRef = useRef<HTMLTextAreaElement | null>(null);
   const startCollaborationInviteEmailInputRef = useRef<HTMLInputElement | null>(null);
   const externalCollaborationEmailInputRef = useRef<HTMLInputElement | null>(null);
+  const collaborationParticipantPickerRef = useRef<HTMLDivElement | null>(null);
   const collaborationMessageRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const [focusCollaborationComposer, setFocusCollaborationComposer] = useState(false);
   const [highlightedCollaborationMessageId, setHighlightedCollaborationMessageId] = useState<
@@ -12105,6 +12106,42 @@ function MailboxView({
     selectedMessageIds,
     selectionAnchorId,
   ]);
+
+  useEffect(() => {
+    if (!isCollaborationParticipantPickerOpen) {
+      return;
+    }
+
+    const closeCollaborationParticipantPicker = () => {
+      setCollaborationParticipantSearch("");
+      setIsCollaborationParticipantPickerOpen(false);
+    };
+
+    const handleDismiss = (event: MouseEvent) => {
+      if (
+        event.target instanceof Node &&
+        collaborationParticipantPickerRef.current?.contains(event.target)
+      ) {
+        return;
+      }
+
+      closeCollaborationParticipantPicker();
+    };
+
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        closeCollaborationParticipantPicker();
+      }
+    };
+
+    document.addEventListener("mousedown", handleDismiss, true);
+    window.addEventListener("keydown", handleEscape);
+
+    return () => {
+      document.removeEventListener("mousedown", handleDismiss, true);
+      window.removeEventListener("keydown", handleEscape);
+    };
+  }, [isCollaborationParticipantPickerOpen]);
 
   useEffect(() => {
     if (selectedMessageIds.length === 1 && selectionAnchorId !== selectedMessageIds[0]) {
@@ -17393,7 +17430,7 @@ function MailboxView({
                                   </span>
                                 </button>
                               ) : (
-                                <>
+                                <div ref={collaborationParticipantPickerRef} className="space-y-2">
                                   <input
                                     type="search"
                                     value={collaborationParticipantSearch}
@@ -17499,7 +17536,7 @@ function MailboxView({
                                       }`}
                                     </button>
                                   </div>
-                                </>
+                                </div>
                               )}
                             </div>
                           ) : null}
