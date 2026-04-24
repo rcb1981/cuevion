@@ -9308,6 +9308,7 @@ function InboxesView({
 
 function MailboxView({
   mailbox,
+  activeMailboxTitleOverride,
   orderedMailboxes,
   managedInboxes,
   smartFolders,
@@ -9352,6 +9353,7 @@ function MailboxView({
   onMessageSelected,
 }: {
   mailbox: OrderedMailbox;
+  activeMailboxTitleOverride?: string;
   orderedMailboxes: OrderedMailbox[];
   managedInboxes: ManagedWorkspaceInbox[];
   smartFolders: SmartFolderDefinition[];
@@ -14457,16 +14459,20 @@ function MailboxView({
         })()
       : null;
   const activeDestinationTitle = isSharedView
-    ? mailbox.title.endsWith("Inbox")
-      ? mailbox.title
-      : `${mailbox.title} Inbox`
+    ? activeMailboxTitleOverride
+      ? activeMailboxTitleOverride
+      : mailbox.title.endsWith("Inbox")
+        ? mailbox.title
+        : `${mailbox.title} Inbox`
     : activeFolder === "Filtered"
       ? "Filtered"
     : activeSmartFolder
       ? activeSmartFolder.name
-      : mailbox.title.endsWith("Inbox")
-        ? mailbox.title
-        : `${mailbox.title} Inbox`;
+      : activeMailboxTitleOverride
+        ? activeMailboxTitleOverride
+        : mailbox.title.endsWith("Inbox")
+          ? mailbox.title
+          : `${mailbox.title} Inbox`;
   const isReadOnlySmartFolderView = Boolean(activeSmartFolder);
   const shouldBlockSmartFolderMutation = () => {
     if (!activeSmartFolder) {
@@ -30808,8 +30814,9 @@ export function WorkspaceShell({
               <div className="h-0 min-h-0 flex-1 overflow-hidden">
 	                <MailboxView
 	                  key={`${activeMailbox.id}-${mailboxResetToken}`}
-	                  mailbox={activeMailbox}
-	                  orderedMailboxes={orderedMailboxes}
+		                  mailbox={activeMailbox}
+		                  activeMailboxTitleOverride={mailboxTitleOverrides[activeMailbox.id]?.trim()}
+		                  orderedMailboxes={orderedMailboxes}
 	                  managedInboxes={savedManagedInboxes}
 	                  smartFolders={smartFolders}
                   onOpenSmartFolderModal={() => {
