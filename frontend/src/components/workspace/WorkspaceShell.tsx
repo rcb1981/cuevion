@@ -17656,33 +17656,6 @@ function MailboxView({
                               {externalInviteEmailFeedback}
                             </div>
                           ) : null}
-                          {externalCollaborationInviteUrl ? (
-                            <div className="flex items-center justify-between gap-3 rounded-[16px] bg-[var(--workspace-card)] px-4 py-3">
-                              <div className="text-[0.8rem] leading-6 text-[var(--workspace-text-soft)]">
-                                Review link ready
-                              </div>
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  if (typeof navigator === "undefined" || !navigator.clipboard) {
-                                    return;
-                                  }
-                                  void navigator.clipboard.writeText(
-                                    externalCollaborationInviteUrl,
-                                  );
-                                  setExternalReviewCopyFeedback("Link copied");
-                                  window.setTimeout(() => {
-                                    setExternalReviewCopyFeedback((current) =>
-                                      current === "Link copied" ? "" : current,
-                                    );
-                                  }, 1800);
-                                }}
-                                className="inline-flex h-8 items-center justify-center rounded-full px-3 text-[0.66rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-soft)] transition-colors duration-150 hover:text-[var(--workspace-text)] focus-visible:outline-none"
-                              >
-                                Copy link
-                              </button>
-                            </div>
-                          ) : null}
                           {externalReviewCopyFeedback ? (
                             <div className="text-[0.76rem] leading-6 text-[var(--workspace-text-faint)]">
                               {externalReviewCopyFeedback}
