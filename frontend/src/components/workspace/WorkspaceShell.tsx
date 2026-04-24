@@ -10802,6 +10802,8 @@ function MailboxView({
         return resolveMailDateMs(firstMessage) - resolveMailDateMs(secondMessage);
       });
   };
+  const selectedMessageThreadMessages = getThreadMessages(selectedMessage);
+  const fullWidthMessageThreadMessages = getThreadMessages(fullWidthMessage);
   const canShowRemoteImagesForMessage = (messageId: string) =>
     revealedRemoteImageMessageIds.includes(messageId);
   const revealRemoteImagesForMessage = (messageId: string) => {
@@ -15660,7 +15662,9 @@ function MailboxView({
                   </div>
                 ) : null}
 
-                {renderThreadMessage(fullWidthMessage, "full")}
+	                {fullWidthMessageThreadMessages.length > 1
+	                  ? renderThreadTimeline(fullWidthMessage, "full")
+	                  : renderThreadMessage(fullWidthMessage, "full")}
               </div>
 
               <div className="rounded-[20px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-5 py-4">
@@ -16600,7 +16604,9 @@ function MailboxView({
                       </div>
                     ) : null}
 
-                    {renderThreadMessage(selectedMessage, "split")}
+	                    {selectedMessageThreadMessages.length > 1
+	                      ? renderThreadTimeline(selectedMessage, "split")
+	                      : renderThreadMessage(selectedMessage, "split")}
                   </div>
                   {selectedMessage.id === "main-1" ? (
                     <div className="grid gap-4 md:grid-cols-2">
