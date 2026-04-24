@@ -15754,9 +15754,11 @@ function MailboxView({
                   const isDragTargetActive = dragTargetKey === dragTargetId;
                   const folderLabel =
                     folder === "Inbox"
-                      ? mailbox.title.endsWith("Inbox")
-                        ? mailbox.title
-                        : `${mailbox.title} Inbox`
+                      ? activeMailboxTitleOverride
+                        ? activeMailboxTitleOverride
+                        : mailbox.title.endsWith("Inbox")
+                          ? mailbox.title
+                          : `${mailbox.title} Inbox`
                       : folder;
 
                   return (
