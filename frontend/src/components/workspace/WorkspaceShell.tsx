@@ -17677,9 +17677,9 @@ function MailboxView({
                               ref={(node) => {
                                 collaborationMessageRefs.current[entry.id] = node;
                               }}
-                              className={`rounded-[16px] bg-[var(--workspace-card)] px-3.5 py-2.5 transition-[background-color,box-shadow,border-color] duration-300 ${
+                              className={`rounded-[16px] border border-[color:rgba(128,142,121,0.14)] bg-[linear-gradient(180deg,rgba(255,253,249,0.96),rgba(247,243,236,0.94))] px-3.5 py-2.5 shadow-[0_8px_20px_rgba(31,42,36,0.04),inset_0_1px_0_rgba(255,255,255,0.08)] transition-[background-image,border-color,box-shadow] duration-300 md:hover:border-[color:rgba(128,142,121,0.22)] md:hover:shadow-[0_10px_24px_rgba(31,42,36,0.06),inset_0_1px_0_rgba(255,255,255,0.1)] dark:border-[var(--workspace-border-soft)] dark:bg-[linear-gradient(180deg,var(--workspace-card-featured-start),var(--workspace-card-featured-end))] ${
                                 highlightedCollaborationMessageId === entry.id
-                                  ? "bg-[color:rgba(126,155,128,0.12)] shadow-[0_0_0_1px_rgba(126,155,128,0.18)]"
+                                  ? "border-[color:rgba(126,155,128,0.24)] bg-[linear-gradient(180deg,rgba(238,246,239,0.96),rgba(244,248,242,0.94))] shadow-[0_0_0_1px_rgba(126,155,128,0.16),0_10px_24px_rgba(96,122,100,0.08)] dark:border-[var(--workspace-accent-border)] dark:bg-[linear-gradient(180deg,var(--workspace-card-featured-start),var(--workspace-card-featured-end))]"
                                   : ""
                               }`}
                             >
@@ -17694,7 +17694,7 @@ function MailboxView({
                                   </span>
                                 </div>
                               ) : null}
-                              <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[0.78rem] leading-5 text-[var(--workspace-text)]">
+                              <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[0.78rem] leading-5 text-[color:rgba(52,64,57,0.92)] dark:text-[var(--workspace-text)]">
                                 <span>{entry.authorName}</span>
                                 <span
                                   className={`inline-flex items-center rounded-full px-2 py-0.5 text-[0.6rem] font-medium uppercase tracking-[0.14em] ${
@@ -17707,7 +17707,7 @@ function MailboxView({
                                     ? "Internal"
                                     : "Shared"}
                                 </span>
-                                <span className="text-[0.72rem] text-[var(--workspace-text-faint)]">
+                                <span className="text-[0.72rem] text-[color:rgba(104,112,103,0.9)] dark:text-[var(--workspace-text-faint)]">
                                   {formatCollaborationStatusTimestamp(entry.timestamp)}
                                 </span>
                               </div>
