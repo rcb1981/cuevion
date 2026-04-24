@@ -1620,6 +1620,7 @@ function renderPlainMessageParagraph(
   className: string,
   contentClassName?: string,
   themeMode: "light" | "dark" = "light",
+  linkStyleOverride?: { color?: string; WebkitTextFillColor?: string },
 ) {
   const matches = Array.from(paragraph.matchAll(plainLinkPattern));
   const resolvedContentClassName = contentClassName ?? className;
@@ -1632,6 +1633,7 @@ function renderPlainMessageParagraph(
   };
   const plainLinkStyle = {
     color: plainLinkTextColor,
+    ...(linkStyleOverride ?? {}),
   };
 
   // Converts a plain-text run into React nodes, turning each \n into an explicit
@@ -30322,15 +30324,22 @@ export function WorkspaceShell({
                               dangerouslySetInnerHTML={{ __html: externalReviewBodyRenderMode.html }}
                             />
                           ) : externalReviewMessageBodyText.trim() ? (
-                            <div className="[&_a]:!text-[color:rgba(71,95,76,0.96)] dark:[&_a]:!text-[color:rgba(176,209,186,0.96)]">
-                              {renderPlainMessageParagraph(
-                                externalReviewMessageBodyText,
-                                "external-review-mail-body",
-                                "",
-                                "",
-                                resolvedTheme,
-                              )}
-                            </div>
+                            renderPlainMessageParagraph(
+                              externalReviewMessageBodyText,
+                              "external-review-mail-body",
+                              "",
+                              "",
+                              resolvedTheme,
+                              resolvedTheme === "dark"
+                                ? {
+                                    color: "rgba(176,209,186,0.96)",
+                                    WebkitTextFillColor: "rgba(176,209,186,0.96)",
+                                  }
+                                : {
+                                    color: "rgba(71,95,76,0.96)",
+                                    WebkitTextFillColor: "rgba(71,95,76,0.96)",
+                                  },
+                            )
                           ) : (
                             <p>No message content available.</p>
                           )}
