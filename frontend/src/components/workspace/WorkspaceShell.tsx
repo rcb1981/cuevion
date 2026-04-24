@@ -30029,9 +30029,10 @@ export function WorkspaceShell({
         );
       }
 
-      const externalReviewMessageBody = (
-        inviteMessage?.body.length ? inviteMessage.body : [inviteMessage?.snippet ?? ""]
-      ).filter(Boolean);
+      const externalReviewMessageBody = inviteMessage?.body.length
+        ? inviteMessage.body
+        : [inviteMessage?.snippet ?? ""];
+      const externalReviewMessageBodyText = externalReviewMessageBody.join("\n");
       const externalReviewMessageTimestamp = inviteMessage?.createdAt ?? inviteMessage?.timestamp;
 
       return (
@@ -30275,19 +30276,17 @@ export function WorkspaceShell({
                           Message body
                         </div>
                         <div className="mt-4 max-h-[420px] space-y-3 overflow-y-auto pr-1 text-[0.94rem] leading-7 text-[var(--workspace-text-soft)]">
-	                          {externalReviewMessageBody.length > 0
-	                            ? externalReviewMessageBody.map((paragraph: string, index: number) => (
-	                                renderPlainMessageParagraph(
-	                                  paragraph,
-	                                  `external-review-mail-body-${index}`,
-	                                  "",
-	                                  "",
-	                                  resolvedTheme,
-	                                )
-	                              ))
-	                            : (
-	                              <p>No message content available.</p>
-	                            )}
+                          {externalReviewMessageBodyText.trim()
+                            ? renderPlainMessageParagraph(
+                                externalReviewMessageBodyText,
+                                "external-review-mail-body",
+                                "",
+                                "",
+                                resolvedTheme,
+                              )
+                            : (
+                              <p>No message content available.</p>
+                            )}
                         </div>
                       </div>
                     </div>
