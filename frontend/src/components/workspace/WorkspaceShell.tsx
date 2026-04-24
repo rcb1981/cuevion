@@ -17549,7 +17549,7 @@ function MailboxView({
                           onClick={() =>
                             setIsCollaborationInviteComposerOpen((current) => !current)
                           }
-                          className="inline-flex h-8 items-center justify-center rounded-full bg-[var(--workspace-card)] px-3 text-[0.66rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-soft)] transition-[background-color,color] duration-150 hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] focus-visible:outline-none"
+                          className="inline-flex h-8 items-center justify-center rounded-full border border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] px-3 text-[0.66rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.16),0_8px_24px_rgba(118,170,112,0.08)] transition-[background-image,border-color,color,transform,box-shadow] duration-150 hover:bg-[linear-gradient(180deg,var(--workspace-accent-surface-hover-start),var(--workspace-accent-surface-hover-end))] active:translate-y-[0.5px] focus-visible:border-[var(--workspace-accent-border)] focus-visible:bg-[linear-gradient(180deg,var(--workspace-accent-surface-hover-start),var(--workspace-accent-surface-hover-end))] focus-visible:outline-none"
                         >
                           Invite
                         </button>
@@ -17562,7 +17562,7 @@ function MailboxView({
                                 primaryExternalReviewParticipant,
                               )
                             }
-                            className="inline-flex h-8 items-center justify-center rounded-full bg-[var(--workspace-card)] px-3 text-[0.66rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-soft)] transition-[background-color,color] duration-150 hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] focus-visible:outline-none"
+                            className="inline-flex h-8 items-center justify-center rounded-full border border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] px-3 text-[0.66rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.16),0_8px_24px_rgba(118,170,112,0.08)] transition-[background-image,border-color,color,transform,box-shadow] duration-150 hover:bg-[linear-gradient(180deg,var(--workspace-accent-surface-hover-start),var(--workspace-accent-surface-hover-end))] active:translate-y-[0.5px] focus-visible:border-[var(--workspace-accent-border)] focus-visible:bg-[linear-gradient(180deg,var(--workspace-accent-surface-hover-start),var(--workspace-accent-surface-hover-end))] focus-visible:outline-none"
                           >
                             Open external review
                           </button>
@@ -17578,7 +17578,7 @@ function MailboxView({
                         <button
                           type="button"
                           onClick={() => setCollaborationHistoryExpanded((current) => !current)}
-                          className="inline-flex h-8 items-center justify-center rounded-full bg-[var(--workspace-card)] px-3 text-[0.66rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-soft)] transition-[background-color,color] duration-150 hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] focus-visible:outline-none"
+                          className="inline-flex h-8 items-center justify-center rounded-full border border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] px-3 text-[0.66rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.16),0_8px_24px_rgba(118,170,112,0.08)] transition-[background-image,border-color,color,transform,box-shadow] duration-150 hover:bg-[linear-gradient(180deg,var(--workspace-accent-surface-hover-start),var(--workspace-accent-surface-hover-end))] active:translate-y-[0.5px] focus-visible:border-[var(--workspace-accent-border)] focus-visible:bg-[linear-gradient(180deg,var(--workspace-accent-surface-hover-start),var(--workspace-accent-surface-hover-end))] focus-visible:outline-none"
                         >
                           {collaborationHistoryExpanded
                             ? "Hide conversation"
@@ -17853,7 +17853,7 @@ function MailboxView({
                               ? "Add an internal note"
                               : "Reply to everyone in this collaboration"
                           }
-                          className="w-full resize-none rounded-[18px] bg-[var(--workspace-card-subtle)] px-4 py-3 text-[0.92rem] leading-7 text-[var(--workspace-text-soft)] outline-none placeholder:text-[var(--workspace-text-faint)]"
+                          className="min-h-[8.5rem] w-full resize-none rounded-[18px] border border-[color:rgba(111,148,111,0.28)] bg-[linear-gradient(180deg,rgba(255,253,249,0.98),rgba(248,244,236,0.96))] px-4 py-3.5 text-[0.92rem] leading-7 text-[var(--workspace-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_10px_24px_rgba(118,170,112,0.06)] outline-none placeholder:text-[var(--workspace-text-faint)] dark:border-[var(--workspace-accent-border)] dark:bg-[linear-gradient(180deg,var(--workspace-card-featured-start),var(--workspace-card-featured-end))]"
                         />
                         {visibleCollaborationMentionCandidates.length > 0 ? (
                           <div className="absolute bottom-[calc(100%-0.75rem)] left-3 right-3 z-10 rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] p-2 shadow-[0_18px_40px_rgba(61,44,32,0.12),0_6px_16px_rgba(61,44,32,0.08)]">
