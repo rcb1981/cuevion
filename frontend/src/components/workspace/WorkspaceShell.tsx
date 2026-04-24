@@ -9309,6 +9309,7 @@ function InboxesView({
 function MailboxView({
   mailbox,
   activeMailboxTitleOverride,
+  mailboxTitleOverrides,
   orderedMailboxes,
   managedInboxes,
   smartFolders,
@@ -9354,6 +9355,7 @@ function MailboxView({
 }: {
   mailbox: OrderedMailbox;
   activeMailboxTitleOverride?: string;
+  mailboxTitleOverrides: Partial<Record<InboxId, string>>;
   orderedMailboxes: OrderedMailbox[];
   managedInboxes: ManagedWorkspaceInbox[];
   smartFolders: SmartFolderDefinition[];
@@ -15880,9 +15882,12 @@ function MailboxView({
                 .map((candidate, index) => {
                   const dragTargetId = `mailbox-${candidate.id}`;
                   const isDragTargetActive = dragTargetKey === dragTargetId;
-                  const mailboxLabel = candidate.title.endsWith("Inbox")
-                    ? candidate.title
-                    : `${candidate.title} Inbox`;
+                  const candidateTitleOverride = mailboxTitleOverrides[candidate.id]?.trim();
+                  const mailboxLabel = candidateTitleOverride
+                    ? candidateTitleOverride
+                    : candidate.title.endsWith("Inbox")
+                      ? candidate.title
+                      : `${candidate.title} Inbox`;
 
                   return (
                     <div key={candidate.id} className={index === 0 ? "pt-4" : ""}>
@@ -30818,6 +30823,7 @@ export function WorkspaceShell({
 	                  key={`${activeMailbox.id}-${mailboxResetToken}`}
 		                  mailbox={activeMailbox}
 		                  activeMailboxTitleOverride={mailboxTitleOverrides[activeMailbox.id]?.trim()}
+		                  mailboxTitleOverrides={mailboxTitleOverrides}
 		                  orderedMailboxes={orderedMailboxes}
 	                  managedInboxes={savedManagedInboxes}
 	                  smartFolders={smartFolders}
