@@ -30321,17 +30321,19 @@ export function WorkspaceShell({
                               className="w-full whitespace-pre-wrap text-[0.94rem] leading-7 text-[var(--workspace-text)] dark:text-[var(--workspace-text)] [&_a]:text-[color:rgba(44,89,116,0.98)] dark:[&_a]:text-[color:rgba(176,209,183,0.96)] [&_a]:underline [&_a]:underline-offset-2 [&_div]:min-h-[1.35rem] [&_[data-compose-quote='true']]:mt-4 [&_[data-compose-quote='true']]:pt-3 [&_[data-compose-quote='true']]:border-t [&_[data-compose-quote='true']]:rounded-[6px] [&_[data-compose-quote='true']]:border-l-2 [&_[data-compose-quote='true']]:border-[color:rgba(160,180,160,0.28)] [&_[data-compose-quote='true']]:bg-[color:rgba(249,245,237,0.42)] [&_[data-compose-quote='true']]:px-2.5 [&_[data-compose-quote='true']]:py-2 [&_[data-compose-quote='true']]:text-[inherit] [&_[data-compose-quote='true']]:[-webkit-text-fill-color:inherit] dark:[&_[data-compose-quote='true']]:border-[color:rgba(160,180,160,0.18)] dark:[&_[data-compose-quote='true']]:bg-[color:rgba(86,114,87,0.08)] [&_[data-compose-quote='true']_*]:text-[inherit] [&_[data-compose-quote='true']_*]:[-webkit-text-fill-color:inherit] [&_[data-compose-signature='true']]:mt-3 [&_[data-compose-signature='true']]:space-y-0 [&_[data-compose-signature-divider='true']]:my-2 [&_[data-compose-signature-divider='true']]:h-px [&_[data-compose-signature-divider='true']]:w-full [&_[data-compose-signature-divider='true']]:bg-[color:rgba(121,151,120,0.18)] [&_[data-compose-signature-logo='true']]:pt-1 [&_[data-compose-signature-logo='true']_img]:max-h-[76px] [&_[data-compose-signature-logo='true']_img]:w-auto [&_[data-compose-signature-logo='true']_img]:max-w-full [&_[data-compose-signature-logo='true']_img]:object-contain [&_[data-compose-signature-right='true']]:min-w-0 [&_[data-compose-signature-right='true']]:flex-1 [&_[data-compose-signature-row='true']]:flex [&_[data-compose-signature-row='true']]:items-start [&_[data-compose-signature-row='true']]:gap-4 [&_[data-compose-signature-spacer='true']]:min-h-[1.2rem] [&_[data-compose-signature-text='true']]:whitespace-pre-wrap [&_[data-compose-signature-text='true']]:text-[0.86rem] [&_[data-compose-signature-text='true']]:leading-[1.45] [&_[data-compose-signature-text='true']_*]:text-[var(--workspace-text-muted)] dark:[&_[data-compose-signature-text='true']_*]:text-[color:rgba(196,202,198,0.82)]"
                               dangerouslySetInnerHTML={{ __html: externalReviewBodyRenderMode.html }}
                             />
-                          ) : externalReviewMessageBodyText.trim()
-                            ? renderPlainMessageParagraph(
+                          ) : externalReviewMessageBodyText.trim() ? (
+                            <div className="[&_a]:text-[color:rgba(71,95,76,0.96)] dark:[&_a]:text-[color:rgba(176,209,186,0.96)]">
+                              {renderPlainMessageParagraph(
                                 externalReviewMessageBodyText,
                                 "external-review-mail-body",
                                 "",
                                 "",
                                 resolvedTheme,
-                              )
-                            : (
-                              <p>No message content available.</p>
-                            )}
+                              )}
+                            </div>
+                          ) : (
+                            <p>No message content available.</p>
+                          )}
                         </div>
                       </div>
                     </div>
