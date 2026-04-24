@@ -12868,6 +12868,8 @@ function MailboxView({
     }
 
     setCollaborationParticipantPersonIds([]);
+    setCollaborationParticipantSearch("");
+    setIsCollaborationParticipantPickerOpen(false);
 
     if (selectedExternalInviteEmails.length > 0) {
       setPendingExternalInviteEmails((current) => [
