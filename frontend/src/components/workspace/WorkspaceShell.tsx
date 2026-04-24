@@ -1123,19 +1123,54 @@ function isBroadcastPromoMessage(
   ]
     .join(" ")
     .toLowerCase();
-
-  return includesAnyKeyword(searchableText, [
-    "newsletter",
-    "nieuws",
-    "newsberichten",
-    "read online",
-    "read this email online",
-    "view in browser",
-    "view online",
-    "unsubscribe",
-    "campaign monitor",
-    "mailchimp",
+  const subjectText = (message.subject ?? "").toLowerCase();
+  const hasSurveyResearchSignal = includesAnyKeyword(searchableText, [
+    "onderzoek",
+    "vragenlijst",
+    "survey",
+    "questionnaire",
+    "deel te nemen",
+    "jouw mening telt",
+    "online vragenlijst",
   ]);
+  const hasStrongPersonalBusinessActionSignal = includesAnyKeyword(searchableText, [
+    "contract",
+    "agreement",
+    "invoice",
+    "payment",
+    "approve",
+    "approval",
+    "deadline",
+    "rights",
+    "license",
+    "legal",
+    "please review",
+    "please confirm",
+    "please send",
+    "can you",
+    "could you",
+    "meeting",
+    "call",
+  ]);
+  const isReplyOrForwardThread = /^(re|fw|fwd):/i.test(subjectText.trim());
+
+  return (
+    includesAnyKeyword(searchableText, [
+      "newsletter",
+      "nieuws",
+      "newsberichten",
+      "read online",
+      "read this email online",
+      "view in browser",
+      "view online",
+      "unsubscribe",
+      "campaign monitor",
+      "mailchimp",
+    ]) ||
+    (hasSurveyResearchSignal &&
+      !hasStrongPersonalBusinessActionSignal &&
+      !isReplyOrForwardThread)
+  );
 }
 
 function resolveVisibleClassification(
