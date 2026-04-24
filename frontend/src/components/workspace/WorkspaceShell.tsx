@@ -30322,7 +30322,7 @@ export function WorkspaceShell({
                               dangerouslySetInnerHTML={{ __html: externalReviewBodyRenderMode.html }}
                             />
                           ) : externalReviewMessageBodyText.trim() ? (
-                            <div className="[&_a]:text-[color:rgba(71,95,76,0.96)] dark:[&_a]:text-[color:rgba(176,209,186,0.96)]">
+                            <div className="[&_a]:!text-[color:rgba(71,95,76,0.96)] dark:[&_a]:!text-[color:rgba(176,209,186,0.96)]">
                               {renderPlainMessageParagraph(
                                 externalReviewMessageBodyText,
                                 "external-review-mail-body",
