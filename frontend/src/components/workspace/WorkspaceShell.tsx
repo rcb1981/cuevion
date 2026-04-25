@@ -1239,6 +1239,13 @@ function resolveVisibleClassification(
     }
 
     if (
+      message.internalClassification === "workflow_update" &&
+      looksLikeMusicReleasePromo
+    ) {
+      return "promo";
+    }
+
+    if (
       message.internalClassification &&
       message.internalClassification !== "unknown"
     ) {
