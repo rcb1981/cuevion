@@ -1208,13 +1208,23 @@ function resolveVisibleClassification(
   })();
 
   const isMarketingNewsletterUpdate = isMarketingNewsletterUpdateMessage(message);
+  const subjectText = message.subject ?? "";
+  const senderText = message.sender ?? "";
+  const looksLikeMusicReleasePromo =
+    signalClassification === "promo" &&
+    senderText.toLowerCase().includes("promo") &&
+    subjectText.includes("|") &&
+    /\b\d{1,2}\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)\b/i.test(
+      subjectText,
+    );
   const resolvedClassification = (() => {
     if (
       (signalClassification === "promo" ||
         signalClassification === "business" ||
         message.internalClassification === "business" ||
         message.internalClassification === "business_reminder") &&
-      isBroadcastPromoMessage(message)
+      isBroadcastPromoMessage(message) &&
+      !looksLikeMusicReleasePromo
     ) {
       return "workflow_update";
     }
