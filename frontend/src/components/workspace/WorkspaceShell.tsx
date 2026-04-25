@@ -1266,6 +1266,27 @@ function resolveVisibleClassification(
     });
   }
 
+  if (
+    includesAnyKeyword(metaDiagnosticText, [
+      "digital promo sound",
+      "tskmo records",
+      "aizaz",
+      "estoy",
+    ])
+  ) {
+    console.info("[Cuevion] Promo workflow_update diagnostic", {
+      subject: message.subject,
+      sender: message.sender,
+      from: message.from,
+      signal: message.signal,
+      ui_signal: message.ui_signal,
+      internalClassification: message.internalClassification,
+      signalClassification,
+      isMarketingNewsletterUpdateMessage: isMarketingNewsletterUpdate,
+      resolvedClassification,
+    });
+  }
+
   return resolvedClassification;
 }
 
