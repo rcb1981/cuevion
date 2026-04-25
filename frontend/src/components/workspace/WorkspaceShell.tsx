@@ -1211,7 +1211,7 @@ function resolveVisibleClassification(
   const subjectText = message.subject ?? "";
   const senderText = message.sender ?? "";
   const looksLikeMusicReleasePromo =
-    signalClassification === "promo" &&
+    (message.signal === "Promo" || message.ui_signal === "PROMO") &&
     senderText.toLowerCase().includes("promo") &&
     subjectText.includes("|") &&
     /\b\d{1,2}\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)\b/i.test(
