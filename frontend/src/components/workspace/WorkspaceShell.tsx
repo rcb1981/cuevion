@@ -15845,17 +15845,22 @@ function MailboxView({
                     <div className="mb-3 text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
                       Added files
                     </div>
-                    <div className="flex flex-wrap gap-3">
+                    <div className="flex min-w-0 max-w-full flex-wrap gap-3 overflow-hidden">
                       {visibleComposeAttachmentCount > 0 ? (
-                        visibleComposeAttachments.map((attachment) =>
-                          renderAttachmentItem(attachment, {
-                            removable: true,
-                            onRemove: () =>
-                              setComposeAttachments((current) =>
-                                current.filter((entry) => entry.id !== attachment.id),
-                              ),
-                          }),
-                        )
+                        visibleComposeAttachments.map((attachment) => (
+                          <div
+                            key={attachment.id}
+                            className="min-w-0 max-w-full overflow-hidden [&>div]:max-w-full [&_button]:w-full [&_button]:max-w-full"
+                          >
+                            {renderAttachmentItem(attachment, {
+                              removable: true,
+                              onRemove: () =>
+                                setComposeAttachments((current) =>
+                                  current.filter((entry) => entry.id !== attachment.id),
+                                ),
+                            })}
+                          </div>
+                        ))
                       ) : (
                         <div className="text-[0.82rem] leading-6 text-[var(--workspace-text-faint)]">
                           No attachments yet
