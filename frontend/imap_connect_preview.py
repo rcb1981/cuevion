@@ -401,6 +401,44 @@ def get_message_attachments(message: Message) -> list[dict[str, Any]]:
     return attachments
 
 
+def get_message_attachment_payload(
+    message: Message,
+    attachment_id: str,
+) -> dict[str, Any] | None:
+    if not message.is_multipart() or not attachment_id:
+        return None
+
+    for index, part in enumerate(message.walk()):
+        if part.is_multipart():
+            continue
+
+        disposition = str(part.get("Content-Disposition") or "").lower()
+        filename = decode_mime_words(part.get_filename())
+        content_id_header = str(part.get("Content-Id") or part.get("Content-ID") or "").strip()
+        content_id = content_id_header.strip("<>") if content_id_header else ""
+
+        if "attachment" not in disposition and "inline" not in disposition and not filename and not content_id:
+            continue
+
+        if f"attachment-{index}" != attachment_id:
+            continue
+
+        payload = part.get_payload(decode=True)
+        if payload is None:
+            return None
+
+        mime_type = part.get_content_type() or "application/octet-stream"
+
+        return {
+            "content": payload,
+            "filename": filename or "Attachment",
+            "mimeType": mime_type,
+            "size": len(payload),
+        }
+
+    return None
+
+
 def format_timestamp(date_header: str) -> tuple[str, str]:
     if not date_header:
         fallback_timestamp = datetime.now(timezone.utc).isoformat()

@@ -165,6 +165,26 @@ export type SendInboxAttachmentRequest = {
   contentBase64: string;
 };
 
+export type DownloadGmailAttachmentRequest = {
+  email: string;
+  messageId: string;
+  attachmentId: string;
+};
+
+export type DownloadImapAttachmentRequest = {
+  provider: ProviderId;
+  email: string;
+  host: string;
+  port: string;
+  ssl: boolean;
+  username: string;
+  password: string;
+  folder: string;
+  uid: string;
+  uidValidity?: string | null;
+  attachmentId: string;
+};
+
 export type SendGmailMessageRequest = {
   provider: ProviderId;
   authMode?: "smtp" | "oauth";
@@ -186,6 +206,13 @@ export type SendGmailMessageRequest = {
 
 type SendGmailMessageResponse = {
   ok: boolean;
+  error?: {
+    code?: string;
+    message?: string;
+  };
+};
+
+type AttachmentDownloadErrorPayload = {
   error?: {
     code?: string;
     message?: string;
@@ -432,6 +459,70 @@ export async function sendGmailMessage(
   } finally {
     window.clearTimeout(timeoutId);
   }
+}
+
+async function readAttachmentDownloadError(
+  response: Response,
+  fallbackMessage: string,
+) {
+  const rawPayload = await response.text();
+
+  if (rawPayload.trim()) {
+    try {
+      const payload = JSON.parse(rawPayload) as AttachmentDownloadErrorPayload;
+      return payload.error?.message ?? fallbackMessage;
+    } catch {
+      return fallbackMessage;
+    }
+  }
+
+  return fallbackMessage;
+}
+
+export async function downloadGmailAttachment(
+  request: DownloadGmailAttachmentRequest,
+): Promise<Blob> {
+  const response = await fetch("/api/inboxes/download-gmail-attachment", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(request),
+  });
+
+  if (!response.ok) {
+    throw new Error(
+      await readAttachmentDownloadError(
+        response,
+        "Could not download this Gmail attachment.",
+      ),
+    );
+  }
+
+  return response.blob();
+}
+
+export async function downloadImapAttachment(
+  request: DownloadImapAttachmentRequest,
+): Promise<Blob> {
+  const response = await fetch("/api/inboxes/download-imap-attachment", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(request),
+  });
+
+  if (!response.ok) {
+    throw new Error(
+      await readAttachmentDownloadError(
+        response,
+        "Could not download this IMAP attachment.",
+      ),
+    );
+  }
+
+  return response.blob();
 }
 
 export async function fetchGmailInbox(

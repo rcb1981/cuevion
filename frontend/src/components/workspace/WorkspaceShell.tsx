@@ -55,6 +55,8 @@ import {
   beginInboxConnection,
   buildConnectInboxRequest,
   connectInboxWithImap,
+  downloadGmailAttachment,
+  downloadImapAttachment,
   fetchGmailInbox,
   sendGmailMessage,
   type SendInboxAttachmentRequest,
@@ -580,6 +582,12 @@ type MailAttachment = {
   disposition?: string;
   inlineSrc?: string;
   file?: File;
+  receivedSource?: {
+    mailboxId: InboxId;
+    messageId: string;
+    messageUid?: string;
+    folder?: MailFolder;
+  };
 };
 type MailAttachmentInput = string | MailAttachment;
 type ComposeRecipientField = "to" | "cc" | "bcc";
@@ -10215,7 +10223,19 @@ function MailboxView({
     );
     setComposeAttachments(
       (effectiveMessage.attachments ?? []).map((attachment: MailAttachment) =>
-        normalizeMailAttachment(attachment),
+        normalizeMailAttachment({
+          ...attachment,
+          receivedSource: attachment.file
+            ? attachment.receivedSource
+            : {
+                mailboxId: sourceMailboxId as InboxId,
+                messageId: effectiveMessage.id,
+                messageUid: effectiveMessage.imapUid,
+                folder:
+                  currentMessageLocationById[effectiveMessage.id]?.folder ??
+                  "Inbox",
+              },
+        }),
       ),
     );
     setIsComposeOpen(true);
@@ -11711,26 +11731,98 @@ function MailboxView({
     return `${size} B`;
   };
 
-  const handleAttachmentOpen = (attachment: MailAttachment) => {
-    if (attachment.file) {
-      const objectUrl = URL.createObjectURL(attachment.file);
-      const downloadAnchor = document.createElement("a");
+  const saveAttachmentBlob = (blob: Blob, name: string) => {
+    const objectUrl = URL.createObjectURL(blob);
+    const downloadAnchor = document.createElement("a");
 
-      downloadAnchor.href = objectUrl;
-      downloadAnchor.download = attachment.name;
-      downloadAnchor.rel = "noopener";
-      downloadAnchor.click();
+    downloadAnchor.href = objectUrl;
+    downloadAnchor.download = name;
+    downloadAnchor.rel = "noopener";
+    downloadAnchor.click();
 
-      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
-      return;
+    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+  };
+
+  const fetchReceivedAttachmentBlob = async (
+    attachment: MailAttachment,
+    sourceMessage?: MailMessage,
+  ) => {
+    const messageLocation = sourceMessage
+      ? currentMessageLocationById[sourceMessage.id]
+      : undefined;
+    const sourceMailboxId =
+      attachment.receivedSource?.mailboxId ??
+      messageLocation?.mailboxId ??
+      mailbox.id;
+    const sourceMailbox =
+      managedInboxes.find((candidate) => candidate.id === sourceMailboxId) ??
+      managedInboxes.find((candidate) => candidate.id === mailbox.id);
+    const sourceMessageUid =
+      attachment.receivedSource?.messageUid ?? sourceMessage?.imapUid;
+
+    if (!sourceMailbox || !sourceMailbox.provider || !sourceMessageUid) {
+      throw new Error("This attachment is missing source mailbox metadata.");
     }
 
-    window.alert(`Opening ${attachment.name}`);
+    if (sourceMailbox.provider === "google") {
+      return downloadGmailAttachment({
+        email: sourceMailbox.email.trim(),
+        messageId: sourceMessageUid,
+        attachmentId: attachment.id,
+      });
+    }
+
+    if (sourceMailbox.provider === "custom_imap") {
+      const resolvedImapSettings = applyProviderDefaults(
+        sourceMailbox.provider,
+        sourceMailbox.customImap,
+        sourceMailbox.email,
+      );
+      const snapshot = readLiveInboxSnapshots()[sourceMailbox.id];
+
+      return downloadImapAttachment({
+        provider: sourceMailbox.provider,
+        email: sourceMailbox.email.trim(),
+        host: resolvedImapSettings.host.trim(),
+        port: resolvedImapSettings.port.trim(),
+        ssl: resolvedImapSettings.ssl,
+        username: resolvedImapSettings.username.trim() || sourceMailbox.email.trim(),
+        password: resolvedImapSettings.password,
+        folder: "INBOX",
+        uid: sourceMessageUid,
+        uidValidity: snapshot?.uidValidity ?? null,
+        attachmentId: attachment.id,
+      });
+    }
+
+    throw new Error("Attachment download is not available for this mailbox provider.");
+  };
+
+  const handleAttachmentOpen = async (
+    attachment: MailAttachment,
+    sourceMessage?: MailMessage,
+  ) => {
+    try {
+      if (attachment.file) {
+        saveAttachmentBlob(attachment.file, attachment.name);
+        return;
+      }
+
+      const downloadedBlob = await fetchReceivedAttachmentBlob(attachment, sourceMessage);
+      saveAttachmentBlob(downloadedBlob, attachment.name);
+    } catch (error) {
+      console.error("Attachment download failed", error);
+      window.alert(
+        error instanceof Error
+          ? error.message
+          : `Could not download ${attachment.name}.`,
+      );
+    }
   };
 
   const renderAttachmentItem = (
     attachment: MailAttachment,
-    options?: { removable?: boolean; onRemove?: () => void },
+    options?: { removable?: boolean; onRemove?: () => void; message?: MailMessage },
   ) => {
     const attachmentType = getAttachmentType(attachment);
     const attachmentSize = formatAttachmentSize(attachment.size);
@@ -11742,7 +11834,7 @@ function MailboxView({
       >
         <button
           type="button"
-          onClick={() => handleAttachmentOpen(attachment)}
+          onClick={() => handleAttachmentOpen(attachment, options?.message)}
           className="flex min-w-[168px] items-center gap-3 rounded-[18px] border border-[var(--workspace-border)] bg-[var(--workspace-card-subtle)] px-3.5 py-3 text-left transition-[background-color,border-color,box-shadow,transform] duration-150 hover:border-[var(--workspace-border-hover)] hover:bg-[var(--workspace-hover-surface)] hover:shadow-[0_8px_18px_rgba(48,38,29,0.08)] focus-visible:outline-none"
         >
           <span className="inline-flex h-9 min-w-[2.75rem] items-center justify-center rounded-[12px] border border-[color:rgba(120,104,89,0.12)] bg-[color:rgba(255,252,247,0.82)] px-2 text-[0.62rem] font-medium uppercase tracking-[0.12em] text-[var(--workspace-text-soft)]">
@@ -11923,12 +12015,11 @@ function MailboxView({
     );
   };
 
-  const serializeComposeAttachment = async (attachment: MailAttachment) => {
-    if (!attachment.file) {
-      return null;
-    }
-
-    const bytes = new Uint8Array(await attachment.file.arrayBuffer());
+  const serializeAttachmentBlob = async (
+    attachment: MailAttachment,
+    blob: Blob,
+  ): Promise<SendInboxAttachmentRequest> => {
+    const bytes = new Uint8Array(await blob.arrayBuffer());
     let binary = "";
 
     bytes.forEach((byte) => {
@@ -11940,6 +12031,19 @@ function MailboxView({
       mimeType: attachment.mimeType,
       contentBase64: btoa(binary),
     };
+  };
+
+  const serializeComposeAttachment = async (attachment: MailAttachment) => {
+    if (attachment.file) {
+      return serializeAttachmentBlob(attachment, attachment.file);
+    }
+
+    if (attachment.receivedSource) {
+      const downloadedBlob = await fetchReceivedAttachmentBlob(attachment);
+      return serializeAttachmentBlob(attachment, downloadedBlob);
+    }
+
+    throw new Error(`Could not attach ${attachment.name}; source file data is unavailable.`);
   };
 
   const saveDraftAndClose = () => {
@@ -15850,7 +15954,7 @@ function MailboxView({
                 </div>
                 <div className="flex flex-wrap gap-3">
                   {(fullWidthMessage.attachments ?? []).map((attachment) =>
-                    renderAttachmentItem(attachment),
+                    renderAttachmentItem(attachment, { message: fullWidthMessage }),
                   )}
                   {!fullWidthMessage.attachments?.length ? (
                     <div className="text-[0.82rem] leading-6 text-[var(--workspace-text-faint)]">
@@ -16833,7 +16937,7 @@ function MailboxView({
                       </div>
                       <div className="flex flex-wrap gap-3">
                         {(selectedMessage.attachments ?? []).map((attachment) =>
-                          renderAttachmentItem(attachment),
+                          renderAttachmentItem(attachment, { message: selectedMessage }),
                         )}
                         {!selectedMessage.attachments?.length ? (
                           <div className="text-[0.82rem] leading-6 text-[var(--workspace-text-faint)]">
