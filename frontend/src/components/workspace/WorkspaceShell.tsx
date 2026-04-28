@@ -11730,6 +11730,11 @@ function MailboxView({
     return `${size} B`;
   };
 
+  const shouldShowInAttachmentList = (attachment: MailAttachment) =>
+    attachment.disposition !== "inline" &&
+    !attachment.contentId &&
+    !attachment.inlineSrc;
+
   const saveAttachmentBlob = (blob: Blob, name: string) => {
     const objectUrl = URL.createObjectURL(blob);
     const downloadAnchor = document.createElement("a");
@@ -15953,10 +15958,12 @@ function MailboxView({
                   Attachments
                 </div>
                 <div className="flex flex-wrap gap-3">
-                  {(fullWidthMessage.attachments ?? []).map((attachment) =>
-                    renderAttachmentItem(attachment, { message: fullWidthMessage }),
-                  )}
-                  {!fullWidthMessage.attachments?.length ? (
+                  {(fullWidthMessage.attachments ?? [])
+                    .filter(shouldShowInAttachmentList)
+                    .map((attachment) =>
+                      renderAttachmentItem(attachment, { message: fullWidthMessage }),
+                    )}
+                  {!fullWidthMessage.attachments?.some(shouldShowInAttachmentList) ? (
                     <div className="text-[0.82rem] leading-6 text-[var(--workspace-text-faint)]">
                       No attachments
                     </div>
@@ -16936,10 +16943,12 @@ function MailboxView({
                         Attachments
                       </div>
                       <div className="flex flex-wrap gap-3">
-                        {(selectedMessage.attachments ?? []).map((attachment) =>
-                          renderAttachmentItem(attachment, { message: selectedMessage }),
-                        )}
-                        {!selectedMessage.attachments?.length ? (
+                        {(selectedMessage.attachments ?? [])
+                          .filter(shouldShowInAttachmentList)
+                          .map((attachment) =>
+                            renderAttachmentItem(attachment, { message: selectedMessage }),
+                          )}
+                        {!selectedMessage.attachments?.some(shouldShowInAttachmentList) ? (
                           <div className="text-[0.82rem] leading-6 text-[var(--workspace-text-faint)]">
                             No attachments
                           </div>
