@@ -1323,6 +1323,18 @@ function resolveVisibleClassification(
       !isMarketingNewsletterUpdate &&
       musicCampaignPromoSignal);
   const resolvedClassification = (() => {
+    console.log("[CLASSIFICATION DEBUG]", {
+      subject: message.subject,
+      sender: message.sender,
+      from: message.from,
+      to: message.to,
+      internalClassification: message.internalClassification,
+      signal: message.signal,
+      ui_signal: message.ui_signal,
+      strongExplicitPromoSubjectSignal,
+      hasStrongExplicitPromoSubjectCorrection,
+    });
+
     if (hasStrongExplicitPromoSubjectCorrection) {
       return "promo";
     }
