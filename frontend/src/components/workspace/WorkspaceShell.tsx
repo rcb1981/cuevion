@@ -6233,6 +6233,14 @@ function normalizeMailAttachment(attachment: MailAttachmentInput): MailAttachmen
   };
 }
 
+function shouldShowInAttachmentList(attachment: MailAttachment) {
+  return (
+    attachment.disposition !== "inline" &&
+    !attachment.contentId &&
+    !attachment.inlineSrc
+  );
+}
+
 function resolveMailDateMs(message: MailMessage) {
   if (message.createdAt) {
     const directDate = new Date(message.createdAt).getTime();
@@ -9872,6 +9880,8 @@ function MailboxView({
   });
   const activeComposeMailbox =
     orderedMailboxes.find((candidate) => candidate.id === composeMailboxId) ?? mailbox;
+  const visibleComposeAttachments = composeAttachments.filter(shouldShowInAttachmentList);
+  const visibleComposeAttachmentCount = visibleComposeAttachments.length;
   const composeSignatureOptions = orderedMailboxes
     .map((candidate) => {
       const signature = normalizeInboxSignatureSettings(inboxSignatures[candidate.id]);
@@ -10099,14 +10109,12 @@ function MailboxView({
     openCompose();
   };
 
-  const handleComposeAttachmentSelection = (event: ChangeEvent<HTMLInputElement>) => {
-    const selectedFiles = Array.from(event.target.files ?? []);
-
-    if (!selectedFiles.length) {
+  const addFilesToComposeAttachments = (files: File[]) => {
+    if (!files.length) {
       return;
     }
 
-    const nextAttachments = selectedFiles.map((file) =>
+    const nextAttachments = files.map((file) =>
       normalizeMailAttachment({
         id: createMailAttachmentId(file.name, file.size, file.type),
         name: file.name,
@@ -10127,8 +10135,36 @@ function MailboxView({
 
       return mergedAttachments;
     });
+  };
+
+  const handleComposeAttachmentSelection = (event: ChangeEvent<HTMLInputElement>) => {
+    const selectedFiles = Array.from(event.target.files ?? []);
+
+    addFilesToComposeAttachments(selectedFiles);
 
     event.target.value = "";
+  };
+
+  const hasDraggedFiles = (event: DragEvent<HTMLElement>) =>
+    Array.from(event.dataTransfer.types).includes("Files");
+
+  const handleComposeFileDragOver = (event: DragEvent<HTMLElement>) => {
+    if (!hasDraggedFiles(event)) {
+      return;
+    }
+
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+  };
+
+  const handleComposeFileDrop = (event: DragEvent<HTMLElement>) => {
+    if (!hasDraggedFiles(event)) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    addFilesToComposeAttachments(Array.from(event.dataTransfer.files ?? []));
   };
 
   const openComposeFromMessage = (
@@ -10885,7 +10921,7 @@ function MailboxView({
     const threadsWithAttachments = new Map<string, boolean>();
 
     folderMessages.forEach((message) => {
-      if ((message.attachments?.length ?? 0) === 0) {
+      if (!message.attachments?.some(shouldShowInAttachmentList)) {
         return;
       }
 
@@ -11729,11 +11765,6 @@ function MailboxView({
 
     return `${size} B`;
   };
-
-  const shouldShowInAttachmentList = (attachment: MailAttachment) =>
-    attachment.disposition !== "inline" &&
-    !attachment.contentId &&
-    !attachment.inlineSrc;
 
   const saveAttachmentBlob = (blob: Blob, name: string) => {
     const objectUrl = URL.createObjectURL(blob);
@@ -15604,7 +15635,11 @@ function MailboxView({
         </div>
 
         {isComposeOpen ? (
-		          <div className="min-h-0 flex-1 overflow-y-auto rounded-[24px] border border-[color:rgba(128,142,121,0.14)] bg-[linear-gradient(180deg,rgba(255,255,253,0.98),rgba(250,246,239,0.96))] p-5 shadow-[0_10px_28px_rgba(164,147,125,0.06)] dark:border-[var(--workspace-border-soft)] dark:bg-[linear-gradient(180deg,var(--workspace-card-featured-start),var(--workspace-card-featured-end))] md:p-6">
+          <div
+            onDragOver={handleComposeFileDragOver}
+            onDrop={handleComposeFileDrop}
+            className="min-h-0 flex-1 overflow-y-auto rounded-[24px] border border-[color:rgba(128,142,121,0.14)] bg-[linear-gradient(180deg,rgba(255,255,253,0.98),rgba(250,246,239,0.96))] p-5 shadow-[0_10px_28px_rgba(164,147,125,0.06)] dark:border-[var(--workspace-border-soft)] dark:bg-[linear-gradient(180deg,var(--workspace-card-featured-start),var(--workspace-card-featured-end))] md:p-6"
+          >
             <div className="space-y-5">
               <div className="flex items-center justify-between gap-4">
                 <h2 className="text-[1.3rem] font-medium tracking-tight text-[var(--workspace-text)] md:text-[1.45rem]">
@@ -15811,8 +15846,8 @@ function MailboxView({
                       Added files
                     </div>
                     <div className="flex flex-wrap gap-3">
-                      {composeAttachments.length > 0 ? (
-                        composeAttachments.map((attachment) =>
+                      {visibleComposeAttachmentCount > 0 ? (
+                        visibleComposeAttachments.map((attachment) =>
                           renderAttachmentItem(attachment, {
                             removable: true,
                             onRemove: () =>
@@ -15833,8 +15868,8 @@ function MailboxView({
                     <div className="flex items-center justify-between gap-4">
                       <div>
                         <div className="text-[0.82rem] leading-6 text-[var(--workspace-text-faint)]">
-                          {composeAttachments.length > 0
-                            ? `${composeAttachments.length} attachment${composeAttachments.length === 1 ? "" : "s"} ready`
+                          {visibleComposeAttachmentCount > 0
+                            ? `${visibleComposeAttachmentCount} attachment${visibleComposeAttachmentCount === 1 ? "" : "s"} ready`
                             : "Message ready to send"}
                         </div>
                         {composeSendError ? (
