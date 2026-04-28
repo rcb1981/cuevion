@@ -55,8 +55,7 @@ import {
   beginInboxConnection,
   buildConnectInboxRequest,
   connectInboxWithImap,
-  downloadGmailAttachment,
-  downloadImapAttachment,
+  downloadAttachment,
   fetchGmailInbox,
   sendGmailMessage,
   type SendInboxAttachmentRequest,
@@ -11765,7 +11764,8 @@ function MailboxView({
     }
 
     if (sourceMailbox.provider === "google") {
-      return downloadGmailAttachment({
+      return downloadAttachment({
+        provider: "gmail",
         email: sourceMailbox.email.trim(),
         messageId: sourceMessageUid,
         attachmentId: attachment.id,
@@ -11780,8 +11780,8 @@ function MailboxView({
       );
       const snapshot = readLiveInboxSnapshots()[sourceMailbox.id];
 
-      return downloadImapAttachment({
-        provider: sourceMailbox.provider,
+      return downloadAttachment({
+        provider: "imap",
         email: sourceMailbox.email.trim(),
         host: resolvedImapSettings.host.trim(),
         port: resolvedImapSettings.port.trim(),

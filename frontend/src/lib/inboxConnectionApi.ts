@@ -165,14 +165,15 @@ export type SendInboxAttachmentRequest = {
   contentBase64: string;
 };
 
-export type DownloadGmailAttachmentRequest = {
+export type DownloadAttachmentGmailRequest = {
+  provider: "gmail";
   email: string;
   messageId: string;
   attachmentId: string;
 };
 
-export type DownloadImapAttachmentRequest = {
-  provider: ProviderId;
+export type DownloadAttachmentImapRequest = {
+  provider: "imap";
   email: string;
   host: string;
   port: string;
@@ -184,6 +185,10 @@ export type DownloadImapAttachmentRequest = {
   uidValidity?: string | null;
   attachmentId: string;
 };
+
+export type DownloadAttachmentRequest =
+  | DownloadAttachmentGmailRequest
+  | DownloadAttachmentImapRequest;
 
 export type SendGmailMessageRequest = {
   provider: ProviderId;
@@ -479,10 +484,10 @@ async function readAttachmentDownloadError(
   return fallbackMessage;
 }
 
-export async function downloadGmailAttachment(
-  request: DownloadGmailAttachmentRequest,
+export async function downloadAttachment(
+  request: DownloadAttachmentRequest,
 ): Promise<Blob> {
-  const response = await fetch("/api/inboxes/download-gmail-attachment", {
+  const response = await fetch("/api/inboxes/download-attachment", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -494,30 +499,7 @@ export async function downloadGmailAttachment(
     throw new Error(
       await readAttachmentDownloadError(
         response,
-        "Could not download this Gmail attachment.",
-      ),
-    );
-  }
-
-  return response.blob();
-}
-
-export async function downloadImapAttachment(
-  request: DownloadImapAttachmentRequest,
-): Promise<Blob> {
-  const response = await fetch("/api/inboxes/download-imap-attachment", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(request),
-  });
-
-  if (!response.ok) {
-    throw new Error(
-      await readAttachmentDownloadError(
-        response,
-        "Could not download this IMAP attachment.",
+        "Could not download this attachment.",
       ),
     );
   }
