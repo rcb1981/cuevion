@@ -1086,6 +1086,27 @@ const smartFolderLabelOptions = [
   { value: "update", label: "Update" },
 ] as const;
 
+type SmartFolderNormalizedLabel = (typeof smartFolderLabelOptions)[number]["value"];
+
+function normalizeVisibleCategoryLabelValue(label: string): SmartFolderNormalizedLabel {
+  switch (label.trim().toLowerCase()) {
+    case "business":
+      return "business";
+    case "demo":
+      return "demo";
+    case "finance":
+      return "finance";
+    case "promo":
+      return "promo";
+    case "reply":
+      return "reply";
+    case "update":
+      return "update";
+    default:
+      return "other";
+  }
+}
+
 function getSmartFolderRuleMatchValue(
   message: MailMessage,
   field: SmartFolderRuleField,
@@ -1331,38 +1352,31 @@ function doesMessageMatchSmartFolderRule(
   return matchValue.includes(ruleValue);
 }
 
-function resolveVisibleSmartFolderLabelValue(
+function resolveVisibleCategoryLabelForMessageInContext(
   message: MailMessage,
-  options?: {
-    mailboxContext?: Pick<ManagedWorkspaceInbox | OrderedMailbox, "id" | "title" | "email"> | null;
-  },
+  preferPromoMailboxContext: boolean,
 ) {
   const visibilityClassification = resolveVisibleClassification(message);
-  const preferPromoMailboxContext =
-    options?.mailboxContext ? isPromoMailboxContext(options.mailboxContext) : false;
 
   switch (visibilityClassification) {
     case "demo":
     case "high_priority_demo":
-      return "demo" as const;
+      return "Demo";
     case "finance":
     case "royalty_statement":
-      return "finance" as const;
+      return "Finance";
     case "promo":
     case "promo_reminder":
-      return "promo" as const;
+      return "Promo";
     case "business":
-    case "business_reminder": {
-      const heuristic = inferHeuristicSignal({
-        ...message,
-        signal: undefined,
-        isAutoReply: false,
-      });
-      return heuristic === "Promo" ? ("promo" as const) : ("business" as const);
-    }
+    case "business_reminder":
+      return "Business";
     case "workflow_update":
     case "info": {
-      if (preferPromoMailboxContext) {
+      if (
+        preferPromoMailboxContext &&
+        !isBroadcastPromoMessage(message)
+      ) {
         const heuristic = inferHeuristicSignal({
           ...message,
           signal: undefined,
@@ -1370,19 +1384,36 @@ function resolveVisibleSmartFolderLabelValue(
         });
 
         if (heuristic === "Promo") {
-          return "promo" as const;
+          return "Promo";
         }
       }
 
-      return "update" as const;
+      return "Update";
     }
     case "distributor_update":
-      return "update" as const;
+      return "Update";
     case "reply":
-      return "reply" as const;
+      return "Reply";
     default:
-      return "other" as const;
+      return "Other";
   }
+}
+
+function resolveVisibleSmartFolderLabelValue(
+  message: MailMessage,
+  options?: {
+    mailboxContext?: Pick<ManagedWorkspaceInbox | OrderedMailbox, "id" | "title" | "email"> | null;
+  },
+) {
+  const preferPromoMailboxContext =
+    options?.mailboxContext ? isPromoMailboxContext(options.mailboxContext) : false;
+
+  return normalizeVisibleCategoryLabelValue(
+    resolveVisibleCategoryLabelForMessageInContext(
+      message,
+      preferPromoMailboxContext,
+    ),
+  );
 }
 
 function doesMessageMatchSmartFolder(
@@ -10314,47 +10345,10 @@ function MailboxView({
     message: MailMessage,
     preferPromoMailboxContext: boolean,
   ) {
-    const visibilityClassification = resolveVisibilityClassificationForMessage(message);
-
-    switch (visibilityClassification) {
-      case "demo":
-      case "high_priority_demo":
-        return "Demo";
-      case "finance":
-      case "royalty_statement":
-        return "Finance";
-      case "promo":
-      case "promo_reminder":
-        return "Promo";
-      case "business":
-      case "business_reminder":
-        return "Business";
-      case "workflow_update":
-      case "info": {
-        if (
-          preferPromoMailboxContext &&
-          !isBroadcastPromoMessage(message)
-        ) {
-          const heuristic = inferHeuristicSignal({
-            ...message,
-            signal: undefined,
-            isAutoReply: false,
-          });
-
-          if (heuristic === "Promo") {
-            return "Promo";
-          }
-        }
-
-        return "Update";
-      }
-      case "distributor_update":
-        return "Update";
-      case "reply":
-        return "Reply";
-      default:
-        return "Other";
-    }
+    return resolveVisibleCategoryLabelForMessageInContext(
+      message,
+      preferPromoMailboxContext,
+    );
   }
   function getVisiblePriorityBadgeForMessageInContext(
     message: MailMessage,
@@ -10583,6 +10577,18 @@ function MailboxView({
       },
     );
   };
+  const getSmartFolderCandidateInboxRowSet = (
+    mailboxId: InboxId,
+    folder: SmartFolderDefinition,
+  ) => {
+    const hasLabelRule = folder.rules.some((rule) => rule.field === "Label");
+
+    if (hasLabelRule) {
+      return getSmartFolderMailboxCollections(mailboxId).Inbox;
+    }
+
+    return getSmartFolderVisibleInboxRowSet(mailboxId);
+  };
   const isArchivedInCuevionForMailbox = (
     mailboxId: InboxId,
     message: MailMessage,
@@ -10602,7 +10608,7 @@ function MailboxView({
   const smartFolderEntries = activeSmartFolder
     ? dedupeSmartFolderEntriesByCanonicalIdentity(
         smartFolderScopeMailboxIds.flatMap((mailboxId) =>
-          getSmartFolderVisibleInboxRowSet(mailboxId)
+          getSmartFolderCandidateInboxRowSet(mailboxId, activeSmartFolder)
             .filter((message) =>
               doesMessageMatchSmartFolder(
                 message,
@@ -14716,7 +14722,7 @@ function MailboxView({
         : orderedMailboxes.map((candidate) => candidate.id);
     const candidateMessages = folder
       ? scopeMailboxIds.flatMap((mailboxId) =>
-          getSmartFolderVisibleInboxRowSet(mailboxId).filter((message) =>
+          getSmartFolderCandidateInboxRowSet(mailboxId, folder).filter((message) =>
             doesMessageMatchSmartFolder(
               message,
               folder,
