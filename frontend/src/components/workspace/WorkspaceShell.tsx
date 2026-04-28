@@ -1333,7 +1333,8 @@ function resolveVisibleClassification(
         message.internalClassification === "business" ||
         message.internalClassification === "business_reminder") &&
       isBroadcastPromoMessage(message) &&
-      !looksLikeMusicReleasePromo
+      !looksLikeMusicReleasePromo &&
+      !strongExplicitPromoSubjectSignal
     ) {
       return "workflow_update";
     }
@@ -16424,31 +16425,6 @@ function MailboxView({
                       const categoryLabel = activeSmartFolder
                         ? getSmartFolderVisibleCategoryLabelForMessage(message)
                         : getVisibleCategoryLabelForMessage(message);
-                      const rowVisibleClassification = resolveVisibleClassification(message);
-                      if (
-                        categoryLabel === "Update" &&
-                        (/\[\s*promo\s*\]/i.test(message.subject ?? "") ||
-                          /^promo\b/i.test((message.subject ?? "").trim()) ||
-                          (message.sender ?? "").toLowerCase().includes("promo") ||
-                          (message.from ?? "").toLowerCase().includes("promo") ||
-                          (message.to ?? "").toLowerCase().includes("promo@"))
-                      ) {
-                        console.log("[ROW LABEL DEBUG]", {
-                          id: message.id,
-                          imapUid: message.imapUid,
-                          threadId: message.threadId,
-                          resolvedThreadId: resolveMailThreadId(message),
-                          subject: message.subject,
-                          sender: message.sender,
-                          from: message.from,
-                          to: message.to,
-                          internalClassification: message.internalClassification,
-                          signal: message.signal,
-                          ui_signal: message.ui_signal,
-                          rowVisibleClassification,
-                          categoryLabel,
-                        });
-                      }
                       const signal =
                         message.signal === "Sent"
                           ? ""
