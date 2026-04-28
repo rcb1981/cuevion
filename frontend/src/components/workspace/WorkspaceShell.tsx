@@ -1249,11 +1249,13 @@ function resolveVisibleClassification(
     /\b\d{1,2}\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)\b/i.test(
       subjectText,
     );
-  const explicitPromoIdentitySignal =
+  const strongExplicitPromoSubjectSignal =
     /\[\s*promo\s*\]/i.test(subjectText) ||
     /^promo\b/i.test(subjectText.trim()) ||
     /\spromo\s/i.test(subjectText) ||
-    /\bpromo\s*\|/i.test(subjectText) ||
+    /\bpromo\s*\|/i.test(subjectText);
+  const explicitPromoIdentitySignal =
+    strongExplicitPromoSubjectSignal ||
     includesAnyKeyword(
       [message.sender ?? "", message.from ?? "", message.to ?? ""].join(" ").toLowerCase(),
       [
@@ -1288,6 +1290,30 @@ function resolveVisibleClassification(
   const hasStrongPromoEligibleClassification =
     hasUpdateLikeVisibleClassification ||
     message.internalClassification === "business_reminder";
+  const isStrongPromoSubjectProtectedClassification = [
+    message.internalClassification,
+    signalClassification,
+  ].some(
+    (classification) =>
+      classification === "reply" ||
+      classification === "demo" ||
+      classification === "high_priority_demo" ||
+      classification === "finance" ||
+      classification === "royalty_statement",
+  );
+  const hasStrongExplicitPromoSubjectCorrection =
+    strongExplicitPromoSubjectSignal &&
+    !isStrongPromoSubjectProtectedClassification &&
+    (message.internalClassification === "workflow_update" ||
+      message.internalClassification === "distributor_update" ||
+      message.internalClassification === "info" ||
+      message.internalClassification === "business_reminder" ||
+      message.internalClassification === "business" ||
+      message.internalClassification === "unknown" ||
+      (!message.internalClassification &&
+        (signalClassification === "workflow_update" ||
+          signalClassification === "business" ||
+          signalClassification === "unknown")));
   const hasExplicitMusicPromoCampaignSignal =
     (hasStrongPromoEligibleClassification && explicitPromoIdentitySignal) ||
     (!message.collaboration &&
@@ -1297,6 +1323,10 @@ function resolveVisibleClassification(
       !isMarketingNewsletterUpdate &&
       musicCampaignPromoSignal);
   const resolvedClassification = (() => {
+    if (hasStrongExplicitPromoSubjectCorrection) {
+      return "promo";
+    }
+
     if (
       (signalClassification === "promo" ||
         signalClassification === "business" ||
