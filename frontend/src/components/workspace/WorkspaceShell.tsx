@@ -1252,6 +1252,8 @@ function resolveVisibleClassification(
   const explicitPromoIdentitySignal =
     /\[\s*promo\s*\]/i.test(subjectText) ||
     /^promo\b/i.test(subjectText.trim()) ||
+    /\spromo\s/i.test(subjectText) ||
+    /\bpromo\s*\|/i.test(subjectText) ||
     includesAnyKeyword(
       [message.sender ?? "", message.from ?? "", message.to ?? ""].join(" ").toLowerCase(),
       [
@@ -1280,14 +1282,20 @@ function resolveVisibleClassification(
       "inflyte",
       "fatdrop",
     ]);
+  const hasUpdateLikeVisibleClassification =
+    message.internalClassification === "workflow_update" ||
+    message.internalClassification === "info";
+  const hasStrongPromoEligibleClassification =
+    hasUpdateLikeVisibleClassification ||
+    message.internalClassification === "business_reminder";
   const hasExplicitMusicPromoCampaignSignal =
-    !message.collaboration &&
-    !message.isShared &&
-    !message.sharedContext &&
-    (message.internalClassification === "workflow_update" ||
-      message.internalClassification === "info") &&
-    (explicitPromoIdentitySignal ||
-      (!isMarketingNewsletterUpdate && musicCampaignPromoSignal));
+    (hasStrongPromoEligibleClassification && explicitPromoIdentitySignal) ||
+    (!message.collaboration &&
+      !message.isShared &&
+      !message.sharedContext &&
+      hasUpdateLikeVisibleClassification &&
+      !isMarketingNewsletterUpdate &&
+      musicCampaignPromoSignal);
   const resolvedClassification = (() => {
     if (
       (signalClassification === "promo" ||
@@ -1310,8 +1318,9 @@ function resolveVisibleClassification(
     }
 
     if (
-      message.internalClassification === "workflow_update" &&
-      (looksLikeMusicReleasePromo || hasExplicitMusicPromoCampaignSignal)
+      (message.internalClassification === "workflow_update" &&
+        looksLikeMusicReleasePromo) ||
+      hasExplicitMusicPromoCampaignSignal
     ) {
       return "promo";
     }
