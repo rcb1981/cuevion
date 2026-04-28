@@ -1198,7 +1198,8 @@ function resolveVisibleClassification(
   message: Pick<
     MailMessage,
     "internalClassification" | "signal" | "ui_signal" | "subject" | "snippet" | "sender" | "from" | "body"
-  >,
+  > &
+    Partial<Pick<MailMessage, "to" | "collaboration" | "isShared" | "sharedContext">>,
 ): CuevionInternalClassification {
   const signalClassification = (() => {
     switch (message.ui_signal ?? message.signal) {
@@ -1231,6 +1232,16 @@ function resolveVisibleClassification(
   const isMarketingNewsletterUpdate = isMarketingNewsletterUpdateMessage(message);
   const subjectText = message.subject ?? "";
   const senderText = message.sender ?? "";
+  const explicitMusicPromoText = [
+    message.subject ?? "",
+    message.snippet ?? "",
+    message.sender ?? "",
+    message.from ?? "",
+    message.to ?? "",
+    ...(message.body ?? []),
+  ]
+    .join(" ")
+    .toLowerCase();
   const looksLikeMusicReleasePromo =
     (message.signal === "Promo" || message.ui_signal === "PROMO") &&
     senderText.toLowerCase().includes("promo") &&
@@ -1238,6 +1249,41 @@ function resolveVisibleClassification(
     /\b\d{1,2}\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)\b/i.test(
       subjectText,
     );
+  const hasExplicitMusicPromoCampaignSignal =
+    !message.collaboration &&
+    !message.isShared &&
+    !message.sharedContext &&
+    !isMarketingNewsletterUpdate &&
+    message.internalClassification === "workflow_update" &&
+    (/\[\s*promo\s*\]/i.test(subjectText) ||
+      /^promo\b/i.test(subjectText.trim()) ||
+      includesAnyKeyword(
+        [message.sender ?? "", message.from ?? "", message.to ?? ""].join(" ").toLowerCase(),
+        [
+          "digital promo sound",
+          "promo@",
+          " promo ",
+          "promo.",
+          "promo-",
+        ],
+      ) ||
+      (includesAnyKeyword(explicitMusicPromoText, [
+        "upcoming single",
+        "remix",
+        "out now",
+        "out on",
+        "club-ready",
+        "release",
+        "promo campaign",
+      ]) &&
+        includesAnyKeyword(explicitMusicPromoText, [
+          "promo",
+          "promotional",
+          "for your sets",
+          "soundcloud",
+          "inflyte",
+          "fatdrop",
+        ])));
   const resolvedClassification = (() => {
     if (
       (signalClassification === "promo" ||
@@ -1261,7 +1307,7 @@ function resolveVisibleClassification(
 
     if (
       message.internalClassification === "workflow_update" &&
-      looksLikeMusicReleasePromo
+      (looksLikeMusicReleasePromo || hasExplicitMusicPromoCampaignSignal)
     ) {
       return "promo";
     }
