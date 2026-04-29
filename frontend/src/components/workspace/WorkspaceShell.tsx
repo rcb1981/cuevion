@@ -15203,30 +15203,38 @@ function MailboxView({
         };
       })()
     : null;
-  const activeInboxMoveLabel =
-    mailbox.title.trim().length > 0
-      ? mailbox.title.endsWith("Inbox")
-        ? mailbox.title
-        : `${mailbox.title} Inbox`
-      : "Inbox";
   const moveTargets = [
-    { label: activeInboxMoveLabel, type: "folder" as const, folder: "Inbox" as MailFolder },
-    { label: "Filtered", type: "folder" as const, folder: "Filtered" as MailFolder },
-    { label: "Drafts", type: "folder" as const, folder: "Drafts" as MailFolder },
-    { label: "Sent", type: "folder" as const, folder: "Sent" as MailFolder },
-    { label: "Archive", type: "folder" as const, folder: "Archive" as MailFolder },
-    { label: "Spam", type: "folder" as const, folder: "Spam" as MailFolder },
-    { label: "Trash", type: "folder" as const, folder: "Trash" as MailFolder },
-    ...orderedMailboxes
-      .filter((candidate) => candidate.id !== mailbox.id)
-      .map((candidate) => ({
-        label: candidate.title.endsWith("Inbox")
-          ? candidate.title
-          : `${candidate.title} Inbox`,
-        type: "mailbox" as const,
-        mailboxId: candidate.id,
-      })),
-  ];
+    ...(activeFolder !== "Inbox"
+      ? [{ label: "Inbox", folder: "Inbox" as MailFolder }]
+      : []),
+    { label: "Filtered", folder: "Filtered" as MailFolder },
+    { label: "Archive", folder: "Archive" as MailFolder },
+    { label: "Spam", folder: "Spam" as MailFolder },
+    { label: "Trash", folder: "Trash" as MailFolder },
+  ].filter((target) => target.folder !== activeFolder);
+  const moveMessagesToManualTarget = (targetFolder: MailFolder, messageIds: string[]) => {
+    const targetMessages = getMessagesByIds(messageIds);
+
+    if (targetFolder === "Spam") {
+      onAddSpamSuppression(targetMessages);
+    }
+
+    if (targetFolder === "Inbox") {
+      onRemoveSpamSuppression(targetMessages);
+    }
+
+    if (isSharedView) {
+      moveMessagesAcrossWorkspace(mailbox.id, targetFolder, messageIds);
+      return;
+    }
+
+    if (activeSmartFolder || activeFolder === "Spam") {
+      moveMessagesToFolderAcrossWorkspace(targetFolder, messageIds);
+      return;
+    }
+
+    moveMessages(mailbox.id, activeFolder, mailbox.id, targetFolder, messageIds);
+  };
   const moveSubmenuPosition =
     contextMenuState?.moveMenuOpen &&
     contextMenuPosition &&
@@ -16161,53 +16169,10 @@ function MailboxView({
                 <div className="my-2 h-px bg-[color:rgba(120,104,89,0.12)]" />
                 {moveTargets.map((target) => (
                   <button
-                    key={`toolbar-${target.type}-${target.label}`}
+                    key={`toolbar-folder-${target.folder}`}
                     type="button"
                     onClick={() => {
-                      if (target.type === "folder") {
-                        if (isSharedView) {
-                          moveMessagesAcrossWorkspace(
-                            mailbox.id,
-                            target.folder,
-                            visibleSelectedMessageIds,
-                          );
-                          return;
-                        }
-
-                        if (activeSmartFolder) {
-                          moveMessagesToFolderAcrossWorkspace(
-                            target.folder,
-                            visibleSelectedMessageIds,
-                          );
-                          return;
-                        }
-
-                        moveMessages(
-                          mailbox.id,
-                          activeFolder,
-                          mailbox.id,
-                          target.folder,
-                          visibleSelectedMessageIds,
-                        );
-                        return;
-                      }
-
-                      if (isSharedView) {
-                        moveMessagesAcrossWorkspace(
-                          target.mailboxId,
-                          "Inbox",
-                          visibleSelectedMessageIds,
-                        );
-                        return;
-                      }
-
-                      moveMessages(
-                        mailbox.id,
-                        activeFolder,
-                        target.mailboxId,
-                        "Inbox",
-                        visibleSelectedMessageIds,
-                      );
+                      moveMessagesToManualTarget(target.folder, visibleSelectedMessageIds);
                     }}
                     className={contextMenuMainItemClass}
                   >
@@ -17925,55 +17890,12 @@ function MailboxView({
                 onMouseDown={(event) => event.stopPropagation()}
               >
                 <div className="space-y-1">
-                  {moveTargets.map((target, index) => (
+                  {moveTargets.map((target) => (
                     <button
-                      key={`${target.type}-${target.label}`}
+                      key={`context-folder-${target.folder}`}
                       type="button"
                       onClick={() => {
-                        if (target.type === "folder") {
-                          if (isSharedView) {
-                            moveMessagesAcrossWorkspace(
-                              mailbox.id,
-                              target.folder,
-                              contextMenuSelectionIds,
-                            );
-                            return;
-                          }
-
-                          if (activeSmartFolder || activeFolder === "Spam") {
-                            moveMessagesToFolderAcrossWorkspace(
-                              target.folder,
-                              contextMenuSelectionIds,
-                            );
-                            return;
-                          }
-
-                          moveMessages(
-                            mailbox.id,
-                            activeFolder,
-                            mailbox.id,
-                            target.folder,
-                            contextMenuSelectionIds,
-                          );
-                          return;
-                        }
-
-                        if (isSharedView || activeFolder === "Spam") {
-                          moveMessagesAcrossWorkspace(
-                            target.mailboxId,
-                            "Inbox",
-                            contextMenuSelectionIds,
-                          );
-                          return;
-                        }
-
-                        moveMessages(
-                          mailbox.id,
-                          activeFolder,
-                          target.mailboxId,
-                          "Inbox",
-                          contextMenuSelectionIds,
-                        );
+                        moveMessagesToManualTarget(target.folder, contextMenuSelectionIds);
                       }}
                       className={contextMenuItemClass}
                     >
