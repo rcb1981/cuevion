@@ -5969,6 +5969,14 @@ function buildReplyParticipantKey(message: SafeThreadGroupingMessage) {
   return Array.from(new Set(participants)).join(",");
 }
 
+function buildConversationGroupingKey(
+  normalizedSubject: string,
+  mailboxPrefix: string,
+  participantKey: string,
+) {
+  return `conversation:${mailboxPrefix}${normalizedSubject}|${participantKey}`;
+}
+
 function resolveSafeThreadGroupingKey(
   message: SafeThreadGroupingMessage,
   mailboxId?: InboxId | string,
@@ -5976,19 +5984,23 @@ function resolveSafeThreadGroupingKey(
   const normalizedSubject = normalizeThreadSubject(message.subject);
   const threadId = message.threadId?.trim();
   const mailboxPrefix = mailboxId ? `${mailboxId}|` : "";
+  const isGenericSubject = isGenericThreadSubject(message.subject);
+  const participantKey = buildReplyParticipantKey(message);
 
   if (threadId && threadId !== normalizedSubject) {
     return `thread:${threadId}`;
   }
 
   if (hasStrongReplyThreadEvidence(message)) {
-    const participantKey = buildReplyParticipantKey(message);
-
-    return `reply:${mailboxPrefix}${normalizedSubject}|${participantKey}`;
+    return buildConversationGroupingKey(normalizedSubject, mailboxPrefix, participantKey);
   }
 
-  if (isGenericThreadSubject(message.subject) && (!threadId || isLikelySubjectFallbackThreadId(message))) {
+  if (isGenericSubject && (!threadId || isLikelySubjectFallbackThreadId(message))) {
     return `message:${message.imapUid || message.id || `${normalizedSubject}|${message.from ?? ""}|${message.timestamp}`}`;
+  }
+
+  if (participantKey) {
+    return buildConversationGroupingKey(normalizedSubject, mailboxPrefix, participantKey);
   }
 
   const normalizedSender = normalizeSenderLearningKey(message.from ?? message.sender ?? "");
