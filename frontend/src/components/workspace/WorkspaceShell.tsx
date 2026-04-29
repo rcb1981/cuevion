@@ -1219,6 +1219,103 @@ function isBroadcastPromoMessage(
   );
 }
 
+type PromoHeuristicMessage = Pick<
+  MailMessage,
+  "subject" | "snippet" | "sender" | "from" | "body"
+> &
+  Partial<Pick<MailMessage, "to">>;
+
+function isStrongMusicPromoMessage(message: PromoHeuristicMessage) {
+  const subjectText = message.subject ?? "";
+  const identityText = [message.sender, message.from].join(" ").toLowerCase();
+  const toText = (message.to ?? "").toLowerCase();
+  const searchableText = [
+    message.subject,
+    message.snippet,
+    message.sender,
+    message.from,
+    message.to ?? "",
+    ...(message.body ?? []),
+  ]
+    .join(" ")
+    .toLowerCase();
+  const hasMusicReleaseContext = includesAnyKeyword(searchableText, [
+    "remix",
+    "track",
+    "release",
+    "upcoming single",
+    "out now",
+    "out on",
+    "club-ready",
+    "for your sets",
+  ]);
+
+  return (
+    /\[\s*promo\s*\]/i.test(subjectText) ||
+    /^promo\b/i.test(subjectText.trim()) ||
+    identityText.includes("digital promo sound") ||
+    includesAnyKeyword(searchableText, ["inflyte", "fatdrop"]) ||
+    (identityText.includes("disco-mailer.net") && hasMusicReleaseContext) ||
+    (toText.includes("promo@") && hasMusicReleaseContext)
+  );
+}
+
+function isGenericRetailMarketingUpdateMessage(message: PromoHeuristicMessage) {
+  if (isStrongMusicPromoMessage(message)) {
+    return false;
+  }
+
+  const subjectText = (message.subject ?? "").toLowerCase();
+  const searchableText = [
+    message.subject,
+    message.snippet,
+    message.sender,
+    message.from,
+    message.to ?? "",
+    ...(message.body ?? []),
+  ]
+    .join(" ")
+    .toLowerCase();
+  const hasBusinessOrFinanceActionSignal = includesAnyKeyword(searchableText, [
+    "contract",
+    "agreement",
+    "invoice",
+    "payment",
+    "approve",
+    "approval",
+    "rights",
+    "license",
+    "legal",
+    "finance",
+    "please review",
+    "please confirm",
+    "please send",
+    "can you",
+    "could you",
+  ]);
+  const isReplyOrForwardThread = /^(re|fw|fwd):/i.test(subjectText.trim());
+
+  if (hasBusinessOrFinanceActionSignal || isReplyOrForwardThread) {
+    return false;
+  }
+
+  return includesAnyKeyword(searchableText, [
+    "offer",
+    "discount",
+    "sale",
+    "save",
+    "coupon",
+    "promo code",
+    "cart",
+    "shop",
+    "store",
+    "limited time",
+    "last chance",
+    "ends tomorrow",
+    "unsubscribe",
+  ]);
+}
+
 function resolveVisibleClassification(
   message: Pick<
     MailMessage,
@@ -1348,6 +1445,10 @@ function resolveVisibleClassification(
       !isMarketingNewsletterUpdate &&
       musicCampaignPromoSignal);
   const resolvedClassification = (() => {
+    if (isGenericRetailMarketingUpdateMessage(message)) {
+      return "workflow_update";
+    }
+
     if (hasStrongExplicitPromoSubjectCorrection) {
       return "promo";
     }
@@ -4642,6 +4743,8 @@ function inferHeuristicSignal(
     searchableText,
     metaBillingKeywords,
   );
+  const isGenericRetailMarketingUpdate =
+    isGenericRetailMarketingUpdateMessage(message);
   // A promo keyword in the subject is a strong, intentional signal — do not let
   // isMetaBillingSystemMail suppress it.  Billing keywords are detected from the
   // full body/footer and are too broad ("ads", "advertentie") to override an
@@ -4665,6 +4768,10 @@ function inferHeuristicSignal(
 
   if (isMetaBillingSystemMail && !hasClearMarketingNewsletterSignal) {
     return "Finance";
+  }
+
+  if (isGenericRetailMarketingUpdate) {
+    return "Update";
   }
 
   if (hasClearMarketingNewsletterSignal && !isPromo) {
@@ -5553,11 +5660,33 @@ function getLocalAutoPriorityScore(
     isGoogleSecurityAuthMail ||
     isMetaBillingSystemMail ||
     (isNoReplySender && isPureInfoLowActionMail);
+  const isGenericRetailMarketingUpdate =
+    isGenericRetailMarketingUpdateMessage(message);
+  const hasBusinessOrFinanceActionSignal = includesAnyKeyword(searchableText, [
+    "contract",
+    "agreement",
+    "invoice",
+    "payment",
+    "approve",
+    "approval",
+    "rights",
+    "license",
+    "legal",
+    "finance",
+  ]);
 
   let score = 0;
 
   if (hasHardSuppressibleSystemPattern && !hasRealHumanActionProtection) {
     return -10;
+  }
+
+  if (
+    isGenericRetailMarketingUpdate &&
+    !hasRealHumanActionProtection &&
+    !hasBusinessOrFinanceActionSignal
+  ) {
+    return -4;
   }
 
   if (message.signal === "Priority") {
