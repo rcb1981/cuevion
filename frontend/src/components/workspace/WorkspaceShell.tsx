@@ -1255,6 +1255,19 @@ function isStrongMusicPromoMessage(message: PromoHeuristicMessage) {
     "club-ready",
     "for your sets",
   ]);
+  const hasPromoboxEvidence =
+    identityText.includes("promobox-reply@label-worx.com") ||
+    searchableText.includes("promobox");
+  const hasPromoServicingDownloadEvidence = includesAnyKeyword(searchableText, [
+    "promo download page",
+    "limited promo download package",
+    "promotional mail out",
+  ]);
+  const hasPromoboxMusicReleaseContext =
+    hasMusicReleaseContext ||
+    includesAnyKeyword(searchableText, ["club", "dancefloor", "tech house"]) ||
+    ((toText.includes("promos@") || toText.includes("promo@")) &&
+      /\s[-–:]\s/.test(subjectText));
 
   return (
     /\[\s*promo\s*\]/i.test(subjectText) ||
@@ -1262,6 +1275,9 @@ function isStrongMusicPromoMessage(message: PromoHeuristicMessage) {
     identityText.includes("digital promo sound") ||
     includesAnyKeyword(searchableText, ["inflyte", "fatdrop"]) ||
     (identityText.includes("disco-mailer.net") && hasMusicReleaseContext) ||
+    (hasPromoboxEvidence &&
+      hasPromoServicingDownloadEvidence &&
+      hasPromoboxMusicReleaseContext) ||
     (toText.includes("promo@") && hasMusicReleaseContext)
   );
 }
