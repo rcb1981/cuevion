@@ -2081,6 +2081,7 @@ function shouldRenderKnownProviderHtmlOnLightCanvas(
   }
 
   const identityText = [message.sender, message.from].join(" ").toLowerCase();
+  const htmlText = normalizedHtml.toLowerCase();
   const contentText = [message.subject, normalizedHtml].join(" ").toLowerCase();
 
   return (
@@ -2098,7 +2099,11 @@ function shouldRenderKnownProviderHtmlOnLightCanvas(
       "artistroyalties.wmg.com",
       "warner music",
       "spinnin",
-    ])
+    ]) ||
+    includesAnyKeyword(identityText, ["asish@seoserviceweb.com", "seoserviceweb.com"]) ||
+    contentText.includes("why your competitor is out ranking you") ||
+    (htmlText.includes("search engine optimization") &&
+      htmlText.includes("linktr.ee/asish.sahoo"))
   );
 }
 
