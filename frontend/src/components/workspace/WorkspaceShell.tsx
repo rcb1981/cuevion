@@ -244,10 +244,18 @@ type MessageIdentitySource = {
 };
 
 type MessageUnreadOverrideStore = Record<string, boolean>;
-type ManualLabelOverride = "Promo" | "Update" | "Finance" | "Business" | "Demo" | "Other";
+type ManualLabelOverride =
+  | "Reply"
+  | "Promo"
+  | "Update"
+  | "Finance"
+  | "Business"
+  | "Demo"
+  | "Other";
 type ManualLabelOverrideStore = Partial<Record<string, ManualLabelOverride>>;
 
 const manualLabelOverrideOptions: ManualLabelOverride[] = [
+  "Reply",
   "Promo",
   "Update",
   "Finance",
@@ -18079,6 +18087,9 @@ function MailboxView({
 	                      type="button"
 	                      onClick={() => {
 	                        onSetManualLabelOverride(contextMenuMessage, label);
+	                        if (label === "Reply") {
+	                          onSetManualPriority(contextMenuMessage.id, true);
+	                        }
 	                        closeMenus();
 	                      }}
 	                      className={contextMenuItemClass}
@@ -18160,6 +18171,9 @@ function MailboxView({
 	                          onClick={() => {
 	                            if (readingLearningTargetMessage) {
 	                              onSetManualLabelOverride(readingLearningTargetMessage, label);
+	                              if (label === "Reply") {
+	                                onSetManualPriority(readingLearningTargetMessage.id, true);
+	                              }
 	                            }
 	                            closeMenus();
 	                          }}
