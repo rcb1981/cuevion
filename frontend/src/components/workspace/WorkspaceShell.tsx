@@ -10607,6 +10607,12 @@ function MailboxView({
     addFilesToComposeAttachments(Array.from(event.dataTransfer.files ?? []));
   };
 
+  const closeReadingLearningMenu = () => {
+    setIsReadingLearningMenuOpen(false);
+    setIsReadingLearningLabelChooserOpen(false);
+    setActiveReadingLearningTrigger(null);
+  };
+
   const openComposeFromMessage = (
     message: MailMessage,
     mode: ComposeMode,
@@ -10663,6 +10669,7 @@ function MailboxView({
 
     }
 
+    closeReadingLearningMenu();
     setDetailActionsMenuState(null);
     resetComposeState();
     setIsCloseModalOpen(false);
@@ -12471,13 +12478,14 @@ function MailboxView({
             <button
               type="button"
               data-detail-actions-trigger
-              onClick={() =>
+              onClick={() => {
+                closeReadingLearningMenu();
                 setDetailActionsMenuState((current) =>
                   current?.messageId === message.id && current.placement === placement
                     ? null
                     : { messageId: message.id, placement },
-                )
-              }
+                );
+              }}
               className={actionClass}
             >
               More ▾
@@ -12826,9 +12834,7 @@ function MailboxView({
   const closeMenus = () => {
     setIsSortMenuOpen(false);
     setIsMoreMenuOpen(false);
-    setIsReadingLearningMenuOpen(false);
-    setIsReadingLearningLabelChooserOpen(false);
-    setActiveReadingLearningTrigger(null);
+    closeReadingLearningMenu();
     setDetailActionsMenuState(null);
     setContextMenuState(null);
     setSmartFolderMenuId(null);
@@ -16495,7 +16501,10 @@ function MailboxView({
 	                  {linkedReview && linkedReviewLabel ? (
 	                    <button
 	                      type="button"
-	                      onClick={() => onOpenLinkedReview(linkedReview.target)}
+	                      onClick={() => {
+	                        closeReadingLearningMenu();
+	                        onOpenLinkedReview(linkedReview.target);
+	                      }}
 	                      className="inline-flex rounded-full border border-[var(--workspace-border)] bg-[var(--workspace-hover-surface)] px-3 py-1 text-[0.68rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text)] transition-[background-color,border-color,color] duration-150 hover:border-[var(--workspace-border-hover)] hover:bg-[var(--workspace-hover-surface-strong)] focus-visible:outline-none"
 	                    >
 	                      {linkedReviewLabel}
@@ -16522,11 +16531,14 @@ function MailboxView({
                   ) : null}
                   <button
                     type="button"
-                    onClick={() => setIsFullMessageOpen(false)}
+                    onClick={() => {
+                      closeReadingLearningMenu();
+                      setIsFullMessageOpen(false);
+                    }}
                     className={closeActionButtonClass}
                   >
                     Close
-	                  </button>
+                  </button>
 	                </div>
 	              </div>
 	                );
@@ -17458,8 +17470,11 @@ function MailboxView({
 	                        {linkedReview && linkedReviewLabel ? (
 	                          <button
 	                            type="button"
-		                            onClick={() => onOpenLinkedReview(linkedReview.target)}
-		                            className="inline-flex rounded-full border border-[var(--workspace-border)] bg-[var(--workspace-hover-surface)] px-3 py-1 text-[0.68rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text)] transition-[background-color,border-color,color] duration-150 hover:border-[var(--workspace-border-hover)] hover:bg-[var(--workspace-hover-surface-strong)] focus-visible:outline-none"
+                            onClick={() => {
+                              closeReadingLearningMenu();
+                              onOpenLinkedReview(linkedReview.target);
+                            }}
+                            className="inline-flex rounded-full border border-[var(--workspace-border)] bg-[var(--workspace-hover-surface)] px-3 py-1 text-[0.68rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text)] transition-[background-color,border-color,color] duration-150 hover:border-[var(--workspace-border-hover)] hover:bg-[var(--workspace-hover-surface-strong)] focus-visible:outline-none"
 	                          >
 	                            {linkedReviewLabel}
 	                          </button>
