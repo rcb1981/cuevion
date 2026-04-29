@@ -12635,8 +12635,7 @@ function MailboxView({
         return;
       }
 
-      setActiveFolder("Sent");
-      setSelectionState([sentId], sentId, sentId);
+      setActiveFolder("Inbox");
       setIsFullMessageOpen(false);
       setIsComposeOpen(false);
       resetComposeState();
