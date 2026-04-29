@@ -8906,16 +8906,16 @@ function TopCards({
   onOpenPriority,
   onOpenNewEmails,
   onOpenInboxes,
-  primaryInboxTitle,
-  primaryInboxEmailCount,
+  newEmailsCount,
+  newEmailsContext,
   priorityInboxCount,
   connectedInboxCount,
 }: {
   onOpenPriority: () => void;
   onOpenNewEmails: () => void;
   onOpenInboxes: () => void;
-  primaryInboxTitle: string;
-  primaryInboxEmailCount: number;
+  newEmailsCount: number;
+  newEmailsContext: string;
   priorityInboxCount: number;
   connectedInboxCount: number;
 }) {
@@ -8932,8 +8932,8 @@ function TopCards({
     },
     {
       label: "New Emails",
-      value: String(primaryInboxEmailCount),
-      context: `Fresh messages ready in ${primaryInboxTitle}`,
+      value: String(newEmailsCount),
+      context: newEmailsContext,
       actionLabel: "Open inbox",
       onClick: onOpenNewEmails,
     },
@@ -9482,8 +9482,8 @@ function DashboardView({
   onOpenInboxes,
   notificationPreviewItems,
   recentActivityItems,
-  primaryInboxTitle,
-  primaryInboxEmailCount,
+  newEmailsCount,
+  newEmailsContext,
   priorityInboxCount,
   connectedInboxCount,
 }: {
@@ -9492,8 +9492,8 @@ function DashboardView({
   onOpenInboxes: () => void;
   notificationPreviewItems: VisibleNotificationItem[];
   recentActivityItems: VisibleActivityItem[];
-  primaryInboxTitle: string;
-  primaryInboxEmailCount: number;
+  newEmailsCount: number;
+  newEmailsContext: string;
   priorityInboxCount: number;
   connectedInboxCount: number;
 }) {
@@ -9529,8 +9529,8 @@ function DashboardView({
         onOpenPriority={onOpenPriority}
         onOpenNewEmails={onOpenPrimaryInbox}
         onOpenInboxes={onOpenInboxes}
-        primaryInboxTitle={primaryInboxTitle}
-        primaryInboxEmailCount={primaryInboxEmailCount}
+        newEmailsCount={newEmailsCount}
+        newEmailsContext={newEmailsContext}
         priorityInboxCount={priorityInboxCount}
         connectedInboxCount={connectedInboxCount}
       />
@@ -27282,13 +27282,28 @@ export function WorkspaceShell({
 
     return [...updatedCurrentMessages, ...genuinelyNewMessages];
   };
-  const primaryInboxEmailCount = getMailboxFolderBadgeCount(
-    mailboxStore[orderedMailboxes[0]?.id ?? "main"],
-    "Inbox",
-  );
   const connectedInboxCount = savedManagedInboxes.filter(
     (mailbox) => mailbox.connected,
   ).length;
+  const connectedMailboxIds = new Set(
+    savedManagedInboxes
+      .filter((mailbox) => mailbox.connected)
+      .map((mailbox) => mailbox.id),
+  );
+  const connectedOrderedMailboxes = orderedMailboxes.filter((mailbox) =>
+    connectedMailboxIds.has(mailbox.id),
+  );
+  const newEmailsCount = connectedOrderedMailboxes.reduce(
+    (total, mailbox) =>
+      total + getMailboxFolderBadgeCount(mailboxStore[mailbox.id], "Inbox"),
+    0,
+  );
+  const newEmailsContext =
+    connectedOrderedMailboxes.length === 1
+      ? `Fresh messages ready in ${connectedOrderedMailboxes[0].title}`
+      : connectedOrderedMailboxes.length > 1
+        ? "Fresh messages across all inboxes"
+        : `Fresh messages ready in ${primaryInboxTitle}`;
   const [mailboxResetToken, setMailboxResetToken] = useState(0);
   // Remembers the last selected message id per mailbox so MailboxView can
   // restore it when the user navigates away and back. Stored in a ref to
@@ -31772,8 +31787,8 @@ export function WorkspaceShell({
                   onOpenInboxes={() => handleOpenInboxes("Connected")}
                   notificationPreviewItems={prioritizedNotificationItems}
                   recentActivityItems={liveActivityItems}
-                  primaryInboxTitle={primaryInboxTitle}
-                  primaryInboxEmailCount={primaryInboxEmailCount}
+                  newEmailsCount={newEmailsCount}
+                  newEmailsContext={newEmailsContext}
                   priorityInboxCount={livePriorityInboxItems.length}
                   connectedInboxCount={connectedInboxCount}
                 />
