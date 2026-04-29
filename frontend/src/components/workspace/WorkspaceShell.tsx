@@ -5886,6 +5886,56 @@ function resolveMailThreadId(message: Pick<MailMessageSeed, "threadId" | "subjec
   return message.threadId?.trim() || normalizeThreadSubject(message.subject);
 }
 
+type SafeThreadGroupingMessage = Pick<MailMessageSeed, "id" | "threadId" | "subject" | "timestamp"> &
+  Partial<Pick<MailMessageSeed, "imapUid" | "from" | "sender" | "createdAt">>;
+
+const genericThreadSubjects = new Set([
+  "demo",
+  "promo",
+  "submission",
+  "new demo",
+  "track",
+  "music",
+  "hello",
+  "hi",
+  "question",
+  "follow up",
+  "follow-up",
+]);
+
+function isLikelySubjectFallbackThreadId(
+  message: Pick<MailMessageSeed, "threadId" | "subject">,
+) {
+  const threadId = message.threadId?.trim();
+
+  return Boolean(threadId) && threadId === normalizeThreadSubject(message.subject);
+}
+
+function isGenericThreadSubject(subject: string) {
+  return genericThreadSubjects.has(normalizeThreadSubject(subject));
+}
+
+function resolveSafeThreadGroupingKey(
+  message: SafeThreadGroupingMessage,
+  mailboxId?: InboxId | string,
+) {
+  const normalizedSubject = normalizeThreadSubject(message.subject);
+  const threadId = message.threadId?.trim();
+
+  if (threadId && threadId !== normalizedSubject) {
+    return `thread:${threadId}`;
+  }
+
+  if (isGenericThreadSubject(message.subject) && isLikelySubjectFallbackThreadId(message)) {
+    return `message:${message.imapUid || message.id || `${normalizedSubject}|${message.from ?? ""}|${message.timestamp}`}`;
+  }
+
+  const normalizedSender = normalizeSenderLearningKey(message.from ?? message.sender ?? "");
+  const mailboxPrefix = mailboxId ? `${mailboxId}|` : "";
+
+  return `fallback:${mailboxPrefix}${normalizedSubject}|${normalizedSender}`;
+}
+
 // pruneInboxSnapshot is imported from inboxEngine.ts above.
 
 function maxCategoryConfidence(
@@ -5911,15 +5961,21 @@ type ThreadCategorizationCandidate = Pick<
   MailMessageSeed,
   "id" | "threadId" | "subject" | "createdAt" | "timestamp"
 > &
+  Partial<Pick<MailMessageSeed, "imapUid" | "from" | "sender">> &
   Partial<
     Pick<MailMessage, "category" | "categorySource" | "categoryConfidence">
   >;
 
 function getRecentThreadMessages<T extends ThreadCategorizationCandidate>(
-  message: Pick<MailMessageSeed, "id" | "threadId" | "subject" | "createdAt" | "timestamp">,
+  message: ThreadCategorizationCandidate,
   candidates: T[],
+  options?: { mailboxId?: InboxId | string; useSafeGrouping?: boolean },
 ) {
-  const threadId = resolveMailThreadId(message);
+  const resolveThreadGroupKey = (candidate: ThreadCategorizationCandidate) =>
+    options?.useSafeGrouping
+      ? resolveSafeThreadGroupingKey(candidate, options.mailboxId)
+      : resolveMailThreadId(candidate);
+  const threadId = resolveThreadGroupKey(message);
   const messageDateMs = resolveMailDateMs({
     id: message.id,
     threadId,
@@ -5944,13 +6000,13 @@ function getRecentThreadMessages<T extends ThreadCategorizationCandidate>(
       return false;
     }
 
-    if (resolveMailThreadId(candidate) !== threadId) {
+    if (resolveThreadGroupKey(candidate) !== threadId) {
       return false;
     }
 
     const candidateDateMs = resolveMailDateMs({
       id: candidate.id,
-      threadId: resolveMailThreadId(candidate),
+      threadId: resolveThreadGroupKey(candidate),
       sender: "",
       subject: candidate.subject,
       snippet: "",
@@ -11079,10 +11135,10 @@ function MailboxView({
   });
 
   // Thread-level dedup for the inbox list: show only the most recent message per
-  // conversation thread. Messages are grouped by resolveMailThreadId (threadId first,
-  // then normalized subject as fallback), and only the newest one (by resolveMailDateMs)
-  // is kept as the representative row. Older messages in the same thread are hidden from
-  // the list but remain fully accessible in the reading pane / thread view.
+  // conversation thread. Messages are grouped by resolveSafeThreadGroupingKey so
+  // legacy subject-only fallbacks like "demo" do not hide unrelated provider mail.
+  // Only the newest one (by resolveMailDateMs) is kept as the representative row.
+  // Older messages in the same thread remain accessible in the reading pane.
   //
   // Scoped strictly to the Inbox folder — Sent, Drafts, Archive, etc. are unaffected.
   // Smart-folder and shared-view modes are also excluded.
@@ -11102,7 +11158,10 @@ function MailboxView({
     : dedupeLatestMessagePerThread(
         uniqueMessages.map((m) => ({
           ...m,
-          threadId: resolveMailThreadId(m),
+          threadId: resolveSafeThreadGroupingKey(
+            m,
+            currentMessageLocationById[m.id]?.mailboxId ?? mailbox.id,
+          ),
           from: m.from ?? m.sender ?? "",
         })),
       );
@@ -11111,12 +11170,15 @@ function MailboxView({
     const counts = new Map<string, number>();
 
     folderMessages.forEach((message) => {
-      const threadId = resolveMailThreadId(message);
+      const threadId = resolveSafeThreadGroupingKey(
+        message,
+        currentMessageLocationById[message.id]?.mailboxId ?? mailbox.id,
+      );
       counts.set(threadId, (counts.get(threadId) ?? 0) + 1);
     });
 
     return counts;
-  }, [folderMessages]);
+  }, [currentMessageLocationById, folderMessages, mailbox.id]);
   const threadHasAttachmentsByThreadId = useMemo(() => {
     const threadsWithAttachments = new Map<string, boolean>();
 
@@ -11125,12 +11187,15 @@ function MailboxView({
         return;
       }
 
-      const threadId = resolveMailThreadId(message);
+      const threadId = resolveSafeThreadGroupingKey(
+        message,
+        currentMessageLocationById[message.id]?.mailboxId ?? mailbox.id,
+      );
       threadsWithAttachments.set(threadId, true);
     });
 
     return threadsWithAttachments;
-  }, [folderMessages]);
+  }, [currentMessageLocationById, folderMessages, mailbox.id]);
   const sortedMessages = [...threadDedupedMessages].sort((firstMessage, secondMessage) => {
     const firstTime = resolveMailDateMs(firstMessage);
     const secondTime = resolveMailDateMs(secondMessage);
@@ -11221,7 +11286,13 @@ function MailboxView({
         )
       : mailboxThreadMessages;
 
-    return [message, ...getRecentThreadMessages(message, threadSourceMessages)]
+    return [
+      message,
+      ...getRecentThreadMessages(message, threadSourceMessages, {
+        mailboxId: messageLocation?.mailboxId ?? mailbox.id,
+        useSafeGrouping: true,
+      }),
+    ]
       .filter(
         (candidate, index, candidates) =>
           candidates.findIndex((entry) => entry.id === candidate.id) === index,
@@ -16819,7 +16890,10 @@ function MailboxView({
                         themeMode === "dark"
                           ? "text-[color:rgba(220,212,202,0.84)]"
                           : "text-[color:rgba(120,111,100,0.76)]";
-                      const threadId = resolveMailThreadId(message);
+                      const threadId = resolveSafeThreadGroupingKey(
+                        message,
+                        currentMessageLocationById[message.id]?.mailboxId ?? mailbox.id,
+                      );
                       const threadMessageCount =
                         threadMessageCountByThreadId.get(threadId) ?? 1;
                       const hasThreadCountIndicator = threadMessageCount > 1;
