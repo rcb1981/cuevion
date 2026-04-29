@@ -57,7 +57,9 @@ import {
   connectInboxWithImap,
   downloadAttachment,
   fetchGmailInbox,
+  getMailboxCredentialStatuses,
   sendGmailMessage,
+  type MailboxCredentialStatusStore,
   type SendInboxAttachmentRequest,
   type LiveInboxMessageSnapshot,
 } from "../../lib/inboxConnectionApi";
@@ -9818,6 +9820,7 @@ function MailboxView({
   mailboxTitleOverrides,
   orderedMailboxes,
   managedInboxes,
+  credentialStatuses,
   smartFolders,
   onOpenSmartFolderModal,
   onEditSmartFolder,
@@ -9864,6 +9867,7 @@ function MailboxView({
   mailboxTitleOverrides: Partial<Record<InboxId, string>>;
   orderedMailboxes: OrderedMailbox[];
   managedInboxes: ManagedWorkspaceInbox[];
+  credentialStatuses: MailboxCredentialStatusStore;
   smartFolders: SmartFolderDefinition[];
   onOpenSmartFolderModal: () => void;
   onEditSmartFolder: (folderId: string) => void;
@@ -12170,6 +12174,7 @@ function MailboxView({
 
       return downloadAttachment({
         provider: "imap",
+        mailboxId: sourceMailbox.id,
         email: sourceMailbox.email.trim(),
         host: resolvedImapSettings.host.trim(),
         port: resolvedImapSettings.port.trim(),
@@ -12491,7 +12496,7 @@ function MailboxView({
       (candidate) => candidate.id === activeComposeMailbox.id,
     );
 
-    if (!managedMailbox || !canSendFromManagedMailbox(managedMailbox)) {
+    if (!managedMailbox || !canSendFromManagedMailbox(managedMailbox, credentialStatuses)) {
       setComposeSendError("Email sending is not available for this mailbox.");
       return;
     }
@@ -12520,7 +12525,7 @@ function MailboxView({
 
     if (
       sendProvider !== "google" &&
-      !(resolvedSmtpSettings?.username.trim() && resolvedSmtpSettings.password.trim())
+      !(resolvedSmtpSettings?.username.trim() && hasUsableSmtpPassword(managedMailbox, credentialStatuses))
     ) {
       setComposeSendError("SMTP credentials are missing for this mailbox.");
       return;
@@ -12544,7 +12549,9 @@ function MailboxView({
       const bodyPreview = extractComposePlainText(composeBody);
       const sendResponse = await sendGmailMessage({
         provider: sendProvider,
+        mailboxId: managedMailbox.id,
         authMode: sendProvider === "google" ? "oauth" : "smtp",
+        useSameCredentials: resolvedSmtpSettings?.useSameCredentials,
         email: managedMailbox.email.trim(),
         username:
           sendProvider === "google"
@@ -13900,7 +13907,7 @@ function MailboxView({
       (candidate) => candidate.id === sourceMailboxId,
     );
 
-    if (!managedMailbox || !canSendFromManagedMailbox(managedMailbox)) {
+    if (!managedMailbox || !canSendFromManagedMailbox(managedMailbox, credentialStatuses)) {
       setExternalInviteEmailFeedback("Email sending is not available for this mailbox.");
       return;
     }
@@ -13923,7 +13930,7 @@ function MailboxView({
 
     if (
       sendProvider !== "google" &&
-      !(resolvedSmtpSettings?.username.trim() && resolvedSmtpSettings.password.trim())
+      !(resolvedSmtpSettings?.username.trim() && hasUsableSmtpPassword(managedMailbox, credentialStatuses))
     ) {
       setExternalInviteEmailFeedback("SMTP credentials are missing for this mailbox.");
       return;
@@ -14075,7 +14082,9 @@ function MailboxView({
     try {
       const sendResponse = await sendGmailMessage({
         provider: sendProvider,
+        mailboxId: managedMailbox.id,
         authMode: sendProvider === "google" ? "oauth" : "smtp",
+        useSameCredentials: resolvedSmtpSettings?.useSameCredentials,
         email: managedMailbox.email.trim(),
         username:
           sendProvider === "google"
@@ -18710,6 +18719,7 @@ function WorkbenchView({
   section,
   orderedMailboxes,
   managedInboxes,
+  credentialStatuses,
   currentUserName,
   onOpenDemoInbox,
   onOpenLearningRequest,
@@ -18734,6 +18744,7 @@ function WorkbenchView({
   section: WorkbenchSection;
   orderedMailboxes: OrderedMailbox[];
   managedInboxes: ManagedWorkspaceInbox[];
+  credentialStatuses: MailboxCredentialStatusStore;
   currentUserName: string;
   onOpenDemoInbox: () => void;
   onOpenLearningRequest: (request: NonNullable<LearningLaunchRequest>) => void;
@@ -18966,7 +18977,7 @@ function WorkbenchView({
           candidate.email.trim().toLowerCase() === primaryMailbox.email.trim().toLowerCase(),
       );
 
-    if (!managedMailbox || !canSendFromManagedMailbox(managedMailbox)) {
+    if (!managedMailbox || !canSendFromManagedMailbox(managedMailbox, credentialStatuses)) {
       return null;
     }
 
@@ -19013,7 +19024,7 @@ function WorkbenchView({
 
     if (
       sendProvider !== "google" &&
-      !(resolvedSmtpSettings?.username.trim() && resolvedSmtpSettings.password.trim())
+      !(resolvedSmtpSettings?.username.trim() && hasUsableSmtpPassword(managedMailbox, credentialStatuses))
     ) {
       return {
         ok: false,
@@ -19053,7 +19064,9 @@ function WorkbenchView({
 
     const sendResponse = await sendGmailMessage({
       provider: sendProvider,
+      mailboxId: managedMailbox.id,
       authMode: sendProvider === "google" ? "oauth" : "smtp",
+      useSameCredentials: resolvedSmtpSettings?.useSameCredentials,
       email: managedMailbox.email.trim(),
       username:
         sendProvider === "google"
@@ -20537,7 +20550,44 @@ function resolveCustomSmtpCredentials(mailbox: ManagedWorkspaceInbox) {
   };
 }
 
-function isCustomSmtpSendReady(mailbox: ManagedWorkspaceInbox) {
+function hasStoredImapPassword(
+  mailbox: ManagedWorkspaceInbox,
+  credentialStatuses: MailboxCredentialStatusStore = {},
+) {
+  return credentialStatuses[mailbox.id]?.imapPasswordSet === true;
+}
+
+function hasUsableImapPassword(
+  mailbox: ManagedWorkspaceInbox,
+  credentialStatuses: MailboxCredentialStatusStore = {},
+) {
+  return mailbox.customImap.password.trim().length > 0 || hasStoredImapPassword(mailbox, credentialStatuses);
+}
+
+function hasUsableSmtpPassword(
+  mailbox: ManagedWorkspaceInbox,
+  credentialStatuses: MailboxCredentialStatusStore = {},
+) {
+  const customSmtp = {
+    ...createManagedCustomSmtpSettings(),
+    ...mailbox.customSmtp,
+  };
+
+  if (customSmtp.password.trim().length > 0 || credentialStatuses[mailbox.id]?.smtpPasswordSet === true) {
+    return true;
+  }
+
+  if (customSmtp.useSameCredentials) {
+    return hasUsableImapPassword(mailbox, credentialStatuses);
+  }
+
+  return false;
+}
+
+function isCustomSmtpSendReady(
+  mailbox: ManagedWorkspaceInbox,
+  credentialStatuses: MailboxCredentialStatusStore = {},
+) {
   if (mailbox.provider !== "custom_imap" || !mailbox.connected) {
     return false;
   }
@@ -20548,11 +20598,14 @@ function isCustomSmtpSendReady(mailbox: ManagedWorkspaceInbox) {
     smtpSettings.host.trim() &&
       smtpSettings.port.trim() &&
       smtpSettings.username.trim() &&
-      smtpSettings.password.trim(),
+      hasUsableSmtpPassword(mailbox, credentialStatuses),
   );
 }
 
-function canSendFromManagedMailbox(mailbox: ManagedWorkspaceInbox | null | undefined) {
+function canSendFromManagedMailbox(
+  mailbox: ManagedWorkspaceInbox | null | undefined,
+  credentialStatuses: MailboxCredentialStatusStore = {},
+) {
   if (!mailbox || !mailbox.connected) {
     return false;
   }
@@ -20561,7 +20614,7 @@ function canSendFromManagedMailbox(mailbox: ManagedWorkspaceInbox | null | undef
     return mailbox.connectionStatus === "connected";
   }
 
-  return isCustomSmtpSendReady(mailbox);
+  return isCustomSmtpSendReady(mailbox, credentialStatuses);
 }
 
 function normalizeStoredWorkspaceThemeMode(value: unknown): SettingsMode | null {
@@ -20739,7 +20792,10 @@ function mergeManagedWorkspaceInboxes(
   return merged;
 }
 
-function isManagedInboxReady(mailbox: ManagedWorkspaceInbox) {
+function isManagedInboxReady(
+  mailbox: ManagedWorkspaceInbox,
+  credentialStatuses: MailboxCredentialStatusStore = {},
+) {
   if (!mailbox.provider || !mailbox.email.trim()) {
     return false;
   }
@@ -20752,11 +20808,19 @@ function isManagedInboxReady(mailbox: ManagedWorkspaceInbox) {
     return true;
   }
 
-  const { host, port, username, password } = mailbox.customImap;
-  return Boolean(host.trim() && port.trim() && username.trim() && password.trim());
+  const { host, port, username } = mailbox.customImap;
+  return Boolean(
+    host.trim() &&
+      port.trim() &&
+      username.trim() &&
+      hasUsableImapPassword(mailbox, credentialStatuses),
+  );
 }
 
-function isManagedInboxConfigurationComplete(mailbox: ManagedWorkspaceInbox) {
+function isManagedInboxConfigurationComplete(
+  mailbox: ManagedWorkspaceInbox,
+  credentialStatuses: MailboxCredentialStatusStore = {},
+) {
   if (!mailbox.provider || !mailbox.email.trim()) {
     return false;
   }
@@ -20765,7 +20829,7 @@ function isManagedInboxConfigurationComplete(mailbox: ManagedWorkspaceInbox) {
     return true;
   }
 
-  return isManagedInboxReady(mailbox);
+  return isManagedInboxReady(mailbox, credentialStatuses);
 }
 
 function getMailboxSyncUnavailableMessage(mailbox: ManagedWorkspaceInbox | null) {
@@ -21083,7 +21147,10 @@ const inputFieldClass =
 const inputFieldErrorClass =
   `${inputFieldClass} border-[color:rgba(146,82,73,0.34)] bg-[color:rgba(82,49,44,0.18)] shadow-[inset_0_1px_0_rgba(255,255,255,0.05)] focus:border-[color:rgba(170,106,95,0.5)] focus:bg-[color:rgba(88,52,47,0.24)]`;
 
-function getManagedInboxMissingRequiredFields(mailbox: ManagedWorkspaceInbox) {
+function getManagedInboxMissingRequiredFields(
+  mailbox: ManagedWorkspaceInbox,
+  credentialStatuses: MailboxCredentialStatusStore = {},
+) {
   const missingFields: Array<
     "email" | "host" | "port" | "username" | "password"
   > = [];
@@ -21105,7 +21172,7 @@ function getManagedInboxMissingRequiredFields(mailbox: ManagedWorkspaceInbox) {
       missingFields.push("username");
     }
 
-    if (!mailbox.customImap.password.trim()) {
+    if (!hasUsableImapPassword(mailbox, credentialStatuses)) {
       missingFields.push("password");
     }
   }
@@ -21165,6 +21232,7 @@ function ManagedInboxEditor({
   canSetPrimary = false,
   connectionError = null,
   isApplying = false,
+  credentialStatuses = {},
   onEditAction,
   onRemoveAction,
   onSetPrimaryAction,
@@ -21182,6 +21250,7 @@ function ManagedInboxEditor({
   canSetPrimary?: boolean;
   connectionError?: string | null;
   isApplying?: boolean;
+  credentialStatuses?: MailboxCredentialStatusStore;
   onEditAction?: () => void;
   onRemoveAction?: () => void;
   onSetPrimaryAction?: () => void;
@@ -21205,13 +21274,22 @@ function ManagedInboxEditor({
   const portInputRef = useRef<HTMLInputElement | null>(null);
   const usernameInputRef = useRef<HTMLInputElement | null>(null);
   const passwordInputRef = useRef<HTMLInputElement | null>(null);
-  const missingRequiredFields = getManagedInboxMissingRequiredFields(mailbox);
+  const missingRequiredFields = getManagedInboxMissingRequiredFields(
+    mailbox,
+    credentialStatuses,
+  );
   const missingFieldSet = new Set(missingRequiredFields);
   const shouldShowFieldErrors = editable && showValidationErrors;
   const smtpSettings = {
     ...createManagedCustomSmtpSettings(),
     ...mailbox.customSmtp,
   };
+  const imapPasswordStatusLabel = hasUsableImapPassword(mailbox, credentialStatuses)
+    ? "Set"
+    : "Not set";
+  const smtpPasswordStatusLabel = hasUsableSmtpPassword(mailbox, credentialStatuses)
+    ? "Set"
+    : "Not set";
 
   useEffect(() => {
     if (!shouldShowFieldErrors || missingRequiredFields.length === 0) {
@@ -21453,7 +21531,7 @@ function ManagedInboxEditor({
                 />
               ) : (
                 <div className="rounded-2xl border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3 text-[0.94rem] text-[var(--workspace-text)]">
-                  {mailbox.customImap.password.trim().length > 0 ? "Saved" : "Not set"}
+                  {imapPasswordStatusLabel}
                 </div>
               )}
               {shouldShowFieldErrors && missingFieldSet.has("password") ? (
@@ -21611,7 +21689,7 @@ function ManagedInboxEditor({
                         />
                       ) : (
                         <div className="rounded-2xl border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3 text-[0.94rem] text-[var(--workspace-text)]">
-                          {smtpSettings.password.trim().length > 0 ? "Saved" : "Not set"}
+                          {smtpPasswordStatusLabel}
                         </div>
                       )}
                     </div>
@@ -21712,6 +21790,7 @@ const ManageInboxesView = memo(function ManageInboxesView({
   onSetPrimaryInbox,
   onDirtyChange,
   themeMode,
+  credentialStatuses,
 }: {
   savedManagedInboxes: ManagedWorkspaceInbox[];
   primaryManagedInboxId: string | null;
@@ -21720,6 +21799,7 @@ const ManageInboxesView = memo(function ManageInboxesView({
   onSetPrimaryInbox: (inboxId: string) => void;
   onDirtyChange: (hasUnsavedChanges: boolean) => void;
   themeMode: "light" | "dark";
+  credentialStatuses: MailboxCredentialStatusStore;
 }) {
   const [draftManagedInboxes, setDraftManagedInboxes] = useState<ManagedWorkspaceInbox[]>(
     savedManagedInboxes.map(cloneManagedWorkspaceInbox),
@@ -21801,6 +21881,7 @@ const ManageInboxesView = memo(function ManageInboxesView({
     }
 
     const response = await beginInboxConnection({
+      mailboxId: mailbox.id,
       provider: mailbox.provider,
       email: mailbox.email,
       customImap: mailbox.customImap,
@@ -21834,7 +21915,7 @@ const ManageInboxesView = memo(function ManageInboxesView({
   const connectManagedInbox = async (inboxId: string) => {
     const mailbox = draftManagedInboxes.find((candidate) => candidate.id === inboxId);
 
-    if (!mailbox || !isManagedInboxConfigurationComplete(mailbox)) {
+    if (!mailbox || !isManagedInboxConfigurationComplete(mailbox, credentialStatuses)) {
       return false;
     }
 
@@ -22054,7 +22135,7 @@ const ManageInboxesView = memo(function ManageInboxesView({
 
     const mailbox = draftManagedInboxes.find((candidate) => candidate.id === inboxId);
 
-    if (!mailbox || !isManagedInboxConfigurationComplete(mailbox)) {
+    if (!mailbox || !isManagedInboxConfigurationComplete(mailbox, credentialStatuses)) {
       setValidationErrorInboxId(inboxId);
       setEditingInboxId(inboxId);
       return;
@@ -22133,6 +22214,7 @@ const ManageInboxesView = memo(function ManageInboxesView({
                 }
                 connectionError={connectionErrors[mailbox.id] ?? null}
                 isApplying={validatingInboxId === mailbox.id}
+                credentialStatuses={credentialStatuses}
                 showValidationErrors={validationErrorInboxId === mailbox.id}
                 onEditAction={
                   editingInboxId === mailbox.id
@@ -22187,7 +22269,7 @@ const ManageInboxesView = memo(function ManageInboxesView({
                 }));
 
               const firstInvalidMailbox = nextMailboxes.find(
-                (mailbox) => !isManagedInboxConfigurationComplete(mailbox),
+                (mailbox) => !isManagedInboxConfigurationComplete(mailbox, credentialStatuses),
               );
 
               if (firstInvalidMailbox) {
@@ -22197,7 +22279,7 @@ const ManageInboxesView = memo(function ManageInboxesView({
               }
 
               const readyMailboxes = nextMailboxes.filter((mailbox) =>
-                isManagedInboxConfigurationComplete(mailbox),
+                isManagedInboxConfigurationComplete(mailbox, credentialStatuses),
               );
               const mailboxesNeedingValidation = readyMailboxes.filter(
                 (mailbox) => !isMailboxPersistedWithoutChanges(mailbox),
@@ -24127,6 +24209,7 @@ function SettingsView({
   accountEmail,
   savedManagedInboxes,
   primaryManagedInboxId,
+  credentialStatuses,
   baseFocusPreferences,
   focusPreferenceOverrides,
   themeMode,
@@ -24155,6 +24238,7 @@ function SettingsView({
   accountEmail: string;
   savedManagedInboxes: ManagedWorkspaceInbox[];
   primaryManagedInboxId: string | null;
+  credentialStatuses: MailboxCredentialStatusStore;
   baseFocusPreferences: FocusPreferences;
   focusPreferenceOverrides: MailboxFocusPreferenceOverridesStore;
   themeMode: "light" | "dark";
@@ -24250,6 +24334,7 @@ function SettingsView({
         onSetPrimaryInbox={onSetPrimaryManagedInbox}
         onDirtyChange={onManagedInboxesDirtyChange}
         themeMode={themeMode}
+        credentialStatuses={credentialStatuses}
       />
     );
   }
@@ -26765,6 +26850,8 @@ export function WorkspaceShell({
       return buildManagedWorkspaceInboxes(onboardingState);
     }
   });
+  const [mailboxCredentialStatuses, setMailboxCredentialStatuses] =
+    useState<MailboxCredentialStatusStore>({});
   const primaryManagedInboxStorageOwnerKey = authenticatedUser?.email?.trim()
     ? normalizeSenderLearningKey(authenticatedUser.email)
     : "guest";
@@ -27511,6 +27598,39 @@ export function WorkspaceShell({
       JSON.stringify(savedManagedInboxes),
     );
   }, [savedManagedInboxes]);
+
+  useEffect(() => {
+    if (!authenticatedUser || authenticatedUser.userType !== "member") {
+      setMailboxCredentialStatuses({});
+      return;
+    }
+
+    const mailboxIds = savedManagedInboxes
+      .map((mailbox) => mailbox.id.trim())
+      .filter(Boolean);
+
+    if (mailboxIds.length === 0) {
+      setMailboxCredentialStatuses({});
+      return;
+    }
+
+    let cancelled = false;
+
+    const loadMailboxCredentialStatuses = async () => {
+      const nextStatuses = await getMailboxCredentialStatuses(mailboxIds);
+      if (cancelled) {
+        return;
+      }
+
+      setMailboxCredentialStatuses(nextStatuses);
+    };
+
+    void loadMailboxCredentialStatuses();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [authenticatedUser, savedManagedInboxes]);
 
   useEffect(() => {
     const nextPrimaryInboxId = resolvePrimaryManagedInboxId(
@@ -29548,6 +29668,7 @@ export function WorkspaceShell({
           })
         : await connectInboxWithImap(
             buildConnectInboxRequest({
+              mailboxId: managedMailbox.id,
               provider: managedMailbox.provider,
               email: managedMailbox.email,
               customImap: managedMailbox.customImap,
@@ -29660,7 +29781,7 @@ export function WorkspaceShell({
 
   const handleApplyManagedInboxes = (nextMailboxes: ManagedWorkspaceInbox[]) => {
     const validMailboxes = nextMailboxes
-      .filter((mailbox) => isManagedInboxConfigurationComplete(mailbox))
+      .filter((mailbox) => isManagedInboxConfigurationComplete(mailbox, mailboxCredentialStatuses))
       .map((mailbox) => ({
         ...normalizeManagedWorkspaceInbox(cloneManagedWorkspaceInbox(mailbox)),
         id: mailbox.id.trim(),
@@ -31568,6 +31689,7 @@ export function WorkspaceShell({
 		                  mailboxTitleOverrides={mailboxTitleOverrides}
 		                  orderedMailboxes={orderedMailboxes}
 	                  managedInboxes={savedManagedInboxes}
+                  credentialStatuses={mailboxCredentialStatuses}
 	                  smartFolders={smartFolders}
                   onOpenSmartFolderModal={() => {
                     resetSmartFolderDraft();
@@ -31681,6 +31803,7 @@ export function WorkspaceShell({
                   section={activeSection}
                   orderedMailboxes={orderedMailboxes}
                   managedInboxes={savedManagedInboxes}
+                  credentialStatuses={mailboxCredentialStatuses}
                   currentUserName={activeWorkspaceUserName}
                   onOpenDemoInbox={handleOpenDemoInbox}
                   onOpenLearningRequest={handleOpenLearningRequest}
@@ -31717,6 +31840,7 @@ export function WorkspaceShell({
                   accountEmail={accountDisplayEmail}
                   savedManagedInboxes={savedManagedInboxes}
                   primaryManagedInboxId={primaryManagedInboxId}
+                  credentialStatuses={mailboxCredentialStatuses}
                   baseFocusPreferences={userConfig.focusPreferences}
                   focusPreferenceOverrides={mailboxFocusPreferenceOverrides}
                   themeMode={resolvedTheme}

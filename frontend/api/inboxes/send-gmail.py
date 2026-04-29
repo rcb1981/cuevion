@@ -11,9 +11,14 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 CURRENT_DIR = Path(__file__).resolve().parent
+API_DIR = CURRENT_DIR.parent
 if str(CURRENT_DIR) not in sys.path:
     sys.path.insert(0, str(CURRENT_DIR))
+if str(API_DIR) not in sys.path:
+    sys.path.insert(0, str(API_DIR))
 
+from beta_auth import parse_beta_session_token, read_beta_session_cookie
+from mailbox_secret_store import get_mailbox_secret, save_mailbox_secret
 from oauth_token_store import get_google_token_record_with_metadata, refresh_google_token_record
 
 GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1/users/me"
@@ -23,6 +28,7 @@ def _json_response(handler: BaseHTTPRequestHandler, status_code: int, payload: d
     response_body = json.dumps(payload).encode("utf-8")
     handler.send_response(status_code)
     handler.send_header("Content-Type", "application/json")
+    handler.send_header("Cache-Control", "no-store")
     handler.send_header("Content-Length", str(len(response_body)))
     handler.end_headers()
     handler.wfile.write(response_body)
@@ -49,6 +55,11 @@ def _is_valid_address(value: str):
 
 def _is_safe_auth_value(value: str):
     return bool(value) and not _has_unsafe_header_chars(value)
+
+
+def _get_authenticated_user(headers) -> dict | None:
+    session_token = read_beta_session_cookie(headers)
+    return parse_beta_session_token(session_token or "")
 
 
 def _is_token_expired(token_record: dict) -> bool:
@@ -274,6 +285,28 @@ class handler(BaseHTTPRequestHandler):
         provider = str(payload.get("provider", "")).strip().lower()
         use_gmail_oauth = auth_mode == "oauth" and provider == "google"
         use_custom_smtp = auth_mode == "smtp" and provider == "custom_imap"
+        session_user = _get_authenticated_user(self.headers)
+        mailbox_id = str(payload.get("mailboxId") or "").strip()
+        provided_password = str(payload.get("password") or "")
+        use_same_credentials = payload.get("useSameCredentials") is True
+
+        if use_custom_smtp and not provided_password and session_user and mailbox_id:
+            secret_record = get_mailbox_secret(session_user["email"], mailbox_id)
+            stored_smtp_password = (
+                secret_record.get("smtpPassword")
+                if isinstance(secret_record, dict)
+                else None
+            )
+            stored_imap_password = (
+                secret_record.get("imapPassword")
+                if isinstance(secret_record, dict)
+                else None
+            )
+            resolved_password = stored_smtp_password or (
+                stored_imap_password if use_same_credentials else None
+            )
+            if isinstance(resolved_password, str) and resolved_password:
+                payload["password"] = resolved_password
 
         try:
             username, password, recipients, message = _build_message(
@@ -373,6 +406,12 @@ class handler(BaseHTTPRequestHandler):
                 )
                 return
 
+            if provided_password and session_user and mailbox_id:
+                save_mailbox_secret(
+                    session_user["email"],
+                    mailbox_id,
+                    smtp_password=provided_password,
+                )
             _json_response(self, 200, {"ok": True})
             return
 

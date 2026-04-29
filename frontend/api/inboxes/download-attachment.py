@@ -12,16 +12,21 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 CURRENT_DIR = Path(__file__).resolve().parent
+API_DIR = CURRENT_DIR.parent
 FRONTEND_DIR = CURRENT_DIR.parent.parent
 if str(CURRENT_DIR) not in sys.path:
     sys.path.insert(0, str(CURRENT_DIR))
+if str(API_DIR) not in sys.path:
+    sys.path.insert(0, str(API_DIR))
 if str(FRONTEND_DIR) not in sys.path:
     sys.path.insert(0, str(FRONTEND_DIR))
 
+from beta_auth import parse_beta_session_token, read_beta_session_cookie
 from imap_connect_preview import (
     connect_mailbox_with_settings,
     get_message_attachment_payload,
 )
+from mailbox_secret_store import get_mailbox_secret
 from oauth_token_store import (
     get_google_token_record_with_metadata,
     refresh_google_token_record,
@@ -39,6 +44,7 @@ def _json_response(handler: BaseHTTPRequestHandler, status_code: int, payload: d
     response_body = json.dumps(payload).encode("utf-8")
     handler.send_response(status_code)
     handler.send_header("Content-Type", "application/json")
+    handler.send_header("Cache-Control", "no-store")
     handler.send_header("Content-Length", str(len(response_body)))
     handler.end_headers()
     handler.wfile.write(response_body)
@@ -126,6 +132,7 @@ def _binary_response(
     safe_filename = _safe_header_filename(filename)
     handler.send_response(200)
     handler.send_header("Content-Type", mime_type or "application/octet-stream")
+    handler.send_header("Cache-Control", "no-store")
     handler.send_header("Content-Length", str(len(content)))
     handler.send_header(
         "Content-Disposition",
@@ -150,6 +157,11 @@ def _read_uid_validity(mailbox, folder: str) -> str | None:
     metadata = data[0].decode("utf-8", errors="ignore") if isinstance(data[0], bytes) else str(data[0])
     match = re.search(r"UIDVALIDITY\s+(\d+)", metadata)
     return match.group(1) if match else None
+
+
+def _get_authenticated_user(headers) -> dict | None:
+    session_token = read_beta_session_cookie(headers)
+    return parse_beta_session_token(session_token or "")
 
 
 def _download_gmail_attachment(handler: BaseHTTPRequestHandler, payload: dict):
@@ -254,6 +266,7 @@ def _download_imap_attachment(handler: BaseHTTPRequestHandler, payload: dict):
     ssl_enabled = bool(payload.get("ssl", True))
     username = str(payload.get("username") or "").strip() or email_address
     password = str(payload.get("password") or "")
+    mailbox_id = str(payload.get("mailboxId") or "").strip()
     folder = str(payload.get("folder") or "INBOX").strip() or "INBOX"
     uid = str(payload.get("uid") or "").strip()
     uid_validity = str(payload.get("uidValidity") or "").strip() or None
@@ -263,6 +276,18 @@ def _download_imap_attachment(handler: BaseHTTPRequestHandler, payload: dict):
         port = int(raw_port)
     except ValueError:
         port = 0
+
+    if not password and mailbox_id:
+        session_user = _get_authenticated_user(handler.headers)
+        if session_user:
+            secret_record = get_mailbox_secret(session_user["email"], mailbox_id)
+            stored_imap_password = (
+                secret_record.get("imapPassword")
+                if isinstance(secret_record, dict)
+                else None
+            )
+            if isinstance(stored_imap_password, str) and stored_imap_password:
+                password = stored_imap_password
 
     if (
         not email_address

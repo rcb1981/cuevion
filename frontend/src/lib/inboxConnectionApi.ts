@@ -46,6 +46,7 @@ export type LiveInboxMessageSnapshot = {
 };
 
 export type ConnectInboxRequest = {
+  mailboxId?: string;
   provider: ProviderId;
   email: string;
   host: string;
@@ -113,6 +114,7 @@ export type InboxConnectionAttemptResult = {
 };
 
 export function buildConnectInboxRequest(options: {
+  mailboxId?: string;
   provider: ProviderId;
   email: string;
   customImap: CustomImapSettings;
@@ -128,6 +130,7 @@ export function buildConnectInboxRequest(options: {
   );
 
   return {
+    mailboxId: options.mailboxId,
     provider: options.provider,
     email,
     host: resolvedImapSettings.host.trim(),
@@ -174,6 +177,7 @@ export type DownloadAttachmentGmailRequest = {
 
 export type DownloadAttachmentImapRequest = {
   provider: "imap";
+  mailboxId?: string;
   email: string;
   host: string;
   port: string;
@@ -191,8 +195,10 @@ export type DownloadAttachmentRequest =
   | DownloadAttachmentImapRequest;
 
 export type SendGmailMessageRequest = {
+  mailboxId?: string;
   provider: ProviderId;
   authMode?: "smtp" | "oauth";
+  useSameCredentials?: boolean;
   email: string;
   username: string;
   password: string;
@@ -224,6 +230,33 @@ type AttachmentDownloadErrorPayload = {
   };
 };
 
+export type MailboxCredentialStatus = {
+  imapPasswordSet: boolean;
+  smtpPasswordSet: boolean;
+};
+
+export type MailboxCredentialStatusStore = Record<string, MailboxCredentialStatus>;
+
+type MailboxCredentialStatusResponse = {
+  ok: boolean;
+  credentials?: MailboxCredentialStatusStore;
+  error?: {
+    code?: string;
+    message?: string;
+  };
+};
+
+type SaveMailboxCredentialsResponse = {
+  ok: boolean;
+  mailboxId?: string;
+  imapPasswordSet?: boolean;
+  smtpPasswordSet?: boolean;
+  error?: {
+    code?: string;
+    message?: string;
+  };
+};
+
 export async function connectInboxWithImap(
   request: ConnectInboxRequest,
 ): Promise<ConnectInboxResponse> {
@@ -231,6 +264,7 @@ export async function connectInboxWithImap(
   try {
     const response = await fetch("/api/inboxes/connect-imap", {
       method: "POST",
+      credentials: "include",
       headers: {
         "Content-Type": "application/json",
       },
@@ -336,6 +370,7 @@ export async function connectInboxWithOAuth(
 }
 
 export async function beginInboxConnection(options: {
+  mailboxId?: string;
   provider: ProviderId;
   email: string;
   customImap: CustomImapSettings;
@@ -418,6 +453,7 @@ export async function sendGmailMessage(
   try {
     const response = await fetch("/api/inboxes/send-gmail", {
       method: "POST",
+      credentials: "include",
       headers: {
         "Content-Type": "application/json",
       },
@@ -489,6 +525,7 @@ export async function downloadAttachment(
 ): Promise<Blob> {
   const response = await fetch("/api/inboxes/download-attachment", {
     method: "POST",
+    credentials: "include",
     headers: {
       "Content-Type": "application/json",
     },
@@ -505,6 +542,81 @@ export async function downloadAttachment(
   }
 
   return response.blob();
+}
+
+export async function getMailboxCredentialStatuses(
+  mailboxIds: string[],
+): Promise<MailboxCredentialStatusStore> {
+  const normalizedMailboxIds = mailboxIds
+    .map((mailboxId) => mailboxId.trim())
+    .filter(Boolean);
+
+  if (normalizedMailboxIds.length === 0) {
+    return {};
+  }
+
+  try {
+    const params = new URLSearchParams({
+      mailboxIds: normalizedMailboxIds.join(","),
+    });
+    const response = await fetch(`/api/inboxes/credentials?${params.toString()}`, {
+      method: "GET",
+      credentials: "include",
+      cache: "no-store",
+    });
+    const payload = (await response.json()) as MailboxCredentialStatusResponse;
+
+    if (!response.ok || !payload.ok) {
+      return {};
+    }
+
+    return payload.credentials ?? {};
+  } catch {
+    return {};
+  }
+}
+
+export async function saveMailboxCredentials({
+  mailboxId,
+  imapPassword,
+  smtpPassword,
+}: {
+  mailboxId: string;
+  imapPassword?: string;
+  smtpPassword?: string;
+}): Promise<SaveMailboxCredentialsResponse> {
+  try {
+    const response = await fetch("/api/inboxes/credentials", {
+      method: "POST",
+      credentials: "include",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        mailboxId,
+        imapPassword,
+        smtpPassword,
+      }),
+    });
+    const payload = (await response.json()) as SaveMailboxCredentialsResponse;
+
+    if (!response.ok || !payload.ok) {
+      return {
+        ok: false,
+        error: payload.error,
+      };
+    }
+
+    return payload;
+  } catch {
+    return {
+      ok: false,
+      error: {
+        code: "mailbox_credentials_unavailable",
+        message: "Mailbox credentials could not be saved.",
+      },
+    };
+  }
 }
 
 export async function fetchGmailInbox(
