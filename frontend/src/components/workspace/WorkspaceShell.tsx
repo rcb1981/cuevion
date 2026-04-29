@@ -244,6 +244,17 @@ type MessageIdentitySource = {
 };
 
 type MessageUnreadOverrideStore = Record<string, boolean>;
+type ManualLabelOverride = "Promo" | "Update" | "Finance" | "Business" | "Demo" | "Other";
+type ManualLabelOverrideStore = Partial<Record<string, ManualLabelOverride>>;
+
+const manualLabelOverrideOptions: ManualLabelOverride[] = [
+  "Promo",
+  "Update",
+  "Finance",
+  "Business",
+  "Demo",
+  "Other",
+];
 
 function buildStablePreviewIdentity(message: MessageIdentitySource) {
   return `${message.subject ?? ""}|${message.from ?? ""}|${message.timestamp ?? ""}`;
@@ -772,6 +783,8 @@ const CUEVION_TRASH_MESSAGES_STORAGE_KEY = "cuevion-trash-messages";
 const CUEVION_SPAM_MESSAGES_STORAGE_KEY = "cuevion-spam-messages";
 const CUEVION_ARCHIVE_MESSAGES_STORAGE_KEY = "cuevion-archive-messages";
 const CUEVION_MANUAL_PRIORITY_OVERRIDES_STORAGE_KEY = "cuevion-manual-priority-overrides";
+const CUEVION_MANUAL_LABEL_OVERRIDES_STORAGE_KEY = "cuevion-manual-label-overrides";
+const CUEVION_SPAM_SUPPRESSION_STORAGE_KEY = "cuevion-spam-suppression";
 const MAIL_SIGNATURES_STORAGE_KEY = "cuevion-mail-signatures";
 const MAIL_OUT_OF_OFFICE_STORAGE_KEY = "cuevion-mail-out-of-office";
 const OUT_OF_OFFICE_REPLY_LOG_STORAGE_KEY = "cuevion-out-of-office-reply-log";
@@ -832,6 +845,20 @@ function buildManualPriorityOverridesStorageKey(
   orderedMailboxKey: string,
 ) {
   return `${CUEVION_MANUAL_PRIORITY_OVERRIDES_STORAGE_KEY}:${workspaceUserId}:${orderedMailboxKey}`;
+}
+
+function buildManualLabelOverridesStorageKey(
+  workspaceUserId: string,
+  orderedMailboxKey: string,
+) {
+  return `${CUEVION_MANUAL_LABEL_OVERRIDES_STORAGE_KEY}:${workspaceUserId}:${orderedMailboxKey}`;
+}
+
+function buildSpamSuppressionStorageKey(
+  workspaceUserId: string,
+  orderedMailboxKey: string,
+) {
+  return `${CUEVION_SPAM_SUPPRESSION_STORAGE_KEY}:${workspaceUserId}:${orderedMailboxKey}`;
 }
 
 function buildNotificationReadStorageKey(workspaceUserId: string) {
@@ -1118,6 +1145,10 @@ const smartFolderLabelOptions = [
 ] as const;
 
 type SmartFolderNormalizedLabel = (typeof smartFolderLabelOptions)[number]["value"];
+type SmartFolderRuleMatchOptions = {
+  mailboxContext?: Pick<ManagedWorkspaceInbox | OrderedMailbox, "id" | "title" | "email"> | null;
+  manualLabelOverride?: ManualLabelOverride | null;
+};
 
 function normalizeVisibleCategoryLabelValue(label: string): SmartFolderNormalizedLabel {
   switch (label.trim().toLowerCase()) {
@@ -1141,9 +1172,7 @@ function normalizeVisibleCategoryLabelValue(label: string): SmartFolderNormalize
 function getSmartFolderRuleMatchValue(
   message: MailMessage,
   field: SmartFolderRuleField,
-  options?: {
-    mailboxContext?: Pick<ManagedWorkspaceInbox | OrderedMailbox, "id" | "title" | "email"> | null;
-  },
+  options?: SmartFolderRuleMatchOptions,
 ) {
   if (field === "From") {
     return message.from;
@@ -1630,9 +1659,7 @@ function resolveVisibleClassification(
 function doesMessageMatchSmartFolderRule(
   message: MailMessage,
   rule: SmartFolderRule,
-  options?: {
-    mailboxContext?: Pick<ManagedWorkspaceInbox | OrderedMailbox, "id" | "title" | "email"> | null;
-  },
+  options?: SmartFolderRuleMatchOptions,
 ) {
   const ruleValue = rule.value.trim().toLowerCase();
 
@@ -1700,10 +1727,12 @@ function resolveVisibleCategoryLabelForMessageInContext(
 
 function resolveVisibleSmartFolderLabelValue(
   message: MailMessage,
-  options?: {
-    mailboxContext?: Pick<ManagedWorkspaceInbox | OrderedMailbox, "id" | "title" | "email"> | null;
-  },
+  options?: SmartFolderRuleMatchOptions,
 ) {
+  if (options?.manualLabelOverride) {
+    return normalizeVisibleCategoryLabelValue(options.manualLabelOverride);
+  }
+
   const preferPromoMailboxContext =
     options?.mailboxContext ? isPromoMailboxContext(options.mailboxContext) : false;
 
@@ -1718,9 +1747,7 @@ function resolveVisibleSmartFolderLabelValue(
 function doesMessageMatchSmartFolder(
   message: MailMessage,
   folder: SmartFolderDefinition,
-  options?: {
-    mailboxContext?: Pick<ManagedWorkspaceInbox | OrderedMailbox, "id" | "title" | "email"> | null;
-  },
+  options?: SmartFolderRuleMatchOptions,
 ) {
   return folder.rules.some((rule) =>
     doesMessageMatchSmartFolderRule(message, rule, options),
@@ -9909,7 +9936,12 @@ function MailboxView({
   notificationNavigationRequest,
   onConsumeNotificationNavigation,
   manualPriorityOverrides,
+  manualLabelOverrides,
+  spamSuppressionKeys,
   onSetManualPriority,
+  onSetManualLabelOverride,
+  onAddSpamSuppression,
+  onRemoveSpamSuppression,
   getLinkedReviewForMessage,
   getLinkedReviewBadgeLabel,
   onOpenLinkedReview,
@@ -9967,7 +9999,12 @@ function MailboxView({
   notificationNavigationRequest?: NotificationNavigationRequest | null;
   onConsumeNotificationNavigation?: (requestKey: number) => void;
   manualPriorityOverrides: Partial<Record<string, ManualPriorityOverride>>;
+  manualLabelOverrides: ManualLabelOverrideStore;
+  spamSuppressionKeys: string[];
   onSetManualPriority: (messageId: string, shouldBePriority: boolean) => void;
+  onSetManualLabelOverride: (message: MessageIdentitySource, label: ManualLabelOverride) => void;
+  onAddSpamSuppression: (messages: MessageIdentitySource[]) => void;
+  onRemoveSpamSuppression: (messages: MessageIdentitySource[]) => void;
   getLinkedReviewForMessage: (messageId: string) => ReviewItem | null;
   getLinkedReviewBadgeLabel: (messageId: string) => string | null;
   onOpenLinkedReview: (target: ReviewWorkspaceTarget) => void;
@@ -10044,6 +10081,8 @@ function MailboxView({
   const [smartFolderMenuId, setSmartFolderMenuId] = useState<string | null>(null);
   const [smartFolderDeleteId, setSmartFolderDeleteId] = useState<string | null>(null);
   const [isReadingLearningMenuOpen, setIsReadingLearningMenuOpen] = useState(false);
+  const [isReadingLearningLabelChooserOpen, setIsReadingLearningLabelChooserOpen] =
+    useState(false);
   const [activeReadingLearningTrigger, setActiveReadingLearningTrigger] = useState<
     "reading-pane" | "full-message" | null
   >(null);
@@ -10072,7 +10111,7 @@ function MailboxView({
     learningAnchorY: number | null;
     learningAnchorHeight: number | null;
     learningChooserOpen: boolean;
-    learningChooserMode: "type" | "sender" | null;
+    learningChooserMode: "label" | null;
   } | null>(null);
   const [selectedMessageId, setSelectedMessageId] = useState<string | null>(() => {
     const inboxMessages = mailboxStore[mailbox.id]?.Inbox ?? [];
@@ -10867,6 +10906,24 @@ function MailboxView({
   }, [isComposeOpen, pendingComposeAttachmentPickerOpen]);
 
   const mailboxCollections = mailboxStore[mailbox.id] ?? createEmptyMailboxCollections();
+  const spamSuppressionKeySet = useMemo(
+    () => new Set(spamSuppressionKeys),
+    [spamSuppressionKeys],
+  );
+  const resolveManualLabelOverride = (message: MessageIdentitySource) =>
+    getCanonicalMessageIdentityKeys(message)
+      .map((key) => manualLabelOverrides[key])
+      .find((override): override is ManualLabelOverride => Boolean(override));
+  const isMessageSpamSuppressed = (message: MessageIdentitySource) =>
+    getCanonicalMessageIdentityKeys(message).some((key) => spamSuppressionKeySet.has(key));
+  const getSpamSuppressionFilteredMailboxCollections = (
+    collections: MailboxCollections,
+  ): MailboxCollections => ({
+    ...collections,
+    Inbox: collections.Inbox.filter((message) => !isMessageSpamSuppressed(message)),
+  });
+  const spamSuppressionFilteredMailboxCollections =
+    getSpamSuppressionFilteredMailboxCollections(mailboxCollections);
   const resolveVisibilityClassificationForMessage = (message: MailMessage) => {
     return resolveVisibleClassification(message);
   };
@@ -10883,6 +10940,12 @@ function MailboxView({
     message: MailMessage,
     preferPromoMailboxContext: boolean,
   ) {
+    const manualLabelOverride = resolveManualLabelOverride(message);
+
+    if (manualLabelOverride) {
+      return manualLabelOverride;
+    }
+
     return resolveVisibleCategoryLabelForMessageInContext(
       message,
       preferPromoMailboxContext,
@@ -10989,7 +11052,7 @@ function MailboxView({
     // Delegate to the same badge function that drives the visible Priority
     // indicator in the list — ensures menus and badge always agree.
     getVisiblePriorityBadgeForMessage(message) === "PRIORITY";
-  const lowSignalInboxMessages = mailboxCollections.Inbox.filter(
+  const lowSignalInboxMessages = spamSuppressionFilteredMailboxCollections.Inbox.filter(
     (message) =>
       !message.collaboration &&
       (getVisiblePriorityBadgeForMessage(message) === "LOW" ||
@@ -11014,7 +11077,7 @@ function MailboxView({
   };
   const visibleMailboxCollections: Record<MailFolder, MailMessage[]> = {
     Inbox: getMailboxReadyInboxMessagesForWorkspaceMailbox(
-      mailboxCollections,
+      spamSuppressionFilteredMailboxCollections,
       manualPriorityOverrides,
       focusPreferences,
       {
@@ -11090,9 +11153,11 @@ function MailboxView({
       ? activeSmartFolder.selectedInboxIds
       : orderedMailboxes.map((candidate) => candidate.id);
   const getSmartFolderMailboxCollections = (mailboxId: InboxId) =>
-    mailboxId === mailbox.id
-      ? mailboxCollections
-      : mailboxStore[mailboxId] ?? createEmptyMailboxCollections();
+    getSpamSuppressionFilteredMailboxCollections(
+      mailboxId === mailbox.id
+        ? mailboxCollections
+        : mailboxStore[mailboxId] ?? createEmptyMailboxCollections(),
+    );
   const getSmartFolderMailboxContext = (mailboxId: InboxId) =>
     orderedMailboxes.find((candidate) => candidate.id === mailboxId) ??
     managedInboxes.find((candidate) => candidate.id === mailboxId) ??
@@ -11153,6 +11218,7 @@ function MailboxView({
                 activeSmartFolder,
                 {
                   mailboxContext: getSmartFolderMailboxContext(mailboxId),
+                  manualLabelOverride: resolveManualLabelOverride(message),
                 },
               ),
             )
@@ -12720,6 +12786,7 @@ function MailboxView({
     setIsSortMenuOpen(false);
     setIsMoreMenuOpen(false);
     setIsReadingLearningMenuOpen(false);
+    setIsReadingLearningLabelChooserOpen(false);
     setActiveReadingLearningTrigger(null);
     setDetailActionsMenuState(null);
     setContextMenuState(null);
@@ -12736,12 +12803,14 @@ function MailboxView({
 
     if (isReadingLearningMenuOpen && activeReadingLearningTrigger === trigger) {
       setIsReadingLearningMenuOpen(false);
+      setIsReadingLearningLabelChooserOpen(false);
       setActiveReadingLearningTrigger(null);
       return;
     }
 
     setReadingLearningMenuAnchor(anchor);
     setActiveReadingLearningTrigger(trigger);
+    setIsReadingLearningLabelChooserOpen(false);
     setIsReadingLearningMenuOpen(true);
   };
 
@@ -14860,6 +14929,72 @@ function MailboxView({
     closeMenus();
   };
 
+  const getLearningTargetMessages = (message: MailMessage) => {
+    const matchedMessages = getMessagesByIds([message.id]);
+    return matchedMessages.length > 0 ? matchedMessages : [message];
+  };
+
+  const moveLearningMessageToSpam = (message: MailMessage) => {
+    if (activeSmartFolder) {
+      closeMenus();
+      return;
+    }
+
+    const targetMessages = getLearningTargetMessages(message);
+    onAddSpamSuppression(targetMessages);
+
+    if (isSharedView) {
+      moveMessagesToFolderAcrossWorkspace("Spam", [message.id]);
+      return;
+    }
+
+    const sourceLocation = currentMessageLocationById[message.id] ?? {
+      mailboxId: mailbox.id,
+      folder: activeFolder,
+    };
+
+    moveMessages(
+      sourceLocation.mailboxId,
+      sourceLocation.folder,
+      sourceLocation.mailboxId,
+      "Spam",
+      [message.id],
+    );
+  };
+
+  const keepLearningMessageInInbox = (message: MailMessage) => {
+    if (activeSmartFolder) {
+      closeMenus();
+      return;
+    }
+
+    const targetMessages = getLearningTargetMessages(message);
+    onRemoveSpamSuppression(targetMessages);
+
+    const sourceLocation = currentMessageLocationById[message.id] ?? {
+      mailboxId: mailbox.id,
+      folder: activeFolder,
+    };
+
+    if (sourceLocation.folder !== "Filtered" && sourceLocation.folder !== "Spam") {
+      closeMenus();
+      return;
+    }
+
+    if (isSharedView) {
+      moveMessagesToFolderAcrossWorkspace("Inbox", [message.id]);
+      return;
+    }
+
+    moveMessages(
+      sourceLocation.mailboxId,
+      sourceLocation.folder,
+      sourceLocation.mailboxId,
+      "Inbox",
+      [message.id],
+    );
+  };
+
   const removeMessagesFromTrash = (
     targetMailboxId: InboxId,
     messageIds: string[],
@@ -15059,28 +15194,6 @@ function MailboxView({
           });
         })()
       : null;
-  const learningMailboxTargets = orderedMailboxes.map((candidate) => {
-    const displayTitle =
-      candidate.id === "main"
-        ? "Inbox"
-        : candidate.title.endsWith("Inbox")
-          ? candidate.title.replace(/\s+Inbox$/i, "")
-          : candidate.title;
-
-    return {
-      mailboxId: candidate.id,
-      chooserLabel: candidate.id === "main" ? "Inbox" : `${displayTitle} Inbox`,
-      belongsLabel:
-        candidate.id === "main"
-          ? "Keep this in Inbox"
-          : `This belongs in ${displayTitle}`,
-      logValue: displayTitle
-        .trim()
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, "_")
-        .replace(/^_|_$/g, ""),
-    };
-  });
   const learningSubmenuPosition =
     contextMenuState?.learningMenuOpen &&
     contextMenuPosition &&
@@ -15097,7 +15210,7 @@ function MailboxView({
             anchorY: contextMenuState.learningAnchorY,
             anchorHeight: contextMenuState.learningAnchorHeight,
             submenuWidth: 210,
-            submenuHeight: Math.min((learningMailboxTargets.length + 6) * 32 + 40, 360),
+            submenuHeight: 230,
             interactionRect,
           });
         })()
@@ -15117,7 +15230,7 @@ function MailboxView({
             anchorY: contextMenuState.learningAnchorY,
             anchorHeight: contextMenuState.learningAnchorHeight,
             submenuWidth: 228,
-            submenuHeight: Math.min(learningMailboxTargets.length * 32 + 48, 320),
+            submenuHeight: Math.min(manualLabelOverrideOptions.length * 32 + 48, 320),
             interactionRect,
           });
         })()
@@ -15178,6 +15291,7 @@ function MailboxView({
 
   useEffect(() => {
     setIsReadingLearningMenuOpen(false);
+    setIsReadingLearningLabelChooserOpen(false);
     setActiveReadingLearningTrigger(null);
   }, [
     activeFolder,
@@ -17825,104 +17939,74 @@ function MailboxView({
                     "var(--workspace-scrollbar-thumb) var(--workspace-scrollbar-track)",
                 }}
                 onMouseDown={(event) => event.stopPropagation()}
-              >
-                <div className="space-y-1">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      console.log("learning_show_less");
-                      closeMenus();
-                    }}
-                    className={contextMenuItemClass}
-                  >
-                    Show less like this
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      console.log("learning_show_more");
-                      closeMenus();
-                    }}
-                    className={contextMenuItemClass}
-                  >
-                    Show more like this
-                  </button>
-                  {contextMenuMessage && !isVisiblePriorityMessage(contextMenuMessage) ? (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        onSetManualPriority(contextMenuMessage.id, true);
-                        closeMenus();
-                      }}
-                      className={contextMenuItemClass}
-                    >
-                      This is important
-                    </button>
-                  ) : null}
-                  {contextMenuMessage && isVisiblePriorityMessage(contextMenuMessage) ? (
-                    <button
-                      type="button"
-                      onMouseDown={(e) => {
-                        e.nativeEvent.stopImmediatePropagation();
-                        onSetManualPriority(contextMenuMessage.id, false);
-                        closeMenus();
-                      }}
-                      className={contextMenuItemClass}
-                    >
-                      Not priority
-                    </button>
-                  ) : null}
-                </div>
-                <div className="my-2 h-px bg-[var(--workspace-divider)]" />
-                <div className="space-y-1">
-                  {learningMailboxTargets.map((target) => (
-                    <button
-                      key={`context-learning-${target.mailboxId}`}
-                      type="button"
-                      onClick={() => {
-                        console.log(`learning_belongs_${target.logValue}`);
-                        closeMenus();
-                      }}
-                      className={contextMenuItemClass}
-                    >
-                      {target.belongsLabel}
-                    </button>
-                  ))}
-                </div>
-                <div className="my-2 h-px bg-[var(--workspace-divider)]" />
-                <div className="space-y-1">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      console.log("learning_this_is_spam");
-                      closeMenus();
-                    }}
-                    className={contextMenuItemClass}
-                  >
-                    This is spam
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      console.log("learning_show_fewer_sender");
-                      closeMenus();
-                    }}
-                    className={contextMenuItemClass}
-                  >
-                    Show fewer emails from this sender
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      console.log("learning_move_future_to_spam");
-                      closeMenus();
-                    }}
-                    className={contextMenuItemClass}
-                  >
-                    Move future emails like this to Spam
-                  </button>
-                </div>
-              </div>,
+	              >
+	                <div className="space-y-1">
+	                  <button
+	                    type="button"
+	                    onClick={() => {
+	                      onSetManualPriority(contextMenuMessage.id, true);
+	                      closeMenus();
+	                    }}
+	                    className={contextMenuItemClass}
+	                  >
+	                    Mark as important
+	                  </button>
+	                  <button
+	                    type="button"
+	                    onClick={() => {
+	                      onSetManualPriority(contextMenuMessage.id, false);
+	                      closeMenus();
+	                    }}
+	                    className={contextMenuItemClass}
+	                  >
+	                    Mark as not important
+	                  </button>
+	                  <ContextSubmenuTriggerRow
+	                    label="Change label..."
+	                    active={Boolean(contextMenuState?.learningChooserOpen)}
+	                    onClick={() => {
+	                      setContextMenuState((current) =>
+	                        current
+	                          ? {
+	                              ...current,
+	                              learningChooserOpen: !current.learningChooserOpen,
+	                              learningChooserMode: "label",
+	                            }
+	                          : current,
+	                      );
+	                    }}
+	                    onMouseEnter={() => {
+	                      setContextMenuState((current) =>
+	                        current
+	                          ? {
+	                              ...current,
+	                              learningChooserOpen: true,
+	                              learningChooserMode: "label",
+	                            }
+	                          : current,
+	                      );
+	                    }}
+	                  />
+	                  <button
+	                    type="button"
+	                    onClick={() => {
+	                      keepLearningMessageInInbox(contextMenuMessage);
+	                    }}
+	                    className={contextMenuItemClass}
+	                  >
+	                    Keep in inbox
+	                  </button>
+	                  <button
+	                    type="button"
+	                    onClick={() => {
+	                      moveLearningMessageToSpam(contextMenuMessage);
+	                    }}
+	                    className={contextMenuItemClass}
+	                  >
+	                    Move to spam
+	                  </button>
+	                </div>
+	              </div>,
               document.body,
             )
           : null}
@@ -17944,31 +18028,25 @@ function MailboxView({
                     "var(--workspace-scrollbar-thumb) var(--workspace-scrollbar-track)",
                 }}
                 onMouseDown={(event) => event.stopPropagation()}
-              >
-                <div className="px-3 pb-2 pt-1 text-[0.66rem] font-medium uppercase tracking-[0.12em] text-[var(--workspace-text-faint)]">
-                  {contextMenuState.learningChooserMode === "type"
-                    ? "Move similar emails to"
-                    : "Move emails from this sender to"}
-                </div>
-                <div className="space-y-1">
-                  {learningMailboxTargets.map((target) => (
-                    <button
-                      key={`${contextMenuState.learningChooserMode}-${target.mailboxId}`}
-                      type="button"
-                      onClick={() => {
-                        console.log(
-                          contextMenuState.learningChooserMode === "type"
-                            ? `learning_move_type_${target.logValue}`
-                            : `learning_move_sender_${target.logValue}`,
-                        );
-                        closeMenus();
-                      }}
-                      className={contextMenuItemClass}
-                    >
-                      {target.chooserLabel}
-                    </button>
-                  ))}
-                </div>
+	              >
+	                <div className="px-3 pb-2 pt-1 text-[0.66rem] font-medium uppercase tracking-[0.12em] text-[var(--workspace-text-faint)]">
+	                  Change label to
+	                </div>
+	                <div className="space-y-1">
+	                  {manualLabelOverrideOptions.map((label) => (
+	                    <button
+	                      key={`context-learning-label-${label}`}
+	                      type="button"
+	                      onClick={() => {
+	                        onSetManualLabelOverride(contextMenuMessage, label);
+	                        closeMenus();
+	                      }}
+	                      className={contextMenuItemClass}
+	                    >
+	                      {label}
+	                    </button>
+	                  ))}
+	                </div>
               </div>,
               document.body,
             )
@@ -17998,107 +18076,87 @@ function MailboxView({
                 className="fixed z-[31] w-[244px] rounded-[20px] border border-[var(--workspace-menu-border)] bg-[var(--workspace-menu-bg)] p-2 shadow-panel"
                 style={readingLearningMenuPosition}
                 onMouseDown={(event) => event.stopPropagation()}
-              >
-                <div className="space-y-1">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      console.log("reading_learning_show_less");
-                      closeMenus();
-                    }}
-                    className={contextMenuItemClass}
-                  >
-                    Show less like this
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      console.log("reading_learning_show_more");
-                      closeMenus();
-                    }}
-                    className={contextMenuItemClass}
-                  >
-                    Show more like this
-                  </button>
-                  {readingLearningTargetMessage && !isVisiblePriorityMessage(readingLearningTargetMessage) ? (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        onSetManualPriority(readingLearningTargetMessage.id, true);
-                        closeMenus();
-                      }}
-                      className={contextMenuItemClass}
-                    >
-                      This is important
-                    </button>
-                  ) : null}
-                  {readingLearningTargetMessage && isVisiblePriorityMessage(readingLearningTargetMessage) ? (
-                    <button
-                      type="button"
-                      onMouseDown={(e) => {
-                        e.nativeEvent.stopImmediatePropagation();
-                        onSetManualPriority(readingLearningTargetMessage.id, false);
-                        closeMenus();
-                      }}
-                      className={contextMenuItemClass}
-                    >
-                      Not priority
-                    </button>
-                  ) : null}
-                </div>
-
-                <div className="my-2 h-px bg-[var(--workspace-divider)]" />
-
-                <div className="space-y-1">
-                  {learningMailboxTargets.map((target) => (
-                    <button
-                      key={`reading-learning-${target.mailboxId}`}
-                      type="button"
-                      onClick={() => {
-                        console.log(`reading_learning_belongs_${target.logValue}`);
-                        closeMenus();
-                      }}
-                      className={contextMenuItemClass}
-                    >
-                      {target.belongsLabel}
-                    </button>
-                  ))}
-                </div>
-
-                <div className="my-2 h-px bg-[var(--workspace-divider)]" />
-
-                <div className="space-y-1">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      console.log("reading_learning_this_is_spam");
-                      closeMenus();
-                    }}
-                    className={contextMenuItemClass}
-                  >
-                    This is spam
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      console.log("reading_learning_show_fewer_sender");
-                      closeMenus();
-                    }}
-                    className={contextMenuItemClass}
-                  >
-                    Show fewer emails from this sender
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      console.log("reading_learning_move_future_to_spam");
-                      closeMenus();
-                    }}
-                    className={contextMenuItemClass}
-                  >
-                    Move future emails like this to Spam
-                  </button>
-                </div>
+	              >
+	                <div className="space-y-1">
+	                  <button
+	                    type="button"
+	                    onClick={() => {
+	                      if (readingLearningTargetMessage) {
+	                        onSetManualPriority(readingLearningTargetMessage.id, true);
+	                      }
+	                      closeMenus();
+	                    }}
+	                    className={contextMenuItemClass}
+	                  >
+	                    Mark as important
+	                  </button>
+	                  <button
+	                    type="button"
+	                    onClick={() => {
+	                      if (readingLearningTargetMessage) {
+	                        onSetManualPriority(readingLearningTargetMessage.id, false);
+	                      }
+	                      closeMenus();
+	                    }}
+	                    className={contextMenuItemClass}
+	                  >
+	                    Mark as not important
+	                  </button>
+	                  <button
+	                    type="button"
+	                    onClick={() => {
+	                      setIsReadingLearningLabelChooserOpen((current) => !current);
+	                    }}
+	                    className={contextMenuItemClass}
+	                  >
+	                    Change label...
+	                  </button>
+	                  {isReadingLearningLabelChooserOpen ? (
+	                    <div className="space-y-1 border-l border-[var(--workspace-divider)] pl-2">
+	                      {manualLabelOverrideOptions.map((label) => (
+	                        <button
+	                          key={`reading-learning-label-${label}`}
+	                          type="button"
+	                          onClick={() => {
+	                            if (readingLearningTargetMessage) {
+	                              onSetManualLabelOverride(readingLearningTargetMessage, label);
+	                            }
+	                            closeMenus();
+	                          }}
+	                          className={contextMenuItemClass}
+	                        >
+	                          {label}
+	                        </button>
+	                      ))}
+	                    </div>
+	                  ) : null}
+	                  <button
+	                    type="button"
+	                    onClick={() => {
+	                      if (readingLearningTargetMessage) {
+	                        keepLearningMessageInInbox(readingLearningTargetMessage);
+	                      } else {
+	                        closeMenus();
+	                      }
+	                    }}
+	                    className={contextMenuItemClass}
+	                  >
+	                    Keep in inbox
+	                  </button>
+	                  <button
+	                    type="button"
+	                    onClick={() => {
+	                      if (readingLearningTargetMessage) {
+	                        moveLearningMessageToSpam(readingLearningTargetMessage);
+	                      } else {
+	                        closeMenus();
+	                      }
+	                    }}
+	                    className={contextMenuItemClass}
+	                  >
+	                    Move to spam
+	                  </button>
+	                </div>
               </div>
                 );
               })(),
@@ -27003,6 +27061,14 @@ export function WorkspaceShell({
     currentWorkspaceUserId,
     mailboxOrderKey,
   );
+  const manualLabelOverridesStorageKey = buildManualLabelOverridesStorageKey(
+    currentWorkspaceUserId,
+    mailboxOrderKey,
+  );
+  const spamSuppressionStorageKey = buildSpamSuppressionStorageKey(
+    currentWorkspaceUserId,
+    mailboxOrderKey,
+  );
   const notificationReadStorageKey = buildNotificationReadStorageKey(currentWorkspaceUserId);
   const mailboxFocusPreferenceOverridesStorageKey =
     buildMailboxFocusPreferenceOverridesStorageKey(currentWorkspaceUserId);
@@ -27241,7 +27307,9 @@ export function WorkspaceShell({
     // Protected threads (unread or recently active) are never pruned; entire
     // threads are removed as a unit so the reading pane stays consistent.
     return pruneInboxSnapshot(
-      [...updatedPersistedMessages, ...genuinelyNewMessages],
+      [...updatedPersistedMessages, ...genuinelyNewMessages].filter(
+        (message) => !isWorkspaceMessageSpamSuppressed(message),
+      ),
       Date.now(),
     );
   };
@@ -27339,7 +27407,9 @@ export function WorkspaceShell({
         ),
     );
 
-    return [...updatedCurrentMessages, ...genuinelyNewMessages];
+    return [...updatedCurrentMessages, ...genuinelyNewMessages].filter(
+      (message) => !isWorkspaceMessageSpamSuppressed(message),
+    );
   };
   const connectedInboxCount = savedManagedInboxes.filter(
     (mailbox) => mailbox.connected,
@@ -27899,6 +27969,50 @@ export function WorkspaceShell({
       return {};
     }
   });
+  const [manualLabelOverrides, setManualLabelOverrides] =
+    useState<ManualLabelOverrideStore>(() => {
+      if (typeof window === "undefined") {
+        return {};
+      }
+
+      const storedValue = window.localStorage.getItem(manualLabelOverridesStorageKey);
+
+      if (!storedValue) {
+        return {};
+      }
+
+      try {
+        return JSON.parse(storedValue) as ManualLabelOverrideStore;
+      } catch {
+        return {};
+      }
+    });
+  const [spamSuppressionKeys, setSpamSuppressionKeys] = useState<string[]>(() => {
+    if (typeof window === "undefined") {
+      return [];
+    }
+
+    const storedValue = window.localStorage.getItem(spamSuppressionStorageKey);
+
+    if (!storedValue) {
+      return [];
+    }
+
+    try {
+      const parsedValue = JSON.parse(storedValue);
+      return Array.isArray(parsedValue)
+        ? parsedValue.filter((key): key is string => typeof key === "string")
+        : [];
+    } catch {
+      return [];
+    }
+  });
+  const spamSuppressionKeySet = useMemo(
+    () => new Set(spamSuppressionKeys),
+    [spamSuppressionKeys],
+  );
+  const isWorkspaceMessageSpamSuppressed = (message: MessageIdentitySource) =>
+    getCanonicalMessageIdentityKeys(message).some((key) => spamSuppressionKeySet.has(key));
   const isGuestInviteUser = authenticatedUser?.userType === "guest";
   const activeFocusPreferences = activeMailbox
     ? resolveEffectiveFocusPreferences(
@@ -28200,8 +28314,14 @@ export function WorkspaceShell({
     for (const candidate of orderedMailboxes) {
       const candidateFocusPreferences =
         effectiveFocusPreferencesByMailbox[candidate.id] ?? activeFocusPreferences;
+      const candidateMailboxCollections = mailboxStore[candidate.id] ?? createEmptyMailboxCollections();
       const candidateVisibleInboxMessages = getMailboxReadyInboxMessagesForWorkspaceMailbox(
-        mailboxStore[candidate.id] ?? createEmptyMailboxCollections(),
+        {
+          ...candidateMailboxCollections,
+          Inbox: candidateMailboxCollections.Inbox.filter(
+            (message) => !isWorkspaceMessageSpamSuppressed(message),
+          ),
+        },
         manualPriorityOverrides,
         candidateFocusPreferences,
         {
@@ -29222,6 +29342,49 @@ export function WorkspaceShell({
         ),
       );
     }
+  };
+
+  const handleSetManualLabelOverride = (
+    message: MessageIdentitySource,
+    label: ManualLabelOverride,
+  ) => {
+    setManualLabelOverrides((current) => {
+      const next = { ...current };
+
+      getCanonicalMessageIdentityKeys(message).forEach((key) => {
+        next[key] = label;
+      });
+
+      return next;
+    });
+  };
+
+  const handleAddSpamSuppression = (messages: MessageIdentitySource[]) => {
+    if (messages.length === 0) {
+      return;
+    }
+
+    setSpamSuppressionKeys((current) => {
+      const next = new Set(current);
+      messages.forEach((message) => {
+        getCanonicalMessageIdentityKeys(message).forEach((key) => next.add(key));
+      });
+      return Array.from(next);
+    });
+  };
+
+  const handleRemoveSpamSuppression = (messages: MessageIdentitySource[]) => {
+    if (messages.length === 0) {
+      return;
+    }
+
+    const identityKeysToRemove = new Set(
+      messages.flatMap((message) => getCanonicalMessageIdentityKeys(message)),
+    );
+
+    setSpamSuppressionKeys((current) =>
+      current.filter((key) => !identityKeysToRemove.has(key)),
+    );
   };
 
   const handleOpenInboxes = (filter: InboxFilter) => {
@@ -30445,6 +30608,49 @@ export function WorkspaceShell({
       return;
     }
 
+    const storedValue = window.localStorage.getItem(manualLabelOverridesStorageKey);
+
+    if (!storedValue) {
+      setManualLabelOverrides({});
+      return;
+    }
+
+    try {
+      setManualLabelOverrides(JSON.parse(storedValue) as ManualLabelOverrideStore);
+    } catch {
+      setManualLabelOverrides({});
+    }
+  }, [manualLabelOverridesStorageKey]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const storedValue = window.localStorage.getItem(spamSuppressionStorageKey);
+
+    if (!storedValue) {
+      setSpamSuppressionKeys([]);
+      return;
+    }
+
+    try {
+      const parsedValue = JSON.parse(storedValue);
+      setSpamSuppressionKeys(
+        Array.isArray(parsedValue)
+          ? parsedValue.filter((key): key is string => typeof key === "string")
+          : [],
+      );
+    } catch {
+      setSpamSuppressionKeys([]);
+    }
+  }, [spamSuppressionStorageKey]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
     window.localStorage.setItem(
       messageUnreadOverridesStorageKey,
       JSON.stringify(messageUnreadOverrides),
@@ -30461,6 +30667,28 @@ export function WorkspaceShell({
       JSON.stringify(manualPriorityOverrides),
     );
   }, [manualPriorityOverrides, manualPriorityOverridesStorageKey]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    window.localStorage.setItem(
+      manualLabelOverridesStorageKey,
+      JSON.stringify(manualLabelOverrides),
+    );
+  }, [manualLabelOverrides, manualLabelOverridesStorageKey]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    window.localStorage.setItem(
+      spamSuppressionStorageKey,
+      JSON.stringify(spamSuppressionKeys),
+    );
+  }, [spamSuppressionKeys, spamSuppressionStorageKey]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -31818,14 +32046,19 @@ export function WorkspaceShell({
                   inboxSignatures={inboxSignatures}
                   themeMode={resolvedTheme}
                   aiSuggestionsEnabled={aiSuggestionsEnabled}
-	                  notificationNavigationRequest={notificationNavigationRequest}
-	                  onConsumeNotificationNavigation={(requestKey) =>
-	                    setNotificationNavigationRequest((current) =>
-	                      current?.requestKey === requestKey ? null : current,
-	                    )
-	                  }
+                  notificationNavigationRequest={notificationNavigationRequest}
+                  onConsumeNotificationNavigation={(requestKey) =>
+                    setNotificationNavigationRequest((current) =>
+                      current?.requestKey === requestKey ? null : current,
+                    )
+                  }
                   manualPriorityOverrides={manualPriorityOverrides}
+                  manualLabelOverrides={manualLabelOverrides}
+                  spamSuppressionKeys={spamSuppressionKeys}
                   onSetManualPriority={handleSetManualPriority}
+                  onSetManualLabelOverride={handleSetManualLabelOverride}
+                  onAddSpamSuppression={handleAddSpamSuppression}
+                  onRemoveSpamSuppression={handleRemoveSpamSuppression}
                   getLinkedReviewForMessage={getLinkedReviewForMessage}
                   getLinkedReviewBadgeLabel={getLinkedReviewBadgeLabel}
                   onOpenLinkedReview={(target) => setActiveTarget(target)}
