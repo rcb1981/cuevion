@@ -78,6 +78,10 @@ import {
   type TeamInviteStatus,
 } from "../../lib/teamInviteApi";
 import {
+  saveUserAccountConfig,
+  type UserAccountConfig,
+} from "../../lib/userConfigApi";
+import {
   TEAM_ROLES,
   getTeamRoleLabel,
   normalizeTeamRole,
@@ -20577,6 +20581,50 @@ function cloneManagedWorkspaceInbox(mailbox: ManagedWorkspaceInbox): ManagedWork
   };
 }
 
+function sanitizeManagedWorkspaceInboxForAccountConfig(
+  mailbox: ManagedWorkspaceInbox,
+): ManagedWorkspaceInbox {
+  const sanitizedMailbox = cloneManagedWorkspaceInbox(mailbox);
+
+  return {
+    ...sanitizedMailbox,
+    oauthAuthorizationUrl: null,
+    customImap: {
+      ...sanitizedMailbox.customImap,
+      password: "",
+    },
+    customSmtp: {
+      ...sanitizedMailbox.customSmtp,
+      password: "",
+    },
+  };
+}
+
+function sanitizeOnboardingStateForAccountConfig(
+  state: OnboardingState,
+): OnboardingState {
+  return {
+    ...state,
+    inboxConnections: Object.fromEntries(
+      Object.entries(state.inboxConnections).map(([inboxId, connection]) => [
+        inboxId,
+        {
+          ...connection,
+          oauthAuthorizationUrl: null,
+          customImap: {
+            ...connection.customImap,
+            password: "",
+          },
+          customSmtp: {
+            ...connection.customSmtp,
+            password: "",
+          },
+        },
+      ]),
+    ) as OnboardingState["inboxConnections"],
+  };
+}
+
 function normalizeManagedWorkspaceInbox(
   mailbox: ManagedWorkspaceInbox,
 ): ManagedWorkspaceInbox {
@@ -30604,6 +30652,52 @@ export function WorkspaceShell({
       JSON.stringify(smartFolders),
     );
   }, [smartFolders]);
+
+  useEffect(() => {
+    if (!authenticatedUser || authenticatedUser.userType !== "member") {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      const nextAccountConfig: UserAccountConfig = {
+        onboardingSession: {
+          completed: true,
+          state: sanitizeOnboardingStateForAccountConfig(onboardingState),
+        },
+        managedInboxes: savedManagedInboxes.map(
+          sanitizeManagedWorkspaceInboxForAccountConfig,
+        ),
+        mailboxTitleOverrides,
+        primaryManagedInboxId,
+        mailboxFocusPreferenceOverrides,
+        inboxSignatures,
+        smartFolders,
+        uiPreferences: {
+          themeMode: workspaceMode,
+          aiSuggestionsEnabled,
+          inboxChangesEnabled,
+          teamActivityEnabled,
+        },
+      };
+
+      void saveUserAccountConfig(nextAccountConfig);
+    }, 900);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [
+    aiSuggestionsEnabled,
+    authenticatedUser,
+    inboxChangesEnabled,
+    inboxSignatures,
+    mailboxFocusPreferenceOverrides,
+    mailboxTitleOverrides,
+    onboardingState,
+    primaryManagedInboxId,
+    savedManagedInboxes,
+    smartFolders,
+    teamActivityEnabled,
+    workspaceMode,
+  ]);
 
   if (collaborationInviteRoute) {
     const inviteViewerType = isExternalReviewRoute
