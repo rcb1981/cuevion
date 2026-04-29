@@ -1445,6 +1445,19 @@ function resolveVisibleClassification(
       classification === "finance" ||
       classification === "royalty_statement",
   );
+  const isStrongMusicPromo = isStrongMusicPromoMessage(message);
+  const hasStrongMusicPromoEligibleClassification =
+    !isStrongPromoSubjectProtectedClassification &&
+    (message.internalClassification === "workflow_update" ||
+      message.internalClassification === "distributor_update" ||
+      message.internalClassification === "info" ||
+      message.internalClassification === "business_reminder" ||
+      message.internalClassification === "business" ||
+      message.internalClassification === "unknown" ||
+      (!message.internalClassification &&
+        (signalClassification === "workflow_update" ||
+          signalClassification === "business" ||
+          signalClassification === "unknown")));
   const hasStrongExplicitPromoSubjectCorrection =
     strongExplicitPromoSubjectSignal &&
     !isStrongPromoSubjectProtectedClassification &&
@@ -1469,6 +1482,10 @@ function resolveVisibleClassification(
   const resolvedClassification = (() => {
     if (isGenericRetailMarketingUpdateMessage(message)) {
       return "workflow_update";
+    }
+
+    if (isStrongMusicPromo && hasStrongMusicPromoEligibleClassification) {
+      return "promo";
     }
 
     if (hasStrongExplicitPromoSubjectCorrection) {
@@ -1530,27 +1547,6 @@ function resolveVisibleClassification(
     ])
   ) {
     console.info("[Cuevion] Meta Finance LOW diagnostic", {
-      subject: message.subject,
-      sender: message.sender,
-      from: message.from,
-      signal: message.signal,
-      ui_signal: message.ui_signal,
-      internalClassification: message.internalClassification,
-      signalClassification,
-      isMarketingNewsletterUpdateMessage: isMarketingNewsletterUpdate,
-      resolvedClassification,
-    });
-  }
-
-  if (
-    includesAnyKeyword(metaDiagnosticText, [
-      "digital promo sound",
-      "tskmo records",
-      "aizaz",
-      "estoy",
-    ])
-  ) {
-    console.info("[Cuevion] Promo workflow_update diagnostic", {
       subject: message.subject,
       sender: message.sender,
       from: message.from,
@@ -5316,31 +5312,6 @@ function getVisiblePriorityBadgeForWorkspaceMessage(
     options,
   );
   const finalBadge = getVisiblePriorityBadge(adjustedMessage, override);
-
-  if (
-    (visibilityClassification === "promo" ||
-      visibilityClassification === "promo_reminder") &&
-    finalBadge === "LOW"
-  ) {
-    console.info("[Cuevion] Promo LOW priority diagnostic", {
-      id: message.id,
-      subject: message.subject,
-      sender: message.sender,
-      from: message.from,
-      signal: message.signal,
-      ui_signal: message.ui_signal,
-      internalClassification: message.internalClassification,
-      visibilityClassification,
-      focusPreferenceLevel,
-      manualOverride: override,
-      final_visibility: message.final_visibility,
-      action: message.action,
-      priorityScoreBefore: message.priorityScore,
-      priorityScoreAfter: adjustedMessage.priorityScore,
-      protectedVisibility: hasProtectedPriorityVisibility(message),
-      finalBadge,
-    });
-  }
 
   return finalBadge;
 }
