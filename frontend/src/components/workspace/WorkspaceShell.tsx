@@ -488,6 +488,24 @@ type MailMessageOwner = {
 type MailMessagePriorityScore = "low" | "medium" | "high";
 type MailMessageFocusSignal = "attention" | null;
 type ManualPriorityOverride = "priority" | "removed";
+
+function resolveManualPriorityOverride(
+  overrides: Partial<Record<string, ManualPriorityOverride>>,
+  message: MessageIdentitySource,
+) {
+  for (const key of getCanonicalMessageIdentityKeys(message)) {
+    if (Object.prototype.hasOwnProperty.call(overrides, key)) {
+      return overrides[key];
+    }
+  }
+
+  if (message.id && Object.prototype.hasOwnProperty.call(overrides, message.id)) {
+    return overrides[message.id];
+  }
+
+  return undefined;
+}
+
 type LearningDecisionSourceContext =
   | "refine"
   | "uncertain"
@@ -5201,7 +5219,7 @@ function getMailboxReadyInboxMessagesForWorkspaceMailbox(
     (message) =>
       !shouldDisplayMessageInFilteredFolderForWorkspaceMessage(
         message,
-        manualPriorityOverrides[message.id],
+        resolveManualPriorityOverride(manualPriorityOverrides, message),
         focusPreferences,
         options,
       ),
@@ -10502,7 +10520,7 @@ function MailboxView({
   ) {
     return getVisiblePriorityBadgeForWorkspaceMessage(
       message,
-      manualPriorityOverrides[message.id],
+      resolveManualPriorityOverride(manualPriorityOverrides, message),
       nextFocusPreferences,
       {
         preferPromoMailboxContext,
@@ -10588,7 +10606,7 @@ function MailboxView({
     }
 
     return (
-      manualPriorityOverrides[message.id] !== "priority" &&
+      resolveManualPriorityOverride(manualPriorityOverrides, message) !== "priority" &&
       resolveFocusPreferenceLevelForMessage(message) === "low"
     );
   };
@@ -10833,12 +10851,12 @@ function MailboxView({
       renderContext.preferPromoMailboxContext,
     );
   };
-  const getManualPriorityOverride = (messageId: string) =>
-    manualPriorityOverrides[messageId];
+  const getManualPriorityOverride = (message: MessageIdentitySource) =>
+    resolveManualPriorityOverride(manualPriorityOverrides, message);
   const getVisibleMessageSignal = (message: MailMessage) =>
     resolveVisiblePrioritySignal(
       getPriorityVisibilityAdjustedMessage(message),
-      getManualPriorityOverride(message.id),
+      getManualPriorityOverride(message),
     );
   const isVisiblePriorityMessage = (message: MailMessage) =>
     isVisiblePriorityMessageForMessage(message);
@@ -16568,7 +16586,7 @@ function MailboxView({
                         (resolvedVisibleClassification === "demo" ||
                           resolvedVisibleClassification === "high_priority_demo") &&
                         !hasProtectedPriorityVisibility(message) &&
-                        getManualPriorityOverride(message.id) !== "priority";
+                        getManualPriorityOverride(message) !== "priority";
                       const visibleSignal = getVisibleMessageSignal(message);
                       const priorityBadge = activeSmartFolder
                         ? getSmartFolderVisiblePriorityBadgeForMessage(message)
@@ -27590,7 +27608,7 @@ export function WorkspaceShell({
     // of messageCollections.Inbox by the MailboxView.
     return getVisiblePriorityBadgeForWorkspaceMessage(
       message,
-      manualPriorityOverrides[message.id],
+      resolveManualPriorityOverride(manualPriorityOverrides, message),
       effectiveFocusPreferencesByMailbox[mailboxId] ?? activeFocusPreferences,
     );
   };
@@ -28608,9 +28626,15 @@ export function WorkspaceShell({
     // used score/signal heuristics that diverged from the badge, causing the
     // "removed" branch to be skipped for messages the UI showed as Priority.
     // Now: always write the override unconditionally based on intent.
+    const override: ManualPriorityOverride = shouldBePriority ? "priority" : "removed";
+
     setManualPriorityOverrides((current) => {
       const next = { ...current };
-      next[messageId] = shouldBePriority ? "priority" : "removed";
+
+      getCanonicalMessageIdentityKeys(sourceMessage).forEach((key) => {
+        next[key] = override;
+      });
+
       return next;
     });
 
@@ -29000,7 +29024,7 @@ export function WorkspaceShell({
           if (
             shouldDisplayMessageInFilteredFolderForWorkspaceMessage(
               message,
-              manualPriorityOverrides[message.id],
+              resolveManualPriorityOverride(manualPriorityOverrides, message),
               nextFocusPreferences,
               {
                 preferPromoMailboxContext: shouldPreferPromoMailboxContext,
