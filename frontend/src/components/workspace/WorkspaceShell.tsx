@@ -5887,7 +5887,23 @@ function resolveMailThreadId(message: Pick<MailMessageSeed, "threadId" | "subjec
 }
 
 type SafeThreadGroupingMessage = Pick<MailMessageSeed, "id" | "threadId" | "subject" | "timestamp"> &
-  Partial<Pick<MailMessageSeed, "imapUid" | "from" | "sender" | "createdAt">>;
+  Partial<
+    Pick<
+      MailMessageSeed,
+      | "imapUid"
+      | "from"
+      | "to"
+      | "cc"
+      | "sender"
+      | "snippet"
+      | "body"
+      | "signal"
+      | "ui_signal"
+      | "internalClassification"
+      | "collaboration"
+      | "createdAt"
+    >
+  >;
 
 const genericThreadSubjects = new Set([
   "demo",
@@ -5915,23 +5931,67 @@ function isGenericThreadSubject(subject: string) {
   return genericThreadSubjects.has(normalizeThreadSubject(subject));
 }
 
+function hasReplySubjectPrefix(subject: string) {
+  return /^(re|fwd|fw):\s*/i.test(subject.trim());
+}
+
+function hasQuotedReplyMarker(message: Pick<SafeThreadGroupingMessage, "snippet" | "body">) {
+  const text = [message.snippet ?? "", ...(message.body ?? [])].join("\n");
+
+  return /\bon .{1,240} wrote:/i.test(text) || /\bwrote:/i.test(text) || /^>/m.test(text);
+}
+
+function hasNonSubjectReplyEvidence(message: SafeThreadGroupingMessage) {
+  return (
+    hasQuotedReplyMarker(message) ||
+    message.internalClassification === "reply" ||
+    message.signal === "Follow-up" ||
+    message.ui_signal === "REPLY" ||
+    Boolean(message.collaboration?.messages?.length)
+  );
+}
+
+function hasStrongReplyThreadEvidence(message: SafeThreadGroupingMessage) {
+  if (isGenericThreadSubject(message.subject)) {
+    return hasNonSubjectReplyEvidence(message);
+  }
+
+  return hasReplySubjectPrefix(message.subject) || hasNonSubjectReplyEvidence(message);
+}
+
+function buildReplyParticipantKey(message: SafeThreadGroupingMessage) {
+  const participants = [message.from, message.to, message.cc]
+    .flatMap((value) => (value ?? "").split(/[,;]/))
+    .map((value) => normalizeSenderLearningKey(value))
+    .filter(Boolean)
+    .sort();
+
+  return Array.from(new Set(participants)).join(",");
+}
+
 function resolveSafeThreadGroupingKey(
   message: SafeThreadGroupingMessage,
   mailboxId?: InboxId | string,
 ) {
   const normalizedSubject = normalizeThreadSubject(message.subject);
   const threadId = message.threadId?.trim();
+  const mailboxPrefix = mailboxId ? `${mailboxId}|` : "";
 
   if (threadId && threadId !== normalizedSubject) {
     return `thread:${threadId}`;
   }
 
-  if (isGenericThreadSubject(message.subject) && isLikelySubjectFallbackThreadId(message)) {
+  if (hasStrongReplyThreadEvidence(message)) {
+    const participantKey = buildReplyParticipantKey(message);
+
+    return `reply:${mailboxPrefix}${normalizedSubject}|${participantKey}`;
+  }
+
+  if (isGenericThreadSubject(message.subject) && (!threadId || isLikelySubjectFallbackThreadId(message))) {
     return `message:${message.imapUid || message.id || `${normalizedSubject}|${message.from ?? ""}|${message.timestamp}`}`;
   }
 
   const normalizedSender = normalizeSenderLearningKey(message.from ?? message.sender ?? "");
-  const mailboxPrefix = mailboxId ? `${mailboxId}|` : "";
 
   return `fallback:${mailboxPrefix}${normalizedSubject}|${normalizedSender}`;
 }
