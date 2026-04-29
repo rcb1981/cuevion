@@ -8654,6 +8654,7 @@ function WorkspaceSidebar({
   onLogoutClick,
   onChangeSection,
   onOpenMailbox,
+  onReorderMailboxes,
 }: {
   activeSection: WorkspaceSection;
   activeMailboxId: InboxId | null;
@@ -8663,8 +8664,11 @@ function WorkspaceSidebar({
   onLogoutClick: () => void;
   onChangeSection: (view: WorkspaceSection) => void;
   onOpenMailbox: (mailbox: OrderedMailbox) => void;
+  onReorderMailboxes?: (sourceId: InboxId, targetId: InboxId) => void;
 }) {
   const [isInboxesOpen, setIsInboxesOpen] = useState(false);
+  const [draggedMailboxId, setDraggedMailboxId] = useState<InboxId | null>(null);
+  const shouldSuppressDragClickRef = useRef(false);
   const hasMultipleMailboxes = orderedMailboxes.length > 1;
   const singleMailbox = !hasMultipleMailboxes ? (orderedMailboxes[0] ?? null) : null;
   const activeSidebarInboxId = activeSection === "Inboxes" ? activeMailboxId : null;
@@ -8683,6 +8687,63 @@ function WorkspaceSidebar({
       setIsInboxesOpen(true);
     }
   }, [activeSidebarInboxId]);
+
+  const resetDragClickSuppression = () => {
+    window.setTimeout(() => {
+      shouldSuppressDragClickRef.current = false;
+    }, 0);
+  };
+
+  const handleSidebarInboxDragStart = (
+    event: DragEvent<HTMLButtonElement>,
+    mailboxId: InboxId,
+  ) => {
+    if (!onReorderMailboxes) {
+      return;
+    }
+
+    shouldSuppressDragClickRef.current = true;
+    setDraggedMailboxId(mailboxId);
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", mailboxId);
+  };
+
+  const handleSidebarInboxDragOver = (
+    event: DragEvent<HTMLButtonElement>,
+    mailboxId: InboxId,
+  ) => {
+    if (!onReorderMailboxes || !draggedMailboxId || draggedMailboxId === mailboxId) {
+      return;
+    }
+
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+  };
+
+  const handleSidebarInboxDrop = (
+    event: DragEvent<HTMLButtonElement>,
+    mailboxId: InboxId,
+  ) => {
+    if (!onReorderMailboxes) {
+      return;
+    }
+
+    event.preventDefault();
+    const sourceMailboxId =
+      draggedMailboxId ?? (event.dataTransfer.getData("text/plain") as InboxId);
+
+    if (sourceMailboxId && sourceMailboxId !== mailboxId) {
+      onReorderMailboxes(sourceMailboxId, mailboxId);
+    }
+
+    setDraggedMailboxId(null);
+    resetDragClickSuppression();
+  };
+
+  const handleSidebarInboxDragEnd = () => {
+    setDraggedMailboxId(null);
+    resetDragClickSuppression();
+  };
 
   const renderItem = (item: {
     section: WorkspaceSection;
@@ -8739,7 +8800,20 @@ function WorkspaceSidebar({
                     <li key={mailbox.id}>
                       <button
                         type="button"
+                        draggable={Boolean(onReorderMailboxes)}
+                        onDragStart={(event) =>
+                          handleSidebarInboxDragStart(event, mailbox.id)
+                        }
+                        onDragOver={(event) =>
+                          handleSidebarInboxDragOver(event, mailbox.id)
+                        }
+                        onDrop={(event) => handleSidebarInboxDrop(event, mailbox.id)}
+                        onDragEnd={handleSidebarInboxDragEnd}
                         onClick={() => {
+                          if (shouldSuppressDragClickRef.current) {
+                            return;
+                          }
+
                           const targetMailbox =
                             orderedMailboxes.find((candidate) => candidate.id === mailbox.id) ?? null;
 
@@ -8749,11 +8823,11 @@ function WorkspaceSidebar({
 
                           onOpenMailbox(targetMailbox);
                         }}
-                        className={`hidden w-full rounded-2xl px-4 py-3 text-left text-sm font-medium transition-[background-color,color,box-shadow] duration-100 focus:outline-none focus-visible:shadow-[inset_0_0_0_1px_rgba(255,255,255,0.12),0_0_0_1px_rgba(214,230,221,0.16)] xl:block ${
+                        className={`hidden w-full rounded-2xl px-4 py-3 text-left text-sm font-medium transition-[background-color,color,box-shadow,opacity] duration-100 focus:outline-none focus-visible:shadow-[inset_0_0_0_1px_rgba(255,255,255,0.12),0_0_0_1px_rgba(214,230,221,0.16)] xl:block ${
                           activeInbox
                             ? "bg-[linear-gradient(180deg,var(--workspace-sidebar-active-start),var(--workspace-sidebar-active-end))] text-[var(--workspace-sidebar-text)]"
                             : "text-[var(--workspace-sidebar-text-muted)] hover:bg-[var(--workspace-sidebar-hover)] hover:text-[var(--workspace-sidebar-text)]"
-                        }`}
+                        }${onReorderMailboxes ? " cursor-grab active:cursor-grabbing" : ""}${draggedMailboxId === mailbox.id ? " opacity-70" : ""}`}
                         aria-label={mailbox.label}
                       >
                         <span className="block pl-4">{mailbox.label}</span>
@@ -8800,7 +8874,20 @@ function WorkspaceSidebar({
                   <li key={mailbox.id}>
                     <button
                       type="button"
+                      draggable={Boolean(onReorderMailboxes)}
+                      onDragStart={(event) =>
+                        handleSidebarInboxDragStart(event, mailbox.id)
+                      }
+                      onDragOver={(event) =>
+                        handleSidebarInboxDragOver(event, mailbox.id)
+                      }
+                      onDrop={(event) => handleSidebarInboxDrop(event, mailbox.id)}
+                      onDragEnd={handleSidebarInboxDragEnd}
                       onClick={() => {
+                        if (shouldSuppressDragClickRef.current) {
+                          return;
+                        }
+
                         const targetMailbox =
                           orderedMailboxes.find((candidate) => candidate.id === mailbox.id) ?? null;
 
@@ -8810,11 +8897,11 @@ function WorkspaceSidebar({
 
                         onOpenMailbox(targetMailbox);
                       }}
-                      className={`hidden w-full rounded-2xl px-4 py-3 text-left text-sm font-medium transition-[background-color,color,box-shadow] duration-100 focus:outline-none focus-visible:shadow-[inset_0_0_0_1px_rgba(255,255,255,0.12),0_0_0_1px_rgba(214,230,221,0.16)] xl:block ${
+                      className={`hidden w-full rounded-2xl px-4 py-3 text-left text-sm font-medium transition-[background-color,color,box-shadow,opacity] duration-100 focus:outline-none focus-visible:shadow-[inset_0_0_0_1px_rgba(255,255,255,0.12),0_0_0_1px_rgba(214,230,221,0.16)] xl:block ${
                         activeInbox
                           ? "bg-[linear-gradient(180deg,var(--workspace-sidebar-active-start),var(--workspace-sidebar-active-end))] text-[var(--workspace-sidebar-text)]"
                           : "text-[var(--workspace-sidebar-text-muted)] hover:bg-[var(--workspace-sidebar-hover)] hover:text-[var(--workspace-sidebar-text)]"
-                      }`}
+                      }${onReorderMailboxes ? " cursor-grab active:cursor-grabbing" : ""}${draggedMailboxId === mailbox.id ? " opacity-70" : ""}`}
                       aria-label={mailbox.label}
                     >
                       <span className="block pl-4">{mailbox.label}</span>
@@ -29870,6 +29957,39 @@ export function WorkspaceShell({
     setPrimaryManagedInboxId(inboxId);
   };
 
+  const handleReorderManagedInboxes = (sourceId: InboxId, targetId: InboxId) => {
+    if (sourceId === targetId) {
+      return;
+    }
+
+    if (
+      primaryManagedInboxId &&
+      (sourceId === primaryManagedInboxId || targetId === primaryManagedInboxId)
+    ) {
+      return;
+    }
+
+    setSavedManagedInboxes((currentMailboxes) => {
+      const sourceIndex = currentMailboxes.findIndex((mailbox) => mailbox.id === sourceId);
+      const targetIndex = currentMailboxes.findIndex((mailbox) => mailbox.id === targetId);
+
+      if (sourceIndex < 0 || targetIndex < 0) {
+        return currentMailboxes;
+      }
+
+      const nextMailboxes = [...currentMailboxes];
+      const [movedMailbox] = nextMailboxes.splice(sourceIndex, 1);
+      const nextTargetIndex = nextMailboxes.findIndex((mailbox) => mailbox.id === targetId);
+
+      if (!movedMailbox || nextTargetIndex < 0) {
+        return currentMailboxes;
+      }
+
+      nextMailboxes.splice(nextTargetIndex, 0, movedMailbox);
+      return nextMailboxes;
+    });
+  };
+
   useEffect(() => {
     setMailboxStore((currentStore) => {
       const nextStore = { ...currentStore };
@@ -31659,6 +31779,7 @@ export function WorkspaceShell({
         onOpenMailbox={(mailbox) =>
           openMailboxFromContext(mailbox, { preserveCurrentContext: false })
         }
+        onReorderMailboxes={handleReorderManagedInboxes}
       />
 
       <div className={`mx-auto h-full ${workspaceContentRailClass}`}>
