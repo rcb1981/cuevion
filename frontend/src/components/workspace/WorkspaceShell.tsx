@@ -6686,7 +6686,7 @@ const primaryBadgeClass =
   "rounded-full bg-[linear-gradient(180deg,rgba(208,232,201,0.92),rgba(146,189,132,0.94)_58%,rgba(94,141,89,0.96))] px-2.5 py-1 text-[0.62rem] font-medium uppercase tracking-[0.18em] text-[color:rgba(41,73,45,0.96)] shadow-[inset_0_1px_0_rgba(255,255,255,0.36),0_8px_24px_rgba(118,170,112,0.14)]";
 
 const unreadAttentionDotClass =
-  "h-2 w-2 rounded-full bg-[#4E2070] shadow-[0_0_0_2px_rgba(78,32,112,0.08)]";
+  "h-2 w-2 rounded-full bg-[#8B3DFF] shadow-[0_0_0_2px_rgba(139,61,255,0.18),0_0_10px_rgba(139,61,255,0.42)]";
 const contextMenuHoverSurfaceClass =
   "hover:bg-[var(--workspace-menu-hover)] hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]";
 const contextMenuItemClass =
