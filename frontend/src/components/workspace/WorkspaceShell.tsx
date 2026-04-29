@@ -1231,6 +1231,57 @@ type PromoHeuristicMessage = Pick<
 > &
   Partial<Pick<MailMessage, "to">>;
 
+function isStrongDemoSubmissionMessage(message: PromoHeuristicMessage) {
+  const subjectText = message.subject ?? "";
+  const toText = (message.to ?? "").toLowerCase();
+  const searchableText = [
+    message.subject,
+    message.snippet,
+    message.sender,
+    message.from,
+    message.to ?? "",
+    ...(message.body ?? []),
+  ]
+    .join(" ")
+    .toLowerCase();
+  const hasExplicitDemoSubjectSignal =
+    /\[\s*demo\s*\]/i.test(subjectText) ||
+    /^demo\b/i.test(subjectText.trim());
+
+  if (hasExplicitDemoSubjectSignal) {
+    return true;
+  }
+
+  const hasExplicitPromoSubjectSignal =
+    /\[\s*promo\s*\]/i.test(subjectText) ||
+    /^promo\b/i.test(subjectText.trim()) ||
+    /\bpromo\s*\|/i.test(subjectText);
+
+  if (hasExplicitPromoSubjectSignal) {
+    return false;
+  }
+
+  const hasDirectSubmissionLanguage = includesAnyKeyword(searchableText, [
+    "listen to my new track",
+    "share your thoughts",
+    "feedback",
+    "demo submission",
+    "new track",
+  ]);
+  const hasPrivateSubmissionLink = includesAnyKeyword(searchableText, [
+    "soundcloud",
+    "dropbox",
+    "drive.google",
+    "google drive",
+    "disco.ac",
+  ]);
+
+  return (
+    toText.includes("demos@") ||
+    (hasDirectSubmissionLanguage && hasPrivateSubmissionLink)
+  );
+}
+
 function isStrongMusicPromoMessage(message: PromoHeuristicMessage) {
   const subjectText = message.subject ?? "";
   const identityText = [message.sender, message.from].join(" ").toLowerCase();
@@ -1376,6 +1427,7 @@ function resolveVisibleClassification(
   const isMarketingNewsletterUpdate = isMarketingNewsletterUpdateMessage(message);
   const subjectText = message.subject ?? "";
   const senderText = message.sender ?? "";
+  const isStrongDemoSubmission = isStrongDemoSubmissionMessage(message);
   const explicitMusicPromoText = [
     message.subject ?? "",
     message.snippet ?? "",
@@ -1445,6 +1497,15 @@ function resolveVisibleClassification(
       classification === "finance" ||
       classification === "royalty_statement",
   );
+  const isStrongDemoProtectedClassification = [
+    message.internalClassification,
+    signalClassification,
+  ].some(
+    (classification) =>
+      classification === "reply" ||
+      classification === "finance" ||
+      classification === "royalty_statement",
+  );
   const isStrongMusicPromo = isStrongMusicPromoMessage(message);
   const hasStrongMusicPromoEligibleClassification =
     !isStrongPromoSubjectProtectedClassification &&
@@ -1480,6 +1541,10 @@ function resolveVisibleClassification(
       !isMarketingNewsletterUpdate &&
       musicCampaignPromoSignal);
   const resolvedClassification = (() => {
+    if (isStrongDemoSubmission && !isStrongDemoProtectedClassification) {
+      return "demo";
+    }
+
     if (isGenericRetailMarketingUpdateMessage(message)) {
       return "workflow_update";
     }
