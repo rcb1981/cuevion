@@ -17047,7 +17047,7 @@ function MailboxView({
                               learningChooserMode: null,
                             });
                           }}
-                          className={`grid min-h-[92px] w-full cursor-pointer grid-cols-[minmax(0,1fr)_max-content] gap-3 rounded-[18px] border px-4 py-2.5 text-left transition-[background-color,background-image,border-color,box-shadow,transform] duration-150 ${
+                          className={`flex min-h-[92px] w-full cursor-pointer flex-col rounded-[18px] border px-4 py-2.5 text-left transition-[background-color,background-image,border-color,box-shadow,transform] duration-150 ${
                             active
                               ? "border-[var(--workspace-border-hover)] bg-[linear-gradient(180deg,var(--workspace-selected-surface-start),var(--workspace-selected-surface-end))] shadow-[0_10px_24px_rgba(31,42,36,0.08),inset_0_1px_0_rgba(255,255,255,0.08)]"
                               : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)]"
@@ -17055,46 +17055,90 @@ function MailboxView({
                         >
                           <div className="flex min-w-0 flex-1 flex-col justify-between text-[var(--workspace-text)] opacity-100">
                             <div className="min-w-0 space-y-0.5">
-                              <div className="flex items-center gap-2">
-                                {active ? (
-                                  <span className="inline-flex h-4 w-4 flex-none items-center justify-center rounded-full border border-[var(--workspace-selection-indicator-border)] bg-[var(--workspace-selection-indicator-bg)] text-[var(--workspace-selection-indicator-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.12)]">
-                                    <svg
+                              <div className="flex items-start justify-between gap-3">
+                                <div className="flex min-w-0 items-center gap-2">
+                                  {active ? (
+                                    <span className="inline-flex h-4 w-4 flex-none items-center justify-center rounded-full border border-[var(--workspace-selection-indicator-border)] bg-[var(--workspace-selection-indicator-bg)] text-[var(--workspace-selection-indicator-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.12)]">
+                                      <svg
+                                        aria-hidden="true"
+                                        viewBox="0 0 16 16"
+                                        className="h-2.5 w-2.5"
+                                        fill="none"
+                                        stroke="currentColor"
+                                        strokeWidth="1.8"
+                                        strokeLinecap="round"
+                                        strokeLinejoin="round"
+                                      >
+                                        <path d="M3.5 8.5 6.5 11.5 12.5 5.5" />
+                                      </svg>
+                                    </span>
+                                  ) : null}
+                                  {message.unread ? (
+                                    <span className={unreadAttentionDotClass} />
+                                  ) : null}
+                                  {message.flagged ? (
+                                    <span
                                       aria-hidden="true"
-                                      viewBox="0 0 16 16"
-                                      className="h-2.5 w-2.5"
-                                      fill="none"
-                                      stroke="currentColor"
-                                      strokeWidth="1.8"
-                                      strokeLinecap="round"
-                                      strokeLinejoin="round"
+                                      className="inline-flex h-4 w-4 flex-none items-center justify-center rounded-full border border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.12)]"
                                     >
-                                      <path d="M3.5 8.5 6.5 11.5 12.5 5.5" />
-                                    </svg>
-                                  </span>
-                                ) : null}
-                                {message.unread ? (
-                                  <span className={unreadAttentionDotClass} />
-                                ) : null}
-                                {message.flagged ? (
-                                  <span
-                                    aria-hidden="true"
-                                    className="inline-flex h-4 w-4 flex-none items-center justify-center rounded-full border border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.12)]"
+                                      <svg
+                                        viewBox="0 0 16 16"
+                                        className="h-2.5 w-2.5"
+                                        fill="currentColor"
+                                        stroke="currentColor"
+                                        strokeWidth="1.6"
+                                        strokeLinecap="round"
+                                        strokeLinejoin="round"
+                                      >
+                                        <path d="M5 3.25h6v9.25L8 10.75 5 12.5z" />
+                                      </svg>
+                                    </span>
+                                  ) : null}
+                                  <div className={`truncate text-[0.96rem] font-semibold tracking-[-0.014em] ${senderTextClass}`}>
+                                    {message.sender}
+                                  </div>
+                                </div>
+                                <div className="flex-none self-start pt-0 text-right">
+                                  <div
+                                    className={`text-[0.64rem] font-medium uppercase tracking-[0.12em] ${timeTextClass}`}
                                   >
-                                    <svg
-                                      viewBox="0 0 16 16"
-                                      className="h-2.5 w-2.5"
-                                      fill="currentColor"
-                                      stroke="currentColor"
-                                      strokeWidth="1.6"
-                                      strokeLinecap="round"
-                                      strokeLinejoin="round"
+                                    {message.time}
+                                  </div>
+                                  {hasThreadAttachmentIndicator || hasThreadCountIndicator ? (
+                                    <div
+                                      className={`mt-1 flex items-center justify-end gap-1.5 text-[0.72rem] font-medium ${metadataIndicatorClass}`}
                                     >
-                                      <path d="M5 3.25h6v9.25L8 10.75 5 12.5z" />
-                                    </svg>
-                                  </span>
-                                ) : null}
-                                <div className={`truncate text-[0.96rem] font-semibold tracking-[-0.014em] ${senderTextClass}`}>
-                                  {message.sender}
+                                      {hasThreadAttachmentIndicator ? (
+                                        <span
+                                          aria-label="Conversation has attachments"
+                                          title="Conversation has attachments"
+                                          className="inline-flex items-center justify-center"
+                                        >
+                                          <svg
+                                            aria-hidden="true"
+                                            viewBox="0 0 16 16"
+                                            className="h-3.5 w-3.5"
+                                            fill="none"
+                                            stroke="currentColor"
+                                            strokeWidth="1.5"
+                                            strokeLinecap="round"
+                                            strokeLinejoin="round"
+                                          >
+                                            <path d="M5.75 8.75 9.9 4.6a2.1 2.1 0 1 1 2.97 2.97l-5.18 5.18a3.15 3.15 0 1 1-4.46-4.46l5.01-5.01" />
+                                          </svg>
+                                        </span>
+                                      ) : null}
+                                      {hasThreadCountIndicator ? (
+                                        <span
+                                          aria-label={`${threadMessageCount} messages in conversation`}
+                                          title={`${threadMessageCount} messages in conversation`}
+                                          className="leading-none before:mr-1 before:content-['·']"
+                                        >
+                                          {threadMessageCount}
+                                        </span>
+                                      ) : null}
+                                    </div>
+                                  ) : null}
                                 </div>
                               </div>
                               <div
@@ -17138,48 +17182,6 @@ function MailboxView({
                                 </div>
                               ) : null}
                             </div>
-                          </div>
-                          <div className="flex-none self-start pt-0 text-right">
-                            <div
-                              className={`text-[0.64rem] font-medium uppercase tracking-[0.12em] ${timeTextClass}`}
-                            >
-                              {message.time}
-                            </div>
-                            {hasThreadAttachmentIndicator || hasThreadCountIndicator ? (
-                              <div
-                                className={`mt-1 flex items-center justify-end gap-1.5 text-[0.72rem] font-medium ${metadataIndicatorClass}`}
-                              >
-                                {hasThreadAttachmentIndicator ? (
-                                  <span
-                                    aria-label="Conversation has attachments"
-                                    title="Conversation has attachments"
-                                    className="inline-flex items-center justify-center"
-                                  >
-                                    <svg
-                                      aria-hidden="true"
-                                      viewBox="0 0 16 16"
-                                      className="h-3.5 w-3.5"
-                                      fill="none"
-                                      stroke="currentColor"
-                                      strokeWidth="1.5"
-                                      strokeLinecap="round"
-                                      strokeLinejoin="round"
-                                    >
-                                      <path d="M5.75 8.75 9.9 4.6a2.1 2.1 0 1 1 2.97 2.97l-5.18 5.18a3.15 3.15 0 1 1-4.46-4.46l5.01-5.01" />
-                                    </svg>
-                                  </span>
-                                ) : null}
-                                {hasThreadCountIndicator ? (
-                                  <span
-                                    aria-label={`${threadMessageCount} messages in conversation`}
-                                    title={`${threadMessageCount} messages in conversation`}
-                                    className="leading-none before:mr-1 before:content-['·']"
-                                  >
-                                    {threadMessageCount}
-                                  </span>
-                                ) : null}
-                              </div>
-                            ) : null}
                           </div>
                         </button>
                       );
