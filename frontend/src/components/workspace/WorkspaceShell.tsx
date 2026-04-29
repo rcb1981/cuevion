@@ -8934,7 +8934,7 @@ function TopCards({
       label: "New Emails",
       value: String(newEmailsCount),
       context: newEmailsContext,
-      actionLabel: "Open inbox",
+      actionLabel: "View inboxes",
       onClick: onOpenNewEmails,
     },
     {
