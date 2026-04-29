@@ -11075,6 +11075,30 @@ function MailboxView({
       return true;
     });
   };
+  const unifiedSpamEntries = (() => {
+    const seenIdentityKeys = new Set<string>();
+    const entries: Array<{ mailboxId: InboxId; folder: "Spam"; message: MailMessage }> = [];
+
+    orderedMailboxes.forEach((candidate) => {
+      (mailboxStore[candidate.id]?.Spam ?? []).forEach((message) => {
+        const identityKeys = getCanonicalMessageIdentityKeys(message);
+
+        if (identityKeys.some((key) => seenIdentityKeys.has(key))) {
+          return;
+        }
+
+        identityKeys.forEach((key) => seenIdentityKeys.add(key));
+        entries.push({
+          mailboxId: candidate.id,
+          folder: "Spam",
+          message,
+        });
+      });
+    });
+
+    return entries;
+  })();
+  const unifiedSpamMessages = unifiedSpamEntries.map((entry) => entry.message);
   const visibleMailboxCollections: Record<MailFolder, MailMessage[]> = {
     Inbox: getMailboxReadyInboxMessagesForWorkspaceMailbox(
       spamSuppressionFilteredMailboxCollections,
@@ -11091,7 +11115,7 @@ function MailboxView({
       ...mailboxCollections.Filtered,
       ...lowSignalInboxMessages,
     ]),
-    Spam: mailboxCollections.Spam,
+    Spam: unifiedSpamMessages,
     Trash: mailboxCollections.Trash,
   };
   const messageCollections: Record<MailFolder, MailMessage[]> = {
@@ -11130,13 +11154,22 @@ function MailboxView({
     };
     return locations;
   }, {});
-  const currentMailboxEntries = canonicalFolderOrder.flatMap((folder) =>
-    messageCollections[folder].map((message) => ({
-      mailboxId: mailbox.id,
-      folder,
-      message,
-    })),
-  );
+  const currentMailboxEntries: Array<{
+    mailboxId: InboxId;
+    folder: MailFolder;
+    message: MailMessage;
+  }> = [
+    ...canonicalFolderOrder
+      .filter((folder) => folder !== "Spam")
+      .flatMap((folder) =>
+        messageCollections[folder].map((message) => ({
+          mailboxId: mailbox.id,
+          folder,
+          message,
+        })),
+      ),
+    ...unifiedSpamEntries,
+  ];
   const currentMailboxMessageLocationById = currentMailboxEntries.reduce<
     Record<string, { mailboxId: InboxId; folder: MailFolder }>
   >((locations, entry) => {
@@ -12494,7 +12527,7 @@ function MailboxView({
                     // mailbox or a different source folder. Use the cross-workspace
                     // mover which resolves the actual source via currentMessageLocationById,
                     // preventing a silent no-op when the source differs from mailbox.id/activeFolder.
-                    if (activeSmartFolder) {
+                    if (activeSmartFolder || activeFolder === "Spam") {
                       moveMessagesToFolderAcrossWorkspace("Archive", [message.id]);
                       return;
                     }
@@ -15053,6 +15086,11 @@ function MailboxView({
       return;
     }
 
+    if (activeFolder === "Spam") {
+      moveMessagesToFolderAcrossWorkspace("Trash", messageIds);
+      return;
+    }
+
     moveMessages(mailbox.id, activeFolder, mailbox.id, "Trash", messageIds);
   };
 
@@ -15066,14 +15104,16 @@ function MailboxView({
   };
 
   const getFolderBadgeCount = (folder: MailFolder) =>
-    getMailboxFolderBadgeCount(
-      {
-        ...mailboxCollections,
-        Inbox: messageCollections.Inbox,
-        Filtered: messageCollections.Filtered,
-      },
-      folder,
-    );
+    folder === "Spam"
+      ? unifiedSpamMessages.length
+      : getMailboxFolderBadgeCount(
+          {
+            ...mailboxCollections,
+            Inbox: messageCollections.Inbox,
+            Filtered: messageCollections.Filtered,
+          },
+          folder,
+        );
 
   const getSharedMessageCount = () => workspaceSharedMessages.length;
 
@@ -15320,7 +15360,7 @@ function MailboxView({
     // different source folders. Use the cross-workspace mover which resolves
     // each message to its actual source via currentMessageLocationById,
     // preventing a silent no-op for messages not in mailbox.id/activeFolder.
-    if (activeSmartFolder) {
+    if (activeSmartFolder || activeFolder === "Spam") {
       moveMessagesToFolderAcrossWorkspace("Archive", actionableSelectionIds);
       return;
     }
@@ -17730,7 +17770,7 @@ function MailboxView({
                           // In smart folder context messages can come from multiple
                           // mailboxes or different source folders. Use the cross-workspace
                           // mover so the archive lands in the message's actual mailbox.
-                          if (activeSmartFolder) {
+                          if (activeSmartFolder || activeFolder === "Spam") {
                             moveMessagesToFolderAcrossWorkspace("Archive", contextMenuSelectionIds);
                             return;
                           }
@@ -17877,7 +17917,7 @@ function MailboxView({
                             return;
                           }
 
-                          if (activeSmartFolder) {
+                          if (activeSmartFolder || activeFolder === "Spam") {
                             moveMessagesToFolderAcrossWorkspace(
                               target.folder,
                               contextMenuSelectionIds,
@@ -17895,7 +17935,7 @@ function MailboxView({
                           return;
                         }
 
-                        if (isSharedView) {
+                        if (isSharedView || activeFolder === "Spam") {
                           moveMessagesAcrossWorkspace(
                             target.mailboxId,
                             "Inbox",
