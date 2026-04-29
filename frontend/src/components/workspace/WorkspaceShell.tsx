@@ -2064,32 +2064,75 @@ function renderCompactMessageMetaHeader(
   );
 }
 
+function shouldRenderKnownProviderHtmlOnLightCanvas(
+  message: Pick<MailMessage, "subject" | "sender" | "from"> &
+    Partial<Pick<MailMessage, "bodyHtml">>,
+) {
+  const normalizedHtml = message.bodyHtml?.trim() ?? "";
+
+  if (!normalizedHtml || isComposeGeneratedHtml(normalizedHtml)) {
+    return false;
+  }
+
+  const identityText = [message.sender, message.from].join(" ").toLowerCase();
+  const contentText = [message.subject, normalizedHtml].join(" ").toLowerCase();
+
+  return (
+    includesAnyKeyword(identityText, ["no-reply@label-worx.com", "label-worx.com"]) ||
+    contentText.includes("labelworx") ||
+    identityText.includes("no-reply@google.com") ||
+    includesAnyKeyword(contentText, [
+      "google account",
+      "google-account",
+      "privacycheck",
+      "beveiligingscheck",
+    ]) ||
+    includesAnyKeyword(identityText, ["artistroyaltiesnoreply@wmg.com", "wmg.com"]) ||
+    includesAnyKeyword(contentText, [
+      "artistroyalties.wmg.com",
+      "warner music",
+      "spinnin",
+    ])
+  );
+}
+
 function buildEmailStageDocument(
   html: string,
   themeMode: "light" | "dark",
-  options?: { emailStyles?: string; isExternalHtml?: boolean },
+  options?: {
+    emailStyles?: string;
+    isExternalHtml?: boolean;
+    isProviderHtmlEmail?: boolean;
+  },
 ) {
   const isExternalHtml = options?.isExternalHtml ?? false;
+  const isProviderHtml = isExternalHtml && (options?.isProviderHtmlEmail ?? false);
   const emailStyles = options?.emailStyles ?? "";
+  const stageThemeMode = isProviderHtml ? "light" : themeMode;
 
   const stageWrapperClass =
-    themeMode === "dark" ? "email-stage email-stage--dark" : "email-stage email-stage--light";
+    stageThemeMode === "dark"
+      ? "email-stage email-stage--dark"
+      : "email-stage email-stage--light";
+  const stageWrapperAttributes = isProviderHtml
+    ? ' data-cuevion-provider-email-html="true" style="color-scheme: light; background-color: #ffffff; color: #1f2933; isolation: isolate;"'
+    : "";
 
   // Fallback colors used only when the email doesn't specify its own.
   // For external HTML we use more neutral fallbacks and avoid !important overrides
   // so the email's own styles win. For compose HTML we still apply full theme colours.
   const stageTextColor =
-    themeMode === "dark" ? "rgba(229, 236, 230, 0.96)" : "rgba(34, 38, 36, 0.99)";
+    stageThemeMode === "dark" ? "rgba(229, 236, 230, 0.96)" : "rgba(34, 38, 36, 0.99)";
   const stageLinkColor =
-    themeMode === "dark" ? "rgba(176, 209, 183, 0.96)" : "rgba(44, 89, 116, 0.98)";
+    stageThemeMode === "dark" ? "rgba(176, 209, 183, 0.96)" : "rgba(44, 89, 116, 0.98)";
   const stageQuoteBorder =
-    themeMode === "dark" ? "rgba(128, 156, 128, 0.28)" : "rgba(108, 136, 108, 0.24)";
+    stageThemeMode === "dark" ? "rgba(128, 156, 128, 0.28)" : "rgba(108, 136, 108, 0.24)";
   const stageQuoteSurface =
-    themeMode === "dark" ? "rgba(82, 98, 84, 0.18)" : "rgba(112, 138, 112, 0.05)";
+    stageThemeMode === "dark" ? "rgba(82, 98, 84, 0.18)" : "rgba(112, 138, 112, 0.05)";
   const stageRuleColor =
-    themeMode === "dark" ? "rgba(128, 156, 128, 0.14)" : "rgba(121, 151, 120, 0.14)";
+    stageThemeMode === "dark" ? "rgba(128, 156, 128, 0.14)" : "rgba(121, 151, 120, 0.14)";
   const stageSecondaryTextColor =
-    themeMode === "dark" ? "rgba(214, 221, 216, 0.92)" : "rgba(74, 68, 62, 0.94)";
+    stageThemeMode === "dark" ? "rgba(214, 221, 216, 0.92)" : "rgba(74, 68, 62, 0.94)";
 
   // Base styles applied to ALL email types (safety-net + image scaling)
   const baseStageStyles = `
@@ -2165,7 +2208,7 @@ function buildEmailStageDocument(
   // Dark background values like #1a1a2e/#333333 start with #1/#3 and are never matched,
   // so branded dark header sections are untouched.
   const externalHtmlDarkLightBgFix =
-    themeMode === "dark"
+    stageThemeMode === "dark"
       ? `
       .email-stage--dark td[bgcolor^="#f"],
       .email-stage--dark td[bgcolor^="#F"],
@@ -2429,7 +2472,7 @@ html body [data-email-quote="true"] * {
     </style>
   </head>
   <body>
-    <div class="${stageWrapperClass}">${html}${lightModeContentFix}</div>
+    <div class="${stageWrapperClass}"${stageWrapperAttributes}>${html}${lightModeContentFix}</div>
   </body>
 </html>`;
 }
@@ -2439,11 +2482,13 @@ function EmailHtmlStage({
   themeMode,
   emailStyles,
   isExternalHtml,
+  isProviderHtml,
 }: {
   html: string;
   themeMode: "light" | "dark";
   emailStyles?: string;
   isExternalHtml?: boolean;
+  isProviderHtml?: boolean;
 }) {
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const cleanupRef = useRef<(() => void) | null>(null);
@@ -2684,17 +2729,25 @@ function EmailHtmlStage({
       cleanupRef.current?.();
       cleanupRef.current = null;
     };
-  }, [html, themeMode, emailStyles, isExternalHtml]);
+  }, [html, themeMode, emailStyles, isExternalHtml, isProviderHtml]);
 
   return (
     <iframe
       ref={iframeRef}
       title="Email content"
       sandbox="allow-popups allow-popups-to-escape-sandbox"
-      srcDoc={buildEmailStageDocument(html, themeMode, { emailStyles, isExternalHtml })}
+      srcDoc={buildEmailStageDocument(html, themeMode, {
+        emailStyles,
+        isExternalHtml,
+        isProviderHtmlEmail: isProviderHtml,
+      })}
       onLoad={attachMeasurementListeners}
       className={`${fallbackClassName} block border-0`}
-      style={{ height, overflow: "visible" }}
+      style={{
+        height,
+        overflow: "visible",
+        ...(isProviderHtml ? { backgroundColor: "#ffffff", colorScheme: "light" } : {}),
+      }}
     />
   );
 }
@@ -11222,6 +11275,10 @@ function MailboxView({
       bodyRenderMode.remoteImageCount > 0 && !remoteImagesAllowed;
     const isExternalHtmlMessage = bodyRenderMode.mode === "html";
     const isNativeHtmlMessage = bodyRenderMode.mode === "native_html";
+    const isProviderHtmlMessage = Boolean(
+      threadMessage.bodyHtml &&
+        shouldRenderKnownProviderHtmlOnLightCanvas(threadMessage),
+    );
     const isComposeGeneratedBodyHtml = Boolean(
       threadMessage.bodyHtml && isComposeGeneratedHtml(threadMessage.bodyHtml),
     );
@@ -11309,6 +11366,7 @@ function MailboxView({
                   themeMode={themeMode}
                   emailStyles={bodyRenderMode.emailStyles}
                   isExternalHtml={bodyRenderMode.mode === "html"}
+                  isProviderHtml={isProviderHtmlMessage}
                 />
               </div>
             ) : bodyRenderMode.mode === "native_html" ? (
@@ -30545,6 +30603,10 @@ export function WorkspaceShell({
         externalReviewBodyRenderMode?.mode === "native_html"
           ? normalizeNativeMessageHtmlForPane(externalReviewBodyRenderMode.html)
           : null;
+      const isExternalReviewProviderHtml = Boolean(
+        inviteMessage?.bodyHtml &&
+          shouldRenderKnownProviderHtmlOnLightCanvas(inviteMessage),
+      );
       const externalReviewMessageTimestamp = inviteMessage ? resolveMailDateMs(inviteMessage) : 0;
 
       return (
@@ -30795,6 +30857,7 @@ export function WorkspaceShell({
                                 themeMode={resolvedTheme}
                                 emailStyles={externalReviewBodyRenderMode.emailStyles}
                                 isExternalHtml
+                                isProviderHtml={isExternalReviewProviderHtml}
                               />
                             </div>
                           ) : externalReviewBodyRenderMode?.mode === "native_html" ? (
