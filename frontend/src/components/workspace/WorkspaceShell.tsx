@@ -28795,15 +28795,6 @@ export function WorkspaceShell({
     .map(({ mailboxId, mailboxTitle, message }) =>
       buildMobileWorkspaceMessage(message, mailboxId, mailboxTitle, "Priority"),
     );
-  const isMobileVisibleInboxMessageCandidate = (message: MailMessage) =>
-    !isWorkspaceMessageSpamSuppressed(message) &&
-    (hasUserCorrectedBusinessCategory(
-      message,
-      resolveManualLabelOverrideFromStore(manualLabelOverrides, message),
-    ) ||
-      (message.final_visibility !== "show_low" &&
-        message.action !== "show_in_quiet_view" &&
-        message.action !== "archive_candidate"));
   // Defensive normalizer — last possible point before raw sync error strings reach
   // mobile render. Catches quota errors that arrive with a non-quota code (e.g.
   // "connection_failed") whose message text still contains the raw provider string.
@@ -28820,10 +28811,20 @@ export function WorkspaceShell({
       (candidate) => candidate.id === mailbox.id,
     );
     const mailboxCollections = mailboxStore[mailbox.id] ?? createEmptyMailboxCollections();
+    // Pre-filter spam only — identical to the desktop's spamSuppressionFilteredMailboxCollections
+    // path. The previous isMobileVisibleInboxMessageCandidate pre-filter also checked raw
+    // final_visibility/action/archive_candidate fields BEFORE getPriorityVisibilityAdjustedMessage
+    // could clear them based on user focus preferences. This caused messages that desktop shows
+    // as NORMAL/PRIORITY (because focus-prefs clear action) to be hidden on mobile.
+    // getMailboxReadyInboxMessagesForWorkspaceMailbox already handles all visibility filtering
+    // via badge logic (same as desktop), so no pre-filter beyond spam is needed.
+    const spamFilteredInbox = mailboxCollections.Inbox.filter(
+      (message) => !isWorkspaceMessageSpamSuppressed(message),
+    );
     const mobileVisibleInboxMessages = getMailboxReadyInboxMessagesForWorkspaceMailbox(
       {
         ...mailboxCollections,
-        Inbox: mailboxCollections.Inbox.filter(isMobileVisibleInboxMessageCandidate),
+        Inbox: spamFilteredInbox,
       },
       manualPriorityOverrides,
       manualLabelOverrides,
@@ -28839,6 +28840,20 @@ export function WorkspaceShell({
       .map((message) =>
         buildMobileWorkspaceMessage(message, mailbox.id, mailbox.title),
       );
+
+    if ((import.meta as { env?: { DEV?: boolean } }).env?.DEV) {
+      const rawCount = mailboxCollections.Inbox.length;
+      const postSpamCount = spamFilteredInbox.length;
+      const visibleCount = inboxMessages.length;
+      const hasError = Boolean(mailboxSyncErrors[mailbox.id]);
+      if (rawCount > 0 || hasError) {
+        console.debug(
+          `[mobile] ${mailbox.title} <${mailbox.email}> id=${mailbox.id}` +
+          ` | raw=${rawCount} post-spam=${postSpamCount} visible=${visibleCount}` +
+          ` | syncError=${hasError ? normalizeMobileSyncError(mailboxSyncErrors[mailbox.id]) ?? "(none)" : "(none)"}`,
+        );
+      }
+    }
 
     return {
       id: mailbox.id,
