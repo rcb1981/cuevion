@@ -1454,6 +1454,107 @@ function isGenericRetailMarketingUpdateMessage(message: PromoHeuristicMessage) {
   ]);
 }
 
+function isLowValueMarketingNewsletterEventUpdateMessage(message: PromoHeuristicMessage) {
+  if (isStrongMusicPromoMessage(message) || isStrongDemoSubmissionMessage(message)) {
+    return false;
+  }
+
+  const subjectText = (message.subject ?? "").toLowerCase();
+  const searchableText = [
+    message.subject,
+    message.snippet,
+    message.sender,
+    message.from,
+    message.to ?? "",
+    ...(message.body ?? []),
+  ]
+    .join(" ")
+    .toLowerCase();
+  const hasReplyThreadIndicator = /^(re|fw|fwd):/i.test(subjectText.trim());
+  const hasRealBusinessActionSignal = includesAnyKeyword(searchableText, [
+    "contract",
+    "agreement",
+    "invoice",
+    "payment",
+    "approve",
+    "approval",
+    "deadline",
+    "signature",
+    "rights",
+    "license",
+    "legal",
+    "finance",
+    "please review",
+    "please confirm",
+    "please send",
+    "can you",
+    "could you",
+    "need your",
+    "let me know",
+    "proposal",
+    "collaboration",
+    "schedule a call",
+  ]);
+  const hasMusicPromoPlatformSignal = includesAnyKeyword(searchableText, [
+    "promobox",
+    "inflyte",
+    "fatdrop",
+    "disco.ac",
+    "digital promo sound",
+  ]);
+  const hasMusicPromoContentSignal = includesAnyKeyword(searchableText, [
+    "track",
+    "remix",
+    "release",
+    "club",
+    "dj support",
+    "for your sets",
+    "soundcloud",
+  ]);
+
+  if (
+    hasReplyThreadIndicator ||
+    hasRealBusinessActionSignal ||
+    (hasMusicPromoPlatformSignal && hasMusicPromoContentSignal)
+  ) {
+    return false;
+  }
+
+  return (
+    isGenericRetailMarketingUpdateMessage(message) ||
+    /\bsave\s+\d{1,2}%\b/.test(searchableText) ||
+    includesAnyKeyword(searchableText, [
+      "save 10%",
+      "save 20%",
+      "save 30%",
+      "save 40%",
+      "save 50%",
+      "get your pass",
+      "get your passes",
+      "show pass",
+      "show passes",
+      "conference",
+      "trade show",
+      "seminar",
+      "seminars",
+      "workshop",
+      "workshops",
+      "event marketing",
+      "offer",
+      "discount",
+      "sale",
+      "limited time",
+      "register now",
+      "unsubscribe",
+      "newsletter",
+      "sponsor",
+      "booth",
+      "expo",
+      "summit",
+    ])
+  );
+}
+
 function resolveVisibleClassification(
   message: Pick<
     MailMessage,
@@ -1610,7 +1711,7 @@ function resolveVisibleClassification(
       return "demo";
     }
 
-    if (isGenericRetailMarketingUpdateMessage(message)) {
+    if (isLowValueMarketingNewsletterEventUpdateMessage(message)) {
       return "workflow_update";
     }
 
@@ -4948,7 +5049,7 @@ function inferHeuristicSignal(
     metaBillingKeywords,
   );
   const isGenericRetailMarketingUpdate =
-    isGenericRetailMarketingUpdateMessage(message);
+    isLowValueMarketingNewsletterEventUpdateMessage(message);
   // A promo keyword in the subject is a strong, intentional signal — do not let
   // isMetaBillingSystemMail suppress it.  Billing keywords are detected from the
   // full body/footer and are too broad ("ads", "advertentie") to override an
@@ -5331,6 +5432,11 @@ function getPriorityVisibilityAdjustedMessage(
       visibilityClassification === "promo_reminder");
   const shouldRespectFinanceNormalPreference =
     focusPreferenceLevel === "medium" && visibilityClassification === "finance";
+  const shouldForceLowValueMarketingUpdateLow =
+    (visibilityClassification === "workflow_update" ||
+      visibilityClassification === "distributor_update" ||
+      visibilityClassification === "info") &&
+    isLowValueMarketingNewsletterEventUpdateMessage(message);
 
   if (
     hasProtectedPriorityVisibility(message) &&
@@ -5338,6 +5444,16 @@ function getPriorityVisibilityAdjustedMessage(
     !shouldRespectFinanceNormalPreference
   ) {
     return message;
+  }
+
+  if (shouldForceLowValueMarketingUpdateLow) {
+    return {
+      ...message,
+      signal: undefined,
+      final_visibility: undefined,
+      action: "show_in_quiet_view" as const,
+      priorityScore: "low" as const,
+    };
   }
 
   // When a user preference is found for this message's category, it becomes the
@@ -5840,7 +5956,7 @@ function getLocalAutoPriorityScore(
     isMetaBillingSystemMail ||
     (isNoReplySender && isPureInfoLowActionMail);
   const isGenericRetailMarketingUpdate =
-    isGenericRetailMarketingUpdateMessage(message);
+    isLowValueMarketingNewsletterEventUpdateMessage(message);
   const hasBusinessOrFinanceActionSignal = includesAnyKeyword(searchableText, [
     "contract",
     "agreement",
