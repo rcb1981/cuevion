@@ -28804,6 +28804,17 @@ export function WorkspaceShell({
       (message.final_visibility !== "show_low" &&
         message.action !== "show_in_quiet_view" &&
         message.action !== "archive_candidate"));
+  // Defensive normalizer — last possible point before raw sync error strings reach
+  // mobile render. Catches quota errors that arrive with a non-quota code (e.g.
+  // "connection_failed") whose message text still contains the raw provider string.
+  const normalizeMobileSyncError = (message?: string | null): string | null => {
+    if (!message?.trim()) return null;
+    const lower = message.toLowerCase();
+    if (lower.includes("quota has been exceeded") || lower.includes("quota exceeded")) {
+      return "Mailbox quota exceeded during refresh — existing messages are kept.";
+    }
+    return message;
+  };
   const mobileMailboxes: MobileWorkspaceMailbox[] = orderedMailboxes.map((mailbox) => {
     const managedMailbox = savedManagedInboxes.find(
       (candidate) => candidate.id === mailbox.id,
@@ -28837,7 +28848,7 @@ export function WorkspaceShell({
       connected: Boolean(
         managedMailbox?.connected && managedMailbox.connectionStatus === "connected",
       ),
-      syncError: mailboxSyncErrors[mailbox.id] ?? null,
+      syncError: normalizeMobileSyncError(mailboxSyncErrors[mailbox.id]) ?? null,
       cachedMessageCount: mailboxCollections.Inbox.length,
       messages: inboxMessages,
     };
