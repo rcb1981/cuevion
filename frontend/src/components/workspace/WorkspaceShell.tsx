@@ -28517,11 +28517,28 @@ export function WorkspaceShell({
     .map(({ mailboxId, mailboxTitle, message }) =>
       buildMobileWorkspaceMessage(message, mailboxId, mailboxTitle, "Priority"),
     );
+  const isMobileVisibleInboxMessageCandidate = (message: MailMessage) =>
+    !isWorkspaceMessageSpamSuppressed(message) &&
+    message.final_visibility !== "show_low" &&
+    message.action !== "show_in_quiet_view" &&
+    message.action !== "archive_candidate";
   const mobileMailboxes: MobileWorkspaceMailbox[] = orderedMailboxes.map((mailbox) => {
     const managedMailbox = savedManagedInboxes.find(
       (candidate) => candidate.id === mailbox.id,
     );
-    const inboxMessages = (mailboxStore[mailbox.id]?.Inbox ?? [])
+    const mailboxCollections = mailboxStore[mailbox.id] ?? createEmptyMailboxCollections();
+    const mobileVisibleInboxMessages = getMailboxReadyInboxMessagesForWorkspaceMailbox(
+      {
+        ...mailboxCollections,
+        Inbox: mailboxCollections.Inbox.filter(isMobileVisibleInboxMessageCandidate),
+      },
+      manualPriorityOverrides,
+      effectiveFocusPreferencesByMailbox[mailbox.id] ?? activeFocusPreferences,
+      {
+        preferPromoMailboxContext: isPromoMailboxContext(mailbox),
+      },
+    );
+    const inboxMessages = mobileVisibleInboxMessages
       .filter((message) => !isWorkspaceMessageSpamSuppressed(message))
       .sort((first, second) => resolveMailDateMs(second) - resolveMailDateMs(first))
       .slice(0, 100)
