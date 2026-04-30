@@ -292,7 +292,7 @@ export function MobileWorkspaceShell({
           view.kind === "mailbox" && activeMailbox ? (
             <>
               {activeMailbox.refreshStatus ? (
-                <div className="border-b border-[color:rgba(86,69,46,0.08)] bg-[color:rgba(255,250,239,0.6)] px-5 py-2 text-[0.72rem] text-[color:rgba(49,92,75,0.82)] dark:border-[color:rgba(232,211,174,0.08)] dark:bg-[color:rgba(19,17,15,0.5)] dark:text-[color:rgba(184,225,197,0.82)]">
+                <div className="border-b border-[color:rgba(86,69,46,0.08)] bg-[color:rgba(255,250,239,0.6)] px-5 py-2 text-[0.72rem] text-[color:rgba(49,92,75,0.82)] dark:border-[color:rgba(232,211,174,0.08)] dark:bg-[color:rgba(19,17,15,0.5)] dark:text-[color:rgba(184,225,197,0.82)] whitespace-pre-wrap break-all">
                   {activeMailbox.refreshStatus}
                 </div>
               ) : null}

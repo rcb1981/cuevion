@@ -27706,6 +27706,27 @@ export function WorkspaceShell({
   >({});
   // IDs queued for retry after startup sync completes (set when tap fires during startup).
   const pendingMobileRefreshIdsRef = useRef<Set<string>>(new Set());
+  // Stores the last raw diagnostic for each mailbox refresh, keyed by mailboxId.
+  // Written by refreshMailboxById immediately before it returns. Read by onOpenMailbox
+  // after awaiting refreshMailboxById to build the mobile debug status line.
+  type MailboxRefreshDiagnostic = {
+    email: string;
+    host: string;
+    port: string;
+    ssl: boolean;
+    requestedLimit: number | "default";
+    firstOk: boolean;
+    firstCode: string | undefined;
+    firstStage: string | undefined;
+    firstFetchedCount: number | undefined;
+    firstMessageCount: number;
+    retried: boolean;
+    retryOk: boolean | undefined;
+    retryMessageCount: number | undefined;
+    cacheRestored: number;
+    mergedCount: number | undefined;
+  };
+  const lastRefreshDiagnosticRef = useRef<Partial<Record<string, MailboxRefreshDiagnostic>>>({});
   const setMailboxSyncError = (
     mailboxId: InboxId,
     message?: string | null,
@@ -30466,6 +30487,8 @@ export function WorkspaceShell({
           focusPreferences: effectiveFocusPreferencesByMailbox[mailboxId],
           limit,
         });
+      // Requested limit for diagnostic purposes (startup uses 20, normal uses default).
+      const diagnosticRequestedLimit: number | "default" = options?.startup ? 20 : "default";
       let response = canUseGmailOAuthFetch
         ? await fetchGmailInbox({
             provider: managedMailbox.provider,
@@ -30475,7 +30498,17 @@ export function WorkspaceShell({
         : await connectInboxWithImap(
             buildCustomImapRefreshRequest(options?.startup ? 20 : undefined),
           );
+      // Snapshot of the first response before any quota retry overwrites it.
+      const firstResponseOk = response.ok;
+      const firstResponseCode = response.error?.code;
+      const firstResponseStage = response.error?.stage;
+      const firstResponseFetchedCount = response.error?.fetched_count;
+      const firstResponseMessageCount = response.messages?.length ?? 0;
+      let diagnosticRetried = false;
+      let diagnosticRetryOk: boolean | undefined;
+      let diagnosticRetryMessageCount: number | undefined;
       if (canUseImapFetch && !response.ok && isQuotaRefreshIssue(response.error)) {
+        diagnosticRetried = true;
         console.info("[SYNC-DIAGNOSTIC] custom IMAP quota retry", {
           mailboxId,
           title: managedMailbox.title,
@@ -30485,6 +30518,8 @@ export function WorkspaceShell({
           retryLimit: 5,
         });
         const retryResponse = await connectInboxWithImap(buildCustomImapRefreshRequest(5));
+        diagnosticRetryOk = retryResponse.ok;
+        diagnosticRetryMessageCount = retryResponse.messages?.length ?? 0;
 
         if (retryResponse.ok) {
           response = {
@@ -30543,6 +30578,24 @@ export function WorkspaceShell({
           fetchedCount: response.error?.fetched_count,
           restoredSnapshotCount,
         });
+        // Write diagnostic so onOpenMailbox can surface it on mobile.
+        lastRefreshDiagnosticRef.current[mailboxId] = {
+          email: managedMailbox.email.trim(),
+          host: managedMailbox.customImap.host.trim(),
+          port: managedMailbox.customImap.port.trim(),
+          ssl: managedMailbox.customImap.ssl,
+          requestedLimit: diagnosticRequestedLimit,
+          firstOk: firstResponseOk,
+          firstCode: firstResponseCode,
+          firstStage: firstResponseStage,
+          firstFetchedCount: firstResponseFetchedCount,
+          firstMessageCount: firstResponseMessageCount,
+          retried: diagnosticRetried,
+          retryOk: diagnosticRetryOk,
+          retryMessageCount: diagnosticRetryMessageCount,
+          cacheRestored: restoredSnapshotCount,
+          mergedCount: undefined,
+        };
         setMailboxSyncError(mailboxId, refreshErrorMessage);
         if (canUseGmailOAuthFetch) {
           setMailboxSyncFeedbackMessage(refreshErrorMessage);
@@ -30607,6 +30660,24 @@ export function WorkspaceShell({
       } else {
         clearMailboxSyncError(mailboxId);
       }
+      // Write diagnostic so onOpenMailbox can surface it on mobile.
+      lastRefreshDiagnosticRef.current[mailboxId] = {
+        email: managedMailbox.email.trim(),
+        host: managedMailbox.customImap.host.trim(),
+        port: managedMailbox.customImap.port.trim(),
+        ssl: managedMailbox.customImap.ssl,
+        requestedLimit: diagnosticRequestedLimit,
+        firstOk: firstResponseOk,
+        firstCode: firstResponseCode,
+        firstStage: firstResponseStage,
+        firstFetchedCount: firstResponseFetchedCount,
+        firstMessageCount: firstResponseMessageCount,
+        retried: diagnosticRetried,
+        retryOk: diagnosticRetryOk,
+        retryMessageCount: diagnosticRetryMessageCount,
+        cacheRestored: 0,
+        mergedCount: mergedMessages.length,
+      };
       console.info("[SYNC-TIMING] refreshMailboxById complete", {
         mailboxId,
         email: managedMailbox.email.trim(),
@@ -32708,6 +32779,29 @@ export function WorkspaceShell({
               [mailboxId]: "↻ Refresh requested…",
             }));
             const result = await refreshMailboxById(mailboxId as InboxId);
+
+            // Build a compact debug line from the raw diagnostic captured inside
+            // refreshMailboxById. This is the ground-truth response from the server,
+            // not derived state, so it shows exactly what happened at each stage.
+            const diag = lastRefreshDiagnosticRef.current[mailboxId];
+            const diagLine = diag
+              ? [
+                  `ok=${diag.firstOk}`,
+                  diag.firstCode ? `code=${diag.firstCode}` : null,
+                  diag.firstStage ? `stage=${diag.firstStage}` : null,
+                  `raw=${diag.firstMessageCount}`,
+                  diag.firstFetchedCount != null ? `fetched=${diag.firstFetchedCount}` : null,
+                  `limit=${diag.requestedLimit}`,
+                  `retried=${diag.retried}`,
+                  diag.retried ? `retryOk=${diag.retryOk ?? "?"}` : null,
+                  diag.retried ? `retryRaw=${diag.retryMessageCount ?? "?"}` : null,
+                  `cache=${diag.cacheRestored}`,
+                  diag.mergedCount != null ? `merged=${diag.mergedCount}` : null,
+                ]
+                  .filter(Boolean)
+                  .join(" ")
+              : null;
+
             if (result === "skipped") {
               // skipped = syncingMailboxIdsRef already has this id (startup sync
               // is currently fetching this exact mailbox, or a manual retry is
@@ -32724,12 +32818,13 @@ export function WorkspaceShell({
               }
             } else if (result === "synced" || result === "partial") {
               const count = mailboxStore[mailboxId as InboxId]?.Inbox.length ?? 0;
+              const statusLine =
+                result === "synced"
+                  ? `✓ Refresh complete (${count} cached)`
+                  : `⚠ Partial refresh — quota limit (${count} cached)`;
               setMobileMailboxRefreshStatus((prev) => ({
                 ...prev,
-                [mailboxId]:
-                  result === "synced"
-                    ? `✓ Refresh complete (${count} cached)`
-                    : `⚠ Partial refresh — quota limit (${count} cached)`,
+                [mailboxId]: diagLine ? `${statusLine}\nDebug: ${diagLine}` : statusLine,
               }));
             } else {
               // "failed" — read from ref, not stale state closure, because setMailboxSyncError
@@ -32742,7 +32837,9 @@ export function WorkspaceShell({
                 "Refresh failed — try again or reconnect this inbox in Settings.";
               setMobileMailboxRefreshStatus((prev) => ({
                 ...prev,
-                [mailboxId]: `✗ ${friendlyError}`,
+                [mailboxId]: diagLine
+                  ? `✗ ${friendlyError}\nDebug: ${diagLine}`
+                  : `✗ ${friendlyError}`,
               }));
             }
           }}
