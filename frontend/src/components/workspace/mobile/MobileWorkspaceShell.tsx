@@ -303,7 +303,7 @@ export function MobileWorkspaceShell({
                     onClick={() => setView({ kind: "mailbox", mailboxId: mailbox.id })}
                     className="flex w-full items-center justify-between gap-4 border-b border-[color:rgba(86,69,46,0.1)] bg-[color:rgba(255,253,248,0.74)] px-5 py-4 text-left active:bg-[color:rgba(232,219,199,0.72)] dark:border-[color:rgba(232,211,174,0.1)] dark:bg-[color:rgba(28,25,21,0.78)] dark:active:bg-[color:rgba(55,47,39,0.8)]"
                   >
-                    <span className="min-w-0">
+                    <span className="min-w-0 flex-1">
                       <span className="block truncate text-[1rem] font-semibold tracking-normal text-[var(--workspace-text)]">
                         {mailbox.title}
                       </span>
@@ -316,8 +316,9 @@ export function MobileWorkspaceShell({
                         </span>
                       ) : null}
                       {mailbox.syncError ? (
-                        <span className="mt-1 block truncate text-[0.74rem] font-medium text-[color:rgba(143,82,48,0.92)] dark:text-[color:rgba(235,174,138,0.86)]">
-                          {mailbox.syncError}
+                        <span className="mt-1 flex min-w-0 items-start gap-1.5 text-[0.74rem] font-medium leading-5 text-[color:rgba(143,82,48,0.92)] dark:text-[color:rgba(235,174,138,0.86)]">
+                          <span aria-hidden="true" className="mt-[0.42rem] h-1.5 w-1.5 shrink-0 rounded-full bg-[color:rgba(143,82,48,0.78)] dark:bg-[color:rgba(235,174,138,0.74)]" />
+                          <span className="min-w-0">{mailbox.syncError}</span>
                         </span>
                       ) : null}
                     </span>

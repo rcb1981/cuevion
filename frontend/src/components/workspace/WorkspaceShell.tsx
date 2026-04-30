@@ -27506,6 +27506,33 @@ export function WorkspaceShell({
   const [mailboxSyncErrors, setMailboxSyncErrors] = useState<
     Partial<Record<InboxId, string>>
   >({});
+  const setMailboxSyncError = (
+    mailboxId: InboxId,
+    message?: string | null,
+    options?: { preserveExisting?: boolean },
+  ) => {
+    const fallbackMessage = "Refresh failed — reconnect this inbox in Settings.";
+    const nextMessage = message?.trim() || fallbackMessage;
+
+    setMailboxSyncErrors((current) => ({
+      ...current,
+      [mailboxId]:
+        options?.preserveExisting && current[mailboxId]
+          ? current[mailboxId]
+          : nextMessage,
+    }));
+  };
+  const clearMailboxSyncError = (mailboxId: InboxId) => {
+    setMailboxSyncErrors((current) => {
+      if (!current[mailboxId]) {
+        return current;
+      }
+
+      const nextValue = { ...current };
+      delete nextValue[mailboxId];
+      return nextValue;
+    });
+  };
   const [workspaceName, setWorkspaceName] = useState("Cuevion Studio");
   const [inboxSignatures, setInboxSignatures] = useState<InboxSignatureStore>(() => {
     if (typeof window === "undefined") {
@@ -30050,15 +30077,7 @@ export function WorkspaceShell({
 
     syncingMailboxIdsRef.current.add(mailboxId);
     setSyncingMailboxId(mailboxId);
-    setMailboxSyncErrors((current) => {
-      if (!current[mailboxId]) {
-        return current;
-      }
-
-      const nextValue = { ...current };
-      delete nextValue[mailboxId];
-      return nextValue;
-    });
+    clearMailboxSyncError(mailboxId);
 
     try {
       const syncStartedAt = performance.now();
@@ -30104,7 +30123,7 @@ export function WorkspaceShell({
           canUseImapFetch &&
           response.error?.code === "invalid_request" &&
           rawRefreshErrorMessage.toLowerCase().includes("password")
-            ? "Missing IMAP password. Reconnect this inbox."
+            ? "Missing saved credentials — reconnect this inbox."
             : rawRefreshErrorMessage ||
               (canUseImapFetch ? "Could not refresh this IMAP inbox." : "Could not fetch Gmail inbox.");
         console.info("[SYNC-TIMING] refreshMailboxById failed", {
@@ -30132,10 +30151,7 @@ export function WorkspaceShell({
           errorCode: response.error?.code,
           errorMessage: response.error?.message,
         });
-        setMailboxSyncErrors((current) => ({
-          ...current,
-          [mailboxId]: refreshErrorMessage,
-        }));
+        setMailboxSyncError(mailboxId, refreshErrorMessage);
         if (canUseGmailOAuthFetch) {
           setMailboxSyncFeedbackMessage(refreshErrorMessage);
         }
@@ -30193,15 +30209,7 @@ export function WorkspaceShell({
         mergedMessages,
         evictImapUids,
       );
-      setMailboxSyncErrors((current) => {
-        if (!current[mailboxId]) {
-          return current;
-        }
-
-        const nextValue = { ...current };
-        delete nextValue[mailboxId];
-        return nextValue;
-      });
+      clearMailboxSyncError(mailboxId);
       console.info("[SYNC-TIMING] refreshMailboxById complete", {
         mailboxId,
         email: managedMailbox.email.trim(),
@@ -30268,10 +30276,22 @@ export function WorkspaceShell({
           const refreshResult = await refreshMailboxById(mailboxId);
           if (refreshResult === "failed") {
             didFailMailbox = true;
+            setMailboxSyncError(
+              mailboxId,
+              "Refresh failed — reconnect this inbox in Settings.",
+              { preserveExisting: true },
+            );
             console.info("[STARTUP-SYNC] mailbox failed", { mailboxId });
           }
         } catch (error) {
           didFailMailbox = true;
+          setMailboxSyncError(
+            mailboxId,
+            error instanceof Error && error.message
+              ? error.message
+              : "Refresh failed — reconnect this inbox in Settings.",
+            { preserveExisting: true },
+          );
           console.info("[STARTUP-SYNC] mailbox failed", {
             mailboxId,
             error: error instanceof Error ? error.message : String(error),
