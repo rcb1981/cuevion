@@ -338,6 +338,15 @@ function getCanonicalMessageIdentityKeys(message: MessageIdentitySource) {
   return keys;
 }
 
+function resolveManualLabelOverrideFromStore(
+  overrides: ManualLabelOverrideStore,
+  message: MessageIdentitySource,
+) {
+  return getCanonicalMessageIdentityKeys(message)
+    .map((key) => overrides[key])
+    .find((override): override is ManualLabelOverride => Boolean(override));
+}
+
 function findMatchingMessageByIdentity<T>(
   message: MessageIdentitySource,
   indexes: {
@@ -5374,8 +5383,12 @@ function getVisiblePriorityBadge(
 function resolveFocusPreferenceLevelForPriorityMessage(
   message: MailMessage,
   focusPreferences: UserConfig["focusPreferences"],
-  options?: { preferPromoMailboxContext?: boolean },
+  options?: PriorityVisibilityOptions,
 ) {
+  if (hasUserCorrectedBusinessCategory(message, options?.manualLabelOverride)) {
+    return focusPreferences.business;
+  }
+
   const visibilityClassification = resolveVisibleClassification(message);
 
   if (
@@ -5428,10 +5441,26 @@ function hasProtectedPriorityVisibility(message: MailMessage) {
   );
 }
 
+type PriorityVisibilityOptions = {
+  preferPromoMailboxContext?: boolean;
+  manualLabelOverride?: ManualLabelOverride | null;
+};
+
+function hasUserCorrectedBusinessCategory(
+  message: Pick<MailMessage, "category" | "categorySource">,
+  manualLabelOverride?: ManualLabelOverride | null,
+) {
+  return (
+    manualLabelOverride === "Business" ||
+    ((message.categorySource === "user" || message.categorySource === "learned") &&
+      message.category === "Primary")
+  );
+}
+
 function getPriorityVisibilityAdjustedMessage(
   message: MailMessage,
   focusPreferences: UserConfig["focusPreferences"],
-  options?: { preferPromoMailboxContext?: boolean },
+  options?: PriorityVisibilityOptions,
 ) {
   const focusPreferenceLevel = resolveFocusPreferenceLevelForPriorityMessage(
     message,
@@ -5445,7 +5474,12 @@ function getPriorityVisibilityAdjustedMessage(
       visibilityClassification === "promo_reminder");
   const shouldRespectFinanceNormalPreference =
     focusPreferenceLevel === "medium" && visibilityClassification === "finance";
+  const hasCorrectedBusinessCategory = hasUserCorrectedBusinessCategory(
+    message,
+    options?.manualLabelOverride,
+  );
   const shouldForceLowValueMarketingUpdateLow =
+    !hasCorrectedBusinessCategory &&
     (visibilityClassification === "workflow_update" ||
       visibilityClassification === "distributor_update" ||
       visibilityClassification === "info") &&
@@ -5536,7 +5570,7 @@ function getVisiblePriorityBadgeForWorkspaceMessage(
   message: MailMessage,
   override: ManualPriorityOverride | undefined,
   focusPreferences: UserConfig["focusPreferences"],
-  options?: { preferPromoMailboxContext?: boolean },
+  options?: PriorityVisibilityOptions,
 ) {
   const focusPreferenceLevel = resolveFocusPreferenceLevelForPriorityMessage(
     message,
@@ -5577,7 +5611,7 @@ function shouldForceFilteredDemoVisibilityForWorkspaceMessage(
   message: MailMessage,
   override: ManualPriorityOverride | undefined,
   focusPreferences: UserConfig["focusPreferences"],
-  options?: { preferPromoMailboxContext?: boolean },
+  options?: PriorityVisibilityOptions,
 ) {
   const visibilityClassification = resolveVisibleClassification(message);
 
@@ -5602,7 +5636,7 @@ function shouldDisplayMessageInFilteredFolderForWorkspaceMessage(
   message: MailMessage,
   override: ManualPriorityOverride | undefined,
   focusPreferences: UserConfig["focusPreferences"],
-  options?: { preferPromoMailboxContext?: boolean },
+  options?: PriorityVisibilityOptions,
 ) {
   if (message.collaboration) {
     return false;
@@ -5627,17 +5661,27 @@ function shouldDisplayMessageInFilteredFolderForWorkspaceMessage(
 function getMailboxReadyInboxMessagesForWorkspaceMailbox(
   mailboxCollections: MailboxCollections,
   manualPriorityOverrides: Partial<Record<string, ManualPriorityOverride>>,
+  manualLabelOverrides: ManualLabelOverrideStore,
   focusPreferences: UserConfig["focusPreferences"],
-  options?: { preferPromoMailboxContext?: boolean },
+  options?: PriorityVisibilityOptions,
 ) {
   return mailboxCollections.Inbox.filter(
-    (message) =>
-      !shouldDisplayMessageInFilteredFolderForWorkspaceMessage(
+    (message) => {
+      const manualLabelOverride = resolveManualLabelOverrideFromStore(
+        manualLabelOverrides,
+        message,
+      );
+
+      return !shouldDisplayMessageInFilteredFolderForWorkspaceMessage(
         message,
         resolveManualPriorityOverride(manualPriorityOverrides, message),
         focusPreferences,
-        options,
-      ),
+        {
+          ...options,
+          manualLabelOverride,
+        },
+      );
+    },
   );
 }
 
@@ -11083,9 +11127,7 @@ function MailboxView({
     [spamSuppressionKeys],
   );
   const resolveManualLabelOverride = (message: MessageIdentitySource) =>
-    getCanonicalMessageIdentityKeys(message)
-      .map((key) => manualLabelOverrides[key])
-      .find((override): override is ManualLabelOverride => Boolean(override));
+    resolveManualLabelOverrideFromStore(manualLabelOverrides, message);
   const isMessageSpamSuppressed = (message: MessageIdentitySource) =>
     getCanonicalMessageIdentityKeys(message).some((key) => spamSuppressionKeySet.has(key));
   const getSpamSuppressionFilteredMailboxCollections = (
@@ -11106,6 +11148,7 @@ function MailboxView({
   ) {
     return resolveFocusPreferenceLevelForPriorityMessage(message, nextFocusPreferences, {
       preferPromoMailboxContext,
+      manualLabelOverride: resolveManualLabelOverride(message),
     });
   }
   function getVisibleCategoryLabelForMessageInContext(
@@ -11116,6 +11159,10 @@ function MailboxView({
 
     if (manualLabelOverride) {
       return manualLabelOverride;
+    }
+
+    if (hasUserCorrectedBusinessCategory(message, manualLabelOverride)) {
+      return "Business";
     }
 
     return resolveVisibleCategoryLabelForMessageInContext(
@@ -11134,6 +11181,7 @@ function MailboxView({
       nextFocusPreferences,
       {
         preferPromoMailboxContext,
+        manualLabelOverride: resolveManualLabelOverride(message),
       },
     );
   }
@@ -11275,6 +11323,7 @@ function MailboxView({
     Inbox: getMailboxReadyInboxMessagesForWorkspaceMailbox(
       spamSuppressionFilteredMailboxCollections,
       manualPriorityOverrides,
+      manualLabelOverrides,
       focusPreferences,
       {
         preferPromoMailboxContext: shouldPreferCurrentMailboxPromoContext,
@@ -11377,6 +11426,7 @@ function MailboxView({
     return getMailboxReadyInboxMessagesForWorkspaceMailbox(
       getSmartFolderMailboxCollections(mailboxId),
       manualPriorityOverrides,
+      manualLabelOverrides,
       effectiveFocusPreferencesByMailbox[mailboxId] ?? focusPreferences,
       {
         preferPromoMailboxContext: mailboxContext
@@ -28556,6 +28606,12 @@ export function WorkspaceShell({
       message,
       resolveManualPriorityOverride(manualPriorityOverrides, message),
       effectiveFocusPreferencesByMailbox[mailboxId] ?? activeFocusPreferences,
+      {
+        manualLabelOverride: resolveManualLabelOverrideFromStore(
+          manualLabelOverrides,
+          message,
+        ),
+      },
     );
   };
   const isPriorityPageVisiblePriorityMessage = (message: MailMessage, mailboxId: InboxId) => {
@@ -28581,6 +28637,7 @@ export function WorkspaceShell({
           ),
         },
         manualPriorityOverrides,
+        manualLabelOverrides,
         candidateFocusPreferences,
         {
           preferPromoMailboxContext: isPromoMailboxContext(candidate),
@@ -28727,9 +28784,13 @@ export function WorkspaceShell({
     );
   const isMobileVisibleInboxMessageCandidate = (message: MailMessage) =>
     !isWorkspaceMessageSpamSuppressed(message) &&
-    message.final_visibility !== "show_low" &&
-    message.action !== "show_in_quiet_view" &&
-    message.action !== "archive_candidate";
+    (hasUserCorrectedBusinessCategory(
+      message,
+      resolveManualLabelOverrideFromStore(manualLabelOverrides, message),
+    ) ||
+      (message.final_visibility !== "show_low" &&
+        message.action !== "show_in_quiet_view" &&
+        message.action !== "archive_candidate"));
   const mobileMailboxes: MobileWorkspaceMailbox[] = orderedMailboxes.map((mailbox) => {
     const managedMailbox = savedManagedInboxes.find(
       (candidate) => candidate.id === mailbox.id,
@@ -28741,6 +28802,7 @@ export function WorkspaceShell({
         Inbox: mailboxCollections.Inbox.filter(isMobileVisibleInboxMessageCandidate),
       },
       manualPriorityOverrides,
+      manualLabelOverrides,
       effectiveFocusPreferencesByMailbox[mailbox.id] ?? activeFocusPreferences,
       {
         preferPromoMailboxContext: isPromoMailboxContext(mailbox),
