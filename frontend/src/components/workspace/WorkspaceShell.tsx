@@ -2344,7 +2344,20 @@ function shouldRenderKnownProviderHtmlOnLightCanvas(
     includesAnyKeyword(identityText, ["asish@seoserviceweb.com", "seoserviceweb.com"]) ||
     contentText.includes("why your competitor is out ranking you") ||
     (htmlText.includes("search engine optimization") &&
-      htmlText.includes("linktr.ee/asish.sahoo"))
+      htmlText.includes("linktr.ee/asish.sahoo")) ||
+    identityText.includes("jeroen@muybridgestudio.com") ||
+    identityText.includes("muybridgestudio.com") ||
+    (contentText.includes("muybridge studio") &&
+      contentText.includes("ai artwork and video studio")) ||
+    (contentText.includes("business development manager") &&
+      contentText.includes("muybridge")) ||
+    identityText.includes("suburbiaduo@gmail.com") ||
+    (contentText.includes("azooland") &&
+      contentText.includes("suburbia") &&
+      contentText.includes("work it")) ||
+    (contentText.includes("hey bingo players") &&
+      contentText.includes("on.soundcloud.com") &&
+      contentText.includes("suburbia"))
   );
 }
 
