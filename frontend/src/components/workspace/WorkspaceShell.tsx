@@ -20652,7 +20652,7 @@ type ManagedWorkspaceInbox = {
   customImap: CustomImapSettings;
   customSmtp: CustomSmtpSettings;
 };
-type MailboxRefreshResult = "synced" | "skipped" | "failed";
+type MailboxRefreshResult = "synced" | "skipped" | "failed" | "partial";
 type StartupSyncStatus = "idle" | "running" | "done" | "partial_error";
 
 function createManagedCustomImapSettings(): CustomImapSettings {
@@ -27533,6 +27533,19 @@ export function WorkspaceShell({
       return nextValue;
     });
   };
+  const resolveMailboxRefreshWarningMessage = (
+    warning?: { code?: string; message?: string } | null,
+  ) => {
+    if (!warning) {
+      return null;
+    }
+
+    if (warning.code === "quota_exceeded_partial") {
+      return "Some older messages could not be refreshed.";
+    }
+
+    return warning.message?.trim() || "Some messages could not be refreshed.";
+  };
   const [workspaceName, setWorkspaceName] = useState("Cuevion Studio");
   const [inboxSignatures, setInboxSignatures] = useState<InboxSignatureStore>(() => {
     if (typeof window === "undefined") {
@@ -30121,11 +30134,14 @@ export function WorkspaceShell({
         const rawRefreshErrorMessage = response.error?.message ?? "";
         const refreshErrorMessage =
           canUseImapFetch &&
-          response.error?.code === "invalid_request" &&
-          rawRefreshErrorMessage.toLowerCase().includes("password")
-            ? "Missing saved credentials — reconnect this inbox."
-            : rawRefreshErrorMessage ||
-              (canUseImapFetch ? "Could not refresh this IMAP inbox." : "Could not fetch Gmail inbox.");
+          response.error?.code === "quota_exceeded"
+            ? "Mailbox quota exceeded — try again later or check this inbox with your mail provider."
+            : canUseImapFetch &&
+                response.error?.code === "invalid_request" &&
+                rawRefreshErrorMessage.toLowerCase().includes("password")
+              ? "Missing saved credentials — reconnect this inbox."
+              : rawRefreshErrorMessage ||
+                (canUseImapFetch ? "Could not refresh this IMAP inbox." : "Could not fetch Gmail inbox.");
         console.info("[SYNC-TIMING] refreshMailboxById failed", {
           mailboxId,
           email: managedMailbox.email.trim(),
@@ -30209,7 +30225,12 @@ export function WorkspaceShell({
         mergedMessages,
         evictImapUids,
       );
-      clearMailboxSyncError(mailboxId);
+      const refreshWarningMessage = resolveMailboxRefreshWarningMessage(response.warning);
+      if (refreshWarningMessage) {
+        setMailboxSyncError(mailboxId, refreshWarningMessage);
+      } else {
+        clearMailboxSyncError(mailboxId);
+      }
       console.info("[SYNC-TIMING] refreshMailboxById complete", {
         mailboxId,
         email: managedMailbox.email.trim(),
@@ -30217,8 +30238,9 @@ export function WorkspaceShell({
         mergeDurationMs: Math.round(performance.now() - mergeStartedAt),
         totalDurationMs: Math.round(performance.now() - syncStartedAt),
         messageCount: mergedMessages.length,
+        warning: response.warning?.code ?? null,
       });
-      return "synced";
+      return refreshWarningMessage ? "partial" : "synced";
     } finally {
       syncingMailboxIdsRef.current.delete(mailboxId);
       setSyncingMailboxId((current) => (current === mailboxId ? null : current));
@@ -30282,6 +30304,14 @@ export function WorkspaceShell({
               { preserveExisting: true },
             );
             console.info("[STARTUP-SYNC] mailbox failed", { mailboxId });
+          } else if (refreshResult === "partial") {
+            didFailMailbox = true;
+            setMailboxSyncError(
+              mailboxId,
+              "Some older messages could not be refreshed.",
+              { preserveExisting: true },
+            );
+            console.info("[STARTUP-SYNC] mailbox partially refreshed", { mailboxId });
           }
         } catch (error) {
           didFailMailbox = true;

@@ -159,6 +159,10 @@ def connect_mailbox_with_settings(
     return mailbox
 
 
+def is_quota_error(value: Any) -> bool:
+    return "quota" in str(value or "").lower()
+
+
 def fetch_recent_messages(mailbox, folder: str = "INBOX", limit: int = DEFAULT_FETCH_LIMIT):
     fetch_start = time.perf_counter()
     select_start = time.perf_counter()
@@ -176,24 +180,65 @@ def fetch_recent_messages(mailbox, folder: str = "INBOX", limit: int = DEFAULT_F
             select_duration_ms,
             search_duration_ms,
         )
-        return []
+        return {
+            "messages": [],
+            "warnings": [
+                {
+                    "code": "fetch_failed",
+                    "message": "Could not refresh this inbox.",
+                }
+            ],
+        }
 
     message_ids = messages[0].split()
     latest_ids = message_ids[-limit:]
     results: list[tuple[Message, bool, str | None]] = []
+    warnings: list[dict[str, str]] = []
 
     for index, message_id in enumerate(reversed(latest_ids)):
         per_message_start = time.perf_counter()
-        status, message_data = mailbox.fetch(message_id, "(UID FLAGS BODY.PEEK[])")
+        try:
+            status, message_data = mailbox.fetch(message_id, "(UID FLAGS BODY.PEEK[])")
+        except imaplib.IMAP4.error as exc:
+            fetch_duration_ms = (time.perf_counter() - per_message_start) * 1000
+            logger.warning(
+                "IMAP preview per-message fetch raised idx=%s quota=%s fetch_ms=%.1f error=%s",
+                index,
+                is_quota_error(exc),
+                fetch_duration_ms,
+                str(exc),
+            )
+            if is_quota_error(exc):
+                warnings.append(
+                    {
+                        "code": "quota_exceeded_partial",
+                        "message": "Some older messages could not be refreshed.",
+                    }
+                )
+                break
+            continue
         fetch_duration_ms = (time.perf_counter() - per_message_start) * 1000
 
         if status != "OK":
+            status_text = " ".join(
+                item.decode("utf-8", errors="ignore") if isinstance(item, bytes) else str(item)
+                for item in (message_data or [])
+            )
             logger.warning(
-                "IMAP preview per-message fetch failed idx=%s status=%s fetch_ms=%.1f",
+                "IMAP preview per-message fetch failed idx=%s status=%s fetch_ms=%.1f response=%s",
                 index,
                 status,
                 fetch_duration_ms,
+                status_text[:160],
             )
+            if is_quota_error(status_text):
+                warnings.append(
+                    {
+                        "code": "quota_exceeded_partial",
+                        "message": "Some older messages could not be refreshed.",
+                    }
+                )
+                break
             continue
 
         metadata_parts: list[str] = []
@@ -220,7 +265,17 @@ def fetch_recent_messages(mailbox, folder: str = "INBOX", limit: int = DEFAULT_F
         imap_uid = uid_match.group(1) if uid_match else None
         if imap_uid is None:
             uid_fetch_start = time.perf_counter()
-            uid_status, uid_data = mailbox.fetch(message_id, "(UID)")
+            try:
+                uid_status, uid_data = mailbox.fetch(message_id, "(UID)")
+            except imaplib.IMAP4.error as exc:
+                uid_status, uid_data = "FAILED", []
+                if is_quota_error(exc):
+                    warnings.append(
+                        {
+                            "code": "quota_exceeded_partial",
+                            "message": "Some older messages could not be refreshed.",
+                        }
+                    )
             uid_fetch_duration_ms = (time.perf_counter() - uid_fetch_start) * 1000
             if uid_status == "OK":
                 uid_metadata_parts: list[str] = []
@@ -280,7 +335,10 @@ def fetch_recent_messages(mailbox, folder: str = "INBOX", limit: int = DEFAULT_F
         (time.perf_counter() - fetch_start) * 1000,
     )
 
-    return results
+    return {
+        "messages": results,
+        "warnings": warnings,
+    }
 
 
 def get_message_body(message: Message) -> str:
@@ -931,7 +989,9 @@ def build_connect_preview_response(payload: dict[str, Any]) -> tuple[int, dict[s
         )
         connect_duration_ms = (time.perf_counter() - connect_start) * 1000
         fetch_start = time.perf_counter()
-        messages = fetch_recent_messages(mailbox, folder=folder, limit=limit)
+        fetch_result = fetch_recent_messages(mailbox, folder=folder, limit=limit)
+        messages = fetch_result["messages"]
+        fetch_warnings = fetch_result["warnings"]
         fetch_duration_ms = (time.perf_counter() - fetch_start) * 1000
         preview_build_start = time.perf_counter()
         previews = [
@@ -985,7 +1045,19 @@ def build_connect_preview_response(payload: dict[str, Any]) -> tuple[int, dict[s
             inbox_uid_set = None
             uid_validity = None
 
+        if not previews and any(warning.get("code") == "quota_exceeded_partial" for warning in fetch_warnings):
+            return 400, {
+                "ok": False,
+                "error": {
+                    "code": "quota_exceeded",
+                    "message": "Mailbox quota exceeded — try again later or check this inbox with your mail provider.",
+                },
+            }
+
         response_body: dict[str, Any] = {"ok": True, "messages": previews}
+        if fetch_warnings:
+            response_body["warning"] = fetch_warnings[0]
+            response_body["warnings"] = fetch_warnings
         if inbox_uid_set is not None:
             response_body["inboxUidSet"] = inbox_uid_set
         if uid_validity is not None:

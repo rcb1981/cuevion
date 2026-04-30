@@ -64,6 +64,14 @@ export type ConnectInboxResponse = {
   messages?: LiveInboxMessageSnapshot[];
   inboxUidSet?: string[] | null;
   uidValidity?: string | null;
+  warning?: {
+    code?: string;
+    message?: string;
+  } | null;
+  warnings?: Array<{
+    code?: string;
+    message?: string;
+  }>;
   error?: {
     code?: string;
     message?: string;
@@ -107,6 +115,10 @@ export type InboxConnectionAttemptResult = {
   oauthAuthorizationUrl?: string | null;
   messages?: LiveInboxMessageSnapshot[];
   uidValidity?: string | null;
+  warning?: {
+    code?: string;
+    message?: string;
+  } | null;
   error?: {
     code?: string;
     message?: string;
@@ -277,6 +289,7 @@ export async function connectInboxWithImap(
       email: request.email,
       durationMs: Math.round(performance.now() - requestStartedAt),
       messageCount: payload.messages?.length ?? 0,
+      warning: payload.warning?.code ?? null,
     });
 
     if (!response.ok) {
@@ -439,6 +452,7 @@ export async function beginInboxConnection(options: {
     oauthAuthorizationUrl: null,
     messages: response.messages ?? [],
     uidValidity: response.uidValidity ?? null,
+    warning: response.warning ?? null,
   };
 }
 
@@ -639,6 +653,7 @@ export async function fetchGmailInbox(
       email: request.email,
       durationMs: Math.round(performance.now() - requestStartedAt),
       messageCount: payload.messages?.length ?? 0,
+      warning: payload.warning?.code ?? null,
     });
 
     if (!response.ok) {
