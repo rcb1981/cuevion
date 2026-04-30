@@ -27691,6 +27691,14 @@ export function WorkspaceShell({
   const [mailboxSyncErrors, setMailboxSyncErrors] = useState<
     Partial<Record<InboxId, string>>
   >({});
+  // Per-mailbox refresh status for mobile diagnostic display. Set in onOpenMailbox callback
+  // so the user can see exactly what happened when tapping a mailbox (requested, skipped,
+  // queued, succeeded, failed). Keyed by mailboxId string.
+  const [mobileMailboxRefreshStatus, setMobileMailboxRefreshStatus] = useState<
+    Partial<Record<string, string>>
+  >({});
+  // IDs queued for retry after startup sync completes (set when tap fires during startup).
+  const pendingMobileRefreshIdsRef = useRef<Set<string>>(new Set());
   const setMailboxSyncError = (
     mailboxId: InboxId,
     message?: string | null,
@@ -28874,6 +28882,7 @@ export function WorkspaceShell({
         managedMailbox?.connected && managedMailbox.connectionStatus === "connected",
       ),
       syncError: normalizeMobileSyncError(mailboxSyncErrors[mailbox.id]) ?? null,
+      refreshStatus: mobileMailboxRefreshStatus[mailbox.id] ?? null,
       cachedMessageCount: mailboxCollections.Inbox.length,
       messages: inboxMessages,
     };
@@ -30702,6 +30711,30 @@ export function WorkspaceShell({
       cancelled = true;
     };
   }, [startupSyncMailboxKey]);
+
+  // When startup sync finishes, retry any mobile mailbox opens that were skipped because
+  // startup was already syncing that exact mailbox at the time the user tapped.
+  useEffect(() => {
+    if (startupSyncStatus !== "done" && startupSyncStatus !== "partial_error") {
+      return;
+    }
+    const pendingIds = [...pendingMobileRefreshIdsRef.current];
+    if (pendingIds.length === 0) {
+      return;
+    }
+    pendingMobileRefreshIdsRef.current.clear();
+    for (const mailboxId of pendingIds) {
+      setMobileMailboxRefreshStatus((prev) => ({
+        ...prev,
+        [mailboxId]: "↻ Retrying after startup…",
+      }));
+      void refreshMailboxById(mailboxId as InboxId);
+    }
+    // refreshMailboxById intentionally omitted from deps — it is a fresh closure on every
+    // render; including it would cause infinite loops. The effect only fires on the
+    // "done"/"partial_error" transition so the captured closure is always current.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [startupSyncStatus]);
 
   const handleApplyManagedInboxes = (nextMailboxes: ManagedWorkspaceInbox[]) => {
     const validMailboxes = nextMailboxes
@@ -32647,11 +32680,48 @@ export function WorkspaceShell({
           mailboxes={mobileMailboxes}
           priorityMessages={mobilePriorityMessages}
           onLogoutClick={() => setIsLogoutConfirmationOpen(true)}
-          onOpenMailbox={(mailboxId) => {
-            // Fire-and-forget per-mailbox refresh — same path as the desktop
-            // activeMailbox useEffect, no startup flag so no 20-message limit.
-            // syncingMailboxIdsRef inside refreshMailboxById prevents duplicates.
-            void refreshMailboxById(mailboxId as InboxId);
+          onOpenMailbox={async (mailboxId) => {
+            // Mark as requested immediately so the UI shows feedback before the
+            // async fetch resolves (the request can take several seconds).
+            setMobileMailboxRefreshStatus((prev) => ({
+              ...prev,
+              [mailboxId]: "↻ Refresh requested…",
+            }));
+            const result = await refreshMailboxById(mailboxId as InboxId);
+            if (result === "skipped") {
+              // skipped = syncingMailboxIdsRef already has this id (startup sync
+              // is currently fetching this exact mailbox, or a manual retry is
+              // already in flight). Queue a retry for when startup ends.
+              const isStartupRunning = startupSyncStatus === "running";
+              setMobileMailboxRefreshStatus((prev) => ({
+                ...prev,
+                [mailboxId]: isStartupRunning
+                  ? "⏳ Queued — startup sync in progress"
+                  : "⚠ Skipped — already syncing",
+              }));
+              if (isStartupRunning) {
+                pendingMobileRefreshIdsRef.current.add(mailboxId);
+              }
+            } else if (result === "synced" || result === "partial") {
+              const count = mailboxStore[mailboxId as InboxId]?.Inbox.length ?? 0;
+              setMobileMailboxRefreshStatus((prev) => ({
+                ...prev,
+                [mailboxId]:
+                  result === "synced"
+                    ? `✓ Refresh complete (${count} cached)`
+                    : `⚠ Partial refresh — quota limit (${count} cached)`,
+              }));
+            } else {
+              // "failed"
+              const friendlyError =
+                normalizeMobileSyncError(mailboxSyncErrors[mailboxId as InboxId]) ??
+                mailboxSyncErrors[mailboxId as InboxId] ??
+                "Refresh failed";
+              setMobileMailboxRefreshStatus((prev) => ({
+                ...prev,
+                [mailboxId]: `✗ ${friendlyError}`,
+              }));
+            }
           }}
         />
         <SettingsConfirmationModal

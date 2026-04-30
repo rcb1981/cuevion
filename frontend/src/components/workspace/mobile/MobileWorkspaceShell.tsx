@@ -22,6 +22,9 @@ export type MobileWorkspaceMailbox = {
   detail: string;
   connected: boolean;
   syncError?: string | null;
+  /** Transient refresh diagnostic set by the onOpenMailbox callback in WorkspaceShell.
+   *  Shows the result of the last per-mailbox refresh triggered by tapping this row. */
+  refreshStatus?: string | null;
   cachedMessageCount?: number;
   messages: MobileWorkspaceMessage[];
 };
@@ -287,15 +290,22 @@ export function MobileWorkspaceShell({
           />
         ) : activeTab === "inboxes" ? (
           view.kind === "mailbox" && activeMailbox ? (
-            <MessageList
-              messages={activeMailbox.messages}
-              emptyTitle="No visible messages"
-              emptyDetail={
-                activeMailbox.syncError ??
-                "Filtered, quiet, archived, and spam messages stay out of this mobile inbox."
-              }
-              onOpenMessage={openMessage}
-            />
+            <>
+              {activeMailbox.refreshStatus ? (
+                <div className="border-b border-[color:rgba(86,69,46,0.08)] bg-[color:rgba(255,250,239,0.6)] px-5 py-2 text-[0.72rem] text-[color:rgba(49,92,75,0.82)] dark:border-[color:rgba(232,211,174,0.08)] dark:bg-[color:rgba(19,17,15,0.5)] dark:text-[color:rgba(184,225,197,0.82)]">
+                  {activeMailbox.refreshStatus}
+                </div>
+              ) : null}
+              <MessageList
+                messages={activeMailbox.messages}
+                emptyTitle="No visible messages"
+                emptyDetail={
+                  activeMailbox.syncError ??
+                  "Filtered, quiet, archived, and spam messages stay out of this mobile inbox."
+                }
+                onOpenMessage={openMessage}
+              />
+            </>
           ) : (
             <div className="overflow-hidden border-y border-[color:rgba(86,69,46,0.08)] bg-[color:rgba(255,251,244,0.5)] dark:border-[color:rgba(232,211,174,0.08)] dark:bg-[color:rgba(19,17,15,0.72)]">
               {connectedFirstMailboxes.map((mailbox) => {
@@ -338,6 +348,11 @@ export function MobileWorkspaceShell({
                         <span className="mt-1 flex min-w-0 items-start gap-1.5 text-[0.74rem] font-medium leading-5 text-[color:rgba(143,82,48,0.92)] dark:text-[color:rgba(235,174,138,0.86)]">
                           <span aria-hidden="true" className="mt-[0.42rem] h-1.5 w-1.5 shrink-0 rounded-full bg-[color:rgba(143,82,48,0.78)] dark:bg-[color:rgba(235,174,138,0.74)]" />
                           <span className="min-w-0">{mailbox.syncError}</span>
+                        </span>
+                      ) : null}
+                      {mailbox.refreshStatus ? (
+                        <span className="mt-0.5 block truncate text-[0.68rem] text-[color:rgba(49,92,75,0.76)] dark:text-[color:rgba(184,225,197,0.76)]">
+                          {mailbox.refreshStatus}
                         </span>
                       ) : null}
                     </span>
