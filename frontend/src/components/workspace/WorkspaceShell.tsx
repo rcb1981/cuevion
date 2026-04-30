@@ -20725,6 +20725,19 @@ function canSendFromManagedMailbox(
   return isCustomSmtpSendReady(mailbox, credentialStatuses);
 }
 
+function isManagedInboxSyncCapable(
+  mailbox: ManagedWorkspaceInbox | null | undefined,
+): mailbox is ManagedWorkspaceInbox {
+  if (!mailbox || !mailbox.connected || !mailbox.provider) {
+    return false;
+  }
+
+  return (
+    (mailbox.provider === "google" && mailbox.connectionStatus === "connected") ||
+    isImapCredentialsProvider(mailbox.provider)
+  );
+}
+
 function normalizeStoredWorkspaceThemeMode(value: unknown): SettingsMode | null {
   return value === "Light" || value === "Dark" || value === "System" ? value : null;
 }
@@ -27011,6 +27024,13 @@ export function WorkspaceShell({
       ...mailbox,
       title: mailboxTitleOverrides[mailbox.id]?.trim() || mailbox.title,
     }));
+  const startupSyncMailboxIds = orderedMailboxes
+    .map((mailbox) =>
+      savedManagedInboxes.find((managedMailbox) => managedMailbox.id === mailbox.id),
+    )
+    .filter(isManagedInboxSyncCapable)
+    .map((mailbox) => mailbox.id as InboxId);
+  const startupSyncMailboxKey = startupSyncMailboxIds.join("|");
   const primaryInboxTitle = orderedMailboxes[0]?.title ?? inboxDisplayConfig.main.title;
   const primaryWorkspaceEmail = orderedMailboxes[0]?.email ?? "team@cuevion.com";
   const accountDisplayName = authenticatedUser?.name ?? orderedMailboxes[0]?.title ?? "You";
@@ -27446,6 +27466,8 @@ export function WorkspaceShell({
   const [learningLaunchRequest, setLearningLaunchRequest] =
     useState<LearningLaunchRequest>(null);
   const [syncingMailboxId, setSyncingMailboxId] = useState<InboxId | null>(null);
+  const syncingMailboxIdsRef = useRef<Set<InboxId>>(new Set());
+  const startupSyncHasRunRef = useRef(false);
   const [mailboxSyncFeedbackMessage, setMailboxSyncFeedbackMessage] =
     useState<string | null>(null);
   const [workspaceName, setWorkspaceName] = useState("Cuevion Studio");
@@ -29863,7 +29885,7 @@ export function WorkspaceShell({
   };
 
   const refreshMailboxById = async (mailboxId: InboxId) => {
-    if (syncingMailboxId === mailboxId) {
+    if (syncingMailboxIdsRef.current.has(mailboxId) || syncingMailboxId === mailboxId) {
       return;
     }
 
@@ -29884,6 +29906,7 @@ export function WorkspaceShell({
       return;
     }
 
+    syncingMailboxIdsRef.current.add(mailboxId);
     setSyncingMailboxId(mailboxId);
 
     try {
@@ -29986,7 +30009,8 @@ export function WorkspaceShell({
         messageCount: mergedMessages.length,
       });
     } finally {
-      setSyncingMailboxId(null);
+      syncingMailboxIdsRef.current.delete(mailboxId);
+      setSyncingMailboxId((current) => (current === mailboxId ? null : current));
     }
   };
 
@@ -30006,6 +30030,38 @@ export function WorkspaceShell({
 
     await refreshMailboxById(activeMailbox.id);
   };
+
+  useEffect(() => {
+    if (startupSyncHasRunRef.current || startupSyncMailboxIds.length === 0) {
+      return;
+    }
+
+    startupSyncHasRunRef.current = true;
+    let cancelled = false;
+
+    const runStartupSync = async () => {
+      for (const mailboxId of startupSyncMailboxIds) {
+        if (cancelled) {
+          return;
+        }
+
+        try {
+          await refreshMailboxById(mailboxId);
+        } catch (error) {
+          console.info("[SYNC-TIMING] startup sync mailbox failed", {
+            mailboxId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+    };
+
+    void runStartupSync();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [startupSyncMailboxKey]);
 
   const handleApplyManagedInboxes = (nextMailboxes: ManagedWorkspaceInbox[]) => {
     const validMailboxes = nextMailboxes
