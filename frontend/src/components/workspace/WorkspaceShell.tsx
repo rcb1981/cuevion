@@ -32647,6 +32647,12 @@ export function WorkspaceShell({
           mailboxes={mobileMailboxes}
           priorityMessages={mobilePriorityMessages}
           onLogoutClick={() => setIsLogoutConfirmationOpen(true)}
+          onOpenMailbox={(mailboxId) => {
+            // Fire-and-forget per-mailbox refresh — same path as the desktop
+            // activeMailbox useEffect, no startup flag so no 20-message limit.
+            // syncingMailboxIdsRef inside refreshMailboxById prevents duplicates.
+            void refreshMailboxById(mailboxId as InboxId);
+          }}
         />
         <SettingsConfirmationModal
           open={isLogoutConfirmationOpen}

@@ -41,6 +41,11 @@ type MobileWorkspaceShellProps = {
   mailboxes: MobileWorkspaceMailbox[];
   priorityMessages: MobileWorkspaceMessage[];
   onLogoutClick: () => void;
+  /** Called when the user taps a mailbox row to open it. The host should trigger
+   *  a non-blocking per-mailbox refresh so mobile gets the same live messages as
+   *  the desktop active-mailbox refresh path. Optional so existing callers remain
+   *  compatible without changes until wired. */
+  onOpenMailbox?: (mailboxId: string) => void;
 };
 
 function formatMessageBody(message: MobileWorkspaceMessage) {
@@ -181,6 +186,7 @@ export function MobileWorkspaceShell({
   mailboxes,
   priorityMessages,
   onLogoutClick,
+  onOpenMailbox,
 }: MobileWorkspaceShellProps) {
   const [activeTab, setActiveTab] = useState<MobileTab>("priority");
   const [view, setView] = useState<MobileView>({ kind: "root" });
@@ -307,7 +313,13 @@ export function MobileWorkspaceShell({
                   <button
                     key={mailbox.id}
                     type="button"
-                    onClick={() => setView({ kind: "mailbox", mailboxId: mailbox.id })}
+                    onClick={() => {
+                      setView({ kind: "mailbox", mailboxId: mailbox.id });
+                      // Trigger a non-blocking per-mailbox refresh, matching the desktop
+                      // activeMailbox useEffect. Concurrent-refresh guard inside
+                      // refreshMailboxById (syncingMailboxIdsRef) prevents duplicates.
+                      onOpenMailbox?.(mailbox.id);
+                    }}
                     className="flex w-full items-center justify-between gap-4 border-b border-[color:rgba(86,69,46,0.1)] bg-[color:rgba(255,253,248,0.74)] px-5 py-4 text-left active:bg-[color:rgba(232,219,199,0.72)] dark:border-[color:rgba(232,211,174,0.1)] dark:bg-[color:rgba(28,25,21,0.78)] dark:active:bg-[color:rgba(55,47,39,0.8)]"
                   >
                     <span className="min-w-0 flex-1">
