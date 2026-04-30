@@ -27718,8 +27718,18 @@ export function WorkspaceShell({
       return nextValue;
     });
   };
-  const isQuotaRefreshIssue = (issue?: InboxRefreshIssue | null) =>
-    issue?.code === "quota_exceeded" || issue?.code === "quota_exceeded_partial";
+  const isQuotaRefreshIssue = (issue?: InboxRefreshIssue | null): boolean => {
+    if (issue?.code === "quota_exceeded" || issue?.code === "quota_exceeded_partial") {
+      return true;
+    }
+    // The backend outer except-handler wraps IMAP quota exceptions as code="connection_failed"
+    // with the raw IMAP server string as the message (e.g. "The quota has been exceeded.").
+    // Detect these by message text so both the 5-message quota retry and the
+    // applyCachedLiveInboxSnapshotToMailboxStore restore path fire correctly on mobile,
+    // where no activeMailbox navigation re-triggers refreshMailboxById independently.
+    const lower = (issue?.message ?? "").toLowerCase();
+    return lower.includes("quota has been exceeded") || lower.includes("quota exceeded");
+  };
   const resolveMailboxRefreshWarningMessage = (warning?: InboxRefreshIssue | null) => {
     if (!warning) {
       return null;
