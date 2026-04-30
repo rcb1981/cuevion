@@ -22,6 +22,7 @@ export type MobileWorkspaceMailbox = {
   detail: string;
   connected: boolean;
   syncError?: string | null;
+  cachedMessageCount?: number;
   messages: MobileWorkspaceMessage[];
 };
 
@@ -294,7 +295,13 @@ export function MobileWorkspaceShell({
               {connectedFirstMailboxes.map((mailbox) => {
                 const unreadCount = mailbox.messages.filter((message) => message.unread).length;
                 const visibleMessageLabel =
-                  mailbox.messages.length === 1 ? "1 visible message" : `${mailbox.messages.length} visible messages`;
+                  mailbox.syncError &&
+                  mailbox.messages.length === 0 &&
+                  (mailbox.cachedMessageCount ?? 0) > 0
+                    ? "Existing messages kept"
+                    : mailbox.messages.length === 1
+                      ? "1 visible message"
+                      : `${mailbox.messages.length} visible messages`;
 
                 return (
                   <button

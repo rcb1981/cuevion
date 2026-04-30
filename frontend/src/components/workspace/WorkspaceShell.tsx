@@ -20653,6 +20653,12 @@ type ManagedWorkspaceInbox = {
   customSmtp: CustomSmtpSettings;
 };
 type MailboxRefreshResult = "synced" | "skipped" | "failed" | "partial";
+type InboxRefreshIssue = {
+  code?: string;
+  stage?: string;
+  message?: string;
+  fetched_count?: number;
+};
 type StartupSyncStatus = "idle" | "running" | "done" | "partial_error";
 
 function createManagedCustomImapSettings(): CustomImapSettings {
@@ -27533,9 +27539,9 @@ export function WorkspaceShell({
       return nextValue;
     });
   };
-  const resolveMailboxRefreshWarningMessage = (
-    warning?: { code?: string; message?: string } | null,
-  ) => {
+  const isQuotaRefreshIssue = (issue?: InboxRefreshIssue | null) =>
+    issue?.code === "quota_exceeded" || issue?.code === "quota_exceeded_partial";
+  const resolveMailboxRefreshWarningMessage = (warning?: InboxRefreshIssue | null) => {
     if (!warning) {
       return null;
     }
@@ -27545,6 +27551,36 @@ export function WorkspaceShell({
     }
 
     return warning.message?.trim() || "Some messages could not be refreshed.";
+  };
+  const resolveMailboxRefreshErrorMessage = (
+    error: InboxRefreshIssue | undefined,
+    canUseImapFetch: boolean,
+    canUseGmailOAuthFetch: boolean,
+  ) => {
+    const rawRefreshErrorMessage = error?.message ?? "";
+
+    if (canUseImapFetch && isQuotaRefreshIssue(error)) {
+      return (error?.fetched_count ?? 0) > 0
+        ? "Some older messages could not be refreshed."
+        : "Mailbox quota exceeded during refresh — existing messages are kept.";
+    }
+
+    if (
+      canUseImapFetch &&
+      error?.code === "invalid_request" &&
+      rawRefreshErrorMessage.toLowerCase().includes("password")
+    ) {
+      return "Missing saved credentials — reconnect this inbox.";
+    }
+
+    return (
+      rawRefreshErrorMessage ||
+      (canUseImapFetch
+        ? "Could not refresh this IMAP inbox."
+        : canUseGmailOAuthFetch
+          ? "Could not fetch Gmail inbox."
+          : "Could not refresh this inbox.")
+    );
   };
   const [workspaceName, setWorkspaceName] = useState("Cuevion Studio");
   const [inboxSignatures, setInboxSignatures] = useState<InboxSignatureStore>(() => {
@@ -28598,6 +28634,7 @@ export function WorkspaceShell({
         managedMailbox?.connected && managedMailbox.connectionStatus === "connected",
       ),
       syncError: mailboxSyncErrors[mailbox.id] ?? null,
+      cachedMessageCount: mailboxCollections.Inbox.length,
       messages: inboxMessages,
     };
   });
@@ -30065,8 +30102,46 @@ export function WorkspaceShell({
       );
     });
   };
+  const applyCachedLiveInboxSnapshotToMailboxStore = (mailboxId: InboxId) => {
+    const targetMailbox = orderedMailboxes.find((entry) => entry.id === mailboxId);
+    const snapshot = readLiveInboxSnapshots()[mailboxId];
 
-  const refreshMailboxById = async (mailboxId: InboxId): Promise<MailboxRefreshResult> => {
+    if (!targetMailbox || !snapshot?.messages.length) {
+      return 0;
+    }
+
+    setMailboxStore((currentStore) => {
+      const currentCollections =
+        currentStore[targetMailbox.id] ?? createEmptyMailboxCollections();
+      const nextStore = {
+        ...currentStore,
+        [targetMailbox.id]: {
+          ...currentCollections,
+          Inbox: mergeLiveInboxMessages(
+            targetMailbox.id,
+            snapshot.messages,
+            currentCollections.Inbox,
+            currentStore,
+          ),
+        },
+      };
+
+      return normalizeMailboxStore(
+        nextStore,
+        orderedMailboxes,
+        senderCategoryLearning,
+        messageOwnershipInteractions,
+        currentWorkspaceUserId,
+      );
+    });
+
+    return snapshot.messages.length;
+  };
+
+  const refreshMailboxById = async (
+    mailboxId: InboxId,
+    options?: { startup?: boolean },
+  ): Promise<MailboxRefreshResult> => {
     if (syncingMailboxIdsRef.current.has(mailboxId) || syncingMailboxId === mailboxId) {
       return "skipped";
     }
@@ -30107,46 +30182,75 @@ export function WorkspaceShell({
           storedImapPasswordSet: mailboxCredentialStatuses[mailboxId]?.imapPasswordSet === true,
         });
       }
-      const response = canUseGmailOAuthFetch
+      const buildCustomImapRefreshRequest = (limit?: number) =>
+        buildConnectInboxRequest({
+          mailboxId: managedMailbox.id,
+          provider: managedMailbox.provider as ProviderId,
+          email: managedMailbox.email,
+          customImap: managedMailbox.customImap,
+          // Pass the current effective focus preferences for this mailbox so the
+          // backend's decide_message_behavior() computes final_visibility, action,
+          // and v7_final_priority using the user's actual settings rather than
+          // default/anonymous rules. effectiveFocusPreferencesByMailbox already
+          // applies any per-mailbox overrides on top of the global base prefs,
+          // matching the same source used by the visible priority render path.
+          focusPreferences: effectiveFocusPreferencesByMailbox[mailboxId],
+          limit,
+        });
+      let response = canUseGmailOAuthFetch
         ? await fetchGmailInbox({
             provider: managedMailbox.provider,
             email: managedMailbox.email,
             focusPreferences: effectiveFocusPreferencesByMailbox[mailboxId],
           })
         : await connectInboxWithImap(
-            buildConnectInboxRequest({
-              mailboxId: managedMailbox.id,
-              provider: managedMailbox.provider,
-              email: managedMailbox.email,
-              customImap: managedMailbox.customImap,
-              // Pass the current effective focus preferences for this mailbox so the
-              // backend's decide_message_behavior() computes final_visibility, action,
-              // and v7_final_priority using the user's actual settings rather than
-              // default/anonymous rules. effectiveFocusPreferencesByMailbox already
-              // applies any per-mailbox overrides on top of the global base prefs,
-              // matching the same source used by the visible priority render path.
-              focusPreferences: effectiveFocusPreferencesByMailbox[mailboxId],
-            }),
+            buildCustomImapRefreshRequest(options?.startup ? 20 : undefined),
           );
+      if (canUseImapFetch && !response.ok && isQuotaRefreshIssue(response.error)) {
+        console.info("[SYNC-DIAGNOSTIC] custom IMAP quota retry", {
+          mailboxId,
+          title: managedMailbox.title,
+          email: managedMailbox.email.trim(),
+          originalStage: response.error?.stage ?? null,
+          originalFetchedCount: response.error?.fetched_count ?? 0,
+          retryLimit: 5,
+        });
+        const retryResponse = await connectInboxWithImap(buildCustomImapRefreshRequest(5));
+
+        if (retryResponse.ok) {
+          response = {
+            ...retryResponse,
+            warning: retryResponse.warning ?? {
+              code: "quota_exceeded_partial",
+              stage: response.error?.stage ?? "retry",
+              message: "Some older messages could not be refreshed.",
+              fetched_count: retryResponse.messages?.length ?? 0,
+            },
+          };
+        } else {
+          response = retryResponse;
+        }
+      }
       const requestDurationMs = performance.now() - syncStartedAt;
 
       if (!response.ok) {
-        const rawRefreshErrorMessage = response.error?.message ?? "";
-        const refreshErrorMessage =
-          canUseImapFetch &&
-          response.error?.code === "quota_exceeded"
-            ? "Mailbox quota exceeded — try again later or check this inbox with your mail provider."
-            : canUseImapFetch &&
-                response.error?.code === "invalid_request" &&
-                rawRefreshErrorMessage.toLowerCase().includes("password")
-              ? "Missing saved credentials — reconnect this inbox."
-              : rawRefreshErrorMessage ||
-                (canUseImapFetch ? "Could not refresh this IMAP inbox." : "Could not fetch Gmail inbox.");
+        const refreshErrorMessage = resolveMailboxRefreshErrorMessage(
+          response.error,
+          canUseImapFetch,
+          canUseGmailOAuthFetch,
+        );
+        const restoredSnapshotCount =
+          canUseImapFetch && isQuotaRefreshIssue(response.error)
+            ? applyCachedLiveInboxSnapshotToMailboxStore(managedMailbox.id as InboxId)
+            : 0;
         console.info("[SYNC-TIMING] refreshMailboxById failed", {
           mailboxId,
           email: managedMailbox.email.trim(),
           requestDurationMs: Math.round(requestDurationMs),
           error: response.error?.message ?? response.error?.code ?? "unknown",
+          stage: response.error?.stage ?? null,
+          fetchedCount: response.error?.fetched_count ?? null,
+          restoredSnapshotCount,
         });
         console.info("[SYNC-DIAGNOSTIC] mailbox refresh failed", {
           mailboxId,
@@ -30165,7 +30269,10 @@ export function WorkspaceShell({
             ? mailboxCredentialStatuses[mailboxId]?.imapPasswordSet === true
             : undefined,
           errorCode: response.error?.code,
+          errorStage: response.error?.stage,
           errorMessage: response.error?.message,
+          fetchedCount: response.error?.fetched_count,
+          restoredSnapshotCount,
         });
         setMailboxSyncError(mailboxId, refreshErrorMessage);
         if (canUseGmailOAuthFetch) {
@@ -30295,7 +30402,7 @@ export function WorkspaceShell({
           console.info("[STARTUP-SYNC] syncing mailbox", { mailboxId });
           setMailboxSyncFeedbackMessage(`Syncing ${mailboxTitle}`);
 
-          const refreshResult = await refreshMailboxById(mailboxId);
+          const refreshResult = await refreshMailboxById(mailboxId, { startup: true });
           if (refreshResult === "failed") {
             didFailMailbox = true;
             setMailboxSyncError(

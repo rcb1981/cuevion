@@ -57,6 +57,7 @@ export type ConnectInboxRequest = {
   internalRole?: string | null;
   focusPreferences?: OnboardingState["focusPreferences"] | null;
   selectedInboxes?: string[] | null;
+  limit?: number | null;
 };
 
 export type ConnectInboxResponse = {
@@ -66,15 +67,21 @@ export type ConnectInboxResponse = {
   uidValidity?: string | null;
   warning?: {
     code?: string;
+    stage?: string;
     message?: string;
+    fetched_count?: number;
   } | null;
   warnings?: Array<{
     code?: string;
+    stage?: string;
     message?: string;
+    fetched_count?: number;
   }>;
   error?: {
     code?: string;
+    stage?: string;
     message?: string;
+    fetched_count?: number;
   };
 };
 
@@ -117,11 +124,15 @@ export type InboxConnectionAttemptResult = {
   uidValidity?: string | null;
   warning?: {
     code?: string;
+    stage?: string;
     message?: string;
+    fetched_count?: number;
   } | null;
   error?: {
     code?: string;
+    stage?: string;
     message?: string;
+    fetched_count?: number;
   };
 };
 
@@ -133,6 +144,7 @@ export function buildConnectInboxRequest(options: {
   internalRole?: string | null;
   focusPreferences?: OnboardingState["focusPreferences"] | null;
   selectedInboxes?: string[] | null;
+  limit?: number | null;
 }): ConnectInboxRequest {
   const email = options.email.trim();
   const resolvedImapSettings = applyProviderDefaults(
@@ -155,6 +167,7 @@ export function buildConnectInboxRequest(options: {
     internalRole: options.internalRole,
     focusPreferences: options.focusPreferences,
     selectedInboxes: options.selectedInboxes,
+    limit: options.limit,
   };
 }
 
@@ -290,6 +303,8 @@ export async function connectInboxWithImap(
       durationMs: Math.round(performance.now() - requestStartedAt),
       messageCount: payload.messages?.length ?? 0,
       warning: payload.warning?.code ?? null,
+      warningStage: payload.warning?.stage ?? null,
+      fetchedCount: payload.warning?.fetched_count ?? null,
     });
 
     if (!response.ok) {
@@ -298,6 +313,8 @@ export async function connectInboxWithImap(
         error: payload.error ?? {
           code: "connection_failed",
           message: "Could not connect to inbox.",
+          stage: "request",
+          fetched_count: 0,
         },
       };
     }
@@ -315,6 +332,8 @@ export async function connectInboxWithImap(
         code: "connection_failed",
         message:
           error instanceof Error ? error.message : "Could not connect to inbox.",
+        stage: "request",
+        fetched_count: 0,
       },
     };
   }

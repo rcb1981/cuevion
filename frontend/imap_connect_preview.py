@@ -21,6 +21,8 @@ DEFAULT_MICROSOFT_PORT = 993
 DEFAULT_FETCH_LIMIT = 50
 MAX_FETCH_LIMIT = 100
 logger = logging.getLogger(__name__)
+QUOTA_REFRESH_KEEP_COPY = "Mailbox quota exceeded during refresh — existing messages are kept."
+QUOTA_PARTIAL_COPY = "Some older messages could not be refreshed."
 
 
 def map_to_ui_signal(result: dict[str, Any]) -> str:
@@ -159,85 +161,200 @@ def connect_mailbox_with_settings(
     return mailbox
 
 
+def open_mailbox_connection(host: str, port: int, ssl_enabled: bool):
+    if ssl_enabled:
+        return imaplib.IMAP4_SSL(host, port)
+
+    return imaplib.IMAP4(host, port)
+
+
 def is_quota_error(value: Any) -> bool:
     return "quota" in str(value or "").lower()
+
+
+def normalize_imap_response_text(value: Any) -> str:
+    if value is None:
+        return ""
+
+    if isinstance(value, (list, tuple)):
+        return " ".join(normalize_imap_response_text(item) for item in value)
+
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="ignore")
+
+    return str(value)
+
+
+def build_imap_issue(
+    code: str,
+    stage: str,
+    message: str,
+    fetched_count: int = 0,
+) -> dict[str, Any]:
+    return {
+        "code": code,
+        "stage": stage,
+        "message": message,
+        "fetched_count": fetched_count,
+    }
+
+
+def build_quota_issue(stage: str, fetched_count: int = 0) -> dict[str, Any]:
+    return build_imap_issue(
+        "quota_exceeded_partial" if fetched_count > 0 else "quota_exceeded",
+        stage,
+        QUOTA_PARTIAL_COPY if fetched_count > 0 else QUOTA_REFRESH_KEEP_COPY,
+        fetched_count,
+    )
 
 
 def fetch_recent_messages(mailbox, folder: str = "INBOX", limit: int = DEFAULT_FETCH_LIMIT):
     fetch_start = time.perf_counter()
     select_start = time.perf_counter()
-    mailbox.select(folder)
-    select_duration_ms = (time.perf_counter() - select_start) * 1000
-    search_start = time.perf_counter()
-    status, messages = mailbox.search(None, "ALL")
-    search_duration_ms = (time.perf_counter() - search_start) * 1000
-
-    if status != "OK":
+    try:
+        logger.info("IMAP preview stage=select_folder folder=%s", folder)
+        select_status, select_data = mailbox.select(folder)
+    except imaplib.IMAP4.error as exc:
+        select_duration_ms = (time.perf_counter() - select_start) * 1000
         logger.warning(
-            "IMAP preview fetch_recent_messages failed status=%s folder=%s select_ms=%.1f search_ms=%.1f",
-            status,
-            folder,
+            "IMAP preview stage=select_folder failed quota=%s fetched_count=0 select_ms=%.1f error=%s",
+            is_quota_error(exc),
             select_duration_ms,
-            search_duration_ms,
+            str(exc),
         )
         return {
             "messages": [],
-            "warnings": [
-                {
-                    "code": "fetch_failed",
-                    "message": "Could not refresh this inbox.",
-                }
-            ],
+            "warnings": [],
+            "error": build_quota_issue("select_folder", 0)
+            if is_quota_error(exc)
+            else build_imap_issue("select_failed", "select_folder", "Could not open this inbox folder.", 0),
+        }
+    select_duration_ms = (time.perf_counter() - select_start) * 1000
+
+    if select_status != "OK":
+        select_text = normalize_imap_response_text(select_data)
+        logger.warning(
+            "IMAP preview stage=select_folder failed status=%s quota=%s fetched_count=0 select_ms=%.1f response=%s",
+            select_status,
+            is_quota_error(select_text),
+            select_duration_ms,
+            select_text[:160],
+        )
+        return {
+            "messages": [],
+            "warnings": [],
+            "error": build_quota_issue("select_folder", 0)
+            if is_quota_error(select_text)
+            else build_imap_issue("select_failed", "select_folder", "Could not open this inbox folder.", 0),
         }
 
-    message_ids = messages[0].split()
+    search_start = time.perf_counter()
+    try:
+        logger.info("IMAP preview stage=search folder=%s", folder)
+        status, messages = mailbox.search(None, "ALL")
+    except imaplib.IMAP4.error as exc:
+        search_duration_ms = (time.perf_counter() - search_start) * 1000
+        logger.warning(
+            "IMAP preview stage=search failed quota=%s fetched_count=0 search_ms=%.1f error=%s",
+            is_quota_error(exc),
+            search_duration_ms,
+            str(exc),
+        )
+        return {
+            "messages": [],
+            "warnings": [],
+            "error": build_quota_issue("search", 0)
+            if is_quota_error(exc)
+            else build_imap_issue("search_failed", "search", "Could not refresh this inbox.", 0),
+        }
+    search_duration_ms = (time.perf_counter() - search_start) * 1000
+
+    if status != "OK":
+        search_text = normalize_imap_response_text(messages)
+        logger.warning(
+            "IMAP preview stage=search failed status=%s quota=%s fetched_count=0 folder=%s select_ms=%.1f search_ms=%.1f response=%s",
+            status,
+            is_quota_error(search_text),
+            folder,
+            select_duration_ms,
+            search_duration_ms,
+            search_text[:160],
+        )
+        return {
+            "messages": [],
+            "warnings": [],
+            "error": build_quota_issue("search", 0)
+            if is_quota_error(search_text)
+            else build_imap_issue("search_failed", "search", "Could not refresh this inbox.", 0),
+        }
+
+    id_collection_start = time.perf_counter()
+    try:
+        logger.info("IMAP preview stage=message_id_collection folder=%s", folder)
+        message_ids = messages[0].split() if messages and messages[0] else []
+    except Exception as exc:
+        id_collection_duration_ms = (time.perf_counter() - id_collection_start) * 1000
+        logger.warning(
+            "IMAP preview stage=message_id_collection failed fetched_count=0 collection_ms=%.1f error=%s",
+            id_collection_duration_ms,
+            str(exc),
+        )
+        return {
+            "messages": [],
+            "warnings": [],
+            "error": build_imap_issue(
+                "message_id_collection_failed",
+                "message_id_collection",
+                "Could not read message identifiers for this inbox.",
+                0,
+            ),
+        }
+    id_collection_duration_ms = (time.perf_counter() - id_collection_start) * 1000
+    logger.info(
+        "IMAP preview stage=message_id_collection success total_ids=%s limit=%s collection_ms=%.1f",
+        len(message_ids),
+        limit,
+        id_collection_duration_ms,
+    )
     latest_ids = message_ids[-limit:]
     results: list[tuple[Message, bool, str | None]] = []
-    warnings: list[dict[str, str]] = []
+    warnings: list[dict[str, Any]] = []
 
     for index, message_id in enumerate(reversed(latest_ids)):
         per_message_start = time.perf_counter()
+        logger.info(
+            "IMAP preview stage=per_message_fetch_start idx=%s fetched_count=%s",
+            index,
+            len(results),
+        )
         try:
             status, message_data = mailbox.fetch(message_id, "(UID FLAGS BODY.PEEK[])")
         except imaplib.IMAP4.error as exc:
             fetch_duration_ms = (time.perf_counter() - per_message_start) * 1000
             logger.warning(
-                "IMAP preview per-message fetch raised idx=%s quota=%s fetch_ms=%.1f error=%s",
+                "IMAP preview stage=per_message_fetch_failure idx=%s quota=%s fetch_ms=%.1f error=%s",
                 index,
                 is_quota_error(exc),
                 fetch_duration_ms,
                 str(exc),
             )
             if is_quota_error(exc):
-                warnings.append(
-                    {
-                        "code": "quota_exceeded_partial",
-                        "message": "Some older messages could not be refreshed.",
-                    }
-                )
+                warnings.append(build_quota_issue("per_message_fetch", len(results)))
                 break
             continue
         fetch_duration_ms = (time.perf_counter() - per_message_start) * 1000
 
         if status != "OK":
-            status_text = " ".join(
-                item.decode("utf-8", errors="ignore") if isinstance(item, bytes) else str(item)
-                for item in (message_data or [])
-            )
+            status_text = normalize_imap_response_text(message_data)
             logger.warning(
-                "IMAP preview per-message fetch failed idx=%s status=%s fetch_ms=%.1f response=%s",
+                "IMAP preview stage=per_message_fetch_failure idx=%s status=%s fetch_ms=%.1f response=%s",
                 index,
                 status,
                 fetch_duration_ms,
                 status_text[:160],
             )
             if is_quota_error(status_text):
-                warnings.append(
-                    {
-                        "code": "quota_exceeded_partial",
-                        "message": "Some older messages could not be refreshed.",
-                    }
-                )
+                warnings.append(build_quota_issue("per_message_fetch", len(results)))
                 break
             continue
 
@@ -270,12 +387,7 @@ def fetch_recent_messages(mailbox, folder: str = "INBOX", limit: int = DEFAULT_F
             except imaplib.IMAP4.error as exc:
                 uid_status, uid_data = "FAILED", []
                 if is_quota_error(exc):
-                    warnings.append(
-                        {
-                            "code": "quota_exceeded_partial",
-                            "message": "Some older messages could not be refreshed.",
-                        }
-                    )
+                    warnings.append(build_quota_issue("per_message_uid_fetch", len(results)))
             uid_fetch_duration_ms = (time.perf_counter() - uid_fetch_start) * 1000
             if uid_status == "OK":
                 uid_metadata_parts: list[str] = []
@@ -316,7 +428,7 @@ def fetch_recent_messages(mailbox, folder: str = "INBOX", limit: int = DEFAULT_F
         unread = "\\Seen" not in flags_content
         results.append((message_from_bytes(raw_email), unread, imap_uid))
         logger.info(
-            "IMAP preview per-message fetch idx=%s fetch_ms=%.1f total_ms=%.1f bytes=%s uid_present=%s unread=%s",
+            "IMAP preview stage=per_message_fetch_success idx=%s fetch_ms=%.1f total_ms=%.1f bytes=%s uid_present=%s unread=%s",
             index,
             fetch_duration_ms,
             (time.perf_counter() - per_message_start) * 1000,
@@ -338,6 +450,7 @@ def fetch_recent_messages(mailbox, folder: str = "INBOX", limit: int = DEFAULT_F
     return {
         "messages": results,
         "warnings": warnings,
+        "error": None,
     }
 
 
@@ -980,39 +1093,133 @@ def build_connect_preview_response(payload: dict[str, Any]) -> tuple[int, dict[s
 
     try:
         connect_start = time.perf_counter()
-        mailbox = connect_mailbox_with_settings(
-            host=host,
-            port=port,
-            username=username,
-            password=password,
-            ssl_enabled=ssl_enabled,
-        )
+        try:
+            logger.info(
+                "IMAP preview stage=connect host=%s port=%s ssl=%s email=%s",
+                host,
+                port,
+                ssl_enabled,
+                email_address,
+            )
+            mailbox = open_mailbox_connection(host=host, port=port, ssl_enabled=ssl_enabled)
+        except imaplib.IMAP4.error as exc:
+            connect_duration_ms = (time.perf_counter() - connect_start) * 1000
+            logger.warning(
+                "IMAP preview stage=connect failed quota=%s connect_ms=%.1f host=%s port=%s ssl=%s error=%s",
+                is_quota_error(exc),
+                connect_duration_ms,
+                host,
+                port,
+                ssl_enabled,
+                str(exc),
+            )
+            return 400, {
+                "ok": False,
+                "error": build_quota_issue("connect", 0)
+                if is_quota_error(exc)
+                else build_imap_issue("connection_failed", "connect", "Could not connect to inbox.", 0),
+            }
         connect_duration_ms = (time.perf_counter() - connect_start) * 1000
+
+        login_start = time.perf_counter()
+        try:
+            logger.info("IMAP preview stage=login email=%s username=%s", email_address, username)
+            mailbox.login(username, password)
+        except imaplib.IMAP4.error as exc:
+            login_duration_ms = (time.perf_counter() - login_start) * 1000
+            logger.warning(
+                "IMAP preview stage=login failed quota=%s login_ms=%.1f email=%s username=%s error=%s",
+                is_quota_error(exc),
+                login_duration_ms,
+                email_address,
+                username,
+                str(exc),
+            )
+            return 400, {
+                "ok": False,
+                "error": build_quota_issue("login", 0)
+                if is_quota_error(exc)
+                else build_imap_issue("invalid_credentials", "login", str(exc), 0),
+            }
+        login_duration_ms = (time.perf_counter() - login_start) * 1000
+
         fetch_start = time.perf_counter()
         fetch_result = fetch_recent_messages(mailbox, folder=folder, limit=limit)
         messages = fetch_result["messages"]
         fetch_warnings = fetch_result["warnings"]
+        fetch_error = fetch_result.get("error")
         fetch_duration_ms = (time.perf_counter() - fetch_start) * 1000
-        preview_build_start = time.perf_counter()
-        previews = [
-            to_message_preview(
-                message,
-                index,
+        if fetch_error:
+            logger.warning(
+                "IMAP preview request failed stage=%s code=%s fetched_count=%s email=%s folder=%s limit=%s connect_ms=%.1f login_ms=%.1f fetch_ms=%.1f total_ms=%.1f",
+                fetch_error.get("stage"),
+                fetch_error.get("code"),
+                fetch_error.get("fetched_count"),
                 email_address,
-                unread,
-                imap_uid,
-                internal_role=internal_role,
-                focus_preferences=focus_preferences,
+                folder,
+                limit,
+                connect_duration_ms,
+                login_duration_ms,
+                fetch_duration_ms,
+                (time.perf_counter() - request_start) * 1000,
             )
-            for index, (message, unread, imap_uid) in enumerate(messages)
-        ]
+            return 400, {
+                "ok": False,
+                "error": fetch_error,
+            }
+
+        preview_build_start = time.perf_counter()
+        logger.info(
+            "IMAP preview stage=response_serialization_start fetched_count=%s email=%s",
+            len(messages),
+            email_address,
+        )
+        previews = []
+        for index, (message, unread, imap_uid) in enumerate(messages):
+            try:
+                previews.append(
+                    to_message_preview(
+                        message,
+                        index,
+                        email_address,
+                        unread,
+                        imap_uid,
+                        internal_role=internal_role,
+                        focus_preferences=focus_preferences,
+                    )
+                )
+            except Exception as exc:
+                preview_build_duration_ms = (time.perf_counter() - preview_build_start) * 1000
+                logger.warning(
+                    "IMAP preview stage=response_serialization failed idx=%s fetched_count=%s serialization_ms=%.1f error=%s",
+                    index,
+                    len(previews),
+                    preview_build_duration_ms,
+                    str(exc),
+                )
+                return 400, {
+                    "ok": False,
+                    "error": build_imap_issue(
+                        "response_serialization_failed",
+                        "response_serialization",
+                        "Could not prepare refreshed messages for this inbox.",
+                        len(previews),
+                    ),
+                }
         preview_build_duration_ms = (time.perf_counter() - preview_build_start) * 1000
+        logger.info(
+            "IMAP preview stage=response_serialization_success fetched_count=%s serialized_count=%s serialization_ms=%.1f",
+            len(messages),
+            len(previews),
+            preview_build_duration_ms,
+        )
         logger.warning(
-            "IMAP preview request complete email=%s folder=%s limit=%s connect_ms=%.1f fetch_ms=%.1f preview_build_ms=%.1f total_ms=%.1f messages=%s",
+            "IMAP preview request complete email=%s folder=%s limit=%s connect_ms=%.1f login_ms=%.1f fetch_ms=%.1f preview_build_ms=%.1f total_ms=%.1f messages=%s",
             email_address,
             folder,
             limit,
             connect_duration_ms,
+            login_duration_ms,
             fetch_duration_ms,
             preview_build_duration_ms,
             (time.perf_counter() - request_start) * 1000,
@@ -1045,12 +1252,11 @@ def build_connect_preview_response(payload: dict[str, Any]) -> tuple[int, dict[s
             inbox_uid_set = None
             uid_validity = None
 
-        if not previews and any(warning.get("code") == "quota_exceeded_partial" for warning in fetch_warnings):
+        if not previews and any(warning.get("code") == "quota_exceeded" for warning in fetch_warnings):
             return 400, {
                 "ok": False,
                 "error": {
-                    "code": "quota_exceeded",
-                    "message": "Mailbox quota exceeded — try again later or check this inbox with your mail provider.",
+                    **build_quota_issue("per_message_fetch", 0),
                 },
             }
 
@@ -1064,20 +1270,25 @@ def build_connect_preview_response(payload: dict[str, Any]) -> tuple[int, dict[s
             response_body["uidValidity"] = uid_validity
         return 200, response_body
     except imaplib.IMAP4.error as exc:
+        code = "quota_exceeded" if is_quota_error(exc) else "invalid_credentials"
+        message = QUOTA_REFRESH_KEEP_COPY if is_quota_error(exc) else str(exc)
         logger.exception(
             "IMAP connection failed with IMAP4 error",
             extra={
                 "imap_host": host,
                 "imap_port": port,
                 "imap_ssl_enabled": ssl_enabled,
+                "imap_stage": "unknown",
                 "imap_error_message": str(exc),
             },
         )
         return 400, {
             "ok": False,
             "error": {
-                "code": "invalid_credentials",
-                "message": str(exc),
+                "code": code,
+                "stage": "unknown",
+                "message": message,
+                "fetched_count": 0,
             },
         }
     except Exception as exc:
