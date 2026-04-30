@@ -86,29 +86,42 @@ function MessageRow({
   const badgeClassName = badgeTone.includes("priority")
     ? "border-[color:rgba(46,112,82,0.24)] bg-[color:rgba(69,130,96,0.12)] text-[color:rgba(35,92,65,0.92)] dark:border-[color:rgba(129,191,153,0.24)] dark:bg-[color:rgba(91,145,109,0.18)] dark:text-[color:rgba(184,225,197,0.9)]"
     : "border-[color:rgba(159,124,66,0.2)] bg-[color:rgba(214,179,114,0.14)] text-[color:rgba(109,84,43,0.86)] dark:border-[color:rgba(218,190,138,0.22)] dark:bg-[color:rgba(214,179,114,0.1)] dark:text-[color:rgba(232,211,174,0.86)]";
+  const unreadAttentionDotClass =
+    "h-2 w-2 rounded-full bg-[#4E2070] shadow-[0_0_0_2px_rgba(78,32,112,0.08)]";
 
   return (
     <button
       type="button"
       onClick={onOpen}
-      className="flex w-full gap-3 border-b border-[color:rgba(86,69,46,0.1)] bg-[color:rgba(255,253,248,0.74)] px-4 py-4 text-left transition-colors duration-150 active:bg-[color:rgba(232,219,199,0.72)] dark:border-[color:rgba(232,211,174,0.1)] dark:bg-[color:rgba(28,25,21,0.78)] dark:active:bg-[color:rgba(55,47,39,0.8)]"
+      className="flex w-full border-b border-[color:rgba(86,69,46,0.1)] bg-[color:rgba(255,253,248,0.74)] px-4 py-4 text-left transition-colors duration-150 active:bg-[color:rgba(232,219,199,0.72)] dark:border-[color:rgba(232,211,174,0.1)] dark:bg-[color:rgba(28,25,21,0.78)] dark:active:bg-[color:rgba(55,47,39,0.8)]"
     >
-      <span
-        aria-hidden="true"
-        className={`mt-2 h-2.5 w-2.5 shrink-0 rounded-full ${
-          message.unread ? "bg-[color:#2e704f] dark:bg-[color:#8fc69f]" : "bg-transparent"
-        }`}
-      />
       <span className="min-w-0 flex-1">
         <span className="flex min-w-0 items-center justify-between gap-3">
-          <span className="truncate text-[0.95rem] font-semibold tracking-normal text-[var(--workspace-text)]">
-            {message.sender || message.from}
+          <span className="flex min-w-0 items-center gap-2">
+            {message.unread ? (
+              <span aria-hidden="true" className={`${unreadAttentionDotClass} shrink-0`} />
+            ) : null}
+            <span
+              className={`truncate text-[0.95rem] tracking-normal ${
+                message.unread
+                  ? "font-semibold text-[var(--workspace-text)]"
+                  : "font-medium text-[var(--workspace-text-soft)]"
+              }`}
+            >
+              {message.sender || message.from}
+            </span>
           </span>
           <span className="shrink-0 text-[0.72rem] text-[var(--workspace-text-faint)]">
             {message.time || message.timestamp}
           </span>
         </span>
-        <span className="mt-0.5 block truncate text-[0.92rem] font-medium text-[var(--workspace-text)]">
+        <span
+          className={`mt-0.5 block truncate text-[0.92rem] ${
+            message.unread
+              ? "font-semibold text-[var(--workspace-text)]"
+              : "font-medium text-[var(--workspace-text-soft)]"
+          }`}
+        >
           {message.subject || "No subject"}
         </span>
         <span className="mt-1 block line-clamp-2 text-[0.82rem] leading-5 text-[var(--workspace-text-faint)]">
@@ -274,30 +287,47 @@ export function MobileWorkspaceShell({
             />
           ) : (
             <div className="overflow-hidden border-y border-[color:rgba(86,69,46,0.08)] bg-[color:rgba(255,251,244,0.5)] dark:border-[color:rgba(232,211,174,0.08)] dark:bg-[color:rgba(19,17,15,0.72)]">
-              {connectedFirstMailboxes.map((mailbox) => (
-                <button
-                  key={mailbox.id}
-                  type="button"
-                  onClick={() => setView({ kind: "mailbox", mailboxId: mailbox.id })}
-                  className="flex w-full items-center justify-between gap-4 border-b border-[color:rgba(86,69,46,0.1)] bg-[color:rgba(255,253,248,0.74)] px-5 py-4 text-left active:bg-[color:rgba(232,219,199,0.72)] dark:border-[color:rgba(232,211,174,0.1)] dark:bg-[color:rgba(28,25,21,0.78)] dark:active:bg-[color:rgba(55,47,39,0.8)]"
-                >
-                  <span className="min-w-0">
-                    <span className="block truncate text-[1rem] font-semibold tracking-normal text-[var(--workspace-text)]">
-                      {mailbox.title}
+              {connectedFirstMailboxes.map((mailbox) => {
+                const unreadCount = mailbox.messages.filter((message) => message.unread).length;
+                const visibleMessageLabel =
+                  mailbox.messages.length === 1 ? "1 visible message" : `${mailbox.messages.length} visible messages`;
+
+                return (
+                  <button
+                    key={mailbox.id}
+                    type="button"
+                    onClick={() => setView({ kind: "mailbox", mailboxId: mailbox.id })}
+                    className="flex w-full items-center justify-between gap-4 border-b border-[color:rgba(86,69,46,0.1)] bg-[color:rgba(255,253,248,0.74)] px-5 py-4 text-left active:bg-[color:rgba(232,219,199,0.72)] dark:border-[color:rgba(232,211,174,0.1)] dark:bg-[color:rgba(28,25,21,0.78)] dark:active:bg-[color:rgba(55,47,39,0.8)]"
+                  >
+                    <span className="min-w-0">
+                      <span className="block truncate text-[1rem] font-semibold tracking-normal text-[var(--workspace-text)]">
+                        {mailbox.title}
+                      </span>
+                      <span className="mt-1 block truncate text-[0.8rem] text-[var(--workspace-text-faint)]">
+                        {mailbox.email}
+                      </span>
+                      {mailbox.connected ? (
+                        <span className="mt-0.5 block truncate text-[0.74rem] text-[var(--workspace-text-faint)]">
+                          {visibleMessageLabel}
+                        </span>
+                      ) : null}
                     </span>
-                    <span className="mt-1 block truncate text-[0.8rem] text-[var(--workspace-text-faint)]">
-                      {mailbox.email}
-                    </span>
-                  </span>
-                  <span className={`shrink-0 rounded-full border px-2.5 py-1 text-[0.72rem] font-semibold ${
-                    mailbox.connected
-                      ? "border-[color:rgba(46,112,82,0.18)] bg-[color:rgba(69,130,96,0.1)] text-[color:rgba(35,92,65,0.9)] dark:border-[color:rgba(129,191,153,0.22)] dark:bg-[color:rgba(91,145,109,0.16)] dark:text-[color:rgba(184,225,197,0.9)]"
-                      : "border-[color:rgba(159,124,66,0.16)] bg-[color:rgba(214,179,114,0.1)] text-[color:rgba(109,84,43,0.72)] dark:border-[color:rgba(218,190,138,0.2)] dark:bg-[color:rgba(214,179,114,0.08)] dark:text-[color:rgba(232,211,174,0.72)]"
-                  }`}>
-                    {mailbox.connected ? `${mailbox.messages.length}` : "Pending"}
-                  </span>
-                </button>
-              ))}
+                    {unreadCount > 0 ? (
+                      <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-[color:rgba(78,32,112,0.18)] bg-[color:rgba(78,32,112,0.06)] px-2.5 py-1 text-[0.72rem] font-semibold text-[color:#4E2070] dark:border-[color:rgba(184,144,205,0.22)] dark:bg-[color:rgba(78,32,112,0.16)] dark:text-[color:rgba(221,190,236,0.92)]">
+                        <span
+                          aria-hidden="true"
+                          className="h-2 w-2 rounded-full bg-[#4E2070] shadow-[0_0_0_2px_rgba(78,32,112,0.08)] dark:bg-[color:rgba(221,190,236,0.92)]"
+                        />
+                        {unreadCount} unread
+                      </span>
+                    ) : mailbox.connected ? null : (
+                      <span className="shrink-0 rounded-full border border-[color:rgba(159,124,66,0.16)] bg-[color:rgba(214,179,114,0.1)] px-2.5 py-1 text-[0.72rem] font-semibold text-[color:rgba(109,84,43,0.72)] dark:border-[color:rgba(218,190,138,0.2)] dark:bg-[color:rgba(214,179,114,0.08)] dark:text-[color:rgba(232,211,174,0.72)]">
+                        Pending
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
             </div>
           )
         ) : (
