@@ -20624,6 +20624,8 @@ type ManagedWorkspaceInbox = {
   customImap: CustomImapSettings;
   customSmtp: CustomSmtpSettings;
 };
+type MailboxRefreshResult = "synced" | "skipped" | "failed";
+type StartupSyncStatus = "idle" | "running" | "done" | "partial_error";
 
 function createManagedCustomImapSettings(): CustomImapSettings {
   return {
@@ -27468,6 +27470,8 @@ export function WorkspaceShell({
   const [syncingMailboxId, setSyncingMailboxId] = useState<InboxId | null>(null);
   const syncingMailboxIdsRef = useRef<Set<InboxId>>(new Set());
   const startupSyncHasRunRef = useRef(false);
+  const [startupSyncStatus, setStartupSyncStatus] =
+    useState<StartupSyncStatus>("idle");
   const [mailboxSyncFeedbackMessage, setMailboxSyncFeedbackMessage] =
     useState<string | null>(null);
   const [workspaceName, setWorkspaceName] = useState("Cuevion Studio");
@@ -27600,12 +27604,16 @@ export function WorkspaceShell({
       return;
     }
 
+    if (startupSyncStatus === "running") {
+      return;
+    }
+
     const timeoutId = window.setTimeout(() => {
       setMailboxSyncFeedbackMessage(null);
     }, 2400);
 
     return () => window.clearTimeout(timeoutId);
-  }, [mailboxSyncFeedbackMessage]);
+  }, [mailboxSyncFeedbackMessage, startupSyncStatus]);
   const [pendingTeamInvitation, setPendingTeamInvitation] =
     useState<PendingTeamInvitation>(() => {
       if (typeof window === "undefined") {
@@ -29884,9 +29892,9 @@ export function WorkspaceShell({
     });
   };
 
-  const refreshMailboxById = async (mailboxId: InboxId) => {
+  const refreshMailboxById = async (mailboxId: InboxId): Promise<MailboxRefreshResult> => {
     if (syncingMailboxIdsRef.current.has(mailboxId) || syncingMailboxId === mailboxId) {
-      return;
+      return "skipped";
     }
 
     const managedMailbox = savedManagedInboxes.find(
@@ -29894,7 +29902,7 @@ export function WorkspaceShell({
     );
 
     if (!managedMailbox || !managedMailbox.connected || !managedMailbox.provider) {
-      return;
+      return "skipped";
     }
 
     const canUseGmailOAuthFetch =
@@ -29903,7 +29911,7 @@ export function WorkspaceShell({
     const canUseImapFetch = isImapCredentialsProvider(managedMailbox.provider);
 
     if (!canUseGmailOAuthFetch && !canUseImapFetch) {
-      return;
+      return "skipped";
     }
 
     syncingMailboxIdsRef.current.add(mailboxId);
@@ -29946,7 +29954,7 @@ export function WorkspaceShell({
             response.error?.message ?? "Could not fetch Gmail inbox.",
           );
         }
-        return;
+        return "failed";
       }
 
       const messages = response.messages ?? [];
@@ -30008,6 +30016,7 @@ export function WorkspaceShell({
         totalDurationMs: Math.round(performance.now() - syncStartedAt),
         messageCount: mergedMessages.length,
       });
+      return "synced";
     } finally {
       syncingMailboxIdsRef.current.delete(mailboxId);
       setSyncingMailboxId((current) => (current === mailboxId ? null : current));
@@ -30040,20 +30049,60 @@ export function WorkspaceShell({
     let cancelled = false;
 
     const runStartupSync = async () => {
+      let didFailMailbox = false;
+
+      console.info("[STARTUP-SYNC] started", {
+        mailboxCount: startupSyncMailboxIds.length,
+      });
+      setStartupSyncStatus("running");
+      setMailboxSyncFeedbackMessage("Refreshing connected inboxes...");
+
       for (const mailboxId of startupSyncMailboxIds) {
         if (cancelled) {
           return;
         }
 
+        const mailboxTitle =
+          orderedMailboxes.find((mailbox) => mailbox.id === mailboxId)?.title ??
+          savedManagedInboxes.find((mailbox) => mailbox.id === mailboxId)?.title ??
+          "inbox";
+
         try {
-          await refreshMailboxById(mailboxId);
+          console.info("[STARTUP-SYNC] syncing mailbox", { mailboxId });
+          setMailboxSyncFeedbackMessage(`Syncing ${mailboxTitle}`);
+
+          const refreshResult = await refreshMailboxById(mailboxId);
+          if (refreshResult === "failed") {
+            didFailMailbox = true;
+            console.info("[STARTUP-SYNC] mailbox failed", { mailboxId });
+          }
         } catch (error) {
+          didFailMailbox = true;
+          console.info("[STARTUP-SYNC] mailbox failed", {
+            mailboxId,
+            error: error instanceof Error ? error.message : String(error),
+          });
           console.info("[SYNC-TIMING] startup sync mailbox failed", {
             mailboxId,
             error: error instanceof Error ? error.message : String(error),
           });
         }
       }
+
+      if (cancelled) {
+        return;
+      }
+
+      console.info("[STARTUP-SYNC] completed", {
+        mailboxCount: startupSyncMailboxIds.length,
+        status: didFailMailbox ? "partial_error" : "done",
+      });
+      setStartupSyncStatus(didFailMailbox ? "partial_error" : "done");
+      setMailboxSyncFeedbackMessage(
+        didFailMailbox
+          ? "Some inboxes could not be refreshed"
+          : "Inbox refresh complete",
+      );
     };
 
     void runStartupSync();
