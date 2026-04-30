@@ -23,6 +23,11 @@ import {
   isReviewWorkspaceTarget,
   useReviewModuleState,
 } from "./review/ReviewModule";
+import {
+  MobileWorkspaceShell,
+  type MobileWorkspaceMailbox,
+  type MobileWorkspaceMessage,
+} from "./mobile/MobileWorkspaceShell";
 import type { ReviewItem, ReviewWorkspaceTarget } from "./review/types";
 import type {
   CustomInboxDefinition,
@@ -721,6 +726,29 @@ type NotificationNavigationRequest = {
   openFullMessage?: boolean;
   requestKey: number;
 };
+
+function useIsMobileWorkspaceViewport() {
+  const [isMobileViewport, setIsMobileViewport] = useState(() =>
+    typeof window !== "undefined" ? window.innerWidth < 768 : false,
+  );
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !window.matchMedia) {
+      return;
+    }
+
+    const mediaQuery = window.matchMedia("(max-width: 767px)");
+    const updateViewport = () => setIsMobileViewport(mediaQuery.matches);
+
+    updateViewport();
+    mediaQuery.addEventListener("change", updateViewport);
+
+    return () => mediaQuery.removeEventListener("change", updateViewport);
+  }, []);
+
+  return isMobileViewport;
+}
+
 type VisibleNotificationItem = {
   id: string;
   sourceIds: string[];
@@ -26918,6 +26946,7 @@ export function WorkspaceShell({
   workspaceDataMode?: WorkspaceDataMode;
 }) {
   const isDemoWorkspace = workspaceDataMode === "demo";
+  const isMobileWorkspaceViewport = useIsMobileWorkspaceViewport();
   const [workspaceMode, setWorkspaceMode] = useState<SettingsMode>(() => {
     if (typeof window === "undefined") {
       return theme === "dark" ? "Dark" : "Light";
@@ -28427,6 +28456,90 @@ export function WorkspaceShell({
       },
     ]),
   );
+
+  const formatMobileMessageBadge = (value?: string | null) => {
+    const normalizedValue = value?.trim().toLowerCase();
+
+    switch (normalizedValue) {
+      case "priority":
+      case "show_priority":
+        return "Priority";
+      case "reply":
+        return "Reply";
+      case "promo":
+      case "promotions":
+        return "Promo";
+      case "business":
+        return "Business";
+      case "finance":
+        return "Finance";
+      case "demo":
+      case "high_priority_demo":
+        return "Demo";
+      case "update":
+      case "updates":
+      case "workflow_update":
+      case "distributor_update":
+        return "Update";
+      default:
+        return null;
+    }
+  };
+  const buildMobileWorkspaceMessage = (
+    message: MailMessage,
+    mailboxId: InboxId,
+    mailboxTitle: string,
+    badge?: string | null,
+  ): MobileWorkspaceMessage => ({
+    id: message.id,
+    mailboxId,
+    mailboxTitle,
+    sender: message.sender,
+    from: message.from,
+    subject: message.subject,
+    snippet: message.snippet,
+    time: message.time,
+    timestamp: message.timestamp,
+    body: message.body,
+    unread: message.unread,
+    badge:
+      badge ??
+      (getPriorityPageVisiblePriorityBadge(message, mailboxId) === "PRIORITY"
+        ? "Priority"
+        : formatMobileMessageBadge(
+            message.ui_signal ?? message.signal ?? message.internalClassification,
+          )),
+  });
+  const mobilePriorityMessages: MobileWorkspaceMessage[] = [...livePriorityInboxEntries]
+    .sort(
+      (first, second) => resolveMailDateMs(second.message) - resolveMailDateMs(first.message),
+    )
+    .map(({ mailboxId, mailboxTitle, message }) =>
+      buildMobileWorkspaceMessage(message, mailboxId, mailboxTitle, "Priority"),
+    );
+  const mobileMailboxes: MobileWorkspaceMailbox[] = orderedMailboxes.map((mailbox) => {
+    const managedMailbox = savedManagedInboxes.find(
+      (candidate) => candidate.id === mailbox.id,
+    );
+    const inboxMessages = (mailboxStore[mailbox.id]?.Inbox ?? [])
+      .filter((message) => !isWorkspaceMessageSpamSuppressed(message))
+      .sort((first, second) => resolveMailDateMs(second) - resolveMailDateMs(first))
+      .slice(0, 100)
+      .map((message) =>
+        buildMobileWorkspaceMessage(message, mailbox.id, mailbox.title),
+      );
+
+    return {
+      id: mailbox.id,
+      title: mailbox.title,
+      email: mailbox.email,
+      detail: mailbox.detail,
+      connected: Boolean(
+        managedMailbox?.connected && managedMailbox.connectionStatus === "connected",
+      ),
+      messages: inboxMessages,
+    };
+  });
 
   const decodedInvitePayload = collaborationInviteRoute
     ? decodeCollaborationInviteToken(collaborationInviteRoute.inviteToken)
@@ -31218,6 +31331,25 @@ export function WorkspaceShell({
     workspaceMode,
   ]);
 
+  const handleConfirmLogout = async () => {
+    try {
+      const response = await fetch(BETA_LOGOUT_ENDPOINT, {
+        method: "POST",
+        credentials: "include",
+      });
+
+      if (!response.ok) {
+        return;
+      }
+
+      window.localStorage.removeItem(CUEVION_AUTH_STORAGE_KEY);
+      setIsLogoutConfirmationOpen(false);
+      window.location.reload();
+    } catch {
+      return;
+    }
+  };
+
   if (collaborationInviteRoute) {
     const inviteViewerType = isExternalReviewRoute
       ? "external"
@@ -31765,7 +31897,7 @@ export function WorkspaceShell({
           </div>
         </main>
       );
-    }
+  }
 
     return (
       <main
@@ -32022,6 +32154,32 @@ export function WorkspaceShell({
           </div>
         </div>
       </main>
+    );
+  }
+
+  if (isMobileWorkspaceViewport) {
+    return (
+      <>
+        <MobileWorkspaceShell
+          themeMode={resolvedTheme}
+          accountName={activeWorkspaceUserName}
+          accountEmail={activeWorkspaceEmail}
+          connectedInboxCount={connectedInboxCount}
+          syncFeedbackMessage={mailboxSyncFeedbackMessage}
+          mailboxes={mobileMailboxes}
+          priorityMessages={mobilePriorityMessages}
+          onLogoutClick={() => setIsLogoutConfirmationOpen(true)}
+        />
+        <SettingsConfirmationModal
+          open={isLogoutConfirmationOpen}
+          themeMode={resolvedTheme}
+          title="Log out?"
+          description="You'll be signed out of Cuevion on this device."
+          confirmLabel="Log out"
+          onCancel={() => setIsLogoutConfirmationOpen(false)}
+          onConfirm={handleConfirmLogout}
+        />
+      </>
     );
   }
 
@@ -32459,24 +32617,7 @@ export function WorkspaceShell({
         description="You'll be signed out of Cuevion on this device."
         confirmLabel="Log out"
         onCancel={() => setIsLogoutConfirmationOpen(false)}
-        onConfirm={async () => {
-          try {
-            const response = await fetch(BETA_LOGOUT_ENDPOINT, {
-              method: "POST",
-              credentials: "include",
-            });
-
-            if (!response.ok) {
-              return;
-            }
-
-            window.localStorage.removeItem(CUEVION_AUTH_STORAGE_KEY);
-            setIsLogoutConfirmationOpen(false);
-            window.location.reload();
-          } catch {
-            return;
-          }
-        }}
+        onConfirm={handleConfirmLogout}
       />
     </main>
   );
