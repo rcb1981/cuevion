@@ -27503,6 +27503,9 @@ export function WorkspaceShell({
     useState<StartupSyncStatus>("idle");
   const [mailboxSyncFeedbackMessage, setMailboxSyncFeedbackMessage] =
     useState<string | null>(null);
+  const [mailboxSyncErrors, setMailboxSyncErrors] = useState<
+    Partial<Record<InboxId, string>>
+  >({});
   const [workspaceName, setWorkspaceName] = useState("Cuevion Studio");
   const [inboxSignatures, setInboxSignatures] = useState<InboxSignatureStore>(() => {
     if (typeof window === "undefined") {
@@ -28554,6 +28557,7 @@ export function WorkspaceShell({
       connected: Boolean(
         managedMailbox?.connected && managedMailbox.connectionStatus === "connected",
       ),
+      syncError: mailboxSyncErrors[mailbox.id] ?? null,
       messages: inboxMessages,
     };
   });
@@ -30046,9 +30050,31 @@ export function WorkspaceShell({
 
     syncingMailboxIdsRef.current.add(mailboxId);
     setSyncingMailboxId(mailboxId);
+    setMailboxSyncErrors((current) => {
+      if (!current[mailboxId]) {
+        return current;
+      }
+
+      const nextValue = { ...current };
+      delete nextValue[mailboxId];
+      return nextValue;
+    });
 
     try {
       const syncStartedAt = performance.now();
+      if (canUseImapFetch) {
+        console.info("[SYNC-DIAGNOSTIC] custom IMAP refresh request", {
+          mailboxId,
+          title: managedMailbox.title,
+          email: managedMailbox.email.trim(),
+          host: managedMailbox.customImap.host.trim(),
+          port: managedMailbox.customImap.port.trim(),
+          ssl: managedMailbox.customImap.ssl,
+          username: managedMailbox.customImap.username.trim(),
+          hasInlineImapPassword: managedMailbox.customImap.password.trim().length > 0,
+          storedImapPasswordSet: mailboxCredentialStatuses[mailboxId]?.imapPasswordSet === true,
+        });
+      }
       const response = canUseGmailOAuthFetch
         ? await fetchGmailInbox({
             provider: managedMailbox.provider,
@@ -30073,16 +30099,45 @@ export function WorkspaceShell({
       const requestDurationMs = performance.now() - syncStartedAt;
 
       if (!response.ok) {
+        const rawRefreshErrorMessage = response.error?.message ?? "";
+        const refreshErrorMessage =
+          canUseImapFetch &&
+          response.error?.code === "invalid_request" &&
+          rawRefreshErrorMessage.toLowerCase().includes("password")
+            ? "Missing IMAP password. Reconnect this inbox."
+            : rawRefreshErrorMessage ||
+              (canUseImapFetch ? "Could not refresh this IMAP inbox." : "Could not fetch Gmail inbox.");
         console.info("[SYNC-TIMING] refreshMailboxById failed", {
           mailboxId,
           email: managedMailbox.email.trim(),
           requestDurationMs: Math.round(requestDurationMs),
           error: response.error?.message ?? response.error?.code ?? "unknown",
         });
+        console.info("[SYNC-DIAGNOSTIC] mailbox refresh failed", {
+          mailboxId,
+          title: managedMailbox.title,
+          email: managedMailbox.email.trim(),
+          provider: managedMailbox.provider,
+          connectionStatus: managedMailbox.connectionStatus,
+          host: canUseImapFetch ? managedMailbox.customImap.host.trim() : undefined,
+          port: canUseImapFetch ? managedMailbox.customImap.port.trim() : undefined,
+          ssl: canUseImapFetch ? managedMailbox.customImap.ssl : undefined,
+          username: canUseImapFetch ? managedMailbox.customImap.username.trim() : undefined,
+          hasInlineImapPassword: canUseImapFetch
+            ? managedMailbox.customImap.password.trim().length > 0
+            : undefined,
+          storedImapPasswordSet: canUseImapFetch
+            ? mailboxCredentialStatuses[mailboxId]?.imapPasswordSet === true
+            : undefined,
+          errorCode: response.error?.code,
+          errorMessage: response.error?.message,
+        });
+        setMailboxSyncErrors((current) => ({
+          ...current,
+          [mailboxId]: refreshErrorMessage,
+        }));
         if (canUseGmailOAuthFetch) {
-          setMailboxSyncFeedbackMessage(
-            response.error?.message ?? "Could not fetch Gmail inbox.",
-          );
+          setMailboxSyncFeedbackMessage(refreshErrorMessage);
         }
         return "failed";
       }
@@ -30138,6 +30193,15 @@ export function WorkspaceShell({
         mergedMessages,
         evictImapUids,
       );
+      setMailboxSyncErrors((current) => {
+        if (!current[mailboxId]) {
+          return current;
+        }
+
+        const nextValue = { ...current };
+        delete nextValue[mailboxId];
+        return nextValue;
+      });
       console.info("[SYNC-TIMING] refreshMailboxById complete", {
         mailboxId,
         email: managedMailbox.email.trim(),

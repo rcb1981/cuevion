@@ -21,6 +21,7 @@ export type MobileWorkspaceMailbox = {
   email: string;
   detail: string;
   connected: boolean;
+  syncError?: string | null;
   messages: MobileWorkspaceMessage[];
 };
 
@@ -282,7 +283,10 @@ export function MobileWorkspaceShell({
             <MessageList
               messages={activeMailbox.messages}
               emptyTitle="No visible messages"
-              emptyDetail="Filtered, quiet, archived, and spam messages stay out of this mobile inbox."
+              emptyDetail={
+                activeMailbox.syncError ??
+                "Filtered, quiet, archived, and spam messages stay out of this mobile inbox."
+              }
               onOpenMessage={openMessage}
             />
           ) : (
@@ -309,6 +313,11 @@ export function MobileWorkspaceShell({
                       {mailbox.connected ? (
                         <span className="mt-0.5 block truncate text-[0.74rem] text-[var(--workspace-text-faint)]">
                           {visibleMessageLabel}
+                        </span>
+                      ) : null}
+                      {mailbox.syncError ? (
+                        <span className="mt-1 block truncate text-[0.74rem] font-medium text-[color:rgba(143,82,48,0.92)] dark:text-[color:rgba(235,174,138,0.86)]">
+                          {mailbox.syncError}
                         </span>
                       ) : null}
                     </span>
