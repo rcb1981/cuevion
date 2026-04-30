@@ -27744,6 +27744,19 @@ export function WorkspaceShell({
         : "Mailbox quota exceeded during refresh — existing messages are kept.";
     }
 
+    // The backend outer `except Exception` handler (not imaplib.IMAP4.error) can
+    // produce code = "connection_failed" with the raw IMAP server quota string as
+    // the message (e.g. "The quota has been exceeded."). isQuotaRefreshIssue only
+    // checks code, so that path falls through here. Match on message text so the
+    // user never sees the raw provider string.
+    if (
+      canUseImapFetch &&
+      (rawRefreshErrorMessage.toLowerCase().includes("quota has been exceeded") ||
+        rawRefreshErrorMessage.toLowerCase().includes("quota exceeded"))
+    ) {
+      return "Mailbox quota exceeded during refresh — existing messages are kept.";
+    }
+
     if (
       canUseImapFetch &&
       error?.code === "invalid_request" &&
