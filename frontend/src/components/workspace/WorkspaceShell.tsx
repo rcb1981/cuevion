@@ -27691,6 +27691,13 @@ export function WorkspaceShell({
   const [mailboxSyncErrors, setMailboxSyncErrors] = useState<
     Partial<Record<InboxId, string>>
   >({});
+  // Ref that always reflects the latest mailboxSyncErrors without stale-closure issues.
+  // Used by the onOpenMailbox async callback which runs after an await and cannot
+  // rely on the React state snapshot captured at render time.
+  const mailboxSyncErrorsRef = useRef<Partial<Record<InboxId, string>>>({});
+  useEffect(() => {
+    mailboxSyncErrorsRef.current = mailboxSyncErrors;
+  }, [mailboxSyncErrors]);
   // Per-mailbox refresh status for mobile diagnostic display. Set in onOpenMailbox callback
   // so the user can see exactly what happened when tapping a mailbox (requested, skipped,
   // queued, succeeded, failed). Keyed by mailboxId string.
@@ -27781,6 +27788,19 @@ export function WorkspaceShell({
       rawRefreshErrorMessage.toLowerCase().includes("password")
     ) {
       return "Missing saved credentials — reconnect this inbox.";
+    }
+
+    // Browser-level network errors (Safari: "Load failed", Chrome: "Failed to fetch",
+    // Firefox: "NetworkError when attempting to fetch resource", iOS: "The network
+    // connection was lost"). These are not informative to show the user verbatim.
+    const isBrowserNetworkError =
+      rawRefreshErrorMessage === "Load failed" ||
+      rawRefreshErrorMessage === "Failed to fetch" ||
+      rawRefreshErrorMessage.startsWith("NetworkError") ||
+      rawRefreshErrorMessage.includes("network connection was lost") ||
+      rawRefreshErrorMessage.includes("The Internet connection appears to be offline");
+    if (isBrowserNetworkError) {
+      return "Refresh failed — try again or reconnect this inbox in Settings.";
     }
 
     return (
@@ -32712,11 +32732,14 @@ export function WorkspaceShell({
                     : `⚠ Partial refresh — quota limit (${count} cached)`,
               }));
             } else {
-              // "failed"
+              // "failed" — read from ref, not stale state closure, because setMailboxSyncError
+              // inside refreshMailboxById runs before we get here but React state hasn't
+              // re-rendered yet; the ref is updated synchronously via its useEffect flush.
+              const latestError = mailboxSyncErrorsRef.current[mailboxId as InboxId];
               const friendlyError =
-                normalizeMobileSyncError(mailboxSyncErrors[mailboxId as InboxId]) ??
-                mailboxSyncErrors[mailboxId as InboxId] ??
-                "Refresh failed";
+                normalizeMobileSyncError(latestError) ??
+                latestError ??
+                "Refresh failed — try again or reconnect this inbox in Settings.";
               setMobileMailboxRefreshStatus((prev) => ({
                 ...prev,
                 [mailboxId]: `✗ ${friendlyError}`,
