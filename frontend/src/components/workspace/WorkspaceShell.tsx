@@ -10159,6 +10159,9 @@ function MailboxView({
   onSyncUnreadOverrides,
   initialSelectedMessageId = null,
   onMessageSelected,
+  mobileReplyRequest = null,
+  onConsumeMobileReplyRequest,
+  onComposeOpenChange,
 }: {
   mailbox: OrderedMailbox;
   activeMailboxTitleOverride?: string;
@@ -10222,6 +10225,14 @@ function MailboxView({
   onSyncUnreadOverrides: (messages: MessageIdentitySource[], unread: boolean) => void;
   initialSelectedMessageId?: string | null;
   onMessageSelected?: (messageId: string) => void;
+  /** Mobile reply request handoff. WorkspaceShell sets this when a mobile Reply
+   *  tap is pending; MailboxView opens compose for the identified message and
+   *  calls onConsumeMobileReplyRequest to acknowledge. */
+  mobileReplyRequest?: { mailboxId: InboxId; messageId: string; requestKey: number } | null;
+  onConsumeMobileReplyRequest?: (requestKey: number) => void;
+  /** Called whenever isComposeOpen changes so WorkspaceShell can track whether
+   *  mobile compose is active and switch between mobile/desktop layouts. */
+  onComposeOpenChange?: (isOpen: boolean) => void;
 }) {
   const [activeFilter, setActiveFilter] = useState<MailFilter>("All");
   const [sortOrder, setSortOrder] = useState<MailSortOrder>("desc");
@@ -12253,6 +12264,57 @@ function MailboxView({
     onConsumeNotificationNavigation,
     selectedMessageId,
     visibleMessages,
+  ]);
+
+  // Mobile reply handoff: when WorkspaceShell sets a mobileReplyRequest targeting
+  // this mailbox, open compose for the identified message using the existing
+  // openComposeFromMessage path (identical to the desktop Reply button).
+  useEffect(() => {
+    if (
+      !mobileReplyRequest ||
+      mobileReplyRequest.mailboxId !== mailbox.id
+    ) {
+      return;
+    }
+
+    const mbCollections = mailboxStore[mailbox.id];
+    if (!mbCollections) {
+      onConsumeMobileReplyRequest?.(mobileReplyRequest.requestKey);
+      // Signal compose closed so WorkspaceShell clears isMobileComposeActive
+      // and restores the mobile layout instead of getting stuck on desktop.
+      onComposeOpenChange?.(false);
+      return;
+    }
+
+    // Search every folder — replies can come from Sent, Inbox, etc.
+    let targetMessage: MailMessage | null = null;
+    for (const folder of canonicalFolderOrder) {
+      const found = mbCollections[folder]?.find(
+        (m) => m.id === mobileReplyRequest.messageId,
+      );
+      if (found) {
+        targetMessage = found;
+        break;
+      }
+    }
+
+    if (!targetMessage) {
+      onConsumeMobileReplyRequest?.(mobileReplyRequest.requestKey);
+      // Same: message not found — release the layout lock.
+      onComposeOpenChange?.(false);
+      return;
+    }
+
+    openComposeFromMessage(targetMessage, "reply");
+    // openComposeFromMessage already calls setIsComposeOpen(true)
+    onConsumeMobileReplyRequest?.(mobileReplyRequest.requestKey);
+  }, [
+    mailbox.id,
+    mailboxStore,
+    mobileReplyRequest,
+    onComposeOpenChange,
+    onConsumeMobileReplyRequest,
+    openComposeFromMessage,
   ]);
 
   useEffect(() => {
@@ -15975,6 +16037,12 @@ function MailboxView({
     window.addEventListener("mousemove", handlePointerMove);
     window.addEventListener("mouseup", handlePointerUp);
   };
+
+  // Notify WorkspaceShell whenever compose opens or closes so it can switch
+  // between mobile and desktop layout when the user replies from mobile.
+  useEffect(() => {
+    onComposeOpenChange?.(isComposeOpen);
+  }, [isComposeOpen, onComposeOpenChange]);
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-3 overflow-hidden md:gap-4">
@@ -28310,6 +28378,16 @@ export function WorkspaceShell({
   };
   const [notificationNavigationRequest, setNotificationNavigationRequest] =
     useState<NotificationNavigationRequest | null>(null);
+  // Mobile reply handoff: set by MobileWorkspaceShell's onReplyMessage callback,
+  // consumed by MailboxView's mobileReplyRequest useEffect.
+  const [mobileReplyRequest, setMobileReplyRequest] = useState<{
+    mailboxId: InboxId;
+    messageId: string;
+    requestKey: number;
+  } | null>(null);
+  // True while compose is open after a mobile reply tap — keeps the desktop
+  // layout mounted so MailboxView's compose pane remains visible.
+  const [isMobileComposeActive, setIsMobileComposeActive] = useState(false);
   const [reviewInboxHandoff, setReviewInboxHandoff] = useState<ReviewInboxHandoff | null>(null);
   const [reviewInboxHandoffFeedback, setReviewInboxHandoffFeedback] = useState<string | null>(null);
   const [completedPriorityReviewIds, setCompletedPriorityReviewIds] = useState<string[]>([]);
@@ -32763,7 +32841,10 @@ export function WorkspaceShell({
     );
   }
 
-  if (isMobileWorkspaceViewport) {
+  // isMobileComposeActive is true while a compose pane opened via mobile Reply
+  // is still mounted — in that case we skip the mobile early return so that
+  // MailboxView (which owns compose state) stays rendered and visible.
+  if (isMobileWorkspaceViewport && !isMobileComposeActive) {
     return (
       <>
         <MobileWorkspaceShell
@@ -32875,6 +32956,18 @@ export function WorkspaceShell({
             } finally {
               window.clearTimeout(uiTimeoutId);
             }
+          }}
+          onReplyMessage={(mailboxId, messageId) => {
+            // Set isMobileComposeActive FIRST so the mobile early return is
+            // skipped on the next render, mounting MailboxView before
+            // mobileReplyRequest is set — otherwise MailboxView never mounts
+            // and its useEffect cannot consume the request (deadlock).
+            setIsMobileComposeActive(true);
+            setMobileReplyRequest({
+              mailboxId: mailboxId as InboxId,
+              messageId,
+              requestKey: Date.now(),
+            });
           }}
         />
         <SettingsConfirmationModal
@@ -33013,6 +33106,13 @@ export function WorkspaceShell({
                       current?.requestKey === requestKey ? null : current,
                     )
                   }
+                  mobileReplyRequest={mobileReplyRequest}
+                  onConsumeMobileReplyRequest={(requestKey) =>
+                    setMobileReplyRequest((current) =>
+                      current?.requestKey === requestKey ? null : current,
+                    )
+                  }
+                  onComposeOpenChange={(isOpen) => setIsMobileComposeActive(isOpen)}
                   manualPriorityOverrides={manualPriorityOverrides}
                   manualLabelOverrides={manualLabelOverrides}
                   spamSuppressionKeys={spamSuppressionKeys}
