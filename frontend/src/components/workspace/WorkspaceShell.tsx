@@ -32958,10 +32958,19 @@ export function WorkspaceShell({
             }
           }}
           onReplyMessage={(mailboxId, messageId) => {
+            // Without activeMailbox set, the desktop branch renders Dashboard
+            // instead of MailboxView, so mobileReplyRequest is never consumed.
+            // Look up the OrderedMailbox so MailboxView renders for the right
+            // mailbox — identical to what openMailboxFromContextWithoutGuard
+            // does on desktop (setActiveTarget(null) + setActiveMailbox(...)).
+            const targetMailbox = orderedMailboxes.find(
+              (mb) => mb.id === (mailboxId as InboxId),
+            );
+            if (!targetMailbox) return;
+            setActiveTarget(null);
+            setActiveMailbox(targetMailbox);
             // Set isMobileComposeActive FIRST so the mobile early return is
-            // skipped on the next render, mounting MailboxView before
-            // mobileReplyRequest is set — otherwise MailboxView never mounts
-            // and its useEffect cannot consume the request (deadlock).
+            // skipped on the next render, mounting MailboxView.
             setIsMobileComposeActive(true);
             setMobileReplyRequest({
               mailboxId: mailboxId as InboxId,
