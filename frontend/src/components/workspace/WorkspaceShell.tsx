@@ -2366,7 +2366,15 @@ function shouldRenderKnownProviderHtmlOnLightCanvas(
       contentText.includes("work it")) ||
     (contentText.includes("hey bingo players") &&
       contentText.includes("on.soundcloud.com") &&
-      contentText.includes("suburbia"))
+      contentText.includes("suburbia")) ||
+    includesAnyKeyword(identityText, ["udipta@daydoseofhouse.com", "daydoseofhouse.com"]) ||
+    (contentText.includes("ddoh nmf spotify trade") &&
+      contentText.includes("open.spotify.com/playlist")) ||
+    (contentText.includes("playlist collaboration") &&
+      contentText.includes("nrj radio france 2025")) ||
+    (contentText.includes("hi udipta this side") &&
+      contentText.includes("spotify") &&
+      contentText.includes("playlist"))
   );
 }
 
