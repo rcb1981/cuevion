@@ -16184,7 +16184,7 @@ function MailboxView({
             <svg
               aria-hidden="true"
               viewBox="0 0 16 16"
-              className={`h-4 w-4 ${isSyncingMailbox ? "animate-spin" : ""}`}
+              className={`h-4 w-4 ${isSyncingMailbox ? "animate-spin [animation-direction:reverse]" : ""}`}
               fill="none"
               stroke="currentColor"
               strokeWidth="1.7"
