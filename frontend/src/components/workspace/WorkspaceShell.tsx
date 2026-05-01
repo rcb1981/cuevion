@@ -32778,69 +32778,98 @@ export function WorkspaceShell({
               ...prev,
               [mailboxId]: "↻ Refresh requested…",
             }));
-            const result = await refreshMailboxById(mailboxId as InboxId);
 
-            // Build a compact debug line from the raw diagnostic captured inside
-            // refreshMailboxById. This is the ground-truth response from the server,
-            // not derived state, so it shows exactly what happened at each stage.
-            const diag = lastRefreshDiagnosticRef.current[mailboxId];
-            const diagLine = diag
-              ? [
-                  `ok=${diag.firstOk}`,
-                  diag.firstCode ? `code=${diag.firstCode}` : null,
-                  diag.firstStage ? `stage=${diag.firstStage}` : null,
-                  `raw=${diag.firstMessageCount}`,
-                  diag.firstFetchedCount != null ? `fetched=${diag.firstFetchedCount}` : null,
-                  `limit=${diag.requestedLimit}`,
-                  `retried=${diag.retried}`,
-                  diag.retried ? `retryOk=${diag.retryOk ?? "?"}` : null,
-                  diag.retried ? `retryRaw=${diag.retryMessageCount ?? "?"}` : null,
-                  `cache=${diag.cacheRestored}`,
-                  diag.mergedCount != null ? `merged=${diag.mergedCount}` : null,
-                ]
-                  .filter(Boolean)
-                  .join(" ")
-              : null;
+            // UI-only timeout guard. Does NOT abort the actual IMAP fetch — the
+            // underlying connectInboxWithImap has no AbortController so there is
+            // nothing safe to cancel. After 13 s the user sees a message instead
+            // of the spinner staying forever. If the fetch later resolves it will
+            // overwrite this status with the real result.
+            let uiTimeoutId: number | undefined = window.setTimeout(() => {
+              setMobileMailboxRefreshStatus((prev) => {
+                if (prev[mailboxId] === "↻ Refresh requested…") {
+                  return {
+                    ...prev,
+                    [mailboxId]: "Refresh is taking longer than expected — please wait or close and re-open.",
+                  };
+                }
+                return prev;
+              });
+            }, 13000);
 
-            if (result === "skipped") {
-              // skipped = syncingMailboxIdsRef already has this id (startup sync
-              // is currently fetching this exact mailbox, or a manual retry is
-              // already in flight). Queue a retry for when startup ends.
-              const isStartupRunning = startupSyncStatus === "running";
-              setMobileMailboxRefreshStatus((prev) => ({
-                ...prev,
-                [mailboxId]: isStartupRunning
-                  ? "⏳ Queued — startup sync in progress"
-                  : "⚠ Skipped — already syncing",
-              }));
-              if (isStartupRunning) {
-                pendingMobileRefreshIdsRef.current.add(mailboxId);
+            try {
+              const result = await refreshMailboxById(mailboxId as InboxId);
+
+              // Build a compact debug line from the raw diagnostic captured inside
+              // refreshMailboxById. Ground-truth from the server, not derived state.
+              const diag = lastRefreshDiagnosticRef.current[mailboxId];
+              const diagLine = diag
+                ? [
+                    `ok=${diag.firstOk}`,
+                    diag.firstCode ? `code=${diag.firstCode}` : null,
+                    diag.firstStage ? `stage=${diag.firstStage}` : null,
+                    `raw=${diag.firstMessageCount}`,
+                    diag.firstFetchedCount != null ? `fetched=${diag.firstFetchedCount}` : null,
+                    `limit=${diag.requestedLimit}`,
+                    `retried=${diag.retried}`,
+                    diag.retried ? `retryOk=${diag.retryOk ?? "?"}` : null,
+                    diag.retried ? `retryRaw=${diag.retryMessageCount ?? "?"}` : null,
+                    `cache=${diag.cacheRestored}`,
+                    diag.mergedCount != null ? `merged=${diag.mergedCount}` : null,
+                  ]
+                    .filter(Boolean)
+                    .join(" ")
+                : null;
+
+              if (result === "skipped") {
+                // skipped = syncingMailboxIdsRef already has this id (startup sync
+                // is currently fetching this exact mailbox, or a manual retry is
+                // already in flight). Queue a retry for when startup ends.
+                const isStartupRunning = startupSyncStatus === "running";
+                setMobileMailboxRefreshStatus((prev) => ({
+                  ...prev,
+                  [mailboxId]: isStartupRunning
+                    ? "⏳ Queued — startup sync in progress"
+                    : "⚠ Skipped — already syncing",
+                }));
+                if (isStartupRunning) {
+                  pendingMobileRefreshIdsRef.current.add(mailboxId);
+                }
+              } else if (result === "synced" || result === "partial") {
+                const count = mailboxStore[mailboxId as InboxId]?.Inbox.length ?? 0;
+                const statusLine =
+                  result === "synced"
+                    ? `✓ Refresh complete (${count} cached)`
+                    : `⚠ Partial refresh — quota limit (${count} cached)`;
+                setMobileMailboxRefreshStatus((prev) => ({
+                  ...prev,
+                  [mailboxId]: diagLine ? `${statusLine}\nDebug: ${diagLine}` : statusLine,
+                }));
+              } else {
+                // "failed" — read from ref, not stale state closure, because
+                // setMailboxSyncError inside refreshMailboxById runs before we get
+                // here but React state hasn't re-rendered yet.
+                const latestError = mailboxSyncErrorsRef.current[mailboxId as InboxId];
+                const friendlyError =
+                  normalizeMobileSyncError(latestError) ??
+                  latestError ??
+                  "Refresh failed — try again or reconnect this inbox in Settings.";
+                setMobileMailboxRefreshStatus((prev) => ({
+                  ...prev,
+                  [mailboxId]: diagLine
+                    ? `✗ ${friendlyError}\nDebug: ${diagLine}`
+                    : `✗ ${friendlyError}`,
+                }));
               }
-            } else if (result === "synced" || result === "partial") {
-              const count = mailboxStore[mailboxId as InboxId]?.Inbox.length ?? 0;
-              const statusLine =
-                result === "synced"
-                  ? `✓ Refresh complete (${count} cached)`
-                  : `⚠ Partial refresh — quota limit (${count} cached)`;
+            } catch {
+              // refreshMailboxById threw an unexpected JS exception (not a network
+              // error — those are caught inside connectInboxWithImap and returned
+              // as ok:false). Show a fallback so the spinner never stays forever.
               setMobileMailboxRefreshStatus((prev) => ({
                 ...prev,
-                [mailboxId]: diagLine ? `${statusLine}\nDebug: ${diagLine}` : statusLine,
+                [mailboxId]: "✗ Refresh failed — try again or reconnect this inbox in Settings.",
               }));
-            } else {
-              // "failed" — read from ref, not stale state closure, because setMailboxSyncError
-              // inside refreshMailboxById runs before we get here but React state hasn't
-              // re-rendered yet; the ref is updated synchronously via its useEffect flush.
-              const latestError = mailboxSyncErrorsRef.current[mailboxId as InboxId];
-              const friendlyError =
-                normalizeMobileSyncError(latestError) ??
-                latestError ??
-                "Refresh failed — try again or reconnect this inbox in Settings.";
-              setMobileMailboxRefreshStatus((prev) => ({
-                ...prev,
-                [mailboxId]: diagLine
-                  ? `✗ ${friendlyError}\nDebug: ${diagLine}`
-                  : `✗ ${friendlyError}`,
-              }));
+            } finally {
+              window.clearTimeout(uiTimeoutId);
             }
           }}
         />
