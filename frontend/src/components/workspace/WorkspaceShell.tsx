@@ -12866,10 +12866,14 @@ function MailboxView({
     resetComposeState();
   };
 
-  const sendMessage = async () => {
+  const sendMessage = async (options?: { bodyHtml?: string }) => {
     if (isSendingCompose) {
       return;
     }
+    // Mobile reply passes an override body (user text prepended to the pre-filled
+    // quote/signature HTML). Desktop callers pass no options so the behaviour is
+    // identical to before.
+    const activeBodyHtml = options?.bodyHtml ?? composeBody;
 
     const managedMailbox = managedInboxes.find(
       (candidate) => candidate.id === activeComposeMailbox.id,
@@ -12925,7 +12929,7 @@ function MailboxView({
         }
       });
 
-      const bodyPreview = extractComposePlainText(composeBody);
+      const bodyPreview = extractComposePlainText(activeBodyHtml);
       const sendResponse = await sendGmailMessage({
         provider: sendProvider,
         mailboxId: managedMailbox.id,
@@ -12948,7 +12952,7 @@ function MailboxView({
         cc: composeCc.trim() || undefined,
         bcc: composeBcc.trim() || undefined,
         subject: composeSubject.trim() || "Untitled message",
-        bodyHtml: composeBody,
+        bodyHtml: activeBodyHtml,
         bodyText: bodyPreview || " ",
         attachments: serializedAttachments,
       });
@@ -12965,7 +12969,7 @@ function MailboxView({
       ]);
 
       const sentId = `${activeComposeMailbox.id}-sent-${Date.now()}`;
-      const bodyParagraphs = extractComposeParagraphs(composeBody);
+      const bodyParagraphs = extractComposeParagraphs(activeBodyHtml);
       const sentMessage = normalizeMailMessage({
         id: sentId,
         threadId:
@@ -12990,7 +12994,7 @@ function MailboxView({
         to: composeTo.trim() || "No recipient yet",
         timestamp: "Sent just now",
         body: bodyParagraphs.length > 0 ? bodyParagraphs : ["Message sent"],
-        bodyHtml: composeBody,
+        bodyHtml: activeBodyHtml,
         signature: undefined,
         attachments: composeAttachments,
         cc: composeCc.trim() || undefined,
@@ -16642,7 +16646,7 @@ function MailboxView({
                       </div>
                       <button
                         type="button"
-                        onClick={sendMessage}
+                        onClick={() => void sendMessage()}
                         disabled={isSendingCompose}
                         className="inline-flex h-10 min-w-[7.4rem] items-center justify-center rounded-full bg-pine px-6 text-[0.72rem] font-medium uppercase tracking-[0.18em] text-white transition-[background-color,transform] duration-150 hover:bg-moss active:scale-[0.99] focus-visible:outline-none disabled:cursor-not-allowed disabled:bg-[color:rgba(101,124,103,0.72)] disabled:hover:bg-[color:rgba(101,124,103,0.72)]"
                       >

@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 export type MobileWorkspaceMessage = {
   id: string;
@@ -35,6 +35,15 @@ type MobileView =
   | { kind: "mailbox"; mailboxId: string }
   | { kind: "message"; message: MobileWorkspaceMessage; backView: MobileView };
 
+type MobileComposeState = {
+  isOpen: boolean;
+  to: string;
+  subject: string;
+  mailboxEmail: string;
+  isSending: boolean;
+  sendError: string | null;
+};
+
 type MobileWorkspaceShellProps = {
   themeMode: "light" | "dark";
   accountName: string;
@@ -49,6 +58,14 @@ type MobileWorkspaceShellProps = {
    *  the desktop active-mailbox refresh path. Optional so existing callers remain
    *  compatible without changes until wired. */
   onOpenMailbox?: (mailboxId: string) => void;
+  /** Called when the user taps Reply on a message. Host opens compose state. */
+  onReplyMessage?: (mailboxId: string, messageId: string) => void;
+  /** Current compose state to show the mobile compose overlay. Null when closed. */
+  mobileCompose?: MobileComposeState | null;
+  /** Called with the user's plain-text reply when they tap Send. */
+  onMobileComposeSend?: (userReplyText: string) => void;
+  /** Called when the user dismisses the compose overlay. */
+  onMobileComposeClose?: () => void;
 };
 
 function formatMessageBody(message: MobileWorkspaceMessage) {
@@ -190,9 +207,22 @@ export function MobileWorkspaceShell({
   priorityMessages,
   onLogoutClick,
   onOpenMailbox,
+  onReplyMessage,
+  mobileCompose,
+  onMobileComposeSend,
+  onMobileComposeClose,
 }: MobileWorkspaceShellProps) {
   const [activeTab, setActiveTab] = useState<MobileTab>("priority");
   const [view, setView] = useState<MobileView>({ kind: "root" });
+  const [replyText, setReplyText] = useState("");
+
+  // Reset reply textarea whenever the compose overlay closes
+  useEffect(() => {
+    if (!mobileCompose?.isOpen) {
+      setReplyText("");
+    }
+  }, [mobileCompose?.isOpen]);
+
   const connectedFirstMailboxes = useMemo(
     () => [...mailboxes].sort((first, second) => Number(second.connected) - Number(first.connected)),
     [mailboxes],
@@ -280,6 +310,17 @@ export function MobileWorkspaceShell({
                 <p key={`${view.message.id}-body-${index}`}>{line}</p>
               ))}
             </div>
+            {onReplyMessage ? (
+              <div className="border-t border-[color:rgba(86,69,46,0.1)] pt-4 dark:border-[color:rgba(232,211,174,0.1)]">
+                <button
+                  type="button"
+                  onClick={() => onReplyMessage(view.message.mailboxId, view.message.id)}
+                  className="rounded-[14px] border border-[color:rgba(47,96,73,0.3)] bg-[linear-gradient(180deg,#3f7659_0%,#2f6049_100%)] px-5 py-2.5 text-[0.88rem] font-semibold text-[color:#fff8ec] shadow-[0_8px_20px_rgba(47,96,73,0.22)] active:opacity-80"
+                >
+                  Reply
+                </button>
+              </div>
+            ) : null}
           </article>
         ) : activeTab === "priority" ? (
           <MessageList
@@ -435,6 +476,85 @@ export function MobileWorkspaceShell({
           ))}
         </div>
       </nav>
+
+      {/* Mobile compose overlay — shown when a reply is in progress */}
+      {mobileCompose?.isOpen ? (
+        <div
+          data-theme={themeMode}
+          className="fixed inset-0 z-[80] flex flex-col bg-[linear-gradient(180deg,#f7efe4_0%,#efe4d6_100%)] dark:bg-[linear-gradient(180deg,#171411_0%,#221c17_100%)]"
+          style={{ colorScheme: themeMode }}
+        >
+          {/* Compose header */}
+          <div className="shrink-0 border-b border-[color:rgba(244,224,183,0.22)] bg-[linear-gradient(180deg,#28473c_0%,#1f352e_100%)] px-4 pb-3 pt-[calc(env(safe-area-inset-top)+0.75rem)] shadow-[0_14px_40px_rgba(31,53,46,0.18)] dark:border-[color:rgba(244,224,183,0.14)] dark:bg-[linear-gradient(180deg,#20372f_0%,#172720_100%)]">
+            <div className="flex min-h-10 items-center justify-between gap-3">
+              <button
+                type="button"
+                onClick={onMobileComposeClose}
+                className="rounded-full px-1 py-2 text-[0.92rem] font-medium text-[color:#fff8ec]"
+              >
+                Cancel
+              </button>
+              <div className="min-w-0 flex-1 text-center text-[1rem] font-semibold tracking-normal text-[color:#fff8ec]">
+                Reply
+              </div>
+              <button
+                type="button"
+                disabled={mobileCompose.isSending || replyText.trim().length === 0}
+                onClick={() => onMobileComposeSend?.(replyText)}
+                className="rounded-full px-3 py-2 text-[0.92rem] font-semibold text-[color:#e7c783] disabled:opacity-40"
+              >
+                {mobileCompose.isSending ? "Sending…" : "Send"}
+              </button>
+            </div>
+          </div>
+
+          {/* Compose meta */}
+          <div className="shrink-0 space-y-0 border-b border-[color:rgba(86,69,46,0.1)] bg-[color:rgba(255,253,248,0.78)] dark:border-[color:rgba(232,211,174,0.1)] dark:bg-[color:rgba(23,20,17,0.82)]">
+            <div className="flex items-baseline gap-2 border-b border-[color:rgba(86,69,46,0.06)] px-5 py-3 dark:border-[color:rgba(232,211,174,0.06)]">
+              <span className="w-16 shrink-0 text-[0.76rem] font-medium uppercase tracking-[0.12em] text-[var(--workspace-text-faint)]">
+                From
+              </span>
+              <span className="min-w-0 truncate text-[0.88rem] text-[var(--workspace-text-soft)]">
+                {mobileCompose.mailboxEmail}
+              </span>
+            </div>
+            <div className="flex items-baseline gap-2 border-b border-[color:rgba(86,69,46,0.06)] px-5 py-3 dark:border-[color:rgba(232,211,174,0.06)]">
+              <span className="w-16 shrink-0 text-[0.76rem] font-medium uppercase tracking-[0.12em] text-[var(--workspace-text-faint)]">
+                To
+              </span>
+              <span className="min-w-0 truncate text-[0.88rem] text-[var(--workspace-text-soft)]">
+                {mobileCompose.to}
+              </span>
+            </div>
+            <div className="flex items-baseline gap-2 px-5 py-3">
+              <span className="w-16 shrink-0 text-[0.76rem] font-medium uppercase tracking-[0.12em] text-[var(--workspace-text-faint)]">
+                Subject
+              </span>
+              <span className="min-w-0 truncate text-[0.88rem] text-[var(--workspace-text-soft)]">
+                {mobileCompose.subject}
+              </span>
+            </div>
+          </div>
+
+          {/* Compose body */}
+          <div className="min-h-0 flex-1 overflow-y-auto bg-[color:rgba(255,253,248,0.78)] dark:bg-[color:rgba(23,20,17,0.82)]">
+            <textarea
+              autoFocus
+              value={replyText}
+              onChange={(e) => setReplyText(e.target.value)}
+              placeholder="Write your reply…"
+              className="h-full min-h-[12rem] w-full resize-none bg-transparent px-5 py-5 text-[0.96rem] leading-7 text-[var(--workspace-text)] placeholder:text-[var(--workspace-text-faint)] focus:outline-none"
+            />
+          </div>
+
+          {/* Send error */}
+          {mobileCompose.sendError ? (
+            <div className="shrink-0 border-t border-[color:rgba(143,82,48,0.2)] bg-[color:rgba(255,248,243,0.9)] px-5 py-3 text-[0.82rem] text-[color:rgba(143,82,48,0.92)] dark:border-[color:rgba(235,174,138,0.2)] dark:bg-[color:rgba(42,24,15,0.9)] dark:text-[color:rgba(235,174,138,0.86)]">
+              {mobileCompose.sendError}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
     </main>
   );
 }
