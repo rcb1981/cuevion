@@ -16040,9 +16040,21 @@ function MailboxView({
 
   // Notify WorkspaceShell whenever compose opens or closes so it can switch
   // between mobile and desktop layout when the user replies from mobile.
+  // Guard: suppress the false notification while a mobileReplyRequest targeting
+  // this mailbox is still pending. MailboxView mounts with isComposeOpen===false
+  // and the observer would fire before the mobileReplyRequest effect has a
+  // chance to run openComposeFromMessage — prematurely clearing
+  // isMobileComposeActive and returning to the mobile shell. The failure
+  // branches in the mobileReplyRequest effect call onComposeOpenChange?.(false)
+  // explicitly, so a failed lookup still releases the mobile layout lock.
   useEffect(() => {
+    const hasPendingMobileReplyForThisMailbox =
+      Boolean(mobileReplyRequest && mobileReplyRequest.mailboxId === mailbox.id);
+    if (!isComposeOpen && hasPendingMobileReplyForThisMailbox) {
+      return;
+    }
     onComposeOpenChange?.(isComposeOpen);
-  }, [isComposeOpen, onComposeOpenChange]);
+  }, [isComposeOpen, mailbox.id, mobileReplyRequest, onComposeOpenChange]);
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-3 overflow-hidden md:gap-4">
