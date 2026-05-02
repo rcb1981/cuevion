@@ -66,6 +66,15 @@ type MobileWorkspaceShellProps = {
   onMobileComposeSend?: (userReplyText: string) => void;
   /** Called when the user dismisses the compose overlay. */
   onMobileComposeClose?: () => void;
+  /** Navigation context to restore on mount after returning from a mobile compose
+   *  flow. WorkspaceShell sets this when onReplyMessage fires so the user lands
+   *  back in the same inbox/message view instead of Priority after closing compose.
+   *  Only consumed once via the useState initialiser — no useEffect needed. */
+  mobileNavRestoreContext?: {
+    tab: "priority" | "inboxes" | "settings";
+    mailboxId?: string;
+    messageId?: string;
+  } | null;
 };
 
 function formatMessageBody(message: MobileWorkspaceMessage) {
@@ -211,9 +220,29 @@ export function MobileWorkspaceShell({
   mobileCompose,
   onMobileComposeSend,
   onMobileComposeClose,
+  mobileNavRestoreContext,
 }: MobileWorkspaceShellProps) {
-  const [activeTab, setActiveTab] = useState<MobileTab>("priority");
-  const [view, setView] = useState<MobileView>({ kind: "root" });
+  // Seed tab/view from mobileNavRestoreContext when provided (post-compose return).
+  // Using the useState initialiser (not a useEffect) avoids a Priority flash on
+  // mount — the initialiser is synchronous and runs before the first paint.
+  const [activeTab, setActiveTab] = useState<MobileTab>(() =>
+    mobileNavRestoreContext?.tab ?? "priority",
+  );
+  const [view, setView] = useState<MobileView>(() => {
+    const ctx = mobileNavRestoreContext;
+    if (!ctx?.mailboxId) return { kind: "root" };
+    const mailboxView: MobileView = { kind: "mailbox", mailboxId: ctx.mailboxId };
+    if (ctx.messageId) {
+      const mb = mailboxes.find((m) => m.id === ctx.mailboxId);
+      const msg = mb?.messages.find((m) => m.id === ctx.messageId);
+      if (msg) {
+        // Restore message detail; Back navigates to the mailbox list.
+        return { kind: "message", message: msg, backView: mailboxView };
+      }
+    }
+    // Message not found (e.g. after send) — fall back to mailbox list.
+    return mailboxView;
+  });
   const [replyText, setReplyText] = useState("");
 
   // Reset reply textarea whenever the compose overlay closes

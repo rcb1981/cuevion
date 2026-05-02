@@ -28526,6 +28526,13 @@ export function WorkspaceShell({
   // True while compose is open after a mobile reply tap — keeps the desktop
   // layout mounted so MailboxView's compose pane remains visible.
   const [isMobileComposeActive, setIsMobileComposeActive] = useState(false);
+  // Captured when onReplyMessage fires; passed to MobileWorkspaceShell so it
+  // remounts into the same inbox/message context instead of defaulting to Priority.
+  const [mobileNavRestoreContext, setMobileNavRestoreContext] = useState<{
+    tab: "priority" | "inboxes" | "settings";
+    mailboxId?: string;
+    messageId?: string;
+  } | null>(null);
   const [reviewInboxHandoff, setReviewInboxHandoff] = useState<ReviewInboxHandoff | null>(null);
   const [reviewInboxHandoffFeedback, setReviewInboxHandoffFeedback] = useState<string | null>(null);
   const [completedPriorityReviewIds, setCompletedPriorityReviewIds] = useState<string[]>([]);
@@ -33105,6 +33112,13 @@ export function WorkspaceShell({
               (mb) => mb.id === (mailboxId as InboxId),
             );
             if (!targetMailbox) return;
+            // Capture navigation context now so MobileWorkspaceShell can seed
+            // its useState initialiser back to this inbox/message on remount.
+            setMobileNavRestoreContext({
+              tab: "inboxes",
+              mailboxId,
+              messageId,
+            });
             setActiveTarget(null);
             setActiveMailbox(targetMailbox);
             // Set isMobileComposeActive FIRST so the mobile early return is
@@ -33116,6 +33130,7 @@ export function WorkspaceShell({
               requestKey: Date.now(),
             });
           }}
+          mobileNavRestoreContext={mobileNavRestoreContext}
         />
         <SettingsConfirmationModal
           open={isLogoutConfirmationOpen}
