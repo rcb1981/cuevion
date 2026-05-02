@@ -10170,6 +10170,7 @@ function MailboxView({
   mobileReplyRequest = null,
   onConsumeMobileReplyRequest,
   onComposeOpenChange,
+  isMobileViewport = false,
 }: {
   mailbox: OrderedMailbox;
   activeMailboxTitleOverride?: string;
@@ -10241,6 +10242,9 @@ function MailboxView({
   /** Called whenever isComposeOpen changes so WorkspaceShell can track whether
    *  mobile compose is active and switch between mobile/desktop layouts. */
   onComposeOpenChange?: (isOpen: boolean) => void;
+  /** True when rendered inside a mobile viewport — swaps the full desktop
+   *  mailbox chrome for a native-feeling mobile compose overlay. */
+  isMobileViewport?: boolean;
 }) {
   const [activeFilter, setActiveFilter] = useState<MailFilter>("All");
   const [sortOrder, setSortOrder] = useState<MailSortOrder>("desc");
@@ -10411,6 +10415,9 @@ function MailboxView({
   const [composeAttachments, setComposeAttachments] = useState<MailAttachment[]>([]);
   const [composeSendError, setComposeSendError] = useState<string | null>(null);
   const [isSendingCompose, setIsSendingCompose] = useState(false);
+  // Plain-text body typed by the user in the mobile compose overlay.
+  // Prepended as HTML to the pre-filled composeBody (quote + signature) on send.
+  const [mobileReplyBodyText, setMobileReplyBodyText] = useState("");
   const [pendingComposeAttachmentPickerOpen, setPendingComposeAttachmentPickerOpen] =
     useState(false);
   const composeToInputRef = useRef<HTMLInputElement | null>(null);
@@ -16064,6 +16071,13 @@ function MailboxView({
     onComposeOpenChange?.(isComposeOpen);
   }, [isComposeOpen, mailbox.id, mobileReplyRequest, onComposeOpenChange]);
 
+  // Reset mobile body text whenever compose closes so a fresh reply starts empty.
+  useEffect(() => {
+    if (!isComposeOpen) {
+      setMobileReplyBodyText("");
+    }
+  }, [isComposeOpen]);
+
   return (
     <div className="flex h-full min-h-0 flex-col gap-3 overflow-hidden md:gap-4">
       <header className="flex-none">
@@ -16483,7 +16497,7 @@ function MailboxView({
           </div>
         </div>
 
-        {isComposeOpen ? (
+        {isComposeOpen && !isMobileViewport ? (
           <div
             onDragOver={handleComposeFileDragOver}
             onDrop={handleComposeFileDrop}
@@ -19118,6 +19132,110 @@ function MailboxView({
           </div>
         ) : null}
       </section>
+
+      {/* ── Mobile compose overlay ─────────────────────────────────────────────
+          Rendered only when isMobileViewport && isComposeOpen. Covers the full
+          viewport with position:fixed so none of the desktop mailbox chrome
+          shows behind it. Reuses all existing compose state/handlers — no
+          second send implementation. Desktop path is untouched (guarded by
+          !isMobileViewport on the desktop compose pane above).
+      ──────────────────────────────────────────────────────────────────────── */}
+      {isMobileViewport && isComposeOpen ? (
+        <div
+          data-theme={themeMode}
+          className="fixed inset-0 z-[90] flex flex-col bg-[linear-gradient(180deg,#f7efe4_0%,#efe4d6_100%)] text-[var(--workspace-text)] dark:bg-[linear-gradient(180deg,#171411_0%,#221c17_100%)]"
+          style={{ colorScheme: themeMode }}
+        >
+          {/* Top bar */}
+          <div className="shrink-0 border-b border-[color:rgba(244,224,183,0.22)] bg-[linear-gradient(180deg,#28473c_0%,#1f352e_100%)] px-4 pb-3 pt-[calc(env(safe-area-inset-top)+0.75rem)] shadow-[0_14px_40px_rgba(31,53,46,0.18)] dark:border-[color:rgba(244,224,183,0.14)] dark:bg-[linear-gradient(180deg,#20372f_0%,#172720_100%)]">
+            <div className="flex min-h-10 items-center justify-between gap-3">
+              <button
+                type="button"
+                onClick={() => { setIsComposeOpen(false); resetComposeState(); }}
+                className="rounded-full px-1 py-2 text-[0.92rem] font-medium text-[color:#fff8ec]"
+              >
+                Cancel
+              </button>
+              <span className="min-w-0 flex-1 text-center text-[1rem] font-semibold tracking-normal text-[color:#fff8ec]">
+                {composeMode === "reply"
+                  ? "Reply"
+                  : composeMode === "reply_all"
+                    ? "Reply All"
+                    : composeMode === "forward"
+                      ? "Forward"
+                      : "New Message"}
+              </span>
+              <button
+                type="button"
+                disabled={isSendingCompose}
+                onClick={() => {
+                  // Wrap the user's plain-text reply in HTML paragraphs and
+                  // prepend to composeBody (quote + signature). Calls the
+                  // existing sendMessage — same Gmail OAuth / SMTP path as desktop.
+                  const userHtml = mobileReplyBodyText
+                    .split("\n")
+                    .map((line) =>
+                      line.trim() === ""
+                        ? "<p><br></p>"
+                        : `<p>${line.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}</p>`,
+                    )
+                    .join("");
+                  void sendMessage({ bodyHtml: userHtml + composeBody });
+                }}
+                className="rounded-full px-3 py-2 text-[0.92rem] font-semibold text-[color:#e7c783] disabled:opacity-40"
+              >
+                {isSendingCompose ? "Sending…" : "Send"}
+              </button>
+            </div>
+          </div>
+
+          {/* Meta: From / To / Subject (read-only) */}
+          <div className="shrink-0 border-b border-[color:rgba(86,69,46,0.1)] bg-[color:rgba(255,253,248,0.78)] dark:border-[color:rgba(232,211,174,0.1)] dark:bg-[color:rgba(23,20,17,0.82)]">
+            {[
+              { label: "From", value: activeComposeMailbox.email },
+              { label: "To",   value: composeTo },
+              { label: "Subj", value: composeSubject },
+            ].map(({ label, value }, i, arr) => (
+              <div
+                key={label}
+                className={`flex items-baseline gap-2 px-5 py-3 ${
+                  i < arr.length - 1
+                    ? "border-b border-[color:rgba(86,69,46,0.06)] dark:border-[color:rgba(232,211,174,0.06)]"
+                    : ""
+                }`}
+              >
+                <span className="w-10 shrink-0 text-[0.72rem] font-medium uppercase tracking-[0.12em] text-[var(--workspace-text-faint)]">
+                  {label}
+                </span>
+                <span className="min-w-0 truncate text-[0.88rem] text-[var(--workspace-text-soft)]">
+                  {value}
+                </span>
+              </div>
+            ))}
+          </div>
+
+          {/* Body textarea */}
+          <div className="min-h-0 flex-1 overflow-y-auto bg-[color:rgba(255,253,248,0.78)] dark:bg-[color:rgba(23,20,17,0.82)]">
+            <textarea
+              // eslint-disable-next-line jsx-a11y/no-autofocus
+              autoFocus
+              value={mobileReplyBodyText}
+              onChange={(e) => setMobileReplyBodyText(e.target.value)}
+              placeholder="Write your reply…"
+              className="h-full min-h-[12rem] w-full resize-none bg-transparent px-5 py-5 text-[0.96rem] leading-7 text-[var(--workspace-text)] placeholder:text-[var(--workspace-text-faint)] focus:outline-none"
+            />
+          </div>
+
+          {/* Send error */}
+          {composeSendError ? (
+            <div className="shrink-0 border-t border-[color:rgba(143,82,48,0.2)] bg-[color:rgba(255,248,243,0.9)] px-5 py-3 pb-[calc(env(safe-area-inset-bottom)+0.75rem)] text-[0.82rem] text-[color:rgba(143,82,48,0.92)] dark:border-[color:rgba(235,174,138,0.2)] dark:bg-[color:rgba(42,24,15,0.9)] dark:text-[color:rgba(235,174,138,0.86)]">
+              {composeSendError}
+            </div>
+          ) : (
+            <div className="shrink-0 h-[env(safe-area-inset-bottom,0px)]" />
+          )}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -33142,6 +33260,7 @@ export function WorkspaceShell({
                     )
                   }
                   onComposeOpenChange={(isOpen) => setIsMobileComposeActive(isOpen)}
+                  isMobileViewport={isMobileWorkspaceViewport}
                   manualPriorityOverrides={manualPriorityOverrides}
                   manualLabelOverrides={manualLabelOverrides}
                   spamSuppressionKeys={spamSuppressionKeys}
