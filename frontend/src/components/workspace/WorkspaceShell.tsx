@@ -13103,13 +13103,14 @@ function MailboxView({
           composeSourceMessage.id,
         );
         resetComposeState();
-        return;
+        return "sent" as const;
       }
 
       setActiveFolder("Inbox");
       setIsFullMessageOpen(false);
       setIsComposeOpen(false);
       resetComposeState();
+      return "sent" as const;
     } catch (error) {
       setComposeSendError(
         error instanceof Error ? error.message : "Could not prepare email for sending.",
@@ -16077,6 +16078,45 @@ function MailboxView({
       setMobileReplyBodyText("");
     }
   }, [isComposeOpen]);
+
+  // Mobile-specific send wrapper.
+  //
+  // Problem: the mobile Send button previously used `void sendMessage({ bodyHtml })`
+  // (fire-and-forget). sendMessage calls setIsComposeOpen(false) on success, which
+  // triggers the onComposeOpenChange useEffect asynchronously on the NEXT render.
+  // Between "compose overlay gone" and "useEffect fires → isMobileComposeActive
+  // cleared → MobileWorkspaceShell mounts", the desktop MailboxView layout is
+  // visible on a mobile-sized screen — perceived as a blank/broken screen.
+  //
+  // Fix: await sendMessage and, on success (return value "sent"), call
+  // onComposeOpenChange?.(false) directly here. This releases the mobile layout
+  // lock synchronously in the same microtask as the successful send, exactly
+  // matching what Cancel does with setIsComposeOpen(false) in a click handler.
+  //
+  // On failure (sendMessage returns undefined and sets composeSendError), we do
+  // nothing — the overlay stays open and shows the error strip.
+  //
+  // sendMessage's internal setIsComposeOpen(false) + the onComposeOpenChange
+  // useEffect still run; the second setIsMobileComposeActive(false) call from the
+  // effect is a no-op since the state is already false.
+  const handleMobileComposeSend = async () => {
+    const userHtml = mobileReplyBodyText
+      .split("\n")
+      .map((line) =>
+        line.trim() === ""
+          ? "<p><br></p>"
+          : `<p>${line.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}</p>`,
+      )
+      .join("");
+    const result = await sendMessage({ bodyHtml: userHtml + composeBody });
+    if (result === "sent") {
+      // sendMessage already called setIsComposeOpen(false). Additionally call
+      // onComposeOpenChange directly to clear isMobileComposeActive without
+      // waiting for the useEffect render cycle.
+      onComposeOpenChange?.(false);
+    }
+    // result === undefined → send failed; composeSendError is set; keep overlay open.
+  };
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-3 overflow-hidden md:gap-4">
@@ -19168,20 +19208,7 @@ function MailboxView({
               <button
                 type="button"
                 disabled={isSendingCompose}
-                onClick={() => {
-                  // Wrap the user's plain-text reply in HTML paragraphs and
-                  // prepend to composeBody (quote + signature). Calls the
-                  // existing sendMessage — same Gmail OAuth / SMTP path as desktop.
-                  const userHtml = mobileReplyBodyText
-                    .split("\n")
-                    .map((line) =>
-                      line.trim() === ""
-                        ? "<p><br></p>"
-                        : `<p>${line.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")}</p>`,
-                    )
-                    .join("");
-                  void sendMessage({ bodyHtml: userHtml + composeBody });
-                }}
+                onClick={() => void handleMobileComposeSend()}
                 className="rounded-full px-3 py-2 text-[0.92rem] font-semibold text-[color:#e7c783] disabled:opacity-40"
               >
                 {isSendingCompose ? "Sending…" : "Send"}

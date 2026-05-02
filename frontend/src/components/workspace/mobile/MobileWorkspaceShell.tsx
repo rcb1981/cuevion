@@ -314,7 +314,7 @@ export function MobileWorkspaceShell({
         ) : null}
       </header>
 
-      <section className="min-h-0 flex-1 overflow-y-auto pb-[calc(env(safe-area-inset-bottom)+4.75rem)]">
+      <section className="min-h-0 flex-1 overflow-y-auto">
         {view.kind === "message" ? (
           <article className="min-h-full bg-[color:rgba(255,253,248,0.78)] px-5 py-5 dark:bg-[color:rgba(23,20,17,0.82)]">
             <div className="space-y-2 border-b border-[color:rgba(86,69,46,0.12)] pb-4 dark:border-[color:rgba(232,211,174,0.1)]">
@@ -483,7 +483,7 @@ export function MobileWorkspaceShell({
         )}
       </section>
 
-      <nav className="fixed inset-x-0 bottom-0 z-[60] border-t border-[color:rgba(86,69,46,0.12)] bg-[color:rgba(255,250,241,0.9)] px-3 pb-[calc(env(safe-area-inset-bottom)+0.5rem)] pt-2 shadow-[0_-16px_34px_rgba(66,48,27,0.08)] backdrop-blur-xl dark:border-[color:rgba(232,211,174,0.1)] dark:bg-[color:rgba(27,23,19,0.9)]">
+      <nav className="shrink-0 border-t border-[color:rgba(86,69,46,0.12)] bg-[color:rgba(255,250,241,0.9)] px-3 pb-[calc(env(safe-area-inset-bottom)+0.5rem)] pt-2 shadow-[0_-16px_34px_rgba(66,48,27,0.08)] backdrop-blur-xl dark:border-[color:rgba(232,211,174,0.1)] dark:bg-[color:rgba(27,23,19,0.9)]">
         <div className="grid grid-cols-3 gap-2">
           {([
             ["priority", "Priority"],
