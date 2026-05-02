@@ -10170,6 +10170,7 @@ function MailboxView({
   mobileReplyRequest = null,
   onConsumeMobileReplyRequest,
   onComposeOpenChange,
+  onMobileComposeSent,
   isMobileViewport = false,
 }: {
   mailbox: OrderedMailbox;
@@ -10242,6 +10243,11 @@ function MailboxView({
   /** Called whenever isComposeOpen changes so WorkspaceShell can track whether
    *  mobile compose is active and switch between mobile/desktop layouts. */
   onComposeOpenChange?: (isOpen: boolean) => void;
+  /** Called with the mailboxId immediately after a successful mobile send so
+   *  WorkspaceShell can update mobileNavRestoreContext to the inbox list (no
+   *  messageId) before releasing the mobile compose lock. This prevents the
+   *  stale message-detail restore that causes a blank screen after send. */
+  onMobileComposeSent?: (mailboxId: InboxId) => void;
   /** True when rendered inside a mobile viewport — swaps the full desktop
    *  mailbox chrome for a native-feeling mobile compose overlay. */
   isMobileViewport?: boolean;
@@ -16110,6 +16116,11 @@ function MailboxView({
       .join("");
     const result = await sendMessage({ bodyHtml: userHtml + composeBody });
     if (result === "sent") {
+      // Notify WorkspaceShell so it can update mobileNavRestoreContext to the
+      // inbox list (mailboxId only, no messageId). This must happen BEFORE
+      // onComposeOpenChange so the context is already correct when
+      // MobileWorkspaceShell mounts in the same batched render.
+      onMobileComposeSent?.(mailbox.id);
       // sendMessage already called setIsComposeOpen(false). Additionally call
       // onComposeOpenChange directly to clear isMobileComposeActive without
       // waiting for the useEffect render cycle.
@@ -33302,6 +33313,16 @@ export function WorkspaceShell({
                     )
                   }
                   onComposeOpenChange={(isOpen) => setIsMobileComposeActive(isOpen)}
+                  onMobileComposeSent={(mailboxId) => {
+                    // After a successful mobile send, restore to the inbox list
+                    // (not the old message detail). Using messageId here would
+                    // cause MobileWorkspaceShell to re-open a potentially stale
+                    // message-detail view, which produces the white/blank screen.
+                    setMobileNavRestoreContext({
+                      tab: "inboxes",
+                      mailboxId,
+                    });
+                  }}
                   isMobileViewport={isMobileWorkspaceViewport}
                   manualPriorityOverrides={manualPriorityOverrides}
                   manualLabelOverrides={manualLabelOverrides}
