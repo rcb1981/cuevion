@@ -231,6 +231,10 @@ export function MobileWorkspaceShell({
   const [view, setView] = useState<MobileView>(() => {
     const ctx = mobileNavRestoreContext;
     if (!ctx?.mailboxId) return { kind: "root" };
+    // Safety: validate that the restored mailboxId actually exists in the
+    // current mailboxes prop. If it is absent (stale/invalid context) fall back
+    // to the root inboxes list rather than hanging on an empty mailbox view.
+    if (!mailboxes.some((m) => m.id === ctx.mailboxId)) return { kind: "root" };
     const mailboxView: MobileView = { kind: "mailbox", mailboxId: ctx.mailboxId };
     if (ctx.messageId) {
       const mb = mailboxes.find((m) => m.id === ctx.mailboxId);
