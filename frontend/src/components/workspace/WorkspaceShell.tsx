@@ -30808,7 +30808,9 @@ export function WorkspaceShell({
       let diagnosticRetried = false;
       let diagnosticRetryOk: boolean | undefined;
       let diagnosticRetryMessageCount: number | undefined;
-      if (canUseImapFetch && !response.ok && isQuotaRefreshIssue(response.error)) {
+      const firstAttemptWasQuota =
+        canUseImapFetch && !response.ok && isQuotaRefreshIssue(response.error);
+      if (firstAttemptWasQuota) {
         diagnosticRetried = true;
         console.info("[SYNC-DIAGNOSTIC] custom IMAP quota retry", {
           mailboxId,
@@ -30845,7 +30847,7 @@ export function WorkspaceShell({
           canUseGmailOAuthFetch,
         );
         const restoredSnapshotCount =
-          canUseImapFetch && isQuotaRefreshIssue(response.error)
+          firstAttemptWasQuota || (canUseImapFetch && isQuotaRefreshIssue(response.error))
             ? applyCachedLiveInboxSnapshotToMailboxStore(managedMailbox.id as InboxId)
             : 0;
         console.info("[SYNC-TIMING] refreshMailboxById failed", {
