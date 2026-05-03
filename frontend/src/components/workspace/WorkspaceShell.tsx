@@ -29214,36 +29214,6 @@ export function WorkspaceShell({
         );
       }
     }
-    // [INFO-INBOX-DIAG] mobileMailboxes counts — scoped to info@hysteriarecs.com
-    if (mailbox.email?.includes("info@hysteriarecs.com") ||
-        mailbox.title?.toLowerCase().includes("info - hysteria")) {
-      const rawCount = mailboxCollections.Inbox.length;
-      const postSpamCount = spamFilteredInbox.length;
-      const visibleCount = inboxMessages.length;
-      const hiddenCandidates = spamFilteredInbox
-        .filter((msg) => !mobileVisibleInboxMessages.includes(msg))
-        .slice(0, 3)
-        .map((msg) => ({
-          subject: msg.subject ?? "(no subject)",
-          internalClassification: msg.internalClassification ?? null,
-          ui_signal: msg.ui_signal ?? null,
-          final_visibility: msg.final_visibility ?? null,
-          action: (msg as { action?: string }).action ?? null,
-        }));
-      console.info("[INFO-INBOX-DIAG] mobileMailboxes computation", {
-        mailboxId: mailbox.id,
-        email: mailbox.email,
-        title: mailbox.title,
-        rawStoreInboxCount: rawCount,
-        postSpamFilterCount: postSpamCount,
-        visibleAfterGetMailboxReady: visibleCount,
-        syncError: normalizeMobileSyncError(mailboxSyncErrors[mailbox.id]) ?? null,
-        focusPreferences: effectiveFocusPreferencesByMailbox[mailbox.id] ?? activeFocusPreferences,
-        isPromoContext: isPromoMailboxContext(mailbox),
-        hiddenCandidatesSample: hiddenCandidates,
-      });
-    }
-
     return {
       id: mailbox.id,
       title: mailbox.title,
@@ -30724,34 +30694,7 @@ export function WorkspaceShell({
   };
   const applyCachedLiveInboxSnapshotToMailboxStore = (mailboxId: InboxId) => {
     const targetMailbox = orderedMailboxes.find((entry) => entry.id === mailboxId);
-    const allSnapshots = readLiveInboxSnapshots();
-    const snapshot = allSnapshots[mailboxId];
-
-    // [INFO-INBOX-DIAG] snapshot probe — scoped to info@hysteriarecs.com
-    if (targetMailbox?.email?.includes("info@hysteriarecs.com")) {
-      const rawSnapshot = (() => {
-        try {
-          const raw = localStorage.getItem("live_inbox_snapshots");
-          if (!raw) return null;
-          const parsed = JSON.parse(raw) as Record<string, unknown>;
-          return parsed[mailboxId] ?? null;
-        } catch {
-          return null;
-        }
-      })();
-      console.info("[INFO-INBOX-DIAG] applyCachedLiveInboxSnapshotToMailboxStore", {
-        mailboxId,
-        email: targetMailbox.email.trim(),
-        snapshotFoundInReadLiveInboxSnapshots: Boolean(snapshot),
-        snapshotMessageCount: snapshot?.messages?.length ?? 0,
-        snapshotSchemaVersion: (snapshot as { schemaVersion?: unknown } | undefined)?.schemaVersion ?? null,
-        rawSnapshotPresent: Boolean(rawSnapshot),
-        rawSnapshotMessageCount: Array.isArray((rawSnapshot as { messages?: unknown[] } | null)?.messages)
-          ? (rawSnapshot as { messages: unknown[] }).messages.length
-          : 0,
-        rawSnapshotSchemaVersion: (rawSnapshot as { schemaVersion?: unknown } | null)?.schemaVersion ?? null,
-      });
-    }
+    const snapshot = readLiveInboxSnapshots()[mailboxId];
 
     if (!targetMailbox || !snapshot?.messages.length) {
       return 0;
@@ -30897,30 +30840,20 @@ export function WorkspaceShell({
       const requestDurationMs = performance.now() - syncStartedAt;
 
       if (!response.ok) {
-        const refreshErrorMessage = resolveMailboxRefreshErrorMessage(
-          response.error,
-          canUseImapFetch,
-          canUseGmailOAuthFetch,
-        );
-        const restoredSnapshotCount =
-          firstAttemptWasQuota || (canUseImapFetch && isQuotaRefreshIssue(response.error))
-            ? applyCachedLiveInboxSnapshotToMailboxStore(managedMailbox.id as InboxId)
-            : 0;
-        // [INFO-INBOX-DIAG] failure restore — scoped to info@hysteriarecs.com
-        if (managedMailbox.email.trim().includes("info@hysteriareks.com") ||
-            managedMailbox.email.trim().includes("info@hysteriarecs.com") ||
-            managedMailbox.title?.toLowerCase().includes("info - hysteria")) {
-          console.info("[INFO-INBOX-DIAG] refreshMailboxById failure restore", {
-            mailboxId,
-            email: managedMailbox.email.trim(),
-            title: managedMailbox.title,
-            firstAttemptWasQuota,
-            finalResponseErrorCode: response.error?.code ?? null,
-            finalResponseErrorMessage: response.error?.message ?? null,
-            restoredSnapshotCount,
-            rawStoreInboxCountAfterRestore: (mailboxStore[mailboxId] ?? { Inbox: [] }).Inbox.length,
-          });
-        }
+        const isQuotaFailure =
+          firstAttemptWasQuota || (canUseImapFetch && isQuotaRefreshIssue(response.error));
+        const restoredSnapshotCount = isQuotaFailure
+          ? applyCachedLiveInboxSnapshotToMailboxStore(managedMailbox.id as InboxId)
+          : 0;
+        const refreshErrorMessage = isQuotaFailure
+          ? restoredSnapshotCount > 0
+            ? "Mailbox quota exceeded during refresh — showing messages from the last successful sync."
+            : "Mailbox quota exceeded during refresh — no cached messages found on this device."
+          : resolveMailboxRefreshErrorMessage(
+              response.error,
+              canUseImapFetch,
+              canUseGmailOAuthFetch,
+            );
         console.info("[SYNC-TIMING] refreshMailboxById failed", {
           mailboxId,
           email: managedMailbox.email.trim(),
