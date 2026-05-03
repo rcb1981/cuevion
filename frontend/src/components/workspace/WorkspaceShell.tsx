@@ -28002,6 +28002,17 @@ export function WorkspaceShell({
     const fallbackMessage = "Refresh failed — reconnect this inbox in Settings.";
     const nextMessage = message?.trim() || fallbackMessage;
 
+    // Also update the ref immediately (synchronous), not only via the useEffect
+    // that fires after React renders. onOpenMailbox reads the ref right after
+    // `await refreshMailboxById` returns — before any render — so without this
+    // the ref is stale and onOpenMailbox falls through to the generic fallback
+    // message instead of the quota-specific one set here.
+    if (!(options?.preserveExisting && mailboxSyncErrorsRef.current[mailboxId])) {
+      mailboxSyncErrorsRef.current = {
+        ...mailboxSyncErrorsRef.current,
+        [mailboxId]: nextMessage,
+      };
+    }
     setMailboxSyncErrors((current) => ({
       ...current,
       [mailboxId]:
@@ -28011,6 +28022,12 @@ export function WorkspaceShell({
     }));
   };
   const clearMailboxSyncError = (mailboxId: InboxId) => {
+    // Mirror the clear into the ref immediately so that any async caller reading
+    // mailboxSyncErrorsRef after an await sees the cleared state, not a stale
+    // entry from the previous render.
+    const nextRef = { ...mailboxSyncErrorsRef.current };
+    delete nextRef[mailboxId];
+    mailboxSyncErrorsRef.current = nextRef;
     setMailboxSyncErrors((current) => {
       if (!current[mailboxId]) {
         return current;
