@@ -10869,25 +10869,44 @@ function MailboxView({
       .split(",")
       .map((value: string) => value.trim())
       .filter(Boolean);
+
+    // Build a normalised set of all own addresses across every connected mailbox.
+    // Used to detect self-authored (Sent) messages and to scrub own addresses from
+    // reply recipient lists regardless of which mailbox is currently active.
+    const ownAddressSet = new Set<string>([
+      normalizeSenderLearningKey(currentUserEmail),
+      ...orderedMailboxes.map((mb) => normalizeSenderLearningKey(mb.email)),
+    ]);
+    const senderIsOwn = ownAddressSet.has(normalizeSenderLearningKey(originalSender));
+
+    // When the original message was sent by the user (Sent / self-authored),
+    // replying to `from` would loop back to the user's own address.  Address
+    // the reply to the original To recipients instead, filtering out any own
+    // addresses in case the user sent to themselves.
+    const replyToAddresses: string[] = senderIsOwn
+      ? originalToRecipients.filter((r) => !ownAddressSet.has(normalizeSenderLearningKey(r)))
+      : [originalSender];
+
     const replyAllCcRecipients: string[] = [];
 
     if (mode === "reply_all") {
-      const originalRecipientsExcludingCurrentUser = [
+      // Track which addresses are already going in the To field so we can
+      // exclude them from Cc (avoids duplication when replying to a sent message
+      // where all original To recipients become the new To).
+      const replyToNormalized = new Set(replyToAddresses.map(normalizeSenderLearningKey));
+
+      const originalRecipientsExcludingOwn = [
         ...originalToRecipients,
         ...originalCcRecipients,
-      ].filter(
-        (recipient) =>
-          normalizeSenderLearningKey(recipient) !==
-          normalizeSenderLearningKey(currentUserEmail),
-      );
+      ].filter((recipient) => !ownAddressSet.has(normalizeSenderLearningKey(recipient)));
 
-      if (originalRecipientsExcludingCurrentUser.length > 1) {
+      if (originalRecipientsExcludingOwn.length > 1) {
         [...originalToRecipients, ...originalCcRecipients].forEach((recipient) => {
           const normalizedRecipient = normalizeSenderLearningKey(recipient);
 
           if (
-            normalizedRecipient === normalizeSenderLearningKey(currentUserEmail) ||
-            normalizedRecipient === normalizeSenderLearningKey(originalSender) ||
+            ownAddressSet.has(normalizedRecipient) ||
+            replyToNormalized.has(normalizedRecipient) ||
             replyAllCcRecipients.some(
               (existingRecipient) =>
                 normalizeSenderLearningKey(existingRecipient) === normalizedRecipient,
@@ -10917,7 +10936,7 @@ function MailboxView({
         : null;
     setComposeMode(mode);
     setComposeSourceMessage(effectiveMessage);
-    setComposeTo(mode === "forward" ? "" : originalSender);
+    setComposeTo(mode === "forward" ? "" : replyToAddresses.join(", "));
     setComposeCc(mode === "reply_all" ? replyAllCcRecipients.join(", ") : "");
     setComposeSubject(
       mode === "reply" || mode === "reply_all"
