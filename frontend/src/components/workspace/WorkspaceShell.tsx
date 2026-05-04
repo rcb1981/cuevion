@@ -28039,6 +28039,12 @@ export function WorkspaceShell({
     });
   };
   const isQuotaRefreshIssue = (issue?: InboxRefreshIssue | null): boolean => {
+    // response_serialization_failed is never a mailbox storage quota issue — it means
+    // one message failed to parse/classify. Exclude it so it doesn't trigger the quota
+    // retry path or the misleading "quota exceeded" user message.
+    if (issue?.code === "response_serialization_failed") {
+      return false;
+    }
     if (issue?.code === "quota_exceeded" || issue?.code === "quota_exceeded_partial") {
       return true;
     }
@@ -28067,6 +28073,14 @@ export function WorkspaceShell({
     canUseGmailOAuthFetch: boolean,
   ) => {
     const rawRefreshErrorMessage = error?.message ?? "";
+
+    // response_serialization_failed: one message failed to parse/classify.
+    // With the backend now skipping bad messages instead of aborting, this code
+    // should only appear on truly unrecoverable serialization errors. Show an
+    // honest message — do NOT say "quota exceeded".
+    if (canUseImapFetch && error?.code === "response_serialization_failed") {
+      return "Refresh failed — one or more messages could not be processed by this inbox.";
+    }
 
     if (canUseImapFetch && isQuotaRefreshIssue(error)) {
       return (error?.fetched_count ?? 0) > 0

@@ -1175,6 +1175,7 @@ def build_connect_preview_response(payload: dict[str, Any]) -> tuple[int, dict[s
             email_address,
         )
         previews = []
+        skipped_count = 0
         for index, (message, unread, imap_uid) in enumerate(messages):
             try:
                 previews.append(
@@ -1189,23 +1190,18 @@ def build_connect_preview_response(payload: dict[str, Any]) -> tuple[int, dict[s
                     )
                 )
             except Exception as exc:
-                preview_build_duration_ms = (time.perf_counter() - preview_build_start) * 1000
+                # A single message that fails to parse/classify must not abort the
+                # entire refresh. Skip it and continue so the other messages are
+                # still delivered. One bad message was previously silencing the
+                # whole inbox (manifesting as a misleading "quota exceeded" error
+                # when isQuotaRefreshIssue matched on unrelated exception text).
+                skipped_count += 1
                 logger.warning(
-                    "IMAP preview stage=response_serialization failed idx=%s fetched_count=%s serialization_ms=%.1f error=%s",
+                    "IMAP preview stage=response_serialization skipped idx=%s built_so_far=%s error=%s",
                     index,
                     len(previews),
-                    preview_build_duration_ms,
                     str(exc),
                 )
-                return 400, {
-                    "ok": False,
-                    "error": build_imap_issue(
-                        "response_serialization_failed",
-                        "response_serialization",
-                        "Could not prepare refreshed messages for this inbox.",
-                        len(previews),
-                    ),
-                }
         preview_build_duration_ms = (time.perf_counter() - preview_build_start) * 1000
         logger.info(
             "IMAP preview stage=response_serialization_success fetched_count=%s serialized_count=%s serialization_ms=%.1f",
