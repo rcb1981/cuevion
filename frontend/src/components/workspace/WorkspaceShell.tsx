@@ -27894,6 +27894,42 @@ export function WorkspaceShell({
   const [mobileMailboxRefreshStatus, setMobileMailboxRefreshStatus] = useState<
     Partial<Record<string, string>>
   >({});
+  const mobileMailboxRefreshStatusDismissTimersRef = useRef<Record<string, number>>({});
+  const clearMobileMailboxRefreshStatusDismissTimer = (mailboxId: string) => {
+    const timerId = mobileMailboxRefreshStatusDismissTimersRef.current[mailboxId];
+    if (timerId == null) {
+      return;
+    }
+
+    window.clearTimeout(timerId);
+    delete mobileMailboxRefreshStatusDismissTimersRef.current[mailboxId];
+  };
+  const scheduleMobileMailboxRefreshStatusDismiss = (
+    mailboxId: string,
+    statusLine: string,
+  ) => {
+    clearMobileMailboxRefreshStatusDismissTimer(mailboxId);
+    mobileMailboxRefreshStatusDismissTimersRef.current[mailboxId] = window.setTimeout(() => {
+      setMobileMailboxRefreshStatus((prev) => {
+        if (prev[mailboxId] !== statusLine) {
+          return prev;
+        }
+
+        const next = { ...prev };
+        delete next[mailboxId];
+        return next;
+      });
+      delete mobileMailboxRefreshStatusDismissTimersRef.current[mailboxId];
+    }, 2000);
+  };
+  useEffect(() => {
+    return () => {
+      Object.values(mobileMailboxRefreshStatusDismissTimersRef.current).forEach((timerId) => {
+        window.clearTimeout(timerId);
+      });
+      mobileMailboxRefreshStatusDismissTimersRef.current = {};
+    };
+  }, []);
   // IDs queued for retry after startup sync completes (set when tap fires during startup).
   const pendingMobileRefreshIdsRef = useRef<Set<string>>(new Set());
   // Stores the last raw diagnostic for each mailbox refresh, keyed by mailboxId.
@@ -33029,6 +33065,7 @@ export function WorkspaceShell({
           priorityMessages={mobilePriorityMessages}
           onLogoutClick={() => setIsLogoutConfirmationOpen(true)}
           onSyncMailbox={async (mailboxId) => {
+            clearMobileMailboxRefreshStatusDismissTimer(mailboxId);
             // Mark as requested immediately so the UI shows feedback before the
             // async fetch resolves (the request can take several seconds).
             setMobileMailboxRefreshStatus((prev) => ({
@@ -33080,6 +33117,9 @@ export function WorkspaceShell({
                   ...prev,
                   [mailboxId]: statusLine,
                 }));
+                if (result === "synced") {
+                  scheduleMobileMailboxRefreshStatusDismiss(mailboxId, statusLine);
+                }
               } else {
                 // "failed" — read from ref, not stale state closure, because
                 // setMailboxSyncError inside refreshMailboxById runs before we get
