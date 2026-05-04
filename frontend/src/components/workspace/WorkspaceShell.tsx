@@ -28409,6 +28409,10 @@ export function WorkspaceShell({
       return;
     }
 
+    if (isMobileWorkspaceViewport) {
+      return;
+    }
+
     const managedMailbox = savedManagedInboxes.find(
       (mailbox) => mailbox.id === activeMailbox.id,
     );
@@ -28426,10 +28430,14 @@ export function WorkspaceShell({
     }
 
     void refreshMailboxById(activeMailbox.id);
-  }, [activeMailbox, savedManagedInboxes]);
+  }, [activeMailbox, isMobileWorkspaceViewport, savedManagedInboxes]);
 
   useEffect(() => {
     if (!activeMailbox) {
+      return;
+    }
+
+    if (isMobileWorkspaceViewport) {
       return;
     }
 
@@ -28454,7 +28462,7 @@ export function WorkspaceShell({
     }, ACTIVE_MAILBOX_AUTO_REFRESH_INTERVAL_MS);
 
     return () => window.clearInterval(intervalId);
-  }, [activeMailbox, savedManagedInboxes, syncingMailboxId]);
+  }, [activeMailbox, isMobileWorkspaceViewport, savedManagedInboxes, syncingMailboxId]);
   const workspaceShellPaddingClass = usesExpandedInboxWorkspaceLayout
     ? "p-3 md:p-4 lg:p-5"
     : "p-6 md:p-8 lg:p-10";
