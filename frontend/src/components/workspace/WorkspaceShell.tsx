@@ -19258,9 +19258,9 @@ function MailboxView({
       ──────────────────────────────────────────────────────────────────────── */}
       {isMobileViewport && isComposeOpen ? (
         <div
-          data-theme={themeMode}
+          data-theme="dark"
           className="fixed inset-0 z-[90] flex flex-col bg-[linear-gradient(180deg,#f7efe4_0%,#efe4d6_100%)] text-[var(--workspace-text)] dark:bg-[linear-gradient(180deg,#171411_0%,#221c17_100%)]"
-          style={{ colorScheme: themeMode }}
+          style={{ colorScheme: "dark" }}
         >
           {/* Top bar */}
           <div className="shrink-0 border-b border-[color:rgba(244,224,183,0.22)] bg-[linear-gradient(180deg,#28473c_0%,#1f352e_100%)] px-4 pb-3 pt-[calc(env(safe-area-inset-top)+0.75rem)] shadow-[0_14px_40px_rgba(31,53,46,0.18)] dark:border-[color:rgba(244,224,183,0.14)] dark:bg-[linear-gradient(180deg,#20372f_0%,#172720_100%)]">
