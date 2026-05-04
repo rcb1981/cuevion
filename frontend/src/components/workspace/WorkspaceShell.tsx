@@ -550,6 +550,7 @@ type LearningDecisionSourceContext =
   | "uncertain"
   | "paste_sender_or_domain";
 type LearningDecisionPrioritySelection = "Important" | "Normal" | "Show Less" | "Spam";
+type ForYouUncertainLabelSelection = "Primary" | "Promo" | "Update" | "Spam";
 type SenderCategoryLearningEntry = {
   learnedCategory: CuevionMessageCategory;
   learnedFromCount: number;
@@ -4706,6 +4707,51 @@ function resolveCuevionCategoryFromForYouSelection(
 
   if (selection === "Review" || selection === "Spam") {
     return "Updates";
+  }
+
+  return "Primary";
+}
+
+function formatCuevionCategoryLabel(category: CuevionMessageCategory) {
+  return category === "Updates" ? "Update" : category;
+}
+
+function resolveCuevionCategoryFromUncertainLabel(
+  selection: ForYouUncertainLabelSelection,
+): CuevionMessageCategory {
+  if (selection === "Promo") {
+    return "Promo";
+  }
+
+  if (selection === "Update" || selection === "Spam") {
+    return "Updates";
+  }
+
+  return "Primary";
+}
+
+function resolveUncertainLabelPrioritySelection(
+  selection: ForYouUncertainLabelSelection,
+): LearningDecisionPrioritySelection | null {
+  return selection === "Spam" ? "Spam" : null;
+}
+
+function resolveUncertainLabelFromLearningDecision(
+  decision: {
+    learnedCategory: CuevionMessageCategory;
+    sourcePrioritySelection?: LearningDecisionPrioritySelection | null;
+  },
+): ForYouUncertainLabelSelection {
+  if (decision.sourcePrioritySelection === "Spam") {
+    return "Spam";
+  }
+
+  if (decision.learnedCategory === "Promo") {
+    return "Promo";
+  }
+
+  if (decision.learnedCategory === "Updates") {
+    return "Update";
   }
 
   return "Primary";
@@ -25838,7 +25884,6 @@ function ForYouView({
   learningLaunchRequest,
   onConsumeLearningLaunchRequest,
   aiSuggestionsEnabled,
-  connectedInboxCount,
 }: {
   context?: ForYouContext;
   onOpenTarget: (target: WorkspaceTarget) => void;
@@ -25861,7 +25906,6 @@ function ForYouView({
   learningLaunchRequest: LearningLaunchRequest;
   onConsumeLearningLaunchRequest: () => void;
   aiSuggestionsEnabled: boolean;
-  connectedInboxCount: number;
 }) {
   const [activeLearningModal, setActiveLearningModal] = useState<
     | "paste-rule"
@@ -25896,10 +25940,8 @@ function ForYouView({
   const [selectedPasteRuleMailboxId, setSelectedPasteRuleMailboxId] = useState<InboxId | null>(
     orderedMailboxes[0]?.id ?? null,
   );
-  const [selectedUncertainMailboxId, setSelectedUncertainMailboxId] = useState<InboxId | null>(
-    null,
-  );
-  const [isUncertainMovePickerOpen, setIsUncertainMovePickerOpen] = useState(false);
+  const [selectedUncertainLabel, setSelectedUncertainLabel] =
+    useState<ForYouUncertainLabelSelection | null>(null);
   const [selectedRecentDecisionCategory, setSelectedRecentDecisionCategory] = useState<
     "Important" | "Review" | "Promo" | "Demo" | "Spam" | null
   >(null);
@@ -25911,9 +25953,8 @@ function ForYouView({
   const [selectedRecentDecisionMailboxId, setSelectedRecentDecisionMailboxId] = useState<
     InboxId | null
   >(orderedMailboxes[0]?.id ?? null);
-  const [selectedRecentDecisionUncertainMailboxId, setSelectedRecentDecisionUncertainMailboxId] =
-    useState<InboxId | null>(null);
-  const [isRecentDecisionMovePickerOpen, setIsRecentDecisionMovePickerOpen] = useState(false);
+  const [selectedRecentDecisionUncertainLabel, setSelectedRecentDecisionUncertainLabel] =
+    useState<ForYouUncertainLabelSelection | null>(null);
   const pasteRuleSaveTimeoutRef = useRef<number | null>(null);
   const reviewUncertainCompletionTimeoutRef = useRef<number | null>(null);
   const [reviewUncertainCompletionFeedback, setReviewUncertainCompletionFeedback] =
@@ -25934,8 +25975,7 @@ function ForYouView({
   };
   const openReviewUncertainModal = () => {
     setActiveUncertainEmailIndex(0);
-    setSelectedUncertainMailboxId(null);
-    setIsUncertainMovePickerOpen(false);
+    setSelectedUncertainLabel(null);
     setReviewUncertainCompletionFeedback("idle");
     setActiveLearningModal("review-uncertain");
   };
@@ -25944,6 +25984,12 @@ function ForYouView({
     setActiveLearningSessionSuggestions(pendingLearningSuggestions.slice(0, learningBatchSize));
     setActiveLearningModal("refine-cuevion");
   };
+  const { learningSuggestionPool, uncertainEmailPool } = forYouEngine.buildForYouLearningPools(
+    aiSuggestionsEnabled,
+    mailboxStore,
+    resolveMailDateMs,
+    (category) => formatCuevionCategoryLabel(category),
+  );
   const teachCuevionActions = [
     {
       title: "Paste sender or domain",
@@ -25952,8 +25998,8 @@ function ForYouView({
       handler: () => setActiveLearningModal("paste-rule"),
     },
     {
-      title: "Inbox destination review",
-      subtitle: "Review messages Cuevion is still learning where to place.",
+      title: "Check uncertain labels",
+      subtitle: "Review messages Cuevion is still learning how to label.",
       handler: openReviewUncertainModal,
     },
     {
@@ -25962,14 +26008,7 @@ function ForYouView({
       handler: () => setActiveLearningModal("recent-decisions"),
     },
   ].filter((action) =>
-    action.title !== "Inbox destination review" || connectedInboxCount >= 2,
-  );
-  const { learningSuggestionPool, uncertainEmailPool } = forYouEngine.buildForYouLearningPools(
-    aiSuggestionsEnabled,
-    mailboxStore,
-    resolveMailDateMs,
-    (category, mailboxId) =>
-      resolveMailboxTitleForCategory(category, orderedMailboxes, mailboxId),
+    action.title !== "Check uncertain labels" || uncertainEmailPool.length > 0,
   );
   const learningBatchSize = 10;
   const pendingLearningSuggestions = learningSuggestionPool.filter(
@@ -25984,10 +26023,6 @@ function ForYouView({
   const learningMailboxOptions = orderedMailboxes.map((mailbox) => ({
     id: mailbox.id,
     label: mailbox.title,
-  }));
-  const uncertainDestinationOptions = orderedMailboxes.map((mailbox) => ({
-    id: mailbox.id,
-    label: mailbox.id === "main" ? "Inbox" : mailbox.title,
   }));
   const trimmedPastedRuleValue = pastedRuleValue.trim();
   const pasteRuleInputType = resolvePasteRuleInputType(trimmedPastedRuleValue);
@@ -26048,21 +26083,21 @@ function ForYouView({
     return true;
   };
   const persistActiveUncertainDecision = () => {
-    if (!activeUncertainEmail || !selectedUncertainMailboxId) {
+    if (!activeUncertainEmail || !selectedUncertainLabel) {
       return false;
     }
 
-    const category = resolveCuevionCategoryFromMailboxId(selectedUncertainMailboxId);
-    const mailboxAction = resolveMailboxActionFromMailboxId(selectedUncertainMailboxId);
+    const category = resolveCuevionCategoryFromUncertainLabel(selectedUncertainLabel);
 
     onSaveLearningRule(
       activeUncertainEmail.senderAddress,
       "sender",
       category,
-      mailboxAction,
+      "keep",
       {
         sourceContext: "uncertain",
-        sourceMailboxId: selectedUncertainMailboxId,
+        sourcePrioritySelection: resolveUncertainLabelPrioritySelection(selectedUncertainLabel),
+        sourceMailboxId: null,
         sourceCurrentMailboxId: activeUncertainEmail.mailboxId,
       },
     );
@@ -26092,17 +26127,11 @@ function ForYouView({
       : Math.min(activeUncertainEmailIndex, totalUncertainEmails - 1);
   const activeUncertainEmail = uncertainEmailPool[safeUncertainEmailIndex];
   const isLastUncertainEmail = safeUncertainEmailIndex === totalUncertainEmails - 1;
-  const hasValidUncertainSelection = selectedUncertainMailboxId !== null;
+  const hasValidUncertainSelection = selectedUncertainLabel !== null;
   const recentLearningDecisions = forYouEngine.buildRecentLearningDecisions(
     senderCategoryLearning,
   );
   const activeRecentDecision = recentLearningDecisions[activeRecentDecisionIndex];
-  const activeRecentDecisionCurrentMailboxLabel =
-    activeRecentDecision?.sourceCurrentMailboxId === "main"
-      ? "Inbox"
-      : orderedMailboxes.find(
-          (mailbox) => mailbox.id === activeRecentDecision?.sourceCurrentMailboxId,
-        )?.title ?? "Inbox";
   const initializeRecentDecisionEditor = (
     decision:
       | (typeof recentLearningDecisions)[number]
@@ -26113,8 +26142,7 @@ function ForYouView({
       setSelectedRecentDecisionInboxAction("keep");
       setSelectedRecentDecisionPriority(null);
       setSelectedRecentDecisionMailboxId(orderedMailboxes[0]?.id ?? null);
-      setSelectedRecentDecisionUncertainMailboxId(null);
-      setIsRecentDecisionMovePickerOpen(false);
+      setSelectedRecentDecisionUncertainLabel(null);
       return;
     }
 
@@ -26122,10 +26150,8 @@ function ForYouView({
     setSelectedRecentDecisionMailboxId(
       decision.sourceMailboxId ?? orderedMailboxes[0]?.id ?? null,
     );
-    setSelectedRecentDecisionUncertainMailboxId(decision.sourceMailboxId ?? null);
-    setIsRecentDecisionMovePickerOpen(
-      decision.sourceContext === "uncertain" &&
-        decision.sourceMailboxId !== (decision.sourceCurrentMailboxId ?? null),
+    setSelectedRecentDecisionUncertainLabel(
+      resolveUncertainLabelFromLearningDecision(decision),
     );
     setSelectedRecentDecisionCategory(
       resolveForYouCategoryFromLearningEntry({
@@ -26178,8 +26204,7 @@ function ForYouView({
   }, [orderedMailboxes]);
 
   useEffect(() => {
-    setSelectedUncertainMailboxId(null);
-    setIsUncertainMovePickerOpen(false);
+    setSelectedUncertainLabel(null);
     setReviewUncertainCompletionFeedback("idle");
   }, [activeUncertainEmailIndex]);
 
@@ -26263,7 +26288,7 @@ function ForYouView({
         <div className="flex flex-col items-center justify-center gap-5 px-4 py-8 text-center md:px-8 md:py-10">
           <div className="max-w-[34rem] space-y-2">
             <div className="text-[0.92rem] leading-7 text-[var(--workspace-text-soft)]">
-              Run a focused learning session to improve how Cuevion classifies, prioritizes, and routes future email.
+              Run a focused learning session to improve how Cuevion classifies, prioritizes, and labels future email.
             </div>
           </div>
           {aiSuggestionsEnabled ? (
@@ -26524,10 +26549,10 @@ function ForYouView({
             <div className="flex items-start justify-between gap-4">
               <div className="space-y-2">
                 <h2 className="text-[1.45rem] font-medium tracking-tight text-[var(--workspace-text)]">
-                  Check uncertain emails
+                  Check uncertain labels
                 </h2>
                 <p className="max-w-[34rem] text-[0.92rem] leading-7 text-[var(--workspace-text-soft)]">
-                  Help Cuevion decide where this message belongs when confidence is low.
+                  Help Cuevion confirm the right label when confidence is low.
                 </p>
               </div>
               <button
@@ -26577,7 +26602,7 @@ function ForYouView({
                       </div>
                     </div>
                     <div className="text-[0.82rem] leading-6 text-[var(--workspace-text-faint)]">
-                      Currently in: {activeUncertainEmail.currentMailboxLabel} — low confidence
+                      Current label: {activeUncertainEmail.currentMailboxLabel} — low confidence
                     </div>
                   </div>
                 </div>
@@ -26594,70 +26619,24 @@ function ForYouView({
                 </div>
               </div>
 
-              <div className="mt-5 space-y-3">
-                <div className="flex flex-wrap gap-2">
+              <div className="mt-5 flex flex-wrap gap-2">
+                {(["Primary", "Promo", "Update", "Spam"] as const).map((label) => (
                   <button
+                    key={`review-uncertain-label-${label}`}
                     type="button"
                     onClick={() => {
-                      if (!activeUncertainEmail.mailboxId) {
-                        return;
-                      }
-
-                      setSelectedUncertainMailboxId(activeUncertainEmail.mailboxId);
-                      setIsUncertainMovePickerOpen(false);
-                      console.log(
-                        `review_uncertain_keep_${activeUncertainEmail.mailboxId}`,
-                      );
+                      setSelectedUncertainLabel(label);
+                      console.log(`review_uncertain_label_${label.toLowerCase()}`);
                     }}
                     className={`inline-flex h-9 items-center justify-center rounded-full border px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color,box-shadow,transform] duration-150 focus-visible:outline-none ${
-                      selectedUncertainMailboxId === activeUncertainEmail.mailboxId
+                      selectedUncertainLabel === label
                         ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_8px_24px_rgba(118,170,112,0.08)]"
                         : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[var(--workspace-text-soft)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface-strong)]"
                     }`}
                   >
-                    {`Keep in ${activeUncertainEmail.currentMailboxLabel}`}
+                    {label}
                   </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setIsUncertainMovePickerOpen((current) => !current);
-                      if (selectedUncertainMailboxId === activeUncertainEmail.mailboxId) {
-                        setSelectedUncertainMailboxId(null);
-                      }
-                    }}
-                    className={`inline-flex h-9 items-center justify-center rounded-full border px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color,box-shadow,transform] duration-150 focus-visible:outline-none ${
-                      isUncertainMovePickerOpen
-                        ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_8px_24px_rgba(118,170,112,0.08)]"
-                        : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[var(--workspace-text-soft)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface-strong)]"
-                    }`}
-                  >
-                    Move to...
-                  </button>
-                </div>
-
-                {isUncertainMovePickerOpen ? (
-                  <div className="flex flex-wrap gap-2">
-                    {uncertainDestinationOptions
-                      .filter((option) => option.id !== activeUncertainEmail.mailboxId)
-                      .map((option) => (
-                        <button
-                          key={option.id}
-                          type="button"
-                          onClick={() => {
-                            setSelectedUncertainMailboxId(option.id);
-                            console.log(`review_uncertain_move_${option.id}`);
-                          }}
-                          className={`inline-flex h-9 items-center justify-center rounded-full border px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color,box-shadow,transform] duration-150 focus-visible:outline-none ${
-                            selectedUncertainMailboxId === option.id
-                              ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_8px_24px_rgba(118,170,112,0.08)]"
-                              : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[var(--workspace-text-soft)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface-strong)]"
-                          }`}
-                        >
-                          {option.label}
-                        </button>
-                      ))}
-                  </div>
-                ) : null}
+                ))}
               </div>
 
               <div className="mt-6 grid grid-cols-[auto_1fr_auto_auto] items-center gap-3">
@@ -26675,7 +26654,7 @@ function ForYouView({
                 <div className="text-center text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)] transition-[color,opacity] duration-200">
                   {reviewUncertainCompletionFeedback === "done"
                     ? "Cuevion learned from your decisions"
-                    : `Email ${safeUncertainEmailIndex + 1} of ${totalUncertainEmails}`}
+                    : `Label ${safeUncertainEmailIndex + 1} of ${totalUncertainEmails}`}
                 </div>
                 <button
                   type="button"
@@ -26704,7 +26683,7 @@ function ForYouView({
                       : `${learningModalPrimaryActionButtonClass} cursor-default border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] text-[var(--workspace-text-faint)] opacity-55`
                   }
                 >
-                  {isLastUncertainEmail ? "Finish" : "Next Email"}
+                  {isLastUncertainEmail ? "Finish" : "Next Label"}
                 </button>
                 {isLastUncertainEmail ? null : (
                   <button
@@ -26723,7 +26702,7 @@ function ForYouView({
               ) : (
                 <div className="rounded-[20px] border border-[var(--workspace-modal-border-strong)] bg-[var(--workspace-modal-inner)] px-5 py-6 shadow-[inset_0_1px_0_rgba(255,255,255,0.14)]">
                   <div className="text-[0.95rem] leading-7 text-[var(--workspace-text-soft)]">
-                    There are no uncertain emails to check right now.
+                    There are no uncertain labels to check right now.
                   </div>
                 </div>
               )}
@@ -26882,70 +26861,25 @@ function ForYouView({
                 </>
               ) : activeRecentDecision?.sourceContext === "uncertain" ? (
                 <div className="mt-5 space-y-3">
-                  <div className="flex flex-wrap gap-2">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setSelectedRecentDecisionUncertainMailboxId(
-                          activeRecentDecision.sourceCurrentMailboxId ?? null,
-                        );
-                        setIsRecentDecisionMovePickerOpen(false);
-                      }}
-                      className={`inline-flex h-9 items-center justify-center rounded-full border px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color,box-shadow,transform] duration-150 focus-visible:outline-none ${
-                        selectedRecentDecisionUncertainMailboxId ===
-                        (activeRecentDecision.sourceCurrentMailboxId ?? null)
-                          ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_8px_24px_rgba(118,170,112,0.08)]"
-                          : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[var(--workspace-text-soft)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface-strong)]"
-                      }`}
-                    >
-                      {`Keep in ${activeRecentDecisionCurrentMailboxLabel}`}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setIsRecentDecisionMovePickerOpen((current) => !current);
-                        if (
-                          selectedRecentDecisionUncertainMailboxId ===
-                          (activeRecentDecision.sourceCurrentMailboxId ?? null)
-                        ) {
-                          setSelectedRecentDecisionUncertainMailboxId(null);
-                        }
-                      }}
-                      className={`inline-flex h-9 items-center justify-center rounded-full border px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color,box-shadow,transform] duration-150 focus-visible:outline-none ${
-                        isRecentDecisionMovePickerOpen
-                          ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_8px_24px_rgba(118,170,112,0.08)]"
-                          : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[var(--workspace-text-soft)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface-strong)]"
-                      }`}
-                    >
-                      Move to...
-                    </button>
+                  <div className="text-[0.7rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                    Label decision
                   </div>
-
-                  {isRecentDecisionMovePickerOpen ? (
-                    <div className="flex flex-wrap gap-2">
-                      {uncertainDestinationOptions
-                        .filter(
-                          (option) =>
-                            option.id !== (activeRecentDecision.sourceCurrentMailboxId ?? null),
-                        )
-                        .map((option) => (
-                          <button
-                            key={`recent-edit-uncertain-${option.id}`}
-                            type="button"
-                            onClick={() => {
-                              setSelectedRecentDecisionUncertainMailboxId(option.id);
-                            }}
-                            className={`inline-flex h-9 items-center justify-center rounded-full border px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color,box-shadow,transform] duration-150 focus-visible:outline-none ${
-                              selectedRecentDecisionUncertainMailboxId === option.id
-                                ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_8px_24px_rgba(118,170,112,0.08)]"
-                                : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[var(--workspace-text-soft)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface-strong)]"
-                            }`}
-                          >
-                            {option.label}
-                          </button>
-                        ))}
-                    </div>
-                  ) : null}
+                  <div className="flex flex-wrap gap-2">
+                    {(["Primary", "Promo", "Update", "Spam"] as const).map((label) => (
+                      <button
+                        key={`recent-edit-uncertain-label-${label}`}
+                        type="button"
+                        onClick={() => setSelectedRecentDecisionUncertainLabel(label)}
+                        className={`inline-flex h-9 items-center justify-center rounded-full border px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color,box-shadow,transform] duration-150 focus-visible:outline-none ${
+                          selectedRecentDecisionUncertainLabel === label
+                            ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_8px_24px_rgba(118,170,112,0.08)]"
+                            : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[var(--workspace-text-soft)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface-strong)]"
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
                 </div>
               ) : activeRecentDecision?.sourceContext === "paste_sender_or_domain" ? (
                 <>
@@ -27095,22 +27029,25 @@ function ForYouView({
                         },
                       );
                     } else if (activeRecentDecision.sourceContext === "uncertain") {
-                      if (!selectedRecentDecisionUncertainMailboxId) {
+                      if (!selectedRecentDecisionUncertainLabel) {
                         return;
                       }
+
+                      const category = resolveCuevionCategoryFromUncertainLabel(
+                        selectedRecentDecisionUncertainLabel,
+                      );
 
                       onSaveLearningRule(
                         activeRecentDecision.ruleValue,
                         activeRecentDecision.ruleType,
-                        resolveCuevionCategoryFromMailboxId(
-                          selectedRecentDecisionUncertainMailboxId,
-                        ),
-                        resolveMailboxActionFromMailboxId(
-                          selectedRecentDecisionUncertainMailboxId,
-                        ),
+                        category,
+                        "keep",
                         {
                           sourceContext: "uncertain",
-                          sourceMailboxId: selectedRecentDecisionUncertainMailboxId,
+                          sourcePrioritySelection: resolveUncertainLabelPrioritySelection(
+                            selectedRecentDecisionUncertainLabel,
+                          ),
+                          sourceMailboxId: null,
                           sourceCurrentMailboxId:
                             activeRecentDecision.sourceCurrentMailboxId ?? null,
                         },
@@ -33524,7 +33461,6 @@ export function WorkspaceShell({
                   learningLaunchRequest={learningLaunchRequest}
                   onConsumeLearningLaunchRequest={() => setLearningLaunchRequest(null)}
                   aiSuggestionsEnabled={aiSuggestionsEnabled}
-                  connectedInboxCount={connectedInboxCount}
                 />
               </div>
 	            )}

@@ -10,6 +10,7 @@ import {
   type CuevionMessageCategory,
   type LearningDecisionPrioritySelection,
   type LearningDecisionSourceContext,
+  type SenderCategoryLearningEntry,
   type SenderCategoryLearningStore,
 } from "./learningEngine";
 
@@ -83,17 +84,28 @@ export type ForYouMailboxStore<TMessage extends ForYouDerivationMessage> = Recor
 
 export function formatForYouReason(
   message: Pick<ForYouDerivationMessage, "category">,
-  mailboxLabel: string,
+  categoryLabel: string,
 ) {
-  if (message.category === "Promo") {
-    return `Cuevion placed this in ${mailboxLabel}, but is not confident yet.`;
+  return `Cuevion thinks this is ${categoryLabel}, but is not confident yet.`;
+}
+
+function formatForYouCategoryLabel(category: CuevionMessageCategory) {
+  return category === "Updates" ? "Update" : category;
+}
+
+function formatForYouRecentLearningAction(
+  entry: SenderCategoryLearningEntry,
+  sourceContext: LearningDecisionSourceContext | null,
+) {
+  if (sourceContext === "uncertain") {
+    if (entry.sourcePrioritySelection === "Spam") {
+      return "future emails labeled Spam";
+    }
+
+    return `future emails labeled ${formatForYouCategoryLabel(entry.learnedCategory)}`;
   }
 
-  if (message.category === "Updates") {
-    return `Cuevion thinks this belongs in ${mailboxLabel}, but still needs confirmation.`;
-  }
-
-  return `Cuevion placed this in ${mailboxLabel}, but still needs confirmation.`;
+  return formatLearningRuleAction(entry);
 }
 
 export function isReviewUncertainEligible(message: ForYouDerivationMessage) {
@@ -213,26 +225,31 @@ export function buildRecentLearningDecisions(
   senderCategoryLearning: SenderCategoryLearningStore,
 ): ForYouRecentLearningDecision[] {
   return Object.entries(senderCategoryLearning)
-    .map(([learningKey, entry]) => ({
-      key: learningKey,
-      sender: formatLearningRuleLabel(learningKey),
-      action: formatLearningRuleAction(entry),
-      timestamp: formatLearningRuleTimestamp(entry.updatedAt),
-      ruleType: learningKey.startsWith("domain:") ? ("domain" as const) : ("sender" as const),
-      ruleValue: learningKey.startsWith("domain:")
-        ? learningKey.replace("domain:", "")
-        : learningKey,
-      learnedCategory: entry.learnedCategory,
-      mailboxAction: entry.mailboxAction ?? (entry.learnedCategory === "Primary" ? "keep" : "move"),
-      sourceContext: inferLearningDecisionSourceContext(
+    .map(([learningKey, entry]) => {
+      const ruleType = learningKey.startsWith("domain:") ? ("domain" as const) : ("sender" as const);
+      const sourceContext = inferLearningDecisionSourceContext(
         entry,
-        learningKey.startsWith("domain:") ? "domain" : "sender",
-      ),
-      sourcePrioritySelection: inferLearningDecisionPrioritySelection(entry),
-      sourceMailboxId: inferLearningDecisionMailboxId(entry),
-      sourceCurrentMailboxId: entry.sourceCurrentMailboxId ?? null,
-      updatedAt: entry.updatedAt,
-    }))
+        ruleType,
+      );
+
+      return {
+        key: learningKey,
+        sender: formatLearningRuleLabel(learningKey),
+        action: formatForYouRecentLearningAction(entry, sourceContext),
+        timestamp: formatLearningRuleTimestamp(entry.updatedAt),
+        ruleType,
+        ruleValue: learningKey.startsWith("domain:")
+          ? learningKey.replace("domain:", "")
+          : learningKey,
+        learnedCategory: entry.learnedCategory,
+        mailboxAction: entry.mailboxAction ?? (entry.learnedCategory === "Primary" ? "keep" : "move"),
+        sourceContext,
+        sourcePrioritySelection: inferLearningDecisionPrioritySelection(entry),
+        sourceMailboxId: inferLearningDecisionMailboxId(entry),
+        sourceCurrentMailboxId: entry.sourceCurrentMailboxId ?? null,
+        updatedAt: entry.updatedAt,
+      };
+    })
     .sort((firstDecision, secondDecision) => {
       const firstTime = firstDecision.updatedAt ? new Date(firstDecision.updatedAt).getTime() : 0;
       const secondTime = secondDecision.updatedAt
