@@ -33056,27 +33056,6 @@ export function WorkspaceShell({
             try {
               const result = await refreshMailboxById(mailboxId as InboxId);
 
-              // Build a compact debug line from the raw diagnostic captured inside
-              // refreshMailboxById. Ground-truth from the server, not derived state.
-              const diag = lastRefreshDiagnosticRef.current[mailboxId];
-              const diagLine = diag
-                ? [
-                    `ok=${diag.firstOk}`,
-                    diag.firstCode ? `code=${diag.firstCode}` : null,
-                    diag.firstStage ? `stage=${diag.firstStage}` : null,
-                    `raw=${diag.firstMessageCount}`,
-                    diag.firstFetchedCount != null ? `fetched=${diag.firstFetchedCount}` : null,
-                    `limit=${diag.requestedLimit}`,
-                    `retried=${diag.retried}`,
-                    diag.retried ? `retryOk=${diag.retryOk ?? "?"}` : null,
-                    diag.retried ? `retryRaw=${diag.retryMessageCount ?? "?"}` : null,
-                    `cache=${diag.cacheRestored}`,
-                    diag.mergedCount != null ? `merged=${diag.mergedCount}` : null,
-                  ]
-                    .filter(Boolean)
-                    .join(" ")
-                : null;
-
               if (result === "skipped") {
                 // skipped = syncingMailboxIdsRef already has this id (startup sync
                 // is currently fetching this exact mailbox, or a manual retry is
@@ -33099,7 +33078,7 @@ export function WorkspaceShell({
                     : `⚠ Partial refresh — quota limit (${count} cached)`;
                 setMobileMailboxRefreshStatus((prev) => ({
                   ...prev,
-                  [mailboxId]: diagLine ? `${statusLine}\nDebug: ${diagLine}` : statusLine,
+                  [mailboxId]: statusLine,
                 }));
               } else {
                 // "failed" — read from ref, not stale state closure, because
@@ -33112,9 +33091,7 @@ export function WorkspaceShell({
                   "Refresh failed — try again or reconnect this inbox in Settings.";
                 setMobileMailboxRefreshStatus((prev) => ({
                   ...prev,
-                  [mailboxId]: diagLine
-                    ? `✗ ${friendlyError}\nDebug: ${diagLine}`
-                    : `✗ ${friendlyError}`,
+                  [mailboxId]: `✗ ${friendlyError}`,
                 }));
               }
             } catch {
