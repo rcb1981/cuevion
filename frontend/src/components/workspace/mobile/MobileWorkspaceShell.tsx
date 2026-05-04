@@ -314,14 +314,28 @@ export function MobileWorkspaceShell({
           {view.kind === "mailbox" && activeMailbox ? (
             <button
               type="button"
-              aria-label="Sync inbox"
+              aria-label={isActiveMailboxSyncing ? "Syncing inbox" : "Sync inbox"}
               disabled={!activeMailbox.connected || isActiveMailboxSyncing || !onSyncMailbox}
               onClick={() => {
                 void onSyncMailbox?.(activeMailbox.id);
               }}
-              className="min-w-16 rounded-full border border-[color:rgba(232,211,174,0.28)] bg-[color:rgba(255,250,239,0.13)] px-3 py-1.5 text-[0.78rem] font-semibold text-[color:#fff8ec] disabled:cursor-not-allowed disabled:opacity-55"
+              className="flex h-10 w-12 items-center justify-center rounded-full border border-[color:rgba(232,211,174,0.28)] bg-[color:rgba(255,250,239,0.13)] text-[color:#fff8ec] disabled:cursor-not-allowed disabled:opacity-55"
             >
-              {isActiveMailboxSyncing ? "Syncing" : "Sync"}
+              <svg
+                aria-hidden="true"
+                viewBox="0 0 16 16"
+                className={`h-4 w-4 ${isActiveMailboxSyncing ? "animate-spin [animation-direction:reverse]" : ""}`}
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.7"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d="M13 5.5A5 5 0 0 0 4.5 3L3 4.5" />
+                <path d="M3.5 2.5v2h2" />
+                <path d="M3 10.5A5 5 0 0 0 11.5 13L13 11.5" />
+                <path d="M12.5 13.5v-2h-2" />
+              </svg>
             </button>
           ) : (
             <div className="w-12" />
