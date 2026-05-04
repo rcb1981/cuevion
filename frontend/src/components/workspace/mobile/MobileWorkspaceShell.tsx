@@ -30,6 +30,7 @@ export type MobileWorkspaceMailbox = {
 };
 
 type MobileTab = "priority" | "inboxes" | "settings";
+type MobileMessageComposeMode = "reply" | "reply_all" | "forward";
 type MobileView =
   | { kind: "root" }
   | { kind: "mailbox"; mailboxId: string }
@@ -57,8 +58,14 @@ type MobileWorkspaceShellProps = {
   /** Optional manual refresh callback for a mailbox. Opening a mailbox itself
    *  stays snapshot-first on mobile so navigation is stable when refresh fails. */
   onSyncMailbox?: (mailboxId: string) => void | Promise<void>;
-  /** Called when the user taps Reply on a message. Host opens compose state. */
-  onReplyMessage?: (mailboxId: string, messageId: string) => void;
+  /** Called when the user taps Compose for a mailbox. Host opens compose state. */
+  onComposeMailbox?: (mailboxId: string) => void;
+  /** Called when the user taps a message compose action. Host opens compose state. */
+  onComposeMessage?: (
+    mailboxId: string,
+    messageId: string,
+    mode: MobileMessageComposeMode,
+  ) => void;
   /** Current compose state to show the mobile compose overlay. Null when closed. */
   mobileCompose?: MobileComposeState | null;
   /** Called with the user's plain-text reply when they tap Send. */
@@ -66,7 +73,7 @@ type MobileWorkspaceShellProps = {
   /** Called when the user dismisses the compose overlay. */
   onMobileComposeClose?: () => void;
   /** Navigation context to restore on mount after returning from a mobile compose
-   *  flow. WorkspaceShell sets this when onReplyMessage fires so the user lands
+   *  flow. WorkspaceShell sets this when a compose action fires so the user lands
    *  back in the same inbox/message view instead of Priority after closing compose.
    *  Only consumed once via the useState initialiser — no useEffect needed. */
   mobileNavRestoreContext?: {
@@ -216,7 +223,8 @@ export function MobileWorkspaceShell({
   priorityMessages,
   onLogoutClick,
   onSyncMailbox,
-  onReplyMessage,
+  onComposeMailbox,
+  onComposeMessage,
   mobileCompose,
   onMobileComposeSend,
   onMobileComposeClose,
@@ -264,6 +272,11 @@ export function MobileWorkspaceShell({
     view.kind === "mailbox"
       ? mailboxes.find((mailbox) => mailbox.id === view.mailboxId) ?? null
       : null;
+  const mobileComposeMailbox =
+    activeMailbox ??
+    (activeTab === "inboxes"
+      ? connectedFirstMailboxes.find((mailbox) => mailbox.connected) ?? null
+      : null);
   const isActiveMailboxSyncing =
     activeMailbox !== null && syncingMailboxId === activeMailbox.id;
 
@@ -311,32 +324,57 @@ export function MobileWorkspaceShell({
           <div className="min-w-0 flex-1 text-center text-[1rem] font-semibold tracking-normal text-[color:#fff8ec]">
             {headerTitle}
           </div>
-          {view.kind === "mailbox" && activeMailbox ? (
-            <button
-              type="button"
-              aria-label={isActiveMailboxSyncing ? "Syncing inbox" : "Sync inbox"}
-              disabled={!activeMailbox.connected || isActiveMailboxSyncing || !onSyncMailbox}
-              onClick={() => {
-                void onSyncMailbox?.(activeMailbox.id);
-              }}
-              className="flex h-10 w-12 items-center justify-center rounded-full border border-[color:rgba(232,211,174,0.28)] bg-[color:rgba(255,250,239,0.13)] text-[color:#fff8ec] disabled:cursor-not-allowed disabled:opacity-55"
-            >
-              <svg
-                aria-hidden="true"
-                viewBox="0 0 16 16"
-                className={`h-4 w-4 ${isActiveMailboxSyncing ? "animate-spin [animation-direction:reverse]" : ""}`}
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.7"
-                strokeLinecap="round"
-                strokeLinejoin="round"
+          {mobileComposeMailbox ? (
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                aria-label="Compose email"
+                disabled={!mobileComposeMailbox.connected || !onComposeMailbox}
+                onClick={() => onComposeMailbox?.(mobileComposeMailbox.id)}
+                className="flex h-10 w-10 items-center justify-center rounded-full border border-[color:rgba(232,211,174,0.28)] bg-[color:rgba(255,250,239,0.13)] text-[color:#fff8ec] disabled:cursor-not-allowed disabled:opacity-55"
               >
-                <path d="M13 5.5A5 5 0 0 0 4.5 3L3 4.5" />
-                <path d="M3.5 2.5v2h2" />
-                <path d="M3 10.5A5 5 0 0 0 11.5 13L13 11.5" />
-                <path d="M12.5 13.5v-2h-2" />
-              </svg>
-            </button>
+                <svg
+                  aria-hidden="true"
+                  viewBox="0 0 16 16"
+                  className="h-4 w-4"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.6"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <path d="M8 3v10" />
+                  <path d="M3 8h10" />
+                </svg>
+              </button>
+              {view.kind === "mailbox" && activeMailbox ? (
+                <button
+                  type="button"
+                  aria-label={isActiveMailboxSyncing ? "Syncing inbox" : "Sync inbox"}
+                  disabled={!activeMailbox.connected || isActiveMailboxSyncing || !onSyncMailbox}
+                  onClick={() => {
+                    void onSyncMailbox?.(activeMailbox.id);
+                  }}
+                  className="flex h-10 w-10 items-center justify-center rounded-full border border-[color:rgba(232,211,174,0.28)] bg-[color:rgba(255,250,239,0.13)] text-[color:#fff8ec] disabled:cursor-not-allowed disabled:opacity-55"
+                >
+                  <svg
+                    aria-hidden="true"
+                    viewBox="0 0 16 16"
+                    className={`h-4 w-4 ${isActiveMailboxSyncing ? "animate-spin [animation-direction:reverse]" : ""}`}
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.7"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <path d="M13 5.5A5 5 0 0 0 4.5 3L3 4.5" />
+                    <path d="M3.5 2.5v2h2" />
+                    <path d="M3 10.5A5 5 0 0 0 11.5 13L13 11.5" />
+                    <path d="M12.5 13.5v-2h-2" />
+                  </svg>
+                </button>
+              ) : null}
+            </div>
           ) : (
             <div className="w-12" />
           )}
@@ -373,14 +411,74 @@ export function MobileWorkspaceShell({
                 <p key={`${view.message.id}-body-${index}`}>{line}</p>
               ))}
             </div>
-            {onReplyMessage ? (
-              <div className="border-t border-[color:rgba(86,69,46,0.1)] pt-4 dark:border-[color:rgba(232,211,174,0.1)]">
+            {onComposeMessage ? (
+              <div className="flex items-center gap-2 border-t border-[color:rgba(86,69,46,0.1)] pt-4 dark:border-[color:rgba(232,211,174,0.1)]">
                 <button
                   type="button"
-                  onClick={() => onReplyMessage(view.message.mailboxId, view.message.id)}
-                  className="rounded-[14px] border border-[color:rgba(47,96,73,0.3)] bg-[linear-gradient(180deg,#3f7659_0%,#2f6049_100%)] px-5 py-2.5 text-[0.88rem] font-semibold text-[color:#fff8ec] shadow-[0_8px_20px_rgba(47,96,73,0.22)] active:opacity-80"
+                  aria-label="Reply"
+                  onClick={() =>
+                    onComposeMessage(view.message.mailboxId, view.message.id, "reply")
+                  }
+                  className="flex h-11 w-11 items-center justify-center rounded-full border border-[color:rgba(47,96,73,0.3)] bg-[linear-gradient(180deg,#3f7659_0%,#2f6049_100%)] text-[color:#fff8ec] shadow-[0_8px_20px_rgba(47,96,73,0.22)] active:opacity-80"
                 >
-                  Reply
+                  <svg
+                    aria-hidden="true"
+                    viewBox="0 0 16 16"
+                    className="h-4 w-4"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.6"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <path d="M6 4 2.5 8 6 12" />
+                    <path d="M3 8h7c2.3 0 4 1.2 4 3.5" />
+                  </svg>
+                </button>
+                <button
+                  type="button"
+                  aria-label="Reply all"
+                  onClick={() =>
+                    onComposeMessage(view.message.mailboxId, view.message.id, "reply_all")
+                  }
+                  className="flex h-11 w-11 items-center justify-center rounded-full border border-[color:rgba(47,96,73,0.3)] bg-[linear-gradient(180deg,#3f7659_0%,#2f6049_100%)] text-[color:#fff8ec] shadow-[0_8px_20px_rgba(47,96,73,0.22)] active:opacity-80"
+                >
+                  <svg
+                    aria-hidden="true"
+                    viewBox="0 0 16 16"
+                    className="h-4 w-4"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.75"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <path d="M5.75 4 2.5 8l3.25 4" />
+                    <path d="M10.75 4 7.5 8l3.25 4" />
+                    <path d="M3 8h7c2.1 0 3.75 1.1 3.75 3.3" />
+                  </svg>
+                </button>
+                <button
+                  type="button"
+                  aria-label="Forward"
+                  onClick={() =>
+                    onComposeMessage(view.message.mailboxId, view.message.id, "forward")
+                  }
+                  className="flex h-11 w-11 items-center justify-center rounded-full border border-[color:rgba(47,96,73,0.3)] bg-[linear-gradient(180deg,#3f7659_0%,#2f6049_100%)] text-[color:#fff8ec] shadow-[0_8px_20px_rgba(47,96,73,0.22)] active:opacity-80"
+                >
+                  <svg
+                    aria-hidden="true"
+                    viewBox="0 0 16 16"
+                    className="h-4 w-4"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.6"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <path d="M10 4 13.5 8 10 12" />
+                    <path d="M13 8H6.5C4.2 8 2.5 9.2 2.5 11.5" />
+                  </svg>
                 </button>
               </div>
             ) : null}
