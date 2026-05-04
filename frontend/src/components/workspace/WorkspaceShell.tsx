@@ -27882,14 +27882,14 @@ export function WorkspaceShell({
     Partial<Record<InboxId, string>>
   >({});
   // Ref that always reflects the latest mailboxSyncErrors without stale-closure issues.
-  // Used by the onOpenMailbox async callback which runs after an await and cannot
+  // Used by the mobile onSyncMailbox async callback which runs after an await and cannot
   // rely on the React state snapshot captured at render time.
   const mailboxSyncErrorsRef = useRef<Partial<Record<InboxId, string>>>({});
   useEffect(() => {
     mailboxSyncErrorsRef.current = mailboxSyncErrors;
   }, [mailboxSyncErrors]);
-  // Per-mailbox refresh status for mobile diagnostic display. Set in onOpenMailbox callback
-  // so the user can see exactly what happened when tapping a mailbox (requested, skipped,
+  // Per-mailbox refresh status for mobile diagnostic display. Set in onSyncMailbox callback
+  // so the user can see exactly what happened when syncing a mailbox (requested, skipped,
   // queued, succeeded, failed). Keyed by mailboxId string.
   const [mobileMailboxRefreshStatus, setMobileMailboxRefreshStatus] = useState<
     Partial<Record<string, string>>
@@ -27897,7 +27897,7 @@ export function WorkspaceShell({
   // IDs queued for retry after startup sync completes (set when tap fires during startup).
   const pendingMobileRefreshIdsRef = useRef<Set<string>>(new Set());
   // Stores the last raw diagnostic for each mailbox refresh, keyed by mailboxId.
-  // Written by refreshMailboxById immediately before it returns. Read by onOpenMailbox
+  // Written by refreshMailboxById immediately before it returns. Read by onSyncMailbox
   // after awaiting refreshMailboxById to build the mobile debug status line.
   type MailboxRefreshDiagnostic = {
     email: string;
@@ -27926,9 +27926,9 @@ export function WorkspaceShell({
     const nextMessage = message?.trim() || fallbackMessage;
 
     // Also update the ref immediately (synchronous), not only via the useEffect
-    // that fires after React renders. onOpenMailbox reads the ref right after
+    // that fires after React renders. onSyncMailbox reads the ref right after
     // `await refreshMailboxById` returns — before any render — so without this
-    // the ref is stale and onOpenMailbox falls through to the generic fallback
+    // the ref is stale and onSyncMailbox falls through to the generic fallback
     // message instead of the quota-specific one set here.
     if (!(options?.preserveExisting && mailboxSyncErrorsRef.current[mailboxId])) {
       mailboxSyncErrorsRef.current = {
@@ -30831,7 +30831,7 @@ export function WorkspaceShell({
           fetchedCount: response.error?.fetched_count,
           restoredSnapshotCount,
         });
-        // Write diagnostic so onOpenMailbox can surface it on mobile.
+        // Write diagnostic so onSyncMailbox can surface it on mobile.
         lastRefreshDiagnosticRef.current[mailboxId] = {
           email: managedMailbox.email.trim(),
           host: managedMailbox.customImap.host.trim(),
@@ -30913,7 +30913,7 @@ export function WorkspaceShell({
       } else {
         clearMailboxSyncError(mailboxId);
       }
-      // Write diagnostic so onOpenMailbox can surface it on mobile.
+      // Write diagnostic so onSyncMailbox can surface it on mobile.
       lastRefreshDiagnosticRef.current[mailboxId] = {
         email: managedMailbox.email.trim(),
         host: managedMailbox.customImap.host.trim(),
@@ -33024,10 +33024,11 @@ export function WorkspaceShell({
           accountEmail={activeWorkspaceEmail}
           connectedInboxCount={connectedInboxCount}
           syncFeedbackMessage={mailboxSyncFeedbackMessage}
+          syncingMailboxId={syncingMailboxId}
           mailboxes={mobileMailboxes}
           priorityMessages={mobilePriorityMessages}
           onLogoutClick={() => setIsLogoutConfirmationOpen(true)}
-          onOpenMailbox={async (mailboxId) => {
+          onSyncMailbox={async (mailboxId) => {
             // Mark as requested immediately so the UI shows feedback before the
             // async fetch resolves (the request can take several seconds).
             setMobileMailboxRefreshStatus((prev) => ({

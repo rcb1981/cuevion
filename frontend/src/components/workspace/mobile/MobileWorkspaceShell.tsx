@@ -22,8 +22,8 @@ export type MobileWorkspaceMailbox = {
   detail: string;
   connected: boolean;
   syncError?: string | null;
-  /** Transient refresh diagnostic set by the onOpenMailbox callback in WorkspaceShell.
-   *  Shows the result of the last per-mailbox refresh triggered by tapping this row. */
+  /** Transient refresh diagnostic set by the onSyncMailbox callback in WorkspaceShell.
+   *  Shows the result of the last explicit per-mailbox refresh. */
   refreshStatus?: string | null;
   cachedMessageCount?: number;
   messages: MobileWorkspaceMessage[];
@@ -50,12 +50,13 @@ type MobileWorkspaceShellProps = {
   accountEmail: string;
   connectedInboxCount: number;
   syncFeedbackMessage?: string | null;
+  syncingMailboxId?: string | null;
   mailboxes: MobileWorkspaceMailbox[];
   priorityMessages: MobileWorkspaceMessage[];
   onLogoutClick: () => void;
   /** Optional manual refresh callback for a mailbox. Opening a mailbox itself
    *  stays snapshot-first on mobile so navigation is stable when refresh fails. */
-  onOpenMailbox?: (mailboxId: string) => void;
+  onSyncMailbox?: (mailboxId: string) => void | Promise<void>;
   /** Called when the user taps Reply on a message. Host opens compose state. */
   onReplyMessage?: (mailboxId: string, messageId: string) => void;
   /** Current compose state to show the mobile compose overlay. Null when closed. */
@@ -210,9 +211,11 @@ export function MobileWorkspaceShell({
   accountEmail,
   connectedInboxCount,
   syncFeedbackMessage,
+  syncingMailboxId,
   mailboxes,
   priorityMessages,
   onLogoutClick,
+  onSyncMailbox,
   onReplyMessage,
   mobileCompose,
   onMobileComposeSend,
@@ -261,6 +264,8 @@ export function MobileWorkspaceShell({
     view.kind === "mailbox"
       ? mailboxes.find((mailbox) => mailbox.id === view.mailboxId) ?? null
       : null;
+  const isActiveMailboxSyncing =
+    activeMailbox !== null && syncingMailboxId === activeMailbox.id;
 
   const openTab = (tab: MobileTab) => {
     setActiveTab(tab);
@@ -306,7 +311,21 @@ export function MobileWorkspaceShell({
           <div className="min-w-0 flex-1 text-center text-[1rem] font-semibold tracking-normal text-[color:#fff8ec]">
             {headerTitle}
           </div>
-          <div className="w-12" />
+          {view.kind === "mailbox" && activeMailbox ? (
+            <button
+              type="button"
+              aria-label="Sync inbox"
+              disabled={!activeMailbox.connected || isActiveMailboxSyncing || !onSyncMailbox}
+              onClick={() => {
+                void onSyncMailbox?.(activeMailbox.id);
+              }}
+              className="min-w-16 rounded-full border border-[color:rgba(232,211,174,0.28)] bg-[color:rgba(255,250,239,0.13)] px-3 py-1.5 text-[0.78rem] font-semibold text-[color:#fff8ec] disabled:cursor-not-allowed disabled:opacity-55"
+            >
+              {isActiveMailboxSyncing ? "Syncing" : "Sync"}
+            </button>
+          ) : (
+            <div className="w-12" />
+          )}
         </div>
         {syncFeedbackMessage ? (
           <div className="mt-2 truncate rounded-full border border-[color:rgba(232,211,174,0.24)] bg-[color:rgba(255,250,239,0.12)] px-3 py-1.5 text-center text-[0.72rem] font-medium text-[color:rgba(255,248,236,0.88)]">
