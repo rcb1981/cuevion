@@ -25973,12 +25973,6 @@ function ForYouView({
     setActiveLearningSessionSuggestions([]);
     setActiveLearningModal(null);
   };
-  const openReviewUncertainModal = () => {
-    setActiveUncertainEmailIndex(0);
-    setSelectedUncertainLabel(null);
-    setReviewUncertainCompletionFeedback("idle");
-    setActiveLearningModal("review-uncertain");
-  };
   const openRefineCuevionModal = () => {
     setActiveLearningSuggestionIndex(0);
     setActiveLearningSessionSuggestions(pendingLearningSuggestions.slice(0, learningBatchSize));
@@ -25998,18 +25992,11 @@ function ForYouView({
       handler: () => setActiveLearningModal("paste-rule"),
     },
     {
-      title: "Check uncertain labels",
-      subtitle: "Review messages Cuevion is still learning how to label.",
-      handler: openReviewUncertainModal,
-    },
-    {
       title: "Recent learning decisions",
       subtitle: "Review recent decisions Cuevion has learned from.",
       handler: () => setActiveLearningModal("recent-decisions"),
     },
-  ].filter((action) =>
-    action.title !== "Check uncertain labels" || uncertainEmailPool.length > 0,
-  );
+  ];
   const learningBatchSize = 10;
   const pendingLearningSuggestions = learningSuggestionPool.filter(
     (suggestion) => !reviewedLearningSuggestionKeys.includes(suggestion.key),
@@ -26234,7 +26221,6 @@ function ForYouView({
     }
 
     if (learningLaunchRequest.modal === "review-uncertain") {
-      openReviewUncertainModal();
       onConsumeLearningLaunchRequest();
       return;
     }
