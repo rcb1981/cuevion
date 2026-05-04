@@ -33011,7 +33011,7 @@ export function WorkspaceShell({
     return (
       <>
         <MobileWorkspaceShell
-          themeMode={resolvedTheme}
+          themeMode="dark"
           accountName={activeWorkspaceUserName}
           accountEmail={activeWorkspaceEmail}
           connectedInboxCount={connectedInboxCount}
