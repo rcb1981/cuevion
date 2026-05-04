@@ -26266,7 +26266,7 @@ function ForYouView({
           </h1>
         </div>
         <p className="max-w-[34rem] text-lg leading-8 text-[var(--workspace-text-muted)]">
-          Shape how Cuevion thinks across your inboxes
+          Shape how Cuevion learns from your email
         </p>
       </header>
 
