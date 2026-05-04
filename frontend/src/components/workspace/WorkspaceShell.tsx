@@ -29214,27 +29214,6 @@ export function WorkspaceShell({
         );
       }
     }
-    // [INFO-FRONTEND-DIAG] mobileMailboxes computation — scoped to info@hysteriarecs.com
-    if (mailbox.email.toLowerCase().includes("info@hysteriarecs.com")) {
-      console.info("[INFO-FRONTEND-DIAG] mobileMailboxes", {
-        mailboxId: mailbox.id,
-        email: mailbox.email,
-        rawStoreInboxCount: mailboxCollections.Inbox.length,
-        postSpamCount: spamFilteredInbox.length,
-        visibleAfterFilter: inboxMessages.length,
-        syncError: normalizeMobileSyncError(mailboxSyncErrors[mailbox.id]) ?? null,
-        refreshStatus: mobileMailboxRefreshStatus[mailbox.id] ?? null,
-        isPromoContext: isPromoMailboxContext(mailbox),
-        // Sample the first 3 raw messages' signals so we can see if filtering is the cause
-        rawSample: mailboxCollections.Inbox.slice(0, 3).map((msg) => ({
-          id: msg.id,
-          ui_signal: msg.ui_signal ?? null,
-          final_visibility: msg.final_visibility ?? null,
-          action: (msg as { action?: string }).action ?? null,
-          internalClassification: msg.internalClassification ?? null,
-        })),
-      });
-    }
     return {
       id: mailbox.id,
       title: mailbox.title,
@@ -30672,23 +30651,6 @@ export function WorkspaceShell({
   ) => {
     const targetMailbox = orderedMailboxes.find((entry) => entry.id === mailboxId);
 
-    // [INFO-FRONTEND-DIAG] applyLiveInboxMessagesToMailboxStore — scoped to info@hysteriarecs.com
-    if (
-      targetMailbox?.email?.toLowerCase().includes("info@hysteriarecs.com") ||
-      orderedMailboxes.some(
-        (mb) => mb.id === mailboxId && mb.email.toLowerCase().includes("info@hysteriarecs.com"),
-      )
-    ) {
-      console.info("[INFO-FRONTEND-DIAG] applyLiveInboxMessagesToMailboxStore", {
-        mailboxId,
-        targetMailboxFound: Boolean(targetMailbox),
-        targetMailboxEmail: targetMailbox?.email ?? null,
-        incomingMessageCount: messages.length,
-        evictImapUidsSize: evictImapUids?.size ?? 0,
-        orderedMailboxCount: orderedMailboxes.length,
-      });
-    }
-
     if (!targetMailbox) {
       return;
     }
@@ -30962,24 +30924,6 @@ export function WorkspaceShell({
         response.uidValidity,
         storedUidValidity,
       );
-      // [INFO-FRONTEND-DIAG] refreshMailboxById success branch — scoped to info@hysteriarecs.com
-      if (managedMailbox.email.trim().toLowerCase().includes("info@hysteriarecs.com")) {
-        console.info("[INFO-FRONTEND-DIAG] refreshMailboxById success branch", {
-          mailboxId,
-          email: managedMailbox.email.trim(),
-          freshMessageCount: messages.length,
-          persistedSnapshotMessageCount: persistedSnapshotMessages.length,
-          currentInboxMessageCount: currentInboxMessages.length,
-          mergedMessageCount: mergedMessages.length,
-          hasUidValidity: Boolean(response.uidValidity),
-          hasInboxUidSet: response.inboxUidSet != null,
-          inboxUidSetLength: response.inboxUidSet?.length ?? null,
-          storedUidValidity,
-          incomingUidValidity: response.uidValidity ?? null,
-          warningCode: response.warning?.code ?? null,
-          startupFlag: Boolean(options?.startup),
-        });
-      }
       const mergeStartedAt = performance.now();
       saveLiveInboxSnapshot({
         inboxId: managedMailbox.id,
@@ -33164,32 +33108,6 @@ export function WorkspaceShell({
 
             try {
               const result = await refreshMailboxById(mailboxId as InboxId);
-
-              // [INFO-FRONTEND-DIAG] onOpenMailbox after await — scoped to info@hysteriarecs.com
-              {
-                const _infoMailbox = orderedMailboxes.find(
-                  (mb) => mb.id === (mailboxId as string) &&
-                    mb.email.toLowerCase().includes("info@hysteriarecs.com"),
-                );
-                if (_infoMailbox) {
-                  const _staleStoreCount =
-                    (mailboxStore[mailboxId as InboxId] ?? { Inbox: [] }).Inbox.length;
-                  const _latestErrorFromRef =
-                    mailboxSyncErrorsRef.current[mailboxId as InboxId] ?? null;
-                  const _diag = lastRefreshDiagnosticRef.current[mailboxId];
-                  console.info("[INFO-FRONTEND-DIAG] onOpenMailbox after await", {
-                    mailboxId,
-                    email: _infoMailbox.email,
-                    result,
-                    staleMailboxStoreInboxCount: _staleStoreCount,
-                    latestErrorFromRef: _latestErrorFromRef,
-                    diagMergedCount: _diag?.mergedCount ?? null,
-                    diagCacheRestored: _diag?.cacheRestored ?? null,
-                    diagRetried: _diag?.retried ?? null,
-                    diagRetryOk: _diag?.retryOk ?? null,
-                  });
-                }
-              }
 
               // Build a compact debug line from the raw diagnostic captured inside
               // refreshMailboxById. Ground-truth from the server, not derived state.

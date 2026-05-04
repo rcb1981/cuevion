@@ -25,11 +25,6 @@ QUOTA_REFRESH_KEEP_COPY = "Mailbox quota exceeded during refresh — existing me
 QUOTA_PARTIAL_COPY = "Some older messages could not be refreshed."
 
 
-def _is_info_diag_email(email_address: str) -> bool:
-    """Return True for the info@hysteriarecs.com inbox diagnostic scope."""
-    return "info@hysteriarecs.com" in email_address.lower()
-
-
 def map_to_ui_signal(result: dict[str, Any]) -> str:
     category = result.get("category")
 
@@ -1076,14 +1071,6 @@ def build_connect_preview_response(payload: dict[str, Any]) -> tuple[int, dict[s
         ssl_enabled = True
         username = email_address
 
-    # [INFO-IMAP-DIAG] start — scoped to info@hysteriarecs.com
-    _diag = _is_info_diag_email(email_address)
-    if _diag:
-        logger.warning(
-            "[INFO-IMAP-DIAG] build_connect_preview_response start email=%s host=%s port=%s ssl=%s username=%s provider=%s folder=%s limit=%s has_password=%s",
-            email_address, host, port, ssl_enabled, username, provider, folder, limit, bool(password),
-        )
-
     if not email_address or not password:
         return 400, {
             "ok": False,
@@ -1133,8 +1120,6 @@ def build_connect_preview_response(payload: dict[str, Any]) -> tuple[int, dict[s
                 else build_imap_issue("connection_failed", "connect", "Could not connect to inbox.", 0),
             }
         connect_duration_ms = (time.perf_counter() - connect_start) * 1000
-        if _diag:
-            logger.warning("[INFO-IMAP-DIAG] phase=connect OK connect_ms=%.1f", connect_duration_ms)
 
         login_start = time.perf_counter()
         try:
@@ -1157,28 +1142,13 @@ def build_connect_preview_response(payload: dict[str, Any]) -> tuple[int, dict[s
                 else build_imap_issue("invalid_credentials", "login", str(exc), 0),
             }
         login_duration_ms = (time.perf_counter() - login_start) * 1000
-        if _diag:
-            logger.warning("[INFO-IMAP-DIAG] phase=login OK login_ms=%.1f", login_duration_ms)
 
         fetch_start = time.perf_counter()
-        if _diag:
-            logger.warning("[INFO-IMAP-DIAG] phase=fetch start folder=%s limit=%s", folder, limit)
         fetch_result = fetch_recent_messages(mailbox, folder=folder, limit=limit)
         messages = fetch_result["messages"]
         fetch_warnings = fetch_result["warnings"]
         fetch_error = fetch_result.get("error")
         fetch_duration_ms = (time.perf_counter() - fetch_start) * 1000
-        if _diag:
-            logger.warning(
-                "[INFO-IMAP-DIAG] phase=fetch done fetch_ms=%.1f message_count=%s warning_count=%s has_error=%s error_code=%s error_stage=%s error_message=%s",
-                fetch_duration_ms,
-                len(messages),
-                len(fetch_warnings),
-                bool(fetch_error),
-                (fetch_error or {}).get("code"),
-                (fetch_error or {}).get("stage"),
-                ((fetch_error or {}).get("message") or "")[:200],
-            )
         if fetch_error:
             logger.warning(
                 "IMAP preview request failed stage=%s code=%s fetched_count=%s email=%s folder=%s limit=%s connect_ms=%.1f login_ms=%.1f fetch_ms=%.1f total_ms=%.1f",
@@ -1206,19 +1176,6 @@ def build_connect_preview_response(payload: dict[str, Any]) -> tuple[int, dict[s
         )
         previews = []
         for index, (message, unread, imap_uid) in enumerate(messages):
-            # [INFO-IMAP-DIAG] per-message trace — scoped to info@hysteriarecs.com
-            if _diag:
-                try:
-                    _msg_subject = decode_mime_words(message.get("Subject", ""))[:120]
-                    _msg_from = decode_mime_words(message.get("From", ""))[:120]
-                    _msg_date = str(message.get("Date", ""))[:60]
-                    _msg_size = len(message.as_bytes()) if hasattr(message, "as_bytes") else -1
-                except Exception:
-                    _msg_subject, _msg_from, _msg_date, _msg_size = "(err)", "(err)", "(err)", -1
-                logger.warning(
-                    "[INFO-IMAP-DIAG] phase=serialize idx=%s uid=%s size_bytes=%s subject=%s from=%s date=%s",
-                    index, imap_uid, _msg_size, _msg_subject, _msg_from, _msg_date,
-                )
             try:
                 previews.append(
                     to_message_preview(
@@ -1240,18 +1197,6 @@ def build_connect_preview_response(payload: dict[str, Any]) -> tuple[int, dict[s
                     preview_build_duration_ms,
                     str(exc),
                 )
-                # [INFO-IMAP-DIAG] serialization failure detail — scoped to info@hysteriarecs.com
-                if _diag:
-                    import traceback as _tb
-                    logger.warning(
-                        "[INFO-IMAP-DIAG] phase=serialize FAILED idx=%s uid=%s built_so_far=%s exc_type=%s exc_message=%s traceback=%s",
-                        index,
-                        imap_uid,
-                        len(previews),
-                        type(exc).__name__,
-                        str(exc)[:300],
-                        _tb.format_exc()[:800],
-                    )
                 return 400, {
                     "ok": False,
                     "error": build_imap_issue(
@@ -1268,11 +1213,6 @@ def build_connect_preview_response(payload: dict[str, Any]) -> tuple[int, dict[s
             len(previews),
             preview_build_duration_ms,
         )
-        if _diag:
-            logger.warning(
-                "[INFO-IMAP-DIAG] phase=serialize OK fetched=%s serialized=%s serialization_ms=%.1f",
-                len(messages), len(previews), preview_build_duration_ms,
-            )
         logger.warning(
             "IMAP preview request complete email=%s folder=%s limit=%s connect_ms=%.1f login_ms=%.1f fetch_ms=%.1f preview_build_ms=%.1f total_ms=%.1f messages=%s",
             email_address,
@@ -1328,23 +1268,10 @@ def build_connect_preview_response(payload: dict[str, Any]) -> tuple[int, dict[s
             response_body["inboxUidSet"] = inbox_uid_set
         if uid_validity is not None:
             response_body["uidValidity"] = uid_validity
-        if _diag:
-            logger.warning(
-                "[INFO-IMAP-DIAG] phase=response_ok email=%s message_count=%s has_warnings=%s total_ms=%.1f",
-                email_address,
-                len(previews),
-                bool(fetch_warnings),
-                (time.perf_counter() - request_start) * 1000,
-            )
         return 200, response_body
     except imaplib.IMAP4.error as exc:
         code = "quota_exceeded" if is_quota_error(exc) else "invalid_credentials"
         message = QUOTA_REFRESH_KEEP_COPY if is_quota_error(exc) else str(exc)
-        if _diag:
-            logger.warning(
-                "[INFO-IMAP-DIAG] outer IMAP4.error email=%s is_quota=%s code=%s message=%s",
-                email_address, is_quota_error(exc), code, str(exc)[:300],
-            )
         logger.exception(
             "IMAP connection failed with IMAP4 error",
             extra={
@@ -1365,12 +1292,6 @@ def build_connect_preview_response(payload: dict[str, Any]) -> tuple[int, dict[s
             },
         }
     except Exception as exc:
-        if _diag:
-            import traceback as _tb
-            logger.warning(
-                "[INFO-IMAP-DIAG] outer Exception email=%s exc_type=%s exc_message=%s traceback=%s",
-                email_address, type(exc).__name__, str(exc)[:300], _tb.format_exc()[:800],
-            )
         logger.exception(
             "IMAP connection failed with unexpected error",
             extra={

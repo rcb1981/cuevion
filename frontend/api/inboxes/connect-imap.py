@@ -1,10 +1,7 @@
 import json
-import logging
 import sys
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
-
-_diag_logger = logging.getLogger("info_imap_diag")
 
 CURRENT_DIR = Path(__file__).resolve().parent
 API_DIR = CURRENT_DIR.parent
@@ -72,41 +69,10 @@ class handler(BaseHTTPRequestHandler):
         payload["internalRole"] = internal_role
         payload["focusPreferences"] = focus_preferences
 
-        # [INFO-IMAP-DIAG] Route entry — scoped to info@hysteriarecs.com
-        _diag_email = str(payload.get("email") or "").strip().lower()
-        _is_info_diag = "info@hysteriarecs.com" in _diag_email
-        if _is_info_diag:
-            _diag_logger.warning(
-                "[INFO-IMAP-DIAG] connect-imap handler entry email=%s mailboxId=%s provider=%s host=%s port=%s limit=%s",
-                _diag_email,
-                mailbox_id,
-                payload.get("provider"),
-                payload.get("host"),
-                payload.get("port"),
-                payload.get("limit"),
-            )
-
         try:
             from imap_connect_preview import build_connect_preview_response
 
             status_code, response_payload = build_connect_preview_response(payload)
-
-            # [INFO-IMAP-DIAG] Route exit — scoped to info@hysteriarecs.com
-            if _is_info_diag:
-                _err = response_payload.get("error") or {}
-                _warn = response_payload.get("warning") or {}
-                _diag_logger.warning(
-                    "[INFO-IMAP-DIAG] connect-imap handler exit email=%s status=%s ok=%s message_count=%s error_code=%s error_stage=%s error_message=%s warning_code=%s",
-                    _diag_email,
-                    status_code,
-                    response_payload.get("ok"),
-                    len(response_payload.get("messages") or []),
-                    _err.get("code"),
-                    _err.get("stage"),
-                    (_err.get("message") or "")[:200],
-                    _warn.get("code"),
-                )
-
             if (
                 status_code < 400
                 and response_payload.get("ok") is True
@@ -120,15 +86,7 @@ class handler(BaseHTTPRequestHandler):
                     imap_password=provided_password,
                 )
             self._send_json(status_code, response_payload)
-        except Exception as exc:
-            # [INFO-IMAP-DIAG] Outer exception — scoped to info@hysteriarecs.com
-            if _is_info_diag:
-                _diag_logger.warning(
-                    "[INFO-IMAP-DIAG] connect-imap outer exception email=%s type=%s message=%s",
-                    _diag_email,
-                    type(exc).__name__,
-                    str(exc)[:300],
-                )
+        except Exception:
             self._send_json(
                 500,
                 {
