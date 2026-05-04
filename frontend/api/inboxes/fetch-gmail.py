@@ -191,6 +191,22 @@ class handler(BaseHTTPRequestHandler):
             access_token,
             f"/messages?{urlencode({'labelIds': 'INBOX', 'maxResults': limit})}",
         )
+        if list_error and list_error.get("code") == "gmail_token_invalid":
+            # Access token was rejected (expired or revoked). Attempt one proactive
+            # refresh so that a stale-but-not-clock-expired token (null expires_at,
+            # clock skew, etc.) recovers without user action. If the refresh_token
+            # itself is revoked, refresh_google_token_record will fail and we fall
+            # through to the original error below.
+            refreshed_record, refresh_error = refresh_google_token_record(email_address)
+            if not refresh_error and isinstance(refreshed_record, dict):
+                new_access_token = refreshed_record.get("access_token")
+                if isinstance(new_access_token, str) and new_access_token.strip():
+                    access_token = new_access_token
+                    token_record = refreshed_record
+                    list_payload, list_error = _gmail_request(
+                        access_token,
+                        f"/messages?{urlencode({'labelIds': 'INBOX', 'maxResults': limit})}",
+                    )
         if list_error:
             _send_json(self, 401 if list_error.get("code") == "gmail_token_invalid" else 502, _build_error(list_error["code"], list_error["message"]))
             return

@@ -28045,6 +28045,21 @@ export function WorkspaceShell({
       return "Refresh failed — try again or reconnect this inbox in Settings.";
     }
 
+    // Gmail OAuth token errors — the raw Google error message (“Token has been
+    // expired or revoked.”) is not useful to show directly. Map all token-related
+    // codes to a single actionable message. The backend already attempts a
+    // proactive token refresh on 401; reaching here means the refresh_token is
+    // also invalid and the user must reconnect.
+    if (
+      canUseGmailOAuthFetch &&
+      (error?.code === "gmail_token_invalid" ||
+        error?.code === "gmail_refresh_failed" ||
+        error?.code === "gmail_refresh_token_missing" ||
+        error?.code === "gmail_token_missing")
+    ) {
+      return "Gmail session expired — reconnect this inbox in Settings.";
+    }
+
     return (
       rawRefreshErrorMessage ||
       (canUseImapFetch
