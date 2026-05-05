@@ -19278,7 +19278,14 @@ function MailboxView({
             <div className="flex min-h-10 items-center justify-between gap-3">
               <button
                 type="button"
-                onClick={() => { setIsComposeOpen(false); resetComposeState(); }}
+                onClick={() => {
+                  setIsComposeOpen(false);
+                  resetComposeState();
+                  // Clear isMobileComposeActive in the same synchronous batch so
+                  // the desktop MailboxView never flashes between overlay-gone and
+                  // MobileWorkspaceShell re-mounting (blank-screen regression fix).
+                  onComposeOpenChange?.(false);
+                }}
                 className="rounded-full px-1 py-2 text-[0.92rem] font-medium text-[color:#fff8ec]"
               >
                 Cancel
@@ -19303,29 +19310,105 @@ function MailboxView({
             </div>
           </div>
 
-          {/* Meta: From / To / Subject (read-only) */}
+          {/* Meta: From / To / Cc / Bcc / Subject
+              – From is always read-only (can't change sending account on mobile).
+              – To is always an editable input; needed for forward + new compose.
+              – Cc/Bcc expand via a single "Cc/Bcc" toggle; auto-shown when
+                composeCc is pre-filled (reply_all).
+              – Subject is editable for new/forward; read-only span for reply/reply_all
+                (subject is pre-set from the source message and editing is unusual). */}
           <div className="shrink-0 border-b border-[color:rgba(86,69,46,0.1)] bg-[color:rgba(255,253,248,0.78)] dark:border-[color:rgba(232,211,174,0.1)] dark:bg-[color:rgba(23,20,17,0.82)]">
-            {[
-              { label: "From", value: activeComposeMailbox.email },
-              { label: "To",   value: composeTo },
-              { label: "Subj", value: composeSubject },
-            ].map(({ label, value }, i, arr) => (
-              <div
-                key={label}
-                className={`flex items-baseline gap-2 px-5 py-3 ${
-                  i < arr.length - 1
-                    ? "border-b border-[color:rgba(86,69,46,0.06)] dark:border-[color:rgba(232,211,174,0.06)]"
-                    : ""
-                }`}
-              >
-                <span className="w-10 shrink-0 text-[0.72rem] font-medium uppercase tracking-[0.12em] text-[var(--workspace-text-faint)]">
-                  {label}
-                </span>
-                <span className="min-w-0 truncate text-[0.88rem] text-[var(--workspace-text-soft)]">
-                  {value}
-                </span>
+            {/* From — read-only */}
+            <div className="flex items-baseline gap-2 border-b border-[color:rgba(86,69,46,0.06)] px-5 py-3 dark:border-[color:rgba(232,211,174,0.06)]">
+              <span className="w-10 shrink-0 text-[0.72rem] font-medium uppercase tracking-[0.12em] text-[var(--workspace-text-faint)]">
+                From
+              </span>
+              <span className="min-w-0 truncate text-[0.88rem] text-[var(--workspace-text-soft)]">
+                {activeComposeMailbox.email}
+              </span>
+            </div>
+            {/* To — editable for all modes */}
+            <div className="flex items-center gap-2 border-b border-[color:rgba(86,69,46,0.06)] px-5 py-3 dark:border-[color:rgba(232,211,174,0.06)]">
+              <span className="w-10 shrink-0 text-[0.72rem] font-medium uppercase tracking-[0.12em] text-[var(--workspace-text-faint)]">
+                To
+              </span>
+              <input
+                value={composeTo}
+                onChange={(e) => setComposeTo(e.target.value)}
+                placeholder="Add recipient"
+                autoCapitalize="none"
+                autoCorrect="off"
+                autoComplete="email"
+                spellCheck={false}
+                className="min-w-0 flex-1 bg-transparent text-[0.88rem] leading-6 text-[var(--workspace-text)] outline-none placeholder:text-[var(--workspace-text-faint)]"
+              />
+            </div>
+            {/* Cc / Bcc — toggled via "Cc/Bcc" button; auto-shown when pre-filled */}
+            {showComposeBcc || Boolean(composeCc.trim()) ? (
+              <>
+                <div className="flex items-center gap-2 border-b border-[color:rgba(86,69,46,0.06)] px-5 py-3 dark:border-[color:rgba(232,211,174,0.06)]">
+                  <span className="w-10 shrink-0 text-[0.72rem] font-medium uppercase tracking-[0.12em] text-[var(--workspace-text-faint)]">
+                    Cc
+                  </span>
+                  <input
+                    value={composeCc}
+                    onChange={(e) => setComposeCc(e.target.value)}
+                    placeholder="Add recipient"
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    autoComplete="email"
+                    spellCheck={false}
+                    className="min-w-0 flex-1 bg-transparent text-[0.88rem] leading-6 text-[var(--workspace-text)] outline-none placeholder:text-[var(--workspace-text-faint)]"
+                  />
+                </div>
+                <div className="flex items-center gap-2 border-b border-[color:rgba(86,69,46,0.06)] px-5 py-3 dark:border-[color:rgba(232,211,174,0.06)]">
+                  <span className="w-10 shrink-0 text-[0.72rem] font-medium uppercase tracking-[0.12em] text-[var(--workspace-text-faint)]">
+                    Bcc
+                  </span>
+                  <input
+                    value={composeBcc}
+                    onChange={(e) => setComposeBcc(e.target.value)}
+                    placeholder="Add recipient"
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    autoComplete="email"
+                    spellCheck={false}
+                    className="min-w-0 flex-1 bg-transparent text-[0.88rem] leading-6 text-[var(--workspace-text)] outline-none placeholder:text-[var(--workspace-text-faint)]"
+                  />
+                </div>
+              </>
+            ) : (
+              <div className="flex items-center border-b border-[color:rgba(86,69,46,0.06)] px-5 py-2.5 dark:border-[color:rgba(232,211,174,0.06)]">
+                <button
+                  type="button"
+                  onClick={() => setShowComposeBcc(true)}
+                  className="text-[0.78rem] font-medium text-[var(--workspace-text-faint)]"
+                >
+                  Cc/Bcc
+                </button>
               </div>
-            ))}
+            )}
+            {/* Subject — editable for new/forward; read-only for reply/reply_all */}
+            <div className="flex items-center gap-2 px-5 py-3">
+              <span className="w-10 shrink-0 text-[0.72rem] font-medium uppercase tracking-[0.12em] text-[var(--workspace-text-faint)]">
+                Subj
+              </span>
+              {composeMode === "new" || composeMode === "forward" ? (
+                <input
+                  value={composeSubject}
+                  onChange={(e) => setComposeSubject(e.target.value)}
+                  placeholder="Subject"
+                  autoCapitalize="sentences"
+                  autoCorrect="on"
+                  spellCheck
+                  className="min-w-0 flex-1 bg-transparent text-[0.88rem] leading-6 text-[var(--workspace-text)] outline-none placeholder:text-[var(--workspace-text-faint)]"
+                />
+              ) : (
+                <span className="min-w-0 truncate text-[0.88rem] text-[var(--workspace-text-soft)]">
+                  {composeSubject}
+                </span>
+              )}
+            </div>
           </div>
 
           {/* Body textarea */}
@@ -19335,7 +19418,11 @@ function MailboxView({
               autoFocus
               value={mobileReplyBodyText}
               onChange={(e) => setMobileReplyBodyText(e.target.value)}
-              placeholder="Write your reply…"
+              placeholder={
+                composeMode === "new" || composeMode === "forward"
+                  ? "Write your message…"
+                  : "Write your reply…"
+              }
               className="h-full min-h-[12rem] w-full resize-none bg-transparent px-5 py-5 text-[0.96rem] leading-7 text-[var(--workspace-text)] placeholder:text-[var(--workspace-text-faint)] focus:outline-none"
             />
           </div>

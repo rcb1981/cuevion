@@ -542,12 +542,10 @@ export function MobileWorkspaceShell({
                           {visibleMessageLabel}
                         </span>
                       ) : null}
-                      {mailbox.syncError ? (
-                        <span className="mt-1 flex min-w-0 items-start gap-1.5 text-[0.74rem] font-medium leading-5 text-[color:rgba(143,82,48,0.92)] dark:text-[color:rgba(235,174,138,0.86)]">
-                          <span aria-hidden="true" className="mt-[0.42rem] h-1.5 w-1.5 shrink-0 rounded-full bg-[color:rgba(143,82,48,0.78)] dark:bg-[color:rgba(235,174,138,0.74)]" />
-                          <span className="min-w-0">{mailbox.syncError}</span>
-                        </span>
-                      ) : null}
+                      {/* syncError is intentionally omitted from list cards — background
+                          refresh failures should not persist as a permanent orange warning
+                          on every inbox row. The refreshStatus (auto-dismissed after a few
+                          seconds) conveys the result of a user-triggered sync instead. */}
                       {mailbox.refreshStatus ? (
                         <span className="mt-0.5 block truncate text-[0.68rem] text-[color:rgba(49,92,75,0.76)] dark:text-[color:rgba(184,225,197,0.76)]">
                           {mailbox.refreshStatus}
