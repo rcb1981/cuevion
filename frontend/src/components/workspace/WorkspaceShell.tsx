@@ -19340,7 +19340,7 @@ function MailboxView({
                 autoCorrect="off"
                 autoComplete="email"
                 spellCheck={false}
-                className="min-w-0 flex-1 bg-transparent text-[0.88rem] leading-6 text-[var(--workspace-text)] outline-none placeholder:text-[var(--workspace-text-faint)]"
+                className="min-w-0 flex-1 bg-transparent text-[16px] leading-6 text-[var(--workspace-text)] outline-none placeholder:text-[var(--workspace-text-faint)]"
               />
             </div>
             {/* Cc / Bcc — toggled via "Cc/Bcc" button; auto-shown when pre-filled */}
@@ -19358,7 +19358,7 @@ function MailboxView({
                     autoCorrect="off"
                     autoComplete="email"
                     spellCheck={false}
-                    className="min-w-0 flex-1 bg-transparent text-[0.88rem] leading-6 text-[var(--workspace-text)] outline-none placeholder:text-[var(--workspace-text-faint)]"
+                    className="min-w-0 flex-1 bg-transparent text-[16px] leading-6 text-[var(--workspace-text)] outline-none placeholder:text-[var(--workspace-text-faint)]"
                   />
                 </div>
                 <div className="flex items-center gap-2 border-b border-[color:rgba(86,69,46,0.06)] px-5 py-3 dark:border-[color:rgba(232,211,174,0.06)]">
@@ -19373,7 +19373,7 @@ function MailboxView({
                     autoCorrect="off"
                     autoComplete="email"
                     spellCheck={false}
-                    className="min-w-0 flex-1 bg-transparent text-[0.88rem] leading-6 text-[var(--workspace-text)] outline-none placeholder:text-[var(--workspace-text-faint)]"
+                    className="min-w-0 flex-1 bg-transparent text-[16px] leading-6 text-[var(--workspace-text)] outline-none placeholder:text-[var(--workspace-text-faint)]"
                   />
                 </div>
               </>
@@ -19401,7 +19401,7 @@ function MailboxView({
                   autoCapitalize="sentences"
                   autoCorrect="on"
                   spellCheck
-                  className="min-w-0 flex-1 bg-transparent text-[0.88rem] leading-6 text-[var(--workspace-text)] outline-none placeholder:text-[var(--workspace-text-faint)]"
+                  className="min-w-0 flex-1 bg-transparent text-[16px] leading-6 text-[var(--workspace-text)] outline-none placeholder:text-[var(--workspace-text-faint)]"
                 />
               ) : (
                 <span className="min-w-0 truncate text-[0.88rem] text-[var(--workspace-text-soft)]">
@@ -19423,7 +19423,7 @@ function MailboxView({
                   ? "Write your message…"
                   : "Write your reply…"
               }
-              className="h-full min-h-[12rem] w-full resize-none bg-transparent px-5 py-5 text-[0.96rem] leading-7 text-[var(--workspace-text)] placeholder:text-[var(--workspace-text-faint)] focus:outline-none"
+              className="h-full min-h-[12rem] w-full resize-none bg-transparent px-5 py-5 text-[16px] leading-7 text-[var(--workspace-text)] placeholder:text-[var(--workspace-text-faint)] focus:outline-none"
             />
           </div>
 
@@ -33433,6 +33433,9 @@ export function WorkspaceShell({
                       tab: "inboxes",
                       mailboxId,
                     });
+                    // Atomically clear the compose overlay so WorkspaceShell
+                    // does not keep isMobileComposeActive=true after the send.
+                    setIsMobileComposeActive(false);
                   }}
                   isMobileViewport={isMobileWorkspaceViewport}
                   manualPriorityOverrides={manualPriorityOverrides}
