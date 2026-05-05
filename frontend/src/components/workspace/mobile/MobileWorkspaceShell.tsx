@@ -379,7 +379,11 @@ export function MobileWorkspaceShell({
             <div className="w-12" />
           )}
         </div>
-        {/* syncFeedbackMessage suppressed on mobile — per-mailbox status shown on inbox cards */}
+        {syncFeedbackMessage ? (
+          <div className="mt-2 truncate rounded-full border border-[color:rgba(232,211,174,0.24)] bg-[color:rgba(255,250,239,0.12)] px-3 py-1.5 text-center text-[0.72rem] font-medium text-[color:rgba(255,248,236,0.88)]">
+            {syncFeedbackMessage}
+          </div>
+        ) : null}
       </header>
 
       <section className="min-h-0 flex-1 overflow-y-auto">
@@ -588,7 +592,11 @@ export function MobileWorkspaceShell({
                   {connectedInboxCount}
                 </span>
               </div>
-              {/* syncFeedbackMessage suppressed on mobile */}
+              {syncFeedbackMessage ? (
+                <div className="mt-3 text-[0.8rem] leading-5 text-[var(--workspace-text-faint)]">
+                  {syncFeedbackMessage}
+                </div>
+              ) : null}
             </section>
             <button
               type="button"
