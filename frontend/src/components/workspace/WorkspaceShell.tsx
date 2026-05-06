@@ -10480,6 +10480,9 @@ function MailboxView({
   const [activeCollaborationMessageId, setActiveCollaborationMessageId] = useState<
     string | null
   >(null);
+  const [draftCollaborationByMessageId, setDraftCollaborationByMessageId] = useState<
+    Record<string, CollaborationThread["collaboration"]>
+  >({});
   const [collaborationReplyDraft, setCollaborationReplyDraft] = useState("");
   const [collaborationParticipantPersonIds, setCollaborationParticipantPersonIds] =
     useState<string[]>([]);
@@ -12073,13 +12076,33 @@ function MailboxView({
       </div>
     );
   };
-  const activeCollaborationMessage = getMessageById(activeCollaborationMessageId);
+  const activeStoredCollaborationMessage = getMessageById(activeCollaborationMessageId);
+  const activeDraftCollaboration = activeCollaborationMessageId
+    ? draftCollaborationByMessageId[activeCollaborationMessageId]
+    : undefined;
+  const activeCollaborationMessage =
+    activeStoredCollaborationMessage &&
+    activeDraftCollaboration &&
+    !activeStoredCollaborationMessage.collaboration
+      ? {
+          ...activeStoredCollaborationMessage,
+          isShared: true,
+          collaboration: activeDraftCollaboration,
+        }
+      : activeStoredCollaborationMessage;
   const isPreStartCollaboration = Boolean(
-    activeCollaborationMessage && !activeCollaborationMessage.collaboration,
+    activeStoredCollaborationMessage &&
+      !activeStoredCollaborationMessage.collaboration &&
+      !activeDraftCollaboration,
+  );
+  const isDraftStartedCollaboration = Boolean(
+    activeStoredCollaborationMessage &&
+      !activeStoredCollaborationMessage.collaboration &&
+      activeDraftCollaboration,
   );
   const directCanonicalCollaborationRefreshMessage =
-    activeCollaborationMessage?.collaboration
-      ? activeCollaborationMessage
+    activeStoredCollaborationMessage?.collaboration
+      ? activeStoredCollaborationMessage
       : selectedMessage?.collaboration
         ? selectedMessage
         : null;
@@ -13629,7 +13652,7 @@ function MailboxView({
     bodyHtml: message.bodyHtml,
   });
 
-  const createCollaborationForMessage = (
+  const buildInitialCollaborationForMessage = (
     messageId: string,
     options?: {
       selectedPersonIds?: string[];
@@ -13639,7 +13662,7 @@ function MailboxView({
   ) => {
     const sourceMessage = getMessageById(messageId);
     if (!sourceMessage) {
-      return;
+      return null;
     }
 
     const selectedPeople = collaborationSelectablePeople.filter((person) =>
@@ -13713,18 +13736,38 @@ function MailboxView({
       messages: initialMessages,
     };
 
+    return {
+      sourceMessage,
+      collaboration: canonicalCollaboration,
+    };
+  };
+
+  const createCollaborationForMessage = (
+    messageId: string,
+    options?: {
+      selectedPersonIds?: string[];
+      requestType?: "needs_review" | "needs_action" | "note_only";
+      note?: string;
+    },
+  ) => {
+    const initialCollaboration = buildInitialCollaborationForMessage(messageId, options);
+
+    if (!initialCollaboration) {
+      return;
+    }
+
     updateMessageById(messageId, (message) => ({
       ...message,
       isShared: true,
-      collaboration: canonicalCollaboration,
+      collaboration: initialCollaboration.collaboration,
     }));
 
     void (async () => {
       const result = await createCollaborationThread({
         workspaceId: currentUserId,
         mailboxId: mailbox.id,
-        sourceMessage: buildCollaborationSourceMessageSnapshot(sourceMessage),
-        collaboration: canonicalCollaboration,
+        sourceMessage: buildCollaborationSourceMessageSnapshot(initialCollaboration.sourceMessage),
+        collaboration: initialCollaboration.collaboration,
         isShared: true,
       });
 
@@ -13769,8 +13812,29 @@ function MailboxView({
     setDetailActionsMenuState(null);
   };
 
+  const clearCollaborationDraft = (messageId: string) => {
+    setDraftCollaborationByMessageId((current) => {
+      if (!current[messageId]) {
+        return current;
+      }
+
+      const { [messageId]: _discardedDraft, ...remainingDrafts } = current;
+      return remainingDrafts;
+    });
+  };
+
   const closeCollaborationOverlay = () => {
+    const closingMessageId = activeCollaborationMessageId;
+
+    if (closingMessageId && !getMessageById(closingMessageId)?.collaboration) {
+      clearCollaborationDraft(closingMessageId);
+    }
+
     setActiveCollaborationMessageId(null);
+    setCollaborationPersonIds([]);
+    setCollaborationMemberSearch("");
+    setStartCollaborationInviteEmail("");
+    setCollaborationNote("");
     setCollaborationParticipantPersonIds([]);
     setCollaborationParticipantSearch("");
     setIsCollaborationParticipantPickerOpen(false);
@@ -13927,28 +13991,19 @@ function MailboxView({
     if (!activeCollaborationMessageId) {
       return;
     }
-    const selectedPeople = collaborationSelectablePeople.filter((person) =>
-      collaborationPersonIds.includes(person.id),
+
+    const initialCollaboration = buildInitialCollaborationForMessage(
+      activeCollaborationMessageId,
     );
-    const nextExternalInviteEmails = [
-      ...selectedPeople
-      .filter((person) => person.kind === "external")
-      .map((person) => person.email),
-      ...(isValidCollaborationParticipantEmail(startCollaborationInviteEmail)
-        ? [startCollaborationInviteEmail.trim().toLowerCase()]
-        : []),
-    ].filter(
-      (email, index, emails) =>
-        emails.findIndex(
-          (candidate) =>
-            normalizeSenderLearningKey(candidate) === normalizeSenderLearningKey(email),
-        ) === index &&
-        !pendingExternalInviteEmailKeys.has(normalizeSenderLearningKey(email)),
-    );
-    createCollaborationForMessage(activeCollaborationMessageId);
-    if (nextExternalInviteEmails.length > 0) {
-      setPendingExternalInviteEmails(nextExternalInviteEmails);
+
+    if (!initialCollaboration) {
+      return;
     }
+
+    setDraftCollaborationByMessageId((current) => ({
+      ...current,
+      [activeCollaborationMessageId]: initialCollaboration.collaboration,
+    }));
     setStartCollaborationInviteEmail("");
   };
 
@@ -13970,6 +14025,60 @@ function MailboxView({
     const replyVisibility = hasRealInternalTeamContext
       ? collaborationReplyVisibility
       : "shared";
+    const draftCollaboration = draftCollaborationByMessageId[messageId];
+
+    if (currentMessage && !currentMessage.collaboration && draftCollaboration) {
+      const nextCollaboration: CollaborationThread["collaboration"] = {
+        ...draftCollaboration,
+        state:
+          draftCollaboration.state === "resolved"
+            ? "needs_review"
+            : draftCollaboration.state,
+        updatedAt: nextTimestamp,
+        previewText: trimmedReply,
+        messages: [
+          ...draftCollaboration.messages,
+          {
+            id: `${messageId}-collaboration-reply-${nextTimestamp}`,
+            authorId: currentUserId,
+            authorName: currentUserName,
+            text: trimmedReply,
+            timestamp: nextTimestamp,
+            visibility: replyVisibility,
+            mentions,
+          },
+        ],
+      };
+
+      updateMessageById(messageId, (message) => ({
+        ...message,
+        isShared: true,
+        collaboration: nextCollaboration,
+      }));
+      clearCollaborationDraft(messageId);
+      setCollaborationReplyDraft("");
+      setCollaborationReplyVisibility(hasRealInternalTeamContext ? "internal" : "shared");
+      setCollaborationMentionIndex(0);
+      setCollaborationReplySelection(null);
+      closeCollaborationOverlay();
+
+      void (async () => {
+        const result = await createCollaborationThread({
+          workspaceId: currentUserId,
+          mailboxId: mailbox.id,
+          sourceMessage: buildCollaborationSourceMessageSnapshot(currentMessage),
+          collaboration: nextCollaboration,
+          isShared: true,
+        });
+
+        if (!result.ok || !result.thread) {
+          return;
+        }
+
+        applyCanonicalCollaborationThreadToMessage(messageId, result.thread);
+      })();
+      return;
+    }
 
     updateMessageById(messageId, (message) =>
       message.collaboration
@@ -14312,9 +14421,12 @@ function MailboxView({
     }
 
     const currentMessage = getMessageById(messageId);
+    const draftCollaboration = currentMessage?.collaboration
+      ? undefined
+      : draftCollaborationByMessageId[messageId];
     let inviteLink = "";
 
-    if (currentMessage?.collaboration) {
+    if (currentMessage?.collaboration || (currentMessage && draftCollaboration)) {
       const issueResult = await issueCollaborationInvite({
         workspaceId: currentUserId,
         mailboxId: mailbox.id,
@@ -14322,10 +14434,17 @@ function MailboxView({
         inviteeEmail: normalizedEmail,
         createdByUserId: currentUserId,
         createdByUserName: currentUserName,
+        sourceMessage:
+          currentMessage && draftCollaboration
+            ? buildCollaborationSourceMessageSnapshot(currentMessage)
+            : undefined,
+        collaboration: draftCollaboration,
+        isShared: draftCollaboration ? true : undefined,
       });
 
       if (issueResult.ok) {
         inviteLink = issueResult.inviteUrl;
+        clearCollaborationDraft(messageId);
         applyCanonicalCollaborationThreadToMessage(messageId, issueResult.thread);
       }
     }
@@ -14366,6 +14485,9 @@ function MailboxView({
     }
 
     const existingInviteMessage = getMessageById(messageId);
+    const draftInviteCollaboration = existingInviteMessage?.collaboration
+      ? undefined
+      : draftCollaborationByMessageId[messageId];
     const sourceMailboxId = currentMessageLocationById[messageId]?.mailboxId ?? mailbox.id;
     const sendingMailbox =
       orderedMailboxes.find((candidate) => candidate.id === sourceMailboxId) ?? mailbox;
@@ -14404,8 +14526,11 @@ function MailboxView({
 
     let inviteLink = "";
     let inviteParticipantName = formatCollaborationParticipantNameFromEmail(normalizedEmail);
-    if (existingInviteMessage?.collaboration) {
-      const existingParticipant = (existingInviteMessage.collaboration.participants ?? []).find(
+    let issuedInviteThread: CollaborationThread | null = null;
+    const inviteCollaboration =
+      existingInviteMessage?.collaboration ?? draftInviteCollaboration;
+    if (existingInviteMessage && inviteCollaboration) {
+      const existingParticipant = (inviteCollaboration.participants ?? []).find(
         (participant) => participant.email.toLowerCase() === normalizedEmail,
       );
       inviteParticipantName =
@@ -14420,23 +14545,31 @@ function MailboxView({
         inviteeEmail: normalizedEmail,
         createdByUserId: currentUserId,
         createdByUserName: currentUserName,
+        sourceMessage: draftInviteCollaboration
+          ? buildCollaborationSourceMessageSnapshot(existingInviteMessage)
+          : undefined,
+        collaboration: draftInviteCollaboration,
+        isShared: draftInviteCollaboration ? true : undefined,
       });
 
       if (issueResult.ok) {
         inviteLink = issueResult.inviteUrl;
+        issuedInviteThread = issueResult.thread;
+        clearCollaborationDraft(messageId);
         applyCanonicalCollaborationThreadToMessage(messageId, issueResult.thread);
       }
     }
 
     const sourceMessage = getMessageById(messageId) ?? existingInviteMessage;
+    const sourceCollaboration = sourceMessage?.collaboration ?? issuedInviteThread?.collaboration;
 
-    if (!sourceMessage?.collaboration || !inviteLink) {
+    if (!sourceMessage || !sourceCollaboration || !inviteLink) {
       setExternalInviteEmailFeedback("Could not prepare the invite email.");
       return;
     }
 
     const inviterName = currentUserName;
-    const collaborationReason = getCollaborationReasonLabel(sourceMessage.collaboration);
+    const collaborationReason = getCollaborationReasonLabel(sourceCollaboration);
     const inviteSubject = `${inviterName} invited you to review: ${sourceMessage.subject}`;
     const escapeInviteHtml = (value: string) =>
       value
@@ -19004,13 +19137,22 @@ function MailboxView({
 
                   <div className="mt-4 flex shrink-0 flex-wrap items-center justify-end gap-3 border-t border-[var(--workspace-border-soft)] pt-4">
                     {isPreStartCollaboration ? (
-                      <button
-                        type="button"
-                        onClick={() => createMessageCollaboration()}
-                        className={`${mailboxPrimaryActionButtonClass} h-10 px-5 text-[0.72rem] tracking-[0.16em]`}
-                      >
-                        Start collaboration
-                      </button>
+                      <>
+                        <button
+                          type="button"
+                          onClick={closeCollaborationOverlay}
+                          className="inline-flex h-10 items-center justify-center rounded-full border border-transparent bg-transparent px-5 text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)] transition-[color,transform] duration-150 hover:text-[var(--workspace-text-soft)] active:scale-[0.99] focus-visible:outline-none"
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => createMessageCollaboration()}
+                          className={`${mailboxPrimaryActionButtonClass} h-10 px-5 text-[0.72rem] tracking-[0.16em]`}
+                        >
+                          Start collaboration
+                        </button>
+                      </>
                     ) : activeCollaborationMessage.collaboration?.state === "resolved" ? (
                       <button
                         type="button"
@@ -19036,15 +19178,25 @@ function MailboxView({
                         >
                           Send reply
                         </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            markMessageCollaborationDone(activeCollaborationMessage.id);
-                          }}
-                          className={`${mailboxPrimaryActionButtonClass} h-10 px-5 text-[0.72rem] tracking-[0.16em]`}
-                        >
-                          Mark as done
-                        </button>
+                        {isDraftStartedCollaboration ? (
+                          <button
+                            type="button"
+                            onClick={closeCollaborationOverlay}
+                            className="inline-flex h-10 items-center justify-center rounded-full border border-transparent bg-transparent px-5 text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)] transition-[color,transform] duration-150 hover:text-[var(--workspace-text-soft)] active:scale-[0.99] focus-visible:outline-none"
+                          >
+                            Cancel
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              markMessageCollaborationDone(activeCollaborationMessage.id);
+                            }}
+                            className={`${mailboxPrimaryActionButtonClass} h-10 px-5 text-[0.72rem] tracking-[0.16em]`}
+                          >
+                            Mark as done
+                          </button>
+                        )}
                       </>
                     ) : null}
                   </div>

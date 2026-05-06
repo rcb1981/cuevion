@@ -162,8 +162,20 @@ def _handle_issue(handler: BaseHTTPRequestHandler, payload: dict):
 
     current_thread = get_thread(workspace_id, message_id)
     if current_thread is None:
-        _send_json(handler, 404, _build_error("thread_not_found", "Canonical collaboration thread was not found."))
-        return
+        current_thread = normalize_collaboration_thread_record(
+            {
+                "v": 1,
+                "workspaceId": workspace_id,
+                "mailboxId": mailbox_id,
+                "messageId": message_id,
+                "sourceMessage": payload.get("sourceMessage"),
+                "isShared": payload.get("isShared"),
+                "collaboration": payload.get("collaboration"),
+            }
+        )
+        if current_thread is None:
+            _send_json(handler, 404, _build_error("thread_not_found", "Canonical collaboration thread was not found."))
+            return
 
     current_participants = current_thread["collaboration"].get("participants", [])
     existing_participant = next(

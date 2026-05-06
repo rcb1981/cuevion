@@ -115,6 +115,9 @@ type IssueCollaborationInviteRequest = {
   inviteeEmail: string;
   createdByUserId: string;
   createdByUserName: string;
+  sourceMessage?: CollaborationThread["sourceMessage"];
+  collaboration?: CollaborationThread["collaboration"];
+  isShared?: boolean;
 };
 
 type IssueCollaborationInviteResponse =
