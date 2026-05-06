@@ -10492,6 +10492,10 @@ function MailboxView({
     setCollaborationExternalInviteIssuedByMessageId,
   ] = useState<Record<string, boolean>>({});
   const [collaborationReplyDraft, setCollaborationReplyDraft] = useState("");
+  const [collaborationReplyFeedback, setCollaborationReplyFeedback] = useState("");
+  const [collaborationReplySendingMessageId, setCollaborationReplySendingMessageId] = useState<
+    string | null
+  >(null);
   const [collaborationParticipantPersonIds, setCollaborationParticipantPersonIds] =
     useState<string[]>([]);
   const [collaborationParticipantSearch, setCollaborationParticipantSearch] = useState("");
@@ -12119,6 +12123,10 @@ function MailboxView({
     activeCollaborationMessageId &&
       collaborationThreadPreparingByMessageId[activeCollaborationMessageId],
   );
+  const isActiveCollaborationReplySending = Boolean(
+    activeCollaborationMessageId &&
+      collaborationReplySendingMessageId === activeCollaborationMessageId,
+  );
   const activeStoredCanonicalCollaborationMessage =
     getStoredCanonicalCollaborationMessage(activeCollaborationMessageId);
   const activeHasStoredCanonicalCollaboration =
@@ -12260,6 +12268,7 @@ function MailboxView({
     activeCollaborationMessage &&
       collaborationReplyDraft.trim() &&
       !isActiveCollaborationThreadPreparing &&
+      !isActiveCollaborationReplySending &&
       (activeHasStoredCanonicalCollaboration || canCreateDraftCollaborationReply),
   );
   const collaborationReplyReadinessMessage =
@@ -13936,6 +13945,8 @@ function MailboxView({
     setExternalReviewCopyFeedback("");
     setCollaborationHistoryExpanded(false);
     setCollaborationReplyDraft("");
+    setCollaborationReplyFeedback("");
+    setCollaborationReplySendingMessageId(null);
     setCollaborationReplyVisibility(hasRealInternalTeamContext ? "internal" : "shared");
     setCollaborationReplySelection(null);
     setHighlightedCollaborationMessageId(null);
@@ -14095,6 +14106,11 @@ function MailboxView({
 
   const sendCollaborationReply = (messageId: string) => {
     if (collaborationThreadPreparingByMessageId[messageId]) {
+      setCollaborationReplyFeedback("Collaboration is preparing. Try again in a moment.");
+      return;
+    }
+
+    if (collaborationReplySendingMessageId) {
       return;
     }
 
@@ -14128,6 +14144,7 @@ function MailboxView({
       (hasExternalInviteActivityForCollaborationMessage(messageId) ||
         hasExternalParticipantWithoutCanonical)
     ) {
+      setCollaborationReplyFeedback("Collaboration is preparing. Try again in a moment.");
       return;
     }
 
@@ -14160,99 +14177,87 @@ function MailboxView({
         ],
       };
 
-      updateMessageById(messageId, (message) => ({
-        ...message,
-        isShared: true,
-        collaboration: nextCollaboration,
-      }));
-      clearCollaborationDraft(messageId);
-      setCollaborationReplyDraft("");
-      setCollaborationReplyVisibility(hasRealInternalTeamContext ? "internal" : "shared");
-      setCollaborationMentionIndex(0);
-      setCollaborationReplySelection(null);
-      closeCollaborationOverlay();
-
+      setCollaborationReplyFeedback("");
+      setCollaborationReplySendingMessageId(messageId);
       void (async () => {
-        const result = await createCollaborationThread({
-          workspaceId: currentUserId,
-          mailboxId: mailbox.id,
-          sourceMessage: buildCollaborationSourceMessageSnapshot(currentMessage),
-          collaboration: nextCollaboration,
-          isShared: true,
-        });
+        try {
+          const result = await createCollaborationThread({
+            workspaceId: currentUserId,
+            mailboxId: mailbox.id,
+            sourceMessage: buildCollaborationSourceMessageSnapshot(currentMessage),
+            collaboration: nextCollaboration,
+            isShared: true,
+          });
 
-        if (!result.ok || !result.thread) {
-          return;
+          if (!result.ok || !result.thread) {
+            setCollaborationReplyFeedback("Could not send reply. Try again.");
+            return;
+          }
+
+          applyCanonicalCollaborationThreadToMessage(messageId, result.thread);
+          clearCollaborationDraft(messageId);
+          setCollaborationReplyDraft("");
+          setCollaborationReplyFeedback("");
+          setCollaborationReplyVisibility(hasRealInternalTeamContext ? "internal" : "shared");
+          setCollaborationMentionIndex(0);
+          setCollaborationReplySelection(null);
+        } finally {
+          setCollaborationReplySendingMessageId((current) =>
+            current === messageId ? null : current,
+          );
         }
-
-        applyCanonicalCollaborationThreadToMessage(messageId, result.thread);
       })();
       return;
     }
 
     if (!canonicalMessage?.collaboration) {
+      setCollaborationReplyFeedback("Collaboration is preparing. Try again in a moment.");
       return;
     }
 
     const expectedUpdatedAt = canonicalMessage.collaboration.updatedAt;
 
-    updateMessageById(messageId, (message) =>
-      message.collaboration
-        ? {
-            ...message,
-            isShared: true,
-            collaboration: {
-              ...message.collaboration,
-              state:
-                message.collaboration.state === "resolved"
-                  ? "needs_review"
-                  : message.collaboration.state,
-              updatedAt: nextTimestamp,
-              previewText: trimmedReply,
-              messages: [
-                ...message.collaboration.messages,
-                {
-                  id: `${messageId}-collaboration-reply-${nextTimestamp}`,
-                  authorId: currentUserId,
-                  authorName: currentUserName,
-                  text: trimmedReply,
-                  timestamp: nextTimestamp,
-                  visibility: replyVisibility,
-                  mentions,
-                },
-              ],
-            },
-          }
-        : message,
-    );
-    setCollaborationReplyDraft("");
-    setCollaborationReplyVisibility(hasRealInternalTeamContext ? "internal" : "shared");
-    setCollaborationMentionIndex(0);
-    setCollaborationReplySelection(null);
-    closeCollaborationOverlay();
-
+    setCollaborationReplyFeedback("");
+    setCollaborationReplySendingMessageId(messageId);
     void (async () => {
-      const result = await mutateCollaborationThread({
-        workspaceId: currentUserId,
-        messageId,
-        expectedUpdatedAt,
-        action: {
-          type: "reply",
-          authorId: currentUserId,
-          authorName: currentUserName,
-          text: trimmedReply,
-          visibility: replyVisibility,
-          mentions,
-        },
-      });
+      try {
+        const result = await mutateCollaborationThread({
+          workspaceId: currentUserId,
+          messageId,
+          expectedUpdatedAt,
+          action: {
+            type: "reply",
+            authorId: currentUserId,
+            authorName: currentUserName,
+            text: trimmedReply,
+            visibility: replyVisibility,
+            mentions,
+          },
+        });
 
-      if (result.ok) {
-        applyCanonicalCollaborationThreadToMessage(messageId, result.thread);
-        return;
-      }
+        if (result.ok) {
+          applyCanonicalCollaborationThreadToMessage(messageId, result.thread);
+          setCollaborationReplyDraft("");
+          setCollaborationReplyFeedback("");
+          setCollaborationReplyVisibility(hasRealInternalTeamContext ? "internal" : "shared");
+          setCollaborationMentionIndex(0);
+          setCollaborationReplySelection(null);
+          return;
+        }
 
-      if (result.code === "stale_thread") {
-        applyCanonicalCollaborationThreadToMessage(messageId, result.thread);
+        if (result.code === "stale_thread") {
+          applyCanonicalCollaborationThreadToMessage(messageId, result.thread);
+          setCollaborationReplyFeedback(
+            "Collaboration changed. Review the latest thread and try again.",
+          );
+          return;
+        }
+
+        setCollaborationReplyFeedback("Could not send reply. Try again.");
+      } finally {
+        setCollaborationReplySendingMessageId((current) =>
+          current === messageId ? null : current,
+        );
       }
     })();
   };
@@ -19171,10 +19176,14 @@ function MailboxView({
                           value={collaborationReplyDraft}
                           disabled={
                             isActiveCollaborationThreadPreparing ||
+                            isActiveCollaborationReplySending ||
                             Boolean(collaborationReplyReadinessMessage)
                           }
                           onChange={(event) => {
                             setCollaborationReplyDraft(event.target.value);
+                            if (collaborationReplyFeedback) {
+                              setCollaborationReplyFeedback("");
+                            }
                             syncCollaborationMentionState(event.target.value, event.target);
                           }}
                           onClick={(event) =>
@@ -19230,8 +19239,11 @@ function MailboxView({
                           rows={hasVisibleCollaborationMessages ? 4 : 3}
                           placeholder={
                             isActiveCollaborationThreadPreparing ||
+                            isActiveCollaborationReplySending ||
                             collaborationReplyReadinessMessage
-                              ? "Preparing collaboration"
+                              ? isActiveCollaborationReplySending
+                                ? "Sending reply"
+                                : "Preparing collaboration"
                               : resolvedCollaborationReplyVisibility === "internal"
                               ? "Add an internal note"
                               : "Reply to everyone in this collaboration"
@@ -19268,9 +19280,9 @@ function MailboxView({
                           </div>
                         ) : null}
                       </div>
-                      {collaborationReplyReadinessMessage ? (
+                      {collaborationReplyFeedback || collaborationReplyReadinessMessage ? (
                         <div className="text-[0.78rem] leading-6 text-[var(--workspace-text-faint)]">
-                          {collaborationReplyReadinessMessage}
+                          {collaborationReplyFeedback || collaborationReplyReadinessMessage}
                         </div>
                       ) : null}
                     </label>
