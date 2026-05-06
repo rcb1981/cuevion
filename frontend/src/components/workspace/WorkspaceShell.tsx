@@ -10487,6 +10487,9 @@ function MailboxView({
     collaborationThreadPreparingByMessageId,
     setCollaborationThreadPreparingByMessageId,
   ] = useState<Record<string, boolean>>({});
+  const [collaborationReplyFeedback, setCollaborationReplyFeedback] = useState<string | null>(
+    null,
+  );
   const [collaborationReplyDraft, setCollaborationReplyDraft] = useState("");
   const [collaborationParticipantPersonIds, setCollaborationParticipantPersonIds] =
     useState<string[]>([]);
@@ -10517,6 +10520,9 @@ function MailboxView({
   );
   const [collaborationHistoryExpanded, setCollaborationHistoryExpanded] = useState(false);
   const lastActiveCanonicalCollaborationRefreshKeyRef = useRef<string>("");
+  const canonicalCollaborationThreadByMessageIdRef = useRef<Record<string, CollaborationThread>>(
+    {},
+  );
   const [externalReviewCopyFeedback, setExternalReviewCopyFeedback] = useState("");
   const [externalInviteEmailFeedback, setExternalInviteEmailFeedback] = useState<string | null>(
     null,
@@ -12094,11 +12100,6 @@ function MailboxView({
           collaboration: activeDraftCollaboration,
         }
       : activeStoredCollaborationMessage;
-  const isPreStartCollaboration = Boolean(
-    activeStoredCollaborationMessage &&
-      !activeStoredCollaborationMessage.collaboration &&
-      !activeDraftCollaboration,
-  );
   const isDraftStartedCollaboration = Boolean(
     activeStoredCollaborationMessage &&
       !activeStoredCollaborationMessage.collaboration &&
@@ -13616,6 +13617,7 @@ function MailboxView({
     messageId: string,
     thread: CollaborationThread,
   ) => {
+    canonicalCollaborationThreadByMessageIdRef.current[messageId] = thread;
     updateMessageById(messageId, (message) => ({
       ...message,
       collaboration: thread.collaboration as MailMessageCollaboration,
@@ -13750,41 +13752,32 @@ function MailboxView({
     };
   };
 
-  const createCollaborationForMessage = (
-    messageId: string,
-    options?: {
-      selectedPersonIds?: string[];
-      requestType?: "needs_review" | "needs_action" | "note_only";
-      note?: string;
-    },
-  ) => {
-    const initialCollaboration = buildInitialCollaborationForMessage(messageId, options);
+  const initializeDraftCollaborationForMessage = (messageId: string) => {
+    const message = getMessageById(messageId);
 
-    if (!initialCollaboration) {
-      return;
+    if (!message || message.collaboration) {
+      return false;
     }
 
-    updateMessageById(messageId, (message) => ({
-      ...message,
-      isShared: true,
-      collaboration: initialCollaboration.collaboration,
-    }));
+    const initialCollaboration = buildInitialCollaborationForMessage(messageId, {
+      selectedPersonIds: [],
+      requestType: "needs_review",
+      note: "",
+    });
 
-    void (async () => {
-      const result = await createCollaborationThread({
-        workspaceId: currentUserId,
-        mailboxId: mailbox.id,
-        sourceMessage: buildCollaborationSourceMessageSnapshot(initialCollaboration.sourceMessage),
-        collaboration: initialCollaboration.collaboration,
-        isShared: true,
-      });
+    if (!initialCollaboration) {
+      return false;
+    }
 
-      if (!result.ok || !result.thread) {
-        return;
-      }
-
-      applyCanonicalCollaborationThreadToMessage(messageId, result.thread);
-    })();
+    setDraftCollaborationByMessageId((current) =>
+      current[messageId]
+        ? current
+        : {
+            ...current,
+            [messageId]: initialCollaboration.collaboration,
+          },
+    );
+    return true;
   };
 
   const openShareCollaboration = (messageId: string) => {
@@ -13805,6 +13798,7 @@ function MailboxView({
     setCollaborationMemberSearch("");
     setStartCollaborationInviteEmail("");
     setCollaborationNote("");
+    initializeDraftCollaborationForMessage(messageId);
     openCollaborationOverlay(messageId);
   };
 
@@ -13874,6 +13868,7 @@ function MailboxView({
     setExternalCollaborationInviteUrl("");
     setExternalInviteEmailFeedback(null);
     setExternalReviewCopyFeedback("");
+    setCollaborationReplyFeedback(null);
     setCollaborationHistoryExpanded(false);
     setCollaborationReplyDraft("");
     setCollaborationReplyVisibility(hasRealInternalTeamContext ? "internal" : "shared");
@@ -14013,39 +14008,24 @@ function MailboxView({
     })();
   };
 
-  const createMessageCollaboration = () => {
-    if (!activeCollaborationMessageId) {
-      return;
-    }
-
-    const initialCollaboration = buildInitialCollaborationForMessage(
-      activeCollaborationMessageId,
-    );
-
-    if (!initialCollaboration) {
-      return;
-    }
-
-    setDraftCollaborationByMessageId((current) => ({
-      ...current,
-      [activeCollaborationMessageId]: initialCollaboration.collaboration,
-    }));
-    setStartCollaborationInviteEmail("");
-  };
-
-  const sendCollaborationReply = (messageId: string) => {
+  const sendCollaborationReply = async (messageId: string): Promise<boolean> => {
     if (collaborationThreadPreparingByMessageId[messageId]) {
-      return;
+      setCollaborationReplyFeedback("Collaboration is still preparing. Try again in a moment.");
+      return false;
     }
 
     const trimmedReply = collaborationReplyDraft.trim();
 
     if (!trimmedReply) {
-      return;
+      return false;
     }
 
     const currentMessage = getMessageById(messageId);
-    const expectedUpdatedAt = currentMessage?.collaboration?.updatedAt;
+    const cachedThread = canonicalCollaborationThreadByMessageIdRef.current[messageId];
+    const canonicalCollaboration =
+      currentMessage?.collaboration ??
+      (cachedThread?.collaboration as MailMessageCollaboration | undefined);
+    const expectedUpdatedAt = canonicalCollaboration?.updatedAt;
     const nextTimestamp = Date.now();
     const mentions = extractCollaborationMentions(
       trimmedReply,
@@ -14057,7 +14037,7 @@ function MailboxView({
       : "shared";
     const draftCollaboration = draftCollaborationByMessageId[messageId];
 
-    if (currentMessage && !currentMessage.collaboration && draftCollaboration) {
+    if (currentMessage && !canonicalCollaboration && draftCollaboration) {
       const nextCollaboration: CollaborationThread["collaboration"] = {
         ...draftCollaboration,
         state:
@@ -14080,19 +14060,9 @@ function MailboxView({
         ],
       };
 
-      updateMessageById(messageId, (message) => ({
-        ...message,
-        isShared: true,
-        collaboration: nextCollaboration,
-      }));
-      clearCollaborationDraft(messageId);
-      setCollaborationReplyDraft("");
-      setCollaborationReplyVisibility(hasRealInternalTeamContext ? "internal" : "shared");
-      setCollaborationMentionIndex(0);
-      setCollaborationReplySelection(null);
-      closeCollaborationOverlay();
-
-      void (async () => {
+      setCollaborationThreadPreparing(messageId, true);
+      setCollaborationReplyFeedback(null);
+      try {
         const result = await createCollaborationThread({
           workspaceId: currentUserId,
           mailboxId: mailbox.id,
@@ -14102,50 +14072,31 @@ function MailboxView({
         });
 
         if (!result.ok || !result.thread) {
-          return;
+          setCollaborationReplyFeedback("Could not send reply. Try again.");
+          return false;
         }
 
         applyCanonicalCollaborationThreadToMessage(messageId, result.thread);
-      })();
-      return;
+        clearCollaborationDraft(messageId);
+        setCollaborationReplyDraft("");
+        setCollaborationReplyVisibility(hasRealInternalTeamContext ? "internal" : "shared");
+        setCollaborationMentionIndex(0);
+        setCollaborationReplySelection(null);
+        closeCollaborationOverlay();
+        return true;
+      } finally {
+        setCollaborationThreadPreparing(messageId, false);
+      }
     }
 
-    updateMessageById(messageId, (message) =>
-      message.collaboration
-        ? {
-            ...message,
-            isShared: true,
-            collaboration: {
-              ...message.collaboration,
-              state:
-                message.collaboration.state === "resolved"
-                  ? "needs_review"
-                  : message.collaboration.state,
-              updatedAt: nextTimestamp,
-              previewText: trimmedReply,
-              messages: [
-                ...message.collaboration.messages,
-                {
-                  id: `${messageId}-collaboration-reply-${nextTimestamp}`,
-                  authorId: currentUserId,
-                  authorName: currentUserName,
-                  text: trimmedReply,
-                  timestamp: nextTimestamp,
-                  visibility: replyVisibility,
-                  mentions,
-                },
-              ],
-            },
-          }
-        : message,
-    );
-    setCollaborationReplyDraft("");
-    setCollaborationReplyVisibility(hasRealInternalTeamContext ? "internal" : "shared");
-    setCollaborationMentionIndex(0);
-    setCollaborationReplySelection(null);
-    closeCollaborationOverlay();
+    if (!canonicalCollaboration) {
+      setCollaborationReplyFeedback("Collaboration is not ready yet. Try again in a moment.");
+      return false;
+    }
 
-    void (async () => {
+    setCollaborationThreadPreparing(messageId, true);
+    setCollaborationReplyFeedback(null);
+    try {
       const result = await mutateCollaborationThread({
         workspaceId: currentUserId,
         messageId,
@@ -14162,13 +14113,23 @@ function MailboxView({
 
       if (result.ok) {
         applyCanonicalCollaborationThreadToMessage(messageId, result.thread);
-        return;
+        clearCollaborationDraft(messageId);
+        setCollaborationReplyDraft("");
+        setCollaborationReplyVisibility(hasRealInternalTeamContext ? "internal" : "shared");
+        setCollaborationMentionIndex(0);
+        setCollaborationReplySelection(null);
+        closeCollaborationOverlay();
+        return true;
       }
 
       if (result.code === "stale_thread") {
         applyCanonicalCollaborationThreadToMessage(messageId, result.thread);
       }
-    })();
+      setCollaborationReplyFeedback("Collaboration changed. Review the latest thread and try again.");
+      return false;
+    } finally {
+      setCollaborationThreadPreparing(messageId, false);
+    }
   };
 
   const addParticipantToCollaboration = (
@@ -14204,7 +14165,56 @@ function MailboxView({
       (participant) => participant.kind === "internal",
     );
 
-    if (selectedInternalParticipants.length > 0) {
+    if (
+      selectedInternalParticipants.length > 0 &&
+      currentMessage &&
+      !currentMessage.collaboration &&
+      draftCollaborationByMessageId[messageId]
+    ) {
+      setDraftCollaborationByMessageId((current) => {
+        const draftCollaboration = current[messageId];
+
+        if (!draftCollaboration) {
+          return current;
+        }
+
+        const existingParticipants = draftCollaboration.participants ?? [];
+        const nextParticipants = [...existingParticipants];
+
+        selectedInternalParticipants.forEach((selectedParticipant) => {
+          const alreadyExists = nextParticipants.some(
+            (participant) =>
+              participant.id === selectedParticipant.id ||
+              participant.email.toLowerCase() === selectedParticipant.email.toLowerCase(),
+          );
+
+          if (alreadyExists) {
+            return;
+          }
+
+          nextParticipants.push({
+            id: selectedParticipant.id,
+            name: selectedParticipant.name,
+            email: selectedParticipant.email,
+            kind: selectedParticipant.kind,
+            status: "active" as const,
+          });
+        });
+
+        if (nextParticipants.length === existingParticipants.length) {
+          return current;
+        }
+
+        return {
+          ...current,
+          [messageId]: {
+            ...draftCollaboration,
+            updatedAt: nextTimestamp,
+            participants: nextParticipants,
+          },
+        };
+      });
+    } else if (selectedInternalParticipants.length > 0) {
       updateMessageById(messageId, (message) => {
         if (!message.collaboration) {
           return message;
@@ -18648,16 +18658,6 @@ function MailboxView({
 
                   <div className="mt-4 min-h-0 flex-1 overflow-y-auto pr-1">
                     <div className="space-y-5">
-                      {isPreStartCollaboration ? (
-                        <div className="rounded-[22px] border border-[var(--workspace-border-soft)] bg-[linear-gradient(180deg,var(--workspace-card),var(--workspace-card-subtle))] px-5 py-6">
-                          <div className="text-[1rem] font-medium tracking-tight text-[var(--workspace-text)]">
-                            Ready to start collaboration
-                          </div>
-                          <div className="mt-1.5 max-w-[32rem] text-[0.84rem] leading-6 text-[var(--workspace-text-faint)]">
-                            Start this thread when you want to bring others into the conversation.
-                          </div>
-                        </div>
-                      ) : (
                       <>
                         <section className="space-y-3">
                           <div className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
@@ -19084,6 +19084,9 @@ function MailboxView({
                           disabled={isActiveCollaborationThreadPreparing}
                           onChange={(event) => {
                             setCollaborationReplyDraft(event.target.value);
+                            if (collaborationReplyFeedback) {
+                              setCollaborationReplyFeedback(null);
+                            }
                             syncCollaborationMentionState(event.target.value, event.target);
                           }}
                           onClick={(event) =>
@@ -19176,31 +19179,19 @@ function MailboxView({
                           </div>
                         ) : null}
                       </div>
+                      {collaborationReplyFeedback ? (
+                        <div className="text-[0.78rem] leading-6 text-[var(--workspace-text-faint)]">
+                          {collaborationReplyFeedback}
+                        </div>
+                      ) : null}
                     </label>
                       </>
-                    )}
                     </div>
                   </div>
 
                   <div className="mt-4 flex shrink-0 flex-wrap items-center justify-end gap-3 border-t border-[var(--workspace-border-soft)] pt-4">
-                    {isPreStartCollaboration ? (
-                      <>
-                        <button
-                          type="button"
-                          onClick={closeCollaborationOverlay}
-                          className="inline-flex h-10 items-center justify-center rounded-full border border-transparent bg-transparent px-5 text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)] transition-[color,transform] duration-150 hover:text-[var(--workspace-text-soft)] active:scale-[0.99] focus-visible:outline-none"
-                        >
-                          Cancel
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => createMessageCollaboration()}
-                          className={`${mailboxPrimaryActionButtonClass} h-10 px-5 text-[0.72rem] tracking-[0.16em]`}
-                        >
-                          Start collaboration
-                        </button>
-                      </>
-                    ) : activeCollaborationMessage.collaboration?.state === "resolved" ? (
+                    {!isDraftStartedCollaboration &&
+                    activeCollaborationMessage.collaboration?.state === "resolved" ? (
                       <button
                         type="button"
                         onClick={() => {
@@ -19211,45 +19202,41 @@ function MailboxView({
                         Reopen collaboration
                       </button>
                     ) : null}
-                    {!isPreStartCollaboration ? (
-                      <>
-                        <button
-                          type="button"
-                          onClick={() => sendCollaborationReply(activeCollaborationMessage.id)}
-                          disabled={
-                            isActiveCollaborationThreadPreparing ||
-                            !collaborationReplyDraft.trim()
-                          }
-                          className={
-                            !isActiveCollaborationThreadPreparing &&
-                            collaborationReplyDraft.trim()
-                              ? `${mailboxPrimaryActionButtonClass} h-10 px-5 text-[0.72rem] tracking-[0.16em]`
-                              : "inline-flex h-10 cursor-not-allowed items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-5 text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-soft)] opacity-45 transition-[opacity] duration-150 focus-visible:outline-none"
-                          }
-                        >
-                          Send reply
-                        </button>
-                        {isDraftStartedCollaboration ? (
-                          <button
-                            type="button"
-                            onClick={closeCollaborationOverlay}
-                            className="inline-flex h-10 items-center justify-center rounded-full border border-transparent bg-transparent px-5 text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)] transition-[color,transform] duration-150 hover:text-[var(--workspace-text-soft)] active:scale-[0.99] focus-visible:outline-none"
-                          >
-                            Cancel
-                          </button>
-                        ) : (
-                          <button
-                            type="button"
-                            onClick={() => {
-                              markMessageCollaborationDone(activeCollaborationMessage.id);
-                            }}
-                            className={`${mailboxPrimaryActionButtonClass} h-10 px-5 text-[0.72rem] tracking-[0.16em]`}
-                          >
-                            Mark as done
-                          </button>
-                        )}
-                      </>
-                    ) : null}
+                    <button
+                      type="button"
+                      onClick={() => void sendCollaborationReply(activeCollaborationMessage.id)}
+                      disabled={
+                        isActiveCollaborationThreadPreparing ||
+                        !collaborationReplyDraft.trim()
+                      }
+                      className={
+                        !isActiveCollaborationThreadPreparing &&
+                        collaborationReplyDraft.trim()
+                          ? `${mailboxPrimaryActionButtonClass} h-10 px-5 text-[0.72rem] tracking-[0.16em]`
+                          : "inline-flex h-10 cursor-not-allowed items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-5 text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-soft)] opacity-45 transition-[opacity] duration-150 focus-visible:outline-none"
+                      }
+                    >
+                      Send reply
+                    </button>
+                    {isDraftStartedCollaboration ? (
+                      <button
+                        type="button"
+                        onClick={closeCollaborationOverlay}
+                        className="inline-flex h-10 items-center justify-center rounded-full border border-transparent bg-transparent px-5 text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)] transition-[color,transform] duration-150 hover:text-[var(--workspace-text-soft)] active:scale-[0.99] focus-visible:outline-none"
+                      >
+                        Cancel
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          markMessageCollaborationDone(activeCollaborationMessage.id);
+                        }}
+                        className={`${mailboxPrimaryActionButtonClass} h-10 px-5 text-[0.72rem] tracking-[0.16em]`}
+                      >
+                        Mark as done
+                      </button>
+                    )}
                   </div>
                 </div>
               </WorkspaceModalLayer>,
