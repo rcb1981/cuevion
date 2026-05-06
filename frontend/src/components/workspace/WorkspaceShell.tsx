@@ -14221,35 +14221,56 @@ function MailboxView({
     setCollaborationReplySendingMessageId(messageId);
     void (async () => {
       try {
-        const result = await mutateCollaborationThread({
-          workspaceId: currentUserId,
-          messageId,
-          expectedUpdatedAt,
-          action: {
-            type: "reply",
-            authorId: currentUserId,
-            authorName: currentUserName,
-            text: trimmedReply,
-            visibility: replyVisibility,
-            mentions,
-          },
-        });
-
-        if (result.ok) {
-          applyCanonicalCollaborationThreadToMessage(messageId, result.thread);
+        const sendCanonicalReplyWithExpectedUpdatedAt = (nextExpectedUpdatedAt?: number) =>
+          mutateCollaborationThread({
+            workspaceId: currentUserId,
+            messageId,
+            expectedUpdatedAt: nextExpectedUpdatedAt,
+            action: {
+              type: "reply",
+              authorId: currentUserId,
+              authorName: currentUserName,
+              text: trimmedReply,
+              visibility: replyVisibility,
+              mentions,
+            },
+          });
+        const applySuccessfulReplyResult = (thread: CollaborationThread) => {
+          applyCanonicalCollaborationThreadToMessage(messageId, thread);
           setCollaborationReplyDraft("");
           setCollaborationReplyFeedback("");
           setCollaborationReplyVisibility(hasRealInternalTeamContext ? "internal" : "shared");
           setCollaborationMentionIndex(0);
           setCollaborationReplySelection(null);
+        };
+
+        const result = await sendCanonicalReplyWithExpectedUpdatedAt(expectedUpdatedAt);
+
+        if (result.ok) {
+          applySuccessfulReplyResult(result.thread);
           return;
         }
 
         if (result.code === "stale_thread") {
           applyCanonicalCollaborationThreadToMessage(messageId, result.thread);
-          setCollaborationReplyFeedback(
-            "Collaboration changed. Review the latest thread and try again.",
+          const retryResult = await sendCanonicalReplyWithExpectedUpdatedAt(
+            result.thread.collaboration.updatedAt,
           );
+
+          if (retryResult.ok) {
+            applySuccessfulReplyResult(retryResult.thread);
+            return;
+          }
+
+          if (retryResult.code === "stale_thread") {
+            applyCanonicalCollaborationThreadToMessage(messageId, retryResult.thread);
+            setCollaborationReplyFeedback(
+              "Collaboration changed. Review the latest thread and try again.",
+            );
+            return;
+          }
+
+          setCollaborationReplyFeedback("Could not send reply. Try again.");
           return;
         }
 
