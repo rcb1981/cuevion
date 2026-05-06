@@ -10483,6 +10483,10 @@ function MailboxView({
   const [draftCollaborationByMessageId, setDraftCollaborationByMessageId] = useState<
     Record<string, CollaborationThread["collaboration"]>
   >({});
+  const [
+    collaborationThreadPreparingByMessageId,
+    setCollaborationThreadPreparingByMessageId,
+  ] = useState<Record<string, boolean>>({});
   const [collaborationReplyDraft, setCollaborationReplyDraft] = useState("");
   const [collaborationParticipantPersonIds, setCollaborationParticipantPersonIds] =
     useState<string[]>([]);
@@ -12099,6 +12103,10 @@ function MailboxView({
     activeStoredCollaborationMessage &&
       !activeStoredCollaborationMessage.collaboration &&
       activeDraftCollaboration,
+  );
+  const isActiveCollaborationThreadPreparing = Boolean(
+    activeCollaborationMessageId &&
+      collaborationThreadPreparingByMessageId[activeCollaborationMessageId],
   );
   const directCanonicalCollaborationRefreshMessage =
     activeStoredCollaborationMessage?.collaboration
@@ -13823,6 +13831,24 @@ function MailboxView({
     });
   };
 
+  const setCollaborationThreadPreparing = (messageId: string, isPreparing: boolean) => {
+    setCollaborationThreadPreparingByMessageId((current) => {
+      if (isPreparing) {
+        return {
+          ...current,
+          [messageId]: true,
+        };
+      }
+
+      if (!current[messageId]) {
+        return current;
+      }
+
+      const { [messageId]: _clearedPreparing, ...remainingPreparing } = current;
+      return remainingPreparing;
+    });
+  };
+
   const closeCollaborationOverlay = () => {
     const closingMessageId = activeCollaborationMessageId;
 
@@ -14008,6 +14034,10 @@ function MailboxView({
   };
 
   const sendCollaborationReply = (messageId: string) => {
+    if (collaborationThreadPreparingByMessageId[messageId]) {
+      return;
+    }
+
     const trimmedReply = collaborationReplyDraft.trim();
 
     if (!trimmedReply) {
@@ -14427,25 +14457,30 @@ function MailboxView({
     let inviteLink = "";
 
     if (currentMessage?.collaboration || (currentMessage && draftCollaboration)) {
-      const issueResult = await issueCollaborationInvite({
-        workspaceId: currentUserId,
-        mailboxId: mailbox.id,
-        messageId,
-        inviteeEmail: normalizedEmail,
-        createdByUserId: currentUserId,
-        createdByUserName: currentUserName,
-        sourceMessage:
-          currentMessage && draftCollaboration
-            ? buildCollaborationSourceMessageSnapshot(currentMessage)
-            : undefined,
-        collaboration: draftCollaboration,
-        isShared: draftCollaboration ? true : undefined,
-      });
+      setCollaborationThreadPreparing(messageId, true);
+      try {
+        const issueResult = await issueCollaborationInvite({
+          workspaceId: currentUserId,
+          mailboxId: mailbox.id,
+          messageId,
+          inviteeEmail: normalizedEmail,
+          createdByUserId: currentUserId,
+          createdByUserName: currentUserName,
+          sourceMessage:
+            currentMessage && draftCollaboration
+              ? buildCollaborationSourceMessageSnapshot(currentMessage)
+              : undefined,
+          collaboration: draftCollaboration,
+          isShared: draftCollaboration ? true : undefined,
+        });
 
-      if (issueResult.ok) {
-        inviteLink = issueResult.inviteUrl;
-        clearCollaborationDraft(messageId);
-        applyCanonicalCollaborationThreadToMessage(messageId, issueResult.thread);
+        if (issueResult.ok) {
+          inviteLink = issueResult.inviteUrl;
+          clearCollaborationDraft(messageId);
+          applyCanonicalCollaborationThreadToMessage(messageId, issueResult.thread);
+        }
+      } finally {
+        setCollaborationThreadPreparing(messageId, false);
       }
     }
 
@@ -14538,25 +14573,30 @@ function MailboxView({
         formatCollaborationParticipantNameFromEmail(normalizedEmail) ||
         normalizedEmail;
 
-      const issueResult = await issueCollaborationInvite({
-        workspaceId: currentUserId,
-        mailboxId: sourceMailboxId,
-        messageId,
-        inviteeEmail: normalizedEmail,
-        createdByUserId: currentUserId,
-        createdByUserName: currentUserName,
-        sourceMessage: draftInviteCollaboration
-          ? buildCollaborationSourceMessageSnapshot(existingInviteMessage)
-          : undefined,
-        collaboration: draftInviteCollaboration,
-        isShared: draftInviteCollaboration ? true : undefined,
-      });
+      setCollaborationThreadPreparing(messageId, true);
+      try {
+        const issueResult = await issueCollaborationInvite({
+          workspaceId: currentUserId,
+          mailboxId: sourceMailboxId,
+          messageId,
+          inviteeEmail: normalizedEmail,
+          createdByUserId: currentUserId,
+          createdByUserName: currentUserName,
+          sourceMessage: draftInviteCollaboration
+            ? buildCollaborationSourceMessageSnapshot(existingInviteMessage)
+            : undefined,
+          collaboration: draftInviteCollaboration,
+          isShared: draftInviteCollaboration ? true : undefined,
+        });
 
-      if (issueResult.ok) {
-        inviteLink = issueResult.inviteUrl;
-        issuedInviteThread = issueResult.thread;
-        clearCollaborationDraft(messageId);
-        applyCanonicalCollaborationThreadToMessage(messageId, issueResult.thread);
+        if (issueResult.ok) {
+          inviteLink = issueResult.inviteUrl;
+          issuedInviteThread = issueResult.thread;
+          clearCollaborationDraft(messageId);
+          applyCanonicalCollaborationThreadToMessage(messageId, issueResult.thread);
+        }
+      } finally {
+        setCollaborationThreadPreparing(messageId, false);
       }
     }
 
@@ -18860,6 +18900,7 @@ function MailboxView({
                                 void sendExternalReviewInvite(activeCollaborationMessage.id)
                               }
                               disabled={
+                                isActiveCollaborationThreadPreparing ||
                                 isSendingExternalInvite ||
                                 pendingExternalInviteEmailKeys.has(
                                   normalizeSenderLearningKey(externalCollaborationEmail),
@@ -18867,6 +18908,7 @@ function MailboxView({
                                 !isValidCollaborationParticipantEmail(externalCollaborationEmail)
                               }
                               className={
+                                !isActiveCollaborationThreadPreparing &&
                                 !isSendingExternalInvite &&
                                 !pendingExternalInviteEmailKeys.has(
                                   normalizeSenderLearningKey(externalCollaborationEmail),
@@ -18884,9 +18926,11 @@ function MailboxView({
                                 void copyExternalInviteLink(activeCollaborationMessage.id)
                               }
                               disabled={
+                                isActiveCollaborationThreadPreparing ||
                                 !isValidCollaborationParticipantEmail(externalCollaborationEmail)
                               }
                               className={
+                                !isActiveCollaborationThreadPreparing &&
                                 isValidCollaborationParticipantEmail(externalCollaborationEmail)
                                   ? "inline-flex h-11 items-center justify-center rounded-full px-4 text-[0.66rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)] transition-colors duration-150 hover:text-[var(--workspace-text)] focus-visible:outline-none"
                                   : "inline-flex h-11 cursor-not-allowed items-center justify-center rounded-full px-4 text-[0.66rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)] opacity-45 transition-[opacity] duration-150 focus-visible:outline-none"
@@ -19037,6 +19081,7 @@ function MailboxView({
                         <textarea
                           ref={collaborationReplyInputRef}
                           value={collaborationReplyDraft}
+                          disabled={isActiveCollaborationThreadPreparing}
                           onChange={(event) => {
                             setCollaborationReplyDraft(event.target.value);
                             syncCollaborationMentionState(event.target.value, event.target);
@@ -19093,7 +19138,9 @@ function MailboxView({
                           }}
                           rows={hasVisibleCollaborationMessages ? 4 : 3}
                           placeholder={
-                            resolvedCollaborationReplyVisibility === "internal"
+                            isActiveCollaborationThreadPreparing
+                              ? "Preparing collaboration"
+                              : resolvedCollaborationReplyVisibility === "internal"
                               ? "Add an internal note"
                               : "Reply to everyone in this collaboration"
                           }
@@ -19169,8 +19216,12 @@ function MailboxView({
                         <button
                           type="button"
                           onClick={() => sendCollaborationReply(activeCollaborationMessage.id)}
-                          disabled={!collaborationReplyDraft.trim()}
+                          disabled={
+                            isActiveCollaborationThreadPreparing ||
+                            !collaborationReplyDraft.trim()
+                          }
                           className={
+                            !isActiveCollaborationThreadPreparing &&
                             collaborationReplyDraft.trim()
                               ? `${mailboxPrimaryActionButtonClass} h-10 px-5 text-[0.72rem] tracking-[0.16em]`
                               : "inline-flex h-10 cursor-not-allowed items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-5 text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-soft)] opacity-45 transition-[opacity] duration-150 focus-visible:outline-none"
