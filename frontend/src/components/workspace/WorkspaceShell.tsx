@@ -10487,6 +10487,11 @@ function MailboxView({
     collaborationThreadPreparingByMessageId,
     setCollaborationThreadPreparingByMessageId,
   ] = useState<Record<string, boolean>>({});
+  const [collaborationReplySendingByMessageId, setCollaborationReplySendingByMessageId] =
+    useState<Record<string, boolean>>({});
+  const [collaborationReplyFeedback, setCollaborationReplyFeedback] = useState<string | null>(
+    null,
+  );
   const [collaborationReplyDraft, setCollaborationReplyDraft] = useState("");
   const [collaborationParticipantPersonIds, setCollaborationParticipantPersonIds] =
     useState<string[]>([]);
@@ -10517,6 +10522,9 @@ function MailboxView({
   );
   const [collaborationHistoryExpanded, setCollaborationHistoryExpanded] = useState(false);
   const lastActiveCanonicalCollaborationRefreshKeyRef = useRef<string>("");
+  const canonicalCollaborationThreadByMessageIdRef = useRef<Record<string, CollaborationThread>>(
+    {},
+  );
   const [externalReviewCopyFeedback, setExternalReviewCopyFeedback] = useState("");
   const [externalInviteEmailFeedback, setExternalInviteEmailFeedback] = useState<string | null>(
     null,
@@ -12108,6 +12116,10 @@ function MailboxView({
     activeCollaborationMessageId &&
       collaborationThreadPreparingByMessageId[activeCollaborationMessageId],
   );
+  const isActiveCollaborationReplySending = Boolean(
+    activeCollaborationMessageId &&
+      collaborationReplySendingByMessageId[activeCollaborationMessageId],
+  );
   const directCanonicalCollaborationRefreshMessage =
     activeStoredCollaborationMessage?.collaboration
       ? activeStoredCollaborationMessage
@@ -13616,6 +13628,7 @@ function MailboxView({
     messageId: string,
     thread: CollaborationThread,
   ) => {
+    canonicalCollaborationThreadByMessageIdRef.current[messageId] = thread;
     updateMessageById(messageId, (message) => ({
       ...message,
       collaboration: thread.collaboration as MailMessageCollaboration,
@@ -13849,6 +13862,24 @@ function MailboxView({
     });
   };
 
+  const setCollaborationReplySending = (messageId: string, isSending: boolean) => {
+    setCollaborationReplySendingByMessageId((current) => {
+      if (isSending) {
+        return {
+          ...current,
+          [messageId]: true,
+        };
+      }
+
+      if (!current[messageId]) {
+        return current;
+      }
+
+      const { [messageId]: _clearedSending, ...remainingSending } = current;
+      return remainingSending;
+    });
+  };
+
   const closeCollaborationOverlay = () => {
     const closingMessageId = activeCollaborationMessageId;
 
@@ -13874,6 +13905,7 @@ function MailboxView({
     setExternalCollaborationInviteUrl("");
     setExternalInviteEmailFeedback(null);
     setExternalReviewCopyFeedback("");
+    setCollaborationReplyFeedback(null);
     setCollaborationHistoryExpanded(false);
     setCollaborationReplyDraft("");
     setCollaborationReplyVisibility(hasRealInternalTeamContext ? "internal" : "shared");
@@ -14033,19 +14065,28 @@ function MailboxView({
     setStartCollaborationInviteEmail("");
   };
 
-  const sendCollaborationReply = (messageId: string) => {
+  const sendCollaborationReply = async (messageId: string): Promise<boolean> => {
     if (collaborationThreadPreparingByMessageId[messageId]) {
-      return;
+      setCollaborationReplyFeedback("Collaboration is still preparing. Try again in a moment.");
+      return false;
+    }
+
+    if (collaborationReplySendingByMessageId[messageId]) {
+      return false;
     }
 
     const trimmedReply = collaborationReplyDraft.trim();
 
     if (!trimmedReply) {
-      return;
+      return false;
     }
 
     const currentMessage = getMessageById(messageId);
-    const expectedUpdatedAt = currentMessage?.collaboration?.updatedAt;
+    const cachedThread = canonicalCollaborationThreadByMessageIdRef.current[messageId];
+    const canonicalCollaboration =
+      currentMessage?.collaboration ??
+      (cachedThread?.collaboration as MailMessageCollaboration | undefined);
+    const expectedUpdatedAt = canonicalCollaboration?.updatedAt;
     const nextTimestamp = Date.now();
     const mentions = extractCollaborationMentions(
       trimmedReply,
@@ -14057,7 +14098,7 @@ function MailboxView({
       : "shared";
     const draftCollaboration = draftCollaborationByMessageId[messageId];
 
-    if (currentMessage && !currentMessage.collaboration && draftCollaboration) {
+    if (currentMessage && !canonicalCollaboration && draftCollaboration) {
       const nextCollaboration: CollaborationThread["collaboration"] = {
         ...draftCollaboration,
         state:
@@ -14080,19 +14121,9 @@ function MailboxView({
         ],
       };
 
-      updateMessageById(messageId, (message) => ({
-        ...message,
-        isShared: true,
-        collaboration: nextCollaboration,
-      }));
-      clearCollaborationDraft(messageId);
-      setCollaborationReplyDraft("");
-      setCollaborationReplyVisibility(hasRealInternalTeamContext ? "internal" : "shared");
-      setCollaborationMentionIndex(0);
-      setCollaborationReplySelection(null);
-      closeCollaborationOverlay();
-
-      void (async () => {
+      setCollaborationReplySending(messageId, true);
+      setCollaborationReplyFeedback(null);
+      try {
         const result = await createCollaborationThread({
           workspaceId: currentUserId,
           mailboxId: mailbox.id,
@@ -14102,50 +14133,31 @@ function MailboxView({
         });
 
         if (!result.ok || !result.thread) {
-          return;
+          setCollaborationReplyFeedback("Could not send reply. Try again.");
+          return false;
         }
 
         applyCanonicalCollaborationThreadToMessage(messageId, result.thread);
-      })();
-      return;
+        clearCollaborationDraft(messageId);
+        setCollaborationReplyDraft("");
+        setCollaborationReplyVisibility(hasRealInternalTeamContext ? "internal" : "shared");
+        setCollaborationMentionIndex(0);
+        setCollaborationReplySelection(null);
+        closeCollaborationOverlay();
+        return true;
+      } finally {
+        setCollaborationReplySending(messageId, false);
+      }
     }
 
-    updateMessageById(messageId, (message) =>
-      message.collaboration
-        ? {
-            ...message,
-            isShared: true,
-            collaboration: {
-              ...message.collaboration,
-              state:
-                message.collaboration.state === "resolved"
-                  ? "needs_review"
-                  : message.collaboration.state,
-              updatedAt: nextTimestamp,
-              previewText: trimmedReply,
-              messages: [
-                ...message.collaboration.messages,
-                {
-                  id: `${messageId}-collaboration-reply-${nextTimestamp}`,
-                  authorId: currentUserId,
-                  authorName: currentUserName,
-                  text: trimmedReply,
-                  timestamp: nextTimestamp,
-                  visibility: replyVisibility,
-                  mentions,
-                },
-              ],
-            },
-          }
-        : message,
-    );
-    setCollaborationReplyDraft("");
-    setCollaborationReplyVisibility(hasRealInternalTeamContext ? "internal" : "shared");
-    setCollaborationMentionIndex(0);
-    setCollaborationReplySelection(null);
-    closeCollaborationOverlay();
+    if (!canonicalCollaboration) {
+      setCollaborationReplyFeedback("Collaboration is not ready yet. Try again in a moment.");
+      return false;
+    }
 
-    void (async () => {
+    setCollaborationReplySending(messageId, true);
+    setCollaborationReplyFeedback(null);
+    try {
       const result = await mutateCollaborationThread({
         workspaceId: currentUserId,
         messageId,
@@ -14162,13 +14174,23 @@ function MailboxView({
 
       if (result.ok) {
         applyCanonicalCollaborationThreadToMessage(messageId, result.thread);
-        return;
+        clearCollaborationDraft(messageId);
+        setCollaborationReplyDraft("");
+        setCollaborationReplyVisibility(hasRealInternalTeamContext ? "internal" : "shared");
+        setCollaborationMentionIndex(0);
+        setCollaborationReplySelection(null);
+        closeCollaborationOverlay();
+        return true;
       }
 
       if (result.code === "stale_thread") {
         applyCanonicalCollaborationThreadToMessage(messageId, result.thread);
       }
-    })();
+      setCollaborationReplyFeedback("Collaboration changed. Review the latest thread and try again.");
+      return false;
+    } finally {
+      setCollaborationReplySending(messageId, false);
+    }
   };
 
   const addParticipantToCollaboration = (
@@ -19081,9 +19103,15 @@ function MailboxView({
                         <textarea
                           ref={collaborationReplyInputRef}
                           value={collaborationReplyDraft}
-                          disabled={isActiveCollaborationThreadPreparing}
+                          disabled={
+                            isActiveCollaborationThreadPreparing ||
+                            isActiveCollaborationReplySending
+                          }
                           onChange={(event) => {
                             setCollaborationReplyDraft(event.target.value);
+                            if (collaborationReplyFeedback) {
+                              setCollaborationReplyFeedback(null);
+                            }
                             syncCollaborationMentionState(event.target.value, event.target);
                           }}
                           onClick={(event) =>
@@ -19140,6 +19168,8 @@ function MailboxView({
                           placeholder={
                             isActiveCollaborationThreadPreparing
                               ? "Preparing collaboration"
+                              : isActiveCollaborationReplySending
+                                ? "Sending reply"
                               : resolvedCollaborationReplyVisibility === "internal"
                               ? "Add an internal note"
                               : "Reply to everyone in this collaboration"
@@ -19176,6 +19206,11 @@ function MailboxView({
                           </div>
                         ) : null}
                       </div>
+                      {collaborationReplyFeedback ? (
+                        <div className="text-[0.78rem] leading-6 text-[var(--workspace-text-faint)]">
+                          {collaborationReplyFeedback}
+                        </div>
+                      ) : null}
                     </label>
                       </>
                     )}
@@ -19215,19 +19250,21 @@ function MailboxView({
                       <>
                         <button
                           type="button"
-                          onClick={() => sendCollaborationReply(activeCollaborationMessage.id)}
+                          onClick={() => void sendCollaborationReply(activeCollaborationMessage.id)}
                           disabled={
                             isActiveCollaborationThreadPreparing ||
+                            isActiveCollaborationReplySending ||
                             !collaborationReplyDraft.trim()
                           }
                           className={
                             !isActiveCollaborationThreadPreparing &&
+                            !isActiveCollaborationReplySending &&
                             collaborationReplyDraft.trim()
                               ? `${mailboxPrimaryActionButtonClass} h-10 px-5 text-[0.72rem] tracking-[0.16em]`
                               : "inline-flex h-10 cursor-not-allowed items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-5 text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-soft)] opacity-45 transition-[opacity] duration-150 focus-visible:outline-none"
                           }
                         >
-                          Send reply
+                          {isActiveCollaborationReplySending ? "Sending..." : "Send reply"}
                         </button>
                         {isDraftStartedCollaboration ? (
                           <button
