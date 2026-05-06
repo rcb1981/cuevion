@@ -21460,6 +21460,184 @@ function normalizeManagedWorkspaceInbox(
   };
 }
 
+function getManagedInboxIdentityKey(mailbox: ManagedWorkspaceInbox) {
+  const normalizedId = mailbox.id.trim();
+
+  if (normalizedId) {
+    return `id:${normalizedId}`;
+  }
+
+  const normalizedEmail = mailbox.email.trim().toLowerCase();
+
+  return normalizedEmail ? `email:${normalizedEmail}` : "";
+}
+
+function findMatchingSavedManagedInbox(
+  next: ManagedWorkspaceInbox,
+  savedList: ManagedWorkspaceInbox[],
+) {
+  const normalizedId = next.id.trim();
+
+  if (normalizedId) {
+    const matchedById = savedList.find(
+      (mailbox) => mailbox.id.trim() === normalizedId,
+    );
+
+    if (matchedById) {
+      return matchedById;
+    }
+  }
+
+  const normalizedEmail = next.email.trim().toLowerCase();
+
+  if (!normalizedEmail) {
+    return undefined;
+  }
+
+  return savedList.find(
+    (mailbox) => mailbox.email.trim().toLowerCase() === normalizedEmail,
+  );
+}
+
+function mergeManagedInboxCredentials(
+  next: ManagedWorkspaceInbox,
+  previous?: ManagedWorkspaceInbox | null,
+): ManagedWorkspaceInbox {
+  if (
+    !previous ||
+    (next.provider && previous.provider && next.provider !== previous.provider)
+  ) {
+    return next;
+  }
+
+  const previousImap = {
+    ...createManagedCustomImapSettings(),
+    ...previous.customImap,
+  };
+  const nextImap = {
+    ...createManagedCustomImapSettings(),
+    ...next.customImap,
+  };
+  const previousSmtp = {
+    ...createManagedCustomSmtpSettings(),
+    ...previous.customSmtp,
+  };
+  const nextSmtp = {
+    ...createManagedCustomSmtpSettings(),
+    ...next.customSmtp,
+  };
+
+  return {
+    ...next,
+    customImap: {
+      ...nextImap,
+      password:
+        nextImap.password.trim().length > 0
+          ? nextImap.password
+          : previousImap.password,
+    },
+    customSmtp: {
+      ...nextSmtp,
+      host:
+        nextSmtp.host.trim().length > 0 ? nextSmtp.host : previousSmtp.host,
+      port:
+        nextSmtp.port.trim().length > 0 ? nextSmtp.port : previousSmtp.port,
+      username:
+        nextSmtp.username.trim().length > 0
+          ? nextSmtp.username
+          : previousSmtp.username,
+      password:
+        nextSmtp.password.trim().length > 0
+          ? nextSmtp.password
+          : previousSmtp.password,
+    },
+  };
+}
+
+function normalizeManagedInboxForStorage(
+  mailbox: ManagedWorkspaceInbox,
+  previous?: ManagedWorkspaceInbox | null,
+): ManagedWorkspaceInbox {
+  const safeMailbox = {
+    ...mailbox,
+    id: typeof mailbox.id === "string" ? mailbox.id : "",
+    title: typeof mailbox.title === "string" ? mailbox.title : "",
+    email: typeof mailbox.email === "string" ? mailbox.email : "",
+    provider: mailbox.provider ?? null,
+    connected: mailbox.connected === true,
+    connectionMethod: mailbox.connectionMethod ?? null,
+    connectionStatus: mailbox.connectionStatus ?? "not_connected",
+    customImap: {
+      ...createManagedCustomImapSettings(),
+      ...(mailbox.customImap ?? {}),
+    },
+    customSmtp: {
+      ...createManagedCustomSmtpSettings(),
+      ...(mailbox.customSmtp ?? {}),
+    },
+  };
+  const normalizedMailbox = normalizeManagedWorkspaceInbox(
+    cloneManagedWorkspaceInbox(safeMailbox),
+  );
+  const trimmedMailbox = {
+    ...normalizedMailbox,
+    id: normalizedMailbox.id.trim(),
+    title:
+      normalizedMailbox.title.trim() ||
+      normalizedMailbox.email.trim() ||
+      "Custom Inbox",
+    email: normalizedMailbox.email.trim().toLowerCase(),
+  };
+
+  return mergeManagedInboxCredentials(trimmedMailbox, previous);
+}
+
+function normalizeStoredManagedInboxList(value: unknown) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .filter((mailbox): mailbox is ManagedWorkspaceInbox => {
+      if (!mailbox || typeof mailbox !== "object") {
+        return false;
+      }
+
+      const candidate = mailbox as Partial<ManagedWorkspaceInbox>;
+      return (
+        typeof candidate.id === "string" &&
+        (typeof candidate.email === "string" ||
+          typeof candidate.title === "string" ||
+          typeof candidate.provider === "string")
+      );
+    })
+    .map((mailbox) => normalizeManagedInboxForStorage(mailbox))
+    .filter((mailbox) => getManagedInboxIdentityKey(mailbox).length > 0);
+}
+
+function mergeOnboardingSeedWithSavedInboxes(
+  seedInboxes: ManagedWorkspaceInbox[],
+  savedInboxes: ManagedWorkspaceInbox[],
+): ManagedWorkspaceInbox[] {
+  if (savedInboxes.length === 0) {
+    return seedInboxes.map((mailbox) => normalizeManagedInboxForStorage(mailbox));
+  }
+
+  const merged = savedInboxes.map((mailbox) =>
+    normalizeManagedInboxForStorage(mailbox, mailbox),
+  );
+
+  seedInboxes.forEach((seedMailbox) => {
+    if (findMatchingSavedManagedInbox(seedMailbox, merged)) {
+      return;
+    }
+
+    merged.push(normalizeManagedInboxForStorage(seedMailbox));
+  });
+
+  return merged;
+}
+
 function isSelectablePrimaryManagedInbox(mailbox: ManagedWorkspaceInbox) {
   return mailbox.connected === true && mailbox.connectionStatus === "connected";
 }
@@ -21511,32 +21689,6 @@ function buildManagedWorkspaceInboxes(
       toManagedWorkspaceInbox(mailbox, onboardingState),
     ),
   );
-}
-
-function mergeManagedWorkspaceInboxes(
-  currentMailboxes: ManagedWorkspaceInbox[],
-  onboardingMailboxes: ManagedWorkspaceInbox[],
-): ManagedWorkspaceInbox[] {
-  const currentById = new Map(
-    currentMailboxes.map((mailbox) => [mailbox.id, mailbox] as const),
-  );
-  const onboardingIds = new Set(onboardingMailboxes.map((mailbox) => mailbox.id));
-  const merged: ManagedWorkspaceInbox[] = onboardingMailboxes.map((mailbox) =>
-    normalizeManagedWorkspaceInbox(
-      cloneManagedWorkspaceInbox({
-        ...(currentById.get(mailbox.id) ?? mailbox),
-        ...mailbox,
-      }),
-    ),
-  );
-
-  currentMailboxes.forEach((mailbox) => {
-    if (!onboardingIds.has(mailbox.id)) {
-      merged.push(normalizeManagedWorkspaceInbox(cloneManagedWorkspaceInbox(mailbox)));
-    }
-  });
-
-  return merged;
 }
 
 function isManagedInboxReady(
@@ -22661,15 +22813,24 @@ const ManageInboxesView = memo(function ManageInboxesView({
 
   const connectManagedInbox = async (inboxId: string) => {
     const mailbox = draftManagedInboxes.find((candidate) => candidate.id === inboxId);
+    const savedMailbox = mailbox
+      ? findMatchingSavedManagedInbox(mailbox, savedManagedInboxes)
+      : undefined;
+    const mailboxForConnection = mailbox
+      ? normalizeManagedInboxForStorage(mailbox, savedMailbox)
+      : null;
 
-    if (!mailbox || !isManagedInboxConfigurationComplete(mailbox, credentialStatuses)) {
+    if (
+      !mailboxForConnection ||
+      !isManagedInboxConfigurationComplete(mailboxForConnection, credentialStatuses)
+    ) {
       return false;
     }
 
     setValidatingInboxId(inboxId);
     clearConnectionError(inboxId);
 
-    const response = await validateManagedInbox(mailbox);
+    const response = await validateManagedInbox(mailboxForConnection);
 
     if (!response.ok) {
       setConnectionErrors((current) => ({
@@ -22881,8 +23042,17 @@ const ManageInboxesView = memo(function ManageInboxesView({
     }
 
     const mailbox = draftManagedInboxes.find((candidate) => candidate.id === inboxId);
+    const mailboxForValidation = mailbox
+      ? normalizeManagedInboxForStorage(
+          mailbox,
+          findMatchingSavedManagedInbox(mailbox, savedManagedInboxes),
+        )
+      : null;
 
-    if (!mailbox || !isManagedInboxConfigurationComplete(mailbox, credentialStatuses)) {
+    if (
+      !mailboxForValidation ||
+      !isManagedInboxConfigurationComplete(mailboxForValidation, credentialStatuses)
+    ) {
       setValidationErrorInboxId(inboxId);
       setEditingInboxId(inboxId);
       return;
@@ -23014,8 +23184,14 @@ const ManageInboxesView = memo(function ManageInboxesView({
                     ? `custom:${(mailbox.title.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "inbox")}-${Date.now().toString(36)}-${index}`
                     : mailbox.id,
                 }));
+              const normalizedNextMailboxes = nextMailboxes.map((mailbox) =>
+                normalizeManagedInboxForStorage(
+                  mailbox,
+                  findMatchingSavedManagedInbox(mailbox, savedManagedInboxes),
+                ),
+              );
 
-              const firstInvalidMailbox = nextMailboxes.find(
+              const firstInvalidMailbox = normalizedNextMailboxes.find(
                 (mailbox) => !isManagedInboxConfigurationComplete(mailbox, credentialStatuses),
               );
 
@@ -23025,7 +23201,7 @@ const ManageInboxesView = memo(function ManageInboxesView({
                 return;
               }
 
-              const readyMailboxes = nextMailboxes.filter((mailbox) =>
+              const readyMailboxes = normalizedNextMailboxes.filter((mailbox) =>
                 isManagedInboxConfigurationComplete(mailbox, credentialStatuses),
               );
               const mailboxesNeedingValidation = readyMailboxes.filter(
@@ -23080,11 +23256,11 @@ const ManageInboxesView = memo(function ManageInboxesView({
                 setIsApplyingAll(false);
               }
 
-              const addedMailboxes = nextMailboxes.filter(
+              const addedMailboxes = normalizedNextMailboxes.filter(
                 (mailbox) =>
                   !savedManagedInboxes.some((savedMailbox) => savedMailbox.id === mailbox.id),
               );
-              const didApply = onApply(nextMailboxes);
+              const didApply = onApply(normalizedNextMailboxes);
 
               if (!didApply) {
                 return;
@@ -27457,22 +27633,51 @@ export function WorkspaceShell({
     }
   });
   const [savedManagedInboxes, setSavedManagedInboxes] = useState<ManagedWorkspaceInbox[]>(() => {
+    const onboardingSeed = buildManagedWorkspaceInboxes(onboardingState);
+
     if (typeof window === "undefined") {
-      return buildManagedWorkspaceInboxes(onboardingState);
+      return onboardingSeed;
     }
 
     const storedValue = window.localStorage.getItem(MANAGED_INBOXES_STORAGE_KEY);
 
     if (!storedValue) {
-      return buildManagedWorkspaceInboxes(onboardingState);
+      console.info("[MANAGED-INBOXES] loaded", {
+        count: onboardingSeed.length,
+        source: "onboarding",
+      });
+      return onboardingSeed;
     }
 
     try {
-      return (JSON.parse(storedValue) as ManagedWorkspaceInbox[]).map((mailbox) =>
-        normalizeManagedWorkspaceInbox(cloneManagedWorkspaceInbox(mailbox)),
-      );
+      const parsedInboxes = normalizeStoredManagedInboxList(JSON.parse(storedValue));
+
+      if (parsedInboxes.length > 0) {
+        const mergedInboxes = mergeOnboardingSeedWithSavedInboxes(
+          onboardingSeed,
+          parsedInboxes,
+        );
+        console.info("[MANAGED-INBOXES] loaded", {
+          count: mergedInboxes.length,
+          source: "localStorage",
+        });
+        if (mergedInboxes.length > parsedInboxes.length) {
+          console.info("[MANAGED-INBOXES] seeded", { count: mergedInboxes.length });
+        }
+        return mergedInboxes;
+      }
+
+      console.info("[MANAGED-INBOXES] loaded", {
+        count: onboardingSeed.length,
+        source: "onboarding",
+      });
+      return onboardingSeed;
     } catch {
-      return buildManagedWorkspaceInboxes(onboardingState);
+      console.info("[MANAGED-INBOXES] loaded", {
+        count: onboardingSeed.length,
+        source: "onboarding",
+      });
+      return onboardingSeed;
     }
   });
   const [mailboxCredentialStatuses, setMailboxCredentialStatuses] =
@@ -28467,9 +28672,19 @@ export function WorkspaceShell({
     }
 
     lastOnboardingMailboxSeedKeyRef.current = onboardingMailboxSeedKey;
-    setSavedManagedInboxes((current) =>
-      mergeManagedWorkspaceInboxes(current, buildManagedWorkspaceInboxes(onboardingState)),
-    );
+    setSavedManagedInboxes((current) => {
+      const nextInboxes = mergeOnboardingSeedWithSavedInboxes(
+        buildManagedWorkspaceInboxes(onboardingState),
+        current,
+      );
+
+      if (JSON.stringify(nextInboxes) === JSON.stringify(current)) {
+        return current;
+      }
+
+      console.info("[MANAGED-INBOXES] seeded", { count: nextInboxes.length });
+      return nextInboxes;
+    });
   }, [onboardingMailboxSeedKey, onboardingState]);
 
   useEffect(() => {
@@ -31216,26 +31431,34 @@ export function WorkspaceShell({
   }, [startupSyncStatus]);
 
   const handleApplyManagedInboxes = (nextMailboxes: ManagedWorkspaceInbox[]) => {
-    const validMailboxes = nextMailboxes
-      .filter((mailbox) => isManagedInboxConfigurationComplete(mailbox, mailboxCredentialStatuses))
-      .map((mailbox) => ({
-        ...normalizeManagedWorkspaceInbox(cloneManagedWorkspaceInbox(mailbox)),
-        id: mailbox.id.trim(),
-        title: mailbox.title.trim() || mailbox.email.trim() || "Custom Inbox",
-        email: mailbox.email.trim(),
-      }))
+    const nextManagedInboxes = nextMailboxes
+      .map((mailbox) =>
+        normalizeManagedInboxForStorage(
+          mailbox,
+          findMatchingSavedManagedInbox(mailbox, savedManagedInboxes),
+        ),
+      )
       .filter((mailbox) => mailbox.id.length > 0);
 
-    if (validMailboxes.length === 0) {
+    if (nextManagedInboxes.length === 0) {
+      return false;
+    }
+
+    const hasIncompleteMailbox = nextManagedInboxes.some(
+      (mailbox) =>
+        !isManagedInboxConfigurationComplete(mailbox, mailboxCredentialStatuses),
+    );
+
+    if (hasIncompleteMailbox) {
       return false;
     }
 
     const nextPrimaryInboxId = resolvePrimaryManagedInboxId(
-      validMailboxes,
+      nextManagedInboxes,
       primaryManagedInboxId,
     );
     const orderedValidMailboxes = orderManagedWorkspaceInboxes(
-      validMailboxes,
+      nextManagedInboxes,
       nextPrimaryInboxId,
     );
 
@@ -31243,12 +31466,12 @@ export function WorkspaceShell({
       const nextStore = { ...currentStore };
 
       Object.keys(nextStore).forEach((mailboxId) => {
-        if (!validMailboxes.some((mailbox) => mailbox.id === mailboxId)) {
+        if (!nextManagedInboxes.some((mailbox) => mailbox.id === mailboxId)) {
           delete nextStore[mailboxId];
         }
       });
 
-      validMailboxes.forEach((mailbox) => {
+      nextManagedInboxes.forEach((mailbox) => {
         if (!nextStore[mailbox.id]) {
           nextStore[mailbox.id] = createEmptyMailboxCollections();
         }
@@ -31261,7 +31484,7 @@ export function WorkspaceShell({
         return current;
       }
 
-      const matchingMailbox = validMailboxes.find((mailbox) => mailbox.id === current.id);
+      const matchingMailbox = nextManagedInboxes.find((mailbox) => mailbox.id === current.id);
 
       if (matchingMailbox) {
         return {
@@ -31277,7 +31500,8 @@ export function WorkspaceShell({
       return fallbackMailbox ? toOrderedMailboxFromManagedInbox(fallbackMailbox) : null;
     });
     setPrimaryManagedInboxId(nextPrimaryInboxId);
-    setSavedManagedInboxes(validMailboxes);
+    setSavedManagedInboxes(nextManagedInboxes);
+    console.info("[MANAGED-INBOXES] applied", { count: nextManagedInboxes.length });
     return true;
   };
 
@@ -33433,6 +33657,13 @@ export function WorkspaceShell({
                       tab: "inboxes",
                       mailboxId,
                     });
+                    // Clear isMobileComposeActive here (same WorkspaceShell
+                    // call site as setMobileNavRestoreContext) so React can
+                    // batch both updates together. onComposeOpenChange(false)
+                    // below also clears it, but calling it here ensures the
+                    // context and the layout-lock are released in the same
+                    // synchronous batch — matching the Cancel path.
+                    setIsMobileComposeActive(false);
                   }}
                   isMobileViewport={isMobileWorkspaceViewport}
                   manualPriorityOverrides={manualPriorityOverrides}

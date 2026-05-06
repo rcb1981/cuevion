@@ -18,6 +18,7 @@ import type { UserConfig } from "./types/userConfig";
 
 const ONBOARDING_STATE_STORAGE_KEY = "label-inbox-ai-onboarding-state";
 const ONBOARDING_DRAFT_STATE_STORAGE_KEY = "label-inbox-ai-onboarding-draft-state";
+const CUEVION_APP_VIEW_STORAGE_KEY = "cuevion-app-view";
 const CATEGORY_LEARNING_STORAGE_KEY = "cuevion-sender-category-learning";
 const MESSAGE_OWNERSHIP_STORAGE_KEY = "cuevion-message-ownership";
 const MANAGED_INBOXES_STORAGE_KEY = "cuevion-managed-inboxes";
@@ -65,6 +66,7 @@ type PersistedOnboardingSession = {
 type PersistedOnboardingDraft = {
   state: OnboardingState;
 };
+type AppView = "onboarding" | "transition" | "workspace";
 type WorkspaceDataMode = "demo" | "live";
 type StoredManagedWorkspaceInbox = {
   id?: string;
@@ -476,6 +478,16 @@ function parsePersistedOnboardingDraft(): PersistedOnboardingDraft | null {
   }
 }
 
+function parsePersistedAppView(): AppView | null {
+  const storedValue = window.localStorage.getItem(CUEVION_APP_VIEW_STORAGE_KEY);
+
+  if (storedValue === "onboarding" || storedValue === "workspace") {
+    return storedValue;
+  }
+
+  return null;
+}
+
 function parseStoredManagedWorkspaceInboxes(): StoredManagedWorkspaceInbox[] {
   const storedValue = window.localStorage.getItem(MANAGED_INBOXES_STORAGE_KEY);
 
@@ -607,6 +619,85 @@ function sanitizeManagedInboxesForAccountConfig(
   ) as StoredManagedWorkspaceInbox[];
 }
 
+function isRecordValue(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object";
+}
+
+function getStoredManagedInboxEmail(mailbox: StoredManagedWorkspaceInbox) {
+  return typeof mailbox.email === "string" ? mailbox.email.trim().toLowerCase() : "";
+}
+
+function findMatchingStoredManagedInbox(
+  next: StoredManagedWorkspaceInbox,
+  savedInboxes: StoredManagedWorkspaceInbox[],
+) {
+  const nextId = typeof next.id === "string" ? next.id.trim() : "";
+
+  if (nextId) {
+    const matchedById = savedInboxes.find(
+      (mailbox) => typeof mailbox.id === "string" && mailbox.id.trim() === nextId,
+    );
+
+    if (matchedById) {
+      return matchedById;
+    }
+  }
+
+  const nextEmail = getStoredManagedInboxEmail(next);
+
+  if (!nextEmail) {
+    return undefined;
+  }
+
+  return savedInboxes.find((mailbox) => getStoredManagedInboxEmail(mailbox) === nextEmail);
+}
+
+function mergeStoredCredentialFields(
+  nextValue: unknown,
+  previousValue: unknown,
+  preservedStringFields: string[],
+) {
+  const next = isRecordValue(nextValue) ? { ...nextValue } : {};
+  const previous = isRecordValue(previousValue) ? previousValue : {};
+
+  preservedStringFields.forEach((field) => {
+    const nextFieldValue = next[field];
+    const previousFieldValue = previous[field];
+
+    if (
+      (typeof nextFieldValue !== "string" || nextFieldValue.trim().length === 0) &&
+      typeof previousFieldValue === "string" &&
+      previousFieldValue.trim().length > 0
+    ) {
+      next[field] = previousFieldValue;
+    }
+  });
+
+  return next;
+}
+
+function mergeStoredManagedInboxCredentials(
+  next: StoredManagedWorkspaceInbox,
+  previous?: StoredManagedWorkspaceInbox,
+): StoredManagedWorkspaceInbox {
+  if (!previous || (next.provider && previous.provider && next.provider !== previous.provider)) {
+    return next;
+  }
+
+  return {
+    ...next,
+    customImap: mergeStoredCredentialFields(next.customImap, previous.customImap, [
+      "password",
+    ]),
+    customSmtp: mergeStoredCredentialFields(next.customSmtp, previous.customSmtp, [
+      "host",
+      "port",
+      "username",
+      "password",
+    ]),
+  };
+}
+
 function normalizeStoredWorkspaceThemeMode(value: unknown): "Light" | "Dark" | "System" | null {
   if (value === "Light" || value === "Dark" || value === "System") {
     return value;
@@ -681,9 +772,17 @@ function writeAccountConfigToLocalStorage(config: UserAccountConfig, ownerEmail:
         state: sanitizeOnboardingStateForAccountConfig(config.onboardingSession.state),
       }
     : null;
-  const managedInboxes = Array.isArray(config.managedInboxes)
-    ? (config.managedInboxes as StoredManagedWorkspaceInbox[])
-    : [];
+  const locallyStoredManagedInboxes = parseStoredManagedWorkspaceInboxes();
+  const managedInboxes =
+    Array.isArray(config.managedInboxes) && config.managedInboxes.length > 0
+      ? (config.managedInboxes as StoredManagedWorkspaceInbox[])
+      : locallyStoredManagedInboxes;
+  const mergedManagedInboxes = managedInboxes.map((mailbox) =>
+    mergeStoredManagedInboxCredentials(
+      mailbox,
+      findMatchingStoredManagedInbox(mailbox, locallyStoredManagedInboxes),
+    ),
+  );
   const workspaceUserId = normalizeAccountStorageKey(ownerEmail);
 
   if (onboardingSession) {
@@ -696,7 +795,7 @@ function writeAccountConfigToLocalStorage(config: UserAccountConfig, ownerEmail:
 
   window.localStorage.setItem(
     MANAGED_INBOXES_STORAGE_KEY,
-    JSON.stringify(sanitizeManagedInboxesForAccountConfig(managedInboxes)),
+    JSON.stringify(mergedManagedInboxes),
   );
   window.localStorage.setItem(
     MAILBOX_TITLE_OVERRIDES_STORAGE_KEY,
@@ -721,7 +820,7 @@ function writeAccountConfigToLocalStorage(config: UserAccountConfig, ownerEmail:
 
   const primaryStorageKey = buildPrimaryManagedInboxStorageKey(
     workspaceUserId,
-    managedInboxes,
+    mergedManagedInboxes,
   );
   if (config.primaryManagedInboxId) {
     window.localStorage.setItem(primaryStorageKey, config.primaryManagedInboxId);
@@ -1181,6 +1280,7 @@ export default function App() {
     useState<PersistedOnboardingSession | null>(() => {
       if (shouldResetOnboardingFromQuery()) {
         window.localStorage.removeItem(ONBOARDING_STATE_STORAGE_KEY);
+        window.localStorage.removeItem(CUEVION_APP_VIEW_STORAGE_KEY);
         clearOnboardingDependentWorkspaceState();
         clearOnboardingResetQueryParam();
         return null;
@@ -1191,8 +1291,10 @@ export default function App() {
   const [persistedOnboardingDraft] = useState<PersistedOnboardingDraft | null>(() =>
     persistedOnboardingSession ? null : parsePersistedOnboardingDraft(),
   );
-  const [view, setView] = useState<"onboarding" | "transition" | "workspace">(
-    () => (persistedOnboardingSession ? "workspace" : "onboarding"),
+  const [view, setView] = useState<AppView>(() =>
+    persistedOnboardingSession || parsePersistedAppView() === "workspace"
+      ? "workspace"
+      : "onboarding",
   );
   const [betaAccessRoute, setBetaAccessRoute] = useState<BetaAccessRoute>(() =>
     resolveBetaAccessRoute(),
@@ -1329,6 +1431,21 @@ export default function App() {
       JSON.stringify({ state: onboardingState }),
     );
   }, [onboardingState, persistedOnboardingSession, view]);
+
+  useEffect(() => {
+    if (collaborationInviteRoute || teamInviteRoute) {
+      return;
+    }
+
+    if (view === "workspace" || view === "transition") {
+      if (persistedOnboardingSession) {
+        window.localStorage.setItem(CUEVION_APP_VIEW_STORAGE_KEY, "workspace");
+      }
+      return;
+    }
+
+    window.localStorage.setItem(CUEVION_APP_VIEW_STORAGE_KEY, "onboarding");
+  }, [collaborationInviteRoute, persistedOnboardingSession, teamInviteRoute, view]);
 
   useEffect(() => {
     const nextInviteRoute = parseCollaborationInviteRoute();
@@ -1468,10 +1585,12 @@ export default function App() {
           setPersistedOnboardingSession(nextSession);
           setOnboardingState(nextSession.state);
           setUserConfig(buildUserConfig(nextSession.state));
+          window.localStorage.setItem(CUEVION_APP_VIEW_STORAGE_KEY, "workspace");
           setView("workspace");
         } else {
           setPersistedOnboardingSession(null);
           setUserConfig(null);
+          window.localStorage.setItem(CUEVION_APP_VIEW_STORAGE_KEY, "onboarding");
           setView("onboarding");
         }
 
@@ -1759,6 +1878,7 @@ export default function App() {
           ONBOARDING_STATE_STORAGE_KEY,
           JSON.stringify(completedSession),
         );
+        window.localStorage.setItem(CUEVION_APP_VIEW_STORAGE_KEY, "workspace");
         window.localStorage.removeItem(ONBOARDING_DRAFT_STATE_STORAGE_KEY);
         setPersistedOnboardingSession(completedSession);
         setUserConfig(nextUserConfig);
