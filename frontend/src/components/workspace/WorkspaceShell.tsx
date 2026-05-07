@@ -3013,6 +3013,42 @@ function fixExternalHtmlDarkModeReadability(iframeDocument: Document) {
   });
 }
 
+function fixLightEmailStageTextLinks(iframeDocument: Document) {
+  const linkColor = "rgba(42, 103, 78, 0.98)";
+  const textDescendantSelector = "span,font,strong,em,b,i,small";
+  const anchors = Array.from(iframeDocument.querySelectorAll<HTMLAnchorElement>("a[href]"));
+
+  anchors.forEach((anchor) => {
+    const linkText = (anchor.textContent ?? "").replace(/\s+/g, " ").trim();
+
+    if (!linkText) {
+      return;
+    }
+
+    const computedStyle = iframeDocument.defaultView?.getComputedStyle(anchor);
+
+    if (
+      !computedStyle ||
+      computedStyle.display === "none" ||
+      computedStyle.visibility === "hidden"
+    ) {
+      return;
+    }
+
+    anchor.style.setProperty("color", linkColor, "important");
+    anchor.style.setProperty("-webkit-text-fill-color", linkColor, "important");
+
+    anchor.querySelectorAll<HTMLElement>(textDescendantSelector).forEach((child) => {
+      if (!(child.textContent ?? "").trim()) {
+        return;
+      }
+
+      child.style.setProperty("color", linkColor, "important");
+      child.style.setProperty("-webkit-text-fill-color", linkColor, "important");
+    });
+  });
+}
+
 function EmailHtmlStage({
   html,
   themeMode,
@@ -3236,6 +3272,19 @@ function EmailHtmlStage({
       }
     };
 
+    const applyLightEmailStageTextLinkFix = () => {
+      if (themeMode !== "light" && !isProviderHtml) {
+        return;
+      }
+
+      try {
+        fixLightEmailStageTextLinks(iframeDoc);
+      } catch {
+        // Cross-origin guard – should never trigger for srcDoc iframes
+      }
+    };
+
+    applyLightEmailStageTextLinkFix();
     applyDarkModeReadabilityFix();
 
     const timeoutIds: number[] = [];
@@ -3245,6 +3294,10 @@ function EmailHtmlStage({
     };
     const scheduleDarkModeReadabilityFix = (delay = 0) => {
       const timeoutId = window.setTimeout(applyDarkModeReadabilityFix, delay);
+      timeoutIds.push(timeoutId);
+    };
+    const scheduleLightEmailStageTextLinkFix = (delay = 0) => {
+      const timeoutId = window.setTimeout(applyLightEmailStageTextLinkFix, delay);
       timeoutIds.push(timeoutId);
     };
     const images = Array.from(iframeDoc.images);
@@ -3270,6 +3323,10 @@ function EmailHtmlStage({
     scheduleDarkModeReadabilityFix(120);
     scheduleDarkModeReadabilityFix(400);
     scheduleDarkModeReadabilityFix(800);
+    scheduleLightEmailStageTextLinkFix(0);
+    scheduleLightEmailStageTextLinkFix(120);
+    scheduleLightEmailStageTextLinkFix(400);
+    scheduleLightEmailStageTextLinkFix(800);
 
     cleanupRef.current = () => {
       timeoutIds.forEach((timeoutId) => window.clearTimeout(timeoutId));
