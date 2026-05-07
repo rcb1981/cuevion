@@ -2385,7 +2385,17 @@ function shouldRenderKnownProviderHtmlOnLightCanvas(
     (identityText.includes("charlie@ourclubwhatever.com") &&
       contentText.includes("club whatever spring sampler") &&
       includesAnyKeyword(contentText, ["deep funktion", "zurra", "dnka", "goldschlager"]) &&
-      (contentText.includes("s.disco.ac") || contentText.includes("disco")))
+      (contentText.includes("s.disco.ac") || contentText.includes("disco"))) ||
+    (identityText.includes("vipromo@whoa-promo.com") &&
+      contentText.includes("inflyte") &&
+      (contentText.includes("listen only links") ||
+        contentText.includes("massive releases")) &&
+      includesAnyKeyword(contentText, [
+        "adam beyer",
+        "green velvet",
+        "joris voorn",
+        "meduza",
+      ]))
   );
 }
 
