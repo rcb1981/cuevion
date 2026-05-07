@@ -2427,7 +2427,7 @@ function buildEmailStageDocument(
   const stageTextColor =
     stageThemeMode === "dark" ? "rgba(229, 236, 230, 0.96)" : "rgba(34, 38, 36, 0.99)";
   const stageLinkColor =
-    stageThemeMode === "dark" ? "rgba(176, 209, 183, 0.96)" : "rgba(44, 89, 116, 0.98)";
+    stageThemeMode === "dark" ? "rgba(176, 209, 183, 0.96)" : "rgba(42, 103, 78, 0.98)";
   const stageQuoteBorder =
     stageThemeMode === "dark" ? "rgba(128, 156, 128, 0.28)" : "rgba(108, 136, 108, 0.24)";
   const stageQuoteSurface =
