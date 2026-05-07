@@ -7137,13 +7137,135 @@ function hasLearnedShowLessBehavior(
   );
 }
 
+function isWebsiteContactFormSpam(
+  message: Pick<
+    MailMessage,
+    | "subject"
+    | "snippet"
+    | "body"
+    | "sender"
+    | "from"
+    | "to"
+    | "signal"
+    | "internalClassification"
+    | "category"
+    | "final_visibility"
+    | "action"
+    | "isShared"
+    | "collaboration"
+  >,
+): boolean {
+  const subjectText = message.subject.toLowerCase();
+  const bodyText = (message.body ?? []).join(" ").toLowerCase();
+  const searchableText = [
+    message.subject,
+    message.snippet,
+    message.sender,
+    message.from,
+    message.to,
+    ...(message.body ?? []),
+  ]
+    .join(" ")
+    .toLowerCase();
+  const rawSearchableText = [
+    message.subject,
+    message.snippet,
+    message.sender,
+    message.from,
+    message.to,
+    ...(message.body ?? []),
+  ].join(" ");
+  const dutchFormLabels = [
+    "voornaam",
+    "achternaam",
+    "bedrijfsnaam",
+    "e-mailadres",
+    "telefoon",
+    "opmerkingen",
+  ];
+  const matchedFormLabelCount = dutchFormLabels.filter((label) =>
+    bodyText.includes(label) || searchableText.includes(label),
+  ).length;
+  const isContactForm =
+    (subjectText.includes("contact request from the website") ||
+      searchableText.includes("contact request from the website")) &&
+    matchedFormLabelCount >= 5;
+
+  if (!isContactForm) {
+    return false;
+  }
+
+  const hasBusinessIntent = includesAnyKeyword(searchableText, [
+    "music",
+    "release",
+    "demo",
+    "label",
+    "artist",
+    "booking",
+    "licensing",
+    "sync",
+    "promo",
+    "hysteria",
+    "records",
+    "business",
+    "contact",
+    "vraag",
+    "aanvraag",
+  ]);
+  const senderAddress = message.from.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)?.[0] ?? "";
+  const senderLocalPart = senderAddress.split("@")[0] ?? "";
+  const senderDomain = senderAddress.split("@")[1] ?? "";
+  const hasRandomLookingSender =
+    /^[a-z]{7,14}\d{0,3}$/i.test(senderLocalPart) &&
+    !includesAnyKeyword(senderDomain.toLowerCase(), [
+      "gmail.",
+      "outlook.",
+      "hotmail.",
+      "icloud.",
+      "yahoo.",
+      "hysteria",
+      "records",
+      "music",
+      "label",
+    ]);
+  const suspiciousSignals = [
+    searchableText.includes("[url="),
+    /[\u0400-\u04ff]/.test(rawSearchableText),
+    searchableText.includes("кракен"),
+    /slon[a-z0-9-]*\.(?:at|cc|ru)\b/i.test(rawSearchableText) ||
+      searchableText.includes("slon4.at") ||
+      searchableText.includes("slonl2.cc"),
+    includesAnyKeyword(searchableText, [
+      "london",
+      "stabbed",
+      "police",
+      "cnn",
+      "antisemitic",
+      "geopolitical",
+    ]),
+    searchableText.includes("bedrijfsnaam : google") ||
+      searchableText.includes("bedrijfsnaam: google"),
+    hasRandomLookingSender,
+    !hasBusinessIntent,
+  ].filter(Boolean).length;
+
+  return suspiciousSignals >= 2;
+}
+
 function shouldRouteMessageToFilteredFolder(
   message: MailMessage,
   senderCategoryLearning: SenderCategoryLearningStore,
 ) {
+  if (message.isShared || message.collaboration) {
+    return false;
+  }
+
+  if (isWebsiteContactFormSpam(message)) {
+    return true;
+  }
+
   if (
     message.categoryConfidence === "low" ||
-    message.isShared ||
     message.signal === "Priority" ||
     message.signal === "Active" ||
     message.signal === "For review" ||
