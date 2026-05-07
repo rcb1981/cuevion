@@ -537,6 +537,36 @@ export function OnboardingFlow({
     });
   };
 
+  const canRemoveSelectedInbox = (inboxId: InboxId) =>
+    inboxId !== state.primaryInbox &&
+    state.selectedInboxes.includes(inboxId) &&
+    state.selectedInboxes.length > getRequiredInboxCount(state.inboxCount);
+
+  const removeSelectedInbox = (inboxId: InboxId) => {
+    onStateChange((current) => {
+      if (inboxId === current.primaryInbox) {
+        return current;
+      }
+
+      if (!current.selectedInboxes.includes(inboxId)) {
+        return current;
+      }
+
+      if (current.selectedInboxes.length - 1 < getRequiredInboxCount(current.inboxCount)) {
+        return current;
+      }
+
+      return {
+        ...current,
+        selectedInboxes: current.selectedInboxes.filter((id) => id !== inboxId),
+        inboxConnections: {
+          ...current.inboxConnections,
+          [inboxId]: createInboxConnection(),
+        },
+      };
+    });
+  };
+
   const setProvider = (inboxId: InboxId, provider: ProviderId) => {
     onStateChange((current) => ({
       ...current,
@@ -839,6 +869,8 @@ export function OnboardingFlow({
             onCustomSmtpChange={setCustomSmtp}
             onReuseCustomImap={reuseCustomImap}
             onConnectInbox={connectInbox}
+            canRemoveInbox={canRemoveSelectedInbox}
+            onRemoveInbox={removeSelectedInbox}
           />
         );
       case 6:

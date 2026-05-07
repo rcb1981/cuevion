@@ -66,6 +66,8 @@ interface StepConnectInboxesProps {
     },
     messages?: LiveInboxMessageSnapshot[],
   ) => void;
+  canRemoveInbox?: (inboxId: InboxId) => boolean;
+  onRemoveInbox?: (inboxId: InboxId) => void;
 }
 
 const presetInboxLabelMap = Object.fromEntries(
@@ -188,6 +190,8 @@ export function StepConnectInboxes({
   onCustomSmtpChange,
   onReuseCustomImap,
   onConnectInbox,
+  canRemoveInbox,
+  onRemoveInbox,
 }: StepConnectInboxesProps) {
   const [loadingInboxId, setLoadingInboxId] = useState<InboxId | null>(null);
   const [connectionErrors, setConnectionErrors] = useState<
@@ -210,6 +214,15 @@ export function StepConnectInboxes({
     customInboxes.find((inbox) => inbox.id === inboxId)?.name ??
     presetInboxLabelMap[inboxId] ??
     "Custom Inbox";
+
+  const handleRemoveInbox = (inboxId: InboxId) => {
+    if (!onRemoveInbox || loadingInboxId === inboxId) {
+      return;
+    }
+
+    clearConnectionFeedback(inboxId);
+    onRemoveInbox(inboxId);
+  };
 
   const handleConnectInbox = async (
     inboxId: InboxId,
@@ -310,6 +323,8 @@ export function StepConnectInboxes({
           const isLoading = loadingInboxId === inboxId;
           const connectionIsConnected =
             connection.connected || connection.connectionStatus === "connected";
+          const canRemoveThisInbox =
+            Boolean(onRemoveInbox && canRemoveInbox?.(inboxId)) && !isLoading;
           const errorMessage = connectionErrors[inboxId];
           const smtpSettings = connection.customSmtp ?? createDefaultCustomSmtpSettings();
           const reusableSettings = selectedInboxes
@@ -330,7 +345,7 @@ export function StepConnectInboxes({
                   : "border-ink/10"
               }`}
             >
-              <div className="mb-5">
+              <div className="mb-5 flex items-start justify-between gap-4">
                 <div>
                   <h3 className="text-xl font-semibold text-ink">
                     {getInboxLabel(inboxId)}
@@ -339,6 +354,15 @@ export function StepConnectInboxes({
                     {onboardingText.connect.inboxHint}
                   </p>
                 </div>
+                {canRemoveThisInbox ? (
+                  <button
+                    type="button"
+                    onClick={() => handleRemoveInbox(inboxId)}
+                    className="mt-1 shrink-0 text-xs font-medium text-ink/45 underline-offset-4 transition hover:text-ink/70 hover:underline"
+                  >
+                    Remove inbox
+                  </button>
+                ) : null}
               </div>
 
               <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
