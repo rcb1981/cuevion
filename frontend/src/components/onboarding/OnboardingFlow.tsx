@@ -332,6 +332,10 @@ export function OnboardingFlow({
     }
 
     if (step === 5) {
+      if (state.selectedInboxes.length < getRequiredInboxCount(state.inboxCount)) {
+        return false;
+      }
+
       return state.selectedInboxes.every((inboxId) => {
         const connection = getInboxConnection(state, inboxId);
         if (!connection.provider || !connection.email.trim()) {
@@ -539,8 +543,7 @@ export function OnboardingFlow({
 
   const canRemoveSelectedInbox = (inboxId: InboxId) =>
     inboxId !== state.primaryInbox &&
-    state.selectedInboxes.includes(inboxId) &&
-    state.selectedInboxes.length > getRequiredInboxCount(state.inboxCount);
+    state.selectedInboxes.includes(inboxId);
 
   const removeSelectedInbox = (inboxId: InboxId) => {
     onStateChange((current) => {
@@ -549,10 +552,6 @@ export function OnboardingFlow({
       }
 
       if (!current.selectedInboxes.includes(inboxId)) {
-        return current;
-      }
-
-      if (current.selectedInboxes.length - 1 < getRequiredInboxCount(current.inboxCount)) {
         return current;
       }
 
