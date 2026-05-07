@@ -33,8 +33,6 @@ export function StepInboxSetup({
   requiredInboxCount,
   onPrimaryInboxChange,
   onPrimaryInboxTypeChange,
-  onSecondaryInboxChange,
-  onThirdInboxChange,
   onToggleAdditionalInbox,
   onAddCustomInbox,
 }: StepInboxSetupProps) {
@@ -120,48 +118,6 @@ export function StepInboxSetup({
       </button>
     );
   };
-
-  const renderSingleSelectSection = (
-    title: string,
-    subtitle: string,
-    selectedInbox: InboxId | null,
-    options: Array<{ id: InboxId; label: string }>,
-    onChange: (inboxId: InboxId) => void,
-  ) => (
-    <div className="space-y-2.5">
-      <div className="space-y-1">
-        <h3 className="text-lg font-medium text-ink">{title}</h3>
-        <p className="text-sm text-ink/52">{subtitle}</p>
-      </div>
-
-      <div className="grid gap-2.5 md:grid-cols-2">
-        {options.map((option) => (
-          <button
-            key={option.id}
-            type="button"
-            onClick={() => {
-              setShowLimitHint(false);
-              onChange(option.id);
-            }}
-            className={`rounded-3xl border px-4 py-3 text-left transition ${
-              selectedInbox === option.id
-                ? "border-pine bg-[linear-gradient(180deg,rgba(226,236,229,0.92),rgba(246,249,246,0.98))] text-ink shadow-panel"
-                : "border-ink/10 bg-white/80 text-ink hover:border-moss/35"
-            } cursor-pointer outline-none focus-visible:border-pine focus-visible:bg-[linear-gradient(180deg,rgba(226,236,229,0.92),rgba(246,249,246,0.98))] focus-visible:text-ink focus-visible:shadow-panel`}
-          >
-            <div className="flex items-center justify-between gap-4">
-              <span className="text-base font-semibold">{option.label}</span>
-              {selectedInbox === option.id ? (
-                <span className="rounded-full border border-ink/8 bg-white/55 px-2.5 py-1 text-[10px] uppercase tracking-[0.18em] text-ink/46">
-                  Selected
-                </span>
-              ) : null}
-            </div>
-          </button>
-        ))}
-      </div>
-    </div>
-  );
 
   const renderPrimaryInboxSection = () => (
     <div className="space-y-2.5">
@@ -281,14 +237,14 @@ export function StepInboxSetup({
       ? selectedInboxes.filter((inboxId) => inboxId !== "main").length
       : selectedInboxes.length;
   const showMinimumHint = effectiveSelectedInboxCount < requiredInboxCount;
-  const secondInbox = selectedInboxes[1] ?? null;
-  const thirdInbox = selectedInboxes[2] ?? null;
-  const isExpandedInboxMode = inboxCount === "4+" || inboxCount === "not_sure";
-  const secondInboxOptions = availableInboxOptions.filter(
-    (option) => option.id !== primaryInbox,
-  );
-  const thirdInboxOptions = availableInboxOptions.filter(
-    (option) => option.id !== primaryInbox && option.id !== secondInbox,
+  const showAdditionalInboxSection = inboxCount !== null && inboxCount !== "1";
+  const selectedAdditionalInboxCount = selectedInboxes.filter(
+    (inboxId) => inboxId !== primaryInbox,
+  ).length;
+  const requiredAdditionalInboxCount = Math.max(requiredInboxCount - 1, 0);
+  const remainingAdditionalInboxCount = Math.max(
+    requiredAdditionalInboxCount - selectedAdditionalInboxCount,
+    0,
   );
   const primaryInboxTypeOptions: Array<{
     id: Exclude<PrimaryInboxType, null>;
@@ -297,6 +253,18 @@ export function StepInboxSetup({
     { id: "personal", label: "Personal" },
     { id: "work", label: "Work" },
   ];
+  const additionalInboxHint =
+    remainingAdditionalInboxCount > 0
+      ? `Select ${
+          inboxCount === "4+" ? "at least " : ""
+        }${remainingAdditionalInboxCount} more ${
+          remainingAdditionalInboxCount === 1 ? "inbox" : "inboxes"
+        } to continue.`
+      : "Choose additional inboxes Cuevion should organize alongside your main inbox.";
+  const minimumHintText =
+    remainingAdditionalInboxCount > 0
+      ? additionalInboxHint
+      : `Select at least ${requiredInboxCount} inboxes to continue.`;
 
   return (
     <section className="space-y-5">
@@ -309,46 +277,20 @@ export function StepInboxSetup({
 
       {renderPrimaryInboxSection()}
 
-      {inboxCount === "2" || inboxCount === "3" ? (
-        renderSingleSelectSection(
-          "Second inbox",
-          "Choose the next inbox Cuevion should organize alongside your main inbox.",
-          secondInbox,
-          secondInboxOptions,
-          (inboxId) => onSecondaryInboxChange(inboxId),
-        )
+      {showLimitHint || (showMinimumHint && !showAdditionalInboxSection) ? (
+        <div className="min-h-[16px] text-sm text-ink/48 transition-opacity duration-300">
+          {showLimitHint
+            ? "To add more inboxes, go back and choose a larger setup."
+            : minimumHintText}
+        </div>
       ) : null}
 
-      {inboxCount === "3" ? (
-        renderSingleSelectSection(
-          "Third inbox",
-          "Choose the third inbox Cuevion should include in your workspace.",
-          thirdInbox,
-          thirdInboxOptions,
-          (inboxId) => onThirdInboxChange(inboxId),
-        )
-      ) : null}
-
-      <div
-        className={`min-h-[16px] text-sm text-ink/48 transition-opacity ${
-          showLimitHint ? "duration-300" : "duration-1000"
-        } ${
-          showLimitHint || showMinimumHint ? "opacity-100" : "opacity-0"
-        }`}
-      >
-        {showLimitHint
-          ? "To add more inboxes, go back and choose a larger setup."
-          : showMinimumHint
-            ? `Select at least ${requiredInboxCount} inboxes to continue.`
-            : ""}
-      </div>
-
-      {isExpandedInboxMode ? (
+      {showAdditionalInboxSection ? (
         <div className="space-y-2.5 rounded-[24px] border border-ink/10 bg-sand/45 px-3.5 py-3.5">
           <div className="space-y-1">
             <h3 className="text-lg font-medium text-ink">Add more inboxes</h3>
             <p className="text-sm text-ink/52">
-              Choose additional inboxes Cuevion should organize alongside your main inbox.
+              {additionalInboxHint}
             </p>
           </div>
 
