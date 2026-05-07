@@ -223,7 +223,7 @@ export const onboardingCopy = {
       email: "Email",
       connectInbox: "Connect inbox",
       continueWithGoogle: "Continue with Google",
-      testingConnection: "Testing connection...",
+      testingConnection: "Connecting…",
       connected: "Connected",
       notConnected: "Not connected",
       oauthRequired: "OAuth required",

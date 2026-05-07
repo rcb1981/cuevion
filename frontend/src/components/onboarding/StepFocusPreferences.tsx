@@ -72,7 +72,7 @@ export function StepFocusPreferences({
                       key={level}
                       type="button"
                       onClick={() => onChange(option.id, level)}
-                      className={`rounded-full border px-3 py-1.5 text-[0.72rem] font-medium uppercase tracking-[0.12em] transition ${
+                      className={`min-w-0 overflow-hidden whitespace-nowrap rounded-full border px-2.5 py-1.5 text-center text-[0.7rem] font-medium uppercase tracking-[0.08em] transition sm:min-w-[5.8rem] ${
                         selected
                           ? "border-pine bg-[linear-gradient(180deg,rgba(226,236,229,0.92),rgba(246,249,246,0.98))] text-ink shadow-panel"
                           : "border-ink/10 bg-white/70 text-ink/56 hover:border-moss/24 hover:text-ink"
@@ -117,13 +117,13 @@ export function StepFocusPreferences({
                         key={level}
                         type="button"
                         onClick={() => onChange(option.id, level)}
-                        className={`rounded-full border px-3 py-1.5 text-[0.72rem] font-medium uppercase tracking-[0.12em] transition ${
+                        className={`min-w-0 overflow-hidden whitespace-nowrap rounded-full border px-2.5 py-1.5 text-center text-[0.7rem] font-medium uppercase tracking-[0.08em] transition sm:min-w-[5.8rem] ${
                           selected
                             ? "border-pine bg-[linear-gradient(180deg,rgba(226,236,229,0.92),rgba(246,249,246,0.98))] text-ink shadow-panel"
                             : "border-ink/10 bg-white/70 text-ink/56 hover:border-moss/24 hover:text-ink"
                         }`}
                       >
-                        {level}
+                        {preferenceLevelLabels[level]}
                       </button>
                     );
                   })}

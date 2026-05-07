@@ -79,50 +79,6 @@ function hasReusableSettings(settings: CustomImapSettings) {
   return Boolean(settings.host && settings.port && settings.username);
 }
 
-function getConnectionStatusLabel(connection: InboxConnection) {
-  if (connection.connectionStatus === "connected") {
-    return onboardingText.connect.connected;
-  }
-
-  if (connection.connectionStatus === "oauth_required") {
-    return onboardingText.connect.oauthRequired;
-  }
-
-  if (connection.connectionStatus === "waiting_for_authentication") {
-    return onboardingText.connect.waitingForAuthentication;
-  }
-
-  if (connection.connectionStatus === "authenticated_pending_activation") {
-    return onboardingText.connect.authenticatedPendingActivation;
-  }
-
-  if (connection.connectionStatus === "connection_failed") {
-    return onboardingText.connect.connectionFailed;
-  }
-
-  return onboardingText.connect.notConnected;
-}
-
-function getConnectionStatusClassName(connection: InboxConnection) {
-  if (connection.connectionStatus === "connected") {
-    return "border-[var(--workspace-status-success-border)] bg-[var(--workspace-status-success-bg)] text-[var(--workspace-status-success-text)]";
-  }
-
-  if (
-    connection.connectionStatus === "oauth_required" ||
-    connection.connectionStatus === "waiting_for_authentication" ||
-    connection.connectionStatus === "authenticated_pending_activation"
-  ) {
-    return "border-moss/18 bg-sand/55 text-moss";
-  }
-
-  if (connection.connectionStatus === "connection_failed") {
-    return "border-amber-900/16 bg-amber-50/70 text-amber-900/75";
-  }
-
-  return "border-ink/10 bg-white/72 text-ink/55";
-}
-
 function isConnectionReady(connection: InboxConnection) {
   if (!connection.provider || !connection.email.trim()) {
     return false;
@@ -352,6 +308,8 @@ export function StepConnectInboxes({
           };
           const readyToConnect = isConnectionReady(connection);
           const isLoading = loadingInboxId === inboxId;
+          const connectionIsConnected =
+            connection.connected || connection.connectionStatus === "connected";
           const errorMessage = connectionErrors[inboxId];
           const smtpSettings = connection.customSmtp ?? createDefaultCustomSmtpSettings();
           const reusableSettings = selectedInboxes
@@ -367,12 +325,12 @@ export function StepConnectInboxes({
             <section
               key={inboxId}
               className={`rounded-[30px] border bg-white/85 p-6 shadow-panel transition ${
-                connection.connected
+                connectionIsConnected
                   ? "border-pine/28"
                   : "border-ink/10"
               }`}
             >
-              <div className="mb-5 flex items-start justify-between gap-4">
+              <div className="mb-5">
                 <div>
                   <h3 className="text-xl font-semibold text-ink">
                     {getInboxLabel(inboxId)}
@@ -381,11 +339,6 @@ export function StepConnectInboxes({
                     {onboardingText.connect.inboxHint}
                   </p>
                 </div>
-                <span
-                  className={`rounded-full border px-3 py-1 text-xs font-medium ${getConnectionStatusClassName(connection)}`}
-                >
-                  {getConnectionStatusLabel(connection)}
-                </span>
               </div>
 
               <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
@@ -698,14 +651,20 @@ export function StepConnectInboxes({
                 <button
                   type="button"
                   onClick={() => handleConnectInbox(inboxId, connection)}
-                  disabled={!readyToConnect || isLoading}
-                  className="rounded-full border border-moss/16 bg-white/72 px-4 py-2 text-sm font-medium text-moss transition hover:border-moss/28 hover:bg-white disabled:cursor-not-allowed disabled:border-ink/10 disabled:text-ink/35"
+                  disabled={!readyToConnect || isLoading || connectionIsConnected}
+                  className={`rounded-full border px-4 py-2 text-sm font-medium transition ${
+                    connectionIsConnected
+                      ? "cursor-default border-[var(--workspace-status-success-border)] bg-[var(--workspace-status-success-bg)] text-[var(--workspace-status-success-text)]"
+                      : "border-moss/16 bg-white/72 text-moss hover:border-moss/28 hover:bg-white disabled:cursor-not-allowed disabled:border-ink/10 disabled:text-ink/35"
+                  }`}
                 >
-                  {isLoading
-                    ? onboardingText.connect.testingConnection
-                    : isOAuthConnectionProvider(connection.provider)
-                      ? onboardingText.connect.continueWithGoogle
-                      : onboardingText.connect.connectInbox}
+                  {connectionIsConnected
+                    ? onboardingText.connect.connected
+                    : isLoading
+                      ? onboardingText.connect.testingConnection
+                      : isOAuthConnectionProvider(connection.provider)
+                        ? onboardingText.connect.continueWithGoogle
+                        : onboardingText.connect.connectInbox}
                 </button>
               </div>
 

@@ -166,9 +166,9 @@ export function StepInboxSetup({
   const renderPrimaryInboxSection = () => (
     <div className="space-y-3">
       <div className="space-y-1">
-        <h3 className="text-lg font-medium text-ink">Primary inbox</h3>
+        <h3 className="text-lg font-medium text-ink">Choose your main inbox</h3>
         <p className="text-sm text-ink/52">
-          Choose the inbox that should anchor your workspace.
+          Select one inbox to anchor your workspace. You can add more inboxes below.
         </p>
       </div>
 
@@ -188,14 +188,14 @@ export function StepInboxSetup({
           return (
             <div
               key={option.id}
-              className={`min-h-[100px] rounded-3xl border transition ${
+              className={`min-h-[78px] rounded-3xl border transition ${
                 selected
                   ? "border-pine bg-[linear-gradient(180deg,rgba(226,236,229,0.92),rgba(246,249,246,0.98))] text-ink shadow-panel"
                   : "border-ink/10 bg-white/80 text-ink hover:border-moss/35"
               }`}
             >
               {showsInboxTypeControls ? (
-                <div className="flex min-h-[100px] items-center justify-center p-4">
+                <div className="flex min-h-[78px] items-center justify-center px-4 py-3">
                   <div className="flex flex-wrap justify-center gap-2">
                     {primaryInboxTypeOptions.map((typeOption) => {
                       const typeSelected = primaryInboxType === typeOption.id;
@@ -236,13 +236,13 @@ export function StepInboxSetup({
                     setIsChoosingMainInboxType(false);
                     onPrimaryInboxChange(option.id);
                   }}
-                  className="flex min-h-[100px] w-full cursor-pointer items-center rounded-3xl p-4 text-left outline-none focus-visible:border-pine focus-visible:text-ink"
+                  className="flex min-h-[78px] w-full cursor-pointer items-center rounded-3xl px-4 py-3 text-left outline-none focus-visible:border-pine focus-visible:text-ink"
                 >
                   <div className="flex w-full items-center justify-between gap-4">
                     <span className="block text-base font-semibold">{option.label}</span>
                     {selected ? (
                       <span className="rounded-full border border-ink/8 bg-white/55 px-2.5 py-1 text-[10px] uppercase tracking-[0.18em] text-ink/46">
-                        Selected
+                        Main inbox
                       </span>
                     ) : null}
                   </div>
@@ -303,7 +303,7 @@ export function StepInboxSetup({
       <div className="space-y-3">
         <h2 className="text-3xl font-semibold tracking-tight text-ink">Inbox setup</h2>
         <p className="text-base text-ink/68">
-          Choose the inboxes you want Cuevion to organize. At least 1 inbox is required.
+          Choose one main inbox first, then add any others Cuevion should organize.
         </p>
       </div>
 
@@ -312,7 +312,7 @@ export function StepInboxSetup({
       {inboxCount === "2" || inboxCount === "3" ? (
         renderSingleSelectSection(
           "Second inbox",
-          "Choose the next inbox Cuevion should organize alongside your primary inbox.",
+          "Choose the next inbox Cuevion should organize alongside your main inbox.",
           secondInbox,
           secondInboxOptions,
           (inboxId) => onSecondaryInboxChange(inboxId),
@@ -345,85 +345,85 @@ export function StepInboxSetup({
 
       {isExpandedInboxMode ? (
         <div className="space-y-3 rounded-[28px] border border-ink/10 bg-sand/45 px-4 py-5">
-        <div className="space-y-1">
-          <h3 className="text-lg font-medium text-ink">Additional inboxes</h3>
-          <p className="text-sm text-ink/52">
-            Add any other inboxes you want Cuevion to organize alongside your primary inbox.
-          </p>
-        </div>
-
-        <div className="grid gap-3 md:grid-cols-2">
-          {availableInboxOptions
-            .filter((option) => option.id !== primaryInbox)
-            .map((option) => renderAdditionalCard(option.id, option.label))}
-        </div>
-
-        {isAddingCustomInbox ? (
-          <div className="rounded-3xl border border-ink/10 bg-white/82 p-4 shadow-panel">
-            <div className="flex flex-col gap-3 md:flex-row md:items-center">
-              <input
-                ref={customInboxInputRef}
-                type="text"
-                value={customInboxName}
-                onChange={(event) => {
-                  setCustomInboxName(event.target.value);
-                  setCustomInboxError(null);
-                }}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") {
-                    event.preventDefault();
-                    submitCustomInbox();
-                  }
-
-                  if (event.key === "Escape") {
-                    event.preventDefault();
-                    setCustomInboxName("");
-                    setCustomInboxError(null);
-                    setIsAddingCustomInbox(false);
-                  }
-                }}
-                placeholder="Inbox name"
-                className="w-full rounded-2xl border border-ink/10 bg-white px-4 py-3 text-ink outline-none transition focus:border-moss"
-              />
-              <div className="flex items-center gap-3">
-                <button
-                  type="button"
-                  onClick={submitCustomInbox}
-                  className="inline-flex h-11 items-center justify-center rounded-full border border-pine/35 bg-[linear-gradient(180deg,rgba(103,141,103,0.18),rgba(69,103,72,0.16))] px-5 text-[0.72rem] font-medium uppercase tracking-[0.16em] text-ink transition hover:border-pine/45"
-                >
-                  Add inbox
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setCustomInboxName("");
-                    setCustomInboxError(null);
-                    setIsAddingCustomInbox(false);
-                  }}
-                  className="text-sm font-medium text-ink/56 transition hover:text-ink/76"
-                >
-                  Cancel
-                </button>
-              </div>
-            </div>
-            {customInboxError ? (
-              <div className="mt-3 text-sm text-amber-900/70">
-                {customInboxError}
-              </div>
-            ) : null}
+          <div className="space-y-1">
+            <h3 className="text-lg font-medium text-ink">Add more inboxes</h3>
+            <p className="text-sm text-ink/52">
+              Choose additional inboxes Cuevion should organize alongside your main inbox.
+            </p>
           </div>
-        ) : (
-          <button
-            type="button"
-            onClick={() => {
-              setCustomInboxError(null);
-              setIsAddingCustomInbox(true);
-            }}
-            className="flex w-full items-center justify-center rounded-3xl border border-dashed border-ink/12 bg-white/76 px-5 py-4 text-sm font-medium text-ink/66 transition hover:border-moss/35 hover:text-ink"
-          >
-            + Add custom inbox
-          </button>
-        )}
+
+          <div className="grid gap-3 md:grid-cols-2">
+            {availableInboxOptions
+              .filter((option) => option.id !== primaryInbox)
+              .map((option) => renderAdditionalCard(option.id, option.label))}
+          </div>
+
+          {isAddingCustomInbox ? (
+            <div className="rounded-3xl border border-ink/10 bg-white/82 p-4 shadow-panel">
+              <div className="flex flex-col gap-3 md:flex-row md:items-center">
+                <input
+                  ref={customInboxInputRef}
+                  type="text"
+                  value={customInboxName}
+                  onChange={(event) => {
+                    setCustomInboxName(event.target.value);
+                    setCustomInboxError(null);
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      submitCustomInbox();
+                    }
+
+                    if (event.key === "Escape") {
+                      event.preventDefault();
+                      setCustomInboxName("");
+                      setCustomInboxError(null);
+                      setIsAddingCustomInbox(false);
+                    }
+                  }}
+                  placeholder="Inbox name"
+                  className="w-full rounded-2xl border border-ink/10 bg-white px-4 py-3 text-ink outline-none transition focus:border-moss"
+                />
+                <div className="flex items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={submitCustomInbox}
+                    className="inline-flex h-11 items-center justify-center rounded-full border border-pine/35 bg-[linear-gradient(180deg,rgba(103,141,103,0.18),rgba(69,103,72,0.16))] px-5 text-[0.72rem] font-medium uppercase tracking-[0.16em] text-ink transition hover:border-pine/45"
+                  >
+                    Add inbox
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCustomInboxName("");
+                      setCustomInboxError(null);
+                      setIsAddingCustomInbox(false);
+                    }}
+                    className="text-sm font-medium text-ink/56 transition hover:text-ink/76"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+              {customInboxError ? (
+                <div className="mt-3 text-sm text-amber-900/70">
+                  {customInboxError}
+                </div>
+              ) : null}
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={() => {
+                setCustomInboxError(null);
+                setIsAddingCustomInbox(true);
+              }}
+              className="flex w-full items-center justify-center rounded-3xl border border-dashed border-ink/12 bg-white/76 px-5 py-4 text-sm font-medium text-ink/66 transition hover:border-moss/35 hover:text-ink"
+            >
+              + Add custom inbox
+            </button>
+          )}
         </div>
       ) : isAddingCustomInbox ? (
         <div className="rounded-3xl border border-ink/10 bg-white/82 p-5 shadow-panel">
