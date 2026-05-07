@@ -6994,6 +6994,25 @@ function resolveMailDateMs(message: MailMessage) {
   return 0;
 }
 
+const PRIORITY_QUEUE_RECENT_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
+
+function isPriorityQueueEligibleMessage(
+  message: MailMessage,
+  override?: ManualPriorityOverride,
+) {
+  if (override === "priority" || message.unread) {
+    return true;
+  }
+
+  const messageDateMs = resolveMailDateMs(message);
+
+  if (!Number.isFinite(messageDateMs) || messageDateMs <= 0) {
+    return false;
+  }
+
+  return Date.now() - messageDateMs <= PRIORITY_QUEUE_RECENT_WINDOW_MS;
+}
+
 const mailboxSecondaryActionButtonClass =
   "inline-flex h-9 w-9 items-center justify-center rounded-full border border-[var(--workspace-border)] bg-[var(--workspace-card-subtle)] text-[var(--workspace-text-soft)] transition-[background-color,border-color,color,transform] duration-150 hover:border-[var(--workspace-border-hover)] hover:bg-[var(--workspace-hover-surface)] active:scale-[0.98] focus-visible:outline-none";
 
@@ -29536,9 +29555,14 @@ export function WorkspaceShell({
       }
     }
 
-    return Array.from(latestByThread.values()).filter(({ message, mailboxId }) =>
-      isPriorityPageVisiblePriorityMessage(message, mailboxId),
-    );
+    return Array.from(latestByThread.values()).filter(({ message, mailboxId }) => {
+      const override = resolveManualPriorityOverride(manualPriorityOverrides, message);
+
+      return (
+        isPriorityQueueEligibleMessage(message, override) &&
+        isPriorityPageVisiblePriorityMessage(message, mailboxId)
+      );
+    });
   })();
   const livePriorityInboxItems: ReviewItem[] = livePriorityInboxEntries.map(
     ({ mailboxId, mailboxTitle, message }) => ({
