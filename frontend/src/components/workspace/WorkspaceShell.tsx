@@ -2864,7 +2864,37 @@ function findNearestOpaqueBackgroundColor(
     currentElement = currentElement.parentElement;
   }
 
-  return null;
+  const documentBackgrounds = [
+    iframeDocument.body,
+    iframeDocument.documentElement,
+  ]
+    .map((documentElement) => {
+      const computedStyle = documentElement
+        ? iframeDocument.defaultView?.getComputedStyle(documentElement)
+        : null;
+
+      return computedStyle ? parseRgb(computedStyle.backgroundColor) : null;
+    })
+    .filter((backgroundColor): backgroundColor is RgbColor => Boolean(backgroundColor));
+  const hasDarkDocumentBackground = documentBackgrounds.some(
+    (backgroundColor) =>
+      backgroundColor.alpha > 0 &&
+      !isLightColor(compositeColorOverBackground(backgroundColor, {
+        r: 255,
+        g: 255,
+        b: 255,
+        alpha: 1,
+      })),
+  );
+
+  return hasDarkDocumentBackground
+    ? null
+    : {
+        r: 255,
+        g: 255,
+        b: 255,
+        alpha: 1,
+      };
 }
 
 function hasOpaqueNonLightBackgroundDescendant(
@@ -2899,6 +2929,7 @@ function fixExternalHtmlDarkModeReadability(iframeDocument: Document) {
     "body",
     "table",
     "td",
+    "th",
     "div",
     "p",
     "span",
@@ -2915,6 +2946,8 @@ function fixExternalHtmlDarkModeReadability(iframeDocument: Document) {
     "b",
     "i",
     "a",
+    "center",
+    "small",
   ].join(",");
   const minimumContrastRatio = 3.8;
   const readableTextColor = "#1f2933";
@@ -3182,17 +3215,27 @@ function EmailHtmlStage({
       }
     }
 
-    if (themeMode === "dark" && isExternalHtml) {
+    const applyDarkModeReadabilityFix = () => {
+      if (themeMode !== "dark" || !isExternalHtml) {
+        return;
+      }
+
       try {
         fixExternalHtmlDarkModeReadability(iframeDoc);
       } catch {
         // Cross-origin guard – should never trigger for srcDoc iframes
       }
-    }
+    };
+
+    applyDarkModeReadabilityFix();
 
     const timeoutIds: number[] = [];
     const scheduleMeasure = (delay = 0) => {
       const timeoutId = window.setTimeout(updateHeight, delay);
+      timeoutIds.push(timeoutId);
+    };
+    const scheduleDarkModeReadabilityFix = (delay = 0) => {
+      const timeoutId = window.setTimeout(applyDarkModeReadabilityFix, delay);
       timeoutIds.push(timeoutId);
     };
     const images = Array.from(iframeDoc.images);
@@ -3214,6 +3257,9 @@ function EmailHtmlStage({
     scheduleMeasure(1200);
     scheduleMeasure(2400);
     scheduleMeasure(4800);
+    scheduleDarkModeReadabilityFix(0);
+    scheduleDarkModeReadabilityFix(120);
+    scheduleDarkModeReadabilityFix(400);
 
     cleanupRef.current = () => {
       timeoutIds.forEach((timeoutId) => window.clearTimeout(timeoutId));
