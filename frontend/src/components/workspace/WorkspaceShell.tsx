@@ -2381,7 +2381,11 @@ function shouldRenderKnownProviderHtmlOnLightCanvas(
       contentText.includes("sunbounce") &&
       (contentText.includes("download stream/presave") ||
         (contentText.includes("download") && contentText.includes("presave")) ||
-        contentText.includes("first release")))
+        contentText.includes("first release"))) ||
+    (identityText.includes("charlie@ourclubwhatever.com") &&
+      contentText.includes("club whatever spring sampler") &&
+      includesAnyKeyword(contentText, ["deep funktion", "zurra", "dnka", "goldschlager"]) &&
+      (contentText.includes("s.disco.ac") || contentText.includes("disco")))
   );
 }
 
