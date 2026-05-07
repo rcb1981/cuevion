@@ -2770,6 +2770,207 @@ html body [data-email-quote="true"] * {
 </html>`;
 }
 
+type RgbColor = {
+  r: number;
+  g: number;
+  b: number;
+  alpha: number;
+};
+
+function parseRgb(color: string): RgbColor | null {
+  const normalizedColor = color.trim();
+  const rgbMatch = normalizedColor.match(
+    /^rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)(?:\s*,\s*([\d.]+))?\s*\)$/i,
+  );
+
+  if (!rgbMatch) {
+    return null;
+  }
+
+  const r = Number(rgbMatch[1]);
+  const g = Number(rgbMatch[2]);
+  const b = Number(rgbMatch[3]);
+  const alpha = rgbMatch[4] === undefined ? 1 : Number(rgbMatch[4]);
+
+  if (![r, g, b, alpha].every(Number.isFinite)) {
+    return null;
+  }
+
+  return {
+    r: Math.min(255, Math.max(0, r)),
+    g: Math.min(255, Math.max(0, g)),
+    b: Math.min(255, Math.max(0, b)),
+    alpha: Math.min(1, Math.max(0, alpha)),
+  };
+}
+
+function relativeLuminance(color: RgbColor): number {
+  const toLinear = (channel: number) => {
+    const normalizedChannel = channel / 255;
+
+    return normalizedChannel <= 0.03928
+      ? normalizedChannel / 12.92
+      : ((normalizedChannel + 0.055) / 1.055) ** 2.4;
+  };
+
+  return 0.2126 * toLinear(color.r) + 0.7152 * toLinear(color.g) + 0.0722 * toLinear(color.b);
+}
+
+function contrastRatio(firstColor: RgbColor, secondColor: RgbColor): number {
+  const firstLuminance = relativeLuminance(firstColor);
+  const secondLuminance = relativeLuminance(secondColor);
+  const lighter = Math.max(firstLuminance, secondLuminance);
+  const darker = Math.min(firstLuminance, secondLuminance);
+
+  return (lighter + 0.05) / (darker + 0.05);
+}
+
+function compositeColorOverBackground(
+  foregroundColor: RgbColor,
+  backgroundColor: RgbColor,
+): RgbColor {
+  if (foregroundColor.alpha >= 1) {
+    return foregroundColor;
+  }
+
+  return {
+    r: foregroundColor.r * foregroundColor.alpha + backgroundColor.r * (1 - foregroundColor.alpha),
+    g: foregroundColor.g * foregroundColor.alpha + backgroundColor.g * (1 - foregroundColor.alpha),
+    b: foregroundColor.b * foregroundColor.alpha + backgroundColor.b * (1 - foregroundColor.alpha),
+    alpha: 1,
+  };
+}
+
+function isLightColor(color: RgbColor): boolean {
+  return relativeLuminance(color) >= 0.72;
+}
+
+function findNearestOpaqueBackgroundColor(
+  element: HTMLElement,
+  iframeDocument: Document,
+): RgbColor | null {
+  let currentElement: HTMLElement | null = element;
+
+  while (currentElement) {
+    const computedStyle = iframeDocument.defaultView?.getComputedStyle(currentElement);
+    const backgroundColor = computedStyle
+      ? parseRgb(computedStyle.backgroundColor)
+      : null;
+
+    if (backgroundColor && backgroundColor.alpha >= 0.95) {
+      return backgroundColor;
+    }
+
+    currentElement = currentElement.parentElement;
+  }
+
+  return null;
+}
+
+function hasOpaqueNonLightBackgroundDescendant(
+  element: HTMLElement,
+  iframeDocument: Document,
+  selector: string,
+): boolean {
+  return Array.from(element.querySelectorAll<HTMLElement>(selector)).some((descendant) => {
+    const computedStyle = iframeDocument.defaultView?.getComputedStyle(descendant);
+
+    if (
+      !computedStyle ||
+      computedStyle.display === "none" ||
+      computedStyle.visibility === "hidden" ||
+      (descendant.textContent ?? "").trim().length === 0
+    ) {
+      return false;
+    }
+
+    const backgroundColor = parseRgb(computedStyle.backgroundColor);
+
+    return Boolean(
+      backgroundColor &&
+        backgroundColor.alpha >= 0.95 &&
+        !isLightColor(backgroundColor),
+    );
+  });
+}
+
+function fixExternalHtmlDarkModeReadability(iframeDocument: Document) {
+  const readabilitySelector = [
+    "body",
+    "table",
+    "td",
+    "div",
+    "p",
+    "span",
+    "font",
+    "li",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "strong",
+    "em",
+    "b",
+    "i",
+    "a",
+  ].join(",");
+  const minimumContrastRatio = 3.8;
+  const readableTextColor = "#1f2933";
+  const readableLinkColor = "#0f5f8f";
+  const elements = Array.from(
+    iframeDocument.querySelectorAll<HTMLElement>(readabilitySelector),
+  );
+
+  elements.forEach((element) => {
+    const computedStyle = iframeDocument.defaultView?.getComputedStyle(element);
+
+    if (!computedStyle) {
+      return;
+    }
+
+    if (
+      computedStyle.display === "none" ||
+      computedStyle.visibility === "hidden" ||
+      (element.textContent ?? "").trim().length === 0
+    ) {
+      return;
+    }
+
+    const backgroundColor = findNearestOpaqueBackgroundColor(element, iframeDocument);
+
+    if (!backgroundColor || !isLightColor(backgroundColor)) {
+      return;
+    }
+
+    if (
+      element.children.length > 0 &&
+      hasOpaqueNonLightBackgroundDescendant(element, iframeDocument, readabilitySelector)
+    ) {
+      return;
+    }
+
+    const textColor = parseRgb(computedStyle.color);
+
+    if (!textColor) {
+      return;
+    }
+
+    const perceivedTextColor = compositeColorOverBackground(textColor, backgroundColor);
+
+    if (contrastRatio(perceivedTextColor, backgroundColor) >= minimumContrastRatio) {
+      return;
+    }
+
+    element.style.setProperty(
+      "color",
+      element.tagName === "A" ? readableLinkColor : readableTextColor,
+      "important",
+    );
+  });
+}
+
 function EmailHtmlStage({
   html,
   themeMode,
@@ -2976,6 +3177,14 @@ function EmailHtmlStage({
             child.style.setProperty("opacity", "1", "important");
           });
         });
+      } catch {
+        // Cross-origin guard – should never trigger for srcDoc iframes
+      }
+    }
+
+    if (themeMode === "dark" && isExternalHtml) {
+      try {
+        fixExternalHtmlDarkModeReadability(iframeDoc);
       } catch {
         // Cross-origin guard – should never trigger for srcDoc iframes
       }
