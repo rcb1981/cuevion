@@ -7310,6 +7310,45 @@ function shouldRouteMessageToFilteredFolder(
   );
 }
 
+function applyFilteredRoutingToMailboxCollections(
+  collections: MailboxCollections,
+  senderCategoryLearning: SenderCategoryLearningStore,
+): MailboxCollections {
+  const keptInbox: MailMessage[] = [];
+  const routedToFiltered: MailMessage[] = [];
+
+  collections.Inbox.forEach((message) => {
+    if (shouldRouteMessageToFilteredFolder(message, senderCategoryLearning)) {
+      routedToFiltered.push(message);
+      return;
+    }
+
+    keptInbox.push(message);
+  });
+
+  if (routedToFiltered.length === 0) {
+    return collections;
+  }
+
+  const seenFilteredIdentityKeys = new Set<string>();
+  const filtered = [...collections.Filtered, ...routedToFiltered].filter((message) => {
+    const identityKeys = getCanonicalMessageIdentityKeys(message);
+
+    if (identityKeys.some((key) => seenFilteredIdentityKeys.has(key))) {
+      return false;
+    }
+
+    identityKeys.forEach((key) => seenFilteredIdentityKeys.add(key));
+    return true;
+  });
+
+  return {
+    ...collections,
+    Inbox: keptInbox,
+    Filtered: filtered,
+  };
+}
+
 function applyFilteredLearningFromMessages(
   messages: MailMessage[],
   onSaveLearningRule: (
@@ -8365,6 +8404,13 @@ function normalizeMailboxStore(
         );
       }
     }
+  }
+
+  for (const mailboxId of Object.keys(nextStore)) {
+    nextStore[mailboxId] = applyFilteredRoutingToMailboxCollections(
+      nextStore[mailboxId],
+      senderCategoryLearning,
+    );
   }
 
   return nextStore;
