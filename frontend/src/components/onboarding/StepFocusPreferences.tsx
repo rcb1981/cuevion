@@ -63,7 +63,7 @@ export function StepFocusPreferences({
               <div className="text-[0.98rem] font-semibold tracking-[-0.015em] text-ink">
                 {option.label}
               </div>
-              <div className="grid grid-cols-3 gap-2 md:w-auto">
+              <div className="flex w-full min-w-0 gap-1.5 md:flex-1 md:justify-end">
                 {preferenceLevels.map((level) => {
                   const selected = value[option.id] === level;
 
@@ -72,7 +72,7 @@ export function StepFocusPreferences({
                       key={level}
                       type="button"
                       onClick={() => onChange(option.id, level)}
-                      className={`min-w-0 overflow-hidden whitespace-nowrap rounded-full border px-2.5 py-1.5 text-center text-[0.7rem] font-medium uppercase tracking-[0.08em] transition sm:min-w-[5.8rem] ${
+                      className={`min-w-0 flex-1 basis-0 overflow-hidden whitespace-nowrap rounded-full border px-2 py-1.5 text-center text-[0.7rem] font-medium uppercase tracking-[0.08em] transition ${
                         selected
                           ? "border-pine bg-[linear-gradient(180deg,rgba(226,236,229,0.92),rgba(246,249,246,0.98))] text-ink shadow-panel"
                           : "border-ink/10 bg-white/70 text-ink/56 hover:border-moss/24 hover:text-ink"
@@ -108,7 +108,7 @@ export function StepFocusPreferences({
                 <div className="text-[0.98rem] font-semibold tracking-[-0.015em] text-ink">
                   {option.label}
                 </div>
-                <div className="grid grid-cols-3 gap-2 md:w-auto">
+                <div className="flex w-full min-w-0 gap-1.5 md:flex-1 md:justify-end">
                   {preferenceLevels.map((level) => {
                     const selected = value[option.id] === level;
 
@@ -117,7 +117,7 @@ export function StepFocusPreferences({
                         key={level}
                         type="button"
                         onClick={() => onChange(option.id, level)}
-                        className={`min-w-0 overflow-hidden whitespace-nowrap rounded-full border px-2.5 py-1.5 text-center text-[0.7rem] font-medium uppercase tracking-[0.08em] transition sm:min-w-[5.8rem] ${
+                        className={`min-w-0 flex-1 basis-0 overflow-hidden whitespace-nowrap rounded-full border px-2 py-1.5 text-center text-[0.7rem] font-medium uppercase tracking-[0.08em] transition ${
                           selected
                             ? "border-pine bg-[linear-gradient(180deg,rgba(226,236,229,0.92),rgba(246,249,246,0.98))] text-ink shadow-panel"
                             : "border-ink/10 bg-white/70 text-ink/56 hover:border-moss/24 hover:text-ink"

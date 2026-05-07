@@ -106,7 +106,7 @@ export function StepInboxSetup({
           setShowLimitHint(false);
           onToggleAdditionalInbox(inboxId);
         }}
-        className={`rounded-3xl border p-4 text-left transition ${
+        className={`min-h-[52px] rounded-[22px] border px-4 py-2.5 text-left transition ${
           selected
             ? "border-pine bg-[linear-gradient(180deg,rgba(226,236,229,0.92),rgba(246,249,246,0.98))] text-ink shadow-panel"
             : "border-ink/10 bg-white/80 text-ink hover:border-moss/35"
@@ -114,8 +114,8 @@ export function StepInboxSetup({
           !disabled ? "cursor-pointer" : ""
         } outline-none focus-visible:border-pine focus-visible:bg-[linear-gradient(180deg,rgba(226,236,229,0.92),rgba(246,249,246,0.98))] focus-visible:text-ink focus-visible:shadow-panel`}
       >
-        <div className="flex items-center justify-between gap-4">
-          <span className="text-base font-semibold">{label}</span>
+        <div className="flex items-center justify-between gap-3">
+          <span className="text-sm font-semibold">{label}</span>
         </div>
       </button>
     );
@@ -128,13 +128,13 @@ export function StepInboxSetup({
     options: Array<{ id: InboxId; label: string }>,
     onChange: (inboxId: InboxId) => void,
   ) => (
-    <div className="space-y-3">
+    <div className="space-y-2.5">
       <div className="space-y-1">
         <h3 className="text-lg font-medium text-ink">{title}</h3>
         <p className="text-sm text-ink/52">{subtitle}</p>
       </div>
 
-      <div className="grid gap-3 md:grid-cols-2">
+      <div className="grid gap-2.5 md:grid-cols-2">
         {options.map((option) => (
           <button
             key={option.id}
@@ -143,7 +143,7 @@ export function StepInboxSetup({
               setShowLimitHint(false);
               onChange(option.id);
             }}
-            className={`rounded-3xl border p-4 text-left transition ${
+            className={`rounded-3xl border px-4 py-3 text-left transition ${
               selectedInbox === option.id
                 ? "border-pine bg-[linear-gradient(180deg,rgba(226,236,229,0.92),rgba(246,249,246,0.98))] text-ink shadow-panel"
                 : "border-ink/10 bg-white/80 text-ink hover:border-moss/35"
@@ -164,7 +164,7 @@ export function StepInboxSetup({
   );
 
   const renderPrimaryInboxSection = () => (
-    <div className="space-y-3">
+    <div className="space-y-2.5">
       <div className="space-y-1">
         <h3 className="text-lg font-medium text-ink">Choose your main inbox</h3>
         <p className="text-sm text-ink/52">
@@ -172,7 +172,7 @@ export function StepInboxSetup({
         </p>
       </div>
 
-      <div className="grid gap-3 md:grid-cols-2">
+      <div className="grid gap-2.5 md:grid-cols-2">
         {availableInboxOptions.map((option) => {
           const isMainInboxOption = option.id === "main";
           const isConfirmedMainSelection =
@@ -188,15 +188,15 @@ export function StepInboxSetup({
           return (
             <div
               key={option.id}
-              className={`min-h-[78px] rounded-3xl border transition ${
+              className={`min-h-[64px] rounded-3xl border transition ${
                 selected
                   ? "border-pine bg-[linear-gradient(180deg,rgba(226,236,229,0.92),rgba(246,249,246,0.98))] text-ink shadow-panel"
                   : "border-ink/10 bg-white/80 text-ink hover:border-moss/35"
               }`}
             >
               {showsInboxTypeControls ? (
-                <div className="flex min-h-[78px] items-center justify-center px-4 py-3">
-                  <div className="flex flex-wrap justify-center gap-2">
+                <div className="flex min-h-[64px] items-center justify-center px-3.5 py-2.5">
+                  <div className="flex flex-wrap justify-center gap-1.5">
                     {primaryInboxTypeOptions.map((typeOption) => {
                       const typeSelected = primaryInboxType === typeOption.id;
 
@@ -210,7 +210,7 @@ export function StepInboxSetup({
                             onPrimaryInboxChange("main");
                             onPrimaryInboxTypeChange(typeOption.id);
                           }}
-                          className={`rounded-full border px-3 py-1.5 text-sm transition ${
+                          className={`rounded-full border px-3 py-1 text-sm transition ${
                             typeSelected
                               ? "border-pine bg-white/82 text-ink shadow-[0_6px_20px_rgba(38,66,56,0.08)]"
                               : "border-ink/10 bg-white/68 text-ink/72 hover:border-moss/35 hover:text-ink"
@@ -236,9 +236,9 @@ export function StepInboxSetup({
                     setIsChoosingMainInboxType(false);
                     onPrimaryInboxChange(option.id);
                   }}
-                  className="flex min-h-[78px] w-full cursor-pointer items-center rounded-3xl px-4 py-3 text-left outline-none focus-visible:border-pine focus-visible:text-ink"
+                  className="flex min-h-[64px] w-full cursor-pointer items-center rounded-3xl px-4 py-2.5 text-left outline-none focus-visible:border-pine focus-visible:text-ink"
                 >
-                  <div className="flex w-full items-center justify-between gap-4">
+                  <div className="flex w-full items-center justify-between gap-3">
                     <span className="block text-base font-semibold">{option.label}</span>
                     {selected ? (
                       <span className="rounded-full border border-ink/8 bg-white/55 px-2.5 py-1 text-[10px] uppercase tracking-[0.18em] text-ink/46">
@@ -299,8 +299,8 @@ export function StepInboxSetup({
   ];
 
   return (
-    <section className="space-y-8">
-      <div className="space-y-3">
+    <section className="space-y-5">
+      <div className="space-y-2">
         <h2 className="text-3xl font-semibold tracking-tight text-ink">Inbox setup</h2>
         <p className="text-base text-ink/68">
           Choose one main inbox first, then add any others Cuevion should organize.
@@ -330,7 +330,7 @@ export function StepInboxSetup({
       ) : null}
 
       <div
-        className={`min-h-[20px] text-sm text-ink/48 transition-opacity ${
+        className={`min-h-[16px] text-sm text-ink/48 transition-opacity ${
           showLimitHint ? "duration-300" : "duration-1000"
         } ${
           showLimitHint || showMinimumHint ? "opacity-100" : "opacity-0"
@@ -344,7 +344,7 @@ export function StepInboxSetup({
       </div>
 
       {isExpandedInboxMode ? (
-        <div className="space-y-3 rounded-[28px] border border-ink/10 bg-sand/45 px-4 py-5">
+        <div className="space-y-2.5 rounded-[24px] border border-ink/10 bg-sand/45 px-3.5 py-3.5">
           <div className="space-y-1">
             <h3 className="text-lg font-medium text-ink">Add more inboxes</h3>
             <p className="text-sm text-ink/52">
@@ -352,15 +352,15 @@ export function StepInboxSetup({
             </p>
           </div>
 
-          <div className="grid gap-3 md:grid-cols-2">
+          <div className="grid gap-2.5 md:grid-cols-2">
             {availableInboxOptions
               .filter((option) => option.id !== primaryInbox)
               .map((option) => renderAdditionalCard(option.id, option.label))}
           </div>
 
           {isAddingCustomInbox ? (
-            <div className="rounded-3xl border border-ink/10 bg-white/82 p-4 shadow-panel">
-              <div className="flex flex-col gap-3 md:flex-row md:items-center">
+            <div className="rounded-3xl border border-ink/10 bg-white/82 p-3.5 shadow-panel">
+              <div className="flex flex-col gap-2.5 md:flex-row md:items-center">
                 <input
                   ref={customInboxInputRef}
                   type="text"
@@ -383,13 +383,13 @@ export function StepInboxSetup({
                     }
                   }}
                   placeholder="Inbox name"
-                  className="w-full rounded-2xl border border-ink/10 bg-white px-4 py-3 text-ink outline-none transition focus:border-moss"
+                  className="w-full rounded-2xl border border-ink/10 bg-white px-4 py-2.5 text-ink outline-none transition focus:border-moss"
                 />
                 <div className="flex items-center gap-3">
                   <button
                     type="button"
                     onClick={submitCustomInbox}
-                    className="inline-flex h-11 items-center justify-center rounded-full border border-pine/35 bg-[linear-gradient(180deg,rgba(103,141,103,0.18),rgba(69,103,72,0.16))] px-5 text-[0.72rem] font-medium uppercase tracking-[0.16em] text-ink transition hover:border-pine/45"
+                    className="inline-flex h-10 items-center justify-center rounded-full border border-pine/35 bg-[linear-gradient(180deg,rgba(103,141,103,0.18),rgba(69,103,72,0.16))] px-5 text-[0.72rem] font-medium uppercase tracking-[0.16em] text-ink transition hover:border-pine/45"
                   >
                     Add inbox
                   </button>
@@ -419,14 +419,14 @@ export function StepInboxSetup({
                 setCustomInboxError(null);
                 setIsAddingCustomInbox(true);
               }}
-              className="flex w-full items-center justify-center rounded-3xl border border-dashed border-ink/12 bg-white/76 px-5 py-4 text-sm font-medium text-ink/66 transition hover:border-moss/35 hover:text-ink"
+              className="flex min-h-[50px] w-full items-center justify-center rounded-[22px] border border-dashed border-ink/12 bg-white/76 px-4 py-2.5 text-sm font-medium text-ink/66 transition hover:border-moss/35 hover:text-ink"
             >
               + Add custom inbox
             </button>
           )}
         </div>
       ) : isAddingCustomInbox ? (
-        <div className="rounded-3xl border border-ink/10 bg-white/82 p-5 shadow-panel">
+        <div className="rounded-3xl border border-ink/10 bg-white/82 p-4 shadow-panel">
           <div className="flex flex-col gap-3 md:flex-row md:items-center">
             <input
               ref={customInboxInputRef}
@@ -450,13 +450,13 @@ export function StepInboxSetup({
                 }
               }}
               placeholder="Inbox name"
-              className="w-full rounded-2xl border border-ink/10 bg-white px-4 py-3 text-ink outline-none transition focus:border-moss"
+              className="w-full rounded-2xl border border-ink/10 bg-white px-4 py-2.5 text-ink outline-none transition focus:border-moss"
             />
             <div className="flex items-center gap-3">
               <button
                 type="button"
                 onClick={submitCustomInbox}
-                className="inline-flex h-11 items-center justify-center rounded-full border border-pine/35 bg-[linear-gradient(180deg,rgba(103,141,103,0.18),rgba(69,103,72,0.16))] px-5 text-[0.72rem] font-medium uppercase tracking-[0.16em] text-ink transition hover:border-pine/45"
+                className="inline-flex h-10 items-center justify-center rounded-full border border-pine/35 bg-[linear-gradient(180deg,rgba(103,141,103,0.18),rgba(69,103,72,0.16))] px-5 text-[0.72rem] font-medium uppercase tracking-[0.16em] text-ink transition hover:border-pine/45"
               >
                 Add inbox
               </button>
@@ -486,7 +486,7 @@ export function StepInboxSetup({
             setCustomInboxError(null);
             setIsAddingCustomInbox(true);
           }}
-          className="flex w-full items-center justify-center rounded-3xl border border-dashed border-ink/12 bg-white/76 px-5 py-4 text-sm font-medium text-ink/66 transition hover:border-moss/35 hover:text-ink"
+          className="flex min-h-[50px] w-full items-center justify-center rounded-[22px] border border-dashed border-ink/12 bg-white/76 px-4 py-2.5 text-sm font-medium text-ink/66 transition hover:border-moss/35 hover:text-ink"
         >
           + Add custom inbox
         </button>
