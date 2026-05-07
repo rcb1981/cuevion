@@ -2375,7 +2375,13 @@ function shouldRenderKnownProviderHtmlOnLightCanvas(
       contentText.includes("nrj radio france 2025")) ||
     (contentText.includes("hi udipta this side") &&
       contentText.includes("spotify") &&
-      contentText.includes("playlist"))
+      contentText.includes("playlist")) ||
+    (identityText.includes("soulshyft.music.official@gmail.com") &&
+      contentText.includes("soulshyft") &&
+      contentText.includes("sunbounce") &&
+      (contentText.includes("download stream/presave") ||
+        (contentText.includes("download") && contentText.includes("presave")) ||
+        contentText.includes("first release")))
   );
 }
 
