@@ -3006,11 +3006,10 @@ function fixExternalHtmlDarkModeReadability(iframeDocument: Document) {
       return;
     }
 
-    element.style.setProperty(
-      "color",
-      element.tagName === "A" ? readableLinkColor : readableTextColor,
-      "important",
-    );
+    const fixedColor = element.tagName === "A" ? readableLinkColor : readableTextColor;
+
+    element.style.setProperty("color", fixedColor, "important");
+    element.style.setProperty("-webkit-text-fill-color", fixedColor, "important");
   });
 }
 
@@ -3270,6 +3269,7 @@ function EmailHtmlStage({
     scheduleDarkModeReadabilityFix(0);
     scheduleDarkModeReadabilityFix(120);
     scheduleDarkModeReadabilityFix(400);
+    scheduleDarkModeReadabilityFix(800);
 
     cleanupRef.current = () => {
       timeoutIds.forEach((timeoutId) => window.clearTimeout(timeoutId));
@@ -3304,7 +3304,8 @@ function EmailHtmlStage({
       style={{
         height,
         overflow: "visible",
-        ...(isProviderHtml ? { backgroundColor: "#ffffff", colorScheme: "light" } : {}),
+        ...(isExternalHtml ? { colorScheme: "light" } : {}),
+        ...(isProviderHtml ? { backgroundColor: "#ffffff" } : {}),
       }}
     />
   );
