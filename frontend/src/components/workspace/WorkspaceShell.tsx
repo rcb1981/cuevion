@@ -202,6 +202,7 @@ function normalizeTeamMemberEntry(value: TeamMemberEntry): TeamMemberEntry {
   return {
     ...value,
     accessLevel: normalizeTeamRole(value.accessLevel),
+    selectedInboxes: [],
   };
 }
 
@@ -213,6 +214,7 @@ function normalizePendingTeamInvitation(value: PendingTeamInvitation): PendingTe
   return {
     ...value,
     accessLevel: normalizeTeamRole(value.accessLevel),
+    selectedInboxes: [],
   };
 }
 
@@ -220,6 +222,7 @@ function normalizeTeamMembershipEntry(value: TeamMembershipEntry): TeamMembershi
   return {
     ...value,
     accessLevel: normalizeTeamRole(value.accessLevel),
+    selectedInboxes: [],
   };
 }
 
@@ -20222,10 +20225,10 @@ function WorkbenchView({
         "A calm notification surface that keeps alerts and updates inside the same premium workspace context.",
     },
     Team: {
-      eyebrow: "Team workspace",
+      eyebrow: "Team access",
       title: "Team",
       summary:
-        "Shared workspace access for inbox collaboration and coordination.",
+        "Collaboration access for explicitly shared threads and external review links.",
     },
   };
 
@@ -20240,22 +20243,22 @@ function WorkbenchView({
             {
               name: "Emma Stone",
               email: "emma@cuevion.com",
-              accessLevel: "Admin" as const,
-              selectedInboxes: ["Primary inbox", "Demo inbox", "Promo inbox"],
+              accessLevel: "Shared" as const,
+              selectedInboxes: [],
               status: "Active",
             },
             {
               name: "David Cole",
               email: "david@cuevion.com",
               accessLevel: "Shared" as const,
-              selectedInboxes: ["Demo inbox"],
+              selectedInboxes: [],
               status: "Invited",
             },
             {
               name: "Mila Hart",
               email: "mila@cuevion.com",
-              accessLevel: "Editor" as const,
-              selectedInboxes: ["Promo inbox"],
+              accessLevel: "Limited" as const,
+              selectedInboxes: [],
               status: "Active",
             },
           ]
@@ -20270,22 +20273,22 @@ function WorkbenchView({
             {
               name: "Emma Stone",
               email: "emma@cuevion.com",
-              accessLevel: "Admin" as const,
-              selectedInboxes: ["Primary inbox", "Demo inbox", "Promo inbox"],
+              accessLevel: "Shared" as const,
+              selectedInboxes: [],
               status: "Active",
             },
             {
               name: "David Cole",
               email: "david@cuevion.com",
               accessLevel: "Shared" as const,
-              selectedInboxes: ["Demo inbox"],
+              selectedInboxes: [],
               status: "Invited",
             },
             {
               name: "Mila Hart",
               email: "mila@cuevion.com",
-              accessLevel: "Editor" as const,
-              selectedInboxes: ["Promo inbox"],
+              accessLevel: "Limited" as const,
+              selectedInboxes: [],
               status: "Active",
             },
           ]
@@ -20309,20 +20312,11 @@ function WorkbenchView({
   const activeTeamMember =
     activeTeamMemberIndex !== null ? teamMembers[activeTeamMemberIndex] : null;
   const [selectedTeamAccessLevel, setSelectedTeamAccessLevel] = useState<TeamAccessLevel>(
-    "Admin",
-  );
-  const teamInboxOptions = orderedMailboxes
-    .map((mailbox) => mailbox.title.trim())
-    .filter((title) => title.length > 0);
-  const [selectedTeamInboxAccess, setSelectedTeamInboxAccess] = useState<string[]>(() =>
-    [...teamInboxOptions],
+    "Shared",
   );
   const [inviteFullName, setInviteFullName] = useState("");
   const [inviteEmail, setInviteEmail] = useState("");
-  const [inviteAccessLevel, setInviteAccessLevel] = useState<TeamAccessLevel>("Editor");
-  const [inviteInboxAccess, setInviteInboxAccess] = useState<string[]>(() =>
-    teamInboxOptions.slice(0, 1),
-  );
+  const [inviteAccessLevel, setInviteAccessLevel] = useState<TeamAccessLevel>("Shared");
   const getInitials = (name: string) =>
     name
       .split(" ")
@@ -20330,66 +20324,31 @@ function WorkbenchView({
       .slice(0, 2)
       .map((part) => part[0]?.toUpperCase() ?? "")
       .join("");
-  const formatInboxSelectionLabel = (inboxes: string[]) => {
-    if (inboxes.length === 0) {
-      return "no inboxes";
+  const getTeamAccessDescription = (accessLevel: TeamAccessLevel) => {
+    if (accessLevel === "Shared") {
+      return "Internal collaboration on explicitly shared threads only";
     }
 
-    if (inboxes.length === 1) {
-      return inboxes[0];
-    }
-
-    if (inboxes.length === 2) {
-      return `${inboxes[0]} and ${inboxes[1]}`;
-    }
-
-    return `${inboxes.slice(0, -1).join(", ")} and ${inboxes[inboxes.length - 1]}`;
+    return "External review link/token access only";
   };
-  const getTeamRoleDescription = (member: TeamMemberEntry) => {
-    if (member.accessLevel === "Shared") {
-      return "Access to shared collaborations only";
-    }
-
-    if (member.accessLevel === "Limited") {
-      return "Access to specific invited emails only";
-    }
-
-    const formattedInboxes = formatInboxSelectionLabel(member.selectedInboxes);
-    return `${getTeamAccessLevelLabel(member.accessLevel)} access for ${formattedInboxes}`;
-  };
-  const isInboxAccessVisibleForLevel = (accessLevel: TeamAccessLevel) =>
-    accessLevel === "Admin" || accessLevel === "Editor";
-  const getTeamInboxAccessLabel = (member: TeamMemberEntry) =>
-    member.selectedInboxes.length > 0 ? member.selectedInboxes.join(", ") : "No inbox access";
+  const getTeamRoleDescription = (member: TeamMemberEntry) =>
+    getTeamAccessDescription(member.accessLevel);
   const inviteAccessLevelDescription =
-    inviteAccessLevel === "Admin"
-      ? "Full workspace access"
-      : inviteAccessLevel === "Editor"
-        ? "Can access and work in selected inboxes"
-        : inviteAccessLevel === "Shared"
-          ? "Access to shared collaborations only"
-          : "Access to specific invited emails only";
+    getTeamAccessDescription(inviteAccessLevel);
   const defaultTeamAccessState = activeTeamMember
     ? {
         level: activeTeamMember.accessLevel,
-        inboxes: activeTeamMember.selectedInboxes,
       }
     : {
-        level: "Admin" as TeamAccessLevel,
-        inboxes: ["Primary inbox"],
+        level: "Shared" as TeamAccessLevel,
       };
   const hasTeamAccessChanges = activeTeamMember
-    ? selectedTeamAccessLevel !== defaultTeamAccessState.level ||
-      [...(isInboxAccessVisibleForLevel(selectedTeamAccessLevel) ? selectedTeamInboxAccess : [])]
-        .sort()
-        .join("|") !==
-        [...defaultTeamAccessState.inboxes].sort().join("|")
+    ? selectedTeamAccessLevel !== defaultTeamAccessState.level
     : false;
   const canSubmitInvite =
     inviteFullName.trim().length > 0 &&
     inviteEmail.trim().length > 0 &&
-    isValidInviteEmail(inviteEmail) &&
-    (!isInboxAccessVisibleForLevel(inviteAccessLevel) || inviteInboxAccess.length > 0);
+    isValidInviteEmail(inviteEmail);
   const mapTeamInviteStatusToMemberStatus = (status: TeamInviteStatus): TeamMemberStatus =>
     status === "accepted"
       ? "Active"
@@ -20589,7 +20548,7 @@ function WorkbenchView({
 
       return [...current, nextMember];
     });
-    setTeamFeedbackMessage("Workspace invite sent");
+    setTeamFeedbackMessage("External review invite sent");
     return true;
   };
   const syncInviteOnlyTeamInviteStatuses = async () => {
@@ -20679,22 +20638,7 @@ function WorkbenchView({
     }
 
     setSelectedTeamAccessLevel(activeTeamMember.accessLevel);
-    setSelectedTeamInboxAccess(() => {
-      const nextInboxes = activeTeamMember.selectedInboxes.filter((inbox) =>
-        teamInboxOptions.includes(inbox),
-      );
-
-      return nextInboxes.length > 0 ? nextInboxes : teamInboxOptions.slice(0, 1);
-    });
-  }, [activeTeamMemberIndex, activeTeamMember, teamInboxOptions]);
-
-  useEffect(() => {
-    setInviteInboxAccess((current) => {
-      const nextInboxes = current.filter((inbox) => teamInboxOptions.includes(inbox));
-
-      return nextInboxes.length > 0 ? nextInboxes : teamInboxOptions.slice(0, 1);
-    });
-  }, [teamInboxOptions]);
+  }, [activeTeamMember]);
 
   return (
     <>
@@ -20820,13 +20764,7 @@ function WorkbenchView({
                     Shared by {pendingTeamInvitation.inviter}
                   </div>
                   <div className="text-[0.82rem] leading-6 text-[var(--workspace-text-soft)]">
-                    {pendingTeamInvitation.accessLevel === "Shared"
-                      ? "Access to shared collaborations only"
-                      : pendingTeamInvitation.accessLevel === "Limited"
-                      ? "Access to specific invited emails only"
-                      : `${getTeamAccessLevelLabel(pendingTeamInvitation.accessLevel)} access for ${formatInboxSelectionLabel(
-                          pendingTeamInvitation.selectedInboxes,
-                        )}`}
+                    {getTeamAccessDescription(pendingTeamInvitation.accessLevel)}
                   </div>
                 </div>
                 <div className="mt-4 flex flex-wrap items-center gap-3">
@@ -20837,16 +20775,14 @@ function WorkbenchView({
                         name: pendingTeamInvitation.inviter,
                         email: "member@cuevion.com",
                         accessLevel: pendingTeamInvitation.accessLevel,
-                        selectedInboxes: [...pendingTeamInvitation.selectedInboxes],
+                        selectedInboxes: [],
                         status: "Active",
                       });
                       onAcceptPendingTeamInvitation();
                       setTeamFeedbackMessage(
                         pendingTeamInvitation.accessLevel === "Limited"
-                          ? "You now have invite-only collaboration access"
-                          : `You now have access to ${formatInboxSelectionLabel(
-                              pendingTeamInvitation.selectedInboxes,
-                            )}`,
+                          ? "You now have external review link/token access"
+                          : "You now have shared collaboration access",
                       );
                     }}
                     className={teamInvitationPrimaryActionClass}
@@ -20928,7 +20864,7 @@ function WorkbenchView({
                   <div className="divide-y divide-[var(--workspace-divider)]">
                     {memberOfEntries.map((member) => (
                       <div
-                        key={`${member.name}-${member.accessLevel}-${member.selectedInboxes.join("|")}`}
+                        key={`${member.name}-${member.accessLevel}`}
                         className="flex items-start justify-between gap-4 py-4 first:pt-1 last:pb-1"
                       >
                         <div className="min-w-0 space-y-0.5">
@@ -20978,8 +20914,8 @@ function WorkbenchView({
                   </h2>
                   <p className="text-[0.88rem] leading-6 text-[var(--workspace-text-soft)]">
                     {inviteAccessLevel === "Limited"
-                      ? "Sends invite-only collaboration access by email."
-                      : "Creates a workspace invite inside Cuevion. No email is sent yet."}
+                      ? "Sends external review link/token access by email."
+                      : "Creates internal collaboration access for explicitly shared threads only. No inbox access is granted."}
                   </p>
                 </div>
                 <button
@@ -21040,46 +20976,6 @@ function WorkbenchView({
                     {inviteAccessLevelDescription}
                   </div>
                 </div>
-
-                {isInboxAccessVisibleForLevel(inviteAccessLevel) ? (
-                  <div className="mt-5 space-y-3">
-                    <div className="text-[0.7rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
-                      Inbox Access
-                    </div>
-                    <div className="flex flex-wrap gap-2">
-                      {teamInboxOptions.map((inboxLabel) => {
-                        const isSelected = inviteInboxAccess.includes(inboxLabel);
-
-                        return (
-                          <button
-                            key={`invite-inbox-${inboxLabel}`}
-                            type="button"
-                            onClick={() => {
-                              setInviteInboxAccess((current) => {
-                                if (current.includes(inboxLabel)) {
-                                  if (current.length === 1) {
-                                    return current;
-                                  }
-
-                                  return current.filter((item) => item !== inboxLabel);
-                                }
-
-                                return [...current, inboxLabel];
-                              });
-                            }}
-                            className={`inline-flex h-9 items-center justify-center rounded-full border px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color,box-shadow,transform] duration-150 focus-visible:outline-none ${
-                              isSelected
-                                ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_8px_24px_rgba(118,170,112,0.08)]"
-                                : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[var(--workspace-text-soft)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface-strong)]"
-                            }`}
-                          >
-                            {inboxLabel}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-                ) : null}
 
                 <div className="mt-6 flex items-center justify-end gap-3">
                   <button
@@ -21165,15 +21061,6 @@ function WorkbenchView({
                     </div>
                     <div className="text-[0.88rem] leading-7 text-[var(--workspace-emphasis-text)]">
                       {getTeamRoleDescription(activeTeamMember)}
-                    </div>
-                  </div>
-
-                  <div className="space-y-1">
-                    <div className="text-[0.7rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
-                      Current inbox access
-                    </div>
-                    <div className="text-[0.88rem] leading-7 text-[var(--workspace-emphasis-text)]">
-                      {getTeamInboxAccessLabel(activeTeamMember)}
                     </div>
                   </div>
 
@@ -21303,18 +21190,18 @@ function WorkbenchView({
                 </h2>
                 <p className="text-[0.9rem] leading-7 text-[var(--workspace-text-soft)]">
                   {activeTeamConfirmation === "revoke"
-                    ? "Are you sure you want to remove this member’s workspace access?"
+                    ? "Are you sure you want to remove this member’s Team access?"
                     : activeTeamConfirmation === "remove-member"
-                      ? "Are you sure you want to remove this member from the workspace?"
+                      ? "Are you sure you want to remove this Team member?"
                     : activeTeamConfirmation === "cancel-invite"
                       ? "Are you sure you want to cancel this invitation?"
                     : activeTeamConfirmation === "resend-invite"
                         ? activeTeamMember?.accessLevel === "Limited"
-                          ? "Send this workspace invite again by email?"
-                          : "Reopen this workspace invite in Cuevion? No email will be sent."
+                          ? "Send this external review invite again by email?"
+                          : "Reopen this shared collaboration invite in Cuevion? No email will be sent."
                         : inviteAccessLevel === "Limited"
-                          ? "Send this workspace invite by email?"
-                          : "Create this workspace invite in Cuevion? No email will be sent."}
+                          ? "Send this external review invite by email?"
+                          : "Create this shared collaboration invite in Cuevion? No email will be sent."}
                 </p>
               </div>
 
@@ -21399,8 +21286,7 @@ function WorkbenchView({
 
                           setInviteFullName("");
                           setInviteEmail("");
-                          setInviteAccessLevel("Editor");
-                          setInviteInboxAccess(teamInboxOptions.slice(0, 1));
+                          setInviteAccessLevel("Shared");
                           setIsInviteMemberOpen(false);
                           console.log("confirm_invite_team_member");
                         } finally {
@@ -21416,17 +21302,15 @@ function WorkbenchView({
                           name: inviteFullName.trim(),
                           email: inviteEmail.trim(),
                           accessLevel: inviteAccessLevel,
-                          selectedInboxes:
-                            isInboxAccessVisibleForLevel(inviteAccessLevel) ? [...inviteInboxAccess] : [],
+                          selectedInboxes: [],
                           status: "Invited",
                         },
                       ]);
                       setInviteFullName("");
                       setInviteEmail("");
-                      setInviteAccessLevel("Editor");
-                      setInviteInboxAccess(teamInboxOptions.slice(0, 1));
+                      setInviteAccessLevel("Shared");
                       setIsInviteMemberOpen(false);
-                      setTeamFeedbackMessage("Workspace invite created");
+                      setTeamFeedbackMessage("Shared collaboration invite created");
                       console.log("confirm_invite_team_member");
                     } else if (
                       activeTeamConfirmation === "cancel-invite" &&
@@ -21504,7 +21388,7 @@ function WorkbenchView({
                             : member,
                         ),
                       );
-                      setTeamFeedbackMessage("Workspace invite reopened");
+                      setTeamFeedbackMessage("Shared collaboration invite reopened");
                       console.log(`confirm_resend_invite_${activeTeamMember.name}`);
                     } else if (
                       activeTeamConfirmation === "remove-member" &&
@@ -21544,7 +21428,7 @@ function WorkbenchView({
                     Change access
                   </h2>
                   <p className="max-w-[30rem] text-[0.9rem] leading-7 text-[var(--workspace-text-soft)]">
-                    Adjust workspace access and inbox visibility.
+                    Adjust Team access. Team access does not grant workspace or inbox access.
                   </p>
                 </div>
               </div>
@@ -21572,46 +21456,6 @@ function WorkbenchView({
                   </div>
                 </div>
 
-                {isInboxAccessVisibleForLevel(selectedTeamAccessLevel) ? (
-                  <div className="mt-5 space-y-3">
-                    <div className="text-[0.7rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
-                      Inbox Access
-                    </div>
-                    <div className="flex flex-wrap gap-2 transition-opacity duration-200">
-                      {teamInboxOptions.map((inboxLabel) => {
-                        const isSelected = selectedTeamInboxAccess.includes(inboxLabel);
-
-                        return (
-                          <button
-                            key={`team-inbox-access-${inboxLabel}`}
-                            type="button"
-                            onClick={() => {
-                              setSelectedTeamInboxAccess((current) => {
-                                if (current.includes(inboxLabel)) {
-                                  if (current.length === 1) {
-                                    return current;
-                                  }
-
-                                  return current.filter((item) => item !== inboxLabel);
-                                }
-
-                                return [...current, inboxLabel];
-                              });
-                            }}
-                            className={`inline-flex h-9 items-center justify-center rounded-full border px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color,box-shadow,transform] duration-150 focus-visible:outline-none ${
-                              isSelected
-                                ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_8px_24px_rgba(118,170,112,0.08)]"
-                                : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[var(--workspace-text-soft)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface-strong)]"
-                            }`}
-                          >
-                            {inboxLabel}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  </div>
-                ) : null}
-
                 {hasTeamAccessChanges ? (
                   <div className="mt-3 text-[0.72rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)]">
                     Unsaved changes
@@ -21635,16 +21479,13 @@ function WorkbenchView({
                             ? {
                                 ...member,
                                 accessLevel: selectedTeamAccessLevel,
-                                selectedInboxes:
-                                  !isInboxAccessVisibleForLevel(selectedTeamAccessLevel)
-                                    ? []
-                                    : [...selectedTeamInboxAccess],
+                                selectedInboxes: [],
                               }
                             : member,
                         ),
                       );
                       console.log(
-                        `save_team_access_${activeTeamMember.name}_${selectedTeamAccessLevel.toLowerCase()}_${selectedTeamInboxAccess.join("_").replace(/\s+/g, "-").toLowerCase()}`,
+                        `save_team_access_${activeTeamMember.name}_${selectedTeamAccessLevel.toLowerCase()}`,
                       );
                       setIsChangeAccessOpen(false);
                     }}
@@ -29250,7 +29091,7 @@ export function WorkspaceShell({
           ? {
               inviter: "Emma Stone",
               accessLevel: "Shared",
-              selectedInboxes: ["Demo inbox"],
+              selectedInboxes: [],
             }
           : null;
       }
@@ -29262,7 +29103,7 @@ export function WorkspaceShell({
           ? {
               inviter: "Emma Stone",
               accessLevel: "Shared",
-              selectedInboxes: ["Demo inbox"],
+              selectedInboxes: [],
             }
           : null;
       }

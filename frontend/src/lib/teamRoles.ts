@@ -1,4 +1,4 @@
-export const TEAM_ROLES = ["Limited", "Shared", "Editor", "Admin"] as const;
+export const TEAM_ROLES = ["Shared", "Limited"] as const;
 
 export type TeamRole = (typeof TEAM_ROLES)[number];
 
@@ -10,27 +10,27 @@ export type TeamInviteLifecycleStatus =
   | "Access removed";
 
 export function normalizeTeamRole(value: unknown): TeamRole {
-  if (value === "Review" || value === "Shared") {
+  if (value === "Review" || value === "Admin" || value === "Editor" || value === "Shared") {
     return "Shared";
   }
 
-  if (value === "Admin" || value === "Editor" || value === "Limited") {
-    return value;
+  if (value === "Limited") {
+    return "Limited";
   }
 
   return "Limited";
 }
 
 export function getTeamRoleLabel(role: TeamRole) {
-  return role === "Limited" ? "Invite-only" : role;
+  return role;
 }
 
 export function canViewSharedCollaborations(role: TeamRole) {
-  return role === "Shared" || role === "Editor" || role === "Admin";
+  return role === "Shared";
 }
 
-export function canManageTeam(role: TeamRole) {
-  return role === "Admin";
+export function canManageTeam(_role: TeamRole) {
+  return false;
 }
 
 export function canAccessInboxes(_role: TeamRole) {
