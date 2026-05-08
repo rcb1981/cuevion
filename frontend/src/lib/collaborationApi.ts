@@ -91,6 +91,16 @@ type FetchCollaborationThreadsGetManyResponse = {
   threadsByMessageId?: Record<string, CollaborationThread>;
 };
 
+type FetchParticipantCollaborationThreadsRequest = {
+  participantEmail?: string;
+  workspaceId?: string;
+};
+
+type FetchParticipantCollaborationThreadsResponse = {
+  ok?: boolean;
+  threads?: CollaborationThread[];
+};
+
 type CreateCollaborationThreadRequest = {
   workspaceId: string;
   mailboxId: string;
@@ -239,6 +249,30 @@ export async function fetchCollaborationThreadsGetMany(
     return payload.threadsByMessageId;
   } catch {
     return {};
+  }
+}
+
+export async function fetchParticipantCollaborationThreads(
+  request: FetchParticipantCollaborationThreadsRequest,
+): Promise<CollaborationThread[] | null> {
+  try {
+    const response = await fetch("/api/collaboration/thread?op=get-participant", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(request),
+    });
+
+    const payload = (await response.json()) as FetchParticipantCollaborationThreadsResponse;
+
+    if (!response.ok || !Array.isArray(payload.threads)) {
+      return null;
+    }
+
+    return payload.threads;
+  } catch {
+    return null;
   }
 }
 

@@ -71,6 +71,7 @@ import {
 import {
   createCollaborationThread,
   fetchCollaborationInvite,
+  fetchParticipantCollaborationThreads,
   fetchCollaborationThreadsGetMany,
   issueCollaborationInvite,
   mutateCollaborationInvite,
@@ -775,6 +776,8 @@ type MailMessage = {
   isShared?: boolean;
   sharedContext?: MailMessageSharedContext;
   collaboration?: MailMessageCollaboration;
+  collaborationWorkspaceId?: string;
+  collaborationMailboxId?: string;
   owner?: MailMessageOwner;
   priorityScore: MailMessagePriorityScore;
   focusSignal?: MailMessageFocusSignal;
@@ -904,6 +907,7 @@ const canonicalFolderOrder: MailFolder[] = [
   "Drafts",
   "Inbox",
 ];
+const sharedCollaborationMailboxId = "__cuevion_shared_collaborations__" as InboxId;
 // INBOX_SNAPSHOT_MAX_MESSAGES, INBOX_SNAPSHOT_MAX_AGE_MS, and
 // INBOX_SNAPSHOT_RECENT_GUARD_MS are imported from inboxEngine.ts above.
 
@@ -4840,6 +4844,30 @@ function isMessageInSharedView(message: MailMessage) {
   }
 
   return Boolean(message.isShared && !message.sharedContext);
+}
+
+function buildSharedCollaborationProjection(thread: CollaborationThread): MailMessage {
+  return {
+    id: thread.sourceMessage.id || thread.messageId,
+    sender: thread.sourceMessage.sender,
+    subject: thread.sourceMessage.subject,
+    snippet: thread.sourceMessage.snippet,
+    time: thread.sourceMessage.timestamp,
+    createdAt: thread.sourceMessage.timestamp,
+    from: thread.sourceMessage.from,
+    to: "",
+    timestamp: thread.sourceMessage.timestamp,
+    body: [...thread.sourceMessage.body],
+    bodyHtml: thread.sourceMessage.bodyHtml,
+    isShared: thread.isShared,
+    collaboration: thread.collaboration as MailMessageCollaboration,
+    collaborationWorkspaceId: thread.workspaceId,
+    collaborationMailboxId: thread.mailboxId,
+    priorityScore: "medium",
+    category: "Primary",
+    categorySource: "system",
+    categoryConfidence: "medium",
+  };
 }
 
 function getAIDecisionCopy(message: MailMessage) {
@@ -14216,6 +14244,11 @@ function MailboxView({
       .find((message) => message.id === messageId) ?? null;
   }
 
+  const getCollaborationWorkspaceIdForMessage = (messageId: string) => {
+    const message = getMessageById(messageId);
+    return message?.collaborationWorkspaceId?.trim().toLowerCase() || currentUserId;
+  };
+
   const syncMessageFromLiveSnapshot = (messageId: string | null) => {
     if (!messageId) {
       return;
@@ -14301,6 +14334,8 @@ function MailboxView({
       ...message,
       collaboration: thread.collaboration as MailMessageCollaboration,
       isShared: thread.isShared,
+      collaborationWorkspaceId: thread.workspaceId,
+      collaborationMailboxId: thread.mailboxId,
     }));
   };
 
@@ -14308,8 +14343,8 @@ function MailboxView({
     message: MailMessage,
   ) => {
     const threadsByMessageId = await fetchCollaborationThreadsGetMany({
-      workspaceId: currentUserId,
-      mailboxId: mailbox.id,
+      workspaceId: message.collaborationWorkspaceId ?? currentUserId,
+      mailboxId: message.collaborationMailboxId ?? mailbox.id,
       messageIds: [message.id],
       messages: [
         {
@@ -14661,7 +14696,7 @@ function MailboxView({
 
     void (async () => {
       const result = await mutateCollaborationThread({
-        workspaceId: currentUserId,
+        workspaceId: getCollaborationWorkspaceIdForMessage(messageId),
         messageId,
         expectedUpdatedAt,
         action: {
@@ -14688,7 +14723,7 @@ function MailboxView({
 
     void (async () => {
       const result = await mutateCollaborationThread({
-        workspaceId: currentUserId,
+        workspaceId: getCollaborationWorkspaceIdForMessage(messageId),
         messageId,
         expectedUpdatedAt,
         action: {
@@ -14846,7 +14881,7 @@ function MailboxView({
       try {
         const sendCanonicalReplyWithExpectedUpdatedAt = (nextExpectedUpdatedAt?: number) =>
           mutateCollaborationThread({
-            workspaceId: currentUserId,
+            workspaceId: getCollaborationWorkspaceIdForMessage(messageId),
             messageId,
             expectedUpdatedAt: nextExpectedUpdatedAt,
             action: {
@@ -15002,7 +15037,7 @@ function MailboxView({
 
     void (async () => {
       const result = await mutateCollaborationThread({
-        workspaceId: currentUserId,
+        workspaceId: getCollaborationWorkspaceIdForMessage(messageId),
         messageId,
         expectedUpdatedAt,
         action: {
@@ -15061,7 +15096,7 @@ function MailboxView({
 
     void (async () => {
       const result = await mutateCollaborationThread({
-        workspaceId: currentUserId,
+        workspaceId: getCollaborationWorkspaceIdForMessage(messageId),
         messageId,
         expectedUpdatedAt,
         action: {
@@ -32489,6 +32524,60 @@ export function WorkspaceShell({
       cancelled = true;
     };
   }, [collaborationInviteRoute, currentWorkspaceUserId, mailboxStore, orderedMailboxes]);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || collaborationInviteRoute) {
+      return;
+    }
+
+    const participantEmail = authenticatedUser?.email?.trim().toLowerCase();
+    if (!participantEmail || !isValidInviteEmail(participantEmail)) {
+      return;
+    }
+
+    let cancelled = false;
+
+    const hydrateParticipantCollaborationThreads = async () => {
+      const threads = await fetchParticipantCollaborationThreads({});
+
+      if (cancelled || threads === null) {
+        return;
+      }
+
+      const projectedMessages = threads
+        .filter(
+          (thread) =>
+            thread.workspaceId !== currentWorkspaceUserId &&
+            thread.collaboration?.state !== "resolved",
+        )
+        .map(buildSharedCollaborationProjection);
+
+      setMailboxStore((currentStore) => {
+        const nextSharedCollections = createEmptyMailboxCollections();
+        nextSharedCollections.Inbox = projectedMessages;
+
+        const currentSharedCollections =
+          currentStore[sharedCollaborationMailboxId] ?? createEmptyMailboxCollections();
+        const currentSignature = JSON.stringify(currentSharedCollections);
+        const nextSignature = JSON.stringify(nextSharedCollections);
+
+        if (currentSignature === nextSignature) {
+          return currentStore;
+        }
+
+        return {
+          ...currentStore,
+          [sharedCollaborationMailboxId]: nextSharedCollections,
+        };
+      });
+    };
+
+    void hydrateParticipantCollaborationThreads();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [authenticatedUser?.email, collaborationInviteRoute, currentWorkspaceUserId]);
 
   useEffect(() => {
     if (typeof window === "undefined") {

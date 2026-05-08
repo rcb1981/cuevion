@@ -128,6 +128,83 @@ def _read_durable_record(config: dict, store_key: str) -> tuple[dict | None, dic
     return result if isinstance(result, dict) else None, None
 
 
+def _normalize_scan_response(payload: dict) -> tuple[str, list[str]] | None:
+    result = payload.get("result")
+
+    if isinstance(result, str):
+        try:
+            result = json.loads(result)
+        except json.JSONDecodeError:
+            return None
+
+    if isinstance(result, (list, tuple)) and len(result) >= 2:
+        cursor = str(result[0] or "0")
+        keys_value = result[1]
+    elif isinstance(result, dict):
+        cursor = str(result.get("cursor") or result.get("nextCursor") or "0")
+        keys_value = result.get("keys") or result.get("results") or []
+    else:
+        return None
+
+    if not isinstance(keys_value, list):
+        return None
+
+    keys = [key for key in keys_value if isinstance(key, str) and key.strip()]
+    return cursor, keys
+
+
+def _scan_durable_keys(
+    config: dict,
+    *,
+    pattern: str,
+    max_keys: int = MAX_COLLABORATION_THREAD_BATCH_SIZE,
+) -> tuple[list[str], dict | None]:
+    cursor = "0"
+    keys: list[str] = []
+    seen_keys: set[str] = set()
+
+    for _ in range(20):
+        payload, error = _perform_rest_request(
+            config,
+            "GET",
+            (
+                f"/scan/{quote(cursor, safe='')}"
+                f"/match/{quote(pattern, safe='')}"
+                "/count/100"
+            ),
+        )
+        if error:
+            return [], error
+
+        if not isinstance(payload, dict):
+            return [], {
+                "code": "collaboration_store_unavailable",
+                "message": "Collaboration store returned an unreadable scan response.",
+            }
+
+        scan_result = _normalize_scan_response(payload)
+        if scan_result is None:
+            return [], {
+                "code": "collaboration_store_unavailable",
+                "message": "Collaboration store returned an unreadable scan response.",
+            }
+
+        cursor, scanned_keys = scan_result
+        for key in scanned_keys:
+            if key in seen_keys:
+                continue
+
+            seen_keys.add(key)
+            keys.append(key)
+            if len(keys) >= max_keys:
+                return keys, None
+
+        if cursor == "0":
+            break
+
+    return keys, None
+
+
 def get_threads_many(workspace_id: str, message_ids: list[str]) -> dict[str, dict]:
     normalized_workspace_id = workspace_id.strip().lower()
     if not normalized_workspace_id:
@@ -177,6 +254,82 @@ def get_threads_many(workspace_id: str, message_ids: list[str]) -> dict[str, dic
         threads_by_message_id[message_id] = normalized_thread
 
     return threads_by_message_id
+
+
+def get_participant_threads(
+    participant_email: str,
+    workspace_id: str | None = None,
+) -> tuple[list[dict], dict | None]:
+    normalized_participant_email = participant_email.strip().lower()
+    normalized_workspace_id = workspace_id.strip().lower() if workspace_id else ""
+
+    if not normalized_participant_email:
+        return [], {
+            "code": "invalid_request",
+            "message": "participantEmail is required.",
+        }
+
+    config = _resolve_durable_store_config()
+    if not config:
+        return [], {
+            "code": "collaboration_store_unavailable",
+            "message": "Collaboration store is not configured.",
+        }
+
+    pattern = build_thread_key(normalized_workspace_id or "*", "*")
+    thread_keys, error = _scan_durable_keys(config, pattern=pattern)
+    if error:
+        return [], error
+
+    threads: list[dict] = []
+    seen_thread_keys: set[str] = set()
+
+    for thread_key in thread_keys:
+        record, read_error = _read_durable_record(config, thread_key)
+        if read_error:
+            return [], read_error
+
+        if not record:
+            continue
+
+        normalized_thread = normalize_collaboration_thread_record(record)
+        if not normalized_thread:
+            continue
+
+        if (
+            normalized_workspace_id
+            and normalized_thread["workspaceId"] != normalized_workspace_id
+        ):
+            continue
+
+        if normalized_thread["collaboration"]["state"] == "resolved":
+            continue
+
+        has_matching_participant = any(
+            participant.get("kind") == "internal"
+            and participant.get("status") in {"active", "invited"}
+            and str(participant.get("email") or "").strip().lower()
+            == normalized_participant_email
+            for participant in normalized_thread["collaboration"].get("participants", [])
+        )
+        if not has_matching_participant:
+            continue
+
+        stable_thread_key = build_thread_key(
+            normalized_thread["workspaceId"],
+            normalized_thread["messageId"],
+        )
+        if stable_thread_key in seen_thread_keys:
+            continue
+
+        seen_thread_keys.add(stable_thread_key)
+        threads.append(normalized_thread)
+
+    threads.sort(
+        key=lambda thread: int(thread["collaboration"].get("updatedAt") or 0),
+        reverse=True,
+    )
+    return threads, None
 
 
 def get_thread(workspace_id: str, message_id: str) -> dict | None:

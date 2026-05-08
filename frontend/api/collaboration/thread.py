@@ -7,9 +7,13 @@ from time import time
 from urllib.parse import parse_qs, urlsplit
 
 CURRENT_DIR = Path(__file__).resolve().parent
+API_DIR = CURRENT_DIR.parent
 if str(CURRENT_DIR) not in sys.path:
     sys.path.insert(0, str(CURRENT_DIR))
+if str(API_DIR) not in sys.path:
+    sys.path.insert(0, str(API_DIR))
 
+from beta_auth import normalize_auth_email, parse_beta_session_token, read_beta_session_cookie  # noqa: E402
 from models import (
     COLLABORATION_THREAD_SCHEMA_VERSION,
     normalize_collaboration_mention_record,
@@ -21,6 +25,7 @@ from models import (
 from redis_store import (
     MAX_COLLABORATION_THREAD_BATCH_SIZE,
     create_thread_if_missing,
+    get_participant_threads,
     get_thread,
     get_threads_many,
     save_thread_if_expected,
@@ -68,6 +73,11 @@ def _read_json_body(handler: BaseHTTPRequestHandler) -> tuple[dict | None, dict 
         return None, _build_error("invalid_request", "Request body must be a JSON object.")
 
     return payload, None
+
+
+def _get_authenticated_user(headers) -> dict | None:
+    session_token = read_beta_session_cookie(headers)
+    return parse_beta_session_token(session_token or "")
 
 
 def _normalize_expected_updated_at(value):
@@ -234,6 +244,54 @@ def _handle_get_many(handler: BaseHTTPRequestHandler, payload: dict):
             threads_by_message_id[lookup_record["id"]] = resolved_thread
 
     _send_json(handler, 200, {"ok": True, "threadsByMessageId": threads_by_message_id})
+
+
+def _handle_get_participant(handler: BaseHTTPRequestHandler, payload: dict):
+    session_user = _get_authenticated_user(handler.headers)
+    if not session_user:
+        _send_json(
+            handler,
+            401,
+            _build_error("unauthorized", "A valid beta session is required.", {"threads": []}),
+        )
+        return
+
+    authenticated_email = normalize_auth_email(session_user["email"])
+    requested_participant_email = str(payload.get("participantEmail") or "").strip()
+    workspace_id = str(payload.get("workspaceId") or "").strip().lower()
+
+    if (
+        requested_participant_email
+        and normalize_auth_email(requested_participant_email) != authenticated_email
+    ):
+        _send_json(
+            handler,
+            403,
+            _build_error(
+                "forbidden",
+                "participantEmail must match the authenticated beta session.",
+                {"threads": []},
+            ),
+        )
+        return
+
+    threads, error = get_participant_threads(
+        authenticated_email,
+        workspace_id=workspace_id or None,
+    )
+    if error:
+        _send_json(
+            handler,
+            503,
+            _build_error(
+                error["code"],
+                error["message"],
+                {"threads": []},
+            ),
+        )
+        return
+
+    _send_json(handler, 200, {"ok": True, "threads": threads})
 
 
 def _handle_create(handler: BaseHTTPRequestHandler, payload: dict):
@@ -433,6 +491,10 @@ class handler(BaseHTTPRequestHandler):
 
         if operation == "get-many":
             _handle_get_many(self, payload or {})
+            return
+
+        if operation == "get-participant":
+            _handle_get_participant(self, payload or {})
             return
 
         if operation == "create":
