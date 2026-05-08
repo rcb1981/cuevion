@@ -10,9 +10,16 @@ from urllib.parse import parse_qs, quote, urlsplit
 from urllib.request import Request, urlopen
 
 TEAM_INVITE_SCHEMA_VERSION = 1
-TEAM_ROLES = {"Limited", "Shared", "Editor", "Admin"}
-TEAM_INVITE_ISSUABLE_ROLES = {"Limited"}
+TEAM_ROLES = {"Limited", "Shared"}
+TEAM_INVITE_ISSUABLE_ROLES = TEAM_ROLES
 TEAM_INVITE_STATUSES = {"invited", "accepted", "declined", "cancelled"}
+LEGACY_TEAM_ROLE_MAP = {
+    "review": "Shared",
+    "admin": "Shared",
+    "editor": "Shared",
+    "shared": "Shared",
+    "limited": "Limited",
+}
 
 
 def _send_json(handler: BaseHTTPRequestHandler, status_code: int, payload: dict):
@@ -66,6 +73,11 @@ def _now_ms() -> int:
     return int(datetime.now(timezone.utc).timestamp() * 1000)
 
 
+def _normalize_team_role(value: object) -> str | None:
+    normalized_value = str(value or "").strip().lower()
+    return LEGACY_TEAM_ROLE_MAP.get(normalized_value)
+
+
 def _normalize_invite_record(value: dict | None) -> dict | None:
     if not isinstance(value, dict):
         return None
@@ -74,7 +86,7 @@ def _normalize_invite_record(value: dict | None) -> dict | None:
     workspace_id = str(value.get("workspaceId") or "").strip().lower()
     invitee_email = str(value.get("inviteeEmail") or "").strip().lower()
     invitee_name = str(value.get("inviteeName") or "").strip()
-    access_level = str(value.get("accessLevel") or "").strip()
+    access_level = _normalize_team_role(value.get("accessLevel"))
     status = str(value.get("status") or "").strip().lower()
     created_by_user_id = str(value.get("createdByUserId") or "").strip()
     created_by_user_name = str(value.get("createdByUserName") or "").strip()
@@ -101,7 +113,7 @@ def _normalize_invite_record(value: dict | None) -> dict | None:
         "workspaceId": workspace_id,
         "inviteeEmail": invitee_email,
         "inviteeName": invitee_name,
-        "accessLevel": "Limited",
+        "accessLevel": access_level,
         "status": status,
         "createdAt": created_at,
         "updatedAt": updated_at,
@@ -129,6 +141,14 @@ def _build_invite_key(token: str) -> str:
 
 def _build_workspace_invite_key(workspace_id: str, invitee_email: str) -> str:
     return f"cuevion:team:v1:workspace-invite:{workspace_id.strip().lower()}:{invitee_email.strip().lower()}"
+
+
+def _build_member_key(workspace_id: str, invitee_email: str) -> str:
+    return f"cuevion:team:v1:member:{workspace_id.strip().lower()}:{invitee_email.strip().lower()}"
+
+
+def _build_members_index_key(workspace_id: str) -> str:
+    return f"cuevion:team:v1:members-index:{workspace_id.strip().lower()}"
 
 
 def _perform_rest_request(
@@ -209,7 +229,38 @@ def _read_durable_record(config: dict, store_key: str) -> tuple[dict | None, dic
     return result if isinstance(result, dict) else None, None
 
 
-def _write_durable_record(config: dict, store_key: str, record: dict) -> tuple[dict | None, dict | None]:
+def _read_durable_value(config: dict, store_key: str) -> tuple[object | None, dict | None]:
+    payload, error = _perform_rest_request(
+        config,
+        "GET",
+        f"/get/{quote(store_key, safe='')}",
+    )
+    if error:
+        return None, error
+
+    if not isinstance(payload, dict):
+        return None, {
+            "code": "team_invite_store_unavailable",
+            "message": "Team invite store returned an unreadable response.",
+        }
+
+    result = payload.get("result")
+    if result is None:
+        return None, None
+
+    if isinstance(result, str):
+        try:
+            return json.loads(result), None
+        except json.JSONDecodeError:
+            return None, {
+                "code": "team_invite_store_unavailable",
+                "message": "Team invite store returned malformed JSON.",
+            }
+
+    return result, None
+
+
+def _write_durable_record(config: dict, store_key: str, record: object) -> tuple[dict | None, dict | None]:
     encoded_record = json.dumps(record, separators=(",", ":"), sort_keys=True).encode("utf-8")
     payload, error = _perform_rest_request(
         config,
@@ -316,6 +367,92 @@ def _save_invite(invite_record: dict) -> tuple[dict | None, dict | None]:
     return normalized_invite, None
 
 
+def _normalize_members_index(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+
+    deduped_emails: list[str] = []
+    seen_emails: set[str] = set()
+    for item in value:
+        email = str(item or "").strip().lower()
+        if not email or email in seen_emails:
+            continue
+
+        seen_emails.add(email)
+        deduped_emails.append(email)
+
+    return deduped_emails
+
+
+def _save_membership_for_accepted_invite(
+    invite_record: dict,
+    accepted_at: int,
+) -> tuple[dict | None, dict | None]:
+    normalized_invite = _normalize_invite_record(invite_record)
+    if not normalized_invite or normalized_invite["status"] != "accepted":
+        return None, {
+            "code": "invalid_invite",
+            "message": "Accepted team invite record is invalid.",
+        }
+
+    config = _resolve_durable_store_config()
+    if not config:
+        return None, {
+            "code": "team_invite_store_unavailable",
+            "message": "Team invite store is not configured.",
+        }
+
+    member_key = _build_member_key(
+        normalized_invite["workspaceId"],
+        normalized_invite["inviteeEmail"],
+    )
+    existing_member, member_read_error = _read_durable_record(config, member_key)
+    if member_read_error:
+        return None, member_read_error
+
+    existing_created_at = existing_member.get("createdAt") if isinstance(existing_member, dict) else None
+    created_at = existing_created_at if isinstance(existing_created_at, int) else normalized_invite["createdAt"]
+    display_name = normalized_invite["inviteeName"]
+    invited_by_user_id = normalized_invite["createdByUserId"]
+    invited_by_user_name = normalized_invite["createdByUserName"]
+    membership_record = {
+        "v": TEAM_INVITE_SCHEMA_VERSION,
+        "workspaceId": normalized_invite["workspaceId"],
+        "email": normalized_invite["inviteeEmail"],
+        "displayName": display_name,
+        "name": display_name,
+        "accessLevel": normalized_invite["accessLevel"],
+        "status": "active",
+        "inviteToken": normalized_invite["token"],
+        "invitedByUserId": invited_by_user_id,
+        "invitedByUserName": invited_by_user_name,
+        "inviterUserId": invited_by_user_id,
+        "inviterName": invited_by_user_name,
+        "createdAt": created_at,
+        "updatedAt": accepted_at,
+        "acceptedAt": accepted_at,
+    }
+
+    _, member_write_error = _write_durable_record(config, member_key, membership_record)
+    if member_write_error:
+        return None, member_write_error
+
+    index_key = _build_members_index_key(normalized_invite["workspaceId"])
+    index_value, index_read_error = _read_durable_value(config, index_key)
+    if index_read_error:
+        return None, index_read_error
+
+    members_index = _normalize_members_index(index_value)
+    if normalized_invite["inviteeEmail"] not in members_index:
+        members_index.append(normalized_invite["inviteeEmail"])
+
+    _, index_write_error = _write_durable_record(config, index_key, members_index)
+    if index_write_error:
+        return None, index_write_error
+
+    return membership_record, None
+
+
 def _build_invite_url(handler: BaseHTTPRequestHandler, *, token: str) -> str:
     forwarded_proto = str(handler.headers.get("x-forwarded-proto") or "").strip()
     forwarded_host = str(handler.headers.get("x-forwarded-host") or "").strip()
@@ -333,7 +470,7 @@ def _handle_issue(handler: BaseHTTPRequestHandler, payload: dict):
     workspace_id = str(payload.get("workspaceId") or "").strip().lower()
     invitee_email = str(payload.get("inviteeEmail") or "").strip().lower()
     invitee_name = str(payload.get("inviteeName") or "").strip()
-    access_level = str(payload.get("accessLevel") or "").strip()
+    access_level = _normalize_team_role(payload.get("accessLevel"))
     created_by_user_id = str(payload.get("createdByUserId") or "").strip()
     created_by_user_name = str(payload.get("createdByUserName") or "").strip()
 
@@ -380,7 +517,7 @@ def _handle_issue(handler: BaseHTTPRequestHandler, payload: dict):
             "workspaceId": workspace_id,
             "inviteeEmail": invitee_email,
             "inviteeName": invitee_name,
-            "accessLevel": "Limited",
+            "accessLevel": access_level,
             "status": "invited",
             "createdAt": now_ms,
             "updatedAt": now_ms,
@@ -446,12 +583,29 @@ def _handle_action(handler: BaseHTTPRequestHandler, payload: dict):
         _send_json(handler, 409, _build_error("cancelled_invite", "Team invite has been cancelled."))
         return
 
+    updated_at = _now_ms()
+    next_invite_candidate = {
+        **invite,
+        "status": next_status,
+        "updatedAt": updated_at,
+    }
+
+    if action_type == "accept":
+        accepted_invite_candidate = next_invite_candidate
+        _, membership_error = _save_membership_for_accepted_invite(accepted_invite_candidate, updated_at)
+        if membership_error:
+            _send_json(
+                handler,
+                503,
+                _build_error(
+                    membership_error["code"],
+                    membership_error["message"],
+                ),
+            )
+            return
+
     next_invite, invite_error = _save_invite(
-        {
-            **invite,
-            "status": next_status,
-            "updatedAt": _now_ms(),
-        }
+        next_invite_candidate
     )
     if invite_error or next_invite is None:
         _send_json(
