@@ -14959,7 +14959,11 @@ function MailboxView({
     }
 
     const currentMessage = getMessageById(messageId);
-    const expectedUpdatedAt = currentMessage?.collaboration?.updatedAt;
+    const canonicalCollaboration = currentMessage?.collaboration;
+    const draftCollaboration = canonicalCollaboration
+      ? undefined
+      : draftCollaborationByMessageId[messageId];
+    const expectedUpdatedAt = canonicalCollaboration?.updatedAt;
     let nextParticipantsForCanonicalWrite: MailMessageCollaborationParticipant[] | null = null;
     const selectedExternalInviteEmails = selectedParticipants
       .filter((participant) => participant.kind === "external")
@@ -14970,44 +14974,75 @@ function MailboxView({
           ),
       )
       .map((participant) => participant.email);
-    const selectedInternalParticipants = selectedParticipants.filter(
-      (participant) => participant.kind === "internal",
-    );
+    const selectedInternalParticipants: MailMessageCollaborationParticipant[] =
+      selectedParticipants
+        .filter((participant) => participant.kind === "internal")
+        .map((participant) => {
+          const normalizedEmail = participant.email.trim().toLowerCase();
+          const normalizedId =
+            participant.id.trim() || normalizeSenderLearningKey(normalizedEmail);
 
-    if (selectedInternalParticipants.length > 0) {
+          return {
+            id: normalizedId,
+            name: participant.name,
+            email: normalizedEmail,
+            kind: "internal" as const,
+            status: "active" as const,
+          };
+        });
+    const mergeSelectedInternalParticipants = (
+      existingParticipants: MailMessageCollaborationParticipant[],
+    ) => {
+      const nextParticipants = [...existingParticipants];
+
+      selectedInternalParticipants.forEach((selectedParticipant) => {
+        const selectedEmailKey = normalizeSenderLearningKey(selectedParticipant.email);
+        const selectedIdKey = normalizeSenderLearningKey(selectedParticipant.id);
+        const alreadyExists = nextParticipants.some((participant) => {
+          const participantEmailKey = participant.email
+            ? normalizeSenderLearningKey(participant.email)
+            : "";
+          const participantIdKey = participant.id
+            ? normalizeSenderLearningKey(participant.id)
+            : "";
+
+          return (
+            (selectedIdKey && participantIdKey === selectedIdKey) ||
+            (selectedEmailKey && participantEmailKey === selectedEmailKey)
+          );
+        });
+
+        if (alreadyExists) {
+          return;
+        }
+
+        nextParticipants.push(selectedParticipant);
+      });
+
+      return nextParticipants.length === existingParticipants.length
+        ? null
+        : nextParticipants;
+    };
+    let didApplyInternalParticipants = selectedInternalParticipants.length === 0;
+
+    if (selectedInternalParticipants.length > 0 && canonicalCollaboration) {
+      const mergedParticipants = mergeSelectedInternalParticipants(
+        canonicalCollaboration.participants ?? [],
+      );
+
+      if (mergedParticipants) {
+        nextParticipantsForCanonicalWrite = mergedParticipants;
+        didApplyInternalParticipants = true;
+      }
+
       updateMessageById(messageId, (message) => {
         if (!message.collaboration) {
           return message;
         }
 
-        const existingParticipants = message.collaboration.participants ?? [];
-        const nextParticipants = [...existingParticipants];
-
-        selectedInternalParticipants.forEach((selectedParticipant) => {
-          const alreadyExists = nextParticipants.some(
-            (participant) =>
-              participant.id === selectedParticipant.id ||
-              participant.email.toLowerCase() === selectedParticipant.email.toLowerCase(),
-          );
-
-          if (alreadyExists) {
-            return;
-          }
-
-          nextParticipants.push({
-            id: selectedParticipant.id,
-            name: selectedParticipant.name,
-            email: selectedParticipant.email,
-            kind: selectedParticipant.kind,
-            status: "active" as const,
-          });
-        });
-
-        if (nextParticipants.length === existingParticipants.length) {
+        if (!nextParticipantsForCanonicalWrite) {
           return message;
         }
-
-        nextParticipantsForCanonicalWrite = nextParticipants;
 
         return {
           ...message,
@@ -15018,17 +15053,43 @@ function MailboxView({
           },
         };
       });
-    }
+    } else if (selectedInternalParticipants.length > 0 && draftCollaboration) {
+      const mergedParticipants = mergeSelectedInternalParticipants(
+        draftCollaboration.participants ?? [],
+      );
 
-    setCollaborationParticipantPersonIds([]);
-    setCollaborationParticipantSearch("");
-    setIsCollaborationParticipantPickerOpen(false);
+      if (mergedParticipants) {
+        didApplyInternalParticipants = true;
+        setDraftCollaborationByMessageId((current) => {
+          const currentDraft = current[messageId];
+
+          if (!currentDraft) {
+            return current;
+          }
+
+          return {
+            ...current,
+            [messageId]: {
+              ...currentDraft,
+              updatedAt: nextTimestamp,
+              participants: mergedParticipants,
+            },
+          };
+        });
+      }
+    }
 
     if (selectedExternalInviteEmails.length > 0) {
       setPendingExternalInviteEmails((current) => [
         ...current,
         ...selectedExternalInviteEmails.filter((email) => !current.includes(email)),
       ]);
+    }
+
+    if (didApplyInternalParticipants || selectedExternalInviteEmails.length > 0) {
+      setCollaborationParticipantPersonIds([]);
+      setCollaborationParticipantSearch("");
+      setIsCollaborationParticipantPickerOpen(false);
     }
 
     if (!nextParticipantsForCanonicalWrite) {
