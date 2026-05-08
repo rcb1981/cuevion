@@ -6,7 +6,7 @@ export type TeamInvite = {
   workspaceId: string;
   inviteeEmail: string;
   inviteeName: string;
-  accessLevel: "Limited";
+  accessLevel: "Shared" | "Limited";
   status: TeamInviteStatus;
   createdAt: number;
   updatedAt: number;
@@ -36,7 +36,7 @@ type IssueTeamInviteRequest = {
   workspaceId: string;
   inviteeEmail: string;
   inviteeName: string;
-  accessLevel: "Limited";
+  accessLevel: "Shared" | "Limited";
   createdByUserId: string;
   createdByUserName: string;
 };

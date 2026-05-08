@@ -20490,6 +20490,30 @@ function WorkbenchView({
         : status === "cancelled"
           ? "Invite cancelled"
           : "Invited";
+  const buildTeamInviteUrlFromToken = (token: string) => {
+    if (typeof window === "undefined") {
+      return `/?team_invite=${encodeURIComponent(token)}`;
+    }
+
+    const inviteUrl = new URL("/", window.location.origin);
+    inviteUrl.searchParams.set("team_invite", token);
+    return inviteUrl.toString();
+  };
+  const copyTeamInviteLink = async (member: TeamMemberEntry) => {
+    if (!member.teamInviteToken) {
+      return;
+    }
+
+    const inviteUrl = buildTeamInviteUrlFromToken(member.teamInviteToken);
+
+    if (typeof navigator === "undefined" || !navigator.clipboard) {
+      setTeamFeedbackMessage(inviteUrl);
+      return;
+    }
+
+    await navigator.clipboard.writeText(inviteUrl);
+    setTeamFeedbackMessage("Invite link copied");
+  };
   const getPrimaryTeamInviteMailbox = () => {
     const primaryMailbox = orderedMailboxes[0];
 
@@ -20684,9 +20708,57 @@ function WorkbenchView({
     setTeamFeedbackMessage("External review invite sent");
     return true;
   };
+  const issueSharedTeamInvite = async ({
+    name,
+    email,
+    existingMemberIndex,
+  }: {
+    name: string;
+    email: string;
+    existingMemberIndex?: number;
+  }) => {
+    const issueResult = await issueTeamInvite({
+      workspaceId: workspacePersistenceKey,
+      inviteeEmail: email,
+      inviteeName: name,
+      accessLevel: "Shared",
+      createdByUserId: workspacePersistenceKey,
+      createdByUserName:
+        currentUserName.trim() || orderedMailboxes[0]?.title.trim() || "Cuevion",
+    });
+
+    if (!issueResult.ok) {
+      setTeamFeedbackMessage(issueResult.error?.message ?? "Could not create team invite");
+      return false;
+    }
+
+    const nextMember: TeamMemberEntry = {
+      name,
+      email,
+      accessLevel: "Shared",
+      selectedInboxes: [],
+      status: mapTeamInviteStatusToMemberStatus(issueResult.invite.status),
+      teamInviteToken: issueResult.invite.token,
+      teamInviteStatus: issueResult.invite.status,
+    };
+
+    setTeamMembers((current) => {
+      if (typeof existingMemberIndex === "number") {
+        return current.map((member, index) =>
+          index === existingMemberIndex ? nextMember : member,
+        );
+      }
+
+      return [...current, nextMember];
+    });
+    setTeamFeedbackMessage(
+      "Shared invite created. Copy the invite link and send it to this person.",
+    );
+    return true;
+  };
   const syncInviteOnlyTeamInviteStatuses = async () => {
     const tokenEntries = teamMembers.flatMap((member, index) =>
-      member.accessLevel === "Limited" && member.teamInviteToken
+      member.teamInviteToken
         ? [
             {
               index,
@@ -21253,6 +21325,20 @@ function WorkbenchView({
                       {activeTeamMember.status}
                     </div>
                   </div>
+
+                  {activeTeamMember.status === "Invited" && activeTeamMember.teamInviteToken ? (
+                    <div className="space-y-2">
+                      <div className="text-[0.7rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                        Invite link
+                      </div>
+                      <div className="break-all rounded-[16px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3 text-[0.78rem] leading-6 text-[var(--workspace-text-soft)]">
+                        {buildTeamInviteUrlFromToken(activeTeamMember.teamInviteToken)}
+                      </div>
+                      <div className="text-[0.78rem] leading-6 text-[var(--workspace-text-soft)]">
+                        No email is sent automatically. Copy and send the invite link manually.
+                      </div>
+                    </div>
+                  ) : null}
                 </div>
                 </div>
 
@@ -21322,6 +21408,15 @@ function WorkbenchView({
                     </>
                   ) : (
                     <>
+                      {activeTeamMember.status === "Invited" && activeTeamMember.teamInviteToken ? (
+                        <button
+                          type="button"
+                          onClick={() => void copyTeamInviteLink(activeTeamMember)}
+                          className={learningModalPrimaryActionButtonClass}
+                        >
+                          Copy invite link
+                        </button>
+                      ) : null}
                       <button
                         type="button"
                         onClick={() => setActiveTeamConfirmation("resend-invite")}
@@ -21379,10 +21474,10 @@ function WorkbenchView({
                     : activeTeamConfirmation === "resend-invite"
                         ? activeTeamMember?.accessLevel === "Limited"
                           ? "Send this external review invite again by email?"
-                          : "Reopen this shared collaboration invite in Cuevion? No email will be sent."
+                          : "Reopen this shared collaboration invite in Cuevion? No email is sent automatically. Copy and send the invite link manually."
                         : inviteAccessLevel === "Limited"
                           ? "Send this external review invite by email?"
-                          : "Create this shared collaboration invite in Cuevion? No email will be sent."}
+                          : "Create this shared collaboration invite in Cuevion? No email is sent automatically. Copy and send the invite link manually."}
                 </p>
               </div>
 
@@ -21477,27 +21572,30 @@ function WorkbenchView({
                         return;
                       }
 
-                      setTeamMembers((current) => [
-                        ...current,
-                        {
+                      setIsSendingTeamInvite(true);
+                      try {
+                        const didCreateInvite = await issueSharedTeamInvite({
                           name: inviteFullName.trim(),
-                          email: inviteEmail.trim(),
-                          accessLevel: inviteAccessLevel,
-                          selectedInboxes: [],
-                          status: "Invited",
-                        },
-                      ]);
+                          email: inviteEmail.trim().toLowerCase(),
+                        });
+
+                        if (!didCreateInvite) {
+                          return;
+                        }
+                      } finally {
+                        setIsSendingTeamInvite(false);
+                      }
+
                       setInviteFullName("");
                       setInviteEmail("");
                       setInviteAccessLevel("Shared");
                       setIsInviteMemberOpen(false);
-                      setTeamFeedbackMessage("Shared collaboration invite created");
                       console.log("confirm_invite_team_member");
                     } else if (
                       activeTeamConfirmation === "cancel-invite" &&
                       activeTeamMemberIndex !== null
                     ) {
-                      if (activeTeamMember?.accessLevel === "Limited" && activeTeamMember.teamInviteToken) {
+                      if (activeTeamMember?.teamInviteToken) {
                         setIsSendingTeamInvite(true);
                         try {
                           const cancelResult = await mutateTeamInvite({
@@ -21525,7 +21623,7 @@ function WorkbenchView({
                                 ...member,
                                 status: "Invite cancelled",
                                 teamInviteStatus:
-                                  member.accessLevel === "Limited" ? "cancelled" : member.teamInviteStatus,
+                                  member.teamInviteToken ? "cancelled" : member.teamInviteStatus,
                               }
                             : member,
                         ),
@@ -21559,17 +21657,20 @@ function WorkbenchView({
                         return;
                       }
 
-                      setTeamMembers((current) =>
-                        current.map((member, index) =>
-                          index === activeTeamMemberIndex
-                            ? {
-                                ...member,
-                                status: "Invited",
-                              }
-                            : member,
-                        ),
-                      );
-                      setTeamFeedbackMessage("Shared collaboration invite reopened");
+                      setIsSendingTeamInvite(true);
+                      try {
+                        const didCreateInvite = await issueSharedTeamInvite({
+                          name: activeTeamMember.name,
+                          email: activeTeamMember.email.trim().toLowerCase(),
+                          existingMemberIndex: activeTeamMemberIndex,
+                        });
+
+                        if (!didCreateInvite) {
+                          return;
+                        }
+                      } finally {
+                        setIsSendingTeamInvite(false);
+                      }
                       console.log(`confirm_resend_invite_${activeTeamMember.name}`);
                     } else if (
                       activeTeamConfirmation === "remove-member" &&
