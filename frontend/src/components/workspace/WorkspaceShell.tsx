@@ -11174,6 +11174,7 @@ function MailboxView({
       .filter(
         (member) =>
           member.status === "Active" &&
+          (member.accessLevel === "Shared" || member.accessLevel === "Limited") &&
           normalizeSenderLearningKey(member.email) !== currentUserId &&
           isValidInviteEmail(member.email),
       )
@@ -11184,7 +11185,7 @@ function MailboxView({
             : normalizeSenderLearningKey(member.email),
         name: member.name,
         email: member.email.trim().toLowerCase(),
-        kind: member.accessLevel === "Limited" ? ("external" as const) : ("internal" as const),
+        kind: member.accessLevel === "Shared" ? ("internal" as const) : ("external" as const),
         status: "active" as const,
       })),
   ].forEach((person) => {
@@ -29307,11 +29308,18 @@ export function WorkspaceShell({
           name: orderedMailboxes[0]?.title ?? "You",
           email: activeWorkspaceEmail,
         },
-    ...memberOfEntries.map((member) => ({
-      id: normalizeSenderLearningKey(member.email),
-      name: member.name,
-      email: member.email,
-    })),
+    ...memberOfEntries
+      .filter(
+        (member) =>
+          member.status === "Active" &&
+          member.accessLevel === "Shared" &&
+          isValidInviteEmail(member.email),
+      )
+      .map((member) => ({
+        id: normalizeSenderLearningKey(member.email),
+        name: member.name,
+        email: member.email.trim().toLowerCase(),
+      })),
   ].filter(
     (person, index, people) =>
       people.findIndex((candidate) => candidate.id === person.id) === index,
