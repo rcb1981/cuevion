@@ -14,6 +14,24 @@ export type TeamInvite = {
   createdByUserName: string;
 };
 
+export type TeamMemberRecord = {
+  v: 1;
+  workspaceId: string;
+  email: string;
+  displayName?: string;
+  name?: string;
+  accessLevel: "Shared" | "Limited";
+  status: "active";
+  inviteToken?: string;
+  invitedByUserId?: string;
+  invitedByUserName?: string;
+  inviterUserId?: string;
+  inviterName?: string;
+  createdAt?: number;
+  updatedAt?: number;
+  acceptedAt?: number;
+};
+
 type IssueTeamInviteRequest = {
   workspaceId: string;
   inviteeEmail: string;
@@ -43,6 +61,16 @@ type FetchTeamInviteResponse =
   | {
       ok: true;
       invite: TeamInvite;
+    }
+  | {
+      ok: false;
+      error?: TeamInviteError;
+    };
+
+type FetchTeamMembersResponse =
+  | {
+      ok: true;
+      members: TeamMemberRecord[];
     }
   | {
       ok: false;
@@ -132,6 +160,39 @@ export async function fetchTeamInvite(token: string): Promise<FetchTeamInviteRes
       error: {
         code: "unavailable",
         message: "Could not load team invite.",
+      },
+    };
+  }
+}
+
+export async function fetchTeamMembers(workspaceId: string): Promise<FetchTeamMembersResponse> {
+  try {
+    const url = new URL("/api/team/members", window.location.origin);
+    url.searchParams.set("op", "list");
+    url.searchParams.set("workspaceId", workspaceId);
+
+    const response = await fetch(`${url.pathname}${url.search}`, {
+      method: "GET",
+      headers: {
+        "Content-Type": "application/json",
+      },
+    });
+    const payload = (await response.json()) as FetchTeamMembersResponse;
+
+    if (!response.ok || !payload.ok || !Array.isArray(payload.members)) {
+      return {
+        ok: false,
+        error: payload && "error" in payload ? payload.error : undefined,
+      };
+    }
+
+    return payload;
+  } catch {
+    return {
+      ok: false,
+      error: {
+        code: "unavailable",
+        message: "Could not load team members.",
       },
     };
   }

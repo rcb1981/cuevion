@@ -78,9 +78,11 @@ import {
   type CollaborationThread,
 } from "../../lib/collaborationApi";
 import {
+  fetchTeamMembers,
   fetchTeamInvite,
   issueTeamInvite,
   mutateTeamInvite,
+  type TeamMemberRecord,
   type TeamInvite,
   type TeamInviteStatus,
 } from "../../lib/teamInviteApi";
@@ -224,6 +226,100 @@ function normalizeTeamMembershipEntry(value: TeamMembershipEntry): TeamMembershi
     accessLevel: normalizeTeamRole(value.accessLevel),
     selectedInboxes: [],
   };
+}
+
+function mapBackendTeamMemberToEntry(member: TeamMemberRecord): TeamMemberEntry | null {
+  const email = member.email.trim().toLowerCase();
+
+  if (!email || member.status !== "active") {
+    return null;
+  }
+
+  const name = (member.displayName || member.name || email).trim();
+
+  return {
+    name,
+    email,
+    accessLevel: normalizeTeamRole(member.accessLevel),
+    selectedInboxes: [],
+    status: "Active",
+    teamInviteToken: member.inviteToken,
+    teamInviteStatus: "accepted",
+  };
+}
+
+function areTeamMemberEntriesEqual(left: TeamMemberEntry[], right: TeamMemberEntry[]) {
+  if (left.length !== right.length) {
+    return false;
+  }
+
+  return left.every((leftMember, index) => {
+    const rightMember = right[index];
+
+    return (
+      rightMember &&
+      leftMember.name === rightMember.name &&
+      leftMember.email === rightMember.email &&
+      leftMember.accessLevel === rightMember.accessLevel &&
+      leftMember.status === rightMember.status &&
+      leftMember.teamInviteToken === rightMember.teamInviteToken &&
+      leftMember.teamInviteStatus === rightMember.teamInviteStatus &&
+      leftMember.selectedInboxes.length === rightMember.selectedInboxes.length
+    );
+  });
+}
+
+function mergeBackendTeamMembers(
+  localMembers: TeamMemberEntry[],
+  backendMembers: TeamMemberRecord[],
+) {
+  const backendMembersByEmail = new Map<string, TeamMemberEntry>();
+
+  backendMembers.forEach((member) => {
+    const normalizedMember = mapBackendTeamMemberToEntry(member);
+
+    if (!normalizedMember) {
+      return;
+    }
+
+    backendMembersByEmail.set(normalizedMember.email, normalizedMember);
+  });
+
+  const seenEmails = new Set<string>();
+  const mergedMembers: TeamMemberEntry[] = [];
+
+  localMembers.forEach((member) => {
+    const normalizedMember = normalizeTeamMemberEntry(member);
+    const email = normalizedMember.email.trim().toLowerCase();
+
+    if (!email || seenEmails.has(email)) {
+      return;
+    }
+
+    const backendMember = backendMembersByEmail.get(email);
+    if (backendMember) {
+      mergedMembers.push(backendMember);
+      backendMembersByEmail.delete(email);
+    } else {
+      mergedMembers.push({
+        ...normalizedMember,
+        email,
+        selectedInboxes: [],
+      });
+    }
+    seenEmails.add(email);
+  });
+
+  backendMembersByEmail.forEach((member, email) => {
+    if (seenEmails.has(email)) {
+      return;
+    }
+
+    mergedMembers.push(member);
+    seenEmails.add(email);
+  });
+
+  return mergedMembers;
 }
 
 type ContactTicketStatus = "Open" | "In progress" | "Resolved" | "Cancelled";
@@ -20309,6 +20405,7 @@ function WorkbenchView({
   >(null);
   const [teamFeedbackMessage, setTeamFeedbackMessage] = useState<string | null>(null);
   const [isSendingTeamInvite, setIsSendingTeamInvite] = useState(false);
+  const [backendTeamMembersRefreshKey, setBackendTeamMembersRefreshKey] = useState(0);
   const activeTeamMember =
     activeTeamMemberIndex !== null ? teamMembers[activeTeamMemberIndex] : null;
   const [selectedTeamAccessLevel, setSelectedTeamAccessLevel] = useState<TeamAccessLevel>(
@@ -20573,6 +20670,17 @@ function WorkbenchView({
         result: await fetchTeamInvite(entry.token),
       })),
     );
+    const acceptedInviteTokens = new Set(
+      results.flatMap((entry) =>
+        entry.result.ok && entry.result.invite.status === "accepted" ? [entry.token] : [],
+      ),
+    );
+    const shouldRefreshBackendMembers = teamMembers.some(
+      (member) =>
+        member.teamInviteToken &&
+        acceptedInviteTokens.has(member.teamInviteToken) &&
+        member.teamInviteStatus !== "accepted",
+    );
 
     setTeamMembers((current) => {
       let didChange = false;
@@ -20604,6 +20712,10 @@ function WorkbenchView({
 
       return didChange ? nextMembers : current;
     });
+
+    if (shouldRefreshBackendMembers) {
+      setBackendTeamMembersRefreshKey((current) => current + 1);
+    }
   };
 
   useEffect(() => {
@@ -20626,6 +20738,39 @@ function WorkbenchView({
     window.localStorage.setItem(teamMembersStorageKey, JSON.stringify(teamMembers));
     onTeamMembersChange(teamMembers);
   }, [onTeamMembersChange, teamMembers, teamMembersStorageKey]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const workspaceId = workspacePersistenceKey.trim().toLowerCase();
+    if (!workspaceId) {
+      return;
+    }
+
+    let isCancelled = false;
+
+    const loadBackendTeamMembers = async () => {
+      const result = await fetchTeamMembers(workspaceId);
+
+      if (isCancelled || !result.ok) {
+        return;
+      }
+
+      setTeamMembers((current) => {
+        const mergedMembers = mergeBackendTeamMembers(current, result.members);
+
+        return areTeamMemberEntriesEqual(current, mergedMembers) ? current : mergedMembers;
+      });
+    };
+
+    void loadBackendTeamMembers();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [backendTeamMembersRefreshKey, workspacePersistenceKey]);
 
   useEffect(() => {
     void syncInviteOnlyTeamInviteStatuses();
