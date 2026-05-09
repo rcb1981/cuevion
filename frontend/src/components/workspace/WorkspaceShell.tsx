@@ -908,6 +908,9 @@ const canonicalFolderOrder: MailFolder[] = [
   "Inbox",
 ];
 const sharedCollaborationMailboxId = "__cuevion_shared_collaborations__" as InboxId;
+const TEAM_MEMBERS_POLL_INTERVAL_MS = 30_000;
+const PARTICIPANT_COLLABORATION_POLL_INTERVAL_MS = 30_000;
+const ACTIVE_COLLABORATION_THREAD_POLL_INTERVAL_MS = 12_000;
 // INBOX_SNAPSHOT_MAX_MESSAGES, INBOX_SNAPSHOT_MAX_AGE_MS, and
 // INBOX_SNAPSHOT_RECENT_GUARD_MS are imported from inboxEngine.ts above.
 
@@ -13195,12 +13198,21 @@ function MailboxView({
       return;
     }
 
+    let isRequestInFlight = false;
+
     const syncActiveCollaborationFromSnapshot = () => {
       syncMessageFromLiveSnapshot(activeCollaborationMessageId);
       const message = getMessageById(activeCollaborationMessageId);
 
       if (message?.collaboration) {
-        void refreshCanonicalCollaborationThreadForMessage(message);
+        if (isRequestInFlight) {
+          return;
+        }
+
+        isRequestInFlight = true;
+        void refreshCanonicalCollaborationThreadForMessage(message).finally(() => {
+          isRequestInFlight = false;
+        });
       }
     };
 
@@ -13212,8 +13224,13 @@ function MailboxView({
 
     window.addEventListener("focus", syncActiveCollaborationFromSnapshot);
     document.addEventListener("visibilitychange", handleVisibilityChange);
+    const intervalId = window.setInterval(
+      syncActiveCollaborationFromSnapshot,
+      ACTIVE_COLLABORATION_THREAD_POLL_INTERVAL_MS,
+    );
 
     return () => {
+      window.clearInterval(intervalId);
       window.removeEventListener("focus", syncActiveCollaborationFromSnapshot);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
@@ -20405,6 +20422,7 @@ function WorkbenchView({
   onDeclinePendingTeamInvitation,
   showDemoContent,
   workspacePersistenceKey,
+  shouldPollTeamMembers,
 }: {
   section: WorkbenchSection;
   orderedMailboxes: OrderedMailbox[];
@@ -20430,6 +20448,7 @@ function WorkbenchView({
   onDeclinePendingTeamInvitation: () => void;
   showDemoContent: boolean;
   workspacePersistenceKey: string;
+  shouldPollTeamMembers: boolean;
 }) {
   const content: Record<
     WorkbenchSection,
@@ -20943,7 +20962,7 @@ function WorkbenchView({
   }, [onTeamMembersChange, teamMembers, teamMembersStorageKey]);
 
   useEffect(() => {
-    if (typeof window === "undefined") {
+    if (typeof window === "undefined" || !shouldPollTeamMembers) {
       return;
     }
 
@@ -20953,27 +20972,57 @@ function WorkbenchView({
     }
 
     let isCancelled = false;
+    let isRequestInFlight = false;
 
     const loadBackendTeamMembers = async () => {
-      const result = await fetchTeamMembers(workspaceId);
-
-      if (isCancelled || !result.ok) {
+      if (isRequestInFlight) {
         return;
       }
 
-      setTeamMembers((current) => {
-        const mergedMembers = mergeBackendTeamMembers(current, result.members);
+      isRequestInFlight = true;
 
-        return areTeamMemberEntriesEqual(current, mergedMembers) ? current : mergedMembers;
-      });
+      try {
+        const result = await fetchTeamMembers(workspaceId);
+
+        if (isCancelled || !result.ok) {
+          return;
+        }
+
+        setTeamMembers((current) => {
+          const mergedMembers = mergeBackendTeamMembers(current, result.members);
+
+          return areTeamMemberEntriesEqual(current, mergedMembers) ? current : mergedMembers;
+        });
+      } finally {
+        isRequestInFlight = false;
+      }
+    };
+
+    const handleFocus = () => {
+      void loadBackendTeamMembers();
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        void loadBackendTeamMembers();
+      }
     };
 
     void loadBackendTeamMembers();
+    const intervalId = window.setInterval(
+      () => void loadBackendTeamMembers(),
+      TEAM_MEMBERS_POLL_INTERVAL_MS,
+    );
+    window.addEventListener("focus", handleFocus);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
 
     return () => {
       isCancelled = true;
+      window.clearInterval(intervalId);
+      window.removeEventListener("focus", handleFocus);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [backendTeamMembersRefreshKey, workspacePersistenceKey]);
+  }, [backendTeamMembersRefreshKey, shouldPollTeamMembers, workspacePersistenceKey]);
 
   useEffect(() => {
     void syncInviteOnlyTeamInviteStatuses();
@@ -32727,53 +32776,92 @@ export function WorkspaceShell({
     }
 
     const participantEmail = authenticatedUser?.email?.trim().toLowerCase();
-    if (!participantEmail || !isValidInviteEmail(participantEmail)) {
+    if (
+      authenticatedUser?.userType !== "member" ||
+      !participantEmail ||
+      !isValidInviteEmail(participantEmail)
+    ) {
       return;
     }
 
     let cancelled = false;
+    let isRequestInFlight = false;
 
     const hydrateParticipantCollaborationThreads = async () => {
-      const threads = await fetchParticipantCollaborationThreads({});
-
-      if (cancelled || threads === null) {
+      if (isRequestInFlight) {
         return;
       }
 
-      const projectedMessages = threads
-        .filter(
-          (thread) =>
-            thread.workspaceId !== currentWorkspaceUserId &&
-            thread.collaboration?.state !== "resolved",
-        )
-        .map(buildSharedCollaborationProjection);
+      isRequestInFlight = true;
 
-      setMailboxStore((currentStore) => {
-        const nextSharedCollections = createEmptyMailboxCollections();
-        nextSharedCollections.Inbox = projectedMessages;
+      try {
+        const threads = await fetchParticipantCollaborationThreads({});
 
-        const currentSharedCollections =
-          currentStore[sharedCollaborationMailboxId] ?? createEmptyMailboxCollections();
-        const currentSignature = JSON.stringify(currentSharedCollections);
-        const nextSignature = JSON.stringify(nextSharedCollections);
-
-        if (currentSignature === nextSignature) {
-          return currentStore;
+        if (cancelled || threads === null) {
+          return;
         }
 
-        return {
-          ...currentStore,
-          [sharedCollaborationMailboxId]: nextSharedCollections,
-        };
-      });
+        const projectedMessages = threads
+          .filter(
+            (thread) =>
+              thread.workspaceId !== currentWorkspaceUserId &&
+              thread.collaboration?.state !== "resolved",
+          )
+          .map(buildSharedCollaborationProjection);
+
+        setMailboxStore((currentStore) => {
+          const nextSharedCollections = createEmptyMailboxCollections();
+          nextSharedCollections.Inbox = projectedMessages;
+
+          const currentSharedCollections =
+            currentStore[sharedCollaborationMailboxId] ?? createEmptyMailboxCollections();
+          const currentSignature = JSON.stringify(currentSharedCollections);
+          const nextSignature = JSON.stringify(nextSharedCollections);
+
+          if (currentSignature === nextSignature) {
+            return currentStore;
+          }
+
+          return {
+            ...currentStore,
+            [sharedCollaborationMailboxId]: nextSharedCollections,
+          };
+        });
+      } finally {
+        isRequestInFlight = false;
+      }
+    };
+
+    const handleFocus = () => {
+      void hydrateParticipantCollaborationThreads();
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        void hydrateParticipantCollaborationThreads();
+      }
     };
 
     void hydrateParticipantCollaborationThreads();
+    const intervalId = window.setInterval(
+      () => void hydrateParticipantCollaborationThreads(),
+      PARTICIPANT_COLLABORATION_POLL_INTERVAL_MS,
+    );
+    window.addEventListener("focus", handleFocus);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
 
     return () => {
       cancelled = true;
+      window.clearInterval(intervalId);
+      window.removeEventListener("focus", handleFocus);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [authenticatedUser?.email, collaborationInviteRoute, currentWorkspaceUserId]);
+  }, [
+    authenticatedUser?.email,
+    authenticatedUser?.userType,
+    collaborationInviteRoute,
+    currentWorkspaceUserId,
+  ]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -34744,6 +34832,11 @@ export function WorkspaceShell({
                   }}
                   showDemoContent={isDemoWorkspace}
                   workspacePersistenceKey={currentWorkspaceUserId}
+                  shouldPollTeamMembers={Boolean(
+                    authenticatedUser?.userType === "member" &&
+                      !collaborationInviteRoute &&
+                      currentWorkspaceUserId,
+                  )}
                 />
               </div>
             ) : activeSection === "Settings" ? (
