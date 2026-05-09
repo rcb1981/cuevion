@@ -11151,6 +11151,9 @@ function MailboxView({
   const [activeCollaborationMessageId, setActiveCollaborationMessageId] = useState<
     string | null
   >(null);
+  const [pendingEndCollaborationMessageId, setPendingEndCollaborationMessageId] = useState<
+    string | null
+  >(null);
   const [draftCollaborationByMessageId, setDraftCollaborationByMessageId] = useState<
     Record<string, CollaborationThread["collaboration"]>
   >({});
@@ -14659,6 +14662,7 @@ function MailboxView({
     setCollaborationReplyVisibility(hasRealInternalTeamContext ? "internal" : "shared");
     setCollaborationReplySelection(null);
     setHighlightedCollaborationMessageId(null);
+    setPendingEndCollaborationMessageId(null);
     setFocusCollaborationComposer(false);
     setIsCollaborationInviteComposerOpen(false);
   };
@@ -20082,50 +20086,25 @@ function MailboxView({
                     </div>
                   </div>
 
-                  <div className="mt-4 flex shrink-0 flex-wrap items-center justify-end gap-3 border-t border-[var(--workspace-border-soft)] pt-4">
-                    {isPreStartCollaboration ? (
-                      <>
+                  <div className="mt-4 flex shrink-0 flex-wrap items-center justify-between gap-3 border-t border-[var(--workspace-border-soft)] pt-4">
+                    <div>
+                      {!isPreStartCollaboration &&
+                      activeCollaborationMessage.collaboration?.state !== "resolved" &&
+                      !isDraftStartedCollaboration ? (
                         <button
                           type="button"
-                          onClick={closeCollaborationOverlay}
-                          className="inline-flex h-10 items-center justify-center rounded-full border border-transparent bg-transparent px-5 text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)] transition-[color,transform] duration-150 hover:text-[var(--workspace-text-soft)] active:scale-[0.99] focus-visible:outline-none"
-                        >
-                          Cancel
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => createMessageCollaboration()}
-                          className={`${mailboxPrimaryActionButtonClass} h-10 px-5 text-[0.72rem] tracking-[0.16em]`}
-                        >
-                          Start collaboration
-                        </button>
-                      </>
-                    ) : activeCollaborationMessage.collaboration?.state === "resolved" ? (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          reopenMessageCollaboration(activeCollaborationMessage.id);
-                        }}
-                        className={`${mailboxPrimaryActionButtonClass} h-10 px-5 text-[0.72rem] tracking-[0.16em]`}
-                      >
-                        Reopen collaboration
-                      </button>
-                    ) : null}
-                    {!isPreStartCollaboration ? (
-                      <>
-                        <button
-                          type="button"
-                          onClick={() => sendCollaborationReply(activeCollaborationMessage.id)}
-                          disabled={!canSendCollaborationReply}
-                          className={
-                            canSendCollaborationReply
-                              ? `${mailboxPrimaryActionButtonClass} h-10 px-5 text-[0.72rem] tracking-[0.16em]`
-                              : "inline-flex h-10 cursor-not-allowed items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-5 text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-soft)] opacity-45 transition-[opacity] duration-150 focus-visible:outline-none"
+                          onClick={() =>
+                            setPendingEndCollaborationMessageId(activeCollaborationMessage.id)
                           }
+                          className={settingsDangerActionClass}
                         >
-                          Send reply
+                          End collaboration
                         </button>
-                        {isDraftStartedCollaboration ? (
+                      ) : null}
+                    </div>
+                    <div className="ml-auto flex flex-wrap items-center justify-end gap-3">
+                      {isPreStartCollaboration ? (
+                        <>
                           <button
                             type="button"
                             onClick={closeCollaborationOverlay}
@@ -20133,25 +20112,76 @@ function MailboxView({
                           >
                             Cancel
                           </button>
-                        ) : (
                           <button
                             type="button"
-                            onClick={() => {
-                              markMessageCollaborationDone(activeCollaborationMessage.id);
-                            }}
+                            onClick={() => createMessageCollaboration()}
                             className={`${mailboxPrimaryActionButtonClass} h-10 px-5 text-[0.72rem] tracking-[0.16em]`}
                           >
-                            Mark as done
+                            Start collaboration
                           </button>
-                        )}
-                      </>
-                    ) : null}
+                        </>
+                      ) : activeCollaborationMessage.collaboration?.state === "resolved" ? (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            reopenMessageCollaboration(activeCollaborationMessage.id);
+                          }}
+                          className={`${mailboxPrimaryActionButtonClass} h-10 px-5 text-[0.72rem] tracking-[0.16em]`}
+                        >
+                          Reopen collaboration
+                        </button>
+                      ) : null}
+                      {!isPreStartCollaboration ? (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => sendCollaborationReply(activeCollaborationMessage.id)}
+                            disabled={!canSendCollaborationReply}
+                            className={
+                              canSendCollaborationReply
+                                ? `${mailboxPrimaryActionButtonClass} h-10 px-5 text-[0.72rem] tracking-[0.16em]`
+                                : "inline-flex h-10 cursor-not-allowed items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-5 text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-soft)] opacity-45 transition-[opacity] duration-150 focus-visible:outline-none"
+                            }
+                          >
+                            Send reply
+                          </button>
+                          {isDraftStartedCollaboration ? (
+                            <button
+                              type="button"
+                              onClick={closeCollaborationOverlay}
+                              className="inline-flex h-10 items-center justify-center rounded-full border border-transparent bg-transparent px-5 text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)] transition-[color,transform] duration-150 hover:text-[var(--workspace-text-soft)] active:scale-[0.99] focus-visible:outline-none"
+                            >
+                              Cancel
+                            </button>
+                          ) : null}
+                        </>
+                      ) : null}
+                    </div>
                   </div>
                 </div>
               </WorkspaceModalLayer>,
               document.body,
             )
           : null}
+
+        <SettingsConfirmationModal
+          open={Boolean(pendingEndCollaborationMessageId)}
+          themeMode={themeMode}
+          title="End collaboration?"
+          description="This will close this collaboration for everyone. The shared mail will disappear from Shared for all participants."
+          confirmLabel="End collaboration"
+          cancelLabel="Cancel"
+          confirmClassName={settingsDangerActionClass}
+          onCancel={() => setPendingEndCollaborationMessageId(null)}
+          onConfirm={() => {
+            const messageId = pendingEndCollaborationMessageId;
+            setPendingEndCollaborationMessageId(null);
+
+            if (messageId) {
+              markMessageCollaborationDone(messageId);
+            }
+          }}
+        />
 
         {isCloseModalOpen ? (
           <div className="absolute inset-0 flex items-center justify-center rounded-[30px] bg-[color:rgba(83,67,54,0.22)] p-6 backdrop-blur-[3px]">
