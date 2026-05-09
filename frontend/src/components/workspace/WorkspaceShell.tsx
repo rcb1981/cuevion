@@ -8540,6 +8540,26 @@ function normalizeMailboxStore(
     );
   }
 
+  const sharedCollaborationCollections = store[sharedCollaborationMailboxId];
+  if (sharedCollaborationCollections) {
+    nextStore[sharedCollaborationMailboxId] = canonicalFolderOrder.reduce<MailboxCollections>(
+      (collections, folder) => {
+        collections[folder] = sharedCollaborationCollections[folder].map((message) =>
+          normalizeMailMessage(
+            message,
+            sharedCollaborationMailboxId,
+            senderCategoryLearning,
+            messageOwnershipInteractions,
+            currentUserId,
+            store,
+          ),
+        );
+        return collections;
+      },
+      createEmptyMailboxCollections(),
+    );
+  }
+
   return nextStore;
 }
 
@@ -14244,6 +14264,16 @@ function MailboxView({
       .find((message) => message.id === messageId) ?? null;
   }
 
+  const isProjectedSharedCollaborationMessage = (messageId: string | null) =>
+    Boolean(
+      messageId &&
+        canonicalFolderOrder.some((folder) =>
+          (mailboxStore[sharedCollaborationMailboxId]?.[folder] ?? []).some(
+            (message) => message.id === messageId,
+          ),
+        ),
+    );
+
   const getCollaborationWorkspaceIdForMessage = (messageId: string) => {
     const message = getMessageById(messageId);
     return message?.collaborationWorkspaceId?.trim().toLowerCase() || currentUserId;
@@ -14251,6 +14281,10 @@ function MailboxView({
 
   const syncMessageFromLiveSnapshot = (messageId: string | null) => {
     if (!messageId) {
+      return;
+    }
+
+    if (isProjectedSharedCollaborationMessage(messageId)) {
       return;
     }
 
