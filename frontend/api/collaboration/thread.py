@@ -122,6 +122,49 @@ def _normalize_participants(value) -> list[dict] | None:
     return normalized_participants
 
 
+def _participant_identity_keys(participant: dict) -> list[str]:
+    return [
+        key
+        for key in (
+            str(participant.get("email") or "").strip().lower(),
+            str(participant.get("id") or "").strip().lower(),
+        )
+        if key
+    ]
+
+
+def _merge_participants_by_identity(
+    existing_participants: list[dict],
+    next_participants: list[dict],
+) -> list[dict]:
+    existing_by_key: dict[str, dict] = {}
+    for participant in existing_participants:
+        for key in _participant_identity_keys(participant):
+            if key not in existing_by_key:
+                existing_by_key[key] = participant
+
+    merged_participants: list[dict] = []
+    for participant in next_participants:
+        existing_participant = next(
+            (
+                existing_by_key[key]
+                for key in _participant_identity_keys(participant)
+                if key in existing_by_key
+            ),
+            None,
+        )
+        if not existing_participant:
+            merged_participants.append(participant)
+            continue
+
+        merged_participant = {**existing_participant, **participant}
+        if existing_participant.get("externalReviewToken") and not participant.get("externalReviewToken"):
+            merged_participant["externalReviewToken"] = existing_participant["externalReviewToken"]
+        merged_participants.append(merged_participant)
+
+    return merged_participants
+
+
 def _normalize_message_lookup_records(value) -> list[dict]:
     if not isinstance(value, list):
         return []
@@ -367,7 +410,7 @@ def _handle_action(handler: BaseHTTPRequestHandler, payload: dict):
         return
 
     action_type = str(action.get("type") or "").strip()
-    next_timestamp = int(time() * 1000)
+    next_timestamp = max(int(time() * 1000), current_thread["collaboration"]["updatedAt"] + 1)
     next_thread = {
         **current_thread,
         "collaboration": {
@@ -419,7 +462,10 @@ def _handle_action(handler: BaseHTTPRequestHandler, payload: dict):
                 _build_error("invalid_request", "participants_set requires a valid participants array."),
             )
             return
-        next_collaboration["participants"] = normalized_participants
+        next_collaboration["participants"] = _merge_participants_by_identity(
+            current_thread["collaboration"].get("participants", []),
+            normalized_participants,
+        )
     elif action_type == "resolve":
         resolved_by_user_id = str(action.get("resolvedByUserId") or "").strip()
         resolved_by_user_name = str(action.get("resolvedByUserName") or "").strip()
@@ -459,6 +505,7 @@ def _handle_action(handler: BaseHTTPRequestHandler, payload: dict):
     saved_thread, error = save_thread_if_expected(
         normalized_next_thread,
         expected_updated_at=expected_updated_at,
+        preserve_existing_participants=action_type != "participants_set",
     )
     if error and error.get("code") == "stale_thread" and saved_thread is not None:
         _send_json(handler, 409, {"ok": False, "code": "stale_thread", "thread": saved_thread})

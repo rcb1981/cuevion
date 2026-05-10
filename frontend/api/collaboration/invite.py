@@ -17,7 +17,7 @@ from models import (
     normalize_collaboration_participant_record,
     normalize_collaboration_thread_record,
 )
-from redis_store import get_invite, get_thread, issue_invite_for_thread, save_thread, save_thread_if_expected
+from redis_store import get_invite, get_thread, issue_invite_for_thread, save_thread_if_expected
 
 
 def _send_json(handler: BaseHTTPRequestHandler, status_code: int, payload: dict):
@@ -119,6 +119,60 @@ def _build_external_thread_payload(thread: dict | None) -> dict | None:
     return build_external_collaboration_thread_view(thread)
 
 
+def _participant_identity_keys(participant: dict) -> list[str]:
+    return [
+        key
+        for key in (
+            str(participant.get("email") or "").strip().lower(),
+            str(participant.get("id") or "").strip().lower(),
+        )
+        if key
+    ]
+
+
+def _merge_invite_participant(
+    current_participants: list[dict],
+    next_participant: dict,
+) -> list[dict]:
+    next_keys = set(_participant_identity_keys(next_participant))
+    existing_index = next(
+        (
+            index
+            for index, participant in enumerate(current_participants)
+            if next_keys.intersection(_participant_identity_keys(participant))
+        ),
+        -1,
+    )
+    if existing_index < 0:
+        return [*current_participants, next_participant]
+
+    existing_participant = current_participants[existing_index]
+    merged_participant = {**existing_participant, **next_participant}
+    return [
+        merged_participant if index == existing_index else participant
+        for index, participant in enumerate(current_participants)
+    ]
+
+
+def _find_invite_participant(thread: dict, invite: dict) -> tuple[int, dict | None]:
+    fallback_index = -1
+    fallback_participant = None
+
+    for index, candidate in enumerate(thread["collaboration"].get("participants", [])):
+        if candidate.get("email", "").lower() != invite["inviteeEmail"]:
+            continue
+
+        external_review_token = candidate.get("externalReviewToken", "")
+        if external_review_token == invite["token"]:
+            return index, candidate
+
+        if not external_review_token and fallback_participant is None:
+            fallback_index = index
+            fallback_participant = candidate
+
+    return fallback_index, fallback_participant
+
+
 def _resolve_active_invite_and_thread(token: str) -> tuple[dict | None, dict | None, dict | None]:
     invite = get_invite(token)
     if invite is None:
@@ -201,7 +255,10 @@ def _handle_issue(handler: BaseHTTPRequestHandler, payload: dict):
         _send_json(handler, 400, _build_error("invalid_request", "Could not prepare invite participant."))
         return
 
-    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    now_ms = max(
+        int(datetime.now(timezone.utc).timestamp() * 1000),
+        current_thread["collaboration"]["updatedAt"] + 1,
+    )
     invite_record, invite_error = issue_invite_for_thread(
         workspace_id=workspace_id,
         mailbox_id=mailbox_id,
@@ -235,27 +292,13 @@ def _handle_issue(handler: BaseHTTPRequestHandler, payload: dict):
         "externalReviewToken": invite_record["token"],
     }
 
-    existing_index = next(
-        (
-            index
-            for index, participant in enumerate(current_participants)
-            if participant.get("email", "").lower() == invitee_email
-        ),
-        -1,
-    )
-    if existing_index >= 0:
-        next_participants = [
-            next_participant if index == existing_index else participant
-            for index, participant in enumerate(current_participants)
-        ]
-    else:
-        next_participants = [*current_participants, next_participant]
+    next_participants = _merge_invite_participant(current_participants, next_participant)
 
     next_thread = {
         **current_thread,
         "collaboration": {
             **current_thread["collaboration"],
-            "updatedAt": max(current_thread["collaboration"]["updatedAt"], invite_record["updatedAt"]),
+            "updatedAt": max(invite_record["updatedAt"], current_thread["collaboration"]["updatedAt"] + 1),
             "participants": next_participants,
         },
         "isShared": True,
@@ -270,7 +313,39 @@ def _handle_issue(handler: BaseHTTPRequestHandler, payload: dict):
         )
         return
 
-    saved_thread, thread_error = save_thread(normalized_next_thread)
+    saved_thread, thread_error = save_thread_if_expected(
+        normalized_next_thread,
+        expected_updated_at=current_thread["collaboration"]["updatedAt"],
+        preserve_existing_participants=True,
+    )
+    if thread_error and thread_error.get("code") == "stale_thread" and saved_thread is not None:
+        latest_thread = saved_thread
+        latest_next_thread = {
+            **latest_thread,
+            "collaboration": {
+                **latest_thread["collaboration"],
+                "updatedAt": max(invite_record["updatedAt"], latest_thread["collaboration"]["updatedAt"] + 1),
+                "participants": _merge_invite_participant(
+                    latest_thread["collaboration"].get("participants", []),
+                    next_participant,
+                ),
+            },
+            "isShared": True,
+        }
+        normalized_latest_next_thread = normalize_collaboration_thread_record(latest_next_thread)
+        if normalized_latest_next_thread is None:
+            _send_json(
+                handler,
+                400,
+                _build_error("invalid_request", "Canonical thread payload is invalid after invite retry."),
+            )
+            return
+        saved_thread, thread_error = save_thread_if_expected(
+            normalized_latest_next_thread,
+            expected_updated_at=latest_thread["collaboration"]["updatedAt"],
+            preserve_existing_participants=True,
+        )
+
     if thread_error or saved_thread is None:
         _send_json(
             handler,
@@ -279,6 +354,15 @@ def _handle_issue(handler: BaseHTTPRequestHandler, payload: dict):
                 thread_error["code"] if thread_error else "collaboration_store_unavailable",
                 thread_error["message"] if thread_error else "Could not persist canonical collaboration thread.",
             ),
+        )
+        return
+
+    participant_index, participant = _find_invite_participant(saved_thread, invite_record)
+    if participant_index < 0 or participant is None:
+        _send_json(
+            handler,
+            503,
+            _build_error("collaboration_store_unavailable", "Could not link invite to canonical collaboration thread."),
         )
         return
 
@@ -313,15 +397,15 @@ def _handle_lookup(handler: BaseHTTPRequestHandler):
         _send_json(handler, status_code, error)
         return
 
-    participant = next(
-        (
-            candidate
-            for candidate in thread["collaboration"].get("participants", [])
-            if candidate.get("email", "").lower() == invite["inviteeEmail"]
-            and candidate.get("externalReviewToken", "") == invite["token"]
-        ),
-        None,
-    )
+    if thread["collaboration"]["state"] == "resolved":
+        _send_json(
+            handler,
+            404,
+            _build_error("unavailable", "Collaboration invite is no longer available."),
+        )
+        return
+
+    _, participant = _find_invite_participant(thread, invite)
     if participant is None:
         _send_json(
             handler,
@@ -356,16 +440,16 @@ def _handle_action(handler: BaseHTTPRequestHandler, payload: dict):
         _send_json(handler, status_code, error)
         return
 
-    participant_index = next(
-        (
-            index
-            for index, candidate in enumerate(current_thread["collaboration"].get("participants", []))
-            if candidate.get("email", "").lower() == invite["inviteeEmail"]
-            and candidate.get("externalReviewToken", "") == invite["token"]
-        ),
-        -1,
-    )
-    if participant_index < 0:
+    if current_thread["collaboration"]["state"] == "resolved":
+        _send_json(
+            handler,
+            404,
+            _build_error("unavailable", "Collaboration invite is no longer available."),
+        )
+        return
+
+    participant_index, participant = _find_invite_participant(current_thread, invite)
+    if participant_index < 0 or participant is None:
         _send_json(
             handler,
             404,
@@ -384,8 +468,7 @@ def _handle_action(handler: BaseHTTPRequestHandler, payload: dict):
         return
 
     expected_updated_at = _normalize_expected_updated_at(payload.get("expectedUpdatedAt"))
-    next_timestamp = int(time() * 1000)
-    participant = current_thread["collaboration"]["participants"][participant_index]
+    next_timestamp = max(int(time() * 1000), current_thread["collaboration"]["updatedAt"] + 1)
     author_name = str(action.get("authorName") or "").strip() or participant.get("name") or invite["inviteeEmail"]
     author_id = str(participant.get("id") or "").strip() or invite["participantId"]
 
@@ -393,6 +476,11 @@ def _handle_action(handler: BaseHTTPRequestHandler, payload: dict):
         {
             **candidate,
             "status": "active" if index == participant_index else candidate.get("status", "active"),
+            **(
+                {"externalReviewToken": invite["token"]}
+                if index == participant_index and not candidate.get("externalReviewToken")
+                else {}
+            ),
         }
         for index, candidate in enumerate(current_thread["collaboration"]["participants"])
     ]
@@ -439,6 +527,7 @@ def _handle_action(handler: BaseHTTPRequestHandler, payload: dict):
     saved_thread, save_error = save_thread_if_expected(
         normalized_next_thread,
         expected_updated_at=expected_updated_at,
+        preserve_existing_participants=True,
     )
     if save_error and save_error.get("code") == "stale_thread" and saved_thread is not None:
         _send_json(

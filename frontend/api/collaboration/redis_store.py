@@ -430,6 +430,7 @@ def create_thread_if_missing(thread_record: dict) -> tuple[dict | None, dict | N
 def save_thread_if_expected(
     thread_record: dict,
     expected_updated_at: int | None = None,
+    preserve_existing_participants: bool = False,
 ) -> tuple[dict | None, dict | None]:
     normalized_thread = normalize_collaboration_thread_record(thread_record)
     if not normalized_thread:
@@ -455,6 +456,76 @@ def save_thread_if_expected(
         return existing_thread, {
             "code": "stale_thread",
             "message": "Canonical collaboration thread is newer than the local version.",
+        }
+
+    if preserve_existing_participants:
+        existing_participants = existing_thread["collaboration"].get("participants", [])
+        incoming_participants = normalized_thread["collaboration"].get("participants", [])
+        existing_by_key: dict[str, dict] = {}
+
+        for participant in existing_participants:
+            for key in (
+                str(participant.get("email") or "").strip().lower(),
+                str(participant.get("id") or "").strip().lower(),
+            ):
+                if key and key not in existing_by_key:
+                    existing_by_key[key] = participant
+
+        merged_participants: list[dict] = []
+        seen_keys: set[str] = set()
+
+        for participant in incoming_participants:
+            participant_keys = [
+                key
+                for key in (
+                    str(participant.get("email") or "").strip().lower(),
+                    str(participant.get("id") or "").strip().lower(),
+                )
+                if key
+            ]
+            existing_participant = next(
+                (
+                    existing_by_key[key]
+                    for key in participant_keys
+                    if key in existing_by_key
+                ),
+                None,
+            )
+            merged_participant = (
+                {**existing_participant, **participant}
+                if existing_participant
+                else participant
+            )
+            if (
+                existing_participant
+                and existing_participant.get("externalReviewToken")
+                and not participant.get("externalReviewToken")
+            ):
+                merged_participant["externalReviewToken"] = existing_participant["externalReviewToken"]
+
+            merged_participants.append(merged_participant)
+            seen_keys.update(participant_keys)
+
+        for participant in existing_participants:
+            participant_keys = [
+                key
+                for key in (
+                    str(participant.get("email") or "").strip().lower(),
+                    str(participant.get("id") or "").strip().lower(),
+                )
+                if key
+            ]
+            if any(key in seen_keys for key in participant_keys):
+                continue
+            merged_participants.append(participant)
+            seen_keys.update(participant_keys)
+
+        normalized_thread = {
+            **normalized_thread,
+            "collaboration": {
+                **normalized_thread["collaboration"],
+                "participants": merged_participants,
+            },
         }
 
     return save_thread(normalized_thread)
