@@ -12804,12 +12804,6 @@ function MailboxView({
     activeCollaborationMessageId &&
       collaborationReplySendingMessageId === activeCollaborationMessageId,
   );
-  const isActiveExternalInviteInFlight = Boolean(
-    activeCollaborationMessageId &&
-      (isSendingExternalInvite ||
-        pendingExternalInviteEmails.length > 0 ||
-        externalInviteInFlightEmails.length > 0),
-  );
   const activeStoredCanonicalCollaborationMessage =
     getStoredCanonicalCollaborationMessage(activeCollaborationMessageId);
   const activeHasStoredCanonicalCollaboration =
@@ -12951,7 +12945,6 @@ function MailboxView({
     activeCollaborationMessage &&
       collaborationReplyDraft.trim() &&
       !isActiveCollaborationThreadPreparing &&
-      !isActiveExternalInviteInFlight &&
       !isActiveCollaborationReplySending &&
       (activeHasStoredCanonicalCollaboration || canCreateDraftCollaborationReply),
   );
@@ -12960,7 +12953,6 @@ function MailboxView({
     !activeStoredCanonicalCollaborationMessage &&
     !isPreStartCollaboration &&
     (isActiveCollaborationThreadPreparing ||
-      isActiveExternalInviteInFlight ||
       hasExternalInviteActivityForCollaborationMessage(activeCollaborationMessage.id) ||
       activeCollaborationHasExternalParticipant)
       ? "Collaboration is preparing. Try again in a moment."
@@ -14826,13 +14818,7 @@ function MailboxView({
   };
 
   const sendCollaborationReply = (messageId: string) => {
-    const hasExternalInviteInFlightForMessage =
-      activeCollaborationMessageId === messageId &&
-      (isSendingExternalInvite ||
-        pendingExternalInviteEmails.length > 0 ||
-        externalInviteInFlightEmails.length > 0);
-
-    if (collaborationThreadPreparingByMessageId[messageId] || hasExternalInviteInFlightForMessage) {
+    if (collaborationThreadPreparingByMessageId[messageId]) {
       setCollaborationReplyFeedback("Collaboration is preparing. Try again in a moment.");
       return;
     }
