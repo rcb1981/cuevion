@@ -1412,6 +1412,39 @@ type PromoHeuristicMessage = Pick<
 > &
   Partial<Pick<MailMessage, "to">>;
 
+function hasMusicPromoSubjectMarker(subject: string) {
+  return (
+    /\[\s*promo\s*\]/i.test(subject) ||
+    /^promo\b/i.test(subject.trim()) ||
+    /\bpromo\s*(?:[:|]|[-–—])/i.test(subject)
+  );
+}
+
+function isProtectedMusicPromoContext(message: PromoHeuristicMessage) {
+  const subjectText = message.subject ?? "";
+  const identityText = [message.sender, message.from].join(" ").toLowerCase();
+  const bodyText = [message.snippet, ...(message.body ?? [])].join(" ").toLowerCase();
+  const labelWorxPromoboxText = [identityText, bodyText].join(" ");
+  const hasLabelWorxPromoboxEvidence =
+    identityText.includes("promobox-reply@label-worx.com") ||
+    includesAnyKeyword(labelWorxPromoboxText, [
+      "labelworx promobox",
+      "label-worx promobox",
+      "labelworx promo box",
+      "label-worx promo box",
+    ]);
+  const hasPromoDownloadEvidence = includesAnyKeyword(bodyText, [
+    "promo download page",
+    "promo download package",
+    "limited promo download package",
+  ]);
+
+  return (
+    hasLabelWorxPromoboxEvidence &&
+    (hasPromoDownloadEvidence || hasMusicPromoSubjectMarker(subjectText))
+  );
+}
+
 function isStrongDemoSubmissionMessage(message: PromoHeuristicMessage) {
   const subjectText = message.subject ?? "";
   const toText = (message.to ?? "").toLowerCase();
@@ -1433,12 +1466,10 @@ function isStrongDemoSubmissionMessage(message: PromoHeuristicMessage) {
     return true;
   }
 
-  const hasExplicitPromoSubjectSignal =
-    /\[\s*promo\s*\]/i.test(subjectText) ||
-    /^promo\b/i.test(subjectText.trim()) ||
-    /\bpromo\s*\|/i.test(subjectText);
-
-  if (hasExplicitPromoSubjectSignal) {
+  if (
+    hasMusicPromoSubjectMarker(subjectText) ||
+    isProtectedMusicPromoContext(message)
+  ) {
     return false;
   }
 
@@ -1502,8 +1533,7 @@ function isStrongMusicPromoMessage(message: PromoHeuristicMessage) {
       /\s[-–:]\s/.test(subjectText));
 
   return (
-    /\[\s*promo\s*\]/i.test(subjectText) ||
-    /^promo\b/i.test(subjectText.trim()) ||
+    hasMusicPromoSubjectMarker(subjectText) ||
     identityText.includes("digital promo sound") ||
     includesAnyKeyword(searchableText, ["inflyte", "fatdrop"]) ||
     (identityText.includes("disco-mailer.net") && hasMusicReleaseContext) ||
@@ -1727,11 +1757,8 @@ function resolveVisibleClassification(
     /\b\d{1,2}\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)\b/i.test(
       subjectText,
     );
-  const strongExplicitPromoSubjectSignal =
-    /\[\s*promo\s*\]/i.test(subjectText) ||
-    /^promo\b/i.test(subjectText.trim()) ||
-    /\spromo\s/i.test(subjectText) ||
-    /\bpromo\s*\|/i.test(subjectText);
+  const strongExplicitPromoSubjectSignal = hasMusicPromoSubjectMarker(subjectText);
+  const hasProtectedMusicPromoContext = isProtectedMusicPromoContext(message);
   const explicitPromoIdentitySignal =
     strongExplicitPromoSubjectSignal ||
     includesAnyKeyword(
@@ -1774,8 +1801,10 @@ function resolveVisibleClassification(
   ].some(
     (classification) =>
       classification === "reply" ||
-      classification === "demo" ||
-      classification === "high_priority_demo" ||
+      (!hasProtectedMusicPromoContext &&
+        (classification === "demo" ||
+          classification === "high_priority_demo")) ||
+      classification === "distributor_update" ||
       classification === "finance" ||
       classification === "royalty_statement",
   );
@@ -1792,10 +1821,11 @@ function resolveVisibleClassification(
   const hasStrongMusicPromoEligibleClassification =
     !isStrongPromoSubjectProtectedClassification &&
     (message.internalClassification === "workflow_update" ||
-      message.internalClassification === "distributor_update" ||
       message.internalClassification === "info" ||
       message.internalClassification === "business_reminder" ||
       message.internalClassification === "business" ||
+      message.internalClassification === "demo" ||
+      message.internalClassification === "high_priority_demo" ||
       message.internalClassification === "unknown" ||
       (!message.internalClassification &&
         (signalClassification === "workflow_update" ||
@@ -1805,10 +1835,11 @@ function resolveVisibleClassification(
     strongExplicitPromoSubjectSignal &&
     !isStrongPromoSubjectProtectedClassification &&
     (message.internalClassification === "workflow_update" ||
-      message.internalClassification === "distributor_update" ||
       message.internalClassification === "info" ||
       message.internalClassification === "business_reminder" ||
       message.internalClassification === "business" ||
+      message.internalClassification === "demo" ||
+      message.internalClassification === "high_priority_demo" ||
       message.internalClassification === "unknown" ||
       (!message.internalClassification &&
         (signalClassification === "workflow_update" ||
@@ -1823,6 +1854,13 @@ function resolveVisibleClassification(
       !isMarketingNewsletterUpdate &&
       musicCampaignPromoSignal);
   const resolvedClassification = (() => {
+    if (
+      hasProtectedMusicPromoContext &&
+      !isStrongPromoSubjectProtectedClassification
+    ) {
+      return "promo";
+    }
+
     if (isStrongDemoSubmission && !isStrongDemoProtectedClassification) {
       return "demo";
     }
