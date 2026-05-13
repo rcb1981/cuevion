@@ -932,6 +932,7 @@ const WORKSPACE_THEME_MODE_STORAGE_KEY = "cuevion-workspace-theme-mode";
 const CATEGORY_LEARNING_STORAGE_KEY = "cuevion-sender-category-learning";
 const MESSAGE_OWNERSHIP_STORAGE_KEY = "cuevion-message-ownership";
 const CUEVION_MESSAGE_UNREAD_OVERRIDES_STORAGE_KEY = "cuevion-message-unread-overrides";
+const CUEVION_COLLABORATION_LAST_SEEN_STORAGE_KEY = "cuevion-collaboration-last-seen";
 const CUEVION_SENT_MESSAGES_STORAGE_KEY = "cuevion-sent-messages";
 const CUEVION_TRASH_MESSAGES_STORAGE_KEY = "cuevion-trash-messages";
 const CUEVION_SPAM_MESSAGES_STORAGE_KEY = "cuevion-spam-messages";
@@ -964,6 +965,10 @@ function buildMessageUnreadOverridesStorageKey(
   orderedMailboxKey: string,
 ) {
   return `${CUEVION_MESSAGE_UNREAD_OVERRIDES_STORAGE_KEY}:${workspaceUserId}:${orderedMailboxKey}`;
+}
+
+function buildCollaborationLastSeenStorageKey(userEmail: string) {
+  return `${CUEVION_COLLABORATION_LAST_SEEN_STORAGE_KEY}:${normalizeSenderLearningKey(userEmail)}`;
 }
 
 function buildSentMessagesStorageKey(
@@ -11015,6 +11020,9 @@ function MailboxView({
    *  mailbox chrome for a native-feeling mobile compose overlay. */
   isMobileViewport?: boolean;
 }) {
+  const collaborationLastSeenStorageKey = buildCollaborationLastSeenStorageKey(
+    currentUserEmail || currentUserId,
+  );
   const [activeFilter, setActiveFilter] = useState<MailFilter>("All");
   const [sortOrder, setSortOrder] = useState<MailSortOrder>("desc");
   const [activeFolder, setActiveFolder] = useState<MailFolder>("Inbox");
@@ -11079,6 +11087,23 @@ function MailboxView({
   const [isCloseModalOpen, setIsCloseModalOpen] = useState(false);
   const [isMoreMenuOpen, setIsMoreMenuOpen] = useState(false);
   const [isSortMenuOpen, setIsSortMenuOpen] = useState(false);
+  const [collaborationLastSeenByKey, setCollaborationLastSeenByKey] = useState<
+    Record<string, number>
+  >(() => {
+    if (typeof window === "undefined") {
+      return {};
+    }
+
+    try {
+      const storedValue = window.localStorage.getItem(collaborationLastSeenStorageKey);
+      const parsedValue = storedValue ? JSON.parse(storedValue) : {};
+      return parsedValue && typeof parsedValue === "object"
+        ? (parsedValue as Record<string, number>)
+        : {};
+    } catch {
+      return {};
+    }
+  });
   const [smartFolderMenuId, setSmartFolderMenuId] = useState<string | null>(null);
   const [smartFolderDeleteId, setSmartFolderDeleteId] = useState<string | null>(null);
   const [isReadingLearningMenuOpen, setIsReadingLearningMenuOpen] = useState(false);
@@ -11257,6 +11282,35 @@ function MailboxView({
     null,
   );
   const [isSendingExternalInvite, setIsSendingExternalInvite] = useState(false);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    try {
+      const storedValue = window.localStorage.getItem(collaborationLastSeenStorageKey);
+      const parsedValue = storedValue ? JSON.parse(storedValue) : {};
+      setCollaborationLastSeenByKey(
+        parsedValue && typeof parsedValue === "object"
+          ? (parsedValue as Record<string, number>)
+          : {},
+      );
+    } catch {
+      setCollaborationLastSeenByKey({});
+    }
+  }, [collaborationLastSeenStorageKey]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    window.localStorage.setItem(
+      collaborationLastSeenStorageKey,
+      JSON.stringify(collaborationLastSeenByKey),
+    );
+  }, [collaborationLastSeenByKey, collaborationLastSeenStorageKey]);
 
   const collaborationPeople =
     workspaceCollaborationPeople.length > 0
@@ -13406,11 +13460,12 @@ function MailboxView({
     }
 
     const isResolvedCollaboration = collaboration.state === "resolved";
+    const hasUnreadCollaboration = hasUnreadCollaborationUpdate(liveMessage);
 
     const collaborationButtonClass =
       isResolvedCollaboration
-        ? "inline-flex items-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-3 py-1 text-[0.76rem] leading-6 text-[color:rgba(106,98,89,0.86)] transition-[background-color,border-color,color] duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text-soft)] focus-visible:outline-none"
-        : "inline-flex items-center rounded-full border border-[color:rgba(95,138,91,0.4)] bg-[linear-gradient(180deg,rgba(183,216,174,0.44),rgba(127,169,121,0.32))] px-3 py-1 text-[0.76rem] leading-6 shadow-[0_9px_20px_rgba(103,143,98,0.14),inset_0_1px_0_rgba(255,255,255,0.24)] transition-[background-color,border-color,color,box-shadow] duration-150 hover:border-[color:rgba(86,126,82,0.48)] hover:bg-[linear-gradient(180deg,rgba(183,216,174,0.54),rgba(127,169,121,0.4))] focus-visible:outline-none dark:border-[color:rgba(128,167,124,0.34)] dark:bg-[linear-gradient(180deg,rgba(94,126,97,0.34),rgba(67,92,70,0.28))] dark:text-[color:rgba(227,239,223,0.96)] dark:shadow-[0_10px_22px_rgba(18,28,20,0.22),inset_0_1px_0_rgba(255,255,255,0.06)] dark:hover:border-[color:rgba(144,184,140,0.4)] dark:hover:bg-[linear-gradient(180deg,rgba(104,138,107,0.42),rgba(73,100,76,0.34))] dark:hover:text-[color:rgba(240,247,237,0.98)]";
+        ? "inline-flex items-center gap-1.5 rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-3 py-1 text-[0.76rem] leading-6 text-[color:rgba(106,98,89,0.86)] transition-[background-color,border-color,color] duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text-soft)] focus-visible:outline-none"
+        : "inline-flex items-center gap-1.5 rounded-full border border-[color:rgba(95,138,91,0.4)] bg-[linear-gradient(180deg,rgba(183,216,174,0.44),rgba(127,169,121,0.32))] px-3 py-1 text-[0.76rem] leading-6 shadow-[0_9px_20px_rgba(103,143,98,0.14),inset_0_1px_0_rgba(255,255,255,0.24)] transition-[background-color,border-color,color,box-shadow] duration-150 hover:border-[color:rgba(86,126,82,0.48)] hover:bg-[linear-gradient(180deg,rgba(183,216,174,0.54),rgba(127,169,121,0.4))] focus-visible:outline-none dark:border-[color:rgba(128,167,124,0.34)] dark:bg-[linear-gradient(180deg,rgba(94,126,97,0.34),rgba(67,92,70,0.28))] dark:text-[color:rgba(227,239,223,0.96)] dark:shadow-[0_10px_22px_rgba(18,28,20,0.22),inset_0_1px_0_rgba(255,255,255,0.06)] dark:hover:border-[color:rgba(144,184,140,0.4)] dark:hover:bg-[linear-gradient(180deg,rgba(104,138,107,0.42),rgba(73,100,76,0.34))] dark:hover:text-[color:rgba(240,247,237,0.98)]";
     const collaborationButtonStyle =
       isResolvedCollaboration || themeMode === "dark"
         ? undefined
@@ -13434,6 +13489,9 @@ function MailboxView({
           className={collaborationButtonClass}
           style={collaborationButtonStyle}
         >
+          {hasUnreadCollaboration ? (
+            <span aria-label="Unread collaboration update" className={unreadAttentionDotClass} />
+          ) : null}
           {isResolvedCollaboration ? "Open collaboration history" : "Open collaboration"}
         </button>
       </div>
@@ -14467,6 +14525,75 @@ function MailboxView({
 
     return matchingCanonicalProjection?.collaborationMessageId?.trim() || messageId;
   };
+  const getCollaborationLastSeenKeyForMessage = (message: MailMessage) => {
+    if (!message.collaboration) {
+      return null;
+    }
+
+    const viewerKey = normalizeSenderLearningKey(currentUserEmail || currentUserId);
+    const workspaceId =
+      message.collaborationWorkspaceId?.trim().toLowerCase() || currentUserId;
+    const canonicalMessageId = getCollaborationMessageIdForMessage(message.id);
+
+    if (!viewerKey || !workspaceId || !canonicalMessageId) {
+      return null;
+    }
+
+    return `${viewerKey}::${workspaceId}::${canonicalMessageId}`;
+  };
+  const hasUnreadCollaborationUpdate = (message: MailMessage) => {
+    if (!message.collaboration || message.collaboration.state === "resolved") {
+      return false;
+    }
+
+    const seenKey = getCollaborationLastSeenKeyForMessage(message);
+    if (!seenKey) {
+      return false;
+    }
+
+    return message.collaboration.updatedAt > (collaborationLastSeenByKey[seenKey] ?? 0);
+  };
+  const markCollaborationSeen = (messageId: string) => {
+    const message = getMessageById(messageId);
+    if (!message?.collaboration) {
+      return;
+    }
+
+    const seenKey = getCollaborationLastSeenKeyForMessage(message);
+    if (!seenKey) {
+      return;
+    }
+
+    const nextSeenAt = message.collaboration.updatedAt;
+    setCollaborationLastSeenByKey((current) =>
+      current[seenKey] && current[seenKey] >= nextSeenAt
+        ? current
+        : {
+            ...current,
+            [seenKey]: nextSeenAt,
+          },
+    );
+  };
+  const markCanonicalCollaborationThreadSeen = (thread: CollaborationThread) => {
+    const viewerKey = normalizeSenderLearningKey(currentUserEmail || currentUserId);
+    const workspaceId = thread.workspaceId.trim().toLowerCase();
+    const canonicalMessageId = thread.messageId.trim();
+
+    if (!viewerKey || !workspaceId || !canonicalMessageId) {
+      return;
+    }
+
+    const seenKey = `${viewerKey}::${workspaceId}::${canonicalMessageId}`;
+    const nextSeenAt = thread.collaboration.updatedAt;
+    setCollaborationLastSeenByKey((current) =>
+      current[seenKey] && current[seenKey] >= nextSeenAt
+        ? current
+        : {
+            ...current,
+            [seenKey]: nextSeenAt,
+          },
+    );
+  };
 
   const syncMessageFromLiveSnapshot = (messageId: string | null) => {
     if (!messageId) {
@@ -14755,6 +14882,7 @@ function MailboxView({
     options?: { focusComposer?: boolean },
   ) => {
     syncMessageFromLiveSnapshot(messageId);
+    markCollaborationSeen(messageId);
     setSelectionState([messageId], messageId, messageId);
     setActiveCollaborationMessageId(messageId);
     setFocusCollaborationComposer(Boolean(options?.focusComposer));
@@ -15080,6 +15208,7 @@ function MailboxView({
           }
 
           applyCanonicalCollaborationThreadToMessage(messageId, result.thread);
+          markCanonicalCollaborationThreadSeen(result.thread);
           clearCollaborationDraft(messageId);
           setCollaborationReplyDraft("");
           setCollaborationReplyFeedback("");
@@ -15122,6 +15251,7 @@ function MailboxView({
           });
         const applySuccessfulReplyResult = (thread: CollaborationThread) => {
           applyCanonicalCollaborationThreadToMessage(messageId, thread);
+          markCanonicalCollaborationThreadSeen(thread);
           setCollaborationReplyDraft("");
           setCollaborationReplyFeedback("");
           setCollaborationReplyVisibility(hasRealInternalTeamContext ? "internal" : "shared");
@@ -18734,6 +18864,7 @@ function MailboxView({
                       const hasThreadCountIndicator = threadMessageCount > 1;
                       const hasThreadAttachmentIndicator =
                         threadHasAttachmentsByThreadId.get(threadId) ?? false;
+                      const hasUnreadCollaboration = hasUnreadCollaborationUpdate(message);
                       return (
                         <button
                           key={message.id}
@@ -18826,6 +18957,13 @@ function MailboxView({
                                   ) : null}
                                   {message.unread ? (
                                     <span className={unreadAttentionDotClass} />
+                                  ) : null}
+                                  {hasUnreadCollaboration ? (
+                                    <span
+                                      aria-label="Unread collaboration update"
+                                      title="Unread collaboration update"
+                                      className={unreadAttentionDotClass}
+                                    />
                                   ) : null}
                                   {message.flagged ? (
                                     <span
@@ -18922,8 +19060,14 @@ function MailboxView({
                                       event.stopPropagation();
                                       openCollaborationOverlay(message.id);
                                     }}
-                                    className="text-[0.68rem] leading-5 text-[color:rgba(120,111,100,0.72)] transition-colors duration-150 hover:text-[var(--workspace-text)] focus-visible:outline-none"
+                                    className="inline-flex items-center gap-1.5 text-[0.68rem] leading-5 text-[color:rgba(120,111,100,0.72)] transition-colors duration-150 hover:text-[var(--workspace-text)] focus-visible:outline-none"
                                   >
+                                    {hasUnreadCollaboration ? (
+                                      <span
+                                        aria-label="Unread collaboration update"
+                                        className={unreadAttentionDotClass}
+                                      />
+                                    ) : null}
                                     {sharedContextHint}
                                   </button>
                                 </div>
