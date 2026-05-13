@@ -32895,11 +32895,7 @@ export function WorkspaceShell({
         }
 
         const projectedMessages = threads
-          .filter(
-            (thread) =>
-              thread.workspaceId !== currentWorkspaceUserId &&
-              thread.collaboration?.state !== "resolved",
-          )
+          .filter((thread) => thread.collaboration?.state !== "resolved")
           .map(buildSharedCollaborationProjection);
 
         setMailboxStore((currentStore) => {
