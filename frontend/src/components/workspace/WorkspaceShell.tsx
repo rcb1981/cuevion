@@ -4912,6 +4912,18 @@ function buildSharedCollaborationProjection(thread: CollaborationThread): MailMe
   };
 }
 
+function getSharedCollaborationProjectionIdentityKeys(thread: CollaborationThread) {
+  const threadWorkspaceId = thread.workspaceId.trim().toLowerCase();
+
+  if (!threadWorkspaceId) {
+    return [];
+  }
+
+  return getCanonicalMessageIdentityKeys(buildCollaborationThreadIdentitySource(thread)).map(
+    (identityKey) => `${threadWorkspaceId}::${identityKey}`,
+  );
+}
+
 function getAIDecisionCopy(message: MailMessage) {
   const subjectText = message.subject.toLowerCase();
   const snippetText = message.snippet.toLowerCase();
@@ -32915,30 +32927,43 @@ export function WorkspaceShell({
             .flatMap(([, collections]) =>
               canonicalFolderOrder.flatMap((folder) => collections[folder]),
             );
-          const unresolvedThreadsByProjectionKey = new Map<string, CollaborationThread>();
+          const dedupedUnresolvedThreads: CollaborationThread[] = [];
 
           threads
             .filter((thread) => thread.collaboration?.state !== "resolved")
             .forEach((thread) => {
-              const threadWorkspaceId = thread.workspaceId.trim().toLowerCase();
-              const threadMessageId = (thread.messageId || thread.sourceMessage.id).trim();
+              const threadIdentityKeys = getSharedCollaborationProjectionIdentityKeys(thread);
 
-              if (!threadWorkspaceId || !threadMessageId) {
+              if (threadIdentityKeys.length === 0) {
                 return;
               }
 
-              const projectionKey = `${threadWorkspaceId}::${threadMessageId}`;
-              const existingThread = unresolvedThreadsByProjectionKey.get(projectionKey);
+              const existingThreadIndex = dedupedUnresolvedThreads.findIndex(
+                (existingThread) => {
+                  const existingIdentityKeys = new Set(
+                    getSharedCollaborationProjectionIdentityKeys(existingThread),
+                  );
+
+                  return threadIdentityKeys.some((identityKey) =>
+                    existingIdentityKeys.has(identityKey),
+                  );
+                },
+              );
+
+              if (existingThreadIndex === -1) {
+                dedupedUnresolvedThreads.push(thread);
+                return;
+              }
 
               if (
-                !existingThread ||
-                thread.collaboration.updatedAt > existingThread.collaboration.updatedAt
+                thread.collaboration.updatedAt >
+                dedupedUnresolvedThreads[existingThreadIndex].collaboration.updatedAt
               ) {
-                unresolvedThreadsByProjectionKey.set(projectionKey, thread);
+                dedupedUnresolvedThreads[existingThreadIndex] = thread;
               }
             });
 
-          const projectedMessages = Array.from(unresolvedThreadsByProjectionKey.values())
+          const projectedMessages = dedupedUnresolvedThreads
             .filter((thread) => {
               const threadWorkspaceId = thread.workspaceId.trim().toLowerCase();
               const threadMessageIds = new Set(
