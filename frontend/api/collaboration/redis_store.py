@@ -15,6 +15,7 @@ from models import (
 )
 
 MAX_COLLABORATION_THREAD_BATCH_SIZE = 200
+MAX_PARTICIPANT_THREAD_SCAN_KEYS = 5000
 
 
 def _resolve_durable_store_config() -> dict | None:
@@ -158,19 +159,21 @@ def _scan_durable_keys(
     *,
     pattern: str,
     max_keys: int = MAX_COLLABORATION_THREAD_BATCH_SIZE,
+    scan_count: int = 100,
+    max_iterations: int = 20,
 ) -> tuple[list[str], dict | None]:
     cursor = "0"
     keys: list[str] = []
     seen_keys: set[str] = set()
 
-    for _ in range(20):
+    for _ in range(max_iterations):
         payload, error = _perform_rest_request(
             config,
             "GET",
             (
                 f"/scan/{quote(cursor, safe='')}"
                 f"/match/{quote(pattern, safe='')}"
-                "/count/100"
+                f"/count/{scan_count}"
             ),
         )
         if error:
@@ -277,7 +280,13 @@ def get_participant_threads(
         }
 
     pattern = build_thread_key(normalized_workspace_id or "*", "*")
-    thread_keys, error = _scan_durable_keys(config, pattern=pattern)
+    thread_keys, error = _scan_durable_keys(
+        config,
+        pattern=pattern,
+        max_keys=MAX_PARTICIPANT_THREAD_SCAN_KEYS,
+        scan_count=500,
+        max_iterations=40,
+    )
     if error:
         return [], error
 
