@@ -12197,6 +12197,7 @@ function MailboxView({
     return [
       ...strictIdentityKeys,
       `${workspaceId}::shared-source:${normalizedSender}::${normalizedSubject}`,
+      `shared-source:${normalizedSender}::${normalizedSubject}`,
     ];
   };
   const shouldPreferSharedEntry = (
