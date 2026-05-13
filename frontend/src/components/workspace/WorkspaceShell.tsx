@@ -32915,8 +32915,30 @@ export function WorkspaceShell({
             .flatMap(([, collections]) =>
               canonicalFolderOrder.flatMap((folder) => collections[folder]),
             );
-          const projectedMessages = threads
+          const unresolvedThreadsByProjectionKey = new Map<string, CollaborationThread>();
+
+          threads
             .filter((thread) => thread.collaboration?.state !== "resolved")
+            .forEach((thread) => {
+              const threadWorkspaceId = thread.workspaceId.trim().toLowerCase();
+              const threadMessageId = (thread.messageId || thread.sourceMessage.id).trim();
+
+              if (!threadWorkspaceId || !threadMessageId) {
+                return;
+              }
+
+              const projectionKey = `${threadWorkspaceId}::${threadMessageId}`;
+              const existingThread = unresolvedThreadsByProjectionKey.get(projectionKey);
+
+              if (
+                !existingThread ||
+                thread.collaboration.updatedAt > existingThread.collaboration.updatedAt
+              ) {
+                unresolvedThreadsByProjectionKey.set(projectionKey, thread);
+              }
+            });
+
+          const projectedMessages = Array.from(unresolvedThreadsByProjectionKey.values())
             .filter((thread) => {
               const threadWorkspaceId = thread.workspaceId.trim().toLowerCase();
               const threadMessageIds = new Set(
