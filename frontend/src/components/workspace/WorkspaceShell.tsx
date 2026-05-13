@@ -15058,6 +15058,7 @@ function MailboxView({
       : draftCollaborationByMessageId[messageId];
     const expectedUpdatedAt = canonicalCollaboration?.updatedAt;
     let nextParticipantsForCanonicalWrite: MailMessageCollaborationParticipant[] | null = null;
+    let draftCollaborationForCanonicalCreate: CollaborationThread["collaboration"] | null = null;
     const selectedExternalInviteEmails = selectedParticipants
       .filter((participant) => participant.kind === "external")
       .filter(
@@ -15153,22 +15154,11 @@ function MailboxView({
 
       if (mergedParticipants) {
         didApplyInternalParticipants = true;
-        setDraftCollaborationByMessageId((current) => {
-          const currentDraft = current[messageId];
-
-          if (!currentDraft) {
-            return current;
-          }
-
-          return {
-            ...current,
-            [messageId]: {
-              ...currentDraft,
-              updatedAt: nextTimestamp,
-              participants: mergedParticipants,
-            },
-          };
-        });
+        draftCollaborationForCanonicalCreate = {
+          ...draftCollaboration,
+          updatedAt: nextTimestamp,
+          participants: mergedParticipants,
+        };
       }
     }
 
@@ -15179,10 +15169,45 @@ function MailboxView({
       ]);
     }
 
-    if (didApplyInternalParticipants || selectedExternalInviteEmails.length > 0) {
+    if (
+      !draftCollaborationForCanonicalCreate &&
+      (didApplyInternalParticipants || selectedExternalInviteEmails.length > 0)
+    ) {
       setCollaborationParticipantPersonIds([]);
       setCollaborationParticipantSearch("");
       setIsCollaborationParticipantPickerOpen(false);
+    }
+
+    if (draftCollaborationForCanonicalCreate && currentMessage) {
+      const nextDraftCollaboration = draftCollaborationForCanonicalCreate;
+
+      setCollaborationThreadPreparing(messageId, true);
+      void (async () => {
+        try {
+          const result = await createCollaborationThread({
+            workspaceId: currentUserId,
+            mailboxId: mailbox.id,
+            sourceMessage: buildCollaborationSourceMessageSnapshot(currentMessage),
+            collaboration: nextDraftCollaboration,
+            isShared: true,
+          });
+
+          if (!result.ok || !result.thread) {
+            setCollaborationReplyFeedback("Could not prepare collaboration. Try again.");
+            return;
+          }
+
+          applyCanonicalCollaborationThreadToMessage(messageId, result.thread);
+          clearCollaborationDraft(messageId);
+          setCollaborationParticipantPersonIds([]);
+          setCollaborationParticipantSearch("");
+          setIsCollaborationParticipantPickerOpen(false);
+          setCollaborationReplyFeedback("");
+        } finally {
+          setCollaborationThreadPreparing(messageId, false);
+        }
+      })();
+      return;
     }
 
     if (!nextParticipantsForCanonicalWrite) {
