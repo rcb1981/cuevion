@@ -12400,6 +12400,30 @@ function MailboxView({
     : isSharedView
       ? workspaceMessageLocationById
       : currentMailboxMessageLocationById;
+  const dedupeMessagesForRenderedRows = (
+    messages: MailMessage[],
+    messageLocationById: Record<string, { mailboxId: InboxId; folder: MailFolder }>,
+  ) => {
+    const uniqueRowMessages = Array.from(
+      new Map(
+        messages.map((message) => [
+          message.imapUid || message.id,
+          message,
+        ]),
+      ).values(),
+    );
+
+    return dedupeLatestMessagePerThread(
+      uniqueRowMessages.map((message) => ({
+        ...message,
+        threadId: resolveSafeThreadGroupingKey(
+          message,
+          messageLocationById[message.id]?.mailboxId ?? mailbox.id,
+        ),
+        from: message.from ?? message.sender ?? "",
+      })),
+    );
+  };
   const resolveSmartFolderRenderContextForMessage = (message: MailMessage) => {
     if (!activeSmartFolder) {
       return {
@@ -12499,29 +12523,13 @@ function MailboxView({
   //
   // Scoped strictly to the Inbox folder — Sent, Drafts, Archive, etc. are unaffected.
   // Smart-folder and shared-view modes are also excluded.
-  const uniqueMessages = activeSmartFolder
-    ? visibleMessages
-    : Array.from(
-        new Map(
-          visibleMessages.map((m) => [
-            m.imapUid || m.id,
-            m,
-          ]),
-        ).values(),
-      );
-
   const threadDedupedMessages = activeSmartFolder
-    ? uniqueMessages
-    : dedupeLatestMessagePerThread(
-        uniqueMessages.map((m) => ({
-          ...m,
-          threadId: resolveSafeThreadGroupingKey(
-            m,
-            currentMessageLocationById[m.id]?.mailboxId ?? mailbox.id,
-          ),
-          from: m.from ?? m.sender ?? "",
-        })),
-      );
+    ? visibleMessages
+    : dedupeMessagesForRenderedRows(visibleMessages, currentMessageLocationById);
+  const sharedRenderedMessages = dedupeMessagesForRenderedRows(
+    workspaceSharedMessages,
+    workspaceMessageLocationById,
+  );
 
   const threadMessageCountByThreadId = useMemo(() => {
     const counts = new Map<string, number>();
@@ -16562,7 +16570,7 @@ function MailboxView({
           folder,
         );
 
-  const getSharedMessageCount = () => workspaceSharedMessages.length;
+  const getSharedMessageCount = () => sharedRenderedMessages.length;
 
   useEffect(() => {
     if (!trashEmptiedToastMessage) {
