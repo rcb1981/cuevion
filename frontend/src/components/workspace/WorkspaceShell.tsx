@@ -12184,10 +12184,20 @@ function MailboxView({
     const workspaceId =
       message.collaborationWorkspaceId?.trim().toLowerCase() ||
       currentUserId;
-
-    return getCanonicalMessageIdentityKeys(message).map(
+    const strictIdentityKeys = getCanonicalMessageIdentityKeys(message).map(
       (identityKey) => `${workspaceId}::${identityKey}`,
     );
+    const normalizedSender = normalizeSenderLearningKey(message.from || message.sender || "");
+    const normalizedSubject = normalizeThreadSubject(message.subject || "");
+
+    if (!normalizedSender || !normalizedSubject) {
+      return strictIdentityKeys;
+    }
+
+    return [
+      ...strictIdentityKeys,
+      `${workspaceId}::shared-source:${normalizedSender}::${normalizedSubject}`,
+    ];
   };
   const shouldPreferSharedEntry = (
     candidate: { message: MailMessage },
