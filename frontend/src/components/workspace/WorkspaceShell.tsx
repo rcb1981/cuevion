@@ -11262,6 +11262,8 @@ function MailboxView({
     useState(false);
   const [collaborationReplyVisibility, setCollaborationReplyVisibility] =
     useState<MailMessageCollaborationVisibility>("internal");
+  const [hasManualCollaborationReplyVisibility, setHasManualCollaborationReplyVisibility] =
+    useState(false);
   const collaborationReplyInputRef = useRef<HTMLTextAreaElement | null>(null);
   const startCollaborationInviteEmailInputRef = useRef<HTMLInputElement | null>(null);
   const externalCollaborationEmailInputRef = useRef<HTMLInputElement | null>(null);
@@ -13092,6 +13094,26 @@ function MailboxView({
         (participantEmail && participantEmail !== normalizeSenderLearningKey(currentUserEmail))
       );
     });
+  const hasActiveInternalCollaborationParticipant = (
+    participants: MailMessageCollaborationParticipant[],
+  ) =>
+    participants.some((participant) => {
+      if (participant.kind !== "internal" || participant.status !== "active") {
+        return false;
+      }
+
+      const participantId = participant.id ? normalizeSenderLearningKey(participant.id) : "";
+      const participantEmail = participant.email
+        ? normalizeSenderLearningKey(participant.email)
+        : "";
+
+      return (
+        (participantId && participantId !== currentUserId) ||
+        (participantEmail && participantEmail !== normalizeSenderLearningKey(currentUserEmail))
+      );
+    });
+  const activeCollaborationHasActiveInternalParticipant =
+    hasActiveInternalCollaborationParticipant(activeCollaborationParticipants);
   const resolvedCollaborationReplyVisibility = hasRealInternalTeamContext
     ? collaborationReplyVisibility
     : "shared";
@@ -13153,10 +13175,24 @@ function MailboxView({
       : "";
 
   useEffect(() => {
+    if (
+      activeCollaborationHasActiveInternalParticipant &&
+      !hasManualCollaborationReplyVisibility &&
+      collaborationReplyVisibility !== "internal"
+    ) {
+      setCollaborationReplyVisibility("internal");
+      return;
+    }
+
     if (!hasRealInternalTeamContext && collaborationReplyVisibility === "internal") {
       setCollaborationReplyVisibility("shared");
     }
-  }, [collaborationReplyVisibility, hasRealInternalTeamContext]);
+  }, [
+    activeCollaborationHasActiveInternalParticipant,
+    collaborationReplyVisibility,
+    hasManualCollaborationReplyVisibility,
+    hasRealInternalTeamContext,
+  ]);
 
   useEffect(() => {
     if (!directCanonicalCollaborationRefreshMessage) {
@@ -14883,6 +14919,21 @@ function MailboxView({
   ) => {
     syncMessageFromLiveSnapshot(messageId);
     markCollaborationSeen(messageId);
+    const message = getMessageById(messageId);
+    const collaboration =
+      message?.collaboration ?? draftCollaborationByMessageId[messageId];
+    const hasInternalParticipant = collaboration
+      ? hasActiveInternalCollaborationParticipant(
+          getCollaborationParticipants(collaboration as MailMessageCollaboration),
+        )
+      : false;
+
+    setHasManualCollaborationReplyVisibility(false);
+    if (hasInternalParticipant) {
+      setCollaborationReplyVisibility("internal");
+    } else if (!hasRealInternalTeamContext) {
+      setCollaborationReplyVisibility("shared");
+    }
     setSelectionState([messageId], messageId, messageId);
     setActiveCollaborationMessageId(messageId);
     setFocusCollaborationComposer(Boolean(options?.focusComposer));
@@ -14960,6 +15011,7 @@ function MailboxView({
     setCollaborationReplyFeedback("");
     setCollaborationReplySendingMessageId(null);
     setCollaborationReplyVisibility(hasRealInternalTeamContext ? "internal" : "shared");
+    setHasManualCollaborationReplyVisibility(false);
     setCollaborationReplySelection(null);
     setHighlightedCollaborationMessageId(null);
     setPendingEndCollaborationMessageId(null);
@@ -15212,7 +15264,9 @@ function MailboxView({
           clearCollaborationDraft(messageId);
           setCollaborationReplyDraft("");
           setCollaborationReplyFeedback("");
-          setCollaborationReplyVisibility(hasRealInternalTeamContext ? "internal" : "shared");
+          if (!hasManualCollaborationReplyVisibility) {
+            setCollaborationReplyVisibility(hasRealInternalTeamContext ? "internal" : "shared");
+          }
           setCollaborationMentionIndex(0);
           setCollaborationReplySelection(null);
         } finally {
@@ -15254,7 +15308,9 @@ function MailboxView({
           markCanonicalCollaborationThreadSeen(thread);
           setCollaborationReplyDraft("");
           setCollaborationReplyFeedback("");
-          setCollaborationReplyVisibility(hasRealInternalTeamContext ? "internal" : "shared");
+          if (!hasManualCollaborationReplyVisibility) {
+            setCollaborationReplyVisibility(hasRealInternalTeamContext ? "internal" : "shared");
+          }
           setCollaborationMentionIndex(0);
           setCollaborationReplySelection(null);
         };
@@ -15348,6 +15404,9 @@ function MailboxView({
             status: "active" as const,
           };
         });
+    if (selectedInternalParticipants.length > 0 && !hasManualCollaborationReplyVisibility) {
+      setCollaborationReplyVisibility("internal");
+    }
     const mergeSelectedInternalParticipants = (
       existingParticipants: MailMessageCollaborationParticipant[],
     ) => {
@@ -20286,7 +20345,10 @@ function MailboxView({
                           <button
                             key={option.value}
                             type="button"
-                            onClick={() => setCollaborationReplyVisibility(option.value)}
+                            onClick={() => {
+                              setHasManualCollaborationReplyVisibility(true);
+                              setCollaborationReplyVisibility(option.value);
+                            }}
                             className={`inline-flex h-9 items-center justify-center rounded-full border px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color] duration-150 focus-visible:outline-none ${
                               resolvedCollaborationReplyVisibility === option.value
                                 ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)]"
@@ -20299,12 +20361,8 @@ function MailboxView({
                       </div>
                       <div className="pt-0.5 text-[0.78rem] leading-6 text-[color:rgba(120,111,100,0.76)]">
                         {resolvedCollaborationReplyVisibility === "internal"
-                          ? "Only visible inside Cuevion"
-                          : `Visible to: ${
-                              activeCollaborationParticipants
-                                .map((participant) => participant.name || participant.email)
-                                .join(", ") || "all participants"
-                            }`}
+                          ? "Only visible to internal team"
+                          : "Visible to external reviewers"}
                       </div>
                       <div className="relative">
                         <textarea
