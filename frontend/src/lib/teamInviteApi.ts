@@ -77,6 +77,26 @@ type FetchTeamMembersResponse =
       error?: TeamInviteError;
     };
 
+type RemoveTeamMemberRequest = {
+  workspaceId: string;
+  memberEmail: string;
+};
+
+type RemoveTeamMemberResponse =
+  | {
+      ok: true;
+      member: {
+        workspaceId: string;
+        email: string;
+        status: "removed";
+        removedAt?: number;
+      };
+    }
+  | {
+      ok: false;
+      error?: TeamInviteError;
+    };
+
 type MutateTeamInviteRequest = {
   token: string;
   action: {
@@ -193,6 +213,42 @@ export async function fetchTeamMembers(workspaceId: string): Promise<FetchTeamMe
       error: {
         code: "unavailable",
         message: "Could not load team members.",
+      },
+    };
+  }
+}
+
+export async function removeTeamMember(
+  request: RemoveTeamMemberRequest,
+): Promise<RemoveTeamMemberResponse> {
+  try {
+    const url = new URL("/api/team/members", window.location.origin);
+    url.searchParams.set("op", "remove");
+
+    const response = await fetch(`${url.pathname}${url.search}`, {
+      method: "POST",
+      credentials: "include",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(request),
+    });
+    const payload = (await response.json()) as RemoveTeamMemberResponse;
+
+    if (!response.ok || !payload.ok || !payload.member) {
+      return {
+        ok: false,
+        error: payload && "error" in payload ? payload.error : undefined,
+      };
+    }
+
+    return payload;
+  } catch {
+    return {
+      ok: false,
+      error: {
+        code: "unavailable",
+        message: "Could not remove team member.",
       },
     };
   }

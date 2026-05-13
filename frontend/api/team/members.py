@@ -2,14 +2,25 @@ from __future__ import annotations
 
 import json
 import os
+import sys
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler
+from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote, urlsplit
 from urllib.request import Request, urlopen
 
+CURRENT_DIR = Path(__file__).resolve().parent
+API_DIR = CURRENT_DIR.parent
+if str(API_DIR) not in sys.path:
+    sys.path.insert(0, str(API_DIR))
+
+from beta_auth import is_valid_auth_email, normalize_auth_email, parse_beta_session_token, read_beta_session_cookie  # noqa: E402
+
 TEAM_MEMBER_SCHEMA_VERSION = 1
 TEAM_ROLES = {"Limited", "Shared"}
 ACTIVE_TEAM_MEMBER_STATUS = "active"
+REMOVED_TEAM_MEMBER_STATUS = "removed"
 LEGACY_TEAM_ROLE_MAP = {
     "review": "Shared",
     "admin": "Shared",
@@ -51,6 +62,25 @@ def _get_workspace_id(handler: BaseHTTPRequestHandler) -> str:
     return str((_get_query(handler).get("workspaceId") or [""])[0] or "").strip().lower()
 
 
+def _read_json_body(handler: BaseHTTPRequestHandler) -> tuple[dict | None, dict | None]:
+    content_length = int(handler.headers.get("content-length", "0"))
+    raw_body = handler.rfile.read(content_length).decode("utf-8") if content_length > 0 else ""
+
+    try:
+        payload = json.loads(raw_body or "{}")
+    except json.JSONDecodeError:
+        return None, _build_error("invalid_request", "Request body must be valid JSON.")
+
+    if not isinstance(payload, dict):
+        return None, _build_error("invalid_request", "Request body must be a JSON object.")
+
+    return payload, None
+
+
+def _now_ms() -> int:
+    return int(datetime.now(timezone.utc).timestamp() * 1000)
+
+
 def _normalize_team_role(value: object) -> str | None:
     normalized_value = str(value or "").strip().lower()
     return LEGACY_TEAM_ROLE_MAP.get(normalized_value)
@@ -58,6 +88,11 @@ def _normalize_team_role(value: object) -> str | None:
 
 def _normalize_email(value: object) -> str:
     return str(value or "").strip().lower()
+
+
+def _normalize_workspace_owner_key(value: object) -> str:
+    normalized_value = str(value or "").strip().lower()
+    return normalized_value
 
 
 def _normalize_members_index(value: object) -> list[str]:
@@ -151,9 +186,11 @@ def _perform_rest_request(
     config: dict,
     method: str,
     path: str,
+    body: bytes | None = None,
 ) -> tuple[dict | None, dict | None]:
     request = Request(
         f"{config['rest_url']}{path}",
+        data=body,
         headers={
             "Authorization": f"Bearer {config['rest_token']}",
             "Content-Type": "application/json",
@@ -230,6 +267,84 @@ def _read_durable_record(config: dict, store_key: str) -> tuple[dict | None, dic
     return value if isinstance(value, dict) else None, None
 
 
+def _write_durable_record(config: dict, store_key: str, record: object) -> tuple[dict | None, dict | None]:
+    encoded_record = json.dumps(record, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    payload, error = _perform_rest_request(
+        config,
+        "POST",
+        f"/set/{quote(store_key, safe='')}",
+        body=encoded_record,
+    )
+    if error:
+        return None, error
+
+    if not isinstance(payload, dict) or payload.get("result") != "OK":
+        return None, {
+            "code": "team_members_store_unavailable",
+            "message": "Team members store did not confirm the write.",
+        }
+
+    return payload, None
+
+
+def _get_authenticated_user(headers) -> dict | None:
+    session_token = read_beta_session_cookie(headers)
+    return parse_beta_session_token(session_token or "")
+
+
+def _remove_team_member(workspace_id: str, member_email: str) -> tuple[dict | None, dict | None]:
+    config = _resolve_durable_store_config()
+    if not config:
+        return None, {
+            "code": "team_members_store_unavailable",
+            "message": "Team members store is not configured.",
+        }
+
+    normalized_workspace_id = workspace_id.strip().lower()
+    normalized_member_email = _normalize_email(member_email)
+    member_key = _build_member_key(normalized_workspace_id, normalized_member_email)
+    index_key = _build_members_index_key(normalized_workspace_id)
+    removed_at = _now_ms()
+
+    record, record_error = _read_durable_record(config, member_key)
+    if record_error:
+        return None, record_error
+
+    if isinstance(record, dict):
+        removed_record = {
+            **record,
+            "workspaceId": normalized_workspace_id,
+            "email": normalized_member_email,
+            "status": REMOVED_TEAM_MEMBER_STATUS,
+            "updatedAt": removed_at,
+            "removedAt": removed_at,
+            "revokedAt": removed_at,
+        }
+        _, write_error = _write_durable_record(config, member_key, removed_record)
+        if write_error:
+            return None, write_error
+
+    index_value, index_error = _read_durable_value(config, index_key)
+    if index_error:
+        return None, index_error
+
+    next_index = [
+        email
+        for email in _normalize_members_index(index_value)
+        if email != normalized_member_email
+    ]
+    _, index_write_error = _write_durable_record(config, index_key, next_index)
+    if index_write_error:
+        return None, index_write_error
+
+    return {
+        "workspaceId": normalized_workspace_id,
+        "email": normalized_member_email,
+        "status": REMOVED_TEAM_MEMBER_STATUS,
+        "removedAt": removed_at,
+    }, None
+
+
 def _list_team_members(workspace_id: str) -> tuple[list[dict] | None, dict | None]:
     config = _resolve_durable_store_config()
     if not config:
@@ -269,6 +384,39 @@ def _handle_list(handler: BaseHTTPRequestHandler):
     _send_json(handler, 200, {"ok": True, "members": members or []})
 
 
+def _handle_remove(handler: BaseHTTPRequestHandler):
+    payload, read_error = _read_json_body(handler)
+    if read_error:
+        _send_json(handler, 400, read_error)
+        return
+
+    workspace_id = str((payload or {}).get("workspaceId") or "").strip().lower()
+    member_email = _normalize_email((payload or {}).get("memberEmail"))
+    if not workspace_id or not is_valid_auth_email(member_email):
+        _send_json(
+            handler,
+            400,
+            _build_error("invalid_request", "workspaceId and memberEmail are required."),
+        )
+        return
+
+    authenticated_user = _get_authenticated_user(handler.headers)
+    authenticated_email = normalize_auth_email(str((authenticated_user or {}).get("email") or ""))
+    if (
+        not authenticated_email
+        or _normalize_workspace_owner_key(authenticated_email) != workspace_id
+    ):
+        _send_json(handler, 403, _build_error("forbidden", "Only the workspace owner can remove Team members."))
+        return
+
+    member, error = _remove_team_member(workspace_id, member_email)
+    if error:
+        _send_json(handler, 503, _build_error(error["code"], error["message"]))
+        return
+
+    _send_json(handler, 200, {"ok": True, "member": member})
+
+
 class handler(BaseHTTPRequestHandler):
     def do_GET(self):
         operation = _get_operation(self)
@@ -280,4 +428,10 @@ class handler(BaseHTTPRequestHandler):
         _send_json(self, 404, _build_error("not_found", "Unsupported team members operation."))
 
     def do_POST(self):
-        _send_json(self, 405, _build_error("method_not_allowed", "Use GET for team members."))
+        operation = _get_operation(self)
+
+        if operation in {"remove", "revoke"}:
+            _handle_remove(self)
+            return
+
+        _send_json(self, 404, _build_error("not_found", "Unsupported team members operation."))

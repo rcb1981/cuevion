@@ -83,6 +83,7 @@ import {
   fetchTeamInvite,
   issueTeamInvite,
   mutateTeamInvite,
+  removeTeamMember,
   type TeamMemberRecord,
   type TeamInvite,
   type TeamInviteStatus,
@@ -21735,25 +21736,37 @@ function WorkbenchView({
                     }
 
                     if (activeTeamConfirmation === "revoke" && activeTeamMemberIndex !== null) {
-                      if (activeTeamMember?.accessLevel === "Limited" && activeTeamMember.teamInviteToken) {
-                        setIsSendingTeamInvite(true);
-                        try {
-                          const revokeResult = await mutateTeamInvite({
+                      const memberEmail = activeTeamMember?.email.trim().toLowerCase() ?? "";
+
+                      if (!memberEmail) {
+                        setTeamFeedbackMessage("Could not revoke access");
+                        return;
+                      }
+
+                      setIsSendingTeamInvite(true);
+                      try {
+                        const removeResult = await removeTeamMember({
+                          workspaceId: workspacePersistenceKey,
+                          memberEmail,
+                        });
+
+                        if (!removeResult.ok) {
+                          setTeamFeedbackMessage(
+                            removeResult.error?.message ?? "Could not revoke access",
+                          );
+                          return;
+                        }
+
+                        if (activeTeamMember?.teamInviteToken) {
+                          await mutateTeamInvite({
                             token: activeTeamMember.teamInviteToken,
                             action: {
                               type: "cancel",
                             },
                           });
-
-                          if (!revokeResult.ok) {
-                            setTeamFeedbackMessage(
-                              revokeResult.error?.message ?? "Could not revoke access",
-                            );
-                            return;
-                          }
-                        } finally {
-                          setIsSendingTeamInvite(false);
                         }
+                      } finally {
+                        setIsSendingTeamInvite(false);
                       }
 
                       setTeamMembers((current) =>
@@ -21763,11 +21776,13 @@ function WorkbenchView({
                                 ...member,
                                 status: "Access removed",
                                 teamInviteStatus:
-                                  member.accessLevel === "Limited" ? "cancelled" : member.teamInviteStatus,
+                                  member.teamInviteToken ? "cancelled" : member.teamInviteStatus,
+                                teamInviteToken: undefined,
                               }
                             : member,
                         ),
                       );
+                      setBackendTeamMembersRefreshKey((current) => current + 1);
                     }
 
                     if (
