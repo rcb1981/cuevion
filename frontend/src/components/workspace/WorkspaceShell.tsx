@@ -32894,11 +32894,34 @@ export function WorkspaceShell({
           return;
         }
 
-        const projectedMessages = threads
-          .filter((thread) => thread.collaboration?.state !== "resolved")
-          .map(buildSharedCollaborationProjection);
-
         setMailboxStore((currentStore) => {
+          const realMailboxMessages = Object.entries(currentStore)
+            .filter(([mailboxId]) => mailboxId !== sharedCollaborationMailboxId)
+            .flatMap(([, collections]) =>
+              canonicalFolderOrder.flatMap((folder) => collections[folder]),
+            );
+          const projectedMessages = threads
+            .filter((thread) => thread.collaboration?.state !== "resolved")
+            .filter((thread) => {
+              const threadWorkspaceId = thread.workspaceId.trim().toLowerCase();
+              const threadMessageIds = new Set(
+                [thread.messageId, thread.sourceMessage.id]
+                  .map((messageId) => messageId.trim())
+                  .filter(Boolean),
+              );
+
+              return !realMailboxMessages.some((message) => {
+                if (!threadMessageIds.has(message.id)) {
+                  return false;
+                }
+
+                const messageWorkspaceId =
+                  message.collaborationWorkspaceId?.trim().toLowerCase() ||
+                  currentWorkspaceUserId;
+                return messageWorkspaceId === threadWorkspaceId;
+              });
+            })
+            .map(buildSharedCollaborationProjection);
           const nextSharedCollections = createEmptyMailboxCollections();
           nextSharedCollections.Inbox = projectedMessages;
 
