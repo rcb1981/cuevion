@@ -777,6 +777,7 @@ type MailMessage = {
   isShared?: boolean;
   sharedContext?: MailMessageSharedContext;
   collaboration?: MailMessageCollaboration;
+  collaborationMessageId?: string;
   collaborationWorkspaceId?: string;
   collaborationMailboxId?: string;
   owner?: MailMessageOwner;
@@ -4903,6 +4904,7 @@ function buildSharedCollaborationProjection(thread: CollaborationThread): MailMe
     bodyHtml: thread.sourceMessage.bodyHtml,
     isShared: thread.isShared,
     collaboration: thread.collaboration as MailMessageCollaboration,
+    collaborationMessageId: thread.messageId,
     collaborationWorkspaceId: thread.workspaceId,
     collaborationMailboxId: thread.mailboxId,
     priorityScore: "medium",
@@ -14436,6 +14438,35 @@ function MailboxView({
     const message = getMessageById(messageId);
     return message?.collaborationWorkspaceId?.trim().toLowerCase() || currentUserId;
   };
+  const getCollaborationMessageIdForMessage = (messageId: string) => {
+    const message = getMessageById(messageId);
+    const canonicalMessageId = message?.collaborationMessageId?.trim();
+
+    if (canonicalMessageId) {
+      return canonicalMessageId;
+    }
+
+    if (!message) {
+      return messageId;
+    }
+
+    const messageIdentityKeys = new Set(getSharedEntryIdentityKeys(message));
+    const matchingCanonicalProjection = Object.values(mailboxStore)
+      .flatMap((collections) =>
+        canonicalFolderOrder.flatMap((folder) => collections[folder]),
+      )
+      .find((candidate) => {
+        if (!candidate.collaborationMessageId?.trim()) {
+          return false;
+        }
+
+        return getSharedEntryIdentityKeys(candidate).some((identityKey) =>
+          messageIdentityKeys.has(identityKey),
+        );
+      });
+
+    return matchingCanonicalProjection?.collaborationMessageId?.trim() || messageId;
+  };
 
   const syncMessageFromLiveSnapshot = (messageId: string | null) => {
     if (!messageId) {
@@ -14526,6 +14557,7 @@ function MailboxView({
       ...message,
       collaboration: thread.collaboration as MailMessageCollaboration,
       isShared: thread.isShared,
+      collaborationMessageId: thread.messageId,
       collaborationWorkspaceId: thread.workspaceId,
       collaborationMailboxId: thread.mailboxId,
     }));
@@ -14534,13 +14566,14 @@ function MailboxView({
   const refreshCanonicalCollaborationThreadForMessage = async (
     message: MailMessage,
   ) => {
+    const canonicalMessageId = getCollaborationMessageIdForMessage(message.id);
     const threadsByMessageId = await fetchCollaborationThreadsGetMany({
       workspaceId: message.collaborationWorkspaceId ?? currentUserId,
       mailboxId: message.collaborationMailboxId ?? mailbox.id,
-      messageIds: [message.id],
+      messageIds: [canonicalMessageId],
       messages: [
         {
-          id: message.id,
+          id: canonicalMessageId,
           imapUid: message.imapUid ?? undefined,
           subject: message.subject,
           from: message.from,
@@ -14548,7 +14581,8 @@ function MailboxView({
         },
       ],
     });
-    const thread = threadsByMessageId[message.id] ?? Object.values(threadsByMessageId)[0];
+    const thread =
+      threadsByMessageId[canonicalMessageId] ?? Object.values(threadsByMessageId)[0];
 
     if (!thread?.collaboration) {
       return;
@@ -14890,7 +14924,7 @@ function MailboxView({
     void (async () => {
       const result = await mutateCollaborationThread({
         workspaceId: getCollaborationWorkspaceIdForMessage(messageId),
-        messageId,
+        messageId: getCollaborationMessageIdForMessage(messageId),
         expectedUpdatedAt,
         action: {
           type: "resolve",
@@ -14917,7 +14951,7 @@ function MailboxView({
     void (async () => {
       const result = await mutateCollaborationThread({
         workspaceId: getCollaborationWorkspaceIdForMessage(messageId),
-        messageId,
+        messageId: getCollaborationMessageIdForMessage(messageId),
         expectedUpdatedAt,
         action: {
           type: "reopen",
@@ -15075,7 +15109,7 @@ function MailboxView({
         const sendCanonicalReplyWithExpectedUpdatedAt = (nextExpectedUpdatedAt?: number) =>
           mutateCollaborationThread({
             workspaceId: getCollaborationWorkspaceIdForMessage(messageId),
-            messageId,
+            messageId: getCollaborationMessageIdForMessage(messageId),
             expectedUpdatedAt: nextExpectedUpdatedAt,
             action: {
               type: "reply",
@@ -15317,7 +15351,7 @@ function MailboxView({
     void (async () => {
       const result = await mutateCollaborationThread({
         workspaceId: getCollaborationWorkspaceIdForMessage(messageId),
-        messageId,
+        messageId: getCollaborationMessageIdForMessage(messageId),
         expectedUpdatedAt,
         action: {
           type: "participants_set",
@@ -15376,7 +15410,7 @@ function MailboxView({
     void (async () => {
       const result = await mutateCollaborationThread({
         workspaceId: getCollaborationWorkspaceIdForMessage(messageId),
-        messageId,
+        messageId: getCollaborationMessageIdForMessage(messageId),
         expectedUpdatedAt,
         action: {
           type: "participants_set",
