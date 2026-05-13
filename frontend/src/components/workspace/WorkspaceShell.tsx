@@ -12180,22 +12180,90 @@ function MailboxView({
     Trash: visibleMailboxCollections.Trash,
   };
   const mailboxThreadMessages = canonicalFolderOrder.flatMap((folder) => messageCollections[folder]);
-  const workspaceSharedEntries = Object.entries(mailboxStore).flatMap(
-    ([entryMailboxId, collections]) =>
-      canonicalFolderOrder.flatMap((folder) =>
-        collections[folder].flatMap((message) =>
-          isMessageInSharedView(message)
-            ? [
-                {
-                  mailboxId: entryMailboxId as InboxId,
-                  folder,
-                  message,
-                },
-              ]
-            : [],
+  const getSharedEntryIdentityKeys = (message: MailMessage) => {
+    const workspaceId =
+      message.collaborationWorkspaceId?.trim().toLowerCase() ||
+      currentUserId;
+
+    return getCanonicalMessageIdentityKeys(message).map(
+      (identityKey) => `${workspaceId}::${identityKey}`,
+    );
+  };
+  const shouldPreferSharedEntry = (
+    candidate: { message: MailMessage },
+    existing: { message: MailMessage },
+  ) => {
+    const candidateHasActiveCollaboration = Boolean(
+      candidate.message.collaboration &&
+        candidate.message.collaboration.state !== "resolved",
+    );
+    const existingHasActiveCollaboration = Boolean(
+      existing.message.collaboration &&
+        existing.message.collaboration.state !== "resolved",
+    );
+
+    if (candidateHasActiveCollaboration !== existingHasActiveCollaboration) {
+      return candidateHasActiveCollaboration;
+    }
+
+    const candidateUpdatedAt = candidate.message.collaboration?.updatedAt ?? 0;
+    const existingUpdatedAt = existing.message.collaboration?.updatedAt ?? 0;
+
+    if (candidateUpdatedAt !== existingUpdatedAt) {
+      return candidateUpdatedAt > existingUpdatedAt;
+    }
+
+    const candidateTimestamp = Date.parse(candidate.message.timestamp || candidate.message.time);
+    const existingTimestamp = Date.parse(existing.message.timestamp || existing.message.time);
+
+    return (
+      Number.isFinite(candidateTimestamp) &&
+      (!Number.isFinite(existingTimestamp) || candidateTimestamp > existingTimestamp)
+    );
+  };
+  const workspaceSharedEntries = (() => {
+    const sharedEntries = Object.entries(mailboxStore).flatMap(
+      ([entryMailboxId, collections]) =>
+        canonicalFolderOrder.flatMap((folder) =>
+          collections[folder].flatMap((message) =>
+            isMessageInSharedView(message)
+              ? [
+                  {
+                    mailboxId: entryMailboxId as InboxId,
+                    folder,
+                    message,
+                  },
+                ]
+              : [],
+          ),
         ),
-      ),
-  );
+    );
+    const dedupedEntries: typeof sharedEntries = [];
+
+    sharedEntries.forEach((entry) => {
+      const entryIdentityKeys = getSharedEntryIdentityKeys(entry.message);
+      const existingEntryIndex = dedupedEntries.findIndex((existingEntry) => {
+        const existingIdentityKeys = new Set(
+          getSharedEntryIdentityKeys(existingEntry.message),
+        );
+
+        return entryIdentityKeys.some((identityKey) =>
+          existingIdentityKeys.has(identityKey),
+        );
+      });
+
+      if (existingEntryIndex === -1) {
+        dedupedEntries.push(entry);
+        return;
+      }
+
+      if (shouldPreferSharedEntry(entry, dedupedEntries[existingEntryIndex])) {
+        dedupedEntries[existingEntryIndex] = entry;
+      }
+    });
+
+    return dedupedEntries;
+  })();
   const workspaceSharedMessages = workspaceSharedEntries.map((entry) => entry.message);
   const workspaceMessageLocationById = workspaceSharedEntries.reduce<
     Record<string, { mailboxId: InboxId; folder: MailFolder }>
