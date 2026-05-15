@@ -971,6 +971,56 @@ function buildCollaborationLastSeenStorageKey(userEmail: string) {
   return `${CUEVION_COLLABORATION_LAST_SEEN_STORAGE_KEY}:${normalizeSenderLearningKey(userEmail)}`;
 }
 
+function buildCollaborationLastSeenKey(
+  message: MailMessage,
+  viewerKey: string,
+  fallbackWorkspaceId: string,
+  canonicalMessageIdOverride?: string,
+) {
+  if (!message.collaboration) {
+    return null;
+  }
+
+  const workspaceId =
+    message.collaborationWorkspaceId?.trim().toLowerCase() ||
+    fallbackWorkspaceId.trim().toLowerCase();
+  const canonicalMessageId =
+    canonicalMessageIdOverride?.trim() ||
+    message.collaborationMessageId?.trim() ||
+    message.id.trim();
+
+  if (!viewerKey || !workspaceId || !canonicalMessageId) {
+    return null;
+  }
+
+  return `${viewerKey}::${workspaceId}::${canonicalMessageId}`;
+}
+
+function hasUnreadCollaborationUpdateForViewer(
+  message: MailMessage,
+  collaborationLastSeenByKey: Record<string, number>,
+  viewerKey: string,
+  fallbackWorkspaceId: string,
+  canonicalMessageIdOverride?: string,
+) {
+  if (!message.collaboration || message.collaboration.state === "resolved") {
+    return false;
+  }
+
+  const seenKey = buildCollaborationLastSeenKey(
+    message,
+    viewerKey,
+    fallbackWorkspaceId,
+    canonicalMessageIdOverride,
+  );
+
+  if (!seenKey) {
+    return false;
+  }
+
+  return message.collaboration.updatedAt > (collaborationLastSeenByKey[seenKey] ?? 0);
+}
+
 function buildSentMessagesStorageKey(
   workspaceUserId: string,
   orderedMailboxKey: string,
@@ -10044,7 +10094,9 @@ function buildVisibleNotificationItems({
   mailboxStore,
   orderedMailboxes,
   authenticatedUser,
+  collaborationLastSeenByKey,
   currentUserId,
+  currentUserEmail,
   currentUserName,
   teamActivityEnabled,
   onOpenNotificationNavigation,
@@ -10052,7 +10104,9 @@ function buildVisibleNotificationItems({
   mailboxStore: MailboxStore;
   orderedMailboxes: OrderedMailbox[];
   authenticatedUser?: AuthenticatedCuevionUser | null;
+  collaborationLastSeenByKey: Record<string, number>;
   currentUserId: string;
+  currentUserEmail: string;
   currentUserName: string;
   teamActivityEnabled: boolean;
   onOpenNotificationNavigation: (
@@ -10064,13 +10118,56 @@ function buildVisibleNotificationItems({
   }
 
   const viewerType = authenticatedUser?.userType === "guest" ? "external" : "workspace";
+  const viewerKey = normalizeSenderLearningKey(currentUserEmail || currentUserId);
   const seenItemIds = new Set<string>();
-
-  return orderedMailboxes
-    .flatMap((mailbox) =>
+  const sharedNavigationMailboxId = orderedMailboxes[0]?.id ?? null;
+  const sharedCollaborationMessages =
+    sharedNavigationMailboxId === null
+      ? []
+      : mailboxStore[sharedCollaborationMailboxId]?.Inbox ?? [];
+  const messageSources = [
+    ...orderedMailboxes.flatMap((mailbox) =>
       (["Inbox", "Filtered"] as const).flatMap((folder) =>
-        (mailboxStore[mailbox.id]?.[folder] ?? []).flatMap((message) => {
+        (mailboxStore[mailbox.id]?.[folder] ?? []).map((message) => ({
+          message,
+          mailboxId: mailbox.id,
+          navigationMailboxId: mailbox.id,
+          sourceMailboxId: undefined as InboxId | undefined,
+          sharedProjectionOnly: false,
+        })),
+      ),
+    ),
+    ...sharedCollaborationMessages.map((message) => ({
+      message,
+      mailboxId: sharedCollaborationMailboxId,
+      navigationMailboxId: sharedNavigationMailboxId as InboxId,
+      sourceMailboxId: sharedCollaborationMailboxId,
+      sharedProjectionOnly: true,
+    })),
+  ];
+
+  return messageSources
+    .flatMap(
+      ({
+        message,
+        mailboxId,
+        navigationMailboxId,
+        sourceMailboxId,
+        sharedProjectionOnly,
+      }) => {
           if (!message.collaboration) {
+            return [];
+          }
+
+          if (
+            sharedProjectionOnly &&
+            !hasUnreadCollaborationUpdateForViewer(
+              message,
+              collaborationLastSeenByKey,
+              viewerKey,
+              currentUserId,
+            )
+          ) {
             return [];
           }
 
@@ -10078,13 +10175,31 @@ function buildVisibleNotificationItems({
           const items: VisibleNotificationItem[] = [];
           const isOwnCollaborationStart =
             message.collaboration.requestedBy === currentUserName;
+          const collaborationSeenKey = buildCollaborationLastSeenKey(
+            message,
+            viewerKey,
+            currentUserId,
+          );
+          const collaborationSeenAt = collaborationSeenKey
+            ? collaborationLastSeenByKey[collaborationSeenKey] ?? 0
+            : 0;
+          const messageNotificationKey =
+            collaborationSeenKey ?? message.id;
+          const openRequestBase = {
+            mailboxId: navigationMailboxId,
+            messageId: message.id,
+            sourceMailboxId,
+          };
 
-          if (!isOwnCollaborationStart) {
+          if (
+            !isOwnCollaborationStart &&
+            (!sharedProjectionOnly || message.collaboration.createdAt > collaborationSeenAt)
+          ) {
             items.push({
-              id: `notification:created:${message.id}:${message.collaboration.createdAt}`,
+              id: `notification:created:${messageNotificationKey}:${message.collaboration.createdAt}`,
               sourceIds: [`notification:created:${message.id}:${message.collaboration.createdAt}`],
               kind: "collaboration",
-              mailboxId: mailbox.id,
+              mailboxId,
               messageId: message.id,
               actorName: message.collaboration.requestedBy,
               title: `${message.collaboration.requestedBy} started a collaboration`,
@@ -10093,9 +10208,8 @@ function buildVisibleNotificationItems({
               sortTimestamp: message.collaboration.createdAt,
               action: () =>
                 onOpenNotificationNavigation({
+                  ...openRequestBase,
                   type: "reply",
-                  mailboxId: mailbox.id,
-                  messageId: message.id,
                 }),
             });
           }
@@ -10103,14 +10217,14 @@ function buildVisibleNotificationItems({
           if (
             message.collaboration.resolvedAt &&
             message.collaboration.resolvedByUserName &&
-            message.collaboration.resolvedByUserId !== currentUserId &&
+            message.collaboration.resolvedByUserId !== viewerKey &&
             message.collaboration.resolvedByUserName !== currentUserName
           ) {
             items.push({
-              id: `notification:resolved:${message.id}:${message.collaboration.resolvedAt}`,
+              id: `notification:resolved:${messageNotificationKey}:${message.collaboration.resolvedAt}`,
               sourceIds: [`notification:resolved:${message.id}:${message.collaboration.resolvedAt}`],
               kind: "collaboration",
-              mailboxId: mailbox.id,
+              mailboxId,
               messageId: message.id,
               actorName: message.collaboration.resolvedByUserName,
               title: `${message.collaboration.resolvedByUserName} marked this as done`,
@@ -10119,31 +10233,31 @@ function buildVisibleNotificationItems({
               sortTimestamp: message.collaboration.resolvedAt,
               action: () =>
                 onOpenNotificationNavigation({
+                  ...openRequestBase,
                   type: "reply",
-                  mailboxId: mailbox.id,
-                  messageId: message.id,
                 }),
             });
           }
 
           message.collaboration.messages
             .filter((entry) => canViewerSeeCollaborationMessage(entry, viewerType))
-            .filter((entry) => entry.authorId !== currentUserId && entry.authorName !== currentUserName)
+            .filter((entry) => entry.authorId !== viewerKey && entry.authorName !== currentUserName)
             .filter((entry) => entry.timestamp !== message.collaboration?.createdAt)
+            .filter((entry) => !sharedProjectionOnly || entry.timestamp > collaborationSeenAt)
             .forEach((entry) => {
               const mentionsCurrentUser = (entry.mentions ?? []).filter(
                 (mention) =>
                   mention.notify &&
-                  (mention.id === currentUserId ||
-                    normalizeSenderLearningKey(mention.email) === currentUserId),
+                  (mention.id === viewerKey ||
+                    normalizeSenderLearningKey(mention.email) === viewerKey),
               );
 
               if (mentionsCurrentUser.length > 0) {
                 items.push({
-                  id: `notification:mention:${message.id}:${entry.id}:${currentUserId}`,
-                  sourceIds: [`notification:mention:${message.id}:${entry.id}:${currentUserId}`],
+                  id: `notification:mention:${messageNotificationKey}:${entry.id}:${viewerKey}`,
+                  sourceIds: [`notification:mention:${message.id}:${entry.id}:${viewerKey}`],
                   kind: "mention",
-                  mailboxId: mailbox.id,
+                  mailboxId,
                   messageId: message.id,
                   collaborationMessageId: entry.id,
                   actorName: entry.authorName,
@@ -10153,9 +10267,8 @@ function buildVisibleNotificationItems({
                   sortTimestamp: entry.timestamp,
                   action: () =>
                     onOpenNotificationNavigation({
+                      ...openRequestBase,
                       type: "mention",
-                      mailboxId: mailbox.id,
-                      messageId: message.id,
                       collaborationMessageId: entry.id,
                     }),
                 });
@@ -10163,10 +10276,10 @@ function buildVisibleNotificationItems({
               }
 
               items.push({
-                id: `notification:reply:${message.id}:${entry.id}`,
+                id: `notification:reply:${messageNotificationKey}:${entry.id}`,
                 sourceIds: [`notification:reply:${message.id}:${entry.id}`],
                 kind: "reply",
-                mailboxId: mailbox.id,
+                mailboxId,
                 messageId: message.id,
                 collaborationMessageId: entry.id,
                 actorName: entry.authorName,
@@ -10179,17 +10292,15 @@ function buildVisibleNotificationItems({
                 sortTimestamp: entry.timestamp,
                 action: () =>
                   onOpenNotificationNavigation({
+                    ...openRequestBase,
                     type: "reply",
-                    mailboxId: mailbox.id,
-                    messageId: message.id,
                     collaborationMessageId: entry.id,
                   }),
               });
             });
 
           return items;
-        }),
-      ),
+      },
     )
     .sort((firstItem, secondItem) => secondItem.sortTimestamp - firstItem.sortTimestamp)
     .filter((item) => {
@@ -10322,12 +10433,18 @@ function buildVisibleActivityItems({
   mailboxStore,
   orderedMailboxes,
   authenticatedUser,
+  collaborationLastSeenByKey,
+  currentUserId,
+  currentUserEmail,
   teamActivityEnabled,
   onOpenActivityNavigation,
 }: {
   mailboxStore: MailboxStore;
   orderedMailboxes: OrderedMailbox[];
   authenticatedUser?: AuthenticatedCuevionUser | null;
+  collaborationLastSeenByKey: Record<string, number>;
+  currentUserId: string;
+  currentUserEmail: string;
   teamActivityEnabled: boolean;
   onOpenActivityNavigation: (
     request: Omit<NotificationNavigationRequest, "requestKey">,
@@ -10338,18 +10455,70 @@ function buildVisibleActivityItems({
   }
 
   const viewerType = authenticatedUser?.userType === "guest" ? "external" : "workspace";
+  const viewerKey = normalizeSenderLearningKey(currentUserEmail || currentUserId);
   const seenItemIds = new Set<string>();
-  const items = orderedMailboxes.flatMap((mailbox) =>
-    canonicalFolderOrder.flatMap((folder) =>
-      (mailboxStore[mailbox.id]?.[folder] ?? []).flatMap((message) => {
+  const sharedNavigationMailboxId = orderedMailboxes[0]?.id ?? null;
+  const sharedCollaborationMessages =
+    sharedNavigationMailboxId === null
+      ? []
+      : mailboxStore[sharedCollaborationMailboxId]?.Inbox ?? [];
+  const messageSources = [
+    ...orderedMailboxes.flatMap((mailbox) =>
+      canonicalFolderOrder.flatMap((folder) =>
+        (mailboxStore[mailbox.id]?.[folder] ?? []).map((message) => ({
+          message,
+          navigationMailboxId: mailbox.id,
+          sourceMailboxId: undefined as InboxId | undefined,
+          sharedProjectionOnly: false,
+        })),
+      ),
+    ),
+    ...sharedCollaborationMessages.map((message) => ({
+      message,
+      navigationMailboxId: sharedNavigationMailboxId as InboxId,
+      sourceMailboxId: sharedCollaborationMailboxId,
+      sharedProjectionOnly: true,
+    })),
+  ];
+  const items = messageSources.flatMap(
+    ({ message, navigationMailboxId, sourceMailboxId, sharedProjectionOnly }) => {
         if (!message.collaboration) {
           return [];
         }
 
+        if (
+          sharedProjectionOnly &&
+          !hasUnreadCollaborationUpdateForViewer(
+            message,
+            collaborationLastSeenByKey,
+            viewerKey,
+            currentUserId,
+          )
+        ) {
+          return [];
+        }
+
         const subjectDetail = message.subject;
-        const nextItems: VisibleActivityItem[] = [
-          {
-            id: `created:${message.id}:${message.collaboration.createdAt}`,
+        const collaborationSeenKey = buildCollaborationLastSeenKey(
+          message,
+          viewerKey,
+          currentUserId,
+        );
+        const collaborationSeenAt = collaborationSeenKey
+          ? collaborationLastSeenByKey[collaborationSeenKey] ?? 0
+          : 0;
+        const messageActivityKey =
+          collaborationSeenKey ?? message.id;
+        const openRequestBase = {
+          mailboxId: navigationMailboxId,
+          messageId: message.id,
+          sourceMailboxId,
+        };
+        const nextItems: VisibleActivityItem[] = [];
+
+        if (!sharedProjectionOnly || message.collaboration.createdAt > collaborationSeenAt) {
+          nextItems.push({
+            id: `created:${messageActivityKey}:${message.collaboration.createdAt}`,
             type: "COLLABORATION",
             title: `${message.collaboration.requestedBy} started the collaboration`,
             detail: subjectDetail,
@@ -10357,19 +10526,19 @@ function buildVisibleActivityItems({
             sortTimestamp: message.collaboration.createdAt,
             action: () =>
               onOpenActivityNavigation({
+                ...openRequestBase,
                 type: "reply",
-                mailboxId: mailbox.id,
-                messageId: message.id,
               }),
-          },
-        ];
+          });
+        }
 
         if (
           message.collaboration.resolvedAt &&
-          message.collaboration.resolvedByUserName
+          message.collaboration.resolvedByUserName &&
+          (!sharedProjectionOnly || message.collaboration.resolvedAt > collaborationSeenAt)
         ) {
           nextItems.push({
-            id: `resolved:${message.id}:${message.collaboration.resolvedAt}`,
+            id: `resolved:${messageActivityKey}:${message.collaboration.resolvedAt}`,
             type: "COLLABORATION",
             title: `${message.collaboration.resolvedByUserName} marked this as done`,
             detail: subjectDetail,
@@ -10377,18 +10546,18 @@ function buildVisibleActivityItems({
             sortTimestamp: message.collaboration.resolvedAt,
             action: () =>
               onOpenActivityNavigation({
+                ...openRequestBase,
                 type: "reply",
-                mailboxId: mailbox.id,
-                messageId: message.id,
               }),
           });
         }
 
         message.collaboration.messages
           .filter((entry) => canViewerSeeCollaborationMessage(entry, viewerType))
+          .filter((entry) => !sharedProjectionOnly || entry.timestamp > collaborationSeenAt)
           .forEach((entry) => {
             nextItems.push({
-              id: `reply:${message.id}:${entry.id}`,
+              id: `reply:${messageActivityKey}:${entry.id}`,
               type: "COLLABORATION",
               title:
                 getCollaborationMessageVisibility(entry) === "internal"
@@ -10399,16 +10568,15 @@ function buildVisibleActivityItems({
               sortTimestamp: entry.timestamp,
               action: () =>
                 onOpenActivityNavigation({
+                  ...openRequestBase,
                   type: "reply",
-                  mailboxId: mailbox.id,
-                  messageId: message.id,
                   collaborationMessageId: entry.id,
                 }),
             });
 
             entry.mentions?.forEach((mention) => {
               nextItems.push({
-                id: `mention:${message.id}:${entry.id}:${mention.id}`,
+                id: `mention:${messageActivityKey}:${entry.id}:${mention.id}`,
                 type: "COLLABORATION",
                 title: `${entry.authorName} mentioned ${mention.name}`,
                 detail: subjectDetail,
@@ -10416,9 +10584,8 @@ function buildVisibleActivityItems({
                 sortTimestamp: entry.timestamp,
                 action: () =>
                   onOpenActivityNavigation({
+                    ...openRequestBase,
                     type: "mention",
-                    mailboxId: mailbox.id,
-                    messageId: message.id,
                     collaborationMessageId: entry.id,
                   }),
               });
@@ -10426,8 +10593,7 @@ function buildVisibleActivityItems({
           });
 
         return nextItems;
-      }),
-    ),
+    },
   )
     .sort((firstItem, secondItem) => secondItem.sortTimestamp - firstItem.sortTimestamp)
     .filter((item) => {
@@ -10902,6 +11068,7 @@ function MailboxView({
   currentUserId,
   currentUserName,
   currentUserEmail,
+  onCollaborationLastSeenChange,
   workspaceCollaborationPeople,
   inviteOnlyCollaborationPeople,
   memberOfEntries,
@@ -10970,6 +11137,7 @@ function MailboxView({
   currentUserId: string;
   currentUserName: string;
   currentUserEmail: string;
+  onCollaborationLastSeenChange?: Dispatch<SetStateAction<Record<string, number>>>;
   workspaceCollaborationPeople: Array<{ id: string; name: string; email: string }>;
   inviteOnlyCollaborationPeople: Array<{ id: string; name: string; email: string }>;
   memberOfEntries: TeamMembershipEntry[];
@@ -13274,13 +13442,17 @@ function MailboxView({
       return;
     }
 
+    const targetMailboxId =
+      notificationNavigationRequest.sourceMailboxId ??
+      notificationNavigationRequest.mailboxId;
+    const targetCollections = mailboxStore[targetMailboxId];
     const targetFolder = canonicalFolderOrder.find((folder) =>
-      mailboxStore[mailbox.id][folder].some(
+      (targetCollections?.[folder] ?? []).some(
         (message) => message.id === notificationNavigationRequest.messageId,
       ),
     );
     const targetMessage = targetFolder
-      ? mailboxStore[mailbox.id][targetFolder].find(
+      ? targetCollections?.[targetFolder].find(
           (message) => message.id === notificationNavigationRequest.messageId,
         ) ?? null
       : null;
@@ -13291,7 +13463,7 @@ function MailboxView({
 
     setActiveSmartFolderId(null);
     setActiveFolder(targetFolder);
-    setIsSharedView(false);
+    setIsSharedView(targetMailboxId === sharedCollaborationMailboxId);
     setIsFullMessageOpen(Boolean(notificationNavigationRequest.openFullMessage));
     setLastNavigationSource(notificationNavigationRequest.source ?? null);
     setSelectionState(
@@ -14561,33 +14733,32 @@ function MailboxView({
 
     return matchingCanonicalProjection?.collaborationMessageId?.trim() || messageId;
   };
+  const updateCollaborationLastSeenByKey = (
+    updater: SetStateAction<Record<string, number>>,
+  ) => {
+    setCollaborationLastSeenByKey(updater);
+    onCollaborationLastSeenChange?.(updater);
+  };
   const getCollaborationLastSeenKeyForMessage = (message: MailMessage) => {
-    if (!message.collaboration) {
-      return null;
-    }
-
     const viewerKey = normalizeSenderLearningKey(currentUserEmail || currentUserId);
-    const workspaceId =
-      message.collaborationWorkspaceId?.trim().toLowerCase() || currentUserId;
     const canonicalMessageId = getCollaborationMessageIdForMessage(message.id);
-
-    if (!viewerKey || !workspaceId || !canonicalMessageId) {
-      return null;
-    }
-
-    return `${viewerKey}::${workspaceId}::${canonicalMessageId}`;
+    return buildCollaborationLastSeenKey(
+      message,
+      viewerKey,
+      currentUserId,
+      canonicalMessageId,
+    );
   };
   const hasUnreadCollaborationUpdate = (message: MailMessage) => {
-    if (!message.collaboration || message.collaboration.state === "resolved") {
-      return false;
-    }
-
-    const seenKey = getCollaborationLastSeenKeyForMessage(message);
-    if (!seenKey) {
-      return false;
-    }
-
-    return message.collaboration.updatedAt > (collaborationLastSeenByKey[seenKey] ?? 0);
+    const viewerKey = normalizeSenderLearningKey(currentUserEmail || currentUserId);
+    const canonicalMessageId = getCollaborationMessageIdForMessage(message.id);
+    return hasUnreadCollaborationUpdateForViewer(
+      message,
+      collaborationLastSeenByKey,
+      viewerKey,
+      currentUserId,
+      canonicalMessageId,
+    );
   };
   const markCollaborationSeen = (messageId: string) => {
     const message = getMessageById(messageId);
@@ -14601,7 +14772,7 @@ function MailboxView({
     }
 
     const nextSeenAt = message.collaboration.updatedAt;
-    setCollaborationLastSeenByKey((current) =>
+    updateCollaborationLastSeenByKey((current) =>
       current[seenKey] && current[seenKey] >= nextSeenAt
         ? current
         : {
@@ -14621,7 +14792,7 @@ function MailboxView({
 
     const seenKey = `${viewerKey}::${workspaceId}::${canonicalMessageId}`;
     const nextSeenAt = thread.collaboration.updatedAt;
-    setCollaborationLastSeenByKey((current) =>
+    updateCollaborationLastSeenByKey((current) =>
       current[seenKey] && current[seenKey] >= nextSeenAt
         ? current
         : {
@@ -29167,6 +29338,8 @@ export function WorkspaceShell({
     collaborationInviteRoute && authenticatedUser?.email
       ? authenticatedUser.email
       : primaryWorkspaceEmail;
+  const activeCollaborationViewerEmail =
+    authenticatedUser?.email ?? activeWorkspaceEmail;
   const activeWorkspaceUserName =
     accountDisplayName;
   const currentWorkspaceUserId = normalizeSenderLearningKey(activeWorkspaceEmail);
@@ -29209,6 +29382,9 @@ export function WorkspaceShell({
     mailboxOrderKey,
   );
   const notificationReadStorageKey = buildNotificationReadStorageKey(currentWorkspaceUserId);
+  const collaborationLastSeenStorageKey = buildCollaborationLastSeenStorageKey(
+    activeCollaborationViewerEmail || currentWorkspaceUserId,
+  );
   const mailboxFocusPreferenceOverridesStorageKey =
     buildMailboxFocusPreferenceOverridesStorageKey(currentWorkspaceUserId);
   const liveMailboxSyncKey = orderedMailboxes
@@ -29300,6 +29476,23 @@ export function WorkspaceShell({
       return Array.isArray(parsed) ? parsed.filter((value) => typeof value === "string") : [];
     } catch {
       return [];
+    }
+  });
+  const [collaborationLastSeenByKey, setCollaborationLastSeenByKey] = useState<
+    Record<string, number>
+  >(() => {
+    if (typeof window === "undefined") {
+      return {};
+    }
+
+    try {
+      const storedValue = window.localStorage.getItem(collaborationLastSeenStorageKey);
+      const parsedValue = storedValue ? JSON.parse(storedValue) : {};
+      return parsedValue && typeof parsedValue === "object"
+        ? (parsedValue as Record<string, number>)
+        : {};
+    } catch {
+      return {};
     }
   });
   const syncUnreadOverrides = (
@@ -32035,7 +32228,9 @@ export function WorkspaceShell({
     mailboxStore,
     orderedMailboxes,
     authenticatedUser,
+    collaborationLastSeenByKey,
     currentUserId: currentWorkspaceUserId,
+    currentUserEmail: activeCollaborationViewerEmail,
     currentUserName: authenticatedUser?.name ?? "You",
     teamActivityEnabled,
     onOpenNotificationNavigation: handleOpenNotificationNavigation,
@@ -32065,6 +32260,9 @@ export function WorkspaceShell({
     mailboxStore,
     orderedMailboxes,
     authenticatedUser,
+    collaborationLastSeenByKey,
+    currentUserId: currentWorkspaceUserId,
+    currentUserEmail: activeCollaborationViewerEmail,
     teamActivityEnabled,
     onOpenActivityNavigation: handleOpenNotificationNavigation,
   });
@@ -33729,6 +33927,35 @@ export function WorkspaceShell({
       return;
     }
 
+    try {
+      const storedValue = window.localStorage.getItem(collaborationLastSeenStorageKey);
+      const parsedValue = storedValue ? JSON.parse(storedValue) : {};
+      setCollaborationLastSeenByKey(
+        parsedValue && typeof parsedValue === "object"
+          ? (parsedValue as Record<string, number>)
+          : {},
+      );
+    } catch {
+      setCollaborationLastSeenByKey({});
+    }
+  }, [collaborationLastSeenStorageKey]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    window.localStorage.setItem(
+      collaborationLastSeenStorageKey,
+      JSON.stringify(collaborationLastSeenByKey),
+    );
+  }, [collaborationLastSeenByKey, collaborationLastSeenStorageKey]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
     const sentMessagesByMailbox = Object.fromEntries(
       orderedMailboxes.map((mailbox) => [
         mailbox.id,
@@ -35201,7 +35428,8 @@ export function WorkspaceShell({
                   }
                   currentUserId={currentWorkspaceUserId}
                   currentUserName={activeWorkspaceUserName}
-                  currentUserEmail={activeWorkspaceEmail}
+                  currentUserEmail={activeCollaborationViewerEmail}
+                  onCollaborationLastSeenChange={setCollaborationLastSeenByKey}
                   workspaceCollaborationPeople={workspaceCollaborationPeople}
                   inviteOnlyCollaborationPeople={inviteOnlyCollaborationPeople}
                   memberOfEntries={memberOfEntries}
