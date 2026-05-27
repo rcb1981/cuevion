@@ -18669,63 +18669,6 @@ function MailboxView({
                   );
                 },
               )}
-              {orderedMailboxes
-                .filter((candidate) => candidate.id !== mailbox.id)
-                .map((candidate, index) => {
-                  const dragTargetId = `mailbox-${candidate.id}`;
-                  const isDragTargetActive = dragTargetKey === dragTargetId;
-                  const candidateTitleOverride = mailboxTitleOverrides[candidate.id]?.trim();
-                  const mailboxLabel = candidateTitleOverride
-                    ? candidateTitleOverride
-                    : candidate.title.endsWith("Inbox")
-                      ? candidate.title
-                      : `${candidate.title} Inbox`;
-
-                  return (
-                    <div key={candidate.id} className={index === 0 ? "pt-4" : ""}>
-                      {index === 0 ? (
-                        <div className="mb-2 px-4">
-                          <div className="text-[0.62rem] font-medium uppercase tracking-[0.14em] text-[color:rgba(104,95,84,0.82)]">
-                            Mailboxes
-                          </div>
-                          <div className="mt-1.5 h-1 w-[calc(100%-0.5rem)] rounded-full bg-[linear-gradient(90deg,rgba(212,192,168,0.9),rgba(224,208,188,0.68),rgba(235,224,209,0.38))]" />
-                        </div>
-                      ) : null}
-                      <button
-                        type="button"
-                        onDragOver={(event) => {
-                          if (!dragPayload) {
-                            return;
-                          }
-                          event.preventDefault();
-                          setDragTargetKey(dragTargetId);
-                        }}
-                        onDragLeave={() => {
-                          if (dragTargetKey === dragTargetId) {
-                            setDragTargetKey(null);
-                          }
-                        }}
-                        onDrop={(event) => {
-                          event.preventDefault();
-                          handleDropToTarget({
-                            type: "mailbox",
-                            mailboxId: candidate.id,
-                          });
-                        }}
-                        onClick={() => onOpenMailbox(candidate)}
-                        className={`flex w-full items-center justify-between rounded-[18px] px-4 py-3 text-left transition-[background-color,border-color,color,box-shadow,transform] duration-150 ${
-                          isDragTargetActive
-                            ? "border border-[var(--workspace-border-hover)] bg-[linear-gradient(180deg,var(--workspace-selected-surface-start),var(--workspace-selected-surface-end))] text-[var(--workspace-text)] shadow-[0_10px_24px_rgba(31,42,36,0.08),inset_0_1px_0_rgba(255,255,255,0.08)]"
-                            : "text-[var(--workspace-text-soft)] hover:bg-[var(--workspace-card-subtle)]"
-                        } focus-visible:outline-none`}
-                      >
-                        <span className="text-[0.8rem] font-medium uppercase tracking-[0.14em]">
-                          {mailboxLabel}
-                        </span>
-                      </button>
-                    </div>
-                  );
-                })}
               <div className="pt-4">
                 <div className="mb-2 px-4">
                   <div className="text-[0.62rem] font-medium uppercase tracking-[0.14em] text-[color:rgba(104,95,84,0.82)]">
