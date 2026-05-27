@@ -8390,6 +8390,8 @@ function createInitialMailboxStore(
   const inboxIds = Array.from(
     new Set<InboxId>([...presetInboxIds, ...orderedMailboxes.map((mailbox) => mailbox.id)]),
   );
+  const liveInboxSnapshots =
+    workspaceDataMode === "live" ? readLiveInboxSnapshots() : {};
 
   const initialStore = inboxIds.reduce<MailboxStore>((store, inboxId) => {
     const mailboxInfo = orderedMailboxMap.get(inboxId);
@@ -8407,7 +8409,40 @@ function createInitialMailboxStore(
     const mailboxEmail = mailboxInfo?.email ?? fallbackInfo.fallbackEmail;
 
     if (workspaceDataMode === "live") {
-      store[inboxId] = createEmptyMailboxCollections();
+      const snapshotMessages = liveInboxSnapshots[inboxId]?.messages ?? [];
+      store[inboxId] = {
+        ...createEmptyMailboxCollections(),
+        Inbox: snapshotMessages.map((message) =>
+          normalizeMailMessage(
+            {
+              id: message.id,
+              threadId: message.threadId,
+              sender: message.sender,
+              subject: message.subject,
+              snippet: message.snippet,
+              time: message.timestamp,
+              createdAt: message.createdAt,
+              imapUid: message.imapUid,
+              unread: message.unread,
+              signal: message.signal,
+              ui_signal: message.ui_signal,
+              internalClassification:
+                message.internalClassification as CuevionInternalClassification | undefined,
+              final_visibility: message.final_visibility,
+              action: message.action,
+              from: message.from,
+              to: message.to,
+              cc: message.cc,
+              timestamp: message.timestamp,
+              body: [],
+            },
+            inboxId,
+            senderCategoryLearning,
+            messageOwnershipInteractions,
+            currentUserId,
+          ),
+        ),
+      };
       return store;
     }
 

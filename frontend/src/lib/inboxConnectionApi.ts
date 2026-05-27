@@ -38,11 +38,16 @@ export type LiveInboxMessageSnapshot = {
   bodyHtml?: string;
   attachments?: LiveInboxAttachmentSnapshot[];
   unread?: boolean;
+  category?: string;
+  categorySource?: string;
+  categoryConfidence?: string;
   signal?: string;
   ui_signal?: string;
   internalClassification?: string;
   final_visibility?: string;
   action?: string;
+  v7_final_priority?: string;
+  threadId?: string;
 };
 
 export type ConnectInboxRequest = {
