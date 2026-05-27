@@ -628,6 +628,7 @@ type MailMessageOwner = {
 type MailMessagePriorityScore = "low" | "medium" | "high";
 type MailMessageFocusSignal = "attention" | null;
 type ManualPriorityOverride = "priority" | "removed";
+type ManualPriorityUpdateOptions = { showConfirmation?: boolean };
 
 function resolveManualPriorityOverride(
   overrides: Partial<Record<string, ManualPriorityOverride>>,
@@ -11190,7 +11191,11 @@ function MailboxView({
   manualPriorityOverrides: Partial<Record<string, ManualPriorityOverride>>;
   manualLabelOverrides: ManualLabelOverrideStore;
   spamSuppressionKeys: string[];
-  onSetManualPriority: (messageId: string, shouldBePriority: boolean) => void;
+  onSetManualPriority: (
+    messageId: string,
+    shouldBePriority: boolean,
+    options?: ManualPriorityUpdateOptions,
+  ) => void;
   onSetManualLabelOverride: (message: MessageIdentitySource, label: ManualLabelOverride) => void;
   onAddSpamSuppression: (messages: MessageIdentitySource[]) => void;
   onRemoveSpamSuppression: (messages: MessageIdentitySource[]) => void;
@@ -14384,7 +14389,9 @@ function MailboxView({
           composeMode === "forward") &&
         isVisiblePriorityMessage(composeSourceMessage)
       ) {
-        onSetManualPriority(composeSourceMessage.id, false);
+        onSetManualPriority(composeSourceMessage.id, false, {
+          showConfirmation: false,
+        });
       }
 
       if ((composeMode === "reply" || composeMode === "reply_all") && composeSourceMessage) {
@@ -19933,7 +19940,9 @@ function MailboxView({
 	                      onClick={() => {
 	                        onSetManualLabelOverride(contextMenuMessage, label);
 	                        if (label === "Reply") {
-	                          onSetManualPriority(contextMenuMessage.id, true);
+	                          onSetManualPriority(contextMenuMessage.id, true, {
+	                            showConfirmation: false,
+	                          });
 	                        }
 	                        closeMenus();
 	                      }}
@@ -20017,7 +20026,9 @@ function MailboxView({
 	                            if (readingLearningTargetMessage) {
 	                              onSetManualLabelOverride(readingLearningTargetMessage, label);
 	                              if (label === "Reply") {
-	                                onSetManualPriority(readingLearningTargetMessage.id, true);
+	                                onSetManualPriority(readingLearningTargetMessage.id, true, {
+	                                  showConfirmation: false,
+	                                });
 	                              }
 	                            }
 	                            closeMenus();
@@ -30717,6 +30728,9 @@ export function WorkspaceShell({
         return {};
       }
     });
+  const [manualChangeToastMessage, setManualChangeToastMessage] = useState<string | null>(
+    null,
+  );
   const [spamSuppressionKeys, setSpamSuppressionKeys] = useState<string[]>(() => {
     if (typeof window === "undefined") {
       return [];
@@ -32184,7 +32198,11 @@ export function WorkspaceShell({
     });
   };
 
-  const handleSetManualPriority = (messageId: string, shouldBePriority: boolean) => {
+  const handleSetManualPriority = (
+    messageId: string,
+    shouldBePriority: boolean,
+    options: ManualPriorityUpdateOptions = {},
+  ) => {
     const sourceMessage = getWorkspaceMessageById(messageId);
 
     if (!sourceMessage) {
@@ -32218,6 +32236,12 @@ export function WorkspaceShell({
         ),
       );
     }
+
+    if (options.showConfirmation !== false) {
+      setManualChangeToastMessage(
+        shouldBePriority ? "Priority set to Important" : "Priority set to Normal",
+      );
+    }
   };
 
   const handleSetManualLabelOverride = (
@@ -32233,6 +32257,7 @@ export function WorkspaceShell({
 
       return next;
     });
+    setManualChangeToastMessage(`Label set to ${label}`);
   };
 
   const handleAddSpamSuppression = (messages: MessageIdentitySource[]) => {
@@ -34029,6 +34054,18 @@ export function WorkspaceShell({
   }, [manualLabelOverrides, manualLabelOverridesStorageKey]);
 
   useEffect(() => {
+    if (!manualChangeToastMessage) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      setManualChangeToastMessage(null);
+    }, 2400);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [manualChangeToastMessage]);
+
+  useEffect(() => {
     if (typeof window === "undefined") {
       return;
     }
@@ -35794,6 +35831,19 @@ export function WorkspaceShell({
 		          <div className="pointer-events-none fixed bottom-6 right-6 z-[340]">
 		            <div className="rounded-[18px] border border-[color:rgba(111,148,111,0.26)] bg-[color:rgba(34,32,28,0.94)] px-4 py-3 text-[0.84rem] leading-6 text-[color:rgba(214,232,218,0.96)] shadow-panel">
 		              {reviewInboxHandoffFeedback}
+		            </div>
+		          </div>
+		        ) : null}
+		        {manualChangeToastMessage ? (
+		          <div
+		            className={`pointer-events-none fixed right-6 z-[342] ${
+		              reviewInboxHandoffFeedback || mailboxSyncFeedbackMessage
+		                ? "bottom-24"
+		                : "bottom-6"
+		            }`}
+		          >
+		            <div className="rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3 text-[0.84rem] leading-6 text-[var(--workspace-text)] shadow-panel">
+		              {manualChangeToastMessage}
 		            </div>
 		          </div>
 		        ) : null}
