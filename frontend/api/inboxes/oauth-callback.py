@@ -3,6 +3,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import sys
 import tempfile
 import time
@@ -19,12 +20,24 @@ MICROSOFT_TOKEN_ENDPOINT_TEMPLATE = (
 )
 STATE_MAX_AGE_SECONDS = 15 * 60
 GMAIL_OAUTH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60
+USER_CONFIG_SCHEMA_VERSION = 1
+USER_CONFIG_KEY_PREFIX = "cuevion:user:v1"
+EMAIL_PATTERN = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
 CURRENT_DIR = Path(__file__).resolve().parent
+API_DIR = CURRENT_DIR.parent
 if str(CURRENT_DIR) not in sys.path:
     sys.path.insert(0, str(CURRENT_DIR))
+if str(API_DIR) not in sys.path:
+    sys.path.insert(0, str(API_DIR))
 
 from oauth_token_store import persist_microsoft_token_record
+from beta_auth import (
+    normalize_auth_email,
+    parse_beta_session_token,
+    read_beta_session_cookie,
+    resolve_beta_session_secret,
+)
 
 
 def base64url_encode(value: bytes) -> str:
@@ -373,6 +386,236 @@ def persist_google_token_record(
         "_storage_durable": storage_durable,
     }, None
 
+
+def _get_authenticated_user(headers) -> dict | None:
+    if not resolve_beta_session_secret():
+        return None
+
+    session_token = read_beta_session_cookie(headers)
+    return parse_beta_session_token(session_token or "")
+
+
+def _build_user_config_key(email: str) -> str:
+    return f"{USER_CONFIG_KEY_PREFIX}:{normalize_auth_email(email)}"
+
+
+def _extract_oauth_identity(token_payload: dict, fallback_email: str) -> dict:
+    identity = {
+        "email": fallback_email.strip().lower(),
+        "display_name": None,
+    }
+    id_token = token_payload.get("id_token")
+    if not isinstance(id_token, str) or id_token.count(".") < 2:
+        return identity
+
+    try:
+        payload_segment = id_token.split(".")[1]
+        claims = json.loads(base64url_decode(payload_segment).decode("utf-8"))
+    except (ValueError, json.JSONDecodeError, UnicodeDecodeError):
+        return identity
+
+    email = claims.get("email") if isinstance(claims, dict) else None
+    if isinstance(email, str) and EMAIL_PATTERN.match(email.strip().lower()):
+        identity["email"] = email.strip().lower()
+
+    name = claims.get("name") if isinstance(claims, dict) else None
+    if isinstance(name, str) and name.strip():
+        identity["display_name"] = name.strip()
+
+    return identity
+
+
+def _format_name_from_email(email: str) -> str:
+    local_part = email.split("@", 1)[0].replace(".", " ").replace("_", " ").strip()
+    if not local_part:
+        return email
+
+    return " ".join(part.capitalize() for part in local_part.split())
+
+
+def _build_gmail_managed_inbox_id(email: str, existing_ids: set[str]) -> str:
+    local_part = email.split("@", 1)[0].lower()
+    slug = re.sub(r"[^a-z0-9]+", "-", local_part).strip("-") or "gmail"
+    candidate = f"gmail-{slug}"
+    if candidate not in existing_ids:
+        return candidate
+
+    domain_slug = re.sub(r"[^a-z0-9]+", "-", email.lower()).strip("-") or "gmail"
+    candidate = f"gmail-{domain_slug}"
+    suffix = 2
+    while candidate in existing_ids:
+        candidate = f"gmail-{domain_slug}-{suffix}"
+        suffix += 1
+
+    return candidate
+
+
+def _create_empty_managed_imap_settings() -> dict:
+    return {
+        "host": "",
+        "port": "",
+        "ssl": True,
+        "username": "",
+        "password": "",
+    }
+
+
+def _create_empty_managed_smtp_settings() -> dict:
+    return {
+        "host": "",
+        "port": "",
+        "security": "starttls",
+        "username": "",
+        "password": "",
+        "useSameCredentials": True,
+    }
+
+
+def _upsert_gmail_managed_inbox_record(
+    managed_inboxes: list,
+    *,
+    email: str,
+    display_name: str | None,
+    message: str,
+) -> list:
+    normalized_email = email.strip().lower()
+    if not EMAIL_PATTERN.match(normalized_email):
+        return managed_inboxes
+
+    next_inboxes = [
+        dict(mailbox) if isinstance(mailbox, dict) else mailbox
+        for mailbox in managed_inboxes
+    ]
+    existing_ids = {
+        mailbox.get("id", "").strip()
+        for mailbox in next_inboxes
+        if isinstance(mailbox, dict) and isinstance(mailbox.get("id"), str)
+    }
+    matched_index = None
+    for index, mailbox in enumerate(next_inboxes):
+        if not isinstance(mailbox, dict):
+            continue
+
+        mailbox_email = mailbox.get("email")
+        mailbox_provider = mailbox.get("provider")
+        if (
+            isinstance(mailbox_email, str)
+            and mailbox_email.strip().lower() == normalized_email
+            and mailbox_provider in {"google", "gmail", None}
+        ):
+            matched_index = index
+            break
+
+    title = (display_name or "").strip() or _format_name_from_email(normalized_email)
+    safe_defaults = {
+        "title": title,
+        "email": normalized_email,
+        "provider": "google",
+        "connected": True,
+        "connectionMethod": "oauth",
+        "connectionStatus": "connected",
+        "connectionMessage": message,
+        "oauthAuthorizationUrl": None,
+        "customImap": _create_empty_managed_imap_settings(),
+        "customSmtp": _create_empty_managed_smtp_settings(),
+    }
+
+    if matched_index is None:
+        next_inboxes.append(
+            {
+                "id": _build_gmail_managed_inbox_id(normalized_email, existing_ids),
+                **safe_defaults,
+            }
+        )
+        return next_inboxes
+
+    existing_mailbox = next_inboxes[matched_index]
+    existing_id = existing_mailbox.get("id") if isinstance(existing_mailbox, dict) else None
+    next_inboxes[matched_index] = {
+        **existing_mailbox,
+        **safe_defaults,
+        "id": (
+            existing_id.strip()
+            if isinstance(existing_id, str) and existing_id.strip()
+            else _build_gmail_managed_inbox_id(normalized_email, existing_ids)
+        ),
+        "title": (
+            existing_mailbox.get("title")
+            if isinstance(existing_mailbox.get("title"), str)
+            and existing_mailbox.get("title").strip()
+            else title
+        ),
+    }
+    return next_inboxes
+
+
+def _write_user_config_durable_record(
+    config: dict,
+    store_key: str,
+    record: dict,
+) -> tuple[dict | None, dict | None]:
+    return _perform_rest_request(
+        config,
+        "POST",
+        f"/set/{quote(store_key, safe='')}",
+        json.dumps(record, separators=(",", ":"), sort_keys=True).encode("utf-8"),
+    )
+
+
+def _upsert_gmail_managed_inbox_in_user_config(
+    headers,
+    *,
+    email: str,
+    display_name: str | None,
+    message: str,
+) -> dict | None:
+    session_user = _get_authenticated_user(headers)
+    durable_config = _resolve_durable_store_config()
+    if not session_user or not durable_config:
+        return None
+
+    store_key = _build_user_config_key(session_user["email"])
+    existing_record, existing_error = _read_durable_record(durable_config, store_key)
+    if existing_error:
+        return existing_error
+
+    existing_config = existing_record if isinstance(existing_record, dict) else {}
+    existing_managed_inboxes = existing_config.get("managedInboxes")
+    if not isinstance(existing_managed_inboxes, list):
+        existing_managed_inboxes = []
+
+    next_record = {
+        "v": USER_CONFIG_SCHEMA_VERSION,
+        "email": normalize_auth_email(session_user["email"]),
+        "updatedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "onboardingSession": {},
+        "managedInboxes": [],
+        "mailboxTitleOverrides": {},
+        "primaryManagedInboxId": None,
+        "mailboxFocusPreferenceOverrides": {},
+        "inboxSignatures": {},
+        "smartFolders": [],
+        "uiPreferences": {},
+        "displayNameOverrides": {},
+        **existing_config,
+    }
+    next_record["v"] = USER_CONFIG_SCHEMA_VERSION
+    next_record["email"] = normalize_auth_email(session_user["email"])
+    next_record["updatedAt"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    next_record["managedInboxes"] = _upsert_gmail_managed_inbox_record(
+        existing_managed_inboxes,
+        email=email,
+        display_name=display_name,
+        message=message,
+    )
+
+    _, write_error = _write_user_config_durable_record(
+        durable_config,
+        store_key,
+        next_record,
+    )
+    return write_error
+
 OAUTH_CALLBACK_RESULT_STORAGE_KEY = "cuevion-oauth-callback-result"
 
 
@@ -400,8 +643,9 @@ def _build_callback_payload(
     connection_status: str,
     message: str,
     connected: bool,
+    display_name: str | None = None,
 ) -> dict:
-    return {
+    payload = {
         "provider": provider,
         "email": email,
         "connectionMethod": "oauth",
@@ -409,6 +653,10 @@ def _build_callback_payload(
         "connected": connected,
         "message": message,
     }
+    if display_name:
+        payload["displayName"] = display_name
+
+    return payload
 
 
 def _render_callback_bridge_page(app_redirect_url: str, payload: dict) -> bytes:
@@ -713,14 +961,22 @@ class handler(BaseHTTPRequestHandler):
             )
             return
 
+        oauth_identity = (
+            _extract_oauth_identity(token_payload, email)
+            if provider == "google"
+            else {"email": email.strip().lower(), "display_name": None}
+        )
+        mailbox_email = oauth_identity["email"] or email.strip().lower()
+        display_name = oauth_identity.get("display_name")
+
         if provider == "google":
             persisted_record, persistence_error = persist_google_token_record(
-                email=email,
+                email=mailbox_email,
                 token_payload=token_payload,
             )
         else:
             persisted_record, persistence_error = persist_microsoft_token_record(
-                email=email,
+                email=mailbox_email,
                 token_payload=token_payload,
             )
 
@@ -728,13 +984,14 @@ class handler(BaseHTTPRequestHandler):
             self._send_callback_page(
                 _build_callback_payload(
                     provider=provider,
-                    email=email,
+                    email=mailbox_email,
                     connection_status="authenticated_pending_activation",
                     message=(
                         persistence_error["message"]
                         or f"{provider_name} authentication completed. Tokens are stored only in the current server runtime. Final mailbox activation requires durable secure mailbox token storage."
                     ),
                     connected=False,
+                    display_name=display_name,
                 )
             )
             return
@@ -743,10 +1000,11 @@ class handler(BaseHTTPRequestHandler):
             self._send_callback_page(
                 _build_callback_payload(
                     provider=provider,
-                    email=email,
+                    email=mailbox_email,
                     connection_status="authenticated_pending_activation",
                     message=f"{provider_name} authentication completed. Tokens are stored only in the current server runtime. Final mailbox activation requires durable secure mailbox token storage.",
                     connected=False,
+                    display_name=display_name,
                 )
             )
             return
@@ -755,24 +1013,52 @@ class handler(BaseHTTPRequestHandler):
             self._send_callback_page(
                 _build_callback_payload(
                     provider=provider,
-                    email=email,
+                    email=mailbox_email,
                     connection_status="authenticated_pending_activation",
                     message=(
                         f"{provider_name} authentication completed. Tokens are stored only in the current server runtime bridge. "
                         "Final mailbox activation requires durable secure mailbox token storage."
                     ),
                     connected=False,
+                    display_name=display_name,
                 )
             )
             return
 
+        connected_message = (
+            f"{provider_name} account connected. Durable mailbox token storage is active."
+        )
+        if provider == "google":
+            user_config_error = _upsert_gmail_managed_inbox_in_user_config(
+                self.headers,
+                email=mailbox_email,
+                display_name=display_name,
+                message=connected_message,
+            )
+            if user_config_error:
+                self._send_callback_page(
+                    _build_callback_payload(
+                        provider=provider,
+                        email=mailbox_email,
+                        connection_status="authenticated_pending_activation",
+                        message=(
+                            user_config_error.get("message")
+                            or "Google authentication completed, but the Gmail inbox could not be saved to user config."
+                        ),
+                        connected=False,
+                        display_name=display_name,
+                    )
+                )
+                return
+
         self._send_callback_page(
             _build_callback_payload(
                 provider=provider,
-                email=email,
+                email=mailbox_email,
                 connection_status="connected",
-                message=f"{provider_name} account connected. Durable mailbox token storage is active.",
+                message=connected_message,
                 connected=True,
+                display_name=display_name,
             )
         )
 
