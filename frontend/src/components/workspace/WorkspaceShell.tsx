@@ -30728,7 +30728,7 @@ export function WorkspaceShell({
         return {};
       }
     });
-  const [manualChangeToastMessage, setManualChangeToastMessage] = useState<string | null>(
+  const [manualChangeConfirmationMessage, setManualChangeConfirmationMessage] = useState<string | null>(
     null,
   );
   const [spamSuppressionKeys, setSpamSuppressionKeys] = useState<string[]>(() => {
@@ -32238,7 +32238,7 @@ export function WorkspaceShell({
     }
 
     if (options.showConfirmation !== false) {
-      setManualChangeToastMessage(
+      setManualChangeConfirmationMessage(
         shouldBePriority ? "Priority set to Important" : "Priority set to Normal",
       );
     }
@@ -32257,7 +32257,7 @@ export function WorkspaceShell({
 
       return next;
     });
-    setManualChangeToastMessage(`Label set to ${label}`);
+    setManualChangeConfirmationMessage(`Label set to ${label}`);
   };
 
   const handleAddSpamSuppression = (messages: MessageIdentitySource[]) => {
@@ -34054,18 +34054,6 @@ export function WorkspaceShell({
   }, [manualLabelOverrides, manualLabelOverridesStorageKey]);
 
   useEffect(() => {
-    if (!manualChangeToastMessage) {
-      return;
-    }
-
-    const timeoutId = window.setTimeout(() => {
-      setManualChangeToastMessage(null);
-    }, 2400);
-
-    return () => window.clearTimeout(timeoutId);
-  }, [manualChangeToastMessage]);
-
-  useEffect(() => {
     if (typeof window === "undefined") {
       return;
     }
@@ -35834,19 +35822,6 @@ export function WorkspaceShell({
 		            </div>
 		          </div>
 		        ) : null}
-		        {manualChangeToastMessage ? (
-		          <div
-		            className={`pointer-events-none fixed right-6 z-[342] ${
-		              reviewInboxHandoffFeedback || mailboxSyncFeedbackMessage
-		                ? "bottom-24"
-		                : "bottom-6"
-		            }`}
-		          >
-		            <div className="rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3 text-[0.84rem] leading-6 text-[var(--workspace-text)] shadow-panel">
-		              {manualChangeToastMessage}
-		            </div>
-		          </div>
-		        ) : null}
 		        {mailboxSyncFeedbackMessage ? (
 		          <div className="pointer-events-none fixed bottom-6 right-6 z-[341]">
 		            <div className="rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3 text-[0.84rem] leading-6 text-[var(--workspace-text)] shadow-panel">
@@ -35855,6 +35830,29 @@ export function WorkspaceShell({
 		          </div>
 		        ) : null}
 		      </div>
+      <SettingsModalShell
+        open={Boolean(manualChangeConfirmationMessage)}
+        themeMode={resolvedTheme}
+        maxWidthClass="max-w-[360px]"
+      >
+        <div className="space-y-2">
+          <h2 className="text-[1.15rem] font-medium tracking-tight text-[var(--workspace-text)]">
+            Change applied
+          </h2>
+          <p className="text-[0.92rem] leading-7 text-[var(--workspace-text-soft)]">
+            {manualChangeConfirmationMessage}
+          </p>
+        </div>
+        <div className="mt-6 flex justify-end">
+          <button
+            type="button"
+            onClick={() => setManualChangeConfirmationMessage(null)}
+            className={settingsPrimaryActionClass}
+          >
+            OK
+          </button>
+        </div>
+      </SettingsModalShell>
       <SmartFolderModal
         open={isSmartFolderModalOpen}
         themeMode={resolvedTheme}
