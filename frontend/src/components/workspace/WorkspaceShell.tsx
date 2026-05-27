@@ -123,7 +123,6 @@ const primaryNavigationItems = [
   { section: "For You", label: "For You", shortLabel: "For" },
   { section: "Priority", label: "Priority", shortLabel: "Pri" },
   { section: "Inboxes", label: "Inboxes", shortLabel: "Box" },
-  { section: "Activity", label: "Activity", shortLabel: "Act" },
   { section: "Notifications", label: "Notifications", shortLabel: "Note" },
   { section: "Team", label: "Team", shortLabel: "Team" },
 ] as const;
@@ -10671,6 +10670,27 @@ function buildVisibleActivityItems({
   return items;
 }
 
+const teamActivityKeywords = [
+  "collaboration",
+  "team",
+  "invite",
+  "invitation",
+  "member",
+  "access",
+  "shared",
+  "reviewer",
+  "mention",
+  "resolved shared thread",
+  "reopened shared thread",
+  "external review",
+];
+
+function isTeamActivityItem(item: VisibleActivityItem) {
+  const searchableText = [item.type, item.title, item.detail].join(" ").toLowerCase();
+
+  return teamActivityKeywords.some((keyword) => searchableText.includes(keyword));
+}
+
 function NotificationsPreviewBlock({
   items,
 }: {
@@ -10716,65 +10736,11 @@ function NotificationsPreviewBlock({
   );
 }
 
-function ContentBlock({
-  title,
-  items,
-}: {
-  title: string;
-  items: Array<{
-    title: string;
-    detail: string;
-    actionLabel: string;
-    onClick: () => void;
-  }>;
-}) {
-  return (
-    <section className="rounded-[30px] border border-[var(--workspace-border)] bg-[var(--workspace-card)] p-6 shadow-panel">
-      <div className="mb-5 flex items-center justify-between">
-        <h2 className="text-xl font-semibold tracking-tight text-[var(--workspace-text)]">
-          {title}
-        </h2>
-        <div className="h-2 w-14 rounded-full bg-[var(--workspace-accent-soft)]" />
-      </div>
-      {items.length > 0 ? (
-        <div className="space-y-2.5">
-          {items.map((item) => (
-            <button
-              key={item.title}
-              type="button"
-              onClick={item.onClick}
-              className="w-full cursor-pointer rounded-[20px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-3.5 text-left transition-[background-color,background-image,border-color,transform] duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)] focus-visible:border-[var(--workspace-border-hover)] focus-visible:bg-[linear-gradient(180deg,var(--workspace-card-featured-start),var(--workspace-card-featured-end))] focus-visible:outline-none"
-              aria-label={`${item.actionLabel}: ${item.title}`}
-            >
-              <div className="space-y-1.5">
-                <div className="text-[0.95rem] font-medium tracking-[-0.012em] text-[var(--workspace-text-soft)]">
-                  {item.title}
-                </div>
-                <div className="text-[0.84rem] leading-6 text-[var(--workspace-text-faint)]">
-                  {item.detail}
-                </div>
-                <div className="text-[0.66rem] font-medium uppercase tracking-[0.08em] text-[var(--workspace-text-faint)]">
-                  {item.actionLabel}
-                </div>
-              </div>
-            </button>
-          ))}
-        </div>
-      ) : (
-        <div className="rounded-[20px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-6 text-[0.88rem] leading-7 text-[var(--workspace-text-soft)]">
-          Nothing new yet.
-        </div>
-      )}
-    </section>
-  );
-}
-
 function DashboardView({
   onOpenPriority,
   onOpenPrimaryInbox,
   onOpenInboxes,
   notificationPreviewItems,
-  recentActivityItems,
   newEmailsCount,
   newEmailsContext,
   priorityInboxCount,
@@ -10784,7 +10750,6 @@ function DashboardView({
   onOpenPrimaryInbox: () => void;
   onOpenInboxes: () => void;
   notificationPreviewItems: VisibleNotificationItem[];
-  recentActivityItems: VisibleActivityItem[];
   newEmailsCount: number;
   newEmailsContext: string;
   priorityInboxCount: number;
@@ -10798,14 +10763,8 @@ function DashboardView({
   morning: "Good morning",
   afternoon: "Good afternoon",
   evening: "Good evening",
-}[dayPeriod];
+  }[dayPeriod];
   const greeting = userName ? `${greetingLabel}, ${userName}` : greetingLabel;
-  const recentUpdateItems = recentActivityItems.slice(0, 4).map((item) => ({
-    title: item.title,
-    detail: item.detail,
-    actionLabel: "Open conversation",
-    onClick: item.action ?? onOpenInboxes,
-  }));
 
   return (
     <div className="space-y-8">
@@ -10828,12 +10787,8 @@ function DashboardView({
         connectedInboxCount={connectedInboxCount}
       />
 
-      <div className="grid gap-6 xl:grid-cols-[1.15fr_0.85fr]">
+      <div className="grid gap-6">
         <NotificationsPreviewBlock items={notificationPreviewItems} />
-        <ContentBlock
-          title="Recent updates"
-          items={recentUpdateItems}
-        />
       </div>
     </div>
   );
@@ -21096,6 +21051,7 @@ function WorkbenchView({
 
   const view = content[section];
   const visibleActivityItems = activityItems;
+  const visibleTeamActivityItems = activityItems.filter(isTeamActivityItem);
   const visibleNotificationItems = notificationItems;
   const teamMembersStorageKey = buildTeamMembersStorageKey(workspacePersistenceKey);
   const [teamMembers, setTeamMembers] = useState<TeamMemberEntry[]>(() => {
@@ -21865,6 +21821,70 @@ function WorkbenchView({
                   No team members yet.
                 </div>
               ) : null}
+            </div>
+
+            <div className="space-y-4 pt-1">
+              <div className="h-px w-full bg-[var(--workspace-divider)]" />
+              <div className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                Team activity
+              </div>
+              {visibleTeamActivityItems.length > 0 ? (
+                <div className="divide-y divide-[var(--workspace-divider)]">
+                  {visibleTeamActivityItems.map((item, index) =>
+                    item.action ? (
+                      <button
+                        key={item.id}
+                        type="button"
+                        onClick={item.action}
+                        className={`flex w-full items-start justify-between gap-4 rounded-[18px] px-2 py-4 text-left transition-colors duration-200 first:pt-1 last:pb-1 hover:bg-[var(--workspace-surface-hover)] focus-visible:bg-[var(--workspace-surface-selected)] focus-visible:outline-none ${
+                          index === 0 ? "bg-[var(--workspace-surface-selected)]" : "bg-transparent"
+                        }`}
+                      >
+                        <div className="min-w-0 space-y-1">
+                          <div className="text-[0.62rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-accent-text)]">
+                            {item.type}
+                          </div>
+                          <div className="text-[0.92rem] font-medium tracking-[-0.014em] text-[var(--workspace-text)]">
+                            {item.title}
+                          </div>
+                          <div className="text-[0.8rem] leading-6 text-[var(--workspace-text-soft)]">
+                            {item.detail}
+                          </div>
+                        </div>
+                        <div className="flex-none pt-0.5 text-[0.66rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)]">
+                          {item.time}
+                        </div>
+                      </button>
+                    ) : (
+                      <div
+                        key={item.id}
+                        className={`flex items-start justify-between gap-4 rounded-[18px] px-2 py-4 text-left first:pt-1 last:pb-1 ${
+                          index === 0 ? "bg-[var(--workspace-surface-selected)]" : "bg-transparent"
+                        }`}
+                      >
+                        <div className="min-w-0 space-y-1">
+                          <div className="text-[0.62rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-accent-text)]">
+                            {item.type}
+                          </div>
+                          <div className="text-[0.92rem] font-medium tracking-[-0.014em] text-[var(--workspace-text)]">
+                            {item.title}
+                          </div>
+                          <div className="text-[0.8rem] leading-6 text-[var(--workspace-text-soft)]">
+                            {item.detail}
+                          </div>
+                        </div>
+                        <div className="flex-none pt-0.5 text-[0.66rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)]">
+                          {item.time}
+                        </div>
+                      </div>
+                    ),
+                  )}
+                </div>
+              ) : (
+                <div className="text-[0.92rem] leading-7 text-[var(--workspace-text-soft)]">
+                  No team activity yet.
+                </div>
+              )}
             </div>
 
             {memberOfEntries.length > 0 ? (
@@ -35837,7 +35857,6 @@ export function WorkspaceShell({
                   onOpenPrimaryInbox={handleOpenSenderContext}
                   onOpenInboxes={() => handleOpenInboxes("Connected")}
                   notificationPreviewItems={prioritizedNotificationItems}
-                  recentActivityItems={liveActivityItems}
                   newEmailsCount={newEmailsCount}
                   newEmailsContext={newEmailsContext}
                   priorityInboxCount={livePriorityInboxItems.length}
