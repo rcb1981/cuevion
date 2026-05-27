@@ -8451,7 +8451,9 @@ function createInitialMailboxStore(
               to: message.to,
               cc: message.cc,
               timestamp: message.timestamp,
-              body: [],
+              body: Array.isArray(message.body) ? message.body : [],
+              bodyHtml: message.bodyHtml,
+              attachments: message.attachments,
             },
             inboxId,
             senderCategoryLearning,
@@ -29695,6 +29697,21 @@ export function WorkspaceShell({
       messages.map((message) => [buildStablePreviewIdentity(message), message]),
     ),
   });
+  const hasRenderableMessagePayload = (message: {
+    body?: unknown;
+    bodyHtml?: unknown;
+    attachments?: unknown;
+  }) => {
+    const hasBodyHtml =
+      typeof message.bodyHtml === "string" && message.bodyHtml.trim().length > 0;
+    const hasTextBody =
+      Array.isArray(message.body) &&
+      message.body.some((line) => typeof line === "string" && line.trim().length > 0);
+    const hasAttachments =
+      Array.isArray(message.attachments) && message.attachments.length > 0;
+
+    return hasBodyHtml || hasTextBody || hasAttachments;
+  };
   const mergePersistedLiveInboxSnapshotMessages = (
     incomingMessages: LiveInboxMessageSnapshot[],
     persistedSnapshotMessages: PersistedLiveInboxMessageSnapshot[],
@@ -29703,8 +29720,12 @@ export function WorkspaceShell({
     incomingUidValidity?: string | null,
     storedUidValidity?: string | null,
   ) => {
-    const persistedSnapshotIndexes = buildMessageIdentityIndexes(persistedSnapshotMessages);
-    const currentInboxIndexes = buildMessageIdentityIndexes(currentInboxMessages);
+    const bodyfulPersistedSnapshotMessages =
+      persistedSnapshotMessages.filter(hasRenderableMessagePayload);
+    const bodyfulCurrentInboxMessages =
+      currentInboxMessages.filter(hasRenderableMessagePayload);
+    const persistedSnapshotIndexes = buildMessageIdentityIndexes(bodyfulPersistedSnapshotMessages);
+    const currentInboxIndexes = buildMessageIdentityIndexes(bodyfulCurrentInboxMessages);
 
     // When UIDVALIDITY changes, the entire UID space was reset. Do not carry any
     // persisted-snapshot-derived data into enrichedIncoming — treat it as a fresh build.
@@ -29750,7 +29771,7 @@ export function WorkspaceShell({
     //     that would indicate a partial/failed UID fetch, not a truly empty inbox.
     //   - Messages without an imapUid are always preserved (cannot confirm server truth).
     //   - If UIDVALIDITY changed, wipe the entire snapshot to avoid stale UID comparisons.
-    let survivingPersistedMessages = persistedSnapshotMessages;
+    let survivingPersistedMessages = bodyfulPersistedSnapshotMessages;
     if (
       inboxUidSet != null &&
       incomingUidValidity != null &&
@@ -29761,7 +29782,7 @@ export function WorkspaceShell({
         survivingPersistedMessages = [];
       } else {
         const inboxUidSetLookup = new Set(inboxUidSet);
-        survivingPersistedMessages = persistedSnapshotMessages.filter(
+        survivingPersistedMessages = bodyfulPersistedSnapshotMessages.filter(
           (msg) => !msg.imapUid || inboxUidSetLookup.has(msg.imapUid),
         );
       }
@@ -29813,7 +29834,9 @@ export function WorkspaceShell({
     currentInboxMessages: MailMessage[],
     currentStore: MailboxStore,
   ) => {
-    const currentInboxIndexes = buildMessageIdentityIndexes(currentInboxMessages);
+    const bodyfulCurrentInboxMessages =
+      currentInboxMessages.filter(hasRenderableMessagePayload);
+    const currentInboxIndexes = buildMessageIdentityIndexes(bodyfulCurrentInboxMessages);
 
     // Deduplicate the incoming batch before mapping. The server can send the same
     // email twice in one snapshot (e.g. old "Other" + new "Reply" after reclassification).
@@ -29885,7 +29908,7 @@ export function WorkspaceShell({
     const incomingIndexes = buildMessageIdentityIndexes(normalizedIncoming);
     const consumedIncomingKeys = new Set<string>();
 
-    const updatedCurrentMessages = currentInboxMessages.map((current) => {
+    const updatedCurrentMessages = bodyfulCurrentInboxMessages.map((current) => {
       const incoming = findMatchingMessageByIdentity(current, incomingIndexes);
       if (!incoming) return current; // upsert-only: preserve messages absent from this fetch
       getCanonicalMessageIdentityKeys(incoming).forEach((key) =>
