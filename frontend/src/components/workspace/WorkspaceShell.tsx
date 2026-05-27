@@ -939,6 +939,7 @@ const CUEVION_TRASH_MESSAGES_STORAGE_KEY = "cuevion-trash-messages";
 const CUEVION_SPAM_MESSAGES_STORAGE_KEY = "cuevion-spam-messages";
 const CUEVION_ARCHIVE_MESSAGES_STORAGE_KEY = "cuevion-archive-messages";
 const CUEVION_MANUAL_PRIORITY_OVERRIDES_STORAGE_KEY = "cuevion-manual-priority-overrides";
+const CUEVION_PRIORITY_CLEARED_STORAGE_KEY = "cuevion-priority-cleared";
 const CUEVION_MANUAL_LABEL_OVERRIDES_STORAGE_KEY = "cuevion-manual-label-overrides";
 const CUEVION_SPAM_SUPPRESSION_STORAGE_KEY = "cuevion-spam-suppression";
 const MAIL_SIGNATURES_STORAGE_KEY = "cuevion-mail-signatures";
@@ -1056,6 +1057,13 @@ function buildManualPriorityOverridesStorageKey(
   orderedMailboxKey: string,
 ) {
   return `${CUEVION_MANUAL_PRIORITY_OVERRIDES_STORAGE_KEY}:${workspaceUserId}:${orderedMailboxKey}`;
+}
+
+function buildPriorityClearedStorageKey(
+  workspaceUserId: string,
+  orderedMailboxKey: string,
+) {
+  return `${CUEVION_PRIORITY_CLEARED_STORAGE_KEY}:${workspaceUserId}:${orderedMailboxKey}`;
 }
 
 function buildManualLabelOverridesStorageKey(
@@ -29536,6 +29544,10 @@ export function WorkspaceShell({
     currentWorkspaceUserId,
     mailboxOrderKey,
   );
+  const priorityClearedStorageKey = buildPriorityClearedStorageKey(
+    currentWorkspaceUserId,
+    mailboxOrderKey,
+  );
   const manualLabelOverridesStorageKey = buildManualLabelOverridesStorageKey(
     currentWorkspaceUserId,
     mailboxOrderKey,
@@ -30750,6 +30762,26 @@ export function WorkspaceShell({
       return {};
     }
   });
+  const [priorityClearedKeys, setPriorityClearedKeys] = useState<string[]>(() => {
+    if (typeof window === "undefined") {
+      return [];
+    }
+
+    const storedValue = window.localStorage.getItem(priorityClearedStorageKey);
+
+    if (!storedValue) {
+      return [];
+    }
+
+    try {
+      const parsedValue = JSON.parse(storedValue);
+      return Array.isArray(parsedValue)
+        ? parsedValue.filter((key): key is string => typeof key === "string")
+        : [];
+    } catch {
+      return [];
+    }
+  });
   const [manualLabelOverrides, setManualLabelOverrides] =
     useState<ManualLabelOverrideStore>(() => {
       if (typeof window === "undefined") {
@@ -31093,6 +31125,13 @@ export function WorkspaceShell({
   const isPriorityPageVisiblePriorityMessage = (message: MailMessage, mailboxId: InboxId) => {
     return getPriorityPageVisiblePriorityBadge(message, mailboxId) === "PRIORITY";
   };
+  const priorityClearedKeySet = new Set(priorityClearedKeys);
+  const getPriorityClearedIdentityKeys = (mailboxId: InboxId, message: MessageIdentitySource) =>
+    getCanonicalMessageIdentityKeys(message).map((key) => `mailbox:${mailboxId}:${key}`);
+  const isPriorityMessageCleared = (mailboxId: InboxId, message: MessageIdentitySource) =>
+    getPriorityClearedIdentityKeys(mailboxId, message).some((key) =>
+      priorityClearedKeySet.has(key),
+    );
   const livePriorityInboxEntries = (() => {
     const seenMessageIds = new Set<string>();
     const uniqueEntries: Array<{
@@ -31161,6 +31200,7 @@ export function WorkspaceShell({
       const override = resolveManualPriorityOverride(manualPriorityOverrides, message);
 
       return (
+        !isPriorityMessageCleared(mailboxId, message) &&
         isPriorityQueueEligibleMessage(message, override) &&
         isPriorityPageVisiblePriorityMessage(message, mailboxId)
       );
@@ -31193,12 +31233,13 @@ export function WorkspaceShell({
   );
   const hiddenPriorityReviewIds = reviewController.store.items.map((item) => item.id);
   const priorityDisplayOverrides = Object.fromEntries(
-    livePriorityInboxEntries.map(({ mailboxId, message }) => [
+    livePriorityInboxEntries.map(({ mailboxId, mailboxTitle, message }) => [
       `live-priority-${mailboxId}-${message.id}`,
       {
         sender: `${message.sender} · ${message.from}`,
         subject: message.subject,
         context: message.snippet,
+        sourceInbox: mailboxTitle,
       },
     ]),
   );
@@ -32244,6 +32285,7 @@ export function WorkspaceShell({
     options: ManualPriorityUpdateOptions = {},
   ) => {
     const sourceMessage = getWorkspaceMessageById(messageId);
+    const sourceLocation = getWorkspaceMessageLocationById(messageId);
 
     if (!sourceMessage) {
       return;
@@ -32267,6 +32309,16 @@ export function WorkspaceShell({
     });
 
     if (shouldBePriority) {
+      if (sourceLocation) {
+        const restoredKeys = new Set(
+          getPriorityClearedIdentityKeys(sourceLocation.mailboxId, sourceMessage),
+        );
+
+        setPriorityClearedKeys((current) =>
+          current.filter((key) => !restoredKeys.has(key)),
+        );
+      }
+
       const linkedReviewId = reviewController.getReviewBySourceId(messageId)?.id ?? null;
 
       setCompletedPriorityReviewIds((current) =>
@@ -32282,6 +32334,35 @@ export function WorkspaceShell({
         shouldBePriority ? "Priority set to Important" : "Priority set to Normal",
       );
     }
+  };
+
+  const handleMarkPriorityItemDone = (reviewItem: ReviewItem) => {
+    const mailboxId = getReviewItemSourceMailboxId(reviewItem);
+    const sourceMessage = mailboxId
+      ? getMailboxMessageById(mailboxId, reviewItem.sourceId)
+      : getWorkspaceMessageById(reviewItem.sourceId);
+
+    if (!mailboxId || !sourceMessage) {
+      return;
+    }
+
+    const clearedKeys = getPriorityClearedIdentityKeys(mailboxId, sourceMessage);
+
+    setPriorityClearedKeys((current) =>
+      Array.from(new Set([...current, ...clearedKeys])),
+    );
+  };
+
+  const handlePriorityListAction = (
+    reviewItem: ReviewItem,
+    action: "remove_priority" | "mark_done",
+  ) => {
+    if (action === "remove_priority") {
+      handleSetManualPriority(reviewItem.sourceId, false);
+      return;
+    }
+
+    handleMarkPriorityItemDone(reviewItem);
   };
 
   const handleSetManualLabelOverride = (
@@ -34030,6 +34111,30 @@ export function WorkspaceShell({
       return;
     }
 
+    const storedValue = window.localStorage.getItem(priorityClearedStorageKey);
+
+    if (!storedValue) {
+      setPriorityClearedKeys([]);
+      return;
+    }
+
+    try {
+      const parsedValue = JSON.parse(storedValue);
+      setPriorityClearedKeys(
+        Array.isArray(parsedValue)
+          ? parsedValue.filter((key): key is string => typeof key === "string")
+          : [],
+      );
+    } catch {
+      setPriorityClearedKeys([]);
+    }
+  }, [priorityClearedStorageKey]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
     const storedValue = window.localStorage.getItem(manualLabelOverridesStorageKey);
 
     if (!storedValue) {
@@ -34089,6 +34194,17 @@ export function WorkspaceShell({
       JSON.stringify(manualPriorityOverrides),
     );
   }, [manualPriorityOverrides, manualPriorityOverridesStorageKey]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    window.localStorage.setItem(
+      priorityClearedStorageKey,
+      JSON.stringify(priorityClearedKeys),
+    );
+  }, [priorityClearedKeys, priorityClearedStorageKey]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -35730,14 +35846,15 @@ export function WorkspaceShell({
               </div>
 	            ) : activeSection === "Priority" ? (
 	              <div className="min-h-0 flex-1 overflow-y-auto pr-1">
-	                <ReviewModuleListView
-	                  filter={reviewFilter}
-	                controller={reviewController}
-	                onOpenItem={handleOpenPriorityItem}
-	                hiddenReviewIds={hiddenPriorityReviewIds}
-	                supplementalItems={livePriorityInboxItems}
-	                displayOverrides={priorityDisplayOverrides}
-	              />
+                <ReviewModuleListView
+                  filter={reviewFilter}
+                  controller={reviewController}
+                  onOpenItem={handleOpenPriorityItem}
+                  hiddenReviewIds={hiddenPriorityReviewIds}
+                  supplementalItems={livePriorityInboxItems}
+                  displayOverrides={priorityDisplayOverrides}
+                  onPriorityItemAction={handlePriorityListAction}
+                />
 	            </div>
             ) : activeSection === "Inboxes" ? (
               <InboxesView

@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { reviewMockService } from "./mockReviewService";
 import type {
@@ -38,7 +38,10 @@ type PriorityDisplayFields = {
   sender: string;
   subject: string;
   context: string;
+  sourceInbox?: string;
 };
+
+type PriorityItemAction = "remove_priority" | "mark_done";
 
 type ReviewListViewProps = {
   filter: "All priority" | "Priority";
@@ -47,6 +50,7 @@ type ReviewListViewProps = {
   hiddenReviewIds?: string[];
   supplementalItems?: ReviewItem[];
   displayOverrides?: Partial<Record<string, PriorityDisplayFields>>;
+  onPriorityItemAction?: (item: ReviewItem, action: PriorityItemAction) => void;
 };
 
 type ReviewDetailViewProps = {
@@ -146,6 +150,13 @@ function getPriorityContextLine(
   displayOverride?: PriorityDisplayFields,
 ) {
   return displayOverride?.context ?? (item.sourceType === "mail_message" ? item.nextStep : item.subtitle);
+}
+
+function getPrioritySourceInboxLine(
+  item: ReviewItem,
+  displayOverride?: PriorityDisplayFields,
+) {
+  return displayOverride?.sourceInbox ?? item.owner;
 }
 
 function getDecisionTargetCopy(item: ReviewItem) {
@@ -804,12 +815,32 @@ export function ReviewListView({
   hiddenReviewIds = [],
   supplementalItems = [],
   displayOverrides = {},
+  onPriorityItemAction,
 }: ReviewListViewProps) {
+  const [openActionItemId, setOpenActionItemId] = useState<string | null>(null);
+  const actionMenuRef = useRef<HTMLDivElement | null>(null);
   const hiddenReviewIdSet = new Set(hiddenReviewIds);
   const items = controller
     .getItems(filter)
     .concat(supplementalItems)
     .filter((item) => !hiddenReviewIdSet.has(item.id));
+
+  useEffect(() => {
+    if (!openActionItemId) {
+      return;
+    }
+
+    const handlePointerDown = (event: PointerEvent) => {
+      if (actionMenuRef.current?.contains(event.target as Node)) {
+        return;
+      }
+
+      setOpenActionItemId(null);
+    };
+
+    window.addEventListener("pointerdown", handlePointerDown);
+    return () => window.removeEventListener("pointerdown", handlePointerDown);
+  }, [openActionItemId]);
 
   return (
     <>
@@ -831,29 +862,88 @@ export function ReviewListView({
             {items.map((item) => {
               const displayOverride = displayOverrides[item.id];
 
+              const isActionMenuOpen = openActionItemId === item.id;
+
               return (
-              <button
+              <div
                 key={item.id}
-                type="button"
+                role="button"
+                tabIndex={0}
                 onClick={() => onOpenItem(item)}
+                onKeyDown={(event) => {
+                  if (event.target !== event.currentTarget) {
+                    return;
+                  }
+
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    onOpenItem(item);
+                  }
+                }}
                 className={`w-full cursor-pointer rounded-[20px] border px-4 py-4 text-left transition-[background-color,background-image,border-color,transform] duration-150 focus-visible:outline-none ${
                   item.status === "resolved"
                     ? "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-card-hover)]"
                     : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)] focus-visible:border-[var(--workspace-border-hover)] focus-visible:bg-[linear-gradient(180deg,var(--workspace-card-featured-start),var(--workspace-card-featured-end))]"
                 }`}
               >
-                <div className="min-w-0">
-                  <div className="truncate text-[0.96rem] font-medium tracking-[-0.014em] text-[var(--workspace-text)]">
-                    {getPrioritySenderLine(item, displayOverride)}
+                <div className="flex min-w-0 items-start gap-3">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+                      <div className="min-w-0 flex-1 truncate text-[0.96rem] font-medium tracking-[-0.014em] text-[var(--workspace-text)]">
+                        {getPrioritySenderLine(item, displayOverride)}
+                      </div>
+                      <span className="shrink-0 rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-2.5 py-1 text-[0.65rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)]">
+                        {getPrioritySourceInboxLine(item, displayOverride)}
+                      </span>
+                    </div>
+                    <div className="mt-0.5 truncate text-[0.84rem] leading-6 text-[var(--workspace-text-soft)]">
+                      {getPrioritySubjectLine(item, displayOverride)}
+                    </div>
+                    <div className="mt-0.5 truncate text-[0.8rem] leading-6 text-[var(--workspace-text-faint)]">
+                      {getPriorityContextLine(item, displayOverride)}
+                    </div>
                   </div>
-                  <div className="mt-0.5 truncate text-[0.84rem] leading-6 text-[var(--workspace-text-soft)]">
-                    {getPrioritySubjectLine(item, displayOverride)}
-                  </div>
-                  <div className="mt-0.5 truncate text-[0.8rem] leading-6 text-[var(--workspace-text-faint)]">
-                    {getPriorityContextLine(item, displayOverride)}
+                  <div className="relative shrink-0" ref={isActionMenuOpen ? actionMenuRef : null}>
+                    <button
+                      type="button"
+                      aria-label="Priority actions"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        setOpenActionItemId((current) => (current === item.id ? null : item.id));
+                      }}
+                      className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[1rem] leading-none text-[var(--workspace-text-faint)] transition-[background-color,border-color,color,transform] duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] active:scale-[0.96] focus-visible:outline-none"
+                    >
+                      ×
+                    </button>
+                    {isActionMenuOpen && onPriorityItemAction ? (
+                      <div className="absolute right-0 top-10 z-30 w-44 overflow-hidden rounded-[16px] border border-[var(--workspace-border)] bg-[var(--workspace-modal-bg)] p-1.5 shadow-panel">
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            onPriorityItemAction(item, "remove_priority");
+                            setOpenActionItemId(null);
+                          }}
+                          className="block w-full rounded-[12px] px-3 py-2 text-left text-[0.82rem] font-medium text-[var(--workspace-text)] transition-colors hover:bg-[var(--workspace-hover-surface)] focus-visible:outline-none"
+                        >
+                          Remove priority
+                        </button>
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            onPriorityItemAction(item, "mark_done");
+                            setOpenActionItemId(null);
+                          }}
+                          className="block w-full rounded-[12px] px-3 py-2 text-left text-[0.82rem] font-medium text-[var(--workspace-text)] transition-colors hover:bg-[var(--workspace-hover-surface)] focus-visible:outline-none"
+                        >
+                          Mark as done
+                        </button>
+                      </div>
+                    ) : null}
                   </div>
                 </div>
-              </button>
+              </div>
               );
             })}
           </div>
