@@ -23748,12 +23748,16 @@ function ManagedInboxEditor({
   isExisting,
   isPrimary = false,
   canSetPrimary = false,
+  canMoveUp = false,
+  canMoveDown = false,
   connectionError = null,
   isApplying = false,
   credentialStatuses = {},
   onEditAction,
   onRemoveAction,
   onSetPrimaryAction,
+  onMoveUpAction,
+  onMoveDownAction,
   removeDisabled = false,
   showValidationErrors = false,
   onApplyAction,
@@ -23766,12 +23770,16 @@ function ManagedInboxEditor({
   isExisting: boolean;
   isPrimary?: boolean;
   canSetPrimary?: boolean;
+  canMoveUp?: boolean;
+  canMoveDown?: boolean;
   connectionError?: string | null;
   isApplying?: boolean;
   credentialStatuses?: MailboxCredentialStatusStore;
   onEditAction?: () => void;
   onRemoveAction?: () => void;
   onSetPrimaryAction?: () => void;
+  onMoveUpAction?: () => void;
+  onMoveDownAction?: () => void;
   removeDisabled?: boolean;
   showValidationErrors?: boolean;
   onApplyAction?: () => void;
@@ -23809,6 +23817,8 @@ function ManagedInboxEditor({
   const smtpPasswordStatusLabel = hasUsableSmtpPassword(mailbox, credentialStatuses)
     ? "Set"
     : "Not set";
+  const moveButtonDisabledClass =
+    "cursor-default opacity-45 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-card)] hover:text-[var(--workspace-text-soft)] hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]";
 
   useEffect(() => {
     if (!shouldShowFieldErrors || missingRequiredFields.length === 0) {
@@ -24243,7 +24253,23 @@ function ManagedInboxEditor({
         </div>
       ) : null}
 
-      <div className="mt-6 flex justify-end gap-3">
+      <div className="mt-6 flex flex-wrap justify-end gap-3">
+        <button
+          type="button"
+          onClick={onMoveUpAction}
+          disabled={!canMoveUp}
+          className={`${settingsSubtleActionClass} ${canMoveUp ? "" : moveButtonDisabledClass}`}
+        >
+          Move up
+        </button>
+        <button
+          type="button"
+          onClick={onMoveDownAction}
+          disabled={!canMoveDown}
+          className={`${settingsSubtleActionClass} ${canMoveDown ? "" : moveButtonDisabledClass}`}
+        >
+          Move down
+        </button>
         {editable && onCancelAction && onApplyAction ? (
           <>
             <button
@@ -24639,6 +24665,25 @@ const ManageInboxesView = memo(function ManageInboxesView({
     );
   };
 
+  const moveDraftInbox = (inboxId: string, direction: -1 | 1) => {
+    setDraftManagedInboxes((current) => {
+      const currentIndex = current.findIndex((mailbox) => mailbox.id === inboxId);
+      const nextIndex = currentIndex + direction;
+
+      if (
+        currentIndex < 0 ||
+        nextIndex < 0 ||
+        nextIndex >= current.length
+      ) {
+        return current;
+      }
+
+      const next = [...current];
+      [next[currentIndex], next[nextIndex]] = [next[nextIndex], next[currentIndex]];
+      return next;
+    });
+  };
+
   const handleStartAddInbox = () => {
     const nextId = `draft-${Date.now()}`;
     setDraftManagedInboxes((current) => [
@@ -24774,13 +24819,15 @@ const ManageInboxesView = memo(function ManageInboxesView({
           </div>
 
           <div className="space-y-6">
-            {draftManagedInboxes.map((mailbox) => (
+            {draftManagedInboxes.map((mailbox, index) => (
               <ManagedInboxEditor
                 key={mailbox.id}
                 mailbox={mailbox}
                 editable={editingInboxId === mailbox.id}
                 isExisting={!mailbox.id.startsWith("draft-")}
                 isPrimary={mailbox.id === primaryManagedInboxId}
+                canMoveUp={index > 0}
+                canMoveDown={index < draftManagedInboxes.length - 1}
                 canSetPrimary={
                   connectedInboxCount > 1 &&
                   isSelectablePrimaryManagedInbox(mailbox) &&
@@ -24800,6 +24847,8 @@ const ManageInboxesView = memo(function ManageInboxesView({
                     ? undefined
                     : () => setPendingInboxRemovalId(mailbox.id)
                 }
+                onMoveUpAction={() => moveDraftInbox(mailbox.id, -1)}
+                onMoveDownAction={() => moveDraftInbox(mailbox.id, 1)}
                 removeDisabled={savedManagedInboxes.length <= 1}
                 onSetPrimaryAction={() => onSetPrimaryInbox(mailbox.id)}
                 onApplyAction={() => handleApplyInbox(mailbox.id)}
@@ -29393,6 +29442,14 @@ export function WorkspaceShell({
     primaryManagedInboxId,
   );
   const orderedMailboxes = orderedManagedInboxes
+    .map((mailbox) => ({
+      ...toOrderedMailboxFromManagedInbox(mailbox),
+    }))
+    .map((mailbox) => ({
+      ...mailbox,
+      title: mailboxTitleOverrides[mailbox.id]?.trim() || mailbox.title,
+    }));
+  const sidebarMailboxes = savedManagedInboxes
     .map((mailbox) => ({
       ...toOrderedMailboxFromManagedInbox(mailbox),
     }))
@@ -35427,7 +35484,7 @@ export function WorkspaceShell({
         activeMailboxId={activeMailbox?.id ?? null}
         hasPendingTeamInvitation={Boolean(pendingTeamInvitation)}
         notificationUnreadCount={notificationUnreadCount}
-        orderedMailboxes={orderedMailboxes}
+        orderedMailboxes={sidebarMailboxes}
         onLogoutClick={() => setIsLogoutConfirmationOpen(true)}
         onChangeSection={handleChangeSection}
         onOpenMailbox={(mailbox) =>
