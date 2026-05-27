@@ -32861,13 +32861,26 @@ export function WorkspaceShell({
         storedUidValidity,
       );
       const mergeStartedAt = performance.now();
-      saveLiveInboxSnapshot({
-        inboxId: managedMailbox.id,
-        email: managedMailbox.email.trim().toLowerCase(),
-        fetchedAt: new Date().toISOString(),
-        messages: mergedMessages,
-        uidValidity: response.uidValidity ?? null,
-      });
+      try {
+        saveLiveInboxSnapshot({
+          inboxId: managedMailbox.id,
+          email: managedMailbox.email.trim().toLowerCase(),
+          fetchedAt: new Date().toISOString(),
+          messages: mergedMessages,
+          uidValidity: response.uidValidity ?? null,
+        });
+      } catch (error) {
+        if (!canUseGmailOAuthFetch) {
+          throw error;
+        }
+
+        console.warn("[SYNC-TIMING] Gmail snapshot persistence skipped", {
+          mailboxId,
+          email: managedMailbox.email.trim(),
+          messageCount: mergedMessages.length,
+          error,
+        });
+      }
       // Compute the in-memory eviction set using the same guard conditions applied
       // in mergePersistedLiveInboxSnapshotMessages. Only evict when the server
       // supplied a trusted UID set and UIDVALIDITY. A UIDVALIDITY change evicts all
