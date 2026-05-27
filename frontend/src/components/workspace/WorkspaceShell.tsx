@@ -23133,6 +23133,33 @@ function findMatchingSavedManagedInbox(
   );
 }
 
+function isConnectedOAuthMailboxWithUnchangedConnection(
+  next: ManagedWorkspaceInbox,
+  previous?: ManagedWorkspaceInbox | null,
+) {
+  if (
+    !previous ||
+    !isOAuthConnectionProvider(next.provider) ||
+    !isOAuthConnectionProvider(previous.provider)
+  ) {
+    return false;
+  }
+
+  return (
+    previous.connected === true &&
+    previous.connectionStatus === "connected" &&
+    next.connected === true &&
+    next.connectionStatus === "connected" &&
+    next.provider === previous.provider &&
+    next.connectionMethod === previous.connectionMethod &&
+    next.email.trim().toLowerCase() === previous.email.trim().toLowerCase() &&
+    JSON.stringify(normalizeManagedCustomImapSettings(next.customImap)) ===
+      JSON.stringify(normalizeManagedCustomImapSettings(previous.customImap)) &&
+    JSON.stringify(normalizeManagedCustomSmtpSettings(next.customSmtp)) ===
+      JSON.stringify(normalizeManagedCustomSmtpSettings(previous.customSmtp))
+  );
+}
+
 function mergeManagedInboxCredentials(
   next: ManagedWorkspaceInbox,
   previous?: ManagedWorkspaceInbox | null,
@@ -24560,6 +24587,18 @@ const ManageInboxesView = memo(function ManageInboxesView({
         }
 
         if (field === "title") {
+          if (
+            isOAuthConnectionProvider(mailbox.provider) &&
+            mailbox.connected &&
+            mailbox.connectionStatus === "connected"
+          ) {
+            return {
+              ...mailbox,
+              title: value as string,
+              oauthAuthorizationUrl: null,
+            };
+          }
+
           return {
             ...mailbox,
             title: value as string,
@@ -24675,6 +24714,30 @@ const ManageInboxesView = memo(function ManageInboxesView({
     }
 
     setValidationErrorInboxId(null);
+
+    if (!inboxId.startsWith("draft-")) {
+      const savedMailbox = findMatchingSavedManagedInbox(
+        mailboxForValidation,
+        savedManagedInboxes,
+      );
+
+      if (
+        isConnectedOAuthMailboxWithUnchangedConnection(
+          mailboxForValidation,
+          savedMailbox,
+        )
+      ) {
+        setDraftManagedInboxes((current) =>
+          current.map((candidate) =>
+            candidate.id === inboxId
+              ? cloneManagedWorkspaceInbox(mailboxForValidation)
+              : candidate,
+          ),
+        );
+        setEditingInboxId(null);
+        return;
+      }
+    }
 
     if (inboxId.startsWith("draft-")) {
       void (async () => {
@@ -24821,7 +24884,16 @@ const ManageInboxesView = memo(function ManageInboxesView({
                 isManagedInboxConfigurationComplete(mailbox, credentialStatuses),
               );
               const mailboxesNeedingValidation = readyMailboxes.filter(
-                (mailbox) => !isMailboxPersistedWithoutChanges(mailbox),
+                (mailbox) => {
+                  if (isMailboxPersistedWithoutChanges(mailbox)) {
+                    return false;
+                  }
+
+                  return !isConnectedOAuthMailboxWithUnchangedConnection(
+                    mailbox,
+                    findMatchingSavedManagedInbox(mailbox, savedManagedInboxes),
+                  );
+                },
               );
 
               if (mailboxesNeedingValidation.length > 0) {
