@@ -22855,16 +22855,54 @@ function createManagedCustomSmtpSettings(): CustomSmtpSettings {
   return createDefaultCustomSmtpSettings();
 }
 
-function resolveCustomSmtpCredentials(mailbox: ManagedWorkspaceInbox) {
-  const customSmtp = {
-    ...createManagedCustomSmtpSettings(),
-    ...mailbox.customSmtp,
+function normalizeManagedCustomImapSettings(value: unknown): CustomImapSettings {
+  const defaults = createManagedCustomImapSettings();
+  const settings =
+    value && typeof value === "object"
+      ? (value as Partial<Record<keyof CustomImapSettings, unknown>>)
+      : {};
+
+  return {
+    host: String(settings.host ?? defaults.host),
+    port: String(settings.port ?? defaults.port),
+    ssl: settings.ssl == null ? defaults.ssl : Boolean(settings.ssl),
+    username: String(settings.username ?? defaults.username),
+    password: String(settings.password ?? defaults.password),
   };
+}
+
+function normalizeManagedCustomSmtpSettings(value: unknown): CustomSmtpSettings {
+  const defaults = createManagedCustomSmtpSettings();
+  const settings =
+    value && typeof value === "object"
+      ? (value as Partial<Record<keyof CustomSmtpSettings, unknown>>)
+      : {};
+  const security =
+    settings.security === "ssl" || settings.security === "starttls"
+      ? settings.security
+      : defaults.security;
+
+  return {
+    host: String(settings.host ?? defaults.host),
+    port: String(settings.port ?? defaults.port),
+    security,
+    username: String(settings.username ?? defaults.username),
+    password: String(settings.password ?? defaults.password),
+    useSameCredentials:
+      settings.useSameCredentials == null
+        ? defaults.useSameCredentials
+        : Boolean(settings.useSameCredentials),
+  };
+}
+
+function resolveCustomSmtpCredentials(mailbox: ManagedWorkspaceInbox) {
+  const customImap = normalizeManagedCustomImapSettings(mailbox.customImap);
+  const customSmtp = normalizeManagedCustomSmtpSettings(mailbox.customSmtp);
   const username = customSmtp.useSameCredentials
-    ? mailbox.customImap.username
+    ? customImap.username
     : customSmtp.username;
   const password = customSmtp.useSameCredentials
-    ? mailbox.customImap.password
+    ? customImap.password
     : customSmtp.password;
 
   return {
@@ -22885,17 +22923,17 @@ function hasUsableImapPassword(
   mailbox: ManagedWorkspaceInbox,
   credentialStatuses: MailboxCredentialStatusStore = {},
 ) {
-  return mailbox.customImap.password.trim().length > 0 || hasStoredImapPassword(mailbox, credentialStatuses);
+  return (
+    normalizeManagedCustomImapSettings(mailbox.customImap).password.trim().length > 0 ||
+    hasStoredImapPassword(mailbox, credentialStatuses)
+  );
 }
 
 function hasUsableSmtpPassword(
   mailbox: ManagedWorkspaceInbox,
   credentialStatuses: MailboxCredentialStatusStore = {},
 ) {
-  const customSmtp = {
-    ...createManagedCustomSmtpSettings(),
-    ...mailbox.customSmtp,
-  };
+  const customSmtp = normalizeManagedCustomSmtpSettings(mailbox.customSmtp);
 
   if (customSmtp.password.trim().length > 0 || credentialStatuses[mailbox.id]?.smtpPasswordSet === true) {
     return true;
@@ -22961,13 +22999,8 @@ function normalizeStoredWorkspaceThemeMode(value: unknown): SettingsMode | null 
 function cloneManagedWorkspaceInbox(mailbox: ManagedWorkspaceInbox): ManagedWorkspaceInbox {
   return {
     ...mailbox,
-    customImap: {
-      ...mailbox.customImap,
-    },
-    customSmtp: {
-      ...createManagedCustomSmtpSettings(),
-      ...mailbox.customSmtp,
-    },
+    customImap: normalizeManagedCustomImapSettings(mailbox.customImap),
+    customSmtp: normalizeManagedCustomSmtpSettings(mailbox.customSmtp),
   };
 }
 
@@ -23037,16 +23070,10 @@ function normalizeManagedWorkspaceInbox(
     oauthAuthorizationUrl: mailbox.oauthAuthorizationUrl ?? null,
     customImap: isGoogleOAuthMailbox
       ? createManagedCustomImapSettings()
-      : {
-          ...createManagedCustomImapSettings(),
-          ...mailbox.customImap,
-        },
+      : normalizeManagedCustomImapSettings(mailbox.customImap),
     customSmtp: isGoogleOAuthMailbox
       ? createManagedCustomSmtpSettings()
-      : {
-          ...createManagedCustomSmtpSettings(),
-          ...mailbox.customSmtp,
-        },
+      : normalizeManagedCustomSmtpSettings(mailbox.customSmtp),
   };
 }
 
@@ -23100,22 +23127,10 @@ function mergeManagedInboxCredentials(
     return next;
   }
 
-  const previousImap = {
-    ...createManagedCustomImapSettings(),
-    ...previous.customImap,
-  };
-  const nextImap = {
-    ...createManagedCustomImapSettings(),
-    ...next.customImap,
-  };
-  const previousSmtp = {
-    ...createManagedCustomSmtpSettings(),
-    ...previous.customSmtp,
-  };
-  const nextSmtp = {
-    ...createManagedCustomSmtpSettings(),
-    ...next.customSmtp,
-  };
+  const previousImap = normalizeManagedCustomImapSettings(previous.customImap);
+  const nextImap = normalizeManagedCustomImapSettings(next.customImap);
+  const previousSmtp = normalizeManagedCustomSmtpSettings(previous.customSmtp);
+  const nextSmtp = normalizeManagedCustomSmtpSettings(next.customSmtp);
 
   return {
     ...next,
@@ -23157,14 +23172,8 @@ function normalizeManagedInboxForStorage(
     connected: mailbox.connected === true,
     connectionMethod: mailbox.connectionMethod ?? null,
     connectionStatus: mailbox.connectionStatus ?? "not_connected",
-    customImap: {
-      ...createManagedCustomImapSettings(),
-      ...(mailbox.customImap ?? {}),
-    },
-    customSmtp: {
-      ...createManagedCustomSmtpSettings(),
-      ...(mailbox.customSmtp ?? {}),
-    },
+    customImap: normalizeManagedCustomImapSettings(mailbox.customImap),
+    customSmtp: normalizeManagedCustomSmtpSettings(mailbox.customSmtp),
   };
   const normalizedMailbox = normalizeManagedWorkspaceInbox(
     cloneManagedWorkspaceInbox(safeMailbox),
@@ -23297,7 +23306,9 @@ function isManagedInboxReady(
     return true;
   }
 
-  const { host, port, username } = mailbox.customImap;
+  const { host, port, username } = normalizeManagedCustomImapSettings(
+    mailbox.customImap,
+  );
   return Boolean(
     host.trim() &&
       port.trim() &&
@@ -23375,16 +23386,10 @@ function toManagedWorkspaceInbox(
     oauthAuthorizationUrl: connection.oauthAuthorizationUrl ?? null,
     customImap: isOAuthConnectionProvider(connection.provider)
       ? createManagedCustomImapSettings()
-      : {
-          ...createManagedCustomImapSettings(),
-          ...connection.customImap,
-        },
+      : normalizeManagedCustomImapSettings(connection.customImap),
     customSmtp: isOAuthConnectionProvider(connection.provider)
       ? createManagedCustomSmtpSettings()
-      : {
-          ...createManagedCustomSmtpSettings(),
-          ...connection.customSmtp,
-        },
+      : normalizeManagedCustomSmtpSettings(connection.customSmtp),
   };
 }
 
@@ -23649,15 +23654,17 @@ function getManagedInboxMissingRequiredFields(
   }
 
   if (isImapCredentialsProvider(mailbox.provider)) {
-    if (!mailbox.customImap.host.trim()) {
+    const customImap = normalizeManagedCustomImapSettings(mailbox.customImap);
+
+    if (!customImap.host.trim()) {
       missingFields.push("host");
     }
 
-    if (!mailbox.customImap.port.trim()) {
+    if (!customImap.port.trim()) {
       missingFields.push("port");
     }
 
-    if (mailbox.provider === "custom_imap" && !mailbox.customImap.username.trim()) {
+    if (mailbox.provider === "custom_imap" && !customImap.username.trim()) {
       missingFields.push("username");
     }
 
@@ -23714,7 +23721,7 @@ function getManagedInboxStatusClassName(mailbox: ManagedWorkspaceInbox) {
 }
 
 function ManagedInboxEditor({
-  mailbox,
+  mailbox: rawMailbox,
   editable,
   isExisting,
   isPrimary = false,
@@ -23758,6 +23765,7 @@ function ManagedInboxEditor({
     value: string | boolean,
   ) => void;
 }) {
+  const mailbox = cloneManagedWorkspaceInbox(rawMailbox);
   const emailInputRef = useRef<HTMLInputElement | null>(null);
   const hostInputRef = useRef<HTMLInputElement | null>(null);
   const portInputRef = useRef<HTMLInputElement | null>(null);
@@ -32661,9 +32669,12 @@ export function WorkspaceShell({
       return "skipped";
     }
 
-    const managedMailbox = savedManagedInboxes.find(
+    const rawManagedMailbox = savedManagedInboxes.find(
       (mailbox) => mailbox.id === mailboxId,
     );
+    const managedMailbox = rawManagedMailbox
+      ? cloneManagedWorkspaceInbox(rawManagedMailbox)
+      : null;
 
     if (!managedMailbox || !managedMailbox.connected || !managedMailbox.provider) {
       return "skipped";
