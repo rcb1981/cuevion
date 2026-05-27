@@ -22,6 +22,7 @@ const CUEVION_APP_VIEW_STORAGE_KEY = "cuevion-app-view";
 const CATEGORY_LEARNING_STORAGE_KEY = "cuevion-sender-category-learning";
 const MESSAGE_OWNERSHIP_STORAGE_KEY = "cuevion-message-ownership";
 const MANAGED_INBOXES_STORAGE_KEY = "cuevion-managed-inboxes";
+const PENDING_OAUTH_MANAGED_INBOX_STORAGE_KEY = "cuevion-pending-oauth-managed-inbox";
 const CUEVION_AUTH_STORAGE_KEY = "label-inbox-ai-auth-user";
 const CUEVION_DISPLAY_NAME_OVERRIDES_STORAGE_KEY = "cuevion-display-name-overrides";
 const PENDING_COLLAB_INVITE_STORAGE_KEY = "label-inbox-ai-pending-collab-invite";
@@ -93,6 +94,13 @@ type OAuthCallbackStorageResult = {
   connectionStatus?: string;
   connected?: boolean;
   message?: string | null;
+};
+
+type PendingOAuthManagedInbox = {
+  id?: string;
+  title?: string;
+  email?: string;
+  provider?: string | null;
 };
 
 type DisplayNameOverrideStore = Record<string, string>;
@@ -752,13 +760,19 @@ function buildStoredGmailManagedInboxId(
 function createStoredGmailManagedInbox(
   callbackResult: OAuthCallbackStorageResult,
   managedInboxes: StoredManagedWorkspaceInbox[],
+  pendingMailbox?: PendingOAuthManagedInbox | null,
 ): StoredManagedWorkspaceInbox {
   const normalizedEmail = callbackResult.email?.trim().toLowerCase() ?? "";
+  const pendingTitle =
+    pendingMailbox?.provider === "google" &&
+    pendingMailbox.email?.trim().toLowerCase() === normalizedEmail
+      ? pendingMailbox.title?.trim()
+      : "";
   const displayName = callbackResult.displayName?.trim();
 
   return {
     id: buildStoredGmailManagedInboxId(normalizedEmail, managedInboxes),
-    title: displayName || formatStoredInboxTitleFromEmail(normalizedEmail),
+    title: pendingTitle || displayName || formatStoredInboxTitleFromEmail(normalizedEmail),
     email: normalizedEmail,
     provider: "google",
     connected:
@@ -986,6 +1000,21 @@ function normalizeOAuthCallbackStorageResult(
   };
 }
 
+function parsePendingOAuthManagedInbox(): PendingOAuthManagedInbox | null {
+  const storedValue = window.localStorage.getItem(PENDING_OAUTH_MANAGED_INBOX_STORAGE_KEY);
+
+  if (!storedValue) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(storedValue) as PendingOAuthManagedInbox;
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
 function applyOAuthCallbackResultToOnboardingState(
   state: OnboardingState,
   callbackResult: OAuthCallbackStorageResult,
@@ -1050,6 +1079,7 @@ function applyOAuthCallbackResultToOnboardingState(
 function applyOAuthCallbackResultToManagedInboxes(
   inboxes: StoredManagedWorkspaceInbox[],
   callbackResult: OAuthCallbackStorageResult,
+  pendingMailbox?: PendingOAuthManagedInbox | null,
 ) {
   const normalizedEmail = callbackResult.email?.trim().toLowerCase() ?? "";
 
@@ -1059,6 +1089,11 @@ function applyOAuthCallbackResultToManagedInboxes(
 
   const providerName =
     callbackResult.provider === "microsoft" ? "Microsoft" : "Google";
+  const pendingTitle =
+    pendingMailbox?.provider === callbackResult.provider &&
+    pendingMailbox?.email?.trim().toLowerCase() === normalizedEmail
+      ? pendingMailbox.title?.trim()
+      : "";
   let didUpdate = false;
   const nextInboxes = inboxes.map((mailbox) => {
     if (
@@ -1085,6 +1120,7 @@ function applyOAuthCallbackResultToManagedInboxes(
     didUpdate = true;
     return {
       ...mailbox,
+      title: pendingTitle || mailbox.title,
       connected:
         callbackResult.connected === true &&
         callbackResult.connectionStatus === "connected",
@@ -1101,7 +1137,7 @@ function applyOAuthCallbackResultToManagedInboxes(
 
   return [
     ...nextInboxes,
-    createStoredGmailManagedInbox(callbackResult, nextInboxes),
+    createStoredGmailManagedInbox(callbackResult, nextInboxes, pendingMailbox),
   ];
 }
 
@@ -1819,14 +1855,22 @@ export default function App() {
       return nextState;
     });
 
+    const pendingOAuthManagedInbox = parsePendingOAuthManagedInbox();
     const nextManagedInboxes = applyOAuthCallbackResultToManagedInboxes(
       parseStoredManagedWorkspaceInboxes(),
       parsedCallbackResult,
+      pendingOAuthManagedInbox,
     );
     window.localStorage.setItem(
       MANAGED_INBOXES_STORAGE_KEY,
       JSON.stringify(nextManagedInboxes),
     );
+    if (
+      pendingOAuthManagedInbox?.provider === parsedCallbackResult.provider &&
+      pendingOAuthManagedInbox?.email?.trim().toLowerCase() === parsedCallbackResult.email
+    ) {
+      window.localStorage.removeItem(PENDING_OAUTH_MANAGED_INBOX_STORAGE_KEY);
+    }
   }, [persistedOnboardingSession]);
 
   const handleBetaLogin = async (credentials: {

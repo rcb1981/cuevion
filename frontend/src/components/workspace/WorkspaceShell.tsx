@@ -944,6 +944,7 @@ const MAIL_SIGNATURES_STORAGE_KEY = "cuevion-mail-signatures";
 const MAIL_OUT_OF_OFFICE_STORAGE_KEY = "cuevion-mail-out-of-office";
 const OUT_OF_OFFICE_REPLY_LOG_STORAGE_KEY = "cuevion-out-of-office-reply-log";
 const MANAGED_INBOXES_STORAGE_KEY = "cuevion-managed-inboxes";
+const PENDING_OAUTH_MANAGED_INBOX_STORAGE_KEY = "cuevion-pending-oauth-managed-inbox";
 const PRIMARY_MANAGED_INBOX_ID_STORAGE_KEY = "cuevion-primary-managed-inbox-id";
 const MAILBOX_TITLE_OVERRIDES_STORAGE_KEY = "cuevion-mailbox-title-overrides";
 const MAILBOX_FOCUS_PREFERENCE_OVERRIDES_STORAGE_KEY =
@@ -22841,6 +22842,22 @@ type InboxRefreshIssue = {
 };
 type StartupSyncStatus = "idle" | "running" | "done" | "partial_error";
 
+function savePendingOAuthManagedInbox(mailbox: ManagedWorkspaceInbox) {
+  if (mailbox.provider !== "google") {
+    return;
+  }
+
+  window.localStorage.setItem(
+    PENDING_OAUTH_MANAGED_INBOX_STORAGE_KEY,
+    JSON.stringify({
+      id: mailbox.id,
+      title: mailbox.title.trim(),
+      email: mailbox.email.trim().toLowerCase(),
+      provider: mailbox.provider,
+    }),
+  );
+}
+
 function createManagedCustomImapSettings(): CustomImapSettings {
   return {
     host: "",
@@ -24479,6 +24496,7 @@ const ManageInboxesView = memo(function ManageInboxesView({
     setValidatingInboxId(null);
 
     if (authorizationUrl) {
+      savePendingOAuthManagedInbox(mailboxForConnection);
       window.location.assign(authorizationUrl);
     }
 
@@ -24846,6 +24864,7 @@ const ManageInboxesView = memo(function ManageInboxesView({
                   mailbox.oauthAuthorizationUrl = response.oauthAuthorizationUrl ?? null;
 
                   if (authorizationUrl) {
+                    savePendingOAuthManagedInbox(mailbox);
                     window.location.assign(authorizationUrl);
                   }
                 }
