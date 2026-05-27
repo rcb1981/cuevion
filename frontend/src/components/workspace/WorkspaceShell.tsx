@@ -11360,10 +11360,9 @@ function MailboxView({
     );
     return sorted[0]?.id ?? null;
   });
-  // Tracks the imapUid of the currently-navigated-to message so that
-  // selectedMessageFromFolder can still find it if a background IMAP sync
-  // reassigns its id (e.g. SHA1 → imap-uid-X via preview identity match).
-  // Cleared on every manual selection change; only set by the nav useEffect.
+  // Tracks the imapUid of the currently selected message so the detail pane can
+  // still find it if a background refresh replaces a cached row with the full
+  // provider message under a different id.
   const [selectedMessageImapUid, setSelectedMessageImapUid] = useState<string | null>(null);
   const [selectedMessageIds, setSelectedMessageIds] = useState<string[]>(() =>
     selectedMessageId ? [selectedMessageId] : [],
@@ -12850,11 +12849,9 @@ function MailboxView({
   const selectedMessageFromFolder =
     // Primary: match by id (the common fast path).
     folderMessages.find((message) => message.id === selectedMessageId) ??
-    // Fallback: match by imapUid. Handles the race where a background IMAP
-    // sync reassigns a message's id (SHA1 snapshot id → imap-uid-X) after the
-    // navigation useEffect already fixed selectedMessageId to the old id.
-    // selectedMessageImapUid is set by the nav useEffect and cleared on every
-    // manual selection, so this only fires during that narrow sync-race window.
+    // Fallback: match by imapUid. Handles the race where a background refresh
+    // replaces a lightweight cached row with the full provider message under a
+    // different id.
     (selectedMessageImapUid
       ? folderMessages.find((m) => m.imapUid === selectedMessageImapUid) ?? null
       : null);
@@ -12881,6 +12878,20 @@ function MailboxView({
     null;
   const fullWidthMessage = selectedMessageFromFolder ?? selectedMessage;
   const renderTargetMessage = isFullMessageOpen ? fullWidthMessage : selectedMessage;
+
+  useEffect(() => {
+    const selectedMessage =
+      folderMessages.find((message) => message.id === selectedMessageId) ?? null;
+
+    if (!selectedMessageId) {
+      setSelectedMessageImapUid(null);
+      return;
+    }
+
+    if (selectedMessage?.imapUid) {
+      setSelectedMessageImapUid(selectedMessage.imapUid);
+    }
+  }, [folderMessages, selectedMessageId]);
 
   useEffect(() => {
     readingPaneViewportRef.current?.scrollTo({ top: 0, left: 0 });
@@ -13012,6 +13023,10 @@ function MailboxView({
       density === "full" ? "leading-[1.82]" : "leading-[1.72]"
     } ${nativeBodyTextClass}`;
     const plainContentClassName = nativeBodyTextClass;
+    const isCacheOnlyBody =
+      !threadMessage.bodyHtml?.trim() &&
+      threadMessage.body.length === 0 &&
+      Boolean(threadMessage.snippet?.trim());
 
     return (
       <div
@@ -13100,6 +13115,13 @@ function MailboxView({
               />
             ) : (
               <div>
+                {isCacheOnlyBody ? (
+                  <div className="rounded-[12px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-3 py-2 text-[0.82rem] leading-6 text-[var(--workspace-text-faint)]">
+                    {isSyncingMailbox
+                      ? "Refreshing message content..."
+                      : "Message content is not cached yet. Refresh this inbox to load the full email."}
+                  </div>
+                ) : null}
                 {leadingParagraphs.map((paragraph) =>
                   renderPlainMessageParagraph(
                     paragraph,
@@ -13512,11 +13534,8 @@ function MailboxView({
       notificationNavigationRequest.messageId,
       notificationNavigationRequest.messageId,
     );
-    // Record the target message's imapUid so selectedMessageFromFolder can
-    // still locate it if a background IMAP sync reassigns its id afterwards
-    // (e.g. SHA1 fallback id → imap-uid-X after the first live fetch).
-    // setSelectionState above clears selectedMessageImapUid first; we overwrite
-    // here only for navigation-driven selections.
+    // Record the target message's imapUid immediately; the normal selection
+    // tracking effect will keep this identity fresh after render.
     if (targetMessage.imapUid) {
       setSelectedMessageImapUid(targetMessage.imapUid);
     }
@@ -32998,6 +33017,9 @@ export function WorkspaceShell({
       }
 
       const messages = response.messages ?? [];
+      // Gmail snapshots are intentionally compact; keep the merged list for
+      // storage, but update React state with the full freshly fetched messages.
+      const inMemoryMessages = canUseGmailOAuthFetch ? messages : null;
       const persistedSnapshot = readLiveInboxSnapshots()[managedMailbox.id];
       const persistedSnapshotMessages =
         (persistedSnapshot?.messages as PersistedLiveInboxMessageSnapshot[]) ?? [];
@@ -33058,7 +33080,7 @@ export function WorkspaceShell({
       }
       applyLiveInboxMessagesToMailboxStore(
         managedMailbox.id as InboxId,
-        mergedMessages,
+        inMemoryMessages ?? mergedMessages,
         evictImapUids,
       );
       const refreshWarningMessage = resolveMailboxRefreshWarningMessage(response.warning);
