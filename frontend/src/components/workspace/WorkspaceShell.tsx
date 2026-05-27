@@ -8384,9 +8384,20 @@ function createInitialMailboxStore(
   messageOwnershipInteractions: MessageOwnershipInteractionStore,
   currentUserId: string,
   workspaceDataMode: WorkspaceDataMode,
+  managedInboxes: ManagedWorkspaceInbox[] = [],
 ): MailboxStore {
   const orderedMailboxMap = new Map(
     orderedMailboxes.map((mailbox) => [mailbox.id, mailbox] as const),
+  );
+  const gmailOAuthMailboxIds = new Set(
+    managedInboxes
+      .filter(
+        (mailbox) =>
+          mailbox.connected &&
+          mailbox.provider === "google" &&
+          mailbox.connectionStatus === "connected",
+      )
+      .map((mailbox) => mailbox.id),
   );
   const inboxIds = Array.from(
     new Set<InboxId>([...presetInboxIds, ...orderedMailboxes.map((mailbox) => mailbox.id)]),
@@ -8410,6 +8421,11 @@ function createInitialMailboxStore(
     const mailboxEmail = mailboxInfo?.email ?? fallbackInfo.fallbackEmail;
 
     if (workspaceDataMode === "live") {
+      if (gmailOAuthMailboxIds.has(inboxId)) {
+        store[inboxId] = createEmptyMailboxCollections();
+        return store;
+      }
+
       const snapshotMessages = liveInboxSnapshots[inboxId]?.messages ?? [];
       store[inboxId] = {
         ...createEmptyMailboxCollections(),
@@ -29579,6 +29595,7 @@ export function WorkspaceShell({
         messageOwnershipInteractions,
         currentWorkspaceUserId,
         workspaceDataMode,
+        savedManagedInboxes,
       ),
       orderedMailboxes,
       senderCategoryLearning,
@@ -32732,6 +32749,7 @@ export function WorkspaceShell({
     mailboxId: InboxId,
     messages: LiveInboxMessageSnapshot[],
     evictImapUids?: Set<string>,
+    options?: { replaceInbox?: boolean },
   ) => {
     const targetMailbox = orderedMailboxes.find((entry) => entry.id === mailboxId);
 
@@ -32743,16 +32761,16 @@ export function WorkspaceShell({
       const currentCollections =
         currentStore[targetMailbox.id] ?? createEmptyMailboxCollections();
 
-      // When a trusted server-side UID eviction set is provided, remove messages
-      // whose imapUid is no longer present in the server's INBOX from the in-memory
-      // store before the upsert merge. This ensures archived messages (which
-      // mergeLiveInboxMessages would otherwise preserve as upsert-only) are also
-      // cleared from the render-time Filtered view within the current session.
-      // Messages without an imapUid are always preserved.
+      // Gmail OAuth applies fresh server rows directly; IMAP keeps the existing
+      // upsert merge and optional UID eviction behavior.
       const currentInbox =
-        evictImapUids && evictImapUids.size > 0
-          ? currentCollections.Inbox.filter((msg) => !msg.imapUid || !evictImapUids.has(msg.imapUid))
-          : currentCollections.Inbox;
+        options?.replaceInbox
+          ? []
+          : evictImapUids && evictImapUids.size > 0
+            ? currentCollections.Inbox.filter(
+                (msg) => !msg.imapUid || !evictImapUids.has(msg.imapUid),
+              )
+            : currentCollections.Inbox;
 
       const nextStore = {
         ...currentStore,
@@ -32998,26 +33016,31 @@ export function WorkspaceShell({
       }
 
       const messages = response.messages ?? [];
-      const persistedSnapshot = readLiveInboxSnapshots()[managedMailbox.id];
+      const persistedSnapshot = canUseGmailOAuthFetch
+        ? undefined
+        : readLiveInboxSnapshots()[managedMailbox.id];
       const persistedSnapshotMessages =
         (persistedSnapshot?.messages as PersistedLiveInboxMessageSnapshot[]) ?? [];
       const storedUidValidity = persistedSnapshot?.uidValidity ?? null;
       const currentInboxMessages = mailboxStore[managedMailbox.id as InboxId]?.Inbox ?? [];
-      const mergedMessages = mergePersistedLiveInboxSnapshotMessages(
-        messages,
-        persistedSnapshotMessages,
-        currentInboxMessages,
-        response.inboxUidSet,
-        response.uidValidity,
-        storedUidValidity,
-      );
+      const messagesForReactState = canUseGmailOAuthFetch
+        ? messages
+        : mergePersistedLiveInboxSnapshotMessages(
+            messages,
+            persistedSnapshotMessages,
+            currentInboxMessages,
+            response.inboxUidSet,
+            response.uidValidity,
+            storedUidValidity,
+          );
+      const messagesForSnapshot = messagesForReactState;
       const mergeStartedAt = performance.now();
       try {
         saveLiveInboxSnapshot({
           inboxId: managedMailbox.id,
           email: managedMailbox.email.trim().toLowerCase(),
           fetchedAt: new Date().toISOString(),
-          messages: mergedMessages,
+          messages: messagesForSnapshot,
           uidValidity: response.uidValidity ?? null,
         });
       } catch (error) {
@@ -33028,7 +33051,7 @@ export function WorkspaceShell({
         console.warn("[SYNC-TIMING] Gmail snapshot persistence skipped", {
           mailboxId,
           email: managedMailbox.email.trim(),
-          messageCount: mergedMessages.length,
+          messageCount: messagesForSnapshot.length,
           error,
         });
       }
@@ -33038,6 +33061,7 @@ export function WorkspaceShell({
       // UID-bearing messages from the in-memory store, matching snapshot behaviour.
       let evictImapUids: Set<string> | undefined;
       if (
+        !canUseGmailOAuthFetch &&
         response.inboxUidSet != null &&
         response.uidValidity != null &&
         !(response.inboxUidSet.length === 0 && messages.length > 0)
@@ -33058,8 +33082,9 @@ export function WorkspaceShell({
       }
       applyLiveInboxMessagesToMailboxStore(
         managedMailbox.id as InboxId,
-        mergedMessages,
+        messagesForReactState,
         evictImapUids,
+        { replaceInbox: canUseGmailOAuthFetch },
       );
       const refreshWarningMessage = resolveMailboxRefreshWarningMessage(response.warning);
       if (refreshWarningMessage) {
@@ -33083,7 +33108,7 @@ export function WorkspaceShell({
         retryOk: diagnosticRetryOk,
         retryMessageCount: diagnosticRetryMessageCount,
         cacheRestored: 0,
-        mergedCount: mergedMessages.length,
+        mergedCount: messagesForReactState.length,
       };
       console.info("[SYNC-TIMING] refreshMailboxById complete", {
         mailboxId,
@@ -33091,7 +33116,7 @@ export function WorkspaceShell({
         requestDurationMs: Math.round(requestDurationMs),
         mergeDurationMs: Math.round(performance.now() - mergeStartedAt),
         totalDurationMs: Math.round(performance.now() - syncStartedAt),
-        messageCount: mergedMessages.length,
+        messageCount: messagesForReactState.length,
         warning: response.warning?.code ?? null,
       });
       return refreshWarningMessage ? "partial" : "synced";
