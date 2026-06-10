@@ -952,6 +952,7 @@ const MAILBOX_FOCUS_PREFERENCE_OVERRIDES_STORAGE_KEY =
   "cuevion-mailbox-focus-preference-overrides";
 const OUT_OF_OFFICE_SUPPRESSION_WINDOW_MS = 24 * 60 * 60 * 1000;
 const SMART_FOLDERS_STORAGE_KEY = "cuevion-smart-folders";
+const SMART_FOLDERS_SIDEBAR_PORTAL_ID = "cuevion-smart-folders-sidebar";
 const MAIL_LIST_PANE_WIDTH_STORAGE_KEY = "cuevion-mail-list-pane-width";
 const COMPOSE_RECIPIENT_MEMORY_STORAGE_KEY = "cuevion-compose-recipient-memory";
 const ACTIVE_MAILBOX_AUTO_REFRESH_INTERVAL_MS = 3 * 60 * 1000;
@@ -9860,6 +9861,13 @@ function WorkspaceSidebar({
     }
   }, [activeSidebarInboxId]);
 
+  const smartFoldersSidebarHost = (
+    <div
+      id={SMART_FOLDERS_SIDEBAR_PORTAL_ID}
+      className={isInboxesOpen ? "mt-4" : "hidden"}
+    />
+  );
+
   const renderItem = (item: {
     section: WorkspaceSection;
     label: string;
@@ -9939,6 +9947,7 @@ function WorkspaceSidebar({
                 })}
               </ul>
             ) : null}
+            {smartFoldersSidebarHost}
           </li>
         );
       }
@@ -10000,6 +10009,7 @@ function WorkspaceSidebar({
               })}
             </ul>
           ) : null}
+          {smartFoldersSidebarHost}
         </li>
       );
     }
@@ -11296,6 +11306,7 @@ function MailboxView({
   });
   const [smartFolderMenuId, setSmartFolderMenuId] = useState<string | null>(null);
   const [smartFolderDeleteId, setSmartFolderDeleteId] = useState<string | null>(null);
+  const [smartFolderSidebarHost, setSmartFolderSidebarHost] = useState<HTMLElement | null>(null);
   const [isReadingLearningMenuOpen, setIsReadingLearningMenuOpen] = useState(false);
   const [isReadingLearningLabelChooserOpen, setIsReadingLearningLabelChooserOpen] =
     useState(false);
@@ -11329,6 +11340,11 @@ function MailboxView({
     learningChooserOpen: boolean;
     learningChooserMode: "label" | null;
   } | null>(null);
+  useLayoutEffect(() => {
+    setSmartFolderSidebarHost(
+      document.getElementById(SMART_FOLDERS_SIDEBAR_PORTAL_ID),
+    );
+  }, []);
   const [selectedMessageId, setSelectedMessageId] = useState<string | null>(() => {
     const inboxMessages = mailboxStore[mailbox.id]?.Inbox ?? [];
     // Restore last selection if the message is still present in the inbox.
@@ -17440,6 +17456,105 @@ function MailboxView({
     closeMenus();
   };
 
+  const smartFoldersSidebarSection = (
+    <div className="border-t border-[var(--workspace-sidebar-border)] pt-4">
+      <div className="px-4 pb-2 text-[0.64rem] font-medium uppercase tracking-[0.18em] text-[var(--workspace-sidebar-text-muted)]">
+        Smart Folders
+      </div>
+      <div className="space-y-1">
+        {smartFolders.length > 0 ? (
+          smartFolders.map((folder) => {
+            const active = activeSmartFolderId === folder.id;
+            const isMenuOpen = smartFolderMenuId === folder.id;
+
+            return (
+              <div key={folder.id} className="group relative">
+                <button
+                  type="button"
+                  onClick={() => openSmartFolder(folder.id)}
+                  className={`flex w-full items-center justify-between rounded-2xl px-4 py-2.5 pr-11 text-left text-sm font-medium transition-[background-color,color,box-shadow] duration-100 focus:outline-none focus-visible:shadow-[inset_0_0_0_1px_rgba(255,255,255,0.12),0_0_0_1px_rgba(214,230,221,0.16)] ${
+                    active
+                      ? "bg-[linear-gradient(180deg,var(--workspace-sidebar-active-start),var(--workspace-sidebar-active-end))] text-[var(--workspace-sidebar-text)]"
+                      : "text-[var(--workspace-sidebar-text-muted)] hover:bg-[var(--workspace-sidebar-hover)] hover:text-[var(--workspace-sidebar-text)]"
+                  }`}
+                >
+                  <span className="block truncate pl-4">{folder.name}</span>
+                </button>
+                <button
+                  type="button"
+                  aria-label={`Manage ${folder.name}`}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setSmartFolderMenuId((current) =>
+                      current === folder.id ? null : folder.id,
+                    );
+                    setContextMenuState(null);
+                    setIsMoreMenuOpen(false);
+                    setIsSortMenuOpen(false);
+                  }}
+                  className={`absolute right-2 top-1/2 inline-flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-full border border-[var(--workspace-sidebar-border)] bg-[var(--workspace-sidebar)] text-[var(--workspace-sidebar-text-muted)] transition-[opacity,background-color,border-color,color] duration-150 focus-visible:outline-none ${
+                    isMenuOpen
+                      ? "opacity-100"
+                      : "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100"
+                  } hover:bg-[var(--workspace-sidebar-hover)] hover:text-[var(--workspace-sidebar-text)]`}
+                >
+                  <svg
+                    aria-hidden="true"
+                    viewBox="0 0 16 16"
+                    className="h-3.5 w-3.5"
+                    fill="currentColor"
+                  >
+                    <circle cx="3.5" cy="8" r="1.1" />
+                    <circle cx="8" cy="8" r="1.1" />
+                    <circle cx="12.5" cy="8" r="1.1" />
+                  </svg>
+                </button>
+                {isMenuOpen ? (
+                  <div
+                    className="absolute right-2 top-full z-20 mt-2 min-w-[180px] rounded-[18px] border border-[var(--workspace-menu-border)] bg-[var(--workspace-menu-bg)] p-2 shadow-panel"
+                    onMouseDown={(event) => event.stopPropagation()}
+                  >
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSmartFolderMenuId(null);
+                        onEditSmartFolder(folder.id);
+                      }}
+                      className={contextMenuMainItemClass}
+                    >
+                      Edit folder
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSmartFolderMenuId(null);
+                        setSmartFolderDeleteId(folder.id);
+                      }}
+                      className={contextMenuMainItemClass}
+                    >
+                      Delete folder
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+            );
+          })
+        ) : (
+          <div className="px-4 py-2 text-[0.74rem] leading-6 text-[var(--workspace-sidebar-text-muted)]">
+            Create lightweight views without moving email.
+          </div>
+        )}
+        <button
+          type="button"
+          onClick={onOpenSmartFolderModal}
+          className="flex w-full items-center rounded-2xl px-4 py-2.5 text-left text-[0.74rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-sidebar-text-muted)] transition-[background-color,color] duration-150 hover:bg-[var(--workspace-sidebar-hover)] hover:text-[var(--workspace-sidebar-text)] focus-visible:outline-none"
+        >
+          <span className="block pl-4">+ Add smart folder</span>
+        </button>
+      </div>
+    </div>
+  );
+
   const switchToFolder = (folder: MailFolder) => {
     const nextMessageId = resolveNextMessageId(messageCollections[folder], folder, false, null);
 
@@ -17705,6 +17820,10 @@ function MailboxView({
   };
 
   return (
+    <>
+    {smartFolderSidebarHost
+      ? createPortal(smartFoldersSidebarSection, smartFolderSidebarHost)
+      : null}
     <div className="flex h-full min-h-0 flex-col gap-3 overflow-hidden md:gap-4">
       <header className="flex-none">
         <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between md:gap-6">
@@ -18657,105 +18776,6 @@ function MailboxView({
                   );
                 },
               )}
-              <div className="pt-4">
-                <div className="mb-2 px-4">
-                  <div className="text-[0.62rem] font-medium uppercase tracking-[0.14em] text-[color:rgba(104,95,84,0.82)]">
-                    Smart folders
-                  </div>
-                  <div className="mt-1.5 h-1 w-[calc(100%-0.5rem)] rounded-full bg-[linear-gradient(90deg,rgba(212,192,168,0.9),rgba(224,208,188,0.68),rgba(235,224,209,0.38))]" />
-                </div>
-                <div className="space-y-1">
-                  {smartFolders.length > 0 ? (
-                    smartFolders.map((folder) => {
-                      const active = activeSmartFolderId === folder.id;
-                      const isMenuOpen = smartFolderMenuId === folder.id;
-
-                      return (
-                        <div key={folder.id} className="group relative">
-                          <button
-                            type="button"
-                            onClick={() => openSmartFolder(folder.id)}
-                            className={`flex w-full items-center justify-between rounded-[18px] px-4 py-3 pr-12 text-left text-[0.8rem] font-medium uppercase tracking-[0.14em] transition-[background-color,border-color,color,box-shadow] duration-150 focus-visible:outline-none ${
-                              active
-                                ? "bg-[linear-gradient(180deg,var(--workspace-card-featured-start),var(--workspace-card-featured-end))] text-[var(--workspace-text)] shadow-[0_10px_24px_rgba(31,42,36,0.08),inset_0_1px_0_rgba(255,255,255,0.08)]"
-                                : "text-[var(--workspace-text-soft)] hover:bg-[var(--workspace-card-subtle)]"
-                            }`}
-                          >
-                            <span className="truncate">{folder.name}</span>
-                          </button>
-                          <button
-                            type="button"
-                            aria-label={`Manage ${folder.name}`}
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              setSmartFolderMenuId((current) =>
-                                current === folder.id ? null : folder.id,
-                              );
-                              setContextMenuState(null);
-                              setIsMoreMenuOpen(false);
-                              setIsSortMenuOpen(false);
-                            }}
-                            className={`absolute right-2 top-1/2 inline-flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[var(--workspace-text-faint)] transition-[opacity,background-color,border-color,color] duration-150 focus-visible:outline-none ${
-                              isMenuOpen
-                                ? "opacity-100"
-                                : "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100"
-                            } hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text-soft)]`}
-                          >
-                            <svg
-                              aria-hidden="true"
-                              viewBox="0 0 16 16"
-                              className="h-3.5 w-3.5"
-                              fill="currentColor"
-                            >
-                              <circle cx="3.5" cy="8" r="1.1" />
-                              <circle cx="8" cy="8" r="1.1" />
-                              <circle cx="12.5" cy="8" r="1.1" />
-                            </svg>
-                          </button>
-                          {isMenuOpen ? (
-                            <div
-                              className="absolute right-2 top-full z-20 mt-2 min-w-[180px] rounded-[18px] border border-[var(--workspace-menu-border)] bg-[var(--workspace-menu-bg)] p-2 shadow-panel"
-                              onMouseDown={(event) => event.stopPropagation()}
-                            >
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setSmartFolderMenuId(null);
-                                  onEditSmartFolder(folder.id);
-                                }}
-                                className={contextMenuMainItemClass}
-                              >
-                                Edit folder
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setSmartFolderMenuId(null);
-                                  setSmartFolderDeleteId(folder.id);
-                                }}
-                                className={contextMenuMainItemClass}
-                              >
-                                Delete folder
-                              </button>
-                            </div>
-                          ) : null}
-                        </div>
-                      );
-                    })
-                  ) : (
-                    <div className="px-4 py-3 text-[0.74rem] leading-6 text-[var(--workspace-text-faint)]">
-                      Create lightweight views without moving email.
-                    </div>
-                  )}
-                  <button
-                    type="button"
-                    onClick={onOpenSmartFolderModal}
-                    className="flex w-full items-center rounded-[18px] px-4 py-3 text-left text-[0.74rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)] transition-[background-color,color] duration-150 hover:bg-[var(--workspace-card-subtle)] hover:text-[var(--workspace-text)] focus-visible:outline-none"
-                  >
-                    + Add smart folder
-                  </button>
-                </div>
-              </div>
               </div>
             </div>
 
@@ -20965,6 +20985,7 @@ function MailboxView({
         </div>
       ) : null}
     </div>
+    </>
   );
 }
 
