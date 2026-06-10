@@ -39,9 +39,11 @@ type PriorityDisplayFields = {
   subject: string;
   context: string;
   sourceInbox?: string;
+  timestamp?: string;
 };
 
 type PriorityItemAction = "remove_priority" | "mark_done";
+type PrioritySortOrder = "newest" | "oldest";
 
 type ReviewListViewProps = {
   filter: "All priority" | "Priority";
@@ -74,6 +76,40 @@ function formatDisplayTimestamp(value: string) {
     hour: "numeric",
     minute: "2-digit",
   });
+}
+
+function getReviewItemSortTimestamp(item: ReviewItem) {
+  const updatedAt = Date.parse(item.updatedAt);
+
+  if (!Number.isNaN(updatedAt)) {
+    return updatedAt;
+  }
+
+  const createdAt = Date.parse(item.createdAt);
+
+  if (!Number.isNaN(createdAt)) {
+    return createdAt;
+  }
+
+  return 0;
+}
+
+function formatPriorityListTimestamp(
+  item: ReviewItem,
+  displayOverride?: PriorityDisplayFields,
+) {
+  const timestamp = displayOverride?.timestamp?.trim();
+
+  if (timestamp) {
+    return timestamp;
+  }
+
+  const itemTimestamp = item.updatedAt || item.createdAt;
+  const parsedTimestamp = Date.parse(itemTimestamp);
+
+  return Number.isNaN(parsedTimestamp)
+    ? itemTimestamp
+    : formatDisplayTimestamp(itemTimestamp);
 }
 
 function getStatusTone(status: ReviewStatus) {
@@ -820,10 +856,23 @@ export function ReviewListView({
   const [openActionItemId, setOpenActionItemId] = useState<string | null>(null);
   const actionMenuRef = useRef<HTMLDivElement | null>(null);
   const hiddenReviewIdSet = new Set(hiddenReviewIds);
+  const [prioritySortOrder, setPrioritySortOrder] = useState<PrioritySortOrder>("newest");
   const items = controller
     .getItems(filter)
     .concat(supplementalItems)
-    .filter((item) => !hiddenReviewIdSet.has(item.id));
+    .filter((item) => !hiddenReviewIdSet.has(item.id))
+    .sort((firstItem, secondItem) => {
+      const firstTimestamp = getReviewItemSortTimestamp(firstItem);
+      const secondTimestamp = getReviewItemSortTimestamp(secondItem);
+
+      if (firstTimestamp === secondTimestamp) {
+        return 0;
+      }
+
+      return prioritySortOrder === "newest"
+        ? secondTimestamp - firstTimestamp
+        : firstTimestamp - secondTimestamp;
+    });
 
   useEffect(() => {
     if (!openActionItemId) {
@@ -855,6 +904,30 @@ export function ReviewListView({
           <p className="text-lg leading-8 text-[var(--workspace-text-muted)]">
             Cross-inbox priority items collected in one place so you can open the right thread and act immediately.
           </p>
+          <div className="flex flex-wrap items-center gap-2 pt-1">
+            <span className="text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+              Sort
+            </span>
+            <div className="inline-flex rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] p-1">
+              {([
+                ["newest", "Newest first"],
+                ["oldest", "Oldest first"],
+              ] as const).map(([value, label]) => (
+                <button
+                  key={value}
+                  type="button"
+                  onClick={() => setPrioritySortOrder(value)}
+                  className={`h-8 rounded-full px-3 text-[0.68rem] font-medium uppercase tracking-[0.12em] transition-[background-color,color] duration-150 focus-visible:outline-none ${
+                    prioritySortOrder === value
+                      ? "bg-[var(--workspace-text)] text-[var(--workspace-card)]"
+                      : "text-[var(--workspace-text-soft)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)]"
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
         </header>
 
         <section className="rounded-[30px] border border-[var(--workspace-border)] bg-[var(--workspace-card)] p-6 shadow-panel">
@@ -902,6 +975,9 @@ export function ReviewListView({
                     <div className="mt-0.5 truncate text-[0.8rem] leading-6 text-[var(--workspace-text-faint)]">
                       {getPriorityContextLine(item, displayOverride)}
                     </div>
+                    <div className="mt-1 text-[0.72rem] font-medium uppercase tracking-[0.12em] text-[var(--workspace-text-faint)]">
+                      {formatPriorityListTimestamp(item, displayOverride)}
+                    </div>
                   </div>
                   <div className="relative shrink-0" ref={isActionMenuOpen ? actionMenuRef : null}>
                     <button
@@ -926,7 +1002,7 @@ export function ReviewListView({
                           }}
                           className="block w-full rounded-[12px] px-3 py-2 text-left text-[0.82rem] font-medium text-[var(--workspace-text)] transition-colors hover:bg-[var(--workspace-hover-surface)] focus-visible:outline-none"
                         >
-                          Remove priority
+                          This is not priority
                         </button>
                         <button
                           type="button"

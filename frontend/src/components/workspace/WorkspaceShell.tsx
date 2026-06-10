@@ -14091,7 +14091,7 @@ function MailboxView({
                   }}
                   className={menuItemClass}
                 >
-                  {messageIsVisiblePriority ? "Remove priority" : "Mark as priority"}
+                  {messageIsVisiblePriority ? "This is not priority" : "Mark as priority"}
                 </button>
                 <button
                   type="button"
@@ -18073,7 +18073,7 @@ function MailboxView({
                       className={contextMenuMainItemClass}
                     >
                       {isVisiblePriorityMessage(fullWidthMessage ?? selectedMessage)
-                        ? "Remove priority"
+                        ? "This is not priority"
                         : "Mark as priority"}
                     </button>
                     {isVisiblePriorityMessage(selectedMessage) ? (
@@ -19593,7 +19593,7 @@ function MailboxView({
                     className={contextMenuMainItemClass}
                   >
                     {isVisiblePriorityMessage(contextMenuMessage)
-                      ? "Remove priority"
+                      ? "This is not priority"
                       : "Mark as priority"}
                   </button>
                   {isVisiblePriorityMessage(contextMenuMessage) ? (
@@ -31227,29 +31227,38 @@ export function WorkspaceShell({
     });
   })();
   const livePriorityInboxItems: ReviewItem[] = livePriorityInboxEntries.map(
-    ({ mailboxId, mailboxTitle, message }) => ({
-      id: `live-priority-${mailboxId}-${message.id}`,
-      target: "demo-review",
-      type: "business_context_review",
-      title: message.subject,
-      subtitle: `${message.sender} · ${message.from}`,
-      description: "Priority message from your live Inbox.",
-      status: "needs_decision",
-      owner: mailboxTitle,
-      nextStep: "Open this thread in Inbox.",
-      highlights: [message.snippet],
-      relatedItems: [],
-      primaryAction: {
-        id: `live-priority-open-${mailboxId}-${message.id}`,
-        label: "Open email",
-        kind: "open_full_review",
-      },
-      sourceType: "mail_message",
-      sourceId: message.id,
-      linkedEntityIds: [`mailbox:${mailboxId}`],
-      createdAt: message.createdAt ?? message.timestamp,
-      updatedAt: message.createdAt ?? message.timestamp,
-    }),
+    ({ mailboxId, mailboxTitle, message }) => {
+      const resolvedPriorityMessageDateMs = resolveMailDateMs(message);
+      const priorityMessageDate =
+        message.createdAt ??
+        (resolvedPriorityMessageDateMs > 0
+          ? new Date(resolvedPriorityMessageDateMs).toISOString()
+          : message.timestamp);
+
+      return {
+        id: `live-priority-${mailboxId}-${message.id}`,
+        target: "demo-review",
+        type: "business_context_review",
+        title: message.subject,
+        subtitle: `${message.sender} · ${message.from}`,
+        description: "Priority message from your live Inbox.",
+        status: "needs_decision",
+        owner: mailboxTitle,
+        nextStep: "Open this thread in Inbox.",
+        highlights: [message.snippet],
+        relatedItems: [],
+        primaryAction: {
+          id: `live-priority-open-${mailboxId}-${message.id}`,
+          label: "Open email",
+          kind: "open_full_review",
+        },
+        sourceType: "mail_message",
+        sourceId: message.id,
+        linkedEntityIds: [`mailbox:${mailboxId}`],
+        createdAt: priorityMessageDate,
+        updatedAt: priorityMessageDate,
+      };
+    },
   );
   const hiddenPriorityReviewIds = reviewController.store.items.map((item) => item.id);
   const priorityDisplayOverrides = Object.fromEntries(
@@ -31260,6 +31269,7 @@ export function WorkspaceShell({
         subject: message.subject,
         context: message.snippet,
         sourceInbox: mailboxTitle,
+        timestamp: message.timestamp,
       },
     ]),
   );
@@ -32351,7 +32361,7 @@ export function WorkspaceShell({
 
     if (options.showConfirmation !== false) {
       setManualChangeConfirmationMessage(
-        shouldBePriority ? "Priority set to Important" : "Priority set to Normal",
+        shouldBePriority ? "Priority set to Important" : "This is not priority",
       );
     }
   };
