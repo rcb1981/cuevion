@@ -901,61 +901,63 @@ export function ReviewListView({
   return (
     <>
       <div className="min-h-full space-y-8">
-        <header className="flex flex-wrap items-start justify-between gap-4">
-          <div className="min-w-[min(100%,32rem)] flex-1 space-y-3">
-            <div className="text-[0.72rem] font-medium uppercase tracking-[0.24em] text-[var(--workspace-text-faint)]">
-              Priority
-            </div>
-            <h1 className="text-[1.85rem] font-medium tracking-tight text-[var(--workspace-text)] md:text-[2.25rem]">
-              {filter}
-            </h1>
-            <p className="max-w-3xl text-lg leading-8 text-[var(--workspace-text-muted)]">
-              Cross-inbox priority items collected in one place so you can open the right thread and act immediately.
-            </p>
+        <header className="space-y-3">
+          <div className="text-[0.72rem] font-medium uppercase tracking-[0.24em] text-[var(--workspace-text-faint)]">
+            Priority
           </div>
-          <div className="relative ml-auto pt-1" ref={sortMenuRef}>
-            <button
-              type="button"
-              aria-expanded={isSortMenuOpen}
-              onClick={() => {
-                setOpenActionItemId(null);
-                setIsSortMenuOpen((current) => !current);
-              }}
-              className="inline-flex h-10 items-center justify-center gap-2 rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 text-[0.68rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-soft)] transition-[background-color,border-color,color,transform] duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] active:scale-[0.98] focus-visible:outline-none"
-            >
-              <span>Sort</span>
-              <span className="text-[var(--workspace-text)]">
-                {prioritySortOrder === "newest" ? "Newest first" : "Oldest first"}
-              </span>
-            </button>
-            {isSortMenuOpen ? (
-              <div className="absolute right-0 top-12 z-30 w-44 overflow-hidden rounded-[16px] border border-[var(--workspace-border)] bg-[var(--workspace-modal-bg)] p-1.5 text-left shadow-panel">
-                {([
-                  ["newest", "Newest first"],
-                  ["oldest", "Oldest first"],
-                ] as const).map(([value, label]) => (
-                  <button
-                    key={value}
-                    type="button"
-                    onClick={() => {
-                      setPrioritySortOrder(value);
-                      setIsSortMenuOpen(false);
-                    }}
-                    className={`block w-full rounded-[12px] px-3 py-2 text-left text-[0.82rem] font-medium transition-colors focus-visible:outline-none ${
-                      prioritySortOrder === value
-                        ? "bg-[var(--workspace-card-subtle)] text-[var(--workspace-text)]"
-                        : "text-[var(--workspace-text-soft)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)]"
-                    }`}
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
-            ) : null}
-          </div>
+          <h1 className="text-[1.85rem] font-medium tracking-tight text-[var(--workspace-text)] md:text-[2.25rem]">
+            {filter}
+          </h1>
+          <p className="max-w-3xl text-lg leading-8 text-[var(--workspace-text-muted)]">
+            Cross-inbox priority items collected in one place so you can open the right thread and act immediately.
+          </p>
         </header>
 
-        <section className="rounded-[30px] border border-[var(--workspace-border)] bg-[var(--workspace-card)] p-6 shadow-panel">
+        <div className="space-y-3">
+          <div className="flex justify-end">
+            <div className="relative" ref={sortMenuRef}>
+              <button
+                type="button"
+                aria-expanded={isSortMenuOpen}
+                onClick={() => {
+                  setOpenActionItemId(null);
+                  setIsSortMenuOpen((current) => !current);
+                }}
+                className="inline-flex h-10 items-center justify-center gap-2 rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 text-[0.68rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-soft)] transition-[background-color,border-color,color,transform] duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] active:scale-[0.98] focus-visible:outline-none"
+              >
+                <span>Sort</span>
+                <span className="text-[var(--workspace-text)]">
+                  {prioritySortOrder === "newest" ? "Newest first" : "Oldest first"}
+                </span>
+              </button>
+              {isSortMenuOpen ? (
+                <div className="absolute right-0 top-12 z-30 w-44 overflow-hidden rounded-[16px] border border-[var(--workspace-border)] bg-[var(--workspace-modal-bg)] p-1.5 text-left shadow-panel">
+                  {([
+                    ["newest", "Newest first"],
+                    ["oldest", "Oldest first"],
+                  ] as const).map(([value, label]) => (
+                    <button
+                      key={value}
+                      type="button"
+                      onClick={() => {
+                        setPrioritySortOrder(value);
+                        setIsSortMenuOpen(false);
+                      }}
+                      className={`block w-full rounded-[12px] px-3 py-2 text-left text-[0.82rem] font-medium transition-colors focus-visible:outline-none ${
+                        prioritySortOrder === value
+                          ? "bg-[var(--workspace-card-subtle)] text-[var(--workspace-text)]"
+                          : "text-[var(--workspace-text-soft)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)]"
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          </div>
+
+          <section className="rounded-[30px] border border-[var(--workspace-border)] bg-[var(--workspace-card)] p-6 shadow-panel">
           <div className="space-y-3">
             {items.map((item) => {
               const displayOverride = displayOverrides[item.id];
@@ -998,31 +1000,28 @@ export function ReviewListView({
                       {getPriorityContextLine(item, displayOverride)}
                     </div>
                   </div>
-                  <div
-                    className="relative ml-auto min-w-[9.5rem] shrink-0 text-right"
-                    ref={isActionMenuOpen ? actionMenuRef : null}
-                  >
-                    <div className="flex flex-col items-end gap-1.5 rounded-[16px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-2 py-2">
-                      <div className="flex max-w-full items-center justify-end gap-2">
+                  <div className="relative ml-auto min-w-[10rem] shrink-0" ref={isActionMenuOpen ? actionMenuRef : null}>
+                    <div className="flex items-start justify-end gap-2">
+                      <div className="flex min-w-0 flex-col items-start gap-1.5">
                         <span className="min-w-0 truncate rounded-full bg-[var(--workspace-card-subtle)] px-2.5 py-1 text-[0.65rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)]">
                           {getPrioritySourceInboxLine(item, displayOverride)}
                         </span>
-                        <button
-                          type="button"
-                          aria-label="Priority actions"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            setIsSortMenuOpen(false);
-                            setOpenActionItemId((current) => (current === item.id ? null : item.id));
-                          }}
-                          className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[0.95rem] leading-none text-[var(--workspace-text-faint)] transition-[background-color,border-color,color,transform] duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] active:scale-[0.96] focus-visible:outline-none"
-                        >
-                          ×
-                        </button>
+                        <div className="max-w-full text-left text-[0.66rem] font-medium uppercase tracking-[0.12em] text-[var(--workspace-text-faint)]">
+                          {formatPriorityListTimestamp(item, displayOverride)}
+                        </div>
                       </div>
-                      <div className="max-w-full text-[0.66rem] font-medium uppercase tracking-[0.12em] text-[var(--workspace-text-faint)]">
-                        {formatPriorityListTimestamp(item, displayOverride)}
-                      </div>
+                      <button
+                        type="button"
+                        aria-label="Priority actions"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          setIsSortMenuOpen(false);
+                          setOpenActionItemId((current) => (current === item.id ? null : item.id));
+                        }}
+                        className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[0.95rem] leading-none text-[var(--workspace-text-faint)] transition-[background-color,border-color,color,transform] duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] active:scale-[0.96] focus-visible:outline-none"
+                      >
+                        ×
+                      </button>
                     </div>
                     {isActionMenuOpen && onPriorityItemAction ? (
                       <div className="absolute right-0 top-10 z-30 w-44 overflow-hidden rounded-[16px] border border-[var(--workspace-border)] bg-[var(--workspace-modal-bg)] p-1.5 shadow-panel">
@@ -1057,6 +1056,7 @@ export function ReviewListView({
             })}
           </div>
         </section>
+      </div>
       </div>
       <ReviewToastView toast={controller.toast} />
     </>
