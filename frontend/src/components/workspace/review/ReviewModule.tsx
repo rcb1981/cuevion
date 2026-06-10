@@ -959,15 +959,12 @@ export function ReviewListView({
                     : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)] focus-visible:border-[var(--workspace-border-hover)] focus-visible:bg-[linear-gradient(180deg,var(--workspace-card-featured-start),var(--workspace-card-featured-end))]"
                 }`}
               >
-                <div className="flex min-w-0 items-start gap-3">
-                  <div className="min-w-0 flex-1">
-                    <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+                <div className="flex min-w-0 flex-wrap items-start gap-x-3 gap-y-2">
+                  <div className="min-w-[min(100%,16rem)] flex-1">
+                    <div className="flex min-w-0 items-center">
                       <div className="min-w-0 flex-1 truncate text-[0.96rem] font-medium tracking-[-0.014em] text-[var(--workspace-text)]">
                         {getPrioritySenderLine(item, displayOverride)}
                       </div>
-                      <span className="shrink-0 rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-2.5 py-1 text-[0.65rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)]">
-                        {getPrioritySourceInboxLine(item, displayOverride)}
-                      </span>
                     </div>
                     <div className="mt-0.5 truncate text-[0.84rem] leading-6 text-[var(--workspace-text-soft)]">
                       {getPrioritySubjectLine(item, displayOverride)}
@@ -975,22 +972,30 @@ export function ReviewListView({
                     <div className="mt-0.5 truncate text-[0.8rem] leading-6 text-[var(--workspace-text-faint)]">
                       {getPriorityContextLine(item, displayOverride)}
                     </div>
-                    <div className="mt-1 text-[0.72rem] font-medium uppercase tracking-[0.12em] text-[var(--workspace-text-faint)]">
+                  </div>
+                  <div
+                    className="relative ml-auto flex min-w-[9rem] shrink-0 flex-col items-end gap-2 text-right"
+                    ref={isActionMenuOpen ? actionMenuRef : null}
+                  >
+                    <div className="flex max-w-full items-center justify-end gap-2">
+                      <span className="min-w-0 truncate rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-2.5 py-1 text-[0.65rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)]">
+                        {getPrioritySourceInboxLine(item, displayOverride)}
+                      </span>
+                      <button
+                        type="button"
+                        aria-label="Priority actions"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          setOpenActionItemId((current) => (current === item.id ? null : item.id));
+                        }}
+                        className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[1rem] leading-none text-[var(--workspace-text-faint)] transition-[background-color,border-color,color,transform] duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] active:scale-[0.96] focus-visible:outline-none"
+                      >
+                        ×
+                      </button>
+                    </div>
+                    <div className="max-w-full text-[0.72rem] font-medium uppercase tracking-[0.12em] text-[var(--workspace-text-faint)]">
                       {formatPriorityListTimestamp(item, displayOverride)}
                     </div>
-                  </div>
-                  <div className="relative shrink-0" ref={isActionMenuOpen ? actionMenuRef : null}>
-                    <button
-                      type="button"
-                      aria-label="Priority actions"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        setOpenActionItemId((current) => (current === item.id ? null : item.id));
-                      }}
-                      className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[1rem] leading-none text-[var(--workspace-text-faint)] transition-[background-color,border-color,color,transform] duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] active:scale-[0.96] focus-visible:outline-none"
-                    >
-                      ×
-                    </button>
                     {isActionMenuOpen && onPriorityItemAction ? (
                       <div className="absolute right-0 top-10 z-30 w-44 overflow-hidden rounded-[16px] border border-[var(--workspace-border)] bg-[var(--workspace-modal-bg)] p-1.5 shadow-panel">
                         <button
