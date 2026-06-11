@@ -1558,6 +1558,95 @@ function isExplicitMusicPromoSendoutContext(message: PromoHeuristicMessage) {
   );
 }
 
+function isPromoAccessRequestMessage(message: PromoHeuristicMessage) {
+  const subjectText = (message.subject ?? "").toLowerCase();
+  const searchableText = [
+    message.subject,
+    message.snippet,
+    message.sender,
+    message.from,
+    message.to ?? "",
+    ...(message.body ?? []),
+  ]
+    .join(" ")
+    .toLowerCase();
+  const hasPromoRequestPattern =
+    includesAnyKeyword(searchableText, [
+      "i would like to receive promo",
+      "i would like to receive promos",
+      "would like to receive promo",
+      "would like to receive promos",
+      "can you send me promos",
+      "could you send me promos",
+      "please send me promos",
+      "send me your promos",
+      "send me promos",
+      "please add me to your promo list",
+      "add me to your promo list",
+      "add me to promo list",
+      "receive promos for my radio show",
+      "receive promo for my radio show",
+      "promo for my radio show",
+      "promo access",
+      "request promo",
+      "request promos",
+    ]) ||
+    /\b(?:receive|get|send me|add me to|include me on|promo access)\b.{0,80}\bpromos?\b/.test(
+      searchableText,
+    );
+
+  if (!hasPromoRequestPattern) {
+    return false;
+  }
+
+  const hasSpecificReleaseSubject =
+    /\s[-–—]\s/.test(subjectText) &&
+    includesAnyKeyword(searchableText, [
+      "track",
+      "release",
+      "single",
+      "ep",
+      "remix",
+      "out now",
+      "out on",
+    ]);
+  const hasDownloadOrListenLink =
+    /https?:\/\/|www\./.test(searchableText) ||
+    includesAnyKeyword(searchableText, [
+      "soundcloud",
+      "spotify.link",
+      "listen link",
+      "download link",
+      "download/listen",
+      "promo download page",
+      "promo download package",
+      "dj promo package",
+      "disco.ac",
+      "hypeddit",
+      "toneden",
+    ]);
+  const hasSpecificSendoutLanguage = includesAnyKeyword(searchableText, [
+    "sending over my new",
+    "sending you my new",
+    "new single",
+    "new ep",
+    "new release",
+    "support this release",
+    "support this track",
+    "support the release",
+    "support the track",
+    "promo campaign",
+  ]);
+
+  return !(
+    isExplicitMusicPromoSendoutContext(message) ||
+    hasMusicPromoSubjectMarker(subjectText) ||
+    hasSpecificReleaseSubject ||
+    hasDownloadOrListenLink ||
+    hasSpecificSendoutLanguage
+  );
+}
+
 function isProtectedMusicPromoContext(message: PromoHeuristicMessage) {
   const subjectText = message.subject ?? "";
   const identityText = [message.sender, message.from].join(" ").toLowerCase();
@@ -1669,6 +1758,10 @@ function isStrongMusicPromoMessage(message: PromoHeuristicMessage) {
     includesAnyKeyword(searchableText, ["club", "dancefloor", "tech house"]) ||
     ((toText.includes("promos@") || toText.includes("promo@")) &&
       /\s[-–:]\s/.test(subjectText));
+
+  if (isPromoAccessRequestMessage(message)) {
+    return false;
+  }
 
   return (
     isExplicitMusicPromoSendoutContext(message) ||
@@ -1957,6 +2050,7 @@ function resolveVisibleClassification(
       classification === "royalty_statement",
   );
   const isStrongMusicPromo = isStrongMusicPromoMessage(message);
+  const isPromoAccessRequest = isPromoAccessRequestMessage(message);
   const hasStrongMusicPromoEligibleClassification =
     !isStrongPromoSubjectProtectedClassification &&
     (message.internalClassification === "workflow_update" ||
@@ -1993,6 +2087,15 @@ function resolveVisibleClassification(
       !isMarketingNewsletterUpdate &&
       musicCampaignPromoSignal);
   const resolvedClassification = (() => {
+    if (
+      isPromoAccessRequest &&
+      (message.internalClassification === "promo" ||
+        message.internalClassification === "promo_reminder" ||
+        signalClassification === "promo")
+    ) {
+      return "business";
+    }
+
     if (
       hasProtectedMusicPromoContext &&
       !isStrongPromoSubjectProtectedClassification
@@ -5768,6 +5871,7 @@ function inferHeuristicSignal(
   );
   const isGenericRetailMarketingUpdate =
     isLowValueMarketingNewsletterEventUpdateMessage(message);
+  const isPromoAccessRequest = isPromoAccessRequestMessage(message);
   // A promo keyword in the subject is a strong, intentional signal — do not let
   // isMetaBillingSystemMail suppress it.  Billing keywords are detected from the
   // full body/footer and are too broad ("ads", "advertentie") to override an
@@ -5777,6 +5881,7 @@ function inferHeuristicSignal(
   const isPromoInSubject = includesAnyKeyword(subjectText, promoKeywords);
   const isPromo =
     includesAnyKeyword(searchableText, promoKeywords) &&
+    !isPromoAccessRequest &&
     !isGoogleSecurityAuthMail &&
     (!isMetaBillingSystemMail || isPromoInSubject);
   const isPriority =
