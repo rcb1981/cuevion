@@ -11613,6 +11613,8 @@ function MailboxView({
   const [externalInviteInFlightEmails, setExternalInviteInFlightEmails] = useState<string[]>([]);
   const [isCollaborationInviteComposerOpen, setIsCollaborationInviteComposerOpen] =
     useState(false);
+  const [isCollaborationActionsMenuOpen, setIsCollaborationActionsMenuOpen] =
+    useState(false);
   const [collaborationReplyVisibility, setCollaborationReplyVisibility] =
     useState<MailMessageCollaborationVisibility>("internal");
   const [hasManualCollaborationReplyVisibility, setHasManualCollaborationReplyVisibility] =
@@ -11621,6 +11623,7 @@ function MailboxView({
   const startCollaborationInviteEmailInputRef = useRef<HTMLInputElement | null>(null);
   const externalCollaborationEmailInputRef = useRef<HTMLInputElement | null>(null);
   const collaborationParticipantPickerRef = useRef<HTMLDivElement | null>(null);
+  const collaborationActionsMenuRef = useRef<HTMLDivElement | null>(null);
   const collaborationMessageRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const [focusCollaborationComposer, setFocusCollaborationComposer] = useState(false);
   const [highlightedCollaborationMessageId, setHighlightedCollaborationMessageId] = useState<
@@ -14696,8 +14699,11 @@ function MailboxView({
 
     const handleDismiss = (event: globalThis.MouseEvent) => {
       if (
-        event.target instanceof Node &&
-        collaborationParticipantPickerRef.current?.contains(event.target)
+        event.target instanceof Element &&
+        (
+          collaborationParticipantPickerRef.current?.contains(event.target) ||
+          event.target.closest("[data-collaboration-participant-trigger]")
+        )
       ) {
         return;
       }
@@ -14719,6 +14725,41 @@ function MailboxView({
       window.removeEventListener("keydown", handleEscape);
     };
   }, [isCollaborationParticipantPickerOpen]);
+
+  useEffect(() => {
+    if (!isCollaborationActionsMenuOpen) {
+      return;
+    }
+
+    const closeCollaborationActionsMenu = () => {
+      setIsCollaborationActionsMenuOpen(false);
+    };
+
+    const handleDismiss = (event: globalThis.MouseEvent) => {
+      if (
+        event.target instanceof Node &&
+        collaborationActionsMenuRef.current?.contains(event.target)
+      ) {
+        return;
+      }
+
+      closeCollaborationActionsMenu();
+    };
+
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        closeCollaborationActionsMenu();
+      }
+    };
+
+    document.addEventListener("mousedown", handleDismiss, true);
+    window.addEventListener("keydown", handleEscape);
+
+    return () => {
+      document.removeEventListener("mousedown", handleDismiss, true);
+      window.removeEventListener("keydown", handleEscape);
+    };
+  }, [isCollaborationActionsMenuOpen]);
 
   useEffect(() => {
     if (selectedMessageIds.length === 1 && selectionAnchorId !== selectedMessageIds[0]) {
@@ -15294,6 +15335,7 @@ function MailboxView({
     setFocusCollaborationComposer(Boolean(options?.focusComposer));
     setContextMenuState(null);
     setDetailActionsMenuState(null);
+    setIsCollaborationActionsMenuOpen(false);
   };
 
   const clearCollaborationDraft = (messageId: string) => {
@@ -15372,6 +15414,7 @@ function MailboxView({
     setPendingEndCollaborationMessageId(null);
     setFocusCollaborationComposer(false);
     setIsCollaborationInviteComposerOpen(false);
+    setIsCollaborationActionsMenuOpen(false);
   };
 
   const syncCollaborationMentionState = (
@@ -20162,9 +20205,23 @@ function MailboxView({
                         </div>
                       ) : (
                       <>
-                        <section className="space-y-3">
-                          <div className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
-                            Participants
+                        <section className="relative space-y-3">
+                          <div className="flex flex-wrap items-center justify-between gap-3">
+                            <div className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                              Participants
+                            </div>
+                            {collaborationTeamPeople.length > 0 ? (
+                              <button
+                                type="button"
+                                data-collaboration-participant-trigger
+                                onClick={() =>
+                                  setIsCollaborationParticipantPickerOpen((current) => !current)
+                                }
+                                className="inline-flex h-8 items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-3 text-[0.64rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)] transition-[background-color,border-color,color] duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] focus-visible:outline-none"
+                              >
+                                Manage participants
+                              </button>
+                            ) : null}
                           </div>
                           <div className="flex flex-wrap gap-2">
                             {collaborationParticipantChipPeople.map((participant) => (
@@ -20200,178 +20257,196 @@ function MailboxView({
                               </div>
                             ))}
                           </div>
-                          {collaborationTeamPeople.length > 0 ? (
-                            <div className="space-y-2 pt-1">
-                              <div className="text-[0.68rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)]">
-                                Add participant
-                              </div>
-                              {!isCollaborationParticipantPickerOpen ? (
-                                <button
-                                  type="button"
-                                  onClick={() => setIsCollaborationParticipantPickerOpen(true)}
-                                  className="flex w-full items-center justify-between rounded-[16px] bg-[var(--workspace-card)] px-4 py-2.5 text-left text-[0.88rem] leading-6 text-[var(--workspace-text-soft)] transition-[background-color,color] duration-150 hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] focus-visible:outline-none"
-                                >
-                                  <span>Select team members</span>
-                                  <span className="text-[0.72rem] text-[var(--workspace-text-faint)]">
-                                    Search
-                                  </span>
-                                </button>
-                              ) : (
-                                <div ref={collaborationParticipantPickerRef} className="space-y-2">
-                                  <input
-                                    type="search"
-                                    value={collaborationParticipantSearch}
-                                    onChange={(event) =>
-                                      setCollaborationParticipantSearch(event.target.value)
-                                    }
-                                    placeholder="Search team members"
-                                    className="w-full rounded-[16px] bg-[var(--workspace-card)] px-4 py-2.5 text-[0.88rem] leading-6 text-[var(--workspace-text)] outline-none placeholder:text-[var(--workspace-text-faint)]"
-                                  />
-                                  <div className="max-h-[280px] space-y-2 overflow-y-auto pr-1">
-                                    {visibleCollaborationParticipantOptions.map((person) => {
-                                      const isExternalInvitePending = pendingExternalInviteEmailKeys.has(
-                                        normalizeSenderLearningKey(person.email),
-                                      );
-                                      const alreadyAdded =
-                                        activeCollaborationParticipantKeys.has(person.id) ||
-                                        activeCollaborationParticipantKeys.has(
-                                          normalizeSenderLearningKey(person.email),
-                                        ) ||
-                                        isExternalInvitePending;
-                                      const isSelected =
-                                        collaborationParticipantPersonIds.includes(person.id);
-                                      const accessLevel = collaborationRoleByEmail.get(
-                                        normalizeSenderLearningKey(person.email),
-                                      );
-
-                                      return (
-                                        <button
-                                          key={`collaboration-person-${person.id}`}
-                                          type="button"
-                                          disabled={alreadyAdded}
-                                          onClick={() =>
-                                            setCollaborationParticipantPersonIds((current) =>
-                                              current.includes(person.id)
-                                                ? current.filter((entry) => entry !== person.id)
-                                                : [...current, person.id],
-                                            )
-                                          }
-                                          className={`flex w-full items-start justify-between gap-3 rounded-[16px] border px-3.5 py-3 text-left transition-[background-color,border-color,color] duration-150 focus-visible:outline-none ${
-                                            alreadyAdded
-                                              ? "cursor-not-allowed border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] opacity-70"
-                                              : isSelected
-                                                ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-card-featured-start),var(--workspace-card-featured-end))]"
-                                                : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)]"
-                                          }`}
-                                        >
-                                          <div className="min-w-0 flex-1">
-                                            <div className="truncate text-[0.86rem] font-medium leading-6 text-[var(--workspace-text)]">
-                                              {person.name}
-                                            </div>
-                                            <div className="truncate text-[0.76rem] leading-5 text-[var(--workspace-text-faint)]">
-                                              {person.email}
-                                            </div>
-                                            {accessLevel ? (
-                                              <div className="mt-2 inline-flex items-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-2.5 py-1 text-[0.56rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)]">
-                                                {getTeamAccessLevelLabel(accessLevel)}
-                                              </div>
-                                            ) : null}
-                                          </div>
-                                          <div
-                                            className={`inline-flex min-w-[4.5rem] items-center justify-center rounded-full border px-2.5 py-1 text-[0.56rem] font-medium uppercase tracking-[0.14em] ${
-                                              alreadyAdded
-                                                ? "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[var(--workspace-text-faint)]"
-                                                : isSelected
-                                                  ? "border-[var(--workspace-accent-border)] bg-[var(--workspace-card)] text-[var(--workspace-text)]"
-                                                  : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] text-[var(--workspace-text-faint)]"
-                                            }`}
-                                          >
-                                            {alreadyAdded
-                                              ? isExternalInvitePending
-                                                ? "Inviting"
-                                                : "Added"
-                                              : isSelected
-                                                ? "Selected"
-                                                : "Select"}
-                                          </div>
-                                        </button>
-                                      );
-                                    })}
-                                    {visibleCollaborationParticipantOptions.length === 0 ? (
-                                      <div className="rounded-[16px] bg-[var(--workspace-card)] px-4 py-4 text-[0.8rem] leading-6 text-[var(--workspace-text-faint)]">
-                                        No team members match that search.
-                                      </div>
-                                    ) : null}
+                          {collaborationTeamPeople.length > 0 && isCollaborationParticipantPickerOpen ? (
+                            <div
+                              ref={collaborationParticipantPickerRef}
+                              className="absolute right-0 top-9 z-30 w-full max-w-[380px] space-y-3 rounded-[20px] border border-[var(--workspace-menu-border)] bg-[var(--workspace-menu-bg)] p-3 shadow-panel"
+                            >
+                              <div className="flex items-center justify-between gap-3 px-1">
+                                <div>
+                                  <div className="text-[0.68rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)]">
+                                    Add participant
                                   </div>
-                                  <div className="flex flex-wrap items-center gap-2">
-                                    <button
-                                      type="button"
-                                      onClick={() =>
-                                        addParticipantToCollaboration(activeCollaborationMessage.id)
-                                      }
-                                      disabled={collaborationParticipantPersonIds.length === 0}
-                                      className={
-                                        collaborationParticipantPersonIds.length > 0
-                                          ? "inline-flex h-9 items-center justify-center rounded-full bg-pine px-4 text-[0.66rem] font-medium uppercase tracking-[0.14em] text-[color:rgba(251,248,242,0.98)] transition-[background-color,transform] duration-150 hover:bg-moss active:scale-[0.99] focus-visible:outline-none"
-                                          : "inline-flex h-9 cursor-not-allowed items-center justify-center rounded-full bg-[var(--workspace-card)] px-4 text-[0.66rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-soft)] opacity-45 transition-[opacity] duration-150 focus-visible:outline-none"
-                                      }
-                                    >
-                                      {`Add selected${
-                                        collaborationParticipantPersonIds.length > 0
-                                          ? ` (${collaborationParticipantPersonIds.length})`
-                                          : ""
-                                      }`}
-                                    </button>
+                                  <div className="text-[0.78rem] leading-5 text-[var(--workspace-text-faint)]">
+                                    Search team members
                                   </div>
                                 </div>
-                              )}
+                                <button
+                                  type="button"
+                                  aria-label="Close participant picker"
+                                  onClick={() => setIsCollaborationParticipantPickerOpen(false)}
+                                  className="inline-flex h-7 w-7 items-center justify-center rounded-full text-[var(--workspace-text-faint)] transition-colors duration-150 hover:bg-[var(--workspace-card)] hover:text-[var(--workspace-text)] focus-visible:outline-none"
+                                >
+                                  ×
+                                </button>
+                              </div>
+                              <input
+                                type="search"
+                                value={collaborationParticipantSearch}
+                                onChange={(event) =>
+                                  setCollaborationParticipantSearch(event.target.value)
+                                }
+                                placeholder="Search team members"
+                                className="w-full rounded-[16px] bg-[var(--workspace-card)] px-4 py-2.5 text-[0.88rem] leading-6 text-[var(--workspace-text)] outline-none placeholder:text-[var(--workspace-text-faint)]"
+                              />
+                              <div className="max-h-[280px] space-y-2 overflow-y-auto pr-1">
+                                {visibleCollaborationParticipantOptions.map((person) => {
+                                  const isExternalInvitePending = pendingExternalInviteEmailKeys.has(
+                                    normalizeSenderLearningKey(person.email),
+                                  );
+                                  const alreadyAdded =
+                                    activeCollaborationParticipantKeys.has(person.id) ||
+                                    activeCollaborationParticipantKeys.has(
+                                      normalizeSenderLearningKey(person.email),
+                                    ) ||
+                                    isExternalInvitePending;
+                                  const isSelected =
+                                    collaborationParticipantPersonIds.includes(person.id);
+                                  const accessLevel = collaborationRoleByEmail.get(
+                                    normalizeSenderLearningKey(person.email),
+                                  );
+
+                                  return (
+                                    <button
+                                      key={`collaboration-person-${person.id}`}
+                                      type="button"
+                                      disabled={alreadyAdded}
+                                      onClick={() =>
+                                        setCollaborationParticipantPersonIds((current) =>
+                                          current.includes(person.id)
+                                            ? current.filter((entry) => entry !== person.id)
+                                            : [...current, person.id],
+                                        )
+                                      }
+                                      className={`flex w-full items-start justify-between gap-3 rounded-[16px] border px-3.5 py-3 text-left transition-[background-color,border-color,color] duration-150 focus-visible:outline-none ${
+                                        alreadyAdded
+                                          ? "cursor-not-allowed border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] opacity-70"
+                                          : isSelected
+                                            ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-card-featured-start),var(--workspace-card-featured-end))]"
+                                            : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)]"
+                                      }`}
+                                    >
+                                      <div className="min-w-0 flex-1">
+                                        <div className="truncate text-[0.86rem] font-medium leading-6 text-[var(--workspace-text)]">
+                                          {person.name}
+                                        </div>
+                                        <div className="truncate text-[0.76rem] leading-5 text-[var(--workspace-text-faint)]">
+                                          {person.email}
+                                        </div>
+                                        {accessLevel ? (
+                                          <div className="mt-2 inline-flex items-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-2.5 py-1 text-[0.56rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)]">
+                                            {getTeamAccessLevelLabel(accessLevel)}
+                                          </div>
+                                        ) : null}
+                                      </div>
+                                      <div
+                                        className={`inline-flex min-w-[4.5rem] items-center justify-center rounded-full border px-2.5 py-1 text-[0.56rem] font-medium uppercase tracking-[0.14em] ${
+                                          alreadyAdded
+                                            ? "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[var(--workspace-text-faint)]"
+                                            : isSelected
+                                              ? "border-[var(--workspace-accent-border)] bg-[var(--workspace-card)] text-[var(--workspace-text)]"
+                                              : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] text-[var(--workspace-text-faint)]"
+                                        }`}
+                                      >
+                                        {alreadyAdded
+                                          ? isExternalInvitePending
+                                            ? "Inviting"
+                                            : "Added"
+                                          : isSelected
+                                            ? "Selected"
+                                            : "Select"}
+                                      </div>
+                                    </button>
+                                  );
+                                })}
+                                {visibleCollaborationParticipantOptions.length === 0 ? (
+                                  <div className="rounded-[16px] bg-[var(--workspace-card)] px-4 py-4 text-[0.8rem] leading-6 text-[var(--workspace-text-faint)]">
+                                    No team members match that search.
+                                  </div>
+                                ) : null}
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  addParticipantToCollaboration(activeCollaborationMessage.id)
+                                }
+                                disabled={collaborationParticipantPersonIds.length === 0}
+                                className={
+                                  collaborationParticipantPersonIds.length > 0
+                                    ? "inline-flex h-9 items-center justify-center rounded-full bg-pine px-4 text-[0.66rem] font-medium uppercase tracking-[0.14em] text-[color:rgba(251,248,242,0.98)] transition-[background-color,transform] duration-150 hover:bg-moss active:scale-[0.99] focus-visible:outline-none"
+                                    : "inline-flex h-9 cursor-not-allowed items-center justify-center rounded-full bg-[var(--workspace-card)] px-4 text-[0.66rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-soft)] opacity-45 transition-[opacity] duration-150 focus-visible:outline-none"
+                                }
+                              >
+                                {`Add selected${
+                                  collaborationParticipantPersonIds.length > 0
+                                    ? ` (${collaborationParticipantPersonIds.length})`
+                                    : ""
+                                }`}
+                              </button>
                             </div>
                           ) : null}
                         </section>
 
                         <section className="space-y-3">
-                          <div className="flex flex-wrap items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setIsCollaborationInviteComposerOpen((current) => !current)
-                          }
-                          className="inline-flex h-8 items-center justify-center rounded-full border border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] px-3 text-[0.66rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.16),0_8px_24px_rgba(118,170,112,0.08)] transition-[background-image,border-color,color,transform,box-shadow] duration-150 hover:bg-[linear-gradient(180deg,var(--workspace-accent-surface-hover-start),var(--workspace-accent-surface-hover-end))] active:translate-y-[0.5px] focus-visible:border-[var(--workspace-accent-border)] focus-visible:bg-[linear-gradient(180deg,var(--workspace-accent-surface-hover-start),var(--workspace-accent-surface-hover-end))] focus-visible:outline-none"
-                        >
-                          Invite
-                        </button>
-                        {primaryExternalReviewParticipant ? (
-                          <button
-                            type="button"
-                            onClick={() =>
-                              void openStoredExternalReviewLink(
-                                activeCollaborationMessage.id,
-                                primaryExternalReviewParticipant,
-                              )
-                            }
-                            className="inline-flex h-8 items-center justify-center rounded-full border border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] px-3 text-[0.66rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.16),0_8px_24px_rgba(118,170,112,0.08)] transition-[background-image,border-color,color,transform,box-shadow] duration-150 hover:bg-[linear-gradient(180deg,var(--workspace-accent-surface-hover-start),var(--workspace-accent-surface-hover-end))] active:translate-y-[0.5px] focus-visible:border-[var(--workspace-accent-border)] focus-visible:bg-[linear-gradient(180deg,var(--workspace-accent-surface-hover-start),var(--workspace-accent-surface-hover-end))] focus-visible:outline-none"
-                          >
-                            Open external review
-                          </button>
-                        ) : (
-                          <button
-                            type="button"
-                            disabled
-                            className="inline-flex h-8 cursor-not-allowed items-center justify-center rounded-full bg-[var(--workspace-card)] px-3 text-[0.66rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-soft)] opacity-45 transition-[opacity] duration-150 focus-visible:outline-none"
-                          >
-                            Open external review
-                          </button>
-                        )}
-                        <button
-                          type="button"
-                          onClick={() => setCollaborationHistoryExpanded((current) => !current)}
-                          className="inline-flex h-8 items-center justify-center rounded-full border border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] px-3 text-[0.66rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.16),0_8px_24px_rgba(118,170,112,0.08)] transition-[background-image,border-color,color,transform,box-shadow] duration-150 hover:bg-[linear-gradient(180deg,var(--workspace-accent-surface-hover-start),var(--workspace-accent-surface-hover-end))] active:translate-y-[0.5px] focus-visible:border-[var(--workspace-accent-border)] focus-visible:bg-[linear-gradient(180deg,var(--workspace-accent-surface-hover-start),var(--workspace-accent-surface-hover-end))] focus-visible:outline-none"
-                        >
-                          {collaborationHistoryExpanded
-                            ? "Hide conversation"
-                            : `View full conversation (${visibleCollaborationMessages.length})`}
-                        </button>
-                      </div>
+                          <div className="flex flex-wrap items-center justify-end gap-2">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setIsCollaborationInviteComposerOpen((current) => !current)
+                              }
+                              className="inline-flex h-8 items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-3 text-[0.66rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)] transition-[background-color,border-color,color] duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] focus-visible:outline-none"
+                            >
+                              Invite
+                            </button>
+                            <div ref={collaborationActionsMenuRef} className="relative">
+                              <button
+                                type="button"
+                                aria-label="More collaboration actions"
+                                onClick={() =>
+                                  setIsCollaborationActionsMenuOpen((current) => !current)
+                                }
+                                className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[var(--workspace-text-faint)] transition-[background-color,border-color,color] duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] focus-visible:outline-none"
+                              >
+                                ...
+                              </button>
+                              {isCollaborationActionsMenuOpen ? (
+                                <div className="absolute right-0 top-full z-30 mt-2 min-w-[220px] rounded-[18px] border border-[var(--workspace-menu-border)] bg-[var(--workspace-menu-bg)] p-2 shadow-panel">
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setIsCollaborationActionsMenuOpen(false);
+                                      if (primaryExternalReviewParticipant) {
+                                        void openStoredExternalReviewLink(
+                                          activeCollaborationMessage.id,
+                                          primaryExternalReviewParticipant,
+                                        );
+                                      }
+                                    }}
+                                    disabled={!primaryExternalReviewParticipant}
+                                    className={`${contextMenuMainItemClass} ${
+                                      primaryExternalReviewParticipant
+                                        ? ""
+                                        : "cursor-not-allowed opacity-45"
+                                    }`}
+                                  >
+                                    Open external review
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setIsCollaborationActionsMenuOpen(false);
+                                      setCollaborationHistoryExpanded((current) => !current);
+                                    }}
+                                    className={contextMenuMainItemClass}
+                                  >
+                                    {collaborationHistoryExpanded
+                                      ? "Hide full conversation"
+                                      : `View full conversation (${visibleCollaborationMessages.length})`}
+                                  </button>
+                                </div>
+                              ) : null}
+                            </div>
+                          </div>
                       {isCollaborationInviteComposerOpen ||
                       externalInviteEmailFeedback ||
                       externalCollaborationInviteUrl ||
@@ -20549,35 +20624,20 @@ function MailboxView({
                       <span className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
                         Reply
                       </span>
-                      <div className="flex flex-wrap gap-2">
-                        {(hasRealInternalTeamContext
-                          ? ([
-                              { value: "internal", label: "Internal" },
-                              { value: "shared", label: "Shared" },
-                            ] as const)
-                          : ([{ value: "shared", label: "Shared" }] as const)
-                        ).map((option) => (
-                          <button
-                            key={option.value}
-                            type="button"
-                            onClick={() => {
-                              setHasManualCollaborationReplyVisibility(true);
-                              setCollaborationReplyVisibility(option.value);
-                            }}
-                            className={`inline-flex h-9 items-center justify-center rounded-full border px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color] duration-150 focus-visible:outline-none ${
-                              resolvedCollaborationReplyVisibility === option.value
-                                ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)]"
-                                : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[var(--workspace-text-soft)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface-strong)]"
-                            }`}
-                          >
-                            {option.label}
-                          </button>
-                        ))}
-                      </div>
-                      <div className="pt-0.5 text-[0.78rem] leading-6 text-[color:rgba(120,111,100,0.76)]">
-                        {resolvedCollaborationReplyVisibility === "internal"
-                          ? "Only visible to internal team"
-                          : "Visible to external reviewers"}
+                      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-[16px] bg-[var(--workspace-card-subtle)] px-3.5 py-2">
+                        <span className="text-[0.64rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                          Visibility
+                        </span>
+                        <span className="inline-flex rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-2.5 py-1 text-[0.62rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-soft)]">
+                          {resolvedCollaborationReplyVisibility === "internal"
+                            ? "Internal"
+                            : "Shared"}
+                        </span>
+                        <span className="text-[0.78rem] leading-6 text-[color:rgba(120,111,100,0.76)]">
+                          {resolvedCollaborationReplyVisibility === "internal"
+                            ? "Only visible to internal team"
+                            : "Visible to external reviewers"}
+                        </span>
                       </div>
                       <div className="relative">
                         <textarea
@@ -35079,7 +35139,7 @@ export function WorkspaceShell({
                             Mail message
                           </div>
                           <div className="text-[0.88rem] leading-6 text-[var(--workspace-text-soft)]">
-                            Open the original email without leaving this review.
+                            View the original email without closing this window.
                           </div>
                         </div>
                         <button
