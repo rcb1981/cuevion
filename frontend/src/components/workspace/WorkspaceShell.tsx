@@ -21253,6 +21253,9 @@ function WorkbenchView({
     }
   });
   const [activeTeamMemberIndex, setActiveTeamMemberIndex] = useState<number | null>(null);
+  const [activeTeamTab, setActiveTeamTab] = useState<
+    "Members" | "Collaborations" | "Activity"
+  >("Members");
   const [isChangeAccessOpen, setIsChangeAccessOpen] = useState(false);
   const [isInviteMemberOpen, setIsInviteMemberOpen] = useState(false);
   const [activeTeamConfirmation, setActiveTeamConfirmation] = useState<
@@ -21263,6 +21266,19 @@ function WorkbenchView({
   const [backendTeamMembersRefreshKey, setBackendTeamMembersRefreshKey] = useState(0);
   const activeTeamMember =
     activeTeamMemberIndex !== null ? teamMembers[activeTeamMemberIndex] : null;
+  const teamTabs = ["Members", "Collaborations", "Activity"] as const;
+  const visibleTeamCollaborationItems = visibleTeamActivityItems.reduce<VisibleActivityItem[]>(
+    (items, item) => {
+      const collaborationKey = item.detail || item.title;
+
+      if (items.some((existingItem) => (existingItem.detail || existingItem.title) === collaborationKey)) {
+        return items;
+      }
+
+      return [...items, item];
+    },
+    [],
+  );
   const [selectedTeamAccessLevel, setSelectedTeamAccessLevel] = useState<TeamAccessLevel>(
     "Shared",
   );
@@ -21856,6 +21872,25 @@ function WorkbenchView({
           )
         ) : section === "Team" ? (
           <div className="space-y-6">
+            <div className="inline-flex rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] p-1">
+              {teamTabs.map((tab) => (
+                <button
+                  key={tab}
+                  type="button"
+                  onClick={() => setActiveTeamTab(tab)}
+                  className={`inline-flex h-9 items-center justify-center rounded-full px-4 text-[0.68rem] font-medium uppercase tracking-[0.14em] transition-[background-color,color,box-shadow] duration-150 focus-visible:outline-none ${
+                    activeTeamTab === tab
+                      ? "bg-[var(--workspace-card)] text-[var(--workspace-text)] shadow-[0_8px_18px_rgba(31,42,36,0.06)]"
+                      : "text-[var(--workspace-text-faint)] hover:text-[var(--workspace-text-soft)]"
+                  }`}
+                >
+                  {tab}
+                </button>
+              ))}
+            </div>
+
+            {activeTeamTab === "Members" ? (
+              <>
             {pendingTeamInvitation ? (
               <div className="rounded-[22px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-5 py-5">
                 <div className="space-y-1">
@@ -21956,7 +21991,120 @@ function WorkbenchView({
               ) : null}
             </div>
 
-            <div className="space-y-4 pt-1">
+            {memberOfEntries.length > 0 ? (
+              <div className="space-y-5 pt-1">
+                <div className="h-px w-full bg-[var(--workspace-divider)]" />
+                <div className="space-y-3">
+                  <div className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                    Member of
+                  </div>
+                  <div className="divide-y divide-[var(--workspace-divider)]">
+                    {memberOfEntries.map((member) => (
+                      <div
+                        key={`${member.name}-${member.accessLevel}`}
+                        className="flex items-start justify-between gap-4 py-4 first:pt-1 last:pb-1"
+                      >
+                        <div className="min-w-0 space-y-0.5">
+                          <div className="text-[0.94rem] font-medium tracking-[-0.014em] text-[var(--workspace-text)]">
+                            {member.name}
+                          </div>
+                          <div className="text-[0.8rem] leading-6 text-[var(--workspace-text-soft)]">
+                            {getTeamRoleDescription(member)}
+                          </div>
+                        </div>
+                        <div className="flex-none pt-0.5 text-[0.68rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)]">
+                          {member.status}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            ) : null}
+
+            <div className="pt-1">
+              {teamFeedbackMessage ? (
+                <div className="mt-3 text-[0.72rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)]">
+                  {teamFeedbackMessage}
+                </div>
+              ) : null}
+            </div>
+              </>
+            ) : activeTeamTab === "Collaborations" ? (
+              <div className="space-y-4">
+                <div className="space-y-1">
+                  <div className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                    Collaborations
+                  </div>
+                  <div className="text-[0.86rem] leading-6 text-[var(--workspace-text-soft)]">
+                    Shared collaborations will appear here as explicitly shared threads and external reviews.
+                  </div>
+                </div>
+                {visibleTeamCollaborationItems.length > 0 ? (
+                  <div className="divide-y divide-[var(--workspace-divider)]">
+                    {visibleTeamCollaborationItems.map((item) => {
+                      const isDone = /\bdone\b|marked this as done|resolved/i.test(item.title);
+                      const isExternal = /external|reviewer|limited|token/i.test(
+                        `${item.title} ${item.detail}`,
+                      );
+                      const statusLabel = isDone ? "Done" : "Active";
+                      const scopeLabel = isExternal ? "External" : "Internal";
+                      const content = (
+                        <>
+                          <div className="min-w-0 space-y-1">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-2.5 py-1 text-[0.58rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)]">
+                                {scopeLabel}
+                              </span>
+                              <span className="rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-2.5 py-1 text-[0.58rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)]">
+                                {statusLabel}
+                              </span>
+                            </div>
+                            <div className="text-[0.94rem] font-medium tracking-[-0.014em] text-[var(--workspace-text)]">
+                              {item.detail}
+                            </div>
+                            <div className="text-[0.8rem] leading-6 text-[var(--workspace-text-soft)]">
+                              {item.title}
+                            </div>
+                          </div>
+                          <div className="flex-none pt-0.5 text-[0.66rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)]">
+                            {item.time}
+                          </div>
+                        </>
+                      );
+
+                      return item.action ? (
+                        <button
+                          key={item.id}
+                          type="button"
+                          onClick={item.action}
+                          className="flex w-full items-start justify-between gap-4 rounded-[18px] px-2 py-4 text-left transition-colors duration-200 first:pt-1 last:pb-1 hover:bg-[var(--workspace-surface-hover)] focus-visible:bg-[var(--workspace-surface-selected)] focus-visible:outline-none"
+                        >
+                          {content}
+                        </button>
+                      ) : (
+                        <div
+                          key={item.id}
+                          className="flex items-start justify-between gap-4 rounded-[18px] px-2 py-4 text-left first:pt-1 last:pb-1"
+                        >
+                          {content}
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div className="space-y-1 rounded-[22px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-5 py-5">
+                    <div className="text-[0.92rem] font-medium tracking-[-0.014em] text-[var(--workspace-text)]">
+                      Shared collaborations will appear here.
+                    </div>
+                    <div className="max-w-[34rem] text-[0.84rem] leading-6 text-[var(--workspace-text-soft)]">
+                      Collaborations let you review explicitly shared email threads without giving inbox access.
+                    </div>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="space-y-4 pt-1">
               <div className="h-px w-full bg-[var(--workspace-divider)]" />
               <div className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
                 Team activity
@@ -22019,45 +22167,7 @@ function WorkbenchView({
                 </div>
               )}
             </div>
-
-            {memberOfEntries.length > 0 ? (
-              <div className="space-y-5 pt-1">
-                <div className="h-px w-full bg-[var(--workspace-divider)]" />
-                <div className="space-y-3">
-                  <div className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
-                    Member of
-                  </div>
-                  <div className="divide-y divide-[var(--workspace-divider)]">
-                    {memberOfEntries.map((member) => (
-                      <div
-                        key={`${member.name}-${member.accessLevel}`}
-                        className="flex items-start justify-between gap-4 py-4 first:pt-1 last:pb-1"
-                      >
-                        <div className="min-w-0 space-y-0.5">
-                          <div className="text-[0.94rem] font-medium tracking-[-0.014em] text-[var(--workspace-text)]">
-                            {member.name}
-                          </div>
-                          <div className="text-[0.8rem] leading-6 text-[var(--workspace-text-soft)]">
-                            {getTeamRoleDescription(member)}
-                          </div>
-                        </div>
-                        <div className="flex-none pt-0.5 text-[0.68rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)]">
-                          {member.status}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            ) : null}
-
-            <div className="pt-1">
-              {teamFeedbackMessage ? (
-                <div className="mt-3 text-[0.72rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)]">
-                  {teamFeedbackMessage}
-                </div>
-              ) : null}
-            </div>
+            )}
           </div>
         ) : (
           <div className="text-[0.95rem] leading-7 text-[var(--workspace-text-soft)]">
