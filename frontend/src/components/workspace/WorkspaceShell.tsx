@@ -1488,6 +1488,9 @@ type PromoHeuristicMessage = Pick<
 > &
   Partial<Pick<MailMessage, "to">>;
 
+type FinanceHeuristicMessage = PromoHeuristicMessage &
+  Partial<Pick<MailMessage, "attachments">>;
+
 function hasMusicPromoSubjectMarker(subject: string) {
   return (
     /\[\s*promo\s*\]/i.test(subject) ||
@@ -1645,6 +1648,95 @@ function isPromoAccessRequestMessage(message: PromoHeuristicMessage) {
     hasDownloadOrListenLink ||
     hasSpecificSendoutLanguage
   );
+}
+
+function isColdSalesOutreachWithoutFinanceEvidence(message: FinanceHeuristicMessage) {
+  const attachmentText = (message.attachments ?? [])
+    .map((attachment) => attachment.name)
+    .join(" ")
+    .toLowerCase();
+  const searchableText = [
+    message.subject,
+    message.snippet,
+    message.sender,
+    message.from,
+    message.to ?? "",
+    ...(message.body ?? []),
+    attachmentText,
+  ]
+    .join(" ")
+    .toLowerCase();
+  const coldOutreachKeywords = [
+    "i came across your content",
+    "came across your content",
+    "grow your content",
+    "new market",
+    "huge audience in china",
+    "we help creators",
+    "we work with creators",
+    "launch and grow your presence",
+    "launch and grow their presence",
+    "grow their presence in china",
+    "we handle",
+    "account setup",
+    "chinese platforms",
+    "content translation",
+    "translation & localization",
+    "translation and localization",
+    "localization",
+    "localisation",
+  ];
+  const coldOutreachHitCount = coldOutreachKeywords.filter((keyword) =>
+    searchableText.includes(keyword),
+  ).length;
+  const hasColdOutreachPattern =
+    coldOutreachHitCount >= 2 ||
+    (includesAnyKeyword(searchableText, [
+      "i came across your content",
+      "came across your content",
+      "i genuinely believe",
+      "strong potential to connect",
+    ]) &&
+      includesAnyKeyword(searchableText, [
+        "we work with creators",
+        "we help creators",
+        "launch and grow your presence",
+        "we handle",
+        "account setup",
+        "content translation",
+        "localization",
+        "localisation",
+      ]));
+  const hasStrongFinanceEvidence =
+    includesAnyKeyword(searchableText, [
+      "invoice",
+      "receipt",
+      "royalty statement",
+      "royalty statements",
+      "royalties statement",
+      "payment",
+      "payout",
+      "billing",
+      "tax",
+      "vat",
+      "transaction",
+      "account statement",
+      "financial statement",
+      "amount due",
+      "payment failed",
+      "payment received",
+      "payment confirmation",
+      "bank transfer",
+      "wire transfer",
+      "factuur",
+      "ontvangstbewijs",
+      "betalingsoverzicht",
+    ]) ||
+    /\b(?:invoice|receipt|royalt(?:y|ies)|payout|payment|billing|vat|tax|transaction)\b/.test(
+      attachmentText,
+    );
+
+  return hasColdOutreachPattern && !hasStrongFinanceEvidence;
 }
 
 function isProtectedMusicPromoContext(message: PromoHeuristicMessage) {
@@ -2094,6 +2186,14 @@ function resolveVisibleClassification(
         signalClassification === "promo")
     ) {
       return "business";
+    }
+
+    if (
+      (message.internalClassification === "finance" ||
+        signalClassification === "finance") &&
+      isColdSalesOutreachWithoutFinanceEvidence(message)
+    ) {
+      return "unknown";
     }
 
     if (
@@ -5871,6 +5971,8 @@ function inferHeuristicSignal(
   );
   const isGenericRetailMarketingUpdate =
     isLowValueMarketingNewsletterEventUpdateMessage(message);
+  const isColdSalesOutreach =
+    isColdSalesOutreachWithoutFinanceEvidence(message);
   const isPromoAccessRequest = isPromoAccessRequestMessage(message);
   // A promo keyword in the subject is a strong, intentional signal — do not let
   // isMetaBillingSystemMail suppress it.  Billing keywords are detected from the
@@ -5894,7 +5996,11 @@ function inferHeuristicSignal(
     includesAnyKeyword(searchableText, updateKeywords) ||
     (isAutomatedSender && !isPromo);
 
-  if (isMetaBillingSystemMail && !hasClearMarketingNewsletterSignal) {
+  if (
+    isMetaBillingSystemMail &&
+    !hasClearMarketingNewsletterSignal &&
+    !isColdSalesOutreach
+  ) {
     return "Finance";
   }
 
@@ -5943,6 +6049,10 @@ function inferInternalClassification(
     case "Update":
       return "workflow_update";
     case "Finance":
+      if (isColdSalesOutreachWithoutFinanceEvidence(message)) {
+        return "unknown";
+      }
+
       return "finance";
     case "For review":
       return "high_priority_demo";
@@ -6498,6 +6608,15 @@ function getVisibleCategoryLabel(
     isMarketingNewsletterUpdateMessage(message)
   ) {
     return "Update";
+  }
+
+  if (
+    (message.internalClassification === "finance" ||
+      message.ui_signal === "FINANCE" ||
+      message.signal === "Finance") &&
+    isColdSalesOutreachWithoutFinanceEvidence(message)
+  ) {
+    return "Other";
   }
 
   const classification = message.internalClassification;
@@ -31623,6 +31742,14 @@ export function WorkspaceShell({
       isMarketingNewsletterUpdateMessage(message)
     ) {
       return "workflow_update" as const;
+    }
+
+    if (
+      (message.internalClassification === "finance" ||
+        signalClassification === "finance") &&
+      isColdSalesOutreachWithoutFinanceEvidence(message)
+    ) {
+      return "unknown" as const;
     }
 
     if (
