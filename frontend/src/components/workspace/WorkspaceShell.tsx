@@ -886,6 +886,16 @@ type VisibleActivityItem = {
   sortTimestamp: number;
   action?: () => void;
 };
+type TeamCollaborationItem = {
+  id: string;
+  title: string;
+  detail: string;
+  time: string;
+  sortTimestamp: number;
+  scopeLabel: "Shared with me" | "Shared by me" | "External / Limited";
+  statusLabel: "Active" | "Done";
+  action?: () => void;
+};
 type PersistedLiveInboxMessageSnapshot = LiveInboxMessageSnapshot & {
   collaboration?: MailMessageCollaboration;
   isShared?: boolean;
@@ -10430,7 +10440,9 @@ function buildVisibleNotificationItems({
               mailboxId,
               messageId: message.id,
               actorName: message.collaboration.requestedBy,
-              title: `${message.collaboration.requestedBy} started a collaboration`,
+              title: sharedProjectionOnly
+                ? `${message.collaboration.requestedBy} shared an email with you`
+                : `${message.collaboration.requestedBy} started a collaboration`,
               detail: subjectDetail,
               time: formatVisibleActivityTimestamp(message.collaboration.createdAt),
               sortTimestamp: message.collaboration.createdAt,
@@ -10834,6 +10846,110 @@ function buildVisibleActivityItems({
     });
 
   return items;
+}
+
+function buildVisibleTeamCollaborationItems({
+  mailboxStore,
+  orderedMailboxes,
+  currentUserId,
+  currentUserName,
+  onOpenCollaborationNavigation,
+}: {
+  mailboxStore: MailboxStore;
+  orderedMailboxes: OrderedMailbox[];
+  currentUserId: string;
+  currentUserName: string;
+  onOpenCollaborationNavigation: (
+    request: Omit<NotificationNavigationRequest, "requestKey">,
+  ) => void;
+}): TeamCollaborationItem[] {
+  const sharedNavigationMailboxId = orderedMailboxes[0]?.id ?? null;
+  const sharedCollaborationMessages =
+    sharedNavigationMailboxId === null
+      ? []
+      : mailboxStore[sharedCollaborationMailboxId]?.Inbox ?? [];
+  const seenCollaborationKeys = new Set<string>();
+  const messageSources = [
+    ...orderedMailboxes.flatMap((mailbox) =>
+      canonicalFolderOrder.flatMap((folder) =>
+        (mailboxStore[mailbox.id]?.[folder] ?? []).map((message) => ({
+          message,
+          navigationMailboxId: mailbox.id,
+          sourceMailboxId: undefined as InboxId | undefined,
+          sharedProjectionOnly: false,
+        })),
+      ),
+    ),
+    ...sharedCollaborationMessages.map((message) => ({
+      message,
+      navigationMailboxId: sharedNavigationMailboxId as InboxId,
+      sourceMailboxId: sharedCollaborationMailboxId,
+      sharedProjectionOnly: true,
+    })),
+  ];
+
+  return messageSources
+    .flatMap(
+      ({
+        message,
+        navigationMailboxId,
+        sourceMailboxId,
+        sharedProjectionOnly,
+      }) => {
+        if (!message.collaboration) {
+          return [];
+        }
+
+        const collaborationWorkspaceId =
+          message.collaborationWorkspaceId?.trim().toLowerCase() ||
+          currentUserId.trim().toLowerCase();
+        const collaborationMessageId =
+          message.collaborationMessageId?.trim() || message.id.trim();
+        const collaborationKey = `${collaborationWorkspaceId}:${collaborationMessageId}`;
+
+        if (seenCollaborationKeys.has(collaborationKey)) {
+          return [];
+        }
+
+        seenCollaborationKeys.add(collaborationKey);
+
+        const participants = getCollaborationParticipants(message.collaboration);
+        const hasExternalParticipant = participants.some(
+          (participant) => participant.kind === "external",
+        );
+        const isSharedByCurrentUser = message.collaboration.requestedBy === currentUserName;
+        const scopeLabel: TeamCollaborationItem["scopeLabel"] = sharedProjectionOnly
+          ? "Shared with me"
+          : hasExternalParticipant
+            ? "External / Limited"
+            : isSharedByCurrentUser
+              ? "Shared by me"
+              : "Shared with me";
+        const statusLabel: TeamCollaborationItem["statusLabel"] =
+          message.collaboration.state === "resolved" ? "Done" : "Active";
+
+        return [
+          {
+            id: `team-collaboration:${collaborationKey}`,
+            title: message.subject,
+            detail: message.collaboration.previewText || message.collaboration.requestedBy,
+            time: formatVisibleActivityTimestamp(message.collaboration.updatedAt),
+            sortTimestamp: message.collaboration.updatedAt,
+            scopeLabel,
+            statusLabel,
+            action: () =>
+              onOpenCollaborationNavigation({
+                mailboxId: navigationMailboxId,
+                messageId: message.id,
+                sourceMailboxId,
+                type: "reply",
+              }),
+          },
+        ];
+      },
+    )
+    .sort((firstItem, secondItem) => secondItem.sortTimestamp - firstItem.sortTimestamp)
+    .slice(0, 24);
 }
 
 const teamActivityKeywords = [
@@ -15957,6 +16073,55 @@ function MailboxView({
     })();
   };
 
+  const findInternalCollaborationPersonByEmail = (email: string) => {
+    const normalizedEmail = normalizeSenderLearningKey(email);
+
+    if (!normalizedEmail) {
+      return null;
+    }
+
+    return (
+      collaborationSelectablePeople.find(
+        (person) =>
+          person.kind === "internal" &&
+          normalizeSenderLearningKey(person.email) === normalizedEmail &&
+          normalizeSenderLearningKey(person.email) !== currentUserId,
+      ) ?? null
+    );
+  };
+
+  const shareCollaborationInAppWithInternalUser = (
+    messageId: string,
+    email: string,
+  ) => {
+    const internalPerson = findInternalCollaborationPersonByEmail(email);
+
+    if (!internalPerson) {
+      return false;
+    }
+
+    const personEmailKey = normalizeSenderLearningKey(internalPerson.email);
+    const personIdKey = normalizeSenderLearningKey(internalPerson.id);
+    const isAlreadyAdded =
+      activeCollaborationParticipantKeys.has(personIdKey) ||
+      activeCollaborationParticipantKeys.has(personEmailKey);
+
+    if (!isAlreadyAdded) {
+      addParticipantToCollaboration(messageId, [internalPerson.id]);
+    }
+
+    setExternalCollaborationEmail("");
+    setExternalCollaborationInviteUrl("");
+    setExternalInviteEmailFeedback(
+      isAlreadyAdded
+        ? `${internalPerson.name} already has in-app access to this collaboration.`
+        : `${internalPerson.name} can now open this collaboration in Cuevion.`,
+    );
+    setExternalReviewCopyFeedback("");
+    setIsCollaborationInviteComposerOpen(false);
+    return true;
+  };
+
   const removeParticipantFromCollaboration = (
     messageId: string,
     participantEmail: string,
@@ -16108,15 +16273,19 @@ function MailboxView({
   };
 
   const copyExternalInviteLink = async (messageId: string) => {
-    if (typeof navigator === "undefined" || !navigator.clipboard) {
-      setExternalInviteEmailFeedback("Copy link is not available in this browser.");
-      return;
-    }
-
     const normalizedEmail = externalCollaborationEmail.trim().toLowerCase();
 
     if (!normalizedEmail || !isValidCollaborationParticipantEmail(normalizedEmail)) {
       setExternalInviteEmailFeedback("Enter a valid reviewer email.");
+      return;
+    }
+
+    if (shareCollaborationInAppWithInternalUser(messageId, normalizedEmail)) {
+      return;
+    }
+
+    if (typeof navigator === "undefined" || !navigator.clipboard) {
+      setExternalInviteEmailFeedback("Copy link is not available in this browser.");
       return;
     }
 
@@ -16177,16 +16346,20 @@ function MailboxView({
 
     const normalizedEmail = email.trim().toLowerCase();
 
+    if (!normalizedEmail || !isValidCollaborationParticipantEmail(normalizedEmail)) {
+      setExternalInviteEmailFeedback("Enter a valid reviewer email.");
+      return;
+    }
+
+    if (shareCollaborationInAppWithInternalUser(messageId, normalizedEmail)) {
+      return;
+    }
+
     if (
       !options?.allowInFlightOwnedSend &&
       pendingExternalInviteEmailKeys.has(normalizeSenderLearningKey(normalizedEmail))
     ) {
       setExternalInviteEmailFeedback("Invite already in progress.");
-      return;
-    }
-
-    if (!normalizedEmail || !isValidCollaborationParticipantEmail(normalizedEmail)) {
-      setExternalInviteEmailFeedback("Enter a valid reviewer email.");
       return;
     }
 
@@ -21112,6 +21285,7 @@ function WorkbenchView({
   onOpenSenderContext,
   activityItems,
   notificationItems,
+  collaborationItems,
   unreadNotificationIds,
   onOpenNotificationItem,
   aiSuggestionsEnabled,
@@ -21138,6 +21312,7 @@ function WorkbenchView({
   onOpenSenderContext: () => void;
   activityItems: VisibleActivityItem[];
   notificationItems: VisibleNotificationItem[];
+  collaborationItems: TeamCollaborationItem[];
   unreadNotificationIds: Set<string>;
   onOpenNotificationItem: (item: VisibleNotificationItem) => void;
   aiSuggestionsEnabled: boolean;
@@ -21186,6 +21361,7 @@ function WorkbenchView({
   const visibleActivityItems = activityItems;
   const visibleTeamActivityItems = activityItems.filter(isTeamActivityItem);
   const visibleNotificationItems = notificationItems;
+  const visibleTeamCollaborationItems = collaborationItems;
   const teamMembersStorageKey = buildTeamMembersStorageKey(workspacePersistenceKey);
   const [teamMembers, setTeamMembers] = useState<TeamMemberEntry[]>(() => {
     if (typeof window === "undefined") {
@@ -21267,18 +21443,6 @@ function WorkbenchView({
   const activeTeamMember =
     activeTeamMemberIndex !== null ? teamMembers[activeTeamMemberIndex] : null;
   const teamTabs = ["Members", "Collaborations", "Activity"] as const;
-  const visibleTeamCollaborationItems = visibleTeamActivityItems.reduce<VisibleActivityItem[]>(
-    (items, item) => {
-      const collaborationKey = item.detail || item.title;
-
-      if (items.some((existingItem) => (existingItem.detail || existingItem.title) === collaborationKey)) {
-        return items;
-      }
-
-      return [...items, item];
-    },
-    [],
-  );
   const [selectedTeamAccessLevel, setSelectedTeamAccessLevel] = useState<TeamAccessLevel>(
     "Shared",
   );
@@ -22043,28 +22207,22 @@ function WorkbenchView({
                 {visibleTeamCollaborationItems.length > 0 ? (
                   <div className="divide-y divide-[var(--workspace-divider)]">
                     {visibleTeamCollaborationItems.map((item) => {
-                      const isDone = /\bdone\b|marked this as done|resolved/i.test(item.title);
-                      const isExternal = /external|reviewer|limited|token/i.test(
-                        `${item.title} ${item.detail}`,
-                      );
-                      const statusLabel = isDone ? "Done" : "Active";
-                      const scopeLabel = isExternal ? "External" : "Internal";
                       const content = (
                         <>
                           <div className="min-w-0 space-y-1">
                             <div className="flex flex-wrap items-center gap-2">
                               <span className="rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-2.5 py-1 text-[0.58rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)]">
-                                {scopeLabel}
+                                {item.scopeLabel}
                               </span>
                               <span className="rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-2.5 py-1 text-[0.58rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)]">
-                                {statusLabel}
+                                {item.statusLabel}
                               </span>
                             </div>
                             <div className="text-[0.94rem] font-medium tracking-[-0.014em] text-[var(--workspace-text)]">
-                              {item.detail}
+                              {item.title}
                             </div>
                             <div className="text-[0.8rem] leading-6 text-[var(--workspace-text-soft)]">
-                              {item.title}
+                              {item.detail}
                             </div>
                           </div>
                           <div className="flex-none pt-0.5 text-[0.66rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)]">
@@ -32849,6 +33007,13 @@ export function WorkspaceShell({
     teamActivityEnabled,
     onOpenActivityNavigation: handleOpenNotificationNavigation,
   });
+  const liveTeamCollaborationItems = buildVisibleTeamCollaborationItems({
+    mailboxStore,
+    orderedMailboxes,
+    currentUserId: currentWorkspaceUserId,
+    currentUserName: activeWorkspaceUserName,
+    onOpenCollaborationNavigation: handleOpenNotificationNavigation,
+  });
   const handleOpenNotificationItem = (item: VisibleNotificationItem) => {
     setReadNotificationIds((current) =>
       Array.from(new Set([...current, ...item.sourceIds])),
@@ -36197,6 +36362,7 @@ export function WorkspaceShell({
                   onOpenSenderContext={handleOpenSenderContext}
                   activityItems={liveActivityItems}
                   notificationItems={prioritizedNotificationItems}
+                  collaborationItems={liveTeamCollaborationItems}
                   unreadNotificationIds={unreadNotificationIds}
                   onOpenNotificationItem={handleOpenNotificationItem}
                   aiSuggestionsEnabled={aiSuggestionsEnabled}
