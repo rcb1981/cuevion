@@ -9861,13 +9861,6 @@ function WorkspaceSidebar({
     }
   }, [activeSidebarInboxId]);
 
-  const smartFoldersSidebarHost = (
-    <div
-      id={SMART_FOLDERS_SIDEBAR_PORTAL_ID}
-      className={isInboxesOpen ? "mt-4" : "hidden"}
-    />
-  );
-
   const renderItem = (item: {
     section: WorkspaceSection;
     label: string;
@@ -9947,7 +9940,6 @@ function WorkspaceSidebar({
                 })}
               </ul>
             ) : null}
-            {smartFoldersSidebarHost}
           </li>
         );
       }
@@ -10009,7 +10001,6 @@ function WorkspaceSidebar({
               })}
             </ul>
           ) : null}
-          {smartFoldersSidebarHost}
         </li>
       );
     }
@@ -10064,7 +10055,19 @@ function WorkspaceSidebar({
             </div>
           </div>
           <nav aria-label="Workspace navigation" className="mt-8 flex flex-1 flex-col">
-            <ul className="space-y-2">{primaryNavigationItems.map(renderItem)}</ul>
+            <ul className="space-y-2">
+              {primaryNavigationItems.map((item) =>
+                item.section === "Inboxes"
+                  ? [
+                      renderItem(item),
+                      <li
+                        key="smart-folders-sidebar-host"
+                        id={SMART_FOLDERS_SIDEBAR_PORTAL_ID}
+                      />,
+                    ]
+                  : renderItem(item),
+              )}
+            </ul>
             <div className="mt-auto pt-8">
               <ul className="space-y-2">{utilityNavigationItems.map(renderItem)}</ul>
               <button
@@ -11307,6 +11310,7 @@ function MailboxView({
   const [smartFolderMenuId, setSmartFolderMenuId] = useState<string | null>(null);
   const [smartFolderDeleteId, setSmartFolderDeleteId] = useState<string | null>(null);
   const [smartFolderSidebarHost, setSmartFolderSidebarHost] = useState<HTMLElement | null>(null);
+  const [isSmartFoldersSidebarOpen, setIsSmartFoldersSidebarOpen] = useState(false);
   const [isReadingLearningMenuOpen, setIsReadingLearningMenuOpen] = useState(false);
   const [isReadingLearningLabelChooserOpen, setIsReadingLearningLabelChooserOpen] =
     useState(false);
@@ -11345,6 +11349,11 @@ function MailboxView({
       document.getElementById(SMART_FOLDERS_SIDEBAR_PORTAL_ID),
     );
   }, []);
+  useEffect(() => {
+    if (activeSmartFolderId !== null) {
+      setIsSmartFoldersSidebarOpen(true);
+    }
+  }, [activeSmartFolderId]);
   const [selectedMessageId, setSelectedMessageId] = useState<string | null>(() => {
     const inboxMessages = mailboxStore[mailbox.id]?.Inbox ?? [];
     // Restore last selection if the message is still present in the inbox.
@@ -17457,102 +17466,137 @@ function MailboxView({
   };
 
   const smartFoldersSidebarSection = (
-    <div className="border-t border-[var(--workspace-sidebar-border)] pt-4">
-      <div className="px-4 pb-2 text-[0.64rem] font-medium uppercase tracking-[0.18em] text-[var(--workspace-sidebar-text-muted)]">
-        Smart Folders
-      </div>
-      <div className="space-y-1">
-        {smartFolders.length > 0 ? (
-          smartFolders.map((folder) => {
-            const active = activeSmartFolderId === folder.id;
-            const isMenuOpen = smartFolderMenuId === folder.id;
-
-            return (
-              <div key={folder.id} className="group relative">
-                <button
-                  type="button"
-                  onClick={() => openSmartFolder(folder.id)}
-                  className={`flex w-full items-center justify-between rounded-2xl px-4 py-2.5 pr-11 text-left text-sm font-medium transition-[background-color,color,box-shadow] duration-100 focus:outline-none focus-visible:shadow-[inset_0_0_0_1px_rgba(255,255,255,0.12),0_0_0_1px_rgba(214,230,221,0.16)] ${
-                    active
-                      ? "bg-[linear-gradient(180deg,var(--workspace-sidebar-active-start),var(--workspace-sidebar-active-end))] text-[var(--workspace-sidebar-text)]"
-                      : "text-[var(--workspace-sidebar-text-muted)] hover:bg-[var(--workspace-sidebar-hover)] hover:text-[var(--workspace-sidebar-text)]"
-                  }`}
-                >
-                  <span className="block truncate pl-4">{folder.name}</span>
-                </button>
-                <button
-                  type="button"
-                  aria-label={`Manage ${folder.name}`}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    setSmartFolderMenuId((current) =>
-                      current === folder.id ? null : folder.id,
-                    );
-                    setContextMenuState(null);
-                    setIsMoreMenuOpen(false);
-                    setIsSortMenuOpen(false);
-                  }}
-                  className={`absolute right-2 top-1/2 inline-flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-full border border-[var(--workspace-sidebar-border)] bg-[var(--workspace-sidebar)] text-[var(--workspace-sidebar-text-muted)] transition-[opacity,background-color,border-color,color] duration-150 focus-visible:outline-none ${
-                    isMenuOpen
-                      ? "opacity-100"
-                      : "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100"
-                  } hover:bg-[var(--workspace-sidebar-hover)] hover:text-[var(--workspace-sidebar-text)]`}
-                >
-                  <svg
-                    aria-hidden="true"
-                    viewBox="0 0 16 16"
-                    className="h-3.5 w-3.5"
-                    fill="currentColor"
-                  >
-                    <circle cx="3.5" cy="8" r="1.1" />
-                    <circle cx="8" cy="8" r="1.1" />
-                    <circle cx="12.5" cy="8" r="1.1" />
-                  </svg>
-                </button>
-                {isMenuOpen ? (
-                  <div
-                    className="absolute right-2 top-full z-20 mt-2 min-w-[180px] rounded-[18px] border border-[var(--workspace-menu-border)] bg-[var(--workspace-menu-bg)] p-2 shadow-panel"
-                    onMouseDown={(event) => event.stopPropagation()}
-                  >
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setSmartFolderMenuId(null);
-                        onEditSmartFolder(folder.id);
-                      }}
-                      className={contextMenuMainItemClass}
-                    >
-                      Edit folder
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setSmartFolderMenuId(null);
-                        setSmartFolderDeleteId(folder.id);
-                      }}
-                      className={contextMenuMainItemClass}
-                    >
-                      Delete folder
-                    </button>
-                  </div>
-                ) : null}
-              </div>
-            );
-          })
-        ) : (
-          <div className="px-4 py-2 text-[0.74rem] leading-6 text-[var(--workspace-sidebar-text-muted)]">
-            Create lightweight views without moving email.
-          </div>
-        )}
-        <button
-          type="button"
-          onClick={onOpenSmartFolderModal}
-          className="flex w-full items-center rounded-2xl px-4 py-2.5 text-left text-[0.74rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-sidebar-text-muted)] transition-[background-color,color] duration-150 hover:bg-[var(--workspace-sidebar-hover)] hover:text-[var(--workspace-sidebar-text)] focus-visible:outline-none"
+    <>
+      <button
+        type="button"
+        onClick={() => setIsSmartFoldersSidebarOpen((current) => !current)}
+        className={`flex w-full items-center justify-center rounded-2xl px-3 py-3 text-center text-sm font-medium transition-[background-color,color,box-shadow] duration-100 focus:outline-none focus-visible:shadow-[inset_0_0_0_1px_rgba(255,255,255,0.12),0_0_0_1px_rgba(214,230,221,0.16)] xl:justify-start xl:px-4 xl:text-left ${
+          activeSmartFolder
+            ? "bg-[linear-gradient(180deg,var(--workspace-sidebar-active-start),var(--workspace-sidebar-active-end))] text-[var(--workspace-sidebar-text)]"
+            : "text-[var(--workspace-sidebar-text-muted)] hover:bg-[var(--workspace-sidebar-hover)] hover:text-[var(--workspace-sidebar-text)]"
+        }`}
+        aria-label="Smart Folders"
+        aria-expanded={isSmartFoldersSidebarOpen}
+      >
+        <span className="hidden xl:inline">Smart Folders</span>
+        <span
+          className={`ml-2 hidden xl:inline-flex transition-transform duration-150 ${
+            isSmartFoldersSidebarOpen ? "rotate-90" : "rotate-0"
+          }`}
+          aria-hidden="true"
         >
-          <span className="block pl-4">+ Add smart folder</span>
-        </button>
-      </div>
-    </div>
+          <svg
+            viewBox="0 0 12 12"
+            className="h-3 w-3"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <path d="M4 2.5 7.5 6 4 9.5" />
+          </svg>
+        </span>
+        <span className="text-[11px] uppercase tracking-[0.18em] xl:hidden">
+          Smart
+        </span>
+      </button>
+      {isSmartFoldersSidebarOpen ? (
+        <ul className="mt-2 space-y-2">
+          {smartFolders.length > 0 ? (
+            smartFolders.map((folder) => {
+              const active = activeSmartFolderId === folder.id;
+              const isMenuOpen = smartFolderMenuId === folder.id;
+
+              return (
+                <li key={folder.id} className="group relative">
+                  <button
+                    type="button"
+                    onClick={() => openSmartFolder(folder.id)}
+                    className={`flex w-full items-center justify-between rounded-2xl px-4 py-2.5 pr-11 text-left text-sm font-medium transition-[background-color,color,box-shadow] duration-100 focus:outline-none focus-visible:shadow-[inset_0_0_0_1px_rgba(255,255,255,0.12),0_0_0_1px_rgba(214,230,221,0.16)] ${
+                      active
+                        ? "bg-[linear-gradient(180deg,var(--workspace-sidebar-active-start),var(--workspace-sidebar-active-end))] text-[var(--workspace-sidebar-text)]"
+                        : "text-[var(--workspace-sidebar-text-muted)] hover:bg-[var(--workspace-sidebar-hover)] hover:text-[var(--workspace-sidebar-text)]"
+                    }`}
+                  >
+                    <span className="block truncate pl-4">{folder.name}</span>
+                  </button>
+                  <button
+                    type="button"
+                    aria-label={`Manage ${folder.name}`}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setSmartFolderMenuId((current) =>
+                        current === folder.id ? null : folder.id,
+                      );
+                      setContextMenuState(null);
+                      setIsMoreMenuOpen(false);
+                      setIsSortMenuOpen(false);
+                    }}
+                    className={`absolute right-2 top-1/2 inline-flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-full border border-[var(--workspace-sidebar-border)] bg-[var(--workspace-sidebar)] text-[var(--workspace-sidebar-text-muted)] transition-[opacity,background-color,border-color,color] duration-150 focus-visible:outline-none ${
+                      isMenuOpen
+                        ? "opacity-100"
+                        : "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100"
+                    } hover:bg-[var(--workspace-sidebar-hover)] hover:text-[var(--workspace-sidebar-text)]`}
+                  >
+                    <svg
+                      aria-hidden="true"
+                      viewBox="0 0 16 16"
+                      className="h-3.5 w-3.5"
+                      fill="currentColor"
+                    >
+                      <circle cx="3.5" cy="8" r="1.1" />
+                      <circle cx="8" cy="8" r="1.1" />
+                      <circle cx="12.5" cy="8" r="1.1" />
+                    </svg>
+                  </button>
+                  {isMenuOpen ? (
+                    <div
+                      className="absolute right-2 top-full z-20 mt-2 min-w-[180px] rounded-[18px] border border-[var(--workspace-menu-border)] bg-[var(--workspace-menu-bg)] p-2 shadow-panel"
+                      onMouseDown={(event) => event.stopPropagation()}
+                    >
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSmartFolderMenuId(null);
+                          onEditSmartFolder(folder.id);
+                        }}
+                        className={contextMenuMainItemClass}
+                      >
+                        Edit folder
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSmartFolderMenuId(null);
+                          setSmartFolderDeleteId(folder.id);
+                        }}
+                        className={contextMenuMainItemClass}
+                      >
+                        Delete folder
+                      </button>
+                    </div>
+                  ) : null}
+                </li>
+              );
+            })
+          ) : (
+            <li className="px-4 py-2 text-[0.74rem] leading-6 text-[var(--workspace-sidebar-text-muted)]">
+              Create lightweight views without moving email.
+            </li>
+          )}
+          <li>
+            <button
+              type="button"
+              onClick={onOpenSmartFolderModal}
+              className="flex w-full items-center rounded-2xl px-4 py-2.5 text-left text-[0.74rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-sidebar-text-muted)] transition-[background-color,color] duration-150 hover:bg-[var(--workspace-sidebar-hover)] hover:text-[var(--workspace-sidebar-text)] focus-visible:outline-none"
+            >
+              <span className="block pl-4">+ Add smart folder</span>
+            </button>
+          </li>
+        </ul>
+      ) : null}
+    </>
   );
 
   const switchToFolder = (folder: MailFolder) => {
@@ -17821,10 +17865,10 @@ function MailboxView({
 
   return (
     <>
-    {smartFolderSidebarHost
-      ? createPortal(smartFoldersSidebarSection, smartFolderSidebarHost)
-      : null}
-    <div className="flex h-full min-h-0 flex-col gap-3 overflow-hidden md:gap-4">
+      {smartFolderSidebarHost
+        ? createPortal(smartFoldersSidebarSection, smartFolderSidebarHost)
+        : null}
+      <div className="flex h-full min-h-0 flex-col gap-3 overflow-hidden md:gap-4">
       <header className="flex-none">
         <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between md:gap-6">
           <div className="flex min-w-0 flex-col items-start gap-2">
@@ -18632,76 +18676,45 @@ function MailboxView({
               inboxInteractionViewportRef.current = node;
               splitPaneContainerRef.current = node;
             }}
-            className="grid h-0 min-h-0 flex-1 items-stretch gap-6 overflow-hidden xl:grid-cols-[180px_minmax(0,0.92fr)_minmax(0,1.28fr)]"
+            className={`grid h-0 min-h-0 flex-1 items-stretch gap-6 overflow-hidden ${
+              activeSmartFolder
+                ? "xl:grid-cols-[minmax(0,0.92fr)_minmax(0,1.28fr)]"
+                : "xl:grid-cols-[180px_minmax(0,0.92fr)_minmax(0,1.28fr)]"
+            }`}
             style={
               isWideSplitView && effectiveMailListPaneWidth !== null
                 ? {
-                    gridTemplateColumns: `${MAIL_FOLDER_COLUMN_WIDTH}px minmax(${MIN_MAIL_LIST_PANE_WIDTH}px, ${effectiveMailListPaneWidth}px) minmax(${MIN_MAIL_DETAIL_PANE_WIDTH}px, 1fr)`,
+                    gridTemplateColumns: activeSmartFolder
+                      ? `minmax(${MIN_MAIL_LIST_PANE_WIDTH}px, ${effectiveMailListPaneWidth}px) minmax(${MIN_MAIL_DETAIL_PANE_WIDTH}px, 1fr)`
+                      : `${MAIL_FOLDER_COLUMN_WIDTH}px minmax(${MIN_MAIL_LIST_PANE_WIDTH}px, ${effectiveMailListPaneWidth}px) minmax(${MIN_MAIL_DETAIL_PANE_WIDTH}px, 1fr)`,
                   }
                 : undefined
             }
           >
-            <div className="flex min-h-0 min-w-0 flex-col overflow-hidden">
-              <div className="min-h-0 flex-1 space-y-1 overflow-y-auto">
-              {(["Inbox", "Drafts", "Sent", "Archive", "Spam", "Trash"] as MailFolder[]).map(
-                (folder) => {
-                  const active =
-                    !isSharedView &&
-                    !activeSmartFolder &&
-                    folder === activeFolder;
+            {!activeSmartFolder ? (
+              <div className="flex min-h-0 min-w-0 flex-col overflow-hidden">
+                <div className="min-h-0 flex-1 space-y-1 overflow-y-auto">
+                  {(["Inbox", "Drafts", "Sent", "Archive", "Spam", "Trash"] as MailFolder[]).map(
+                    (folder) => {
+                      const active =
+                        !isSharedView &&
+                        !activeSmartFolder &&
+                        folder === activeFolder;
                       const count = getFolderBadgeCount(folder);
                       const shouldShowFolderCount = folder === "Inbox";
-                  const dragTargetId = `folder-${folder}`;
-                  const isDragTargetActive = dragTargetKey === dragTargetId;
-                  const folderLabel =
-                    folder === "Inbox"
-                      ? activeMailboxTitleOverride
-                        ? activeMailboxTitleOverride
-                        : mailbox.title.endsWith("Inbox")
-                          ? mailbox.title
-                          : `${mailbox.title} Inbox`
-                      : folder;
+                      const dragTargetId = `folder-${folder}`;
+                      const isDragTargetActive = dragTargetKey === dragTargetId;
+                      const folderLabel =
+                        folder === "Inbox"
+                          ? activeMailboxTitleOverride
+                            ? activeMailboxTitleOverride
+                            : mailbox.title.endsWith("Inbox")
+                              ? mailbox.title
+                              : `${mailbox.title} Inbox`
+                          : folder;
 
-                  return (
-                    <div key={folder} className="space-y-1">
-                      <button
-                        type="button"
-                        onDragOver={(event) => {
-                          if (!dragPayload) {
-                            return;
-                          }
-                          event.preventDefault();
-                          setDragTargetKey(dragTargetId);
-                        }}
-                        onDragLeave={() => {
-                          if (dragTargetKey === dragTargetId) {
-                            setDragTargetKey(null);
-                          }
-                        }}
-                        onDrop={(event) => {
-                          event.preventDefault();
-                          handleDropToTarget({ type: "folder", folder });
-                        }}
-                        onClick={() => switchToFolder(folder)}
-                        className={`flex w-full items-center justify-between rounded-[18px] px-4 py-3 text-left transition-[background-color,border-color,color,box-shadow,transform] duration-150 ${
-                          active
-                            ? "bg-[linear-gradient(180deg,var(--workspace-card-featured-start),var(--workspace-card-featured-end))] text-[var(--workspace-text)]"
-                            : isDragTargetActive
-                              ? "border border-[var(--workspace-border-hover)] bg-[linear-gradient(180deg,var(--workspace-selected-surface-start),var(--workspace-selected-surface-end))] text-[var(--workspace-text)] shadow-[0_10px_24px_rgba(31,42,36,0.08),inset_0_1px_0_rgba(255,255,255,0.08)]"
-                              : "text-[var(--workspace-text-soft)] hover:bg-[var(--workspace-card-subtle)]"
-                        } focus-visible:outline-none`}
-                      >
-                        <span className="text-[0.8rem] font-medium uppercase tracking-[0.14em]">
-                          {folderLabel}
-                        </span>
-                        {shouldShowFolderCount ? (
-                          <span className="text-[0.72rem] text-[var(--workspace-text-faint)]">
-                            {count}
-                          </span>
-                        ) : null}
-                      </button>
-                      {folder === "Inbox" ? (
-                        <>
+                      return (
+                        <div key={folder} className="space-y-1">
                           <button
                             type="button"
                             onDragOver={(event) => {
@@ -18709,75 +18722,114 @@ function MailboxView({
                                 return;
                               }
                               event.preventDefault();
-                              setDragTargetKey("folder-Filtered");
+                              setDragTargetKey(dragTargetId);
                             }}
                             onDragLeave={() => {
-                              if (dragTargetKey === "folder-Filtered") {
+                              if (dragTargetKey === dragTargetId) {
                                 setDragTargetKey(null);
                               }
                             }}
                             onDrop={(event) => {
                               event.preventDefault();
-                              handleDropToTarget({ type: "folder", folder: "Filtered" });
+                              handleDropToTarget({ type: "folder", folder });
                             }}
-                            onClick={() => switchToFolder("Filtered")}
-                            className={`flex w-full items-center justify-between rounded-[18px] pl-6 pr-4 py-3 text-left transition-[background-color,border-color,color,box-shadow,transform] duration-150 ${
-                              !isSharedView &&
-                              !activeSmartFolder &&
-                              activeFolder === "Filtered"
-                                ? "bg-[linear-gradient(180deg,var(--workspace-card-featured-start),var(--workspace-card-featured-end))] text-[var(--workspace-text)]"
-                                : dragTargetKey === "folder-Filtered"
-                                  ? "border border-[var(--workspace-border-hover)] bg-[linear-gradient(180deg,var(--workspace-selected-surface-start),var(--workspace-selected-surface-end))] text-[var(--workspace-text)] shadow-[0_10px_24px_rgba(31,42,36,0.08),inset_0_1px_0_rgba(255,255,255,0.08)]"
-                                  : "text-[color:rgba(108,99,89,0.92)] hover:bg-[var(--workspace-card-subtle)] hover:text-[var(--workspace-text)]"
-                            } focus-visible:outline-none`}
-                          >
-                            <span
-                              className={`text-[0.8rem] font-medium uppercase tracking-[0.14em] ${
-                                !isSharedView &&
-                                !activeSmartFolder &&
-                                activeFolder === "Filtered"
-                                  ? ""
-                                  : "opacity-95"
-                              }`}
-                            >
-                              Filtered
-                            </span>
-                            <span
-                              className={`text-[0.72rem] ${
-                                !isSharedView &&
-                                !activeSmartFolder &&
-                                activeFolder === "Filtered"
-                                  ? "text-[var(--workspace-text-faint)]"
-                                  : "text-[color:rgba(116,107,97,0.74)]"
-                              }`}
-                            >
-                              {getFolderBadgeCount("Filtered")}
-                            </span>
-                          </button>
-                          <button
-                            type="button"
-                            onClick={switchToSharedView}
+                            onClick={() => switchToFolder(folder)}
                             className={`flex w-full items-center justify-between rounded-[18px] px-4 py-3 text-left transition-[background-color,border-color,color,box-shadow,transform] duration-150 ${
-                              isSharedView
+                              active
                                 ? "bg-[linear-gradient(180deg,var(--workspace-card-featured-start),var(--workspace-card-featured-end))] text-[var(--workspace-text)]"
-                                : "text-[var(--workspace-text-soft)] hover:bg-[var(--workspace-card-subtle)]"
+                                : isDragTargetActive
+                                  ? "border border-[var(--workspace-border-hover)] bg-[linear-gradient(180deg,var(--workspace-selected-surface-start),var(--workspace-selected-surface-end))] text-[var(--workspace-text)] shadow-[0_10px_24px_rgba(31,42,36,0.08),inset_0_1px_0_rgba(255,255,255,0.08)]"
+                                  : "text-[var(--workspace-text-soft)] hover:bg-[var(--workspace-card-subtle)]"
                             } focus-visible:outline-none`}
                           >
                             <span className="text-[0.8rem] font-medium uppercase tracking-[0.14em]">
-                              Shared
+                              {folderLabel}
                             </span>
-                            <span className="text-[0.72rem] text-[var(--workspace-text-faint)]">
-                              {getSharedMessageCount()}
-                            </span>
+                            {shouldShowFolderCount ? (
+                              <span className="text-[0.72rem] text-[var(--workspace-text-faint)]">
+                                {count}
+                              </span>
+                            ) : null}
                           </button>
-                        </>
-                      ) : null}
-                    </div>
-                  );
-                },
-              )}
+                          {folder === "Inbox" ? (
+                            <>
+                              <button
+                                type="button"
+                                onDragOver={(event) => {
+                                  if (!dragPayload) {
+                                    return;
+                                  }
+                                  event.preventDefault();
+                                  setDragTargetKey("folder-Filtered");
+                                }}
+                                onDragLeave={() => {
+                                  if (dragTargetKey === "folder-Filtered") {
+                                    setDragTargetKey(null);
+                                  }
+                                }}
+                                onDrop={(event) => {
+                                  event.preventDefault();
+                                  handleDropToTarget({ type: "folder", folder: "Filtered" });
+                                }}
+                                onClick={() => switchToFolder("Filtered")}
+                                className={`flex w-full items-center justify-between rounded-[18px] py-3 pl-6 pr-4 text-left transition-[background-color,border-color,color,box-shadow,transform] duration-150 ${
+                                  !isSharedView &&
+                                  !activeSmartFolder &&
+                                  activeFolder === "Filtered"
+                                    ? "bg-[linear-gradient(180deg,var(--workspace-card-featured-start),var(--workspace-card-featured-end))] text-[var(--workspace-text)]"
+                                    : dragTargetKey === "folder-Filtered"
+                                      ? "border border-[var(--workspace-border-hover)] bg-[linear-gradient(180deg,var(--workspace-selected-surface-start),var(--workspace-selected-surface-end))] text-[var(--workspace-text)] shadow-[0_10px_24px_rgba(31,42,36,0.08),inset_0_1px_0_rgba(255,255,255,0.08)]"
+                                      : "text-[color:rgba(108,99,89,0.92)] hover:bg-[var(--workspace-card-subtle)] hover:text-[var(--workspace-text)]"
+                                } focus-visible:outline-none`}
+                              >
+                                <span
+                                  className={`text-[0.8rem] font-medium uppercase tracking-[0.14em] ${
+                                    !isSharedView &&
+                                    !activeSmartFolder &&
+                                    activeFolder === "Filtered"
+                                      ? ""
+                                      : "opacity-95"
+                                  }`}
+                                >
+                                  Filtered
+                                </span>
+                                <span
+                                  className={`text-[0.72rem] ${
+                                    !isSharedView &&
+                                    !activeSmartFolder &&
+                                    activeFolder === "Filtered"
+                                      ? "text-[var(--workspace-text-faint)]"
+                                      : "text-[color:rgba(116,107,97,0.74)]"
+                                  }`}
+                                >
+                                  {getFolderBadgeCount("Filtered")}
+                                </span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={switchToSharedView}
+                                className={`flex w-full items-center justify-between rounded-[18px] px-4 py-3 text-left transition-[background-color,border-color,color,box-shadow,transform] duration-150 ${
+                                  isSharedView
+                                    ? "bg-[linear-gradient(180deg,var(--workspace-card-featured-start),var(--workspace-card-featured-end))] text-[var(--workspace-text)]"
+                                    : "text-[var(--workspace-text-soft)] hover:bg-[var(--workspace-card-subtle)]"
+                                } focus-visible:outline-none`}
+                              >
+                                <span className="text-[0.8rem] font-medium uppercase tracking-[0.14em]">
+                                  Shared
+                                </span>
+                                <span className="text-[0.72rem] text-[var(--workspace-text-faint)]">
+                                  {getSharedMessageCount()}
+                                </span>
+                              </button>
+                            </>
+                          ) : null}
+                        </div>
+                      );
+                    },
+                  )}
+                </div>
               </div>
-            </div>
+            ) : null}
 
             {isWideSplitView && effectiveMailListPaneWidth !== null ? (
               <button
@@ -18786,10 +18838,11 @@ function MailboxView({
                 onMouseDown={handleMailSplitResizeStart}
                 className="group absolute bottom-0 top-0 z-20 hidden w-6 cursor-col-resize xl:flex xl:items-stretch xl:justify-center"
                 style={{
-                  left:
-                    MAIL_FOLDER_COLUMN_WIDTH +
-                    MAIL_SPLIT_GAP +
-                    effectiveMailListPaneWidth,
+                  left: activeSmartFolder
+                    ? effectiveMailListPaneWidth
+                    : MAIL_FOLDER_COLUMN_WIDTH +
+                      MAIL_SPLIT_GAP +
+                      effectiveMailListPaneWidth,
                 }}
               >
                 <span className="h-full w-px bg-transparent transition-colors duration-150 group-hover:bg-[var(--workspace-border)]" />
