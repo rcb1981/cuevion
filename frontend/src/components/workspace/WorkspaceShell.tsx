@@ -9857,7 +9857,8 @@ function WorkspaceSidebar({
   const [smartFolderMenuId, setSmartFolderMenuId] = useState<string | null>(null);
   const hasMultipleMailboxes = orderedMailboxes.length > 1;
   const singleMailbox = !hasMultipleMailboxes ? (orderedMailboxes[0] ?? null) : null;
-  const activeSidebarInboxId = activeSection === "Inboxes" ? activeMailboxId : null;
+  const activeSidebarInboxId =
+    activeSection === "Inboxes" && activeSmartFolderId === null ? activeMailboxId : null;
   const shouldShowInboxChildren = hasMultipleMailboxes && isInboxesOpen;
   const inboxSidebarItems = useMemo(
     () =>
@@ -10020,7 +10021,9 @@ function WorkspaceSidebar({
     shortLabel: string;
   }) => {
     const isInboxesItem = item.section === "Inboxes";
-    const active = item.section === activeSection;
+    const active =
+      item.section === activeSection &&
+      !(isInboxesItem && activeSmartFolderId !== null);
 
     if (isInboxesItem) {
       if (hasMultipleMailboxes) {
