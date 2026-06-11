@@ -1496,6 +1496,68 @@ function hasMusicPromoSubjectMarker(subject: string) {
   );
 }
 
+function isExplicitMusicPromoSendoutContext(message: PromoHeuristicMessage) {
+  const subjectText = message.subject ?? "";
+  const identityText = [message.sender, message.from].join(" ").toLowerCase();
+  const searchableText = [
+    message.subject,
+    message.snippet,
+    message.sender,
+    message.from,
+    message.to ?? "",
+    ...(message.body ?? []),
+  ]
+    .join(" ")
+    .toLowerCase();
+  const hasPromoSubjectMarker =
+    hasMusicPromoSubjectMarker(subjectText) || /\(\s*promo\s*\)/i.test(subjectText);
+  const hasMusicSenderContext = includesAnyKeyword(identityText, [
+    "music",
+    "artist",
+    "dj",
+    "edm",
+    "records",
+    "recordings",
+    "label",
+    "promo",
+  ]);
+  const hasMusicReleaseContext = includesAnyKeyword(searchableText, [
+    "house/edm",
+    "edm",
+    "track",
+    "ep",
+    "single",
+    "remix",
+    "release",
+    "collaboration ep",
+    "new house",
+    "new track",
+    "new single",
+  ]);
+  const hasPromoSupportContext = includesAnyKeyword(searchableText, [
+    "dj support",
+    "support is appreciated",
+    "within your dj sets",
+    "dj sets",
+    "spotify playlists",
+    "spotify playlist",
+    "radio shows",
+    "radio show",
+    "youtube channels",
+    "youtube channel",
+    "promo support",
+    "release promo",
+    "promo download",
+    "for your sets",
+  ]);
+
+  return (
+    hasPromoSubjectMarker &&
+    hasPromoSupportContext &&
+    (hasMusicReleaseContext || hasMusicSenderContext)
+  );
+}
+
 function isProtectedMusicPromoContext(message: PromoHeuristicMessage) {
   const subjectText = message.subject ?? "";
   const identityText = [message.sender, message.from].join(" ").toLowerCase();
@@ -1609,6 +1671,7 @@ function isStrongMusicPromoMessage(message: PromoHeuristicMessage) {
       /\s[-–:]\s/.test(subjectText));
 
   return (
+    isExplicitMusicPromoSendoutContext(message) ||
     hasMusicPromoSubjectMarker(subjectText) ||
     identityText.includes("digital promo sound") ||
     includesAnyKeyword(searchableText, ["inflyte", "fatdrop"]) ||
