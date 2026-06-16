@@ -30823,9 +30823,31 @@ export function WorkspaceShell({
     !activeMailbox &&
     !activeTarget &&
     (!areMailboxCountsHydrated || Boolean(syncingMailboxId));
+  const startupSyncProgressMessage = (() => {
+    if (startupSyncStatus !== "running" || !syncingMailboxId) {
+      return null;
+    }
+
+    const currentSyncIndex = startupSyncMailboxIds.indexOf(syncingMailboxId);
+
+    if (currentSyncIndex === -1 || startupSyncMailboxIds.length === 0) {
+      return null;
+    }
+
+    const syncingMailboxTitle =
+      orderedMailboxes.find((mailbox) => mailbox.id === syncingMailboxId)?.title ??
+      null;
+
+    if (!syncingMailboxTitle) {
+      return null;
+    }
+
+    return `Syncing ${currentSyncIndex + 1} of ${startupSyncMailboxIds.length} · ${syncingMailboxTitle}`;
+  })();
   const dashboardSyncStatusMessage =
     shouldShowDashboardSyncStatus
-      ? mailboxSyncFeedbackMessage ??
+      ? startupSyncProgressMessage ??
+        mailboxSyncFeedbackMessage ??
         (syncingMailboxId
           ? `Refreshing ${
               orderedMailboxes.find((mailbox) => mailbox.id === syncingMailboxId)?.title ??
