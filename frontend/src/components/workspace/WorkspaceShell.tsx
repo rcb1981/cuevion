@@ -10585,7 +10585,7 @@ function TopCards({
       value: String(priorityInboxCount),
       context:
         priorityInboxCount > 0
-          ? `${priorityInboxCount} item${priorityInboxCount === 1 ? "" : "s"} ready in Inbox`
+          ? `${priorityInboxCount} priority item${priorityInboxCount === 1 ? " needs" : "s need"} attention`
           : "No items yet",
       actionLabel: "Open queue",
       onClick: onOpenPriority,
