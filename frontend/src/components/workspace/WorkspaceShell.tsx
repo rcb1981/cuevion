@@ -8080,6 +8080,8 @@ const primaryBadgeClass =
 
 const unreadAttentionDotClass =
   "h-2 w-2 rounded-full bg-[#8B3DFF] shadow-[0_0_0_2px_rgba(139,61,255,0.18),0_0_10px_rgba(139,61,255,0.42)]";
+const sidebarUnreadBadgeClass =
+  "inline-flex min-w-[1.35rem] items-center justify-center rounded-full border border-[var(--workspace-sidebar-border)] bg-[var(--workspace-sidebar-hover)] px-1.5 py-0.5 text-[0.62rem] font-medium tracking-normal text-[var(--workspace-sidebar-text)]";
 const contextMenuHoverSurfaceClass =
   "hover:bg-[var(--workspace-menu-hover)] hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]";
 const contextMenuItemClass =
@@ -10124,6 +10126,7 @@ function WorkspaceSidebar({
   activeSmartFolderId,
   hasPendingTeamInvitation,
   notificationUnreadCount,
+  mailboxUnreadCounts,
   orderedMailboxes,
   smartFolders,
   onLogoutClick,
@@ -10139,6 +10142,7 @@ function WorkspaceSidebar({
   activeSmartFolderId: string | null;
   hasPendingTeamInvitation: boolean;
   notificationUnreadCount: number;
+  mailboxUnreadCounts: Record<string, number>;
   orderedMailboxes: OrderedMailbox[];
   smartFolders: SmartFolderDefinition[];
   onLogoutClick: () => void;
@@ -10157,13 +10161,19 @@ function WorkspaceSidebar({
   const activeSidebarInboxId =
     activeSection === "Inboxes" && activeSmartFolderId === null ? activeMailboxId : null;
   const shouldShowInboxChildren = hasMultipleMailboxes && isInboxesOpen;
+  const formatUnreadBadgeCount = (count: number) => (count > 99 ? "99+" : String(count));
   const inboxSidebarItems = useMemo(
     () =>
       orderedMailboxes.map((mailbox) => ({
         id: mailbox.id,
         label: mailbox.title,
+        unreadCount: mailboxUnreadCounts[mailbox.id] ?? 0,
       })),
-    [orderedMailboxes],
+    [mailboxUnreadCounts, orderedMailboxes],
+  );
+  const inboxSidebarUnreadTotal = inboxSidebarItems.reduce(
+    (total, item) => total + item.unreadCount,
+    0,
   );
 
   useEffect(() => {
@@ -10338,6 +10348,11 @@ function WorkspaceSidebar({
               aria-expanded={isInboxesOpen}
             >
               <span className="hidden xl:inline">{item.label}</span>
+              {inboxSidebarUnreadTotal > 0 ? (
+                <span className={`${sidebarUnreadBadgeClass} ml-auto hidden xl:inline-flex`}>
+                  {formatUnreadBadgeCount(inboxSidebarUnreadTotal)}
+                </span>
+              ) : null}
               <span
                 className={`ml-2 hidden xl:inline-flex transition-transform duration-150 ${
                   isInboxesOpen ? "rotate-90" : "rotate-0"
@@ -10379,14 +10394,19 @@ function WorkspaceSidebar({
 
                           onOpenMailbox(targetMailbox);
                         }}
-                        className={`hidden w-full rounded-2xl px-4 py-3 text-left text-sm font-medium transition-[background-color,color,box-shadow] duration-100 focus:outline-none focus-visible:shadow-[inset_0_0_0_1px_rgba(255,255,255,0.12),0_0_0_1px_rgba(214,230,221,0.16)] xl:block ${
+                        className={`hidden w-full items-center justify-between gap-3 rounded-2xl px-4 py-3 text-left text-sm font-medium transition-[background-color,color,box-shadow] duration-100 focus:outline-none focus-visible:shadow-[inset_0_0_0_1px_rgba(255,255,255,0.12),0_0_0_1px_rgba(214,230,221,0.16)] xl:flex ${
                           activeInbox
                             ? "bg-[linear-gradient(180deg,var(--workspace-sidebar-active-start),var(--workspace-sidebar-active-end))] text-[var(--workspace-sidebar-text)]"
                             : "text-[var(--workspace-sidebar-text-muted)] hover:bg-[var(--workspace-sidebar-hover)] hover:text-[var(--workspace-sidebar-text)]"
                         }`}
                         aria-label={mailbox.label}
                       >
-                        <span className="block pl-4">{mailbox.label}</span>
+                        <span className="block min-w-0 truncate pl-4">{mailbox.label}</span>
+                        {mailbox.unreadCount > 0 ? (
+                          <span className={`${sidebarUnreadBadgeClass} flex-none`}>
+                            {formatUnreadBadgeCount(mailbox.unreadCount)}
+                          </span>
+                        ) : null}
                       </button>
                     </li>
                   );
@@ -10410,14 +10430,19 @@ function WorkspaceSidebar({
                 <button
                   type="button"
                   onClick={() => onOpenMailbox(singleMailbox)}
-                  className={`hidden w-full rounded-2xl px-4 py-3 text-left text-sm font-medium transition-[background-color,color,box-shadow] duration-100 focus:outline-none focus-visible:shadow-[inset_0_0_0_1px_rgba(255,255,255,0.12),0_0_0_1px_rgba(214,230,221,0.16)] xl:block ${
+                  className={`hidden w-full items-center justify-between gap-3 rounded-2xl px-4 py-3 text-left text-sm font-medium transition-[background-color,color,box-shadow] duration-100 focus:outline-none focus-visible:shadow-[inset_0_0_0_1px_rgba(255,255,255,0.12),0_0_0_1px_rgba(214,230,221,0.16)] xl:flex ${
                     activeSidebarInboxId === singleMailbox.id
                       ? "bg-[linear-gradient(180deg,var(--workspace-sidebar-active-start),var(--workspace-sidebar-active-end))] text-[var(--workspace-sidebar-text)]"
                       : "text-[var(--workspace-sidebar-text-muted)] hover:bg-[var(--workspace-sidebar-hover)] hover:text-[var(--workspace-sidebar-text)]"
                   }`}
                   aria-label={singleMailbox.title}
                 >
-                  <span className="block pl-4">{singleMailbox.title}</span>
+                  <span className="block min-w-0 truncate pl-4">{singleMailbox.title}</span>
+                  {(mailboxUnreadCounts[singleMailbox.id] ?? 0) > 0 ? (
+                    <span className={`${sidebarUnreadBadgeClass} flex-none`}>
+                      {formatUnreadBadgeCount(mailboxUnreadCounts[singleMailbox.id] ?? 0)}
+                    </span>
+                  ) : null}
                 </button>
               </li>
             </ul>
@@ -10440,14 +10465,19 @@ function WorkspaceSidebar({
 
                         onOpenMailbox(targetMailbox);
                       }}
-                      className={`hidden w-full rounded-2xl px-4 py-3 text-left text-sm font-medium transition-[background-color,color,box-shadow] duration-100 focus:outline-none focus-visible:shadow-[inset_0_0_0_1px_rgba(255,255,255,0.12),0_0_0_1px_rgba(214,230,221,0.16)] xl:block ${
+                      className={`hidden w-full items-center justify-between gap-3 rounded-2xl px-4 py-3 text-left text-sm font-medium transition-[background-color,color,box-shadow] duration-100 focus:outline-none focus-visible:shadow-[inset_0_0_0_1px_rgba(255,255,255,0.12),0_0_0_1px_rgba(214,230,221,0.16)] xl:flex ${
                         activeInbox
                           ? "bg-[linear-gradient(180deg,var(--workspace-sidebar-active-start),var(--workspace-sidebar-active-end))] text-[var(--workspace-sidebar-text)]"
                           : "text-[var(--workspace-sidebar-text-muted)] hover:bg-[var(--workspace-sidebar-hover)] hover:text-[var(--workspace-sidebar-text)]"
                       }`}
                       aria-label={mailbox.label}
                     >
-                      <span className="block pl-4">{mailbox.label}</span>
+                      <span className="block min-w-0 truncate pl-4">{mailbox.label}</span>
+                      {mailbox.unreadCount > 0 ? (
+                        <span className={`${sidebarUnreadBadgeClass} flex-none`}>
+                          {formatUnreadBadgeCount(mailbox.unreadCount)}
+                        </span>
+                      ) : null}
                     </button>
                   </li>
                 );
@@ -10543,18 +10573,18 @@ function WorkspaceSidebar({
 
 function TopCards({
   onOpenPriority,
-  onOpenNewEmails,
+  onOpenUnread,
   onOpenInboxes,
-  newEmailsCount,
-  newEmailsContext,
+  unreadMessagesCount,
+  unreadMessagesContext,
   priorityInboxCount,
   connectedInboxCount,
 }: {
   onOpenPriority: () => void;
-  onOpenNewEmails: () => void;
+  onOpenUnread: () => void;
   onOpenInboxes: () => void;
-  newEmailsCount: number;
-  newEmailsContext: string;
+  unreadMessagesCount: number;
+  unreadMessagesContext: string;
   priorityInboxCount: number;
   connectedInboxCount: number;
 }) {
@@ -10570,11 +10600,11 @@ function TopCards({
       onClick: onOpenPriority,
     },
     {
-      label: "New Emails",
-      value: String(newEmailsCount),
-      context: newEmailsContext,
-      actionLabel: "View inboxes",
-      onClick: onOpenNewEmails,
+      label: "Unread",
+      value: String(unreadMessagesCount),
+      context: unreadMessagesContext,
+      actionLabel: "View unread",
+      onClick: onOpenUnread,
     },
     {
       label: "Connected Inboxes",
@@ -11307,20 +11337,20 @@ function NotificationsPreviewBlock({
 
 function DashboardView({
   onOpenPriority,
-  onOpenPrimaryInbox,
+  onOpenUnread,
   onOpenInboxes,
   notificationPreviewItems,
-  newEmailsCount,
-  newEmailsContext,
+  unreadMessagesCount,
+  unreadMessagesContext,
   priorityInboxCount,
   connectedInboxCount,
 }: {
   onOpenPriority: () => void;
-  onOpenPrimaryInbox: () => void;
+  onOpenUnread: () => void;
   onOpenInboxes: () => void;
   notificationPreviewItems: VisibleNotificationItem[];
-  newEmailsCount: number;
-  newEmailsContext: string;
+  unreadMessagesCount: number;
+  unreadMessagesContext: string;
   priorityInboxCount: number;
   connectedInboxCount: number;
 }) {
@@ -11348,10 +11378,10 @@ function DashboardView({
 
       <TopCards
         onOpenPriority={onOpenPriority}
-        onOpenNewEmails={onOpenPrimaryInbox}
+        onOpenUnread={onOpenUnread}
         onOpenInboxes={onOpenInboxes}
-        newEmailsCount={newEmailsCount}
-        newEmailsContext={newEmailsContext}
+        unreadMessagesCount={unreadMessagesCount}
+        unreadMessagesContext={unreadMessagesContext}
         priorityInboxCount={priorityInboxCount}
         connectedInboxCount={connectedInboxCount}
       />
@@ -30262,7 +30292,6 @@ export function WorkspaceShell({
     .filter(isManagedInboxSyncCapable)
     .map((mailbox) => mailbox.id as InboxId);
   const startupSyncMailboxKey = startupSyncMailboxIds.join("|");
-  const primaryInboxTitle = orderedMailboxes[0]?.title ?? inboxDisplayConfig.main.title;
   const primaryWorkspaceEmail = orderedMailboxes[0]?.email ?? "team@cuevion.com";
   const accountDisplayName = authenticatedUser?.name ?? orderedMailboxes[0]?.title ?? "You";
   const accountDisplayEmail = authenticatedUser?.email ?? primaryWorkspaceEmail;
@@ -30712,17 +30741,22 @@ export function WorkspaceShell({
   const connectedOrderedMailboxes = orderedMailboxes.filter((mailbox) =>
     connectedMailboxIds.has(mailbox.id),
   );
-  const newEmailsCount = connectedOrderedMailboxes.reduce(
+  const mailboxUnreadCounts = useMemo(
+    () =>
+      Object.fromEntries(
+        orderedMailboxes.map((mailbox) => [
+          mailbox.id,
+          getMailboxFolderBadgeCount(mailboxStore[mailbox.id], "Inbox"),
+        ]),
+      ),
+    [mailboxStore, orderedMailboxes],
+  );
+  const unreadMessagesCount = connectedOrderedMailboxes.reduce(
     (total, mailbox) =>
-      total + getMailboxFolderBadgeCount(mailboxStore[mailbox.id], "Inbox"),
+      total + (mailboxUnreadCounts[mailbox.id] ?? 0),
     0,
   );
-  const newEmailsContext =
-    connectedOrderedMailboxes.length === 1
-      ? `Fresh messages ready in ${connectedOrderedMailboxes[0].title}`
-      : connectedOrderedMailboxes.length > 1
-        ? "Fresh messages across all inboxes"
-        : `Fresh messages ready in ${primaryInboxTitle}`;
+  const unreadMessagesContext = "Unread messages across all inboxes";
   const [mailboxResetToken, setMailboxResetToken] = useState(0);
   // Remembers the last selected message id per mailbox so MailboxView can
   // restore it when the user navigates away and back. Stored in a ref to
@@ -36527,6 +36561,7 @@ export function WorkspaceShell({
         activeSmartFolderId={activeSmartFolderId}
         hasPendingTeamInvitation={Boolean(pendingTeamInvitation)}
         notificationUnreadCount={notificationUnreadCount}
+        mailboxUnreadCounts={mailboxUnreadCounts}
         orderedMailboxes={sidebarMailboxes}
         smartFolders={smartFolders}
         onLogoutClick={() => setIsLogoutConfirmationOpen(true)}
@@ -36668,11 +36703,11 @@ export function WorkspaceShell({
               <div className="min-h-0 flex-1 overflow-y-auto pr-1">
                 <DashboardView
                   onOpenPriority={() => handleOpenPriority("Priority")}
-                  onOpenPrimaryInbox={handleOpenSenderContext}
+                  onOpenUnread={handleOpenSenderContext}
                   onOpenInboxes={() => handleOpenInboxes("Connected")}
                   notificationPreviewItems={prioritizedNotificationItems}
-                  newEmailsCount={newEmailsCount}
-                  newEmailsContext={newEmailsContext}
+                  unreadMessagesCount={unreadMessagesCount}
+                  unreadMessagesContext={unreadMessagesContext}
                   priorityInboxCount={livePriorityInboxItems.length}
                   connectedInboxCount={connectedInboxCount}
                 />
