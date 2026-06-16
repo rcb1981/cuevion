@@ -23439,6 +23439,14 @@ function settingsPillButtonClass(selected: boolean) {
   }`;
 }
 
+function settingsTabButtonClass(selected: boolean) {
+  return `inline-flex h-10 items-center justify-center rounded-full border px-4 text-[0.72rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color,box-shadow,transform] duration-150 active:scale-[0.99] focus-visible:outline-none ${
+    selected
+      ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_8px_18px_rgba(118,170,112,0.08)]"
+      : "border-transparent bg-transparent text-[var(--workspace-text-soft)] hover:border-[var(--workspace-border-soft)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)]"
+  }`;
+}
+
 function settingsToggleButtonClass(enabled: boolean) {
   return `relative inline-flex h-7 w-[3rem] items-center rounded-full border transition-[background-color,border-color,box-shadow,transform] duration-150 active:scale-[0.98] focus-visible:outline-none ${
     enabled
@@ -27587,6 +27595,16 @@ const AccountSettingsCard = memo(function AccountSettingsCard({
   );
 });
 
+type SettingsTab = "Workspace" | "Account" | "Focus" | "Notifications" | "Mail";
+
+const settingsTabs: SettingsTab[] = [
+  "Workspace",
+  "Account",
+  "Focus",
+  "Notifications",
+  "Mail",
+];
+
 function SettingsView({
   workspaceName,
   accountName,
@@ -27650,6 +27668,7 @@ function SettingsView({
   onAccountNameChange?: (name: string) => void;
 }) {
   const [settingsPage, setSettingsPage] = useState<"root" | "manage-inboxes">("root");
+  const [activeSettingsTab, setActiveSettingsTab] = useState<SettingsTab>("Workspace");
   const [activeSignatureInboxId, setActiveSignatureInboxId] = useState<string | null>(null);
   const [signatureDraft, setSignatureDraft] = useState<InboxSignatureSettings>(
     createEmptySignatureSettings(),
@@ -27723,19 +27742,10 @@ function SettingsView({
     );
   }
 
-  return (
-    <div className={settingsPageSurfaceClass(themeMode)}>
-      <header className="space-y-3">
-        <h1 className="text-[1.85rem] font-medium tracking-tight text-[var(--workspace-text)] md:text-[2.25rem]">
-          Settings
-        </h1>
-        <p className="max-w-3xl text-lg leading-8 text-[var(--workspace-text-muted)]">
-          Control how your workspace feels and behaves.
-        </p>
-      </header>
-
-      <div className="grid gap-6 xl:grid-cols-2 xl:items-start">
-        <div className="space-y-6">
+  const activeSettingsContent = (() => {
+    switch (activeSettingsTab) {
+      case "Workspace":
+        return (
           <WorkspaceSettingsCard
             savedWorkspaceName={workspaceName}
             managedInboxCount={savedManagedInboxes.length}
@@ -27747,21 +27757,18 @@ function SettingsView({
             onSaveWorkspaceName={onSaveWorkspaceName}
             onManageInboxes={() => setSettingsPage("manage-inboxes")}
           />
+        );
+      case "Account":
+        return (
           <AccountSettingsCard
             themeMode={themeMode}
             accountName={accountName}
             accountEmail={accountEmail}
             onAccountNameChange={onAccountNameChange}
           />
-          <NotificationsSettingsCard
-            themeMode={themeMode}
-            inboxChangesEnabled={inboxChangesEnabled}
-            onToggleInboxChanges={onToggleInboxChanges}
-            teamActivityEnabled={teamActivityEnabled}
-            onToggleTeamActivity={onToggleTeamActivity}
-          />
-        </div>
-        <div className="space-y-6">
+        );
+      case "Focus":
+        return (
           <FocusPreferencesSettingsCard
             themeMode={themeMode}
             managedInboxes={savedManagedInboxes}
@@ -27771,6 +27778,19 @@ function SettingsView({
             onApplyFocusPreferences={onApplyFocusPreferences}
             isApplying={isApplyingFocusPreferences}
           />
+        );
+      case "Notifications":
+        return (
+          <NotificationsSettingsCard
+            themeMode={themeMode}
+            inboxChangesEnabled={inboxChangesEnabled}
+            onToggleInboxChanges={onToggleInboxChanges}
+            teamActivityEnabled={teamActivityEnabled}
+            onToggleTeamActivity={onToggleTeamActivity}
+          />
+        );
+      case "Mail":
+        return (
           <MailSettingsCard
             managedInboxes={savedManagedInboxes}
             inboxOutOfOffice={inboxOutOfOffice}
@@ -27782,7 +27802,40 @@ function SettingsView({
               setActiveOutOfOfficeInboxId(mailbox.id);
             }}
           />
+        );
+      default:
+        return null;
+    }
+  })();
+
+  return (
+    <div className={settingsPageSurfaceClass(themeMode)}>
+      <header className="space-y-3">
+        <h1 className="text-[1.85rem] font-medium tracking-tight text-[var(--workspace-text)] md:text-[2.25rem]">
+          Settings
+        </h1>
+        <p className="max-w-3xl text-lg leading-8 text-[var(--workspace-text-muted)]">
+          Control how your workspace feels and behaves.
+        </p>
+      </header>
+
+      <div className="overflow-x-auto pb-1">
+        <div className="inline-flex min-w-max items-center gap-1 rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] p-1 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+          {settingsTabs.map((tab) => (
+            <button
+              key={`settings-tab-${tab}`}
+              type="button"
+              onClick={() => setActiveSettingsTab(tab)}
+              className={settingsTabButtonClass(activeSettingsTab === tab)}
+            >
+              {tab}
+            </button>
+          ))}
         </div>
+      </div>
+
+      <div className="max-w-[980px]">
+        {activeSettingsContent}
       </div>
 
       <SignatureSettingsModal
