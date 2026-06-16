@@ -11355,6 +11355,7 @@ function DashboardView({
   unreadMessagesContext,
   priorityInboxCount,
   connectedInboxCount,
+  syncStatusMessage,
 }: {
   onOpenPriority: () => void;
   onOpenUnread: () => void;
@@ -11364,6 +11365,7 @@ function DashboardView({
   unreadMessagesContext: string;
   priorityInboxCount: number | null;
   connectedInboxCount: number;
+  syncStatusMessage: string | null;
 }) {
   const userName: string | null = null;
   const currentHour = new Date().getHours();
@@ -11386,6 +11388,22 @@ function DashboardView({
           Here&apos;s what needs attention today
         </p>
       </header>
+
+      {syncStatusMessage ? (
+        <div className="rounded-[22px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-3.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]">
+          <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex items-center gap-2.5">
+              <span className="inline-flex h-2.5 w-2.5 rounded-full bg-[var(--workspace-accent-text)] shadow-[0_0_0_4px_rgba(118,170,112,0.12)]" />
+              <span className="text-[0.86rem] font-medium text-[var(--workspace-text)]">
+                {syncStatusMessage}
+              </span>
+            </div>
+            <span className="text-[0.78rem] leading-6 text-[var(--workspace-text-soft)]">
+              Counts will appear when sync is complete.
+            </span>
+          </div>
+        </div>
+      ) : null}
 
       <TopCards
         onOpenPriority={onOpenPriority}
@@ -30800,6 +30818,21 @@ export function WorkspaceShell({
     startupSyncStatus === "partial_error";
   const [mailboxSyncFeedbackMessage, setMailboxSyncFeedbackMessage] =
     useState<string | null>(null);
+  const shouldShowDashboardSyncStatus =
+    activeSection === "Dashboard" &&
+    !activeMailbox &&
+    !activeTarget &&
+    (!areMailboxCountsHydrated || Boolean(syncingMailboxId));
+  const dashboardSyncStatusMessage =
+    shouldShowDashboardSyncStatus
+      ? mailboxSyncFeedbackMessage ??
+        (syncingMailboxId
+          ? `Refreshing ${
+              orderedMailboxes.find((mailbox) => mailbox.id === syncingMailboxId)?.title ??
+              "inbox"
+            }`
+          : "Syncing inboxes...")
+      : null;
   const [mailboxSyncErrors, setMailboxSyncErrors] = useState<
     Partial<Record<InboxId, string>>
   >({});
@@ -36734,6 +36767,7 @@ export function WorkspaceShell({
                     areMailboxCountsHydrated ? livePriorityInboxItems.length : null
                   }
                   connectedInboxCount={connectedInboxCount}
+                  syncStatusMessage={dashboardSyncStatusMessage}
                 />
               </div>
 	            ) : activeSection === "Priority" ? (
@@ -36880,7 +36914,7 @@ export function WorkspaceShell({
 		            </div>
 		          </div>
 		        ) : null}
-		        {mailboxSyncFeedbackMessage ? (
+		        {mailboxSyncFeedbackMessage && !shouldShowDashboardSyncStatus ? (
 		          <div className="pointer-events-none fixed bottom-6 right-6 z-[341]">
 		            <div className="rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3 text-[0.84rem] leading-6 text-[var(--workspace-text)] shadow-panel">
 		              {mailboxSyncFeedbackMessage}
