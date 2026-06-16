@@ -10171,10 +10171,6 @@ function WorkspaceSidebar({
       })),
     [mailboxUnreadCounts, orderedMailboxes],
   );
-  const inboxSidebarUnreadTotal = inboxSidebarItems.reduce(
-    (total, item) => total + item.unreadCount,
-    0,
-  );
 
   useEffect(() => {
     if (activeSidebarInboxId !== null) {
@@ -10348,11 +10344,6 @@ function WorkspaceSidebar({
               aria-expanded={isInboxesOpen}
             >
               <span className="hidden xl:inline">{item.label}</span>
-              {inboxSidebarUnreadTotal > 0 ? (
-                <span className={`${sidebarUnreadBadgeClass} ml-auto hidden xl:inline-flex`}>
-                  {formatUnreadBadgeCount(inboxSidebarUnreadTotal)}
-                </span>
-              ) : null}
               <span
                 className={`ml-2 hidden xl:inline-flex transition-transform duration-150 ${
                   isInboxesOpen ? "rotate-90" : "rotate-0"
