@@ -5730,7 +5730,22 @@ function getMailboxFolderBadgeCount(
   }
 
   if (folder === "Inbox" || folder === "Filtered") {
-    return mailboxCollections[folder].filter((message) => message.unread).length;
+    const seenIdentityKeys = new Set<string>();
+
+    return mailboxCollections[folder].filter((message) => {
+      if (!message.unread) {
+        return false;
+      }
+
+      const identityKeys = getCanonicalMessageIdentityKeys(message);
+
+      if (identityKeys.some((key) => seenIdentityKeys.has(key))) {
+        return false;
+      }
+
+      identityKeys.forEach((key) => seenIdentityKeys.add(key));
+      return true;
+    }).length;
   }
 
   return mailboxCollections[folder].length;
@@ -10127,6 +10142,7 @@ function WorkspaceSidebar({
   hasPendingTeamInvitation,
   notificationUnreadCount,
   mailboxUnreadCounts,
+  showMailboxUnreadCounts,
   orderedMailboxes,
   smartFolders,
   onLogoutClick,
@@ -10143,6 +10159,7 @@ function WorkspaceSidebar({
   hasPendingTeamInvitation: boolean;
   notificationUnreadCount: number;
   mailboxUnreadCounts: Record<string, number>;
+  showMailboxUnreadCounts: boolean;
   orderedMailboxes: OrderedMailbox[];
   smartFolders: SmartFolderDefinition[];
   onLogoutClick: () => void;
@@ -10167,9 +10184,9 @@ function WorkspaceSidebar({
       orderedMailboxes.map((mailbox) => ({
         id: mailbox.id,
         label: mailbox.title,
-        unreadCount: mailboxUnreadCounts[mailbox.id] ?? 0,
+        unreadCount: showMailboxUnreadCounts ? mailboxUnreadCounts[mailbox.id] ?? 0 : 0,
       })),
-    [mailboxUnreadCounts, orderedMailboxes],
+    [mailboxUnreadCounts, orderedMailboxes, showMailboxUnreadCounts],
   );
 
   useEffect(() => {
@@ -10429,7 +10446,8 @@ function WorkspaceSidebar({
                   aria-label={singleMailbox.title}
                 >
                   <span className="block min-w-0 truncate pl-4">{singleMailbox.title}</span>
-                  {(mailboxUnreadCounts[singleMailbox.id] ?? 0) > 0 ? (
+                  {showMailboxUnreadCounts &&
+                  (mailboxUnreadCounts[singleMailbox.id] ?? 0) > 0 ? (
                     <span className={`${sidebarUnreadBadgeClass} flex-none`}>
                       {formatUnreadBadgeCount(mailboxUnreadCounts[singleMailbox.id] ?? 0)}
                     </span>
@@ -10574,17 +10592,19 @@ function TopCards({
   onOpenPriority: () => void;
   onOpenUnread: () => void;
   onOpenInboxes: () => void;
-  unreadMessagesCount: number;
+  unreadMessagesCount: number | null;
   unreadMessagesContext: string;
-  priorityInboxCount: number;
+  priorityInboxCount: number | null;
   connectedInboxCount: number;
 }) {
   const cards = [
     {
       label: "Priority",
-      value: String(priorityInboxCount),
+      value: priorityInboxCount === null ? "—" : String(priorityInboxCount),
       context:
-        priorityInboxCount > 0
+        priorityInboxCount === null
+          ? "Refreshing priority state"
+          : priorityInboxCount > 0
           ? `${priorityInboxCount} priority item${priorityInboxCount === 1 ? " needs" : "s need"} attention`
           : "No items yet",
       actionLabel: "Open queue",
@@ -10592,7 +10612,7 @@ function TopCards({
     },
     {
       label: "Unread",
-      value: String(unreadMessagesCount),
+      value: unreadMessagesCount === null ? "—" : String(unreadMessagesCount),
       context: unreadMessagesContext,
       actionLabel: "View unread",
       onClick: onOpenUnread,
@@ -11340,9 +11360,9 @@ function DashboardView({
   onOpenUnread: () => void;
   onOpenInboxes: () => void;
   notificationPreviewItems: VisibleNotificationItem[];
-  unreadMessagesCount: number;
+  unreadMessagesCount: number | null;
   unreadMessagesContext: string;
-  priorityInboxCount: number;
+  priorityInboxCount: number | null;
   connectedInboxCount: number;
 }) {
   const userName: string | null = null;
@@ -30774,6 +30794,10 @@ export function WorkspaceShell({
   const startupSyncHasRunRef = useRef(false);
   const [startupSyncStatus, setStartupSyncStatus] =
     useState<StartupSyncStatus>("idle");
+  const areMailboxCountsHydrated =
+    startupSyncMailboxIds.length === 0 ||
+    startupSyncStatus === "done" ||
+    startupSyncStatus === "partial_error";
   const [mailboxSyncFeedbackMessage, setMailboxSyncFeedbackMessage] =
     useState<string | null>(null);
   const [mailboxSyncErrors, setMailboxSyncErrors] = useState<
@@ -36553,6 +36577,7 @@ export function WorkspaceShell({
         hasPendingTeamInvitation={Boolean(pendingTeamInvitation)}
         notificationUnreadCount={notificationUnreadCount}
         mailboxUnreadCounts={mailboxUnreadCounts}
+        showMailboxUnreadCounts={areMailboxCountsHydrated}
         orderedMailboxes={sidebarMailboxes}
         smartFolders={smartFolders}
         onLogoutClick={() => setIsLogoutConfirmationOpen(true)}
@@ -36697,9 +36722,17 @@ export function WorkspaceShell({
                   onOpenUnread={handleOpenSenderContext}
                   onOpenInboxes={() => handleOpenInboxes("Connected")}
                   notificationPreviewItems={prioritizedNotificationItems}
-                  unreadMessagesCount={unreadMessagesCount}
-                  unreadMessagesContext={unreadMessagesContext}
-                  priorityInboxCount={livePriorityInboxItems.length}
+                  unreadMessagesCount={
+                    areMailboxCountsHydrated ? unreadMessagesCount : null
+                  }
+                  unreadMessagesContext={
+                    areMailboxCountsHydrated
+                      ? unreadMessagesContext
+                      : "Refreshing unread state"
+                  }
+                  priorityInboxCount={
+                    areMailboxCountsHydrated ? livePriorityInboxItems.length : null
+                  }
                   connectedInboxCount={connectedInboxCount}
                 />
               </div>
