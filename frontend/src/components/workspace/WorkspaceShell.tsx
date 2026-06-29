@@ -119,19 +119,32 @@ import type {
 import type { ForYouLearningSuggestion } from "../../lib/forYouEngine";
 
 const primaryNavigationItems = [
-  { section: "Dashboard", label: "Dashboard", shortLabel: "Dash" },
-  { section: "For You", label: "For You", shortLabel: "For" },
-  { section: "Priority", label: "Priority", shortLabel: "Pri" },
-  { section: "Inboxes", label: "Inboxes", shortLabel: "Box" },
-  { section: "Notifications", label: "Notifications", shortLabel: "Note" },
-  { section: "Team", label: "Team", shortLabel: "Team" },
+  { section: "Dashboard", label: "Dashboard", shortLabel: "Dash", icon: "dashboard" },
+  { section: "For You", label: "For You", shortLabel: "For", icon: "sparkle" },
+  { section: "Priority", label: "Priority", shortLabel: "Pri", icon: "priority" },
+  { section: "Inboxes", label: "Inboxes", shortLabel: "Box", icon: "inbox" },
+  { section: "Notifications", label: "Notifications", shortLabel: "Note", icon: "bell" },
+  { section: "Team", label: "Team", shortLabel: "Team", icon: "users" },
 ] as const;
 
 const utilityNavigationItems = [
-  { section: "Settings", label: "Settings", shortLabel: "Set" },
-  { section: "Help", label: "Help", shortLabel: "Help" },
-  { section: "Contact", label: "Contact", shortLabel: "Talk" },
+  { section: "Settings", label: "Settings", shortLabel: "Set", icon: "settings" },
+  { section: "Help", label: "Help", shortLabel: "Help", icon: "help" },
+  { section: "Contact", label: "Contact", shortLabel: "Talk", icon: "contact" },
 ] as const;
+
+type SidebarNavigationIconName =
+  | "dashboard"
+  | "sparkle"
+  | "priority"
+  | "inbox"
+  | "folder"
+  | "bell"
+  | "users"
+  | "settings"
+  | "help"
+  | "contact"
+  | "logout";
 
 type WorkspaceSection =
   | "Dashboard"
@@ -10135,6 +10148,93 @@ function CuevionMark({ compact = false }: { compact?: boolean }) {
   );
 }
 
+function SidebarNavigationIcon({ name }: { name: SidebarNavigationIconName }) {
+  return (
+    <svg
+      aria-hidden="true"
+      focusable="false"
+      viewBox="0 0 24 24"
+      className="h-[18px] w-[18px] flex-none"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.7"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      {name === "dashboard" ? (
+        <>
+          <rect x="4" y="4" width="6.5" height="6.5" rx="1.4" />
+          <rect x="13.5" y="4" width="6.5" height="6.5" rx="1.4" />
+          <rect x="4" y="13.5" width="6.5" height="6.5" rx="1.4" />
+          <rect x="13.5" y="13.5" width="6.5" height="6.5" rx="1.4" />
+        </>
+      ) : null}
+      {name === "sparkle" ? (
+        <>
+          <path d="M12 3.5 13.7 8.3 18.5 10 13.7 11.7 12 16.5 10.3 11.7 5.5 10 10.3 8.3 12 3.5Z" />
+          <path d="M18.2 14.8 19 17 21.2 17.8 19 18.6 18.2 20.8 17.4 18.6 15.2 17.8 17.4 17 18.2 14.8Z" />
+        </>
+      ) : null}
+      {name === "priority" ? (
+        <>
+          <path d="m13 2.8-7 11h5l-1 7.4 7-11h-5l1-7.4Z" />
+        </>
+      ) : null}
+      {name === "inbox" ? (
+        <>
+          <path d="M5 5.5h14l2 8v4a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5v-4l2-8Z" />
+          <path d="M3 13.5h5l1.5 2h5l1.5-2h5" />
+        </>
+      ) : null}
+      {name === "folder" ? (
+        <>
+          <path d="M3.8 7.2A1.7 1.7 0 0 1 5.5 5.5h4.2l2 2h6.8a1.7 1.7 0 0 1 1.7 1.7v8.1a1.7 1.7 0 0 1-1.7 1.7h-13a1.7 1.7 0 0 1-1.7-1.7V7.2Z" />
+        </>
+      ) : null}
+      {name === "bell" ? (
+        <>
+          <path d="M6.5 10.8a5.5 5.5 0 0 1 11 0c0 4 1.6 5 1.6 5H4.9s1.6-1 1.6-5Z" />
+          <path d="M10 18.7a2.2 2.2 0 0 0 4 0" />
+        </>
+      ) : null}
+      {name === "users" ? (
+        <>
+          <path d="M9.5 12.2a3.3 3.3 0 1 0 0-6.6 3.3 3.3 0 0 0 0 6.6Z" />
+          <path d="M3.8 19.1a5.8 5.8 0 0 1 11.4 0" />
+          <path d="M15.3 6.1a3 3 0 0 1 0 5.6" />
+          <path d="M16.8 14.1a5.2 5.2 0 0 1 3.4 5" />
+        </>
+      ) : null}
+      {name === "settings" ? (
+        <>
+          <path d="M12 15.2a3.2 3.2 0 1 0 0-6.4 3.2 3.2 0 0 0 0 6.4Z" />
+          <path d="M19.1 13.4a7.7 7.7 0 0 0 .1-2.8l2-1.5-2-3.4-2.4 1a7.5 7.5 0 0 0-2.4-1.4L14 2.8h-4l-.4 2.5a7.5 7.5 0 0 0-2.4 1.4l-2.4-1-2 3.4 2 1.5a7.7 7.7 0 0 0 .1 2.8l-2.1 1.5 2 3.4 2.5-1a7.5 7.5 0 0 0 2.3 1.3l.4 2.6h4l.4-2.6a7.5 7.5 0 0 0 2.3-1.3l2.5 1 2-3.4-2.1-1.5Z" />
+        </>
+      ) : null}
+      {name === "help" ? (
+        <>
+          <circle cx="12" cy="12" r="8.5" />
+          <path d="M9.8 9.6a2.4 2.4 0 0 1 4.6 1c0 1.8-2.4 2-2.4 3.7" />
+          <path d="M12 17.3h.01" />
+        </>
+      ) : null}
+      {name === "contact" ? (
+        <>
+          <path d="M4.5 6.5h15a1.5 1.5 0 0 1 1.5 1.5v9a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17V8a1.5 1.5 0 0 1 1.5-1.5Z" />
+          <path d="m4.5 8 7.5 5.3L19.5 8" />
+        </>
+      ) : null}
+      {name === "logout" ? (
+        <>
+          <path d="M10 6H6.5A1.5 1.5 0 0 0 5 7.5v9A1.5 1.5 0 0 0 6.5 18H10" />
+          <path d="M14 8.2 17.8 12 14 15.8" />
+          <path d="M9.2 12h8.4" />
+        </>
+      ) : null}
+    </svg>
+  );
+}
+
 function WorkspaceSidebar({
   activeSection,
   activeMailboxId,
@@ -10214,7 +10314,10 @@ function WorkspaceSidebar({
         aria-label="Smart Folders"
         aria-expanded={isSmartFoldersOpen}
       >
-        <span className="hidden xl:inline">Smart Folders</span>
+        <span className="hidden items-center gap-2 xl:inline-flex">
+          <SidebarNavigationIcon name="folder" />
+          <span>Smart Folders</span>
+        </span>
         <span
           className={`ml-2 hidden xl:inline-flex transition-transform duration-150 ${
             isSmartFoldersOpen ? "rotate-90" : "rotate-0"
@@ -10233,8 +10336,9 @@ function WorkspaceSidebar({
             <path d="M4 2.5 7.5 6 4 9.5" />
           </svg>
         </span>
-        <span className="text-[11px] uppercase tracking-[0.18em] xl:hidden">
-          Smart
+        <span className="inline-flex items-center justify-center gap-1.5 text-[11px] uppercase tracking-[0.18em] xl:hidden">
+          <SidebarNavigationIcon name="folder" />
+          <span>Smart</span>
         </span>
       </button>
       {isSmartFoldersOpen ? (
@@ -10339,6 +10443,7 @@ function WorkspaceSidebar({
     section: WorkspaceSection;
     label: string;
     shortLabel: string;
+    icon: SidebarNavigationIconName;
   }) => {
     const isInboxesItem = item.section === "Inboxes";
     const active =
@@ -10360,7 +10465,10 @@ function WorkspaceSidebar({
               aria-label={item.label}
               aria-expanded={isInboxesOpen}
             >
-              <span className="hidden xl:inline">{item.label}</span>
+              <span className="hidden items-center gap-2 xl:inline-flex">
+                <SidebarNavigationIcon name={item.icon} />
+                <span>{item.label}</span>
+              </span>
               <span
                 className={`ml-2 hidden xl:inline-flex transition-transform duration-150 ${
                   isInboxesOpen ? "rotate-90" : "rotate-0"
@@ -10379,8 +10487,9 @@ function WorkspaceSidebar({
                   <path d="M4 2.5 7.5 6 4 9.5" />
                 </svg>
               </span>
-              <span className="text-[11px] uppercase tracking-[0.18em] xl:hidden">
-                {item.shortLabel}
+              <span className="inline-flex items-center justify-center gap-1.5 text-[11px] uppercase tracking-[0.18em] xl:hidden">
+                <SidebarNavigationIcon name={item.icon} />
+                <span>{item.shortLabel}</span>
               </span>
             </button>
             {shouldShowInboxChildren ? (
@@ -10428,8 +10537,9 @@ function WorkspaceSidebar({
       return (
         <li key={item.label} className="pt-2">
           <div className="hidden items-center justify-between px-4 pb-2 xl:flex">
-            <span className="text-[0.68rem] font-medium uppercase tracking-[0.18em] text-[var(--workspace-sidebar-text-muted)]">
-              {item.label}
+            <span className="inline-flex items-center gap-2 text-[0.68rem] font-medium uppercase tracking-[0.18em] text-[var(--workspace-sidebar-text-muted)]">
+              <SidebarNavigationIcon name={item.icon} />
+              <span>{item.label}</span>
             </span>
           </div>
           {singleMailbox ? (
@@ -10511,7 +10621,10 @@ function WorkspaceSidebar({
           }`}
           aria-label={item.label}
         >
-          <span className="hidden xl:inline">{item.label}</span>
+          <span className="hidden items-center gap-2 xl:inline-flex">
+            <SidebarNavigationIcon name={item.icon} />
+            <span>{item.label}</span>
+          </span>
           {item.section === "Notifications" && notificationUnreadCount > 0 ? (
             <span className="ml-2 hidden min-w-[1.4rem] items-center justify-center rounded-full bg-[linear-gradient(180deg,var(--workspace-sidebar-active-start),var(--workspace-sidebar-active-end))] px-1.5 py-0.5 text-[0.62rem] font-medium tracking-normal text-[var(--workspace-sidebar-text)] xl:inline-flex">
               {notificationUnreadCount > 99 ? "99+" : notificationUnreadCount}
@@ -10522,8 +10635,9 @@ function WorkspaceSidebar({
               <span className="h-[7px] w-[7px] rounded-full bg-[radial-gradient(circle_at_30%_30%,#DCCFBB_0%,#D2C2A8_48%,#C3B091_100%)] shadow-[0_0_5px_rgba(210,194,168,0.28)]" />
             </span>
           ) : null}
-          <span className="text-[11px] uppercase tracking-[0.18em] xl:hidden">
-            {item.shortLabel}
+          <span className="inline-flex items-center justify-center gap-1.5 text-[11px] uppercase tracking-[0.18em] xl:hidden">
+            <SidebarNavigationIcon name={item.icon} />
+            <span>{item.shortLabel}</span>
           </span>
         </button>
       </li>
@@ -10564,9 +10678,13 @@ function WorkspaceSidebar({
                 onClick={onLogoutClick}
                 className="mt-5 flex w-full items-center justify-center rounded-2xl px-3 py-3 text-center text-sm font-medium text-[var(--workspace-sidebar-text-muted)] transition-[background-color,color,box-shadow] duration-100 hover:bg-[var(--workspace-sidebar-hover)] hover:text-[var(--workspace-sidebar-text)] focus:outline-none focus-visible:shadow-[inset_0_0_0_1px_rgba(255,255,255,0.12),0_0_0_1px_rgba(214,230,221,0.16)] xl:justify-start xl:px-4 xl:text-left"
               >
-                <span className="hidden xl:inline">Log out</span>
-                <span className="text-[11px] uppercase tracking-[0.18em] xl:hidden">
-                  Out
+                <span className="hidden items-center gap-2 xl:inline-flex">
+                  <SidebarNavigationIcon name="logout" />
+                  <span>Log out</span>
+                </span>
+                <span className="inline-flex items-center justify-center gap-1.5 text-[11px] uppercase tracking-[0.18em] xl:hidden">
+                  <SidebarNavigationIcon name="logout" />
+                  <span>Out</span>
                 </span>
               </button>
               <div className="pt-5 text-center text-[0.68rem] font-medium tracking-[0.05em] text-[color:rgba(146,122,98,0.78)] xl:px-4 xl:text-left">
