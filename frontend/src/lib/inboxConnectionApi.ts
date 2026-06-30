@@ -48,6 +48,7 @@ export type LiveInboxMessageSnapshot = {
   action?: string;
   v7_final_priority?: string;
   threadId?: string;
+  classifierVersion?: string;
 };
 
 export type ConnectInboxRequest = {

@@ -18,6 +18,11 @@ import {
   INBOX_SNAPSHOT_MAX_AGE_MS,
   INBOX_SNAPSHOT_RECENT_GUARD_MS,
 } from "./inboxEngine";
+import {
+  MUSIC_CLASSIFIER_VERSION,
+  readLiveInboxSnapshots,
+  saveLiveInboxSnapshot,
+} from "./liveInboxSnapshots";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -397,6 +402,86 @@ test("preserves distinct threads", () => {
   ];
   const result = dedupeLatestMessagePerThread(messages);
   assert.equal(result.length, 2);
+});
+
+// ---------------------------------------------------------------------------
+// liveInboxSnapshots — classifier version
+// ---------------------------------------------------------------------------
+
+console.log("\nliveInboxSnapshots — classifier version");
+
+test("drops stale snapshots without current classifier version", () => {
+  const store = new Map<string, string>();
+  const previousWindow = (globalThis as { window?: unknown }).window;
+  (globalThis as { window?: unknown }).window = {
+    localStorage: {
+      getItem: (key: string) => store.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        store.set(key, value);
+      },
+    },
+  };
+
+  try {
+    store.set(
+      "cuevion-live-inbox-snapshots",
+      JSON.stringify({
+        promo: {
+          schemaVersion: 5,
+          inboxId: "promo",
+          email: "promo@example.com",
+          fetchedAt: new Date().toISOString(),
+          messages: [
+            {
+              id: "stale-demo",
+              sender: "Sender",
+              subject: "Promo nieuw vuur!",
+              snippet: "Hier echt een dikke promo!!",
+              from: "sender@example.com",
+              to: "dj@example.com",
+              timestamp: "March 27 at 10:00",
+              createdAt: new Date().toISOString(),
+              body: ["Hier echt een dikke promo!!"],
+              ui_signal: "DEMO",
+              internalClassification: "demo",
+            },
+          ],
+        },
+      }),
+    );
+
+    assert.deepEqual(readLiveInboxSnapshots(), {});
+
+    saveLiveInboxSnapshot({
+      inboxId: "promo",
+      email: "promo@example.com",
+      fetchedAt: new Date().toISOString(),
+      messages: [
+        {
+          id: "fresh-promo",
+          sender: "Sender",
+          subject: "Promo nieuw vuur!",
+          snippet: "Hier echt een dikke promo!!",
+          from: "sender@example.com",
+          to: "dj@example.com",
+          timestamp: "March 27 at 10:00",
+          createdAt: new Date().toISOString(),
+          body: ["Hier echt een dikke promo!!"],
+          ui_signal: "PROMO",
+          internalClassification: "promo",
+        },
+      ],
+    });
+
+    const snapshots = readLiveInboxSnapshots();
+    assert.equal(snapshots.promo?.classifierVersion, MUSIC_CLASSIFIER_VERSION);
+    assert.equal(
+      snapshots.promo?.messages[0]?.classifierVersion,
+      MUSIC_CLASSIFIER_VERSION,
+    );
+  } finally {
+    (globalThis as { window?: unknown }).window = previousWindow;
+  }
 });
 
 // ---------------------------------------------------------------------------
