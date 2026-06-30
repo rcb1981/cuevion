@@ -28486,7 +28486,7 @@ function UtilityView({
   };
 
   const view = content[section];
-  const helpSearchFieldClass = `${inputFieldClass} border-[color:rgba(121,151,120,0.2)] bg-[color:rgba(255,253,249,0.97)] px-4 py-[0.92rem] shadow-none placeholder:text-[color:rgba(31,42,36,0.3)] focus:border-[color:rgba(93,126,94,0.44)] focus:bg-[color:rgba(255,253,249,0.995)] focus:shadow-[0_0_0_4px_rgba(93,126,94,0.1)] transition-[background-color,border-color,box-shadow,color]`;
+  const helpSearchFieldClass = `${inputFieldClass} border-[var(--workspace-help-guidance-border)] px-4 py-[0.92rem] shadow-none focus:border-[var(--workspace-border-hover)] focus:shadow-[0_0_0_4px_rgba(93,126,94,0.1)] dark:focus:shadow-[0_0_0_4px_rgba(121,151,120,0.12)] transition-[background-color,border-color,box-shadow,color]`;
   const helpGuidanceCardClass =
     "rounded-[20px] border border-[var(--workspace-help-guidance-border)] bg-[var(--workspace-help-guidance-surface)] px-4 py-4";
   const helpGuidanceButtonClass =
@@ -29057,7 +29057,7 @@ function UtilityView({
               }}
             />
             {helpSuggestionsVisible && !selectedHelpSuggestion ? (
-              <div className="mt-1.5 rounded-[20px] rounded-t-[14px] border border-[color:rgba(121,151,120,0.1)] bg-[color:rgba(255,252,247,0.72)] p-2">
+              <div className="mt-1.5 rounded-[20px] rounded-t-[14px] border border-[var(--workspace-help-guidance-border)] bg-[var(--workspace-card)] p-2 shadow-panel">
                 {lastViewedHelpTopic && trimmedHelpSearchQuery.length === 0 ? (
                   <>
                     <div className="px-4 pb-1 pt-2 text-[0.72rem] font-medium tracking-[0.02em] text-[var(--workspace-text-faint)]">
@@ -29070,7 +29070,7 @@ function UtilityView({
                         onSetLastViewedGuidance(lastViewedHelpTopic.title);
                         setHelpSuggestionsVisible(false);
                       }}
-                      className="w-full rounded-[16px] px-4 py-3 text-left text-[0.94rem] leading-6 text-[var(--workspace-text-soft)] transition-colors duration-150 hover:bg-[color:rgba(121,151,120,0.045)] focus:bg-[color:rgba(121,151,120,0.045)] focus:outline-none"
+                      className="w-full rounded-[16px] px-4 py-3 text-left text-[0.94rem] leading-6 text-[var(--workspace-text-soft)] transition-colors duration-150 hover:bg-[var(--workspace-help-guidance-hover)] focus:bg-[var(--workspace-help-guidance-hover)] focus:outline-none"
                     >
                       {lastViewedHelpTopic.title}
                     </button>
@@ -29089,7 +29089,7 @@ function UtilityView({
                         onSetLastViewedGuidance(topic.title);
                         setHelpSuggestionsVisible(false);
                       }}
-                      className="w-full rounded-[16px] px-4 py-3 text-left transition-colors duration-150 hover:bg-[color:rgba(121,151,120,0.045)] focus:bg-[color:rgba(121,151,120,0.045)] focus:outline-none"
+                      className="w-full rounded-[16px] px-4 py-3 text-left transition-colors duration-150 hover:bg-[var(--workspace-help-guidance-hover)] focus:bg-[var(--workspace-help-guidance-hover)] focus:outline-none"
                     >
                       <span className="block text-[0.94rem] leading-6 text-[var(--workspace-text-soft)]">
                         {topic.title}
@@ -29131,7 +29131,7 @@ function UtilityView({
                     setSelectedHelpSuggestion(null);
                     setHelpSuggestionsVisible(false);
                   }}
-                  className="cursor-pointer text-[0.78rem] font-medium text-[var(--workspace-accent-primary)] underline-offset-4 transition-[color,text-decoration-color] duration-150 hover:text-[color:rgba(76,132,94,0.98)] hover:underline focus:outline-none focus:text-[color:rgba(76,132,94,0.98)] focus:underline"
+                  className="cursor-pointer text-[0.78rem] font-medium text-[var(--workspace-accent-primary)] underline-offset-4 transition-[color,text-decoration-color] duration-150 hover:text-[var(--workspace-text)] hover:underline focus:outline-none focus:text-[var(--workspace-text)] focus:underline"
                 >
                   Back to all topics
                 </button>
@@ -29144,7 +29144,7 @@ function UtilityView({
                     setSelectedHelpSuggestion(null);
                     setHelpSuggestionsVisible(false);
                   }}
-                  className="cursor-pointer text-[0.78rem] font-medium text-[var(--workspace-accent-primary)] underline-offset-4 transition-[color,text-decoration-color] duration-150 hover:text-[color:rgba(76,132,94,0.98)] hover:underline focus:outline-none focus:text-[color:rgba(76,132,94,0.98)] focus:underline"
+                  className="cursor-pointer text-[0.78rem] font-medium text-[var(--workspace-accent-primary)] underline-offset-4 transition-[color,text-decoration-color] duration-150 hover:text-[var(--workspace-text)] hover:underline focus:outline-none focus:text-[var(--workspace-text)] focus:underline"
                 >
                   Clear search
                 </button>
