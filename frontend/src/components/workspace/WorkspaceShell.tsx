@@ -10310,7 +10310,7 @@ function WorkspaceSidebar({
       <button
         type="button"
         onClick={() => setIsSmartFoldersOpen((current) => !current)}
-        className={`flex w-full items-center justify-center rounded-2xl px-3 py-3 text-center text-sm font-medium transition-[background-color,color,box-shadow] duration-100 focus:outline-none focus-visible:shadow-[inset_0_0_0_1px_rgba(255,255,255,0.12),0_0_0_1px_rgba(214,230,221,0.16)] xl:justify-start xl:px-4 xl:text-left ${
+        className={`flex w-full items-center justify-center rounded-2xl px-3 py-3 text-center text-sm font-medium transition-[background-color,color,box-shadow] duration-100 focus:outline-none focus-visible:shadow-[inset_0_0_0_1px_rgba(255,255,255,0.12),0_0_0_1px_rgba(214,230,221,0.16)] xl:justify-start xl:px-3.5 xl:text-left ${
           activeSmartFolderId
             ? "bg-[linear-gradient(180deg,var(--workspace-sidebar-active-start),var(--workspace-sidebar-active-end))] text-[var(--workspace-sidebar-text)]"
             : "text-[var(--workspace-sidebar-text-muted)] hover:bg-[var(--workspace-sidebar-hover)] hover:text-[var(--workspace-sidebar-text)]"
@@ -10461,7 +10461,7 @@ function WorkspaceSidebar({
             <button
               type="button"
               onClick={() => setIsInboxesOpen((current) => !current)}
-              className={`flex w-full items-center justify-center rounded-2xl px-3 py-3 text-center text-sm font-medium transition-[background-color,color,box-shadow] duration-100 focus:outline-none focus-visible:shadow-[inset_0_0_0_1px_rgba(255,255,255,0.12),0_0_0_1px_rgba(214,230,221,0.16)] xl:justify-start xl:px-4 xl:text-left ${
+              className={`flex w-full items-center justify-center rounded-2xl px-3 py-3 text-center text-sm font-medium transition-[background-color,color,box-shadow] duration-100 focus:outline-none focus-visible:shadow-[inset_0_0_0_1px_rgba(255,255,255,0.12),0_0_0_1px_rgba(214,230,221,0.16)] xl:justify-start xl:px-3.5 xl:text-left ${
                 active
                   ? "bg-[linear-gradient(180deg,var(--workspace-sidebar-active-start),var(--workspace-sidebar-active-end))] text-[var(--workspace-sidebar-text)]"
                   : "text-[var(--workspace-sidebar-text-muted)] hover:bg-[var(--workspace-sidebar-hover)] hover:text-[var(--workspace-sidebar-text)]"
@@ -10618,7 +10618,7 @@ function WorkspaceSidebar({
           onClick={() => {
             onChangeSection(item.section);
           }}
-          className={`flex w-full items-center justify-center rounded-2xl px-3 py-3 text-center text-sm font-medium transition-[background-color,color,box-shadow] duration-100 focus:outline-none focus-visible:shadow-[inset_0_0_0_1px_rgba(255,255,255,0.12),0_0_0_1px_rgba(214,230,221,0.16)] xl:justify-start xl:px-4 xl:text-left ${
+          className={`flex w-full items-center justify-center rounded-2xl px-3 py-3 text-center text-sm font-medium transition-[background-color,color,box-shadow] duration-100 focus:outline-none focus-visible:shadow-[inset_0_0_0_1px_rgba(255,255,255,0.12),0_0_0_1px_rgba(214,230,221,0.16)] xl:justify-start xl:px-3.5 xl:text-left ${
             active
               ? "bg-[linear-gradient(180deg,var(--workspace-sidebar-active-start),var(--workspace-sidebar-active-end))] text-[var(--workspace-sidebar-text)]"
               : "text-[var(--workspace-sidebar-text-muted)] hover:bg-[var(--workspace-sidebar-hover)] hover:text-[var(--workspace-sidebar-text)]"
@@ -10649,11 +10649,11 @@ function WorkspaceSidebar({
   };
 
   return (
-    <aside className="fixed inset-y-0 left-0 hidden overflow-y-auto w-24 border-r border-[var(--workspace-sidebar-border)] bg-[var(--workspace-sidebar)] px-4 py-10 text-[var(--workspace-sidebar-text)] md:block xl:w-[280px] xl:px-8">
+    <aside className="fixed inset-y-0 left-0 hidden overflow-y-auto w-24 border-r border-[var(--workspace-sidebar-border)] bg-[var(--workspace-sidebar)] px-4 py-10 text-[var(--workspace-sidebar-text)] md:block xl:w-[240px] xl:px-5">
       <div className="absolute inset-0 bg-[var(--workspace-sidebar-glow)]" />
       <div className="relative flex h-full flex-col">
         <div className="flex h-full flex-col">
-          <span className="hidden rounded-full border border-[var(--workspace-sidebar-border)] bg-[var(--workspace-sidebar-hover)] px-4 py-2 text-xs uppercase tracking-[0.28em] text-[var(--workspace-sidebar-text-muted)] xl:inline-flex">
+          <span className="hidden rounded-full border border-[var(--workspace-sidebar-border)] bg-[var(--workspace-sidebar-hover)] px-3.5 py-2 text-xs uppercase tracking-[0.28em] text-[var(--workspace-sidebar-text-muted)] xl:inline-flex">
             Workspace
           </span>
           <div className="mt-8 flex justify-center xl:justify-start">
@@ -10680,7 +10680,7 @@ function WorkspaceSidebar({
               <button
                 type="button"
                 onClick={onLogoutClick}
-                className="mt-5 flex w-full items-center justify-center rounded-2xl px-3 py-3 text-center text-sm font-medium text-[var(--workspace-sidebar-text-muted)] transition-[background-color,color,box-shadow] duration-100 hover:bg-[var(--workspace-sidebar-hover)] hover:text-[var(--workspace-sidebar-text)] focus:outline-none focus-visible:shadow-[inset_0_0_0_1px_rgba(255,255,255,0.12),0_0_0_1px_rgba(214,230,221,0.16)] xl:justify-start xl:px-4 xl:text-left"
+                className="mt-5 flex w-full items-center justify-center rounded-2xl px-3 py-3 text-center text-sm font-medium text-[var(--workspace-sidebar-text-muted)] transition-[background-color,color,box-shadow] duration-100 hover:bg-[var(--workspace-sidebar-hover)] hover:text-[var(--workspace-sidebar-text)] focus:outline-none focus-visible:shadow-[inset_0_0_0_1px_rgba(255,255,255,0.12),0_0_0_1px_rgba(214,230,221,0.16)] xl:justify-start xl:px-3.5 xl:text-left"
               >
                 <span className="hidden items-center gap-2 xl:inline-flex">
                   <SidebarNavigationIcon name="logout" />
@@ -10691,7 +10691,7 @@ function WorkspaceSidebar({
                   <span>Out</span>
                 </span>
               </button>
-              <div className="pt-5 text-center text-[0.68rem] font-medium tracking-[0.05em] text-[color:rgba(146,122,98,0.78)] xl:px-4 xl:text-left">
+              <div className="pt-5 text-center text-[0.68rem] font-medium tracking-[0.05em] text-[color:rgba(146,122,98,0.78)] xl:px-3.5 xl:text-left">
                 Version 1.0.0
               </div>
             </div>
@@ -31495,8 +31495,8 @@ export function WorkspaceShell({
     ? "px-0.5 pt-0 pb-0 sm:px-1.5 sm:pt-0.5 sm:pb-0.5 md:px-2.5 md:pt-1 md:pb-1 xl:px-3 xl:pt-1.5 xl:pb-1"
     : "px-4 py-8 md:px-8 md:py-10";
   const workspaceContentRailClass = usesExpandedInboxWorkspaceLayout
-    ? "max-w-[2280px] md:pl-[100px] xl:pl-[284px]"
-    : "max-w-[1880px] md:pl-[112px] xl:pl-[304px]";
+    ? "max-w-[2280px] md:pl-[100px] xl:pl-[244px]"
+    : "max-w-[1880px] md:pl-[112px] xl:pl-[264px]";
 
   useEffect(() => {
     if (lastOnboardingMailboxSeedKeyRef.current === onboardingMailboxSeedKey) {
