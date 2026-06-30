@@ -3,13 +3,14 @@ import {
   formatLearningRuleAction,
   formatLearningRuleLabel,
   formatLearningRuleTimestamp,
-  inferLearningDecisionMailboxId,
   inferLearningDecisionPrioritySelection,
   inferLearningDecisionSourceContext,
   normalizeSenderLearningKey,
   type CuevionMessageCategory,
+  type CuevionLearningLabel,
   type LearningDecisionPrioritySelection,
   type LearningDecisionSourceContext,
+  type SenderLearningBehavior,
   type SenderCategoryLearningEntry,
   type SenderCategoryLearningStore,
 } from "./learningEngine";
@@ -26,6 +27,9 @@ export type ForYouLearningSuggestion = {
   reason: string;
   visualLabel?: string;
   mailboxId: InboxId | null;
+  category: CuevionMessageCategory;
+  categoryConfidence: "low" | "medium" | "high";
+  priorityScore: "low" | "medium" | "high";
 };
 
 export type ForYouUncertainEmail = {
@@ -47,7 +51,9 @@ export type ForYouRecentLearningDecision = {
   ruleType: "sender" | "domain";
   ruleValue: string;
   learnedCategory: CuevionMessageCategory;
+  learnedLabel?: CuevionLearningLabel;
   mailboxAction: "keep" | "move";
+  senderBehavior?: SenderLearningBehavior;
   sourceContext: LearningDecisionSourceContext | null;
   sourcePrioritySelection: LearningDecisionPrioritySelection | null;
   sourceMailboxId: InboxId | null;
@@ -97,15 +103,31 @@ function formatForYouRecentLearningAction(
   entry: SenderCategoryLearningEntry,
   sourceContext: LearningDecisionSourceContext | null,
 ) {
-  if (sourceContext === "uncertain") {
-    if (entry.sourcePrioritySelection === "Spam") {
-      return "future emails labeled Spam";
-    }
+  const label =
+    entry.learnedLabel ??
+    (entry.sourcePrioritySelection === "Spam"
+      ? "Spam"
+      : formatForYouCategoryLabel(entry.learnedCategory));
+  const priority =
+    entry.sourcePrioritySelection === "Important"
+      ? "Priority"
+      : entry.sourcePrioritySelection === "Show Less" || entry.sourcePrioritySelection === "Spam"
+        ? "Low"
+        : "Normal";
+  const behavior =
+    entry.senderBehavior === "always_prioritize"
+      ? "Always prioritize"
+      : entry.senderBehavior === "normal"
+        ? "Show normally"
+        : entry.senderBehavior === "show_less"
+          ? "Show less"
+          : entry.senderBehavior === "spam"
+            ? "Mark sender as spam"
+            : entry.senderBehavior === "do_not_learn"
+              ? "Do not learn from sender"
+              : null;
 
-    return `future emails labeled ${formatForYouCategoryLabel(entry.learnedCategory)}`;
-  }
-
-  return formatLearningRuleAction(entry);
+  return `${priority} · ${label}${behavior ? ` · ${behavior}` : ""}`;
 }
 
 export function isReviewUncertainEligible(message: ForYouDerivationMessage) {
@@ -195,6 +217,9 @@ export function buildForYouLearningPools<TMessage extends ForYouDerivationMessag
         snippet: message.body.slice(0, 2).length > 0 ? message.body.slice(0, 2) : [message.snippet],
         reason: formatForYouReason(message, mailboxLabel),
         mailboxId,
+        category: message.category,
+        categoryConfidence: message.categoryConfidence,
+        priorityScore: message.priorityScore,
       };
     });
   const uncertainEmailPool = realUncertainMessages
@@ -242,10 +267,12 @@ export function buildRecentLearningDecisions(
           ? learningKey.replace("domain:", "")
           : learningKey,
         learnedCategory: entry.learnedCategory,
+        learnedLabel: entry.learnedLabel,
         mailboxAction: entry.mailboxAction ?? (entry.learnedCategory === "Primary" ? "keep" : "move"),
+        senderBehavior: entry.senderBehavior,
         sourceContext,
         sourcePrioritySelection: inferLearningDecisionPrioritySelection(entry),
-        sourceMailboxId: inferLearningDecisionMailboxId(entry),
+        sourceMailboxId: entry.sourceMailboxId ?? null,
         sourceCurrentMailboxId: entry.sourceCurrentMailboxId ?? null,
         updatedAt: entry.updatedAt,
       };

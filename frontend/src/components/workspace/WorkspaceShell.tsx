@@ -958,12 +958,29 @@ type LearningDecisionSourceContext =
   | "uncertain"
   | "paste_sender_or_domain";
 type LearningDecisionPrioritySelection = "Important" | "Normal" | "Show Less" | "Spam";
-type ForYouUncertainLabelSelection = "Primary" | "Promo" | "Update" | "Spam";
+type CuevionLearningLabel =
+  | "Demo"
+  | "Promo"
+  | "Business"
+  | "Finance"
+  | "Update"
+  | "Reply"
+  | "Other"
+  | "Spam";
+type CuevionLearningPriorityLevel = "Priority" | "Normal" | "Low";
+type SenderLearningBehavior =
+  | "always_prioritize"
+  | "normal"
+  | "show_less"
+  | "spam"
+  | "do_not_learn";
 type SenderCategoryLearningEntry = {
   learnedCategory: CuevionMessageCategory;
+  learnedLabel?: CuevionLearningLabel;
   learnedFromCount: number;
   autoCategoryEnabled?: boolean;
   mailboxAction?: "keep" | "move";
+  senderBehavior?: SenderLearningBehavior;
   sourceContext?: LearningDecisionSourceContext;
   sourcePrioritySelection?: LearningDecisionPrioritySelection;
   sourceMailboxId?: InboxId | null;
@@ -5786,18 +5803,165 @@ function formatLearningRuleLabel(learningKey: string) {
   return learningKey;
 }
 
+const cuevionLearningLabelOptions: CuevionLearningLabel[] = [
+  "Demo",
+  "Promo",
+  "Business",
+  "Finance",
+  "Update",
+  "Reply",
+  "Other",
+  "Spam",
+];
+
+const cuevionLearningPriorityOptions: CuevionLearningPriorityLevel[] = [
+  "Priority",
+  "Normal",
+  "Low",
+];
+
+const senderLearningBehaviorOptions: Array<{
+  value: SenderLearningBehavior;
+  label: string;
+}> = [
+  { value: "always_prioritize", label: "Always prioritize this sender" },
+  { value: "normal", label: "Show normally" },
+  { value: "show_less", label: "Show less" },
+  { value: "spam", label: "Mark sender as spam" },
+  { value: "do_not_learn", label: "Do not learn from this sender" },
+];
+
+const pasteRuleSenderBehaviorOptions: Array<{
+  value: Exclude<SenderLearningBehavior, "do_not_learn">;
+  label: string;
+}> = [
+  { value: "always_prioritize", label: "Always prioritize" },
+  { value: "normal", label: "Show normally" },
+  { value: "show_less", label: "Show less" },
+  { value: "spam", label: "Mark as spam" },
+];
+
+function resolveLearningLabelFromCategory(
+  category: CuevionMessageCategory,
+  sourcePrioritySelection?: LearningDecisionPrioritySelection | null,
+  learnedLabel?: CuevionLearningLabel,
+): CuevionLearningLabel {
+  if (learnedLabel) {
+    return learnedLabel;
+  }
+
+  if (sourcePrioritySelection === "Spam") {
+    return "Spam";
+  }
+
+  if (category === "Promo") {
+    return "Promo";
+  }
+
+  if (category === "Updates") {
+    return "Update";
+  }
+
+  return "Other";
+}
+
+function resolveCuevionCategoryFromLearningLabel(
+  label: CuevionLearningLabel,
+): CuevionMessageCategory {
+  if (label === "Promo") {
+    return "Promo";
+  }
+
+  if (label === "Demo" || label === "Update" || label === "Spam") {
+    return "Updates";
+  }
+
+  return "Primary";
+}
+
+function resolveLearningPriorityFromSelection(
+  selection?: LearningDecisionPrioritySelection | null,
+): CuevionLearningPriorityLevel {
+  if (selection === "Important") {
+    return "Priority";
+  }
+
+  if (selection === "Show Less" || selection === "Spam") {
+    return "Low";
+  }
+
+  return "Normal";
+}
+
+function resolveLearningPriorityFromMessage(
+  priorityScore?: MailMessagePriorityScore,
+): CuevionLearningPriorityLevel {
+  if (priorityScore === "high") {
+    return "Priority";
+  }
+
+  if (priorityScore === "low") {
+    return "Low";
+  }
+
+  return "Normal";
+}
+
+function resolvePrioritySelectionFromLearningChoice(
+  priority: CuevionLearningPriorityLevel,
+  label: CuevionLearningLabel,
+  senderBehavior?: SenderLearningBehavior | null,
+): LearningDecisionPrioritySelection {
+  if (label === "Spam" || senderBehavior === "spam") {
+    return "Spam";
+  }
+
+  if (priority === "Priority") {
+    return "Important";
+  }
+
+  if (priority === "Low" || senderBehavior === "show_less") {
+    return "Show Less";
+  }
+
+  return "Normal";
+}
+
+function resolveMailboxActionFromLearningChoice(
+  prioritySelection: LearningDecisionPrioritySelection,
+  category: CuevionMessageCategory,
+) {
+  return resolveMailboxActionFromForYouSelection(
+    prioritySelection,
+    category,
+    prioritySelection === "Spam" || prioritySelection === "Show Less"
+      ? "move"
+      : "keep",
+  );
+}
+
+function formatSenderLearningBehavior(
+  behavior?: SenderLearningBehavior | null,
+) {
+  return (
+    senderLearningBehaviorOptions.find((option) => option.value === behavior)?.label ??
+    "Do not learn from this sender"
+  );
+}
+
 function formatLearningRuleAction(entry: SenderCategoryLearningEntry) {
-  if (entry.learnedCategory === "Promo") {
-    return "future emails to Promo";
-  }
+  const label = resolveLearningLabelFromCategory(
+    entry.learnedCategory,
+    entry.sourcePrioritySelection,
+    entry.learnedLabel,
+  );
+  const priority = resolveLearningPriorityFromSelection(entry.sourcePrioritySelection);
+  const behavior =
+    entry.senderBehavior && entry.senderBehavior !== "do_not_learn"
+      ? ` · ${formatSenderLearningBehavior(entry.senderBehavior)}`
+      : "";
 
-  if (entry.learnedCategory === "Updates") {
-    return entry.mailboxAction === "keep"
-      ? "future emails to Updates"
-      : "moved out of Inbox";
-  }
-
-  return entry.mailboxAction === "move" ? "future emails to Primary" : "kept in Inbox";
+  return `${priority} · ${label}${behavior}`;
 }
 
 function getForYouCategoryLabel(
@@ -5873,44 +6037,30 @@ function formatCuevionCategoryLabel(category: CuevionMessageCategory) {
 }
 
 function resolveCuevionCategoryFromUncertainLabel(
-  selection: ForYouUncertainLabelSelection,
+  selection: CuevionLearningLabel,
 ): CuevionMessageCategory {
-  if (selection === "Promo") {
-    return "Promo";
-  }
-
-  if (selection === "Update" || selection === "Spam") {
-    return "Updates";
-  }
-
-  return "Primary";
+  return resolveCuevionCategoryFromLearningLabel(selection);
 }
 
 function resolveUncertainLabelPrioritySelection(
-  selection: ForYouUncertainLabelSelection,
-): LearningDecisionPrioritySelection | null {
-  return selection === "Spam" ? "Spam" : null;
+  selection: CuevionLearningLabel,
+  priority: CuevionLearningPriorityLevel,
+): LearningDecisionPrioritySelection {
+  return resolvePrioritySelectionFromLearningChoice(priority, selection);
 }
 
 function resolveUncertainLabelFromLearningDecision(
   decision: {
     learnedCategory: CuevionMessageCategory;
+    learnedLabel?: CuevionLearningLabel;
     sourcePrioritySelection?: LearningDecisionPrioritySelection | null;
   },
-): ForYouUncertainLabelSelection {
-  if (decision.sourcePrioritySelection === "Spam") {
-    return "Spam";
-  }
-
-  if (decision.learnedCategory === "Promo") {
-    return "Promo";
-  }
-
-  if (decision.learnedCategory === "Updates") {
-    return "Update";
-  }
-
-  return "Primary";
+): CuevionLearningLabel {
+  return resolveLearningLabelFromCategory(
+    decision.learnedCategory,
+    decision.sourcePrioritySelection,
+    decision.learnedLabel,
+  );
 }
 
 function resolveMailboxActionFromForYouSelection(
@@ -12182,10 +12332,13 @@ function MailboxView({
     category: CuevionMessageCategory,
     mailboxAction?: "keep" | "move",
     options?: {
+      learnedLabel?: CuevionLearningLabel;
+      senderBehavior?: SenderLearningBehavior;
       sourceContext?: LearningDecisionSourceContext;
       sourcePrioritySelection?: LearningDecisionPrioritySelection | null;
       sourceMailboxId?: InboxId | null;
       sourceCurrentMailboxId?: InboxId | null;
+      autoCategoryEnabled?: boolean;
     },
   ) => void;
   onLearnCategoryDecision: (senderAddress: string, category: CuevionMessageCategory) => void;
@@ -29278,10 +29431,13 @@ function ForYouView({
     category: CuevionMessageCategory,
     mailboxAction?: "keep" | "move",
     options?: {
+      learnedLabel?: CuevionLearningLabel;
+      senderBehavior?: SenderLearningBehavior;
       sourceContext?: LearningDecisionSourceContext;
       sourcePrioritySelection?: LearningDecisionPrioritySelection | null;
       sourceMailboxId?: InboxId | null;
       sourceCurrentMailboxId?: InboxId | null;
+      autoCategoryEnabled?: boolean;
     },
   ) => void;
   senderCategoryLearning: SenderCategoryLearningStore;
@@ -29309,37 +29465,35 @@ function ForYouView({
   const [reviewedLearningSuggestionKeys, setReviewedLearningSuggestionKeys] = useState<
     string[]
   >([]);
-  const [selectedLearningPriority, setSelectedLearningPriority] = useState<
-    "Important" | "Normal" | "Show Less" | "Spam"
-  | null>(null);
-  const [selectedLearningMailboxId, setSelectedLearningMailboxId] = useState<InboxId | null>(
-    orderedMailboxes[0]?.id ?? null,
-  );
+  const [isLearningDecisionEditorOpen, setIsLearningDecisionEditorOpen] =
+    useState(false);
+  const [selectedLearningLabel, setSelectedLearningLabel] =
+    useState<CuevionLearningLabel | null>(null);
+  const [selectedLearningPriority, setSelectedLearningPriority] =
+    useState<CuevionLearningPriorityLevel | null>(null);
+  const [selectedLearningSenderBehavior, setSelectedLearningSenderBehavior] =
+    useState<SenderLearningBehavior>("do_not_learn");
   const [pastedRuleValue, setPastedRuleValue] = useState("");
   const [pasteRuleSaveFeedback, setPasteRuleSaveFeedback] = useState<"idle" | "saved">(
     "idle",
   );
-  const [selectedPasteRulePriority, setSelectedPasteRulePriority] = useState<
-    "Important" | "Normal" | "Show Less" | "Spam" | null
-  >(null);
-  const [selectedPasteRuleMailboxId, setSelectedPasteRuleMailboxId] = useState<InboxId | null>(
-    orderedMailboxes[0]?.id ?? null,
-  );
+  const [selectedPasteRuleLabel, setSelectedPasteRuleLabel] =
+    useState<CuevionLearningLabel | null>(null);
+  const [selectedPasteRulePriority, setSelectedPasteRulePriority] =
+    useState<CuevionLearningPriorityLevel | null>(null);
+  const [selectedPasteRuleSenderBehavior, setSelectedPasteRuleSenderBehavior] =
+    useState<Exclude<SenderLearningBehavior, "do_not_learn"> | null>(null);
   const [selectedUncertainLabel, setSelectedUncertainLabel] =
-    useState<ForYouUncertainLabelSelection | null>(null);
-  const [selectedRecentDecisionCategory, setSelectedRecentDecisionCategory] = useState<
-    "Important" | "Review" | "Promo" | "Demo" | "Spam" | null
-  >(null);
-  const [selectedRecentDecisionInboxAction, setSelectedRecentDecisionInboxAction] =
-    useState<"keep" | "move" | null>("keep");
+    useState<CuevionLearningLabel | null>(null);
+  const [selectedUncertainPriority, setSelectedUncertainPriority] =
+    useState<CuevionLearningPriorityLevel | null>(null);
+  const [selectedRecentDecisionLabel, setSelectedRecentDecisionLabel] =
+    useState<CuevionLearningLabel | null>(null);
   const [selectedRecentDecisionPriority, setSelectedRecentDecisionPriority] = useState<
-    LearningDecisionPrioritySelection | null
+    CuevionLearningPriorityLevel | null
   >(null);
-  const [selectedRecentDecisionMailboxId, setSelectedRecentDecisionMailboxId] = useState<
-    InboxId | null
-  >(orderedMailboxes[0]?.id ?? null);
-  const [selectedRecentDecisionUncertainLabel, setSelectedRecentDecisionUncertainLabel] =
-    useState<ForYouUncertainLabelSelection | null>(null);
+  const [selectedRecentDecisionSenderBehavior, setSelectedRecentDecisionSenderBehavior] =
+    useState<SenderLearningBehavior>("do_not_learn");
   const pasteRuleSaveTimeoutRef = useRef<number | null>(null);
   const reviewUncertainCompletionTimeoutRef = useRef<number | null>(null);
   const [reviewUncertainCompletionFeedback, setReviewUncertainCompletionFeedback] =
@@ -29361,6 +29515,7 @@ function ForYouView({
   const openRefineCuevionModal = () => {
     setActiveLearningSuggestionIndex(0);
     setActiveLearningSessionSuggestions(pendingLearningSuggestions.slice(0, learningBatchSize));
+    setIsLearningDecisionEditorOpen(false);
     setActiveLearningModal("refine-cuevion");
   };
   const { learningSuggestionPool, uncertainEmailPool } = forYouEngine.buildForYouLearningPools(
@@ -29392,10 +29547,17 @@ function ForYouView({
   const activeLearningSuggestion =
     activeLearningSuggestions[activeLearningSuggestionIndex] ??
     activeLearningSuggestions[0];
-  const learningMailboxOptions = orderedMailboxes.map((mailbox) => ({
-    id: mailbox.id,
-    label: mailbox.title,
-  }));
+  const activeLearningSourceInboxTitle = resolveOrderedMailboxTitle(
+    orderedMailboxes,
+    activeLearningSuggestion?.mailboxId ?? null,
+  );
+  const activeLearningCurrentLabel = activeLearningSuggestion
+    ? resolveLearningLabelFromCategory(activeLearningSuggestion.category)
+    : "Other";
+  const activeLearningCurrentPriority = activeLearningSuggestion
+    ? resolveLearningPriorityFromMessage(activeLearningSuggestion.priorityScore)
+    : "Normal";
+  const activeLearningSummary = `${activeLearningCurrentPriority} · ${activeLearningCurrentLabel}`;
   const trimmedPastedRuleValue = pastedRuleValue.trim();
   const pasteRuleInputType = resolvePasteRuleInputType(trimmedPastedRuleValue);
   const pasteRuleType =
@@ -29408,42 +29570,56 @@ function ForYouView({
       : null;
   const canSavePasteRule =
     pasteRuleType !== null &&
+    selectedPasteRuleLabel !== null &&
     selectedPasteRulePriority !== null &&
-    (selectedPasteRulePriority === "Spam" || selectedPasteRuleMailboxId !== null);
+    selectedPasteRuleSenderBehavior !== null;
   const resolvedPasteRuleCategory: CuevionMessageCategory | null =
-    selectedPasteRulePriority === null
+    selectedPasteRuleLabel === null
       ? null
-      : selectedPasteRulePriority === "Spam" || selectedPasteRulePriority === "Show Less"
-        ? "Updates"
-        : selectedPasteRuleMailboxId === "promo"
-          ? "Promo"
-          : "Primary";
-  const persistActiveLearningSuggestionDecision = () => {
-    if (!activeLearningSuggestion || !selectedLearningPriority) {
+      : resolveCuevionCategoryFromLearningLabel(selectedPasteRuleLabel);
+  const persistActiveLearningSuggestionDecision = (
+    options?: { confirmCurrent?: boolean },
+  ) => {
+    if (!activeLearningSuggestion) {
       return false;
     }
 
-    const category =
-      selectedLearningPriority === "Spam" || selectedLearningPriority === "Show Less"
-        ? "Updates"
-        : selectedLearningMailboxId === "promo"
-          ? "Promo"
-          : "Primary";
+    const learningLabel = options?.confirmCurrent
+      ? activeLearningCurrentLabel
+      : selectedLearningLabel;
+    const learningPriority = options?.confirmCurrent
+      ? activeLearningCurrentPriority
+      : selectedLearningPriority;
+    const senderBehavior = options?.confirmCurrent
+      ? "do_not_learn"
+      : selectedLearningSenderBehavior;
+
+    if (!learningLabel || !learningPriority) {
+      return false;
+    }
+
+    const category = resolveCuevionCategoryFromLearningLabel(learningLabel);
+    const prioritySelection = resolvePrioritySelectionFromLearningChoice(
+      learningPriority,
+      learningLabel,
+      senderBehavior,
+    );
 
     onSaveLearningRule(
       activeLearningSuggestion.senderAddress,
       "sender",
       category,
-      resolveMailboxActionFromForYouSelection(
-        selectedLearningPriority,
+      resolveMailboxActionFromLearningChoice(
+        prioritySelection,
         category,
-        category === "Primary" ? "keep" : "move",
       ),
       {
+        learnedLabel: learningLabel,
+        senderBehavior,
         sourceContext: "refine",
-        sourcePrioritySelection: selectedLearningPriority,
-        sourceMailboxId:
-          selectedLearningPriority === "Spam" ? null : selectedLearningMailboxId,
+        sourcePrioritySelection: prioritySelection,
+        sourceMailboxId: activeLearningSuggestion.mailboxId ?? null,
+        autoCategoryEnabled: senderBehavior !== "do_not_learn",
       },
     );
     setReviewedLearningSuggestionKeys((current) =>
@@ -29455,22 +29631,29 @@ function ForYouView({
     return true;
   };
   const persistActiveUncertainDecision = () => {
-    if (!activeUncertainEmail || !selectedUncertainLabel) {
+    if (!activeUncertainEmail || !selectedUncertainLabel || !selectedUncertainPriority) {
       return false;
     }
 
     const category = resolveCuevionCategoryFromUncertainLabel(selectedUncertainLabel);
+    const prioritySelection = resolveUncertainLabelPrioritySelection(
+      selectedUncertainLabel,
+      selectedUncertainPriority,
+    );
 
     onSaveLearningRule(
       activeUncertainEmail.senderAddress,
       "sender",
       category,
-      "keep",
+      resolveMailboxActionFromLearningChoice(prioritySelection, category),
       {
+        learnedLabel: selectedUncertainLabel,
+        senderBehavior: "do_not_learn",
         sourceContext: "uncertain",
-        sourcePrioritySelection: resolveUncertainLabelPrioritySelection(selectedUncertainLabel),
+        sourcePrioritySelection: prioritySelection,
         sourceMailboxId: null,
         sourceCurrentMailboxId: activeUncertainEmail.mailboxId,
+        autoCategoryEnabled: false,
       },
     );
 
@@ -29490,7 +29673,8 @@ function ForYouView({
       ? 0
       : completedLearningSuggestionsCount + safeLearningSuggestionIndex + 1;
   const isLastLearningSuggestion = activeLearningSuggestions.length === 1;
-  const hasValidLearningSelection = selectedLearningPriority !== null;
+  const hasValidLearningSelection =
+    selectedLearningLabel !== null && selectedLearningPriority !== null;
   const hasPendingLearningSuggestions = pendingLearningSuggestions.length > 0;
   const totalUncertainEmails = uncertainEmailPool.length;
   const safeUncertainEmailIndex =
@@ -29499,7 +29683,8 @@ function ForYouView({
       : Math.min(activeUncertainEmailIndex, totalUncertainEmails - 1);
   const activeUncertainEmail = uncertainEmailPool[safeUncertainEmailIndex];
   const isLastUncertainEmail = safeUncertainEmailIndex === totalUncertainEmails - 1;
-  const hasValidUncertainSelection = selectedUncertainLabel !== null;
+  const hasValidUncertainSelection =
+    selectedUncertainLabel !== null && selectedUncertainPriority !== null;
   const recentLearningDecisions = forYouEngine.buildRecentLearningDecisions(
     senderCategoryLearning,
   );
@@ -29510,29 +29695,21 @@ function ForYouView({
       | undefined,
   ) => {
     if (!decision) {
-      setSelectedRecentDecisionCategory(null);
-      setSelectedRecentDecisionInboxAction("keep");
+      setSelectedRecentDecisionLabel(null);
       setSelectedRecentDecisionPriority(null);
-      setSelectedRecentDecisionMailboxId(orderedMailboxes[0]?.id ?? null);
-      setSelectedRecentDecisionUncertainLabel(null);
+      setSelectedRecentDecisionSenderBehavior("do_not_learn");
       return;
     }
 
-    setSelectedRecentDecisionPriority(decision.sourcePrioritySelection);
-    setSelectedRecentDecisionMailboxId(
-      decision.sourceMailboxId ?? orderedMailboxes[0]?.id ?? null,
+    setSelectedRecentDecisionPriority(
+      resolveLearningPriorityFromSelection(decision.sourcePrioritySelection),
     );
-    setSelectedRecentDecisionUncertainLabel(
+    setSelectedRecentDecisionLabel(
       resolveUncertainLabelFromLearningDecision(decision),
     );
-    setSelectedRecentDecisionCategory(
-      resolveForYouCategoryFromLearningEntry({
-        learnedCategory: decision.learnedCategory,
-        learnedFromCount: 0,
-        mailboxAction: decision.mailboxAction,
-      }),
+    setSelectedRecentDecisionSenderBehavior(
+      decision.senderBehavior ?? "do_not_learn",
     );
-    setSelectedRecentDecisionInboxAction(decision.mailboxAction);
   };
 
   useEffect(() => {
@@ -29567,16 +29744,15 @@ function ForYouView({
   }, [activeLearningSuggestionIndex, activeLearningSuggestions.length]);
 
   useEffect(() => {
-    setSelectedLearningPriority(null);
-    setSelectedLearningMailboxId(activeLearningSuggestion?.mailboxId ?? orderedMailboxes[0]?.id ?? null);
-  }, [activeLearningSuggestion?.mailboxId, orderedMailboxes]);
-
-  useEffect(() => {
-    setSelectedPasteRuleMailboxId(orderedMailboxes[0]?.id ?? null);
-  }, [orderedMailboxes]);
+    setSelectedLearningLabel(activeLearningCurrentLabel);
+    setSelectedLearningPriority(activeLearningCurrentPriority);
+    setSelectedLearningSenderBehavior("do_not_learn");
+    setIsLearningDecisionEditorOpen(false);
+  }, [activeLearningCurrentLabel, activeLearningCurrentPriority, activeLearningSuggestion?.key]);
 
   useEffect(() => {
     setSelectedUncertainLabel(null);
+    setSelectedUncertainPriority(null);
     setReviewUncertainCompletionFeedback("idle");
   }, [activeUncertainEmailIndex]);
 
@@ -29651,7 +29827,7 @@ function ForYouView({
           </h1>
         </div>
         <p className="max-w-[34rem] text-lg leading-8 text-[var(--workspace-text-muted)]">
-          Shape how Cuevion learns from your email
+          Shape how Cuevion labels, prioritizes, and learns from your email.
         </p>
       </header>
 
@@ -29659,7 +29835,7 @@ function ForYouView({
         <div className="flex flex-col items-center justify-center gap-5 px-4 py-8 text-center md:px-8 md:py-10">
           <div className="max-w-[34rem] space-y-2">
             <div className="text-[0.92rem] leading-7 text-[var(--workspace-text-soft)]">
-              Run a focused learning session to improve how Cuevion classifies, prioritizes, and labels future email.
+              Confirm what Cuevion got right, correct what feels wrong, and teach sender behavior for future emails.
             </div>
           </div>
           {aiSuggestionsEnabled ? (
@@ -29682,7 +29858,7 @@ function ForYouView({
               Teach Cuevion
             </div>
             <p className="max-w-[34rem] text-[0.92rem] leading-7 text-[var(--workspace-text-soft)]">
-              Guide Cuevion with quick actions that improve future email decisions.
+              Guide Cuevion with quick actions that improve future labels, priority, and sender behavior.
             </p>
           </div>
 
@@ -29761,57 +29937,95 @@ function ForYouView({
                 </div>
               </div>
 
-              <div className="mt-6 flex flex-wrap gap-2">
-                {(["Important", "Normal", "Show Less", "Spam"] as const).map(
-                  (action) => (
+              <div className="mt-6 space-y-3">
+                <div>
+                  <div className="text-[0.7rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                    Label
+                  </div>
+                  <p className="mt-1 text-[0.82rem] leading-6 text-[var(--workspace-text-faint)]">
+                    Choose what type of email this is.
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {cuevionLearningLabelOptions.map((label) => (
                     <button
-                      key={`paste-rule-${action}`}
+                      key={`paste-rule-label-${label}`}
                       type="button"
                       onClick={() => {
-                        setSelectedPasteRulePriority(action);
-                        console.log(
-                          `paste_rule_priority_${action.toLowerCase().replace(/\s+/g, "_")}`,
-                        );
+                        setSelectedPasteRuleLabel(label);
+                        console.log(`paste_rule_label_${label.toLowerCase()}`);
                       }}
                       className={`inline-flex h-9 items-center justify-center rounded-full border px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color,box-shadow,transform] duration-150 focus-visible:outline-none ${
-                        selectedPasteRulePriority === action
+                        selectedPasteRuleLabel === label
                           ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_8px_24px_rgba(118,170,112,0.08)]"
                           : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[var(--workspace-text-soft)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface-strong)]"
                       }`}
                     >
-                      {action}
+                      {label}
                     </button>
-                  ),
-                )}
+                  ))}
+                </div>
               </div>
 
-              <div className={`mt-4 flex flex-wrap gap-2 transition-opacity duration-200 ${selectedPasteRulePriority === "Spam" ? "pointer-events-none opacity-45" : ""}`}>
-                {learningMailboxOptions.map((mailboxOption) => (
-                  <button
-                    key={`paste-rule-mailbox-${mailboxOption.id}`}
-                    type="button"
-                    disabled={selectedPasteRulePriority === "Spam"}
-                    onClick={() => {
-                      setSelectedPasteRuleMailboxId(mailboxOption.id);
-                      console.log(`paste_rule_mailbox_${mailboxOption.id}`);
-                    }}
-                    className={`inline-flex h-9 items-center justify-center rounded-full border px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color,box-shadow,transform] duration-150 focus-visible:outline-none ${
-                      selectedPasteRulePriority === "Spam"
-                        ? "border-[color:rgba(176,155,133,0.16)] bg-[color:rgba(245,239,232,0.72)] text-[color:rgba(127,113,98,0.72)] shadow-none"
-                        : selectedPasteRuleMailboxId === mailboxOption.id
+              <div className="mt-6 space-y-3">
+                <div>
+                  <div className="text-[0.7rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                    Priority
+                  </div>
+                  <p className="mt-1 text-[0.82rem] leading-6 text-[var(--workspace-text-faint)]">
+                    Choose how strongly Cuevion should surface similar emails.
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {cuevionLearningPriorityOptions.map((priority) => (
+                    <button
+                      key={`paste-rule-priority-${priority}`}
+                      type="button"
+                      onClick={() => {
+                        setSelectedPasteRulePriority(priority);
+                        console.log(`paste_rule_priority_${priority.toLowerCase()}`);
+                      }}
+                      className={`inline-flex h-9 items-center justify-center rounded-full border px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color,box-shadow,transform] duration-150 focus-visible:outline-none ${
+                        selectedPasteRulePriority === priority
                           ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_8px_24px_rgba(118,170,112,0.08)]"
                           : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[var(--workspace-text-soft)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface-strong)]"
-                    }`}
-                  >
-                    {mailboxOption.label}
-                  </button>
-                ))}
-              </div>
-              {selectedPasteRulePriority === "Spam" ? (
-                <div className="mt-2 px-1 text-[0.72rem] leading-6 text-[color:rgba(127,113,98,0.72)]">
-                  Uses central spam handling
+                      }`}
+                    >
+                      {priority}
+                    </button>
+                  ))}
                 </div>
-              ) : null}
+              </div>
+
+              <div className="mt-6 space-y-3">
+                <div>
+                  <div className="text-[0.7rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                    Sender/domain behavior
+                  </div>
+                  <p className="mt-1 text-[0.82rem] leading-6 text-[var(--workspace-text-faint)]">
+                    Choose what Cuevion should remember for this sender or domain.
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {pasteRuleSenderBehaviorOptions.map((option) => (
+                    <button
+                      key={`paste-rule-behavior-${option.value}`}
+                      type="button"
+                      onClick={() => {
+                        setSelectedPasteRuleSenderBehavior(option.value);
+                        console.log(`paste_rule_behavior_${option.value}`);
+                      }}
+                      className={`inline-flex h-9 items-center justify-center rounded-full border px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color,box-shadow,transform] duration-150 focus-visible:outline-none ${
+                        selectedPasteRuleSenderBehavior === option.value
+                          ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_8px_24px_rgba(118,170,112,0.08)]"
+                          : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[var(--workspace-text-soft)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface-strong)]"
+                      }`}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
 
               <div className="mt-6 flex items-center justify-between gap-4">
                 <div
@@ -29829,26 +30043,35 @@ function ForYouView({
                   type="button"
                   disabled={!canSavePasteRule}
                   onClick={() => {
-                    if (!pasteRuleType || !resolvedPasteRuleCategory) {
+                    if (
+                      !pasteRuleType ||
+                      !resolvedPasteRuleCategory ||
+                      !selectedPasteRuleLabel ||
+                      !selectedPasteRulePriority ||
+                      !selectedPasteRuleSenderBehavior
+                    ) {
                       return;
                     }
+                    const prioritySelection = resolvePrioritySelectionFromLearningChoice(
+                      selectedPasteRulePriority,
+                      selectedPasteRuleLabel,
+                      selectedPasteRuleSenderBehavior,
+                    );
 
                     onSaveLearningRule(
                       trimmedPastedRuleValue,
                       pasteRuleType,
                       resolvedPasteRuleCategory,
-                      resolveMailboxActionFromForYouSelection(
-                        selectedPasteRulePriority,
+                      resolveMailboxActionFromLearningChoice(
+                        prioritySelection,
                         resolvedPasteRuleCategory,
-                        resolvedPasteRuleCategory === "Primary" ? "keep" : "move",
                       ),
                       {
+                        learnedLabel: selectedPasteRuleLabel,
+                        senderBehavior: selectedPasteRuleSenderBehavior,
                         sourceContext: "paste_sender_or_domain",
-                        sourcePrioritySelection: selectedPasteRulePriority,
-                        sourceMailboxId:
-                          selectedPasteRulePriority === "Spam"
-                            ? null
-                            : selectedPasteRuleMailboxId,
+                        sourcePrioritySelection: prioritySelection,
+                        sourceMailboxId: null,
                       },
                     );
                     const normalizedRuleValue = trimmedPastedRuleValue.toLowerCase();
@@ -29886,8 +30109,9 @@ function ForYouView({
                     }
                     pasteRuleSaveTimeoutRef.current = window.setTimeout(() => {
                       setPastedRuleValue("");
+                      setSelectedPasteRuleLabel(null);
                       setSelectedPasteRulePriority(null);
-                      setSelectedPasteRuleMailboxId(orderedMailboxes[0]?.id ?? null);
+                      setSelectedPasteRuleSenderBehavior(null);
                       setPasteRuleSaveFeedback("idle");
                       closeLearningModal();
                       pasteRuleSaveTimeoutRef.current = null;
@@ -29920,10 +30144,10 @@ function ForYouView({
             <div className="flex items-start justify-between gap-4">
               <div className="space-y-2">
                 <h2 className="text-[1.45rem] font-medium tracking-tight text-[var(--workspace-text)]">
-                  Check uncertain labels
+                  Check uncertain email
                 </h2>
                 <p className="max-w-[34rem] text-[0.92rem] leading-7 text-[var(--workspace-text-soft)]">
-                  Help Cuevion confirm the right label when confidence is low.
+                  Cuevion is not fully sure about this label and priority.
                 </p>
               </div>
               <button
@@ -29973,7 +30197,7 @@ function ForYouView({
                       </div>
                     </div>
                     <div className="text-[0.82rem] leading-6 text-[var(--workspace-text-faint)]">
-                      Current label: {activeUncertainEmail.currentMailboxLabel} — low confidence
+                      Current signal: {activeUncertainEmail.currentMailboxLabel} — low confidence
                     </div>
                   </div>
                 </div>
@@ -29990,24 +30214,64 @@ function ForYouView({
                 </div>
               </div>
 
-              <div className="mt-5 flex flex-wrap gap-2">
-                {(["Primary", "Promo", "Update", "Spam"] as const).map((label) => (
-                  <button
-                    key={`review-uncertain-label-${label}`}
-                    type="button"
-                    onClick={() => {
-                      setSelectedUncertainLabel(label);
-                      console.log(`review_uncertain_label_${label.toLowerCase()}`);
-                    }}
-                    className={`inline-flex h-9 items-center justify-center rounded-full border px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color,box-shadow,transform] duration-150 focus-visible:outline-none ${
-                      selectedUncertainLabel === label
-                        ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_8px_24px_rgba(118,170,112,0.08)]"
-                        : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[var(--workspace-text-soft)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface-strong)]"
-                    }`}
-                  >
-                    {label}
-                  </button>
-                ))}
+              <div className="mt-5 space-y-3">
+                <div>
+                  <div className="text-[0.7rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                    Label
+                  </div>
+                  <p className="mt-1 text-[0.82rem] leading-6 text-[var(--workspace-text-faint)]">
+                    Choose what type of email this is.
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {cuevionLearningLabelOptions.map((label) => (
+                    <button
+                      key={`review-uncertain-label-${label}`}
+                      type="button"
+                      onClick={() => {
+                        setSelectedUncertainLabel(label);
+                        console.log(`review_uncertain_label_${label.toLowerCase()}`);
+                      }}
+                      className={`inline-flex h-9 items-center justify-center rounded-full border px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color,box-shadow,transform] duration-150 focus-visible:outline-none ${
+                        selectedUncertainLabel === label
+                          ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_8px_24px_rgba(118,170,112,0.08)]"
+                          : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[var(--workspace-text-soft)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface-strong)]"
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="mt-6 space-y-3">
+                <div>
+                  <div className="text-[0.7rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                    Priority
+                  </div>
+                  <p className="mt-1 text-[0.82rem] leading-6 text-[var(--workspace-text-faint)]">
+                    Choose how strongly Cuevion should surface similar emails.
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {cuevionLearningPriorityOptions.map((priority) => (
+                    <button
+                      key={`review-uncertain-priority-${priority}`}
+                      type="button"
+                      onClick={() => {
+                        setSelectedUncertainPriority(priority);
+                        console.log(`review_uncertain_priority_${priority.toLowerCase()}`);
+                      }}
+                      className={`inline-flex h-9 items-center justify-center rounded-full border px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color,box-shadow,transform] duration-150 focus-visible:outline-none ${
+                        selectedUncertainPriority === priority
+                          ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_8px_24px_rgba(118,170,112,0.08)]"
+                          : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[var(--workspace-text-soft)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface-strong)]"
+                      }`}
+                    >
+                      {priority}
+                    </button>
+                  ))}
+                </div>
               </div>
 
               <div className="mt-6 grid grid-cols-[auto_1fr_auto_auto] items-center gap-3">
@@ -30025,7 +30289,7 @@ function ForYouView({
                 <div className="text-center text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)] transition-[color,opacity] duration-200">
                   {reviewUncertainCompletionFeedback === "done"
                     ? "Cuevion learned from your decisions"
-                    : `Label ${safeUncertainEmailIndex + 1} of ${totalUncertainEmails}`}
+                    : `Email ${safeUncertainEmailIndex + 1} of ${totalUncertainEmails}`}
                 </div>
                 <button
                   type="button"
@@ -30054,7 +30318,7 @@ function ForYouView({
                       : `${learningModalPrimaryActionButtonClass} cursor-default border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] text-[var(--workspace-text-faint)] opacity-55`
                   }
                 >
-                  {isLastUncertainEmail ? "Finish" : "Next Label"}
+                  {isLastUncertainEmail ? "Finish" : "Next suggestion"}
                 </button>
                 {isLastUncertainEmail ? null : (
                   <button
@@ -30096,7 +30360,7 @@ function ForYouView({
                   Recent learning decisions
                 </h2>
                 <p className="max-w-[34rem] text-[0.92rem] leading-7 text-[var(--workspace-text-soft)]">
-                  See recent learning actions across your inboxes.
+                  See recent label, priority, and sender behavior decisions.
                 </p>
               </div>
               <button
@@ -30191,166 +30455,108 @@ function ForYouView({
                 </div>
               </div>
 
-              {activeRecentDecision?.sourceContext === "refine" ? (
-                <>
-                  <div className="mt-5 flex flex-wrap gap-2">
-                    {(["Important", "Normal", "Show Less", "Spam"] as const).map((action) => (
-                      <button
-                        key={`recent-edit-refine-${action}`}
-                        type="button"
-                        onClick={() => setSelectedRecentDecisionPriority(action)}
-                        className={`inline-flex h-9 items-center justify-center rounded-full border px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color,box-shadow,transform] duration-150 focus-visible:outline-none ${
-                          selectedRecentDecisionPriority === action
-                            ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_8px_24px_rgba(118,170,112,0.08)]"
-                            : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[var(--workspace-text-soft)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface-strong)]"
-                        }`}
-                      >
-                        {action}
-                      </button>
-                    ))}
-                  </div>
-
-                  <div className={`mt-4 flex flex-wrap gap-2 transition-opacity duration-200 ${selectedRecentDecisionPriority === "Spam" ? "pointer-events-none opacity-45" : ""}`}>
-                    {learningMailboxOptions.map((mailboxOption) => (
-                      <button
-                        key={`recent-edit-refine-mailbox-${mailboxOption.id}`}
-                        type="button"
-                        disabled={selectedRecentDecisionPriority === "Spam"}
-                        onClick={() => setSelectedRecentDecisionMailboxId(mailboxOption.id)}
-                        className={`inline-flex h-9 items-center justify-center rounded-full border px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color,box-shadow,transform] duration-150 focus-visible:outline-none ${
-                          selectedRecentDecisionPriority === "Spam"
-                            ? "border-[color:rgba(176,155,133,0.16)] bg-[color:rgba(245,239,232,0.72)] text-[color:rgba(127,113,98,0.72)] shadow-none"
-                            : selectedRecentDecisionMailboxId === mailboxOption.id
-                              ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_8px_24px_rgba(118,170,112,0.08)]"
-                              : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[var(--workspace-text-soft)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface-strong)]"
-                        }`}
-                      >
-                        {mailboxOption.label}
-                      </button>
-                    ))}
-                  </div>
-                </>
-              ) : activeRecentDecision?.sourceContext === "uncertain" ? (
-                <div className="mt-5 space-y-3">
-                  <div className="text-[0.7rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
-                    Label decision
-                  </div>
-                  <div className="flex flex-wrap gap-2">
-                    {(["Primary", "Promo", "Update", "Spam"] as const).map((label) => (
-                      <button
-                        key={`recent-edit-uncertain-label-${label}`}
-                        type="button"
-                        onClick={() => setSelectedRecentDecisionUncertainLabel(label)}
-                        className={`inline-flex h-9 items-center justify-center rounded-full border px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color,box-shadow,transform] duration-150 focus-visible:outline-none ${
-                          selectedRecentDecisionUncertainLabel === label
-                            ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_8px_24px_rgba(118,170,112,0.08)]"
-                            : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[var(--workspace-text-soft)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface-strong)]"
-                        }`}
-                      >
-                        {label}
-                      </button>
-                    ))}
-                  </div>
+              <div className="mt-5 grid gap-3 sm:grid-cols-2">
+                <div className="rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3 text-[0.84rem] leading-6 text-[var(--workspace-text-soft)]">
+                  <span className="font-medium text-[var(--workspace-text)]">
+                    Rule type:
+                  </span>{" "}
+                  {activeRecentDecision.ruleType === "domain" ? "Domain" : "Sender"}
                 </div>
-              ) : activeRecentDecision?.sourceContext === "paste_sender_or_domain" ? (
-                <>
-                  <div className="mt-5 space-y-3">
-                    <div className="space-y-2">
-                      <div className="text-[0.7rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
-                        Sender or domain
-                      </div>
-                      <div className="rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3 text-[0.9rem] leading-6 text-[var(--workspace-text-soft)]">
-                        {activeRecentDecision.ruleValue}
-                      </div>
-                    </div>
-                    <div className="text-[0.74rem] leading-6 text-[var(--workspace-text-faint)]">
-                      {activeRecentDecision.ruleType === "domain"
-                        ? "Detected as domain rule"
-                        : "Detected as sender rule"}
-                    </div>
-                  </div>
-
-                  <div className="mt-6 flex flex-wrap gap-2">
-                    {(["Important", "Normal", "Show Less", "Spam"] as const).map((action) => (
-                      <button
-                        key={`recent-edit-paste-${action}`}
-                        type="button"
-                        onClick={() => setSelectedRecentDecisionPriority(action)}
-                        className={`inline-flex h-9 items-center justify-center rounded-full border px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color,box-shadow,transform] duration-150 focus-visible:outline-none ${
-                          selectedRecentDecisionPriority === action
-                            ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_8px_24px_rgba(118,170,112,0.08)]"
-                            : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[var(--workspace-text-soft)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface-strong)]"
-                        }`}
-                      >
-                        {action}
-                      </button>
-                    ))}
-                  </div>
-
-                  <div className={`mt-4 flex flex-wrap gap-2 transition-opacity duration-200 ${selectedRecentDecisionPriority === "Spam" ? "pointer-events-none opacity-45" : ""}`}>
-                    {learningMailboxOptions.map((mailboxOption) => (
-                      <button
-                        key={`recent-edit-paste-mailbox-${mailboxOption.id}`}
-                        type="button"
-                        disabled={selectedRecentDecisionPriority === "Spam"}
-                        onClick={() => setSelectedRecentDecisionMailboxId(mailboxOption.id)}
-                        className={`inline-flex h-9 items-center justify-center rounded-full border px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color,box-shadow,transform] duration-150 focus-visible:outline-none ${
-                          selectedRecentDecisionPriority === "Spam"
-                            ? "border-[color:rgba(176,155,133,0.16)] bg-[color:rgba(245,239,232,0.72)] text-[color:rgba(127,113,98,0.72)] shadow-none"
-                            : selectedRecentDecisionMailboxId === mailboxOption.id
-                              ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_8px_24px_rgba(118,170,112,0.08)]"
-                              : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[var(--workspace-text-soft)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface-strong)]"
-                        }`}
-                      >
-                        {mailboxOption.label}
-                      </button>
-                    ))}
-                  </div>
-                </>
-              ) : (
-                <>
-                  <div className="mt-5 flex flex-wrap gap-2">
-                    {(["Important", "Review", "Promo", "Demo", "Spam"] as const).map(
-                      (category) => (
-                        <button
-                          key={`recent-edit-${category}`}
-                          type="button"
-                          onClick={() => setSelectedRecentDecisionCategory(category)}
-                          className={`inline-flex h-9 items-center justify-center rounded-full border px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color,box-shadow,transform] duration-150 focus-visible:outline-none ${
-                            selectedRecentDecisionCategory === category
-                              ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_8px_24px_rgba(118,170,112,0.08)]"
-                              : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[var(--workspace-text-soft)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface-strong)]"
-                          }`}
-                        >
-                          {getForYouCategoryLabel(category)}
-                        </button>
-                      ),
+                {activeRecentDecision.sourceMailboxId ||
+                activeRecentDecision.sourceCurrentMailboxId ? (
+                  <div className="rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3 text-[0.84rem] leading-6 text-[var(--workspace-text-soft)]">
+                    <span className="font-medium text-[var(--workspace-text)]">
+                      Source:
+                    </span>{" "}
+                    {resolveOrderedMailboxTitle(
+                      orderedMailboxes,
+                      activeRecentDecision.sourceCurrentMailboxId ??
+                        activeRecentDecision.sourceMailboxId,
                     )}
                   </div>
+                ) : null}
+              </div>
 
-                  <div className="mt-4 flex flex-wrap gap-2">
-                    {(
-                      [
-                        { value: "keep", label: "Keep in Inbox" },
-                        { value: "move", label: "Move out of Inbox" },
-                      ] as const
-                    ).map((option) => (
-                      <button
-                        key={`recent-edit-inbox-${option.value}`}
-                        type="button"
-                        onClick={() => setSelectedRecentDecisionInboxAction(option.value)}
-                        className={`inline-flex h-9 items-center justify-center rounded-full border px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color,box-shadow,transform] duration-150 focus-visible:outline-none ${
-                          selectedRecentDecisionInboxAction === option.value
-                            ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_8px_24px_rgba(118,170,112,0.08)]"
-                            : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[var(--workspace-text-soft)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface-strong)]"
-                        }`}
-                      >
-                        {option.label}
-                      </button>
-                    ))}
+              <div className="mt-6 space-y-3">
+                <div>
+                  <div className="text-[0.7rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                    Learned label
                   </div>
-                </>
-              )}
+                  <p className="mt-1 text-[0.82rem] leading-6 text-[var(--workspace-text-faint)]">
+                    Choose what type of email Cuevion should remember.
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {cuevionLearningLabelOptions.map((label) => (
+                    <button
+                      key={`recent-edit-label-${label}`}
+                      type="button"
+                      onClick={() => setSelectedRecentDecisionLabel(label)}
+                      className={`inline-flex h-9 items-center justify-center rounded-full border px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color,box-shadow,transform] duration-150 focus-visible:outline-none ${
+                        selectedRecentDecisionLabel === label
+                          ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_8px_24px_rgba(118,170,112,0.08)]"
+                          : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[var(--workspace-text-soft)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface-strong)]"
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="mt-6 space-y-3">
+                <div>
+                  <div className="text-[0.7rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                    Learned priority
+                  </div>
+                  <p className="mt-1 text-[0.82rem] leading-6 text-[var(--workspace-text-faint)]">
+                    Choose how strongly Cuevion should surface similar emails.
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {cuevionLearningPriorityOptions.map((priority) => (
+                    <button
+                      key={`recent-edit-priority-${priority}`}
+                      type="button"
+                      onClick={() => setSelectedRecentDecisionPriority(priority)}
+                      className={`inline-flex h-9 items-center justify-center rounded-full border px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color,box-shadow,transform] duration-150 focus-visible:outline-none ${
+                        selectedRecentDecisionPriority === priority
+                          ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_8px_24px_rgba(118,170,112,0.08)]"
+                          : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[var(--workspace-text-soft)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface-strong)]"
+                      }`}
+                    >
+                      {priority}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="mt-6 space-y-3">
+                <div>
+                  <div className="text-[0.7rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                    Sender behavior
+                  </div>
+                  <p className="mt-1 text-[0.82rem] leading-6 text-[var(--workspace-text-faint)]">
+                    Choose whether Cuevion should remember this sender.
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {senderLearningBehaviorOptions.map((option) => (
+                    <button
+                      key={`recent-edit-behavior-${option.value}`}
+                      type="button"
+                      onClick={() => setSelectedRecentDecisionSenderBehavior(option.value)}
+                      className={`inline-flex h-9 items-center justify-center rounded-full border px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color,box-shadow,transform] duration-150 focus-visible:outline-none ${
+                        selectedRecentDecisionSenderBehavior === option.value
+                          ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_8px_24px_rgba(118,170,112,0.08)]"
+                          : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[var(--workspace-text-soft)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface-strong)]"
+                      }`}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
 
               <div className="mt-6 flex items-center justify-end gap-3">
                 <button
@@ -30368,104 +30574,35 @@ function ForYouView({
                     }
 
                     console.log("save_recent_learning_decision_changes");
-                    if (activeRecentDecision.sourceContext === "refine") {
-                      if (!selectedRecentDecisionPriority) {
-                        return;
-                      }
-
-                      const category =
-                        selectedRecentDecisionPriority === "Spam" ||
-                        selectedRecentDecisionPriority === "Show Less"
-                          ? "Updates"
-                          : selectedRecentDecisionMailboxId === "promo"
-                            ? "Promo"
-                            : "Primary";
-
-                      onSaveLearningRule(
-                        activeRecentDecision.ruleValue,
-                        activeRecentDecision.ruleType,
-                        category,
-                        resolveMailboxActionFromForYouSelection(
-                          selectedRecentDecisionPriority,
-                          category,
-                          category === "Primary" ? "keep" : "move",
-                        ),
-                        {
-                          sourceContext: "refine",
-                          sourcePrioritySelection: selectedRecentDecisionPriority,
-                          sourceMailboxId:
-                            selectedRecentDecisionPriority === "Spam"
-                              ? null
-                              : selectedRecentDecisionMailboxId,
-                        },
-                      );
-                    } else if (activeRecentDecision.sourceContext === "uncertain") {
-                      if (!selectedRecentDecisionUncertainLabel) {
-                        return;
-                      }
-
-                      const category = resolveCuevionCategoryFromUncertainLabel(
-                        selectedRecentDecisionUncertainLabel,
-                      );
-
-                      onSaveLearningRule(
-                        activeRecentDecision.ruleValue,
-                        activeRecentDecision.ruleType,
-                        category,
-                        "keep",
-                        {
-                          sourceContext: "uncertain",
-                          sourcePrioritySelection: resolveUncertainLabelPrioritySelection(
-                            selectedRecentDecisionUncertainLabel,
-                          ),
-                          sourceMailboxId: null,
-                          sourceCurrentMailboxId:
-                            activeRecentDecision.sourceCurrentMailboxId ?? null,
-                        },
-                      );
-                    } else if (
-                      activeRecentDecision.sourceContext === "paste_sender_or_domain"
-                    ) {
-                      if (!selectedRecentDecisionPriority) {
-                        return;
-                      }
-
-                      const category =
-                        selectedRecentDecisionPriority === "Spam" ||
-                        selectedRecentDecisionPriority === "Show Less"
-                          ? "Updates"
-                          : selectedRecentDecisionMailboxId === "promo"
-                            ? "Promo"
-                            : "Primary";
-
-                      onSaveLearningRule(
-                        activeRecentDecision.ruleValue,
-                        activeRecentDecision.ruleType,
-                        category,
-                        resolveMailboxActionFromForYouSelection(
-                          selectedRecentDecisionPriority,
-                          category,
-                          category === "Primary" ? "keep" : "move",
-                        ),
-                        {
-                          sourceContext: "paste_sender_or_domain",
-                          sourcePrioritySelection: selectedRecentDecisionPriority,
-                          sourceMailboxId:
-                            selectedRecentDecisionPriority === "Spam"
-                              ? null
-                              : selectedRecentDecisionMailboxId,
-                        },
-                      );
-                    } else {
-                      onSaveLearningRule(
-                        activeRecentDecision.ruleValue,
-                        activeRecentDecision.ruleType,
-                        resolveCuevionCategoryFromForYouSelection(
-                          selectedRecentDecisionCategory,
-                        ),
-                        selectedRecentDecisionInboxAction ?? "keep",
-                      );
+                    if (!selectedRecentDecisionLabel || !selectedRecentDecisionPriority) {
+                      return;
                     }
+                    const category = resolveCuevionCategoryFromLearningLabel(
+                      selectedRecentDecisionLabel,
+                    );
+                    const prioritySelection = resolvePrioritySelectionFromLearningChoice(
+                      selectedRecentDecisionPriority,
+                      selectedRecentDecisionLabel,
+                      selectedRecentDecisionSenderBehavior,
+                    );
+
+                    onSaveLearningRule(
+                      activeRecentDecision.ruleValue,
+                      activeRecentDecision.ruleType,
+                      category,
+                      resolveMailboxActionFromLearningChoice(prioritySelection, category),
+                      {
+                        learnedLabel: selectedRecentDecisionLabel,
+                        senderBehavior: selectedRecentDecisionSenderBehavior,
+                        sourceContext: activeRecentDecision.sourceContext ?? "refine",
+                        sourcePrioritySelection: prioritySelection,
+                        sourceMailboxId: activeRecentDecision.sourceMailboxId,
+                        sourceCurrentMailboxId:
+                          activeRecentDecision.sourceCurrentMailboxId,
+                        autoCategoryEnabled:
+                          selectedRecentDecisionSenderBehavior !== "do_not_learn",
+                      },
+                    );
                     setActiveLearningModal("recent-decisions");
                   }}
                   className={closeActionButtonClass}
@@ -30572,55 +30709,138 @@ function ForYouView({
                 </div>
               </div>
 
-              <div className="mt-5 flex flex-wrap gap-2">
-                {(["Important", "Normal", "Show Less", "Spam"] as const).map(
-                  (action) => (
-                    <button
-                      key={action}
-                      type="button"
-                      onClick={() => {
-                        setSelectedLearningPriority(action);
-                        console.log(
-                          `refine_cuevion_priority_${action.toLowerCase().replace(/\s+/g, "_")}`,
-                        );
-                      }}
-                      className={`inline-flex h-9 items-center justify-center rounded-full border px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color,box-shadow,transform] duration-150 focus-visible:outline-none ${
-                        selectedLearningPriority === action
-                          ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_8px_24px_rgba(118,170,112,0.08)]"
-                          : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[var(--workspace-text-soft)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface-strong)]"
-                      }`}
-                    >
-                      {action}
-                    </button>
-                  ),
-                )}
+              <div className="mt-5 rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3">
+                <div className="text-[0.7rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                  Current Cuevion decision
+                </div>
+                <div className="mt-2 text-[0.96rem] leading-7 text-[var(--workspace-text)]">
+                  {activeLearningSuggestion.categoryConfidence === "low"
+                    ? "Cuevion is not fully sure about this label and priority."
+                    : `Cuevion labelled this as ${activeLearningSummary}.`}
+                </div>
+                <div className="mt-1 text-[0.78rem] leading-5 text-[var(--workspace-text-faint)]">
+                  Source inbox: {activeLearningSourceInboxTitle}
+                </div>
               </div>
 
-              <div className={`mt-4 flex flex-wrap gap-2 transition-opacity duration-200 ${selectedLearningPriority === "Spam" ? "pointer-events-none opacity-45" : ""}`}>
-                {learningMailboxOptions.map((mailboxOption) => (
-                  <button
-                    key={mailboxOption.id}
-                    type="button"
-                    disabled={selectedLearningPriority === "Spam"}
-                    onClick={() => {
-                      setSelectedLearningMailboxId(mailboxOption.id);
-                      console.log(`refine_cuevion_mailbox_${mailboxOption.id}`);
-                    }}
-                    className={`inline-flex h-9 items-center justify-center rounded-full border px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color,box-shadow,transform] duration-150 focus-visible:outline-none ${
-                      selectedLearningPriority === "Spam"
-                        ? "border-[color:rgba(176,155,133,0.16)] bg-[color:rgba(245,239,232,0.72)] text-[color:rgba(127,113,98,0.72)] shadow-none"
-                        : selectedLearningMailboxId === mailboxOption.id
-                        ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_8px_24px_rgba(118,170,112,0.08)]"
-                        : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[var(--workspace-text-soft)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface-strong)]"
-                    }`}
-                  >
-                    {mailboxOption.label}
-                  </button>
-                ))}
+              <div className="mt-5 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    persistActiveLearningSuggestionDecision({ confirmCurrent: true });
+                    if (isLastLearningSuggestion) {
+                      setActiveLearningSuggestionIndex(0);
+                      closeLearningModal();
+                      return;
+                    }
+                    setActiveLearningSuggestionIndex((current) =>
+                      Math.min(current, Math.max(activeLearningSuggestions.length - 2, 0)),
+                    );
+                  }}
+                  className={closeActionButtonClass}
+                >
+                  Yes, correct
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIsLearningDecisionEditorOpen(true)}
+                  className={subtleSecondaryActionButtonClass}
+                >
+                  Change label or priority
+                </button>
               </div>
-              {selectedLearningPriority === "Spam" ? (
-                <div className="mt-2 px-1 text-[0.72rem] leading-6 text-[color:rgba(127,113,98,0.72)]">
-                  Uses central spam handling
+
+              {isLearningDecisionEditorOpen ? (
+                <div className="mt-6 space-y-6">
+                  <div className="space-y-3">
+                    <div>
+                      <div className="text-[0.7rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                        Label
+                      </div>
+                      <p className="mt-1 text-[0.82rem] leading-6 text-[var(--workspace-text-faint)]">
+                        Choose what type of email this is.
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {cuevionLearningLabelOptions.map((label) => (
+                        <button
+                          key={`refine-label-${label}`}
+                          type="button"
+                          onClick={() => {
+                            setSelectedLearningLabel(label);
+                            console.log(`refine_cuevion_label_${label.toLowerCase()}`);
+                          }}
+                          className={`inline-flex h-9 items-center justify-center rounded-full border px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color,box-shadow,transform] duration-150 focus-visible:outline-none ${
+                            selectedLearningLabel === label
+                              ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_8px_24px_rgba(118,170,112,0.08)]"
+                              : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[var(--workspace-text-soft)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface-strong)]"
+                          }`}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="space-y-3">
+                    <div>
+                      <div className="text-[0.7rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                        Priority
+                      </div>
+                      <p className="mt-1 text-[0.82rem] leading-6 text-[var(--workspace-text-faint)]">
+                        Choose how strongly Cuevion should surface similar emails.
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {cuevionLearningPriorityOptions.map((priority) => (
+                        <button
+                          key={`refine-priority-${priority}`}
+                          type="button"
+                          onClick={() => {
+                            setSelectedLearningPriority(priority);
+                            console.log(`refine_cuevion_priority_${priority.toLowerCase()}`);
+                          }}
+                          className={`inline-flex h-9 items-center justify-center rounded-full border px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color,box-shadow,transform] duration-150 focus-visible:outline-none ${
+                            selectedLearningPriority === priority
+                              ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_8px_24px_rgba(118,170,112,0.08)]"
+                              : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[var(--workspace-text-soft)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface-strong)]"
+                          }`}
+                        >
+                          {priority}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="space-y-3">
+                    <div>
+                      <div className="text-[0.7rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                        Future emails from this sender
+                      </div>
+                      <p className="mt-1 text-[0.82rem] leading-6 text-[var(--workspace-text-faint)]">
+                        Choose whether Cuevion should remember this sender.
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {senderLearningBehaviorOptions.map((option) => (
+                        <button
+                          key={`refine-behavior-${option.value}`}
+                          type="button"
+                          onClick={() => {
+                            setSelectedLearningSenderBehavior(option.value);
+                            console.log(`refine_cuevion_behavior_${option.value}`);
+                          }}
+                          className={`inline-flex h-9 items-center justify-center rounded-full border px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color,box-shadow,transform] duration-150 focus-visible:outline-none ${
+                            selectedLearningSenderBehavior === option.value
+                              ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_8px_24px_rgba(118,170,112,0.08)]"
+                              : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[var(--workspace-text-soft)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface-strong)]"
+                          }`}
+                        >
+                          {option.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
                 </div>
               ) : null}
                 </>
@@ -34143,9 +34363,11 @@ export function WorkspaceShell({
         ruleValue: senderAddress,
         ruleType: "sender",
         category: existingEntry.learnedCategory,
+        learnedLabel: existingEntry.learnedLabel,
         learnedFromCount: existingEntry.learnedFromCount,
         autoCategoryEnabled: true,
         mailboxAction: existingEntry.mailboxAction,
+        senderBehavior: existingEntry.senderBehavior,
         sourceContext: existingEntry.sourceContext,
         sourcePrioritySelection: existingEntry.sourcePrioritySelection,
         sourceMailboxId: existingEntry.sourceMailboxId,
@@ -34162,10 +34384,13 @@ export function WorkspaceShell({
     category: CuevionMessageCategory,
     mailboxAction: "keep" | "move" = category === "Primary" ? "keep" : "move",
     options?: {
+      learnedLabel?: CuevionLearningLabel;
+      senderBehavior?: SenderLearningBehavior;
       sourceContext?: LearningDecisionSourceContext;
       sourcePrioritySelection?: LearningDecisionPrioritySelection | null;
       sourceMailboxId?: InboxId | null;
       sourceCurrentMailboxId?: InboxId | null;
+      autoCategoryEnabled?: boolean;
     },
   ) => {
     setSenderCategoryLearning((current) => {
@@ -34175,11 +34400,14 @@ export function WorkspaceShell({
         ruleValue,
         ruleType,
         category,
+        learnedLabel: options?.learnedLabel,
         mailboxAction,
+        senderBehavior: options?.senderBehavior,
         sourceContext: options?.sourceContext,
         sourcePrioritySelection: options?.sourcePrioritySelection,
         sourceMailboxId: options?.sourceMailboxId,
         sourceCurrentMailboxId: options?.sourceCurrentMailboxId,
+        autoCategoryEnabled: options?.autoCategoryEnabled,
         learnedFromCountFloor: HIGH_CONFIDENCE_LEARNING_COUNT,
       });
 

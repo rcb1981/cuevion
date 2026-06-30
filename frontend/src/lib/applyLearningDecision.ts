@@ -3,8 +3,10 @@ import {
   normalizeSenderLearningDomain,
   normalizeSenderLearningKey,
   type CuevionMessageCategory,
+  type CuevionLearningLabel,
   type LearningDecisionPrioritySelection,
   type LearningDecisionSourceContext,
+  type SenderLearningBehavior,
   type SenderCategoryLearningEntry,
   type SenderCategoryLearningStore,
 } from "./learningEngine";
@@ -30,8 +32,10 @@ export type ApplyLearningDecisionInput = {
   ruleValue: string;
   ruleType: "sender" | "domain";
   category: CuevionMessageCategory;
+  learnedLabel?: CuevionLearningLabel;
   learnedFromCount?: number;
   mailboxAction?: "keep" | "move";
+  senderBehavior?: SenderLearningBehavior;
   sourceContext?: LearningDecisionSourceContext;
   sourcePrioritySelection?: LearningDecisionPrioritySelection | null;
   sourceMailboxId?: InboxId | null;
@@ -95,12 +99,14 @@ export function applyLearningDecision(
   const existingEntry = input.senderCategoryLearning[learningKey];
   const nextEntry: SenderCategoryLearningEntry = {
     learnedCategory: input.category,
+    learnedLabel: input.learnedLabel ?? existingEntry?.learnedLabel,
     learnedFromCount:
       input.learnedFromCount ??
       Math.max(existingEntry?.learnedFromCount ?? 0, input.learnedFromCountFloor ?? 3),
     autoCategoryEnabled: input.autoCategoryEnabled ?? existingEntry?.autoCategoryEnabled ?? true,
     mailboxAction:
       input.mailboxAction ?? existingEntry?.mailboxAction ?? (input.category === "Primary" ? "keep" : "move"),
+    senderBehavior: input.senderBehavior ?? existingEntry?.senderBehavior,
     sourceContext: input.sourceContext ?? existingEntry?.sourceContext,
     sourcePrioritySelection:
       input.sourcePrioritySelection ?? existingEntry?.sourcePrioritySelection,

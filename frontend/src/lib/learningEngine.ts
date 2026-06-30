@@ -1,6 +1,21 @@
 import type { InboxId } from "../types/onboarding";
 
 export type CuevionMessageCategory = "Primary" | "Promo" | "Updates";
+export type CuevionLearningLabel =
+  | "Demo"
+  | "Promo"
+  | "Business"
+  | "Finance"
+  | "Update"
+  | "Reply"
+  | "Other"
+  | "Spam";
+export type SenderLearningBehavior =
+  | "always_prioritize"
+  | "normal"
+  | "show_less"
+  | "spam"
+  | "do_not_learn";
 
 export type LearningDecisionSourceContext =
   | "refine"
@@ -15,9 +30,11 @@ export type LearningDecisionPrioritySelection =
 
 export type SenderCategoryLearningEntry = {
   learnedCategory: CuevionMessageCategory;
+  learnedLabel?: CuevionLearningLabel;
   learnedFromCount: number;
   autoCategoryEnabled?: boolean;
   mailboxAction?: "keep" | "move";
+  senderBehavior?: SenderLearningBehavior;
   sourceContext?: LearningDecisionSourceContext;
   sourcePrioritySelection?: LearningDecisionPrioritySelection;
   sourceMailboxId?: InboxId | null;
@@ -117,19 +134,34 @@ export function formatLearningRuleLabel(learningKey: string) {
 }
 
 export function formatLearningRuleAction(entry: SenderCategoryLearningEntry) {
-  if (entry.learnedCategory === "Promo") {
-    return "future emails to Promo";
-  }
+  const label =
+    entry.learnedLabel ??
+    (entry.sourcePrioritySelection === "Spam"
+      ? "Spam"
+      : entry.learnedCategory === "Promo"
+        ? "Promo"
+        : entry.learnedCategory === "Updates"
+          ? "Update"
+          : "Other");
+  const priority =
+    entry.sourcePrioritySelection === "Important"
+      ? "Priority"
+      : entry.sourcePrioritySelection === "Show Less" ||
+          entry.sourcePrioritySelection === "Spam"
+        ? "Low"
+        : "Normal";
+  const behavior =
+    entry.senderBehavior === "always_prioritize"
+      ? " · Always prioritize"
+      : entry.senderBehavior === "normal"
+        ? " · Show normally"
+        : entry.senderBehavior === "show_less"
+          ? " · Show less"
+          : entry.senderBehavior === "spam"
+            ? " · Mark sender as spam"
+            : "";
 
-  if (entry.learnedCategory === "Updates") {
-    return entry.mailboxAction === "keep"
-      ? "future emails to Updates"
-      : "moved out of Inbox";
-  }
-
-  return entry.mailboxAction === "move"
-    ? "future emails to Primary"
-    : "kept in Inbox";
+  return `${priority} · ${label}${behavior}`;
 }
 
 export function formatLearningRuleTimestamp(value?: string) {
