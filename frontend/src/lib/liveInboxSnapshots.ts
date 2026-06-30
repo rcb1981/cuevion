@@ -2,9 +2,11 @@ import type { LiveInboxMessageSnapshot } from "./inboxConnectionApi";
 
 const LIVE_INBOX_SNAPSHOTS_STORAGE_KEY = "cuevion-live-inbox-snapshots";
 const LIVE_INBOX_SNAPSHOT_SCHEMA_VERSION = 5;
+export const MUSIC_CLASSIFIER_VERSION = "2026-06-30-subject-first-v2";
 
 export type LiveInboxSnapshot = {
   schemaVersion?: number;
+  classifierVersion?: string;
   inboxId: string;
   email: string;
   fetchedAt: string;
@@ -34,6 +36,10 @@ function normalizeSnapshot(
   inboxId: string,
   snapshot: LiveInboxSnapshot,
 ): LiveInboxSnapshot | null {
+  if (snapshot.classifierVersion !== MUSIC_CLASSIFIER_VERSION) {
+    return null;
+  }
+
   const messages = Array.isArray(snapshot.messages)
     ? snapshot.messages.filter(
         (message) =>
@@ -52,10 +58,14 @@ function normalizeSnapshot(
   return {
     ...snapshot,
     schemaVersion: LIVE_INBOX_SNAPSHOT_SCHEMA_VERSION,
+    classifierVersion: MUSIC_CLASSIFIER_VERSION,
     inboxId: snapshot.inboxId || inboxId,
     email: String(snapshot.email ?? "").trim().toLowerCase(),
     fetchedAt: String(snapshot.fetchedAt ?? new Date().toISOString()),
-    messages,
+    messages: messages.map((message) => ({
+      ...message,
+      classifierVersion: MUSIC_CLASSIFIER_VERSION,
+    })),
     uidValidity:
       typeof snapshot.uidValidity === "string" || snapshot.uidValidity === null
         ? snapshot.uidValidity
@@ -129,6 +139,11 @@ export function saveLiveInboxSnapshot(snapshot: LiveInboxSnapshot) {
   const nextSnapshot = normalizeSnapshot(snapshot.inboxId, {
     ...snapshot,
     schemaVersion: LIVE_INBOX_SNAPSHOT_SCHEMA_VERSION,
+    classifierVersion: MUSIC_CLASSIFIER_VERSION,
+    messages: snapshot.messages.map((message) => ({
+      ...message,
+      classifierVersion: message.classifierVersion ?? MUSIC_CLASSIFIER_VERSION,
+    })),
   });
 
   if (!nextSnapshot) {

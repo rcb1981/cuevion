@@ -645,6 +645,7 @@ def resolve_preview_routing(
             USER_LINK_SETTINGS,
             USER_REMINDER_SETTINGS,
             V7_USER_CONFIG,
+            MUSIC_CLASSIFIER_VERSION,
             apply_deterministic_music_category_guardrails,
             extract_all_links,
             get_usable_demo_links,
@@ -978,6 +979,7 @@ def resolve_preview_routing(
         )
         result["ui_signal"] = result.get("ui_signal") or map_to_ui_signal(result)
         result["signal"] = map_to_stable_signal(result)
+        result["classifierVersion"] = MUSIC_CLASSIFIER_VERSION
 
         logger.warning(
             "Preview ui_signal resolved category=%s priority=%s workflow_links=%s usable_demo_links=%s analyze_ms=%.1f total_ms=%.1f subject=%s",
@@ -1071,6 +1073,7 @@ def to_message_preview(
       "action": preview_routing.get("action"),
       "v7_final_priority": preview_routing.get("v7_final_priority"),
       "category": preview_routing.get("category"),
+      "classifierVersion": preview_routing.get("classifierVersion"),
       **({"bodyHtml": html_body} if html_body else {}),
     }
 

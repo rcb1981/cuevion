@@ -46,6 +46,44 @@ class MusicCategoryGuardrailTests(unittest.TestCase):
         self.assertEqual(result["ui_signal"], "PROMO")
         self.assertNotEqual(result["category"], "demo")
 
+    def test_dutch_short_promo_subject_with_download_link_is_promo(self):
+        result = self.preview(
+            "Promo nieuw vuur!",
+            "Hier echt een dikke promo!! https://www.dropbox.com/s/example/nieuw-vuur.wav?dl=0",
+            sender="Rutger <rutger@example.com>",
+            to="carltricksmusic@gmail.com",
+        )
+
+        self.assertEqual(result["category"], "promo")
+        self.assertEqual(result["ui_signal"], "PROMO")
+        self.assertEqual(
+            result.get("deterministic_category_reason"),
+            "standalone_promo_subject_with_music_context",
+        )
+        self.assertNotEqual(result["category"], "demo")
+        self.assertEqual(result.get("usable_demo_links"), [])
+
+    def test_nieuwe_promo_support_language_is_promo(self):
+        result = self.preview(
+            "Nieuwe promo",
+            "Hierbij de promo voor support: https://www.dropbox.com/s/example/support.wav?dl=0",
+            to="musiclover@example.com",
+        )
+
+        self.assertEqual(result["category"], "promo")
+        self.assertEqual(result["ui_signal"], "PROMO")
+
+    def test_dikke_promo_voor_je_set_is_promo(self):
+        result = self.preview(
+            "Dikke promo voor je set",
+            "Luister hier: https://soundcloud.com/example/private-promo/s-abc123 "
+            "Download: https://www.dropbox.com/s/example/set.wav?dl=0",
+            to="dj@example.com",
+        )
+
+        self.assertEqual(result["category"], "promo")
+        self.assertEqual(result["ui_signal"], "PROMO")
+
     def test_promo_for_label_with_release_support_link_is_promo(self):
         result = self.preview(
             "Promo For Hysteria Records",
@@ -88,6 +126,18 @@ class MusicCategoryGuardrailTests(unittest.TestCase):
 
         self.assertNotIn(result["category"], ["promo", "demo", "high_priority_demo", "incomplete_demo"])
         self.assertIn(result["category"], ["finance", "workflow_update", "info", "unknown"])
+
+    def test_dutch_demo_with_label_intent_and_link_is_demo(self):
+        result = self.preview(
+            "Demo nieuw vuur",
+            "Demo submission voor jullie label. Please consider this track: "
+            "https://www.dropbox.com/s/example/demo-nieuw-vuur.wav?dl=0",
+            to="demo@hysteriarecs.com",
+        )
+
+        self.assertIn(result["category"], ["demo", "high_priority_demo"])
+        self.assertEqual(result["ui_signal"], "DEMO")
+        self.assertNotEqual(result["category"], "promo")
 
     def test_reply_context_wins_before_music_intent(self):
         result = self.preview(
@@ -142,6 +192,31 @@ class MusicCategoryGuardrailTests(unittest.TestCase):
 
         self.assertEqual(result["category"], "unknown")
         self.assertEqual(result["usable_demo_links"], [])
+
+    def test_existing_demo_with_short_promo_subject_is_overridden_to_promo(self):
+        subject = "Promo nieuw vuur!"
+        body = "Hier echt een dikke promo!! https://www.dropbox.com/s/example/nieuw-vuur.wav?dl=0"
+        extracted_links = extract_all_links(body, "", subject=subject, artist_name="Sender")
+        result = apply_deterministic_music_category_guardrails(
+            result={
+                "category": "demo",
+                "usable_demo_links": ["https://www.dropbox.com/s/example/nieuw-vuur.wav?dl=0"],
+            },
+            subject=subject,
+            body=body,
+            sender_email="sender@example.com",
+            to_header="dj@example.com",
+            inbox_profile="",
+            extracted_links=extracted_links,
+            user_link_settings=USER_LINK_SETTINGS,
+        )
+
+        self.assertEqual(result["category"], "promo")
+        self.assertEqual(
+            result.get("deterministic_category_reason"),
+            "standalone_promo_subject_with_music_context",
+        )
+        self.assertEqual(result.get("usable_demo_links"), [])
 
 
 if __name__ == "__main__":

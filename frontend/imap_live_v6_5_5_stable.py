@@ -129,6 +129,8 @@ USER_REMINDER_SETTINGS = {
     "business_reminders_mode": "show_normal",
 }
 
+MUSIC_CLASSIFIER_VERSION = "2026-06-30-subject-first-v2"
+
 V7_USER_CONFIG = create_default_user_config(
     user_id="local_test",
     role="label_ar_manager",
@@ -1354,8 +1356,14 @@ def detect_subject_first_music_intent(subject):
         "support the release",
         "upcoming release",
         "new release",
+        "nieuwe promo",
+        "promo nieuw",
+        "dikke promo",
+        "nieuwe release",
         "out now",
         "out soon",
+        "voor je set",
+        "voor support",
     ]
     blocked_promo_contexts = [
         "promotion approved",
@@ -1392,6 +1400,38 @@ def detect_subject_first_music_intent(subject):
     }
 
 
+def _has_music_promo_context(text, extracted_links=None, user_link_settings=None):
+    music_context_phrases = [
+        "download link",
+        "listen and download",
+        "soundcloud",
+        "dropbox",
+        "disco",
+        "google drive",
+        "gdrive",
+        "onedrive",
+        "wetransfer",
+        ".wav",
+        ".mp3",
+        "release",
+        "track",
+        "radio support",
+        "dj support",
+        "playlist support",
+        "voor je set",
+        "voor support",
+        "nieuwe release",
+        "hier een promo",
+        "hierbij een promo",
+        "dikke promo",
+    ]
+
+    return (
+        _has_usable_music_link(extracted_links or {}, user_link_settings=user_link_settings)
+        or any(phrase in text for phrase in music_context_phrases)
+    )
+
+
 def detect_hard_music_category(
     subject,
     body,
@@ -1412,12 +1452,20 @@ def detect_hard_music_category(
         "i send you a promo",
         "sending you a promo",
         "here is a promo",
+        "hier een promo",
+        "hierbij een promo",
+        "hier echt een dikke promo",
+        "dikke promo",
+        "nieuwe promo",
+        "promo nieuw",
         "promo for your radio show",
         "for your radio show",
         "for your radioshow",
         "radio support",
         "dj support",
         "playlist support",
+        "voor je set",
+        "voor support",
         "support this release",
         "support the release",
         "support the track",
@@ -1426,6 +1474,7 @@ def detect_hard_music_category(
         "download link",
         "upcoming release",
         "new release",
+        "nieuwe release",
         "release date",
         "will be released",
         "released on",
@@ -1454,6 +1503,11 @@ def detect_hard_music_category(
     promo_context = recipient_local == "promo" or inbox_profile == "promo_first" or "promo" in sender_text
     demo_context = recipient_local == "demo" or inbox_profile == "demo_first"
     has_music_link = _has_usable_music_link(extracted_links or {}, user_link_settings=user_link_settings)
+    has_music_context = _has_music_promo_context(
+        f"{normalized_subject} {body_text}",
+        extracted_links=extracted_links,
+        user_link_settings=user_link_settings,
+    )
 
     if is_promo_reminder_email(subject, body, sender_email):
         return {
@@ -1471,6 +1525,9 @@ def detect_hard_music_category(
     has_subject_demo = bool(subject_intent["demo_subject_hits"])
     has_body_promo = bool(promo_body_hits)
     has_body_demo = bool(demo_body_hits)
+    subject_promo_hits = set(subject_intent["promo_subject_hits"])
+    has_standalone_promo_subject = "promo" in subject_promo_hits
+    has_only_weak_promo_subject = bool(subject_promo_hits) and subject_promo_hits.issubset({"promo", "release"})
 
     if has_subject_promo and has_body_demo and not (has_body_promo or promo_context):
         logger.warning(
@@ -1486,7 +1543,21 @@ def detect_hard_music_category(
         )
         return None
 
-    if has_subject_promo or (has_body_promo and promo_context):
+    if has_standalone_promo_subject and has_music_context:
+        return {
+            "category": "promo",
+            "reason": "standalone_promo_subject_with_music_context",
+            "has_music_link": has_music_link,
+            "details": {
+                "normalized_subject": normalized_subject,
+                "promo_hits": promo_hits,
+                "demo_hits": demo_hits,
+            },
+        }
+
+    if (has_subject_promo and (not has_only_weak_promo_subject or has_music_context)) or (
+        has_body_promo and (promo_context or has_music_context)
+    ):
         return {
             "category": "promo",
             "reason": "hard_promo_subject_body" if has_subject_promo else "promo_context_body",
@@ -1574,6 +1645,7 @@ def apply_deterministic_music_category_guardrails(
 
     result["category"] = new_category
     result["deterministic_category_reason"] = reason
+    result["classifierVersion"] = MUSIC_CLASSIFIER_VERSION
 
     if new_category in ["promo", "promo_reminder"]:
         result["usable_demo_links"] = []
@@ -2068,6 +2140,7 @@ def analyze_email(
     result["from"] = from_header
     result["inbox_name"] = inbox_name
     result["inbox_profile"] = inbox_profile
+    result["classifierVersion"] = MUSIC_CLASSIFIER_VERSION
     logger.warning(
         "Preview analyze_email complete subject=%s sender=%s preview_mode=%s total_ms=%.1f category=%s priority=%s",
         subject[:120],
