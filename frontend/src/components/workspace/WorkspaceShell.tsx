@@ -166,6 +166,300 @@ type InboxFilter = "All inboxes" | "Connected";
 type ForYouContext = "Main" | "Promo";
 type WorkbenchSection = "Activity" | "Notifications" | "Team";
 type UtilitySection = "Help" | "Contact";
+type HelpTopic = {
+  id: string;
+  section: string;
+  title: string;
+  intro: string;
+  points: string[];
+  tip?: string;
+  keywords: string[];
+  popular?: boolean;
+};
+
+const helpTopics: HelpTopic[] = [
+  {
+    id: "getting-started",
+    section: "Basics",
+    title: "Getting started",
+    intro:
+      "Use Cuevion as your working email surface first: connect an inbox, scan the main lanes, then tune settings as you go.",
+    points: [
+      "Start with your normal email workflow so the workspace feels familiar.",
+      "Use Dashboard for a high-level view, For You for recommended attention, and Priority for threads that need faster review.",
+      "Open Inboxes when you want to work from a specific connected mailbox.",
+      "Use Settings to adjust inbox setup, signatures, out of office, and workspace preferences.",
+      "Use Help for guidance and Contact when something needs a person from Cuevion.",
+    ],
+    tip: "For testing, avoid changing too many settings at once. One change at a time makes issues easier to report.",
+    keywords: ["start", "setup", "overview", "dashboard", "first run", "guide"],
+    popular: true,
+  },
+  {
+    id: "navigation-overview",
+    section: "Basics",
+    title: "Navigation overview",
+    intro:
+      "The sidebar separates daily email work from setup, support, and account utilities.",
+    points: [
+      "Dashboard summarizes the current workspace state.",
+      "For You highlights messages and actions Cuevion thinks may deserve attention.",
+      "Priority focuses on messages that are likely time-sensitive or important.",
+      "Inboxes shows connected mailboxes and smart folder views.",
+      "Settings, Help, and Contact live in the utility area at the bottom of the sidebar.",
+    ],
+    keywords: ["sidebar", "navigation", "menu", "dashboard", "inboxes", "where"],
+  },
+  {
+    id: "connected-inboxes",
+    section: "Inbox setup",
+    title: "Managing connected inboxes",
+    intro:
+      "Connected inboxes define which mailboxes Cuevion can show and how each mailbox appears in the workspace.",
+    points: [
+      "Open Settings and use Connected inboxes to review mailbox status.",
+      "Use the inbox row actions to reconnect, edit, or inspect setup details when available.",
+      "Keep mailbox names recognizable so message lists and filters stay easy to scan.",
+      "Check whether the inbox is connected before troubleshooting missing messages.",
+      "Do not remove or reconnect an inbox unless you are intentionally testing that flow.",
+    ],
+    tip: "If a setting changes but the UI still looks old, refresh the workspace once before reporting it.",
+    keywords: ["inbox", "mailbox", "connected", "connection", "settings", "edit inbox"],
+    popular: true,
+  },
+  {
+    id: "gmail-google-reconnect",
+    section: "Inbox setup",
+    title: "Gmail and Google reconnect",
+    intro:
+      "Gmail inboxes use a Google connection flow. If access expires or changes, reconnect from the existing inbox controls.",
+    points: [
+      "Open Settings, then Connected inboxes.",
+      "Find the Gmail or Google inbox that needs attention.",
+      "Use Reconnect Gmail if that action is shown for the inbox.",
+      "Complete the Google flow in the same account you want Cuevion to use.",
+      "Return to Cuevion and confirm the inbox status updates before testing message sync again.",
+    ],
+    tip: "If Reconnect Gmail is not visible, report the inbox name and what status you see.",
+    keywords: ["gmail", "google", "oauth", "reconnect", "authorize", "authorization", "access"],
+    popular: true,
+  },
+  {
+    id: "custom-imap",
+    section: "Inbox setup",
+    title: "Custom IMAP setup",
+    intro:
+      "Custom IMAP is for providers that are not connected through the Google flow.",
+    points: [
+      "Confirm the IMAP host and port from your mail provider.",
+      "Check whether the provider expects SSL or another security option.",
+      "Use the username format your provider requires, often the full email address.",
+      "Use an app password when your provider requires one for external mail clients.",
+      "Save the inbox, then verify the connection status in Connected inboxes.",
+    ],
+    tip: "Common IMAP issues are a wrong port, SSL mismatch, or using the account password when an app password is required.",
+    keywords: ["imap", "custom", "host", "port", "ssl", "username", "password", "app password", "provider"],
+    popular: true,
+  },
+  {
+    id: "working-with-messages",
+    section: "Daily workflow",
+    title: "Working with messages",
+    intro:
+      "Message views are designed for scanning, opening a thread, and taking the next obvious action.",
+    points: [
+      "Use the message list to scan sender, subject, preview, and category signals.",
+      "Open a message to read the full thread and review any available suggestions.",
+      "Use category and priority cues as guidance, then verify the message content before acting.",
+      "When a message looks wrong, note the sender, subject, current category, and expected category.",
+      "Keep an eye on whether the issue appears in one inbox or across multiple inboxes.",
+    ],
+    keywords: ["message", "email", "thread", "category", "label", "read", "reply", "detail"],
+  },
+  {
+    id: "priority-for-you-ai",
+    section: "Daily workflow",
+    title: "Priority, For You, and AI suggestions",
+    intro:
+      "Priority and For You help surface work, while AI suggestions provide supporting context for decisions.",
+    points: [
+      "Use Priority when you want to focus on messages that likely need timely attention.",
+      "Use For You to review suggested next actions and learning opportunities.",
+      "Treat AI suggestions as recommendations, not final decisions.",
+      "Check the original message before applying a suggestion or changing behavior.",
+      "Report suggestions that feel confusing, stale, or mismatched to the message.",
+    ],
+    tip: "Good feedback includes what Cuevion suggested and what you expected instead.",
+    keywords: ["priority", "for you", "ai", "suggestion", "suggestions", "recommended", "learning"],
+    popular: true,
+  },
+  {
+    id: "smart-folders",
+    section: "Daily workflow",
+    title: "Smart Folders",
+    intro:
+      "Smart Folders create lightweight views for recurring work without changing the underlying mailbox.",
+    points: [
+      "Open Inboxes in the sidebar to access Smart Folders.",
+      "Use Add smart folder to create a focused view when that control is available.",
+      "Name folders clearly so the purpose is obvious later.",
+      "Edit or delete a folder from its folder controls.",
+      "Use Smart Folders for review patterns you repeat often, not one-off searches.",
+    ],
+    keywords: ["smart folder", "smart folders", "folder", "folders", "view", "saved view"],
+    popular: true,
+  },
+  {
+    id: "team-collaboration",
+    section: "Workspace",
+    title: "Team and collaboration",
+    intro:
+      "Team areas help testers review access and collaboration flows from inside the workspace.",
+    points: [
+      "Open Team to inspect workspace members and invitations.",
+      "Check whether member status, role labels, and invitation state are clear.",
+      "Use collaboration views only for the message or inbox access shown in the UI.",
+      "Report any flow where it is unclear who can see or act on a message.",
+      "Do not assume hidden sharing behavior beyond what the workspace displays.",
+    ],
+    keywords: ["team", "collaboration", "invite", "member", "role", "access", "shared"],
+  },
+  {
+    id: "settings-signatures-out-of-office",
+    section: "Workspace",
+    title: "Settings, signatures, and out of office",
+    intro:
+      "Settings centralizes account preferences, connected inbox setup, signatures, and out of office controls.",
+    points: [
+      "Use Connected inboxes for mailbox setup and connection status.",
+      "Use signature settings to review or adjust the saved signature shown for the workspace.",
+      "Use out of office controls when testing automatic absence messaging options.",
+      "After saving a setting, confirm the UI shows the updated value.",
+      "If a setting appears unchanged, refresh once and note exactly which setting did not update.",
+    ],
+    keywords: ["settings", "signature", "signatures", "out of office", "ooo", "preferences", "save"],
+    popular: true,
+  },
+  {
+    id: "troubleshooting-sync",
+    section: "Troubleshooting",
+    title: "Troubleshooting sync and connection issues",
+    intro:
+      "Start with the visible connection state before assuming messages are lost or a sync has failed.",
+    points: [
+      "Check Connected inboxes for the mailbox status.",
+      "For Gmail, use Reconnect Gmail if it is available.",
+      "For custom IMAP, confirm host, port, SSL, username, and password or app password.",
+      "Refresh the workspace once after reconnecting or saving connection settings.",
+      "If the issue continues, open Contact from the sidebar and include the inbox name and action you tried.",
+    ],
+    keywords: ["sync", "connection", "connect", "offline", "stuck", "refresh", "troubleshoot", "troubleshooting"],
+    popular: true,
+  },
+  {
+    id: "gmail-needs-reconnecting",
+    section: "Troubleshooting",
+    title: "Gmail needs reconnecting",
+    intro:
+      "A Gmail inbox may need reconnecting when permissions expire, the Google account changes, or the inbox shows a disconnected state.",
+    points: [
+      "Open Settings, then Connected inboxes.",
+      "Find the Gmail inbox with the warning or disconnected state.",
+      "Click Reconnect Gmail if the action is shown.",
+      "Complete Google authorization with the intended mailbox account.",
+      "Return to Cuevion and verify the inbox status before checking messages again.",
+    ],
+    keywords: ["gmail", "google", "reconnect", "disconnected", "permission", "oauth", "auth"],
+  },
+  {
+    id: "custom-imap-will-not-connect",
+    section: "Troubleshooting",
+    title: "Custom IMAP will not connect",
+    intro:
+      "IMAP connection failures usually come from provider settings or credentials that do not match the mailbox.",
+    points: [
+      "Verify the IMAP host exactly matches the provider documentation.",
+      "Check the port and SSL setting together; they need to match.",
+      "Confirm the username, especially whether the provider requires the full email address.",
+      "Use an app password if the provider requires one for mail apps.",
+      "Try saving again, then report the provider, host, port, SSL setting, and visible error state if it still fails.",
+    ],
+    keywords: ["imap", "custom", "will not connect", "cannot connect", "host", "port", "ssl", "password"],
+  },
+  {
+    id: "messages-not-showing",
+    section: "Troubleshooting",
+    title: "Messages are not showing",
+    intro:
+      "When messages are missing, first narrow down whether the issue is a mailbox connection, view, filter, or timing problem.",
+    points: [
+      "Confirm the inbox is connected in Settings.",
+      "Check whether you are viewing Dashboard, Priority, For You, a specific inbox, or a Smart Folder.",
+      "Refresh the workspace once to rule out a stale view.",
+      "Compare with the provider inbox if you are testing a live mailbox.",
+      "Report the inbox, expected message subject, and where you expected it to appear.",
+    ],
+    keywords: ["messages", "not showing", "missing", "empty", "sync", "filter", "inbox", "view"],
+  },
+  {
+    id: "wrong-category",
+    section: "Troubleshooting",
+    title: "An email appears in the wrong category",
+    intro:
+      "Category signals help route work, but testers should report messages that look misclassified.",
+    points: [
+      "Open the message and confirm the sender, subject, and body context.",
+      "Note the current category or UI signal you see.",
+      "Write down the category you expected and why.",
+      "Include whether the message has links or attachments that may affect classification.",
+      "Use Contact from the sidebar if the issue blocks testing or affects a live workflow.",
+    ],
+    tip: "A useful report says: inbox, sender, subject, current category, expected category, and why.",
+    keywords: ["wrong category", "category", "classification", "label", "demo", "promo", "priority", "misclassified"],
+  },
+  {
+    id: "settings-change-not-visible",
+    section: "Troubleshooting",
+    title: "I changed inbox settings but do not see the result",
+    intro:
+      "Some settings need the workspace view to refresh before the visible state catches up.",
+    points: [
+      "Confirm the setting was saved and the form did not show an error.",
+      "Return to Connected inboxes and check the current value or status.",
+      "Refresh the workspace once if the old value still appears.",
+      "Avoid making another change until you know whether the first one applied.",
+      "Report the inbox, setting name, old value, new value, and what the UI showed after saving.",
+    ],
+    keywords: ["settings", "changed", "not visible", "save", "saved", "result", "refresh", "inbox settings"],
+  },
+  {
+    id: "testing-cuevion",
+    section: "Tester feedback",
+    title: "Testing Cuevion",
+    intro:
+      "Test Cuevion by using it like your real email workspace, then call out where the product helps or gets in the way.",
+    points: [
+      "Try your normal workflow first before looking for edge cases.",
+      "Note where Cuevion saves time or causes confusion.",
+      "Check connected inboxes, message handling, settings, and reconnect flows.",
+      "Use Contact if something feels wrong, unclear, or blocks testing.",
+      "When reporting feedback, include the inbox, action, what happened, and what you expected.",
+    ],
+    tip: "The best tester notes are specific enough that someone else can repeat the same path.",
+    keywords: ["test", "tester", "testing", "feedback", "report", "qa", "support"],
+    popular: true,
+  },
+];
+
+const helpTopicSections = [
+  "Basics",
+  "Inbox setup",
+  "Daily workflow",
+  "Workspace",
+  "Troubleshooting",
+  "Tester feedback",
+] as const;
+
 type TeamAccessLevel = TeamRole;
 type AuthenticatedCuevionUser = {
   email: string;
@@ -28150,6 +28444,7 @@ function UtilityView({
   const [selectedHelpSuggestion, setSelectedHelpSuggestion] = useState<string | null>(
     null,
   );
+  const [helpSearchQuery, setHelpSearchQuery] = useState("");
   const [contactSubject, setContactSubject] = useState("");
   const [contactMessage, setContactMessage] = useState("");
   const [contactRequestSent, setContactRequestSent] = useState(false);
@@ -28192,62 +28487,58 @@ function UtilityView({
 
   const view = content[section];
   const helpSearchFieldClass = `${inputFieldClass} border-[color:rgba(121,151,120,0.2)] bg-[color:rgba(255,253,249,0.97)] px-4 py-[0.92rem] shadow-none placeholder:text-[color:rgba(31,42,36,0.3)] focus:border-[color:rgba(93,126,94,0.44)] focus:bg-[color:rgba(255,253,249,0.995)] focus:shadow-[0_0_0_4px_rgba(93,126,94,0.1)] transition-[background-color,border-color,box-shadow,color]`;
-  const helpSuggestions = [
-    "How Cuevion organizes your inbox",
-    "Understanding AI suggestions",
-    "Managing your inbox settings",
-    "Fixing sync or connection issues",
-  ];
   const helpGuidanceCardClass =
-    "rounded-[20px] border border-[var(--workspace-help-guidance-border)] bg-[var(--workspace-help-guidance-surface)] px-4 py-2.5";
+    "rounded-[20px] border border-[var(--workspace-help-guidance-border)] bg-[var(--workspace-help-guidance-surface)] px-4 py-4";
   const helpGuidanceButtonClass =
-    "w-full rounded-[14px] px-1 py-1.5 text-left text-[var(--workspace-help-guidance-text)] transition-[background-color,color] duration-150 hover:bg-[var(--workspace-help-guidance-hover)] focus:bg-[var(--workspace-help-guidance-hover)] focus:outline-none";
+    "w-full rounded-[14px] px-2 py-2 text-left text-[var(--workspace-help-guidance-text)] transition-[background-color,color] duration-150 hover:bg-[var(--workspace-help-guidance-hover)] focus:bg-[var(--workspace-help-guidance-hover)] focus:outline-none";
   const helpGuidanceSelectedCardClass =
-    "rounded-[20px] border border-[var(--workspace-help-guidance-border)] bg-[var(--workspace-help-guidance-surface-selected)] px-5 py-4";
-  const fallbackHelpSuggestions = helpSuggestions.slice(0, 3);
-  const helpSuggestionDetails: Record<
-    string,
-    {
-      intro: string;
-      points: string[];
+    "rounded-[24px] border border-[var(--workspace-help-guidance-border)] bg-[var(--workspace-help-guidance-surface-selected)] px-5 py-5";
+  const selectedHelpTopic =
+    selectedHelpSuggestion === null
+      ? null
+      : helpTopics.find((topic) => topic.title === selectedHelpSuggestion) ?? null;
+  const lastViewedHelpTopic =
+    lastViewedGuidance === null
+      ? null
+      : helpTopics.find((topic) => topic.title === lastViewedGuidance) ?? null;
+  const trimmedHelpSearchQuery = helpSearchQuery.trim().toLowerCase();
+  const filteredHelpTopics = useMemo(() => {
+    if (trimmedHelpSearchQuery.length === 0) {
+      return helpTopics;
     }
-  > = {
-    "How Cuevion organizes your inbox": {
-      intro:
-        "Cuevion keeps the workspace readable by grouping incoming conversations into clear working lanes.",
-      points: [
-        "Primary keeps active, time-sensitive threads close at hand.",
-        "Promo collects campaign and release-related outreach that needs structured handling.",
-        "Other categories stay separated so your core inbox remains easier to scan.",
-      ],
-    },
-    "Understanding AI suggestions": {
-      intro:
-        "AI suggestions are lightweight recommendations designed to support decisions, not replace your judgment.",
-      points: [
-        "Cuevion highlights patterns it detects across incoming messages and past decisions.",
-        "Suggestions stay contextual so you can compare them against the thread before acting.",
-        "You remain in control of whether a suggestion should be applied or ignored.",
-      ],
-    },
-    "Managing your inbox settings": {
-      intro:
-        "Inbox settings let you shape how each connected mailbox behaves inside the workspace.",
-      points: [
-        "Adjust naming and connection details from the Settings area.",
-        "Control how inbox behavior and workspace preferences support your daily flow.",
-      ],
-    },
-    "Fixing sync or connection issues": {
-      intro:
-        "Most connection issues can be resolved by checking mailbox details and verifying the current setup.",
-      points: [
-        "Check the saved inbox configuration and provider information.",
-        "Confirm credentials or server details if sync stops behaving as expected.",
-        "Use Help and Contact as a stable place to troubleshoot inside the workspace.",
-      ],
-    },
-  };
+
+    return helpTopics.filter((topic) => {
+      const searchableText = [
+        topic.title,
+        topic.intro,
+        ...topic.points,
+        topic.tip ?? "",
+        ...topic.keywords,
+      ]
+        .join(" ")
+        .toLowerCase();
+
+      return searchableText.includes(trimmedHelpSearchQuery);
+    });
+  }, [trimmedHelpSearchQuery]);
+  const groupedHelpTopics = useMemo(
+    () =>
+      helpTopicSections
+        .map((topicSection) => ({
+          section: topicSection,
+          topics: filteredHelpTopics.filter((topic) => topic.section === topicSection),
+        }))
+        .filter((group) => group.topics.length > 0),
+    [filteredHelpTopics],
+  );
+  const popularHelpTopics = helpTopics.filter((topic) => topic.popular);
+  const helpSearchSuggestionTopics =
+    trimmedHelpSearchQuery.length > 0
+      ? filteredHelpTopics.slice(0, 5)
+      : [
+          ...(lastViewedHelpTopic ? [lastViewedHelpTopic] : []),
+          ...popularHelpTopics.filter((topic) => topic.title !== lastViewedHelpTopic?.title),
+        ].slice(0, 5);
   const contactStatusClassNames: Record<ContactTicketStatus, string> = {
     Open:
       "border-[color:rgba(118,170,112,0.26)] bg-[color:rgba(118,170,112,0.14)] text-[color:rgba(70,109,73,0.94)]",
@@ -28752,8 +29043,14 @@ function UtilityView({
           >
             <input
               type="text"
-              placeholder="Search for guidance, workflows, or questions"
+              value={helpSearchQuery}
+              placeholder="Search for inbox, Gmail, IMAP, priority, smart folders, or settings"
               className={helpSearchFieldClass}
+              onChange={(event) => {
+                setHelpSearchQuery(event.target.value);
+                setSelectedHelpSuggestion(null);
+                setHelpSuggestionsVisible(true);
+              }}
               onFocus={() => {
                 setHelpSuggestionsVisible(true);
                 setSelectedHelpSuggestion(null);
@@ -28761,7 +29058,7 @@ function UtilityView({
             />
             {helpSuggestionsVisible && !selectedHelpSuggestion ? (
               <div className="mt-1.5 rounded-[20px] rounded-t-[14px] border border-[color:rgba(121,151,120,0.1)] bg-[color:rgba(255,252,247,0.72)] p-2">
-                {lastViewedGuidance ? (
+                {lastViewedHelpTopic && trimmedHelpSearchQuery.length === 0 ? (
                   <>
                     <div className="px-4 pb-1 pt-2 text-[0.72rem] font-medium tracking-[0.02em] text-[var(--workspace-text-faint)]">
                       Continue where you left off
@@ -28769,30 +29066,43 @@ function UtilityView({
                     <button
                       type="button"
                       onClick={() => {
-                        setSelectedHelpSuggestion(lastViewedGuidance);
-                        onSetLastViewedGuidance(lastViewedGuidance);
+                        setSelectedHelpSuggestion(lastViewedHelpTopic.title);
+                        onSetLastViewedGuidance(lastViewedHelpTopic.title);
                         setHelpSuggestionsVisible(false);
                       }}
                       className="w-full rounded-[16px] px-4 py-3 text-left text-[0.94rem] leading-6 text-[var(--workspace-text-soft)] transition-colors duration-150 hover:bg-[color:rgba(121,151,120,0.045)] focus:bg-[color:rgba(121,151,120,0.045)] focus:outline-none"
                     >
-                      {lastViewedGuidance}
+                      {lastViewedHelpTopic.title}
                     </button>
                   </>
-                ) : (
-                  fallbackHelpSuggestions.map((item) => (
+                ) : null}
+                <div className="px-4 pb-1 pt-2 text-[0.72rem] font-medium tracking-[0.02em] text-[var(--workspace-text-faint)]">
+                  {trimmedHelpSearchQuery.length > 0 ? "Search matches" : "Quick help"}
+                </div>
+                {helpSearchSuggestionTopics.length > 0 ? (
+                  helpSearchSuggestionTopics.map((topic) => (
                     <button
-                      key={item}
+                      key={topic.id}
                       type="button"
                       onClick={() => {
-                        setSelectedHelpSuggestion(item);
-                        onSetLastViewedGuidance(item);
+                        setSelectedHelpSuggestion(topic.title);
+                        onSetLastViewedGuidance(topic.title);
                         setHelpSuggestionsVisible(false);
                       }}
-                      className="w-full rounded-[16px] px-4 py-3 text-left text-[0.94rem] leading-6 text-[var(--workspace-text-soft)] transition-colors duration-150 hover:bg-[color:rgba(121,151,120,0.045)] focus:bg-[color:rgba(121,151,120,0.045)] focus:outline-none"
+                      className="w-full rounded-[16px] px-4 py-3 text-left transition-colors duration-150 hover:bg-[color:rgba(121,151,120,0.045)] focus:bg-[color:rgba(121,151,120,0.045)] focus:outline-none"
                     >
-                      {item}
+                      <span className="block text-[0.94rem] leading-6 text-[var(--workspace-text-soft)]">
+                        {topic.title}
+                      </span>
+                      <span className="mt-0.5 block text-[0.78rem] leading-5 text-[var(--workspace-text-faint)]">
+                        {topic.section}
+                      </span>
                     </button>
                   ))
+                ) : (
+                  <div className="px-4 py-3 text-[0.9rem] leading-6 text-[var(--workspace-text-muted)]">
+                    No quick matches. Try a broader search term.
+                  </div>
                 )}
               </div>
             ) : null}
@@ -28801,35 +29111,85 @@ function UtilityView({
       </header>
 
       <section className="rounded-[30px] border border-[var(--workspace-border)] bg-[var(--workspace-card)] p-6 shadow-panel">
-        <div className="mb-5 flex items-center justify-between">
-          <h2 className="text-xl font-semibold tracking-tight text-[var(--workspace-text)]">
-            {selectedHelpSuggestion ? "Selected guidance" : "Common guidance"}
-          </h2>
-          {selectedHelpSuggestion ? (
-            <button
-              type="button"
-              onClick={() => {
-                setSelectedHelpSuggestion(null);
-                setHelpSuggestionsVisible(false);
-              }}
-              className="cursor-pointer text-[0.78rem] font-medium text-[var(--workspace-accent-primary)] underline-offset-4 transition-[color,text-decoration-color] duration-150 hover:text-[color:rgba(76,132,94,0.98)] hover:underline focus:outline-none focus:text-[color:rgba(76,132,94,0.98)] focus:underline"
-            >
-              Clear
-            </button>
+        <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="text-xl font-semibold tracking-tight text-[var(--workspace-text)]">
+              {selectedHelpTopic ? "Selected guidance" : "Quick help"}
+            </h2>
+            <p className="mt-1 text-[0.9rem] leading-6 text-[var(--workspace-text-soft)]">
+              {selectedHelpTopic
+                ? "Focused steps for the topic you selected."
+                : "Common tester paths and setup questions."}
+            </p>
+          </div>
+          {selectedHelpTopic || trimmedHelpSearchQuery.length > 0 ? (
+            <div className="flex items-center gap-3">
+              {selectedHelpTopic ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedHelpSuggestion(null);
+                    setHelpSuggestionsVisible(false);
+                  }}
+                  className="cursor-pointer text-[0.78rem] font-medium text-[var(--workspace-accent-primary)] underline-offset-4 transition-[color,text-decoration-color] duration-150 hover:text-[color:rgba(76,132,94,0.98)] hover:underline focus:outline-none focus:text-[color:rgba(76,132,94,0.98)] focus:underline"
+                >
+                  Back to all topics
+                </button>
+              ) : null}
+              {trimmedHelpSearchQuery.length > 0 ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setHelpSearchQuery("");
+                    setSelectedHelpSuggestion(null);
+                    setHelpSuggestionsVisible(false);
+                  }}
+                  className="cursor-pointer text-[0.78rem] font-medium text-[var(--workspace-accent-primary)] underline-offset-4 transition-[color,text-decoration-color] duration-150 hover:text-[color:rgba(76,132,94,0.98)] hover:underline focus:outline-none focus:text-[color:rgba(76,132,94,0.98)] focus:underline"
+                >
+                  Clear search
+                </button>
+              ) : null}
+            </div>
           ) : (
             <div className="h-2 w-14 rounded-full bg-[var(--workspace-help-guidance-accent)]" />
           )}
         </div>
-        {selectedHelpSuggestion ? (
+
+        <div className="mb-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          {popularHelpTopics.slice(0, 8).map((topic) => (
+            <button
+              key={topic.id}
+              type="button"
+              onClick={() => {
+                setSelectedHelpSuggestion(topic.title);
+                setHelpSuggestionsVisible(false);
+                onSetLastViewedGuidance(topic.title);
+              }}
+              className="rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-3 text-left transition-[background-color,border-color] duration-150 hover:border-[var(--workspace-help-guidance-border)] hover:bg-[var(--workspace-help-guidance-hover)] focus:border-[var(--workspace-help-guidance-border)] focus:bg-[var(--workspace-help-guidance-hover)] focus:outline-none"
+            >
+              <span className="block text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                {topic.section}
+              </span>
+              <span className="mt-1 block text-[0.9rem] font-medium leading-6 text-[var(--workspace-text)]">
+                {topic.title}
+              </span>
+            </button>
+          ))}
+        </div>
+
+        {selectedHelpTopic ? (
           <div className={helpGuidanceSelectedCardClass}>
-            <div className="text-[0.94rem] font-medium leading-6 text-[var(--workspace-text)]">
-              {selectedHelpSuggestion}
+            <div className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+              {selectedHelpTopic.section}
+            </div>
+            <div className="mt-2 text-[1.2rem] font-medium leading-7 text-[var(--workspace-text)]">
+              {selectedHelpTopic.title}
             </div>
             <p className="mt-2 text-[0.92rem] leading-6 text-[var(--workspace-text-soft)]">
-              {helpSuggestionDetails[selectedHelpSuggestion].intro}
+              {selectedHelpTopic.intro}
             </p>
             <ul className="mt-2.5 space-y-2 text-[0.9rem] leading-6 text-[var(--workspace-text-muted)]">
-              {helpSuggestionDetails[selectedHelpSuggestion].points.map((point) => (
+              {selectedHelpTopic.points.map((point) => (
                 <li key={point} className="flex gap-3">
                   <span className="pt-[0.5rem] text-[0.5rem] text-[var(--workspace-text-faint)]">
                     •
@@ -28838,27 +29198,57 @@ function UtilityView({
                 </li>
               ))}
             </ul>
+            {selectedHelpTopic.tip ? (
+              <div className="mt-4 rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-3 text-[0.88rem] leading-6 text-[var(--workspace-text-soft)]">
+                <span className="font-medium text-[var(--workspace-text)]">Tip:</span>{" "}
+                {selectedHelpTopic.tip}
+              </div>
+            ) : null}
+          </div>
+        ) : filteredHelpTopics.length === 0 ? (
+          <div className="rounded-[24px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-5 py-8 text-center">
+            <div className="text-[1.05rem] font-medium tracking-tight text-[var(--workspace-text)]">
+              No help topic found
+            </div>
+            <p className="mx-auto mt-2 max-w-xl text-[0.92rem] leading-7 text-[var(--workspace-text-muted)]">
+              Try searching for inbox, Gmail, IMAP, priority, smart folders, or settings.
+            </p>
           </div>
         ) : (
-          <div className="space-y-2">
-            {helpSuggestions.map((item) => (
-              <div
-                key={item}
-                className={helpGuidanceCardClass}
-              >
-                <button
-                  type="button"
-                  onClick={() => {
-                    setSelectedHelpSuggestion(item);
-                    setHelpSuggestionsVisible(false);
-                    onSetLastViewedGuidance(item);
-                  }}
-                  className={helpGuidanceButtonClass}
-                >
-                  <div className="text-[0.92rem] leading-6 text-[var(--workspace-help-guidance-text)]">
-                    {item}
-                  </div>
-                </button>
+          <div className="space-y-6">
+            {groupedHelpTopics.map((group) => (
+              <div key={group.section} className="space-y-3">
+                <div className="flex items-center justify-between gap-4">
+                  <h3 className="text-[0.78rem] font-medium uppercase tracking-[0.18em] text-[var(--workspace-text-faint)]">
+                    {group.section}
+                  </h3>
+                  <div className="h-px flex-1 bg-[var(--workspace-border-soft)]" />
+                </div>
+                <div className="grid gap-3 lg:grid-cols-2">
+                  {group.topics.map((topic) => (
+                    <div key={topic.id} className={helpGuidanceCardClass}>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSelectedHelpSuggestion(topic.title);
+                          setHelpSuggestionsVisible(false);
+                          onSetLastViewedGuidance(topic.title);
+                        }}
+                        className={helpGuidanceButtonClass}
+                      >
+                        <div className="text-[0.96rem] font-medium leading-6 text-[var(--workspace-help-guidance-text)]">
+                          {topic.title}
+                        </div>
+                        <p className="mt-1 line-clamp-2 text-[0.86rem] leading-6 text-[var(--workspace-text-muted)]">
+                          {topic.intro}
+                        </p>
+                        <div className="mt-3 text-[0.74rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)]">
+                          {topic.points.length} steps
+                        </div>
+                      </button>
+                    </div>
+                  ))}
+                </div>
               </div>
             ))}
           </div>
