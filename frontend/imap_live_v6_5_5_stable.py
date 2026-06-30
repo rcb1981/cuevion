@@ -4,11 +4,17 @@ import logging
 from email.header import decode_header
 from email.utils import parseaddr
 from dotenv import load_dotenv
-from openai import OpenAI
+try:
+    from openai import OpenAI
+except ImportError:
+    OpenAI = None
 import os
 import re
 import json
-import requests
+try:
+    import requests
+except ImportError:
+    requests = None
 import html
 import time
 from urllib.parse import urlparse, parse_qs, unquote
@@ -20,7 +26,7 @@ from v7_decision_layer import decide_message_behavior
 # =========================
 load_dotenv()
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY")) if OpenAI else None
 logger = logging.getLogger(__name__)
 
 # =========================
@@ -233,23 +239,36 @@ def print_v7_summary(result: dict) -> None:
         print(f"V7 EXPLANATION: {explanation}")
 
 def map_to_ui_signal(result):
-    priority = result.get("v7_final_priority")
     category = result.get("category")
 
-    if priority == "PRIORITY":
-        return "PRIORITY"
-
-    if category in ["promo"]:
+    if category in ["promo", "promo_reminder"]:
         return "PROMO"
 
+    if category in ["demo", "high_priority_demo", "incomplete_demo"]:
+        return "DEMO"
+
+    if category == "reply":
+        return "REPLY"
+
     if category in [
+        "workflow_update",
         "distributor_update",
         "labelradar_update",
         "trackstack_submission",
-        "royalty_statement",
-        "business_reminder"
     ]:
         return "UPDATE"
+
+    if category in [
+        "finance",
+        "royalty_statement",
+    ]:
+        return "FINANCE"
+
+    if category in ["business", "business_reminder"]:
+        return "BUSINESS"
+
+    if category == "info":
+        return "INFO"
 
     return "NEW"
 
@@ -1256,6 +1275,324 @@ def is_bulk_submission_email(subject, body, sender_email, to_header, extracted_l
     return False, bulk_score
 
 
+PROTECTED_MUSIC_CATEGORIES = {
+    "reply",
+    "trackstack_submission",
+    "labelradar_update",
+    "distributor_update",
+    "royalty_statement",
+    "business_reminder",
+    "finance",
+    "workflow_update",
+    "security",
+    "system",
+    "spam",
+}
+
+MUSIC_LINK_TYPES = ["soundcloud", "dropbox", "disco", "gdrive", "onedrive", "wetransfer"]
+
+
+def normalize_subject_for_music_intent(subject):
+    normalized = (subject or "").lower().strip()
+    normalized = re.sub(r"\s+", " ", normalized)
+    normalized = re.sub(r"^(?:(?:re|fw|fwd)\s*:\s*)+", "", normalized).strip()
+    return normalized
+
+
+def _contains_phrase(text, phrase):
+    return re.search(r"(?<![a-z0-9])" + re.escape(phrase) + r"(?![a-z0-9])", text) is not None
+
+
+def _contains_any_phrase(text, phrases):
+    return [phrase for phrase in phrases if _contains_phrase(text, phrase)]
+
+
+def _recipient_local_part(to_header):
+    if not to_header:
+        return ""
+
+    addresses = re.findall(r"[\w.+-]+@[\w.-]+", to_header.lower())
+    if addresses:
+        return addresses[0].split("@", 1)[0]
+
+    return to_header.lower().split("@", 1)[0].strip()
+
+
+def _has_usable_music_link(extracted_links, user_link_settings=None):
+    enabled_types = get_intake_enabled_link_types(user_link_settings)
+
+    for link_type in enabled_types:
+        if link_type not in MUSIC_LINK_TYPES:
+            continue
+
+        value = (extracted_links or {}).get(link_type)
+        if not value:
+            continue
+
+        if link_type == "soundcloud" and is_soundcloud_profile_url(value):
+            continue
+
+        return True
+
+    return False
+
+
+def detect_subject_first_music_intent(subject):
+    normalized_subject = normalize_subject_for_music_intent(subject)
+
+    promo_subject_phrases = [
+        "promo",
+        "promo submission",
+        "promo for",
+        "dj promo",
+        "radio promo",
+        "for radio",
+        "for your radio show",
+        "for your radioshow",
+        "hysteria radio",
+        "support this release",
+        "support the release",
+        "upcoming release",
+        "new release",
+        "out now",
+        "out soon",
+    ]
+    blocked_promo_contexts = [
+        "promotion approved",
+        "promotions approved",
+        "promotion rejected",
+        "meta ads promotion",
+        "ads promotion",
+        "advertising promotion",
+    ]
+    demo_subject_phrases = [
+        "demo",
+        "demo submission",
+        "new demo",
+        "unreleased demo",
+        "track for your label",
+        "submission for your label",
+        "please consider this track",
+        "sign this track",
+        "label submission",
+    ]
+
+    promo_hits = _contains_any_phrase(normalized_subject, promo_subject_phrases)
+    if promo_hits and not any(phrase in normalized_subject for phrase in blocked_promo_contexts):
+        return {
+            "normalized_subject": normalized_subject,
+            "promo_subject_hits": promo_hits,
+            "demo_subject_hits": [],
+        }
+
+    return {
+        "normalized_subject": normalized_subject,
+        "promo_subject_hits": [],
+        "demo_subject_hits": _contains_any_phrase(normalized_subject, demo_subject_phrases),
+    }
+
+
+def detect_hard_music_category(
+    subject,
+    body,
+    sender_email="",
+    to_header="",
+    inbox_profile="",
+    extracted_links=None,
+    user_link_settings=None,
+):
+    subject_intent = detect_subject_first_music_intent(subject)
+    normalized_subject = subject_intent["normalized_subject"]
+    body_text = re.sub(r"\s+", " ", (body or "").lower())
+    sender_text = (sender_email or "").lower()
+    recipient_local = _recipient_local_part(to_header)
+    inbox_profile = (inbox_profile or "").lower().strip()
+
+    body_promo_phrases = [
+        "i send you a promo",
+        "sending you a promo",
+        "here is a promo",
+        "promo for your radio show",
+        "for your radio show",
+        "for your radioshow",
+        "radio support",
+        "dj support",
+        "playlist support",
+        "support this release",
+        "support the release",
+        "support the track",
+        "play in your sets",
+        "listen and download",
+        "download link",
+        "upcoming release",
+        "new release",
+        "release date",
+        "will be released",
+        "released on",
+        "out now",
+        "out soon",
+    ]
+    body_demo_phrases = [
+        "demo submission",
+        "submitting my demo",
+        "track for your label",
+        "would love your feedback",
+        "please consider this track",
+        "sign this track",
+        "unreleased demo",
+        "looking for a label",
+        "label consideration",
+    ]
+
+    promo_hits = list(subject_intent["promo_subject_hits"])
+    demo_hits = list(subject_intent["demo_subject_hits"])
+    promo_body_hits = _contains_any_phrase(body_text, body_promo_phrases)
+    demo_body_hits = _contains_any_phrase(body_text, body_demo_phrases)
+    promo_hits.extend(promo_body_hits)
+    demo_hits.extend(demo_body_hits)
+
+    promo_context = recipient_local == "promo" or inbox_profile == "promo_first" or "promo" in sender_text
+    demo_context = recipient_local == "demo" or inbox_profile == "demo_first"
+    has_music_link = _has_usable_music_link(extracted_links or {}, user_link_settings=user_link_settings)
+
+    if is_promo_reminder_email(subject, body, sender_email):
+        return {
+            "category": "promo_reminder",
+            "reason": "promo_reminder",
+            "has_music_link": has_music_link,
+            "details": {
+                "normalized_subject": normalized_subject,
+                "promo_hits": promo_hits,
+                "demo_hits": demo_hits,
+            },
+        }
+
+    has_subject_promo = bool(subject_intent["promo_subject_hits"])
+    has_subject_demo = bool(subject_intent["demo_subject_hits"])
+    has_body_promo = bool(promo_body_hits)
+    has_body_demo = bool(demo_body_hits)
+
+    if has_subject_promo and has_body_demo and not (has_body_promo or promo_context):
+        logger.warning(
+            "Deterministic music category uncertainty: subject promo conflicts with demo body | subject='%s'",
+            subject,
+        )
+        return None
+
+    if has_subject_demo and has_body_promo and not (has_body_demo or demo_context):
+        logger.warning(
+            "Deterministic music category uncertainty: subject demo conflicts with promo body | subject='%s'",
+            subject,
+        )
+        return None
+
+    if has_subject_promo or (has_body_promo and promo_context):
+        return {
+            "category": "promo",
+            "reason": "hard_promo_subject_body" if has_subject_promo else "promo_context_body",
+            "has_music_link": has_music_link,
+            "details": {
+                "normalized_subject": normalized_subject,
+                "promo_hits": promo_hits,
+                "demo_hits": demo_hits,
+            },
+        }
+
+    if has_subject_demo or (has_body_demo and demo_context):
+        return {
+            "category": "demo" if has_music_link else "incomplete_demo",
+            "reason": "hard_demo_subject_link" if has_music_link else "hard_demo_subject_no_link",
+            "has_music_link": has_music_link,
+            "details": {
+                "normalized_subject": normalized_subject,
+                "promo_hits": promo_hits,
+                "demo_hits": demo_hits,
+            },
+        }
+
+    if has_music_link and not (promo_hits or demo_hits):
+        logger.info(
+            "Music link treated as transport evidence, not demo trigger | reason=no_clear_music_intent subject='%s'",
+            subject,
+        )
+
+    return None
+
+
+def apply_deterministic_music_category_guardrails(
+    result,
+    subject,
+    body,
+    sender_email="",
+    to_header="",
+    inbox_profile="",
+    extracted_links=None,
+    user_link_settings=None,
+    existing_platform_category=None,
+):
+    if result is None:
+        result = {}
+
+    current_category = str(
+        existing_platform_category or result.get("category") or "unknown"
+    ).strip().lower()
+
+    if current_category in PROTECTED_MUSIC_CATEGORIES:
+        return result
+
+    hard_category = detect_hard_music_category(
+        subject=subject,
+        body=body,
+        sender_email=sender_email,
+        to_header=to_header,
+        inbox_profile=inbox_profile,
+        extracted_links=extracted_links or {},
+        user_link_settings=user_link_settings,
+    )
+
+    if not hard_category:
+        return result
+
+    new_category = hard_category["category"]
+    reason = hard_category["reason"]
+    old_category = result.get("category") or "unknown"
+
+    if old_category != new_category:
+        logger.warning(
+            "Deterministic category override: %s -> %s | reason=%s | subject='%s'",
+            old_category,
+            new_category,
+            reason,
+            subject,
+        )
+
+    if hard_category.get("has_music_link") and new_category in ["promo", "promo_reminder"]:
+        logger.info(
+            "Music link treated as transport evidence, not demo trigger | reason=promo_intent_present subject='%s'",
+            subject,
+        )
+
+    result["category"] = new_category
+    result["deterministic_category_reason"] = reason
+
+    if new_category in ["promo", "promo_reminder"]:
+        result["usable_demo_links"] = []
+        result["priority"] = "LOW"
+        result["score"] = min(max(int(float(result.get("score", 0) or 0)), 20), 65)
+        result["reason"] = "Deterministic promo intent detected"
+    elif new_category == "demo":
+        result["priority"] = result.get("priority") or "REVIEW"
+        result["score"] = max(int(float(result.get("score", 0) or 0)), 70)
+        result["reason"] = "Deterministic demo intent detected"
+    elif new_category == "incomplete_demo":
+        result["usable_demo_links"] = []
+        result["priority"] = "LOW"
+        result["score"] = min(max(int(float(result.get("score", 0) or 0)), 35), 60)
+        result["reason"] = "Deterministic demo intent detected without usable music link"
+
+    return result
+
+
 def get_reminder_mode(category, user_reminder_settings=None):
     if user_reminder_settings is None:
         user_reminder_settings = USER_REMINDER_SETTINGS
@@ -1285,6 +1622,25 @@ def get_suggested_action(category, user_reminder_settings=None):
 # CLASSIFIER
 # =========================
 def classify_email_with_ai(subject, body, sender_name, sender_email, to_header, inbox_profile=""):
+    if client is None:
+        return {
+            "artist": sender_name or "",
+            "category": "info",
+            "score": 0,
+            "priority": "LOW",
+            "reason": "AI client unavailable",
+            "spotify": None,
+            "soundcloud_track": None,
+            "dropbox": None,
+            "wetransfer": None,
+            "disco": None,
+            "gdrive": None,
+            "onedrive": None,
+            "instagram": None,
+            "usable_demo_links": [],
+            "bulk_score": 0,
+        }
+
     prompt = f"""
 You classify music industry emails.
 
@@ -1410,6 +1766,7 @@ def enrich_email_result(
     sender_name,
     sender_email,
     to_header,
+    inbox_profile="",
     user_link_settings=None,
     user_reminder_settings=None,
     preview_mode=False
@@ -1488,6 +1845,17 @@ def enrich_email_result(
             result["priority"] = "LOW"
             if not result.get("reason"):
                 result["reason"] = "Bulk signals detected"
+
+    result = apply_deterministic_music_category_guardrails(
+        result=result,
+        subject=subject,
+        body=body,
+        sender_email=sender_email,
+        to_header=to_header,
+        inbox_profile=inbox_profile,
+        extracted_links=extracted_links,
+        user_link_settings=user_link_settings,
+    )
 
     result["soundcloud_track"] = soundcloud
     result["dropbox"] = dropbox
@@ -1685,6 +2053,7 @@ def analyze_email(
         sender_name=sender_name,
         sender_email=sender_email,
         to_header=to_header,
+        inbox_profile=inbox_profile,
         user_link_settings=user_link_settings,
         user_reminder_settings=user_reminder_settings,
         preview_mode=preview_mode

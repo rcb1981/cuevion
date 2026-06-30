@@ -31,7 +31,7 @@ def map_to_ui_signal(result: dict[str, Any]) -> str:
     if category in ["promo", "promo_reminder"]:
         return "PROMO"
 
-    if category in ["demo", "high_priority_demo"]:
+    if category in ["demo", "high_priority_demo", "incomplete_demo"]:
         return "DEMO"
 
     if category == "reply":
@@ -96,8 +96,11 @@ def normalize_internal_classification(category: Any) -> str:
         "business_reminder",
         "royalty_statement",
         "distributor_update",
+        "labelradar_update",
+        "trackstack_submission",
         "finance",
         "info",
+        "incomplete_demo",
     }:
         return normalized_category
 
@@ -642,6 +645,7 @@ def resolve_preview_routing(
             USER_LINK_SETTINGS,
             USER_REMINDER_SETTINGS,
             V7_USER_CONFIG,
+            apply_deterministic_music_category_guardrails,
             extract_all_links,
             get_usable_demo_links,
             is_business_reminder_email,
@@ -686,11 +690,6 @@ def resolve_preview_routing(
             "",
             subject=subject,
             artist_name=artist_hint,
-        )
-        usable_demo_links = get_usable_demo_links(
-            extracted_links=extracted_links,
-            category="demo",
-            user_link_settings=USER_LINK_SETTINGS,
         )
         promo_keywords = [
             "[promo]",
@@ -844,6 +843,10 @@ def resolve_preview_routing(
         has_clear_update_newsletter_signal = any(
             keyword in classification_text for keyword in update_keywords
         )
+        has_google_security_signal = (
+            ("google" in sender_lower or "accounts.google.com" in classification_text)
+            and any(keyword in classification_text for keyword in google_security_keywords)
+        )
         result = {
             "category": "unknown",
             "priority": "NORMAL",
@@ -874,32 +877,58 @@ def resolve_preview_routing(
             result["category"] = "royalty_statement"
         elif is_promo_reminder_email(subject, body, sender_email):
             result["category"] = "promo_reminder"
-        elif (
-            ("google" in sender_lower or "accounts.google.com" in classification_text)
-            and any(keyword in classification_text for keyword in google_security_keywords)
-        ):
+        elif has_google_security_signal:
             result["category"] = "info"
-        elif any(keyword in classification_text for keyword in finance_keywords) and not has_clear_update_newsletter_signal:
+        elif (
+            any(keyword in classification_text for keyword in finance_keywords)
+            or any(keyword in classification_text for keyword in meta_ads_keywords)
+        ) and not has_clear_update_newsletter_signal:
             result["category"] = "finance"
         elif has_clear_update_newsletter_signal:
             result["category"] = "workflow_update"
-        elif has_subject_promo_marker:
-            result["category"] = "promo"
-        elif is_promo_mailbox_context and has_promo_provider_signal:
-            result["category"] = "promo"
-        elif is_promo_mailbox_context and has_promo_pitch_signal and has_private_soundcloud_signal:
-            result["category"] = "promo"
-        elif has_promo_provider_signal:
-            result["category"] = "promo"
-        elif usable_demo_links:
-            result["category"] = "demo"
-            result["usable_demo_links"] = usable_demo_links
-        elif any(keyword in classification_text for keyword in demo_intent_keywords):
-            result["category"] = "demo"
-        elif any(keyword in classification_text for keyword in meta_ads_keywords):
-            result["category"] = "finance"
-        elif any(keyword in classification_text for keyword in business_keywords):
-            result["category"] = "business"
+
+        result = apply_deterministic_music_category_guardrails(
+            result=result,
+            subject=subject,
+            body=body,
+            sender_email=sender_email,
+            to_header=message.get("To", ""),
+            inbox_profile=inbox_profile,
+            extracted_links=extracted_links,
+            user_link_settings=USER_LINK_SETTINGS,
+            existing_platform_category="security" if has_google_security_signal else None,
+        )
+
+        if result.get("category") == "demo":
+            result["usable_demo_links"] = get_usable_demo_links(
+                extracted_links=extracted_links,
+                category="demo",
+                user_link_settings=USER_LINK_SETTINGS,
+            )
+        elif result.get("category") not in ["high_priority_demo", "reply"]:
+            result["usable_demo_links"] = []
+
+        if result.get("category") in ["unknown", None]:
+            if has_subject_promo_marker:
+                result["category"] = "promo"
+            elif is_promo_mailbox_context and has_promo_provider_signal:
+                result["category"] = "promo"
+            elif is_promo_mailbox_context and has_promo_pitch_signal and has_private_soundcloud_signal:
+                result["category"] = "promo"
+            elif has_promo_provider_signal:
+                result["category"] = "promo"
+            elif any(keyword in classification_text for keyword in demo_intent_keywords) and not (
+                has_promo_provider_signal or has_promo_pitch_signal
+            ):
+                fallback_demo_links = get_usable_demo_links(
+                    extracted_links=extracted_links,
+                    category="demo",
+                    user_link_settings=USER_LINK_SETTINGS,
+                )
+                result["category"] = "demo" if fallback_demo_links else "incomplete_demo"
+                result["usable_demo_links"] = fallback_demo_links
+            elif any(keyword in classification_text for keyword in business_keywords):
+                result["category"] = "business"
 
         result = normalize_priority(
             result,
