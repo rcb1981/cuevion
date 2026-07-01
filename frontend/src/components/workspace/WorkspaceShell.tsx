@@ -11140,14 +11140,14 @@ function WorkspaceSidebar({
   };
 
   return (
-    <aside className="fixed inset-y-0 left-0 hidden overflow-y-auto w-24 border-r border-[var(--workspace-sidebar-border)] bg-[var(--workspace-sidebar)] px-4 py-10 text-[var(--workspace-sidebar-text)] md:block xl:w-[240px] xl:px-5">
+    <aside className="fixed inset-y-0 left-0 hidden w-24 overflow-hidden border-r border-[var(--workspace-sidebar-border)] bg-[var(--workspace-sidebar)] px-4 py-10 text-[var(--workspace-sidebar-text)] md:block xl:w-[240px] xl:px-5">
       <div className="absolute inset-0 bg-[var(--workspace-sidebar-glow)]" />
-      <div className="relative flex h-full flex-col">
-        <div className="flex h-full flex-col">
-          <span className="hidden max-w-full truncate rounded-full border border-[color:rgba(218,194,142,0.2)] bg-[linear-gradient(180deg,rgba(238,224,190,0.11),rgba(33,58,49,0.34))] px-3.5 py-2 text-xs uppercase tracking-[0.18em] text-[color:rgba(232,222,198,0.78)] shadow-[inset_0_1px_0_rgba(255,248,226,0.12),0_6px_14px_rgba(0,0,0,0.08)] xl:inline-block">
-            {workspaceName}
+      <div className="relative flex h-full min-h-0 flex-col">
+        <div className="flex h-full min-h-0 flex-col">
+          <span className="hidden h-8 max-w-full flex-none items-center overflow-hidden rounded-full border border-[color:rgba(218,194,142,0.2)] bg-[linear-gradient(180deg,rgba(238,224,190,0.11),rgba(33,58,49,0.34))] px-3.5 text-xs uppercase leading-none tracking-[0.18em] text-[color:rgba(232,222,198,0.78)] shadow-[inset_0_1px_0_rgba(255,248,226,0.12),0_6px_14px_rgba(0,0,0,0.08)] xl:flex">
+            <span className="block min-w-0 truncate">{workspaceName}</span>
           </span>
-          <div className="mt-8 flex justify-center xl:justify-start">
+          <div className="mt-8 flex flex-none justify-center xl:justify-start">
             <div className="xl:hidden">
               <CuevionMark compact />
             </div>
@@ -11155,7 +11155,7 @@ function WorkspaceSidebar({
               <CuevionMark />
             </div>
           </div>
-          <nav aria-label="Workspace navigation" className="mt-8 flex flex-1 flex-col">
+          <nav aria-label="Workspace navigation" className="mt-8 flex min-h-0 flex-1 flex-col overflow-y-auto pr-1">
             <ul className="space-y-2">
               {primaryNavigationItems.map((item) =>
                 item.section === "Inboxes"
