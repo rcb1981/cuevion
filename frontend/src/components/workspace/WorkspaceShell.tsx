@@ -92,6 +92,7 @@ import {
   saveUserAccountConfig,
   type UserAccountConfig,
 } from "../../lib/userConfigApi";
+import { sendContactSupportRequest } from "../../lib/contactSupportApi";
 import {
   TEAM_ROLES,
   getTeamRoleLabel,
@@ -630,7 +631,7 @@ function mergeBackendTeamMembers(
   return mergedMembers;
 }
 
-type ContactRequestStatus = "Open";
+type ContactRequestStatus = "Sent" | "Saved locally";
 type ContactRequest = {
   id: string;
   subject: string;
@@ -28724,13 +28725,20 @@ function normalizeContactRequest(value: unknown): ContactRequest | null {
     return null;
   }
 
-  const candidate = value as Partial<ContactRequest>;
+  const candidate = value as Record<string, unknown>;
   const id = typeof candidate.id === "string" ? candidate.id.trim() : "";
   const subject = typeof candidate.subject === "string" ? candidate.subject.trim() : "";
   const message = typeof candidate.message === "string" ? candidate.message.trim() : "";
   const fromInbox =
     typeof candidate.fromInbox === "string" ? candidate.fromInbox.trim() : "Workspace";
   const createdAt = typeof candidate.createdAt === "string" ? candidate.createdAt : "";
+  const rawStatus = typeof candidate.status === "string" ? candidate.status : "";
+  const status: ContactRequestStatus =
+    rawStatus === "Sent"
+      ? rawStatus
+      : rawStatus === "Saved locally" || rawStatus === "Open"
+        ? "Saved locally"
+        : "Saved locally";
 
   if (!id || !subject || !message || !createdAt) {
     return null;
@@ -28742,7 +28750,7 @@ function normalizeContactRequest(value: unknown): ContactRequest | null {
     message,
     fromInbox: fromInbox || "Workspace",
     createdAt,
-    status: "Open",
+    status,
   };
 }
 
@@ -28786,11 +28794,17 @@ function UtilityView({
   lastViewedGuidance,
   onSetLastViewedGuidance,
   primaryWorkspaceEmail,
+  workspaceName,
+  authenticatedUserName,
+  authenticatedUserEmail,
 }: {
   section: UtilitySection;
   lastViewedGuidance: string | null;
   onSetLastViewedGuidance: (item: string) => void;
   primaryWorkspaceEmail: string;
+  workspaceName: string;
+  authenticatedUserName: string;
+  authenticatedUserEmail: string;
 }) {
   const [helpSuggestionsVisible, setHelpSuggestionsVisible] = useState(false);
   const [selectedHelpSuggestion, setSelectedHelpSuggestion] = useState<string | null>(
@@ -28803,7 +28817,11 @@ function UtilityView({
   );
   const [contactSubject, setContactSubject] = useState("");
   const [contactMessage, setContactMessage] = useState("");
-  const [contactRequestCreated, setContactRequestCreated] = useState(false);
+  const [contactRequestNotice, setContactRequestNotice] = useState<{
+    tone: "success" | "warning";
+    message: string;
+  } | null>(null);
+  const [isContactRequestSubmitting, setIsContactRequestSubmitting] = useState(false);
   const [contactRequests, setContactRequests] = useState<ContactRequest[]>(() =>
     readStoredContactRequests(contactRequestsStorageKey),
   );
@@ -28832,11 +28850,11 @@ function UtilityView({
       eyebrow: "Contact",
       title: "Contact",
       summary:
-        "Create local beta support requests for things that feel unclear, blocked, or worth tracking during testing.",
+        "Send private support requests for things that feel unclear, blocked, or worth tracking during testing.",
       items: [
-        "Requests stay saved in this workspace during the beta",
+        "Requests are sent privately to Cuevion support",
         "Use the overview to track what you already reported",
-        "External delivery can be connected later",
+        "Request history stays saved in this workspace",
       ],
     },
   };
@@ -28895,8 +28913,12 @@ function UtilityView({
           ...(lastViewedHelpTopic ? [lastViewedHelpTopic] : []),
           ...popularHelpTopics.filter((topic) => topic.title !== lastViewedHelpTopic?.title),
         ].slice(0, 5);
-  const contactStatusClassName =
-    "border-[color:rgba(118,170,112,0.26)] bg-[color:rgba(118,170,112,0.14)] text-[var(--workspace-text)]";
+  const contactStatusClassNames: Record<ContactRequestStatus, string> = {
+    Sent:
+      "border-[color:rgba(118,170,112,0.26)] bg-[color:rgba(118,170,112,0.14)] text-[var(--workspace-text)]",
+    "Saved locally":
+      "border-[color:rgba(184,163,120,0.26)] bg-[color:rgba(184,163,120,0.14)] text-[var(--workspace-text)]",
+  };
   const isContactRequestReady =
     contactSubject.trim().length > 0 && contactMessage.trim().length > 0;
   const resetContactForm = () => {
@@ -28914,16 +28936,16 @@ function UtilityView({
   }, [contactRequestsStorageKey]);
 
   useEffect(() => {
-    if (!contactRequestCreated) {
+    if (!contactRequestNotice) {
       return;
     }
 
     const timeoutId = window.setTimeout(() => {
-      setContactRequestCreated(false);
+      setContactRequestNotice(null);
     }, 3200);
 
     return () => window.clearTimeout(timeoutId);
-  }, [contactRequestCreated]);
+  }, [contactRequestNotice]);
 
   if (section === "Contact") {
     return (
@@ -28942,21 +28964,34 @@ function UtilityView({
             <div className="grid gap-6 xl:grid-cols-[minmax(0,1.15fr)_minmax(300px,0.85fr)]">
               <form
                 className="rounded-[22px] border border-[var(--workspace-border-soft)] bg-[linear-gradient(180deg,var(--workspace-card-featured-start),var(--workspace-card-featured-end))] p-5"
-                onSubmit={(event) => {
+                onSubmit={async (event) => {
                   event.preventDefault();
 
-                  if (!isContactRequestReady) {
+                  if (!isContactRequestReady || isContactRequestSubmitting) {
                     return;
                   }
 
                   const createdAt = new Date();
-                  const nextRequest: ContactRequest = {
+                  const requestBase: Omit<ContactRequest, "status"> = {
                     id: createContactRequestId(createdAt),
                     subject: contactSubject.trim(),
                     message: contactMessage.trim(),
                     fromInbox: primaryWorkspaceEmail || "Workspace",
                     createdAt: createdAt.toISOString(),
-                    status: "Open",
+                  };
+                  setIsContactRequestSubmitting(true);
+                  setContactRequestNotice(null);
+
+                  const sendResult = await sendContactSupportRequest({
+                    ...requestBase,
+                    workspaceName,
+                    userName: authenticatedUserName,
+                    userEmail: authenticatedUserEmail,
+                    appSection: "Contact",
+                  });
+                  const nextRequest: ContactRequest = {
+                    ...requestBase,
+                    status: sendResult.ok ? "Sent" : "Saved locally",
                   };
 
                   setContactRequests((current) => {
@@ -28966,17 +29001,23 @@ function UtilityView({
 
                     return nextRequests;
                   });
+                  setIsContactRequestSubmitting(false);
                   resetContactForm();
-                  setContactRequestCreated(true);
+                  setContactRequestNotice({
+                    tone: sendResult.ok ? "success" : "warning",
+                    message: sendResult.ok
+                      ? "Request sent."
+                      : "Request saved locally, but could not be sent. Please try again later.",
+                  });
                 }}
               >
                 <div className="mb-5 flex items-center justify-between gap-4">
                   <div>
                     <h2 className="text-xl font-semibold tracking-tight text-[var(--workspace-text)]">
-                      Create support request
+                      Send support request
                     </h2>
                     <p className="mt-1 text-[0.92rem] leading-6 text-[var(--workspace-text-soft)]">
-                      For this beta, requests are saved in this workspace so you can track what you reported.
+                      Requests are sent privately to Cuevion support and saved in this workspace for your reference.
                     </p>
                   </div>
                 </div>
@@ -29000,7 +29041,7 @@ function UtilityView({
                       value={contactSubject}
                       onChange={(event) => {
                         setContactSubject(event.target.value);
-                        setContactRequestCreated(false);
+                        setContactRequestNotice(null);
                       }}
                       placeholder="Briefly describe your request"
                       className="w-full bg-transparent text-[0.9rem] leading-6 text-[var(--workspace-text-soft)] outline-none placeholder:text-[var(--workspace-text-faint)]"
@@ -29014,7 +29055,7 @@ function UtilityView({
                       value={contactMessage}
                       onChange={(event) => {
                         setContactMessage(event.target.value);
-                        setContactRequestCreated(false);
+                        setContactRequestNotice(null);
                       }}
                       placeholder="Write what feels unclear or needs attention"
                       className="mt-3 block min-h-[220px] w-full resize-none bg-transparent text-[0.94rem] leading-7 text-[var(--workspace-text-soft)] outline-none placeholder:text-[var(--workspace-text-faint)]"
@@ -29022,22 +29063,28 @@ function UtilityView({
                   </label>
                 </div>
 
-                {contactRequestCreated ? (
-                  <div className="mt-4 rounded-[18px] border border-[color:rgba(118,170,112,0.2)] bg-[color:rgba(118,170,112,0.1)] px-4 py-3 text-[0.9rem] leading-6 text-[var(--workspace-text-soft)]">
-                    Request created.
+                {contactRequestNotice ? (
+                  <div
+                    className={`mt-4 rounded-[18px] border px-4 py-3 text-[0.9rem] leading-6 text-[var(--workspace-text-soft)] ${
+                      contactRequestNotice.tone === "success"
+                        ? "border-[color:rgba(118,170,112,0.2)] bg-[color:rgba(118,170,112,0.1)]"
+                        : "border-[color:rgba(184,163,120,0.24)] bg-[color:rgba(184,163,120,0.12)]"
+                    }`}
+                  >
+                    {contactRequestNotice.message}
                   </div>
                 ) : null}
 
                 <div className="mt-5 flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
                   <div className="max-w-[28rem] text-[0.88rem] leading-6 text-[var(--workspace-text-muted)]">
-                    External delivery can be connected later. These beta requests are stored locally in this workspace.
+                    Your support history stays available here even if delivery fails.
                   </div>
                   <div className="flex items-center gap-3">
                     <button
                       type="button"
                       onClick={() => {
                         resetContactForm();
-                        setContactRequestCreated(false);
+                        setContactRequestNotice(null);
                       }}
                       className={subtleSecondaryActionButtonClass}
                     >
@@ -29045,14 +29092,14 @@ function UtilityView({
                     </button>
                     <button
                       type="submit"
-                      disabled={!isContactRequestReady}
+                      disabled={!isContactRequestReady || isContactRequestSubmitting}
                       className={`${mailboxPrimaryActionButtonClass} ${
-                        isContactRequestReady
+                        isContactRequestReady && !isContactRequestSubmitting
                           ? ""
                           : "cursor-default bg-[var(--workspace-card-subtle)] text-[var(--workspace-text-faint)] opacity-55 hover:bg-[var(--workspace-card-subtle)]"
                       }`}
                     >
-                      Create request
+                      {isContactRequestSubmitting ? "Sending..." : "Send request"}
                     </button>
                   </div>
                 </div>
@@ -29064,7 +29111,7 @@ function UtilityView({
                     Request overview
                   </h2>
                   <p className="mt-1 text-[0.9rem] leading-6 text-[var(--workspace-text-soft)]">
-                    Local beta requests saved from this workspace.
+                    Support requests saved from this workspace.
                   </p>
                 </div>
                 {contactRequests.length === 0 ? (
@@ -29073,7 +29120,7 @@ function UtilityView({
                       No support requests yet.
                     </div>
                     <p className="mt-2 text-[0.9rem] leading-6 text-[var(--workspace-text-soft)]">
-                      Create a request when something feels unclear or needs attention.
+                      Send a request when something feels unclear or needs attention.
                     </p>
                   </div>
                 ) : (
@@ -29101,7 +29148,7 @@ function UtilityView({
                               </div>
                             </div>
                             <div
-                              className={`rounded-full border px-3 py-1 text-[0.64rem] font-medium uppercase tracking-[0.14em] ${contactStatusClassName}`}
+                              className={`rounded-full border px-3 py-1 text-[0.64rem] font-medium uppercase tracking-[0.14em] ${contactStatusClassNames[request.status]}`}
                             >
                               {request.status}
                             </div>
@@ -29149,7 +29196,7 @@ function UtilityView({
 
                       <div className="mt-5 flex flex-wrap items-center gap-3">
                         <div
-                          className={`rounded-full border px-3 py-1 text-[0.64rem] font-medium uppercase tracking-[0.14em] ${contactStatusClassName}`}
+                          className={`rounded-full border px-3 py-1 text-[0.64rem] font-medium uppercase tracking-[0.14em] ${contactStatusClassNames[activeContactRequest.status]}`}
                         >
                           {activeContactRequest.status}
                         </div>
@@ -29172,7 +29219,9 @@ function UtilityView({
                             Delivery
                           </div>
                           <div className="mt-2 text-[0.92rem] leading-6 text-[var(--workspace-text-soft)]">
-                            Saved locally for this beta. Not externally sent.
+                            {activeContactRequest.status === "Saved locally"
+                              ? "Saved locally. Delivery did not complete."
+                              : "Sent privately to Cuevion support."}
                           </div>
                         </div>
                       </div>
@@ -37871,6 +37920,9 @@ export function WorkspaceShell({
                   lastViewedGuidance={lastViewedGuidance}
                   onSetLastViewedGuidance={setLastViewedGuidance}
                   primaryWorkspaceEmail={primaryWorkspaceEmail}
+                  workspaceName={workspaceName}
+                  authenticatedUserName={accountDisplayName}
+                  authenticatedUserEmail={accountDisplayEmail}
                 />
               </div>
             ) : (
