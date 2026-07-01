@@ -29559,10 +29559,6 @@ function ForYouView({
   const activeLearningCurrentPriority = activeLearningSuggestion
     ? activeLearningSuggestion.displayPriority
     : "Normal";
-  const activeLearningSummary = forYouEngine.formatLearningDecisionSummary(
-    activeLearningCurrentPriority,
-    activeLearningCurrentLabel,
-  );
   const trimmedPastedRuleValue = pastedRuleValue.trim();
   const pasteRuleInputType = resolvePasteRuleInputType(trimmedPastedRuleValue);
   const pasteRuleType =
@@ -30707,25 +30703,12 @@ function ForYouView({
                 </div>
               </div>
 
-              <div className="mt-6 h-px w-full bg-[var(--workspace-divider)]" />
-              <div className="mt-4 space-y-1 px-1">
-                <div className="text-[0.7rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
-                  Cuevion reason
-                </div>
-                <div className="text-[0.88rem] leading-7 text-[var(--workspace-emphasis-text)]">
-                  {activeLearningSuggestion.reason}
-                </div>
-              </div>
-
               <div className="mt-5 rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3">
                 <div className="text-[0.7rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
                   Current Cuevion decision
                 </div>
                 <div className="mt-2 text-[0.96rem] leading-7 text-[var(--workspace-text)]">
-                  Cuevion labelled this as {activeLearningSummary}
-                  {activeLearningSuggestion.categoryConfidence === "low"
-                    ? ", but is not fully sure yet."
-                    : "."}
+                  Cuevion is not fully sure about this decision.
                 </div>
                 <div className="mt-3 flex flex-wrap gap-2">
                   <span className="inline-flex items-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-modal-inner)] px-3 py-1 text-[0.72rem] font-medium text-[var(--workspace-text-soft)]">
