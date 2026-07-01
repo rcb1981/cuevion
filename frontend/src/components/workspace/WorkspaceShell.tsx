@@ -29510,6 +29510,7 @@ function ForYouView({
     setPasteRuleSaveFeedback("idle");
     setReviewUncertainCompletionFeedback("idle");
     setActiveLearningSessionSuggestions([]);
+    setActiveLearningSuggestionIndex(0);
     setActiveLearningModal(null);
   };
   const openRefineCuevionModal = () => {
@@ -29541,12 +29542,13 @@ function ForYouView({
   const pendingLearningSuggestions = learningSuggestionPool.filter(
     (suggestion) => !reviewedLearningSuggestionKeys.includes(suggestion.key),
   );
-  const activeLearningSuggestions = activeLearningSessionSuggestions.filter(
-    (suggestion) => !reviewedLearningSuggestionKeys.includes(suggestion.key),
-  );
+  const totalLearningSuggestions = activeLearningSessionSuggestions.length;
+  const safeLearningSuggestionIndex =
+    totalLearningSuggestions === 0
+      ? 0
+      : Math.min(activeLearningSuggestionIndex, totalLearningSuggestions - 1);
   const activeLearningSuggestion =
-    activeLearningSuggestions[activeLearningSuggestionIndex] ??
-    activeLearningSuggestions[0];
+    activeLearningSessionSuggestions[safeLearningSuggestionIndex];
   const activeLearningSourceInboxTitle = resolveOrderedMailboxTitle(
     orderedMailboxes,
     activeLearningSuggestion?.mailboxId ?? null,
@@ -29663,21 +29665,16 @@ function ForYouView({
     return true;
   };
 
-  const totalLearningSuggestions = activeLearningSessionSuggestions.length;
-  const completedLearningSuggestionsCount = activeLearningSessionSuggestions.filter((suggestion) =>
-    reviewedLearningSuggestionKeys.includes(suggestion.key),
-  ).length;
-  const safeLearningSuggestionIndex =
-    activeLearningSuggestions.length === 0
-      ? 0
-      : Math.min(activeLearningSuggestionIndex, activeLearningSuggestions.length - 1);
   const currentLearningSuggestionNumber =
-    activeLearningSuggestions.length === 0
+    totalLearningSuggestions === 0
       ? 0
-      : completedLearningSuggestionsCount + safeLearningSuggestionIndex + 1;
-  const isLastLearningSuggestion = activeLearningSuggestions.length === 1;
+      : safeLearningSuggestionIndex + 1;
+  const isLastLearningSuggestion =
+    totalLearningSuggestions === 0 ||
+    safeLearningSuggestionIndex >= totalLearningSuggestions - 1;
   const hasValidLearningSelection =
     selectedLearningLabel !== null && selectedLearningPriority !== null;
+  const hasActiveLearningSession = totalLearningSuggestions > 0;
   const hasPendingLearningSuggestions = pendingLearningSuggestions.length > 0;
   const totalUncertainEmails = uncertainEmailPool.length;
   const safeUncertainEmailIndex =
@@ -29741,10 +29738,18 @@ function ForYouView({
   }, [pasteRuleSaveFeedback]);
 
   useEffect(() => {
-    if (activeLearningSuggestionIndex >= activeLearningSuggestions.length) {
+    if (totalLearningSuggestions === 0 && activeLearningSuggestionIndex !== 0) {
       setActiveLearningSuggestionIndex(0);
+      return;
     }
-  }, [activeLearningSuggestionIndex, activeLearningSuggestions.length]);
+
+    if (
+      totalLearningSuggestions > 0 &&
+      activeLearningSuggestionIndex >= totalLearningSuggestions
+    ) {
+      setActiveLearningSuggestionIndex(totalLearningSuggestions - 1);
+    }
+  }, [activeLearningSuggestionIndex, totalLearningSuggestions]);
 
   useEffect(() => {
     setSelectedLearningLabel(activeLearningCurrentLabel);
@@ -30623,10 +30628,10 @@ function ForYouView({
         ? createPortal(
         <WorkspaceModalLayer>
             <div
-              className="w-full max-w-[680px] overflow-hidden rounded-[28px] border border-[var(--workspace-border)] bg-[var(--workspace-modal-bg)] p-6 shadow-[0_28px_80px_rgba(61,44,32,0.18),0_10px_26px_rgba(61,44,32,0.1)]"
+              className="flex max-h-[calc(100dvh-3rem)] w-full max-w-[680px] flex-col overflow-hidden rounded-[28px] border border-[var(--workspace-border)] bg-[var(--workspace-modal-bg)] p-6 shadow-[0_28px_80px_rgba(61,44,32,0.18),0_10px_26px_rgba(61,44,32,0.1)]"
               onMouseDown={(event) => event.stopPropagation()}
             >
-            <div className="flex items-start justify-between gap-4">
+            <div className="flex flex-none items-start justify-between gap-4">
               <div>
                 <h2 className="text-[1.45rem] font-medium tracking-tight text-[var(--workspace-text)]">
                   Refine Cuevion
@@ -30641,8 +30646,8 @@ function ForYouView({
               </button>
             </div>
 
-            <div className="mt-6 rounded-[24px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-modal-subtle)] px-6 pb-6 pt-7 shadow-[inset_0_1px_0_rgba(255,255,255,0.12)]">
-              {!hasPendingLearningSuggestions ? (
+            <div className="cuevion-soft-scroll mt-6 min-h-0 flex-1 overflow-y-auto rounded-[24px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-modal-subtle)] px-6 pb-0 pt-7 shadow-[inset_0_1px_0_rgba(255,255,255,0.12)]">
+              {!activeLearningSuggestion ? (
                 <div className="flex min-h-[20rem] items-center justify-center text-center">
                   <div className="max-w-[24rem] space-y-3">
                     <div className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
@@ -30739,14 +30744,17 @@ function ForYouView({
                 <button
                   type="button"
                   onClick={() => {
-                    persistActiveLearningSuggestionDecision({ confirmCurrent: true });
+                    if (!persistActiveLearningSuggestionDecision({ confirmCurrent: true })) {
+                      return;
+                    }
+
                     if (isLastLearningSuggestion) {
-                      setActiveLearningSuggestionIndex(0);
                       closeLearningModal();
                       return;
                     }
+
                     setActiveLearningSuggestionIndex((current) =>
-                      Math.min(current, Math.max(activeLearningSuggestions.length - 2, 0)),
+                      Math.min(current + 1, totalLearningSuggestions - 1),
                     );
                   }}
                   className={closeActionButtonClass}
@@ -30858,17 +30866,17 @@ function ForYouView({
                 </>
               )}
 
-              <div className="mt-6 grid grid-cols-[auto_1fr_auto] items-center gap-3">
+              <div className="sticky bottom-0 z-10 -mx-6 mt-6 grid grid-cols-[auto_1fr_auto] items-center gap-3 border-t border-[var(--workspace-border-soft)] bg-[var(--workspace-modal-subtle)] px-6 py-4 shadow-[0_-18px_30px_rgba(61,44,32,0.08)]">
                 <button
                   type="button"
-                  disabled={!hasPendingLearningSuggestions}
+                  disabled={!hasActiveLearningSession || safeLearningSuggestionIndex === 0}
                   onClick={() =>
                     setActiveLearningSuggestionIndex((current) =>
-                      current === 0 ? totalLearningSuggestions - 1 : current - 1,
+                      Math.max(current - 1, 0),
                     )
                   }
                   className={`${closeActionButtonClass} ${
-                    hasPendingLearningSuggestions
+                    hasActiveLearningSession && safeLearningSuggestionIndex > 0
                       ? ""
                       : "cursor-default border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] text-[var(--workspace-text-faint)] opacity-55"
                   }`}
@@ -30876,16 +30884,16 @@ function ForYouView({
                   Back
                 </button>
                 <div className="text-center text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
-                  {activeLearningSuggestions.length > 0
+                  {hasActiveLearningSession
                     ? `${currentLearningSuggestionNumber} of ${totalLearningSuggestions}`
                     : "0 of 0"}
                 </div>
                 <button
                   type="button"
-                  disabled={!hasPendingLearningSuggestions || !hasValidLearningSelection}
+                  disabled={!hasActiveLearningSession || !hasValidLearningSelection}
                   onClick={() => {
                     if (
-                      !hasPendingLearningSuggestions ||
+                      !hasActiveLearningSession ||
                       !hasValidLearningSelection ||
                       !persistActiveLearningSuggestionDecision()
                     ) {
@@ -30893,17 +30901,16 @@ function ForYouView({
                     }
 
                     if (isLastLearningSuggestion) {
-                      setActiveLearningSuggestionIndex(0);
                       closeLearningModal();
                       return;
                     }
 
                     setActiveLearningSuggestionIndex((current) =>
-                      Math.min(current, Math.max(activeLearningSuggestions.length - 2, 0)),
+                      Math.min(current + 1, totalLearningSuggestions - 1),
                     );
                   }}
                   className={
-                    hasPendingLearningSuggestions && hasValidLearningSelection
+                    hasActiveLearningSession && hasValidLearningSelection
                       ? closeActionButtonClass
                       : `${learningModalPrimaryActionButtonClass} cursor-default border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] text-[var(--workspace-text-faint)] opacity-55`
                   }
