@@ -2,11 +2,9 @@ export type SendContactSupportRequest = {
   id: string;
   subject: string;
   message: string;
-  fromInbox: string;
+  submittedBy: string;
   workspaceName: string;
-  userName: string;
-  userEmail: string;
-  appSection: string;
+  topic: string;
   createdAt: string;
 };
 

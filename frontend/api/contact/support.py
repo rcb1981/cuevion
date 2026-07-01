@@ -20,11 +20,21 @@ from beta_auth import parse_beta_session_token, read_beta_session_cookie, resolv
 
 MAX_SUBJECT_LENGTH = 160
 MAX_MESSAGE_LENGTH = 5000
-MAX_CONTEXT_LENGTH = 254
+MAX_IDENTITY_LENGTH = 254
 MAX_WORKSPACE_NAME_LENGTH = 160
-MAX_APP_SECTION_LENGTH = 80
+MAX_TOPIC_LENGTH = 40
 MAX_REQUEST_ID_LENGTH = 80
 EMAIL_PATTERN = re.compile(r"^[^\s@]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}$")
+SUPPORT_TOPICS = {
+    "General",
+    "Inboxes",
+    "Learning",
+    "Settings",
+    "Smart Folders",
+    "Message view",
+    "Bug",
+    "Feedback",
+}
 
 
 def _send_json(handler: BaseHTTPRequestHandler, status_code: int, payload: dict):
@@ -152,19 +162,14 @@ def _resolve_smtp_config() -> tuple[dict | None, dict | None]:
     }, None
 
 
-def _normalize_support_payload(payload: dict, session_user: dict | None) -> tuple[dict | None, dict | None]:
+def _normalize_support_payload(payload: dict) -> tuple[dict | None, dict | None]:
     subject = _clean_text(payload.get("subject"), MAX_SUBJECT_LENGTH)
     message = _clean_text(payload.get("message"), MAX_MESSAGE_LENGTH)
     request_id = _clean_text(payload.get("id"), MAX_REQUEST_ID_LENGTH)
-    from_inbox = _clean_text(payload.get("fromInbox"), MAX_CONTEXT_LENGTH) or "Workspace"
+    submitted_by = _clean_text(payload.get("submittedBy"), MAX_IDENTITY_LENGTH) or "Beta tester"
     workspace_name = _clean_text(payload.get("workspaceName"), MAX_WORKSPACE_NAME_LENGTH) or "Workspace"
-    app_section = _clean_text(payload.get("appSection"), MAX_APP_SECTION_LENGTH) or "Contact"
+    topic = _clean_text(payload.get("topic"), MAX_TOPIC_LENGTH) or "General"
     created_at = _normalize_created_at(payload.get("createdAt"))
-
-    payload_user_name = _clean_text(payload.get("userName"), MAX_CONTEXT_LENGTH)
-    payload_user_email = _clean_text(payload.get("userEmail"), MAX_CONTEXT_LENGTH).lower()
-    user_name = _clean_text((session_user or {}).get("name"), MAX_CONTEXT_LENGTH) or payload_user_name or "Unknown user"
-    user_email = _clean_text((session_user or {}).get("email"), MAX_CONTEXT_LENGTH).lower() or payload_user_email
 
     if not subject:
         return None, _build_error("invalid_request", "Subject is required.")
@@ -172,8 +177,8 @@ def _normalize_support_payload(payload: dict, session_user: dict | None) -> tupl
         return None, _build_error("invalid_request", "Message is required.")
     if _has_unsafe_header_chars(subject):
         return None, _build_error("invalid_request", "Subject is invalid.")
-    if user_email and not _is_valid_email(user_email):
-        return None, _build_error("invalid_request", "User email is invalid.")
+    if topic not in SUPPORT_TOPICS:
+        topic = "General"
 
     if not request_id:
         request_id = f"REQ-{int(datetime.now(timezone.utc).timestamp())}"
@@ -182,12 +187,10 @@ def _normalize_support_payload(payload: dict, session_user: dict | None) -> tupl
         "id": request_id,
         "subject": subject,
         "message": message,
-        "from_inbox": from_inbox,
+        "submitted_by": submitted_by,
         "workspace_name": workspace_name,
-        "app_section": app_section,
+        "topic": topic,
         "created_at": created_at,
-        "user_name": user_name,
-        "user_email": user_email or "Unknown email",
     }, None
 
 
@@ -196,8 +199,6 @@ def _build_support_email(config: dict, request: dict) -> EmailMessage:
     message["From"] = config["from_email"]
     message["To"] = config["to_email"]
     message["Subject"] = f"[Cuevion support] {request['subject']}"
-    if _is_valid_email(request["user_email"]):
-        message["Reply-To"] = request["user_email"]
 
     body = "\n".join(
         [
@@ -205,11 +206,9 @@ def _build_support_email(config: dict, request: dict) -> EmailMessage:
             "",
             f"Request ID: {request['id']}",
             f"Created at: {request['created_at']}",
+            f"Submitted by: {request['submitted_by']}",
             f"Workspace: {request['workspace_name']}",
-            f"App section: {request['app_section']}",
-            f"From inbox/context: {request['from_inbox']}",
-            f"User: {request['user_name']}",
-            f"User email: {request['user_email']}",
+            f"Topic: {request['topic']}",
             "",
             "Subject:",
             request["subject"],
@@ -255,7 +254,7 @@ class handler(BaseHTTPRequestHandler):
             _send_json(self, 503, config_error)
             return
 
-        support_request, request_error = _normalize_support_payload(payload or {}, session_user)
+        support_request, request_error = _normalize_support_payload(payload or {})
         if request_error:
             _send_json(self, 400, request_error)
             return

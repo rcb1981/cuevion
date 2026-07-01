@@ -636,10 +636,31 @@ type ContactRequest = {
   id: string;
   subject: string;
   message: string;
-  fromInbox: string;
+  submittedBy: string;
+  topic: ContactRequestTopic;
   createdAt: string;
   status: ContactRequestStatus;
 };
+type ContactRequestTopic =
+  | "General"
+  | "Inboxes"
+  | "Learning"
+  | "Settings"
+  | "Smart Folders"
+  | "Message view"
+  | "Bug"
+  | "Feedback";
+
+const contactRequestTopicOptions: ContactRequestTopic[] = [
+  "General",
+  "Inboxes",
+  "Learning",
+  "Settings",
+  "Smart Folders",
+  "Message view",
+  "Bug",
+  "Feedback",
+];
 
 const getUnreadPreviewIds = (messages: Array<{ id: string; unread?: boolean }>) =>
   messages.filter((message) => message.unread).map((message) => message.id).slice(0, 8);
@@ -28720,7 +28741,34 @@ function formatContactRequestTimestamp(value: string) {
   });
 }
 
-function normalizeContactRequest(value: unknown): ContactRequest | null {
+function isContactRequestTopic(value: string): value is ContactRequestTopic {
+  return contactRequestTopicOptions.includes(value as ContactRequestTopic);
+}
+
+function resolveContactSubmittedBy({
+  workspaceName,
+  authenticatedUserName,
+}: {
+  workspaceName: string;
+  authenticatedUserName: string;
+}) {
+  const normalizedWorkspaceName = workspaceName.trim();
+  if (normalizedWorkspaceName && normalizedWorkspaceName !== "Workspace") {
+    return normalizedWorkspaceName;
+  }
+
+  const normalizedUserName = authenticatedUserName.trim();
+  if (normalizedUserName && normalizedUserName !== "You") {
+    return normalizedUserName;
+  }
+
+  return "Beta tester";
+}
+
+function normalizeContactRequest(
+  value: unknown,
+  fallbackSubmittedBy: string,
+): ContactRequest | null {
   if (!value || typeof value !== "object") {
     return null;
   }
@@ -28729,8 +28777,12 @@ function normalizeContactRequest(value: unknown): ContactRequest | null {
   const id = typeof candidate.id === "string" ? candidate.id.trim() : "";
   const subject = typeof candidate.subject === "string" ? candidate.subject.trim() : "";
   const message = typeof candidate.message === "string" ? candidate.message.trim() : "";
-  const fromInbox =
-    typeof candidate.fromInbox === "string" ? candidate.fromInbox.trim() : "Workspace";
+  const submittedBy =
+    typeof candidate.submittedBy === "string" && candidate.submittedBy.trim()
+      ? candidate.submittedBy.trim()
+      : fallbackSubmittedBy;
+  const rawTopic = typeof candidate.topic === "string" ? candidate.topic.trim() : "";
+  const topic: ContactRequestTopic = isContactRequestTopic(rawTopic) ? rawTopic : "General";
   const createdAt = typeof candidate.createdAt === "string" ? candidate.createdAt : "";
   const rawStatus = typeof candidate.status === "string" ? candidate.status : "";
   const status: ContactRequestStatus =
@@ -28748,13 +28800,17 @@ function normalizeContactRequest(value: unknown): ContactRequest | null {
     id,
     subject,
     message,
-    fromInbox: fromInbox || "Workspace",
+    submittedBy,
+    topic,
     createdAt,
     status,
   };
 }
 
-function readStoredContactRequests(storageKey: string): ContactRequest[] {
+function readStoredContactRequests(
+  storageKey: string,
+  fallbackSubmittedBy = "Beta tester",
+): ContactRequest[] {
   if (typeof window === "undefined") {
     return [];
   }
@@ -28773,7 +28829,7 @@ function readStoredContactRequests(storageKey: string): ContactRequest[] {
     }
 
     return parsed
-      .map((value) => normalizeContactRequest(value))
+      .map((value) => normalizeContactRequest(value, fallbackSubmittedBy))
       .filter((value): value is ContactRequest => value !== null)
       .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt));
   } catch {
@@ -28796,7 +28852,6 @@ function UtilityView({
   primaryWorkspaceEmail,
   workspaceName,
   authenticatedUserName,
-  authenticatedUserEmail,
 }: {
   section: UtilitySection;
   lastViewedGuidance: string | null;
@@ -28804,7 +28859,6 @@ function UtilityView({
   primaryWorkspaceEmail: string;
   workspaceName: string;
   authenticatedUserName: string;
-  authenticatedUserEmail: string;
 }) {
   const [helpSuggestionsVisible, setHelpSuggestionsVisible] = useState(false);
   const [selectedHelpSuggestion, setSelectedHelpSuggestion] = useState<string | null>(
@@ -28815,6 +28869,11 @@ function UtilityView({
     () => buildContactRequestsStorageKey(primaryWorkspaceEmail),
     [primaryWorkspaceEmail],
   );
+  const contactSubmittedBy = resolveContactSubmittedBy({
+    workspaceName,
+    authenticatedUserName,
+  });
+  const [contactTopic, setContactTopic] = useState<ContactRequestTopic>("General");
   const [contactSubject, setContactSubject] = useState("");
   const [contactMessage, setContactMessage] = useState("");
   const [contactRequestNotice, setContactRequestNotice] = useState<{
@@ -28823,7 +28882,7 @@ function UtilityView({
   } | null>(null);
   const [isContactRequestSubmitting, setIsContactRequestSubmitting] = useState(false);
   const [contactRequests, setContactRequests] = useState<ContactRequest[]>(() =>
-    readStoredContactRequests(contactRequestsStorageKey),
+    readStoredContactRequests(contactRequestsStorageKey, contactSubmittedBy),
   );
   const [activeContactRequestId, setActiveContactRequestId] = useState<string | null>(null);
   const content: Record<
@@ -28922,6 +28981,7 @@ function UtilityView({
   const isContactRequestReady =
     contactSubject.trim().length > 0 && contactMessage.trim().length > 0;
   const resetContactForm = () => {
+    setContactTopic("General");
     setContactSubject("");
     setContactMessage("");
   };
@@ -28931,9 +28991,9 @@ function UtilityView({
       : contactRequests.find((request) => request.id === activeContactRequestId) ?? null;
 
   useEffect(() => {
-    setContactRequests(readStoredContactRequests(contactRequestsStorageKey));
+    setContactRequests(readStoredContactRequests(contactRequestsStorageKey, contactSubmittedBy));
     setActiveContactRequestId(null);
-  }, [contactRequestsStorageKey]);
+  }, [contactRequestsStorageKey, contactSubmittedBy]);
 
   useEffect(() => {
     if (!contactRequestNotice) {
@@ -28976,7 +29036,8 @@ function UtilityView({
                     id: createContactRequestId(createdAt),
                     subject: contactSubject.trim(),
                     message: contactMessage.trim(),
-                    fromInbox: primaryWorkspaceEmail || "Workspace",
+                    submittedBy: contactSubmittedBy,
+                    topic: contactTopic,
                     createdAt: createdAt.toISOString(),
                   };
                   setIsContactRequestSubmitting(true);
@@ -28985,9 +29046,7 @@ function UtilityView({
                   const sendResult = await sendContactSupportRequest({
                     ...requestBase,
                     workspaceName,
-                    userName: authenticatedUserName,
-                    userEmail: authenticatedUserEmail,
-                    appSection: "Contact",
+                    topic: contactTopic,
                   });
                   const nextRequest: ContactRequest = {
                     ...requestBase,
@@ -29025,13 +29084,35 @@ function UtilityView({
                 <div className="space-y-3">
                   <label className="grid grid-cols-[96px_minmax(0,1fr)] items-center gap-4 rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3">
                     <span className="text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
-                      Context
+                      Submitted by
                     </span>
                     <input
-                      value={primaryWorkspaceEmail}
+                      value={contactSubmittedBy}
                       readOnly
                       className="w-full cursor-default bg-transparent text-[0.9rem] leading-6 text-[var(--workspace-text-soft)] outline-none"
                     />
+                  </label>
+                  <label className="grid grid-cols-[96px_minmax(0,1fr)] items-center gap-4 rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3">
+                    <span className="text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                      Topic
+                    </span>
+                    <select
+                      value={contactTopic}
+                      onChange={(event) => {
+                        const nextTopic = event.target.value;
+                        setContactTopic(
+                          isContactRequestTopic(nextTopic) ? nextTopic : "General",
+                        );
+                        setContactRequestNotice(null);
+                      }}
+                      className="w-full bg-transparent text-[0.9rem] leading-6 text-[var(--workspace-text-soft)] outline-none"
+                    >
+                      {contactRequestTopicOptions.map((topic) => (
+                        <option key={topic} value={topic}>
+                          {topic}
+                        </option>
+                      ))}
+                    </select>
                   </label>
                   <label className="grid grid-cols-[96px_minmax(0,1fr)] items-center gap-4 rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3">
                     <span className="text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
@@ -29156,6 +29237,10 @@ function UtilityView({
                           <div className="mt-2 text-[0.8rem] leading-5 text-[var(--workspace-text-faint)]">
                             Created {formatContactRequestTimestamp(request.createdAt)}
                           </div>
+                          <div className="mt-2 flex flex-wrap gap-2 text-[0.76rem] leading-5 text-[var(--workspace-text-faint)]">
+                            <span>Submitted by {request.submittedBy}</span>
+                            <span>Topic: {request.topic}</span>
+                          </div>
                           <p className="mt-2 line-clamp-2 text-[0.86rem] leading-6 text-[var(--workspace-text-soft)]">
                             {preview}
                           </p>
@@ -29205,23 +29290,21 @@ function UtilityView({
                         </div>
                       </div>
 
-                      <div className="mt-6 grid gap-4 md:grid-cols-[minmax(0,0.8fr)_minmax(0,1.2fr)]">
+                      <div className="mt-6 grid gap-4 md:grid-cols-2">
                         <div className="rounded-[20px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-4">
                           <div className="text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
-                            Workspace context
+                            Submitted by
                           </div>
                           <div className="mt-2 break-words text-[0.92rem] leading-6 text-[var(--workspace-text-soft)]">
-                            {activeContactRequest.fromInbox}
+                            {activeContactRequest.submittedBy}
                           </div>
                         </div>
                         <div className="rounded-[20px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-4">
                           <div className="text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
-                            Delivery
+                            Topic
                           </div>
                           <div className="mt-2 text-[0.92rem] leading-6 text-[var(--workspace-text-soft)]">
-                            {activeContactRequest.status === "Saved locally"
-                              ? "Saved locally. Delivery did not complete."
-                              : "Sent privately to Cuevion support."}
+                            {activeContactRequest.topic}
                           </div>
                         </div>
                       </div>
@@ -37921,8 +38004,7 @@ export function WorkspaceShell({
                   onSetLastViewedGuidance={setLastViewedGuidance}
                   primaryWorkspaceEmail={primaryWorkspaceEmail}
                   workspaceName={workspaceName}
-                  authenticatedUserName={accountDisplayName}
-                  authenticatedUserEmail={accountDisplayEmail}
+                  authenticatedUserName={authenticatedUser?.name ?? ""}
                 />
               </div>
             ) : (
