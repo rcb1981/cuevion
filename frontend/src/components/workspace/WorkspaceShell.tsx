@@ -8577,6 +8577,8 @@ const primaryActionSurfaceClass =
 
 const closeActionButtonClass =
   `inline-flex items-center gap-2 rounded-full px-4 py-2 text-[0.68rem] font-medium uppercase tracking-[0.16em] ${primaryActionSurfaceClass}`;
+const navigationCloseBackButtonClass =
+  "inline-flex items-center gap-2 rounded-full border border-[color:rgba(218,194,142,0.5)] bg-[linear-gradient(180deg,rgba(239,224,188,0.97),rgba(197,163,100,0.95))] px-4 py-2 text-[0.68rem] font-semibold uppercase tracking-[0.15em] text-[color:rgba(29,58,48,0.96)] shadow-[inset_0_1px_0_rgba(255,252,240,0.62),inset_0_-1px_0_rgba(111,76,36,0.13),0_8px_18px_rgba(28,43,34,0.12)] transition-[background-image,border-color,transform,box-shadow] duration-150 hover:border-[color:rgba(225,202,151,0.62)] hover:bg-[linear-gradient(180deg,rgba(243,229,195,0.98),rgba(184,149,88,0.97))] hover:shadow-[inset_0_1px_0_rgba(255,252,240,0.68),inset_0_-1px_0_rgba(98,67,32,0.15),0_10px_22px_rgba(28,43,34,0.16)] active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:rgba(237,222,184,0.72)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--workspace-bg)]";
 
 const mailboxPrimaryActionButtonClass =
   `inline-flex h-9 items-center justify-center rounded-full px-4 text-[0.68rem] font-medium uppercase tracking-[0.18em] ${primaryActionSurfaceClass}`;
@@ -8718,7 +8720,7 @@ function CloseActionButton({
     <button
       type="button"
       onClick={onClick}
-      className={closeActionButtonClass}
+      className={navigationCloseBackButtonClass}
     >
       Close
     </button>
@@ -19503,7 +19505,7 @@ function MailboxView({
                 <button
                   type="button"
                   onClick={() => setIsCloseModalOpen(true)}
-                  className={closeActionButtonClass}
+                  className={navigationCloseBackButtonClass}
                 >
                   Close
                 </button>
@@ -19805,7 +19807,7 @@ function MailboxView({
                       closeReadingLearningMenu();
                       setIsFullMessageOpen(false);
                     }}
-                    className={closeActionButtonClass}
+                    className={navigationCloseBackButtonClass}
                   >
                     Close
                   </button>
@@ -23313,7 +23315,7 @@ function WorkbenchView({
                 <button
                   type="button"
                   onClick={() => setIsInviteMemberOpen(false)}
-                  className={closeActionButtonClass}
+                  className={navigationCloseBackButtonClass}
                 >
                   Close
                 </button>
@@ -26571,7 +26573,7 @@ const ManageInboxesView = memo(function ManageInboxesView({
         <button
           type="button"
           onClick={handleClose}
-          className={settingsPairedSecondaryActionClass}
+          className={navigationCloseBackButtonClass}
         >
           Back
         </button>
@@ -28410,7 +28412,7 @@ const AccountSettingsCard = memo(function AccountSettingsCard({
             <button
               type="button"
               onClick={handleCloseManagePlan}
-              className={settingsSubtleActionClass}
+              className={navigationCloseBackButtonClass}
             >
               Close
             </button>
@@ -29122,7 +29124,7 @@ function UtilityView({
                         <button
                           type="button"
                           onClick={() => setActiveContactTicketId(null)}
-                          className={closeActionButtonClass}
+                          className={navigationCloseBackButtonClass}
                         >
                           Close
                         </button>
@@ -30343,7 +30345,7 @@ function ForYouView({
               <button
                 type="button"
                 onClick={closeLearningModal}
-                className={closeActionButtonClass}
+                className={navigationCloseBackButtonClass}
               >
                 Close
               </button>
@@ -30472,7 +30474,7 @@ function ForYouView({
                       current === 0 ? totalUncertainEmails - 1 : current - 1,
                     )
                   }
-                  className={closeActionButtonClass}
+                  className={navigationCloseBackButtonClass}
                 >
                   Back
                 </button>
@@ -30556,7 +30558,7 @@ function ForYouView({
               <button
                 type="button"
                 onClick={closeLearningModal}
-                className={closeActionButtonClass}
+                className={navigationCloseBackButtonClass}
               >
                 Close
               </button>
@@ -30620,7 +30622,7 @@ function ForYouView({
               <button
                 type="button"
                 onClick={closeLearningModal}
-                className={closeActionButtonClass}
+                className={navigationCloseBackButtonClass}
               >
                 Close
               </button>
@@ -30822,7 +30824,7 @@ function ForYouView({
               <button
                 type="button"
                 onClick={closeLearningModal}
-                className={closeActionButtonClass}
+                className={navigationCloseBackButtonClass}
               >
                 Close
               </button>
@@ -30848,7 +30850,7 @@ function ForYouView({
                         <button
                           type="button"
                           onClick={() => setIsLearningFullMessageOpen(false)}
-                          className={closeActionButtonClass}
+                          className={navigationCloseBackButtonClass}
                         >
                           Back to Refine
                         </button>
@@ -31162,7 +31164,7 @@ function ForYouView({
                       Math.max(current - 1, 0),
                     )
                   }
-                  className={`${closeActionButtonClass} ${
+                  className={`${navigationCloseBackButtonClass} ${
                     hasActiveLearningSession && safeLearningSuggestionIndex > 0
                       ? ""
                       : "cursor-default border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] text-[var(--workspace-text-faint)] opacity-55"
