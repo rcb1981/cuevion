@@ -30,6 +30,8 @@ export type ForYouLearningSuggestion = {
   category: CuevionMessageCategory;
   categoryConfidence: "low" | "medium" | "high";
   priorityScore: "low" | "medium" | "high";
+  displayLabel: CuevionLearningLabel;
+  displayPriority: CuevionLearningPriorityLevel;
 };
 
 export type ForYouUncertainEmail = {
@@ -41,6 +43,8 @@ export type ForYouUncertainEmail = {
   preview: string[];
   reason: string;
   currentMailboxLabel: string;
+  displayLabel: CuevionLearningLabel;
+  displayPriority: CuevionLearningPriorityLevel;
 };
 
 export type ForYouRecentLearningDecision = {
@@ -68,6 +72,11 @@ export type ForYouDerivationMessage = {
   subject: string;
   createdAt?: string;
   category: CuevionMessageCategory;
+  signal?: string;
+  ui_signal?: string;
+  internalClassification?: string | null;
+  final_visibility?: string;
+  action?: string;
   categorySource: "system" | "user" | "learned";
   categoryConfidence: "low" | "medium" | "high";
   priorityScore: "low" | "medium" | "high";
@@ -81,6 +90,8 @@ export type ForYouDerivationMessage = {
   };
 };
 
+export type CuevionLearningPriorityLevel = "Priority" | "Normal" | "Low";
+
 export type ForYouMailboxStore<TMessage extends ForYouDerivationMessage> = Record<
   string,
   {
@@ -89,14 +100,116 @@ export type ForYouMailboxStore<TMessage extends ForYouDerivationMessage> = Recor
 >;
 
 export function formatForYouReason(
-  message: Pick<ForYouDerivationMessage, "category">,
-  categoryLabel: string,
+  displayLabel: CuevionLearningLabel,
+  displayPriority: CuevionLearningPriorityLevel,
 ) {
-  return `Cuevion thinks this is ${categoryLabel}, but is not confident yet.`;
+  return `Cuevion labelled this as ${displayPriority} · ${displayLabel}, but is not fully sure yet.`;
 }
 
-function formatForYouCategoryLabel(category: CuevionMessageCategory) {
-  return category === "Updates" ? "Update" : category;
+function formatForYouCategoryLabel(category: CuevionMessageCategory): CuevionLearningLabel {
+  if (category === "Promo") {
+    return "Promo";
+  }
+
+  if (category === "Updates") {
+    return "Update";
+  }
+
+  return "Other";
+}
+
+function normalizeLearningSignal(value?: string | null) {
+  return value?.trim().toLowerCase().replace(/[\s-]+/g, "_") ?? "";
+}
+
+function resolveLabelFromClassification(
+  value?: string | null,
+): CuevionLearningLabel | null {
+  switch (normalizeLearningSignal(value)) {
+    case "demo":
+    case "high_priority_demo":
+    case "incomplete_demo":
+      return "Demo";
+    case "promo":
+    case "promo_reminder":
+      return "Promo";
+    case "business":
+    case "business_reminder":
+      return "Business";
+    case "finance":
+    case "royalty_statement":
+      return "Finance";
+    case "workflow_update":
+    case "distributor_update":
+    case "info":
+    case "update":
+    case "updates":
+      return "Update";
+    case "reply":
+      return "Reply";
+    case "spam":
+      return "Spam";
+    case "primary":
+    case "unknown":
+      return "Other";
+    default:
+      return null;
+  }
+}
+
+export function resolveForYouLearningDisplayLabel(
+  message: Pick<
+    ForYouDerivationMessage,
+    "category" | "internalClassification" | "signal" | "ui_signal"
+  >,
+): CuevionLearningLabel {
+  return (
+    resolveLabelFromClassification(message.internalClassification) ??
+    resolveLabelFromClassification(message.ui_signal) ??
+    resolveLabelFromClassification(message.signal) ??
+    formatForYouCategoryLabel(message.category)
+  );
+}
+
+export function resolveForYouLearningDisplayPriority(
+  message: Pick<
+    ForYouDerivationMessage,
+    "priorityScore" | "signal" | "ui_signal" | "final_visibility" | "action"
+  >,
+): CuevionLearningPriorityLevel {
+  const explicitSignals = [
+    message.signal,
+    message.ui_signal,
+    message.final_visibility,
+    message.action,
+  ].map(normalizeLearningSignal);
+
+  if (
+    explicitSignals.some((signal) =>
+      ["priority", "high", "important", "show_priority"].includes(signal),
+    ) ||
+    message.priorityScore === "high"
+  ) {
+    return "Priority";
+  }
+
+  if (
+    explicitSignals.some((signal) =>
+      ["low", "show_low", "show_less", "show_in_quiet_view"].includes(signal),
+    ) ||
+    message.priorityScore === "low"
+  ) {
+    return "Low";
+  }
+
+  return "Normal";
+}
+
+export function formatLearningDecisionSummary(
+  displayPriority: CuevionLearningPriorityLevel,
+  displayLabel: CuevionLearningLabel,
+) {
+  return `${displayPriority} · ${displayLabel}`;
 }
 
 function formatForYouRecentLearningAction(
@@ -156,7 +269,7 @@ export function buildForYouLearningPools<TMessage extends ForYouDerivationMessag
   isAIEnabled: boolean,
   mailboxStore: ForYouMailboxStore<TMessage>,
   resolveMailDateMs: (message: TMessage) => number,
-  resolveMailboxLabel: (
+  _resolveMailboxLabel: (
     category: CuevionMessageCategory,
     mailboxId: InboxId | null,
   ) => string,
@@ -204,7 +317,8 @@ export function buildForYouLearningPools<TMessage extends ForYouDerivationMessag
     .map(({ mailboxId, message }): ForYouLearningSuggestion => {
       const senderFrequency =
         senderFrequencyByKey[normalizeSenderLearningKey(message.from)] ?? 1;
-      const mailboxLabel = resolveMailboxLabel(message.category, mailboxId);
+      const displayLabel = resolveForYouLearningDisplayLabel(message);
+      const displayPriority = resolveForYouLearningDisplayPriority(message);
 
       return {
         key: message.id,
@@ -215,18 +329,22 @@ export function buildForYouLearningPools<TMessage extends ForYouDerivationMessag
         uncertainty: 94,
         senderFrequency,
         snippet: message.body.slice(0, 2).length > 0 ? message.body.slice(0, 2) : [message.snippet],
-        reason: formatForYouReason(message, mailboxLabel),
+        reason: formatForYouReason(displayLabel, displayPriority),
         mailboxId,
         category: message.category,
         categoryConfidence: message.categoryConfidence,
         priorityScore: message.priorityScore,
+        displayLabel,
+        displayPriority,
       };
     });
   const uncertainEmailPool = realUncertainMessages
     .filter(({ message }) => isReviewUncertainEligible(message))
     .slice(0, 5)
     .map(({ mailboxId, message }): ForYouUncertainEmail => {
-      const mailboxLabel = resolveMailboxLabel(message.category, mailboxId);
+      const displayLabel = resolveForYouLearningDisplayLabel(message);
+      const displayPriority = resolveForYouLearningDisplayPriority(message);
+      const decisionSummary = formatLearningDecisionSummary(displayPriority, displayLabel);
 
       return {
         key: message.id,
@@ -235,8 +353,10 @@ export function buildForYouLearningPools<TMessage extends ForYouDerivationMessag
         mailboxId,
         subject: message.subject,
         preview: message.body.slice(0, 2).length > 0 ? message.body.slice(0, 2) : [message.snippet],
-        reason: formatForYouReason(message, mailboxLabel),
-        currentMailboxLabel: mailboxLabel,
+        reason: formatForYouReason(displayLabel, displayPriority),
+        currentMailboxLabel: decisionSummary,
+        displayLabel,
+        displayPriority,
       };
     });
 

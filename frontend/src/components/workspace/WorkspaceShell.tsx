@@ -29552,12 +29552,15 @@ function ForYouView({
     activeLearningSuggestion?.mailboxId ?? null,
   );
   const activeLearningCurrentLabel = activeLearningSuggestion
-    ? resolveLearningLabelFromCategory(activeLearningSuggestion.category)
+    ? activeLearningSuggestion.displayLabel
     : "Other";
   const activeLearningCurrentPriority = activeLearningSuggestion
-    ? resolveLearningPriorityFromMessage(activeLearningSuggestion.priorityScore)
+    ? activeLearningSuggestion.displayPriority
     : "Normal";
-  const activeLearningSummary = `${activeLearningCurrentPriority} · ${activeLearningCurrentLabel}`;
+  const activeLearningSummary = forYouEngine.formatLearningDecisionSummary(
+    activeLearningCurrentPriority,
+    activeLearningCurrentLabel,
+  );
   const trimmedPastedRuleValue = pastedRuleValue.trim();
   const pasteRuleInputType = resolvePasteRuleInputType(trimmedPastedRuleValue);
   const pasteRuleType =
@@ -30714,9 +30717,18 @@ function ForYouView({
                   Current Cuevion decision
                 </div>
                 <div className="mt-2 text-[0.96rem] leading-7 text-[var(--workspace-text)]">
+                  Cuevion labelled this as {activeLearningSummary}
                   {activeLearningSuggestion.categoryConfidence === "low"
-                    ? "Cuevion is not fully sure about this label and priority."
-                    : `Cuevion labelled this as ${activeLearningSummary}.`}
+                    ? ", but is not fully sure yet."
+                    : "."}
+                </div>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <span className="inline-flex items-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-modal-inner)] px-3 py-1 text-[0.72rem] font-medium text-[var(--workspace-text-soft)]">
+                    Label: {activeLearningCurrentLabel}
+                  </span>
+                  <span className="inline-flex items-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-modal-inner)] px-3 py-1 text-[0.72rem] font-medium text-[var(--workspace-text-soft)]">
+                    Priority: {activeLearningCurrentPriority}
+                  </span>
                 </div>
                 <div className="mt-1 text-[0.78rem] leading-5 text-[var(--workspace-text-faint)]">
                   Source inbox: {activeLearningSourceInboxTitle}
