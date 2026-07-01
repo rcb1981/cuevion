@@ -2,7 +2,7 @@ import type { LiveInboxMessageSnapshot } from "./inboxConnectionApi";
 
 const LIVE_INBOX_SNAPSHOTS_STORAGE_KEY = "cuevion-live-inbox-snapshots";
 const LIVE_INBOX_SNAPSHOT_SCHEMA_VERSION = 5;
-export const MUSIC_CLASSIFIER_VERSION = "2026-06-30-subject-first-v2";
+export const MUSIC_CLASSIFIER_VERSION = "2026-07-01-universal-music-subject-v3";
 
 export type LiveInboxSnapshot = {
   schemaVersion?: number;

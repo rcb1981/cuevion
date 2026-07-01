@@ -653,7 +653,9 @@ def resolve_preview_routing(
             is_distributor_update_email,
             is_promo_reminder_email,
             is_royalty_statement_email,
+            has_strong_meta_ads_finance_context,
             normalize_priority,
+            strip_url_tracking_params_for_keyword_matching,
         )
         from v7_config import EngineResult
         from v7_decision_layer import decide_message_behavior
@@ -823,9 +825,12 @@ def resolve_preview_routing(
             "suspicious activity",
         ]
         classification_text = f"{subject_lower} {body_lower}"
+        finance_meta_body_text = strip_url_tracking_params_for_keyword_matching(body_lower)
+        finance_meta_text = f"{subject_lower} {finance_meta_body_text}"
         is_promo_mailbox_context = any(
             keyword in local_part for keyword in ["promo", "press", "servicing"]
         )
+        is_demo_mailbox_context = "demo" in local_part
         has_subject_promo_marker = (
             subject_lower == "promo"
             or subject_lower.startswith("promo:")
@@ -881,8 +886,8 @@ def resolve_preview_routing(
         elif has_google_security_signal:
             result["category"] = "info"
         elif (
-            any(keyword in classification_text for keyword in finance_keywords)
-            or any(keyword in classification_text for keyword in meta_ads_keywords)
+            any(keyword in finance_meta_text for keyword in finance_keywords)
+            or has_strong_meta_ads_finance_context(sender_lower, finance_meta_text)
         ) and not has_clear_update_newsletter_signal:
             result["category"] = "finance"
         elif has_clear_update_newsletter_signal:
@@ -926,8 +931,34 @@ def resolve_preview_routing(
                     category="demo",
                     user_link_settings=USER_LINK_SETTINGS,
                 )
-                result["category"] = "demo" if fallback_demo_links else "incomplete_demo"
-                result["usable_demo_links"] = fallback_demo_links
+                has_demo_fallback_context = (
+                    is_demo_mailbox_context
+                    or bool(fallback_demo_links)
+                    or any(
+                        keyword in classification_text
+                        for keyword in [
+                            "track",
+                            "artist",
+                            "producer",
+                            "label",
+                            "soundcloud",
+                            "dropbox",
+                            "disco",
+                            "google drive",
+                            "gdrive",
+                            "onedrive",
+                            "wetransfer",
+                        ]
+                    )
+                )
+                if has_demo_fallback_context:
+                    result["category"] = "demo" if fallback_demo_links else "incomplete_demo"
+                    result["usable_demo_links"] = fallback_demo_links
+                else:
+                    logger.info(
+                        "Blocked generic link/demo classification | reason=blocked_generic_link_to_demo_classification subject='%s'",
+                        subject,
+                    )
             elif any(keyword in classification_text for keyword in business_keywords):
                 result["category"] = "business"
 

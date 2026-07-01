@@ -129,7 +129,7 @@ USER_REMINDER_SETTINGS = {
     "business_reminders_mode": "show_normal",
 }
 
-MUSIC_CLASSIFIER_VERSION = "2026-06-30-subject-first-v2"
+MUSIC_CLASSIFIER_VERSION = "2026-07-01-universal-music-subject-v3"
 
 V7_USER_CONFIG = create_default_user_config(
     user_id="local_test",
@@ -1284,8 +1284,6 @@ PROTECTED_MUSIC_CATEGORIES = {
     "distributor_update",
     "royalty_statement",
     "business_reminder",
-    "finance",
-    "workflow_update",
     "security",
     "system",
     "spam",
@@ -1301,12 +1299,109 @@ def normalize_subject_for_music_intent(subject):
     return normalized
 
 
+def tokenize_subject_for_music_intent(subject):
+    normalized_subject = normalize_subject_for_music_intent(subject)
+    return re.findall(r"[^\W_]+", normalized_subject, flags=re.UNICODE)
+
+
 def _contains_phrase(text, phrase):
     return re.search(r"(?<![a-z0-9])" + re.escape(phrase) + r"(?![a-z0-9])", text) is not None
 
 
 def _contains_any_phrase(text, phrases):
     return [phrase for phrase in phrases if _contains_phrase(text, phrase)]
+
+
+URL_TRACKING_QUERY_PARAMS = {
+    "utm_source",
+    "utm_medium",
+    "utm_campaign",
+    "utm_content",
+    "utm_term",
+    "si",
+    "text",
+    "fbclid",
+    "gclid",
+}
+
+
+def strip_url_tracking_params_for_keyword_matching(text):
+    ignored_tracking_params = False
+
+    def sanitize_url(match):
+        nonlocal ignored_tracking_params
+        url = match.group(0)
+        trailing = ""
+
+        while url and url[-1] in ".,);]}>":
+            trailing = url[-1] + trailing
+            url = url[:-1]
+
+        parsed = urlparse(url)
+        if not parsed.query:
+            return url + trailing
+
+        query_keys = {key.lower() for key in parse_qs(parsed.query, keep_blank_values=True)}
+        if query_keys & URL_TRACKING_QUERY_PARAMS or parsed.query:
+            ignored_tracking_params = True
+
+        return parsed._replace(query="", fragment="").geturl() + trailing
+
+    sanitized = re.sub(r"https?://[^\s<>\"]+", sanitize_url, text or "")
+
+    if ignored_tracking_params:
+        logger.info(
+            "Ignored URL tracking params for finance/meta keyword matching | reason=ignored_url_tracking_params_for_finance_detection"
+        )
+
+    return sanitized
+
+
+def has_strong_meta_ads_finance_context(sender_text, text):
+    sender_text = (sender_text or "").lower()
+    text = (text or "").lower()
+    sender_has_meta_context = any(
+        marker in sender_text
+        for marker in [
+            "facebook.com",
+            "facebookmail.com",
+            "business.facebook",
+            "meta",
+            "ads",
+            "billing",
+        ]
+    )
+    strong_ads_terms = [
+        "meta ads",
+        "facebook ads",
+        "ad account",
+        "ads account",
+        "advertising account",
+        "account id",
+        "advertentie",
+        "advertenties",
+    ]
+    financial_terms = [
+        "invoice",
+        "payment",
+        "billing",
+        "receipt",
+        "factuur",
+        "betaling",
+        "ontvangstbewijs",
+    ]
+    campaign_terms = [
+        "campaign approved",
+        "campaign",
+    ]
+
+    has_ads_term = any(term in text for term in strong_ads_terms)
+    has_financial_term = any(term in text for term in financial_terms)
+    has_campaign_term = any(term in text for term in campaign_terms)
+
+    return (
+        sender_has_meta_context and (has_ads_term or has_financial_term or has_campaign_term)
+    ) or (has_ads_term and has_financial_term)
 
 
 def _recipient_local_part(to_header):
@@ -1341,10 +1436,10 @@ def _has_usable_music_link(extracted_links, user_link_settings=None):
 
 def detect_subject_first_music_intent(subject):
     normalized_subject = normalize_subject_for_music_intent(subject)
+    subject_tokens = tokenize_subject_for_music_intent(subject)
+    token_set = set(subject_tokens)
 
     promo_subject_phrases = [
-        "promo",
-        "promo submission",
         "promo for",
         "dj promo",
         "radio promo",
@@ -1374,7 +1469,6 @@ def detect_subject_first_music_intent(subject):
         "advertising promotion",
     ]
     demo_subject_phrases = [
-        "demo",
         "demo submission",
         "new demo",
         "unreleased demo",
@@ -1386,17 +1480,30 @@ def detect_subject_first_music_intent(subject):
     ]
 
     promo_hits = _contains_any_phrase(normalized_subject, promo_subject_phrases)
+    if "promo" in token_set:
+        promo_hits.insert(0, "promo")
+    if "promos" in token_set:
+        promo_hits.insert(0, "promos")
+
     if promo_hits and not any(phrase in normalized_subject for phrase in blocked_promo_contexts):
         return {
             "normalized_subject": normalized_subject,
+            "subject_tokens": subject_tokens,
             "promo_subject_hits": promo_hits,
             "demo_subject_hits": [],
         }
 
+    demo_hits = _contains_any_phrase(normalized_subject, demo_subject_phrases)
+    if "demo" in token_set:
+        demo_hits.insert(0, "demo")
+    if "demos" in token_set:
+        demo_hits.insert(0, "demos")
+
     return {
         "normalized_subject": normalized_subject,
+        "subject_tokens": subject_tokens,
         "promo_subject_hits": [],
-        "demo_subject_hits": _contains_any_phrase(normalized_subject, demo_subject_phrases),
+        "demo_subject_hits": demo_hits,
     }
 
 
@@ -1418,18 +1525,49 @@ def _has_music_promo_context(text, extracted_links=None, user_link_settings=None
         "radio support",
         "dj support",
         "playlist support",
+        "promo pack",
         "voor je set",
+        "for your set",
+        "for your sets",
         "voor support",
         "nieuwe release",
+        "upcoming release",
+        "out now",
+        "out soon",
         "hier een promo",
         "hierbij een promo",
         "dikke promo",
+        "track",
+        "producer",
+        "artist",
+        "label",
+        "listen",
+        "hear it",
+        "submit",
+        "submission",
+        "demo submission",
+        "unreleased",
+        "feedback",
+        "sign",
+        "signing",
+        "consideration",
+        "description",
     ]
 
     return (
         _has_usable_music_link(extracted_links or {}, user_link_settings=user_link_settings)
         or any(phrase in text for phrase in music_context_phrases)
     )
+
+
+def _has_website_demo_form_fields(body_text):
+    form_fields = [
+        "name",
+        "email",
+        "soundcloud",
+        "description",
+    ]
+    return sum(1 for field in form_fields if _contains_phrase(body_text, field)) >= 3
 
 
 def detect_hard_music_category(
@@ -1503,11 +1641,25 @@ def detect_hard_music_category(
     promo_context = recipient_local == "promo" or inbox_profile == "promo_first" or "promo" in sender_text
     demo_context = recipient_local == "demo" or inbox_profile == "demo_first"
     has_music_link = _has_usable_music_link(extracted_links or {}, user_link_settings=user_link_settings)
+    has_website_demo_form_fields = _has_website_demo_form_fields(body_text)
+    has_website_demo_form_context = (
+        (
+            "demo submission via website" in normalized_subject
+            or _contains_phrase(normalized_subject, "demo submission")
+        )
+        and (
+            demo_context
+            or "demo@" in sender_text
+            or "hysteriarecs.com" in sender_text
+            or "hysteriarecs" in sender_text
+        )
+        and has_website_demo_form_fields
+    )
     has_music_context = _has_music_promo_context(
         f"{normalized_subject} {body_text}",
         extracted_links=extracted_links,
         user_link_settings=user_link_settings,
-    )
+    ) or demo_context or has_website_demo_form_fields
 
     if is_promo_reminder_email(subject, body, sender_email):
         return {
@@ -1526,8 +1678,12 @@ def detect_hard_music_category(
     has_body_promo = bool(promo_body_hits)
     has_body_demo = bool(demo_body_hits)
     subject_promo_hits = set(subject_intent["promo_subject_hits"])
+    subject_demo_hits = set(subject_intent["demo_subject_hits"])
     has_standalone_promo_subject = "promo" in subject_promo_hits
-    has_only_weak_promo_subject = bool(subject_promo_hits) and subject_promo_hits.issubset({"promo", "release"})
+    has_standalone_promos_subject = "promos" in subject_promo_hits
+    has_standalone_demo_subject = "demo" in subject_demo_hits
+    has_standalone_demos_subject = "demos" in subject_demo_hits
+    has_only_weak_promo_subject = bool(subject_promo_hits) and subject_promo_hits.issubset({"promo", "promos", "release"})
 
     if has_subject_promo and has_body_demo and not (has_body_promo or promo_context):
         logger.warning(
@@ -1543,10 +1699,42 @@ def detect_hard_music_category(
         )
         return None
 
-    if has_standalone_promo_subject and has_music_context:
+    if has_website_demo_form_context:
+        return {
+            "category": "demo" if has_music_link else "incomplete_demo",
+            "reason": "demo_subject_website_form_context",
+            "has_music_link": has_music_link,
+            "details": {
+                "normalized_subject": normalized_subject,
+                "promo_hits": promo_hits,
+                "demo_hits": demo_hits,
+            },
+        }
+
+    if (has_standalone_promo_subject or has_standalone_promos_subject) and has_music_context:
         return {
             "category": "promo",
-            "reason": "standalone_promo_subject_with_music_context",
+            "reason": (
+                "standalone_promos_subject_with_music_context"
+                if has_standalone_promos_subject
+                else "standalone_promo_subject_with_music_context"
+            ),
+            "has_music_link": has_music_link,
+            "details": {
+                "normalized_subject": normalized_subject,
+                "promo_hits": promo_hits,
+                "demo_hits": demo_hits,
+            },
+        }
+
+    if (has_standalone_demo_subject or has_standalone_demos_subject) and has_music_context:
+        return {
+            "category": "demo" if has_music_link else "incomplete_demo",
+            "reason": (
+                "standalone_demos_subject_with_music_context"
+                if has_standalone_demos_subject
+                else "standalone_demo_subject_with_music_context"
+            ),
             "has_music_link": has_music_link,
             "details": {
                 "normalized_subject": normalized_subject,
@@ -1569,7 +1757,7 @@ def detect_hard_music_category(
             },
         }
 
-    if has_subject_demo or (has_body_demo and demo_context):
+    if (has_subject_demo and has_music_context) or (has_body_demo and demo_context):
         return {
             "category": "demo" if has_music_link else "incomplete_demo",
             "reason": "hard_demo_subject_link" if has_music_link else "hard_demo_subject_no_link",
