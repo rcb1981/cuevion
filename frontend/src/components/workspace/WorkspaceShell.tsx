@@ -8579,6 +8579,8 @@ const closeActionButtonClass =
   `inline-flex items-center gap-2 rounded-full px-4 py-2 text-[0.68rem] font-medium uppercase tracking-[0.16em] ${primaryActionSurfaceClass}`;
 const navigationCloseBackButtonClass =
   "inline-flex items-center gap-2 rounded-full border border-[color:rgba(218,194,142,0.5)] bg-[linear-gradient(180deg,rgba(239,224,188,0.97),rgba(197,163,100,0.95))] px-4 py-2 text-[0.68rem] font-semibold uppercase tracking-[0.15em] text-[color:rgba(29,58,48,0.96)] shadow-[inset_0_1px_0_rgba(255,252,240,0.62),inset_0_-1px_0_rgba(111,76,36,0.13),0_8px_18px_rgba(28,43,34,0.12)] transition-[background-image,border-color,transform,box-shadow] duration-150 hover:border-[color:rgba(225,202,151,0.62)] hover:bg-[linear-gradient(180deg,rgba(243,229,195,0.98),rgba(184,149,88,0.97))] hover:shadow-[inset_0_1px_0_rgba(255,252,240,0.68),inset_0_-1px_0_rgba(98,67,32,0.15),0_10px_22px_rgba(28,43,34,0.16)] active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:rgba(237,222,184,0.72)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--workspace-bg)]";
+const navigationCloseBackButtonDisabledClass =
+  "inline-flex cursor-default items-center gap-2 rounded-full border border-[color:rgba(188,166,124,0.34)] bg-[linear-gradient(180deg,rgba(226,209,169,0.52),rgba(155,129,85,0.42))] px-4 py-2 text-[0.68rem] font-semibold uppercase tracking-[0.15em] text-[color:rgba(41,65,55,0.78)] opacity-75 shadow-[inset_0_1px_0_rgba(255,252,240,0.26)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:rgba(237,222,184,0.48)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--workspace-bg)]";
 
 const mailboxPrimaryActionButtonClass =
   `inline-flex h-9 items-center justify-center rounded-full px-4 text-[0.68rem] font-medium uppercase tracking-[0.18em] ${primaryActionSurfaceClass}`;
@@ -12050,7 +12052,7 @@ function WorkspaceTargetView({
         <button
           type="button"
           onClick={onBack}
-          className={settingsPrimaryActionClass}
+          className={navigationCloseBackButtonClass}
         >
           Back
         </button>
@@ -19085,7 +19087,7 @@ function MailboxView({
             <button
               type="button"
               onClick={handleMailboxBack}
-              className={settingsPrimaryActionClass}
+              className={navigationCloseBackButtonClass}
             >
               Back
             </button>
@@ -31164,11 +31166,11 @@ function ForYouView({
                       Math.max(current - 1, 0),
                     )
                   }
-                  className={`${navigationCloseBackButtonClass} ${
+                  className={
                     hasActiveLearningSession && safeLearningSuggestionIndex > 0
-                      ? ""
-                      : "cursor-default border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] text-[var(--workspace-text-faint)] opacity-55"
-                  }`}
+                      ? navigationCloseBackButtonClass
+                      : navigationCloseBackButtonDisabledClass
+                  }
                 >
                   Back
                 </button>
@@ -31200,8 +31202,8 @@ function ForYouView({
                   }}
                   className={
                     hasActiveLearningSession && hasValidLearningSelection
-                      ? closeActionButtonClass
-                      : `${learningModalPrimaryActionButtonClass} cursor-default border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] text-[var(--workspace-text-faint)] opacity-55`
+                      ? navigationCloseBackButtonClass
+                      : navigationCloseBackButtonDisabledClass
                   }
                 >
                   {isLastLearningSuggestion ? "Finish" : "Next suggestion"}
