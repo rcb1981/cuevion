@@ -30706,22 +30706,29 @@ function ForYouView({
                 </div>
               ) : isLearningFullMessageOpen ? (
                 <div className="space-y-5">
-                  <div className="sticky top-0 z-10 -mx-1 flex flex-wrap items-start justify-between gap-4 bg-[var(--workspace-modal-subtle)] px-1 pb-3">
-                    <div className="space-y-2">
-                      <div className="text-[0.7rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
-                        Full message
+                  <div className="sticky top-0 z-10 -mx-1 bg-[var(--workspace-modal-subtle)] px-1 pb-3">
+                    <div className="flex flex-wrap items-start justify-between gap-4">
+                      <div className="space-y-2">
+                        <button
+                          type="button"
+                          onClick={() => setIsLearningFullMessageOpen(false)}
+                          className={closeActionButtonClass}
+                        >
+                          Back to Refine
+                        </button>
+                        <div className="text-[0.78rem] leading-5 text-[var(--workspace-text-faint)]">
+                          Return to the current suggestion without losing your choices.
+                        </div>
                       </div>
-                      <div className="text-[1.08rem] font-medium tracking-[-0.014em] text-[var(--workspace-text)]">
-                        {activeLearningSuggestion.subject}
+                      <div className="max-w-[24rem] space-y-2 text-left sm:text-right">
+                        <div className="text-[0.7rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                          Full message
+                        </div>
+                        <div className="text-[1.08rem] font-medium tracking-[-0.014em] text-[var(--workspace-text)]">
+                          {activeLearningSuggestion.subject}
+                        </div>
                       </div>
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => setIsLearningFullMessageOpen(false)}
-                      className={subtleSecondaryActionButtonClass}
-                    >
-                      Back to Refine
-                    </button>
                   </div>
 
                   <div className="grid gap-3 sm:grid-cols-2">
