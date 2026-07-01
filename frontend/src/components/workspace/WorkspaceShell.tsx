@@ -1284,6 +1284,7 @@ const OUT_OF_OFFICE_REPLY_LOG_STORAGE_KEY = "cuevion-out-of-office-reply-log";
 const MANAGED_INBOXES_STORAGE_KEY = "cuevion-managed-inboxes";
 const PENDING_OAUTH_MANAGED_INBOX_STORAGE_KEY = "cuevion-pending-oauth-managed-inbox";
 const PRIMARY_MANAGED_INBOX_ID_STORAGE_KEY = "cuevion-primary-managed-inbox-id";
+const WORKSPACE_NAME_STORAGE_KEY = "cuevion-workspace-name";
 const MAILBOX_TITLE_OVERRIDES_STORAGE_KEY = "cuevion-mailbox-title-overrides";
 const MAILBOX_FOCUS_PREFERENCE_OVERRIDES_STORAGE_KEY =
   "cuevion-mailbox-focus-preference-overrides";
@@ -1434,6 +1435,10 @@ function buildPrimaryManagedInboxStorageKey(
     .join("|");
 
   return `${PRIMARY_MANAGED_INBOX_ID_STORAGE_KEY}:${workspaceUserId}:${managedInboxSetKey}`;
+}
+
+function buildWorkspaceNameStorageKey(workspaceUserId: string) {
+  return `${WORKSPACE_NAME_STORAGE_KEY}:${workspaceUserId}`;
 }
 
 function createEmptySignatureSettings(): InboxSignatureSettings {
@@ -10720,6 +10725,7 @@ function SidebarNavigationIcon({ name }: { name: SidebarNavigationIconName }) {
 }
 
 function WorkspaceSidebar({
+  workspaceName,
   activeSection,
   activeMailboxId,
   activeSmartFolderId,
@@ -10737,6 +10743,7 @@ function WorkspaceSidebar({
   onEditSmartFolder,
   onRequestDeleteSmartFolder,
 }: {
+  workspaceName: string;
   activeSection: WorkspaceSection;
   activeMailboxId: InboxId | null;
   activeSmartFolderId: string | null;
@@ -11133,8 +11140,8 @@ function WorkspaceSidebar({
       <div className="absolute inset-0 bg-[var(--workspace-sidebar-glow)]" />
       <div className="relative flex h-full flex-col">
         <div className="flex h-full flex-col">
-          <span className="hidden rounded-full border border-[var(--workspace-sidebar-border)] bg-[var(--workspace-sidebar-hover)] px-3.5 py-2 text-xs uppercase tracking-[0.28em] text-[var(--workspace-sidebar-text-muted)] xl:inline-flex">
-            Workspace
+          <span className="hidden max-w-full truncate rounded-full border border-[var(--workspace-sidebar-border)] bg-[var(--workspace-sidebar-hover)] px-3.5 py-2 text-xs uppercase tracking-[0.18em] text-[var(--workspace-sidebar-text-muted)] xl:inline-block">
+            {workspaceName}
           </span>
           <div className="mt-8 flex justify-center xl:justify-start">
             <div className="xl:hidden">
@@ -24729,6 +24736,84 @@ function buildManagedWorkspaceInboxes(
   );
 }
 
+function normalizeWorkspaceName(value: string | null | undefined) {
+  const trimmedValue = value?.trim();
+
+  return trimmedValue && trimmedValue.length > 0 ? trimmedValue : "Workspace";
+}
+
+function formatWorkspaceNameFromEmail(email: string | null | undefined) {
+  const localPart = email?.split("@")[0]?.replace(/[._+-]+/g, " ").trim();
+
+  if (!localPart) {
+    return null;
+  }
+
+  return localPart.replace(/\b\w/g, (character) => character.toUpperCase());
+}
+
+const genericWorkspaceInboxTitles = new Set([
+  "business",
+  "business inbox",
+  "custom inbox",
+  "demo",
+  "demo inbox",
+  "finance",
+  "finance inbox",
+  "legal",
+  "legal inbox",
+  "licensing",
+  "main inbox",
+  "promo",
+  "promo inbox",
+  "royalty",
+  "royalty inbox",
+]);
+
+function resolveDefaultWorkspaceName({
+  authenticatedUser,
+  managedInboxes,
+}: {
+  authenticatedUser?: AuthenticatedCuevionUser | null;
+  managedInboxes: ManagedWorkspaceInbox[];
+}) {
+  const authName = authenticatedUser?.name?.trim();
+
+  if (authName) {
+    return authName;
+  }
+
+  const firstMeaningfulInboxTitle = managedInboxes
+    .find((mailbox) => {
+      const title = mailbox.title.trim();
+
+      return title.length > 0 && !genericWorkspaceInboxTitles.has(title.toLowerCase());
+    })
+    ?.title.trim();
+
+  if (firstMeaningfulInboxTitle) {
+    return firstMeaningfulInboxTitle;
+  }
+
+  const authEmailFallback = formatWorkspaceNameFromEmail(authenticatedUser?.email);
+
+  if (authEmailFallback) {
+    return authEmailFallback;
+  }
+
+  const firstInboxEmailFallback = formatWorkspaceNameFromEmail(
+    managedInboxes.find((mailbox) => mailbox.email.trim().length > 0)?.email,
+  );
+
+  if (firstInboxEmailFallback) {
+    return firstInboxEmailFallback;
+  }
+
+  return normalizeWorkspaceName(
+    managedInboxes.find((mailbox) => mailbox.title.trim().length > 0)?.title,
+  );
+}
+
 function isManagedInboxReady(
   mailbox: ManagedWorkspaceInbox,
   credentialStatuses: MailboxCredentialStatusStore = {},
@@ -24920,6 +25005,8 @@ const WorkspaceSettingsCard = memo(function WorkspaceSettingsCard({
   onManageInboxes: () => void;
 }) {
   const [isEditing, setIsEditing] = useState(false);
+  const [workspaceNameDraft, setWorkspaceNameDraft] = useState(savedWorkspaceName);
+  const [workspaceNameError, setWorkspaceNameError] = useState<string | null>(null);
   const [savedAutomationLevel, setSavedAutomationLevel] = useState<
     "Conservative" | "Balanced" | "Proactive"
   >("Balanced");
@@ -24927,12 +25014,37 @@ const WorkspaceSettingsCard = memo(function WorkspaceSettingsCard({
   const hasUnsavedAutomationLevelChanges =
     draftAutomationLevel !== savedAutomationLevel;
 
+  useEffect(() => {
+    if (!isEditing) {
+      setWorkspaceNameDraft(savedWorkspaceName);
+      setWorkspaceNameError(null);
+    }
+  }, [isEditing, savedWorkspaceName]);
+
   const handleCloseWorkspaceSettings = () => {
+    setWorkspaceNameDraft(savedWorkspaceName);
+    setWorkspaceNameError(null);
     setIsEditing(false);
   };
 
   const handleOpenWorkspaceSettings = () => {
+    setWorkspaceNameDraft(savedWorkspaceName);
+    setWorkspaceNameError(null);
     setIsEditing(true);
+  };
+
+  const handleSaveWorkspaceName = () => {
+    const trimmedWorkspaceName = workspaceNameDraft.trim();
+
+    if (!trimmedWorkspaceName) {
+      setWorkspaceNameError("Enter a workspace name.");
+      return;
+    }
+
+    onSaveWorkspaceName(trimmedWorkspaceName);
+    setWorkspaceNameDraft(trimmedWorkspaceName);
+    setWorkspaceNameError(null);
+    setIsEditing(false);
   };
 
   return (
@@ -24965,10 +25077,34 @@ const WorkspaceSettingsCard = memo(function WorkspaceSettingsCard({
               </label>
               <input
                 type="text"
-                value={savedWorkspaceName}
-                onChange={(event) => onSaveWorkspaceName(event.target.value)}
+                value={workspaceNameDraft}
+                onChange={(event) => {
+                  setWorkspaceNameDraft(event.target.value);
+                  setWorkspaceNameError(null);
+                }}
                 className="w-full rounded-[16px] border border-[var(--workspace-border)] bg-[var(--workspace-input-bg)] px-4 py-3 text-[0.94rem] text-[var(--workspace-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.08)] outline-none transition-[background-color,border-color,color] duration-150 placeholder:text-[var(--workspace-text-faint)] focus:border-[color:rgba(103,141,103,0.5)] focus:bg-[var(--workspace-input-focus-bg)]"
               />
+              {workspaceNameError ? (
+                <div className="mt-2 text-[0.78rem] leading-5 text-[color:rgba(146,82,73,0.96)] dark:text-[color:rgba(244,186,168,0.86)]">
+                  {workspaceNameError}
+                </div>
+              ) : null}
+              <div className="mt-3 flex justify-end gap-3">
+                <button
+                  type="button"
+                  onClick={handleCloseWorkspaceSettings}
+                  className={settingsPairedSecondaryActionClass}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={handleSaveWorkspaceName}
+                  className={`${settingsPrimaryActionClass} w-[7.5rem]`}
+                >
+                  Apply
+                </button>
+              </div>
             </div>
 
             <div className={settingsCardSectionClass}>
@@ -31262,6 +31398,11 @@ export function WorkspaceShell({
   const activeWorkspaceUserName =
     accountDisplayName;
   const currentWorkspaceUserId = normalizeSenderLearningKey(activeWorkspaceEmail);
+  const workspaceNameStorageKey = buildWorkspaceNameStorageKey(currentWorkspaceUserId);
+  const defaultWorkspaceName = resolveDefaultWorkspaceName({
+    authenticatedUser,
+    managedInboxes: savedManagedInboxes,
+  });
   const teamPendingInvitationStorageKey =
     buildTeamPendingInvitationStorageKey(currentWorkspaceUserId);
   const teamMembersStorageKey = buildTeamMembersStorageKey(currentWorkspaceUserId);
@@ -31998,7 +32139,38 @@ export function WorkspaceShell({
           : "Could not refresh this inbox.")
     );
   };
-  const [workspaceName, setWorkspaceName] = useState("Cuevion Studio");
+  const [workspaceName, setWorkspaceName] = useState(() => {
+    if (typeof window === "undefined") {
+      return defaultWorkspaceName;
+    }
+
+    return normalizeWorkspaceName(
+      window.localStorage.getItem(workspaceNameStorageKey) ?? defaultWorkspaceName,
+    );
+  });
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      setWorkspaceName(defaultWorkspaceName);
+      return;
+    }
+
+    setWorkspaceName(
+      normalizeWorkspaceName(
+        window.localStorage.getItem(workspaceNameStorageKey) ?? defaultWorkspaceName,
+      ),
+    );
+  }, [defaultWorkspaceName, workspaceNameStorageKey]);
+
+  const handleSaveWorkspaceName = (name: string) => {
+    const nextWorkspaceName = normalizeWorkspaceName(name);
+
+    setWorkspaceName(nextWorkspaceName);
+
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(workspaceNameStorageKey, nextWorkspaceName);
+    }
+  };
   const [inboxSignatures, setInboxSignatures] = useState<InboxSignatureStore>(() => {
     if (typeof window === "undefined") {
       return {};
@@ -37564,6 +37736,7 @@ export function WorkspaceShell({
       style={{ background: "var(--workspace-bg)", colorScheme: resolvedTheme }}
     >
       <WorkspaceSidebar
+        workspaceName={workspaceName}
         activeSection={activeSection}
         activeMailboxId={activeMailbox?.id ?? null}
         activeSmartFolderId={activeSmartFolderId}
@@ -37819,7 +37992,7 @@ export function WorkspaceShell({
                   onToggleTeamActivity={() =>
                     setTeamActivityEnabled((current) => !current)
                   }
-                  onSaveWorkspaceName={setWorkspaceName}
+                  onSaveWorkspaceName={handleSaveWorkspaceName}
                   onApplyFocusPreferences={handleApplyFocusPreferences}
                   isApplyingFocusPreferences={isApplyingFocusPreferences}
                   onApplyManagedInboxes={handleApplyManagedInboxes}
