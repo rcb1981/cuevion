@@ -40,6 +40,8 @@ const MAILBOX_TITLE_OVERRIDES_STORAGE_KEY = "cuevion-mailbox-title-overrides";
 const MAILBOX_FOCUS_PREFERENCE_OVERRIDES_STORAGE_KEY =
   "cuevion-mailbox-focus-preference-overrides";
 const SMART_FOLDERS_STORAGE_KEY = "cuevion-smart-folders";
+const premiumAccessButtonClass =
+  "inline-flex h-10 items-center justify-center rounded-full border border-[rgba(218,194,142,0.56)] bg-[linear-gradient(180deg,rgba(237,222,184,0.98),rgba(199,166,104,0.96))] px-5 text-[0.72rem] font-semibold uppercase tracking-[0.15em] text-[rgba(29,58,48,0.96)] shadow-[inset_0_1px_0_rgba(255,252,240,0.66),inset_0_-1px_0_rgba(119,82,38,0.14),0_10px_22px_rgba(15,36,30,0.18)] transition-[background-image,border-color,transform,box-shadow] duration-150 hover:border-[rgba(231,207,156,0.66)] hover:bg-[linear-gradient(180deg,rgba(242,228,192,0.98),rgba(184,149,88,0.98))] hover:shadow-[inset_0_1px_0_rgba(255,252,240,0.72),inset_0_-1px_0_rgba(99,68,32,0.16),0_12px_26px_rgba(15,36,30,0.22)] hover:-translate-y-px active:translate-y-0 active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[rgba(237,222,184,0.78)] focus-visible:ring-offset-2 focus-visible:ring-offset-[rgba(38,66,56,1)] disabled:cursor-not-allowed disabled:opacity-60";
 
 type AuthenticatedCuevionUser = {
   email: string;
@@ -342,7 +344,7 @@ function BetaAccessGate({
                   inviteCode: trimmedInviteCode,
                 });
               }}
-              className="inline-flex h-10 items-center justify-center rounded-full border border-[rgba(66,99,69,0.52)] bg-[linear-gradient(180deg,rgba(103,141,103,0.98),rgba(69,103,72,0.98))] px-5 text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[rgba(251,248,242,0.98)] shadow-[inset_0_1px_0_rgba(255,255,255,0.1),0_8px_18px_rgba(66,99,69,0.12)] transition-[background-image,border-color,transform,box-shadow] duration-150 hover:border-[rgba(58,88,62,0.6)] hover:bg-[linear-gradient(180deg,rgba(93,130,95,0.98),rgba(61,95,65,0.98))] active:scale-[0.99] focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-60"
+              className={premiumAccessButtonClass}
             >
               {loading ? "Checking access..." : "Open beta"}
             </button>
@@ -1264,7 +1266,7 @@ function CollaborationInviteAuthGate({
                   },
                 );
               }}
-              className="inline-flex h-10 items-center justify-center rounded-full border border-[rgba(66,99,69,0.52)] bg-[linear-gradient(180deg,rgba(103,141,103,0.98),rgba(69,103,72,0.98))] px-5 text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[rgba(251,248,242,0.98)] shadow-[inset_0_1px_0_rgba(255,255,255,0.1),0_8px_18px_rgba(66,99,69,0.12)] transition-[background-image,border-color,transform,box-shadow] duration-150 hover:border-[rgba(58,88,62,0.6)] hover:bg-[linear-gradient(180deg,rgba(93,130,95,0.98),rgba(61,95,65,0.98))] active:scale-[0.99] focus-visible:outline-none"
+              className={premiumAccessButtonClass}
             >
               Continue
             </button>
@@ -1398,7 +1400,7 @@ function TeamInviteRouteView({ route }: { route: TeamInviteRoute }) {
                 type="button"
                 disabled={status === "updating"}
                 onClick={() => void handleInviteAction("accept")}
-                className="inline-flex h-10 items-center justify-center rounded-full border border-[rgba(66,99,69,0.52)] bg-[linear-gradient(180deg,rgba(103,141,103,0.98),rgba(69,103,72,0.98))] px-5 text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[rgba(251,248,242,0.98)] shadow-[inset_0_1px_0_rgba(255,255,255,0.1),0_8px_18px_rgba(66,99,69,0.12)] transition-[background-image,border-color,transform,box-shadow] duration-150 hover:border-[rgba(58,88,62,0.6)] hover:bg-[linear-gradient(180deg,rgba(93,130,95,0.98),rgba(61,95,65,0.98))] active:scale-[0.99] focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-60"
+                className={premiumAccessButtonClass}
               >
                 Accept
               </button>
