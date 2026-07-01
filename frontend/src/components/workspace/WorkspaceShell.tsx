@@ -630,18 +630,14 @@ function mergeBackendTeamMembers(
   return mergedMembers;
 }
 
-type ContactTicketStatus = "Open" | "In progress" | "Resolved" | "Cancelled";
-type ContactTicketMessage = {
-  senderType: "user" | "cuevion";
-  body: string;
-  timestamp: string;
-};
-type ContactTicket = {
+type ContactRequestStatus = "Open";
+type ContactRequest = {
   id: string;
   subject: string;
-  status: ContactTicketStatus;
-  updatedAt: string;
-  messages: ContactTicketMessage[];
+  message: string;
+  fromInbox: string;
+  createdAt: string;
+  status: ContactRequestStatus;
 };
 
 const getUnreadPreviewIds = (messages: Array<{ id: string; unread?: boolean }>) =>
@@ -1285,6 +1281,7 @@ const MANAGED_INBOXES_STORAGE_KEY = "cuevion-managed-inboxes";
 const PENDING_OAUTH_MANAGED_INBOX_STORAGE_KEY = "cuevion-pending-oauth-managed-inbox";
 const PRIMARY_MANAGED_INBOX_ID_STORAGE_KEY = "cuevion-primary-managed-inbox-id";
 const WORKSPACE_NAME_STORAGE_KEY = "cuevion-workspace-name";
+const CONTACT_REQUESTS_STORAGE_KEY = "cuevion-contact-requests";
 const MAILBOX_TITLE_OVERRIDES_STORAGE_KEY = "cuevion-mailbox-title-overrides";
 const MAILBOX_FOCUS_PREFERENCE_OVERRIDES_STORAGE_KEY =
   "cuevion-mailbox-focus-preference-overrides";
@@ -1439,6 +1436,10 @@ function buildPrimaryManagedInboxStorageKey(
 
 function buildWorkspaceNameStorageKey(workspaceUserId: string) {
   return `${WORKSPACE_NAME_STORAGE_KEY}:${workspaceUserId}`;
+}
+
+function buildContactRequestsStorageKey(primaryWorkspaceEmail: string) {
+  return `${CONTACT_REQUESTS_STORAGE_KEY}:${normalizeSenderLearningKey(primaryWorkspaceEmail) || "workspace"}`;
 }
 
 function createEmptySignatureSettings(): InboxSignatureSettings {
@@ -8611,69 +8612,6 @@ const contextMenuMainItemClass =
   `flex w-full items-center rounded-[14px] px-3 py-2.5 text-left text-[0.82rem] text-[var(--workspace-text)] transition-[background-color,color] duration-150 ${contextMenuHoverSurfaceClass}`;
 const contextMenuActiveItemClass =
   "bg-[var(--workspace-menu-hover)] shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]";
-
-const contactMockTickets: ContactTicket[] = [
-  {
-    id: "#2418",
-    subject: "Workspace setup question for shared inbox routing",
-    status: "Open",
-    updatedAt: "March 20, 2026",
-    messages: [
-      {
-        senderType: "user",
-        body:
-          "Hi Cuevion, could you help me understand how to route a shared inbox so the workspace stays consistent for the team?",
-        timestamp: "March 20, 2026 at 10:14",
-      },
-      {
-        senderType: "cuevion",
-        body:
-          "Of course. We are reviewing the setup context from your workspace and will come back with the cleanest structure for shared routing.",
-        timestamp: "March 20, 2026 at 11:02",
-      },
-    ],
-  },
-  {
-    id: "#2394",
-    subject: "Clarification on mailbox connection settings",
-    status: "In progress",
-    updatedAt: "March 18, 2026",
-    messages: [
-      {
-        senderType: "user",
-        body:
-          "I want to confirm whether the current mailbox connection settings are the right ones for our secondary inbox before we change anything.",
-        timestamp: "March 18, 2026 at 09:26",
-      },
-      {
-        senderType: "cuevion",
-        body:
-          "We are checking the current connection details and comparing them against the intended setup so we can advise you precisely.",
-        timestamp: "March 18, 2026 at 12:41",
-      },
-    ],
-  },
-  {
-    id: "#2317",
-    subject: "Resolved request about notification visibility",
-    status: "Resolved",
-    updatedAt: "March 12, 2026",
-    messages: [
-      {
-        senderType: "user",
-        body:
-          "Could you confirm why some notification updates are only visible to part of the team?",
-        timestamp: "March 11, 2026 at 16:08",
-      },
-      {
-        senderType: "cuevion",
-        body:
-          "This was caused by workspace notification preferences. We adjusted the setup and confirmed the visibility issue is resolved.",
-        timestamp: "March 12, 2026 at 08:54",
-      },
-    ],
-  },
-];
 
 function MailToolbarIconButton({
   label,
@@ -28758,6 +28696,91 @@ function SettingsView({
   );
 }
 
+function createContactRequestId(createdAt: Date) {
+  const dateSegment = createdAt.toISOString().slice(2, 10).replace(/-/g, "");
+  const randomSegment = Math.random().toString(36).slice(2, 6).toUpperCase();
+
+  return `REQ-${dateSegment}-${randomSegment}`;
+}
+
+function formatContactRequestTimestamp(value: string) {
+  const timestamp = Date.parse(value);
+
+  if (!Number.isFinite(timestamp)) {
+    return "Unknown date";
+  }
+
+  return new Date(timestamp).toLocaleString("en-US", {
+    month: "long",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+function normalizeContactRequest(value: unknown): ContactRequest | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const candidate = value as Partial<ContactRequest>;
+  const id = typeof candidate.id === "string" ? candidate.id.trim() : "";
+  const subject = typeof candidate.subject === "string" ? candidate.subject.trim() : "";
+  const message = typeof candidate.message === "string" ? candidate.message.trim() : "";
+  const fromInbox =
+    typeof candidate.fromInbox === "string" ? candidate.fromInbox.trim() : "Workspace";
+  const createdAt = typeof candidate.createdAt === "string" ? candidate.createdAt : "";
+
+  if (!id || !subject || !message || !createdAt) {
+    return null;
+  }
+
+  return {
+    id,
+    subject,
+    message,
+    fromInbox: fromInbox || "Workspace",
+    createdAt,
+    status: "Open",
+  };
+}
+
+function readStoredContactRequests(storageKey: string): ContactRequest[] {
+  if (typeof window === "undefined") {
+    return [];
+  }
+
+  const storedValue = window.localStorage.getItem(storageKey);
+
+  if (!storedValue) {
+    return [];
+  }
+
+  try {
+    const parsed = JSON.parse(storedValue);
+
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+
+    return parsed
+      .map((value) => normalizeContactRequest(value))
+      .filter((value): value is ContactRequest => value !== null)
+      .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt));
+  } catch {
+    return [];
+  }
+}
+
+function persistContactRequests(storageKey: string, requests: ContactRequest[]) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  window.localStorage.setItem(storageKey, JSON.stringify(requests));
+}
+
 function UtilityView({
   section,
   lastViewedGuidance,
@@ -28774,13 +28797,17 @@ function UtilityView({
     null,
   );
   const [helpSearchQuery, setHelpSearchQuery] = useState("");
+  const contactRequestsStorageKey = useMemo(
+    () => buildContactRequestsStorageKey(primaryWorkspaceEmail),
+    [primaryWorkspaceEmail],
+  );
   const [contactSubject, setContactSubject] = useState("");
   const [contactMessage, setContactMessage] = useState("");
-  const [contactRequestSent, setContactRequestSent] = useState(false);
-  const [contactTickets, setContactTickets] = useState<ContactTicket[]>(contactMockTickets);
-  const [activeContactTicketId, setActiveContactTicketId] = useState<string | null>(null);
-  const [contactReplyDraft, setContactReplyDraft] = useState("");
-  const [isContactCancelConfirmOpen, setIsContactCancelConfirmOpen] = useState(false);
+  const [contactRequestCreated, setContactRequestCreated] = useState(false);
+  const [contactRequests, setContactRequests] = useState<ContactRequest[]>(() =>
+    readStoredContactRequests(contactRequestsStorageKey),
+  );
+  const [activeContactRequestId, setActiveContactRequestId] = useState<string | null>(null);
   const content: Record<
     UtilitySection,
     {
@@ -28805,11 +28832,11 @@ function UtilityView({
       eyebrow: "Contact",
       title: "Contact",
       summary:
-        "Reach the Cuevion team for support, setup questions, or workspace assistance from within the existing shell.",
+        "Create local beta support requests for things that feel unclear, blocked, or worth tracking during testing.",
       items: [
-        "Product support responds to workspace setup questions",
-        "Operational issues can be routed without leaving the UI",
-        "Contact stays available as a stable utility destination",
+        "Requests stay saved in this workspace during the beta",
+        "Use the overview to track what you already reported",
+        "External delivery can be connected later",
       ],
     },
   };
@@ -28868,51 +28895,35 @@ function UtilityView({
           ...(lastViewedHelpTopic ? [lastViewedHelpTopic] : []),
           ...popularHelpTopics.filter((topic) => topic.title !== lastViewedHelpTopic?.title),
         ].slice(0, 5);
-  const contactStatusClassNames: Record<ContactTicketStatus, string> = {
-    Open:
-      "border-[color:rgba(118,170,112,0.26)] bg-[color:rgba(118,170,112,0.14)] text-[color:rgba(70,109,73,0.94)]",
-    "In progress":
-      "border-[color:rgba(184,163,120,0.24)] bg-[color:rgba(184,163,120,0.14)] text-[color:rgba(118,95,58,0.94)]",
-    Resolved:
-      "border-[color:rgba(121,151,120,0.18)] bg-[color:rgba(121,151,120,0.1)] text-[color:rgba(83,108,84,0.94)]",
-    Cancelled:
-      "border-[color:rgba(154,145,133,0.2)] bg-[color:rgba(154,145,133,0.12)] text-[color:rgba(108,100,91,0.92)]",
-  };
+  const contactStatusClassName =
+    "border-[color:rgba(118,170,112,0.26)] bg-[color:rgba(118,170,112,0.14)] text-[var(--workspace-text)]";
   const isContactRequestReady =
     contactSubject.trim().length > 0 && contactMessage.trim().length > 0;
   const resetContactForm = () => {
     setContactSubject("");
     setContactMessage("");
   };
-  const activeContactTicket =
-    activeContactTicketId === null
+  const activeContactRequest =
+    activeContactRequestId === null
       ? null
-      : contactTickets.find((ticket) => ticket.id === activeContactTicketId) ?? null;
-  const isContactReplyReady = contactReplyDraft.trim().length > 0;
+      : contactRequests.find((request) => request.id === activeContactRequestId) ?? null;
 
   useEffect(() => {
-    if (!contactRequestSent) {
+    setContactRequests(readStoredContactRequests(contactRequestsStorageKey));
+    setActiveContactRequestId(null);
+  }, [contactRequestsStorageKey]);
+
+  useEffect(() => {
+    if (!contactRequestCreated) {
       return;
     }
 
     const timeoutId = window.setTimeout(() => {
-      setContactRequestSent(false);
+      setContactRequestCreated(false);
     }, 3200);
 
     return () => window.clearTimeout(timeoutId);
-  }, [contactRequestSent]);
-
-  useEffect(() => {
-    setContactReplyDraft("");
-  }, [activeContactTicketId]);
-
-  useEffect(() => {
-    if (activeContactTicketId !== null) {
-      return;
-    }
-
-    setIsContactCancelConfirmOpen(false);
-  }, [activeContactTicketId]);
+  }, [contactRequestCreated]);
 
   if (section === "Contact") {
     return (
@@ -28938,52 +28949,42 @@ function UtilityView({
                     return;
                   }
 
-                  const submittedSubject = contactSubject.trim();
-                  const nextTicketId = `#${2400 + contactTickets.length + 1}`;
-                  const updatedAt = new Date().toLocaleDateString("en-US", {
-                    month: "long",
-                    day: "numeric",
-                    year: "numeric",
-                  });
+                  const createdAt = new Date();
+                  const nextRequest: ContactRequest = {
+                    id: createContactRequestId(createdAt),
+                    subject: contactSubject.trim(),
+                    message: contactMessage.trim(),
+                    fromInbox: primaryWorkspaceEmail || "Workspace",
+                    createdAt: createdAt.toISOString(),
+                    status: "Open",
+                  };
 
-                  setContactTickets((current) => [
-                    {
-                      id: nextTicketId,
-                      subject: submittedSubject,
-                      status: "Open",
-                      updatedAt,
-                      messages: [
-                        {
-                          senderType: "user",
-                          body: contactMessage.trim(),
-                          timestamp: `${updatedAt} at ${new Date().toLocaleTimeString("en-US", {
-                            hour: "numeric",
-                            minute: "2-digit",
-                          })}`,
-                        },
-                      ],
-                    },
-                    ...current,
-                  ]);
+                  setContactRequests((current) => {
+                    const nextRequests = [nextRequest, ...current];
+
+                    persistContactRequests(contactRequestsStorageKey, nextRequests);
+
+                    return nextRequests;
+                  });
                   resetContactForm();
-                  setContactRequestSent(true);
+                  setContactRequestCreated(true);
                 }}
               >
                 <div className="mb-5 flex items-center justify-between gap-4">
                   <div>
                     <h2 className="text-xl font-semibold tracking-tight text-[var(--workspace-text)]">
-                      Send a request
+                      Create support request
                     </h2>
                     <p className="mt-1 text-[0.92rem] leading-6 text-[var(--workspace-text-soft)]">
-                      Your request is handled by the Cuevion team personally.
+                      For this beta, requests are saved in this workspace so you can track what you reported.
                     </p>
                   </div>
                 </div>
 
                 <div className="space-y-3">
-                  <label className="grid grid-cols-[88px_minmax(0,1fr)] items-center gap-4 rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3">
+                  <label className="grid grid-cols-[96px_minmax(0,1fr)] items-center gap-4 rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3">
                     <span className="text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
-                      Send from
+                      Context
                     </span>
                     <input
                       value={primaryWorkspaceEmail}
@@ -28991,7 +28992,7 @@ function UtilityView({
                       className="w-full cursor-default bg-transparent text-[0.9rem] leading-6 text-[var(--workspace-text-soft)] outline-none"
                     />
                   </label>
-                  <label className="grid grid-cols-[88px_minmax(0,1fr)] items-center gap-4 rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3">
+                  <label className="grid grid-cols-[96px_minmax(0,1fr)] items-center gap-4 rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3">
                     <span className="text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
                       Subject
                     </span>
@@ -28999,7 +29000,7 @@ function UtilityView({
                       value={contactSubject}
                       onChange={(event) => {
                         setContactSubject(event.target.value);
-                        setContactRequestSent(false);
+                        setContactRequestCreated(false);
                       }}
                       placeholder="Briefly describe your request"
                       className="w-full bg-transparent text-[0.9rem] leading-6 text-[var(--workspace-text-soft)] outline-none placeholder:text-[var(--workspace-text-faint)]"
@@ -29013,30 +29014,30 @@ function UtilityView({
                       value={contactMessage}
                       onChange={(event) => {
                         setContactMessage(event.target.value);
-                        setContactRequestSent(false);
+                        setContactRequestCreated(false);
                       }}
-                      placeholder="Write your request for the Cuevion team"
+                      placeholder="Write what feels unclear or needs attention"
                       className="mt-3 block min-h-[220px] w-full resize-none bg-transparent text-[0.94rem] leading-7 text-[var(--workspace-text-soft)] outline-none placeholder:text-[var(--workspace-text-faint)]"
                     />
                   </label>
                 </div>
 
-                {contactRequestSent ? (
-                  <div className="mt-4 rounded-[18px] border border-[color:rgba(121,151,120,0.14)] bg-[color:rgba(255,252,247,0.6)] px-4 py-3 text-[0.9rem] leading-6 text-[var(--workspace-text-soft)]">
-                    Your request has been sent. The Cuevion team will reply from your workspace context.
+                {contactRequestCreated ? (
+                  <div className="mt-4 rounded-[18px] border border-[color:rgba(118,170,112,0.2)] bg-[color:rgba(118,170,112,0.1)] px-4 py-3 text-[0.9rem] leading-6 text-[var(--workspace-text-soft)]">
+                    Request created.
                   </div>
                 ) : null}
 
-                <div className="mt-5 flex items-center justify-between gap-4">
-                  <div className="max-w-[26rem] text-[0.88rem] leading-6 text-[var(--workspace-text-muted)]">
-                    Messages from this workspace go directly to Cuevion so a person can respond with context.
+                <div className="mt-5 flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+                  <div className="max-w-[28rem] text-[0.88rem] leading-6 text-[var(--workspace-text-muted)]">
+                    External delivery can be connected later. These beta requests are stored locally in this workspace.
                   </div>
                   <div className="flex items-center gap-3">
                     <button
                       type="button"
                       onClick={() => {
                         resetContactForm();
-                        setContactRequestSent(false);
+                        setContactRequestCreated(false);
                       }}
                       className={subtleSecondaryActionButtonClass}
                     >
@@ -29051,7 +29052,7 @@ function UtilityView({
                           : "cursor-default bg-[var(--workspace-card-subtle)] text-[var(--workspace-text-faint)] opacity-55 hover:bg-[var(--workspace-card-subtle)]"
                       }`}
                     >
-                      Send request
+                      Create request
                     </button>
                   </div>
                 </div>
@@ -29060,56 +29061,70 @@ function UtilityView({
               <div className="rounded-[22px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] p-5">
                 <div className="mb-4">
                   <h2 className="text-xl font-semibold tracking-tight text-[var(--workspace-text)]">
-                    Ticket overview
+                    Request overview
                   </h2>
                   <p className="mt-1 text-[0.9rem] leading-6 text-[var(--workspace-text-soft)]">
-                    Recent contact history from this workspace.
+                    Local beta requests saved from this workspace.
                   </p>
                 </div>
-                <div className="max-h-[420px] space-y-2 overflow-y-auto pr-1">
-                  {contactTickets.map((ticket) => (
-                    <div
-                      key={ticket.id}
-                      role="button"
-                      tabIndex={0}
-                      onClick={() => setActiveContactTicketId(ticket.id)}
-                      onKeyDown={(event) => {
-                        if (event.key === "Enter" || event.key === " ") {
-                          event.preventDefault();
-                          setActiveContactTicketId(ticket.id);
-                        }
-                      }}
-                      className="cursor-pointer rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3 transition-colors duration-150 hover:bg-[var(--workspace-hover-surface)] focus:outline-none focus:bg-[var(--workspace-hover-surface)]"
-                    >
-                      <div className="flex items-start justify-between gap-4">
-                        <div className="min-w-0">
-                          <div className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
-                            {ticket.id}
-                          </div>
-                          <div className="mt-1 text-[0.92rem] leading-6 text-[var(--workspace-text-soft)]">
-                            {ticket.subject}
-                          </div>
-                        </div>
-                        <div
-                          className={`rounded-full border px-3 py-1 text-[0.64rem] font-medium uppercase tracking-[0.14em] ${contactStatusClassNames[ticket.status]}`}
-                        >
-                          {ticket.status}
-                        </div>
-                      </div>
-                      <div className="mt-2 text-[0.8rem] leading-5 text-[var(--workspace-text-faint)]">
-                        Updated {ticket.updatedAt}
-                      </div>
+                {contactRequests.length === 0 ? (
+                  <div className="rounded-[18px] border border-dashed border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-6">
+                    <div className="text-[0.96rem] font-medium text-[var(--workspace-text)]">
+                      No support requests yet.
                     </div>
-                  ))}
-                </div>
+                    <p className="mt-2 text-[0.9rem] leading-6 text-[var(--workspace-text-soft)]">
+                      Create a request when something feels unclear or needs attention.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="max-h-[420px] space-y-2 overflow-y-auto pr-1">
+                    {contactRequests.map((request) => {
+                      const preview =
+                        request.message.length > 150
+                          ? `${request.message.slice(0, 150).trim()}...`
+                          : request.message;
+
+                      return (
+                        <button
+                          key={request.id}
+                          type="button"
+                          onClick={() => setActiveContactRequestId(request.id)}
+                          className="w-full rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3 text-left transition-colors duration-150 hover:bg-[var(--workspace-hover-surface)] focus:bg-[var(--workspace-hover-surface)] focus:outline-none"
+                        >
+                          <div className="flex items-start justify-between gap-4">
+                            <div className="min-w-0">
+                              <div className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                                {request.id}
+                              </div>
+                              <div className="mt-1 text-[0.92rem] leading-6 text-[var(--workspace-text-soft)]">
+                                {request.subject}
+                              </div>
+                            </div>
+                            <div
+                              className={`rounded-full border px-3 py-1 text-[0.64rem] font-medium uppercase tracking-[0.14em] ${contactStatusClassName}`}
+                            >
+                              {request.status}
+                            </div>
+                          </div>
+                          <div className="mt-2 text-[0.8rem] leading-5 text-[var(--workspace-text-faint)]">
+                            Created {formatContactRequestTimestamp(request.createdAt)}
+                          </div>
+                          <p className="mt-2 line-clamp-2 text-[0.86rem] leading-6 text-[var(--workspace-text-soft)]">
+                            {preview}
+                          </p>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
             </div>
 
-            {activeContactTicket
+            {activeContactRequest
               ? createPortal(
                   <WorkspaceModalLayer>
                     <div
-                      className="w-full max-w-[860px] overflow-hidden rounded-[26px] border border-[var(--workspace-border)] bg-[var(--workspace-modal-bg)] p-6 shadow-[0_24px_70px_rgba(61,44,32,0.16),0_8px_20px_rgba(61,44,32,0.08)]"
+                      className="w-full max-w-[760px] overflow-hidden rounded-[26px] border border-[var(--workspace-border)] bg-[var(--workspace-modal-bg)] p-6 shadow-[0_24px_70px_rgba(61,44,32,0.16),0_8px_20px_rgba(61,44,32,0.08)]"
                       onMouseDown={(event) => event.stopPropagation()}
                       onWheel={(event) => event.stopPropagation()}
                       onTouchMove={(event) => event.stopPropagation()}
@@ -29117,15 +29132,15 @@ function UtilityView({
                       <div className="flex items-start justify-between gap-4">
                         <div>
                           <div className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
-                            {activeContactTicket.id}
+                            {activeContactRequest.id}
                           </div>
                           <h2 className="mt-2 text-[1.45rem] font-medium tracking-tight text-[var(--workspace-text)]">
-                            {activeContactTicket.subject}
+                            {activeContactRequest.subject}
                           </h2>
                         </div>
                         <button
                           type="button"
-                          onClick={() => setActiveContactTicketId(null)}
+                          onClick={() => setActiveContactRequestId(null)}
                           className={navigationCloseBackButtonClass}
                         >
                           Close
@@ -29134,126 +29149,40 @@ function UtilityView({
 
                       <div className="mt-5 flex flex-wrap items-center gap-3">
                         <div
-                          className={`rounded-full border px-3 py-1 text-[0.64rem] font-medium uppercase tracking-[0.14em] ${contactStatusClassNames[activeContactTicket.status]}`}
+                          className={`rounded-full border px-3 py-1 text-[0.64rem] font-medium uppercase tracking-[0.14em] ${contactStatusClassName}`}
                         >
-                          {activeContactTicket.status}
+                          {activeContactRequest.status}
                         </div>
                         <div className="text-[0.82rem] leading-6 text-[var(--workspace-text-faint)]">
-                          Updated {activeContactTicket.updatedAt}
+                          Created {formatContactRequestTimestamp(activeContactRequest.createdAt)}
                         </div>
                       </div>
 
-                      <div className="mt-6 rounded-[24px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] p-5">
-                        <div className="mb-4 text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
-                          Conversation
+                      <div className="mt-6 grid gap-4 md:grid-cols-[minmax(0,0.8fr)_minmax(0,1.2fr)]">
+                        <div className="rounded-[20px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-4">
+                          <div className="text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                            Workspace context
+                          </div>
+                          <div className="mt-2 break-words text-[0.92rem] leading-6 text-[var(--workspace-text-soft)]">
+                            {activeContactRequest.fromInbox}
+                          </div>
                         </div>
-                        <div className="space-y-3">
-                          {activeContactTicket.messages.map((message, index) => (
-                            <div
-                              key={`${activeContactTicket.id}-${index}-${message.timestamp}`}
-                              className={`rounded-[20px] border px-4 py-4 ${
-                                message.senderType === "cuevion"
-                                  ? "border-[color:rgba(121,151,120,0.14)] bg-[color:rgba(255,252,247,0.64)]"
-                                  : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)]"
-                              }`}
-                            >
-                              <div className="flex items-center justify-between gap-4">
-                                <div
-                                  className={`text-[0.72rem] font-medium uppercase tracking-[0.16em] ${
-                                    message.senderType === "cuevion"
-                                      ? "text-[var(--workspace-text-muted)]"
-                                      : "text-[var(--workspace-text-faint)]"
-                                  }`}
-                                >
-                                  {message.senderType === "cuevion" ? "Cuevion" : "You"}
-                                </div>
-                                <div className="text-[0.78rem] leading-5 text-[var(--workspace-text-faint)]">
-                                  {message.timestamp}
-                                </div>
-                              </div>
-                              <div className="mt-3 text-[0.94rem] leading-7 text-[var(--workspace-text-soft)]">
-                                {message.body}
-                              </div>
-                            </div>
-                          ))}
+                        <div className="rounded-[20px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-4">
+                          <div className="text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                            Delivery
+                          </div>
+                          <div className="mt-2 text-[0.92rem] leading-6 text-[var(--workspace-text-soft)]">
+                            Saved locally for this beta. Not externally sent.
+                          </div>
                         </div>
                       </div>
 
-                      <div className="mt-6 rounded-[24px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] p-5">
+                      <div className="mt-5 max-h-[38vh] overflow-y-auto rounded-[24px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] p-5">
                         <div className="mb-3 text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
-                          Reply
+                          Message
                         </div>
-                        <label className="block rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3">
-                          <textarea
-                            value={contactReplyDraft}
-                            onChange={(event) => setContactReplyDraft(event.target.value)}
-                            placeholder="Reply to the Cuevion team..."
-                            className="block min-h-[132px] w-full resize-none bg-transparent text-[0.92rem] leading-7 text-[var(--workspace-text-soft)] outline-none placeholder:text-[var(--workspace-text-faint)]"
-                          />
-                        </label>
-                        <div className="mt-3 flex items-center justify-end gap-3">
-                            {activeContactTicket.status === "Open" ? (
-                              <button
-                                type="button"
-                                onClick={() => setIsContactCancelConfirmOpen(true)}
-                                className={subtleSecondaryActionButtonClass}
-                              >
-                                Cancel request
-                              </button>
-                            ) : null}
-                            <button
-                              type="button"
-                              disabled={!isContactReplyReady}
-                              onClick={() => {
-                                if (!isContactReplyReady) {
-                                  return;
-                                }
-
-                                const updatedAt = new Date().toLocaleDateString("en-US", {
-                                  month: "long",
-                                  day: "numeric",
-                                  year: "numeric",
-                                });
-                                const replyTimestamp = `${updatedAt} at ${new Date().toLocaleTimeString(
-                                  "en-US",
-                                  {
-                                    hour: "numeric",
-                                    minute: "2-digit",
-                                  },
-                                )}`;
-
-                                setContactTickets((current) =>
-                                  current.map((ticket) =>
-                                    ticket.id === activeContactTicket.id
-                                      ? {
-                                          ...ticket,
-                                          updatedAt,
-                                          status:
-                                            ticket.status === "Open"
-                                              ? "In progress"
-                                              : ticket.status,
-                                          messages: [
-                                            ...ticket.messages,
-                                            {
-                                              senderType: "user",
-                                              body: contactReplyDraft.trim(),
-                                              timestamp: replyTimestamp,
-                                            },
-                                          ],
-                                        }
-                                      : ticket,
-                                  ),
-                                );
-                                setContactReplyDraft("");
-                              }}
-                              className={`${mailboxPrimaryActionButtonClass} ${
-                                isContactReplyReady
-                                  ? ""
-                                  : "cursor-default bg-[var(--workspace-card-subtle)] text-[var(--workspace-text-faint)] opacity-55 hover:bg-[var(--workspace-card-subtle)]"
-                              }`}
-                            >
-                              Reply
-                            </button>
+                        <div className="whitespace-pre-wrap text-[0.94rem] leading-7 text-[var(--workspace-text-soft)]">
+                          {activeContactRequest.message}
                         </div>
                       </div>
                     </div>
@@ -29261,88 +29190,6 @@ function UtilityView({
                   document.body,
                 )
               : null}
-
-            {activeContactTicket && isContactCancelConfirmOpen
-              ? createPortal(
-                  <WorkspaceModalLayer>
-                    <div
-                      className="w-full max-w-[420px] overflow-hidden rounded-[26px] border border-[var(--workspace-border)] bg-[var(--workspace-modal-bg)] p-6 shadow-[0_24px_70px_rgba(61,44,32,0.16),0_8px_20px_rgba(61,44,32,0.08)]"
-                      onMouseDown={(event) => event.stopPropagation()}
-                      onWheel={(event) => event.stopPropagation()}
-                      onTouchMove={(event) => event.stopPropagation()}
-                    >
-                      <div className="space-y-2">
-                        <h2 className="text-[1.25rem] font-medium tracking-tight text-[var(--workspace-text)]">
-                          Cancel this request?
-                        </h2>
-                        <p className="text-[0.9rem] leading-7 text-[var(--workspace-text-soft)]">
-                          The Cuevion team will no longer respond to this thread.
-                        </p>
-                      </div>
-
-                      <div className="mt-6 flex items-center justify-end gap-3">
-                        <button
-                          type="button"
-                          onClick={() => setIsContactCancelConfirmOpen(false)}
-                          className={subtleSecondaryActionButtonClass}
-                        >
-                          Keep request
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setContactTickets((current) =>
-                              current.map((ticket) =>
-                                ticket.id === activeContactTicket.id
-                                  ? { ...ticket, status: "Cancelled" }
-                                  : ticket,
-                              ),
-                            );
-                            setIsContactCancelConfirmOpen(false);
-                          }}
-                          className={mailboxPrimaryActionButtonClass}
-                        >
-                          Confirm cancel
-                        </button>
-                      </div>
-                    </div>
-                  </WorkspaceModalLayer>,
-                  document.body,
-                )
-              : null}
-
-            <div className="rounded-[22px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-5 py-5">
-              <div className="mb-4 flex items-center justify-between gap-4">
-                <h2 className="text-xl font-semibold tracking-tight text-[var(--workspace-text)]">
-                  Contact details
-                </h2>
-                <div className="h-2 w-14 rounded-full bg-[var(--workspace-accent-soft)]" />
-              </div>
-              <div className="grid gap-5 lg:grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)]">
-                <div className="space-y-3">
-                  <div className="text-[1rem] font-medium tracking-[-0.014em] text-[var(--workspace-text)]">
-                    Cuevion B.V.
-                  </div>
-                  <div className="space-y-1 text-[0.94rem] leading-7 text-[var(--workspace-text-soft)]">
-                    <div>Herengracht 482</div>
-                    <div>1017 CB Amsterdam</div>
-                    <div>The Netherlands</div>
-                  </div>
-                  <div className="pt-1 text-[0.94rem] leading-7 text-[var(--workspace-text-soft)]">
-                    hello@cuevion.com
-                  </div>
-                </div>
-                <div className="rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-4">
-                  <div className="mb-2 text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
-                    Business details
-                  </div>
-                  <div className="space-y-1 text-[0.9rem] leading-6 text-[var(--workspace-text-soft)]">
-                    <div>KvK: 00000000</div>
-                    <div>VAT: NL000000000B00</div>
-                  </div>
-                </div>
-              </div>
-            </div>
           </div>
         </section>
       </div>
