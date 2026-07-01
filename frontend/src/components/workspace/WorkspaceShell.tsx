@@ -6004,6 +6004,42 @@ function formatLearningRuleTimestamp(value?: string) {
   }).toUpperCase();
 }
 
+function formatLearningFullMessageTimestamp(value?: string) {
+  if (!value) {
+    return null;
+  }
+
+  const timestamp = new Date(value).getTime();
+
+  if (Number.isNaN(timestamp)) {
+    return null;
+  }
+
+  return new Date(timestamp).toLocaleString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+function formatLearningAttachmentSize(size?: number) {
+  if (!size || size <= 0) {
+    return null;
+  }
+
+  if (size < 1024) {
+    return `${size} B`;
+  }
+
+  if (size < 1024 * 1024) {
+    return `${Math.round(size / 102.4) / 10} KB`;
+  }
+
+  return `${Math.round(size / (1024 * 102.4)) / 10} MB`;
+}
+
 function resolveForYouCategoryFromLearningEntry(
   entry: SenderCategoryLearningEntry,
 ): "Important" | "Review" | "Promo" | "Demo" | "Spam" {
@@ -29467,6 +29503,8 @@ function ForYouView({
   >([]);
   const [isLearningDecisionEditorOpen, setIsLearningDecisionEditorOpen] =
     useState(false);
+  const [isLearningFullMessageOpen, setIsLearningFullMessageOpen] =
+    useState(false);
   const [selectedLearningLabel, setSelectedLearningLabel] =
     useState<CuevionLearningLabel | null>(null);
   const [selectedLearningPriority, setSelectedLearningPriority] =
@@ -29511,12 +29549,14 @@ function ForYouView({
     setReviewUncertainCompletionFeedback("idle");
     setActiveLearningSessionSuggestions([]);
     setActiveLearningSuggestionIndex(0);
+    setIsLearningFullMessageOpen(false);
     setActiveLearningModal(null);
   };
   const openRefineCuevionModal = () => {
     setActiveLearningSuggestionIndex(0);
     setActiveLearningSessionSuggestions(pendingLearningSuggestions.slice(0, learningBatchSize));
     setIsLearningDecisionEditorOpen(false);
+    setIsLearningFullMessageOpen(false);
     setActiveLearningModal("refine-cuevion");
   };
   const { learningSuggestionPool, uncertainEmailPool } = forYouEngine.buildForYouLearningPools(
@@ -29559,6 +29599,12 @@ function ForYouView({
   const activeLearningCurrentPriority = activeLearningSuggestion
     ? activeLearningSuggestion.displayPriority
     : "Normal";
+  const activeLearningFullBody =
+    activeLearningSuggestion?.fullBody.filter((paragraph) => paragraph.trim().length > 0) ??
+    [];
+  const activeLearningTimestampLabel = formatLearningFullMessageTimestamp(
+    activeLearningSuggestion?.timestamp ?? activeLearningSuggestion?.createdAt,
+  );
   const trimmedPastedRuleValue = pastedRuleValue.trim();
   const pasteRuleInputType = resolvePasteRuleInputType(trimmedPastedRuleValue);
   const pasteRuleType =
@@ -29753,6 +29799,10 @@ function ForYouView({
     setSelectedLearningSenderBehavior("do_not_learn");
     setIsLearningDecisionEditorOpen(false);
   }, [activeLearningCurrentLabel, activeLearningCurrentPriority, activeLearningSuggestion?.key]);
+
+  useEffect(() => {
+    setIsLearningFullMessageOpen(false);
+  }, [activeLearningSuggestion?.key]);
 
   useEffect(() => {
     setSelectedUncertainLabel(null);
@@ -30654,6 +30704,107 @@ function ForYouView({
                     </div>
                   </div>
                 </div>
+              ) : isLearningFullMessageOpen ? (
+                <div className="space-y-5">
+                  <div className="sticky top-0 z-10 -mx-1 flex flex-wrap items-start justify-between gap-4 bg-[var(--workspace-modal-subtle)] px-1 pb-3">
+                    <div className="space-y-2">
+                      <div className="text-[0.7rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                        Full message
+                      </div>
+                      <div className="text-[1.08rem] font-medium tracking-[-0.014em] text-[var(--workspace-text)]">
+                        {activeLearningSuggestion.subject}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setIsLearningFullMessageOpen(false)}
+                      className={subtleSecondaryActionButtonClass}
+                    >
+                      Back to Refine
+                    </button>
+                  </div>
+
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <div className="rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3 text-[0.84rem] leading-6 text-[var(--workspace-text-soft)]">
+                      <span className="font-medium text-[var(--workspace-text)]">
+                        Sender:
+                      </span>{" "}
+                      {activeLearningSuggestion.sender}
+                    </div>
+                    <div className="rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3 text-[0.84rem] leading-6 text-[var(--workspace-text-soft)]">
+                      <span className="font-medium text-[var(--workspace-text)]">
+                        Source inbox:
+                      </span>{" "}
+                      {activeLearningSourceInboxTitle}
+                    </div>
+                    {activeLearningTimestampLabel ? (
+                      <div className="rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3 text-[0.84rem] leading-6 text-[var(--workspace-text-soft)] sm:col-span-2">
+                        <span className="font-medium text-[var(--workspace-text)]">
+                          Timestamp:
+                        </span>{" "}
+                        {activeLearningTimestampLabel}
+                      </div>
+                    ) : null}
+                  </div>
+
+                  <div className="rounded-[20px] border border-[var(--workspace-modal-border-strong)] bg-[var(--workspace-modal-inner)] px-5 py-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.14)]">
+                    <div className="text-[0.7rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                      Message body
+                    </div>
+                    {activeLearningFullBody.length > 0 ? (
+                      <div className="mt-4 space-y-4 whitespace-pre-wrap text-[0.9rem] leading-7 text-[var(--workspace-text-soft)]">
+                        {activeLearningFullBody.map((paragraph, index) => (
+                          <p key={`${activeLearningSuggestion.key}-body-${index}`}>
+                            {paragraph}
+                          </p>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="mt-4 text-[0.9rem] leading-7 text-[var(--workspace-text-soft)]">
+                        Full message body is not available for this suggestion.
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="rounded-[20px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-5 py-4">
+                    <div className="text-[0.7rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                      Attachments
+                    </div>
+                    {activeLearningSuggestion.attachments.length > 0 ? (
+                      <div className="mt-3 space-y-2">
+                        {activeLearningSuggestion.attachments.map((attachment, index) => {
+                          const attachmentSize = formatLearningAttachmentSize(
+                            attachment.size,
+                          );
+
+                          return (
+                            <div
+                              key={attachment.id ?? `${attachment.name}-${index}`}
+                              className="rounded-[16px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-modal-inner)] px-4 py-3 text-[0.84rem] leading-6 text-[var(--workspace-text-soft)]"
+                            >
+                              <span className="font-medium text-[var(--workspace-text)]">
+                                {attachment.name}
+                              </span>
+                              {attachment.mimeType || attachmentSize ? (
+                                <span className="text-[var(--workspace-text-faint)]">
+                                  {" "}
+                                  {[
+                                    attachment.mimeType,
+                                    attachmentSize,
+                                  ].filter(Boolean).join(" · ")}
+                                </span>
+                              ) : null}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <div className="mt-3 text-[0.84rem] leading-6 text-[var(--workspace-text-faint)]">
+                        No attachments available for this suggestion.
+                      </div>
+                    )}
+                  </div>
+                </div>
               ) : (
                 <>
                 <div className="rounded-[20px] border border-[var(--workspace-modal-border-strong)] bg-[var(--workspace-modal-inner)] px-5 py-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.14)]">
@@ -30676,8 +30827,17 @@ function ForYouView({
                       </div>
                     </div>
                     <div className="space-y-1">
-                      <div className="text-[0.7rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
-                        Preview
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div className="text-[0.7rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                          Preview
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setIsLearningFullMessageOpen(true)}
+                          className={subtleSecondaryActionButtonClass}
+                        >
+                          View full message
+                        </button>
                       </div>
                     <div className="space-y-3">
                       {activeLearningSuggestion.snippet.map((paragraph) => (
@@ -30849,6 +31009,7 @@ function ForYouView({
                 </>
               )}
 
+              {!isLearningFullMessageOpen ? (
               <div className="sticky bottom-0 z-10 -mx-6 mt-6 grid grid-cols-[auto_1fr_auto] items-center gap-3 border-t border-[var(--workspace-border-soft)] bg-[var(--workspace-modal-subtle)] px-6 py-4 shadow-[0_-18px_30px_rgba(61,44,32,0.08)]">
                 <button
                   type="button"
@@ -30901,6 +31062,7 @@ function ForYouView({
                   {isLastLearningSuggestion ? "Finish" : "Next suggestion"}
                 </button>
               </div>
+              ) : null}
               </div>
             </div>
         </WorkspaceModalLayer>,

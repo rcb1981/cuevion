@@ -21,9 +21,12 @@ export type ForYouLearningSuggestion = {
   senderAddress: string;
   subject: string;
   createdAt: string;
+  timestamp?: string;
   uncertainty: number;
   senderFrequency: number;
   snippet: string[];
+  fullBody: string[];
+  attachments: ForYouLearningAttachment[];
   reason: string;
   visualLabel?: string;
   mailboxId: InboxId | null;
@@ -32,6 +35,13 @@ export type ForYouLearningSuggestion = {
   priorityScore: "low" | "medium" | "high";
   displayLabel: CuevionLearningLabel;
   displayPriority: CuevionLearningPriorityLevel;
+};
+
+export type ForYouLearningAttachment = {
+  id?: string;
+  name: string;
+  mimeType?: string;
+  size?: number;
 };
 
 export type ForYouUncertainEmail = {
@@ -71,6 +81,8 @@ export type ForYouDerivationMessage = {
   from: string;
   subject: string;
   createdAt?: string;
+  timestamp?: string;
+  time?: string;
   category: CuevionMessageCategory;
   signal?: string;
   ui_signal?: string;
@@ -84,6 +96,12 @@ export type ForYouDerivationMessage = {
   isShared?: boolean;
   snippet: string;
   body: string[];
+  attachments?: Array<{
+    id?: string;
+    name?: string;
+    mimeType?: string;
+    size?: number;
+  }>;
   suggestion?: {
     type: "confirm_category";
     proposedCategory: CuevionMessageCategory;
@@ -319,6 +337,14 @@ export function buildForYouLearningPools<TMessage extends ForYouDerivationMessag
         senderFrequencyByKey[normalizeSenderLearningKey(message.from)] ?? 1;
       const displayLabel = resolveForYouLearningDisplayLabel(message);
       const displayPriority = resolveForYouLearningDisplayPriority(message);
+      const messageTimestamp =
+        message.createdAt ?? message.timestamp ?? message.time;
+      const attachments = (message.attachments ?? []).map((attachment, index) => ({
+        id: attachment.id ?? `${message.id}-attachment-${index}`,
+        name: attachment.name?.trim() || "Attachment",
+        mimeType: attachment.mimeType,
+        size: attachment.size,
+      }));
 
       return {
         key: message.id,
@@ -326,9 +352,12 @@ export function buildForYouLearningPools<TMessage extends ForYouDerivationMessag
         senderAddress: message.from,
         subject: message.subject,
         createdAt: message.createdAt ?? new Date(resolveMailDateMs(message)).toISOString(),
+        timestamp: messageTimestamp,
         uncertainty: 94,
         senderFrequency,
         snippet: message.body.slice(0, 2).length > 0 ? message.body.slice(0, 2) : [message.snippet],
+        fullBody: message.body,
+        attachments,
         reason: formatForYouReason(displayLabel, displayPriority),
         mailboxId,
         category: message.category,
