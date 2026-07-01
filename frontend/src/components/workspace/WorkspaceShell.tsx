@@ -11140,7 +11140,7 @@ function WorkspaceSidebar({
       <div className="absolute inset-0 bg-[var(--workspace-sidebar-glow)]" />
       <div className="relative flex h-full flex-col">
         <div className="flex h-full flex-col">
-          <span className="hidden max-w-full truncate rounded-full border border-[var(--workspace-sidebar-border)] bg-[var(--workspace-sidebar-hover)] px-3.5 py-2 text-xs uppercase tracking-[0.18em] text-[var(--workspace-sidebar-text-muted)] xl:inline-block">
+          <span className="hidden max-w-full truncate rounded-full border border-[color:rgba(218,194,142,0.2)] bg-[linear-gradient(180deg,rgba(238,224,190,0.11),rgba(33,58,49,0.34))] px-3.5 py-2 text-xs uppercase tracking-[0.18em] text-[color:rgba(232,222,198,0.78)] shadow-[inset_0_1px_0_rgba(255,248,226,0.12),0_6px_14px_rgba(0,0,0,0.08)] xl:inline-block">
             {workspaceName}
           </span>
           <div className="mt-8 flex justify-center xl:justify-start">
