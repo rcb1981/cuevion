@@ -33846,6 +33846,17 @@ export function WorkspaceShell({
       },
     ]),
   );
+  const bundleOrganizerHasLiveWorkspaceData =
+    productAccess === "bundle" &&
+    connectedOrderedMailboxes.some((mailbox) => {
+      const mailboxCollections =
+        mailboxStore[mailbox.id] ?? createEmptyMailboxCollections();
+
+      return (
+        mailboxCollections.Inbox.length > 0 ||
+        mailboxCollections.Filtered.length > 0
+      );
+    });
   const bundleOrganizerLiveMessages: BundleOrganizerWorkspaceMessage[] =
     productAccess === "bundle"
       ? (() => {
@@ -38629,6 +38640,7 @@ export function WorkspaceShell({
             ) : activeSection === "Organizer" && productAccess === "bundle" ? (
               <BundleOrganizerSurface
                 liveMessages={bundleOrganizerLiveMessages}
+                hasLiveWorkspaceData={bundleOrganizerHasLiveWorkspaceData}
                 connectedInboxCount={connectedInboxCount}
               />
             ) : activeSection === "Activity" ||

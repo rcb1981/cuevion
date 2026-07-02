@@ -101,6 +101,7 @@ type BundleOrganizerActiveWorkStatus =
 
 type BundleOrganizerSurfaceProps = {
   liveMessages?: BundleOrganizerWorkspaceMessage[];
+  hasLiveWorkspaceData?: boolean;
   connectedInboxCount?: number;
 };
 
@@ -287,6 +288,41 @@ const viewCopy: Record<
     description: "Organizer preferences will be managed from the shared Cuevion Workspace.",
     emptyTitle: "Settings are managed by Cuevion Workspace.",
     emptyDescription: "Connected inboxes are shared with this Organizer in Bundle Pilot.",
+  },
+};
+
+const liveEmptyCopy: Partial<
+  Record<BundleOrganizerView, { emptyTitle: string; emptyDescription: string }>
+> = {
+  priority: {
+    emptyTitle: "No active Organizer priority yet",
+    emptyDescription:
+      "Active demo and promo follow-ups will appear here when they have Organizer workflow state.",
+  },
+  shortlist: {
+    emptyTitle: "No live shortlisted messages yet.",
+    emptyDescription:
+      "Shortlist rows will appear here when safe Organizer workflow state is available.",
+  },
+  demo: {
+    emptyTitle: "No live demo messages yet.",
+    emptyDescription:
+      "Demo and high-priority demo messages from connected workspace inboxes will appear here.",
+  },
+  promo: {
+    emptyTitle: "No live promo messages yet.",
+    emptyDescription:
+      "Promo and promo reminder messages from connected workspace inboxes will appear here.",
+  },
+  sent: {
+    emptyTitle: "No live sent activity yet.",
+    emptyDescription:
+      "Organizer sent rows will appear here when safe read-only sent activity is available.",
+  },
+  trash: {
+    emptyTitle: "No live Organizer trash yet.",
+    emptyDescription:
+      "Organizer-local trash rows will appear here only when safe read-only workflow state is available.",
   },
 };
 
@@ -597,10 +633,11 @@ function getLiveMessagesForView(
 function getMessagesForView(
   view: BundleOrganizerView,
   liveMessages: BundleOrganizerMessage[],
+  hasLiveWorkspaceData: boolean,
 ) {
   const liveViewMessages = getLiveMessagesForView(view, liveMessages);
 
-  if (liveViewMessages.length > 0) {
+  if (hasLiveWorkspaceData) {
     return {
       messages: liveViewMessages,
       source: "workspace" as const,
@@ -613,9 +650,13 @@ function getMessagesForView(
   };
 }
 
-function getCounts(liveMessages: BundleOrganizerMessage[]) {
+function getCounts(liveMessages: BundleOrganizerMessage[], hasLiveWorkspaceData: boolean) {
   return navItems.reduce<Partial<Record<BundleOrganizerView, number>>>((counts, item) => {
-    const viewMessages = getMessagesForView(item.id, liveMessages).messages;
+    const viewMessages = getMessagesForView(
+      item.id,
+      liveMessages,
+      hasLiveWorkspaceData,
+    ).messages;
 
     counts[item.id] =
       item.id === "promo"
@@ -660,6 +701,7 @@ function MessagePill({ children, tone }: { children: string; tone: Parameters<ty
 
 export function BundleOrganizerSurface({
   liveMessages = [],
+  hasLiveWorkspaceData = false,
   connectedInboxCount = 0,
 }: BundleOrganizerSurfaceProps) {
   const [activeView, setActiveView] = useState<BundleOrganizerView>("priority");
@@ -671,10 +713,14 @@ export function BundleOrganizerSurface({
     () => normalizeWorkspaceMessages(liveMessages),
     [liveMessages],
   );
-  const counts = useMemo(() => getCounts(workspaceMessages), [workspaceMessages]);
+  const shouldUseLiveWorkspaceData = hasLiveWorkspaceData || workspaceMessages.length > 0;
+  const counts = useMemo(
+    () => getCounts(workspaceMessages, shouldUseLiveWorkspaceData),
+    [shouldUseLiveWorkspaceData, workspaceMessages],
+  );
   const activeDisplay = useMemo(
-    () => getMessagesForView(activeView, workspaceMessages),
-    [activeView, workspaceMessages],
+    () => getMessagesForView(activeView, workspaceMessages, shouldUseLiveWorkspaceData),
+    [activeView, shouldUseLiveWorkspaceData, workspaceMessages],
   );
   const activeMessages = useMemo(() => {
     const normalizedQuery = searchQuery.trim().toLowerCase();
@@ -694,6 +740,7 @@ export function BundleOrganizerSurface({
     );
   }, [activeDisplay, searchQuery]);
   const activeCopy = viewCopy[activeView];
+  const activeEmptyCopy = liveEmptyCopy[activeView] ?? activeCopy;
   const activeSourceLabel =
     activeDisplay.source === "workspace" ? "Live workspace preview" : "Pilot sample data";
   const activeSourceDescription =
@@ -705,8 +752,16 @@ export function BundleOrganizerSurface({
       ? connectedInboxCount
       : Math.max(2, connectedInboxCount);
   const previewGroupCounts = useMemo(() => {
-    const demoMessages = getMessagesForView("demo", workspaceMessages).messages;
-    const promoMessages = getMessagesForView("promo", workspaceMessages).messages;
+    const demoMessages = getMessagesForView(
+      "demo",
+      workspaceMessages,
+      shouldUseLiveWorkspaceData,
+    ).messages;
+    const promoMessages = getMessagesForView(
+      "promo",
+      workspaceMessages,
+      shouldUseLiveWorkspaceData,
+    ).messages;
 
     return {
       highPriorityDemos: demoMessages.filter(
@@ -716,7 +771,7 @@ export function BundleOrganizerSurface({
         (message) => message.internalClassification === "promo_reminder",
       ).length,
     };
-  }, [workspaceMessages]);
+  }, [shouldUseLiveWorkspaceData, workspaceMessages]);
 
   const selectView = (view: BundleOrganizerView) => {
     setActiveView(view);
@@ -991,10 +1046,14 @@ export function BundleOrganizerSurface({
                             </span>
                           ) : null}
                           <h3 className="text-[1rem] font-semibold tracking-[-0.02em] text-[color:#f5efe5]">
-                            {activeCopy.emptyTitle}
+                            {activeDisplay.source === "workspace"
+                              ? activeEmptyCopy.emptyTitle
+                              : activeCopy.emptyTitle}
                           </h3>
                           <p className="mx-auto mt-2 max-w-[460px] text-[0.86rem] leading-6 text-[rgba(245,239,229,0.58)]">
-                            {activeCopy.emptyDescription}
+                            {activeDisplay.source === "workspace"
+                              ? activeEmptyCopy.emptyDescription
+                              : activeCopy.emptyDescription}
                           </p>
                         </div>
                       ) : (
