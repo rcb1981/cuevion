@@ -637,6 +637,7 @@ type ContactRequest = {
   subject: string;
   message: string;
   submittedBy: string;
+  workspaceName: string;
   topic: ContactRequestTopic;
   createdAt: string;
   status: ContactRequestStatus;
@@ -28768,6 +28769,7 @@ function resolveContactSubmittedBy({
 function normalizeContactRequest(
   value: unknown,
   fallbackSubmittedBy: string,
+  fallbackWorkspaceName: string,
 ): ContactRequest | null {
   if (!value || typeof value !== "object") {
     return null;
@@ -28781,6 +28783,10 @@ function normalizeContactRequest(
     typeof candidate.submittedBy === "string" && candidate.submittedBy.trim()
       ? candidate.submittedBy.trim()
       : fallbackSubmittedBy;
+  const workspaceName =
+    typeof candidate.workspaceName === "string" && candidate.workspaceName.trim()
+      ? candidate.workspaceName.trim()
+      : fallbackWorkspaceName;
   const rawTopic = typeof candidate.topic === "string" ? candidate.topic.trim() : "";
   const topic: ContactRequestTopic = isContactRequestTopic(rawTopic) ? rawTopic : "General";
   const createdAt = typeof candidate.createdAt === "string" ? candidate.createdAt : "";
@@ -28801,6 +28807,7 @@ function normalizeContactRequest(
     subject,
     message,
     submittedBy,
+    workspaceName,
     topic,
     createdAt,
     status,
@@ -28810,6 +28817,7 @@ function normalizeContactRequest(
 function readStoredContactRequests(
   storageKey: string,
   fallbackSubmittedBy = "Beta tester",
+  fallbackWorkspaceName = "Workspace",
 ): ContactRequest[] {
   if (typeof window === "undefined") {
     return [];
@@ -28829,7 +28837,9 @@ function readStoredContactRequests(
     }
 
     return parsed
-      .map((value) => normalizeContactRequest(value, fallbackSubmittedBy))
+      .map((value) =>
+        normalizeContactRequest(value, fallbackSubmittedBy, fallbackWorkspaceName),
+      )
       .filter((value): value is ContactRequest => value !== null)
       .sort((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt));
   } catch {
@@ -28882,7 +28892,7 @@ function UtilityView({
   } | null>(null);
   const [isContactRequestSubmitting, setIsContactRequestSubmitting] = useState(false);
   const [contactRequests, setContactRequests] = useState<ContactRequest[]>(() =>
-    readStoredContactRequests(contactRequestsStorageKey, contactSubmittedBy),
+    readStoredContactRequests(contactRequestsStorageKey, contactSubmittedBy, workspaceName),
   );
   const [activeContactRequestId, setActiveContactRequestId] = useState<string | null>(null);
   const content: Record<
@@ -28991,9 +29001,11 @@ function UtilityView({
       : contactRequests.find((request) => request.id === activeContactRequestId) ?? null;
 
   useEffect(() => {
-    setContactRequests(readStoredContactRequests(contactRequestsStorageKey, contactSubmittedBy));
+    setContactRequests(
+      readStoredContactRequests(contactRequestsStorageKey, contactSubmittedBy, workspaceName),
+    );
     setActiveContactRequestId(null);
-  }, [contactRequestsStorageKey, contactSubmittedBy]);
+  }, [contactRequestsStorageKey, contactSubmittedBy, workspaceName]);
 
   useEffect(() => {
     if (!contactRequestNotice) {
@@ -29037,6 +29049,7 @@ function UtilityView({
                     subject: contactSubject.trim(),
                     message: contactMessage.trim(),
                     submittedBy: contactSubmittedBy,
+                    workspaceName,
                     topic: contactTopic,
                     createdAt: createdAt.toISOString(),
                   };
@@ -29045,8 +29058,6 @@ function UtilityView({
 
                   const sendResult = await sendContactSupportRequest({
                     ...requestBase,
-                    workspaceName,
-                    topic: contactTopic,
                   });
                   const nextRequest: ContactRequest = {
                     ...requestBase,
@@ -29186,8 +29197,8 @@ function UtilityView({
                 </div>
               </form>
 
-              <div className="rounded-[22px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] p-5">
-                <div className="mb-4">
+              <div className="flex min-h-[520px] flex-col rounded-[22px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] p-4 sm:p-5">
+                <div className="mb-3">
                   <h2 className="text-xl font-semibold tracking-tight text-[var(--workspace-text)]">
                     Request overview
                   </h2>
@@ -29196,7 +29207,7 @@ function UtilityView({
                   </p>
                 </div>
                 {contactRequests.length === 0 ? (
-                  <div className="rounded-[18px] border border-dashed border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-6">
+                  <div className="rounded-[18px] border border-dashed border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-5">
                     <div className="text-[0.96rem] font-medium text-[var(--workspace-text)]">
                       No support requests yet.
                     </div>
@@ -29205,11 +29216,11 @@ function UtilityView({
                     </p>
                   </div>
                 ) : (
-                  <div className="max-h-[420px] space-y-2 overflow-y-auto pr-1">
+                  <div className="max-h-[min(640px,calc(100dvh-16rem))] flex-1 space-y-1.5 overflow-y-auto pr-1">
                     {contactRequests.map((request) => {
                       const preview =
-                        request.message.length > 150
-                          ? `${request.message.slice(0, 150).trim()}...`
+                        request.message.length > 120
+                          ? `${request.message.slice(0, 120).trim()}...`
                           : request.message;
 
                       return (
@@ -29217,31 +29228,28 @@ function UtilityView({
                           key={request.id}
                           type="button"
                           onClick={() => setActiveContactRequestId(request.id)}
-                          className="w-full rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3 text-left transition-colors duration-150 hover:bg-[var(--workspace-hover-surface)] focus:bg-[var(--workspace-hover-surface)] focus:outline-none"
+                          className="w-full rounded-2xl border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-3.5 py-2.5 text-left transition-[background-color,border-color,box-shadow] duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)] hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.05)] focus:border-[var(--workspace-border)] focus:bg-[var(--workspace-hover-surface)] focus:outline-none"
                         >
                           <div className="flex items-start justify-between gap-4">
                             <div className="min-w-0">
-                              <div className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                              <div className="text-[0.68rem] font-medium uppercase tracking-[0.15em] text-[var(--workspace-text-faint)]">
                                 {request.id}
                               </div>
-                              <div className="mt-1 text-[0.92rem] leading-6 text-[var(--workspace-text-soft)]">
+                              <div className="mt-0.5 truncate text-[0.9rem] font-medium leading-5 text-[var(--workspace-text)]">
                                 {request.subject}
                               </div>
                             </div>
                             <div
-                              className={`rounded-full border px-3 py-1 text-[0.64rem] font-medium uppercase tracking-[0.14em] ${contactStatusClassNames[request.status]}`}
+                              className={`shrink-0 rounded-full border px-2.5 py-0.5 text-[0.6rem] font-medium uppercase tracking-[0.13em] ${contactStatusClassNames[request.status]}`}
                             >
                               {request.status}
                             </div>
                           </div>
-                          <div className="mt-2 text-[0.8rem] leading-5 text-[var(--workspace-text-faint)]">
-                            Created {formatContactRequestTimestamp(request.createdAt)}
+                          <div className="mt-1.5 flex flex-wrap gap-x-2 gap-y-1 text-[0.75rem] leading-5 text-[var(--workspace-text-faint)]">
+                            <span>{formatContactRequestTimestamp(request.createdAt)}</span>
+                            <span>{request.topic}</span>
                           </div>
-                          <div className="mt-2 flex flex-wrap gap-2 text-[0.76rem] leading-5 text-[var(--workspace-text-faint)]">
-                            <span>Submitted by {request.submittedBy}</span>
-                            <span>Topic: {request.topic}</span>
-                          </div>
-                          <p className="mt-2 line-clamp-2 text-[0.86rem] leading-6 text-[var(--workspace-text-soft)]">
+                          <p className="mt-1 line-clamp-1 text-[0.82rem] leading-5 text-[var(--workspace-text-soft)]">
                             {preview}
                           </p>
                         </button>
@@ -29290,13 +29298,21 @@ function UtilityView({
                         </div>
                       </div>
 
-                      <div className="mt-6 grid gap-4 md:grid-cols-2">
+                      <div className="mt-6 grid gap-4 md:grid-cols-3">
                         <div className="rounded-[20px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-4">
                           <div className="text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
                             Submitted by
                           </div>
                           <div className="mt-2 break-words text-[0.92rem] leading-6 text-[var(--workspace-text-soft)]">
                             {activeContactRequest.submittedBy}
+                          </div>
+                        </div>
+                        <div className="rounded-[20px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-4">
+                          <div className="text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                            Workspace
+                          </div>
+                          <div className="mt-2 break-words text-[0.92rem] leading-6 text-[var(--workspace-text-soft)]">
+                            {activeContactRequest.workspaceName}
                           </div>
                         </div>
                         <div className="rounded-[20px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-4">
