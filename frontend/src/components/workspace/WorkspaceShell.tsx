@@ -33849,12 +33849,6 @@ export function WorkspaceShell({
   const bundleOrganizerLiveMessages: BundleOrganizerWorkspaceMessage[] =
     productAccess === "bundle"
       ? (() => {
-          const livePriorityMessageKeys = new Set(
-            livePriorityInboxEntries.map(
-              ({ mailboxId, message }) => `${mailboxId}:${message.id}`,
-            ),
-          );
-
           return connectedOrderedMailboxes.flatMap((mailbox) => {
             const mailboxCollections =
               mailboxStore[mailbox.id] ?? createEmptyMailboxCollections();
@@ -33872,30 +33866,34 @@ export function WorkspaceShell({
 
               seenMessageKeys.add(messageKey);
 
-              const isWorkspacePriority = livePriorityMessageKeys.has(messageKey);
               const isOrganizerClassification =
                 message.internalClassification === "demo" ||
                 message.internalClassification === "high_priority_demo" ||
                 message.internalClassification === "promo" ||
-                message.internalClassification === "promo_reminder" ||
-                message.internalClassification === "reply";
+                message.internalClassification === "promo_reminder";
+              const normalizedOrganizerSignal = (
+                message.ui_signal ??
+                message.signal ??
+                ""
+              )
+                .trim()
+                .toLowerCase();
+              const hasOrganizerSignalFallback =
+                normalizedOrganizerSignal === "demo" ||
+                normalizedOrganizerSignal === "for review" ||
+                normalizedOrganizerSignal === "shortlist" ||
+                normalizedOrganizerSignal === "promo";
 
-              if (!isOrganizerClassification && !isWorkspacePriority) {
+              if (!isOrganizerClassification && !hasOrganizerSignalFallback) {
                 return [];
               }
 
               const priorityBadge =
                 message.internalClassification === "high_priority_demo"
                   ? "High-priority demo"
-                  : isWorkspacePriority
-                  ? "Priority"
                   : undefined;
               const reason =
-                isWorkspacePriority
-                  ? "Existing workspace priority signal."
-                  : message.internalClassification === "reply"
-                  ? "Live reply-classified message."
-                  : message.internalClassification === "high_priority_demo"
+                message.internalClassification === "high_priority_demo"
                   ? "High-priority demo classification."
                   : undefined;
 
@@ -33912,9 +33910,13 @@ export function WorkspaceShell({
                   signal: message.signal,
                   uiSignal: message.ui_signal,
                   unread: message.unread,
-                  priority: isWorkspacePriority,
                   priorityBadge,
                   reason,
+                  identityKey: message.imapUid
+                    ? `${mailbox.id}:imap:${message.imapUid}`
+                    : message.threadId
+                    ? `${mailbox.id}:thread:${message.threadId}`
+                    : `${mailbox.id}:id:${message.id}`,
                   sortTimestamp: resolveMailDateMs(message),
                 },
               ];

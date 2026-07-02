@@ -20,7 +20,7 @@ type BundleOrganizerIconName =
 
 type BundleOrganizerMessage = {
   id: string;
-  kind: "demo" | "promo" | "reply" | "sent";
+  kind: "demo" | "promo" | "sent";
   source: "sample" | "workspace";
   sender: string;
   subject: string;
@@ -28,15 +28,21 @@ type BundleOrganizerMessage = {
   body: string[];
   timestamp: string;
   sourceMailbox: string;
+  manualCategory?: "demo" | "promo";
   internalClassification?: BundleOrganizerInternalClassification;
+  category?: string;
   signal?: string;
   uiSignal?: string;
   unread?: boolean;
   shortlisted?: boolean;
-  priority?: boolean;
+  manualPriority?: boolean;
+  active_work_status?: BundleOrganizerActiveWorkStatus;
+  v7_final_priority?: string;
   priorityBadge?: string;
   status?: "replied" | "declined" | "interested" | "sent" | "trashed";
   reason?: string;
+  identityKey?: string;
+  sortTimestamp?: number;
 };
 
 export type BundleOrganizerInternalClassification =
@@ -63,15 +69,35 @@ export type BundleOrganizerWorkspaceMessage = {
   body: string[];
   timestamp: string;
   sourceMailbox: string;
+  manualCategory?: "demo" | "promo";
   internalClassification?: BundleOrganizerInternalClassification;
+  category?: string;
   signal?: string;
   uiSignal?: string;
   unread?: boolean;
-  priority?: boolean;
+  manualPriority?: boolean;
+  active_work_status?: BundleOrganizerActiveWorkStatus;
+  v7_final_priority?: string;
   priorityBadge?: string;
   reason?: string;
+  identityKey?: string;
   sortTimestamp?: number;
 };
+
+type BundleOrganizerVisibleCategory =
+  | "demo"
+  | "high_priority_demo"
+  | "promo"
+  | "promo_reminder";
+
+type BundleOrganizerActiveWorkStatus =
+  | "none"
+  | "review"
+  | "active"
+  | "waiting"
+  | "needs_reply"
+  | "follow_up"
+  | "closed";
 
 type BundleOrganizerSurfaceProps = {
   liveMessages?: BundleOrganizerWorkspaceMessage[];
@@ -96,7 +122,7 @@ const bundleOrganizerMessages: BundleOrganizerMessage[] = [
     timestamp: "12 min",
     sourceMailbox: "demos@cuevion.com",
     unread: true,
-    priority: true,
+    manualPriority: true,
     priorityBadge: "High-priority demo",
     reason: "Active demo with artist context and private audio link.",
   },
@@ -117,7 +143,7 @@ const bundleOrganizerMessages: BundleOrganizerMessage[] = [
     timestamp: "38 min",
     sourceMailbox: "info@cuevion.com",
     shortlisted: true,
-    priority: true,
+    active_work_status: "follow_up",
     priorityBadge: "Priority",
     reason: "Shortlisted demo with open follow-up.",
   },
@@ -138,7 +164,7 @@ const bundleOrganizerMessages: BundleOrganizerMessage[] = [
     timestamp: "9 min",
     sourceMailbox: "promo@cuevion.com",
     unread: true,
-    priority: true,
+    v7_final_priority: "priority",
     priorityBadge: "Promo priority",
     reason: "Release deadline and feedback link detected.",
   },
@@ -349,136 +375,177 @@ function NavIcon({ name }: { name: BundleOrganizerIconName }) {
   );
 }
 
-const demoClassifications = new Set<BundleOrganizerInternalClassification>([
+const organizerVisibleCategories = new Set<BundleOrganizerVisibleCategory>([
   "demo",
   "high_priority_demo",
-]);
-
-const promoClassifications = new Set<BundleOrganizerInternalClassification>([
   "promo",
   "promo_reminder",
 ]);
 
-const organizerActiveWorkTerms = [
-  "waiting",
-  "follow up",
-  "follow-up",
-  "replied",
-  "reply",
-  "feedback",
-  "interested",
-  "shortlist",
-  "shortlisted",
-  "stems",
-  "label copy",
-  "signing",
-  "sign",
-  "contract",
-  "agreement",
-  "approve",
-  "approval",
-  "move forward",
-  "proceed",
-  "next step",
-  "can you",
-  "please send",
-  "let me know",
-];
-
-const organizerWorkflowSignals = [
+const activeWorkPriorityStatuses = new Set<BundleOrganizerActiveWorkStatus>([
   "active",
-  "follow-up",
-  "follow up",
-  "timing",
-  "for review",
-  "shortlist",
-  "shortlisted",
-  "interested",
-  "needs_action",
-  "needs action",
-  "needs_review",
-  "needs review",
-];
+  "waiting",
+  "needs_reply",
+  "follow_up",
+]);
 
-function getOrganizerActiveWorkReason(message: BundleOrganizerMessage) {
-  if (message.internalClassification === "reply") {
-    return "Reply-classified message.";
-  }
+function normalizeOrganizerSignal(value?: string | null) {
+  return value?.trim().toLowerCase() ?? "";
+}
 
-  if (/^(re|fw|fwd):/i.test(message.subject.trim())) {
-    return "Existing reply or forwarded thread.";
-  }
-
-  const workflowSignal = [message.signal, message.uiSignal, message.status]
-    .filter(Boolean)
-    .join(" ")
-    .toLowerCase();
-
-  if (organizerWorkflowSignals.some((term) => workflowSignal.includes(term))) {
-    return "Organizer workflow signal detected.";
-  }
-
-  const searchableText = [
-    message.subject,
-    message.snippet,
-    message.sender,
-    message.sourceMailbox,
-    ...message.body,
-  ]
-    .join(" ")
-    .toLowerCase();
-  const matchedTerm = organizerActiveWorkTerms.find((term) =>
-    searchableText.includes(term),
+function isOrganizerVisibleCategory(
+  value?: string | null,
+): value is BundleOrganizerVisibleCategory {
+  return organizerVisibleCategories.has(
+    normalizeOrganizerSignal(value) as BundleOrganizerVisibleCategory,
   );
+}
 
-  if (matchedTerm) {
-    return `Open-loop signal: ${matchedTerm}.`;
+function resolveOrganizerSignalFallback(value?: string | null) {
+  const normalizedValue = normalizeOrganizerSignal(value);
+
+  if (
+    normalizedValue === "demo" ||
+    normalizedValue === "for review" ||
+    normalizedValue === "shortlist"
+  ) {
+    return "demo";
+  }
+
+  if (normalizedValue === "promo") {
+    return "promo";
   }
 
   return null;
 }
 
-function isOrganizerActiveWorkMessage(message: BundleOrganizerMessage) {
-  return getOrganizerActiveWorkReason(message) !== null;
+function resolveOrganizerCategory(
+  message: Pick<
+    BundleOrganizerMessage,
+    "manualCategory" | "internalClassification" | "category" | "uiSignal" | "signal"
+  >,
+) {
+  if (message.manualCategory === "demo" || message.manualCategory === "promo") {
+    return message.manualCategory;
+  }
+
+  if (isOrganizerVisibleCategory(message.internalClassification)) {
+    return normalizeOrganizerSignal(
+      message.internalClassification,
+    ) as BundleOrganizerVisibleCategory;
+  }
+
+  if (isOrganizerVisibleCategory(message.category)) {
+    return normalizeOrganizerSignal(message.category) as BundleOrganizerVisibleCategory;
+  }
+
+  return (
+    resolveOrganizerSignalFallback(message.uiSignal) ??
+    resolveOrganizerSignalFallback(message.signal)
+  );
 }
 
-function resolveWorkspaceMessageKind(
-  classification?: BundleOrganizerInternalClassification,
-): BundleOrganizerMessage["kind"] {
-  if (classification === "reply") {
-    return "reply";
+function shouldShowInDemoInbox(message: BundleOrganizerMessage) {
+  const category = resolveOrganizerCategory(message);
+  return category === "demo" || category === "high_priority_demo";
+}
+
+function shouldShowInPromoInbox(message: BundleOrganizerMessage) {
+  const category = resolveOrganizerCategory(message);
+  return category === "promo" || category === "promo_reminder";
+}
+
+function shouldShowInOrganizerPriority(message: BundleOrganizerMessage) {
+  if (resolveOrganizerCategory(message) === null) {
+    return false;
   }
 
-  if (classification && promoClassifications.has(classification)) {
-    return "promo";
+  if (message.manualPriority === true) {
+    return true;
   }
 
-  return "demo";
+  if (
+    message.active_work_status &&
+    activeWorkPriorityStatuses.has(message.active_work_status)
+  ) {
+    return true;
+  }
+
+  return normalizeOrganizerSignal(message.v7_final_priority) === "priority";
+}
+
+function countUnreadMessages(messages: BundleOrganizerMessage[]) {
+  return messages.filter((message) => message.unread === true).length;
+}
+
+function resolvePriorityReason(message: BundleOrganizerMessage) {
+  if (message.reason) {
+    return message.reason;
+  }
+
+  if (message.manualPriority === true) {
+    return "Manual Organizer priority.";
+  }
+
+  if (message.active_work_status && activeWorkPriorityStatuses.has(message.active_work_status)) {
+    return `Organizer active work: ${message.active_work_status.replace(/_/g, " ")}.`;
+  }
+
+  if (normalizeOrganizerSignal(message.v7_final_priority) === "priority") {
+    return "Organizer priority signal.";
+  }
+
+  return null;
+}
+
+function resolveWorkspaceMessageKind(message: BundleOrganizerMessage): BundleOrganizerMessage["kind"] {
+  const category = resolveOrganizerCategory(message);
+  return category === "promo" || category === "promo_reminder" ? "promo" : "demo";
 }
 
 function normalizeWorkspaceMessages(
   liveMessages: BundleOrganizerWorkspaceMessage[],
 ): BundleOrganizerMessage[] {
-  return liveMessages
-    .map((message) => ({
+  const messagesByIdentity = new Map<string, BundleOrganizerMessage>();
+
+  liveMessages
+    .map((message): BundleOrganizerMessage => ({
       ...message,
       id: `workspace-${message.id}`,
-      kind: resolveWorkspaceMessageKind(message.internalClassification),
+      kind: "demo",
       source: "workspace" as const,
       priorityBadge:
         message.priorityBadge ??
         (message.internalClassification === "high_priority_demo"
           ? "High-priority demo"
-          : message.priority
-          ? "Priority"
           : undefined),
     }))
-    .sort((first, second) => (second.sortTimestamp ?? 0) - (first.sortTimestamp ?? 0));
+    .map((message) => ({
+      ...message,
+      kind: resolveWorkspaceMessageKind(message),
+    }))
+    .forEach((message) => {
+      const identityKey = message.identityKey ?? message.id;
+      const existingMessage = messagesByIdentity.get(identityKey);
+
+      if (
+        !existingMessage ||
+        (message.sortTimestamp ?? 0) >= (existingMessage.sortTimestamp ?? 0)
+      ) {
+        messagesByIdentity.set(identityKey, message);
+      }
+    });
+
+  return Array.from(messagesByIdentity.values()).sort(
+    (first, second) => (second.sortTimestamp ?? 0) - (first.sortTimestamp ?? 0),
+  );
 }
 
 function getSampleMessagesForView(view: BundleOrganizerView) {
   if (view === "priority") {
-    return bundleOrganizerMessages.filter((message) => message.priority && message.status !== "trashed");
+    return bundleOrganizerMessages.filter(
+      (message) => shouldShowInOrganizerPriority(message) && message.status !== "trashed",
+    );
   }
 
   if (view === "shortlist") {
@@ -486,11 +553,15 @@ function getSampleMessagesForView(view: BundleOrganizerView) {
   }
 
   if (view === "demo") {
-    return bundleOrganizerMessages.filter((message) => message.kind === "demo" && message.status !== "trashed");
+    return bundleOrganizerMessages.filter(
+      (message) => shouldShowInDemoInbox(message) && message.status !== "trashed",
+    );
   }
 
   if (view === "promo") {
-    return bundleOrganizerMessages.filter((message) => message.kind === "promo" && message.status !== "trashed");
+    return bundleOrganizerMessages.filter(
+      (message) => shouldShowInPromoInbox(message) && message.status !== "trashed",
+    );
   }
 
   if (view === "sent") {
@@ -509,23 +580,15 @@ function getLiveMessagesForView(
   liveMessages: BundleOrganizerMessage[],
 ) {
   if (view === "priority") {
-    return liveMessages.filter(isOrganizerActiveWorkMessage);
+    return liveMessages.filter(shouldShowInOrganizerPriority);
   }
 
   if (view === "demo") {
-    return liveMessages.filter(
-      (message) =>
-        message.internalClassification != null &&
-        demoClassifications.has(message.internalClassification),
-    );
+    return liveMessages.filter(shouldShowInDemoInbox);
   }
 
   if (view === "promo") {
-    return liveMessages.filter(
-      (message) =>
-        message.internalClassification != null &&
-        promoClassifications.has(message.internalClassification),
-    );
+    return liveMessages.filter(shouldShowInPromoInbox);
   }
 
   return [];
@@ -552,7 +615,17 @@ function getMessagesForView(
 
 function getCounts(liveMessages: BundleOrganizerMessage[]) {
   return navItems.reduce<Partial<Record<BundleOrganizerView, number>>>((counts, item) => {
-    counts[item.id] = getMessagesForView(item.id, liveMessages).messages.length;
+    const viewMessages = getMessagesForView(item.id, liveMessages).messages;
+
+    counts[item.id] =
+      item.id === "promo"
+        ? countUnreadMessages(
+            viewMessages.filter(
+              (message) => resolveOrganizerCategory(message) !== "promo_reminder",
+            ),
+          )
+        : countUnreadMessages(viewMessages);
+
     return counts;
   }, {});
 }
@@ -631,7 +704,7 @@ export function BundleOrganizerSurface({
     activeDisplay.source === "workspace"
       ? connectedInboxCount
       : Math.max(2, connectedInboxCount);
-  const smartViewCounts = useMemo(() => {
+  const previewGroupCounts = useMemo(() => {
     const demoMessages = getMessagesForView("demo", workspaceMessages).messages;
     const promoMessages = getMessagesForView("promo", workspaceMessages).messages;
 
@@ -794,29 +867,29 @@ export function BundleOrganizerSurface({
 
             <section className="border-t border-white/10 pt-3">
               <div className="flex h-10 items-center justify-between gap-2 rounded-full px-3.5 text-[0.62rem] font-semibold uppercase tracking-[0.14em] text-[rgba(217,203,184,0.5)]">
-                <span>Smart Views</span>
+                <span>Preview Groups</span>
                 <button
                   type="button"
-                  onClick={() => showStaticFeedback("Smart Views are static in Bundle Pilot.")}
+                  onClick={() => showStaticFeedback("Preview groups are static in Bundle Pilot.")}
                   className="inline-flex h-6 w-6 items-center justify-center rounded-full border border-[rgba(143,179,159,0.2)] bg-[rgba(143,179,159,0.1)] text-[0.86rem] leading-none text-[rgba(198,228,209,0.86)] transition-colors hover:bg-[rgba(143,179,159,0.16)]"
-                  aria-label="Create Smart View"
+                  aria-label="Create preview group"
                 >
                   +
                 </button>
               </div>
               {[
-                { label: "High priority demos", count: smartViewCounts.highPriorityDemos },
-                { label: "Promo reminders", count: smartViewCounts.promoReminders },
-              ].map((smartView) => (
+                { label: "High priority demos", count: previewGroupCounts.highPriorityDemos },
+                { label: "Promo reminders", count: previewGroupCounts.promoReminders },
+              ].map((previewGroup) => (
                 <button
-                  key={smartView.label}
+                  key={previewGroup.label}
                   type="button"
-                  onClick={() => showStaticFeedback(`${smartView.label} is a static Bundle Pilot Smart View.`)}
+                  onClick={() => showStaticFeedback(`${previewGroup.label} is a static Bundle Pilot preview group.`)}
                   className="mb-2 flex h-10 w-full shrink-0 items-center justify-between gap-2 rounded-full px-3.5 text-[0.82rem] font-medium text-[rgba(245,239,229,0.72)] transition-colors hover:bg-white/5"
                 >
-                  <span className="truncate">{smartView.label}</span>
+                  <span className="truncate">{previewGroup.label}</span>
                   <span className="rounded-full bg-white/5 px-2 py-0.5 text-[0.72rem] text-[rgba(245,239,229,0.52)]">
-                    {smartView.count}
+                    {previewGroup.count}
                   </span>
                 </button>
               ))}
@@ -958,9 +1031,9 @@ export function BundleOrganizerSurface({
                             <p className="mt-1 line-clamp-2 text-[0.84rem] leading-5 text-[rgba(245,239,229,0.6)]">
                               {message.snippet}
                             </p>
-                            {activeView === "priority" && getOrganizerActiveWorkReason(message) ? (
+                            {activeView === "priority" && resolvePriorityReason(message) ? (
                               <p className="mt-2 text-[0.76rem] font-medium uppercase tracking-[0.12em] text-[rgba(143,179,159,0.78)]">
-                                {getOrganizerActiveWorkReason(message)}
+                                {resolvePriorityReason(message)}
                               </p>
                             ) : null}
                           </div>
@@ -1020,7 +1093,7 @@ function BundleOrganizerMessageDetail({
   onBack: () => void;
   onAction: (message: string) => void;
 }) {
-  const activeReason = getOrganizerActiveWorkReason(message) ?? message.reason;
+  const activeReason = resolvePriorityReason(message) ?? message.reason;
   const bodyLines = message.body.length > 0 ? message.body : [message.snippet];
   const actionButtonClass =
     "inline-flex h-9 items-center justify-center rounded-full border border-[rgba(143,179,159,0.2)] bg-[rgba(143,179,159,0.1)] px-3.5 text-[0.72rem] font-medium uppercase tracking-[0.11em] text-[rgba(198,228,209,0.82)] transition-colors hover:border-[rgba(143,179,159,0.3)] hover:bg-[rgba(143,179,159,0.16)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[rgba(143,179,159,0.24)]";
@@ -1112,10 +1185,10 @@ function BundleOrganizerSettings() {
           badge: "Shared",
         },
         {
-          eyebrow: "Organizer rules",
-          title: "Smart Views and routing",
+          eyebrow: "Organizer preview",
+          title: "Preview groups and routing",
           description:
-            "Smart Views are shown here as static pilot structure. No classifier, filtering, or mailbox routing changes are active.",
+            "Preview groups are static pilot structure. No classifier, filtering, or mailbox routing changes are active.",
           badge: "Static",
         },
         {
