@@ -8717,7 +8717,13 @@ function ReadingLearningButton({
   );
 }
 
-function WorkspaceModalLayer({ children }: { children: ReactNode }) {
+function WorkspaceModalLayer({
+  children,
+  themeMode,
+}: {
+  children: ReactNode;
+  themeMode?: "light" | "dark";
+}) {
   useLayoutEffect(() => {
     workspaceModalLockCount += 1;
 
@@ -8764,7 +8770,11 @@ function WorkspaceModalLayer({ children }: { children: ReactNode }) {
   }, []);
 
   return (
-    <div className="pointer-events-auto fixed inset-0 z-[321] bg-[var(--workspace-modal-scrim)] backdrop-blur-[2px]">
+    <div
+      className="pointer-events-auto fixed inset-0 z-[321] bg-[var(--workspace-modal-scrim)] backdrop-blur-[2px]"
+      data-theme={themeMode}
+      style={themeMode ? { colorScheme: themeMode } : undefined}
+    >
       <div className="flex min-h-dvh w-full items-center justify-center overflow-y-auto p-6">
         {children}
       </div>
@@ -28862,6 +28872,7 @@ function UtilityView({
   primaryWorkspaceEmail,
   workspaceName,
   authenticatedUserName,
+  themeMode,
 }: {
   section: UtilitySection;
   lastViewedGuidance: string | null;
@@ -28869,6 +28880,7 @@ function UtilityView({
   primaryWorkspaceEmail: string;
   workspaceName: string;
   authenticatedUserName: string;
+  themeMode: "light" | "dark";
 }) {
   const [helpSuggestionsVisible, setHelpSuggestionsVisible] = useState(false);
   const [selectedHelpSuggestion, setSelectedHelpSuggestion] = useState<string | null>(
@@ -29262,7 +29274,7 @@ function UtilityView({
 
             {activeContactRequest
               ? createPortal(
-                  <WorkspaceModalLayer>
+                  <WorkspaceModalLayer themeMode={themeMode}>
                     <div
                       className="w-full max-w-[760px] overflow-hidden rounded-[26px] border border-[var(--workspace-border)] bg-[var(--workspace-modal-bg)] p-6 shadow-[0_24px_70px_rgba(61,44,32,0.16),0_8px_20px_rgba(61,44,32,0.08)]"
                       onMouseDown={(event) => event.stopPropagation()}
@@ -38021,6 +38033,7 @@ export function WorkspaceShell({
                   primaryWorkspaceEmail={primaryWorkspaceEmail}
                   workspaceName={workspaceName}
                   authenticatedUserName={authenticatedUser?.name ?? ""}
+                  themeMode={resolvedTheme}
                 />
               </div>
             ) : (
