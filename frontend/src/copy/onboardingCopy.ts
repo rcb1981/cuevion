@@ -219,7 +219,8 @@ export const onboardingCopy = {
     connect: {
       title: "Connect your inboxes",
       description: "Add provider details for each selected inbox.",
-      inboxHint: "Choose a provider and enter the email for this inbox.",
+      inboxHint:
+        "Choose Gmail OAuth or Custom IMAP. Other providers can be tested through Custom IMAP during this beta.",
       email: "Email",
       connectInbox: "Connect inbox",
       continueWithGoogle: "Continue with Google",
@@ -235,9 +236,9 @@ export const onboardingCopy = {
       invalidHost: "Host address is invalid",
       couldNotConnect: "Could not connect to server",
       connectionTimedOut: "Connection timed out",
-      googleOAuthTitle: "Google connects with OAuth",
+      googleOAuthTitle: "Gmail connects with OAuth",
       googleOAuthDescription:
-        "Use secure Google authentication for Gmail and Google Workspace. Manual IMAP passwords are no longer used in this path.",
+        "Use secure Google authentication for Gmail and Google Workspace. For other providers, choose Custom IMAP during this beta.",
       googleOAuthPending:
         "Authentication will continue in Google once the runtime OAuth endpoint is available.",
       googleOAuthActivationPending:
@@ -250,10 +251,7 @@ export const onboardingCopy = {
       password: "Password",
       ssl: "SSL",
       providers: [
-        { id: "google", label: "Gmail / Google Workspace (OAuth)" },
-        { id: "microsoft", label: "Microsoft 365 / Outlook" },
-        { id: "icloud", label: "iCloud" },
-        { id: "yahoo", label: "Yahoo" },
+        { id: "google", label: "Gmail / Google Workspace" },
         { id: "custom_imap", label: "Custom IMAP" },
       ],
     },

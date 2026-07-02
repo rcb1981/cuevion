@@ -11173,6 +11173,7 @@ function TopCards({
   unreadMessagesContext,
   priorityInboxCount,
   connectedInboxCount,
+  connectedInboxStatusContext,
 }: {
   onOpenPriority: () => void;
   onOpenUnread: () => void;
@@ -11181,6 +11182,7 @@ function TopCards({
   unreadMessagesContext: string;
   priorityInboxCount: number | null;
   connectedInboxCount: number;
+  connectedInboxStatusContext: string;
 }) {
   const cards = [
     {
@@ -11205,7 +11207,7 @@ function TopCards({
     {
       label: "Connected Inboxes",
       value: String(connectedInboxCount),
-      context: "All systems connected",
+      context: connectedInboxStatusContext,
       actionLabel: "Open inboxes",
       onClick: onOpenInboxes,
     },
@@ -11940,6 +11942,7 @@ function DashboardView({
   unreadMessagesContext,
   priorityInboxCount,
   connectedInboxCount,
+  connectedInboxStatusContext,
   syncStatusMessage,
 }: {
   onOpenPriority: () => void;
@@ -11950,6 +11953,7 @@ function DashboardView({
   unreadMessagesContext: string;
   priorityInboxCount: number | null;
   connectedInboxCount: number;
+  connectedInboxStatusContext: string;
   syncStatusMessage: string | null;
 }) {
   const userName: string | null = null;
@@ -11998,6 +12002,7 @@ function DashboardView({
         unreadMessagesContext={unreadMessagesContext}
         priorityInboxCount={priorityInboxCount}
         connectedInboxCount={connectedInboxCount}
+        connectedInboxStatusContext={connectedInboxStatusContext}
       />
 
       <div className="grid gap-6">
@@ -24806,6 +24811,10 @@ function isManagedInboxReady(
     return false;
   }
 
+  if (!isPrivateBetaSupportedProvider(mailbox.provider)) {
+    return false;
+  }
+
   if (isOAuthConnectionProvider(mailbox.provider)) {
     return true;
   }
@@ -24825,11 +24834,32 @@ function isManagedInboxReady(
   );
 }
 
+function isPrivateBetaSupportedProvider(provider: ProviderId | null) {
+  return provider === "google" || provider === "custom_imap";
+}
+
+function getUnsupportedProviderLabel(provider: ProviderId | null) {
+  switch (provider) {
+    case "microsoft":
+      return "Microsoft 365 / Outlook";
+    case "icloud":
+      return "iCloud";
+    case "yahoo":
+      return "Yahoo";
+    default:
+      return "Unsupported provider";
+  }
+}
+
 function isManagedInboxConfigurationComplete(
   mailbox: ManagedWorkspaceInbox,
   credentialStatuses: MailboxCredentialStatusStore = {},
 ) {
   if (!mailbox.provider || !mailbox.email.trim()) {
+    return false;
+  }
+
+  if (!isPrivateBetaSupportedProvider(mailbox.provider)) {
     return false;
   }
 
@@ -25236,6 +25266,10 @@ function getManagedInboxMissingRequiredFields(
 }
 
 function getManagedInboxStatusLabel(mailbox: ManagedWorkspaceInbox) {
+  if (mailbox.provider && !isPrivateBetaSupportedProvider(mailbox.provider)) {
+    return "Unsupported provider";
+  }
+
   if (mailbox.connectionStatus === "connected") {
     return onboardingText.connect.connected;
   }
@@ -25260,6 +25294,10 @@ function getManagedInboxStatusLabel(mailbox: ManagedWorkspaceInbox) {
 }
 
 function getManagedInboxStatusClassName(mailbox: ManagedWorkspaceInbox) {
+  if (mailbox.provider && !isPrivateBetaSupportedProvider(mailbox.provider)) {
+    return "border-[color:rgba(184,163,120,0.24)] bg-[color:rgba(184,163,120,0.12)] text-[var(--workspace-text-muted)]";
+  }
+
   if (mailbox.connectionStatus === "connected") {
     return "border-[var(--workspace-status-success-border)] bg-[var(--workspace-status-success-bg)] text-[var(--workspace-status-success-text)]";
   }
@@ -25356,6 +25394,9 @@ function ManagedInboxEditor({
   const smtpPasswordStatusLabel = hasUsableSmtpPassword(mailbox, credentialStatuses)
     ? "Set"
     : "Not set";
+  const isUnsupportedProvider =
+    Boolean(mailbox.provider) && !isPrivateBetaSupportedProvider(mailbox.provider);
+  const unsupportedProviderLabel = getUnsupportedProviderLabel(mailbox.provider);
   const moveButtonDisabledClass =
     "cursor-default opacity-45 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-card)] hover:text-[var(--workspace-text-soft)] hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]";
 
@@ -25486,7 +25527,17 @@ function ManagedInboxEditor({
         ) : null}
       </div>
 
-      {isImapCredentialsProvider(mailbox.provider) ? (
+      {isUnsupportedProvider ? (
+        <div className="mt-6 space-y-3 rounded-[24px] border border-[color:rgba(184,163,120,0.24)] bg-[color:rgba(184,163,120,0.1)] p-5">
+          <p className="text-sm font-semibold text-[var(--workspace-text)]">
+            {unsupportedProviderLabel} is not available in this beta
+          </p>
+          <p className="text-sm leading-6 text-[var(--workspace-text-muted)]">
+            Gmail / Google Workspace and Custom IMAP are supported for private beta testing.
+            Switch this inbox to Custom IMAP if this provider offers IMAP access.
+          </p>
+        </div>
+      ) : isImapCredentialsProvider(mailbox.provider) ? (
         <div className="mt-6 space-y-4 rounded-[24px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] p-5">
           <div className="grid gap-4 md:grid-cols-2">
             <div>
@@ -31956,6 +32007,29 @@ export function WorkspaceShell({
   useEffect(() => {
     mailboxSyncErrorsRef.current = mailboxSyncErrors;
   }, [mailboxSyncErrors]);
+  const hasConnectedInboxNeedingAttention = savedManagedInboxes.some((mailbox) => {
+    if (connectedInboxCount === 0) {
+      return false;
+    }
+
+    if (mailbox.provider && !isPrivateBetaSupportedProvider(mailbox.provider)) {
+      return true;
+    }
+
+    if (!mailbox.connected || mailbox.connectionStatus !== "connected") {
+      return true;
+    }
+
+    return Boolean(mailboxSyncErrors[mailbox.id as InboxId]);
+  });
+  const connectedInboxStatusContext =
+    connectedInboxCount === 0
+      ? "No connected inboxes yet"
+      : !areMailboxCountsHydrated || Boolean(syncingMailboxId)
+        ? "Sync in progress"
+        : hasConnectedInboxNeedingAttention
+          ? "Some inboxes need attention"
+          : "All connected inboxes are active";
   // Per-mailbox refresh status for mobile diagnostic display. Set in onSyncMailbox callback
   // so the user can see exactly what happened when syncing a mailbox (requested, skipped,
   // queued, succeeded, failed). Keyed by mailboxId string.
@@ -37920,6 +37994,7 @@ export function WorkspaceShell({
                     areMailboxCountsHydrated ? livePriorityInboxItems.length : null
                   }
                   connectedInboxCount={connectedInboxCount}
+                  connectedInboxStatusContext={connectedInboxStatusContext}
                   syncStatusMessage={dashboardSyncStatusMessage}
                 />
               </div>
