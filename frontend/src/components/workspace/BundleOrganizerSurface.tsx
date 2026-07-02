@@ -1,68 +1,820 @@
-const organizerModules = [
+import { useMemo, useState } from "react";
+
+type BundleOrganizerView =
+  | "priority"
+  | "shortlist"
+  | "demo"
+  | "promo"
+  | "sent"
+  | "trash"
+  | "settings";
+
+type BundleOrganizerIconName =
+  | "priority"
+  | "shortlist"
+  | "demo"
+  | "promo"
+  | "sent"
+  | "trash"
+  | "settings";
+
+type BundleOrganizerMessage = {
+  id: string;
+  kind: "demo" | "promo" | "sent";
+  sender: string;
+  subject: string;
+  snippet: string;
+  body: string[];
+  timestamp: string;
+  sourceMailbox: string;
+  unread?: boolean;
+  shortlisted?: boolean;
+  priority?: boolean;
+  priorityBadge?: string;
+  status?: "replied" | "declined" | "interested" | "sent" | "trashed";
+  reason?: string;
+};
+
+const bundleOrganizerMessages: BundleOrganizerMessage[] = [
   {
+    id: "bundle-demo-mila-hart",
+    kind: "demo",
+    sender: "Mila Hart",
+    subject: "Demo submission - late night melodic house",
+    snippet:
+      "Private SoundCloud link included. References recent Nora En Pure and Lane 8 playlist support.",
+    body: [
+      "Hi Cuevion team, I wanted to share a late night melodic house demo that feels close to the sound you have been supporting.",
+      "The private link includes the full mix, a short instrumental version, current streaming notes, and artist context.",
+      "Would love to know if this is in range for the label.",
+    ],
+    timestamp: "12 min",
+    sourceMailbox: "demos@cuevion.com",
+    unread: true,
+    priority: true,
+    priorityBadge: "High-priority demo",
+    reason: "Active demo with artist context and private audio link.",
+  },
+  {
+    id: "bundle-demo-northline",
+    kind: "demo",
+    sender: "Northline Records",
+    subject: "New artist demo for your A&R team",
+    snippet:
+      "Three unreleased tracks from a Berlin duo with recent Spotify editorial traction.",
+    body: [
+      "Sharing three unreleased tracks from a Berlin duo we are developing for Q3.",
+      "The lead track sits between melodic house and indie dance, with a clear club arrangement.",
+      "If there is interest, we can send WAVs and a clean one-sheet this week.",
+    ],
+    timestamp: "38 min",
+    sourceMailbox: "info@cuevion.com",
+    shortlisted: true,
+    priority: true,
+    priorityBadge: "Priority",
+    reason: "Shortlisted demo with open follow-up.",
+  },
+  {
+    id: "bundle-promo-riva",
+    kind: "promo",
+    sender: "Riva Promo Pool",
+    subject: "Promo: Kaito Ray - Solar Drift",
+    snippet:
+      "Club mix, radio edit, and DJ feedback link available before Friday's release.",
+    body: [
+      "Kaito Ray returns with Solar Drift, a warm melodic club record scheduled for release this Friday.",
+      "The promo pack includes the club mix, radio edit, WAV download, and DJ feedback link.",
+      "Early support is coming from a small group of European selectors.",
+    ],
+    timestamp: "9 min",
+    sourceMailbox: "promo@cuevion.com",
+    unread: true,
+    priority: true,
+    priorityBadge: "Promo priority",
+    reason: "Release deadline and feedback link detected.",
+  },
+  {
+    id: "bundle-promo-labelworx",
+    kind: "promo",
+    sender: "LabelWorx Promos",
+    subject: "Reminder: Maya Sol - Open Skies",
+    snippet:
+      "Promo reminder for pending feedback. Includes private stream and WAV download.",
+    body: [
+      "Quick reminder that Maya Sol - Open Skies is still open for feedback.",
+      "The private stream and WAV download remain available in the promo portal.",
+      "Feedback closes this Friday.",
+    ],
+    timestamp: "2h",
+    sourceMailbox: "press@cuevion.com",
+    shortlisted: true,
+  },
+  {
+    id: "bundle-sent-decline",
+    kind: "sent",
+    sender: "Cuevion",
+    subject: "Re: Demo submission - late night melodic house",
+    snippet:
+      "Thanks for sending this through. The production is strong, but it is not the right fit for the current release lane.",
+    body: [
+      "Thanks for sending this through. The production is strong, but it is not the right fit for the current release lane.",
+      "Please keep us posted on future records. This was reviewed from the Organizer pilot shell.",
+    ],
+    timestamp: "Yesterday",
+    sourceMailbox: "demos@cuevion.com",
+    status: "sent",
+  },
+  {
+    id: "bundle-trash-old-promo",
+    kind: "promo",
+    sender: "Archive Promo",
+    subject: "Old campaign follow-up",
+    snippet: "Archived promo reminder shown here as Organizer-local trash.",
+    body: [
+      "This static trash item shows the Organizer-local trash state.",
+      "No real mail is moved, archived, deleted, or filtered in Bundle Pilot.",
+    ],
+    timestamp: "Last week",
+    sourceMailbox: "promo@cuevion.com",
+    status: "trashed",
+  },
+];
+
+const navItems: Array<{
+  id: BundleOrganizerView;
+  label: string;
+  icon: BundleOrganizerIconName;
+  showCount?: boolean;
+}> = [
+  { id: "priority", label: "Priority", icon: "priority", showCount: true },
+  { id: "shortlist", label: "Shortlist", icon: "shortlist", showCount: true },
+  { id: "demo", label: "Demo Inbox", icon: "demo", showCount: true },
+  { id: "promo", label: "Promo Inbox", icon: "promo", showCount: true },
+  { id: "sent", label: "Sent", icon: "sent", showCount: true },
+  { id: "trash", label: "Trash", icon: "trash" },
+  { id: "settings", label: "Settings", icon: "settings" },
+];
+
+const viewCopy: Record<
+  BundleOrganizerView,
+  { eyebrow: string; title: string; description: string; emptyTitle: string; emptyDescription: string }
+> = {
+  priority: {
+    eyebrow: "Active work queue",
     title: "Priority",
-    description: "High-intent demos, promos, and follow-ups gathered for review.",
+    description: "Active demos, promos, replies, and follow-ups that need attention.",
+    emptyTitle: "No priority messages yet.",
+    emptyDescription: "Priority work from shared bundle inboxes will collect here.",
   },
-  {
+  shortlist: {
+    eyebrow: "Saved for follow-up",
     title: "Shortlist",
-    description: "A focused holding area for music that is worth a closer listen.",
+    description: "Saved demos and promos collected for focused follow-up.",
+    emptyTitle: "No shortlisted messages yet.",
+    emptyDescription: "Shortlist demos or promos to collect them here for review.",
   },
-  {
+  demo: {
+    eyebrow: "Unified demo intake",
     title: "Demo Inbox",
-    description: "Incoming demos will appear here in the bundle-managed experience.",
+    description: "Demo submissions from connected workspace inboxes in one focused queue.",
+    emptyTitle: "No synced demo messages yet.",
+    emptyDescription: "Demo messages will appear here after bundle-managed sync is connected.",
   },
-  {
+  promo: {
+    eyebrow: "Unified promo review",
     title: "Promo Inbox",
-    description: "Promo sends and campaign updates will live here when the pilot expands.",
+    description: "Promo campaigns and reminders kept separate from demo discovery.",
+    emptyTitle: "No synced promo messages yet.",
+    emptyDescription: "Promo messages will appear here after bundle-managed sync is connected.",
   },
-  {
+  sent: {
+    eyebrow: "Organizer sent activity",
+    title: "Sent",
+    description: "Replies, declines, and forwards sent from Organizer workflows.",
+    emptyTitle: "No sent activity yet.",
+    emptyDescription: "Static sent activity will appear here in the bundle pilot shell.",
+  },
+  trash: {
+    eyebrow: "Organizer-local trash",
+    title: "Trash",
+    description: "Messages hidden from active Organizer views until restored.",
+    emptyTitle: "Trash is empty.",
+    emptyDescription: "Trash is local to Organizer and does not move mail in IMAP.",
+  },
+  settings: {
+    eyebrow: "Bundle-managed module",
     title: "Settings",
-    description: "Organizer preferences will be managed from the shared workspace.",
+    description: "Organizer preferences will be managed from the shared Cuevion Workspace.",
+    emptyTitle: "Settings are managed by Cuevion Workspace.",
+    emptyDescription: "Connected inboxes are shared with this Organizer in Bundle Pilot.",
   },
-] as const;
+};
+
+function OrganizerIcon({ className = "" }: { className?: string }) {
+  return (
+    <svg
+      aria-hidden="true"
+      viewBox="0 0 72 72"
+      className={className}
+      fill="none"
+    >
+      <path
+        d="M47.2 12.2C40.6 8.6 32.5 8.2 25.4 11.2C15.5 15.4 9.1 25 9.1 36C9.1 47 15.5 56.6 25.4 60.8C32.5 63.8 40.6 63.4 47.2 59.8"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="7.5"
+      />
+      <path d="M38.5 31.5V40.5" stroke="currentColor" strokeLinecap="round" strokeWidth="4.8" />
+      <path d="M46 26.5V45.5" stroke="currentColor" strokeLinecap="round" strokeWidth="4.8" />
+      <path d="M53.5 22.5V49.5" stroke="currentColor" strokeLinecap="round" strokeWidth="4.8" />
+      <path d="M61 29.5V42.5" stroke="currentColor" strokeLinecap="round" strokeWidth="4.8" />
+    </svg>
+  );
+}
+
+function NavIcon({ name }: { name: BundleOrganizerIconName }) {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-[18px] w-[18px] shrink-0"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.8"
+      viewBox="0 0 24 24"
+    >
+      {name === "priority" ? (
+        <>
+          <path d="m13 2-2 8h7l-7 12 2-8H6l7-12Z" />
+          <path d="M5 19h4" />
+        </>
+      ) : null}
+      {name === "shortlist" ? (
+        <path d="M6.5 4.75A2.25 2.25 0 0 1 8.75 2.5h6.5a2.25 2.25 0 0 1 2.25 2.25v16l-5.5-3.2-5.5 3.2v-16Z" />
+      ) : null}
+      {name === "demo" ? (
+        <>
+          <path d="M4 7.5A2.5 2.5 0 0 1 6.5 5h11A2.5 2.5 0 0 1 20 7.5v9A2.5 2.5 0 0 1 17.5 19h-11A2.5 2.5 0 0 1 4 16.5v-9Z" />
+          <path d="M4 11h4.1a2.75 2.75 0 0 0 2.55 1.72h2.7A2.75 2.75 0 0 0 15.9 11H20" />
+          <path d="M14.5 7.4v3.8" />
+          <path d="M14.5 7.4 17 6.75" />
+        </>
+      ) : null}
+      {name === "promo" ? (
+        <>
+          <path d="M4 13.5h3.25l8.25 4.25V6.25L7.25 10.5H4v3Z" />
+          <path d="M7.25 13.5 8.5 19" />
+          <path d="M18 9.1a3.25 3.25 0 0 1 0 5.8" />
+          <path d="M20.25 7a6 6 0 0 1 0 10" />
+        </>
+      ) : null}
+      {name === "sent" ? (
+        <>
+          <path d="M21 3 10 14" />
+          <path d="m21 3-7 18-4-7-7-4 18-7Z" />
+        </>
+      ) : null}
+      {name === "trash" ? (
+        <>
+          <path d="M4 6.5h16" />
+          <path d="M9.5 6.5v-2h5v2" />
+          <path d="M7 6.5 8 20h8l1-13.5" />
+          <path d="M10.5 10.5v5.5" />
+          <path d="M13.5 10.5v5.5" />
+        </>
+      ) : null}
+      {name === "settings" ? (
+        <>
+          <path d="M12 8.25A3.75 3.75 0 1 0 12 15.75 3.75 3.75 0 0 0 12 8.25Z" />
+          <path d="M19.4 15a1.8 1.8 0 0 0 .36 1.98l.05.05a2.15 2.15 0 0 1-3.04 3.04l-.05-.05a1.8 1.8 0 0 0-1.98-.36 1.8 1.8 0 0 0-1.09 1.65v.14a2.15 2.15 0 0 1-4.3 0v-.08a1.8 1.8 0 0 0-1.18-1.68 1.8 1.8 0 0 0-1.98.36l-.05.05a2.15 2.15 0 1 1-3.04-3.04l.05-.05A1.8 1.8 0 0 0 3.51 15a1.8 1.8 0 0 0-1.65-1.09h-.14a2.15 2.15 0 0 1 0-4.3h.08a1.8 1.8 0 0 0 1.68-1.18 1.8 1.8 0 0 0-.36-1.98l-.05-.05a2.15 2.15 0 0 1 3.04-3.04l.05.05a1.8 1.8 0 0 0 1.98.36h.08a1.8 1.8 0 0 0 1.09-1.65v-.14a2.15 2.15 0 0 1 4.3 0v.08a1.8 1.8 0 0 0 1.09 1.65 1.8 1.8 0 0 0 1.98-.36l.05-.05a2.15 2.15 0 0 1 3.04 3.04l-.05.05a1.8 1.8 0 0 0-.36 1.98v.08a1.8 1.8 0 0 0 1.65 1.09h.14a2.15 2.15 0 0 1 0 4.3h-.08A1.8 1.8 0 0 0 19.4 15Z" />
+        </>
+      ) : null}
+    </svg>
+  );
+}
+
+function getMessagesForView(view: BundleOrganizerView) {
+  if (view === "priority") {
+    return bundleOrganizerMessages.filter((message) => message.priority && message.status !== "trashed");
+  }
+
+  if (view === "shortlist") {
+    return bundleOrganizerMessages.filter((message) => message.shortlisted && message.status !== "trashed");
+  }
+
+  if (view === "demo") {
+    return bundleOrganizerMessages.filter((message) => message.kind === "demo" && message.status !== "trashed");
+  }
+
+  if (view === "promo") {
+    return bundleOrganizerMessages.filter((message) => message.kind === "promo" && message.status !== "trashed");
+  }
+
+  if (view === "sent") {
+    return bundleOrganizerMessages.filter((message) => message.kind === "sent");
+  }
+
+  if (view === "trash") {
+    return bundleOrganizerMessages.filter((message) => message.status === "trashed");
+  }
+
+  return [];
+}
+
+function getCounts() {
+  return navItems.reduce<Partial<Record<BundleOrganizerView, number>>>((counts, item) => {
+    counts[item.id] = getMessagesForView(item.id).length;
+    return counts;
+  }, {});
+}
+
+function statusPillClass(status: NonNullable<BundleOrganizerMessage["status"]> | "shortlisted" | "priority") {
+  if (status === "declined") {
+    return "border-[rgba(232,146,118,0.22)] bg-[rgba(161,78,55,0.14)] text-[rgba(246,184,162,0.88)]";
+  }
+
+  if (status === "shortlisted") {
+    return "border-[rgba(246,183,91,0.24)] bg-[rgba(214,137,45,0.14)] text-[rgba(255,204,125,0.9)]";
+  }
+
+  if (status === "sent") {
+    return "border-[rgba(139,179,194,0.22)] bg-[rgba(139,179,194,0.12)] text-[rgba(196,226,237,0.88)]";
+  }
+
+  if (status === "trashed") {
+    return "border-white/15 bg-white/8 text-[rgba(245,239,229,0.66)]";
+  }
+
+  return "border-[rgba(143,179,159,0.22)] bg-[rgba(143,179,159,0.12)] text-[rgba(198,228,209,0.88)]";
+}
+
+function MessagePill({ children, tone }: { children: string; tone: Parameters<typeof statusPillClass>[0] }) {
+  return (
+    <span className={`rounded-full border px-2 py-0.5 text-[0.68rem] font-medium uppercase tracking-[0.1em] ${statusPillClass(tone)}`}>
+      {children}
+    </span>
+  );
+}
 
 export function BundleOrganizerSurface() {
-  return (
-    <div className="min-h-0 flex-1 overflow-y-auto px-1.5 pb-1 md:px-2 md:pb-2">
-      <section className="min-h-full rounded-[28px] border border-[color:rgba(218,194,142,0.16)] bg-[radial-gradient(circle_at_20%_0%,rgba(238,224,190,0.12),transparent_34%),linear-gradient(180deg,rgba(11,30,25,0.94),rgba(6,18,15,0.98))] p-5 shadow-panel md:p-7">
-        <div className="flex flex-col gap-6 lg:flex-row lg:items-start lg:justify-between">
-          <div className="max-w-3xl">
-            <span className="inline-flex items-center rounded-full border border-[color:rgba(218,194,142,0.22)] bg-[color:rgba(238,224,190,0.09)] px-3 py-1 text-[0.68rem] font-medium uppercase tracking-[0.18em] text-[color:rgba(232,222,198,0.76)]">
-              Bundle Pilot
-            </span>
-            <h1 className="mt-5 text-3xl font-semibold tracking-[0.01em] text-[var(--workspace-foreground)] md:text-4xl">
-              Demo &amp; Promo Organizer
-            </h1>
-            <p className="mt-3 max-w-2xl text-base leading-7 text-[var(--workspace-muted)]">
-              A dedicated music workflow for demos, promos, and active follow-ups.
-            </p>
-          </div>
-          <div className="w-full rounded-[22px] border border-[color:rgba(218,194,142,0.16)] bg-[color:rgba(238,224,190,0.07)] p-4 shadow-[inset_0_1px_0_rgba(255,248,226,0.08)] lg:max-w-sm">
-            <p className="text-sm font-medium text-[var(--workspace-foreground)]">
-              Inbox access is managed by Cuevion Workspace.
-            </p>
-            <p className="mt-2 text-sm leading-6 text-[var(--workspace-muted)]">
-              Connected inboxes will be shared with Organizer in the bundle experience.
-            </p>
-          </div>
-        </div>
+  const [activeView, setActiveView] = useState<BundleOrganizerView>("priority");
+  const [selectedMessageId, setSelectedMessageId] = useState<string | null>(
+    getMessagesForView("priority")[0]?.id ?? null,
+  );
+  const [searchQuery, setSearchQuery] = useState("");
+  const [actionFeedback, setActionFeedback] = useState<string | null>(null);
 
-        <div className="mt-8 grid gap-3 md:grid-cols-2 xl:grid-cols-5">
-          {organizerModules.map((module) => (
-            <article
-              key={module.title}
-              className="rounded-[22px] border border-[color:rgba(218,194,142,0.14)] bg-[linear-gradient(180deg,rgba(238,224,190,0.08),rgba(33,58,49,0.24))] p-4 shadow-[inset_0_1px_0_rgba(255,248,226,0.08)]"
-            >
-              <h2 className="text-sm font-semibold text-[var(--workspace-foreground)]">
-                {module.title}
-              </h2>
-              <p className="mt-2 text-sm leading-6 text-[var(--workspace-muted)]">
-                {module.description}
+  const counts = useMemo(() => getCounts(), []);
+  const activeMessages = useMemo(() => {
+    const messages = getMessagesForView(activeView);
+    const normalizedQuery = searchQuery.trim().toLowerCase();
+
+    if (!normalizedQuery) {
+      return messages;
+    }
+
+    return messages.filter((message) =>
+      [
+        message.sender,
+        message.subject,
+        message.snippet,
+        message.sourceMailbox,
+        ...message.body,
+      ].some((value) => value.toLowerCase().includes(normalizedQuery)),
+    );
+  }, [activeView, searchQuery]);
+  const selectedMessage =
+    activeMessages.find((message) => message.id === selectedMessageId) ??
+    activeMessages[0] ??
+    null;
+  const activeCopy = viewCopy[activeView];
+
+  const selectView = (view: BundleOrganizerView) => {
+    setActiveView(view);
+    setSelectedMessageId(getMessagesForView(view)[0]?.id ?? null);
+    setActionFeedback(null);
+  };
+
+  const showStaticFeedback = (message: string) => {
+    setActionFeedback(message);
+  };
+
+  return (
+    <div className="min-h-0 flex-1 overflow-hidden px-1.5 pb-1 md:px-2 md:pb-2">
+      <section className="flex h-full min-h-[720px] flex-col overflow-hidden rounded-[30px] border border-white/10 bg-[radial-gradient(circle_at_top_left,rgba(88,69,55,0.28),transparent_34%),radial-gradient(circle_at_right,rgba(55,87,74,0.22),transparent_28%),linear-gradient(180deg,#1d1b18_0%,#101915_100%)] p-4 text-[color:#f5efe5] shadow-[0_28px_90px_rgba(0,0,0,0.22)] md:p-5">
+        <header className="border-b border-white/10 pb-4">
+          <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+            <div>
+              <div className="flex items-center gap-2.5">
+                <OrganizerIcon className="h-8 w-8 shrink-0 text-[color:#8fb39f]" />
+                <p className="text-[0.72rem] font-medium uppercase tracking-[0.18em] text-[rgba(217,203,184,0.68)]">
+                  Cuevion
+                </p>
+              </div>
+              <h1 className="mt-2.5 text-[1.7rem] font-semibold tracking-[-0.03em] text-[color:#f5efe5] sm:text-[2rem]">
+                Demo &amp; Promo Organizer
+              </h1>
+            </div>
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center xl:max-w-[600px]">
+              <span className="w-fit rounded-full border border-[rgba(143,179,159,0.22)] bg-[rgba(143,179,159,0.1)] px-3 py-1 text-[0.68rem] font-medium uppercase tracking-[0.14em] text-[rgba(198,228,209,0.78)]">
+                Bundle Pilot
+              </span>
+              <p className="text-[0.84rem] leading-6 text-[rgba(245,239,229,0.58)]">
+                Connected inboxes are shared with this Organizer in Bundle Pilot.
               </p>
-            </article>
-          ))}
+            </div>
+          </div>
+          <div className="mt-4 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+            <p className="max-w-[560px] text-[0.96rem] leading-7 text-[rgba(245,239,229,0.66)]">
+              A dedicated music inbox for demos, promos, and active follow-ups.
+            </p>
+            <div className="relative w-full lg:max-w-[340px]">
+              <span className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-[rgba(245,239,229,0.42)]">
+                <svg
+                  aria-hidden="true"
+                  className="h-4 w-4"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth="2"
+                  viewBox="0 0 24 24"
+                >
+                  <path d="m21 21-4.34-4.34" />
+                  <circle cx="11" cy="11" r="8" />
+                </svg>
+              </span>
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(event) => setSearchQuery(event.target.value)}
+                placeholder="Search messages..."
+                className="h-10 w-full rounded-full border border-white/10 bg-white/5 pl-10 pr-10 text-[0.86rem] font-medium text-[rgba(245,239,229,0.84)] outline-none transition-colors placeholder:text-[rgba(245,239,229,0.38)] hover:border-[rgba(143,179,159,0.24)] hover:bg-white/8 focus:border-[rgba(143,179,159,0.34)] focus:bg-white/10 focus:ring-2 focus:ring-[rgba(143,179,159,0.14)]"
+              />
+              {searchQuery ? (
+                <button
+                  type="button"
+                  onClick={() => setSearchQuery("")}
+                  className="absolute right-2 top-1/2 inline-flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-full text-[1rem] leading-none text-[rgba(245,239,229,0.46)] transition-colors hover:bg-[rgba(143,179,159,0.12)] hover:text-[rgba(198,228,209,0.9)] focus-visible:outline-none"
+                  aria-label="Clear message search"
+                >
+                  x
+                </button>
+              ) : null}
+            </div>
+          </div>
+        </header>
+
+        <div className="grid min-h-0 flex-1 gap-4 overflow-hidden pt-4 lg:grid-cols-[210px_minmax(320px,0.9fr)_minmax(360px,1.1fr)] xl:grid-cols-[230px_minmax(360px,0.85fr)_minmax(420px,1.15fr)]">
+          <aside className="flex min-h-0 flex-col gap-4 overflow-y-auto border-b border-white/10 pb-4 lg:border-b-0 lg:border-r lg:pb-0 lg:pr-4 xl:pr-5">
+            <section className="rounded-[15px] border border-white/10 bg-white/5 px-3 py-2.5 shadow-[0_10px_24px_rgba(0,0,0,0.16)]">
+              <p className="text-[0.66rem] font-medium uppercase tracking-[0.15em] text-[rgba(217,203,184,0.55)]">
+                Connected Inboxes
+              </p>
+              <div className="mt-1.5 flex items-center justify-between gap-2">
+                <span className="text-[1.45rem] font-semibold leading-none tracking-[-0.04em] text-[color:#f5efe5]">
+                  2
+                </span>
+                <span className="inline-flex h-7 shrink-0 items-center justify-center rounded-full border border-[rgba(143,179,159,0.24)] bg-[rgba(143,179,159,0.1)] px-2.5 text-[0.64rem] font-medium uppercase tracking-[0.1em] text-[rgba(167,203,181,0.84)]">
+                  Shared
+                </span>
+              </div>
+              <p className="mt-1 truncate text-[0.68rem] font-medium leading-4 text-[rgba(167,203,181,0.72)]">
+                Managed by Cuevion Workspace
+              </p>
+            </section>
+
+            <nav
+              aria-label="Organizer sections"
+              className="flex gap-2 overflow-x-auto lg:block lg:overflow-visible"
+            >
+              {navItems.map((item) => {
+                const isActive = item.id === activeView;
+                const count = counts[item.id] ?? 0;
+
+                return (
+                  <button
+                    key={item.id}
+                    type="button"
+                    onClick={() => selectView(item.id)}
+                    className={`flex h-10 shrink-0 items-center justify-between gap-3 rounded-full px-3.5 text-left text-[0.82rem] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[rgba(143,179,159,0.28)] lg:mb-2 lg:w-full ${
+                      isActive
+                        ? "bg-[color:#8fb39f] text-[color:#14201a]"
+                        : "text-[rgba(245,239,229,0.72)] hover:bg-white/5"
+                    }`}
+                    aria-current={isActive ? "page" : undefined}
+                  >
+                    <span className="flex min-w-0 items-center gap-2.5">
+                      <NavIcon name={item.icon} />
+                      <span className="truncate">{item.label}</span>
+                    </span>
+                    {item.showCount && count > 0 ? (
+                      <span
+                        className={`rounded-full px-2 py-0.5 text-[0.72rem] ${
+                          isActive
+                            ? "bg-[rgba(20,32,26,0.18)] text-[rgba(20,32,26,0.72)]"
+                            : "bg-white/5 text-[rgba(245,239,229,0.52)]"
+                        }`}
+                      >
+                        {count}
+                      </span>
+                    ) : null}
+                  </button>
+                );
+              })}
+            </nav>
+
+            <section className="border-t border-white/10 pt-3">
+              <div className="flex h-10 items-center justify-between gap-2 rounded-full px-3.5 text-[0.62rem] font-semibold uppercase tracking-[0.14em] text-[rgba(217,203,184,0.5)]">
+                <span>Smart Views</span>
+                <button
+                  type="button"
+                  onClick={() => showStaticFeedback("Smart Views are static in Bundle Pilot.")}
+                  className="inline-flex h-6 w-6 items-center justify-center rounded-full border border-[rgba(143,179,159,0.2)] bg-[rgba(143,179,159,0.1)] text-[0.86rem] leading-none text-[rgba(198,228,209,0.86)] transition-colors hover:bg-[rgba(143,179,159,0.16)]"
+                  aria-label="Create Smart View"
+                >
+                  +
+                </button>
+              </div>
+              {[
+                { label: "High priority demos", count: 1 },
+                { label: "Promo reminders", count: 1 },
+              ].map((smartView) => (
+                <button
+                  key={smartView.label}
+                  type="button"
+                  onClick={() => showStaticFeedback(`${smartView.label} is a static Bundle Pilot Smart View.`)}
+                  className="mb-2 flex h-10 w-full shrink-0 items-center justify-between gap-2 rounded-full px-3.5 text-[0.82rem] font-medium text-[rgba(245,239,229,0.72)] transition-colors hover:bg-white/5"
+                >
+                  <span className="truncate">{smartView.label}</span>
+                  <span className="rounded-full bg-white/5 px-2 py-0.5 text-[0.72rem] text-[rgba(245,239,229,0.52)]">
+                    {smartView.count}
+                  </span>
+                </button>
+              ))}
+            </section>
+          </aside>
+
+          <main className="min-h-0 overflow-y-auto">
+            <div className="mb-3">
+              <p className="text-[0.68rem] font-semibold uppercase tracking-[0.16em] text-[rgba(167,203,181,0.78)]">
+                {activeCopy.eyebrow}
+              </p>
+              <h2 className="mt-1 text-[1.25rem] font-semibold tracking-[-0.03em] text-[color:#f5efe5]">
+                {activeCopy.title}
+              </h2>
+              <p className="mt-1 text-[0.84rem] leading-6 text-[rgba(245,239,229,0.58)]">
+                {activeCopy.description}
+              </p>
+            </div>
+
+            {activeView === "settings" ? (
+              <BundleOrganizerSettings />
+            ) : activeMessages.length === 0 ? (
+              <div className="rounded-[18px] border border-white/10 bg-white/5 px-5 py-10 text-center">
+                {activeView === "shortlist" ? (
+                  <span className="mx-auto mb-3 inline-flex rounded-full border border-[rgba(143,179,159,0.2)] bg-[rgba(143,179,159,0.1)] px-3 py-1 text-[0.68rem] font-medium uppercase tracking-[0.12em] text-[rgba(198,228,209,0.78)]">
+                    Saved follow-up
+                  </span>
+                ) : null}
+                <h3 className="text-[1rem] font-semibold tracking-[-0.02em] text-[color:#f5efe5]">
+                  {activeCopy.emptyTitle}
+                </h3>
+                <p className="mx-auto mt-2 max-w-[460px] text-[0.86rem] leading-6 text-[rgba(245,239,229,0.58)]">
+                  {activeCopy.emptyDescription}
+                </p>
+              </div>
+            ) : (
+              <ul className="overflow-hidden rounded-[16px] border border-white/10 bg-white/5">
+                {activeMessages.map((message) => (
+                  <li
+                    key={message.id}
+                    className="border-b border-white/10 last:border-b-0"
+                  >
+                    <button
+                      type="button"
+                      onClick={() => setSelectedMessageId(message.id)}
+                      className={`relative grid w-full gap-3 border-l-2 px-4 py-3.5 pr-5 text-left transition-[background-color,border-color,box-shadow] sm:grid-cols-[minmax(120px,0.55fr)_minmax(0,2fr)_minmax(72px,auto)] ${
+                        selectedMessage?.id === message.id
+                          ? "border-[color:#8fb39f] bg-[rgba(143,179,159,0.1)]"
+                          : "border-transparent hover:bg-white/[0.04]"
+                      }`}
+                    >
+                      <div className="grid min-w-0 grid-cols-[0.5rem_minmax(0,1fr)] items-start gap-2">
+                        <span
+                          className={`mt-[0.36rem] h-2 w-2 rounded-full ${
+                            message.unread ? "bg-[color:#8fb39f]" : "bg-white/20"
+                          }`}
+                        />
+                        <div className="min-w-0">
+                          <div className="truncate text-[0.92rem] font-semibold tracking-[-0.01em] text-[color:#f5efe5]">
+                            {message.sender}
+                          </div>
+                          <div className="mt-1 flex flex-wrap gap-1.5">
+                            <span className="max-w-full truncate rounded-full bg-white/5 px-2 py-0.5 text-[0.68rem] font-medium text-[rgba(245,239,229,0.56)]">
+                              {message.sourceMailbox}
+                            </span>
+                            {message.priorityBadge ? (
+                              <span className="rounded-full bg-[rgba(143,179,159,0.14)] px-2 py-0.5 text-[0.68rem] font-medium text-[rgba(167,203,181,0.9)]">
+                                {message.priorityBadge}
+                              </span>
+                            ) : null}
+                            {message.shortlisted ? <MessagePill tone="shortlisted">Shortlisted</MessagePill> : null}
+                            {message.status ? <MessagePill tone={message.status}>{message.status}</MessagePill> : null}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="min-w-0">
+                        <div className="truncate text-[0.95rem] font-medium tracking-[-0.01em] text-[rgba(245,239,229,0.88)]">
+                          {message.subject}
+                        </div>
+                        <p className="mt-1 line-clamp-2 text-[0.84rem] leading-5 text-[rgba(245,239,229,0.6)]">
+                          {message.snippet}
+                        </p>
+                        {activeView === "priority" && message.reason ? (
+                          <p className="mt-2 text-[0.76rem] font-medium uppercase tracking-[0.12em] text-[rgba(143,179,159,0.78)]">
+                            {message.reason}
+                          </p>
+                        ) : null}
+                      </div>
+                      <div className="text-[0.78rem] font-medium text-[rgba(245,239,229,0.45)] sm:pt-0.5 sm:text-right">
+                        {message.timestamp}
+                      </div>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </main>
+
+          <aside className="min-h-0 overflow-y-auto">
+            {selectedMessage && activeView !== "settings" ? (
+              <BundleOrganizerDetail
+                message={selectedMessage}
+                onAction={showStaticFeedback}
+              />
+            ) : (
+              <div className="rounded-[20px] border border-white/10 bg-white/5 p-6">
+                <p className="text-[0.72rem] font-semibold uppercase tracking-[0.16em] text-[rgba(167,203,181,0.78)]">
+                  Bundle Pilot
+                </p>
+                <h3 className="mt-2 text-[1.16rem] font-semibold tracking-[-0.03em] text-[color:#f5efe5]">
+                  Managed by Cuevion Workspace
+                </h3>
+                <p className="mt-3 text-[0.9rem] leading-6 text-[rgba(245,239,229,0.6)]">
+                  This internal surface mirrors the Organizer experience with static pilot data. No real mail actions run here yet.
+                </p>
+              </div>
+            )}
+            {actionFeedback ? (
+              <p className="mt-3 rounded-[14px] border border-[rgba(143,179,159,0.16)] bg-[rgba(143,179,159,0.1)] px-4 py-3 text-[0.84rem] leading-6 text-[rgba(167,203,181,0.9)]">
+                {actionFeedback}
+              </p>
+            ) : null}
+          </aside>
         </div>
       </section>
+    </div>
+  );
+}
+
+function BundleOrganizerDetail({
+  message,
+  onAction,
+}: {
+  message: BundleOrganizerMessage;
+  onAction: (message: string) => void;
+}) {
+  return (
+    <article className="rounded-[20px] border border-white/10 bg-white/5 p-6 sm:p-7">
+      <div className="flex flex-col gap-5 border-b border-white/10 pb-6 md:flex-row md:items-start md:justify-between">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-[0.92rem] font-semibold tracking-[-0.01em] text-[color:#f5efe5]">
+              {message.sender}
+            </span>
+            <span className="rounded-full bg-white/5 px-2 py-0.5 text-[0.68rem] font-medium text-[rgba(245,239,229,0.56)]">
+              {message.sourceMailbox}
+            </span>
+          </div>
+          <div className="mt-2 grid max-w-[780px] gap-1 text-[0.76rem] leading-5 text-[rgba(245,239,229,0.5)]">
+            <div className="flex min-w-0 gap-1.5">
+              <span className="shrink-0 font-medium text-[rgba(245,239,229,0.42)]">
+                From
+              </span>
+              <span className="min-w-0 truncate">{message.sender}</span>
+            </div>
+            <div className="flex min-w-0 gap-1.5">
+              <span className="shrink-0 font-medium text-[rgba(245,239,229,0.42)]">
+                To
+              </span>
+              <span className="min-w-0 truncate">{message.sourceMailbox}</span>
+            </div>
+          </div>
+          <h3 className="mt-4 max-w-[780px] text-[1.65rem] font-semibold leading-tight tracking-[-0.035em] text-[color:#f5efe5] sm:text-[2rem]">
+            {message.subject}
+          </h3>
+          <div className="mt-4 flex flex-wrap gap-2">
+            {message.priorityBadge ? (
+              <span className="rounded-full bg-[rgba(143,179,159,0.14)] px-2.5 py-1 text-[0.7rem] font-medium text-[rgba(167,203,181,0.9)]">
+                {message.priorityBadge}
+              </span>
+            ) : null}
+            {message.shortlisted ? <MessagePill tone="shortlisted">Shortlisted</MessagePill> : null}
+            {message.status ? <MessagePill tone={message.status}>{message.status}</MessagePill> : null}
+          </div>
+        </div>
+        <div className="shrink-0 text-[0.78rem] font-medium text-[rgba(245,239,229,0.48)]">
+          {message.timestamp}
+        </div>
+      </div>
+
+      <div className="max-w-[780px] py-7">
+        {message.body.map((paragraph, index) => (
+          <p
+            key={`${message.id}-body-${index}`}
+            className="mb-6 text-[0.94rem] leading-7 text-[rgba(245,239,229,0.72)] last:mb-0"
+          >
+            {paragraph}
+          </p>
+        ))}
+      </div>
+
+      <div className="flex flex-wrap gap-3 border-t border-white/10 pt-6">
+        {[
+          "Reply",
+          "Decline",
+          message.shortlisted ? "Remove Shortlist" : "Shortlist",
+          "Mark Reviewed",
+        ].map((action, index) => (
+          <button
+            key={action}
+            type="button"
+            onClick={() => onAction(`${action} is disabled in the safe Bundle Pilot shell.`)}
+            className={`inline-flex h-10 items-center justify-center rounded-full border px-4 text-[0.72rem] font-medium uppercase tracking-[0.12em] transition-colors ${
+              index === 0
+                ? "border-[rgba(143,179,159,0.36)] bg-[color:#8fb39f] text-[color:#14201a] hover:bg-[color:#a3c5b1]"
+                : "border-white/10 bg-white/5 text-[rgba(245,239,229,0.64)] hover:border-[rgba(143,179,159,0.28)] hover:bg-[rgba(143,179,159,0.1)]"
+            }`}
+          >
+            {action}
+          </button>
+        ))}
+      </div>
+    </article>
+  );
+}
+
+function BundleOrganizerSettings() {
+  return (
+    <div className="space-y-3">
+      {[
+        {
+          eyebrow: "Workspace managed",
+          title: "Inbox access",
+          description:
+            "Connected inboxes are shared with this Organizer in Bundle Pilot. Inbox setup stays in Cuevion Workspace.",
+          badge: "Shared",
+        },
+        {
+          eyebrow: "Organizer rules",
+          title: "Smart Views and routing",
+          description:
+            "Smart Views are shown here as static pilot structure. No classifier, filtering, or mailbox routing changes are active.",
+          badge: "Static",
+        },
+        {
+          eyebrow: "Safe shell",
+          title: "Mail actions",
+          description:
+            "Reply, decline, shortlist, trash, and restore controls are visual only in this internal review surface.",
+          badge: "No-op",
+        },
+      ].map((item) => (
+        <section
+          key={item.title}
+          className="rounded-[18px] border border-white/10 bg-white/5 p-5"
+        >
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <div>
+              <p className="text-[0.68rem] font-semibold uppercase tracking-[0.16em] text-[rgba(167,203,181,0.78)]">
+                {item.eyebrow}
+              </p>
+              <h3 className="mt-2 text-[1rem] font-semibold tracking-[-0.02em] text-[color:#f5efe5]">
+                {item.title}
+              </h3>
+              <p className="mt-2 text-[0.84rem] leading-6 text-[rgba(245,239,229,0.6)]">
+                {item.description}
+              </p>
+            </div>
+            <span className="w-fit rounded-full border border-[rgba(143,179,159,0.22)] bg-[rgba(143,179,159,0.1)] px-2.5 py-1 text-[0.66rem] font-medium uppercase tracking-[0.12em] text-[rgba(198,228,209,0.82)]">
+              {item.badge}
+            </span>
+          </div>
+        </section>
+      ))}
     </div>
   );
 }
