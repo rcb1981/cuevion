@@ -148,6 +148,7 @@ type SidebarNavigationIconName =
   | "priority"
   | "inbox"
   | "folder"
+  | "organizer"
   | "bell"
   | "users"
   | "settings"
@@ -10716,6 +10717,15 @@ function SidebarNavigationIcon({ name }: { name: SidebarNavigationIconName }) {
           <path d="M3.8 7.2A1.7 1.7 0 0 1 5.5 5.5h4.2l2 2h6.8a1.7 1.7 0 0 1 1.7 1.7v8.1a1.7 1.7 0 0 1-1.7 1.7h-13a1.7 1.7 0 0 1-1.7-1.7V7.2Z" />
         </>
       ) : null}
+      {name === "organizer" ? (
+        <>
+          <path d="M15.7 4.1C13.5 2.9 10.8 2.7 8.5 3.7C5.2 5.1 3 8.3 3 12s2.2 6.9 5.5 8.3c2.3 1 5 .8 7.2-.4" />
+          <path d="M12.8 10.5v3" />
+          <path d="M15.3 8.8v6.4" />
+          <path d="M17.8 7.5v9" />
+          <path d="M20.3 9.8v4.4" />
+        </>
+      ) : null}
       {name === "bell" ? (
         <>
           <path d="M6.5 10.8a5.5 5.5 0 0 1 11 0c0 4 1.6 5 1.6 5H4.9s1.6-1 1.6-5Z" />
@@ -11219,11 +11229,11 @@ function WorkspaceSidebar({
                     aria-label="Organizer"
                   >
                     <span className="hidden items-center gap-2 xl:inline-flex">
-                      <SidebarNavigationIcon name="folder" />
+                      <SidebarNavigationIcon name="organizer" />
                       <span>Organizer</span>
                     </span>
                     <span className="inline-flex items-center justify-center gap-1.5 text-[11px] uppercase tracking-[0.18em] xl:hidden">
-                      <SidebarNavigationIcon name="folder" />
+                      <SidebarNavigationIcon name="organizer" />
                       <span>Org</span>
                     </span>
                   </button>

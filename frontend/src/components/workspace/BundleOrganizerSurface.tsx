@@ -21,7 +21,7 @@ type BundleOrganizerIconName =
 type BundleOrganizerMessage = {
   id: string;
   kind: "demo" | "promo" | "sent";
-  source: "sample" | "workspace";
+  source: "workspace";
   sender: string;
   subject: string;
   snippet: string;
@@ -99,127 +99,14 @@ type BundleOrganizerActiveWorkStatus =
   | "follow_up"
   | "closed";
 
+type BundleOrganizerPromoFilter = "all" | "reminders" | "unread";
+type BundleOrganizerSortOrder = "newest" | "oldest";
+
 type BundleOrganizerSurfaceProps = {
   liveMessages?: BundleOrganizerWorkspaceMessage[];
   hasLiveWorkspaceData?: boolean;
   connectedInboxCount?: number;
 };
-
-const bundleOrganizerMessages: BundleOrganizerMessage[] = [
-  {
-    id: "bundle-demo-mila-hart",
-    kind: "demo",
-    source: "sample",
-    internalClassification: "high_priority_demo",
-    sender: "Mila Hart",
-    subject: "Demo submission - late night melodic house",
-    snippet:
-      "Private SoundCloud link included. References recent Nora En Pure and Lane 8 playlist support.",
-    body: [
-      "Hi Cuevion team, I wanted to share a late night melodic house demo that feels close to the sound you have been supporting.",
-      "The private link includes the full mix, a short instrumental version, current streaming notes, and artist context.",
-      "Would love to know if this is in range for the label.",
-    ],
-    timestamp: "12 min",
-    sourceMailbox: "demos@cuevion.com",
-    unread: true,
-    manualPriority: true,
-    priorityBadge: "High-priority demo",
-    reason: "Active demo with artist context and private audio link.",
-  },
-  {
-    id: "bundle-demo-northline",
-    kind: "demo",
-    source: "sample",
-    internalClassification: "demo",
-    sender: "Northline Records",
-    subject: "New artist demo for your A&R team",
-    snippet:
-      "Three unreleased tracks from a Berlin duo with recent Spotify editorial traction.",
-    body: [
-      "Sharing three unreleased tracks from a Berlin duo we are developing for Q3.",
-      "The lead track sits between melodic house and indie dance, with a clear club arrangement.",
-      "If there is interest, we can send WAVs and a clean one-sheet this week.",
-    ],
-    timestamp: "38 min",
-    sourceMailbox: "info@cuevion.com",
-    shortlisted: true,
-    active_work_status: "follow_up",
-    priorityBadge: "Priority",
-    reason: "Shortlisted demo with open follow-up.",
-  },
-  {
-    id: "bundle-promo-riva",
-    kind: "promo",
-    source: "sample",
-    internalClassification: "promo",
-    sender: "Riva Promo Pool",
-    subject: "Promo: Kaito Ray - Solar Drift",
-    snippet:
-      "Club mix, radio edit, and DJ feedback link available before Friday's release.",
-    body: [
-      "Kaito Ray returns with Solar Drift, a warm melodic club record scheduled for release this Friday.",
-      "The promo pack includes the club mix, radio edit, WAV download, and DJ feedback link.",
-      "Early support is coming from a small group of European selectors.",
-    ],
-    timestamp: "9 min",
-    sourceMailbox: "promo@cuevion.com",
-    unread: true,
-    v7_final_priority: "priority",
-    priorityBadge: "Promo priority",
-    reason: "Release deadline and feedback link detected.",
-  },
-  {
-    id: "bundle-promo-labelworx",
-    kind: "promo",
-    source: "sample",
-    internalClassification: "promo_reminder",
-    sender: "LabelWorx Promos",
-    subject: "Reminder: Maya Sol - Open Skies",
-    snippet:
-      "Promo reminder for pending feedback. Includes private stream and WAV download.",
-    body: [
-      "Quick reminder that Maya Sol - Open Skies is still open for feedback.",
-      "The private stream and WAV download remain available in the promo portal.",
-      "Feedback closes this Friday.",
-    ],
-    timestamp: "2h",
-    sourceMailbox: "press@cuevion.com",
-    shortlisted: true,
-  },
-  {
-    id: "bundle-sent-decline",
-    kind: "sent",
-    source: "sample",
-    sender: "Cuevion",
-    subject: "Re: Demo submission - late night melodic house",
-    snippet:
-      "Thanks for sending this through. The production is strong, but it is not the right fit for the current release lane.",
-    body: [
-      "Thanks for sending this through. The production is strong, but it is not the right fit for the current release lane.",
-      "Please keep us posted on future records. This was reviewed from the Organizer pilot shell.",
-    ],
-    timestamp: "Yesterday",
-    sourceMailbox: "demos@cuevion.com",
-    status: "sent",
-  },
-  {
-    id: "bundle-trash-old-promo",
-    kind: "promo",
-    source: "sample",
-    internalClassification: "promo_reminder",
-    sender: "Archive Promo",
-    subject: "Old campaign follow-up",
-    snippet: "Archived promo reminder shown here as Organizer-local trash.",
-    body: [
-      "This static trash item shows the Organizer-local trash state.",
-      "No real mail is moved, archived, deleted, or filtered in Bundle Pilot.",
-    ],
-    timestamp: "Last week",
-    sourceMailbox: "promo@cuevion.com",
-    status: "trashed",
-  },
-];
 
 const navItems: Array<{
   id: BundleOrganizerView;
@@ -273,7 +160,7 @@ const viewCopy: Record<
     title: "Sent",
     description: "Replies, declines, and forwards sent from Organizer workflows.",
     emptyTitle: "No sent activity yet.",
-    emptyDescription: "Static sent activity will appear here in the bundle pilot shell.",
+    emptyDescription: "Sent activity will appear here when safe read-only Organizer history is available.",
   },
   trash: {
     eyebrow: "Organizer-local trash",
@@ -289,6 +176,17 @@ const viewCopy: Record<
     emptyTitle: "Settings are managed by Cuevion Workspace.",
     emptyDescription: "Connected inboxes are shared with this Organizer in Bundle Pilot.",
   },
+};
+
+const workspaceSetupEmptyCopy: { emptyTitle: string; emptyDescription: string } = {
+  emptyTitle: "No workspace messages loaded yet.",
+  emptyDescription:
+    "Connect or sync inboxes in Cuevion Workspace to populate this Organizer.",
+};
+
+const filterEmptyCopy: { emptyTitle: string; emptyDescription: string } = {
+  emptyTitle: "No messages match this filter.",
+  emptyDescription: "Try another inbox, status, or filter.",
 };
 
 const liveEmptyCopy: Partial<
@@ -577,40 +475,6 @@ function normalizeWorkspaceMessages(
   );
 }
 
-function getSampleMessagesForView(view: BundleOrganizerView) {
-  if (view === "priority") {
-    return bundleOrganizerMessages.filter(
-      (message) => shouldShowInOrganizerPriority(message) && message.status !== "trashed",
-    );
-  }
-
-  if (view === "shortlist") {
-    return bundleOrganizerMessages.filter((message) => message.shortlisted && message.status !== "trashed");
-  }
-
-  if (view === "demo") {
-    return bundleOrganizerMessages.filter(
-      (message) => shouldShowInDemoInbox(message) && message.status !== "trashed",
-    );
-  }
-
-  if (view === "promo") {
-    return bundleOrganizerMessages.filter(
-      (message) => shouldShowInPromoInbox(message) && message.status !== "trashed",
-    );
-  }
-
-  if (view === "sent") {
-    return bundleOrganizerMessages.filter((message) => message.kind === "sent");
-  }
-
-  if (view === "trash") {
-    return bundleOrganizerMessages.filter((message) => message.status === "trashed");
-  }
-
-  return [];
-}
-
 function getLiveMessagesForView(
   view: BundleOrganizerView,
   liveMessages: BundleOrganizerMessage[],
@@ -633,30 +497,16 @@ function getLiveMessagesForView(
 function getMessagesForView(
   view: BundleOrganizerView,
   liveMessages: BundleOrganizerMessage[],
-  hasLiveWorkspaceData: boolean,
 ) {
-  const liveViewMessages = getLiveMessagesForView(view, liveMessages);
-
-  if (hasLiveWorkspaceData) {
-    return {
-      messages: liveViewMessages,
-      source: "workspace" as const,
-    };
-  }
-
   return {
-    messages: getSampleMessagesForView(view),
-    source: "sample" as const,
+    messages: getLiveMessagesForView(view, liveMessages),
+    source: "workspace" as const,
   };
 }
 
-function getCounts(liveMessages: BundleOrganizerMessage[], hasLiveWorkspaceData: boolean) {
+function getCounts(liveMessages: BundleOrganizerMessage[]) {
   return navItems.reduce<Partial<Record<BundleOrganizerView, number>>>((counts, item) => {
-    const viewMessages = getMessagesForView(
-      item.id,
-      liveMessages,
-      hasLiveWorkspaceData,
-    ).messages;
+    const viewMessages = getMessagesForView(item.id, liveMessages).messages;
 
     counts[item.id] =
       item.id === "promo"
@@ -669,6 +519,16 @@ function getCounts(liveMessages: BundleOrganizerMessage[], hasLiveWorkspaceData:
 
     return counts;
   }, {});
+}
+
+function getSourceMailboxOptions(messages: BundleOrganizerMessage[]) {
+  return Array.from(
+    new Set(messages.map((message) => message.sourceMailbox).filter(Boolean)),
+  ).sort((first, second) => first.localeCompare(second));
+}
+
+function getMessageSortValue(message: BundleOrganizerMessage) {
+  return message.sortTimestamp ?? 0;
 }
 
 function statusPillClass(status: NonNullable<BundleOrganizerMessage["status"]> | "shortlisted" | "priority") {
@@ -708,60 +568,98 @@ export function BundleOrganizerSurface({
   const [searchQuery, setSearchQuery] = useState("");
   const [actionFeedback, setActionFeedback] = useState<string | null>(null);
   const [selectedMessage, setSelectedMessage] = useState<BundleOrganizerMessage | null>(null);
+  const [sourceMailboxFilter, setSourceMailboxFilter] = useState("all");
+  const [promoFilter, setPromoFilter] = useState<BundleOrganizerPromoFilter>("all");
+  const [sortOrder, setSortOrder] = useState<BundleOrganizerSortOrder>("newest");
 
   const workspaceMessages = useMemo(
     () => normalizeWorkspaceMessages(liveMessages),
     [liveMessages],
   );
   const shouldUseLiveWorkspaceData = hasLiveWorkspaceData || workspaceMessages.length > 0;
-  const counts = useMemo(
-    () => getCounts(workspaceMessages, shouldUseLiveWorkspaceData),
-    [shouldUseLiveWorkspaceData, workspaceMessages],
-  );
+  const counts = useMemo(() => getCounts(workspaceMessages), [workspaceMessages]);
   const activeDisplay = useMemo(
-    () => getMessagesForView(activeView, workspaceMessages, shouldUseLiveWorkspaceData),
-    [activeView, shouldUseLiveWorkspaceData, workspaceMessages],
+    () => getMessagesForView(activeView, workspaceMessages),
+    [activeView, workspaceMessages],
+  );
+  const sourceMailboxOptions = useMemo(
+    () =>
+      activeView === "demo" || activeView === "promo"
+        ? getSourceMailboxOptions(activeDisplay.messages)
+        : [],
+    [activeDisplay.messages, activeView],
   );
   const activeMessages = useMemo(() => {
     const normalizedQuery = searchQuery.trim().toLowerCase();
+    let nextMessages = activeDisplay.messages;
 
-    if (!normalizedQuery) {
-      return activeDisplay.messages;
+    if (
+      (activeView === "demo" || activeView === "promo") &&
+      sourceMailboxFilter !== "all"
+    ) {
+      nextMessages = nextMessages.filter(
+        (message) => message.sourceMailbox === sourceMailboxFilter,
+      );
     }
 
-    return activeDisplay.messages.filter((message) =>
-      [
-        message.sender,
-        message.subject,
-        message.snippet,
-        message.sourceMailbox,
-        ...message.body,
-      ].some((value) => value.toLowerCase().includes(normalizedQuery)),
+    if (activeView === "promo") {
+      if (promoFilter === "reminders") {
+        nextMessages = nextMessages.filter(
+          (message) => resolveOrganizerCategory(message) === "promo_reminder",
+        );
+      } else if (promoFilter === "unread") {
+        nextMessages = nextMessages.filter((message) => message.unread === true);
+      }
+    }
+
+    if (normalizedQuery) {
+      nextMessages = nextMessages.filter((message) =>
+        [
+          message.sender,
+          message.subject,
+          message.snippet,
+          message.sourceMailbox,
+          ...message.body,
+        ].some((value) => value.toLowerCase().includes(normalizedQuery)),
+      );
+    }
+
+    return [...nextMessages].sort((first, second) =>
+      sortOrder === "oldest"
+        ? getMessageSortValue(first) - getMessageSortValue(second)
+        : getMessageSortValue(second) - getMessageSortValue(first),
     );
-  }, [activeDisplay, searchQuery]);
+  }, [
+    activeDisplay,
+    activeView,
+    promoFilter,
+    searchQuery,
+    sortOrder,
+    sourceMailboxFilter,
+  ]);
   const activeCopy = viewCopy[activeView];
-  const activeEmptyCopy = liveEmptyCopy[activeView] ?? activeCopy;
-  const activeSourceLabel =
-    activeDisplay.source === "workspace" ? "Live workspace preview" : "Pilot sample data";
+  const isFilterableView = activeView === "demo" || activeView === "promo";
+  const hasLocalFilter =
+    searchQuery.trim().length > 0 ||
+    (isFilterableView && sourceMailboxFilter !== "all") ||
+    (activeView === "promo" && promoFilter !== "all");
+  const activeEmptyCopy =
+    !shouldUseLiveWorkspaceData
+      ? workspaceSetupEmptyCopy
+      : activeDisplay.messages.length > 0 && hasLocalFilter
+      ? filterEmptyCopy
+      : liveEmptyCopy[activeView] ?? activeCopy;
+  const activeSourceLabel = shouldUseLiveWorkspaceData
+    ? "Live workspace preview"
+    : "Workspace setup";
   const activeSourceDescription =
-    activeDisplay.source === "workspace"
+    shouldUseLiveWorkspaceData
       ? "Focused Demo and Promo views are displaying read-only workspace messages."
-      : "Focused Demo and Promo views are represented with pilot sample data.";
-  const displayedConnectedInboxCount =
-    activeDisplay.source === "workspace"
-      ? connectedInboxCount
-      : Math.max(2, connectedInboxCount);
+      : "Connect or sync inboxes in Cuevion Workspace to populate this Organizer.";
+  const displayedConnectedInboxCount = connectedInboxCount;
   const previewGroupCounts = useMemo(() => {
-    const demoMessages = getMessagesForView(
-      "demo",
-      workspaceMessages,
-      shouldUseLiveWorkspaceData,
-    ).messages;
-    const promoMessages = getMessagesForView(
-      "promo",
-      workspaceMessages,
-      shouldUseLiveWorkspaceData,
-    ).messages;
+    const demoMessages = getMessagesForView("demo", workspaceMessages).messages;
+    const promoMessages = getMessagesForView("promo", workspaceMessages).messages;
 
     return {
       highPriorityDemos: demoMessages.filter(
@@ -771,10 +669,12 @@ export function BundleOrganizerSurface({
         (message) => message.internalClassification === "promo_reminder",
       ).length,
     };
-  }, [shouldUseLiveWorkspaceData, workspaceMessages]);
+  }, [workspaceMessages]);
 
   const selectView = (view: BundleOrganizerView) => {
     setActiveView(view);
+    setSourceMailboxFilter("all");
+    setPromoFilter("all");
     setActionFeedback(null);
     setSelectedMessage(null);
   };
@@ -814,9 +714,9 @@ export function BundleOrganizerSurface({
                 Bundle Pilot
               </span>
               <p className="text-[0.84rem] leading-6 text-[rgba(245,239,229,0.58)]">
-                {activeDisplay.source === "workspace"
+                {shouldUseLiveWorkspaceData
                   ? "Live workspace preview for the embedded Organizer."
-                  : "Pilot sample data for the embedded workspace preview."}
+                  : "Workspace messages will appear here after inbox data is loaded."}
               </p>
             </div>
           </div>
@@ -964,7 +864,7 @@ export function BundleOrganizerSurface({
                 </div>
                 <p className="max-w-[460px] text-[0.82rem] leading-6 text-[rgba(245,239,229,0.58)] md:text-right">
                   {activeView === "sent"
-                    ? "Organizer-sent replies and declines across pilot sample messages."
+                    ? "Organizer-sent replies and declines will appear when read-only history is connected."
                     : activeView === "trash"
                     ? "Trash is Organizer-local and does not move mail in IMAP."
                     : activeView === "settings"
@@ -1000,40 +900,68 @@ export function BundleOrganizerSurface({
                         <div className="mt-4 flex flex-wrap items-center justify-between gap-2">
                           <div className="flex flex-wrap items-center gap-2">
                             {activeView === "promo"
-                              ? ["All promos", "Reminders", "Unread"].map((filter) => (
+                              ? ([
+                                  { id: "all", label: "All promos" },
+                                  { id: "reminders", label: "Reminders" },
+                                  { id: "unread", label: "Unread" },
+                                ] satisfies Array<{
+                                  id: BundleOrganizerPromoFilter;
+                                  label: string;
+                                }>).map((filter) => (
                                   <button
-                                    key={filter}
+                                    key={filter.id}
                                     type="button"
-                                    onClick={() => showStaticFeedback(`${filter} is a static preview filter.`)}
-                                    className="inline-flex h-9 items-center justify-center rounded-full border border-white/10 bg-white/5 px-3.5 text-[0.74rem] font-medium uppercase tracking-[0.1em] text-[rgba(245,239,229,0.62)] transition-colors hover:border-[rgba(143,179,159,0.24)] hover:bg-[rgba(143,179,159,0.1)] hover:text-[rgba(198,228,209,0.84)]"
+                                    onClick={() => setPromoFilter(filter.id)}
+                                    className={`inline-flex h-9 items-center justify-center rounded-full border px-3.5 text-[0.74rem] font-medium uppercase tracking-[0.1em] transition-colors ${
+                                      promoFilter === filter.id
+                                        ? "border-[rgba(143,179,159,0.34)] bg-[rgba(143,179,159,0.16)] text-[rgba(198,228,209,0.9)]"
+                                        : "border-white/10 bg-white/5 text-[rgba(245,239,229,0.62)] hover:border-[rgba(143,179,159,0.24)] hover:bg-[rgba(143,179,159,0.1)] hover:text-[rgba(198,228,209,0.84)]"
+                                    }`}
                                   >
-                                    {filter}
+                                    {filter.label}
                                   </button>
                                 ))
                               : null}
-                            <button
-                              type="button"
-                              onClick={() => showStaticFeedback("Source inbox filtering is static in this preview.")}
-                              className="inline-flex h-9 items-center justify-center rounded-full border border-white/10 bg-white/5 px-3.5 text-[0.74rem] font-medium uppercase tracking-[0.1em] text-[rgba(245,239,229,0.62)] transition-colors hover:border-[rgba(143,179,159,0.24)] hover:bg-[rgba(143,179,159,0.1)] hover:text-[rgba(198,228,209,0.84)]"
+                            <label className="sr-only" htmlFor="bundle-organizer-source-filter">
+                              Filter by source inbox
+                            </label>
+                            <select
+                              id="bundle-organizer-source-filter"
+                              value={sourceMailboxFilter}
+                              onChange={(event) => setSourceMailboxFilter(event.target.value)}
+                              className="h-9 max-w-[190px] rounded-full border border-white/10 bg-[rgba(255,255,255,0.05)] px-3.5 text-[0.74rem] font-medium uppercase tracking-[0.1em] text-[rgba(245,239,229,0.72)] outline-none transition-colors hover:border-[rgba(143,179,159,0.24)] hover:bg-[rgba(143,179,159,0.1)] focus:border-[rgba(143,179,159,0.34)] focus:ring-2 focus:ring-[rgba(143,179,159,0.14)]"
                             >
-                              All inboxes
-                            </button>
+                              <option value="all">All inboxes</option>
+                              {sourceMailboxOptions.map((sourceMailbox) => (
+                                <option key={sourceMailbox} value={sourceMailbox}>
+                                  {sourceMailbox}
+                                </option>
+                              ))}
+                            </select>
                           </div>
                           <div className="flex flex-wrap items-center gap-2">
                             <button
                               type="button"
-                              onClick={() => showStaticFeedback("Status filtering is static in this preview.")}
-                              className="inline-flex h-9 items-center justify-center rounded-full border border-white/10 bg-white/5 px-3.5 text-[0.74rem] font-medium uppercase tracking-[0.1em] text-[rgba(245,239,229,0.62)] transition-colors hover:border-[rgba(143,179,159,0.24)] hover:bg-[rgba(143,179,159,0.1)] hover:text-[rgba(198,228,209,0.84)]"
+                              disabled
+                              title="Status filtering will activate when Organizer workflow state is connected."
+                              className="inline-flex h-9 cursor-not-allowed items-center justify-center rounded-full border border-white/10 bg-white/[0.025] px-3.5 text-[0.74rem] font-medium uppercase tracking-[0.1em] text-[rgba(245,239,229,0.34)]"
                             >
                               All status
                             </button>
-                            <button
-                              type="button"
-                              onClick={() => showStaticFeedback("Sorting is static in this preview.")}
-                              className="inline-flex h-9 items-center justify-center rounded-full border border-white/10 bg-white/5 px-3.5 text-[0.74rem] font-medium uppercase tracking-[0.1em] text-[rgba(245,239,229,0.62)] transition-colors hover:border-[rgba(143,179,159,0.24)] hover:bg-[rgba(143,179,159,0.1)] hover:text-[rgba(198,228,209,0.84)]"
+                            <label className="sr-only" htmlFor="bundle-organizer-sort-order">
+                              Sort messages
+                            </label>
+                            <select
+                              id="bundle-organizer-sort-order"
+                              value={sortOrder}
+                              onChange={(event) =>
+                                setSortOrder(event.target.value as BundleOrganizerSortOrder)
+                              }
+                              className="h-9 rounded-full border border-white/10 bg-[rgba(255,255,255,0.05)] px-3.5 text-[0.74rem] font-medium uppercase tracking-[0.1em] text-[rgba(245,239,229,0.72)] outline-none transition-colors hover:border-[rgba(143,179,159,0.24)] hover:bg-[rgba(143,179,159,0.1)] focus:border-[rgba(143,179,159,0.34)] focus:ring-2 focus:ring-[rgba(143,179,159,0.14)]"
                             >
-                              Newest first
-                            </button>
+                              <option value="newest">Newest first</option>
+                              <option value="oldest">Oldest first</option>
+                            </select>
                           </div>
                         </div>
                       ) : null}
@@ -1046,14 +974,10 @@ export function BundleOrganizerSurface({
                             </span>
                           ) : null}
                           <h3 className="text-[1rem] font-semibold tracking-[-0.02em] text-[color:#f5efe5]">
-                            {activeDisplay.source === "workspace"
-                              ? activeEmptyCopy.emptyTitle
-                              : activeCopy.emptyTitle}
+                            {activeEmptyCopy.emptyTitle}
                           </h3>
                           <p className="mx-auto mt-2 max-w-[460px] text-[0.86rem] leading-6 text-[rgba(245,239,229,0.58)]">
-                            {activeDisplay.source === "workspace"
-                              ? activeEmptyCopy.emptyDescription
-                              : activeCopy.emptyDescription}
+                            {activeEmptyCopy.emptyDescription}
                           </p>
                         </div>
                       ) : (
