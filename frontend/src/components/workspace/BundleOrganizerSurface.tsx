@@ -360,9 +360,6 @@ function MessagePill({ children, tone }: { children: string; tone: Parameters<ty
 
 export function BundleOrganizerSurface() {
   const [activeView, setActiveView] = useState<BundleOrganizerView>("priority");
-  const [selectedMessageId, setSelectedMessageId] = useState<string | null>(
-    getMessagesForView("priority")[0]?.id ?? null,
-  );
   const [searchQuery, setSearchQuery] = useState("");
   const [actionFeedback, setActionFeedback] = useState<string | null>(null);
 
@@ -385,15 +382,10 @@ export function BundleOrganizerSurface() {
       ].some((value) => value.toLowerCase().includes(normalizedQuery)),
     );
   }, [activeView, searchQuery]);
-  const selectedMessage =
-    activeMessages.find((message) => message.id === selectedMessageId) ??
-    activeMessages[0] ??
-    null;
   const activeCopy = viewCopy[activeView];
 
   const selectView = (view: BundleOrganizerView) => {
     setActiveView(view);
-    setSelectedMessageId(getMessagesForView(view)[0]?.id ?? null);
     setActionFeedback(null);
   };
 
@@ -422,7 +414,7 @@ export function BundleOrganizerSurface() {
                 Bundle Pilot
               </span>
               <p className="text-[0.84rem] leading-6 text-[rgba(245,239,229,0.58)]">
-                Connected inboxes are shared with this Organizer in Bundle Pilot.
+                Pilot sample data for the embedded workspace preview.
               </p>
             </div>
           </div>
@@ -467,8 +459,8 @@ export function BundleOrganizerSurface() {
           </div>
         </header>
 
-        <div className="grid min-h-0 flex-1 gap-2.5 overflow-hidden pt-2.5 lg:grid-cols-[190px_minmax(0,0.9fr)_minmax(0,1.1fr)] xl:grid-cols-[210px_minmax(0,0.85fr)_minmax(0,1.15fr)]">
-          <aside className="flex min-h-0 min-w-0 flex-col gap-2.5 overflow-y-auto border-b border-white/10 pb-2.5 lg:border-b-0 lg:border-r lg:pb-0 lg:pr-2.5 xl:pr-3">
+        <div className="grid min-h-0 flex-1 gap-3 overflow-hidden pt-3 lg:grid-cols-[210px_minmax(0,1fr)] xl:grid-cols-[220px_minmax(0,1fr)]">
+          <aside className="flex min-h-0 min-w-0 flex-col gap-3 overflow-y-auto pb-2.5 lg:pb-0">
             <section className="rounded-[14px] border border-white/10 bg-white/[0.04] px-3 py-2.5">
               <p className="text-[0.66rem] font-medium uppercase tracking-[0.15em] text-[rgba(217,203,184,0.55)]">
                 Connected Inboxes
@@ -482,7 +474,7 @@ export function BundleOrganizerSurface() {
                 </span>
               </div>
               <p className="mt-1 truncate text-[0.68rem] font-medium leading-4 text-[rgba(167,203,181,0.72)]">
-                Managed by Cuevion Workspace
+                Workspace preview
               </p>
             </section>
 
@@ -558,50 +550,110 @@ export function BundleOrganizerSurface() {
           </aside>
 
           <main className="min-h-0 min-w-0 overflow-y-auto">
-            <div className="mb-3">
-              <p className="text-[0.68rem] font-semibold uppercase tracking-[0.16em] text-[rgba(167,203,181,0.78)]">
-                {activeCopy.eyebrow}
-              </p>
-              <h2 className="mt-1 text-[1.25rem] font-semibold tracking-[-0.03em] text-[color:#f5efe5]">
-                {activeCopy.title}
-              </h2>
-              <p className="mt-1 text-[0.84rem] leading-6 text-[rgba(245,239,229,0.58)]">
-                {activeCopy.description}
-              </p>
-            </div>
-
-            {activeView === "settings" ? (
-              <BundleOrganizerSettings />
-            ) : activeMessages.length === 0 ? (
-              <div className="rounded-[16px] border border-white/10 bg-white/[0.04] px-4 py-8 text-center">
-                {activeView === "shortlist" ? (
-                  <span className="mx-auto mb-3 inline-flex rounded-full border border-[rgba(143,179,159,0.2)] bg-[rgba(143,179,159,0.1)] px-3 py-1 text-[0.68rem] font-medium uppercase tracking-[0.12em] text-[rgba(198,228,209,0.78)]">
-                    Saved follow-up
-                  </span>
-                ) : null}
-                <h3 className="text-[1rem] font-semibold tracking-[-0.02em] text-[color:#f5efe5]">
-                  {activeCopy.emptyTitle}
-                </h3>
-                <p className="mx-auto mt-2 max-w-[460px] text-[0.86rem] leading-6 text-[rgba(245,239,229,0.58)]">
-                  {activeCopy.emptyDescription}
+            <section className="rounded-[20px] border border-white/10 bg-[rgba(25,34,30,0.82)] p-4 shadow-[0_18px_48px_rgba(0,0,0,0.26)] sm:p-5 xl:p-6">
+              <div className="flex flex-col gap-3 border-b border-white/10 pb-4 md:flex-row md:items-end md:justify-between">
+                <div>
+                  <p className="text-[0.74rem] font-medium uppercase tracking-[0.16em] text-[rgba(217,203,184,0.58)]">
+                    {activeCopy.eyebrow}
+                  </p>
+                  <h2 className="mt-1.5 text-[1.36rem] font-semibold tracking-[-0.03em] text-[color:#f5efe5]">
+                    {activeCopy.title}
+                  </h2>
+                </div>
+                <p className="max-w-[460px] text-[0.82rem] leading-6 text-[rgba(245,239,229,0.58)] md:text-right">
+                  {activeView === "sent"
+                    ? "Organizer-sent replies and declines across pilot sample messages."
+                    : activeView === "trash"
+                    ? "Trash is Organizer-local and does not move mail in IMAP."
+                    : activeView === "settings"
+                    ? "Bundle Pilot settings are shown as safe, static workspace preview controls."
+                    : "Focused Demo and Promo views are represented with pilot sample data."}
                 </p>
               </div>
-            ) : (
-              <ul className="overflow-hidden rounded-[16px] border border-white/10 bg-white/[0.04]">
-                {activeMessages.map((message) => (
-                  <li
-                    key={message.id}
-                    className="border-b border-white/10 last:border-b-0"
-                  >
-                    <button
-                      type="button"
-                      onClick={() => setSelectedMessageId(message.id)}
-                      className={`relative grid w-full gap-3 border-l-2 px-4 py-3.5 pr-5 text-left transition-[background-color,border-color,box-shadow] sm:grid-cols-[minmax(120px,0.55fr)_minmax(0,2fr)_minmax(72px,auto)] ${
-                        selectedMessage?.id === message.id
-                          ? "border-[color:#8fb39f] bg-[rgba(143,179,159,0.1)]"
-                          : "border-transparent hover:bg-white/[0.04]"
-                      }`}
-                    >
+
+              {activeView === "settings" ? (
+                <div className="pt-4">
+                  <BundleOrganizerSettings />
+                </div>
+              ) : (
+                <div className="pt-4">
+                  <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                    <p className="max-w-[920px] text-[0.9rem] leading-6 text-[rgba(245,239,229,0.66)]">
+                      {activeCopy.description}
+                    </p>
+                    <span className="w-fit shrink-0 rounded-full border border-[rgba(143,179,159,0.2)] bg-[rgba(143,179,159,0.1)] px-3 py-1 text-[0.68rem] font-medium uppercase tracking-[0.12em] text-[rgba(198,228,209,0.78)]">
+                      Pilot sample data
+                    </span>
+                  </div>
+
+                  {activeView === "demo" || activeView === "promo" ? (
+                    <div className="mt-4 flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex flex-wrap items-center gap-2">
+                        {activeView === "promo"
+                          ? ["All promos", "Reminders", "Unread"].map((filter) => (
+                              <button
+                                key={filter}
+                                type="button"
+                                onClick={() => showStaticFeedback(`${filter} is a static preview filter.`)}
+                                className="inline-flex h-9 items-center justify-center rounded-full border border-white/10 bg-white/5 px-3.5 text-[0.74rem] font-medium uppercase tracking-[0.1em] text-[rgba(245,239,229,0.62)] transition-colors hover:border-[rgba(143,179,159,0.24)] hover:bg-[rgba(143,179,159,0.1)] hover:text-[rgba(198,228,209,0.84)]"
+                              >
+                                {filter}
+                              </button>
+                            ))
+                          : null}
+                        <button
+                          type="button"
+                          onClick={() => showStaticFeedback("Source inbox filtering is static in this preview.")}
+                          className="inline-flex h-9 items-center justify-center rounded-full border border-white/10 bg-white/5 px-3.5 text-[0.74rem] font-medium uppercase tracking-[0.1em] text-[rgba(245,239,229,0.62)] transition-colors hover:border-[rgba(143,179,159,0.24)] hover:bg-[rgba(143,179,159,0.1)] hover:text-[rgba(198,228,209,0.84)]"
+                        >
+                          All inboxes
+                        </button>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => showStaticFeedback("Status filtering is static in this preview.")}
+                          className="inline-flex h-9 items-center justify-center rounded-full border border-white/10 bg-white/5 px-3.5 text-[0.74rem] font-medium uppercase tracking-[0.1em] text-[rgba(245,239,229,0.62)] transition-colors hover:border-[rgba(143,179,159,0.24)] hover:bg-[rgba(143,179,159,0.1)] hover:text-[rgba(198,228,209,0.84)]"
+                        >
+                          All status
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => showStaticFeedback("Sorting is static in this preview.")}
+                          className="inline-flex h-9 items-center justify-center rounded-full border border-white/10 bg-white/5 px-3.5 text-[0.74rem] font-medium uppercase tracking-[0.1em] text-[rgba(245,239,229,0.62)] transition-colors hover:border-[rgba(143,179,159,0.24)] hover:bg-[rgba(143,179,159,0.1)] hover:text-[rgba(198,228,209,0.84)]"
+                        >
+                          Newest first
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {activeMessages.length === 0 ? (
+                    <div className="mt-4 rounded-[18px] border border-white/10 bg-white/5 px-5 py-10 text-center">
+                      {activeView === "shortlist" ? (
+                        <span className="mx-auto mb-3 inline-flex rounded-full border border-[rgba(143,179,159,0.2)] bg-[rgba(143,179,159,0.1)] px-3 py-1 text-[0.68rem] font-medium uppercase tracking-[0.12em] text-[rgba(198,228,209,0.78)]">
+                          Saved follow-up
+                        </span>
+                      ) : null}
+                      <h3 className="text-[1rem] font-semibold tracking-[-0.02em] text-[color:#f5efe5]">
+                        {activeCopy.emptyTitle}
+                      </h3>
+                      <p className="mx-auto mt-2 max-w-[460px] text-[0.86rem] leading-6 text-[rgba(245,239,229,0.58)]">
+                        {activeCopy.emptyDescription}
+                      </p>
+                    </div>
+                  ) : (
+                    <ul className="mt-4 overflow-hidden rounded-[16px] border border-white/10 bg-white/5">
+                      {activeMessages.map((message) => (
+                        <li
+                          key={message.id}
+                          className="border-b border-white/10 last:border-b-0"
+                        >
+                          <button
+                            type="button"
+                            onClick={() => showStaticFeedback(`${message.subject} is preview sample data.`)}
+                            className="relative grid w-full gap-3 border-l-2 border-transparent px-4 py-3.5 pr-5 text-left transition-[background-color,border-color,box-shadow] hover:border-[color:#8fb39f] hover:bg-white/[0.04] sm:grid-cols-[minmax(150px,0.55fr)_minmax(0,2.6fr)_minmax(72px,auto)] lg:grid-cols-[minmax(170px,0.46fr)_minmax(0,3fr)_minmax(82px,auto)] xl:px-5"
+                          >
                       <div className="grid min-w-0 grid-cols-[0.5rem_minmax(0,1fr)] items-start gap-2">
                         <span
                           className={`mt-[0.36rem] h-2 w-2 rounded-full ${
@@ -642,128 +694,23 @@ export function BundleOrganizerSurface() {
                       <div className="text-[0.78rem] font-medium text-[rgba(245,239,229,0.45)] sm:pt-0.5 sm:text-right">
                         {message.timestamp}
                       </div>
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  {actionFeedback ? (
+                    <p className="mt-3 rounded-[14px] border border-[rgba(143,179,159,0.16)] bg-[rgba(143,179,159,0.1)] px-3.5 py-2.5 text-[0.84rem] leading-6 text-[rgba(167,203,181,0.9)]">
+                      {actionFeedback}
+                    </p>
+                  ) : null}
+                </div>
+              )}
+            </section>
           </main>
-
-          <aside className="min-h-0 min-w-0 overflow-y-auto">
-            {selectedMessage && activeView !== "settings" ? (
-              <BundleOrganizerDetail
-                message={selectedMessage}
-                onAction={showStaticFeedback}
-              />
-            ) : (
-              <div className="rounded-[18px] border border-white/10 bg-white/[0.04] p-5">
-                <p className="text-[0.72rem] font-semibold uppercase tracking-[0.16em] text-[rgba(167,203,181,0.78)]">
-                  Bundle Pilot
-                </p>
-                <h3 className="mt-2 text-[1.16rem] font-semibold tracking-[-0.03em] text-[color:#f5efe5]">
-                  Managed by Cuevion Workspace
-                </h3>
-                <p className="mt-3 text-[0.9rem] leading-6 text-[rgba(245,239,229,0.6)]">
-                  This internal surface mirrors the Organizer experience with static pilot data. No real mail actions run here yet.
-                </p>
-              </div>
-            )}
-            {actionFeedback ? (
-              <p className="mt-3 rounded-[14px] border border-[rgba(143,179,159,0.16)] bg-[rgba(143,179,159,0.1)] px-3.5 py-2.5 text-[0.84rem] leading-6 text-[rgba(167,203,181,0.9)]">
-                {actionFeedback}
-              </p>
-            ) : null}
-          </aside>
         </div>
       </section>
     </div>
-  );
-}
-
-function BundleOrganizerDetail({
-  message,
-  onAction,
-}: {
-  message: BundleOrganizerMessage;
-  onAction: (message: string) => void;
-}) {
-  return (
-    <article className="rounded-[18px] border border-white/10 bg-white/[0.04] p-4 sm:p-5">
-      <div className="flex flex-col gap-4 border-b border-white/10 pb-4 md:flex-row md:items-start md:justify-between">
-        <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="text-[0.92rem] font-semibold tracking-[-0.01em] text-[color:#f5efe5]">
-              {message.sender}
-            </span>
-            <span className="rounded-full bg-white/5 px-2 py-0.5 text-[0.68rem] font-medium text-[rgba(245,239,229,0.56)]">
-              {message.sourceMailbox}
-            </span>
-          </div>
-          <div className="mt-2 grid max-w-[780px] gap-1 text-[0.76rem] leading-5 text-[rgba(245,239,229,0.5)]">
-            <div className="flex min-w-0 gap-1.5">
-              <span className="shrink-0 font-medium text-[rgba(245,239,229,0.42)]">
-                From
-              </span>
-              <span className="min-w-0 truncate">{message.sender}</span>
-            </div>
-            <div className="flex min-w-0 gap-1.5">
-              <span className="shrink-0 font-medium text-[rgba(245,239,229,0.42)]">
-                To
-              </span>
-              <span className="min-w-0 truncate">{message.sourceMailbox}</span>
-            </div>
-          </div>
-          <h3 className="mt-4 max-w-[780px] text-[1.65rem] font-semibold leading-tight tracking-[-0.035em] text-[color:#f5efe5] sm:text-[2rem]">
-            {message.subject}
-          </h3>
-          <div className="mt-4 flex flex-wrap gap-2">
-            {message.priorityBadge ? (
-              <span className="rounded-full bg-[rgba(143,179,159,0.14)] px-2.5 py-1 text-[0.7rem] font-medium text-[rgba(167,203,181,0.9)]">
-                {message.priorityBadge}
-              </span>
-            ) : null}
-            {message.shortlisted ? <MessagePill tone="shortlisted">Shortlisted</MessagePill> : null}
-            {message.status ? <MessagePill tone={message.status}>{message.status}</MessagePill> : null}
-          </div>
-        </div>
-        <div className="shrink-0 text-[0.78rem] font-medium text-[rgba(245,239,229,0.48)]">
-          {message.timestamp}
-        </div>
-      </div>
-
-      <div className="max-w-[780px] py-5">
-        {message.body.map((paragraph, index) => (
-          <p
-            key={`${message.id}-body-${index}`}
-            className="mb-6 text-[0.94rem] leading-7 text-[rgba(245,239,229,0.72)] last:mb-0"
-          >
-            {paragraph}
-          </p>
-        ))}
-      </div>
-
-      <div className="flex flex-wrap gap-2.5 border-t border-white/10 pt-4">
-        {[
-          "Reply",
-          "Decline",
-          message.shortlisted ? "Remove Shortlist" : "Shortlist",
-          "Mark Reviewed",
-        ].map((action, index) => (
-          <button
-            key={action}
-            type="button"
-            onClick={() => onAction(`${action} is disabled in the safe Bundle Pilot shell.`)}
-            className={`inline-flex h-10 items-center justify-center rounded-full border px-4 text-[0.72rem] font-medium uppercase tracking-[0.12em] transition-colors ${
-              index === 0
-                ? "border-[rgba(143,179,159,0.36)] bg-[color:#8fb39f] text-[color:#14201a] hover:bg-[color:#a3c5b1]"
-                : "border-white/10 bg-white/5 text-[rgba(245,239,229,0.64)] hover:border-[rgba(143,179,159,0.28)] hover:bg-[rgba(143,179,159,0.1)]"
-            }`}
-          >
-            {action}
-          </button>
-        ))}
-      </div>
-    </article>
   );
 }
 
