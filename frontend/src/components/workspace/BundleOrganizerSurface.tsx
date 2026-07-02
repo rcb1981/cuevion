@@ -29,6 +29,8 @@ type BundleOrganizerMessage = {
   timestamp: string;
   sourceMailbox: string;
   internalClassification?: BundleOrganizerInternalClassification;
+  signal?: string;
+  uiSignal?: string;
   unread?: boolean;
   shortlisted?: boolean;
   priority?: boolean;
@@ -62,6 +64,8 @@ export type BundleOrganizerWorkspaceMessage = {
   timestamp: string;
   sourceMailbox: string;
   internalClassification?: BundleOrganizerInternalClassification;
+  signal?: string;
+  uiSignal?: string;
   unread?: boolean;
   priority?: boolean;
   priorityBadge?: string;
@@ -355,6 +359,89 @@ const promoClassifications = new Set<BundleOrganizerInternalClassification>([
   "promo_reminder",
 ]);
 
+const organizerActiveWorkTerms = [
+  "waiting",
+  "follow up",
+  "follow-up",
+  "replied",
+  "reply",
+  "feedback",
+  "interested",
+  "shortlist",
+  "shortlisted",
+  "stems",
+  "label copy",
+  "signing",
+  "sign",
+  "contract",
+  "agreement",
+  "approve",
+  "approval",
+  "move forward",
+  "proceed",
+  "next step",
+  "can you",
+  "please send",
+  "let me know",
+];
+
+const organizerWorkflowSignals = [
+  "active",
+  "follow-up",
+  "follow up",
+  "timing",
+  "for review",
+  "shortlist",
+  "shortlisted",
+  "interested",
+  "needs_action",
+  "needs action",
+  "needs_review",
+  "needs review",
+];
+
+function getOrganizerActiveWorkReason(message: BundleOrganizerMessage) {
+  if (message.internalClassification === "reply") {
+    return "Reply-classified message.";
+  }
+
+  if (/^(re|fw|fwd):/i.test(message.subject.trim())) {
+    return "Existing reply or forwarded thread.";
+  }
+
+  const workflowSignal = [message.signal, message.uiSignal, message.status]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+
+  if (organizerWorkflowSignals.some((term) => workflowSignal.includes(term))) {
+    return "Organizer workflow signal detected.";
+  }
+
+  const searchableText = [
+    message.subject,
+    message.snippet,
+    message.sender,
+    message.sourceMailbox,
+    ...message.body,
+  ]
+    .join(" ")
+    .toLowerCase();
+  const matchedTerm = organizerActiveWorkTerms.find((term) =>
+    searchableText.includes(term),
+  );
+
+  if (matchedTerm) {
+    return `Open-loop signal: ${matchedTerm}.`;
+  }
+
+  return null;
+}
+
+function isOrganizerActiveWorkMessage(message: BundleOrganizerMessage) {
+  return getOrganizerActiveWorkReason(message) !== null;
+}
+
 function resolveWorkspaceMessageKind(
   classification?: BundleOrganizerInternalClassification,
 ): BundleOrganizerMessage["kind"] {
@@ -422,16 +509,7 @@ function getLiveMessagesForView(
   liveMessages: BundleOrganizerMessage[],
 ) {
   if (view === "priority") {
-    return liveMessages.filter((message) => {
-      const classification = message.internalClassification;
-
-      return (
-        message.priority ||
-        classification === "reply" ||
-        classification === "high_priority_demo" ||
-        (classification != null && promoClassifications.has(classification) && message.priority)
-      );
-    });
+    return liveMessages.filter(isOrganizerActiveWorkMessage);
   }
 
   if (view === "demo") {
@@ -514,6 +592,7 @@ export function BundleOrganizerSurface({
   const [activeView, setActiveView] = useState<BundleOrganizerView>("priority");
   const [searchQuery, setSearchQuery] = useState("");
   const [actionFeedback, setActionFeedback] = useState<string | null>(null);
+  const [selectedMessage, setSelectedMessage] = useState<BundleOrganizerMessage | null>(null);
 
   const workspaceMessages = useMemo(
     () => normalizeWorkspaceMessages(liveMessages),
@@ -558,8 +637,7 @@ export function BundleOrganizerSurface({
 
     return {
       highPriorityDemos: demoMessages.filter(
-        (message) =>
-          message.internalClassification === "high_priority_demo" || message.priority,
+        (message) => message.internalClassification === "high_priority_demo",
       ).length,
       promoReminders: promoMessages.filter(
         (message) => message.internalClassification === "promo_reminder",
@@ -570,10 +648,21 @@ export function BundleOrganizerSurface({
   const selectView = (view: BundleOrganizerView) => {
     setActiveView(view);
     setActionFeedback(null);
+    setSelectedMessage(null);
   };
 
   const showStaticFeedback = (message: string) => {
     setActionFeedback(message);
+  };
+
+  const openMessageDetail = (message: BundleOrganizerMessage) => {
+    setSelectedMessage(message);
+    setActionFeedback(null);
+  };
+
+  const closeMessageDetail = () => {
+    setSelectedMessage(null);
+    setActionFeedback(null);
   };
 
   return (
@@ -771,124 +860,119 @@ export function BundleOrganizerSurface({
                     </span>
                   </div>
 
-                  {activeView === "demo" || activeView === "promo" ? (
-                    <div className="mt-4 flex flex-wrap items-center justify-between gap-2">
-                      <div className="flex flex-wrap items-center gap-2">
-                        {activeView === "promo"
-                          ? ["All promos", "Reminders", "Unread"].map((filter) => (
-                              <button
-                                key={filter}
-                                type="button"
-                                onClick={() => showStaticFeedback(`${filter} is a static preview filter.`)}
-                                className="inline-flex h-9 items-center justify-center rounded-full border border-white/10 bg-white/5 px-3.5 text-[0.74rem] font-medium uppercase tracking-[0.1em] text-[rgba(245,239,229,0.62)] transition-colors hover:border-[rgba(143,179,159,0.24)] hover:bg-[rgba(143,179,159,0.1)] hover:text-[rgba(198,228,209,0.84)]"
-                              >
-                                {filter}
-                              </button>
-                            ))
-                          : null}
-                        <button
-                          type="button"
-                          onClick={() => showStaticFeedback("Source inbox filtering is static in this preview.")}
-                          className="inline-flex h-9 items-center justify-center rounded-full border border-white/10 bg-white/5 px-3.5 text-[0.74rem] font-medium uppercase tracking-[0.1em] text-[rgba(245,239,229,0.62)] transition-colors hover:border-[rgba(143,179,159,0.24)] hover:bg-[rgba(143,179,159,0.1)] hover:text-[rgba(198,228,209,0.84)]"
-                        >
-                          All inboxes
-                        </button>
-                      </div>
-                      <div className="flex flex-wrap items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={() => showStaticFeedback("Status filtering is static in this preview.")}
-                          className="inline-flex h-9 items-center justify-center rounded-full border border-white/10 bg-white/5 px-3.5 text-[0.74rem] font-medium uppercase tracking-[0.1em] text-[rgba(245,239,229,0.62)] transition-colors hover:border-[rgba(143,179,159,0.24)] hover:bg-[rgba(143,179,159,0.1)] hover:text-[rgba(198,228,209,0.84)]"
-                        >
-                          All status
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => showStaticFeedback("Sorting is static in this preview.")}
-                          className="inline-flex h-9 items-center justify-center rounded-full border border-white/10 bg-white/5 px-3.5 text-[0.74rem] font-medium uppercase tracking-[0.1em] text-[rgba(245,239,229,0.62)] transition-colors hover:border-[rgba(143,179,159,0.24)] hover:bg-[rgba(143,179,159,0.1)] hover:text-[rgba(198,228,209,0.84)]"
-                        >
-                          Newest first
-                        </button>
-                      </div>
-                    </div>
-                  ) : null}
-
-                  {activeMessages.length === 0 ? (
-                    <div className="mt-4 rounded-[18px] border border-white/10 bg-white/5 px-5 py-10 text-center">
-                      {activeView === "shortlist" ? (
-                        <span className="mx-auto mb-3 inline-flex rounded-full border border-[rgba(143,179,159,0.2)] bg-[rgba(143,179,159,0.1)] px-3 py-1 text-[0.68rem] font-medium uppercase tracking-[0.12em] text-[rgba(198,228,209,0.78)]">
-                          Saved follow-up
-                        </span>
-                      ) : null}
-                      <h3 className="text-[1rem] font-semibold tracking-[-0.02em] text-[color:#f5efe5]">
-                        {activeCopy.emptyTitle}
-                      </h3>
-                      <p className="mx-auto mt-2 max-w-[460px] text-[0.86rem] leading-6 text-[rgba(245,239,229,0.58)]">
-                        {activeCopy.emptyDescription}
-                      </p>
-                    </div>
+                  {selectedMessage ? (
+                    <BundleOrganizerMessageDetail
+                      message={selectedMessage}
+                      onBack={closeMessageDetail}
+                      onAction={showStaticFeedback}
+                    />
                   ) : (
-                    <ul className="mt-4 overflow-hidden rounded-[16px] border border-white/10 bg-white/5">
-                      {activeMessages.map((message) => (
-                        <li
-                          key={message.id}
-                          className="border-b border-white/10 last:border-b-0"
-                        >
-                          <button
-                            type="button"
-                            onClick={() =>
-                              showStaticFeedback(
-                                message.source === "workspace"
-                                  ? `${message.subject} is shown from the live workspace preview. No mailbox action was taken.`
-                                  : `${message.subject} is preview sample data.`,
-                              )
-                            }
-                            className="relative grid w-full gap-3 border-l-2 border-transparent px-4 py-3.5 pr-5 text-left transition-[background-color,border-color,box-shadow] hover:border-[color:#8fb39f] hover:bg-white/[0.04] sm:grid-cols-[minmax(150px,0.55fr)_minmax(0,2.6fr)_minmax(72px,auto)] lg:grid-cols-[minmax(170px,0.46fr)_minmax(0,3fr)_minmax(82px,auto)] xl:px-5"
-                          >
-                      <div className="grid min-w-0 grid-cols-[0.5rem_minmax(0,1fr)] items-start gap-2">
-                        <span
-                          className={`mt-[0.36rem] h-2 w-2 rounded-full ${
-                            message.unread ? "bg-[color:#8fb39f]" : "bg-white/20"
-                          }`}
-                        />
-                        <div className="min-w-0">
-                          <div className="truncate text-[0.92rem] font-semibold tracking-[-0.01em] text-[color:#f5efe5]">
-                            {message.sender}
+                    <>
+                      {activeView === "demo" || activeView === "promo" ? (
+                        <div className="mt-4 flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex flex-wrap items-center gap-2">
+                            {activeView === "promo"
+                              ? ["All promos", "Reminders", "Unread"].map((filter) => (
+                                  <button
+                                    key={filter}
+                                    type="button"
+                                    onClick={() => showStaticFeedback(`${filter} is a static preview filter.`)}
+                                    className="inline-flex h-9 items-center justify-center rounded-full border border-white/10 bg-white/5 px-3.5 text-[0.74rem] font-medium uppercase tracking-[0.1em] text-[rgba(245,239,229,0.62)] transition-colors hover:border-[rgba(143,179,159,0.24)] hover:bg-[rgba(143,179,159,0.1)] hover:text-[rgba(198,228,209,0.84)]"
+                                  >
+                                    {filter}
+                                  </button>
+                                ))
+                              : null}
+                            <button
+                              type="button"
+                              onClick={() => showStaticFeedback("Source inbox filtering is static in this preview.")}
+                              className="inline-flex h-9 items-center justify-center rounded-full border border-white/10 bg-white/5 px-3.5 text-[0.74rem] font-medium uppercase tracking-[0.1em] text-[rgba(245,239,229,0.62)] transition-colors hover:border-[rgba(143,179,159,0.24)] hover:bg-[rgba(143,179,159,0.1)] hover:text-[rgba(198,228,209,0.84)]"
+                            >
+                              All inboxes
+                            </button>
                           </div>
-                          <div className="mt-1 flex flex-wrap gap-1.5">
-                            <span className="max-w-full truncate rounded-full bg-white/5 px-2 py-0.5 text-[0.68rem] font-medium text-[rgba(245,239,229,0.56)]">
-                              {message.sourceMailbox}
+                          <div className="flex flex-wrap items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => showStaticFeedback("Status filtering is static in this preview.")}
+                              className="inline-flex h-9 items-center justify-center rounded-full border border-white/10 bg-white/5 px-3.5 text-[0.74rem] font-medium uppercase tracking-[0.1em] text-[rgba(245,239,229,0.62)] transition-colors hover:border-[rgba(143,179,159,0.24)] hover:bg-[rgba(143,179,159,0.1)] hover:text-[rgba(198,228,209,0.84)]"
+                            >
+                              All status
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => showStaticFeedback("Sorting is static in this preview.")}
+                              className="inline-flex h-9 items-center justify-center rounded-full border border-white/10 bg-white/5 px-3.5 text-[0.74rem] font-medium uppercase tracking-[0.1em] text-[rgba(245,239,229,0.62)] transition-colors hover:border-[rgba(143,179,159,0.24)] hover:bg-[rgba(143,179,159,0.1)] hover:text-[rgba(198,228,209,0.84)]"
+                            >
+                              Newest first
+                            </button>
+                          </div>
+                        </div>
+                      ) : null}
+
+                      {activeMessages.length === 0 ? (
+                        <div className="mt-4 rounded-[18px] border border-white/10 bg-white/5 px-5 py-10 text-center">
+                          {activeView === "shortlist" ? (
+                            <span className="mx-auto mb-3 inline-flex rounded-full border border-[rgba(143,179,159,0.2)] bg-[rgba(143,179,159,0.1)] px-3 py-1 text-[0.68rem] font-medium uppercase tracking-[0.12em] text-[rgba(198,228,209,0.78)]">
+                              Saved follow-up
                             </span>
-                            {message.priorityBadge ? (
-                              <span className="rounded-full bg-[rgba(143,179,159,0.14)] px-2 py-0.5 text-[0.68rem] font-medium text-[rgba(167,203,181,0.9)]">
-                                {message.priorityBadge}
-                              </span>
-                            ) : null}
-                            {message.shortlisted ? <MessagePill tone="shortlisted">Shortlisted</MessagePill> : null}
-                            {message.status ? <MessagePill tone={message.status}>{message.status}</MessagePill> : null}
-                          </div>
-                        </div>
-                      </div>
-                      <div className="min-w-0">
-                        <div className="truncate text-[0.95rem] font-medium tracking-[-0.01em] text-[rgba(245,239,229,0.88)]">
-                          {message.subject}
-                        </div>
-                        <p className="mt-1 line-clamp-2 text-[0.84rem] leading-5 text-[rgba(245,239,229,0.6)]">
-                          {message.snippet}
-                        </p>
-                        {activeView === "priority" && message.reason ? (
-                          <p className="mt-2 text-[0.76rem] font-medium uppercase tracking-[0.12em] text-[rgba(143,179,159,0.78)]">
-                            {message.reason}
+                          ) : null}
+                          <h3 className="text-[1rem] font-semibold tracking-[-0.02em] text-[color:#f5efe5]">
+                            {activeCopy.emptyTitle}
+                          </h3>
+                          <p className="mx-auto mt-2 max-w-[460px] text-[0.86rem] leading-6 text-[rgba(245,239,229,0.58)]">
+                            {activeCopy.emptyDescription}
                           </p>
-                        ) : null}
-                      </div>
-                      <div className="text-[0.78rem] font-medium text-[rgba(245,239,229,0.45)] sm:pt-0.5 sm:text-right">
-                        {message.timestamp}
-                      </div>
-                          </button>
-                        </li>
-                      ))}
-                    </ul>
+                        </div>
+                      ) : (
+                        <ul className="mt-4 overflow-hidden rounded-[16px] border border-white/10 bg-white/5">
+                          {activeMessages.map((message) => (
+                            <li
+                              key={message.id}
+                              className="border-b border-white/10 last:border-b-0"
+                            >
+                              <button
+                                type="button"
+                                onClick={() => openMessageDetail(message)}
+                                className="relative grid w-full gap-3 border-l-2 border-transparent px-4 py-3.5 pr-5 text-left transition-[background-color,border-color,box-shadow] hover:border-[color:#8fb39f] hover:bg-white/[0.04] sm:grid-cols-[minmax(150px,0.55fr)_minmax(0,2.6fr)_minmax(72px,auto)] lg:grid-cols-[minmax(170px,0.46fr)_minmax(0,3fr)_minmax(82px,auto)] xl:px-5"
+                              >
+                          <div className="grid min-w-0 grid-cols-[0.5rem_minmax(0,1fr)] items-start gap-2">
+                            <span
+                              className={`mt-[0.36rem] h-2 w-2 rounded-full ${
+                                message.unread ? "bg-[color:#8fb39f]" : "bg-white/20"
+                              }`}
+                            />
+                            <div className="min-w-0">
+                              <div className="truncate text-[0.92rem] font-semibold tracking-[-0.01em] text-[color:#f5efe5]">
+                                {message.sender}
+                              </div>
+                              <div className="mt-1 flex flex-wrap gap-1.5">
+                                <BundleOrganizerMessagePills message={message} />
+                              </div>
+                            </div>
+                          </div>
+                          <div className="min-w-0">
+                            <div className="truncate text-[0.95rem] font-medium tracking-[-0.01em] text-[rgba(245,239,229,0.88)]">
+                              {message.subject}
+                            </div>
+                            <p className="mt-1 line-clamp-2 text-[0.84rem] leading-5 text-[rgba(245,239,229,0.6)]">
+                              {message.snippet}
+                            </p>
+                            {activeView === "priority" && getOrganizerActiveWorkReason(message) ? (
+                              <p className="mt-2 text-[0.76rem] font-medium uppercase tracking-[0.12em] text-[rgba(143,179,159,0.78)]">
+                                {getOrganizerActiveWorkReason(message)}
+                              </p>
+                            ) : null}
+                          </div>
+                          <div className="text-[0.78rem] font-medium text-[rgba(245,239,229,0.45)] sm:pt-0.5 sm:text-right">
+                            {message.timestamp}
+                          </div>
+                              </button>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </>
                   )}
                   {actionFeedback ? (
                     <p className="mt-3 rounded-[14px] border border-[rgba(143,179,159,0.16)] bg-[rgba(143,179,159,0.1)] px-3.5 py-2.5 text-[0.84rem] leading-6 text-[rgba(167,203,181,0.9)]">
@@ -902,6 +986,117 @@ export function BundleOrganizerSurface({
         </div>
       </section>
     </div>
+  );
+}
+
+function BundleOrganizerMessagePills({ message }: { message: BundleOrganizerMessage }) {
+  return (
+    <>
+      <span className="max-w-full truncate rounded-full bg-white/5 px-2 py-0.5 text-[0.68rem] font-medium text-[rgba(245,239,229,0.56)]">
+        {message.sourceMailbox}
+      </span>
+      {message.priorityBadge ? (
+        <span className="rounded-full bg-[rgba(143,179,159,0.14)] px-2 py-0.5 text-[0.68rem] font-medium text-[rgba(167,203,181,0.9)]">
+          {message.priorityBadge}
+        </span>
+      ) : null}
+      {message.internalClassification ? (
+        <span className="rounded-full bg-white/5 px-2 py-0.5 text-[0.68rem] font-medium text-[rgba(245,239,229,0.56)]">
+          {message.internalClassification.replace(/_/g, " ")}
+        </span>
+      ) : null}
+      {message.shortlisted ? <MessagePill tone="shortlisted">Shortlisted</MessagePill> : null}
+      {message.status ? <MessagePill tone={message.status}>{message.status}</MessagePill> : null}
+    </>
+  );
+}
+
+function BundleOrganizerMessageDetail({
+  message,
+  onBack,
+  onAction,
+}: {
+  message: BundleOrganizerMessage;
+  onBack: () => void;
+  onAction: (message: string) => void;
+}) {
+  const activeReason = getOrganizerActiveWorkReason(message) ?? message.reason;
+  const bodyLines = message.body.length > 0 ? message.body : [message.snippet];
+  const actionButtonClass =
+    "inline-flex h-9 items-center justify-center rounded-full border border-[rgba(143,179,159,0.2)] bg-[rgba(143,179,159,0.1)] px-3.5 text-[0.72rem] font-medium uppercase tracking-[0.11em] text-[rgba(198,228,209,0.82)] transition-colors hover:border-[rgba(143,179,159,0.3)] hover:bg-[rgba(143,179,159,0.16)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[rgba(143,179,159,0.24)]";
+
+  const handleAction = (label: string) => {
+    onAction(`${label} is a read-only Bundle Pilot action. No mailbox message was changed.`);
+  };
+
+  return (
+    <article className="mt-4 rounded-[18px] border border-white/10 bg-white/[0.045] p-4 sm:p-5">
+      <div className="flex flex-col gap-3 border-b border-white/10 pb-4 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0">
+          <button
+            type="button"
+            onClick={onBack}
+            className="mb-3 inline-flex h-8 items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 text-[0.7rem] font-medium uppercase tracking-[0.12em] text-[rgba(245,239,229,0.62)] transition-colors hover:border-[rgba(143,179,159,0.24)] hover:bg-[rgba(143,179,159,0.1)] hover:text-[rgba(198,228,209,0.84)]"
+          >
+            Back
+          </button>
+          <p className="text-[0.74rem] font-medium uppercase tracking-[0.16em] text-[rgba(217,203,184,0.58)]">
+            {message.sender}
+          </p>
+          <h3 className="mt-1.5 text-[1.3rem] font-semibold tracking-[-0.03em] text-[color:#f5efe5]">
+            {message.subject}
+          </h3>
+          <div className="mt-3 flex flex-wrap gap-1.5">
+            <BundleOrganizerMessagePills message={message} />
+          </div>
+        </div>
+        <div className="shrink-0 text-left text-[0.78rem] font-medium text-[rgba(245,239,229,0.48)] sm:text-right">
+          <div>{message.timestamp}</div>
+          <div className="mt-1 text-[rgba(245,239,229,0.58)]">{message.sourceMailbox}</div>
+        </div>
+      </div>
+
+      <div className="grid gap-4 pt-4 lg:grid-cols-[minmax(0,1fr)_220px]">
+        <div className="min-w-0">
+          {activeReason ? (
+            <p className="mb-3 rounded-[14px] border border-[rgba(143,179,159,0.18)] bg-[rgba(143,179,159,0.1)] px-3.5 py-2.5 text-[0.82rem] font-medium leading-6 text-[rgba(167,203,181,0.9)]">
+              {activeReason}
+            </p>
+          ) : null}
+          <p className="text-[0.9rem] leading-6 text-[rgba(245,239,229,0.68)]">
+            {message.snippet}
+          </p>
+          <div className="mt-4 space-y-3 rounded-[16px] border border-white/10 bg-[rgba(12,18,15,0.38)] p-4">
+            {bodyLines.map((line, index) => (
+              <p
+                key={`${message.id}-body-${index}`}
+                className="text-[0.88rem] leading-7 text-[rgba(245,239,229,0.72)]"
+              >
+                {line}
+              </p>
+            ))}
+          </div>
+        </div>
+
+        <aside className="rounded-[16px] border border-white/10 bg-white/[0.04] p-3">
+          <p className="px-1 text-[0.66rem] font-semibold uppercase tracking-[0.14em] text-[rgba(217,203,184,0.52)]">
+            Safe actions
+          </p>
+          <div className="mt-3 flex flex-col gap-2">
+            {["Reply", "Decline", "Shortlist", "Mark Reviewed"].map((label) => (
+              <button
+                key={label}
+                type="button"
+                onClick={() => handleAction(label)}
+                className={actionButtonClass}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </aside>
+      </div>
+    </article>
   );
 }
 

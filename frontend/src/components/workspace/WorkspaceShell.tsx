@@ -33909,6 +33909,8 @@ export function WorkspaceShell({
                   timestamp: message.timestamp || message.time,
                   sourceMailbox: mailbox.title,
                   internalClassification: message.internalClassification,
+                  signal: message.signal,
+                  uiSignal: message.ui_signal,
                   unread: message.unread,
                   priority: isWorkspacePriority,
                   priorityBadge,
