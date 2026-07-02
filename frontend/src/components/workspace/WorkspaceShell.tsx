@@ -10745,6 +10745,8 @@ function WorkspaceSidebar({
     activeSection === "Inboxes" && activeSmartFolderId === null ? activeMailboxId : null;
   const shouldShowInboxChildren = hasMultipleMailboxes && isInboxesOpen;
   const formatUnreadBadgeCount = (count: number) => (count > 99 ? "99+" : String(count));
+  const shouldShowUnreadBadgeCount = (count: number) =>
+    showMailboxUnreadCounts && count > 0;
   const inboxSidebarItems = useMemo(
     () =>
       orderedMailboxes.map((mailbox) => ({
@@ -10985,7 +10987,7 @@ function WorkspaceSidebar({
                         aria-label={mailbox.label}
                       >
                         <span className="block min-w-0 truncate pl-4">{mailbox.label}</span>
-                        {mailbox.unreadCount > 0 ? (
+                        {shouldShowUnreadBadgeCount(mailbox.unreadCount) ? (
                           <span className={`${sidebarUnreadBadgeClass} flex-none`}>
                             {formatUnreadBadgeCount(mailbox.unreadCount)}
                           </span>
@@ -11022,8 +11024,7 @@ function WorkspaceSidebar({
                   aria-label={singleMailbox.title}
                 >
                   <span className="block min-w-0 truncate pl-4">{singleMailbox.title}</span>
-                  {showMailboxUnreadCounts &&
-                  (mailboxUnreadCounts[singleMailbox.id] ?? 0) > 0 ? (
+                  {shouldShowUnreadBadgeCount(mailboxUnreadCounts[singleMailbox.id] ?? 0) ? (
                     <span className={`${sidebarUnreadBadgeClass} flex-none`}>
                       {formatUnreadBadgeCount(mailboxUnreadCounts[singleMailbox.id] ?? 0)}
                     </span>
@@ -11058,7 +11059,7 @@ function WorkspaceSidebar({
                       aria-label={mailbox.label}
                     >
                       <span className="block min-w-0 truncate pl-4">{mailbox.label}</span>
-                      {mailbox.unreadCount > 0 ? (
+                      {shouldShowUnreadBadgeCount(mailbox.unreadCount) ? (
                         <span className={`${sidebarUnreadBadgeClass} flex-none`}>
                           {formatUnreadBadgeCount(mailbox.unreadCount)}
                         </span>
@@ -19879,7 +19880,11 @@ function MailboxView({
                         !activeSmartFolder &&
                         folder === activeFolder;
                       const count = getFolderBadgeCount(folder);
-                      const shouldShowFolderCount = folder === "Inbox";
+                      const shouldShowFolderCount = folder === "Inbox" && count > 0;
+                      const filteredFolderCount =
+                        folder === "Inbox" ? getFolderBadgeCount("Filtered") : 0;
+                      const sharedMessageCount =
+                        folder === "Inbox" ? getSharedMessageCount() : 0;
                       const dragTargetId = `folder-${folder}`;
                       const isDragTargetActive = dragTargetKey === dragTargetId;
                       const folderLabel =
@@ -19971,17 +19976,19 @@ function MailboxView({
                                 >
                                   Filtered
                                 </span>
-                                <span
-                                  className={`text-[0.72rem] ${
-                                    !isSharedView &&
-                                    !activeSmartFolder &&
-                                    activeFolder === "Filtered"
-                                      ? "text-[var(--workspace-text-faint)]"
-                                      : "text-[color:rgba(116,107,97,0.74)]"
-                                  }`}
-                                >
-                                  {getFolderBadgeCount("Filtered")}
-                                </span>
+                                {filteredFolderCount > 0 ? (
+                                  <span
+                                    className={`text-[0.72rem] ${
+                                      !isSharedView &&
+                                      !activeSmartFolder &&
+                                      activeFolder === "Filtered"
+                                        ? "text-[var(--workspace-text-faint)]"
+                                        : "text-[color:rgba(116,107,97,0.74)]"
+                                    }`}
+                                  >
+                                    {filteredFolderCount}
+                                  </span>
+                                ) : null}
                               </button>
                               <button
                                 type="button"
@@ -19995,9 +20002,11 @@ function MailboxView({
                                 <span className="text-[0.8rem] font-medium uppercase tracking-[0.14em]">
                                   Shared
                                 </span>
-                                <span className="text-[0.72rem] text-[var(--workspace-text-faint)]">
-                                  {getSharedMessageCount()}
-                                </span>
+                                {sharedMessageCount > 0 ? (
+                                  <span className="text-[0.72rem] text-[var(--workspace-text-faint)]">
+                                    {sharedMessageCount}
+                                  </span>
+                                ) : null}
                               </button>
                             </>
                           ) : null}
