@@ -278,6 +278,35 @@ const helpTopics: HelpTopic[] = [
     keywords: ["message", "email", "thread", "category", "label", "read", "reply", "detail"],
   },
   {
+    id: "private-beta-mailbox-actions",
+    section: "Daily workflow",
+    title: "Private beta mailbox actions",
+    intro:
+      "During private beta, Cuevion keeps some organization state inside the workspace so testers can use the product safely while provider behavior is still being expanded.",
+    points: [
+      "Archive, trash, spam, read state, manual priority, manual labels, and Smart Folder rules may be saved inside Cuevion during beta.",
+      "Your original provider mailbox may not be changed for every organization action.",
+      "Gmail and IMAP connections can still show real mailbox data where configured.",
+      "Sending can be real where the connected mailbox supports it and has been configured.",
+      "When testing, compare with the provider inbox if you need to confirm whether a specific action changed the original mailbox.",
+    ],
+    tip: "This keeps private beta testing practical without implying every mailbox action has provider-side sync yet.",
+    keywords: [
+      "private beta",
+      "local",
+      "local only",
+      "archive",
+      "trash",
+      "spam",
+      "read state",
+      "unread",
+      "manual priority",
+      "manual labels",
+      "smart folders",
+      "provider mailbox",
+    ],
+  },
+  {
     id: "priority-for-you-ai",
     section: "Daily workflow",
     title: "Priority, For You, and AI suggestions",
@@ -29505,6 +29534,17 @@ function UtilityView({
           </div>
         ) : null}
       </header>
+
+      {section === "Help" ? (
+        <div className="max-w-3xl rounded-[22px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-5 py-4 text-[0.9rem] leading-6 text-[var(--workspace-text-muted)]">
+          <span className="font-medium text-[var(--workspace-text)]">
+            Private beta note:
+          </span>{" "}
+          Some organization actions, such as archive, trash, spam, read state,
+          manual priority, and Smart Folders, are saved inside Cuevion during
+          beta. Your original mailbox may not be changed for every action.
+        </div>
+      ) : null}
 
       <section className="rounded-[30px] border border-[var(--workspace-border)] bg-[var(--workspace-card)] p-6 shadow-panel">
         <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
