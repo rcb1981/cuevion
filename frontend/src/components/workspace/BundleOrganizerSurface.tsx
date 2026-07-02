@@ -101,6 +101,12 @@ type BundleOrganizerActiveWorkStatus =
 
 type BundleOrganizerPromoFilter = "all" | "reminders" | "unread";
 type BundleOrganizerSortOrder = "newest" | "oldest";
+type BundleOrganizerSettingsTab = "inboxes" | "rules" | "templates" | "appearance";
+
+type BundleOrganizerRowMenuAction = {
+  label: string;
+  disabled?: boolean;
+};
 
 type BundleOrganizerSurfaceProps = {
   liveMessages?: BundleOrganizerWorkspaceMessage[];
@@ -531,6 +537,45 @@ function getMessageSortValue(message: BundleOrganizerMessage) {
   return message.sortTimestamp ?? 0;
 }
 
+function getRowMenuActions(
+  message: BundleOrganizerMessage,
+  activeView: BundleOrganizerView,
+): BundleOrganizerRowMenuAction[] {
+  if (activeView === "sent" || activeView === "settings") {
+    return [];
+  }
+
+  if (activeView === "trash") {
+    return [
+      { label: "Restore" },
+      { label: "Delete permanently" },
+    ];
+  }
+
+  const actions: BundleOrganizerRowMenuAction[] = [
+    { label: "Forward" },
+    { label: message.unread ? "Mark as read" : "Mark as unread" },
+  ];
+
+  if (activeView === "demo") {
+    actions.push({ label: "Move to Promo" });
+  } else if (activeView === "promo") {
+    actions.push({ label: "Move to Demo" });
+  } else if (activeView === "priority" || activeView === "shortlist") {
+    actions.push({ label: "Move to Demo" }, { label: "Move to Promo" });
+  }
+
+  actions.push(
+    { label: message.shortlisted ? "Remove from Shortlist" : "Shortlist" },
+    { label: message.manualPriority === true ? "Remove Priority" : "Mark as Priority" },
+    { label: "Always prioritize this sender" },
+    { label: "Create Smart View for this sender" },
+    { label: "Move to Trash" },
+  );
+
+  return actions;
+}
+
 function statusPillClass(status: NonNullable<BundleOrganizerMessage["status"]> | "shortlisted" | "priority") {
   if (status === "declined") {
     return "border-[rgba(232,146,118,0.22)] bg-[rgba(161,78,55,0.14)] text-[rgba(246,184,162,0.88)]";
@@ -568,6 +613,7 @@ export function BundleOrganizerSurface({
   const [searchQuery, setSearchQuery] = useState("");
   const [actionFeedback, setActionFeedback] = useState<string | null>(null);
   const [selectedMessage, setSelectedMessage] = useState<BundleOrganizerMessage | null>(null);
+  const [openMenuMessageId, setOpenMenuMessageId] = useState<string | null>(null);
   const [sourceMailboxFilter, setSourceMailboxFilter] = useState("all");
   const [promoFilter, setPromoFilter] = useState<BundleOrganizerPromoFilter>("all");
   const [sortOrder, setSortOrder] = useState<BundleOrganizerSortOrder>("newest");
@@ -657,7 +703,7 @@ export function BundleOrganizerSurface({
       ? "Focused Demo and Promo views are displaying read-only workspace messages."
       : "Connect or sync inboxes in Cuevion Workspace to populate this Organizer.";
   const displayedConnectedInboxCount = connectedInboxCount;
-  const previewGroupCounts = useMemo(() => {
+  const smartViewCounts = useMemo(() => {
     const demoMessages = getMessagesForView("demo", workspaceMessages).messages;
     const promoMessages = getMessagesForView("promo", workspaceMessages).messages;
 
@@ -675,6 +721,7 @@ export function BundleOrganizerSurface({
     setActiveView(view);
     setSourceMailboxFilter("all");
     setPromoFilter("all");
+    setOpenMenuMessageId(null);
     setActionFeedback(null);
     setSelectedMessage(null);
   };
@@ -684,6 +731,7 @@ export function BundleOrganizerSurface({
   };
 
   const openMessageDetail = (message: BundleOrganizerMessage) => {
+    setOpenMenuMessageId(null);
     setSelectedMessage(message);
     setActionFeedback(null);
   };
@@ -822,29 +870,29 @@ export function BundleOrganizerSurface({
 
             <section className="border-t border-white/10 pt-3">
               <div className="flex h-10 items-center justify-between gap-2 rounded-full px-3.5 text-[0.62rem] font-semibold uppercase tracking-[0.14em] text-[rgba(217,203,184,0.5)]">
-                <span>Preview Groups</span>
+                <span>Smart Views</span>
                 <button
                   type="button"
-                  onClick={() => showStaticFeedback("Preview groups are static in Bundle Pilot.")}
+                  onClick={() => showStaticFeedback("Smart View creation is preview-only in Bundle Pilot.")}
                   className="inline-flex h-6 w-6 items-center justify-center rounded-full border border-[rgba(143,179,159,0.2)] bg-[rgba(143,179,159,0.1)] text-[0.86rem] leading-none text-[rgba(198,228,209,0.86)] transition-colors hover:bg-[rgba(143,179,159,0.16)]"
-                  aria-label="Create preview group"
+                  aria-label="Create Smart View"
                 >
                   +
                 </button>
               </div>
               {[
-                { label: "High priority demos", count: previewGroupCounts.highPriorityDemos },
-                { label: "Promo reminders", count: previewGroupCounts.promoReminders },
-              ].map((previewGroup) => (
+                { label: "High priority demos", count: smartViewCounts.highPriorityDemos },
+                { label: "Promo reminders", count: smartViewCounts.promoReminders },
+              ].map((smartView) => (
                 <button
-                  key={previewGroup.label}
+                  key={smartView.label}
                   type="button"
-                  onClick={() => showStaticFeedback(`${previewGroup.label} is a static Bundle Pilot preview group.`)}
+                  onClick={() => showStaticFeedback(`${smartView.label} is a read-only Bundle Pilot Smart View preview.`)}
                   className="mb-2 flex h-10 w-full shrink-0 items-center justify-between gap-2 rounded-full px-3.5 text-[0.82rem] font-medium text-[rgba(245,239,229,0.72)] transition-colors hover:bg-white/5"
                 >
-                  <span className="truncate">{previewGroup.label}</span>
+                  <span className="truncate">{smartView.label}</span>
                   <span className="rounded-full bg-white/5 px-2 py-0.5 text-[0.72rem] text-[rgba(245,239,229,0.52)]">
-                    {previewGroup.count}
+                    {smartView.count}
                   </span>
                 </button>
               ))}
@@ -875,7 +923,7 @@ export function BundleOrganizerSurface({
 
               {activeView === "settings" ? (
                 <div className="pt-4">
-                  <BundleOrganizerSettings />
+                  <BundleOrganizerSettings connectedInboxCount={connectedInboxCount} />
                 </div>
               ) : (
                 <div className="pt-4">
@@ -985,12 +1033,12 @@ export function BundleOrganizerSurface({
                           {activeMessages.map((message) => (
                             <li
                               key={message.id}
-                              className="border-b border-white/10 last:border-b-0"
+                              className="relative border-b border-white/10 last:border-b-0"
                             >
                               <button
                                 type="button"
                                 onClick={() => openMessageDetail(message)}
-                                className="relative grid w-full gap-3 border-l-2 border-transparent px-4 py-3.5 pr-5 text-left transition-[background-color,border-color,box-shadow] hover:border-[color:#8fb39f] hover:bg-white/[0.04] sm:grid-cols-[minmax(150px,0.55fr)_minmax(0,2.6fr)_minmax(72px,auto)] lg:grid-cols-[minmax(170px,0.46fr)_minmax(0,3fr)_minmax(82px,auto)] xl:px-5"
+                                className="relative grid w-full gap-3 border-l-2 border-transparent px-4 py-3.5 pr-14 text-left transition-[background-color,border-color,box-shadow] hover:border-[color:#8fb39f] hover:bg-white/[0.04] sm:grid-cols-[minmax(150px,0.55fr)_minmax(0,2.6fr)_minmax(72px,auto)] lg:grid-cols-[minmax(170px,0.46fr)_minmax(0,3fr)_minmax(82px,auto)] xl:px-5 xl:pr-14"
                               >
                           <div className="grid min-w-0 grid-cols-[0.5rem_minmax(0,1fr)] items-start gap-2">
                             <span
@@ -1024,6 +1072,52 @@ export function BundleOrganizerSurface({
                             {message.timestamp}
                           </div>
                               </button>
+                              {getRowMenuActions(message, activeView).length > 0 ? (
+                                <div className="absolute right-3 top-3 z-10">
+                                  <button
+                                    type="button"
+                                    aria-label={`More actions for ${message.subject}`}
+                                    aria-haspopup="menu"
+                                    aria-expanded={openMenuMessageId === message.id}
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      setOpenMenuMessageId((current) =>
+                                        current === message.id ? null : message.id,
+                                      );
+                                      setActionFeedback(null);
+                                    }}
+                                    className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-white/10 bg-[rgba(15,22,18,0.72)] text-[1rem] leading-none text-[rgba(245,239,229,0.58)] transition-colors hover:border-[rgba(143,179,159,0.24)] hover:bg-[rgba(143,179,159,0.12)] hover:text-[rgba(198,228,209,0.92)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[rgba(143,179,159,0.24)]"
+                                  >
+                                    ...
+                                  </button>
+                                  {openMenuMessageId === message.id ? (
+                                    <div
+                                      role="menu"
+                                      onClick={(event) => event.stopPropagation()}
+                                      onMouseDown={(event) => event.stopPropagation()}
+                                      className="absolute right-0 top-9 z-50 min-w-[210px] rounded-[14px] border border-white/10 bg-[rgba(25,34,30,0.98)] p-1.5 shadow-[0_18px_40px_rgba(0,0,0,0.34)] backdrop-blur-sm"
+                                    >
+                                      {getRowMenuActions(message, activeView).map((action) => (
+                                        <button
+                                          key={action.label}
+                                          type="button"
+                                          role="menuitem"
+                                          disabled={action.disabled}
+                                          onClick={() => {
+                                            setOpenMenuMessageId(null);
+                                            showStaticFeedback(
+                                              `${action.label} is a preview action only in Bundle Pilot. No mailbox message was changed.`,
+                                            );
+                                          }}
+                                          className="flex w-full items-center rounded-[10px] px-3 py-2 text-left text-[0.82rem] font-medium text-[rgba(245,239,229,0.72)] transition-colors hover:bg-[rgba(143,179,159,0.12)] hover:text-[rgba(198,228,209,0.94)] disabled:cursor-not-allowed disabled:opacity-40"
+                                        >
+                                          {action.label}
+                                        </button>
+                                      ))}
+                                    </div>
+                                  ) : null}
+                                </div>
+                              ) : null}
                             </li>
                           ))}
                         </ul>
@@ -1156,54 +1250,187 @@ function BundleOrganizerMessageDetail({
   );
 }
 
-function BundleOrganizerSettings() {
+const bundleOrganizerSettingsTabs: Array<{
+  id: BundleOrganizerSettingsTab;
+  label: string;
+}> = [
+  { id: "inboxes", label: "Inboxes" },
+  { id: "rules", label: "Rules & Views" },
+  { id: "templates", label: "Templates" },
+  { id: "appearance", label: "Appearance" },
+];
+
+function BundleOrganizerSettings({
+  connectedInboxCount,
+}: {
+  connectedInboxCount: number;
+}) {
+  const [activeSettingsTab, setActiveSettingsTab] =
+    useState<BundleOrganizerSettingsTab>("inboxes");
+  const settingsCardClass = "rounded-[16px] border border-white/10 bg-white/[0.04] p-4";
+  const settingsBadgeClass =
+    "w-fit rounded-full border border-[rgba(143,179,159,0.22)] bg-[rgba(143,179,159,0.1)] px-2.5 py-1 text-[0.66rem] font-medium uppercase tracking-[0.12em] text-[rgba(198,228,209,0.82)]";
+  const settingsMutedButtonClass =
+    "inline-flex h-8 cursor-not-allowed items-center justify-center rounded-full border border-white/10 bg-white/[0.025] px-3 text-[0.66rem] font-medium uppercase tracking-[0.11em] text-[rgba(245,239,229,0.34)]";
+
   return (
-    <div className="space-y-3">
-      {[
-        {
-          eyebrow: "Workspace managed",
-          title: "Inbox access",
-          description:
-            "Connected inboxes are shared with this Organizer in Bundle Pilot. Inbox setup stays in Cuevion Workspace.",
-          badge: "Shared",
-        },
-        {
-          eyebrow: "Organizer preview",
-          title: "Preview groups and routing",
-          description:
-            "Preview groups are static pilot structure. No classifier, filtering, or mailbox routing changes are active.",
-          badge: "Static",
-        },
-        {
-          eyebrow: "Safe shell",
-          title: "Mail actions",
-          description:
-            "Reply, decline, shortlist, trash, and restore controls are visual only in this internal review surface.",
-          badge: "No-op",
-        },
-      ].map((item) => (
-        <section
-          key={item.title}
-          className="rounded-[16px] border border-white/10 bg-white/[0.04] p-4"
-        >
+    <div className="space-y-4">
+      <div className="flex flex-wrap gap-2">
+        {bundleOrganizerSettingsTabs.map((tab) => (
+          <button
+            key={tab.id}
+            type="button"
+            onClick={() => setActiveSettingsTab(tab.id)}
+            aria-pressed={activeSettingsTab === tab.id}
+            className={`inline-flex h-9 items-center rounded-full border px-3.5 text-[0.72rem] font-medium uppercase tracking-[0.11em] transition-colors ${
+              activeSettingsTab === tab.id
+                ? "border-[rgba(143,179,159,0.34)] bg-[rgba(143,179,159,0.16)] text-[rgba(198,228,209,0.92)]"
+                : "border-white/10 bg-white/5 text-[rgba(245,239,229,0.58)] hover:border-[rgba(143,179,159,0.24)] hover:bg-[rgba(143,179,159,0.1)] hover:text-[rgba(198,228,209,0.84)]"
+            }`}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
+
+      {activeSettingsTab === "inboxes" ? (
+        <section className={settingsCardClass}>
           <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
             <div>
               <p className="text-[0.68rem] font-semibold uppercase tracking-[0.16em] text-[rgba(167,203,181,0.78)]">
-                {item.eyebrow}
+                Inboxes
               </p>
               <h3 className="mt-2 text-[1rem] font-semibold tracking-[-0.02em] text-[color:#f5efe5]">
-                {item.title}
+                Managed by Cuevion Workspace
               </h3>
               <p className="mt-2 text-[0.84rem] leading-6 text-[rgba(245,239,229,0.6)]">
-                {item.description}
+                Bundle Organizer reads from the workspace inboxes already connected in the Email Client. Connection, sync, and authentication stay managed by Cuevion Workspace.
               </p>
             </div>
-            <span className="w-fit rounded-full border border-[rgba(143,179,159,0.22)] bg-[rgba(143,179,159,0.1)] px-2.5 py-1 text-[0.66rem] font-medium uppercase tracking-[0.12em] text-[rgba(198,228,209,0.82)]">
-              {item.badge}
+            <span className={settingsBadgeClass}>
+              {connectedInboxCount} shared
             </span>
           </div>
+          <div className="mt-4 grid gap-3 sm:grid-cols-2">
+            {[
+              ["Source access", "Read-only workspace mailbox data"],
+              ["Sync controls", "Managed in Cuevion Workspace"],
+              ["Sending", "Disabled in Bundle Pilot preview"],
+              ["Mailbox actions", "No archive, trash, move, or read-state writes"],
+            ].map(([label, value]) => (
+              <div key={label} className="rounded-[14px] border border-white/10 bg-white/[0.035] p-3">
+                <p className="text-[0.64rem] font-semibold uppercase tracking-[0.14em] text-[rgba(217,203,184,0.48)]">
+                  {label}
+                </p>
+                <p className="mt-1.5 text-[0.82rem] leading-5 text-[rgba(245,239,229,0.66)]">
+                  {value}
+                </p>
+              </div>
+            ))}
+          </div>
         </section>
-      ))}
+      ) : null}
+
+      {activeSettingsTab === "rules" ? (
+        <section className={settingsCardClass}>
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <div>
+              <p className="text-[0.68rem] font-semibold uppercase tracking-[0.16em] text-[rgba(167,203,181,0.78)]">
+                Rules & Views
+              </p>
+              <h3 className="mt-2 text-[1rem] font-semibold tracking-[-0.02em] text-[color:#f5efe5]">
+                Smart Views and sender rules
+              </h3>
+              <p className="mt-2 text-[0.84rem] leading-6 text-[rgba(245,239,229,0.6)]">
+                Row menus expose Organizer-style rule and Smart View actions as preview-only controls. No sender rules are persisted and no messages are hidden or reprioritized.
+              </p>
+            </div>
+            <span className={settingsBadgeClass}>Preview only</span>
+          </div>
+          <div className="mt-4 space-y-2">
+            {[
+              "Always prioritize this sender",
+              "Create Smart View for this sender",
+              "Move to Demo / Move to Promo",
+              "Move to Trash",
+            ].map((label) => (
+              <div
+                key={label}
+                className="flex items-center justify-between gap-3 rounded-[14px] border border-white/10 bg-white/[0.035] px-3 py-2.5"
+              >
+                <span className="text-[0.84rem] font-medium text-[rgba(245,239,229,0.7)]">
+                  {label}
+                </span>
+                <span className="text-[0.64rem] font-semibold uppercase tracking-[0.12em] text-[rgba(217,203,184,0.44)]">
+                  No-op
+                </span>
+              </div>
+            ))}
+          </div>
+        </section>
+      ) : null}
+
+      {activeSettingsTab === "templates" ? (
+        <section className={settingsCardClass}>
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <div>
+              <p className="text-[0.68rem] font-semibold uppercase tracking-[0.16em] text-[rgba(167,203,181,0.78)]">
+                Templates
+              </p>
+              <h3 className="mt-2 text-[1rem] font-semibold tracking-[-0.02em] text-[color:#f5efe5]">
+                Reply and decline templates
+              </h3>
+              <p className="mt-2 text-[0.84rem] leading-6 text-[rgba(245,239,229,0.6)]">
+                Template structure mirrors Organizer reply and decline flows, including signature-aware wording. Editing and saving templates is disabled in this embedded preview.
+              </p>
+            </div>
+            <button type="button" disabled className={settingsMutedButtonClass}>
+              Save templates
+            </button>
+          </div>
+          <div className="mt-4 grid gap-3 md:grid-cols-2">
+            {[
+              ["Demo decline", "Thanks for sending this through. It is not the right fit for the current release lane."],
+              ["Forward note", "Forward this message with context once Organizer sending is connected."],
+            ].map(([label, body]) => (
+              <div key={label} className="rounded-[14px] border border-white/10 bg-[rgba(12,18,15,0.3)] p-3">
+                <p className="text-[0.72rem] font-semibold uppercase tracking-[0.14em] text-[rgba(217,203,184,0.52)]">
+                  {label}
+                </p>
+                <p className="mt-2 text-[0.84rem] leading-6 text-[rgba(245,239,229,0.64)]">
+                  {body}
+                </p>
+              </div>
+            ))}
+          </div>
+        </section>
+      ) : null}
+
+      {activeSettingsTab === "appearance" ? (
+        <section className={settingsCardClass}>
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <div>
+              <p className="text-[0.68rem] font-semibold uppercase tracking-[0.16em] text-[rgba(167,203,181,0.78)]">
+                Appearance
+              </p>
+              <h3 className="mt-2 text-[1rem] font-semibold tracking-[-0.02em] text-[color:#f5efe5]">
+                Organizer theme preview
+              </h3>
+              <p className="mt-2 text-[0.84rem] leading-6 text-[rgba(245,239,229,0.6)]">
+                The embedded Organizer follows the Bundle workspace shell. Standalone light/dark theme controls are shown here as preview-only settings.
+              </p>
+            </div>
+            <span className={settingsBadgeClass}>Bundle theme</span>
+          </div>
+          <div className="mt-4 flex flex-wrap gap-2">
+            {["System", "Light", "Dark"].map((label) => (
+              <button key={label} type="button" disabled className={settingsMutedButtonClass}>
+                {label}
+              </button>
+            ))}
+          </div>
+        </section>
+      ) : null}
     </div>
   );
 }
