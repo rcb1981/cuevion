@@ -122,7 +122,7 @@ import type { ForYouLearningSuggestion } from "../../lib/forYouEngine";
 
 const PRODUCT_ACCESS_STORAGE_KEY = "cuevion-product-access";
 const BUNDLE_PILOT_ACCESS_CODE = "CUEVION-BUNDLE-PILOT";
-const ORGANIZER_PILOT_URL = "/organizer";
+const ORGANIZER_PILOT_URL = "https://organizer.cuevion.com";
 
 const primaryNavigationItems = [
   { section: "Dashboard", label: "Dashboard", shortLabel: "Dash", icon: "dashboard" },
