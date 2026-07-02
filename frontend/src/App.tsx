@@ -107,6 +107,24 @@ type PendingOAuthManagedInbox = {
 
 type DisplayNameOverrideStore = Record<string, string>;
 
+function isOnboardingPreviewRoute() {
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  const params = new URLSearchParams(window.location.search);
+  return (
+    window.location.pathname.replace(/\/+$/, "") === "/onboarding-preview" ||
+    params.get("preview") === "onboarding"
+  );
+}
+
+function createPreviewOnboardingState(): OnboardingState {
+  return normalizeOnboardingState(
+    JSON.parse(JSON.stringify(initialOnboardingState)) as Partial<OnboardingState>,
+  );
+}
+
 function buildUserConfig(state: OnboardingState): UserConfig {
   return {
     primaryRole: state.primaryRole,
@@ -1412,7 +1430,94 @@ function TeamInviteRouteView({ route }: { route: TeamInviteRoute }) {
   );
 }
 
-export default function App() {
+function OnboardingPreviewRoute({ onExit }: { onExit: () => void }) {
+  const [previewRunId, setPreviewRunId] = useState(0);
+  const [previewState, setPreviewState] = useState<OnboardingState>(() =>
+    createPreviewOnboardingState(),
+  );
+  const [isComplete, setIsComplete] = useState(false);
+
+  const restartPreview = () => {
+    setPreviewState(createPreviewOnboardingState());
+    setIsComplete(false);
+    setPreviewRunId((current) => current + 1);
+  };
+  const previewControls = (
+    <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-[18px] border border-[rgba(38,66,56,0.13)] bg-[rgba(255,252,247,0.88)] px-4 py-3 text-[color:#2f2a24] shadow-[0_14px_36px_rgba(61,44,32,0.10)] backdrop-blur dark:border-[rgba(255,255,255,0.08)] dark:bg-[rgba(33,28,24,0.86)] dark:text-[color:#f1e9de]">
+      <div className="flex items-center gap-3">
+        <span className="inline-flex h-2.5 w-2.5 rounded-full bg-[rgba(52,115,88,0.92)] shadow-[0_0_0_4px_rgba(52,115,88,0.12)]" />
+        <div>
+          <div className="text-[0.72rem] font-semibold uppercase tracking-[0.18em] text-[rgba(38,66,56,0.72)] dark:text-[rgba(222,211,200,0.72)]">
+            Preview mode
+          </div>
+          <div className="text-sm text-[rgba(88,80,71,0.72)] dark:text-[rgba(222,211,200,0.66)]">
+            Review-only onboarding. Workspace, inbox, and user settings are not saved.
+          </div>
+        </div>
+      </div>
+      <button
+        type="button"
+        onClick={onExit}
+        className="inline-flex h-9 items-center justify-center rounded-full border border-[rgba(38,66,56,0.16)] bg-white/72 px-4 text-[0.72rem] font-semibold uppercase tracking-[0.14em] text-[rgba(38,66,56,0.82)] transition hover:border-[rgba(38,66,56,0.28)] hover:bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[rgba(52,115,88,0.28)] dark:border-[rgba(255,255,255,0.1)] dark:bg-[rgba(44,38,33,0.76)] dark:text-[rgba(241,233,222,0.78)]"
+      >
+        Exit preview
+      </button>
+    </div>
+  );
+
+  if (isComplete) {
+    return (
+      <main className="min-h-screen bg-[linear-gradient(180deg,#f6efe7_0%,#efe5da_100%)] px-4 py-8 text-[color:#2f2a24] md:px-8 md:py-10 dark:bg-[linear-gradient(180deg,#171411_0%,#221c17_100%)] dark:text-[color:#f1e9de]">
+        <div className="mx-auto max-w-3xl">
+          {previewControls}
+          <div className="rounded-[32px] border border-[rgba(120,104,89,0.14)] bg-[rgba(255,252,247,0.86)] p-8 text-center shadow-[0_28px_80px_rgba(61,44,32,0.12)] backdrop-blur dark:border-[rgba(255,255,255,0.08)] dark:bg-[rgba(33,28,24,0.82)]">
+            <div className="mx-auto mb-5 flex h-12 w-12 items-center justify-center rounded-full border border-[rgba(52,115,88,0.18)] bg-[rgba(226,236,229,0.78)] text-[rgba(38,66,56,0.82)]">
+              OK
+            </div>
+            <div className="text-[0.72rem] font-semibold uppercase tracking-[0.2em] text-[rgba(120,104,89,0.7)] dark:text-[rgba(214,201,189,0.64)]">
+              Preview complete
+            </div>
+            <h1 className="mt-3 text-[2rem] font-semibold tracking-[-0.04em]">
+              Onboarding review finished
+            </h1>
+            <p className="mx-auto mt-3 max-w-xl text-[0.98rem] leading-7 text-[rgba(88,80,71,0.78)] dark:text-[rgba(222,211,200,0.7)]">
+              This preview did not open the workspace or save onboarding, inbox, mailbox, or user configuration.
+            </p>
+            <div className="mt-7 flex flex-wrap justify-center gap-3">
+              <button
+                type="button"
+                onClick={restartPreview}
+                className="inline-flex h-10 items-center justify-center rounded-full border border-[rgba(38,66,56,0.14)] bg-white/74 px-5 text-[0.74rem] font-semibold uppercase tracking-[0.14em] text-[rgba(38,66,56,0.82)] transition hover:border-[rgba(38,66,56,0.26)] hover:bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[rgba(52,115,88,0.28)] dark:border-[rgba(255,255,255,0.1)] dark:bg-[rgba(44,38,33,0.76)] dark:text-[rgba(241,233,222,0.78)]"
+              >
+                Restart preview
+              </button>
+              <button
+                type="button"
+                onClick={onExit}
+                className={premiumAccessButtonClass}
+              >
+                Exit preview
+              </button>
+            </div>
+          </div>
+        </div>
+      </main>
+    );
+  }
+
+  return (
+    <OnboardingFlow
+      key={previewRunId}
+      state={previewState}
+      onStateChange={setPreviewState}
+      onOpenWorkspace={() => setIsComplete(true)}
+      previewControls={previewControls}
+      isPreviewMode
+    />
+  );
+}
+
+function CuevionApp() {
   const shouldShowLandingPage = isPublicLandingHost();
 
   if (shouldShowLandingPage) {
@@ -2047,4 +2152,30 @@ export default function App() {
       }}
     />
   );
+}
+
+export default function App() {
+  const [isPreviewMode, setIsPreviewMode] = useState(() => isOnboardingPreviewRoute());
+
+  useEffect(() => {
+    const handlePopState = () => {
+      setIsPreviewMode(isOnboardingPreviewRoute());
+    };
+
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
+
+  if (isPreviewMode) {
+    return (
+      <OnboardingPreviewRoute
+        onExit={() => {
+          window.history.replaceState(null, "", "/");
+          setIsPreviewMode(false);
+        }}
+      />
+    );
+  }
+
+  return <CuevionApp />;
 }

@@ -68,6 +68,7 @@ interface StepConnectInboxesProps {
   ) => void;
   canRemoveInbox?: (inboxId: InboxId) => boolean;
   onRemoveInbox?: (inboxId: InboxId) => void;
+  isPreviewMode?: boolean;
 }
 
 const presetInboxLabelMap = Object.fromEntries(
@@ -192,6 +193,7 @@ export function StepConnectInboxes({
   onConnectInbox,
   canRemoveInbox,
   onRemoveInbox,
+  isPreviewMode = false,
 }: StepConnectInboxesProps) {
   const [loadingInboxId, setLoadingInboxId] = useState<InboxId | null>(null);
   const [connectionErrors, setConnectionErrors] = useState<
@@ -243,6 +245,18 @@ export function StepConnectInboxes({
         [inboxId]: feedback,
       }));
       setLoadingInboxId(null);
+      return;
+    }
+
+    if (isPreviewMode) {
+      onConnectInbox(inboxId, {
+        connected: true,
+        connectionMethod: getProviderConnectionMethod(connection.provider),
+        connectionStatus: "connected",
+        connectionMessage: "Preview connection only. No mailbox settings were saved.",
+        oauthAuthorizationUrl: null,
+      });
+      clearConnectionFeedback(inboxId);
       return;
     }
 

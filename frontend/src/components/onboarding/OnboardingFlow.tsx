@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import { onboardingText } from "../../copy/onboardingCopy";
 import {
   createCustomInboxId,
@@ -259,12 +259,16 @@ interface OnboardingFlowProps {
     value: OnboardingState | ((current: OnboardingState) => OnboardingState),
   ) => void;
   onOpenWorkspace: (userConfig: UserConfig) => void;
+  isPreviewMode?: boolean;
+  previewControls?: ReactNode;
 }
 
 export function OnboardingFlow({
   state,
   onStateChange,
   onOpenWorkspace,
+  isPreviewMode = false,
+  previewControls,
 }: OnboardingFlowProps) {
   const [step, setStep] = useState(0);
   const showSetupProgress = step > 0;
@@ -716,7 +720,7 @@ export function OnboardingFlow({
 
     const connection = state.inboxConnections[inboxId];
 
-    if (result.connected && connection?.email.trim()) {
+    if (!isPreviewMode && result.connected && connection?.email.trim()) {
       saveLiveInboxSnapshot({
         inboxId,
         email: connection.email.trim().toLowerCase(),
@@ -870,6 +874,7 @@ export function OnboardingFlow({
             onConnectInbox={connectInbox}
             canRemoveInbox={canRemoveSelectedInbox}
             onRemoveInbox={removeSelectedInbox}
+            isPreviewMode={isPreviewMode}
           />
         );
       case 6:
@@ -897,6 +902,7 @@ export function OnboardingFlow({
   return (
     <main className="min-h-screen px-4 py-8 md:px-8 md:py-10">
       <div className="mx-auto max-w-6xl">
+        {previewControls}
         <div className="overflow-hidden rounded-[36px] border border-white/50 bg-white/55 shadow-panel backdrop-blur-xl">
           <div className="grid min-h-[860px] lg:grid-cols-[320px_1fr]">
             <aside className="relative hidden border-r border-ink/8 bg-pine px-8 py-10 text-white lg:block">
