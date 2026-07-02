@@ -55,13 +55,11 @@ function resolveItemLevel(
 interface StepFocusPreferencesProps {
   value: OnboardingState["focusPreferences"];
   onChange: (fields: FocusPreferenceKey[], value: FocusPreferenceLevel) => void;
-  hasPrioritySelection: boolean;
 }
 
 export function StepFocusPreferences({
   value,
   onChange,
-  hasPrioritySelection,
 }: StepFocusPreferencesProps) {
   return (
     <section className="space-y-7">
@@ -99,9 +97,7 @@ export function StepFocusPreferences({
                         onClick={() => onChange(item.fields, level)}
                         className={`min-w-0 rounded-full border px-2 py-1.5 text-center text-[0.7rem] font-medium uppercase tracking-[0.08em] transition ${
                           selected
-                            ? level === "medium"
-                              ? "border-ink/18 bg-white text-ink shadow-[0_8px_20px_rgba(32,28,24,0.06)]"
-                              : "border-pine bg-[linear-gradient(180deg,rgba(226,236,229,0.92),rgba(246,249,246,0.98))] text-ink shadow-panel"
+                            ? "border-pine bg-[linear-gradient(180deg,rgba(226,236,229,0.92),rgba(246,249,246,0.98))] text-ink shadow-panel"
                             : "border-ink/10 bg-white/62 text-ink/50 hover:border-moss/24 hover:text-ink"
                         }`}
                       >
@@ -116,14 +112,8 @@ export function StepFocusPreferences({
         })}
       </div>
 
-      <p
-        className={`text-sm leading-6 ${
-          hasPrioritySelection ? "text-ink/52" : "text-amber-900/70"
-        }`}
-      >
-        {hasPrioritySelection
-          ? "Normal is the default for anything you do not mark as Priority or Low."
-          : "Choose at least one Priority focus to continue."}
+      <p className="text-sm leading-6 text-ink/52">
+        Normal is the default for anything you do not mark as Priority or Low.
       </p>
     </section>
   );

@@ -86,9 +86,6 @@ export function OnboardingFlow({
     };
   };
 
-  const hasPrioritySelection = Object.values(state.focusPreferences).some(
-    (level) => level === "high",
-  );
   const connectedInboxIds = state.selectedInboxes.filter((inboxId) => {
     const connection = getInboxConnection(state, inboxId);
     return connection.connected || connection.connectionStatus === "connected";
@@ -100,16 +97,12 @@ export function OnboardingFlow({
     .map((item) => item.label);
 
   const canGoNext = useMemo(() => {
-    if (step === 1) {
-      return hasPrioritySelection;
-    }
-
     if (step === 2) {
       return connectedInboxIds.length > 0;
     }
 
     return true;
-  }, [connectedInboxIds.length, hasPrioritySelection, step]);
+  }, [connectedInboxIds.length, step]);
 
   const setFocusPreference = (
     fields: Array<keyof OnboardingState["focusPreferences"]>,
@@ -360,7 +353,6 @@ export function OnboardingFlow({
           <StepFocusPreferences
             value={state.focusPreferences}
             onChange={setFocusPreference}
-            hasPrioritySelection={hasPrioritySelection}
           />
         );
       case 2:
