@@ -33042,12 +33042,21 @@ export function WorkspaceShell({
   const workspaceModalHostRef = useRef<HTMLDivElement | null>(null);
   const seenIncomingMessageIdsRef = useRef<Set<string>>(new Set());
   const isInboxView = activeMailbox !== null;
+  const usesOrganizerWorkspaceLayout =
+    activeSection === "Organizer" && productAccess === "bundle";
   const usesExpandedInboxWorkspaceLayout =
-    isInboxView || activeSection === "Inboxes" || activeSection === "Priority";
-  const workspaceOuterShellClass = usesExpandedInboxWorkspaceLayout
+    isInboxView ||
+    activeSection === "Inboxes" ||
+    activeSection === "Priority" ||
+    usesOrganizerWorkspaceLayout;
+  const workspaceOuterShellClass = usesOrganizerWorkspaceLayout
+    ? "px-0 py-0"
+    : usesExpandedInboxWorkspaceLayout
     ? "px-0.5 pt-0 pb-0 sm:px-1.5 sm:pt-0.5 sm:pb-0.5 md:px-2.5 md:pt-1 md:pb-1 xl:px-3 xl:pt-1.5 xl:pb-1"
     : "px-4 py-8 md:px-8 md:py-10";
-  const workspaceContentRailClass = usesExpandedInboxWorkspaceLayout
+  const workspaceContentRailClass = usesOrganizerWorkspaceLayout
+    ? "max-w-none md:pl-[96px] xl:pl-[240px]"
+    : usesExpandedInboxWorkspaceLayout
     ? "max-w-[2280px] md:pl-[100px] xl:pl-[244px]"
     : "max-w-[1880px] md:pl-[112px] xl:pl-[264px]";
 
@@ -33197,10 +33206,14 @@ export function WorkspaceShell({
 
     return () => window.clearInterval(intervalId);
   }, [activeMailbox, isMobileWorkspaceViewport, savedManagedInboxes, syncingMailboxId]);
-  const workspaceShellPaddingClass = usesExpandedInboxWorkspaceLayout
+  const workspaceShellPaddingClass = usesOrganizerWorkspaceLayout
+    ? "p-0"
+    : usesExpandedInboxWorkspaceLayout
     ? "p-3 md:p-4 lg:p-5"
     : "p-6 md:p-8 lg:p-10";
-  const workspaceShellSurfaceClass = usesExpandedInboxWorkspaceLayout
+  const workspaceShellSurfaceClass = usesOrganizerWorkspaceLayout
+    ? "rounded-none border border-transparent bg-transparent shadow-none"
+    : usesExpandedInboxWorkspaceLayout
     ? "rounded-[30px] border border-transparent bg-transparent shadow-none"
     : "rounded-[36px] border border-[var(--workspace-shell-border)] bg-[var(--workspace-shell)] shadow-panel";
   const [inviteDecisionState, setInviteDecisionState] = useState<

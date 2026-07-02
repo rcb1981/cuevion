@@ -403,8 +403,8 @@ export function BundleOrganizerSurface() {
 
   return (
     <div className="min-h-0 flex-1 overflow-hidden">
-      <section className="flex h-full min-h-0 flex-col overflow-hidden rounded-[22px] bg-[radial-gradient(circle_at_top_left,rgba(88,69,55,0.24),transparent_32%),radial-gradient(circle_at_right,rgba(55,87,74,0.2),transparent_28%),linear-gradient(180deg,#1d1b18_0%,#101915_100%)] p-3 text-[color:#f5efe5] md:p-4">
-        <header className="border-b border-white/10 pb-3">
+      <section className="flex h-full min-h-0 flex-col overflow-hidden rounded-[18px] bg-[radial-gradient(circle_at_top_left,rgba(88,69,55,0.24),transparent_32%),radial-gradient(circle_at_right,rgba(55,87,74,0.2),transparent_28%),linear-gradient(180deg,#1d1b18_0%,#101915_100%)] p-2 text-[color:#f5efe5] md:p-3">
+        <header className="border-b border-white/10 pb-2.5">
           <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
             <div>
               <div className="flex items-center gap-2.5">
@@ -467,8 +467,8 @@ export function BundleOrganizerSurface() {
           </div>
         </header>
 
-        <div className="grid min-h-0 flex-1 gap-3 overflow-hidden pt-3 lg:grid-cols-[190px_minmax(0,0.9fr)_minmax(0,1.1fr)] xl:grid-cols-[210px_minmax(0,0.85fr)_minmax(0,1.15fr)]">
-          <aside className="flex min-h-0 min-w-0 flex-col gap-3 overflow-y-auto border-b border-white/10 pb-3 lg:border-b-0 lg:border-r lg:pb-0 lg:pr-3 xl:pr-4">
+        <div className="grid min-h-0 flex-1 gap-2.5 overflow-hidden pt-2.5 lg:grid-cols-[190px_minmax(0,0.9fr)_minmax(0,1.1fr)] xl:grid-cols-[210px_minmax(0,0.85fr)_minmax(0,1.15fr)]">
+          <aside className="flex min-h-0 min-w-0 flex-col gap-2.5 overflow-y-auto border-b border-white/10 pb-2.5 lg:border-b-0 lg:border-r lg:pb-0 lg:pr-2.5 xl:pr-3">
             <section className="rounded-[14px] border border-white/10 bg-white/[0.04] px-3 py-2.5">
               <p className="text-[0.66rem] font-medium uppercase tracking-[0.15em] text-[rgba(217,203,184,0.55)]">
                 Connected Inboxes
