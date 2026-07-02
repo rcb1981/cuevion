@@ -120,6 +120,10 @@ import type {
 } from "../../lib/suggestionEngine";
 import type { ForYouLearningSuggestion } from "../../lib/forYouEngine";
 
+const PRODUCT_ACCESS_STORAGE_KEY = "cuevion-product-access";
+const BUNDLE_PILOT_ACCESS_CODE = "CUEVION-BUNDLE-PILOT";
+const ORGANIZER_PILOT_URL = "/organizer";
+
 const primaryNavigationItems = [
   { section: "Dashboard", label: "Dashboard", shortLabel: "Dash", icon: "dashboard" },
   { section: "For You", label: "For You", shortLabel: "For", icon: "sparkle" },
@@ -163,6 +167,7 @@ type PendingManagedInboxNavigation = {
   action: () => void;
 };
 type WorkspaceDataMode = "demo" | "live";
+type ProductAccess = "bundle" | null;
 type ReviewFilter = "All priority" | "Priority";
 type InboxFilter = "All inboxes" | "Connected";
 type ForYouContext = "Main" | "Promo";
@@ -10641,6 +10646,29 @@ function CuevionMark({ compact = false }: { compact?: boolean }) {
   );
 }
 
+function readStoredProductAccess(): ProductAccess {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  return window.localStorage.getItem(PRODUCT_ACCESS_STORAGE_KEY) === "bundle"
+    ? "bundle"
+    : null;
+}
+
+function writeStoredProductAccess(nextAccess: ProductAccess) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  if (nextAccess === "bundle") {
+    window.localStorage.setItem(PRODUCT_ACCESS_STORAGE_KEY, "bundle");
+    return;
+  }
+
+  window.localStorage.removeItem(PRODUCT_ACCESS_STORAGE_KEY);
+}
+
 function SidebarNavigationIcon({ name }: { name: SidebarNavigationIconName }) {
   return (
     <svg
@@ -10730,6 +10758,7 @@ function SidebarNavigationIcon({ name }: { name: SidebarNavigationIconName }) {
 
 function WorkspaceSidebar({
   workspaceName,
+  productAccess,
   activeSection,
   activeMailboxId,
   activeSmartFolderId,
@@ -10748,6 +10777,7 @@ function WorkspaceSidebar({
   onRequestDeleteSmartFolder,
 }: {
   workspaceName: string;
+  productAccess: ProductAccess;
   activeSection: WorkspaceSection;
   activeMailboxId: InboxId | null;
   activeSmartFolderId: string | null;
@@ -11168,6 +11198,26 @@ function WorkspaceSidebar({
               )}
             </ul>
             <div className="mt-auto pt-8">
+              {productAccess === "bundle" ? (
+                <div className="mb-5 rounded-[22px] border border-[color:rgba(218,194,142,0.2)] bg-[linear-gradient(180deg,rgba(238,224,190,0.1),rgba(33,58,49,0.28))] p-2.5 shadow-[inset_0_1px_0_rgba(255,248,226,0.1)]">
+                  <div className="hidden px-2 pb-2 text-[0.62rem] font-medium uppercase tracking-[0.18em] text-[color:rgba(232,222,198,0.62)] xl:block">
+                    Bundle Pilot
+                  </div>
+                  <a
+                    href={ORGANIZER_PILOT_URL}
+                    className="flex w-full items-center justify-center rounded-2xl px-3 py-3 text-center text-sm font-medium text-[var(--workspace-sidebar-text-muted)] transition-[background-color,color,box-shadow] duration-100 hover:bg-[var(--workspace-sidebar-hover)] hover:text-[var(--workspace-sidebar-text)] focus:outline-none focus-visible:shadow-[inset_0_0_0_1px_rgba(255,255,255,0.12),0_0_0_1px_rgba(214,230,221,0.16)] xl:justify-start xl:px-3.5 xl:text-left"
+                  >
+                    <span className="hidden items-center gap-2 xl:inline-flex">
+                      <SidebarNavigationIcon name="folder" />
+                      <span>Organizer</span>
+                    </span>
+                    <span className="inline-flex items-center justify-center gap-1.5 text-[11px] uppercase tracking-[0.18em] xl:hidden">
+                      <SidebarNavigationIcon name="folder" />
+                      <span>Org</span>
+                    </span>
+                  </a>
+                </div>
+              ) : null}
               <ul className="space-y-2">{utilityNavigationItems.map(renderItem)}</ul>
               <button
                 type="button"
@@ -28243,11 +28293,15 @@ const AccountSettingsCard = memo(function AccountSettingsCard({
   themeMode,
   accountName,
   accountEmail,
+  productAccess,
+  onProductAccessChange,
   onAccountNameChange,
 }: {
   themeMode: "light" | "dark";
   accountName: string;
   accountEmail: string;
+  productAccess: ProductAccess;
+  onProductAccessChange: (nextAccess: ProductAccess) => void;
   onAccountNameChange?: (name: string) => void;
 }) {
   const [isManaging, setIsManaging] = useState(false);
@@ -28265,6 +28319,8 @@ const AccountSettingsCard = memo(function AccountSettingsCard({
   const [nextEmail, setNextEmail] = useState("");
   const [confirmNextEmail, setConfirmNextEmail] = useState("");
   const [password, setPassword] = useState("");
+  const [accessCodeDraft, setAccessCodeDraft] = useState("");
+  const [accessCodeError, setAccessCodeError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!isManaging) {
@@ -28315,6 +28371,23 @@ const AccountSettingsCard = memo(function AccountSettingsCard({
   const handleCloseManagePlan = () => {
     setDraftPlan(savedPlan);
     setIsManagePlanOpen(false);
+  };
+
+  const handleApplyProductAccessCode = () => {
+    if (accessCodeDraft.trim().toUpperCase() !== BUNDLE_PILOT_ACCESS_CODE) {
+      setAccessCodeError("This access code is not valid.");
+      return;
+    }
+
+    onProductAccessChange("bundle");
+    setAccessCodeDraft("");
+    setAccessCodeError(null);
+  };
+
+  const handleRemoveProductAccess = () => {
+    onProductAccessChange(null);
+    setAccessCodeDraft("");
+    setAccessCodeError(null);
   };
 
   const normalizedNextEmail = nextEmail.trim();
@@ -28436,6 +28509,81 @@ const AccountSettingsCard = memo(function AccountSettingsCard({
             </div>
           ) : null}
         </div>
+      </div>
+
+      <div className={settingsCardClass(themeMode)}>
+        <div className="mb-4 flex items-start justify-between gap-4">
+          <div>
+            <h2 className="text-[1.1rem] font-medium tracking-tight text-[var(--workspace-text)]">
+              Product access
+            </h2>
+            <p className="mt-1 max-w-xl text-[0.9rem] leading-6 text-[var(--workspace-text-muted)]">
+              Unlock internal Cuevion pilot features for this workspace.
+            </p>
+          </div>
+          {productAccess === "bundle" ? (
+            <span className="shrink-0 rounded-full border border-[var(--workspace-status-success-border)] bg-[var(--workspace-status-success-bg)] px-3 py-1 text-[0.62rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-status-success-text)]">
+              Bundle Pilot
+            </span>
+          ) : null}
+        </div>
+
+        {productAccess === "bundle" ? (
+          <div className="rounded-[20px] border border-[var(--workspace-status-success-border)] bg-[var(--workspace-status-success-bg)] px-4 py-3.5">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <div className="text-[0.92rem] font-medium text-[var(--workspace-status-success-text)]">
+                  Cuevion Suite access enabled
+                </div>
+                <p className="mt-1 text-[0.82rem] leading-6 text-[var(--workspace-text-muted)]">
+                  Organizer access is visible in the workspace navigation.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={handleRemoveProductAccess}
+                className={settingsSubtleActionClass}
+              >
+                Remove access
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className={settingsCardSectionClass}>
+            <label className="mb-2 block text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+              Access code
+            </label>
+            <div className="flex flex-col gap-3 sm:flex-row">
+              <input
+                type="text"
+                value={accessCodeDraft}
+                onChange={(event) => {
+                  setAccessCodeDraft(event.target.value);
+                  setAccessCodeError(null);
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    handleApplyProductAccessCode();
+                  }
+                }}
+                className={accessCodeError ? inputFieldErrorClass : inputFieldClass}
+                placeholder="Enter access code"
+              />
+              <button
+                type="button"
+                onClick={handleApplyProductAccessCode}
+                className={`${settingsPrimaryActionClass} h-[3.05rem] shrink-0 px-5`}
+              >
+                Unlock
+              </button>
+            </div>
+            {accessCodeError ? (
+              <div className="mt-2 text-[0.78rem] leading-5 text-[color:rgba(146,82,73,0.96)] dark:text-[color:rgba(244,186,168,0.86)]">
+                {accessCodeError}
+              </div>
+            ) : null}
+          </div>
+        )}
       </div>
 
       <SettingsModalShell
@@ -28737,6 +28885,7 @@ function SettingsView({
   workspaceName,
   accountName,
   accountEmail,
+  productAccess,
   savedManagedInboxes,
   primaryManagedInboxId,
   credentialStatuses,
@@ -28762,11 +28911,13 @@ function SettingsView({
   onManagedInboxesDirtyChange,
   onSaveInboxSignature,
   onSaveInboxOutOfOffice,
+  onProductAccessChange,
   onAccountNameChange,
 }: {
   workspaceName: string;
   accountName: string;
   accountEmail: string;
+  productAccess: ProductAccess;
   savedManagedInboxes: ManagedWorkspaceInbox[];
   primaryManagedInboxId: string | null;
   credentialStatuses: MailboxCredentialStatusStore;
@@ -28795,6 +28946,7 @@ function SettingsView({
     inboxId: InboxId,
     outOfOffice: InboxOutOfOfficeSettings,
   ) => void;
+  onProductAccessChange: (nextAccess: ProductAccess) => void;
   onAccountNameChange?: (name: string) => void;
 }) {
   const [activeSettingsTab, setActiveSettingsTab] = useState<SettingsTab>("Workspace");
@@ -28908,6 +29060,8 @@ function SettingsView({
             themeMode={themeMode}
             accountName={accountName}
             accountEmail={accountEmail}
+            productAccess={productAccess}
+            onProductAccessChange={onProductAccessChange}
             onAccountNameChange={onAccountNameChange}
           />
         );
@@ -31631,6 +31785,9 @@ export function WorkspaceShell({
 
     return storedMode ?? (theme === "dark" ? "Dark" : "Light");
   });
+  const [productAccess, setProductAccess] = useState<ProductAccess>(() =>
+    readStoredProductAccess(),
+  );
   const [systemColorMode, setSystemColorMode] = useState<"light" | "dark">(() =>
     typeof window !== "undefined" &&
     window.matchMedia &&
@@ -32289,6 +32446,10 @@ export function WorkspaceShell({
     !activeMailbox &&
     !visibleActiveTarget &&
     (!areMailboxCountsHydrated || Boolean(syncingMailboxId));
+  const handleProductAccessChange = (nextAccess: ProductAccess) => {
+    writeStoredProductAccess(nextAccess);
+    setProductAccess(nextAccess);
+  };
 
   useEffect(() => {
     if (!isDemoWorkspace && activeTarget) {
@@ -38167,6 +38328,7 @@ export function WorkspaceShell({
     >
       <WorkspaceSidebar
         workspaceName={workspaceName}
+        productAccess={productAccess}
         activeSection={activeSection}
         activeMailboxId={activeMailbox?.id ?? null}
         activeSmartFolderId={activeSmartFolderId}
@@ -38405,6 +38567,7 @@ export function WorkspaceShell({
                   workspaceName={workspaceName}
                   accountName={accountDisplayName}
                   accountEmail={accountDisplayEmail}
+                  productAccess={productAccess}
                   savedManagedInboxes={savedManagedInboxes}
                   primaryManagedInboxId={primaryManagedInboxId}
                   credentialStatuses={mailboxCredentialStatuses}
@@ -38446,6 +38609,7 @@ export function WorkspaceShell({
                       [inboxId]: normalizeInboxOutOfOfficeSettings(outOfOffice),
                     }));
                   }}
+                  onProductAccessChange={handleProductAccessChange}
                   onAccountNameChange={onAuthenticatedUserNameChange}
                 />
               </div>
