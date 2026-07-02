@@ -189,7 +189,7 @@ const helpTopics: HelpTopic[] = [
       "Start with your normal email workflow so the workspace feels familiar.",
       "Use Dashboard for a high-level view, For You for recommended attention, and Priority for threads that need faster review.",
       "Open Inboxes when you want to work from a specific connected mailbox.",
-      "Use Settings to adjust inbox setup, signatures, out of office, and workspace preferences.",
+      "Use Settings to adjust inbox setup, signatures, and workspace preferences.",
       "Use Help for guidance and Contact when something needs a person from Cuevion.",
     ],
     tip: "For testing, avoid changing too many settings at once. One change at a time makes issues easier to report.",
@@ -355,19 +355,18 @@ const helpTopics: HelpTopic[] = [
     keywords: ["team", "collaboration", "invite", "member", "role", "access", "shared"],
   },
   {
-    id: "settings-signatures-out-of-office",
+    id: "settings-signatures",
     section: "Workspace",
-    title: "Settings, signatures, and out of office",
+    title: "Settings and signatures",
     intro:
-      "Settings centralizes account preferences, connected inbox setup, signatures, and out of office controls.",
+      "Settings centralizes account preferences, connected inbox setup, signatures, and workspace controls.",
     points: [
       "Use Connected inboxes for mailbox setup and connection status.",
       "Use signature settings to review or adjust the saved signature shown for the workspace.",
-      "Use out of office controls when testing automatic absence messaging options.",
       "After saving a setting, confirm the UI shows the updated value.",
       "If a setting appears unchanged, refresh once and note exactly which setting did not update.",
     ],
-    keywords: ["settings", "signature", "signatures", "out of office", "ooo", "preferences", "save"],
+    keywords: ["settings", "signature", "signatures", "preferences", "save"],
     popular: true,
   },
   {
@@ -27454,12 +27453,14 @@ const MailSettingsCard = memo(function MailSettingsCard({
   managedInboxes,
   inboxOutOfOffice,
   themeMode,
+  showOutOfOfficeSettings,
   onManageSignature,
   onManageOutOfOffice,
 }: {
   managedInboxes: ManagedWorkspaceInbox[];
   inboxOutOfOffice: InboxOutOfOfficeStore;
   themeMode: "light" | "dark";
+  showOutOfOfficeSettings: boolean;
   onManageSignature: (inbox: ManagedWorkspaceInbox) => void;
   onManageOutOfOffice: (inbox: ManagedWorkspaceInbox) => void;
 }) {
@@ -27519,60 +27520,62 @@ const MailSettingsCard = memo(function MailSettingsCard({
             )}
           </div>
 
-          <div className={settingsCardSectionClass}>
-            <div className="mb-3 text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
-              Out of office
-            </div>
+          {showOutOfOfficeSettings ? (
+            <div className={settingsCardSectionClass}>
+              <div className="mb-3 text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                Out of office
+              </div>
 
-            {connectedInboxes.length > 0 ? (
-              <div className="overflow-hidden rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)]">
-                {connectedInboxes.map((mailbox, index) => {
-                  const outOfOfficeEnabled = normalizeInboxOutOfOfficeSettings(
-                    inboxOutOfOffice[mailbox.id as InboxId],
-                  ).enabled;
+              {connectedInboxes.length > 0 ? (
+                <div className="overflow-hidden rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)]">
+                  {connectedInboxes.map((mailbox, index) => {
+                    const outOfOfficeEnabled = normalizeInboxOutOfOfficeSettings(
+                      inboxOutOfOffice[mailbox.id as InboxId],
+                    ).enabled;
 
-                  return (
-                    <div
-                      key={`out-of-office-${mailbox.id}`}
-                      className={`flex items-center justify-between gap-4 px-4 py-3.5 ${
-                        index > 0
-                          ? "border-t border-[var(--workspace-border-soft)]"
-                          : ""
-                      }`}
-                    >
-                      <div className="min-w-0 flex-1">
-                        <div className="truncate text-[0.92rem] font-medium text-[var(--workspace-text)]">
-                          {mailbox.email}
+                    return (
+                      <div
+                        key={`out-of-office-${mailbox.id}`}
+                        className={`flex items-center justify-between gap-4 px-4 py-3.5 ${
+                          index > 0
+                            ? "border-t border-[var(--workspace-border-soft)]"
+                            : ""
+                        }`}
+                      >
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate text-[0.92rem] font-medium text-[var(--workspace-text)]">
+                            {mailbox.email}
+                          </div>
+                        </div>
+                        <div className="flex flex-none items-center gap-3">
+                          <span
+                            className={`inline-flex min-w-[3.25rem] items-center justify-center rounded-full border px-3 py-1 text-[0.66rem] font-medium uppercase tracking-[0.14em] ${
+                              outOfOfficeEnabled
+                                ? "border-[var(--workspace-status-success-border)] bg-[var(--workspace-status-success-bg)] text-[var(--workspace-status-success-text)]"
+                                : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] text-[var(--workspace-text-soft)]"
+                            }`}
+                          >
+                            {outOfOfficeEnabled ? "On" : "Off"}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => onManageOutOfOffice(mailbox)}
+                            className={settingsSubtleActionClass}
+                          >
+                            Manage
+                          </button>
                         </div>
                       </div>
-                      <div className="flex flex-none items-center gap-3">
-                        <span
-                          className={`inline-flex min-w-[3.25rem] items-center justify-center rounded-full border px-3 py-1 text-[0.66rem] font-medium uppercase tracking-[0.14em] ${
-                            outOfOfficeEnabled
-                              ? "border-[var(--workspace-status-success-border)] bg-[var(--workspace-status-success-bg)] text-[var(--workspace-status-success-text)]"
-                              : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] text-[var(--workspace-text-soft)]"
-                          }`}
-                        >
-                          {outOfOfficeEnabled ? "On" : "Off"}
-                        </span>
-                        <button
-                          type="button"
-                          onClick={() => onManageOutOfOffice(mailbox)}
-                          className={settingsSubtleActionClass}
-                        >
-                          Manage
-                        </button>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            ) : (
-              <div className="rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-6 text-[0.9rem] text-[var(--workspace-text-muted)]">
-                No inboxes connected
-              </div>
-            )}
-          </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-6 text-[0.9rem] text-[var(--workspace-text-muted)]">
+                  No inboxes connected
+                </div>
+              )}
+            </div>
+          ) : null}
         </div>
       </div>
     </section>
@@ -28508,6 +28511,7 @@ function SettingsView({
   workspaceMode,
   inboxSignatures,
   inboxOutOfOffice,
+  showOutOfOfficeSettings,
   onChangeWorkspaceMode,
   aiSuggestionsEnabled,
   onToggleAiSuggestions,
@@ -28537,6 +28541,7 @@ function SettingsView({
   workspaceMode: SettingsMode;
   inboxSignatures: InboxSignatureStore;
   inboxOutOfOffice: InboxOutOfOfficeStore;
+  showOutOfOfficeSettings: boolean;
   onChangeWorkspaceMode: (mode: SettingsMode) => void;
   aiSuggestionsEnabled: boolean;
   onToggleAiSuggestions: () => void;
@@ -28685,6 +28690,7 @@ function SettingsView({
             managedInboxes={savedManagedInboxes}
             inboxOutOfOffice={inboxOutOfOffice}
             themeMode={themeMode}
+            showOutOfOfficeSettings={showOutOfOfficeSettings}
             onManageSignature={(mailbox) => {
               setActiveSignatureInboxId(mailbox.id);
             }}
@@ -36556,6 +36562,10 @@ export function WorkspaceShell({
   }, [messageOwnershipInteractions]);
 
   useEffect(() => {
+    if (!isDemoWorkspace) {
+      return;
+    }
+
     const currentInboxMessageIds = new Set(
       Object.values(mailboxStore).flatMap((collections) =>
         collections.Inbox.map((message) => message.id),
@@ -36688,6 +36698,7 @@ export function WorkspaceShell({
   }, [
     currentWorkspaceUserId,
     inboxOutOfOffice,
+    isDemoWorkspace,
     mailboxStore,
     messageOwnershipInteractions,
     orderedMailboxes,
@@ -38133,6 +38144,7 @@ export function WorkspaceShell({
                   workspaceMode={workspaceMode}
                   inboxSignatures={inboxSignatures}
                   inboxOutOfOffice={inboxOutOfOffice}
+                  showOutOfOfficeSettings={isDemoWorkspace}
                   onChangeWorkspaceMode={setWorkspaceMode}
                   aiSuggestionsEnabled={aiSuggestionsEnabled}
                   onToggleAiSuggestions={() =>
