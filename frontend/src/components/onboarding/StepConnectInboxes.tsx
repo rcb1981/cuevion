@@ -1,9 +1,7 @@
 import { useState } from "react";
 import {
   createInboxConnection,
-  mainInboxOptions,
   providerOptions,
-  specializedInboxOptions,
 } from "../../data/onboardingOptions";
 import type {
   InboxConnectionAttemptResult,
@@ -68,15 +66,9 @@ interface StepConnectInboxesProps {
   ) => void;
   canRemoveInbox?: (inboxId: InboxId) => boolean;
   onRemoveInbox?: (inboxId: InboxId) => void;
+  onAddInbox: () => void;
   isPreviewMode?: boolean;
 }
-
-const presetInboxLabelMap = Object.fromEntries(
-  [...mainInboxOptions, ...specializedInboxOptions].map((option) => [
-    option.id,
-    option.label,
-  ]),
-) as Record<string, string>;
 
 function hasReusableSettings(settings: CustomImapSettings) {
   return Boolean(settings.host && settings.port && settings.username);
@@ -193,6 +185,7 @@ export function StepConnectInboxes({
   onConnectInbox,
   canRemoveInbox,
   onRemoveInbox,
+  onAddInbox,
   isPreviewMode = false,
 }: StepConnectInboxesProps) {
   const [loadingInboxId, setLoadingInboxId] = useState<InboxId | null>(null);
@@ -212,10 +205,9 @@ export function StepConnectInboxes({
     });
   };
 
-  const getInboxLabel = (inboxId: InboxId) =>
+  const getInboxLabel = (inboxId: InboxId, index: number) =>
     customInboxes.find((inbox) => inbox.id === inboxId)?.name ??
-    presetInboxLabelMap[inboxId] ??
-    "Custom Inbox";
+    `Inbox ${index + 1}`;
 
   const handleRemoveInbox = (inboxId: InboxId) => {
     if (!onRemoveInbox || loadingInboxId === inboxId) {
@@ -257,6 +249,7 @@ export function StepConnectInboxes({
         oauthAuthorizationUrl: null,
       });
       clearConnectionFeedback(inboxId);
+      setLoadingInboxId(null);
       return;
     }
 
@@ -321,6 +314,10 @@ export function StepConnectInboxes({
         <p className="text-base text-ink/68">
           {onboardingText.connect.description}
         </p>
+        <p className="max-w-2xl text-sm leading-6 text-ink/54">
+          Connect at least one Gmail / Google Workspace or Custom IMAP account.
+          You can add more inboxes later in Settings &gt; Inboxes.
+        </p>
       </div>
 
       <div className="space-y-6">
@@ -362,7 +359,7 @@ export function StepConnectInboxes({
               <div className="mb-5 flex items-start justify-between gap-4">
                 <div>
                   <h3 className="text-xl font-semibold text-ink">
-                    {getInboxLabel(inboxId)}
+                    {getInboxLabel(inboxId, index)}
                   </h3>
                   <p className="mt-1 text-sm text-ink/60">
                     {onboardingText.connect.inboxHint}
@@ -722,6 +719,13 @@ export function StepConnectInboxes({
           );
         })}
       </div>
+      <button
+        type="button"
+        onClick={onAddInbox}
+        className="inline-flex h-10 items-center justify-center self-start rounded-full border border-moss/16 bg-white/72 px-5 text-sm font-medium text-moss transition hover:border-moss/28 hover:bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss/20"
+      >
+        Add another inbox
+      </button>
     </section>
   );
 }

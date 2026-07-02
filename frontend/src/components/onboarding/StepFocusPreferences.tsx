@@ -1,25 +1,32 @@
 import type { FocusPreferenceLevel, OnboardingState } from "../../types/onboarding";
 
-const focusOptions: Array<{
-  id: keyof OnboardingState["focusPreferences"];
-  label: string;
-}> = [
-  { id: "demos", label: "Demos" },
-  { id: "promo", label: "Promo" },
-  { id: "finance", label: "Finance" },
-  { id: "legal", label: "Legal" },
-  { id: "business", label: "Business" },
-  { id: "updates", label: "Updates" },
-  { id: "distribution", label: "Distribution" },
-  { id: "royalties", label: "Royalties" },
-];
+type FocusPreferenceKey = keyof OnboardingState["focusPreferences"];
 
-const reminderOptions: Array<{
-  id: keyof OnboardingState["focusPreferences"];
+export const onboardingFocusItems: Array<{
+  id: string;
   label: string;
+  fields: FocusPreferenceKey[];
 }> = [
-  { id: "promoReminders", label: "Promo reminders" },
-  { id: "paymentReminders", label: "Payment reminders" },
+  { id: "demos", label: "Demos / A&R", fields: ["demos"] },
+  { id: "promo", label: "Promo", fields: ["promo"] },
+  { id: "business", label: "Business", fields: ["business"] },
+  {
+    id: "financeRoyalties",
+    label: "Finance & royalties",
+    fields: ["finance", "royalties"],
+  },
+  {
+    id: "distributionUpdates",
+    label: "Distribution updates",
+    fields: ["distribution", "updates"],
+  },
+  { id: "legal", label: "Contracts / legal", fields: ["legal"] },
+  { id: "promoReminders", label: "Promo reminders", fields: ["promoReminders"] },
+  {
+    id: "paymentReminders",
+    label: "Payment reminders",
+    fields: ["paymentReminders"],
+  },
 ];
 
 const preferenceLevels: FocusPreferenceLevel[] = ["high", "medium", "low"];
@@ -30,97 +37,72 @@ const preferenceLevelLabels: Record<FocusPreferenceLevel, string> = {
   low: "Low",
 };
 
+function resolveItemLevel(
+  value: OnboardingState["focusPreferences"],
+  fields: FocusPreferenceKey[],
+) {
+  if (fields.some((field) => value[field] === "high")) {
+    return "high";
+  }
+
+  if (fields.every((field) => value[field] === "low")) {
+    return "low";
+  }
+
+  return "medium";
+}
+
 interface StepFocusPreferencesProps {
   value: OnboardingState["focusPreferences"];
-  onChange: (
-    field: keyof OnboardingState["focusPreferences"],
-    value: FocusPreferenceLevel,
-  ) => void;
+  onChange: (fields: FocusPreferenceKey[], value: FocusPreferenceLevel) => void;
+  hasPrioritySelection: boolean;
 }
 
 export function StepFocusPreferences({
   value,
   onChange,
+  hasPrioritySelection,
 }: StepFocusPreferencesProps) {
   return (
-    <section className="space-y-8">
+    <section className="space-y-7">
       <div className="space-y-3">
         <h2 className="text-3xl font-semibold tracking-tight text-ink">
-          What should Cuevion surface first?
+          Set your focus
         </h2>
         <p className="max-w-2xl text-base leading-7 text-ink/68">
-          Set your personal focus across the inbox. You can fine-tune it later.
+          Choose what Cuevion should prioritize first. You can change this later
+          in Settings &gt; Focus.
         </p>
       </div>
 
-      <div className="grid gap-4 md:gap-x-6 grid-cols-1 md:grid-cols-2">
-        {focusOptions.map((option) => (
-          <div
-            key={option.id}
-            className="rounded-[28px] border border-ink/10 bg-white/82 px-4 py-3.5 shadow-[0_10px_30px_rgba(32,28,24,0.04)]"
-          >
-            <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-              <div className="text-[0.98rem] font-semibold tracking-[-0.015em] text-ink">
-                {option.label}
-              </div>
-              <div className="flex w-full min-w-0 gap-1.5 md:flex-1 md:justify-end">
-                {preferenceLevels.map((level) => {
-                  const selected = value[option.id] === level;
+      <div className="space-y-3">
+        {onboardingFocusItems.map((item) => {
+          const selectedLevel = resolveItemLevel(value, item.fields);
 
-                  return (
-                    <button
-                      key={level}
-                      type="button"
-                      onClick={() => onChange(option.id, level)}
-                      className={`min-w-0 flex-1 basis-0 overflow-hidden whitespace-nowrap rounded-full border px-2 py-1.5 text-center text-[0.7rem] font-medium uppercase tracking-[0.08em] transition ${
-                        selected
-                          ? "border-pine bg-[linear-gradient(180deg,rgba(226,236,229,0.92),rgba(246,249,246,0.98))] text-ink shadow-panel"
-                          : "border-ink/10 bg-white/70 text-ink/56 hover:border-moss/24 hover:text-ink"
-                      }`}
-                    >
-                      {preferenceLevelLabels[level]}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          </div>
-        ))}
-      </div>
-
-      <div className="space-y-3 pt-2">
-        <div className="space-y-2">
-          <h3 className="text-[1.05rem] font-semibold tracking-[-0.018em] text-ink">
-            Reminder handling
-          </h3>
-          <p className="max-w-2xl text-sm leading-6 text-ink/62">
-            Control how strongly recurring reminder emails should be surfaced.
-          </p>
-        </div>
-
-        <div className="grid gap-3 grid-cols-1">
-          {reminderOptions.map((option) => (
+          return (
             <div
-              key={option.id}
-              className="rounded-[28px] border border-ink/10 bg-white/82 px-4 py-3.5 shadow-[0_10px_30px_rgba(32,28,24,0.04)]"
+              key={item.id}
+              className="rounded-[22px] border border-ink/10 bg-white/82 px-4 py-3 shadow-[0_10px_30px_rgba(32,28,24,0.04)]"
             >
               <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
                 <div className="text-[0.98rem] font-semibold tracking-[-0.015em] text-ink">
-                  {option.label}
+                  {item.label}
                 </div>
-                <div className="flex w-full min-w-0 gap-1.5 md:flex-1 md:justify-end">
+                <div className="grid grid-cols-3 gap-1.5 md:w-[19rem]">
                   {preferenceLevels.map((level) => {
-                    const selected = value[option.id] === level;
+                    const selected = selectedLevel === level;
 
                     return (
                       <button
                         key={level}
                         type="button"
-                        onClick={() => onChange(option.id, level)}
-                        className={`min-w-0 flex-1 basis-0 overflow-hidden whitespace-nowrap rounded-full border px-2 py-1.5 text-center text-[0.7rem] font-medium uppercase tracking-[0.08em] transition ${
+                        onClick={() => onChange(item.fields, level)}
+                        className={`min-w-0 rounded-full border px-2 py-1.5 text-center text-[0.7rem] font-medium uppercase tracking-[0.08em] transition ${
                           selected
-                            ? "border-pine bg-[linear-gradient(180deg,rgba(226,236,229,0.92),rgba(246,249,246,0.98))] text-ink shadow-panel"
-                            : "border-ink/10 bg-white/70 text-ink/56 hover:border-moss/24 hover:text-ink"
+                            ? level === "medium"
+                              ? "border-ink/18 bg-white text-ink shadow-[0_8px_20px_rgba(32,28,24,0.06)]"
+                              : "border-pine bg-[linear-gradient(180deg,rgba(226,236,229,0.92),rgba(246,249,246,0.98))] text-ink shadow-panel"
+                            : "border-ink/10 bg-white/62 text-ink/50 hover:border-moss/24 hover:text-ink"
                         }`}
                       >
                         {preferenceLevelLabels[level]}
@@ -130,9 +112,19 @@ export function StepFocusPreferences({
                 </div>
               </div>
             </div>
-          ))}
-        </div>
+          );
+        })}
       </div>
+
+      <p
+        className={`text-sm leading-6 ${
+          hasPrioritySelection ? "text-ink/52" : "text-amber-900/70"
+        }`}
+      >
+        {hasPrioritySelection
+          ? "Normal is the default for anything you do not mark as Priority or Low."
+          : "Choose at least one Priority focus to continue."}
+      </p>
     </section>
   );
 }

@@ -91,8 +91,8 @@ export function createCustomInboxId(name: string): InboxId {
 }
 
 export const initialOnboardingState: OnboardingState = {
-  primaryRole: null,
-  internalRole: null,
+  primaryRole: "label_ar_manager",
+  internalRole: "label_ar_manager",
   secondaryRole: null,
   primaryInbox: "main",
   primaryInboxType: null,
@@ -108,8 +108,8 @@ export const initialOnboardingState: OnboardingState = {
     promoReminders: "medium",
     paymentReminders: "medium",
   },
-  inboxCount: null,
-  selectedInboxes: [],
+  inboxCount: "1",
+  selectedInboxes: ["main"],
   customInboxes: [],
   inboxConnections: {
     main: createInboxConnection(),

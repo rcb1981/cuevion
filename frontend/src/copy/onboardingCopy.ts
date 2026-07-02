@@ -218,9 +218,9 @@ export const onboardingCopy = {
     },
     connect: {
       title: "Connect your inboxes",
-      description: "Add provider details for each selected inbox.",
+      description: "Connect the source accounts Cuevion should organize first.",
       inboxHint:
-        "Choose Gmail OAuth or Custom IMAP. Other providers can be tested through Custom IMAP during this beta.",
+        "Gmail / Google Workspace and Custom IMAP are supported in this private beta.",
       email: "Email",
       connectInbox: "Connect inbox",
       continueWithGoogle: "Continue with Google",
@@ -258,7 +258,7 @@ export const onboardingCopy = {
     complete: {
       badge: "Setup Complete",
       title: "Your workspace is ready",
-      text: "Your inbox setup is complete. We’ll now organize your workflow.",
+      text: "Your focus and first inbox connection are set. We’ll sync recent messages before opening the workspace.",
       summary: (count: number) => `${count} inboxes connected · workflow configured`,
       sidebarText:
         "Your workspace is ready to use. Everything is configured and can be adjusted later.",

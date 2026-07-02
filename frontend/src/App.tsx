@@ -1903,18 +1903,6 @@ function CuevionApp() {
   ]);
 
   useEffect(() => {
-    if (view !== "transition") {
-      return;
-    }
-
-    const timer = window.setTimeout(() => {
-      setView("workspace");
-    }, 2200);
-
-    return () => window.clearTimeout(timer);
-  }, [view]);
-
-  useEffect(() => {
     const storedCallbackResult = window.localStorage.getItem(
       OAUTH_CALLBACK_RESULT_STORAGE_KEY,
     );
@@ -2118,7 +2106,15 @@ function CuevionApp() {
   }
 
   if (view === "transition") {
-    return <WorkspaceTransition />;
+    return (
+      <WorkspaceTransition
+        connectedInboxIds={onboardingState.selectedInboxes.filter((inboxId) => {
+          const connection = onboardingState.inboxConnections[inboxId];
+          return connection?.connected || connection?.connectionStatus === "connected";
+        })}
+        onComplete={() => setView("workspace")}
+      />
+    );
   }
 
   return (
