@@ -31940,6 +31940,14 @@ export function WorkspaceShell({
   const [inboxFilter, setInboxFilter] = useState<InboxFilter>("All inboxes");
   const [forYouContext, setForYouContext] = useState<ForYouContext>("Main");
   const [activeTarget, setActiveTarget] = useState<WorkspaceTarget | null>(null);
+  const visibleActiveTarget = isDemoWorkspace ? activeTarget : null;
+  const openWorkspaceTarget = (target: WorkspaceTarget) => {
+    if (!isDemoWorkspace) {
+      return;
+    }
+
+    setActiveTarget(target);
+  };
   const [activeMailbox, setActiveMailbox] = useState<OrderedMailbox | null>(null);
   const [mailboxReturnContext, setMailboxReturnContext] =
     useState<MailboxReturnContext | null>(null);
@@ -31963,8 +31971,15 @@ export function WorkspaceShell({
   const shouldShowDashboardSyncStatus =
     activeSection === "Dashboard" &&
     !activeMailbox &&
-    !activeTarget &&
+    !visibleActiveTarget &&
     (!areMailboxCountsHydrated || Boolean(syncingMailboxId));
+
+  useEffect(() => {
+    if (!isDemoWorkspace && activeTarget) {
+      setActiveTarget(null);
+    }
+  }, [activeTarget, isDemoWorkspace]);
+
   const startupSyncProgressMessage = (() => {
     if (startupSyncStatus !== "running" || !syncingMailboxId) {
       return null;
@@ -34278,7 +34293,7 @@ export function WorkspaceShell({
     reviewFilter,
     inboxFilter,
     forYouContext,
-    target: activeTarget,
+    target: visibleActiveTarget,
     mailboxId: activeMailbox?.id ?? null,
   });
 
@@ -37863,24 +37878,24 @@ export function WorkspaceShell({
             <div className="mb-8 flex items-center justify-between md:hidden">
               <CuevionMark />
 	              <span className="rounded-full border border-[var(--workspace-border)] bg-[var(--workspace-card)] px-4 py-2 text-xs uppercase tracking-[0.24em] text-[var(--workspace-text-faint)]">
-	                {activeTarget
-	                  ? isReviewWorkspaceTarget(activeTarget)
+	                {visibleActiveTarget
+	                  ? isReviewWorkspaceTarget(visibleActiveTarget)
 	                    ? getReviewTargetEyebrow()
-	                    : targetContent[activeTarget].eyebrow
+	                    : targetContent[visibleActiveTarget].eyebrow
 	                  : activeSection}
 	              </span>
 	            </div>
-	            {activeTarget ? (
-	              isReviewWorkspaceTarget(activeTarget) ? (
+	            {visibleActiveTarget ? (
+	              isReviewWorkspaceTarget(visibleActiveTarget) ? (
 	                <ReviewModuleDetailView
-	                  target={activeTarget}
+	                  target={visibleActiveTarget}
 	                  controller={reviewController}
 	                  onBack={() => setActiveTarget(null)}
 	                  onHandleNow={handleReviewHandleNow}
 	                />
 	              ) : (
 	                <WorkspaceTargetView
-	                  target={activeTarget}
+	                  target={visibleActiveTarget}
 	                  onBack={() => setActiveTarget(null)}
 	                  themeMode={resolvedTheme}
 	                />
@@ -37963,9 +37978,13 @@ export function WorkspaceShell({
                   onSetManualLabelOverride={handleSetManualLabelOverride}
                   onAddSpamSuppression={handleAddSpamSuppression}
                   onRemoveSpamSuppression={handleRemoveSpamSuppression}
-                  getLinkedReviewForMessage={getLinkedReviewForMessage}
-                  getLinkedReviewBadgeLabel={getLinkedReviewBadgeLabel}
-                  onOpenLinkedReview={(target) => setActiveTarget(target)}
+                  getLinkedReviewForMessage={
+                    isDemoWorkspace ? getLinkedReviewForMessage : () => null
+                  }
+                  getLinkedReviewBadgeLabel={
+                    isDemoWorkspace ? getLinkedReviewBadgeLabel : () => null
+                  }
+                  onOpenLinkedReview={openWorkspaceTarget}
                   onSyncMailbox={handleSyncActiveMailbox}
                   isSyncingMailbox={syncingMailboxId === activeMailbox.id}
                   onSyncUnreadOverrides={syncUnreadOverrides}
@@ -38124,7 +38143,7 @@ export function WorkspaceShell({
               <div className="min-h-0 flex-1 overflow-y-auto pr-1">
                 <ForYouView
                   context={forYouContext}
-                  onOpenTarget={setActiveTarget}
+                  onOpenTarget={openWorkspaceTarget}
                   onSaveLearningRule={handleSaveLearningRule}
                   senderCategoryLearning={senderCategoryLearning}
                   mailboxStore={mailboxStore}
