@@ -1,5 +1,6 @@
 import {
   memo,
+  useCallback,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -25027,24 +25028,20 @@ function isPromoMailboxContext(
 }
 const WorkspaceSettingsCard = memo(function WorkspaceSettingsCard({
   savedWorkspaceName,
-  managedInboxCount,
   themeMode,
   appliedMode,
   aiSuggestionsEnabled,
   onToggleAiSuggestions,
   onChangeMode,
   onSaveWorkspaceName,
-  onManageInboxes,
 }: {
   savedWorkspaceName: string;
-  managedInboxCount: number;
   themeMode: "light" | "dark";
   appliedMode: SettingsMode;
   aiSuggestionsEnabled: boolean;
   onToggleAiSuggestions: () => void;
   onChangeMode: (mode: SettingsMode) => void;
   onSaveWorkspaceName: (name: string) => void;
-  onManageInboxes: () => void;
 }) {
   const [isEditing, setIsEditing] = useState(false);
   const [workspaceNameDraft, setWorkspaceNameDraft] = useState(savedWorkspaceName);
@@ -25150,26 +25147,6 @@ const WorkspaceSettingsCard = memo(function WorkspaceSettingsCard({
             </div>
 
             <div className={settingsCardSectionClass}>
-              <div className="flex items-center justify-between gap-4">
-                <div>
-                  <div className="text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
-                    Connected inboxes
-                  </div>
-                  <div className="mt-1 text-[0.86rem] text-[var(--workspace-text-muted)]">
-                    Keep connected inboxes aligned with this workspace.
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  onClick={onManageInboxes}
-                  className={settingsSubtleActionClass}
-                >
-                  Manage inboxes
-                </button>
-              </div>
-            </div>
-
-            <div className={settingsCardSectionClass}>
               <div className="mb-2 text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
                 Theme
               </div>
@@ -25190,10 +25167,6 @@ const WorkspaceSettingsCard = memo(function WorkspaceSettingsCard({
         ) : (
           <div className="space-y-2">
             <SettingsInfoRow label="Workspace name" value={savedWorkspaceName} />
-            <SettingsInfoRow
-              label="Connected inboxes"
-              value={`${managedInboxCount} inboxes`}
-            />
             <SettingsInfoRow label="Theme" value={appliedMode} />
           </div>
         )}
@@ -26068,7 +26041,7 @@ const ManageInboxesView = memo(function ManageInboxesView({
 }: {
   savedManagedInboxes: ManagedWorkspaceInbox[];
   primaryManagedInboxId: string | null;
-  onBack: () => void;
+  onBack?: () => void;
   onApply: (nextMailboxes: ManagedWorkspaceInbox[]) => boolean;
   onSetPrimaryInbox: (inboxId: string) => void;
   onDirtyChange: (hasUnsavedChanges: boolean) => void;
@@ -26653,6 +26626,10 @@ const ManageInboxesView = memo(function ManageInboxesView({
   };
 
   const handleClose = () => {
+    if (!onBack) {
+      return;
+    }
+
     if (hasUnsavedChanges) {
       setIsDiscardConfirmationOpen(true);
       return;
@@ -26879,15 +26856,17 @@ const ManageInboxesView = memo(function ManageInboxesView({
         </section>
       </div>
 
-      <div className="mt-8 flex justify-start">
-        <button
-          type="button"
-          onClick={handleClose}
-          className={navigationCloseBackButtonClass}
-        >
-          Back
-        </button>
-      </div>
+      {onBack ? (
+        <div className="mt-8 flex justify-start">
+          <button
+            type="button"
+            onClick={handleClose}
+            className={navigationCloseBackButtonClass}
+          >
+            Back
+          </button>
+        </div>
+      ) : null}
       <SettingsConfirmationModal
         open={isDiscardConfirmationOpen}
         themeMode={themeMode}
@@ -26904,7 +26883,7 @@ const ManageInboxesView = memo(function ManageInboxesView({
           setPendingInboxRemovalId(null);
           setValidationErrorInboxId(null);
           setIsDiscardConfirmationOpen(false);
-          onBack();
+          onBack?.();
         }}
       />
       <SettingsConfirmationModal
@@ -28737,10 +28716,17 @@ const AccountSettingsCard = memo(function AccountSettingsCard({
   );
 });
 
-type SettingsTab = "Workspace" | "Account" | "Focus" | "Notifications" | "Mail";
+type SettingsTab =
+  | "Workspace"
+  | "Inboxes"
+  | "Account"
+  | "Focus"
+  | "Notifications"
+  | "Mail";
 
 const settingsTabs: SettingsTab[] = [
   "Workspace",
+  "Inboxes",
   "Account",
   "Focus",
   "Notifications",
@@ -28811,8 +28797,9 @@ function SettingsView({
   ) => void;
   onAccountNameChange?: (name: string) => void;
 }) {
-  const [settingsPage, setSettingsPage] = useState<"root" | "manage-inboxes">("root");
   const [activeSettingsTab, setActiveSettingsTab] = useState<SettingsTab>("Workspace");
+  const [pendingSettingsTab, setPendingSettingsTab] = useState<SettingsTab | null>(null);
+  const [hasManagedInboxDraftChanges, setHasManagedInboxDraftChanges] = useState(false);
   const [activeSignatureInboxId, setActiveSignatureInboxId] = useState<string | null>(null);
   const [signatureDraft, setSignatureDraft] = useState<InboxSignatureSettings>(
     createEmptySignatureSettings(),
@@ -28871,20 +28858,23 @@ function SettingsView({
     setOutOfOfficeDraft(savedOutOfOffice);
   }, [activeOutOfOfficeInboxId, inboxOutOfOffice]);
 
-  if (settingsPage === "manage-inboxes") {
-    return (
-      <ManageInboxesView
-        savedManagedInboxes={savedManagedInboxes}
-        primaryManagedInboxId={primaryManagedInboxId}
-        onBack={() => setSettingsPage("root")}
-        onApply={onApplyManagedInboxes}
-        onSetPrimaryInbox={onSetPrimaryManagedInbox}
-        onDirtyChange={onManagedInboxesDirtyChange}
-        themeMode={themeMode}
-        credentialStatuses={credentialStatuses}
-      />
-    );
-  }
+  const handleManagedInboxesDirtyChange = useCallback((hasUnsavedChanges: boolean) => {
+    setHasManagedInboxDraftChanges(hasUnsavedChanges);
+    onManagedInboxesDirtyChange(hasUnsavedChanges);
+  }, [onManagedInboxesDirtyChange]);
+
+  const handleSettingsTabChange = (tab: SettingsTab) => {
+    if (
+      tab !== activeSettingsTab &&
+      activeSettingsTab === "Inboxes" &&
+      hasManagedInboxDraftChanges
+    ) {
+      setPendingSettingsTab(tab);
+      return;
+    }
+
+    setActiveSettingsTab(tab);
+  };
 
   const activeSettingsContent = (() => {
     switch (activeSettingsTab) {
@@ -28892,14 +28882,24 @@ function SettingsView({
         return (
           <WorkspaceSettingsCard
             savedWorkspaceName={workspaceName}
-            managedInboxCount={savedManagedInboxes.length}
             themeMode={themeMode}
             appliedMode={workspaceMode}
             aiSuggestionsEnabled={aiSuggestionsEnabled}
             onToggleAiSuggestions={onToggleAiSuggestions}
             onChangeMode={onChangeWorkspaceMode}
             onSaveWorkspaceName={onSaveWorkspaceName}
-            onManageInboxes={() => setSettingsPage("manage-inboxes")}
+          />
+        );
+      case "Inboxes":
+        return (
+          <ManageInboxesView
+            savedManagedInboxes={savedManagedInboxes}
+            primaryManagedInboxId={primaryManagedInboxId}
+            onApply={onApplyManagedInboxes}
+            onSetPrimaryInbox={onSetPrimaryManagedInbox}
+            onDirtyChange={handleManagedInboxesDirtyChange}
+            themeMode={themeMode}
+            credentialStatuses={credentialStatuses}
           />
         );
       case "Account":
@@ -28970,7 +28970,7 @@ function SettingsView({
             <button
               key={`settings-tab-${tab}`}
               type="button"
-              onClick={() => setActiveSettingsTab(tab)}
+              onClick={() => handleSettingsTabChange(tab)}
               className={settingsTabButtonClass(activeSettingsTab === tab)}
             >
               {tab}
@@ -28979,9 +28979,30 @@ function SettingsView({
         </div>
       </div>
 
-      <div className="max-w-[980px]">
+      <div className={activeSettingsTab === "Inboxes" ? "max-w-none" : "max-w-[980px]"}>
         {activeSettingsContent}
       </div>
+
+      <SettingsConfirmationModal
+        open={Boolean(pendingSettingsTab)}
+        themeMode={themeMode}
+        title="You have unsaved inbox changes"
+        description="You have connected-inbox changes that have not been applied yet. Do you want to discard them and switch tabs?"
+        cancelLabel="Continue editing"
+        confirmLabel="Discard changes"
+        confirmClassName={settingsDangerActionClass}
+        onCancel={() => setPendingSettingsTab(null)}
+        onConfirm={() => {
+          const nextTab = pendingSettingsTab;
+          setPendingSettingsTab(null);
+          setHasManagedInboxDraftChanges(false);
+          onManagedInboxesDirtyChange(false);
+
+          if (nextTab) {
+            setActiveSettingsTab(nextTab);
+          }
+        }}
+      />
 
       <SignatureSettingsModal
         open={Boolean(activeSignatureInbox)}
