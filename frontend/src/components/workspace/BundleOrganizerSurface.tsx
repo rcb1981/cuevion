@@ -402,10 +402,10 @@ export function BundleOrganizerSurface() {
   };
 
   return (
-    <div className="min-h-0 flex-1 overflow-hidden px-1.5 pb-1 md:px-2 md:pb-2">
-      <section className="flex h-full min-h-[720px] flex-col overflow-hidden rounded-[30px] border border-white/10 bg-[radial-gradient(circle_at_top_left,rgba(88,69,55,0.28),transparent_34%),radial-gradient(circle_at_right,rgba(55,87,74,0.22),transparent_28%),linear-gradient(180deg,#1d1b18_0%,#101915_100%)] p-4 text-[color:#f5efe5] shadow-[0_28px_90px_rgba(0,0,0,0.22)] md:p-5">
-        <header className="border-b border-white/10 pb-4">
-          <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+    <div className="min-h-0 flex-1 overflow-hidden">
+      <section className="flex h-full min-h-0 flex-col overflow-hidden rounded-[22px] bg-[radial-gradient(circle_at_top_left,rgba(88,69,55,0.24),transparent_32%),radial-gradient(circle_at_right,rgba(55,87,74,0.2),transparent_28%),linear-gradient(180deg,#1d1b18_0%,#101915_100%)] p-3 text-[color:#f5efe5] md:p-4">
+        <header className="border-b border-white/10 pb-3">
+          <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
             <div>
               <div className="flex items-center gap-2.5">
                 <OrganizerIcon className="h-8 w-8 shrink-0 text-[color:#8fb39f]" />
@@ -426,7 +426,7 @@ export function BundleOrganizerSurface() {
               </p>
             </div>
           </div>
-          <div className="mt-4 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <div className="mt-3 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
             <p className="max-w-[560px] text-[0.96rem] leading-7 text-[rgba(245,239,229,0.66)]">
               A dedicated music inbox for demos, promos, and active follow-ups.
             </p>
@@ -467,9 +467,9 @@ export function BundleOrganizerSurface() {
           </div>
         </header>
 
-        <div className="grid min-h-0 flex-1 gap-4 overflow-hidden pt-4 lg:grid-cols-[210px_minmax(320px,0.9fr)_minmax(360px,1.1fr)] xl:grid-cols-[230px_minmax(360px,0.85fr)_minmax(420px,1.15fr)]">
-          <aside className="flex min-h-0 flex-col gap-4 overflow-y-auto border-b border-white/10 pb-4 lg:border-b-0 lg:border-r lg:pb-0 lg:pr-4 xl:pr-5">
-            <section className="rounded-[15px] border border-white/10 bg-white/5 px-3 py-2.5 shadow-[0_10px_24px_rgba(0,0,0,0.16)]">
+        <div className="grid min-h-0 flex-1 gap-3 overflow-hidden pt-3 lg:grid-cols-[190px_minmax(0,0.9fr)_minmax(0,1.1fr)] xl:grid-cols-[210px_minmax(0,0.85fr)_minmax(0,1.15fr)]">
+          <aside className="flex min-h-0 min-w-0 flex-col gap-3 overflow-y-auto border-b border-white/10 pb-3 lg:border-b-0 lg:border-r lg:pb-0 lg:pr-3 xl:pr-4">
+            <section className="rounded-[14px] border border-white/10 bg-white/[0.04] px-3 py-2.5">
               <p className="text-[0.66rem] font-medium uppercase tracking-[0.15em] text-[rgba(217,203,184,0.55)]">
                 Connected Inboxes
               </p>
@@ -557,7 +557,7 @@ export function BundleOrganizerSurface() {
             </section>
           </aside>
 
-          <main className="min-h-0 overflow-y-auto">
+          <main className="min-h-0 min-w-0 overflow-y-auto">
             <div className="mb-3">
               <p className="text-[0.68rem] font-semibold uppercase tracking-[0.16em] text-[rgba(167,203,181,0.78)]">
                 {activeCopy.eyebrow}
@@ -573,7 +573,7 @@ export function BundleOrganizerSurface() {
             {activeView === "settings" ? (
               <BundleOrganizerSettings />
             ) : activeMessages.length === 0 ? (
-              <div className="rounded-[18px] border border-white/10 bg-white/5 px-5 py-10 text-center">
+              <div className="rounded-[16px] border border-white/10 bg-white/[0.04] px-4 py-8 text-center">
                 {activeView === "shortlist" ? (
                   <span className="mx-auto mb-3 inline-flex rounded-full border border-[rgba(143,179,159,0.2)] bg-[rgba(143,179,159,0.1)] px-3 py-1 text-[0.68rem] font-medium uppercase tracking-[0.12em] text-[rgba(198,228,209,0.78)]">
                     Saved follow-up
@@ -587,7 +587,7 @@ export function BundleOrganizerSurface() {
                 </p>
               </div>
             ) : (
-              <ul className="overflow-hidden rounded-[16px] border border-white/10 bg-white/5">
+              <ul className="overflow-hidden rounded-[16px] border border-white/10 bg-white/[0.04]">
                 {activeMessages.map((message) => (
                   <li
                     key={message.id}
@@ -649,14 +649,14 @@ export function BundleOrganizerSurface() {
             )}
           </main>
 
-          <aside className="min-h-0 overflow-y-auto">
+          <aside className="min-h-0 min-w-0 overflow-y-auto">
             {selectedMessage && activeView !== "settings" ? (
               <BundleOrganizerDetail
                 message={selectedMessage}
                 onAction={showStaticFeedback}
               />
             ) : (
-              <div className="rounded-[20px] border border-white/10 bg-white/5 p-6">
+              <div className="rounded-[18px] border border-white/10 bg-white/[0.04] p-5">
                 <p className="text-[0.72rem] font-semibold uppercase tracking-[0.16em] text-[rgba(167,203,181,0.78)]">
                   Bundle Pilot
                 </p>
@@ -669,7 +669,7 @@ export function BundleOrganizerSurface() {
               </div>
             )}
             {actionFeedback ? (
-              <p className="mt-3 rounded-[14px] border border-[rgba(143,179,159,0.16)] bg-[rgba(143,179,159,0.1)] px-4 py-3 text-[0.84rem] leading-6 text-[rgba(167,203,181,0.9)]">
+              <p className="mt-3 rounded-[14px] border border-[rgba(143,179,159,0.16)] bg-[rgba(143,179,159,0.1)] px-3.5 py-2.5 text-[0.84rem] leading-6 text-[rgba(167,203,181,0.9)]">
                 {actionFeedback}
               </p>
             ) : null}
@@ -688,8 +688,8 @@ function BundleOrganizerDetail({
   onAction: (message: string) => void;
 }) {
   return (
-    <article className="rounded-[20px] border border-white/10 bg-white/5 p-6 sm:p-7">
-      <div className="flex flex-col gap-5 border-b border-white/10 pb-6 md:flex-row md:items-start md:justify-between">
+    <article className="rounded-[18px] border border-white/10 bg-white/[0.04] p-4 sm:p-5">
+      <div className="flex flex-col gap-4 border-b border-white/10 pb-4 md:flex-row md:items-start md:justify-between">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-[0.92rem] font-semibold tracking-[-0.01em] text-[color:#f5efe5]">
@@ -731,7 +731,7 @@ function BundleOrganizerDetail({
         </div>
       </div>
 
-      <div className="max-w-[780px] py-7">
+      <div className="max-w-[780px] py-5">
         {message.body.map((paragraph, index) => (
           <p
             key={`${message.id}-body-${index}`}
@@ -742,7 +742,7 @@ function BundleOrganizerDetail({
         ))}
       </div>
 
-      <div className="flex flex-wrap gap-3 border-t border-white/10 pt-6">
+      <div className="flex flex-wrap gap-2.5 border-t border-white/10 pt-4">
         {[
           "Reply",
           "Decline",
@@ -795,7 +795,7 @@ function BundleOrganizerSettings() {
       ].map((item) => (
         <section
           key={item.title}
-          className="rounded-[18px] border border-white/10 bg-white/5 p-5"
+          className="rounded-[16px] border border-white/10 bg-white/[0.04] p-4"
         >
           <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
             <div>
