@@ -29,6 +29,7 @@ import {
   type MobileWorkspaceMailbox,
   type MobileWorkspaceMessage,
 } from "./mobile/MobileWorkspaceShell";
+import { BundleOrganizerSurface } from "./BundleOrganizerSurface";
 import type { ReviewItem, ReviewWorkspaceTarget } from "./review/types";
 import type {
   CustomInboxDefinition,
@@ -122,7 +123,6 @@ import type { ForYouLearningSuggestion } from "../../lib/forYouEngine";
 
 const PRODUCT_ACCESS_STORAGE_KEY = "cuevion-product-access";
 const BUNDLE_PILOT_ACCESS_CODE = "CUEVION-BUNDLE-PILOT";
-const ORGANIZER_PILOT_URL = "https://organizer.cuevion.com";
 
 const primaryNavigationItems = [
   { section: "Dashboard", label: "Dashboard", shortLabel: "Dash", icon: "dashboard" },
@@ -157,6 +157,7 @@ type WorkspaceSection =
   | "For You"
   | "Priority"
   | "Inboxes"
+  | "Organizer"
   | "Activity"
   | "Notifications"
   | "Team"
@@ -10802,6 +10803,7 @@ function WorkspaceSidebar({
   const singleMailbox = !hasMultipleMailboxes ? (orderedMailboxes[0] ?? null) : null;
   const activeSidebarInboxId =
     activeSection === "Inboxes" && activeSmartFolderId === null ? activeMailboxId : null;
+  const isOrganizerActive = activeSection === "Organizer";
   const shouldShowInboxChildren = hasMultipleMailboxes && isInboxesOpen;
   const formatUnreadBadgeCount = (count: number) => (count > 99 ? "99+" : String(count));
   const shouldShowUnreadBadgeCount = (count: number) =>
@@ -11203,9 +11205,15 @@ function WorkspaceSidebar({
                   <div className="hidden px-2 pb-2 text-[0.62rem] font-medium uppercase tracking-[0.18em] text-[color:rgba(232,222,198,0.62)] xl:block">
                     Bundle Pilot
                   </div>
-                  <a
-                    href={ORGANIZER_PILOT_URL}
-                    className="flex w-full items-center justify-center rounded-2xl px-3 py-3 text-center text-sm font-medium text-[var(--workspace-sidebar-text-muted)] transition-[background-color,color,box-shadow] duration-100 hover:bg-[var(--workspace-sidebar-hover)] hover:text-[var(--workspace-sidebar-text)] focus:outline-none focus-visible:shadow-[inset_0_0_0_1px_rgba(255,255,255,0.12),0_0_0_1px_rgba(214,230,221,0.16)] xl:justify-start xl:px-3.5 xl:text-left"
+                  <button
+                    type="button"
+                    onClick={() => onChangeSection("Organizer")}
+                    className={`flex w-full items-center justify-center rounded-2xl px-3 py-3 text-center text-sm font-medium transition-[background-color,color,box-shadow] duration-100 focus:outline-none focus-visible:shadow-[inset_0_0_0_1px_rgba(255,255,255,0.12),0_0_0_1px_rgba(214,230,221,0.16)] xl:justify-start xl:px-3.5 xl:text-left ${
+                      isOrganizerActive
+                        ? "bg-[linear-gradient(180deg,var(--workspace-sidebar-active-start),var(--workspace-sidebar-active-end))] text-[var(--workspace-sidebar-text)]"
+                        : "text-[var(--workspace-sidebar-text-muted)] hover:bg-[var(--workspace-sidebar-hover)] hover:text-[var(--workspace-sidebar-text)]"
+                    }`}
+                    aria-label="Organizer"
                   >
                     <span className="hidden items-center gap-2 xl:inline-flex">
                       <SidebarNavigationIcon name="folder" />
@@ -11215,7 +11223,7 @@ function WorkspaceSidebar({
                       <SidebarNavigationIcon name="folder" />
                       <span>Org</span>
                     </span>
-                  </a>
+                  </button>
                 </div>
               ) : null}
               <ul className="space-y-2">{utilityNavigationItems.map(renderItem)}</ul>
@@ -32452,6 +32460,12 @@ export function WorkspaceShell({
   };
 
   useEffect(() => {
+    if (productAccess !== "bundle" && activeSection === "Organizer") {
+      setActiveSection("Dashboard");
+    }
+  }, [activeSection, productAccess]);
+
+  useEffect(() => {
     if (!isDemoWorkspace && activeTarget) {
       setActiveTarget(null);
     }
@@ -38518,6 +38532,8 @@ export function WorkspaceShell({
                 orderedMailboxes={orderedMailboxes}
                 onOpenMailbox={openMailboxFromContext}
               />
+            ) : activeSection === "Organizer" && productAccess === "bundle" ? (
+              <BundleOrganizerSurface />
             ) : activeSection === "Activity" ||
               activeSection === "Notifications" ||
               activeSection === "Team" ? (
