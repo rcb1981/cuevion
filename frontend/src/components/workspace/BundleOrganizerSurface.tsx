@@ -20,13 +20,15 @@ type BundleOrganizerIconName =
 
 type BundleOrganizerMessage = {
   id: string;
-  kind: "demo" | "promo" | "sent";
+  kind: "demo" | "promo" | "reply" | "sent";
+  source: "sample" | "workspace";
   sender: string;
   subject: string;
   snippet: string;
   body: string[];
   timestamp: string;
   sourceMailbox: string;
+  internalClassification?: BundleOrganizerInternalClassification;
   unread?: boolean;
   shortlisted?: boolean;
   priority?: boolean;
@@ -35,10 +37,49 @@ type BundleOrganizerMessage = {
   reason?: string;
 };
 
+export type BundleOrganizerInternalClassification =
+  | "promo"
+  | "promo_reminder"
+  | "workflow_update"
+  | "distributor_update"
+  | "business_reminder"
+  | "royalty_statement"
+  | "finance"
+  | "info"
+  | "reply"
+  | "business"
+  | "demo"
+  | "high_priority_demo"
+  | "incomplete_demo"
+  | "unknown";
+
+export type BundleOrganizerWorkspaceMessage = {
+  id: string;
+  sender: string;
+  subject: string;
+  snippet: string;
+  body: string[];
+  timestamp: string;
+  sourceMailbox: string;
+  internalClassification?: BundleOrganizerInternalClassification;
+  unread?: boolean;
+  priority?: boolean;
+  priorityBadge?: string;
+  reason?: string;
+  sortTimestamp?: number;
+};
+
+type BundleOrganizerSurfaceProps = {
+  liveMessages?: BundleOrganizerWorkspaceMessage[];
+  connectedInboxCount?: number;
+};
+
 const bundleOrganizerMessages: BundleOrganizerMessage[] = [
   {
     id: "bundle-demo-mila-hart",
     kind: "demo",
+    source: "sample",
+    internalClassification: "high_priority_demo",
     sender: "Mila Hart",
     subject: "Demo submission - late night melodic house",
     snippet:
@@ -58,6 +99,8 @@ const bundleOrganizerMessages: BundleOrganizerMessage[] = [
   {
     id: "bundle-demo-northline",
     kind: "demo",
+    source: "sample",
+    internalClassification: "demo",
     sender: "Northline Records",
     subject: "New artist demo for your A&R team",
     snippet:
@@ -77,6 +120,8 @@ const bundleOrganizerMessages: BundleOrganizerMessage[] = [
   {
     id: "bundle-promo-riva",
     kind: "promo",
+    source: "sample",
+    internalClassification: "promo",
     sender: "Riva Promo Pool",
     subject: "Promo: Kaito Ray - Solar Drift",
     snippet:
@@ -96,6 +141,8 @@ const bundleOrganizerMessages: BundleOrganizerMessage[] = [
   {
     id: "bundle-promo-labelworx",
     kind: "promo",
+    source: "sample",
+    internalClassification: "promo_reminder",
     sender: "LabelWorx Promos",
     subject: "Reminder: Maya Sol - Open Skies",
     snippet:
@@ -112,6 +159,7 @@ const bundleOrganizerMessages: BundleOrganizerMessage[] = [
   {
     id: "bundle-sent-decline",
     kind: "sent",
+    source: "sample",
     sender: "Cuevion",
     subject: "Re: Demo submission - late night melodic house",
     snippet:
@@ -127,6 +175,8 @@ const bundleOrganizerMessages: BundleOrganizerMessage[] = [
   {
     id: "bundle-trash-old-promo",
     kind: "promo",
+    source: "sample",
+    internalClassification: "promo_reminder",
     sender: "Archive Promo",
     subject: "Old campaign follow-up",
     snippet: "Archived promo reminder shown here as Organizer-local trash.",
@@ -295,7 +345,51 @@ function NavIcon({ name }: { name: BundleOrganizerIconName }) {
   );
 }
 
-function getMessagesForView(view: BundleOrganizerView) {
+const demoClassifications = new Set<BundleOrganizerInternalClassification>([
+  "demo",
+  "high_priority_demo",
+]);
+
+const promoClassifications = new Set<BundleOrganizerInternalClassification>([
+  "promo",
+  "promo_reminder",
+]);
+
+function resolveWorkspaceMessageKind(
+  classification?: BundleOrganizerInternalClassification,
+): BundleOrganizerMessage["kind"] {
+  if (classification === "reply") {
+    return "reply";
+  }
+
+  if (classification && promoClassifications.has(classification)) {
+    return "promo";
+  }
+
+  return "demo";
+}
+
+function normalizeWorkspaceMessages(
+  liveMessages: BundleOrganizerWorkspaceMessage[],
+): BundleOrganizerMessage[] {
+  return liveMessages
+    .map((message) => ({
+      ...message,
+      id: `workspace-${message.id}`,
+      kind: resolveWorkspaceMessageKind(message.internalClassification),
+      source: "workspace" as const,
+      priorityBadge:
+        message.priorityBadge ??
+        (message.internalClassification === "high_priority_demo"
+          ? "High-priority demo"
+          : message.priority
+          ? "Priority"
+          : undefined),
+    }))
+    .sort((first, second) => (second.sortTimestamp ?? 0) - (first.sortTimestamp ?? 0));
+}
+
+function getSampleMessagesForView(view: BundleOrganizerView) {
   if (view === "priority") {
     return bundleOrganizerMessages.filter((message) => message.priority && message.status !== "trashed");
   }
@@ -323,9 +417,64 @@ function getMessagesForView(view: BundleOrganizerView) {
   return [];
 }
 
-function getCounts() {
+function getLiveMessagesForView(
+  view: BundleOrganizerView,
+  liveMessages: BundleOrganizerMessage[],
+) {
+  if (view === "priority") {
+    return liveMessages.filter((message) => {
+      const classification = message.internalClassification;
+
+      return (
+        message.priority ||
+        classification === "reply" ||
+        classification === "high_priority_demo" ||
+        (classification != null && promoClassifications.has(classification) && message.priority)
+      );
+    });
+  }
+
+  if (view === "demo") {
+    return liveMessages.filter(
+      (message) =>
+        message.internalClassification != null &&
+        demoClassifications.has(message.internalClassification),
+    );
+  }
+
+  if (view === "promo") {
+    return liveMessages.filter(
+      (message) =>
+        message.internalClassification != null &&
+        promoClassifications.has(message.internalClassification),
+    );
+  }
+
+  return [];
+}
+
+function getMessagesForView(
+  view: BundleOrganizerView,
+  liveMessages: BundleOrganizerMessage[],
+) {
+  const liveViewMessages = getLiveMessagesForView(view, liveMessages);
+
+  if (liveViewMessages.length > 0) {
+    return {
+      messages: liveViewMessages,
+      source: "workspace" as const,
+    };
+  }
+
+  return {
+    messages: getSampleMessagesForView(view),
+    source: "sample" as const,
+  };
+}
+
+function getCounts(liveMessages: BundleOrganizerMessage[]) {
   return navItems.reduce<Partial<Record<BundleOrganizerView, number>>>((counts, item) => {
-    counts[item.id] = getMessagesForView(item.id).length;
+    counts[item.id] = getMessagesForView(item.id, liveMessages).messages.length;
     return counts;
   }, {});
 }
@@ -358,21 +507,31 @@ function MessagePill({ children, tone }: { children: string; tone: Parameters<ty
   );
 }
 
-export function BundleOrganizerSurface() {
+export function BundleOrganizerSurface({
+  liveMessages = [],
+  connectedInboxCount = 0,
+}: BundleOrganizerSurfaceProps) {
   const [activeView, setActiveView] = useState<BundleOrganizerView>("priority");
   const [searchQuery, setSearchQuery] = useState("");
   const [actionFeedback, setActionFeedback] = useState<string | null>(null);
 
-  const counts = useMemo(() => getCounts(), []);
+  const workspaceMessages = useMemo(
+    () => normalizeWorkspaceMessages(liveMessages),
+    [liveMessages],
+  );
+  const counts = useMemo(() => getCounts(workspaceMessages), [workspaceMessages]);
+  const activeDisplay = useMemo(
+    () => getMessagesForView(activeView, workspaceMessages),
+    [activeView, workspaceMessages],
+  );
   const activeMessages = useMemo(() => {
-    const messages = getMessagesForView(activeView);
     const normalizedQuery = searchQuery.trim().toLowerCase();
 
     if (!normalizedQuery) {
-      return messages;
+      return activeDisplay.messages;
     }
 
-    return messages.filter((message) =>
+    return activeDisplay.messages.filter((message) =>
       [
         message.sender,
         message.subject,
@@ -381,8 +540,32 @@ export function BundleOrganizerSurface() {
         ...message.body,
       ].some((value) => value.toLowerCase().includes(normalizedQuery)),
     );
-  }, [activeView, searchQuery]);
+  }, [activeDisplay, searchQuery]);
   const activeCopy = viewCopy[activeView];
+  const activeSourceLabel =
+    activeDisplay.source === "workspace" ? "Live workspace preview" : "Pilot sample data";
+  const activeSourceDescription =
+    activeDisplay.source === "workspace"
+      ? "Focused Demo and Promo views are displaying read-only workspace messages."
+      : "Focused Demo and Promo views are represented with pilot sample data.";
+  const displayedConnectedInboxCount =
+    activeDisplay.source === "workspace"
+      ? connectedInboxCount
+      : Math.max(2, connectedInboxCount);
+  const smartViewCounts = useMemo(() => {
+    const demoMessages = getMessagesForView("demo", workspaceMessages).messages;
+    const promoMessages = getMessagesForView("promo", workspaceMessages).messages;
+
+    return {
+      highPriorityDemos: demoMessages.filter(
+        (message) =>
+          message.internalClassification === "high_priority_demo" || message.priority,
+      ).length,
+      promoReminders: promoMessages.filter(
+        (message) => message.internalClassification === "promo_reminder",
+      ).length,
+    };
+  }, [workspaceMessages]);
 
   const selectView = (view: BundleOrganizerView) => {
     setActiveView(view);
@@ -414,7 +597,9 @@ export function BundleOrganizerSurface() {
                 Bundle Pilot
               </span>
               <p className="text-[0.84rem] leading-6 text-[rgba(245,239,229,0.58)]">
-                Pilot sample data for the embedded workspace preview.
+                {activeDisplay.source === "workspace"
+                  ? "Live workspace preview for the embedded Organizer."
+                  : "Pilot sample data for the embedded workspace preview."}
               </p>
             </div>
           </div>
@@ -467,7 +652,7 @@ export function BundleOrganizerSurface() {
               </p>
               <div className="mt-1.5 flex items-center justify-between gap-2">
                 <span className="text-[1.45rem] font-semibold leading-none tracking-[-0.04em] text-[color:#f5efe5]">
-                  2
+                  {displayedConnectedInboxCount}
                 </span>
                 <span className="inline-flex h-7 shrink-0 items-center justify-center rounded-full border border-[rgba(143,179,159,0.24)] bg-[rgba(143,179,159,0.1)] px-2.5 text-[0.64rem] font-medium uppercase tracking-[0.1em] text-[rgba(167,203,181,0.84)]">
                   Shared
@@ -531,8 +716,8 @@ export function BundleOrganizerSurface() {
                 </button>
               </div>
               {[
-                { label: "High priority demos", count: 1 },
-                { label: "Promo reminders", count: 1 },
+                { label: "High priority demos", count: smartViewCounts.highPriorityDemos },
+                { label: "Promo reminders", count: smartViewCounts.promoReminders },
               ].map((smartView) => (
                 <button
                   key={smartView.label}
@@ -567,7 +752,7 @@ export function BundleOrganizerSurface() {
                     ? "Trash is Organizer-local and does not move mail in IMAP."
                     : activeView === "settings"
                     ? "Bundle Pilot settings are shown as safe, static workspace preview controls."
-                    : "Focused Demo and Promo views are represented with pilot sample data."}
+                    : activeSourceDescription}
                 </p>
               </div>
 
@@ -582,7 +767,7 @@ export function BundleOrganizerSurface() {
                       {activeCopy.description}
                     </p>
                     <span className="w-fit shrink-0 rounded-full border border-[rgba(143,179,159,0.2)] bg-[rgba(143,179,159,0.1)] px-3 py-1 text-[0.68rem] font-medium uppercase tracking-[0.12em] text-[rgba(198,228,209,0.78)]">
-                      Pilot sample data
+                      {activeSourceLabel}
                     </span>
                   </div>
 
@@ -651,7 +836,13 @@ export function BundleOrganizerSurface() {
                         >
                           <button
                             type="button"
-                            onClick={() => showStaticFeedback(`${message.subject} is preview sample data.`)}
+                            onClick={() =>
+                              showStaticFeedback(
+                                message.source === "workspace"
+                                  ? `${message.subject} is shown from the live workspace preview. No mailbox action was taken.`
+                                  : `${message.subject} is preview sample data.`,
+                              )
+                            }
                             className="relative grid w-full gap-3 border-l-2 border-transparent px-4 py-3.5 pr-5 text-left transition-[background-color,border-color,box-shadow] hover:border-[color:#8fb39f] hover:bg-white/[0.04] sm:grid-cols-[minmax(150px,0.55fr)_minmax(0,2.6fr)_minmax(72px,auto)] lg:grid-cols-[minmax(170px,0.46fr)_minmax(0,3fr)_minmax(82px,auto)] xl:px-5"
                           >
                       <div className="grid min-w-0 grid-cols-[0.5rem_minmax(0,1fr)] items-start gap-2">

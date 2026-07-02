@@ -29,7 +29,10 @@ import {
   type MobileWorkspaceMailbox,
   type MobileWorkspaceMessage,
 } from "./mobile/MobileWorkspaceShell";
-import { BundleOrganizerSurface } from "./BundleOrganizerSurface";
+import {
+  BundleOrganizerSurface,
+  type BundleOrganizerWorkspaceMessage,
+} from "./BundleOrganizerSurface";
 import type { ReviewItem, ReviewWorkspaceTarget } from "./review/types";
 import type {
   CustomInboxDefinition,
@@ -33843,6 +33846,80 @@ export function WorkspaceShell({
       },
     ]),
   );
+  const bundleOrganizerLiveMessages: BundleOrganizerWorkspaceMessage[] =
+    productAccess === "bundle"
+      ? (() => {
+          const livePriorityMessageKeys = new Set(
+            livePriorityInboxEntries.map(
+              ({ mailboxId, message }) => `${mailboxId}:${message.id}`,
+            ),
+          );
+
+          return connectedOrderedMailboxes.flatMap((mailbox) => {
+            const mailboxCollections =
+              mailboxStore[mailbox.id] ?? createEmptyMailboxCollections();
+            const seenMessageKeys = new Set<string>();
+
+            return [
+              ...mailboxCollections.Inbox,
+              ...mailboxCollections.Filtered,
+            ].flatMap((message): BundleOrganizerWorkspaceMessage[] => {
+              const messageKey = `${mailbox.id}:${message.id}`;
+
+              if (seenMessageKeys.has(messageKey)) {
+                return [];
+              }
+
+              seenMessageKeys.add(messageKey);
+
+              const isWorkspacePriority = livePriorityMessageKeys.has(messageKey);
+              const isOrganizerClassification =
+                message.internalClassification === "demo" ||
+                message.internalClassification === "high_priority_demo" ||
+                message.internalClassification === "promo" ||
+                message.internalClassification === "promo_reminder" ||
+                message.internalClassification === "reply";
+
+              if (!isOrganizerClassification && !isWorkspacePriority) {
+                return [];
+              }
+
+              const priorityBadge =
+                message.internalClassification === "high_priority_demo"
+                  ? "High-priority demo"
+                  : isWorkspacePriority
+                  ? "Priority"
+                  : undefined;
+              const reason =
+                isWorkspacePriority
+                  ? "Existing workspace priority signal."
+                  : message.internalClassification === "reply"
+                  ? "Live reply-classified message."
+                  : message.internalClassification === "high_priority_demo"
+                  ? "High-priority demo classification."
+                  : undefined;
+
+              return [
+                {
+                  id: `${mailbox.id}-${message.id}`,
+                  sender: message.sender,
+                  subject: message.subject,
+                  snippet: message.snippet,
+                  body: message.body.length > 0 ? message.body : [message.snippet],
+                  timestamp: message.timestamp || message.time,
+                  sourceMailbox: mailbox.title,
+                  internalClassification: message.internalClassification,
+                  unread: message.unread,
+                  priority: isWorkspacePriority,
+                  priorityBadge,
+                  reason,
+                  sortTimestamp: resolveMailDateMs(message),
+                },
+              ];
+            });
+          });
+        })()
+      : [];
 
   const formatMobileMessageBadge = (value?: string | null) => {
     const normalizedValue = value?.trim().toLowerCase();
@@ -38546,7 +38623,10 @@ export function WorkspaceShell({
                 onOpenMailbox={openMailboxFromContext}
               />
             ) : activeSection === "Organizer" && productAccess === "bundle" ? (
-              <BundleOrganizerSurface />
+              <BundleOrganizerSurface
+                liveMessages={bundleOrganizerLiveMessages}
+                connectedInboxCount={connectedInboxCount}
+              />
             ) : activeSection === "Activity" ||
               activeSection === "Notifications" ||
               activeSection === "Team" ? (
