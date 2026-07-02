@@ -25345,10 +25345,19 @@ function getManagedInboxStatusClassName(mailbox: ManagedWorkspaceInbox) {
   return "border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] text-[var(--workspace-text-faint)]";
 }
 
+type ManagedInboxEditorTab = "Details" | "Receiving" | "Sending";
+
+const managedInboxEditorTabs: ManagedInboxEditorTab[] = [
+  "Details",
+  "Receiving",
+  "Sending",
+];
+
 function ManagedInboxEditor({
   mailbox: rawMailbox,
   editable,
   isExisting,
+  activeTab,
   isPrimary = false,
   canSetPrimary = false,
   canMoveUp = false,
@@ -25366,12 +25375,14 @@ function ManagedInboxEditor({
   onApplyAction,
   onCancelAction,
   onReconnectAction,
+  onTabChange,
   onChange,
   onSmtpChange,
 }: {
   mailbox: ManagedWorkspaceInbox;
   editable: boolean;
   isExisting: boolean;
+  activeTab: ManagedInboxEditorTab;
   isPrimary?: boolean;
   canSetPrimary?: boolean;
   canMoveUp?: boolean;
@@ -25389,6 +25400,7 @@ function ManagedInboxEditor({
   onApplyAction?: () => void;
   onCancelAction?: () => void;
   onReconnectAction?: () => void;
+  onTabChange: (tab: ManagedInboxEditorTab) => void;
   onChange: (
     inboxId: string,
     field: "title" | "email" | "provider" | keyof CustomImapSettings,
@@ -25425,6 +25437,14 @@ function ManagedInboxEditor({
   const isUnsupportedProvider =
     Boolean(mailbox.provider) && !isPrivateBetaSupportedProvider(mailbox.provider);
   const unsupportedProviderLabel = getUnsupportedProviderLabel(mailbox.provider);
+  const providerLabel =
+    onboardingText.connect.providers.find((provider) => provider.id === mailbox.provider)
+      ?.label ??
+    (mailbox.provider ? unsupportedProviderLabel : "No provider selected");
+  const readOnlyValueClass =
+    "rounded-2xl border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-3 text-[0.94rem] text-[var(--workspace-text)]";
+  const readOnlyNestedValueClass =
+    "rounded-2xl border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3 text-[0.94rem] text-[var(--workspace-text)]";
   const moveButtonDisabledClass =
     "cursor-default opacity-45 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-card)] hover:text-[var(--workspace-text-soft)] hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]";
 
@@ -25454,16 +25474,16 @@ function ManagedInboxEditor({
 
   return (
     <section
-      className={`rounded-[30px] border bg-[var(--workspace-card)] p-6 shadow-panel transition ${
+      className={`rounded-[28px] border bg-[var(--workspace-card)] p-5 shadow-panel transition md:p-6 ${
         editable
           ? "border-[var(--workspace-border-hover)] shadow-[inset_0_1px_0_rgba(255,255,255,0.1),0_10px_24px_rgba(61,44,32,0.06)]"
           : "border-[var(--workspace-border-soft)]"
       }`}
     >
-      <div className="mb-5 flex items-start justify-between gap-4">
-        <div>
-          <div className="flex items-center gap-2">
-            <h3 className="text-xl font-semibold text-[var(--workspace-text)]">
+      <div className="mb-5 flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <h3 className="truncate text-xl font-semibold text-[var(--workspace-text)]">
               {mailbox.title.trim().length > 0 ? mailbox.title : "New inbox"}
             </h3>
             {isPrimary ? (
@@ -25472,247 +25492,373 @@ function ManagedInboxEditor({
               </span>
             ) : null}
           </div>
-          <p className="mt-1 text-sm text-[var(--workspace-text-muted)]">
-            {onboardingText.connect.inboxHint}
+          <p className="mt-1 max-w-2xl text-sm leading-6 text-[var(--workspace-text-muted)]">
+            Select a tab to edit identity, receiving, or sending settings for this inbox.
           </p>
         </div>
         <span
-          className={`rounded-full border px-3 py-1 text-xs font-medium ${getManagedInboxStatusClassName(mailbox)}`}
+          className={`inline-flex w-fit rounded-full border px-3 py-1 text-xs font-medium ${getManagedInboxStatusClassName(mailbox)}`}
         >
           {getManagedInboxStatusLabel(mailbox)}
         </span>
       </div>
 
-      <div className="mb-5">
-        <label className="mb-2 block text-sm font-medium text-[var(--workspace-text-soft)]">
-          Inbox title
-        </label>
-        {editable ? (
-          <input
-            type="text"
-            value={mailbox.title}
-            onChange={(event) => onChange(mailbox.id, "title", event.target.value)}
-            placeholder="Primary inbox"
-            className={inputFieldClass}
-          />
-        ) : (
-          <div className="rounded-2xl border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-3 text-[0.94rem] text-[var(--workspace-text)]">
-            {mailbox.title.trim() || "Not set"}
-          </div>
-        )}
-      </div>
-
-      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-        {onboardingText.connect.providers.map((provider) => {
-          const selected = mailbox.provider === provider.id;
-
-          return (
+      <div className="mb-5 overflow-x-auto pb-1">
+        <div className="inline-flex min-w-max items-center gap-1 rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] p-1">
+          {managedInboxEditorTabs.map((tab) => (
             <button
-              key={provider.id}
+              key={`managed-inbox-tab-${tab}`}
               type="button"
-              onClick={() =>
-                editable ? onChange(mailbox.id, "provider", provider.id) : undefined
-              }
-              disabled={!editable}
-              className={`rounded-3xl border px-4 py-3 text-left transition outline-none ${
-                selected
-                  ? "border-[var(--workspace-provider-selected-border)] bg-[var(--workspace-provider-selected-surface)] text-[var(--workspace-provider-selected-text)] shadow-panel"
-                  : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] text-[var(--workspace-text)]"
-              } ${editable ? "hover:border-[var(--workspace-border-hover)] hover:bg-[var(--workspace-hover-surface)]" : "cursor-default opacity-90"}`}
+              onClick={() => onTabChange(tab)}
+              className={`inline-flex h-9 items-center justify-center rounded-full px-4 text-[0.68rem] font-medium uppercase tracking-[0.14em] transition-[background-color,color,box-shadow] duration-150 focus-visible:outline-none ${
+                activeTab === tab
+                  ? "bg-[var(--workspace-card)] text-[var(--workspace-text)] shadow-[0_8px_18px_rgba(31,42,36,0.06)]"
+                  : "text-[var(--workspace-text-faint)] hover:text-[var(--workspace-text-soft)]"
+              }`}
             >
-              <span className="text-sm font-semibold">{provider.label}</span>
+              {tab}
             </button>
-          );
-        })}
-      </div>
-
-      <div className="mt-5">
-        <label className="mb-2 block text-sm font-medium text-[var(--workspace-text-soft)]">
-          {onboardingText.connect.email}
-        </label>
-        {editable ? (
-          <input
-            type="email"
-            ref={emailInputRef}
-            value={mailbox.email}
-            onChange={(event) => onChange(mailbox.id, "email", event.target.value)}
-            placeholder="name@company.com"
-            className={
-              shouldShowFieldErrors && missingFieldSet.has("email")
-                ? inputFieldErrorClass
-                : inputFieldClass
-            }
-          />
-        ) : (
-          <div className="rounded-2xl border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-3 text-[0.94rem] text-[var(--workspace-text)]">
-            {mailbox.email.trim() || "Not set"}
-          </div>
-        )}
-        {shouldShowFieldErrors && missingFieldSet.has("email") ? (
-          <div className="mt-2 text-[0.78rem] leading-6 text-[color:rgba(208,160,151,0.92)]">
-            Enter an email address
-          </div>
-        ) : null}
-      </div>
-
-      {isUnsupportedProvider ? (
-        <div className="mt-6 space-y-3 rounded-[24px] border border-[color:rgba(184,163,120,0.24)] bg-[color:rgba(184,163,120,0.1)] p-5">
-          <p className="text-sm font-semibold text-[var(--workspace-text)]">
-            {unsupportedProviderLabel} is not available in this beta
-          </p>
-          <p className="text-sm leading-6 text-[var(--workspace-text-muted)]">
-            Gmail / Google Workspace and Custom IMAP are supported for private beta testing.
-            Switch this inbox to Custom IMAP if this provider offers IMAP access.
-          </p>
+          ))}
         </div>
-      ) : isImapCredentialsProvider(mailbox.provider) ? (
-        <div className="mt-6 space-y-4 rounded-[24px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] p-5">
-          <div className="grid gap-4 md:grid-cols-2">
-            <div>
-              <label className="mb-2 block text-sm font-medium text-[var(--workspace-text-soft)]">
-                {onboardingText.connect.host}
-              </label>
-              {editable ? (
-                <input
-                  type="text"
-                  ref={hostInputRef}
-                  value={mailbox.customImap.host}
-                  onChange={(event) => onChange(mailbox.id, "host", event.target.value)}
-                  className={
-                    shouldShowFieldErrors && missingFieldSet.has("host")
-                      ? inputFieldErrorClass
-                      : inputFieldClass
-                  }
-                />
-              ) : (
-                <div className="rounded-2xl border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3 text-[0.94rem] text-[var(--workspace-text)]">
-                  {mailbox.customImap.host.trim() || "Not set"}
-                </div>
-              )}
-              {shouldShowFieldErrors && missingFieldSet.has("host") ? (
-                <div className="mt-2 text-[0.78rem] leading-6 text-[color:rgba(208,160,151,0.92)]">
-                  Enter an IMAP host
-                </div>
-              ) : null}
-            </div>
-            <div>
-              <label className="mb-2 block text-sm font-medium text-[var(--workspace-text-soft)]">
-                {onboardingText.connect.port}
-              </label>
-              {editable ? (
-                <input
-                  type="text"
-                  ref={portInputRef}
-                  value={mailbox.customImap.port}
-                  onChange={(event) => onChange(mailbox.id, "port", event.target.value)}
-                  className={
-                    shouldShowFieldErrors && missingFieldSet.has("port")
-                      ? inputFieldErrorClass
-                      : inputFieldClass
-                  }
-                />
-              ) : (
-                <div className="rounded-2xl border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3 text-[0.94rem] text-[var(--workspace-text)]">
-                  {mailbox.customImap.port.trim() || "Not set"}
-                </div>
-              )}
-              {shouldShowFieldErrors && missingFieldSet.has("port") ? (
-                <div className="mt-2 text-[0.78rem] leading-6 text-[color:rgba(208,160,151,0.92)]">
-                  Enter a port
-                </div>
-              ) : null}
-            </div>
-            {mailbox.provider === "custom_imap" ? (
-              <div>
-                <label className="mb-2 block text-sm font-medium text-[var(--workspace-text-soft)]">
-                  {onboardingText.connect.username}
-                </label>
-                {editable ? (
-                  <input
-                    type="text"
-                    ref={usernameInputRef}
-                    value={mailbox.customImap.username}
-                    onChange={(event) => onChange(mailbox.id, "username", event.target.value)}
-                    className={
-                      shouldShowFieldErrors && missingFieldSet.has("username")
-                        ? inputFieldErrorClass
-                        : inputFieldClass
-                    }
-                  />
-                ) : (
-                  <div className="rounded-2xl border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3 text-[0.94rem] text-[var(--workspace-text)]">
-                    {mailbox.customImap.username.trim() || "Not set"}
-                  </div>
-                )}
-                {shouldShowFieldErrors && missingFieldSet.has("username") ? (
-                  <div className="mt-2 text-[0.78rem] leading-6 text-[color:rgba(208,160,151,0.92)]">
-                    Enter a username
-                  </div>
-                ) : null}
-              </div>
+      </div>
+
+      {activeTab === "Details" ? (
+        <div className="space-y-5">
+          <div>
+            <label className="mb-2 block text-sm font-medium text-[var(--workspace-text-soft)]">
+              Inbox title
+            </label>
+            {editable ? (
+              <input
+                type="text"
+                value={mailbox.title}
+                onChange={(event) => onChange(mailbox.id, "title", event.target.value)}
+                placeholder="Primary inbox"
+                className={inputFieldClass}
+              />
             ) : (
-              <div>
-                <label className="mb-2 block text-sm font-medium text-[var(--workspace-text-soft)]">
-                  {onboardingText.connect.username}
-                </label>
-                <div className="rounded-2xl border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3 text-[0.94rem] text-[var(--workspace-text)]">
-                  {mailbox.email.trim() || "Uses the inbox email above"}
-                </div>
+              <div className={readOnlyValueClass}>
+                {mailbox.title.trim() || "Not set"}
               </div>
             )}
-            <div>
-              <label className="mb-2 block text-sm font-medium text-[var(--workspace-text-soft)]">
-                {getPasswordLabel(mailbox.provider)}
-              </label>
-              {editable ? (
-                <input
-                  type="password"
-                  ref={passwordInputRef}
-                  value={mailbox.customImap.password}
-                  onChange={(event) => onChange(mailbox.id, "password", event.target.value)}
-                  className={
-                    shouldShowFieldErrors && missingFieldSet.has("password")
-                      ? inputFieldErrorClass
-                      : inputFieldClass
-                  }
-                />
-              ) : (
-                <div className="rounded-2xl border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3 text-[0.94rem] text-[var(--workspace-text)]">
-                  {imapPasswordStatusLabel}
-                </div>
-              )}
-              {shouldShowFieldErrors && missingFieldSet.has("password") ? (
-                <div className="mt-2 text-[0.78rem] leading-6 text-[color:rgba(208,160,151,0.92)]">
-                  Enter a password
-                </div>
-              ) : null}
+          </div>
+
+          <div className="grid gap-3 md:grid-cols-2">
+            <div className="rounded-[20px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-4">
+              <div className="text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                Email address
+              </div>
+              <div className="mt-2 truncate text-[0.94rem] text-[var(--workspace-text)]">
+                {mailbox.email.trim() || "Not set"}
+              </div>
+            </div>
+            <div className="rounded-[20px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-4">
+              <div className="text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                Provider
+              </div>
+              <div className="mt-2 text-[0.94rem] text-[var(--workspace-text)]">
+                {providerLabel}
+              </div>
             </div>
           </div>
 
-          <label className="flex items-center gap-3 text-sm font-medium text-[var(--workspace-text-soft)]">
-            <span className="relative flex h-4 w-4 items-center justify-center">
+          <div className="rounded-[20px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-4">
+            <div className="mb-3 text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+              Inbox actions
+            </div>
+            <div className="flex flex-wrap gap-3">
+              <button
+                type="button"
+                onClick={onMoveUpAction}
+                disabled={!canMoveUp}
+                className={`${settingsSubtleActionClass} ${canMoveUp ? "" : moveButtonDisabledClass}`}
+              >
+                Move up
+              </button>
+              <button
+                type="button"
+                onClick={onMoveDownAction}
+                disabled={!canMoveDown}
+                className={`${settingsSubtleActionClass} ${canMoveDown ? "" : moveButtonDisabledClass}`}
+              >
+                Move down
+              </button>
+              {!isPrimary && canSetPrimary && onSetPrimaryAction ? (
+                <button
+                  type="button"
+                  onClick={onSetPrimaryAction}
+                  className={settingsSubtleActionClass}
+                >
+                  Set as primary
+                </button>
+              ) : null}
+              {isExisting && !isPrimary && onRemoveAction ? (
+                <button
+                  type="button"
+                  onClick={onRemoveAction}
+                  disabled={removeDisabled}
+                  className={`${settingsSubtleActionClass} ${
+                    removeDisabled
+                      ? "cursor-default opacity-45 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-card)] hover:text-[var(--workspace-text-soft)] hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"
+                      : "border-[color:rgba(146,82,73,0.18)] text-[color:rgba(134,79,71,0.92)] hover:border-[color:rgba(146,82,73,0.28)] hover:bg-[color:rgba(249,238,235,0.92)] hover:text-[color:rgba(116,63,56,0.96)]"
+                  }`}
+                >
+                  Remove
+                </button>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {activeTab === "Receiving" ? (
+        <div className="space-y-5">
+          <div className="grid gap-3 md:grid-cols-2">
+            {onboardingText.connect.providers.map((provider) => {
+              const selected = mailbox.provider === provider.id;
+
+              return (
+                <button
+                  key={provider.id}
+                  type="button"
+                  onClick={() =>
+                    editable ? onChange(mailbox.id, "provider", provider.id) : undefined
+                  }
+                  disabled={!editable}
+                  className={`rounded-[22px] border px-4 py-3 text-left transition outline-none ${
+                    selected
+                      ? "border-[var(--workspace-provider-selected-border)] bg-[var(--workspace-provider-selected-surface)] text-[var(--workspace-provider-selected-text)] shadow-panel"
+                      : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] text-[var(--workspace-text)]"
+                  } ${editable ? "hover:border-[var(--workspace-border-hover)] hover:bg-[var(--workspace-hover-surface)]" : "cursor-default opacity-90"}`}
+                >
+                  <span className="text-sm font-semibold">{provider.label}</span>
+                </button>
+              );
+            })}
+          </div>
+
+          <div>
+            <label className="mb-2 block text-sm font-medium text-[var(--workspace-text-soft)]">
+              {onboardingText.connect.email}
+            </label>
+            {editable ? (
               <input
-                type="checkbox"
-                checked={mailbox.customImap.ssl}
-                onChange={(event) =>
-                  editable ? onChange(mailbox.id, "ssl", event.target.checked) : undefined
+                type="email"
+                ref={emailInputRef}
+                value={mailbox.email}
+                onChange={(event) => onChange(mailbox.id, "email", event.target.value)}
+                placeholder="name@company.com"
+                className={
+                  shouldShowFieldErrors && missingFieldSet.has("email")
+                    ? inputFieldErrorClass
+                    : inputFieldClass
                 }
-                disabled={!editable}
-                className={`peer absolute inset-0 m-0 h-full w-full appearance-none rounded-[5px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-input-bg)] outline-none transition checked:border-moss/55 checked:bg-[linear-gradient(180deg,rgba(226,236,229,0.92),rgba(246,249,246,0.98))] ${editable ? "cursor-pointer" : "cursor-default"}`}
               />
-              <span className="pointer-events-none absolute inset-0 flex items-center justify-center text-[10px] font-semibold leading-none text-moss opacity-0 transition peer-checked:opacity-100">
-                ✓
-              </span>
-            </span>
-            {onboardingText.connect.ssl}
-          </label>
+            ) : (
+              <div className={readOnlyValueClass}>
+                {mailbox.email.trim() || "Not set"}
+              </div>
+            )}
+            {shouldShowFieldErrors && missingFieldSet.has("email") ? (
+              <div className="mt-2 text-[0.78rem] leading-6 text-[color:rgba(208,160,151,0.92)]">
+                Enter an email address
+              </div>
+            ) : null}
+          </div>
+
+          {isUnsupportedProvider ? (
+            <div className="space-y-3 rounded-[24px] border border-[color:rgba(184,163,120,0.24)] bg-[color:rgba(184,163,120,0.1)] p-5">
+              <p className="text-sm font-semibold text-[var(--workspace-text)]">
+                {unsupportedProviderLabel} is not available in this beta
+              </p>
+              <p className="text-sm leading-6 text-[var(--workspace-text-muted)]">
+                Gmail / Google Workspace and Custom IMAP are supported for private beta testing.
+                Switch this inbox to Custom IMAP if this provider offers IMAP access.
+              </p>
+            </div>
+          ) : isImapCredentialsProvider(mailbox.provider) ? (
+            <div className="space-y-4 rounded-[24px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] p-5">
+              <div className="grid gap-4 md:grid-cols-2">
+                <div>
+                  <label className="mb-2 block text-sm font-medium text-[var(--workspace-text-soft)]">
+                    {onboardingText.connect.host}
+                  </label>
+                  {editable ? (
+                    <input
+                      type="text"
+                      ref={hostInputRef}
+                      value={mailbox.customImap.host}
+                      onChange={(event) => onChange(mailbox.id, "host", event.target.value)}
+                      className={
+                        shouldShowFieldErrors && missingFieldSet.has("host")
+                          ? inputFieldErrorClass
+                          : inputFieldClass
+                      }
+                    />
+                  ) : (
+                    <div className={readOnlyNestedValueClass}>
+                      {mailbox.customImap.host.trim() || "Not set"}
+                    </div>
+                  )}
+                  {shouldShowFieldErrors && missingFieldSet.has("host") ? (
+                    <div className="mt-2 text-[0.78rem] leading-6 text-[color:rgba(208,160,151,0.92)]">
+                      Enter an IMAP host
+                    </div>
+                  ) : null}
+                </div>
+                <div>
+                  <label className="mb-2 block text-sm font-medium text-[var(--workspace-text-soft)]">
+                    {onboardingText.connect.port}
+                  </label>
+                  {editable ? (
+                    <input
+                      type="text"
+                      ref={portInputRef}
+                      value={mailbox.customImap.port}
+                      onChange={(event) => onChange(mailbox.id, "port", event.target.value)}
+                      className={
+                        shouldShowFieldErrors && missingFieldSet.has("port")
+                          ? inputFieldErrorClass
+                          : inputFieldClass
+                      }
+                    />
+                  ) : (
+                    <div className={readOnlyNestedValueClass}>
+                      {mailbox.customImap.port.trim() || "Not set"}
+                    </div>
+                  )}
+                  {shouldShowFieldErrors && missingFieldSet.has("port") ? (
+                    <div className="mt-2 text-[0.78rem] leading-6 text-[color:rgba(208,160,151,0.92)]">
+                      Enter a port
+                    </div>
+                  ) : null}
+                </div>
+                <div>
+                  <label className="mb-2 block text-sm font-medium text-[var(--workspace-text-soft)]">
+                    {onboardingText.connect.username}
+                  </label>
+                  {mailbox.provider === "custom_imap" && editable ? (
+                    <input
+                      type="text"
+                      ref={usernameInputRef}
+                      value={mailbox.customImap.username}
+                      onChange={(event) => onChange(mailbox.id, "username", event.target.value)}
+                      className={
+                        shouldShowFieldErrors && missingFieldSet.has("username")
+                          ? inputFieldErrorClass
+                          : inputFieldClass
+                      }
+                    />
+                  ) : (
+                    <div className={readOnlyNestedValueClass}>
+                      {mailbox.provider === "custom_imap"
+                        ? mailbox.customImap.username.trim() || "Not set"
+                        : mailbox.email.trim() || "Uses the inbox email above"}
+                    </div>
+                  )}
+                  {shouldShowFieldErrors && missingFieldSet.has("username") ? (
+                    <div className="mt-2 text-[0.78rem] leading-6 text-[color:rgba(208,160,151,0.92)]">
+                      Enter a username
+                    </div>
+                  ) : null}
+                </div>
+                <div>
+                  <label className="mb-2 block text-sm font-medium text-[var(--workspace-text-soft)]">
+                    {getPasswordLabel(mailbox.provider)}
+                  </label>
+                  {editable ? (
+                    <input
+                      type="password"
+                      ref={passwordInputRef}
+                      value={mailbox.customImap.password}
+                      onChange={(event) => onChange(mailbox.id, "password", event.target.value)}
+                      className={
+                        shouldShowFieldErrors && missingFieldSet.has("password")
+                          ? inputFieldErrorClass
+                          : inputFieldClass
+                      }
+                    />
+                  ) : (
+                    <div className={readOnlyNestedValueClass}>
+                      {imapPasswordStatusLabel}
+                    </div>
+                  )}
+                  {shouldShowFieldErrors && missingFieldSet.has("password") ? (
+                    <div className="mt-2 text-[0.78rem] leading-6 text-[color:rgba(208,160,151,0.92)]">
+                      Enter a password
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+
+              <label className="flex items-center gap-3 text-sm font-medium text-[var(--workspace-text-soft)]">
+                <span className="relative flex h-4 w-4 items-center justify-center">
+                  <input
+                    type="checkbox"
+                    checked={mailbox.customImap.ssl}
+                    onChange={(event) =>
+                      editable ? onChange(mailbox.id, "ssl", event.target.checked) : undefined
+                    }
+                    disabled={!editable}
+                    className={`peer absolute inset-0 m-0 h-full w-full appearance-none rounded-[5px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-input-bg)] outline-none transition checked:border-moss/55 checked:bg-[linear-gradient(180deg,rgba(226,236,229,0.92),rgba(246,249,246,0.98))] ${editable ? "cursor-pointer" : "cursor-default"}`}
+                  />
+                  <span className="pointer-events-none absolute inset-0 flex items-center justify-center text-[10px] font-semibold leading-none text-moss opacity-0 transition peer-checked:opacity-100">
+                    ✓
+                  </span>
+                </span>
+                {onboardingText.connect.ssl}
+              </label>
+            </div>
+          ) : isOAuthConnectionProvider(mailbox.provider) ? (
+            <div className="space-y-3 rounded-[24px] border border-moss/10 bg-[var(--workspace-card-subtle)] p-5">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="space-y-1">
+                  <p className="text-sm font-semibold text-[var(--workspace-text)]">
+                    {onboardingText.connect.googleOAuthTitle}
+                  </p>
+                  <p className="text-sm text-[var(--workspace-text-muted)]">
+                    {onboardingText.connect.googleOAuthDescription}
+                  </p>
+                </div>
+                {isExisting &&
+                mailbox.provider === "google" &&
+                mailbox.connected &&
+                mailbox.connectionStatus === "connected" &&
+                onReconnectAction ? (
+                  <button
+                    type="button"
+                    onClick={onReconnectAction}
+                    disabled={isApplying}
+                    className={settingsSubtleActionClass}
+                  >
+                    {isApplying ? "Opening..." : "Reconnect Gmail"}
+                  </button>
+                ) : null}
+              </div>
+              <div className={readOnlyNestedValueClass}>
+                {mailbox.connectionMessage?.trim() ||
+                  (mailbox.connectionStatus === "authenticated_pending_activation"
+                    ? onboardingText.connect.googleOAuthActivationPending
+                    : onboardingText.connect.googleOAuthPending)}
+              </div>
+            </div>
+          ) : (
+            <div className="rounded-[20px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-5 text-[0.9rem] leading-6 text-[var(--workspace-text-muted)]">
+              Select Gmail / Google Workspace or Custom IMAP to configure receiving.
+            </div>
+          )}
+        </div>
+      ) : null}
+
+      {activeTab === "Sending" ? (
+        <div className="space-y-5">
           {mailbox.provider === "custom_imap" ? (
-            <div className="space-y-4 border-t border-[var(--workspace-border-soft)] pt-4">
+            <div className="space-y-4 rounded-[24px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] p-5">
               <div>
                 <p className="text-sm font-semibold text-[var(--workspace-text)]">
                   Outgoing SMTP
                 </p>
-                <p className="mt-1 text-sm text-[var(--workspace-text-muted)]">
+                <p className="mt-1 text-sm leading-6 text-[var(--workspace-text-muted)]">
                   Enter explicit SMTP send settings. Cuevion does not infer these from IMAP.
                 </p>
               </div>
@@ -25732,7 +25878,7 @@ function ManagedInboxEditor({
                       className={inputFieldClass}
                     />
                   ) : (
-                    <div className="rounded-2xl border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3 text-[0.94rem] text-[var(--workspace-text)]">
+                    <div className={readOnlyNestedValueClass}>
                       {smtpSettings.host.trim() || "Not set"}
                     </div>
                   )}
@@ -25751,7 +25897,7 @@ function ManagedInboxEditor({
                       className={inputFieldClass}
                     />
                   ) : (
-                    <div className="rounded-2xl border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3 text-[0.94rem] text-[var(--workspace-text)]">
+                    <div className={readOnlyNestedValueClass}>
                       {smtpSettings.port.trim() || "Not set"}
                     </div>
                   )}
@@ -25772,7 +25918,7 @@ function ManagedInboxEditor({
                       <option value="ssl">SSL/TLS</option>
                     </select>
                   ) : (
-                    <div className="rounded-2xl border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3 text-[0.94rem] text-[var(--workspace-text)]">
+                    <div className={readOnlyNestedValueClass}>
                       {smtpSettings.security === "ssl" ? "SSL/TLS" : "STARTTLS"}
                     </div>
                   )}
@@ -25816,7 +25962,7 @@ function ManagedInboxEditor({
                           className={inputFieldClass}
                         />
                       ) : (
-                        <div className="rounded-2xl border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3 text-[0.94rem] text-[var(--workspace-text)]">
+                        <div className={readOnlyNestedValueClass}>
                           {smtpSettings.username.trim() || "Not set"}
                         </div>
                       )}
@@ -25835,7 +25981,7 @@ function ManagedInboxEditor({
                           className={inputFieldClass}
                         />
                       ) : (
-                        <div className="rounded-2xl border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3 text-[0.94rem] text-[var(--workspace-text)]">
+                        <div className={readOnlyNestedValueClass}>
                           {smtpPasswordStatusLabel}
                         </div>
                       )}
@@ -25844,40 +25990,30 @@ function ManagedInboxEditor({
                 ) : null}
               </div>
             </div>
-          ) : null}
-        </div>
-      ) : isOAuthConnectionProvider(mailbox.provider) ? (
-        <div className="mt-6 space-y-3 rounded-[24px] border border-moss/10 bg-[var(--workspace-card-subtle)] p-5">
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div className="space-y-1">
+          ) : isOAuthConnectionProvider(mailbox.provider) ? (
+            <div className="space-y-3 rounded-[24px] border border-moss/10 bg-[var(--workspace-card-subtle)] p-5">
               <p className="text-sm font-semibold text-[var(--workspace-text)]">
-                {onboardingText.connect.googleOAuthTitle}
+                Gmail sending
               </p>
-              <p className="text-sm text-[var(--workspace-text-muted)]">
-                {onboardingText.connect.googleOAuthDescription}
+              <p className="text-sm leading-6 text-[var(--workspace-text-muted)]">
+                Gmail uses the same Google OAuth connection for sending where the
+                connected account is authorized.
               </p>
+              <div className={readOnlyNestedValueClass}>
+                {mailbox.connectionStatus === "connected"
+                  ? "OAuth connected"
+                  : "Finish Gmail OAuth before sending from this inbox."}
+              </div>
             </div>
-            {isExisting &&
-            mailbox.provider === "google" &&
-            mailbox.connected &&
-            mailbox.connectionStatus === "connected" &&
-            onReconnectAction ? (
-              <button
-                type="button"
-                onClick={onReconnectAction}
-                disabled={isApplying}
-                className={settingsSubtleActionClass}
-              >
-                {isApplying ? "Opening..." : "Reconnect Gmail"}
-              </button>
-            ) : null}
-          </div>
-          <div className="rounded-2xl border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3 text-[0.9rem] text-[var(--workspace-text-muted)]">
-            {mailbox.connectionMessage?.trim() ||
-              (mailbox.connectionStatus === "authenticated_pending_activation"
-                ? onboardingText.connect.googleOAuthActivationPending
-                : onboardingText.connect.googleOAuthPending)}
-          </div>
+          ) : isUnsupportedProvider ? (
+            <div className="rounded-[20px] border border-[color:rgba(184,163,120,0.24)] bg-[color:rgba(184,163,120,0.1)] px-4 py-5 text-[0.9rem] leading-6 text-[var(--workspace-text-muted)]">
+              Sending is not available for {unsupportedProviderLabel} in this beta.
+            </div>
+          ) : (
+            <div className="rounded-[20px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-5 text-[0.9rem] leading-6 text-[var(--workspace-text-muted)]">
+              Select a provider before configuring sending.
+            </div>
+          )}
         </div>
       ) : null}
 
@@ -25887,23 +26023,7 @@ function ManagedInboxEditor({
         </div>
       ) : null}
 
-      <div className="mt-6 flex flex-wrap justify-end gap-3">
-        <button
-          type="button"
-          onClick={onMoveUpAction}
-          disabled={!canMoveUp}
-          className={`${settingsSubtleActionClass} ${canMoveUp ? "" : moveButtonDisabledClass}`}
-        >
-          Move up
-        </button>
-        <button
-          type="button"
-          onClick={onMoveDownAction}
-          disabled={!canMoveDown}
-          className={`${settingsSubtleActionClass} ${canMoveDown ? "" : moveButtonDisabledClass}`}
-        >
-          Move down
-        </button>
+      <div className="mt-6 flex flex-wrap justify-end gap-3 border-t border-[var(--workspace-border-soft)] pt-5">
         {editable && onCancelAction && onApplyAction ? (
           <>
             <button
@@ -25923,38 +26043,13 @@ function ManagedInboxEditor({
             </button>
           </>
         ) : onEditAction ? (
-          <>
-            {!isPrimary && canSetPrimary && onSetPrimaryAction ? (
-              <button
-                type="button"
-                onClick={onSetPrimaryAction}
-                className={settingsSubtleActionClass}
-              >
-                Set as primary
-              </button>
-            ) : null}
-            {isExisting && !isPrimary && onRemoveAction ? (
-              <button
-                type="button"
-                onClick={onRemoveAction}
-                disabled={removeDisabled}
-                className={`${settingsSubtleActionClass} ${
-                  removeDisabled
-                    ? "cursor-default opacity-45 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-card)] hover:text-[var(--workspace-text-soft)] hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"
-                    : "border-[color:rgba(146,82,73,0.18)] text-[color:rgba(134,79,71,0.92)] hover:border-[color:rgba(146,82,73,0.28)] hover:bg-[color:rgba(249,238,235,0.92)] hover:text-[color:rgba(116,63,56,0.96)]"
-                }`}
-              >
-                Remove
-              </button>
-            ) : null}
-            <button
-              type="button"
-              onClick={onEditAction}
-              className={settingsSubtleActionClass}
-            >
-              Edit
-            </button>
-          </>
+          <button
+            type="button"
+            onClick={onEditAction}
+            className={settingsSubtleActionClass}
+          >
+            Edit
+          </button>
         ) : null}
       </div>
     </section>
@@ -25993,6 +26088,13 @@ const ManageInboxesView = memo(function ManageInboxesView({
   const [validatingInboxId, setValidatingInboxId] = useState<string | null>(null);
   const [validationErrorInboxId, setValidationErrorInboxId] = useState<string | null>(null);
   const [successToastMessage, setSuccessToastMessage] = useState<string | null>(null);
+  const [selectedInboxId, setSelectedInboxId] = useState<string | null>(() =>
+    resolvePrimaryManagedInboxId(savedManagedInboxes, primaryManagedInboxId) ??
+    savedManagedInboxes[0]?.id ??
+    null,
+  );
+  const [activeInboxEditorTab, setActiveInboxEditorTab] =
+    useState<ManagedInboxEditorTab>("Details");
 
   useEffect(() => {
     setDraftManagedInboxes(savedManagedInboxes.map(cloneManagedWorkspaceInbox));
@@ -26002,7 +26104,32 @@ const ManageInboxesView = memo(function ManageInboxesView({
     setPendingInboxRemovalId(null);
     setValidatingInboxId(null);
     setValidationErrorInboxId(null);
+    setSelectedInboxId(
+      resolvePrimaryManagedInboxId(savedManagedInboxes, primaryManagedInboxId) ??
+        savedManagedInboxes[0]?.id ??
+        null,
+    );
+    setActiveInboxEditorTab("Details");
   }, [savedManagedInboxes]);
+
+  useEffect(() => {
+    if (draftManagedInboxes.length === 0) {
+      setSelectedInboxId(null);
+      return;
+    }
+
+    setSelectedInboxId((current) => {
+      if (current && draftManagedInboxes.some((mailbox) => mailbox.id === current)) {
+        return current;
+      }
+
+      return (
+        resolvePrimaryManagedInboxId(draftManagedInboxes, primaryManagedInboxId) ??
+        draftManagedInboxes[0]?.id ??
+        null
+      );
+    });
+  }, [draftManagedInboxes, primaryManagedInboxId]);
 
   useEffect(() => {
     if (!successToastMessage) {
@@ -26026,6 +26153,11 @@ const ManageInboxesView = memo(function ManageInboxesView({
     pendingInboxApplyMailbox?.title.trim() ||
     pendingInboxApplyMailbox?.email.trim() ||
     "this inbox";
+  const selectedInboxIndex = selectedInboxId
+    ? draftManagedInboxes.findIndex((mailbox) => mailbox.id === selectedInboxId)
+    : -1;
+  const selectedInbox =
+    selectedInboxIndex >= 0 ? draftManagedInboxes[selectedInboxIndex] : null;
 
   useEffect(() => {
     onDirtyChange(hasUnsavedChanges);
@@ -26151,6 +26283,8 @@ const ManageInboxesView = memo(function ManageInboxesView({
     ) {
       setValidationErrorInboxId(inboxId);
       setEditingInboxId(inboxId);
+      setSelectedInboxId(inboxId);
+      setActiveInboxEditorTab("Receiving");
       return false;
     }
 
@@ -26229,6 +26363,7 @@ const ManageInboxesView = memo(function ManageInboxesView({
         candidate.id === inboxId ? cloneManagedWorkspaceInbox(mailboxForStorage) : candidate,
       ),
     );
+    setSelectedInboxId(mailboxForStorage.id);
     setEditingInboxId(null);
     setSuccessToastMessage(
       inboxId.startsWith("draft-")
@@ -26483,6 +26618,8 @@ const ManageInboxesView = memo(function ManageInboxesView({
         customSmtp: createManagedCustomSmtpSettings(),
       },
     ]);
+    setSelectedInboxId(nextId);
+    setActiveInboxEditorTab("Details");
     setEditingInboxId(nextId);
   };
 
@@ -26514,6 +26651,8 @@ const ManageInboxesView = memo(function ManageInboxesView({
     ) {
       setValidationErrorInboxId(inboxId);
       setEditingInboxId(inboxId);
+      setSelectedInboxId(inboxId);
+      setActiveInboxEditorTab("Receiving");
       return;
     }
 
@@ -26529,9 +26668,15 @@ const ManageInboxesView = memo(function ManageInboxesView({
 
   const handleCancelInbox = (inboxId: string) => {
     if (inboxId.startsWith("draft-")) {
+      const currentIndex = draftManagedInboxes.findIndex((mailbox) => mailbox.id === inboxId);
+      const nextSelection =
+        draftManagedInboxes[currentIndex + 1]?.id ??
+        draftManagedInboxes[currentIndex - 1]?.id ??
+        null;
       setDraftManagedInboxes((current) =>
         current.filter((mailbox) => mailbox.id !== inboxId),
       );
+      setSelectedInboxId(nextSelection);
       setValidationErrorInboxId((current) => (current === inboxId ? null : current));
       setEditingInboxId((current) => (current === inboxId ? null : current));
       return;
@@ -26586,47 +26731,119 @@ const ManageInboxesView = memo(function ManageInboxesView({
             </button>
           </div>
 
-          <div className="space-y-6">
-            {draftManagedInboxes.map((mailbox, index) => (
-              <ManagedInboxEditor
-                key={mailbox.id}
-                mailbox={mailbox}
-                editable={editingInboxId === mailbox.id}
-                isExisting={!mailbox.id.startsWith("draft-")}
-                isPrimary={mailbox.id === primaryManagedInboxId}
-                canMoveUp={index > 0}
-                canMoveDown={index < draftManagedInboxes.length - 1}
-                canSetPrimary={
-                  connectedInboxCount > 1 &&
-                  isSelectablePrimaryManagedInbox(mailbox) &&
-                  mailbox.id !== primaryManagedInboxId
-                }
-                connectionError={connectionErrors[mailbox.id] ?? null}
-                isApplying={validatingInboxId === mailbox.id}
-                credentialStatuses={credentialStatuses}
-                showValidationErrors={validationErrorInboxId === mailbox.id}
-                onEditAction={
-                  editingInboxId === mailbox.id
-                    ? undefined
-                    : () => setEditingInboxId(mailbox.id)
-                }
-                onRemoveAction={
-                  editingInboxId === mailbox.id || !mailbox.id || mailbox.id.startsWith("draft-")
-                    ? undefined
-                    : () => setPendingInboxRemovalId(mailbox.id)
-                }
-                onMoveUpAction={() => moveDraftInbox(mailbox.id, -1)}
-                onMoveDownAction={() => moveDraftInbox(mailbox.id, 1)}
-                removeDisabled={savedManagedInboxes.length <= 1}
-                onSetPrimaryAction={() => onSetPrimaryInbox(mailbox.id)}
-                onApplyAction={() => handleApplyInbox(mailbox.id)}
-                onCancelAction={() => handleCancelInbox(mailbox.id)}
-                onReconnectAction={() => handleReconnectInbox(mailbox.id)}
-                onChange={updateDraftInbox}
-                onSmtpChange={updateDraftSmtp}
-              />
-            ))}
-          </div>
+          {draftManagedInboxes.length === 0 ? (
+            <div className="rounded-[28px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-6 py-10 text-center shadow-panel">
+              <div className="text-xl font-semibold tracking-tight text-[var(--workspace-text)]">
+                No connected inboxes yet
+              </div>
+              <p className="mx-auto mt-2 max-w-xl text-[0.92rem] leading-7 text-[var(--workspace-text-muted)]">
+                Add a Gmail / Google Workspace inbox or configure Custom IMAP to start testing live inbox behavior.
+              </p>
+              <button
+                type="button"
+                onClick={handleStartAddInbox}
+                className={`${settingsAccentSecondaryActionClass} mt-5`}
+              >
+                Add inbox
+              </button>
+            </div>
+          ) : (
+            <div className="grid gap-5 xl:grid-cols-[minmax(230px,300px)_minmax(0,1fr)]">
+              <aside className="rounded-[26px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] p-3 shadow-panel">
+                <div className="px-2 pb-2 text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                  Connected inboxes
+                </div>
+                <div className="space-y-2">
+                  {draftManagedInboxes.map((mailbox) => {
+                    const isSelected = mailbox.id === selectedInbox?.id;
+                    const mailboxTitle = mailbox.title.trim() || mailbox.email.trim() || "New inbox";
+                    const mailboxEmail = mailbox.email.trim() || "Not configured";
+
+                    return (
+                      <button
+                        key={`managed-inbox-selector-${mailbox.id}`}
+                        type="button"
+                        onClick={() => {
+                          setSelectedInboxId(mailbox.id);
+                          setActiveInboxEditorTab("Details");
+                        }}
+                        className={`w-full rounded-[18px] border px-3 py-3 text-left transition-[background-color,border-color,box-shadow] duration-150 focus-visible:outline-none ${
+                          isSelected
+                            ? "border-[var(--workspace-border-hover)] bg-[var(--workspace-card-subtle)] shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]"
+                            : "border-transparent hover:border-[var(--workspace-border-soft)] hover:bg-[var(--workspace-hover-surface)]"
+                        }`}
+                      >
+                        <div className="flex min-w-0 items-center justify-between gap-2">
+                          <div className="min-w-0 truncate text-[0.9rem] font-medium text-[var(--workspace-text)]">
+                            {mailboxTitle}
+                          </div>
+                          {mailbox.id === primaryManagedInboxId ? (
+                            <span className="flex-none rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-2 py-0.5 text-[0.58rem] font-medium uppercase tracking-[0.12em] text-[var(--workspace-text-faint)]">
+                              Primary
+                            </span>
+                          ) : null}
+                        </div>
+                        <div className="mt-1 truncate text-[0.76rem] leading-5 text-[var(--workspace-text-muted)]">
+                          {mailboxEmail}
+                        </div>
+                        <div className="mt-2">
+                          <span
+                            className={`inline-flex rounded-full border px-2.5 py-0.5 text-[0.62rem] font-medium ${getManagedInboxStatusClassName(mailbox)}`}
+                          >
+                            {getManagedInboxStatusLabel(mailbox)}
+                          </span>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </aside>
+
+              {selectedInbox ? (
+                <ManagedInboxEditor
+                  key={selectedInbox.id}
+                  mailbox={selectedInbox}
+                  editable={editingInboxId === selectedInbox.id}
+                  isExisting={!selectedInbox.id.startsWith("draft-")}
+                  activeTab={activeInboxEditorTab}
+                  isPrimary={selectedInbox.id === primaryManagedInboxId}
+                  canMoveUp={selectedInboxIndex > 0}
+                  canMoveDown={selectedInboxIndex < draftManagedInboxes.length - 1}
+                  canSetPrimary={
+                    connectedInboxCount > 1 &&
+                    isSelectablePrimaryManagedInbox(selectedInbox) &&
+                    selectedInbox.id !== primaryManagedInboxId
+                  }
+                  connectionError={connectionErrors[selectedInbox.id] ?? null}
+                  isApplying={validatingInboxId === selectedInbox.id}
+                  credentialStatuses={credentialStatuses}
+                  showValidationErrors={validationErrorInboxId === selectedInbox.id}
+                  onEditAction={
+                    editingInboxId === selectedInbox.id
+                      ? undefined
+                      : () => setEditingInboxId(selectedInbox.id)
+                  }
+                  onRemoveAction={
+                    editingInboxId === selectedInbox.id ||
+                    !selectedInbox.id ||
+                    selectedInbox.id.startsWith("draft-")
+                      ? undefined
+                      : () => setPendingInboxRemovalId(selectedInbox.id)
+                  }
+                  onMoveUpAction={() => moveDraftInbox(selectedInbox.id, -1)}
+                  onMoveDownAction={() => moveDraftInbox(selectedInbox.id, 1)}
+                  removeDisabled={savedManagedInboxes.length <= 1}
+                  onSetPrimaryAction={() => onSetPrimaryInbox(selectedInbox.id)}
+                  onApplyAction={() => handleApplyInbox(selectedInbox.id)}
+                  onCancelAction={() => handleCancelInbox(selectedInbox.id)}
+                  onReconnectAction={() => handleReconnectInbox(selectedInbox.id)}
+                  onTabChange={setActiveInboxEditorTab}
+                  onChange={updateDraftInbox}
+                  onSmtpChange={updateDraftSmtp}
+                />
+              ) : null}
+            </div>
+          )}
         </section>
       </div>
 
