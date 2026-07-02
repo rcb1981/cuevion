@@ -26582,22 +26582,51 @@ const ManageInboxesView = memo(function ManageInboxesView({
   };
 
   const moveDraftInbox = (inboxId: string, direction: -1 | 1) => {
-    setDraftManagedInboxes((current) => {
-      const currentIndex = current.findIndex((mailbox) => mailbox.id === inboxId);
-      const nextIndex = currentIndex + direction;
+    if (editingInboxId !== null) {
+      return;
+    }
 
-      if (
-        currentIndex < 0 ||
-        nextIndex < 0 ||
-        nextIndex >= current.length
-      ) {
-        return current;
-      }
+    const currentIndex = draftManagedInboxes.findIndex((mailbox) => mailbox.id === inboxId);
+    const nextIndex = currentIndex + direction;
 
-      const next = [...current];
-      [next[currentIndex], next[nextIndex]] = [next[nextIndex], next[currentIndex]];
-      return next;
+    if (
+      currentIndex < 0 ||
+      nextIndex < 0 ||
+      nextIndex >= draftManagedInboxes.length
+    ) {
+      return;
+    }
+
+    const nextDraftManagedInboxes = [...draftManagedInboxes];
+    [nextDraftManagedInboxes[currentIndex], nextDraftManagedInboxes[nextIndex]] = [
+      nextDraftManagedInboxes[nextIndex],
+      nextDraftManagedInboxes[currentIndex],
+    ];
+
+    const savedMailboxById = new Map(
+      savedManagedInboxes.map((mailbox) => [mailbox.id, mailbox]),
+    );
+    const nextSavedManagedInboxes = nextDraftManagedInboxes.flatMap((mailbox) => {
+      const savedMailbox = savedMailboxById.get(mailbox.id);
+
+      return savedMailbox ? [savedMailbox] : [];
     });
+
+    if (nextSavedManagedInboxes.length !== savedManagedInboxes.length) {
+      setSuccessToastMessage("Apply or cancel the new inbox before reordering.");
+      return;
+    }
+
+    const didApply = onApply(nextSavedManagedInboxes);
+
+    if (!didApply) {
+      setSuccessToastMessage("Could not save inbox order. Check inbox settings and try again.");
+      return;
+    }
+
+    setDraftManagedInboxes(nextDraftManagedInboxes.map(cloneManagedWorkspaceInbox));
+    setSelectedInboxId(inboxId);
+    setSuccessToastMessage("Inbox order saved");
   };
 
   const handleStartAddInbox = () => {
@@ -26807,8 +26836,11 @@ const ManageInboxesView = memo(function ManageInboxesView({
                   isExisting={!selectedInbox.id.startsWith("draft-")}
                   activeTab={activeInboxEditorTab}
                   isPrimary={selectedInbox.id === primaryManagedInboxId}
-                  canMoveUp={selectedInboxIndex > 0}
-                  canMoveDown={selectedInboxIndex < draftManagedInboxes.length - 1}
+                  canMoveUp={editingInboxId === null && selectedInboxIndex > 0}
+                  canMoveDown={
+                    editingInboxId === null &&
+                    selectedInboxIndex < draftManagedInboxes.length - 1
+                  }
                   canSetPrimary={
                     connectedInboxCount > 1 &&
                     isSelectablePrimaryManagedInbox(selectedInbox) &&
