@@ -719,13 +719,29 @@ export function StepConnectInboxes({
           );
         })}
       </div>
-      <button
-        type="button"
-        onClick={onAddInbox}
-        className="inline-flex h-10 items-center justify-center self-start rounded-full border border-moss/16 bg-white/72 px-5 text-sm font-medium text-moss transition hover:border-moss/28 hover:bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss/20"
-      >
-        Add another inbox
-      </button>
+      <div className="rounded-[26px] border border-dashed border-moss/22 bg-[linear-gradient(180deg,rgba(255,255,255,0.74),rgba(246,248,241,0.68))] px-5 py-4 shadow-[0_12px_32px_rgba(32,28,24,0.045)]">
+        <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+          <div className="space-y-1">
+            <h3 className="text-[0.98rem] font-semibold tracking-[-0.015em] text-ink">
+              More inboxes to include?
+            </h3>
+            <p className="max-w-xl text-sm leading-6 text-ink/58">
+              Connect another inbox now, or add more later in Settings &gt;
+              Inboxes.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onAddInbox}
+            className="inline-flex h-11 shrink-0 items-center justify-center rounded-full border border-moss/22 bg-white/84 px-5 text-sm font-semibold text-moss shadow-[0_10px_24px_rgba(32,28,24,0.06)] transition hover:border-moss/36 hover:bg-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-moss/20"
+          >
+            <span className="mr-2 text-base leading-none" aria-hidden="true">
+              +
+            </span>
+            Connect another inbox
+          </button>
+        </div>
+      </div>
     </section>
   );
 }
