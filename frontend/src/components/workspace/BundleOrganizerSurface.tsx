@@ -73,9 +73,11 @@ type BundleOrganizerSearchRow = {
 type BundleOrganizerMessage = {
   id: string;
   sender: string;
+  from?: string;
   subject: string;
   snippet: string;
   body: string[];
+  bodyHtml?: string;
   timestamp: string;
   sourceMailbox: string;
   manualCategory?: "demo" | "promo";
@@ -124,9 +126,11 @@ export type BundleOrganizerInternalClassification =
 export type BundleOrganizerWorkspaceMessage = {
   id: string;
   sender: string;
+  from?: string;
   subject: string;
   snippet: string;
   body: string[];
+  bodyHtml?: string;
   timestamp: string;
   sourceMailbox: string;
   manualCategory?: "demo" | "promo";
@@ -261,6 +265,77 @@ const trashedPillClass =
   "rounded-full border border-white/15 bg-white/8 px-2 py-0.5 text-[0.68rem] font-medium uppercase tracking-[0.1em] text-[rgba(245,239,229,0.66)]";
 const manualPillClass =
   "rounded-full border border-white/12 bg-white/6 px-2 py-0.5 text-[0.68rem] font-medium uppercase tracking-[0.1em] text-[rgba(245,239,229,0.6)]";
+const allowedEmailTags = new Set([
+  "a",
+  "b",
+  "blockquote",
+  "br",
+  "div",
+  "em",
+  "h1",
+  "h2",
+  "h3",
+  "h4",
+  "hr",
+  "i",
+  "li",
+  "ol",
+  "p",
+  "span",
+  "strong",
+  "table",
+  "tbody",
+  "td",
+  "th",
+  "thead",
+  "tr",
+  "u",
+  "ul",
+]);
+const unsafeEmailTags = new Set([
+  "applet",
+  "base",
+  "button",
+  "embed",
+  "form",
+  "frame",
+  "frameset",
+  "iframe",
+  "input",
+  "link",
+  "math",
+  "meta",
+  "object",
+  "script",
+  "select",
+  "style",
+  "svg",
+  "textarea",
+]);
+const linkPattern = /(https?:\/\/[^\s<>"']+|www\.[^\s<>"']+)/gi;
+const trailingLinkPunctuation = /[.,!?;:)\]}]+$/;
+const quoteMarkerPatterns = [
+  /^\s*>/,
+  /^\s*On .+ wrote:\s*$/i,
+  /^\s*Op .+ schreef:\s*$/i,
+  /^\s*Il giorno .+ ha scritto:\s*$/i,
+  /^\s*From:\s+/i,
+  /^\s*Sent:\s+/i,
+  /^\s*Subject:\s+/i,
+  /^\s*-{2,}\s*Original Message\s*-{2,}\s*$/i,
+  /^\s*-{2,}\s*Forwarded message\s*-{2,}\s*$/i,
+  /^\s*Forwarded message\s*$/i,
+];
+
+type MessageBodySegment = {
+  kind: "message" | "quote";
+  lines: string[];
+};
+
+type SanitizedEmailHtml = {
+  blockedImageCount: number;
+  html: string | null;
+};
 
 type BundleOrganizerWorkflowState = Record<
   string,
@@ -297,6 +372,299 @@ function resolvePriorityReason(message: BundleOrganizerMessage) {
   }
 
   return null;
+}
+
+function isSafeUrl(value: string) {
+  const normalizedValue = value.trim();
+
+  if (!normalizedValue) {
+    return false;
+  }
+
+  if (/^(javascript:|vbscript:|data:|file:)/i.test(normalizedValue)) {
+    return false;
+  }
+
+  if (/^mailto:/i.test(normalizedValue)) {
+    return true;
+  }
+
+  return /^https?:\/\//i.test(normalizedValue);
+}
+
+function normalizeHref(value: string) {
+  const trimmedValue = value.trim();
+
+  if (/^www\./i.test(trimmedValue)) {
+    return `https://${trimmedValue}`;
+  }
+
+  return trimmedValue;
+}
+
+function sanitizeDimension(value: string | null) {
+  const trimmedValue = value?.trim() ?? "";
+
+  if (!trimmedValue) {
+    return null;
+  }
+
+  if (/^\d{1,4}%?$/.test(trimmedValue)) {
+    return trimmedValue;
+  }
+
+  return null;
+}
+
+function sanitizeSpanValue(value: string | null) {
+  const trimmedValue = value?.trim() ?? "";
+
+  if (!/^\d{1,2}$/.test(trimmedValue)) {
+    return null;
+  }
+
+  const parsedValue = Number.parseInt(trimmedValue, 10);
+  return parsedValue > 0 && parsedValue <= 20 ? String(parsedValue) : null;
+}
+
+function moveChildrenBeforeElement(element: Element) {
+  const parent = element.parentNode;
+
+  if (!parent) {
+    return;
+  }
+
+  while (element.firstChild) {
+    parent.insertBefore(element.firstChild, element);
+  }
+
+  parent.removeChild(element);
+}
+
+function replaceImageWithPlaceholder(
+  documentRef: Document,
+  element: Element,
+  options: { label?: string } = {},
+) {
+  const altText = options.label || element.getAttribute("alt")?.trim() || "Image";
+  const placeholder = documentRef.createElement("div");
+  placeholder.setAttribute("data-bundle-organizer-email-image-placeholder", "true");
+  placeholder.setAttribute(
+    "style",
+    "display:inline-flex;max-width:100%;min-width:180px;white-space:normal;word-break:normal;overflow-wrap:anywhere;",
+  );
+  placeholder.textContent = `Image blocked: ${altText}`;
+  element.replaceWith(placeholder);
+}
+
+function sanitizeElement(
+  documentRef: Document,
+  element: Element,
+  stats: { blockedImageCount: number },
+) {
+  const tagName = element.tagName.toLowerCase();
+
+  if (tagName === "img") {
+    stats.blockedImageCount += 1;
+    replaceImageWithPlaceholder(documentRef, element);
+    return;
+  }
+
+  if (unsafeEmailTags.has(tagName)) {
+    element.remove();
+    return;
+  }
+
+  if (!allowedEmailTags.has(tagName)) {
+    moveChildrenBeforeElement(element);
+    return;
+  }
+
+  Array.from(element.attributes).forEach((attribute) => {
+    const attributeName = attribute.name.toLowerCase();
+    const attributeValue = attribute.value;
+
+    if (
+      attributeName.startsWith("on") ||
+      attributeName === "style" ||
+      attributeName === "class" ||
+      attributeName.startsWith("data-")
+    ) {
+      element.removeAttribute(attribute.name);
+      return;
+    }
+
+    if (tagName === "a" && attributeName === "href") {
+      const href = normalizeHref(attributeValue);
+      if (isSafeUrl(href)) {
+        element.setAttribute("href", href);
+      } else {
+        element.removeAttribute(attribute.name);
+      }
+      return;
+    }
+
+    if (attributeName === "title") {
+      element.setAttribute("title", attributeValue.slice(0, 240));
+      return;
+    }
+
+    if (
+      ["table", "td", "th"].includes(tagName) &&
+      ["width", "height"].includes(attributeName)
+    ) {
+      const safeDimension = sanitizeDimension(attributeValue);
+      if (safeDimension) {
+        element.setAttribute(attributeName, safeDimension);
+      } else {
+        element.removeAttribute(attribute.name);
+      }
+      return;
+    }
+
+    if (
+      ["td", "th"].includes(tagName) &&
+      ["colspan", "rowspan"].includes(attributeName)
+    ) {
+      const safeSpanValue = sanitizeSpanValue(attributeValue);
+      if (safeSpanValue) {
+        element.setAttribute(attributeName, safeSpanValue);
+      } else {
+        element.removeAttribute(attribute.name);
+      }
+      return;
+    }
+
+    element.removeAttribute(attribute.name);
+  });
+
+  if (element instanceof HTMLAnchorElement) {
+    const href = element.getAttribute("href");
+    if (!href || !isSafeUrl(href)) {
+      element.removeAttribute("href");
+    }
+    element.setAttribute("target", "_blank");
+    element.setAttribute("rel", "noopener noreferrer nofollow");
+  }
+}
+
+function sanitizeEmailHtml(bodyHtml?: string): SanitizedEmailHtml {
+  const normalizedHtml = bodyHtml?.trim() ?? "";
+
+  if (!normalizedHtml || typeof DOMParser === "undefined") {
+    return { blockedImageCount: 0, html: null };
+  }
+
+  const parsedDocument = new DOMParser().parseFromString(normalizedHtml, "text/html");
+  const body = parsedDocument.body;
+  const stats = { blockedImageCount: 0 };
+
+  body.querySelectorAll("*").forEach((element) => {
+    sanitizeElement(parsedDocument, element, stats);
+  });
+
+  const sanitizedHtml = body.innerHTML.trim();
+  const hasRenderableContent =
+    Boolean(body.textContent?.replace(/\s+/g, "").length) ||
+    Boolean(body.querySelector("a, blockquote, hr, li, table, td, th"));
+
+  return {
+    blockedImageCount: stats.blockedImageCount,
+    html: hasRenderableContent ? sanitizedHtml : null,
+  };
+}
+
+function isQuoteMarkerLine(line: string) {
+  return quoteMarkerPatterns.some((pattern) => pattern.test(line));
+}
+
+function splitParagraphIntoSegments(paragraph: string): MessageBodySegment[] {
+  const lines = paragraph.split(/\r?\n/);
+  const segments: MessageBodySegment[] = [];
+  let quoteStarted = false;
+
+  for (const line of lines) {
+    if (isQuoteMarkerLine(line)) {
+      quoteStarted = true;
+    }
+
+    const kind: MessageBodySegment["kind"] = quoteStarted ? "quote" : "message";
+    const currentSegment = segments[segments.length - 1];
+    if (currentSegment?.kind === kind) {
+      currentSegment.lines.push(line);
+    } else {
+      segments.push({ kind, lines: [line] });
+    }
+  }
+
+  return segments;
+}
+
+function renderLinkedText(line: string, keyPrefix: string) {
+  const parts: ReactNode[] = [];
+  let lastIndex = 0;
+
+  for (const match of line.matchAll(linkPattern)) {
+    const rawUrl = match[0];
+    const matchIndex = match.index ?? 0;
+    const trailingMatch = rawUrl.match(trailingLinkPunctuation);
+    const trailingText = trailingMatch?.[0] ?? "";
+    const displayUrl = trailingText
+      ? rawUrl.slice(0, -trailingText.length)
+      : rawUrl;
+
+    if (matchIndex > lastIndex) {
+      parts.push(line.slice(lastIndex, matchIndex));
+    }
+
+    if (displayUrl) {
+      const href = normalizeHref(displayUrl);
+      parts.push(
+        <a
+          key={`${keyPrefix}-link-${matchIndex}`}
+          href={href}
+          target="_blank"
+          rel="noopener noreferrer nofollow"
+          className="break-all font-medium text-[rgba(167,203,181,0.94)] underline decoration-[rgba(167,203,181,0.34)] underline-offset-4 transition-colors hover:text-[rgba(198,228,209,0.98)]"
+        >
+          {displayUrl}
+        </a>,
+      );
+    }
+
+    if (trailingText) {
+      parts.push(trailingText);
+    }
+
+    lastIndex = matchIndex + rawUrl.length;
+  }
+
+  if (lastIndex < line.length) {
+    parts.push(line.slice(lastIndex));
+  }
+
+  return parts.length > 0 ? parts : line;
+}
+
+function renderBodyLines(lines: string[], keyPrefix: string) {
+  return lines.map((line, lineIndex) => (
+    <span key={`${keyPrefix}-line-${lineIndex}`}>
+      {lineIndex > 0 ? <br /> : null}
+      {renderLinkedText(line, `${keyPrefix}-${lineIndex}`)}
+    </span>
+  ));
+}
+
+function normalizePlainBody(body?: string[] | string) {
+  if (Array.isArray(body) && body.some((line) => line.trim().length > 0)) {
+    return body;
+  }
+
+  if (typeof body === "string" && body.trim()) {
+    return body.split(/\n{2,}/);
+  }
+
+  return ["No text body available."];
 }
 
 function normalizeWorkspaceMessages(
@@ -1001,6 +1369,87 @@ function MessagePills({ message }: { message: BundleOrganizerMessage }) {
   );
 }
 
+function DetailMetadata({
+  label,
+  value,
+}: {
+  label: string;
+  value?: string | null;
+}) {
+  const normalizedValue = value?.trim();
+
+  if (!normalizedValue) {
+    return null;
+  }
+
+  return (
+    <div className="min-w-0">
+      <dt className="text-[0.62rem] font-semibold uppercase tracking-[0.14em] text-[rgba(217,203,184,0.42)]">
+        {label}
+      </dt>
+      <dd className="mt-1 truncate text-[0.78rem] font-medium text-[rgba(245,239,229,0.68)]">
+        {normalizedValue}
+      </dd>
+    </div>
+  );
+}
+
+function BundleOrganizerEmailBody({
+  body,
+  bodyHtml,
+}: {
+  body: string[];
+  bodyHtml?: string;
+}) {
+  const sanitizedEmail = useMemo(() => sanitizeEmailHtml(bodyHtml), [bodyHtml]);
+
+  if (sanitizedEmail.html) {
+    return (
+      <div className="space-y-3">
+        {sanitizedEmail.blockedImageCount > 0 ? (
+          <div className="rounded-[14px] border border-[rgba(143,179,159,0.16)] bg-[rgba(143,179,159,0.08)] px-3 py-2.5 text-[0.78rem] leading-5 text-[rgba(167,203,181,0.82)]">
+            Images are hidden for privacy.
+          </div>
+        ) : null}
+        <div
+          className="bundle-organizer-email-html max-w-full overflow-x-auto rounded-[16px] border border-white/10 bg-[rgba(12,18,15,0.38)] p-4 text-[0.92rem] leading-7 text-[rgba(245,239,229,0.74)] [overflow-wrap:anywhere] sm:p-5 [&_*]:max-w-full [&_a]:font-semibold [&_a]:text-[rgba(167,203,181,0.94)] [&_a]:underline [&_a]:decoration-[rgba(167,203,181,0.34)] [&_a]:underline-offset-4 [&_blockquote]:my-4 [&_blockquote]:rounded-[14px] [&_blockquote]:border-l-4 [&_blockquote]:border-[rgba(217,203,184,0.2)] [&_blockquote]:bg-white/5 [&_blockquote]:px-4 [&_blockquote]:py-3 [&_h1]:mb-3 [&_h1]:text-[1.3rem] [&_h1]:font-semibold [&_h1]:leading-tight [&_h2]:mb-3 [&_h2]:text-[1.16rem] [&_h2]:font-semibold [&_h2]:leading-tight [&_h3]:mb-2 [&_h3]:text-[1.05rem] [&_h3]:font-semibold [&_h4]:mb-2 [&_h4]:font-semibold [&_hr]:my-5 [&_hr]:border-white/10 [&_li]:my-1 [&_ol]:my-3 [&_ol]:list-decimal [&_ol]:pl-5 [&_p]:my-3 [&_table]:my-4 [&_table]:w-auto [&_table]:max-w-full [&_table]:border-collapse [&_td]:align-top [&_td]:leading-6 [&_td]:[overflow-wrap:anywhere] [&_th]:align-top [&_th]:font-semibold [&_ul]:my-3 [&_ul]:list-disc [&_ul]:pl-5 [&_[data-bundle-organizer-email-image-placeholder='true']]:my-3 [&_[data-bundle-organizer-email-image-placeholder='true']]:rounded-[12px] [&_[data-bundle-organizer-email-image-placeholder='true']]:border [&_[data-bundle-organizer-email-image-placeholder='true']]:border-white/10 [&_[data-bundle-organizer-email-image-placeholder='true']]:bg-white/5 [&_[data-bundle-organizer-email-image-placeholder='true']]:px-3 [&_[data-bundle-organizer-email-image-placeholder='true']]:py-2 [&_[data-bundle-organizer-email-image-placeholder='true']]:text-[0.78rem] [&_[data-bundle-organizer-email-image-placeholder='true']]:font-medium [&_[data-bundle-organizer-email-image-placeholder='true']]:text-[rgba(245,239,229,0.58)]"
+          dangerouslySetInnerHTML={{ __html: sanitizedEmail.html }}
+        />
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4 rounded-[16px] border border-white/10 bg-[rgba(12,18,15,0.38)] p-4 text-[0.9rem] leading-7 text-[rgba(245,239,229,0.72)] sm:p-5">
+      {normalizePlainBody(body).flatMap((paragraph, paragraphIndex) =>
+        splitParagraphIntoSegments(paragraph).map((segment, segmentIndex) =>
+          segment.kind === "quote" ? (
+            <blockquote
+              key={`${paragraphIndex}-${segmentIndex}-quote`}
+              className="break-words rounded-[14px] border-l-4 border-[rgba(217,203,184,0.2)] bg-white/5 px-4 py-3 text-[0.86rem] leading-7 text-[rgba(245,239,229,0.56)] [overflow-wrap:anywhere]"
+            >
+              {renderBodyLines(
+                segment.lines,
+                `${paragraphIndex}-${segmentIndex}-quote`,
+              )}
+            </blockquote>
+          ) : (
+            <p
+              key={`${paragraphIndex}-${segmentIndex}-message`}
+              className="break-words [overflow-wrap:anywhere]"
+            >
+              {renderBodyLines(
+                segment.lines,
+                `${paragraphIndex}-${segmentIndex}-message`,
+              )}
+            </p>
+          ),
+        ),
+      )}
+    </div>
+  );
+}
+
 function FilterSelect({
   ariaLabel,
   children,
@@ -1084,20 +1533,32 @@ function MessageDetail({
   onToggleTrash: (message: BundleOrganizerMessage) => void;
 }) {
   const activeReason = resolvePriorityReason(message);
-  const bodyLines = message.body.length > 0 ? message.body : [message.snippet];
   const resolvedCategory = resolveOrganizerCategory(message);
+  const bodyLines = message.body.length > 0 ? message.body : [message.snippet];
 
   return (
-    <article className="mt-4 rounded-[18px] border border-white/10 bg-white/[0.045] p-4 sm:p-5">
-      <div className="border-b border-white/10 pb-4">
+    <article className="mt-4 overflow-hidden rounded-[18px] border border-white/10 bg-white/[0.045] shadow-[0_24px_70px_rgba(0,0,0,0.22)]">
+      <div className="border-b border-white/10 p-4 sm:p-5">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div className="min-w-0">
             <button
               type="button"
               onClick={onBack}
-              className="mb-3 inline-flex h-8 items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 text-[0.7rem] font-medium uppercase tracking-[0.12em] text-[rgba(245,239,229,0.62)] transition-colors hover:border-[rgba(143,179,159,0.24)] hover:bg-[rgba(143,179,159,0.1)] hover:text-[rgba(198,228,209,0.84)]"
+              className="mb-4 inline-flex h-8 items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 text-[0.7rem] font-medium uppercase tracking-[0.12em] text-[rgba(245,239,229,0.62)] transition-colors hover:border-[rgba(143,179,159,0.24)] hover:bg-[rgba(143,179,159,0.1)] hover:text-[rgba(198,228,209,0.84)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[rgba(143,179,159,0.22)]"
             >
-              Back
+              <svg
+                aria-hidden="true"
+                className="h-3.5 w-3.5"
+                fill="none"
+                stroke="currentColor"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth="2"
+                viewBox="0 0 24 24"
+              >
+                <path d="m15 18-6-6 6-6" />
+              </svg>
+              Back to list
             </button>
             <p className="text-[0.74rem] font-medium uppercase tracking-[0.16em] text-[rgba(217,203,184,0.58)]">
               {message.sender}
@@ -1116,6 +1577,13 @@ function MessageDetail({
             ) : null}
           </div>
         </div>
+
+        <dl className="mt-4 grid gap-3 rounded-[16px] border border-white/10 bg-[rgba(12,18,15,0.28)] p-3 sm:grid-cols-2 lg:grid-cols-4">
+          <DetailMetadata label="From" value={message.sender} />
+          <DetailMetadata label="Email" value={message.from} />
+          <DetailMetadata label="Mailbox" value={message.sourceMailbox} />
+          <DetailMetadata label="Date" value={message.timestamp} />
+        </dl>
 
         <div className="mt-4 flex flex-wrap items-center gap-2 rounded-[16px] border border-white/10 bg-[rgba(12,18,15,0.3)] p-2">
           {resolvedCategory !== "demo" ? (
@@ -1158,25 +1626,16 @@ function MessageDetail({
         </div>
       </div>
 
-      <div className="pt-4">
+      <div className="p-4 sm:p-5">
         {activeReason ? (
           <p className="mb-3 rounded-[14px] border border-[rgba(143,179,159,0.18)] bg-[rgba(143,179,159,0.1)] px-3.5 py-2.5 text-[0.82rem] font-medium leading-6 text-[rgba(167,203,181,0.9)]">
             {activeReason}
           </p>
         ) : null}
-        <p className="text-[0.9rem] leading-6 text-[rgba(245,239,229,0.68)]">
+        <p className="mb-4 text-[0.9rem] leading-6 text-[rgba(245,239,229,0.68)]">
           {message.snippet}
         </p>
-        <div className="mt-4 space-y-3 rounded-[16px] border border-white/10 bg-[rgba(12,18,15,0.38)] p-4">
-          {bodyLines.map((line, index) => (
-            <p
-              key={`${message.id}-body-${index}`}
-              className="text-[0.88rem] leading-7 text-[rgba(245,239,229,0.72)]"
-            >
-              {line}
-            </p>
-          ))}
-        </div>
+        <BundleOrganizerEmailBody body={bodyLines} bodyHtml={message.bodyHtml} />
       </div>
     </article>
   );

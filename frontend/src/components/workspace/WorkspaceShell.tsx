@@ -33919,9 +33919,11 @@ export function WorkspaceShell({
                 {
                   id: `${mailbox.id}-${message.id}`,
                   sender: message.sender,
+                  from: message.from,
                   subject: message.subject,
                   snippet: message.snippet,
                   body: message.body.length > 0 ? message.body : [message.snippet],
+                  bodyHtml: message.bodyHtml,
                   timestamp: message.timestamp || message.time,
                   sourceMailbox: mailbox.title,
                   internalClassification: message.internalClassification,
