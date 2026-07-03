@@ -1038,6 +1038,33 @@ function FilterSelect({
   );
 }
 
+function DetailActionButton({
+  active = false,
+  children,
+  icon,
+  onClick,
+}: {
+  active?: boolean;
+  children: ReactNode;
+  icon: BundleOrganizerContextMenuIconName;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`inline-flex h-9 items-center justify-center gap-1.5 rounded-full border px-3 text-[0.68rem] font-medium uppercase tracking-[0.1em] transition-colors ${
+        active
+          ? "border-[rgba(143,179,159,0.28)] bg-[rgba(143,179,159,0.12)] text-[rgba(198,228,209,0.92)] hover:bg-[rgba(143,179,159,0.16)]"
+          : "border-white/10 bg-white/5 text-[rgba(245,239,229,0.56)] hover:border-[rgba(143,179,159,0.24)] hover:bg-[rgba(143,179,159,0.1)] hover:text-[rgba(198,228,209,0.88)]"
+      }`}
+    >
+      <ContextMenuIcon name={icon} />
+      <span>{children}</span>
+    </button>
+  );
+}
+
 function MessageDetail({
   message,
   onBack,
@@ -1062,96 +1089,72 @@ function MessageDetail({
 
   return (
     <article className="mt-4 rounded-[18px] border border-white/10 bg-white/[0.045] p-4 sm:p-5">
-      <div className="flex flex-col gap-3 border-b border-white/10 pb-4 sm:flex-row sm:items-start sm:justify-between">
-        <div className="min-w-0">
-          <div className="mb-3 flex flex-wrap items-center gap-2">
+      <div className="border-b border-white/10 pb-4">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div className="min-w-0">
             <button
               type="button"
               onClick={onBack}
-              className="inline-flex h-8 items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 text-[0.7rem] font-medium uppercase tracking-[0.12em] text-[rgba(245,239,229,0.62)] transition-colors hover:border-[rgba(143,179,159,0.24)] hover:bg-[rgba(143,179,159,0.1)] hover:text-[rgba(198,228,209,0.84)]"
+              className="mb-3 inline-flex h-8 items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 text-[0.7rem] font-medium uppercase tracking-[0.12em] text-[rgba(245,239,229,0.62)] transition-colors hover:border-[rgba(143,179,159,0.24)] hover:bg-[rgba(143,179,159,0.1)] hover:text-[rgba(198,228,209,0.84)]"
             >
               Back
             </button>
-            {resolvedCategory !== "demo" ? (
-              <button
-                type="button"
-                onClick={() => onMoveToCategory(message, "demo")}
-                className="inline-flex h-8 items-center gap-1.5 rounded-full border border-white/10 bg-white/5 px-3 text-[0.68rem] font-medium uppercase tracking-[0.1em] text-[rgba(245,239,229,0.56)] transition-colors hover:border-[rgba(143,179,159,0.24)] hover:bg-[rgba(143,179,159,0.1)] hover:text-[rgba(198,228,209,0.88)]"
-              >
-                <ContextMenuIcon name="category" />
-                <span>Move to Demo</span>
-              </button>
-            ) : null}
-            {resolvedCategory !== "promo" ? (
-              <button
-                type="button"
-                onClick={() => onMoveToCategory(message, "promo")}
-                className="inline-flex h-8 items-center gap-1.5 rounded-full border border-white/10 bg-white/5 px-3 text-[0.68rem] font-medium uppercase tracking-[0.1em] text-[rgba(245,239,229,0.56)] transition-colors hover:border-[rgba(143,179,159,0.24)] hover:bg-[rgba(143,179,159,0.1)] hover:text-[rgba(198,228,209,0.88)]"
-              >
-                <ContextMenuIcon name="category" />
-                <span>Move to Promo</span>
-              </button>
-            ) : null}
-            <button
-              type="button"
-              onClick={() => onToggleShortlist(message)}
-              className={`inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-[0.68rem] font-medium uppercase tracking-[0.1em] transition-colors ${
-                message.shortlisted
-                  ? "border-[rgba(143,179,159,0.28)] bg-[rgba(143,179,159,0.12)] text-[rgba(198,228,209,0.92)] hover:bg-[rgba(143,179,159,0.16)]"
-                  : "border-white/10 bg-white/5 text-[rgba(245,239,229,0.56)] hover:border-[rgba(143,179,159,0.24)] hover:bg-[rgba(143,179,159,0.1)] hover:text-[rgba(198,228,209,0.88)]"
-              }`}
-            >
-              <ContextMenuIcon
-                name={message.shortlisted ? "shortlistOff" : "shortlist"}
-              />
-              <span>
-                {message.shortlisted ? "Remove from shortlist" : "Shortlist"}
-              </span>
-            </button>
-            <button
-              type="button"
-              onClick={() => onTogglePriority(message)}
-              className={`inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-[0.68rem] font-medium uppercase tracking-[0.1em] transition-colors ${
-                message.manualPriority
-                  ? "border-[rgba(143,179,159,0.28)] bg-[rgba(143,179,159,0.12)] text-[rgba(198,228,209,0.92)] hover:bg-[rgba(143,179,159,0.16)]"
-                  : "border-white/10 bg-white/5 text-[rgba(245,239,229,0.56)] hover:border-[rgba(143,179,159,0.24)] hover:bg-[rgba(143,179,159,0.1)] hover:text-[rgba(198,228,209,0.88)]"
-              }`}
-            >
-              <ContextMenuIcon
-                name={message.manualPriority ? "priorityOff" : "priority"}
-              />
-              <span>
-                {message.manualPriority ? "Remove Priority" : "Mark as Priority"}
-              </span>
-            </button>
-            <button
-              type="button"
-              onClick={() => onToggleTrash(message)}
-              className={`inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-[0.68rem] font-medium uppercase tracking-[0.1em] transition-colors ${
-                message.trashed
-                  ? "border-[rgba(143,179,159,0.28)] bg-[rgba(143,179,159,0.12)] text-[rgba(198,228,209,0.92)] hover:bg-[rgba(143,179,159,0.16)]"
-                  : "border-white/10 bg-white/5 text-[rgba(245,239,229,0.56)] hover:border-[rgba(143,179,159,0.24)] hover:bg-[rgba(143,179,159,0.1)] hover:text-[rgba(198,228,209,0.88)]"
-              }`}
-            >
-              <ContextMenuIcon name={message.trashed ? "restore" : "trash"} />
-              <span>{message.trashed ? "Restore" : "Move to Trash"}</span>
-            </button>
+            <p className="text-[0.74rem] font-medium uppercase tracking-[0.16em] text-[rgba(217,203,184,0.58)]">
+              {message.sender}
+            </p>
+            <h3 className="mt-1.5 text-[1.3rem] font-semibold tracking-[-0.03em] text-[color:#f5efe5]">
+              {message.subject}
+            </h3>
+            <div className="mt-3 flex flex-wrap gap-1.5">
+              <MessagePills message={message} />
+            </div>
           </div>
-          <p className="text-[0.74rem] font-medium uppercase tracking-[0.16em] text-[rgba(217,203,184,0.58)]">
-            {message.sender}
-          </p>
-          <h3 className="mt-1.5 text-[1.3rem] font-semibold tracking-[-0.03em] text-[color:#f5efe5]">
-            {message.subject}
-          </h3>
-          <div className="mt-3 flex flex-wrap gap-1.5">
-            <MessagePills message={message} />
+          <div className="shrink-0 text-left text-[0.78rem] font-medium text-[rgba(245,239,229,0.48)] sm:text-right">
+            <div>{message.timestamp}</div>
+            {message.sourceMailbox ? (
+              <div className="mt-1 text-[rgba(245,239,229,0.58)]">{message.sourceMailbox}</div>
+            ) : null}
           </div>
         </div>
-        <div className="shrink-0 text-left text-[0.78rem] font-medium text-[rgba(245,239,229,0.48)] sm:text-right">
-          <div>{message.timestamp}</div>
-          {message.sourceMailbox ? (
-            <div className="mt-1 text-[rgba(245,239,229,0.58)]">{message.sourceMailbox}</div>
+
+        <div className="mt-4 flex flex-wrap items-center gap-2 rounded-[16px] border border-white/10 bg-[rgba(12,18,15,0.3)] p-2">
+          {resolvedCategory !== "demo" ? (
+            <DetailActionButton
+              icon="category"
+              onClick={() => onMoveToCategory(message, "demo")}
+            >
+              Move to Demo
+            </DetailActionButton>
           ) : null}
+          {resolvedCategory !== "promo" ? (
+            <DetailActionButton
+              icon="category"
+              onClick={() => onMoveToCategory(message, "promo")}
+            >
+              Move to Promo
+            </DetailActionButton>
+          ) : null}
+          <DetailActionButton
+            active={message.shortlisted === true}
+            icon={message.shortlisted ? "shortlistOff" : "shortlist"}
+            onClick={() => onToggleShortlist(message)}
+          >
+            {message.shortlisted ? "Remove from Shortlist" : "Shortlist"}
+          </DetailActionButton>
+          <DetailActionButton
+            active={message.manualPriority === true}
+            icon={message.manualPriority ? "priorityOff" : "priority"}
+            onClick={() => onTogglePriority(message)}
+          >
+            {message.manualPriority ? "Remove Priority" : "Mark as Priority"}
+          </DetailActionButton>
+          <DetailActionButton
+            active={message.trashed === true}
+            icon={message.trashed ? "restore" : "trash"}
+            onClick={() => onToggleTrash(message)}
+          >
+            {message.trashed ? "Restore" : "Move to Trash"}
+          </DetailActionButton>
         </div>
       </div>
 
