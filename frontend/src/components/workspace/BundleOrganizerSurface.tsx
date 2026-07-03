@@ -16,6 +16,21 @@ import {
 } from "./bundleOrganizerFilters";
 
 type BundleOrganizerView = "priority" | "demo" | "promo";
+type BundleOrganizerDemoStatusFilter =
+  | "all"
+  | "unread"
+  | "shortlisted"
+  | "priority"
+  | "replied"
+  | "declined";
+type BundleOrganizerPromoStatusFilter =
+  | "all"
+  | "unread"
+  | "read"
+  | "shortlisted"
+  | "priority";
+type BundleOrganizerPromoFilter = "new" | "reminders" | "all";
+type BundleOrganizerDateSort = "newest" | "oldest";
 
 type BundleOrganizerContextMenuState = {
   messageId: string;
@@ -64,6 +79,12 @@ type BundleOrganizerMessage = {
   ui_signal?: string;
   uiSignal?: string;
   unread?: boolean;
+  shortlisted?: boolean;
+  replied?: boolean;
+  repliedAt?: string | null;
+  replyHistory?: unknown[];
+  declined?: boolean;
+  declinedAt?: string | null;
   manualPriority?: boolean | null;
   active_work_status?: BundleOrganizerActiveWorkStatus | string | null;
   v7_final_priority?: string;
@@ -103,6 +124,12 @@ export type BundleOrganizerWorkspaceMessage = {
   signal?: string;
   uiSignal?: string;
   unread?: boolean;
+  shortlisted?: boolean;
+  replied?: boolean;
+  repliedAt?: string | null;
+  replyHistory?: unknown[];
+  declined?: boolean;
+  declinedAt?: string | null;
   manualPriority?: boolean | null;
   active_work_status?: BundleOrganizerActiveWorkStatus | string | null;
   v7_final_priority?: string;
@@ -126,6 +153,33 @@ const navItems: Array<{
   { id: "priority", label: "Priority", icon: "priority" },
   { id: "demo", label: "Demo Inbox", icon: "demo" },
   { id: "promo", label: "Promo Inbox", icon: "promo" },
+];
+
+const allSourceFilterId = "all";
+const demoStatusFilterOptions: Array<{
+  id: BundleOrganizerDemoStatusFilter;
+  label: string;
+}> = [
+  { id: "all", label: "All status" },
+  { id: "unread", label: "Unread" },
+  { id: "shortlisted", label: "Shortlisted" },
+  { id: "priority", label: "Priority" },
+  { id: "replied", label: "Replied" },
+  { id: "declined", label: "Declined" },
+];
+const promoStatusFilterOptions: Array<{
+  id: BundleOrganizerPromoStatusFilter;
+  label: string;
+}> = [
+  { id: "all", label: "All status" },
+  { id: "unread", label: "Unread" },
+  { id: "read", label: "Read" },
+  { id: "shortlisted", label: "Shortlisted" },
+  { id: "priority", label: "Priority" },
+];
+const dateSortOptions: Array<{ id: BundleOrganizerDateSort; label: string }> = [
+  { id: "newest", label: "Newest first" },
+  { id: "oldest", label: "Oldest first" },
 ];
 
 const viewCopy: Record<
@@ -243,6 +297,131 @@ function getCounts(liveMessages: BundleOrganizerMessage[]) {
 
 function getViewLabel(view: BundleOrganizerView) {
   return navItems.find((item) => item.id === view)?.label ?? viewCopy[view].title;
+}
+
+function resolveMessageSourceFilterId(message: BundleOrganizerMessage) {
+  return message.sourceMailbox.trim() || "";
+}
+
+function buildSourceFilterOptions(messages: BundleOrganizerMessage[]) {
+  const optionsById = new Map<
+    string,
+    { count: number; id: string; label: string }
+  >();
+
+  messages.forEach((message) => {
+    const id = resolveMessageSourceFilterId(message);
+
+    if (!id) {
+      return;
+    }
+
+    const existingOption = optionsById.get(id);
+
+    if (existingOption) {
+      existingOption.count += 1;
+      return;
+    }
+
+    optionsById.set(id, {
+      count: 1,
+      id,
+      label: message.sourceMailbox.trim() || "Unknown inbox",
+    });
+  });
+
+  return Array.from(optionsById.values()).sort((first, second) =>
+    first.label.localeCompare(second.label),
+  );
+}
+
+function filterMessagesBySource(
+  messages: BundleOrganizerMessage[],
+  sourceFilterId: string,
+) {
+  if (sourceFilterId === allSourceFilterId) {
+    return messages;
+  }
+
+  return messages.filter(
+    (message) => resolveMessageSourceFilterId(message) === sourceFilterId,
+  );
+}
+
+function filterMessagesByDemoStatus(
+  messages: BundleOrganizerMessage[],
+  statusFilter: BundleOrganizerDemoStatusFilter,
+) {
+  if (statusFilter === "all") {
+    return messages;
+  }
+
+  return messages.filter((message) => {
+    if (statusFilter === "unread") {
+      return message.unread === true;
+    }
+
+    if (statusFilter === "shortlisted") {
+      return message.shortlisted === true;
+    }
+
+    if (statusFilter === "priority") {
+      return shouldShowInOrganizerPriority(message);
+    }
+
+    if (statusFilter === "replied") {
+      return (
+        message.replied === true ||
+        Boolean(message.repliedAt) ||
+        Boolean(message.replyHistory?.length)
+      );
+    }
+
+    if (statusFilter === "declined") {
+      return message.declined === true || Boolean(message.declinedAt);
+    }
+
+    return true;
+  });
+}
+
+function filterMessagesByPromoStatus(
+  messages: BundleOrganizerMessage[],
+  statusFilter: BundleOrganizerPromoStatusFilter,
+) {
+  return messages.filter((message) => {
+    if (statusFilter === "unread") {
+      return message.unread === true;
+    }
+
+    if (statusFilter === "read") {
+      return message.unread !== true;
+    }
+
+    if (statusFilter === "shortlisted") {
+      return message.shortlisted === true;
+    }
+
+    if (statusFilter === "priority") {
+      return shouldShowInOrganizerPriority(message);
+    }
+
+    return true;
+  });
+}
+
+function sortMessagesByDate(
+  messages: BundleOrganizerMessage[],
+  sortMode: BundleOrganizerDateSort,
+) {
+  return [...messages].sort((left, right) => {
+    const leftTime = left.sortTimestamp ?? 0;
+    const rightTime = right.sortTimestamp ?? 0;
+
+    return sortMode === "oldest"
+      ? leftTime - rightTime
+      : rightTime - leftTime;
+  });
 }
 
 function buildGlobalSearchSourceRows(
@@ -434,9 +613,9 @@ function ContextMenuIcon({ name }: { name: BundleOrganizerContextMenuIconName })
 
 function isPromoReminderMessage(message: BundleOrganizerMessage) {
   return (
-    message.internalClassification === "promo_reminder" ||
-    message.category === "promo_reminder" ||
-    message.ui_signal === "promo_reminder"
+    formatOrganizerSignal(message.internalClassification) === "promo_reminder" ||
+    formatOrganizerSignal(message.category) === "promo_reminder" ||
+    formatOrganizerSignal(message.ui_signal) === "promo_reminder"
   );
 }
 
@@ -560,6 +739,43 @@ function MessagePills({ message }: { message: BundleOrganizerMessage }) {
   );
 }
 
+function FilterSelect({
+  ariaLabel,
+  children,
+  onChange,
+  value,
+}: {
+  ariaLabel: string;
+  children: ReactNode;
+  onChange: (value: string) => void;
+  value: string;
+}) {
+  return (
+    <label className="relative inline-flex">
+      <span className="sr-only">{ariaLabel}</span>
+      <select
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        className="h-9 max-w-[220px] appearance-none rounded-full border border-white/10 bg-white/5 px-3.5 pr-10 text-[0.74rem] font-medium uppercase tracking-[0.1em] text-[rgba(245,239,229,0.66)] outline-none transition-colors hover:border-[rgba(143,179,159,0.24)] hover:bg-[rgba(143,179,159,0.1)] hover:text-[rgba(198,228,209,0.84)] focus:border-[rgba(143,179,159,0.34)]"
+      >
+        {children}
+      </select>
+      <svg
+        aria-hidden="true"
+        className="pointer-events-none absolute right-3.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[rgba(245,239,229,0.52)]"
+        fill="none"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="2"
+        viewBox="0 0 24 24"
+      >
+        <path d="m6 9 6 6 6-6" />
+      </svg>
+    </label>
+  );
+}
+
 function MessageDetail({
   message,
   onBack,
@@ -634,14 +850,108 @@ export function BundleOrganizerSurface({
   const [contextMenu, setContextMenu] =
     useState<BundleOrganizerContextMenuState | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
+  const [demoSourceFilterId, setDemoSourceFilterId] = useState(allSourceFilterId);
+  const [promoSourceFilterId, setPromoSourceFilterId] = useState(allSourceFilterId);
+  const [demoStatusFilter, setDemoStatusFilter] =
+    useState<BundleOrganizerDemoStatusFilter>("all");
+  const [promoFilter, setPromoFilter] =
+    useState<BundleOrganizerPromoFilter>("new");
+  const [promoStatusFilter, setPromoStatusFilter] =
+    useState<BundleOrganizerPromoStatusFilter>("all");
+  const [demoSort, setDemoSort] = useState<BundleOrganizerDateSort>("newest");
+  const [promoSort, setPromoSort] = useState<BundleOrganizerDateSort>("newest");
   const workspaceMessages = useMemo(
     () => normalizeWorkspaceMessages(liveMessages),
     [liveMessages],
   );
   const counts = useMemo(() => getCounts(workspaceMessages), [workspaceMessages]);
+  const demoAllMessages = useMemo(
+    () => getMessagesForView("demo", workspaceMessages),
+    [workspaceMessages],
+  );
+  const promoAllMessages = useMemo(
+    () => getMessagesForView("promo", workspaceMessages),
+    [workspaceMessages],
+  );
+  const demoSourceFilterOptions = useMemo(
+    () => buildSourceFilterOptions(demoAllMessages),
+    [demoAllMessages],
+  );
+  const promoSourceFilterOptions = useMemo(
+    () => buildSourceFilterOptions(promoAllMessages),
+    [promoAllMessages],
+  );
+  const sourceFilteredDemoMessages = useMemo(
+    () => filterMessagesBySource(demoAllMessages, demoSourceFilterId),
+    [demoAllMessages, demoSourceFilterId],
+  );
+  const sortedVisibleDemoMessages = useMemo(
+    () =>
+      sortMessagesByDate(
+        filterMessagesByDemoStatus(sourceFilteredDemoMessages, demoStatusFilter),
+        demoSort,
+      ),
+    [demoSort, demoStatusFilter, sourceFilteredDemoMessages],
+  );
+  const sourceFilteredPromoMessages = useMemo(
+    () => filterMessagesBySource(promoAllMessages, promoSourceFilterId),
+    [promoAllMessages, promoSourceFilterId],
+  );
+  const promoReminderMessages = useMemo(
+    () => sourceFilteredPromoMessages.filter(isPromoReminderMessage),
+    [sourceFilteredPromoMessages],
+  );
+  const promoNewMessages = useMemo(
+    () =>
+      sourceFilteredPromoMessages.filter(
+        (message) => !isPromoReminderMessage(message),
+      ),
+    [sourceFilteredPromoMessages],
+  );
+  const visiblePromoMessages = useMemo(
+    () =>
+      promoFilter === "reminders"
+        ? promoReminderMessages
+        : promoFilter === "all"
+        ? sourceFilteredPromoMessages
+        : promoNewMessages,
+    [
+      promoFilter,
+      promoNewMessages,
+      promoReminderMessages,
+      sourceFilteredPromoMessages,
+    ],
+  );
+  const sortedVisiblePromoMessages = useMemo(
+    () =>
+      sortMessagesByDate(
+        filterMessagesByPromoStatus(visiblePromoMessages, promoStatusFilter),
+        promoSort,
+      ),
+    [promoSort, promoStatusFilter, visiblePromoMessages],
+  );
+  const promoFilterOptions: Array<{
+    count: number;
+    id: BundleOrganizerPromoFilter;
+    label: string;
+  }> = [
+    { id: "new", label: "Promos", count: promoNewMessages.length },
+    { id: "reminders", label: "Reminders", count: promoReminderMessages.length },
+    { id: "all", label: "All", count: sourceFilteredPromoMessages.length },
+  ];
   const rawActiveMessages = useMemo(
-    () => getMessagesForView(activeView, workspaceMessages),
-    [activeView, workspaceMessages],
+    () =>
+      activeView === "demo"
+        ? sortedVisibleDemoMessages
+        : activeView === "promo"
+        ? sortedVisiblePromoMessages
+        : getMessagesForView(activeView, workspaceMessages),
+    [
+      activeView,
+      sortedVisibleDemoMessages,
+      sortedVisiblePromoMessages,
+      workspaceMessages,
+    ],
   );
   const globalSearchSourceRows = useMemo(
     () => buildGlobalSearchSourceRows(workspaceMessages),
@@ -680,6 +990,21 @@ export function BundleOrganizerSurface({
   const contextMenuActions = contextMenuMessage
     ? getContextMenuActions(contextMenuMessage.message, contextMenuMessage.sourceView)
     : [];
+  const isViewFilterActive =
+    !isSearchActive &&
+    ((activeView === "demo" &&
+      (demoSourceFilterId !== allSourceFilterId ||
+        demoStatusFilter !== "all" ||
+        demoSort !== "newest")) ||
+      (activeView === "promo" &&
+        (promoSourceFilterId !== allSourceFilterId ||
+          promoStatusFilter !== "all" ||
+          promoFilter !== "new" ||
+          promoSort !== "newest")));
+  const shouldShowControlBar =
+    !selectedMessage &&
+    !isSearchActive &&
+    (activeView === "demo" || activeView === "promo");
 
   const selectView = (view: BundleOrganizerView) => {
     setActiveView(view);
@@ -713,6 +1038,24 @@ export function BundleOrganizerSurface({
   useEffect(() => {
     setContextMenu(null);
   }, [activeView, isSearchActive]);
+
+  useEffect(() => {
+    if (
+      demoSourceFilterId !== allSourceFilterId &&
+      !demoSourceFilterOptions.some((option) => option.id === demoSourceFilterId)
+    ) {
+      setDemoSourceFilterId(allSourceFilterId);
+    }
+  }, [demoSourceFilterId, demoSourceFilterOptions]);
+
+  useEffect(() => {
+    if (
+      promoSourceFilterId !== allSourceFilterId &&
+      !promoSourceFilterOptions.some((option) => option.id === promoSourceFilterId)
+    ) {
+      setPromoSourceFilterId(allSourceFilterId);
+    }
+  }, [promoSourceFilterId, promoSourceFilterOptions]);
 
   useEffect(() => {
     if (!contextMenu) {
@@ -901,6 +1244,143 @@ export function BundleOrganizerSurface({
                 </p>
               </div>
 
+              {shouldShowControlBar ? (
+                <div className="mt-4 flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    {activeView === "promo"
+                      ? promoFilterOptions.map((option) => {
+                          const isSelected = option.id === promoFilter;
+
+                          return (
+                            <button
+                              key={option.id}
+                              type="button"
+                              onClick={() => {
+                                setPromoFilter(option.id);
+                                setSelectedMessage(null);
+                                setContextMenu(null);
+                              }}
+                              className={`inline-flex h-9 items-center justify-center gap-2 rounded-full border px-3.5 text-[0.74rem] font-medium uppercase tracking-[0.1em] transition-colors ${
+                                isSelected
+                                  ? "border-[rgba(143,179,159,0.34)] bg-[rgba(143,179,159,0.16)] text-[rgba(198,228,209,0.94)]"
+                                  : "border-white/10 bg-white/5 text-[rgba(245,239,229,0.62)] hover:border-[rgba(143,179,159,0.24)] hover:bg-[rgba(143,179,159,0.1)] hover:text-[rgba(198,228,209,0.84)]"
+                              }`}
+                            >
+                              <span>{option.label}</span>
+                              <span
+                                className={`rounded-full px-2 py-0.5 text-[0.68rem] ${
+                                  isSelected
+                                    ? "bg-[rgba(143,179,159,0.16)] text-[rgba(198,228,209,0.92)]"
+                                    : "bg-white/5 text-[rgba(245,239,229,0.5)]"
+                                }`}
+                              >
+                                {option.count}
+                              </span>
+                            </button>
+                          );
+                        })
+                      : null}
+                    <FilterSelect
+                      ariaLabel="Filter by source inbox"
+                      value={
+                        activeView === "demo"
+                          ? demoSourceFilterId
+                          : promoSourceFilterId
+                      }
+                      onChange={(value) => {
+                        if (activeView === "demo") {
+                          setDemoSourceFilterId(value);
+                        } else {
+                          setPromoSourceFilterId(value);
+                        }
+                        setSelectedMessage(null);
+                        setContextMenu(null);
+                      }}
+                    >
+                      <option value={allSourceFilterId}>All inboxes</option>
+                      {(activeView === "demo"
+                        ? demoSourceFilterOptions
+                        : promoSourceFilterOptions
+                      ).map((option) => (
+                        <option key={option.id} value={option.id}>
+                          {option.label} ({option.count})
+                        </option>
+                      ))}
+                    </FilterSelect>
+                  </div>
+
+                  {activeView === "demo" ? (
+                    <div className="flex flex-wrap items-center gap-2">
+                      <FilterSelect
+                        ariaLabel="Filter by demo status"
+                        value={demoStatusFilter}
+                        onChange={(value) => {
+                          setDemoStatusFilter(value as BundleOrganizerDemoStatusFilter);
+                          setSelectedMessage(null);
+                          setContextMenu(null);
+                        }}
+                      >
+                        {demoStatusFilterOptions.map((option) => (
+                          <option key={option.id} value={option.id}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </FilterSelect>
+                      <FilterSelect
+                        ariaLabel="Sort demo messages"
+                        value={demoSort}
+                        onChange={(value) => {
+                          setDemoSort(value as BundleOrganizerDateSort);
+                          setSelectedMessage(null);
+                          setContextMenu(null);
+                        }}
+                      >
+                        {dateSortOptions.map((option) => (
+                          <option key={option.id} value={option.id}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </FilterSelect>
+                    </div>
+                  ) : null}
+
+                  {activeView === "promo" ? (
+                    <div className="flex flex-wrap items-center gap-2">
+                      <FilterSelect
+                        ariaLabel="Filter promo status"
+                        value={promoStatusFilter}
+                        onChange={(value) => {
+                          setPromoStatusFilter(value as BundleOrganizerPromoStatusFilter);
+                          setSelectedMessage(null);
+                          setContextMenu(null);
+                        }}
+                      >
+                        {promoStatusFilterOptions.map((option) => (
+                          <option key={option.id} value={option.id}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </FilterSelect>
+                      <FilterSelect
+                        ariaLabel="Sort promo messages"
+                        value={promoSort}
+                        onChange={(value) => {
+                          setPromoSort(value as BundleOrganizerDateSort);
+                          setSelectedMessage(null);
+                          setContextMenu(null);
+                        }}
+                      >
+                        {dateSortOptions.map((option) => (
+                          <option key={option.id} value={option.id}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </FilterSelect>
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+
               {selectedMessage ? (
                 <MessageDetail
                   message={selectedMessage}
@@ -911,6 +1391,8 @@ export function BundleOrganizerSurface({
                   <h3 className="text-[1rem] font-semibold tracking-[-0.02em] text-[color:#f5efe5]">
                     {isSearchActive
                       ? "No matching messages."
+                      : isViewFilterActive
+                      ? "No messages match this filter."
                       : hasOrganizerData
                       ? activeCopy.emptyTitle
                       : "No messages loaded."}
@@ -918,6 +1400,8 @@ export function BundleOrganizerSurface({
                   <p className="mx-auto mt-2 max-w-[460px] text-[0.86rem] leading-6 text-[rgba(245,239,229,0.58)]">
                     {isSearchActive
                       ? "Try a different sender, subject, snippet, or source mailbox."
+                      : isViewFilterActive
+                      ? "Try another inbox, status, or filter."
                       : hasOrganizerData
                       ? activeCopy.emptyDescription
                       : "Connected inbox messages will appear here after sync."}
