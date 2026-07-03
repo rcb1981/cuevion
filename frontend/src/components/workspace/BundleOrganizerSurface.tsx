@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -33,6 +34,8 @@ type BundleOrganizerPromoFilter = "new" | "reminders" | "all";
 type BundleOrganizerDateSort = "newest" | "oldest";
 
 type BundleOrganizerContextMenuState = {
+  anchorX: number;
+  anchorY: number;
   messageId: string;
   sourceView: BundleOrganizerView;
   x: number;
@@ -242,6 +245,11 @@ const viewCopy: Record<
 const bundleModeDisabledReason = "Not connected in Bundle mode yet";
 const bundleOrganizerWorkflowStorageKey =
   "cuevion-bundle-organizer-workflow-state";
+const contextMenuGap = 8;
+const contextMenuViewportPadding = 12;
+const contextMenuWidth = 190;
+const contextMenuEstimatedActionHeight = 37;
+const contextMenuVerticalChrome = 12;
 const shortlistedPillClass =
   "rounded-full border border-[rgba(246,183,91,0.24)] bg-[rgba(214,137,45,0.14)] px-2 py-0.5 text-[0.68rem] font-medium uppercase tracking-[0.1em] text-[rgba(255,204,125,0.9)]";
 const trashedPillClass =
@@ -778,6 +786,49 @@ function buildDisabledMenuAction(
   };
 }
 
+function estimateContextMenuHeight(actionCount: number) {
+  return contextMenuVerticalChrome + actionCount * contextMenuEstimatedActionHeight;
+}
+
+function resolveContextMenuPosition(
+  anchorX: number,
+  anchorY: number,
+  menuHeight: number,
+  menuWidth = contextMenuWidth,
+) {
+  if (typeof window === "undefined") {
+    return { x: anchorX, y: anchorY };
+  }
+
+  const maxX = Math.max(
+    contextMenuViewportPadding,
+    window.innerWidth - menuWidth - contextMenuViewportPadding,
+  );
+  const x = Math.min(
+    Math.max(contextMenuViewportPadding, anchorX),
+    maxX,
+  );
+  const availableMenuHeight = Math.min(
+    menuHeight,
+    Math.max(0, window.innerHeight - contextMenuViewportPadding * 2),
+  );
+  const maxY = Math.max(
+    contextMenuViewportPadding,
+    window.innerHeight - availableMenuHeight - contextMenuViewportPadding,
+  );
+  const opensPastBottom =
+    anchorY + menuHeight > window.innerHeight - contextMenuViewportPadding;
+  const preferredY = opensPastBottom
+    ? anchorY - menuHeight - contextMenuGap * 2
+    : anchorY;
+  const y = Math.min(
+    Math.max(contextMenuViewportPadding, preferredY),
+    maxY,
+  );
+
+  return { x, y };
+}
+
 function getContextMenuActions(
   message: BundleOrganizerMessage,
   sourceView: BundleOrganizerView,
@@ -1312,26 +1363,59 @@ export function BundleOrganizerSurface({
     x: number,
     y: number,
   ) => {
-    const clampedX =
-      typeof window === "undefined"
-        ? x
-        : Math.min(Math.max(12, x), Math.max(12, window.innerWidth - 220));
-    const clampedY =
-      typeof window === "undefined"
-        ? y
-        : Math.min(Math.max(12, y), Math.max(12, window.innerHeight - 160));
+    const estimatedActionCount = getContextMenuActions(
+      message,
+      sourceView,
+      toggleMessageShortlist,
+      toggleMessageTrash,
+    ).length;
+    const position = resolveContextMenuPosition(
+      x,
+      y,
+      estimateContextMenuHeight(estimatedActionCount),
+    );
 
     setContextMenu({
+      anchorX: x,
+      anchorY: y,
       messageId: message.id,
       sourceView,
-      x: clampedX,
-      y: clampedY,
+      x: position.x,
+      y: position.y,
     });
   };
 
   useEffect(() => {
     setContextMenu(null);
   }, [activeView, isSearchActive]);
+
+  useLayoutEffect(() => {
+    if (!contextMenu || !menuRef.current) {
+      return;
+    }
+
+    const rect = menuRef.current.getBoundingClientRect();
+    const position = resolveContextMenuPosition(
+      contextMenu.anchorX,
+      contextMenu.anchorY,
+      rect.height,
+      rect.width,
+    );
+
+    if (position.x === contextMenu.x && position.y === contextMenu.y) {
+      return;
+    }
+
+    setContextMenu((currentContextMenu) =>
+      currentContextMenu
+        ? {
+            ...currentContextMenu,
+            x: position.x,
+            y: position.y,
+          }
+        : currentContextMenu,
+    );
+  }, [contextMenu, contextMenuActions.length]);
 
   useEffect(() => {
     if (
@@ -1792,8 +1876,8 @@ export function BundleOrganizerSurface({
                             openContextMenu(
                               message,
                               sourceView,
-                              rect.right - 176,
-                              rect.bottom + 8,
+                              rect.right - contextMenuWidth,
+                              rect.bottom + contextMenuGap,
                             );
                           }}
                           className={`absolute right-3 top-3 inline-flex h-8 w-8 items-center justify-center rounded-full border text-[1rem] leading-none transition-colors sm:right-4 ${
@@ -1848,8 +1932,12 @@ export function BundleOrganizerSurface({
                   data-organizer-context-menu-surface="true"
                   onContextMenu={(event) => event.preventDefault()}
                   onMouseDown={(event) => event.stopPropagation()}
-                  style={{ left: contextMenu.x, top: contextMenu.y }}
-                  className="fixed z-50 min-w-[190px] rounded-[14px] border border-white/10 bg-[rgba(25,34,30,0.96)] p-1.5 shadow-[0_18px_40px_rgba(0,0,0,0.34)] backdrop-blur-sm"
+                  style={{
+                    left: contextMenu.x,
+                    maxHeight: `calc(100vh - ${contextMenuViewportPadding * 2}px)`,
+                    top: contextMenu.y,
+                  }}
+                  className="fixed z-50 min-w-[190px] overflow-y-auto rounded-[14px] border border-white/10 bg-[rgba(25,34,30,0.96)] p-1.5 shadow-[0_18px_40px_rgba(0,0,0,0.34)] backdrop-blur-sm"
                 >
                   {contextMenuActions.map((action) => (
                     <button
