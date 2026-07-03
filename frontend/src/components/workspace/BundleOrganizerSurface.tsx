@@ -10,6 +10,7 @@ import {
   ACTIVE_WORK_PRIORITY_STATUSES,
   countUnreadMessages,
   formatOrganizerSignal,
+  resolveOrganizerCategory,
   shouldShowInDemoInbox,
   shouldShowInOrganizerPriority,
   shouldShowInPromoInbox,
@@ -78,6 +79,7 @@ type BundleOrganizerMessage = {
   timestamp: string;
   sourceMailbox: string;
   manualCategory?: "demo" | "promo";
+  manualCategoryAt?: string | null;
   internalClassification?: BundleOrganizerInternalClassification;
   category?: string;
   signal?: string;
@@ -128,6 +130,7 @@ export type BundleOrganizerWorkspaceMessage = {
   timestamp: string;
   sourceMailbox: string;
   manualCategory?: "demo" | "promo";
+  manualCategoryAt?: string | null;
   internalClassification?: BundleOrganizerInternalClassification;
   category?: string;
   signal?: string;
@@ -264,6 +267,8 @@ type BundleOrganizerWorkflowState = Record<
   {
     shortlisted?: boolean;
     shortlistedAt?: string;
+    manualCategory?: "demo" | "promo";
+    manualCategoryAt?: string;
     manualPriority?: boolean;
     manualPriorityAt?: string;
     trashed?: boolean;
@@ -388,6 +393,13 @@ function applyBundleWorkflowState(
           ? workflowEntry.shortlisted
           : message.shortlisted,
       shortlistedAt: workflowEntry.shortlistedAt ?? message.shortlistedAt,
+      manualCategory:
+        workflowEntry.manualCategory === "demo" ||
+        workflowEntry.manualCategory === "promo"
+          ? workflowEntry.manualCategory
+          : message.manualCategory,
+      manualCategoryAt:
+        workflowEntry.manualCategoryAt ?? message.manualCategoryAt,
       manualPriority:
         typeof workflowEntry.manualPriority === "boolean"
           ? workflowEntry.manualPriority
@@ -603,6 +615,8 @@ function doesMessageMatchSearch(message: BundleOrganizerMessage, searchQuery: st
     message.reason,
     message.internalClassification,
     message.category,
+    message.manualCategory,
+    resolveManualCategoryLabel(message),
     message.ui_signal,
     message.shortlisted ? "shortlisted" : null,
     message.manualPriority ? "manual priority" : null,
@@ -790,6 +804,18 @@ function isPromoReminderMessage(message: BundleOrganizerMessage) {
   );
 }
 
+function resolveManualCategoryLabel(message: BundleOrganizerMessage) {
+  if (message.manualCategory === "demo") {
+    return "Demo Inbox";
+  }
+
+  if (message.manualCategory === "promo") {
+    return "Promo Inbox";
+  }
+
+  return null;
+}
+
 function buildDisabledMenuAction(
   action: Omit<BundleOrganizerContextMenuAction, "disabled" | "disabledReason">,
 ): BundleOrganizerContextMenuAction {
@@ -846,6 +872,10 @@ function resolveContextMenuPosition(
 function getContextMenuActions(
   message: BundleOrganizerMessage,
   sourceView: BundleOrganizerView,
+  onMoveToCategory: (
+    message: BundleOrganizerMessage,
+    manualCategory: "demo" | "promo",
+  ) => void,
   onToggleShortlist: (message: BundleOrganizerMessage) => void,
   onTogglePriority: (message: BundleOrganizerMessage) => void,
   onToggleTrash: (message: BundleOrganizerMessage) => void,
@@ -877,30 +907,25 @@ function getContextMenuActions(
     return actions;
   }
 
-  if (sourceView === "demo") {
+  const resolvedCategory = resolveOrganizerCategory(message);
+
+  if (resolvedCategory !== "demo") {
     actions.push(
-      buildDisabledMenuAction({
-        icon: "category",
-        label: "Move to Promo",
-      }),
-    );
-  } else if (sourceView === "promo") {
-    actions.push(
-      buildDisabledMenuAction({
+      {
         icon: "category",
         label: "Move to Demo",
-      }),
+        onSelect: () => onMoveToCategory(message, "demo"),
+      },
     );
-  } else if (sourceView === "priority" || sourceView === "shortlist") {
+  }
+
+  if (resolvedCategory !== "promo") {
     actions.push(
-      buildDisabledMenuAction({
-        icon: "category",
-        label: "Move to Demo",
-      }),
-      buildDisabledMenuAction({
+      {
         icon: "category",
         label: "Move to Promo",
-      }),
+        onSelect: () => onMoveToCategory(message, "promo"),
+      },
     );
   }
 
@@ -955,6 +980,8 @@ function getContextMenuActions(
 }
 
 function MessagePills({ message }: { message: BundleOrganizerMessage }) {
+  const manualCategoryLabel = resolveManualCategoryLabel(message);
+
   return (
     <>
       {message.sourceMailbox ? (
@@ -969,6 +996,11 @@ function MessagePills({ message }: { message: BundleOrganizerMessage }) {
       ) : null}
       {message.manualPriority === true ? (
         <span className={manualPillClass}>Manual Priority</span>
+      ) : null}
+      {manualCategoryLabel ? (
+        <span className={manualPillClass}>
+          Manual: {manualCategoryLabel}
+        </span>
       ) : null}
       {message.shortlisted ? (
         <span className={shortlistedPillClass}>Shortlisted</span>
@@ -1025,18 +1057,24 @@ function FilterSelect({
 function MessageDetail({
   message,
   onBack,
+  onMoveToCategory,
   onTogglePriority,
   onToggleShortlist,
   onToggleTrash,
 }: {
   message: BundleOrganizerMessage;
   onBack: () => void;
+  onMoveToCategory: (
+    message: BundleOrganizerMessage,
+    manualCategory: "demo" | "promo",
+  ) => void;
   onTogglePriority: (message: BundleOrganizerMessage) => void;
   onToggleShortlist: (message: BundleOrganizerMessage) => void;
   onToggleTrash: (message: BundleOrganizerMessage) => void;
 }) {
   const activeReason = resolvePriorityReason(message);
   const bodyLines = message.body.length > 0 ? message.body : [message.snippet];
+  const resolvedCategory = resolveOrganizerCategory(message);
 
   return (
     <article className="mt-4 rounded-[18px] border border-white/10 bg-white/[0.045] p-4 sm:p-5">
@@ -1050,6 +1088,26 @@ function MessageDetail({
             >
               Back
             </button>
+            {resolvedCategory !== "demo" ? (
+              <button
+                type="button"
+                onClick={() => onMoveToCategory(message, "demo")}
+                className="inline-flex h-8 items-center gap-1.5 rounded-full border border-white/10 bg-white/5 px-3 text-[0.68rem] font-medium uppercase tracking-[0.1em] text-[rgba(245,239,229,0.56)] transition-colors hover:border-[rgba(143,179,159,0.24)] hover:bg-[rgba(143,179,159,0.1)] hover:text-[rgba(198,228,209,0.88)]"
+              >
+                <ContextMenuIcon name="category" />
+                <span>Move to Demo</span>
+              </button>
+            ) : null}
+            {resolvedCategory !== "promo" ? (
+              <button
+                type="button"
+                onClick={() => onMoveToCategory(message, "promo")}
+                className="inline-flex h-8 items-center gap-1.5 rounded-full border border-white/10 bg-white/5 px-3 text-[0.68rem] font-medium uppercase tracking-[0.1em] text-[rgba(245,239,229,0.56)] transition-colors hover:border-[rgba(143,179,159,0.24)] hover:bg-[rgba(143,179,159,0.1)] hover:text-[rgba(198,228,209,0.88)]"
+              >
+                <ContextMenuIcon name="category" />
+                <span>Move to Promo</span>
+              </button>
+            ) : null}
             <button
               type="button"
               onClick={() => onToggleShortlist(message)}
@@ -1298,6 +1356,7 @@ export function BundleOrganizerSurface({
     ? getContextMenuActions(
         contextMenuMessage.message,
         contextMenuMessage.sourceView,
+        moveMessageToCategory,
         toggleMessageShortlist,
         toggleMessagePriority,
         toggleMessageTrash,
@@ -1324,6 +1383,38 @@ export function BundleOrganizerSurface({
     setSelectedMessage(null);
     setContextMenu(null);
   };
+
+  function moveMessageToCategory(
+    message: BundleOrganizerMessage,
+    manualCategory: "demo" | "promo",
+  ) {
+    const identityKey = getWorkflowIdentityKey(message);
+    const manualCategoryAt = new Date().toISOString();
+
+    setWorkflowState((currentState) => {
+      const nextState = {
+        ...currentState,
+        [identityKey]: {
+          ...currentState[identityKey],
+          manualCategory,
+          manualCategoryAt,
+        },
+      };
+
+      writeBundleOrganizerWorkflowState(nextState);
+      return nextState;
+    });
+    setContextMenu(null);
+    setSelectedMessage((currentMessage) =>
+      currentMessage && getWorkflowIdentityKey(currentMessage) === identityKey
+        ? {
+            ...currentMessage,
+            manualCategory,
+            manualCategoryAt,
+          }
+        : currentMessage,
+    );
+  }
 
   function toggleMessageShortlist(message: BundleOrganizerMessage) {
     const identityKey = getWorkflowIdentityKey(message);
@@ -1440,6 +1531,7 @@ export function BundleOrganizerSurface({
     const estimatedActionCount = getContextMenuActions(
       message,
       sourceView,
+      moveMessageToCategory,
       toggleMessageShortlist,
       toggleMessagePriority,
       toggleMessageTrash,
@@ -1838,6 +1930,7 @@ export function BundleOrganizerSurface({
                 <MessageDetail
                   message={selectedMessage}
                   onBack={() => setSelectedMessage(null)}
+                  onMoveToCategory={moveMessageToCategory}
                   onTogglePriority={toggleMessagePriority}
                   onToggleShortlist={toggleMessageShortlist}
                   onToggleTrash={toggleMessageTrash}
