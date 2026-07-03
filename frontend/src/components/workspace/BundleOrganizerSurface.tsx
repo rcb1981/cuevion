@@ -616,7 +616,8 @@ function doesMessageMatchSearch(message: BundleOrganizerMessage, searchQuery: st
     message.internalClassification,
     message.category,
     message.manualCategory,
-    resolveManualCategoryLabel(message),
+    resolveOrganizerCategory(message),
+    resolveOrganizerCategory(message)?.replace(/_/g, " "),
     message.ui_signal,
     message.shortlisted ? "shortlisted" : null,
     message.manualPriority ? "manual priority" : null,
@@ -804,18 +805,6 @@ function isPromoReminderMessage(message: BundleOrganizerMessage) {
   );
 }
 
-function resolveManualCategoryLabel(message: BundleOrganizerMessage) {
-  if (message.manualCategory === "demo") {
-    return "Demo Inbox";
-  }
-
-  if (message.manualCategory === "promo") {
-    return "Promo Inbox";
-  }
-
-  return null;
-}
-
 function buildDisabledMenuAction(
   action: Omit<BundleOrganizerContextMenuAction, "disabled" | "disabledReason">,
 ): BundleOrganizerContextMenuAction {
@@ -980,7 +969,7 @@ function getContextMenuActions(
 }
 
 function MessagePills({ message }: { message: BundleOrganizerMessage }) {
-  const manualCategoryLabel = resolveManualCategoryLabel(message);
+  const resolvedCategory = resolveOrganizerCategory(message);
 
   return (
     <>
@@ -997,20 +986,15 @@ function MessagePills({ message }: { message: BundleOrganizerMessage }) {
       {message.manualPriority === true ? (
         <span className={manualPillClass}>Manual Priority</span>
       ) : null}
-      {manualCategoryLabel ? (
-        <span className={manualPillClass}>
-          Manual: {manualCategoryLabel}
-        </span>
-      ) : null}
       {message.shortlisted ? (
         <span className={shortlistedPillClass}>Shortlisted</span>
       ) : null}
       {message.trashed ? (
         <span className={trashedPillClass}>Trashed</span>
       ) : null}
-      {message.internalClassification ? (
+      {resolvedCategory ? (
         <span className="rounded-full bg-[rgba(120,104,89,0.1)] px-2 py-0.5 text-[0.68rem] font-medium text-[rgba(64,56,48,0.62)] dark:bg-white/5 dark:text-[rgba(245,239,229,0.56)]">
-          {message.internalClassification.replace(/_/g, " ")}
+          {resolvedCategory.replace(/_/g, " ")}
         </span>
       ) : null}
     </>
