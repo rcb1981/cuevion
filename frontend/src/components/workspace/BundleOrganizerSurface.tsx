@@ -94,6 +94,7 @@ type BundleOrganizerMessage = {
   declined?: boolean;
   declinedAt?: string | null;
   manualPriority?: boolean | null;
+  manualPriorityAt?: string | null;
   active_work_status?: BundleOrganizerActiveWorkStatus | string | null;
   v7_final_priority?: string;
   priorityBadge?: string;
@@ -142,6 +143,7 @@ export type BundleOrganizerWorkspaceMessage = {
   declined?: boolean;
   declinedAt?: string | null;
   manualPriority?: boolean | null;
+  manualPriorityAt?: string | null;
   active_work_status?: BundleOrganizerActiveWorkStatus | string | null;
   v7_final_priority?: string;
   priorityBadge?: string;
@@ -254,12 +256,16 @@ const shortlistedPillClass =
   "rounded-full border border-[rgba(246,183,91,0.24)] bg-[rgba(214,137,45,0.14)] px-2 py-0.5 text-[0.68rem] font-medium uppercase tracking-[0.1em] text-[rgba(255,204,125,0.9)]";
 const trashedPillClass =
   "rounded-full border border-white/15 bg-white/8 px-2 py-0.5 text-[0.68rem] font-medium uppercase tracking-[0.1em] text-[rgba(245,239,229,0.66)]";
+const manualPillClass =
+  "rounded-full border border-white/12 bg-white/6 px-2 py-0.5 text-[0.68rem] font-medium uppercase tracking-[0.1em] text-[rgba(245,239,229,0.6)]";
 
 type BundleOrganizerWorkflowState = Record<
   string,
   {
     shortlisted?: boolean;
     shortlistedAt?: string;
+    manualPriority?: boolean;
+    manualPriorityAt?: string;
     trashed?: boolean;
     trashedAt?: string;
   }
@@ -382,6 +388,12 @@ function applyBundleWorkflowState(
           ? workflowEntry.shortlisted
           : message.shortlisted,
       shortlistedAt: workflowEntry.shortlistedAt ?? message.shortlistedAt,
+      manualPriority:
+        typeof workflowEntry.manualPriority === "boolean"
+          ? workflowEntry.manualPriority
+          : message.manualPriority,
+      manualPriorityAt:
+        workflowEntry.manualPriorityAt ?? message.manualPriorityAt,
       trashed:
         typeof workflowEntry.trashed === "boolean"
           ? workflowEntry.trashed
@@ -593,6 +605,8 @@ function doesMessageMatchSearch(message: BundleOrganizerMessage, searchQuery: st
     message.category,
     message.ui_signal,
     message.shortlisted ? "shortlisted" : null,
+    message.manualPriority ? "manual priority" : null,
+    message.manualPriority ? "priority" : null,
     message.trashed ? "trashed" : null,
     ...(Array.isArray(message.body) ? message.body : []),
   ];
@@ -833,6 +847,7 @@ function getContextMenuActions(
   message: BundleOrganizerMessage,
   sourceView: BundleOrganizerView,
   onToggleShortlist: (message: BundleOrganizerMessage) => void,
+  onTogglePriority: (message: BundleOrganizerMessage) => void,
   onToggleTrash: (message: BundleOrganizerMessage) => void,
 ): BundleOrganizerContextMenuAction[] {
   const actions: BundleOrganizerContextMenuAction[] = [
@@ -896,10 +911,11 @@ function getContextMenuActions(
         message.shortlisted === true ? "Remove from Shortlist" : "Shortlist",
       onSelect: () => onToggleShortlist(message),
     },
-    buildDisabledMenuAction({
+    {
       icon: message.manualPriority === true ? "priorityOff" : "priority",
       label: message.manualPriority === true ? "Remove Priority" : "Mark as Priority",
-    }),
+      onSelect: () => onTogglePriority(message),
+    },
   );
 
   if (sourceView === "promo" || (sourceView === "shortlist" && shouldShowInPromoInbox(message))) {
@@ -950,6 +966,9 @@ function MessagePills({ message }: { message: BundleOrganizerMessage }) {
         <span className="rounded-full bg-[rgba(48,72,61,0.1)] px-2 py-0.5 text-[0.68rem] font-medium text-[rgba(48,72,61,0.86)] dark:bg-[rgba(143,179,159,0.14)] dark:text-[rgba(167,203,181,0.9)]">
           {message.priorityBadge}
         </span>
+      ) : null}
+      {message.manualPriority === true ? (
+        <span className={manualPillClass}>Manual Priority</span>
       ) : null}
       {message.shortlisted ? (
         <span className={shortlistedPillClass}>Shortlisted</span>
@@ -1006,11 +1025,13 @@ function FilterSelect({
 function MessageDetail({
   message,
   onBack,
+  onTogglePriority,
   onToggleShortlist,
   onToggleTrash,
 }: {
   message: BundleOrganizerMessage;
   onBack: () => void;
+  onTogglePriority: (message: BundleOrganizerMessage) => void;
   onToggleShortlist: (message: BundleOrganizerMessage) => void;
   onToggleTrash: (message: BundleOrganizerMessage) => void;
 }) {
@@ -1043,6 +1064,22 @@ function MessageDetail({
               />
               <span>
                 {message.shortlisted ? "Remove from shortlist" : "Shortlist"}
+              </span>
+            </button>
+            <button
+              type="button"
+              onClick={() => onTogglePriority(message)}
+              className={`inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-[0.68rem] font-medium uppercase tracking-[0.1em] transition-colors ${
+                message.manualPriority
+                  ? "border-[rgba(143,179,159,0.28)] bg-[rgba(143,179,159,0.12)] text-[rgba(198,228,209,0.92)] hover:bg-[rgba(143,179,159,0.16)]"
+                  : "border-white/10 bg-white/5 text-[rgba(245,239,229,0.56)] hover:border-[rgba(143,179,159,0.24)] hover:bg-[rgba(143,179,159,0.1)] hover:text-[rgba(198,228,209,0.88)]"
+              }`}
+            >
+              <ContextMenuIcon
+                name={message.manualPriority ? "priorityOff" : "priority"}
+              />
+              <span>
+                {message.manualPriority ? "Remove Priority" : "Mark as Priority"}
               </span>
             </button>
             <button
@@ -1262,6 +1299,7 @@ export function BundleOrganizerSurface({
         contextMenuMessage.message,
         contextMenuMessage.sourceView,
         toggleMessageShortlist,
+        toggleMessagePriority,
         toggleMessageTrash,
       )
     : [];
@@ -1323,6 +1361,42 @@ export function BundleOrganizerSurface({
     );
   }
 
+  function toggleMessagePriority(message: BundleOrganizerMessage) {
+    const identityKey = getWorkflowIdentityKey(message);
+    const nextManualPriority = message.manualPriority !== true;
+    const manualPriorityAt = nextManualPriority
+      ? new Date().toISOString()
+      : undefined;
+
+    setWorkflowState((currentState) => {
+      const nextState = {
+        ...currentState,
+        [identityKey]: {
+          ...currentState[identityKey],
+          manualPriority: nextManualPriority,
+          manualPriorityAt,
+        },
+      };
+
+      if (!nextManualPriority) {
+        delete nextState[identityKey].manualPriorityAt;
+      }
+
+      writeBundleOrganizerWorkflowState(nextState);
+      return nextState;
+    });
+    setContextMenu(null);
+    setSelectedMessage((currentMessage) =>
+      currentMessage && getWorkflowIdentityKey(currentMessage) === identityKey
+        ? {
+            ...currentMessage,
+            manualPriority: nextManualPriority,
+            manualPriorityAt,
+          }
+        : currentMessage,
+    );
+  }
+
   function toggleMessageTrash(message: BundleOrganizerMessage) {
     const identityKey = getWorkflowIdentityKey(message);
     const nextTrashed = message.trashed !== true;
@@ -1367,6 +1441,7 @@ export function BundleOrganizerSurface({
       message,
       sourceView,
       toggleMessageShortlist,
+      toggleMessagePriority,
       toggleMessageTrash,
     ).length;
     const position = resolveContextMenuPosition(
@@ -1763,6 +1838,7 @@ export function BundleOrganizerSurface({
                 <MessageDetail
                   message={selectedMessage}
                   onBack={() => setSelectedMessage(null)}
+                  onTogglePriority={toggleMessagePriority}
                   onToggleShortlist={toggleMessageShortlist}
                   onToggleTrash={toggleMessageTrash}
                 />
