@@ -45,11 +45,14 @@ type BundleOrganizerContextMenuState = {
 
 type BundleOrganizerContextMenuIconName =
   | "category"
+  | "decline"
   | "forward"
+  | "interest"
   | "mail"
   | "mailOpen"
   | "priority"
   | "priorityOff"
+  | "reply"
   | "restore"
   | "rule"
   | "shortlist"
@@ -314,6 +317,57 @@ const unsafeEmailTags = new Set([
 ]);
 const linkPattern = /(https?:\/\/[^\s<>"']+|www\.[^\s<>"']+)/gi;
 const trailingLinkPunctuation = /[.,!?;:)\]}]+$/;
+const maxEmbeddedLinkCards = 3;
+const fallbackPlaylistSoundCloudHeight = 360;
+const fallbackTrackSoundCloudHeight = 166;
+const maxPlaylistSoundCloudHeight = 520;
+const maxTrackSoundCloudHeight = 190;
+const minPlaylistSoundCloudHeight = 260;
+const minTrackSoundCloudHeight = 166;
+const soundCloudResolveEndpoint = "/api/organizer/soundcloud-resolve";
+const soundCloudLinkPattern =
+  /(https?:\/\/[^\s<>"']+|www\.soundcloud\.com\/[^\s<>"']+)/gi;
+const dropboxLinkPattern =
+  /(https?:\/\/[^\s<>"']+|(?:www\.)?dropbox\.com\/[^\s<>"']+|dl\.dropboxusercontent\.com\/[^\s<>"']+)/gi;
+const allowedSoundCloudHosts = new Set([
+  "soundcloud.com",
+  "www.soundcloud.com",
+  "on.soundcloud.com",
+]);
+const finalSoundCloudHosts = new Set(["soundcloud.com", "www.soundcloud.com"]);
+const reservedSoundCloudPaths = new Set([
+  "about",
+  "charts",
+  "discover",
+  "for",
+  "imprint",
+  "jobs",
+  "pages",
+  "popular",
+  "premium",
+  "search",
+  "settings",
+  "stream",
+  "terms-of-use",
+  "upload",
+  "you",
+]);
+const allowedDropboxHosts = new Set([
+  "dropbox.com",
+  "www.dropbox.com",
+  "dl.dropboxusercontent.com",
+]);
+const dropboxAudioExtensions = new Set([
+  "aac",
+  "aif",
+  "aiff",
+  "flac",
+  "m4a",
+  "mp3",
+  "ogg",
+  "wav",
+]);
+const soundCloudResolveCache = new Map<string, Promise<SoundCloudResolveResponse>>();
 const quoteMarkerPatterns = [
   /^\s*>/,
   /^\s*On .+ wrote:\s*$/i,
@@ -335,6 +389,37 @@ type MessageBodySegment = {
 type SanitizedEmailHtml = {
   blockedImageCount: number;
   html: string | null;
+};
+
+type BundleOrganizerLinkCard = {
+  href: string;
+  label: string;
+  typeLabel: string;
+  urlLabel: string;
+};
+
+type SoundCloudPreviewLink = {
+  canonicalUrl: string;
+  height: number;
+  href: string;
+  iframeSrc: string;
+  title?: string;
+};
+
+type SoundCloudResolveResponse = {
+  ok: boolean;
+  canonicalUrl?: string;
+  height?: number | null;
+  iframeSrc?: string;
+  originalUrl?: string;
+  reason?: string;
+  title?: string | null;
+};
+
+type SoundCloudResolutionState = {
+  loading: boolean;
+  resolvedPreviews: Record<string, SoundCloudPreviewLink | null>;
+  signature: string;
 };
 
 type BundleOrganizerWorkflowState = Record<
@@ -400,6 +485,67 @@ function normalizeHref(value: string) {
   }
 
   return trimmedValue;
+}
+
+function normalizePotentialUrl(value: string) {
+  const trimmedValue = value.trim().replace(/&amp;/gi, "&");
+  const withoutTrailingPunctuation = trimmedValue.replace(
+    trailingLinkPunctuation,
+    "",
+  );
+
+  if (
+    /^www\./i.test(withoutTrailingPunctuation) ||
+    /^dropbox\.com\//i.test(withoutTrailingPunctuation) ||
+    /^dl\.dropboxusercontent\.com\//i.test(withoutTrailingPunctuation)
+  ) {
+    return `https://${withoutTrailingPunctuation}`;
+  }
+
+  return withoutTrailingPunctuation;
+}
+
+function collectPlainBodyUrls(
+  body: string[] | string | undefined,
+  pattern: RegExp,
+) {
+  const bodyText = Array.isArray(body) ? body.join("\n\n") : body ?? "";
+  return Array.from(bodyText.matchAll(pattern), (match) => match[0]);
+}
+
+function collectHtmlUrls(bodyHtml: string | undefined, pattern: RegExp) {
+  const html = bodyHtml?.trim() ?? "";
+  if (!html) {
+    return [];
+  }
+
+  if (typeof DOMParser === "undefined") {
+    return Array.from(html.matchAll(pattern), (match) => match[0]);
+  }
+
+  const parsedDocument = new DOMParser().parseFromString(html, "text/html");
+  const hrefs = Array.from(parsedDocument.querySelectorAll("a[href]"), (link) =>
+    link.getAttribute("href") ?? "",
+  );
+  const visibleUrls = Array.from(
+    (parsedDocument.body.textContent ?? "").matchAll(pattern),
+    (match) => match[0],
+  );
+
+  return [...hrefs, ...visibleUrls];
+}
+
+function safeDecodeURIComponent(value: string) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function getUrlLabel(url: URL) {
+  const pathLabel = url.pathname.replace(/\/+$/, "") || "/";
+  return `${url.hostname}${pathLabel}`;
 }
 
 function sanitizeDimension(value: string | null) {
@@ -625,7 +771,7 @@ function renderLinkedText(line: string, keyPrefix: string) {
           href={href}
           target="_blank"
           rel="noopener noreferrer nofollow"
-          className="break-all font-medium text-[rgba(167,203,181,0.94)] underline decoration-[rgba(167,203,181,0.34)] underline-offset-4 transition-colors hover:text-[rgba(198,228,209,0.98)]"
+          className="break-all font-medium text-[rgba(48,72,61,0.88)] underline decoration-[rgba(48,72,61,0.28)] underline-offset-4 transition-colors hover:text-[rgba(35,58,47,0.96)]"
         >
           {displayUrl}
         </a>,
@@ -665,6 +811,349 @@ function normalizePlainBody(body?: string[] | string) {
   }
 
   return ["No text body available."];
+}
+
+function isClearlySoundCloudTrackOrPlaylist(url: URL) {
+  const hostname = url.hostname.toLowerCase();
+  if (!finalSoundCloudHosts.has(hostname)) {
+    return false;
+  }
+
+  if (url.protocol !== "https:" && url.protocol !== "http:") {
+    return false;
+  }
+
+  if (url.username || url.password) {
+    return false;
+  }
+
+  const pathParts = url.pathname.split("/").filter(Boolean);
+  const [profileOrCollection, secondPart] = pathParts.map((part) =>
+    part.toLowerCase(),
+  );
+
+  if (
+    pathParts.length < 2 ||
+    !profileOrCollection ||
+    reservedSoundCloudPaths.has(profileOrCollection)
+  ) {
+    return false;
+  }
+
+  if (secondPart === "sets") {
+    return pathParts.length >= 3;
+  }
+
+  return Boolean(secondPart);
+}
+
+function buildSoundCloudLinkCard(value: string): BundleOrganizerLinkCard | null {
+  const normalizedValue = normalizePotentialUrl(value);
+
+  try {
+    const soundCloudUrl = new URL(normalizedValue);
+    const hostname = soundCloudUrl.hostname.toLowerCase();
+    if (
+      (soundCloudUrl.protocol !== "https:" && soundCloudUrl.protocol !== "http:") ||
+      !allowedSoundCloudHosts.has(hostname) ||
+      soundCloudUrl.username ||
+      soundCloudUrl.password
+    ) {
+      return null;
+    }
+
+    if (hostname === "on.soundcloud.com") {
+      if (!soundCloudUrl.pathname.split("/").filter(Boolean).length) {
+        return null;
+      }
+    } else if (!isClearlySoundCloudTrackOrPlaylist(soundCloudUrl)) {
+      return null;
+    }
+
+    const pathParts = soundCloudUrl.pathname.split("/").filter(Boolean);
+    const lastPathPart = pathParts[pathParts.length - 1];
+    return {
+      href: soundCloudUrl.toString(),
+      label: lastPathPart
+        ? safeDecodeURIComponent(lastPathPart).replace(/[-_]+/g, " ")
+        : "Open SoundCloud link",
+      typeLabel:
+        pathParts.map((part) => part.toLowerCase()).includes("sets")
+          ? "SoundCloud playlist"
+          : "SoundCloud link",
+      urlLabel: getUrlLabel(soundCloudUrl),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function isSafeSoundCloudIframeSrc(value?: string) {
+  try {
+    const iframeUrl = new URL(value ?? "");
+    return (
+      iframeUrl.protocol === "https:" &&
+      iframeUrl.hostname.toLowerCase() === "w.soundcloud.com" &&
+      iframeUrl.pathname.startsWith("/player/")
+    );
+  } catch {
+    return false;
+  }
+}
+
+function soundCloudUrlContainsSet(value?: string | null) {
+  if (!value) {
+    return false;
+  }
+
+  try {
+    return new URL(value).pathname
+      .split("/")
+      .filter(Boolean)
+      .some((part) => part.toLowerCase() === "sets");
+  } catch {
+    return /(^|\/)sets(\/|$)/i.test(value);
+  }
+}
+
+function getSoundCloudIframeTargetUrl(iframeSrc?: string) {
+  try {
+    return new URL(iframeSrc ?? "").searchParams.get("url");
+  } catch {
+    return null;
+  }
+}
+
+function isPlaylistPreview(input: {
+  canonicalUrl?: string;
+  height?: number | null;
+  href: string;
+  iframeSrc?: string;
+}) {
+  return (
+    soundCloudUrlContainsSet(input.href) ||
+    soundCloudUrlContainsSet(input.canonicalUrl) ||
+    soundCloudUrlContainsSet(getSoundCloudIframeTargetUrl(input.iframeSrc)) ||
+    Boolean(input.height && input.height > 200)
+  );
+}
+
+function clampSoundCloudHeight(value?: number | null, isPlaylist = false) {
+  const fallbackHeight = isPlaylist
+    ? fallbackPlaylistSoundCloudHeight
+    : fallbackTrackSoundCloudHeight;
+  if (!Number.isFinite(value ?? NaN)) {
+    return fallbackHeight;
+  }
+
+  const minHeight = isPlaylist ? minPlaylistSoundCloudHeight : minTrackSoundCloudHeight;
+  const maxHeight = isPlaylist ? maxPlaylistSoundCloudHeight : maxTrackSoundCloudHeight;
+  return Math.min(
+    maxHeight,
+    Math.max(minHeight, Math.round(value ?? fallbackHeight)),
+  );
+}
+
+function buildSoundCloudPreviewLinks(
+  candidates: BundleOrganizerLinkCard[],
+  resolvedPreviews: Record<string, SoundCloudPreviewLink | null>,
+) {
+  const seen = new Set<string>();
+  const previews: SoundCloudPreviewLink[] = [];
+
+  for (const candidate of candidates) {
+    const preview = resolvedPreviews[candidate.href];
+    if (!preview) {
+      continue;
+    }
+
+    const previewKey = preview.iframeSrc || preview.canonicalUrl;
+    if (seen.has(previewKey)) {
+      continue;
+    }
+
+    seen.add(previewKey);
+    previews.push(preview);
+    if (previews.length >= maxEmbeddedLinkCards) {
+      break;
+    }
+  }
+
+  return previews;
+}
+
+async function resolveSoundCloudCandidate(
+  href: string,
+): Promise<SoundCloudResolveResponse> {
+  const cachedResolve = soundCloudResolveCache.get(href);
+  if (cachedResolve) {
+    return cachedResolve;
+  }
+
+  const resolvePromise = fetch(soundCloudResolveEndpoint, {
+    method: "POST",
+    credentials: "include",
+    cache: "no-store",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ url: href }),
+  })
+    .then(async (response) => {
+      const payload = (await response.json()) as SoundCloudResolveResponse;
+      if (!response.ok || payload.ok !== true || !payload.canonicalUrl) {
+        return {
+          ok: false,
+          originalUrl: href,
+          reason: payload.reason ?? "resolve_failed",
+        };
+      }
+      if (!isSafeSoundCloudIframeSrc(payload.iframeSrc)) {
+        return {
+          ok: false,
+          originalUrl: href,
+          reason: "invalid_iframe_src",
+        };
+      }
+      return payload;
+    })
+    .catch(() => ({
+      ok: false,
+      originalUrl: href,
+      reason: "resolve_failed",
+    }));
+
+  soundCloudResolveCache.set(href, resolvePromise);
+  return resolvePromise;
+}
+
+function getDropboxPathParts(url: URL) {
+  return url.pathname
+    .split("/")
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+function isDropboxSharedFileOrFolder(url: URL) {
+  const hostname = url.hostname.toLowerCase();
+  if (
+    !allowedDropboxHosts.has(hostname) ||
+    (url.protocol !== "https:" && url.protocol !== "http:") ||
+    url.username ||
+    url.password
+  ) {
+    return false;
+  }
+
+  const pathParts = getDropboxPathParts(url);
+  if (pathParts.length === 0) {
+    return false;
+  }
+
+  const [root, shareType] = pathParts.map((part) => part.toLowerCase());
+  if (root === "scl") {
+    return (
+      (shareType === "fi" && pathParts.length >= 4) ||
+      (shareType === "fo" && pathParts.length >= 3)
+    );
+  }
+
+  if (root === "s" || root === "sh") {
+    return pathParts.length >= 2;
+  }
+
+  return hostname === "dl.dropboxusercontent.com" && pathParts.length >= 2;
+}
+
+function getDropboxLinkType(url: URL): "Dropbox file" | "Dropbox folder" {
+  const [root, shareType] = getDropboxPathParts(url).map((part) =>
+    part.toLowerCase(),
+  );
+  if ((root === "scl" && shareType === "fo") || root === "sh") {
+    return "Dropbox folder";
+  }
+
+  return "Dropbox file";
+}
+
+function getDropboxFilename(url: URL) {
+  const pathParts = getDropboxPathParts(url);
+  const hostname = url.hostname.toLowerCase();
+  const [root, shareType] = pathParts.map((part) => part.toLowerCase());
+  const filenameIndex =
+    root === "scl" && shareType === "fi" ? 3 : root === "s" ? 2 : -1;
+
+  if (hostname === "dl.dropboxusercontent.com" && pathParts.length > 0) {
+    return pathParts[pathParts.length - 1];
+  }
+
+  return filenameIndex >= 0 && pathParts.length > filenameIndex
+    ? pathParts[filenameIndex]
+    : null;
+}
+
+function getDropboxFileExtension(url: URL) {
+  const filename = getDropboxFilename(url);
+  const extensionMatch = filename?.match(/\.([a-z0-9]+)$/i);
+  return extensionMatch?.[1]?.toLowerCase() ?? "";
+}
+
+function buildDropboxLinkCard(value: string): BundleOrganizerLinkCard | null {
+  const normalizedValue = normalizePotentialUrl(value);
+
+  try {
+    const dropboxUrl = new URL(normalizedValue);
+    if (!isDropboxSharedFileOrFolder(dropboxUrl)) {
+      return null;
+    }
+
+    const typeLabel = getDropboxLinkType(dropboxUrl);
+    const maybeFilename = getDropboxFilename(dropboxUrl);
+    const isAudio =
+      typeLabel === "Dropbox file" &&
+      dropboxAudioExtensions.has(getDropboxFileExtension(dropboxUrl));
+
+    return {
+      href: dropboxUrl.toString(),
+      label:
+        typeLabel === "Dropbox folder"
+          ? "Shared folder"
+          : maybeFilename
+          ? safeDecodeURIComponent(maybeFilename)
+          : "Shared file",
+      typeLabel: isAudio ? "Dropbox audio" : typeLabel,
+      urlLabel: getUrlLabel(dropboxUrl),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function collectLinkCards(
+  body: string[],
+  bodyHtml: string | undefined,
+  snippet: string | undefined,
+  pattern: RegExp,
+  buildCard: (value: string) => BundleOrganizerLinkCard | null,
+) {
+  const seen = new Set<string>();
+  const links: BundleOrganizerLinkCard[] = [];
+
+  [
+    ...collectHtmlUrls(bodyHtml, pattern),
+    ...collectPlainBodyUrls(body, pattern),
+    ...collectPlainBodyUrls(snippet, pattern),
+  ].forEach((value) => {
+    const link = buildCard(value);
+    if (!link || seen.has(link.href)) {
+      return;
+    }
+
+    seen.add(link.href);
+    links.push(link);
+  });
+
+  return links;
 }
 
 function normalizeWorkspaceMessages(
@@ -1081,7 +1570,17 @@ function ContextMenuIcon({ name }: { name: BundleOrganizerContextMenuIconName })
         <path d="M4 17h10" />
       </>
     ),
+    decline: (
+      <>
+        <circle cx="12" cy="12" r="9" />
+        <path d="m9 9 6 6" />
+        <path d="m15 9-6 6" />
+      </>
+    ),
     forward: <path d="M15 7l5 5-5 5M20 12H8a4 4 0 0 0-4 4v1" />,
+    interest: (
+      <path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.6l-1-1a5.5 5.5 0 0 0-7.8 7.8l1 1L12 21l7.8-7.6 1-1a5.5 5.5 0 0 0 0-7.8Z" />
+    ),
     mail: (
       <>
         <rect height="14" rx="2" width="18" x="3" y="5" />
@@ -1108,6 +1607,7 @@ function ContextMenuIcon({ name }: { name: BundleOrganizerContextMenuIconName })
         <path d="M4 4 20 20" />
       </>
     ),
+    reply: <path d="M9 17 4 12l5-5M4 12h12a4 4 0 0 1 4 4v1" />,
     restore: (
       <>
         <path d="M3 12a9 9 0 1 0 3-6.7" />
@@ -1397,22 +1897,24 @@ function DetailMetadata({
 function BundleOrganizerEmailBody({
   body,
   bodyHtml,
+  className = "",
 }: {
   body: string[];
   bodyHtml?: string;
+  className?: string;
 }) {
   const sanitizedEmail = useMemo(() => sanitizeEmailHtml(bodyHtml), [bodyHtml]);
 
   if (sanitizedEmail.html) {
     return (
-      <div className="space-y-3">
+      <div className={`space-y-3 ${className}`}>
         {sanitizedEmail.blockedImageCount > 0 ? (
           <div className="rounded-[14px] border border-[rgba(143,179,159,0.16)] bg-[rgba(143,179,159,0.08)] px-3 py-2.5 text-[0.78rem] leading-5 text-[rgba(167,203,181,0.82)]">
             Images are hidden for privacy.
           </div>
         ) : null}
         <div
-          className="bundle-organizer-email-html max-w-full overflow-x-auto rounded-[16px] border border-white/10 bg-[rgba(12,18,15,0.38)] p-4 text-[0.92rem] leading-7 text-[rgba(245,239,229,0.74)] [overflow-wrap:anywhere] sm:p-5 [&_*]:max-w-full [&_a]:font-semibold [&_a]:text-[rgba(167,203,181,0.94)] [&_a]:underline [&_a]:decoration-[rgba(167,203,181,0.34)] [&_a]:underline-offset-4 [&_blockquote]:my-4 [&_blockquote]:rounded-[14px] [&_blockquote]:border-l-4 [&_blockquote]:border-[rgba(217,203,184,0.2)] [&_blockquote]:bg-white/5 [&_blockquote]:px-4 [&_blockquote]:py-3 [&_h1]:mb-3 [&_h1]:text-[1.3rem] [&_h1]:font-semibold [&_h1]:leading-tight [&_h2]:mb-3 [&_h2]:text-[1.16rem] [&_h2]:font-semibold [&_h2]:leading-tight [&_h3]:mb-2 [&_h3]:text-[1.05rem] [&_h3]:font-semibold [&_h4]:mb-2 [&_h4]:font-semibold [&_hr]:my-5 [&_hr]:border-white/10 [&_li]:my-1 [&_ol]:my-3 [&_ol]:list-decimal [&_ol]:pl-5 [&_p]:my-3 [&_table]:my-4 [&_table]:w-auto [&_table]:max-w-full [&_table]:border-collapse [&_td]:align-top [&_td]:leading-6 [&_td]:[overflow-wrap:anywhere] [&_th]:align-top [&_th]:font-semibold [&_ul]:my-3 [&_ul]:list-disc [&_ul]:pl-5 [&_[data-bundle-organizer-email-image-placeholder='true']]:my-3 [&_[data-bundle-organizer-email-image-placeholder='true']]:rounded-[12px] [&_[data-bundle-organizer-email-image-placeholder='true']]:border [&_[data-bundle-organizer-email-image-placeholder='true']]:border-white/10 [&_[data-bundle-organizer-email-image-placeholder='true']]:bg-white/5 [&_[data-bundle-organizer-email-image-placeholder='true']]:px-3 [&_[data-bundle-organizer-email-image-placeholder='true']]:py-2 [&_[data-bundle-organizer-email-image-placeholder='true']]:text-[0.78rem] [&_[data-bundle-organizer-email-image-placeholder='true']]:font-medium [&_[data-bundle-organizer-email-image-placeholder='true']]:text-[rgba(245,239,229,0.58)]"
+          className="bundle-organizer-email-html max-w-full overflow-x-auto rounded-[16px] border border-[rgba(120,104,89,0.12)] bg-[color:#fffaf2] p-4 text-[0.94rem] leading-7 text-[color:#302a24] shadow-[inset_0_1px_0_rgba(255,255,255,0.7)] [overflow-wrap:anywhere] sm:p-5 [&_*]:max-w-full [&_a]:font-semibold [&_a]:text-[color:#245b43] [&_a]:underline [&_a]:decoration-[rgba(36,91,67,0.26)] [&_a]:underline-offset-4 [&_blockquote]:my-4 [&_blockquote]:rounded-[14px] [&_blockquote]:border-l-4 [&_blockquote]:border-[rgba(120,104,89,0.24)] [&_blockquote]:bg-[rgba(120,104,89,0.08)] [&_blockquote]:px-4 [&_blockquote]:py-3 [&_h1]:mb-3 [&_h1]:text-[1.45rem] [&_h1]:font-semibold [&_h1]:leading-tight [&_h2]:mb-3 [&_h2]:text-[1.25rem] [&_h2]:font-semibold [&_h2]:leading-tight [&_h3]:mb-2 [&_h3]:text-[1.12rem] [&_h3]:font-semibold [&_h4]:mb-2 [&_h4]:font-semibold [&_hr]:my-5 [&_hr]:border-[rgba(120,104,89,0.18)] [&_li]:my-1 [&_ol]:my-3 [&_ol]:list-decimal [&_ol]:pl-5 [&_p]:my-3 [&_table]:my-4 [&_table]:w-auto [&_table]:max-w-full [&_table]:border-collapse [&_td]:align-top [&_td]:leading-6 [&_td]:[overflow-wrap:anywhere] [&_th]:align-top [&_th]:font-semibold [&_ul]:my-3 [&_ul]:list-disc [&_ul]:pl-5 [&_[data-bundle-organizer-email-image-placeholder='true']]:my-3 [&_[data-bundle-organizer-email-image-placeholder='true']]:rounded-[12px] [&_[data-bundle-organizer-email-image-placeholder='true']]:border [&_[data-bundle-organizer-email-image-placeholder='true']]:border-[rgba(120,104,89,0.16)] [&_[data-bundle-organizer-email-image-placeholder='true']]:bg-[rgba(120,104,89,0.07)] [&_[data-bundle-organizer-email-image-placeholder='true']]:px-3 [&_[data-bundle-organizer-email-image-placeholder='true']]:py-2 [&_[data-bundle-organizer-email-image-placeholder='true']]:text-[0.78rem] [&_[data-bundle-organizer-email-image-placeholder='true']]:font-medium [&_[data-bundle-organizer-email-image-placeholder='true']]:text-[rgba(64,56,48,0.58)]"
           dangerouslySetInnerHTML={{ __html: sanitizedEmail.html }}
         />
       </div>
@@ -1420,13 +1922,13 @@ function BundleOrganizerEmailBody({
   }
 
   return (
-    <div className="space-y-4 rounded-[16px] border border-white/10 bg-[rgba(12,18,15,0.38)] p-4 text-[0.9rem] leading-7 text-[rgba(245,239,229,0.72)] sm:p-5">
+    <div className={`space-y-5 rounded-[16px] border border-[rgba(120,104,89,0.12)] bg-[color:#fffaf2] p-4 text-[0.94rem] leading-7 text-[color:#302a24] shadow-[inset_0_1px_0_rgba(255,255,255,0.7)] sm:p-5 ${className}`}>
       {normalizePlainBody(body).flatMap((paragraph, paragraphIndex) =>
         splitParagraphIntoSegments(paragraph).map((segment, segmentIndex) =>
           segment.kind === "quote" ? (
             <blockquote
               key={`${paragraphIndex}-${segmentIndex}-quote`}
-              className="break-words rounded-[14px] border-l-4 border-[rgba(217,203,184,0.2)] bg-white/5 px-4 py-3 text-[0.86rem] leading-7 text-[rgba(245,239,229,0.56)] [overflow-wrap:anywhere]"
+              className="break-words rounded-[14px] border-l-4 border-[rgba(120,104,89,0.24)] bg-[rgba(120,104,89,0.08)] px-4 py-3 text-[0.92rem] leading-7 text-[rgba(64,56,48,0.6)] [overflow-wrap:anywhere]"
             >
               {renderBodyLines(
                 segment.lines,
@@ -1487,25 +1989,269 @@ function FilterSelect({
   );
 }
 
-function DetailActionButton({
+function BundleOrganizerLinkPreview({
+  cards,
+  className = "",
+  description,
+  title,
+}: {
+  cards: BundleOrganizerLinkCard[];
+  className?: string;
+  description: string;
+  title: string;
+}) {
+  const visibleCards = cards.slice(0, maxEmbeddedLinkCards);
+  const remainingLinkCount = Math.max(cards.length - visibleCards.length, 0);
+
+  if (visibleCards.length === 0) {
+    return null;
+  }
+
+  return (
+    <section className={className} aria-label={title}>
+      <div className="space-y-3 rounded-[18px] border border-[rgba(48,72,61,0.16)] bg-[rgba(255,252,247,0.62)] p-3.5 shadow-[0_14px_34px_rgba(61,44,32,0.07)] dark:border-[rgba(143,179,159,0.18)] dark:bg-[rgba(143,179,159,0.08)] dark:shadow-[0_14px_34px_rgba(0,0,0,0.16)]">
+        <div>
+          <p className="text-[0.72rem] font-semibold uppercase tracking-[0.14em] text-[rgba(48,72,61,0.76)] dark:text-[rgba(167,203,181,0.88)]">
+            {title}
+          </p>
+          <p className="mt-1 text-[0.78rem] leading-5 text-[rgba(64,56,48,0.54)] dark:text-[rgba(245,239,229,0.5)]">
+            {description}
+          </p>
+        </div>
+        <div className="grid gap-3">
+          {visibleCards.map((card) => (
+            <div
+              key={card.href}
+              className="overflow-hidden rounded-[14px] border border-[rgba(120,104,89,0.12)] bg-[color:#fffaf2] dark:border-white/10 dark:bg-[rgba(11,18,15,0.28)]"
+            >
+              <div className="flex min-w-0 flex-col gap-2 px-3 py-3 sm:flex-row sm:items-center sm:justify-between">
+                <div className="min-w-0">
+                  <p className="text-[0.7rem] font-semibold uppercase tracking-[0.12em] text-[rgba(48,72,61,0.58)] dark:text-[rgba(167,203,181,0.66)]">
+                    {card.typeLabel}
+                  </p>
+                  <p
+                    className="mt-1 truncate text-[0.86rem] font-semibold text-[rgba(64,56,48,0.8)] dark:text-[rgba(245,239,229,0.78)]"
+                    title={card.label}
+                  >
+                    {card.label}
+                  </p>
+                  <p
+                    className="mt-1 truncate text-[0.72rem] leading-4 text-[rgba(64,56,48,0.46)] dark:text-[rgba(245,239,229,0.44)]"
+                    title={card.urlLabel}
+                  >
+                    {card.urlLabel}
+                  </p>
+                </div>
+                <a
+                  href={card.href}
+                  target="_blank"
+                  rel="noopener noreferrer nofollow"
+                  className="inline-flex h-8 w-fit shrink-0 items-center justify-center rounded-full border border-[rgba(48,72,61,0.16)] bg-[rgba(48,72,61,0.06)] px-3 text-[0.7rem] font-semibold text-[rgba(48,72,61,0.8)] transition-colors hover:border-[rgba(48,72,61,0.26)] hover:bg-[rgba(48,72,61,0.1)] dark:border-[rgba(143,179,159,0.2)] dark:bg-[rgba(143,179,159,0.08)] dark:text-[rgba(167,203,181,0.88)] dark:hover:border-[rgba(143,179,159,0.3)] dark:hover:bg-[rgba(143,179,159,0.12)]"
+                >
+                  Open
+                </a>
+              </div>
+            </div>
+          ))}
+        </div>
+        {remainingLinkCount > 0 ? (
+          <p className="text-[0.72rem] leading-5 text-[rgba(64,56,48,0.46)] dark:text-[rgba(245,239,229,0.44)]">
+            +{remainingLinkCount} more {title.toLowerCase()}{" "}
+            {remainingLinkCount === 1 ? "link" : "links"} in email body
+          </p>
+        ) : null}
+      </div>
+    </section>
+  );
+}
+
+function BundleOrganizerSoundCloudPreview({
+  cards,
+  className = "",
+}: {
+  cards: BundleOrganizerLinkCard[];
+  className?: string;
+}) {
+  const candidateSignature = useMemo(
+    () => cards.map((card) => card.href).join("|"),
+    [cards],
+  );
+  const [resolutionState, setResolutionState] = useState<SoundCloudResolutionState>({
+    loading: false,
+    resolvedPreviews: {},
+    signature: "",
+  });
+  const activeResolvedPreviews =
+    resolutionState.signature === candidateSignature
+      ? resolutionState.resolvedPreviews
+      : {};
+  const previews = useMemo(
+    () => buildSoundCloudPreviewLinks(cards, activeResolvedPreviews),
+    [cards, activeResolvedPreviews],
+  );
+  const candidateHrefs = useMemo(
+    () =>
+      cards
+        .map((card) => card.href)
+        .filter((href, index, hrefs) => hrefs.indexOf(href) === index),
+    [cards],
+  );
+
+  useEffect(() => {
+    if (candidateHrefs.length === 0) {
+      setResolutionState({
+        loading: false,
+        resolvedPreviews: {},
+        signature: candidateSignature,
+      });
+      return;
+    }
+
+    let isCancelled = false;
+    setResolutionState((currentState) => ({
+      loading: true,
+      resolvedPreviews:
+        currentState.signature === candidateSignature
+          ? currentState.resolvedPreviews
+          : {},
+      signature: candidateSignature,
+    }));
+
+    Promise.all(
+      candidateHrefs.map(async (href) => {
+        const result = await resolveSoundCloudCandidate(href);
+        const isPlaylist =
+          result.ok &&
+          isPlaylistPreview({
+            canonicalUrl: result.canonicalUrl,
+            height: result.height,
+            href,
+            iframeSrc: result.iframeSrc,
+          });
+        const preview =
+          result.ok && result.canonicalUrl && isSafeSoundCloudIframeSrc(result.iframeSrc)
+            ? {
+                canonicalUrl: result.canonicalUrl,
+                height: clampSoundCloudHeight(result.height, isPlaylist),
+                href,
+                iframeSrc: result.iframeSrc ?? "",
+                title: result.title ?? undefined,
+              }
+            : null;
+        return [href, preview] as const;
+      }),
+    ).then((resolvedEntries) => {
+      if (isCancelled) {
+        return;
+      }
+
+      setResolutionState({
+        loading: false,
+        resolvedPreviews: Object.fromEntries(resolvedEntries),
+        signature: candidateSignature,
+      });
+    });
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [candidateHrefs, candidateSignature]);
+
+  const isResolving =
+    resolutionState.signature === candidateSignature && resolutionState.loading;
+
+  if (cards.length === 0) {
+    return null;
+  }
+
+  if (previews.length === 0 && !isResolving) {
+    return (
+      <BundleOrganizerLinkPreview
+        cards={cards}
+        className={className}
+        title={cards.length === 1 ? "SoundCloud link" : "SoundCloud links"}
+        description="Open the SoundCloud link in a new tab."
+      />
+    );
+  }
+
+  return (
+    <section className={className} aria-label="SoundCloud preview">
+      <div className="space-y-3 rounded-[18px] border border-[rgba(48,72,61,0.16)] bg-[rgba(255,252,247,0.62)] p-3.5 shadow-[0_14px_34px_rgba(61,44,32,0.07)] dark:border-[rgba(143,179,159,0.18)] dark:bg-[rgba(143,179,159,0.08)] dark:shadow-[0_14px_34px_rgba(0,0,0,0.16)]">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <p className="text-[0.72rem] font-semibold uppercase tracking-[0.14em] text-[rgba(48,72,61,0.76)] dark:text-[rgba(167,203,181,0.88)]">
+            SoundCloud preview
+          </p>
+        </div>
+        {isResolving && previews.length === 0 ? (
+          <p className="rounded-[14px] border border-[rgba(120,104,89,0.12)] bg-[rgba(255,252,247,0.42)] px-3 py-2 text-[0.78rem] leading-5 text-[rgba(64,56,48,0.58)] dark:border-white/10 dark:bg-white/[0.035] dark:text-[rgba(245,239,229,0.54)]">
+            Resolving SoundCloud preview...
+          </p>
+        ) : null}
+        {previews.length > 0 ? (
+          <div className="grid gap-3">
+            {previews.map((preview) => (
+              <div
+                key={preview.canonicalUrl}
+                className="overflow-hidden rounded-[14px] border border-[rgba(120,104,89,0.12)] bg-[color:#fffaf2] dark:border-white/10 dark:bg-[rgba(11,18,15,0.28)]"
+              >
+                <iframe
+                  title={preview.title || "SoundCloud audio player"}
+                  src={preview.iframeSrc}
+                  allow="autoplay"
+                  height={preview.height}
+                  width="100%"
+                  loading="lazy"
+                  referrerPolicy="no-referrer"
+                  className="block w-full border-0"
+                />
+                <div className="flex flex-col gap-1.5 border-t border-[rgba(120,104,89,0.1)] px-3 py-2.5 text-[0.72rem] leading-5 dark:border-white/10 sm:flex-row sm:items-center sm:justify-between">
+                  <span className="font-medium text-[rgba(64,56,48,0.48)] dark:text-[rgba(245,239,229,0.46)]">
+                    Playback unavailable?
+                  </span>
+                  <a
+                    href={preview.href}
+                    target="_blank"
+                    rel="noopener noreferrer nofollow"
+                    className="w-fit font-semibold text-[rgba(48,72,61,0.8)] underline decoration-[rgba(48,72,61,0.24)] underline-offset-4 transition-colors hover:text-[rgba(35,58,47,0.94)] dark:text-[rgba(167,203,181,0.88)] dark:decoration-[rgba(167,203,181,0.28)] dark:hover:text-[rgba(198,228,209,0.98)]"
+                  >
+                    Open in SoundCloud
+                  </a>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : null}
+      </div>
+    </section>
+  );
+}
+
+function DetailFooterActionButton({
   active = false,
   children,
+  disabled = false,
   icon,
   onClick,
+  title,
 }: {
   active?: boolean;
+  disabled?: boolean;
   children: ReactNode;
   icon: BundleOrganizerContextMenuIconName;
-  onClick: () => void;
+  onClick?: () => void;
+  title?: string;
 }) {
   return (
     <button
       type="button"
+      disabled={disabled}
       onClick={onClick}
-      className={`inline-flex h-9 items-center justify-center gap-1.5 rounded-full border px-3 text-[0.68rem] font-medium uppercase tracking-[0.1em] transition-colors ${
+      title={title}
+      className={`inline-flex h-10 items-center justify-center gap-2 rounded-full border px-4 text-[0.74rem] font-medium uppercase tracking-[0.12em] transition-colors disabled:cursor-not-allowed disabled:opacity-55 ${
         active
-          ? "border-[rgba(143,179,159,0.28)] bg-[rgba(143,179,159,0.12)] text-[rgba(198,228,209,0.92)] hover:bg-[rgba(143,179,159,0.16)]"
-          : "border-white/10 bg-white/5 text-[rgba(245,239,229,0.56)] hover:border-[rgba(143,179,159,0.24)] hover:bg-[rgba(143,179,159,0.1)] hover:text-[rgba(198,228,209,0.88)]"
+          ? "border-[rgba(48,72,61,0.22)] bg-[rgba(48,72,61,0.08)] text-[rgba(48,72,61,0.86)] hover:bg-[rgba(48,72,61,0.12)] dark:border-[rgba(143,179,159,0.28)] dark:bg-[rgba(143,179,159,0.12)] dark:text-[rgba(198,228,209,0.92)] dark:hover:bg-[rgba(143,179,159,0.16)]"
+          : "border-[rgba(120,104,89,0.16)] bg-[rgba(246,239,231,0.62)] text-[rgba(64,56,48,0.72)] hover:bg-[rgba(238,227,215,0.78)] dark:border-white/10 dark:bg-white/5 dark:text-[rgba(245,239,229,0.7)] dark:hover:bg-white/10"
       }`}
     >
       <ContextMenuIcon name={icon} />
@@ -1517,127 +2263,168 @@ function DetailActionButton({
 function MessageDetail({
   message,
   onBack,
-  onMoveToCategory,
-  onTogglePriority,
   onToggleShortlist,
   onToggleTrash,
 }: {
   message: BundleOrganizerMessage;
   onBack: () => void;
-  onMoveToCategory: (
-    message: BundleOrganizerMessage,
-    manualCategory: "demo" | "promo",
-  ) => void;
-  onTogglePriority: (message: BundleOrganizerMessage) => void;
   onToggleShortlist: (message: BundleOrganizerMessage) => void;
   onToggleTrash: (message: BundleOrganizerMessage) => void;
 }) {
   const activeReason = resolvePriorityReason(message);
-  const resolvedCategory = resolveOrganizerCategory(message);
-  const bodyLines = message.body.length > 0 ? message.body : [message.snippet];
+  const bodyLines = useMemo(
+    () => (message.body.length > 0 ? message.body : [message.snippet]),
+    [message.body, message.snippet],
+  );
+  const soundCloudLinks = useMemo(
+    () =>
+      collectLinkCards(
+        bodyLines,
+        message.bodyHtml,
+        message.snippet,
+        soundCloudLinkPattern,
+        buildSoundCloudLinkCard,
+      ),
+    [bodyLines, message.bodyHtml, message.snippet],
+  );
+  const dropboxLinks = useMemo(
+    () =>
+      collectLinkCards(
+        bodyLines,
+        message.bodyHtml,
+        message.snippet,
+        dropboxLinkPattern,
+        buildDropboxLinkCard,
+      ),
+    [bodyLines, message.bodyHtml, message.snippet],
+  );
 
   return (
-    <article className="mt-4 overflow-hidden rounded-[18px] border border-white/10 bg-white/[0.045] shadow-[0_24px_70px_rgba(0,0,0,0.22)]">
-      <div className="border-b border-white/10 p-4 sm:p-5">
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+    <div>
+      <button
+        type="button"
+        onClick={onBack}
+        className="mt-4 inline-flex h-9 items-center justify-center rounded-full border border-[rgba(143,179,159,0.34)] bg-[rgba(143,179,159,0.12)] px-3.5 text-[0.72rem] font-semibold uppercase tracking-[0.12em] text-[rgba(198,228,209,0.96)] shadow-[0_8px_18px_rgba(0,0,0,0.18)] transition-[background-color,border-color,color,box-shadow,transform] duration-150 hover:border-[rgba(143,179,159,0.48)] hover:bg-[rgba(143,179,159,0.18)] hover:text-[rgba(226,246,233,0.98)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[rgba(143,179,159,0.3)] active:scale-[0.99]"
+      >
+        &larr; Back to list
+      </button>
+
+      <article className="mt-5 rounded-[20px] border border-white/10 bg-white/5 p-6 shadow-[0_24px_70px_rgba(0,0,0,0.22)] sm:p-7">
+        <div className="flex flex-col gap-5 border-b border-white/10 pb-6 md:flex-row md:items-start md:justify-between">
           <div className="min-w-0">
-            <button
-              type="button"
-              onClick={onBack}
-              className="mb-4 inline-flex h-8 items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 text-[0.7rem] font-medium uppercase tracking-[0.12em] text-[rgba(245,239,229,0.62)] transition-colors hover:border-[rgba(143,179,159,0.24)] hover:bg-[rgba(143,179,159,0.1)] hover:text-[rgba(198,228,209,0.84)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[rgba(143,179,159,0.22)]"
-            >
-              <svg
-                aria-hidden="true"
-                className="h-3.5 w-3.5"
-                fill="none"
-                stroke="currentColor"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth="2"
-                viewBox="0 0 24 24"
-              >
-                <path d="m15 18-6-6 6-6" />
-              </svg>
-              Back to list
-            </button>
-            <p className="text-[0.74rem] font-medium uppercase tracking-[0.16em] text-[rgba(217,203,184,0.58)]">
-              {message.sender}
-            </p>
-            <h3 className="mt-1.5 text-[1.3rem] font-semibold tracking-[-0.03em] text-[color:#f5efe5]">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-[0.92rem] font-semibold tracking-[-0.01em] text-[color:#f5efe5]">
+                {message.sender}
+              </span>
+              {message.sourceMailbox ? (
+                <span className="rounded-full bg-white/5 px-2 py-0.5 text-[0.68rem] font-medium text-[rgba(245,239,229,0.56)]">
+                  {message.sourceMailbox}
+                </span>
+              ) : null}
+            </div>
+            {message.from ? (
+              <div className="mt-2 grid max-w-[780px] gap-1 text-[0.76rem] leading-5 text-[rgba(245,239,229,0.5)]">
+                <div className="flex min-w-0 gap-1.5">
+                  <span className="shrink-0 font-medium text-[rgba(245,239,229,0.42)]">
+                    From:
+                  </span>
+                  <span className="min-w-0 truncate" title={message.from}>
+                    {message.from}
+                  </span>
+                </div>
+              </div>
+            ) : null}
+            <h3 className="mt-4 max-w-[780px] text-[1.65rem] font-semibold leading-tight tracking-[-0.035em] text-[color:#f5efe5] sm:text-[2rem]">
               {message.subject}
             </h3>
-            <div className="mt-3 flex flex-wrap gap-1.5">
+            <div className="mt-4 flex flex-wrap gap-2">
               <MessagePills message={message} />
             </div>
-          </div>
-          <div className="shrink-0 text-left text-[0.78rem] font-medium text-[rgba(245,239,229,0.48)] sm:text-right">
-            <div>{message.timestamp}</div>
-            {message.sourceMailbox ? (
-              <div className="mt-1 text-[rgba(245,239,229,0.58)]">{message.sourceMailbox}</div>
+            {activeReason ? (
+              <p className="mt-3 w-fit rounded-[14px] border border-[rgba(143,179,159,0.18)] bg-[rgba(143,179,159,0.08)] px-3 py-2 text-[0.78rem] font-medium text-[rgba(167,203,181,0.84)]">
+                Prioritized: {activeReason}
+              </p>
             ) : null}
+          </div>
+          <div className="shrink-0 text-[0.78rem] font-medium text-[rgba(245,239,229,0.48)]">
+            {message.timestamp}
           </div>
         </div>
 
-        <dl className="mt-4 grid gap-3 rounded-[16px] border border-white/10 bg-[rgba(12,18,15,0.28)] p-3 sm:grid-cols-2 lg:grid-cols-4">
+        <dl className="mt-5 grid max-w-[780px] gap-3 rounded-[16px] border border-white/10 bg-white/[0.035] p-3 sm:grid-cols-2 lg:grid-cols-4">
           <DetailMetadata label="From" value={message.sender} />
           <DetailMetadata label="Email" value={message.from} />
           <DetailMetadata label="Mailbox" value={message.sourceMailbox} />
           <DetailMetadata label="Date" value={message.timestamp} />
         </dl>
 
-        <div className="mt-4 flex flex-wrap items-center gap-2 rounded-[16px] border border-white/10 bg-[rgba(12,18,15,0.3)] p-2">
-          {resolvedCategory !== "demo" ? (
-            <DetailActionButton
-              icon="category"
-              onClick={() => onMoveToCategory(message, "demo")}
-            >
-              Move to Demo
-            </DetailActionButton>
-          ) : null}
-          {resolvedCategory !== "promo" ? (
-            <DetailActionButton
-              icon="category"
-              onClick={() => onMoveToCategory(message, "promo")}
-            >
-              Move to Promo
-            </DetailActionButton>
-          ) : null}
-          <DetailActionButton
+        <p className="mt-5 max-w-[780px] text-[0.9rem] leading-6 text-[rgba(245,239,229,0.68)]">
+          {message.snippet}
+        </p>
+        <BundleOrganizerEmailBody
+          body={bodyLines}
+          bodyHtml={message.bodyHtml}
+          className="max-w-[780px] py-7"
+        />
+
+        <BundleOrganizerSoundCloudPreview
+          cards={soundCloudLinks}
+          className="mb-6 max-w-[780px]"
+        />
+
+        <BundleOrganizerLinkPreview
+          cards={dropboxLinks}
+          className="mb-6 max-w-[780px]"
+          title={dropboxLinks.length === 1 ? "Dropbox link" : "Dropbox links"}
+          description="Open the shared files in Dropbox."
+        />
+
+        <div className="flex flex-wrap gap-3 border-t border-white/10 pt-6">
+          <DetailFooterActionButton
+            disabled
+            icon="reply"
+            title={bundleModeDisabledReason}
+          >
+            Reply
+          </DetailFooterActionButton>
+          <DetailFooterActionButton
+            disabled
+            icon="forward"
+            title={bundleModeDisabledReason}
+          >
+            Forward
+          </DetailFooterActionButton>
+          <DetailFooterActionButton
+            disabled
+            icon="interest"
+            title={bundleModeDisabledReason}
+          >
+            Interested
+          </DetailFooterActionButton>
+          <DetailFooterActionButton
             active={message.shortlisted === true}
             icon={message.shortlisted ? "shortlistOff" : "shortlist"}
             onClick={() => onToggleShortlist(message)}
           >
-            {message.shortlisted ? "Remove from Shortlist" : "Shortlist"}
-          </DetailActionButton>
-          <DetailActionButton
-            active={message.manualPriority === true}
-            icon={message.manualPriority ? "priorityOff" : "priority"}
-            onClick={() => onTogglePriority(message)}
-          >
-            {message.manualPriority ? "Remove Priority" : "Mark as Priority"}
-          </DetailActionButton>
-          <DetailActionButton
+            {message.shortlisted ? "Remove from shortlist" : "Shortlist"}
+          </DetailFooterActionButton>
+          <DetailFooterActionButton
             active={message.trashed === true}
             icon={message.trashed ? "restore" : "trash"}
             onClick={() => onToggleTrash(message)}
           >
             {message.trashed ? "Restore" : "Move to Trash"}
-          </DetailActionButton>
+          </DetailFooterActionButton>
+          <DetailFooterActionButton
+            disabled
+            icon="decline"
+            title={bundleModeDisabledReason}
+          >
+            Decline
+          </DetailFooterActionButton>
         </div>
-      </div>
-
-      <div className="p-4 sm:p-5">
-        {activeReason ? (
-          <p className="mb-3 rounded-[14px] border border-[rgba(143,179,159,0.18)] bg-[rgba(143,179,159,0.1)] px-3.5 py-2.5 text-[0.82rem] font-medium leading-6 text-[rgba(167,203,181,0.9)]">
-            {activeReason}
-          </p>
-        ) : null}
-        <p className="mb-4 text-[0.9rem] leading-6 text-[rgba(245,239,229,0.68)]">
-          {message.snippet}
-        </p>
-        <BundleOrganizerEmailBody body={bodyLines} bodyHtml={message.bodyHtml} />
-      </div>
-    </article>
+      </article>
+    </div>
   );
 }
 
@@ -2376,8 +3163,6 @@ export function BundleOrganizerSurface({
                 <MessageDetail
                   message={selectedMessage}
                   onBack={() => setSelectedMessage(null)}
-                  onMoveToCategory={moveMessageToCategory}
-                  onTogglePriority={toggleMessagePriority}
                   onToggleShortlist={toggleMessageShortlist}
                   onToggleTrash={toggleMessageTrash}
                 />
