@@ -15,7 +15,7 @@ import {
   type BundleOrganizerActiveWorkStatus,
 } from "./bundleOrganizerFilters";
 
-type BundleOrganizerView = "priority" | "shortlist" | "demo" | "promo";
+type BundleOrganizerView = "priority" | "shortlist" | "demo" | "promo" | "trash";
 type BundleOrganizerDemoStatusFilter =
   | "all"
   | "unread"
@@ -46,6 +46,7 @@ type BundleOrganizerContextMenuIconName =
   | "mailOpen"
   | "priority"
   | "priorityOff"
+  | "restore"
   | "rule"
   | "shortlist"
   | "shortlistOff"
@@ -82,6 +83,8 @@ type BundleOrganizerMessage = {
   unread?: boolean;
   shortlisted?: boolean;
   shortlistedAt?: string | null;
+  trashed?: boolean;
+  trashedAt?: string | null;
   replied?: boolean;
   repliedAt?: string | null;
   replyHistory?: unknown[];
@@ -128,6 +131,8 @@ export type BundleOrganizerWorkspaceMessage = {
   unread?: boolean;
   shortlisted?: boolean;
   shortlistedAt?: string | null;
+  trashed?: boolean;
+  trashedAt?: string | null;
   replied?: boolean;
   repliedAt?: string | null;
   replyHistory?: unknown[];
@@ -157,6 +162,7 @@ const navItems: Array<{
   { id: "shortlist", label: "Shortlist", icon: "shortlist" },
   { id: "demo", label: "Demo Inbox", icon: "demo" },
   { id: "promo", label: "Promo Inbox", icon: "promo" },
+  { id: "trash", label: "Trash", icon: "trash" },
 ];
 
 const allSourceFilterId = "all";
@@ -224,6 +230,13 @@ const viewCopy: Record<
     emptyTitle: "No promo messages.",
     emptyDescription: "Promo messages from connected inboxes will appear here.",
   },
+  trash: {
+    title: "Trash",
+    eyebrow: "Organizer-local trash",
+    description: "Messages moved out of Organizer views stay here until restored.",
+    emptyTitle: "Trash is empty.",
+    emptyDescription: "Messages moved out of Organizer views will appear here.",
+  },
 };
 
 const bundleModeDisabledReason = "Not connected in Bundle mode yet";
@@ -231,12 +244,16 @@ const bundleOrganizerWorkflowStorageKey =
   "cuevion-bundle-organizer-workflow-state";
 const shortlistedPillClass =
   "rounded-full border border-[rgba(246,183,91,0.24)] bg-[rgba(214,137,45,0.14)] px-2 py-0.5 text-[0.68rem] font-medium uppercase tracking-[0.1em] text-[rgba(255,204,125,0.9)]";
+const trashedPillClass =
+  "rounded-full border border-white/15 bg-white/8 px-2 py-0.5 text-[0.68rem] font-medium uppercase tracking-[0.1em] text-[rgba(245,239,229,0.66)]";
 
 type BundleOrganizerWorkflowState = Record<
   string,
   {
     shortlisted?: boolean;
     shortlistedAt?: string;
+    trashed?: boolean;
+    trashedAt?: string;
   }
 >;
 
@@ -352,8 +369,16 @@ function applyBundleWorkflowState(
 
     return {
       ...message,
-      shortlisted: workflowEntry.shortlisted === true,
+      shortlisted:
+        typeof workflowEntry.shortlisted === "boolean"
+          ? workflowEntry.shortlisted
+          : message.shortlisted,
       shortlistedAt: workflowEntry.shortlistedAt ?? message.shortlistedAt,
+      trashed:
+        typeof workflowEntry.trashed === "boolean"
+          ? workflowEntry.trashed
+          : message.trashed,
+      trashedAt: workflowEntry.trashedAt ?? message.trashedAt,
     };
   });
 }
@@ -362,19 +387,25 @@ function getMessagesForView(
   view: BundleOrganizerView,
   liveMessages: BundleOrganizerMessage[],
 ) {
+  if (view === "trash") {
+    return liveMessages.filter((message) => message.trashed === true);
+  }
+
+  const activeMessages = liveMessages.filter((message) => message.trashed !== true);
+
   if (view === "priority") {
-    return liveMessages.filter(shouldShowInOrganizerPriority);
+    return activeMessages.filter(shouldShowInOrganizerPriority);
   }
 
   if (view === "shortlist") {
-    return liveMessages.filter((message) => message.shortlisted === true);
+    return activeMessages.filter((message) => message.shortlisted === true);
   }
 
   if (view === "demo") {
-    return liveMessages.filter(shouldShowInDemoInbox);
+    return activeMessages.filter(shouldShowInDemoInbox);
   }
 
-  return liveMessages.filter(shouldShowInPromoInbox);
+  return activeMessages.filter(shouldShowInPromoInbox);
 }
 
 function getCounts(liveMessages: BundleOrganizerMessage[]) {
@@ -515,14 +546,12 @@ function sortMessagesByDate(
 
 function buildGlobalSearchSourceRows(
   liveMessages: BundleOrganizerMessage[],
+  includeTrash: boolean,
 ): BundleOrganizerSearchRow[] {
   const messagesById = new Map<string, BundleOrganizerSearchRow>();
-  const sourceViews: BundleOrganizerView[] = [
-    "demo",
-    "promo",
-    "priority",
-    "shortlist",
-  ];
+  const sourceViews: BundleOrganizerView[] = includeTrash
+    ? ["trash"]
+    : ["demo", "promo", "priority", "shortlist"];
 
   sourceViews.forEach((view) => {
     getMessagesForView(view, liveMessages).forEach((message) => {
@@ -556,6 +585,7 @@ function doesMessageMatchSearch(message: BundleOrganizerMessage, searchQuery: st
     message.category,
     message.ui_signal,
     message.shortlisted ? "shortlisted" : null,
+    message.trashed ? "trashed" : null,
     ...(Array.isArray(message.body) ? message.body : []),
   ];
 
@@ -624,6 +654,15 @@ function OrganizerNavIcon({ name }: { name: BundleOrganizerView }) {
           <path d="M20.25 7a6 6 0 0 1 0 10" />
         </>
       ) : null}
+      {name === "trash" ? (
+        <>
+          <path d="M4 6.5h16" />
+          <path d="M9.5 6.5v-2h5v2" />
+          <path d="M7 6.5 8 20h8l1-13.5" />
+          <path d="M10.5 10.5v5.5" />
+          <path d="M13.5 10.5v5.5" />
+        </>
+      ) : null}
     </svg>
   );
 }
@@ -662,6 +701,12 @@ function ContextMenuIcon({ name }: { name: BundleOrganizerContextMenuIconName })
         <path d="M5 21V4" />
         <path d="M5 4h11l-1.5 4L16 12H5" />
         <path d="M4 4 20 20" />
+      </>
+    ),
+    restore: (
+      <>
+        <path d="M3 12a9 9 0 1 0 3-6.7" />
+        <path d="M3 4v6h6" />
       </>
     ),
     rule: (
@@ -737,6 +782,7 @@ function getContextMenuActions(
   message: BundleOrganizerMessage,
   sourceView: BundleOrganizerView,
   onToggleShortlist: (message: BundleOrganizerMessage) => void,
+  onToggleTrash: (message: BundleOrganizerMessage) => void,
 ): BundleOrganizerContextMenuAction[] {
   const actions: BundleOrganizerContextMenuAction[] = [
     buildDisabledMenuAction({
@@ -748,6 +794,22 @@ function getContextMenuActions(
       label: message.unread ? "Mark as read" : "Mark as unread",
     }),
   ];
+
+  if (sourceView === "trash" || message.trashed === true) {
+    actions.push(
+      {
+        icon: "restore",
+        label: "Restore",
+        onSelect: () => onToggleTrash(message),
+      },
+      buildDisabledMenuAction({
+        icon: "trash",
+        label: "Delete permanently",
+      }),
+    );
+
+    return actions;
+  }
 
   if (sourceView === "demo") {
     actions.push(
@@ -815,10 +877,11 @@ function getContextMenuActions(
       icon: "smartView",
       label: "Create Smart View for this sender",
     }),
-    buildDisabledMenuAction({
+    {
       icon: "trash",
       label: "Move to Trash",
-    }),
+      onSelect: () => onToggleTrash(message),
+    },
   );
 
   return actions;
@@ -839,6 +902,9 @@ function MessagePills({ message }: { message: BundleOrganizerMessage }) {
       ) : null}
       {message.shortlisted ? (
         <span className={shortlistedPillClass}>Shortlisted</span>
+      ) : null}
+      {message.trashed ? (
+        <span className={trashedPillClass}>Trashed</span>
       ) : null}
       {message.internalClassification ? (
         <span className="rounded-full bg-[rgba(120,104,89,0.1)] px-2 py-0.5 text-[0.68rem] font-medium text-[rgba(64,56,48,0.62)] dark:bg-white/5 dark:text-[rgba(245,239,229,0.56)]">
@@ -890,10 +956,12 @@ function MessageDetail({
   message,
   onBack,
   onToggleShortlist,
+  onToggleTrash,
 }: {
   message: BundleOrganizerMessage;
   onBack: () => void;
   onToggleShortlist: (message: BundleOrganizerMessage) => void;
+  onToggleTrash: (message: BundleOrganizerMessage) => void;
 }) {
   const activeReason = resolvePriorityReason(message);
   const bodyLines = message.body.length > 0 ? message.body : [message.snippet];
@@ -925,6 +993,18 @@ function MessageDetail({
               <span>
                 {message.shortlisted ? "Remove from shortlist" : "Shortlist"}
               </span>
+            </button>
+            <button
+              type="button"
+              onClick={() => onToggleTrash(message)}
+              className={`inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-[0.68rem] font-medium uppercase tracking-[0.1em] transition-colors ${
+                message.trashed
+                  ? "border-[rgba(143,179,159,0.28)] bg-[rgba(143,179,159,0.12)] text-[rgba(198,228,209,0.92)] hover:bg-[rgba(143,179,159,0.16)]"
+                  : "border-white/10 bg-white/5 text-[rgba(245,239,229,0.56)] hover:border-[rgba(143,179,159,0.24)] hover:bg-[rgba(143,179,159,0.1)] hover:text-[rgba(198,228,209,0.88)]"
+              }`}
+            >
+              <ContextMenuIcon name={message.trashed ? "restore" : "trash"} />
+              <span>{message.trashed ? "Restore" : "Move to Trash"}</span>
             </button>
           </div>
           <p className="text-[0.74rem] font-medium uppercase tracking-[0.16em] text-[rgba(217,203,184,0.58)]">
@@ -1090,8 +1170,8 @@ export function BundleOrganizerSurface({
     ],
   );
   const globalSearchSourceRows = useMemo(
-    () => buildGlobalSearchSourceRows(workspaceMessages),
-    [workspaceMessages],
+    () => buildGlobalSearchSourceRows(workspaceMessages, activeView === "trash"),
+    [activeView, workspaceMessages],
   );
   const visibleRows = useMemo(
     () =>
@@ -1107,10 +1187,13 @@ export function BundleOrganizerSurface({
   );
   const isSearchActive = searchQuery.trim().length > 0;
   const activeCopy = isSearchActive
-    ? {
+      ? {
         title: "Search results",
         eyebrow: "Global Organizer search",
-        description: "Matching messages across embedded Organizer views.",
+        description:
+          activeView === "trash"
+            ? "Matching messages in embedded Organizer Trash."
+            : "Matching messages across embedded Organizer views.",
         emptyTitle: "No messages match your search.",
         emptyDescription: "Clear the search to return to the current view.",
       }
@@ -1128,6 +1211,7 @@ export function BundleOrganizerSurface({
         contextMenuMessage.message,
         contextMenuMessage.sourceView,
         toggleMessageShortlist,
+        toggleMessageTrash,
       )
     : [];
   const isViewFilterActive =
@@ -1183,6 +1267,40 @@ export function BundleOrganizerSurface({
             ...currentMessage,
             shortlisted: nextShortlisted,
             shortlistedAt,
+          }
+        : currentMessage,
+    );
+  }
+
+  function toggleMessageTrash(message: BundleOrganizerMessage) {
+    const identityKey = getWorkflowIdentityKey(message);
+    const nextTrashed = message.trashed !== true;
+    const trashedAt = nextTrashed ? new Date().toISOString() : undefined;
+
+    setWorkflowState((currentState) => {
+      const nextState = {
+        ...currentState,
+        [identityKey]: {
+          ...currentState[identityKey],
+          trashed: nextTrashed,
+          trashedAt,
+        },
+      };
+
+      if (!nextTrashed) {
+        delete nextState[identityKey].trashedAt;
+      }
+
+      writeBundleOrganizerWorkflowState(nextState);
+      return nextState;
+    });
+    setContextMenu(null);
+    setSelectedMessage((currentMessage) =>
+      currentMessage && getWorkflowIdentityKey(currentMessage) === identityKey
+        ? {
+            ...currentMessage,
+            trashed: nextTrashed,
+            trashedAt,
           }
         : currentMessage,
     );
@@ -1387,7 +1505,7 @@ export function BundleOrganizerSurface({
                       <OrganizerNavIcon name={item.icon} />
                       <span className="truncate">{item.label}</span>
                     </span>
-                    {count > 0 ? (
+                    {item.id !== "trash" && count > 0 ? (
                       <span
                         className={`rounded-full px-2 py-0.5 text-[0.72rem] ${
                           isActive
@@ -1562,6 +1680,7 @@ export function BundleOrganizerSurface({
                   message={selectedMessage}
                   onBack={() => setSelectedMessage(null)}
                   onToggleShortlist={toggleMessageShortlist}
+                  onToggleTrash={toggleMessageTrash}
                 />
               ) : visibleRows.length === 0 ? (
                 <div className="mt-4 rounded-[18px] border border-white/10 bg-white/5 px-5 py-10 text-center">
@@ -1686,20 +1805,34 @@ export function BundleOrganizerSurface({
                         >
                           <span aria-hidden="true">...</span>
                         </button>
-                        {activeView === "shortlist" ? (
+                        {activeView === "shortlist" || activeView === "trash" ? (
                           <div className="flex justify-end px-3 pb-3 sm:px-4 xl:px-5">
                             <button
                               type="button"
                               onClick={(event) => {
                                 event.preventDefault();
                                 event.stopPropagation();
+                                if (activeView === "trash") {
+                                  toggleMessageTrash(message);
+                                  return;
+                                }
                                 toggleMessageShortlist(message);
                               }}
                               data-organizer-list-control="true"
                               className="inline-flex h-8 items-center justify-center gap-1.5 rounded-full border border-white/10 bg-white/5 px-3 text-[0.68rem] font-medium uppercase tracking-[0.1em] text-[rgba(245,239,229,0.56)] transition-colors hover:border-[rgba(143,179,159,0.24)] hover:bg-[rgba(143,179,159,0.1)] hover:text-[rgba(198,228,209,0.88)]"
                             >
-                              <ContextMenuIcon name="shortlistOff" />
-                              <span>Remove from shortlist</span>
+                              <ContextMenuIcon
+                                name={
+                                  activeView === "trash"
+                                    ? "restore"
+                                    : "shortlistOff"
+                                }
+                              />
+                              <span>
+                                {activeView === "trash"
+                                  ? "Restore"
+                                  : "Remove from shortlist"}
+                              </span>
                             </button>
                           </div>
                         ) : null}
