@@ -83,28 +83,41 @@ type BundleOrganizerSurfaceProps = {
 const navItems: Array<{
   id: BundleOrganizerView;
   label: string;
+  icon: BundleOrganizerView;
 }> = [
-  { id: "priority", label: "Priority" },
-  { id: "demo", label: "Demo Inbox" },
-  { id: "promo", label: "Promo Inbox" },
+  { id: "priority", label: "Priority", icon: "priority" },
+  { id: "demo", label: "Demo Inbox", icon: "demo" },
+  { id: "promo", label: "Promo Inbox", icon: "promo" },
 ];
 
 const viewCopy: Record<
   BundleOrganizerView,
-  { title: string; emptyTitle: string; emptyDescription: string }
+  {
+    title: string;
+    eyebrow: string;
+    description: string;
+    emptyTitle: string;
+    emptyDescription: string;
+  }
 > = {
   priority: {
     title: "Priority",
+    eyebrow: "Active Work Queue",
+    description: "Priority shows active work, replies, waiting items, and open follow-ups.",
     emptyTitle: "No priority messages.",
     emptyDescription: "Priority demo and promo messages will appear here.",
   },
   demo: {
     title: "Demo Inbox",
+    eyebrow: "Unified Demo Intake",
+    description: "Demos from connected workspace inboxes are filtered into one focused queue.",
     emptyTitle: "No demo messages.",
     emptyDescription: "Demo messages from connected inboxes will appear here.",
   },
   promo: {
     title: "Promo Inbox",
+    eyebrow: "Unified Promo Review",
+    description: "Promo mail and promo reminders are organized without mixing into demo review.",
     emptyTitle: "No promo messages.",
     emptyDescription: "Promo messages from connected inboxes will appear here.",
   },
@@ -188,6 +201,21 @@ function getCounts(liveMessages: BundleOrganizerMessage[]) {
   }, {});
 }
 
+function doesMessageMatchSearch(message: BundleOrganizerMessage, searchQuery: string) {
+  const normalizedSearchQuery = searchQuery.trim().toLowerCase();
+
+  if (!normalizedSearchQuery) {
+    return true;
+  }
+
+  return [
+    message.sender,
+    message.subject,
+    message.snippet,
+    message.sourceMailbox,
+  ].some((value) => value.toLowerCase().includes(normalizedSearchQuery));
+}
+
 function OrganizerIcon({ className = "" }: { className?: string }) {
   return (
     <svg
@@ -211,21 +239,59 @@ function OrganizerIcon({ className = "" }: { className?: string }) {
   );
 }
 
+function OrganizerNavIcon({ name }: { name: BundleOrganizerView }) {
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-[18px] w-[18px] shrink-0"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.8"
+      viewBox="0 0 24 24"
+    >
+      {name === "priority" ? (
+        <>
+          <path d="m13 2-2 8h7l-7 12 2-8H6l7-12Z" />
+          <path d="M5 19h4" />
+        </>
+      ) : null}
+      {name === "demo" ? (
+        <>
+          <path d="M4 7.5A2.5 2.5 0 0 1 6.5 5h11A2.5 2.5 0 0 1 20 7.5v9A2.5 2.5 0 0 1 17.5 19h-11A2.5 2.5 0 0 1 4 16.5v-9Z" />
+          <path d="M4 11h4.1a2.75 2.75 0 0 0 2.55 1.72h2.7A2.75 2.75 0 0 0 15.9 11H20" />
+          <path d="M14.5 7.4v3.8" />
+          <path d="M14.5 7.4 17 6.75" />
+        </>
+      ) : null}
+      {name === "promo" ? (
+        <>
+          <path d="M4 13.5h3.25l8.25 4.25V6.25L7.25 10.5H4v3Z" />
+          <path d="M7.25 13.5 8.5 19" />
+          <path d="M18 9.1a3.25 3.25 0 0 1 0 5.8" />
+          <path d="M20.25 7a6 6 0 0 1 0 10" />
+        </>
+      ) : null}
+    </svg>
+  );
+}
+
 function MessagePills({ message }: { message: BundleOrganizerMessage }) {
   return (
     <>
       {message.sourceMailbox ? (
-        <span className="max-w-full truncate rounded-full bg-white/5 px-2 py-0.5 text-[0.68rem] font-medium text-[rgba(245,239,229,0.56)]">
+        <span className="max-w-full truncate rounded-full bg-[rgba(120,104,89,0.1)] px-2 py-0.5 text-[0.68rem] font-medium text-[rgba(64,56,48,0.62)] dark:bg-white/5 dark:text-[rgba(245,239,229,0.56)]">
           {message.sourceMailbox}
         </span>
       ) : null}
       {message.priorityBadge ? (
-        <span className="rounded-full bg-[rgba(143,179,159,0.14)] px-2 py-0.5 text-[0.68rem] font-medium text-[rgba(167,203,181,0.9)]">
+        <span className="rounded-full bg-[rgba(48,72,61,0.1)] px-2 py-0.5 text-[0.68rem] font-medium text-[rgba(48,72,61,0.86)] dark:bg-[rgba(143,179,159,0.14)] dark:text-[rgba(167,203,181,0.9)]">
           {message.priorityBadge}
         </span>
       ) : null}
       {message.internalClassification ? (
-        <span className="rounded-full bg-white/5 px-2 py-0.5 text-[0.68rem] font-medium text-[rgba(245,239,229,0.56)]">
+        <span className="rounded-full bg-[rgba(120,104,89,0.1)] px-2 py-0.5 text-[0.68rem] font-medium text-[rgba(64,56,48,0.62)] dark:bg-white/5 dark:text-[rgba(245,239,229,0.56)]">
           {message.internalClassification.replace(/_/g, " ")}
         </span>
       ) : null}
@@ -299,20 +365,30 @@ function MessageDetail({
 export function BundleOrganizerSurface({
   liveMessages = [],
   hasLiveWorkspaceData = false,
+  connectedInboxCount = 0,
 }: BundleOrganizerSurfaceProps) {
   const [activeView, setActiveView] = useState<BundleOrganizerView>("priority");
   const [selectedMessage, setSelectedMessage] = useState<BundleOrganizerMessage | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
   const workspaceMessages = useMemo(
     () => normalizeWorkspaceMessages(liveMessages),
     [liveMessages],
   );
   const counts = useMemo(() => getCounts(workspaceMessages), [workspaceMessages]);
-  const activeMessages = useMemo(
+  const rawActiveMessages = useMemo(
     () => getMessagesForView(activeView, workspaceMessages),
     [activeView, workspaceMessages],
   );
+  const activeMessages = useMemo(
+    () =>
+      rawActiveMessages.filter((message) =>
+        doesMessageMatchSearch(message, searchQuery),
+      ),
+    [rawActiveMessages, searchQuery],
+  );
   const activeCopy = viewCopy[activeView];
   const hasOrganizerData = hasLiveWorkspaceData || workspaceMessages.length > 0;
+  const isSearchActive = searchQuery.trim().length > 0;
 
   const selectView = (view: BundleOrganizerView) => {
     setActiveView(view);
@@ -321,28 +397,92 @@ export function BundleOrganizerSurface({
 
   return (
     <div className="min-h-0 flex-1 overflow-hidden">
-      <section className="flex h-full min-h-0 flex-col overflow-hidden rounded-[18px] bg-[linear-gradient(180deg,#1d1b18_0%,#101915_100%)] p-2 text-[color:#f5efe5] md:p-3">
-        <header className="border-b border-white/10 pb-3">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <div className="min-w-0">
-              <div className="flex items-center gap-2.5">
-                <OrganizerIcon className="h-8 w-8 shrink-0 text-[color:#8fb39f]" />
-                <p className="text-[0.72rem] font-medium uppercase tracking-[0.18em] text-[rgba(217,203,184,0.68)]">
-                  Cuevion
-                </p>
+      <section className="dark flex h-full min-h-0 flex-col overflow-hidden rounded-[18px] bg-[linear-gradient(180deg,#111a16_0%,#19241f_100%)] px-3 py-3 text-[color:#f5efe5] sm:px-4 lg:px-5">
+        <header className="border-b border-white/10 pb-4">
+          <div className="flex flex-col gap-4">
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2.5">
+                  <OrganizerIcon className="h-8 w-8 shrink-0 text-[color:#8fb39f]" />
+                  <p className="text-[0.72rem] font-medium uppercase tracking-[0.18em] text-[rgba(217,203,184,0.68)]">
+                    Cuevion
+                  </p>
+                </div>
+                <h1 className="mt-2.5 text-[1.7rem] font-semibold tracking-[-0.03em] text-[color:#f5efe5] sm:text-[2rem]">
+                  Demo &amp; Promo Organizer
+                </h1>
               </div>
-              <h1 className="mt-2.5 text-[1.7rem] font-semibold tracking-[-0.03em] text-[color:#f5efe5] sm:text-[2rem]">
-                Demo &amp; Promo Organizer
-              </h1>
+            </div>
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <p className="max-w-[520px] text-[0.96rem] leading-7 text-[rgba(245,239,229,0.66)]">
+                A dedicated music inbox for demos, promos, and active follow-ups.
+              </p>
+              <div className="relative w-full sm:max-w-[320px]">
+                <span className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-[rgba(245,239,229,0.42)]">
+                  <svg
+                    aria-hidden="true"
+                    className="h-4 w-4"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth="2"
+                    viewBox="0 0 24 24"
+                  >
+                    <path d="m21 21-4.34-4.34" />
+                    <circle cx="11" cy="11" r="8" />
+                  </svg>
+                </span>
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={(event) => {
+                    setSearchQuery(event.target.value);
+                    setSelectedMessage(null);
+                  }}
+                  placeholder="Search messages..."
+                  className="h-10 w-full rounded-full border border-white/10 bg-white/5 pl-10 pr-10 text-[0.86rem] font-medium text-[rgba(245,239,229,0.84)] outline-none transition-colors placeholder:text-[rgba(245,239,229,0.38)] hover:border-[rgba(143,179,159,0.24)] hover:bg-white/8 focus:border-[rgba(143,179,159,0.34)] focus:bg-white/10 focus:ring-2 focus:ring-[rgba(143,179,159,0.14)]"
+                />
+                {searchQuery ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSearchQuery("");
+                      setSelectedMessage(null);
+                    }}
+                    className="absolute right-2 top-1/2 inline-flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-full text-[0.78rem] font-semibold leading-none text-[rgba(245,239,229,0.46)] transition-colors hover:bg-[rgba(143,179,159,0.12)] hover:text-[rgba(198,228,209,0.9)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[rgba(143,179,159,0.2)]"
+                    aria-label="Clear message search"
+                  >
+                    X
+                  </button>
+                ) : null}
+              </div>
             </div>
           </div>
         </header>
 
-        <div className="grid min-h-0 flex-1 gap-3 overflow-hidden pt-3 lg:grid-cols-[210px_minmax(0,1fr)] xl:grid-cols-[220px_minmax(0,1fr)]">
-          <aside className="min-h-0 min-w-0 overflow-y-auto pb-2.5 lg:pb-0">
+        <div className="mt-3 grid min-h-0 flex-1 gap-4 overflow-hidden lg:grid-cols-[210px_minmax(0,1fr)] xl:grid-cols-[220px_minmax(0,1fr)]">
+          <aside className="flex min-w-0 flex-col gap-3 overflow-y-auto pb-2.5 lg:pb-0">
+            <section className="w-full rounded-[15px] border border-white/10 bg-white/5 px-3 py-2.5 shadow-[0_10px_24px_rgba(0,0,0,0.16)]">
+              <p className="text-[0.66rem] font-medium uppercase tracking-[0.15em] text-[rgba(217,203,184,0.55)]">
+                Connected Inboxes
+              </p>
+              <div className="mt-1.5 flex items-center justify-between gap-2">
+                <span className="text-[1.45rem] font-semibold leading-none tracking-[-0.04em] text-[color:#f5efe5]">
+                  {connectedInboxCount}
+                </span>
+                <span className="inline-flex h-7 shrink-0 items-center justify-center rounded-full border border-white/10 bg-white/5 px-2.5 text-[0.64rem] font-medium uppercase tracking-[0.1em] text-[rgba(245,239,229,0.5)]">
+                  Live
+                </span>
+              </div>
+              <p className="mt-1 truncate text-[0.68rem] font-medium leading-4 text-[rgba(167,203,181,0.72)]">
+                Workspace messages only
+              </p>
+            </section>
+
             <nav
               aria-label="Organizer sections"
-              className="flex gap-2 overflow-x-auto lg:block lg:overflow-visible"
+              className="flex gap-2 overflow-x-auto border-b border-white/10 pb-3 lg:block lg:overflow-visible lg:border-b-0 lg:border-r lg:bg-transparent lg:pb-0 lg:pr-4 xl:pr-5"
             >
               {navItems.map((item) => {
                 const isActive = item.id === activeView;
@@ -360,7 +500,10 @@ export function BundleOrganizerSurface({
                     }`}
                     aria-current={isActive ? "page" : undefined}
                   >
-                    <span className="truncate">{item.label}</span>
+                    <span className="flex min-w-0 items-center gap-2.5">
+                      <OrganizerNavIcon name={item.icon} />
+                      <span className="truncate">{item.label}</span>
+                    </span>
                     {count > 0 ? (
                       <span
                         className={`rounded-full px-2 py-0.5 text-[0.72rem] ${
@@ -378,12 +521,20 @@ export function BundleOrganizerSurface({
             </nav>
           </aside>
 
-          <main className="min-h-0 min-w-0 overflow-y-auto">
-            <section className="rounded-[20px] border border-white/10 bg-[rgba(25,34,30,0.82)] p-4 shadow-[0_18px_48px_rgba(0,0,0,0.26)] sm:p-5 xl:p-6">
-              <div className="border-b border-white/10 pb-4">
-                <h2 className="text-[1.36rem] font-semibold tracking-[-0.03em] text-[color:#f5efe5]">
+          <main className="min-h-0 min-w-0 overflow-y-auto pr-1">
+            <section className="rounded-[22px] border border-white/10 bg-[rgba(25,34,30,0.82)] p-4 shadow-[0_18px_48px_rgba(0,0,0,0.26)] sm:p-5 xl:p-6">
+              <div className="flex items-center gap-2.5">
+                <p className="text-[0.72rem] font-semibold uppercase tracking-[0.16em] text-[rgba(217,203,184,0.58)]">
+                  {activeCopy.eyebrow}
+                </p>
+              </div>
+              <div className="mt-1 border-b border-white/10 pb-4">
+                <h2 className="text-[1.45rem] font-semibold tracking-[-0.03em] text-[color:#f5efe5]">
                   {activeCopy.title}
                 </h2>
+                <p className="mt-1.5 max-w-[660px] text-[0.86rem] leading-6 text-[rgba(245,239,229,0.58)]">
+                  {activeCopy.description}
+                </p>
               </div>
 
               {selectedMessage ? (
@@ -394,10 +545,16 @@ export function BundleOrganizerSurface({
               ) : activeMessages.length === 0 ? (
                 <div className="mt-4 rounded-[18px] border border-white/10 bg-white/5 px-5 py-10 text-center">
                   <h3 className="text-[1rem] font-semibold tracking-[-0.02em] text-[color:#f5efe5]">
-                    {hasOrganizerData ? activeCopy.emptyTitle : "No messages loaded."}
+                    {isSearchActive
+                      ? "No matching messages."
+                      : hasOrganizerData
+                      ? activeCopy.emptyTitle
+                      : "No messages loaded."}
                   </h3>
                   <p className="mx-auto mt-2 max-w-[460px] text-[0.86rem] leading-6 text-[rgba(245,239,229,0.58)]">
-                    {hasOrganizerData
+                    {isSearchActive
+                      ? "Try a different sender, subject, snippet, or source mailbox."
+                      : hasOrganizerData
                       ? activeCopy.emptyDescription
                       : "Connected inbox messages will appear here after sync."}
                   </p>
@@ -412,12 +569,15 @@ export function BundleOrganizerSurface({
                       <button
                         type="button"
                         onClick={() => setSelectedMessage(message)}
-                        className="grid w-full gap-3 border-l-2 border-transparent px-4 py-3.5 text-left transition-[background-color,border-color,box-shadow] hover:border-[color:#8fb39f] hover:bg-white/[0.04] sm:grid-cols-[minmax(150px,0.55fr)_minmax(0,2.6fr)_minmax(72px,auto)] lg:grid-cols-[minmax(170px,0.46fr)_minmax(0,3fr)_minmax(82px,auto)] xl:px-5"
+                        className="grid w-full gap-3 border-l-2 border-transparent px-3 py-3.5 text-left transition-[background-color,border-color,box-shadow] hover:bg-white/5 sm:grid-cols-[minmax(150px,0.55fr)_minmax(0,2.6fr)_minmax(72px,auto)] sm:px-4 lg:grid-cols-[minmax(170px,0.46fr)_minmax(0,3fr)_minmax(82px,auto)] xl:px-5"
                       >
                         <div className="grid min-w-0 grid-cols-[0.5rem_minmax(0,1fr)] items-start gap-2">
                           <span
+                            aria-hidden="true"
                             className={`mt-[0.36rem] h-2 w-2 rounded-full ${
-                              message.unread ? "bg-[color:#8fb39f]" : "bg-white/20"
+                              message.unread
+                                ? "bg-[#a78bfa] shadow-[0_0_0_2px_rgba(167,139,250,0.2)]"
+                                : "bg-transparent"
                             }`}
                           />
                           <div className="min-w-0">
