@@ -15,7 +15,7 @@ import {
   type BundleOrganizerActiveWorkStatus,
 } from "./bundleOrganizerFilters";
 
-type BundleOrganizerView = "priority" | "demo" | "promo";
+type BundleOrganizerView = "priority" | "shortlist" | "demo" | "promo";
 type BundleOrganizerDemoStatusFilter =
   | "all"
   | "unread"
@@ -48,6 +48,7 @@ type BundleOrganizerContextMenuIconName =
   | "priorityOff"
   | "rule"
   | "shortlist"
+  | "shortlistOff"
   | "smartView"
   | "trash";
 
@@ -80,6 +81,7 @@ type BundleOrganizerMessage = {
   uiSignal?: string;
   unread?: boolean;
   shortlisted?: boolean;
+  shortlistedAt?: string | null;
   replied?: boolean;
   repliedAt?: string | null;
   replyHistory?: unknown[];
@@ -125,6 +127,7 @@ export type BundleOrganizerWorkspaceMessage = {
   uiSignal?: string;
   unread?: boolean;
   shortlisted?: boolean;
+  shortlistedAt?: string | null;
   replied?: boolean;
   repliedAt?: string | null;
   replyHistory?: unknown[];
@@ -151,6 +154,7 @@ const navItems: Array<{
   icon: BundleOrganizerView;
 }> = [
   { id: "priority", label: "Priority", icon: "priority" },
+  { id: "shortlist", label: "Shortlist", icon: "shortlist" },
   { id: "demo", label: "Demo Inbox", icon: "demo" },
   { id: "promo", label: "Promo Inbox", icon: "promo" },
 ];
@@ -199,6 +203,13 @@ const viewCopy: Record<
     emptyTitle: "No priority messages.",
     emptyDescription: "Priority demo and promo messages will appear here.",
   },
+  shortlist: {
+    title: "Shortlist",
+    eyebrow: "Saved for follow-up",
+    description: "Messages you shortlist from Demo, Promo, and Priority stay collected here.",
+    emptyTitle: "No shortlisted messages yet.",
+    emptyDescription: "Shortlisted demos and promos will appear here.",
+  },
   demo: {
     title: "Demo Inbox",
     eyebrow: "Unified Demo Intake",
@@ -216,6 +227,18 @@ const viewCopy: Record<
 };
 
 const bundleModeDisabledReason = "Not connected in Bundle mode yet";
+const bundleOrganizerWorkflowStorageKey =
+  "cuevion-bundle-organizer-workflow-state";
+const shortlistedPillClass =
+  "rounded-full border border-[rgba(246,183,91,0.24)] bg-[rgba(214,137,45,0.14)] px-2 py-0.5 text-[0.68rem] font-medium uppercase tracking-[0.1em] text-[rgba(255,204,125,0.9)]";
+
+type BundleOrganizerWorkflowState = Record<
+  string,
+  {
+    shortlisted?: boolean;
+    shortlistedAt?: string;
+  }
+>;
 
 function resolvePriorityReason(message: BundleOrganizerMessage) {
   if (message.reason) {
@@ -273,12 +296,78 @@ function normalizeWorkspaceMessages(
   );
 }
 
+function getWorkflowIdentityKey(message: BundleOrganizerMessage) {
+  return message.identityKey ?? message.id;
+}
+
+function readBundleOrganizerWorkflowState(): BundleOrganizerWorkflowState {
+  if (typeof window === "undefined") {
+    return {};
+  }
+
+  try {
+    const storedValue = window.localStorage.getItem(
+      bundleOrganizerWorkflowStorageKey,
+    );
+    if (!storedValue) {
+      return {};
+    }
+
+    const parsedValue = JSON.parse(storedValue);
+    if (!parsedValue || typeof parsedValue !== "object") {
+      return {};
+    }
+
+    return parsedValue as BundleOrganizerWorkflowState;
+  } catch {
+    return {};
+  }
+}
+
+function writeBundleOrganizerWorkflowState(state: BundleOrganizerWorkflowState) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  try {
+    window.localStorage.setItem(
+      bundleOrganizerWorkflowStorageKey,
+      JSON.stringify(state),
+    );
+  } catch {
+    // Local workflow state is optional; mailbox data must never depend on it.
+  }
+}
+
+function applyBundleWorkflowState(
+  messages: BundleOrganizerMessage[],
+  workflowState: BundleOrganizerWorkflowState,
+) {
+  return messages.map((message) => {
+    const workflowEntry = workflowState[getWorkflowIdentityKey(message)];
+
+    if (!workflowEntry) {
+      return message;
+    }
+
+    return {
+      ...message,
+      shortlisted: workflowEntry.shortlisted === true,
+      shortlistedAt: workflowEntry.shortlistedAt ?? message.shortlistedAt,
+    };
+  });
+}
+
 function getMessagesForView(
   view: BundleOrganizerView,
   liveMessages: BundleOrganizerMessage[],
 ) {
   if (view === "priority") {
     return liveMessages.filter(shouldShowInOrganizerPriority);
+  }
+
+  if (view === "shortlist") {
+    return liveMessages.filter((message) => message.shortlisted === true);
   }
 
   if (view === "demo") {
@@ -428,7 +517,12 @@ function buildGlobalSearchSourceRows(
   liveMessages: BundleOrganizerMessage[],
 ): BundleOrganizerSearchRow[] {
   const messagesById = new Map<string, BundleOrganizerSearchRow>();
-  const sourceViews: BundleOrganizerView[] = ["demo", "promo", "priority"];
+  const sourceViews: BundleOrganizerView[] = [
+    "demo",
+    "promo",
+    "priority",
+    "shortlist",
+  ];
 
   sourceViews.forEach((view) => {
     getMessagesForView(view, liveMessages).forEach((message) => {
@@ -461,6 +555,7 @@ function doesMessageMatchSearch(message: BundleOrganizerMessage, searchQuery: st
     message.internalClassification,
     message.category,
     message.ui_signal,
+    message.shortlisted ? "shortlisted" : null,
     ...(Array.isArray(message.body) ? message.body : []),
   ];
 
@@ -509,6 +604,9 @@ function OrganizerNavIcon({ name }: { name: BundleOrganizerView }) {
           <path d="m13 2-2 8h7l-7 12 2-8H6l7-12Z" />
           <path d="M5 19h4" />
         </>
+      ) : null}
+      {name === "shortlist" ? (
+        <path d="M6.5 4.75A2.25 2.25 0 0 1 8.75 2.5h6.5a2.25 2.25 0 0 1 2.25 2.25v16l-5.5-3.2-5.5 3.2v-16Z" />
       ) : null}
       {name === "demo" ? (
         <>
@@ -576,6 +674,12 @@ function ContextMenuIcon({ name }: { name: BundleOrganizerContextMenuIconName })
     shortlist: (
       <path d="M6.5 4.75A2.25 2.25 0 0 1 8.75 2.5h6.5a2.25 2.25 0 0 1 2.25 2.25v16l-5.5-3.2-5.5 3.2v-16Z" />
     ),
+    shortlistOff: (
+      <>
+        <path d="M6.5 4.75A2.25 2.25 0 0 1 8.75 2.5h6.5a2.25 2.25 0 0 1 2.25 2.25v16l-5.5-3.2-5.5 3.2v-16Z" />
+        <path d="M4 4 20 20" />
+      </>
+    ),
     smartView: (
       <>
         <circle cx="11" cy="11" r="7" />
@@ -632,6 +736,7 @@ function buildDisabledMenuAction(
 function getContextMenuActions(
   message: BundleOrganizerMessage,
   sourceView: BundleOrganizerView,
+  onToggleShortlist: (message: BundleOrganizerMessage) => void,
 ): BundleOrganizerContextMenuAction[] {
   const actions: BundleOrganizerContextMenuAction[] = [
     buildDisabledMenuAction({
@@ -658,7 +763,7 @@ function getContextMenuActions(
         label: "Move to Demo",
       }),
     );
-  } else if (sourceView === "priority") {
+  } else if (sourceView === "priority" || sourceView === "shortlist") {
     actions.push(
       buildDisabledMenuAction({
         icon: "category",
@@ -672,17 +777,19 @@ function getContextMenuActions(
   }
 
   actions.push(
-    buildDisabledMenuAction({
-      icon: "shortlist",
-      label: "Shortlist",
-    }),
+    {
+      icon: message.shortlisted === true ? "shortlistOff" : "shortlist",
+      label:
+        message.shortlisted === true ? "Remove from Shortlist" : "Shortlist",
+      onSelect: () => onToggleShortlist(message),
+    },
     buildDisabledMenuAction({
       icon: message.manualPriority === true ? "priorityOff" : "priority",
       label: message.manualPriority === true ? "Remove Priority" : "Mark as Priority",
     }),
   );
 
-  if (sourceView === "promo") {
+  if (sourceView === "promo" || (sourceView === "shortlist" && shouldShowInPromoInbox(message))) {
     if (isPromoReminderMessage(message)) {
       actions.push(
         buildDisabledMenuAction({
@@ -729,6 +836,9 @@ function MessagePills({ message }: { message: BundleOrganizerMessage }) {
         <span className="rounded-full bg-[rgba(48,72,61,0.1)] px-2 py-0.5 text-[0.68rem] font-medium text-[rgba(48,72,61,0.86)] dark:bg-[rgba(143,179,159,0.14)] dark:text-[rgba(167,203,181,0.9)]">
           {message.priorityBadge}
         </span>
+      ) : null}
+      {message.shortlisted ? (
+        <span className={shortlistedPillClass}>Shortlisted</span>
       ) : null}
       {message.internalClassification ? (
         <span className="rounded-full bg-[rgba(120,104,89,0.1)] px-2 py-0.5 text-[0.68rem] font-medium text-[rgba(64,56,48,0.62)] dark:bg-white/5 dark:text-[rgba(245,239,229,0.56)]">
@@ -779,9 +889,11 @@ function FilterSelect({
 function MessageDetail({
   message,
   onBack,
+  onToggleShortlist,
 }: {
   message: BundleOrganizerMessage;
   onBack: () => void;
+  onToggleShortlist: (message: BundleOrganizerMessage) => void;
 }) {
   const activeReason = resolvePriorityReason(message);
   const bodyLines = message.body.length > 0 ? message.body : [message.snippet];
@@ -790,13 +902,31 @@ function MessageDetail({
     <article className="mt-4 rounded-[18px] border border-white/10 bg-white/[0.045] p-4 sm:p-5">
       <div className="flex flex-col gap-3 border-b border-white/10 pb-4 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0">
-          <button
-            type="button"
-            onClick={onBack}
-            className="mb-3 inline-flex h-8 items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 text-[0.7rem] font-medium uppercase tracking-[0.12em] text-[rgba(245,239,229,0.62)] transition-colors hover:border-[rgba(143,179,159,0.24)] hover:bg-[rgba(143,179,159,0.1)] hover:text-[rgba(198,228,209,0.84)]"
-          >
-            Back
-          </button>
+          <div className="mb-3 flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={onBack}
+              className="inline-flex h-8 items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 text-[0.7rem] font-medium uppercase tracking-[0.12em] text-[rgba(245,239,229,0.62)] transition-colors hover:border-[rgba(143,179,159,0.24)] hover:bg-[rgba(143,179,159,0.1)] hover:text-[rgba(198,228,209,0.84)]"
+            >
+              Back
+            </button>
+            <button
+              type="button"
+              onClick={() => onToggleShortlist(message)}
+              className={`inline-flex h-8 items-center gap-1.5 rounded-full border px-3 text-[0.68rem] font-medium uppercase tracking-[0.1em] transition-colors ${
+                message.shortlisted
+                  ? "border-[rgba(143,179,159,0.28)] bg-[rgba(143,179,159,0.12)] text-[rgba(198,228,209,0.92)] hover:bg-[rgba(143,179,159,0.16)]"
+                  : "border-white/10 bg-white/5 text-[rgba(245,239,229,0.56)] hover:border-[rgba(143,179,159,0.24)] hover:bg-[rgba(143,179,159,0.1)] hover:text-[rgba(198,228,209,0.88)]"
+              }`}
+            >
+              <ContextMenuIcon
+                name={message.shortlisted ? "shortlistOff" : "shortlist"}
+              />
+              <span>
+                {message.shortlisted ? "Remove from shortlist" : "Shortlist"}
+              </span>
+            </button>
+          </div>
           <p className="text-[0.74rem] font-medium uppercase tracking-[0.16em] text-[rgba(217,203,184,0.58)]">
             {message.sender}
           </p>
@@ -860,9 +990,15 @@ export function BundleOrganizerSurface({
     useState<BundleOrganizerPromoStatusFilter>("all");
   const [demoSort, setDemoSort] = useState<BundleOrganizerDateSort>("newest");
   const [promoSort, setPromoSort] = useState<BundleOrganizerDateSort>("newest");
-  const workspaceMessages = useMemo(
+  const [workflowState, setWorkflowState] =
+    useState<BundleOrganizerWorkflowState>(readBundleOrganizerWorkflowState);
+  const baseWorkspaceMessages = useMemo(
     () => normalizeWorkspaceMessages(liveMessages),
     [liveMessages],
+  );
+  const workspaceMessages = useMemo(
+    () => applyBundleWorkflowState(baseWorkspaceMessages, workflowState),
+    [baseWorkspaceMessages, workflowState],
   );
   const counts = useMemo(() => getCounts(workspaceMessages), [workspaceMessages]);
   const demoAllMessages = useMemo(
@@ -988,7 +1124,11 @@ export function BundleOrganizerSurface({
       ) ?? null
     : null;
   const contextMenuActions = contextMenuMessage
-    ? getContextMenuActions(contextMenuMessage.message, contextMenuMessage.sourceView)
+    ? getContextMenuActions(
+        contextMenuMessage.message,
+        contextMenuMessage.sourceView,
+        toggleMessageShortlist,
+      )
     : [];
   const isViewFilterActive =
     !isSearchActive &&
@@ -1011,6 +1151,42 @@ export function BundleOrganizerSurface({
     setSelectedMessage(null);
     setContextMenu(null);
   };
+
+  function toggleMessageShortlist(message: BundleOrganizerMessage) {
+    const identityKey = getWorkflowIdentityKey(message);
+    const nextShortlisted = message.shortlisted !== true;
+    const shortlistedAt = nextShortlisted
+      ? new Date().toISOString()
+      : undefined;
+
+    setWorkflowState((currentState) => {
+      const nextState = {
+        ...currentState,
+        [identityKey]: {
+          ...currentState[identityKey],
+          shortlisted: nextShortlisted,
+          shortlistedAt,
+        },
+      };
+
+      if (!nextShortlisted) {
+        delete nextState[identityKey].shortlistedAt;
+      }
+
+      writeBundleOrganizerWorkflowState(nextState);
+      return nextState;
+    });
+    setContextMenu(null);
+    setSelectedMessage((currentMessage) =>
+      currentMessage && getWorkflowIdentityKey(currentMessage) === identityKey
+        ? {
+            ...currentMessage,
+            shortlisted: nextShortlisted,
+            shortlistedAt,
+          }
+        : currentMessage,
+    );
+  }
 
   const openContextMenu = (
     message: BundleOrganizerMessage,
@@ -1385,6 +1561,7 @@ export function BundleOrganizerSurface({
                 <MessageDetail
                   message={selectedMessage}
                   onBack={() => setSelectedMessage(null)}
+                  onToggleShortlist={toggleMessageShortlist}
                 />
               ) : visibleRows.length === 0 ? (
                 <div className="mt-4 rounded-[18px] border border-white/10 bg-white/5 px-5 py-10 text-center">
@@ -1509,6 +1686,23 @@ export function BundleOrganizerSurface({
                         >
                           <span aria-hidden="true">...</span>
                         </button>
+                        {activeView === "shortlist" ? (
+                          <div className="flex justify-end px-3 pb-3 sm:px-4 xl:px-5">
+                            <button
+                              type="button"
+                              onClick={(event) => {
+                                event.preventDefault();
+                                event.stopPropagation();
+                                toggleMessageShortlist(message);
+                              }}
+                              data-organizer-list-control="true"
+                              className="inline-flex h-8 items-center justify-center gap-1.5 rounded-full border border-white/10 bg-white/5 px-3 text-[0.68rem] font-medium uppercase tracking-[0.1em] text-[rgba(245,239,229,0.56)] transition-colors hover:border-[rgba(143,179,159,0.24)] hover:bg-[rgba(143,179,159,0.1)] hover:text-[rgba(198,228,209,0.88)]"
+                            >
+                              <ContextMenuIcon name="shortlistOff" />
+                              <span>Remove from shortlist</span>
+                            </button>
+                          </div>
+                        ) : null}
                       </div>
                     </li>
                   ))}
