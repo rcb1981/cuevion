@@ -11215,9 +11215,6 @@ function WorkspaceSidebar({
             <div className="mt-auto pt-8">
               {productAccess === "bundle" ? (
                 <div className="mb-5 rounded-[22px] border border-[color:rgba(218,194,142,0.2)] bg-[linear-gradient(180deg,rgba(238,224,190,0.1),rgba(33,58,49,0.28))] p-2.5 shadow-[inset_0_1px_0_rgba(255,248,226,0.1)]">
-                  <div className="hidden px-2 pb-2 text-[0.62rem] font-medium uppercase tracking-[0.18em] text-[color:rgba(232,222,198,0.62)] xl:block">
-                    Bundle Pilot
-                  </div>
                   <button
                     type="button"
                     onClick={() => onChangeSection("Organizer")}
@@ -28544,7 +28541,7 @@ const AccountSettingsCard = memo(function AccountSettingsCard({
           </div>
           {productAccess === "bundle" ? (
             <span className="shrink-0 rounded-full border border-[var(--workspace-status-success-border)] bg-[var(--workspace-status-success-bg)] px-3 py-1 text-[0.62rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-status-success-text)]">
-              Bundle Pilot
+              Organizer
             </span>
           ) : null}
         </div>
@@ -28554,7 +28551,7 @@ const AccountSettingsCard = memo(function AccountSettingsCard({
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <div>
                 <div className="text-[0.92rem] font-medium text-[var(--workspace-status-success-text)]">
-                  Cuevion Suite access enabled
+                  Organizer access enabled
                 </div>
                 <p className="mt-1 text-[0.82rem] leading-6 text-[var(--workspace-text-muted)]">
                   Organizer access is visible in the workspace navigation.
