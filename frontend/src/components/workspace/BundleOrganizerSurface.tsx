@@ -1,4 +1,10 @@
-import { useMemo, useState } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import {
   ACTIVE_WORK_PRIORITY_STATUSES,
   countUnreadMessages,
@@ -10,6 +16,38 @@ import {
 } from "./bundleOrganizerFilters";
 
 type BundleOrganizerView = "priority" | "demo" | "promo";
+
+type BundleOrganizerContextMenuState = {
+  messageId: string;
+  sourceView: BundleOrganizerView;
+  x: number;
+  y: number;
+};
+
+type BundleOrganizerContextMenuIconName =
+  | "category"
+  | "forward"
+  | "mail"
+  | "mailOpen"
+  | "priority"
+  | "priorityOff"
+  | "rule"
+  | "shortlist"
+  | "smartView"
+  | "trash";
+
+type BundleOrganizerContextMenuAction = {
+  disabled?: boolean;
+  disabledReason?: string;
+  icon?: BundleOrganizerContextMenuIconName;
+  label: string;
+  onSelect?: () => void;
+};
+
+type BundleOrganizerSearchRow = {
+  message: BundleOrganizerMessage;
+  sourceView: BundleOrganizerView;
+};
 
 type BundleOrganizerMessage = {
   id: string;
@@ -123,6 +161,8 @@ const viewCopy: Record<
   },
 };
 
+const bundleModeDisabledReason = "Not connected in Bundle mode yet";
+
 function resolvePriorityReason(message: BundleOrganizerMessage) {
   if (message.reason) {
     return message.reason;
@@ -201,6 +241,30 @@ function getCounts(liveMessages: BundleOrganizerMessage[]) {
   }, {});
 }
 
+function getViewLabel(view: BundleOrganizerView) {
+  return navItems.find((item) => item.id === view)?.label ?? viewCopy[view].title;
+}
+
+function buildGlobalSearchSourceRows(
+  liveMessages: BundleOrganizerMessage[],
+): BundleOrganizerSearchRow[] {
+  const messagesById = new Map<string, BundleOrganizerSearchRow>();
+  const sourceViews: BundleOrganizerView[] = ["demo", "promo", "priority"];
+
+  sourceViews.forEach((view) => {
+    getMessagesForView(view, liveMessages).forEach((message) => {
+      if (!messagesById.has(message.id)) {
+        messagesById.set(message.id, { message, sourceView: view });
+      }
+    });
+  });
+
+  return Array.from(messagesById.values()).sort(
+    (first, second) =>
+      (second.message.sortTimestamp ?? 0) - (first.message.sortTimestamp ?? 0),
+  );
+}
+
 function doesMessageMatchSearch(message: BundleOrganizerMessage, searchQuery: string) {
   const normalizedSearchQuery = searchQuery.trim().toLowerCase();
 
@@ -208,12 +272,22 @@ function doesMessageMatchSearch(message: BundleOrganizerMessage, searchQuery: st
     return true;
   }
 
-  return [
+  const searchableFields = [
     message.sender,
     message.subject,
     message.snippet,
     message.sourceMailbox,
-  ].some((value) => value.toLowerCase().includes(normalizedSearchQuery));
+    message.priorityBadge,
+    message.reason,
+    message.internalClassification,
+    message.category,
+    message.ui_signal,
+    ...(Array.isArray(message.body) ? message.body : []),
+  ];
+
+  return searchableFields.some((value) =>
+    (value ?? "").toLowerCase().includes(normalizedSearchQuery),
+  );
 }
 
 function OrganizerIcon({ className = "" }: { className?: string }) {
@@ -275,6 +349,193 @@ function OrganizerNavIcon({ name }: { name: BundleOrganizerView }) {
       ) : null}
     </svg>
   );
+}
+
+function ContextMenuIcon({ name }: { name: BundleOrganizerContextMenuIconName }) {
+  const paths: Record<BundleOrganizerContextMenuIconName, ReactNode> = {
+    category: (
+      <>
+        <path d="M4 7h10" />
+        <path d="M4 12h16" />
+        <path d="M4 17h10" />
+      </>
+    ),
+    forward: <path d="M15 7l5 5-5 5M20 12H8a4 4 0 0 0-4 4v1" />,
+    mail: (
+      <>
+        <rect height="14" rx="2" width="18" x="3" y="5" />
+        <path d="m3 7 9 6 9-6" />
+      </>
+    ),
+    mailOpen: (
+      <>
+        <path d="M3 9 12 3l9 6" />
+        <path d="M21 9v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V9" />
+        <path d="m3 9 9 6 9-6" />
+      </>
+    ),
+    priority: (
+      <>
+        <path d="M5 21V4" />
+        <path d="M5 4h11l-1.5 4L16 12H5" />
+      </>
+    ),
+    priorityOff: (
+      <>
+        <path d="M5 21V4" />
+        <path d="M5 4h11l-1.5 4L16 12H5" />
+        <path d="M4 4 20 20" />
+      </>
+    ),
+    rule: (
+      <>
+        <path d="M4 6h16" />
+        <path d="M7 12h10" />
+        <path d="M10 18h4" />
+      </>
+    ),
+    shortlist: (
+      <path d="M6.5 4.75A2.25 2.25 0 0 1 8.75 2.5h6.5a2.25 2.25 0 0 1 2.25 2.25v16l-5.5-3.2-5.5 3.2v-16Z" />
+    ),
+    smartView: (
+      <>
+        <circle cx="11" cy="11" r="7" />
+        <path d="m16 16 4 4" />
+        <path d="M8.5 11h5" />
+        <path d="M11 8.5v5" />
+      </>
+    ),
+    trash: (
+      <>
+        <path d="M3 6h18" />
+        <path d="M8 6V4h8v2" />
+        <path d="M19 6 18 20H6L5 6" />
+        <path d="M10 11v5" />
+        <path d="M14 11v5" />
+      </>
+    ),
+  };
+
+  return (
+    <svg
+      aria-hidden="true"
+      className="h-3.5 w-3.5 shrink-0"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      strokeWidth="1.9"
+      viewBox="0 0 24 24"
+    >
+      {paths[name]}
+    </svg>
+  );
+}
+
+function isPromoReminderMessage(message: BundleOrganizerMessage) {
+  return (
+    message.internalClassification === "promo_reminder" ||
+    message.category === "promo_reminder" ||
+    message.ui_signal === "promo_reminder"
+  );
+}
+
+function buildDisabledMenuAction(
+  action: Omit<BundleOrganizerContextMenuAction, "disabled" | "disabledReason">,
+): BundleOrganizerContextMenuAction {
+  return {
+    ...action,
+    disabled: true,
+    disabledReason: bundleModeDisabledReason,
+  };
+}
+
+function getContextMenuActions(
+  message: BundleOrganizerMessage,
+  sourceView: BundleOrganizerView,
+): BundleOrganizerContextMenuAction[] {
+  const actions: BundleOrganizerContextMenuAction[] = [
+    buildDisabledMenuAction({
+      icon: "forward",
+      label: "Forward",
+    }),
+    buildDisabledMenuAction({
+      icon: message.unread ? "mailOpen" : "mail",
+      label: message.unread ? "Mark as read" : "Mark as unread",
+    }),
+  ];
+
+  if (sourceView === "demo") {
+    actions.push(
+      buildDisabledMenuAction({
+        icon: "category",
+        label: "Move to Promo",
+      }),
+    );
+  } else if (sourceView === "promo") {
+    actions.push(
+      buildDisabledMenuAction({
+        icon: "category",
+        label: "Move to Demo",
+      }),
+    );
+  } else if (sourceView === "priority") {
+    actions.push(
+      buildDisabledMenuAction({
+        icon: "category",
+        label: "Move to Demo",
+      }),
+      buildDisabledMenuAction({
+        icon: "category",
+        label: "Move to Promo",
+      }),
+    );
+  }
+
+  actions.push(
+    buildDisabledMenuAction({
+      icon: "shortlist",
+      label: "Shortlist",
+    }),
+    buildDisabledMenuAction({
+      icon: message.manualPriority === true ? "priorityOff" : "priority",
+      label: message.manualPriority === true ? "Remove Priority" : "Mark as Priority",
+    }),
+  );
+
+  if (sourceView === "promo") {
+    if (isPromoReminderMessage(message)) {
+      actions.push(
+        buildDisabledMenuAction({
+          icon: "rule",
+          label: "Hide future reminders from this sender",
+        }),
+      );
+    }
+    actions.push(
+      buildDisabledMenuAction({
+        icon: "rule",
+        label: "Hide future promos from this sender",
+      }),
+    );
+  }
+
+  actions.push(
+    buildDisabledMenuAction({
+      icon: "rule",
+      label: "Always prioritize this sender",
+    }),
+    buildDisabledMenuAction({
+      icon: "smartView",
+      label: "Create Smart View for this sender",
+    }),
+    buildDisabledMenuAction({
+      icon: "trash",
+      label: "Move to Trash",
+    }),
+  );
+
+  return actions;
 }
 
 function MessagePills({ message }: { message: BundleOrganizerMessage }) {
@@ -367,8 +628,11 @@ export function BundleOrganizerSurface({
   hasLiveWorkspaceData = false,
   connectedInboxCount = 0,
 }: BundleOrganizerSurfaceProps) {
+  const menuRef = useRef<HTMLDivElement>(null);
   const [activeView, setActiveView] = useState<BundleOrganizerView>("priority");
   const [selectedMessage, setSelectedMessage] = useState<BundleOrganizerMessage | null>(null);
+  const [contextMenu, setContextMenu] =
+    useState<BundleOrganizerContextMenuState | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const workspaceMessages = useMemo(
     () => normalizeWorkspaceMessages(liveMessages),
@@ -379,21 +643,121 @@ export function BundleOrganizerSurface({
     () => getMessagesForView(activeView, workspaceMessages),
     [activeView, workspaceMessages],
   );
-  const activeMessages = useMemo(
-    () =>
-      rawActiveMessages.filter((message) =>
-        doesMessageMatchSearch(message, searchQuery),
-      ),
-    [rawActiveMessages, searchQuery],
+  const globalSearchSourceRows = useMemo(
+    () => buildGlobalSearchSourceRows(workspaceMessages),
+    [workspaceMessages],
   );
-  const activeCopy = viewCopy[activeView];
-  const hasOrganizerData = hasLiveWorkspaceData || workspaceMessages.length > 0;
+  const visibleRows = useMemo(
+    () =>
+      searchQuery.trim()
+        ? globalSearchSourceRows.filter(({ message }) =>
+            doesMessageMatchSearch(message, searchQuery),
+          )
+        : rawActiveMessages.map((message) => ({
+            message,
+            sourceView: activeView,
+          })),
+    [activeView, globalSearchSourceRows, rawActiveMessages, searchQuery],
+  );
   const isSearchActive = searchQuery.trim().length > 0;
+  const activeCopy = isSearchActive
+    ? {
+        title: "Search results",
+        eyebrow: "Global Organizer search",
+        description: "Matching messages across embedded Organizer views.",
+        emptyTitle: "No messages match your search.",
+        emptyDescription: "Clear the search to return to the current view.",
+      }
+    : viewCopy[activeView];
+  const hasOrganizerData = hasLiveWorkspaceData || workspaceMessages.length > 0;
+  const contextMenuMessage = contextMenu
+    ? visibleRows.find(
+        ({ message, sourceView }) =>
+          message.id === contextMenu.messageId &&
+          sourceView === contextMenu.sourceView,
+      ) ?? null
+    : null;
+  const contextMenuActions = contextMenuMessage
+    ? getContextMenuActions(contextMenuMessage.message, contextMenuMessage.sourceView)
+    : [];
 
   const selectView = (view: BundleOrganizerView) => {
     setActiveView(view);
     setSelectedMessage(null);
+    setContextMenu(null);
   };
+
+  const openContextMenu = (
+    message: BundleOrganizerMessage,
+    sourceView: BundleOrganizerView,
+    x: number,
+    y: number,
+  ) => {
+    const clampedX =
+      typeof window === "undefined"
+        ? x
+        : Math.min(Math.max(12, x), Math.max(12, window.innerWidth - 220));
+    const clampedY =
+      typeof window === "undefined"
+        ? y
+        : Math.min(Math.max(12, y), Math.max(12, window.innerHeight - 160));
+
+    setContextMenu({
+      messageId: message.id,
+      sourceView,
+      x: clampedX,
+      y: clampedY,
+    });
+  };
+
+  useEffect(() => {
+    setContextMenu(null);
+  }, [activeView, isSearchActive]);
+
+  useEffect(() => {
+    if (!contextMenu) {
+      return;
+    }
+
+    if (!contextMenuMessage) {
+      setContextMenu(null);
+    }
+  }, [contextMenu, contextMenuMessage]);
+
+  useEffect(() => {
+    if (!contextMenu) {
+      return;
+    }
+
+    const closeOnOutsideMouseDown = (event: MouseEvent) => {
+      if (
+        event.target instanceof Node &&
+        menuRef.current?.contains(event.target)
+      ) {
+        return;
+      }
+      if (
+        event.target instanceof Element &&
+        event.target.closest("[data-organizer-context-menu-surface='true']")
+      ) {
+        return;
+      }
+
+      setContextMenu(null);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setContextMenu(null);
+      }
+    };
+
+    document.addEventListener("mousedown", closeOnOutsideMouseDown);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("mousedown", closeOnOutsideMouseDown);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [contextMenu]);
 
   return (
     <div className="min-h-0 flex-1 overflow-hidden">
@@ -542,7 +906,7 @@ export function BundleOrganizerSurface({
                   message={selectedMessage}
                   onBack={() => setSelectedMessage(null)}
                 />
-              ) : activeMessages.length === 0 ? (
+              ) : visibleRows.length === 0 ? (
                 <div className="mt-4 rounded-[18px] border border-white/10 bg-white/5 px-5 py-10 text-center">
                   <h3 className="text-[1rem] font-semibold tracking-[-0.02em] text-[color:#f5efe5]">
                     {isSearchActive
@@ -561,55 +925,147 @@ export function BundleOrganizerSurface({
                 </div>
               ) : (
                 <ul className="mt-4 overflow-hidden rounded-[16px] border border-white/10 bg-white/5">
-                  {activeMessages.map((message) => (
+                  {visibleRows.map(({ message, sourceView }) => (
                     <li
-                      key={message.id}
+                      key={`${isSearchActive ? "search" : activeView}-${sourceView}-${message.id}`}
                       className="border-b border-white/10 last:border-b-0"
                     >
-                      <button
-                        type="button"
-                        onClick={() => setSelectedMessage(message)}
-                        className="grid w-full gap-3 border-l-2 border-transparent px-3 py-3.5 text-left transition-[background-color,border-color,box-shadow] hover:bg-white/5 sm:grid-cols-[minmax(150px,0.55fr)_minmax(0,2.6fr)_minmax(72px,auto)] sm:px-4 lg:grid-cols-[minmax(170px,0.46fr)_minmax(0,3fr)_minmax(82px,auto)] xl:px-5"
+                      <div
+                        className="relative border-l-2 border-transparent transition-[background-color,border-color,box-shadow] hover:bg-white/5"
                       >
-                        <div className="grid min-w-0 grid-cols-[0.5rem_minmax(0,1fr)] items-start gap-2">
-                          <span
-                            aria-hidden="true"
-                            className={`mt-[0.36rem] h-2 w-2 rounded-full ${
-                              message.unread
-                                ? "bg-[#a78bfa] shadow-[0_0_0_2px_rgba(167,139,250,0.2)]"
-                                : "bg-transparent"
-                            }`}
-                          />
+                        <button
+                          type="button"
+                          onContextMenu={(event) => {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            openContextMenu(
+                              message,
+                              sourceView,
+                              event.clientX,
+                              event.clientY,
+                            );
+                          }}
+                          onClick={() => {
+                            setContextMenu(null);
+                            setSelectedMessage(message);
+                          }}
+                          className="grid w-full gap-3 px-3 py-3.5 pr-12 text-left transition-[background-color,border-color,box-shadow] sm:grid-cols-[minmax(150px,0.55fr)_minmax(0,2.6fr)_minmax(72px,auto)] sm:px-4 sm:pr-14 lg:grid-cols-[minmax(170px,0.46fr)_minmax(0,3fr)_minmax(82px,auto)] xl:px-5 xl:pr-14"
+                        >
+                          <div className="grid min-w-0 grid-cols-[0.5rem_minmax(0,1fr)] items-start gap-2">
+                            <span
+                              aria-hidden="true"
+                              className={`mt-[0.36rem] h-2 w-2 rounded-full ${
+                                message.unread
+                                  ? "bg-[#a78bfa] shadow-[0_0_0_2px_rgba(167,139,250,0.2)]"
+                                  : "bg-transparent"
+                              }`}
+                            />
+                            <div className="min-w-0">
+                              <div className="truncate text-[0.92rem] font-semibold tracking-[-0.01em] text-[color:#f5efe5]">
+                                {message.sender}
+                              </div>
+                              <div className="mt-1 flex flex-wrap gap-1.5">
+                                {isSearchActive ? (
+                                  <span className="rounded-full bg-[rgba(143,179,159,0.14)] px-2 py-0.5 text-[0.68rem] font-medium text-[rgba(167,203,181,0.9)]">
+                                    {getViewLabel(sourceView)}
+                                  </span>
+                                ) : null}
+                                <MessagePills message={message} />
+                              </div>
+                            </div>
+                          </div>
                           <div className="min-w-0">
-                            <div className="truncate text-[0.92rem] font-semibold tracking-[-0.01em] text-[color:#f5efe5]">
-                              {message.sender}
+                            <div className="truncate text-[0.95rem] font-medium tracking-[-0.01em] text-[rgba(245,239,229,0.88)]">
+                              {message.subject}
                             </div>
-                            <div className="mt-1 flex flex-wrap gap-1.5">
-                              <MessagePills message={message} />
-                            </div>
-                          </div>
-                        </div>
-                        <div className="min-w-0">
-                          <div className="truncate text-[0.95rem] font-medium tracking-[-0.01em] text-[rgba(245,239,229,0.88)]">
-                            {message.subject}
-                          </div>
-                          <p className="mt-1 line-clamp-2 text-[0.84rem] leading-5 text-[rgba(245,239,229,0.6)]">
-                            {message.snippet}
-                          </p>
-                          {activeView === "priority" && resolvePriorityReason(message) ? (
-                            <p className="mt-2 text-[0.76rem] font-medium uppercase tracking-[0.12em] text-[rgba(143,179,159,0.78)]">
-                              {resolvePriorityReason(message)}
+                            <p className="mt-1 line-clamp-2 text-[0.84rem] leading-5 text-[rgba(245,239,229,0.6)]">
+                              {message.snippet}
                             </p>
-                          ) : null}
-                        </div>
-                        <div className="text-[0.78rem] font-medium text-[rgba(245,239,229,0.45)] sm:pt-0.5 sm:text-right">
-                          {message.timestamp}
-                        </div>
-                      </button>
+                            {sourceView === "priority" && resolvePriorityReason(message) ? (
+                              <p className="mt-2 text-[0.76rem] font-medium uppercase tracking-[0.12em] text-[rgba(143,179,159,0.78)]">
+                                {resolvePriorityReason(message)}
+                              </p>
+                            ) : null}
+                          </div>
+                          <div className="text-[0.78rem] font-medium text-[rgba(245,239,229,0.45)] sm:pt-0.5 sm:text-right">
+                            {message.timestamp}
+                          </div>
+                        </button>
+                        <button
+                          type="button"
+                          aria-expanded={
+                            contextMenu?.messageId === message.id &&
+                            contextMenu.sourceView === sourceView
+                          }
+                          aria-haspopup="menu"
+                          aria-label="Message actions"
+                          data-organizer-context-menu-surface="true"
+                          data-organizer-list-control="true"
+                          onMouseDown={(event) => {
+                            event.preventDefault();
+                            event.stopPropagation();
+                          }}
+                          onClick={(event) => {
+                            event.preventDefault();
+                            event.stopPropagation();
+                            const rect = event.currentTarget.getBoundingClientRect();
+                            openContextMenu(
+                              message,
+                              sourceView,
+                              rect.right - 176,
+                              rect.bottom + 8,
+                            );
+                          }}
+                          className={`absolute right-3 top-3 inline-flex h-8 w-8 items-center justify-center rounded-full border text-[1rem] leading-none transition-colors sm:right-4 ${
+                            contextMenu?.messageId === message.id &&
+                            contextMenu.sourceView === sourceView
+                              ? "border-[rgba(143,179,159,0.28)] bg-[rgba(143,179,159,0.12)] text-[rgba(198,228,209,0.9)]"
+                              : "border-white/10 bg-white/5 text-[rgba(245,239,229,0.48)] hover:border-[rgba(143,179,159,0.24)] hover:bg-[rgba(143,179,159,0.1)] hover:text-[rgba(198,228,209,0.86)]"
+                          }`}
+                        >
+                          <span aria-hidden="true">...</span>
+                        </button>
+                      </div>
                     </li>
                   ))}
                 </ul>
               )}
+              {contextMenu && contextMenuActions.length > 0 ? (
+                <div
+                  ref={menuRef}
+                  role="menu"
+                  data-organizer-context-menu-surface="true"
+                  onContextMenu={(event) => event.preventDefault()}
+                  onMouseDown={(event) => event.stopPropagation()}
+                  style={{ left: contextMenu.x, top: contextMenu.y }}
+                  className="fixed z-50 min-w-[190px] rounded-[14px] border border-white/10 bg-[rgba(25,34,30,0.96)] p-1.5 shadow-[0_18px_40px_rgba(0,0,0,0.34)] backdrop-blur-sm"
+                >
+                  {contextMenuActions.map((action) => (
+                    <button
+                      key={action.label}
+                      type="button"
+                      role="menuitem"
+                      disabled={action.disabled}
+                      title={action.disabledReason}
+                      onClick={() => {
+                        if (action.disabled) {
+                          return;
+                        }
+                        setContextMenu(null);
+                        action.onSelect?.();
+                      }}
+                      className={`flex w-full items-center gap-2.5 rounded-[10px] px-3 py-2 text-left text-[0.82rem] font-medium transition-colors ${
+                        action.disabled
+                          ? "cursor-not-allowed text-[rgba(245,239,229,0.34)]"
+                          : "text-[rgba(245,239,229,0.72)] hover:bg-[rgba(143,179,159,0.12)] hover:text-[rgba(198,228,209,0.94)]"
+                      }`}
+                    >
+                      {action.icon ? <ContextMenuIcon name={action.icon} /> : null}
+                      <span>{action.label}</span>
+                    </button>
+                  ))}
+                </div>
+              ) : null}
             </section>
           </main>
         </div>
