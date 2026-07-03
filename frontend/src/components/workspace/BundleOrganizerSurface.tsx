@@ -1,4 +1,13 @@
 import { useMemo, useState } from "react";
+import {
+  ACTIVE_WORK_PRIORITY_STATUSES,
+  countUnreadMessages,
+  formatOrganizerSignal,
+  shouldShowInDemoInbox,
+  shouldShowInOrganizerPriority,
+  shouldShowInPromoInbox,
+  type BundleOrganizerActiveWorkStatus,
+} from "./bundleOrganizerFilters";
 
 type BundleOrganizerView = "priority" | "demo" | "promo";
 
@@ -14,10 +23,11 @@ type BundleOrganizerMessage = {
   internalClassification?: BundleOrganizerInternalClassification;
   category?: string;
   signal?: string;
+  ui_signal?: string;
   uiSignal?: string;
   unread?: boolean;
-  manualPriority?: boolean;
-  active_work_status?: BundleOrganizerActiveWorkStatus;
+  manualPriority?: boolean | null;
+  active_work_status?: BundleOrganizerActiveWorkStatus | string | null;
   v7_final_priority?: string;
   priorityBadge?: string;
   reason?: string;
@@ -55,29 +65,14 @@ export type BundleOrganizerWorkspaceMessage = {
   signal?: string;
   uiSignal?: string;
   unread?: boolean;
-  manualPriority?: boolean;
-  active_work_status?: BundleOrganizerActiveWorkStatus;
+  manualPriority?: boolean | null;
+  active_work_status?: BundleOrganizerActiveWorkStatus | string | null;
   v7_final_priority?: string;
   priorityBadge?: string;
   reason?: string;
   identityKey?: string;
   sortTimestamp?: number;
 };
-
-type BundleOrganizerVisibleCategory =
-  | "demo"
-  | "high_priority_demo"
-  | "promo"
-  | "promo_reminder";
-
-type BundleOrganizerActiveWorkStatus =
-  | "none"
-  | "review"
-  | "active"
-  | "waiting"
-  | "needs_reply"
-  | "follow_up"
-  | "closed";
 
 type BundleOrganizerSurfaceProps = {
   liveMessages?: BundleOrganizerWorkspaceMessage[];
@@ -115,109 +110,6 @@ const viewCopy: Record<
   },
 };
 
-const organizerVisibleCategories = new Set<BundleOrganizerVisibleCategory>([
-  "demo",
-  "high_priority_demo",
-  "promo",
-  "promo_reminder",
-]);
-
-const activeWorkPriorityStatuses = new Set<BundleOrganizerActiveWorkStatus>([
-  "active",
-  "waiting",
-  "needs_reply",
-  "follow_up",
-]);
-
-function normalizeOrganizerSignal(value?: string | null) {
-  return value?.trim().toLowerCase() ?? "";
-}
-
-function isOrganizerVisibleCategory(
-  value?: string | null,
-): value is BundleOrganizerVisibleCategory {
-  return organizerVisibleCategories.has(
-    normalizeOrganizerSignal(value) as BundleOrganizerVisibleCategory,
-  );
-}
-
-function resolveOrganizerSignalFallback(value?: string | null) {
-  const normalizedValue = normalizeOrganizerSignal(value);
-
-  if (
-    normalizedValue === "demo" ||
-    normalizedValue === "for review" ||
-    normalizedValue === "shortlist"
-  ) {
-    return "demo";
-  }
-
-  if (normalizedValue === "promo") {
-    return "promo";
-  }
-
-  return null;
-}
-
-function resolveOrganizerCategory(
-  message: Pick<
-    BundleOrganizerMessage,
-    "manualCategory" | "internalClassification" | "category" | "uiSignal" | "signal"
-  >,
-) {
-  if (message.manualCategory === "demo" || message.manualCategory === "promo") {
-    return message.manualCategory;
-  }
-
-  if (isOrganizerVisibleCategory(message.internalClassification)) {
-    return normalizeOrganizerSignal(
-      message.internalClassification,
-    ) as BundleOrganizerVisibleCategory;
-  }
-
-  if (isOrganizerVisibleCategory(message.category)) {
-    return normalizeOrganizerSignal(message.category) as BundleOrganizerVisibleCategory;
-  }
-
-  return (
-    resolveOrganizerSignalFallback(message.uiSignal) ??
-    resolveOrganizerSignalFallback(message.signal)
-  );
-}
-
-function shouldShowInDemoInbox(message: BundleOrganizerMessage) {
-  const category = resolveOrganizerCategory(message);
-  return category === "demo" || category === "high_priority_demo";
-}
-
-function shouldShowInPromoInbox(message: BundleOrganizerMessage) {
-  const category = resolveOrganizerCategory(message);
-  return category === "promo" || category === "promo_reminder";
-}
-
-function shouldShowInOrganizerPriority(message: BundleOrganizerMessage) {
-  if (resolveOrganizerCategory(message) === null) {
-    return false;
-  }
-
-  if (message.manualPriority === true) {
-    return true;
-  }
-
-  if (
-    message.active_work_status &&
-    activeWorkPriorityStatuses.has(message.active_work_status)
-  ) {
-    return true;
-  }
-
-  return normalizeOrganizerSignal(message.v7_final_priority) === "priority";
-}
-
-function countUnreadMessages(messages: BundleOrganizerMessage[]) {
-  return messages.filter((message) => message.unread === true).length;
-}
-
 function resolvePriorityReason(message: BundleOrganizerMessage) {
   if (message.reason) {
     return message.reason;
@@ -227,11 +119,14 @@ function resolvePriorityReason(message: BundleOrganizerMessage) {
     return "Manual priority.";
   }
 
-  if (message.active_work_status && activeWorkPriorityStatuses.has(message.active_work_status)) {
+  if (
+    message.active_work_status &&
+    ACTIVE_WORK_PRIORITY_STATUSES.has(formatOrganizerSignal(message.active_work_status))
+  ) {
     return message.active_work_status.replace(/_/g, " ");
   }
 
-  if (normalizeOrganizerSignal(message.v7_final_priority) === "priority") {
+  if (formatOrganizerSignal(message.v7_final_priority) === "priority") {
     return "Priority signal.";
   }
 
@@ -247,6 +142,7 @@ function normalizeWorkspaceMessages(
     .map((message): BundleOrganizerMessage => ({
       ...message,
       id: `workspace-${message.id}`,
+      ui_signal: message.uiSignal,
       priorityBadge:
         message.priorityBadge ??
         (message.internalClassification === "high_priority_demo"
