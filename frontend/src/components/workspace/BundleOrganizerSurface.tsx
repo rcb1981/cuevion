@@ -2248,12 +2248,28 @@ function BundleOrganizerSoundCloudPreview({
 
   const isResolving =
     resolutionState.signature === candidateSignature && resolutionState.loading;
+  const unresolvedHrefs = useMemo(
+    () =>
+      resolutionState.signature === candidateSignature && !isResolving
+        ? candidateHrefs.filter((href) =>
+            Object.prototype.hasOwnProperty.call(activeResolvedPreviews, href) &&
+            activeResolvedPreviews[href] === null,
+          )
+        : [],
+    [
+      activeResolvedPreviews,
+      candidateHrefs,
+      candidateSignature,
+      isResolving,
+      resolutionState.signature,
+    ],
+  );
 
   if (candidates.length === 0) {
     return null;
   }
 
-  if (previews.length === 0 && !isResolving) {
+  if (previews.length === 0 && unresolvedHrefs.length === 0 && !isResolving) {
     return null;
   }
 
@@ -2296,6 +2312,36 @@ function BundleOrganizerSoundCloudPreview({
                     target="_blank"
                     rel="noopener noreferrer nofollow"
                     className="w-fit font-semibold text-[rgba(48,72,61,0.8)] underline decoration-[rgba(48,72,61,0.24)] underline-offset-4 transition-colors hover:text-[rgba(35,58,47,0.94)] dark:text-[rgba(167,203,181,0.88)] dark:decoration-[rgba(167,203,181,0.28)] dark:hover:text-[rgba(198,228,209,0.98)]"
+                  >
+                    Open in SoundCloud
+                  </a>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : null}
+        {unresolvedHrefs.length > 0 ? (
+          <div className="grid gap-3">
+            {unresolvedHrefs.map((href) => (
+              <div
+                key={href}
+                className="rounded-[14px] border border-[rgba(120,104,89,0.12)] bg-[rgba(255,252,247,0.44)] px-3 py-3 dark:border-white/10 dark:bg-white/[0.035]"
+              >
+                <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="min-w-0">
+                    <p className="text-[0.78rem] font-semibold text-[rgba(64,56,48,0.74)] dark:text-[rgba(245,239,229,0.74)]">
+                      SoundCloud preview unavailable
+                    </p>
+                    <p className="mt-1 text-[0.74rem] leading-5 text-[rgba(64,56,48,0.54)] dark:text-[rgba(245,239,229,0.5)]">
+                      This link may be private, removed, expired, or unavailable.
+                      Please check the SoundCloud link manually.
+                    </p>
+                  </div>
+                  <a
+                    href={href}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex h-8 w-fit shrink-0 items-center justify-center rounded-full border border-[rgba(48,72,61,0.16)] bg-[rgba(48,72,61,0.06)] px-3 text-[0.7rem] font-semibold text-[rgba(48,72,61,0.78)] transition-colors hover:border-[rgba(48,72,61,0.26)] hover:bg-[rgba(48,72,61,0.1)] dark:border-[rgba(143,179,159,0.2)] dark:bg-[rgba(143,179,159,0.08)] dark:text-[rgba(167,203,181,0.84)] dark:hover:border-[rgba(143,179,159,0.3)] dark:hover:bg-[rgba(143,179,159,0.12)]"
                   >
                     Open in SoundCloud
                   </a>
