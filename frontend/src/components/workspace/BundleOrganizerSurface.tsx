@@ -2333,8 +2333,8 @@ function BundleOrganizerSoundCloudPreview({
                       SoundCloud preview unavailable
                     </p>
                     <p className="mt-1 text-[0.74rem] leading-5 text-[rgba(64,56,48,0.54)] dark:text-[rgba(245,239,229,0.5)]">
-                      This link may be private, removed, expired, or unavailable.
-                      Please check the SoundCloud link manually.
+                      SoundCloud could not create an embedded preview for this
+                      link. The track may still open and play on SoundCloud.
                     </p>
                   </div>
                   <a
