@@ -511,40 +511,40 @@ function normalizePotentialUrl(value: string) {
   return withoutTrailingPunctuation;
 }
 
-function stripSoundCloudShortlinkEmailSuffix(value: string) {
+function stripSoundCloudEmailSuffix(value: string) {
   const commonEmailSuffixes = [
-    "best",
-    "regards",
-    "thanks",
-    "thankyou",
-    "cheers",
-    "sincerely",
+    "Best",
+    "Regards",
+    "Thanks",
+    "ThankYou",
+    "Cheers",
+    "Sincerely",
   ];
 
   try {
     const url = new URL(value);
-    if (url.hostname.toLowerCase() !== "on.soundcloud.com") {
+    const hostname = url.hostname.toLowerCase();
+    if (!allowedSoundCloudHosts.has(hostname)) {
       return value;
     }
 
     const pathParts = url.pathname.split("/").filter(Boolean);
-    const shortlinkToken = pathParts[0] ?? "";
-    if (!shortlinkToken) {
+    const lastPathPart = pathParts[pathParts.length - 1] ?? "";
+    if (!lastPathPart) {
       return value;
     }
 
-    const lowerToken = shortlinkToken.toLowerCase();
     const suffix = commonEmailSuffixes.find(
       (candidate) =>
-        lowerToken.endsWith(candidate) &&
-        shortlinkToken.length > candidate.length + 12,
+        lastPathPart.endsWith(candidate) &&
+        lastPathPart.length > candidate.length + 12,
     );
     if (!suffix) {
       return value;
     }
 
-    const trimmedToken = shortlinkToken.slice(0, -suffix.length);
-    url.pathname = `/${[trimmedToken, ...pathParts.slice(1)].join("/")}`;
+    pathParts[pathParts.length - 1] = lastPathPart.slice(0, -suffix.length);
+    url.pathname = `/${pathParts.join("/")}`;
     return url.toString();
   } catch {
     return value;
@@ -553,7 +553,7 @@ function stripSoundCloudShortlinkEmailSuffix(value: string) {
 
 function normalizePotentialSoundCloudUrl(value: string) {
   const normalizedValue = normalizePotentialUrl(value);
-  return stripSoundCloudShortlinkEmailSuffix(normalizedValue);
+  return stripSoundCloudEmailSuffix(normalizedValue);
 }
 
 function collectPlainBodyUrls(
@@ -579,13 +579,10 @@ function collectHtmlUrls(bodyHtml: string | undefined, pattern: RegExp) {
     parsedDocument.querySelectorAll<HTMLAnchorElement>("a[href]"),
     (link) => link.getAttribute("href") ?? "",
   ).filter((href) => href.trim().length > 0);
-  const visibleUrls =
-    hrefs.length > 0
-      ? []
-      : Array.from(
-          (parsedDocument.body.textContent ?? "").matchAll(pattern),
-          (match) => match[0],
-        );
+  const visibleUrls = Array.from(
+    (parsedDocument.body.textContent ?? "").matchAll(pattern),
+    (match) => match[0],
+  );
 
   return [...hrefs, ...visibleUrls];
 }
