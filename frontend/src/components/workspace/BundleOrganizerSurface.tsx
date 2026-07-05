@@ -317,7 +317,7 @@ const unsafeEmailTags = new Set([
 ]);
 const linkPattern = /(https?:\/\/[^\s<>"']+|www\.[^\s<>"']+)/gi;
 const trailingLinkPunctuation = /[.,!?;:)\]}]+$/;
-const maxEmbeddedLinkCards = 3;
+const maxEmbeddedLinkPreviews = 3;
 const fallbackPlaylistSoundCloudHeight = 360;
 const fallbackTrackSoundCloudHeight = 166;
 const maxPlaylistSoundCloudHeight = 520;
@@ -326,9 +326,9 @@ const minPlaylistSoundCloudHeight = 260;
 const minTrackSoundCloudHeight = 166;
 const soundCloudResolveEndpoint = "/api/organizer/soundcloud-resolve";
 const soundCloudLinkPattern =
-  /(https?:\/\/[^\s<>"']+|www\.soundcloud\.com\/[^\s<>"']+)/gi;
+  /(?:https?:\/\/(?:www\.)?soundcloud\.com\/[^\s<>"']+|https?:\/\/on\.soundcloud\.com\/[^\s<>"']+|www\.soundcloud\.com\/[^\s<>"']+)/gi;
 const dropboxLinkPattern =
-  /(https?:\/\/[^\s<>"']+|(?:www\.)?dropbox\.com\/[^\s<>"']+|dl\.dropboxusercontent\.com\/[^\s<>"']+)/gi;
+  /(?:https?:\/\/(?:www\.)?dropbox\.com\/[^\s<>"']+|https?:\/\/dl\.dropboxusercontent\.com\/[^\s<>"']+|(?:www\.)?dropbox\.com\/[^\s<>"']+|dl\.dropboxusercontent\.com\/[^\s<>"']+)/gi;
 const allowedSoundCloudHosts = new Set([
   "soundcloud.com",
   "www.soundcloud.com",
@@ -391,10 +391,16 @@ type SanitizedEmailHtml = {
   html: string | null;
 };
 
-type BundleOrganizerLinkCard = {
+type SoundCloudPreviewCandidate = {
   href: string;
+};
+
+type DropboxPreviewLink = {
+  audioSrc?: string;
+  href: string;
+  isAudio: boolean;
   label: string;
-  typeLabel: string;
+  typeLabel: "Dropbox audio" | "Dropbox file" | "Dropbox folder";
   urlLabel: string;
 };
 
@@ -505,6 +511,51 @@ function normalizePotentialUrl(value: string) {
   return withoutTrailingPunctuation;
 }
 
+function stripSoundCloudShortlinkEmailSuffix(value: string) {
+  const commonEmailSuffixes = [
+    "best",
+    "regards",
+    "thanks",
+    "thankyou",
+    "cheers",
+    "sincerely",
+  ];
+
+  try {
+    const url = new URL(value);
+    if (url.hostname.toLowerCase() !== "on.soundcloud.com") {
+      return value;
+    }
+
+    const pathParts = url.pathname.split("/").filter(Boolean);
+    const shortlinkToken = pathParts[0] ?? "";
+    if (!shortlinkToken) {
+      return value;
+    }
+
+    const lowerToken = shortlinkToken.toLowerCase();
+    const suffix = commonEmailSuffixes.find(
+      (candidate) =>
+        lowerToken.endsWith(candidate) &&
+        shortlinkToken.length > candidate.length + 12,
+    );
+    if (!suffix) {
+      return value;
+    }
+
+    const trimmedToken = shortlinkToken.slice(0, -suffix.length);
+    url.pathname = `/${[trimmedToken, ...pathParts.slice(1)].join("/")}`;
+    return url.toString();
+  } catch {
+    return value;
+  }
+}
+
+function normalizePotentialSoundCloudUrl(value: string) {
+  const normalizedValue = normalizePotentialUrl(value);
+  return stripSoundCloudShortlinkEmailSuffix(normalizedValue);
+}
+
 function collectPlainBodyUrls(
   body: string[] | string | undefined,
   pattern: RegExp,
@@ -524,15 +575,52 @@ function collectHtmlUrls(bodyHtml: string | undefined, pattern: RegExp) {
   }
 
   const parsedDocument = new DOMParser().parseFromString(html, "text/html");
-  const hrefs = Array.from(parsedDocument.querySelectorAll("a[href]"), (link) =>
-    link.getAttribute("href") ?? "",
-  );
-  const visibleUrls = Array.from(
-    (parsedDocument.body.textContent ?? "").matchAll(pattern),
-    (match) => match[0],
-  );
+  const hrefs = Array.from(
+    parsedDocument.querySelectorAll<HTMLAnchorElement>("a[href]"),
+    (link) => link.getAttribute("href") ?? "",
+  ).filter((href) => href.trim().length > 0);
+  const visibleUrls =
+    hrefs.length > 0
+      ? []
+      : Array.from(
+          (parsedDocument.body.textContent ?? "").matchAll(pattern),
+          (match) => match[0],
+        );
 
   return [...hrefs, ...visibleUrls];
+}
+
+function collectPreviewItems<T>(
+  body: string[] | string | undefined,
+  bodyHtml: string | undefined,
+  snippet: string | undefined,
+  pattern: RegExp,
+  buildItem: (value: string) => T | null,
+  getKey: (item: T) => string,
+) {
+  const seen = new Set<string>();
+  const items: T[] = [];
+
+  [
+    ...collectHtmlUrls(bodyHtml, pattern),
+    ...collectPlainBodyUrls(body, pattern),
+    ...collectPlainBodyUrls(snippet, pattern),
+  ].forEach((value) => {
+    const item = buildItem(value);
+    if (!item) {
+      return;
+    }
+
+    const key = getKey(item);
+    if (seen.has(key)) {
+      return;
+    }
+
+    seen.add(key);
+    items.push(item);
+  });
+
+  return items;
 }
 
 function safeDecodeURIComponent(value: string) {
@@ -847,8 +935,10 @@ function isClearlySoundCloudTrackOrPlaylist(url: URL) {
   return Boolean(secondPart);
 }
 
-function buildSoundCloudLinkCard(value: string): BundleOrganizerLinkCard | null {
-  const normalizedValue = normalizePotentialUrl(value);
+function buildSoundCloudPreviewCandidate(
+  value: string,
+): SoundCloudPreviewCandidate | null {
+  const normalizedValue = normalizePotentialSoundCloudUrl(value);
 
   try {
     const soundCloudUrl = new URL(normalizedValue);
@@ -870,18 +960,8 @@ function buildSoundCloudLinkCard(value: string): BundleOrganizerLinkCard | null 
       return null;
     }
 
-    const pathParts = soundCloudUrl.pathname.split("/").filter(Boolean);
-    const lastPathPart = pathParts[pathParts.length - 1];
     return {
       href: soundCloudUrl.toString(),
-      label: lastPathPart
-        ? safeDecodeURIComponent(lastPathPart).replace(/[-_]+/g, " ")
-        : "Open SoundCloud link",
-      typeLabel:
-        pathParts.map((part) => part.toLowerCase()).includes("sets")
-          ? "SoundCloud playlist"
-          : "SoundCloud link",
-      urlLabel: getUrlLabel(soundCloudUrl),
     };
   } catch {
     return null;
@@ -955,7 +1035,7 @@ function clampSoundCloudHeight(value?: number | null, isPlaylist = false) {
 }
 
 function buildSoundCloudPreviewLinks(
-  candidates: BundleOrganizerLinkCard[],
+  candidates: SoundCloudPreviewCandidate[],
   resolvedPreviews: Record<string, SoundCloudPreviewLink | null>,
 ) {
   const seen = new Set<string>();
@@ -974,7 +1054,7 @@ function buildSoundCloudPreviewLinks(
 
     seen.add(previewKey);
     previews.push(preview);
-    if (previews.length >= maxEmbeddedLinkCards) {
+    if (previews.length >= maxEmbeddedLinkPreviews) {
       break;
     }
   }
@@ -1098,7 +1178,17 @@ function getDropboxFileExtension(url: URL) {
   return extensionMatch?.[1]?.toLowerCase() ?? "";
 }
 
-function buildDropboxLinkCard(value: string): BundleOrganizerLinkCard | null {
+function buildDropboxAudioSrc(url: URL) {
+  const audioUrl = new URL(url.toString());
+  const hostname = audioUrl.hostname.toLowerCase();
+  if (hostname === "dropbox.com" || hostname === "www.dropbox.com") {
+    audioUrl.searchParams.delete("dl");
+    audioUrl.searchParams.set("raw", "1");
+  }
+  return audioUrl.toString();
+}
+
+function buildDropboxPreviewLink(value: string): DropboxPreviewLink | null {
   const normalizedValue = normalizePotentialUrl(value);
 
   try {
@@ -1114,7 +1204,9 @@ function buildDropboxLinkCard(value: string): BundleOrganizerLinkCard | null {
       dropboxAudioExtensions.has(getDropboxFileExtension(dropboxUrl));
 
     return {
+      audioSrc: isAudio ? buildDropboxAudioSrc(dropboxUrl) : undefined,
       href: dropboxUrl.toString(),
+      isAudio,
       label:
         typeLabel === "Dropbox folder"
           ? "Shared folder"
@@ -1127,33 +1219,6 @@ function buildDropboxLinkCard(value: string): BundleOrganizerLinkCard | null {
   } catch {
     return null;
   }
-}
-
-function collectLinkCards(
-  body: string[],
-  bodyHtml: string | undefined,
-  snippet: string | undefined,
-  pattern: RegExp,
-  buildCard: (value: string) => BundleOrganizerLinkCard | null,
-) {
-  const seen = new Set<string>();
-  const links: BundleOrganizerLinkCard[] = [];
-
-  [
-    ...collectHtmlUrls(bodyHtml, pattern),
-    ...collectPlainBodyUrls(body, pattern),
-    ...collectPlainBodyUrls(snippet, pattern),
-  ].forEach((value) => {
-    const link = buildCard(value);
-    if (!link || seen.has(link.href)) {
-      return;
-    }
-
-    seen.add(link.href);
-    links.push(link);
-  });
-
-  return links;
 }
 
 function normalizeWorkspaceMessages(
@@ -1989,74 +2054,101 @@ function FilterSelect({
   );
 }
 
-function BundleOrganizerLinkPreview({
-  cards,
+function BundleOrganizerDropboxLinkPreview({
+  links,
   className = "",
-  description,
-  title,
 }: {
-  cards: BundleOrganizerLinkCard[];
+  links: DropboxPreviewLink[];
   className?: string;
-  description: string;
-  title: string;
 }) {
-  const visibleCards = cards.slice(0, maxEmbeddedLinkCards);
-  const remainingLinkCount = Math.max(cards.length - visibleCards.length, 0);
+  const visibleLinks = links.slice(0, maxEmbeddedLinkPreviews);
+  const remainingLinkCount = Math.max(links.length - visibleLinks.length, 0);
 
-  if (visibleCards.length === 0) {
+  if (visibleLinks.length === 0) {
     return null;
   }
 
   return (
-    <section className={className} aria-label={title}>
+    <section className={className} aria-label="Dropbox links">
       <div className="space-y-3 rounded-[18px] border border-[rgba(48,72,61,0.16)] bg-[rgba(255,252,247,0.62)] p-3.5 shadow-[0_14px_34px_rgba(61,44,32,0.07)] dark:border-[rgba(143,179,159,0.18)] dark:bg-[rgba(143,179,159,0.08)] dark:shadow-[0_14px_34px_rgba(0,0,0,0.16)]">
-        <div>
-          <p className="text-[0.72rem] font-semibold uppercase tracking-[0.14em] text-[rgba(48,72,61,0.76)] dark:text-[rgba(167,203,181,0.88)]">
-            {title}
-          </p>
-          <p className="mt-1 text-[0.78rem] leading-5 text-[rgba(64,56,48,0.54)] dark:text-[rgba(245,239,229,0.5)]">
-            {description}
-          </p>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <p className="text-[0.72rem] font-semibold uppercase tracking-[0.14em] text-[rgba(48,72,61,0.76)] dark:text-[rgba(167,203,181,0.88)]">
+              {visibleLinks.length === 1 ? "Dropbox link" : "Dropbox links"}
+            </p>
+            <p className="mt-1 text-[0.78rem] leading-5 text-[rgba(64,56,48,0.54)] dark:text-[rgba(245,239,229,0.5)]">
+              Open the shared files in Dropbox.
+            </p>
+          </div>
         </div>
         <div className="grid gap-3">
-          {visibleCards.map((card) => (
+          {visibleLinks.map((link) => (
             <div
-              key={card.href}
+              key={link.href}
               className="overflow-hidden rounded-[14px] border border-[rgba(120,104,89,0.12)] bg-[color:#fffaf2] dark:border-white/10 dark:bg-[rgba(11,18,15,0.28)]"
             >
               <div className="flex min-w-0 flex-col gap-2 px-3 py-3 sm:flex-row sm:items-center sm:justify-between">
                 <div className="min-w-0">
                   <p className="text-[0.7rem] font-semibold uppercase tracking-[0.12em] text-[rgba(48,72,61,0.58)] dark:text-[rgba(167,203,181,0.66)]">
-                    {card.typeLabel}
+                    {link.typeLabel}
                   </p>
                   <p
                     className="mt-1 truncate text-[0.86rem] font-semibold text-[rgba(64,56,48,0.8)] dark:text-[rgba(245,239,229,0.78)]"
-                    title={card.label}
+                    title={link.label}
                   >
-                    {card.label}
+                    {link.label}
                   </p>
                   <p
                     className="mt-1 truncate text-[0.72rem] leading-4 text-[rgba(64,56,48,0.46)] dark:text-[rgba(245,239,229,0.44)]"
-                    title={card.urlLabel}
+                    title={link.urlLabel}
                   >
-                    {card.urlLabel}
+                    {link.urlLabel}
                   </p>
                 </div>
-                <a
-                  href={card.href}
-                  target="_blank"
-                  rel="noopener noreferrer nofollow"
-                  className="inline-flex h-8 w-fit shrink-0 items-center justify-center rounded-full border border-[rgba(48,72,61,0.16)] bg-[rgba(48,72,61,0.06)] px-3 text-[0.7rem] font-semibold text-[rgba(48,72,61,0.8)] transition-colors hover:border-[rgba(48,72,61,0.26)] hover:bg-[rgba(48,72,61,0.1)] dark:border-[rgba(143,179,159,0.2)] dark:bg-[rgba(143,179,159,0.08)] dark:text-[rgba(167,203,181,0.88)] dark:hover:border-[rgba(143,179,159,0.3)] dark:hover:bg-[rgba(143,179,159,0.12)]"
-                >
-                  Open
-                </a>
+                {!link.isAudio ? (
+                  <a
+                    href={link.href}
+                    target="_blank"
+                    rel="noopener noreferrer nofollow"
+                    className="inline-flex h-8 w-fit shrink-0 items-center justify-center rounded-full border border-[rgba(48,72,61,0.16)] bg-[rgba(48,72,61,0.06)] px-3 text-[0.7rem] font-semibold text-[rgba(48,72,61,0.8)] transition-colors hover:border-[rgba(48,72,61,0.26)] hover:bg-[rgba(48,72,61,0.1)] dark:border-[rgba(143,179,159,0.2)] dark:bg-[rgba(143,179,159,0.08)] dark:text-[rgba(167,203,181,0.88)] dark:hover:border-[rgba(143,179,159,0.3)] dark:hover:bg-[rgba(143,179,159,0.12)]"
+                  >
+                    Open in Dropbox
+                  </a>
+                ) : null}
               </div>
+              {link.isAudio && link.audioSrc ? (
+                <>
+                  <div className="px-3 pb-3">
+                    <audio
+                      controls
+                      preload="none"
+                      src={link.audioSrc}
+                      className="h-10 w-full rounded-[10px]"
+                    >
+                      <a href={link.href}>Open audio in Dropbox</a>
+                    </audio>
+                  </div>
+                  <div className="flex flex-col gap-1.5 border-t border-[rgba(120,104,89,0.1)] px-3 py-2.5 text-[0.72rem] leading-5 dark:border-white/10 sm:flex-row sm:items-center sm:justify-between">
+                    <span className="font-medium text-[rgba(64,56,48,0.48)] dark:text-[rgba(245,239,229,0.46)]">
+                      Can&apos;t play inline?
+                    </span>
+                    <a
+                      href={link.href}
+                      target="_blank"
+                      rel="noopener noreferrer nofollow"
+                      className="w-fit font-semibold text-[rgba(48,72,61,0.8)] underline decoration-[rgba(48,72,61,0.24)] underline-offset-4 transition-colors hover:text-[rgba(35,58,47,0.94)] dark:text-[rgba(167,203,181,0.88)] dark:decoration-[rgba(167,203,181,0.28)] dark:hover:text-[rgba(198,228,209,0.98)]"
+                    >
+                      Open in Dropbox
+                    </a>
+                  </div>
+                </>
+              ) : null}
             </div>
           ))}
         </div>
         {remainingLinkCount > 0 ? (
           <p className="text-[0.72rem] leading-5 text-[rgba(64,56,48,0.46)] dark:text-[rgba(245,239,229,0.44)]">
-            +{remainingLinkCount} more {title.toLowerCase()}{" "}
+            +{remainingLinkCount} more Dropbox{" "}
             {remainingLinkCount === 1 ? "link" : "links"} in email body
           </p>
         ) : null}
@@ -2066,15 +2158,15 @@ function BundleOrganizerLinkPreview({
 }
 
 function BundleOrganizerSoundCloudPreview({
-  cards,
+  candidates,
   className = "",
 }: {
-  cards: BundleOrganizerLinkCard[];
+  candidates: SoundCloudPreviewCandidate[];
   className?: string;
 }) {
   const candidateSignature = useMemo(
-    () => cards.map((card) => card.href).join("|"),
-    [cards],
+    () => candidates.map((candidate) => candidate.href).join("|"),
+    [candidates],
   );
   const [resolutionState, setResolutionState] = useState<SoundCloudResolutionState>({
     loading: false,
@@ -2086,15 +2178,15 @@ function BundleOrganizerSoundCloudPreview({
       ? resolutionState.resolvedPreviews
       : {};
   const previews = useMemo(
-    () => buildSoundCloudPreviewLinks(cards, activeResolvedPreviews),
-    [cards, activeResolvedPreviews],
+    () => buildSoundCloudPreviewLinks(candidates, activeResolvedPreviews),
+    [candidates, activeResolvedPreviews],
   );
   const candidateHrefs = useMemo(
     () =>
-      cards
-        .map((card) => card.href)
+      candidates
+        .map((candidate) => candidate.href)
         .filter((href, index, hrefs) => hrefs.indexOf(href) === index),
-    [cards],
+    [candidates],
   );
 
   useEffect(() => {
@@ -2160,19 +2252,12 @@ function BundleOrganizerSoundCloudPreview({
   const isResolving =
     resolutionState.signature === candidateSignature && resolutionState.loading;
 
-  if (cards.length === 0) {
+  if (candidates.length === 0) {
     return null;
   }
 
   if (previews.length === 0 && !isResolving) {
-    return (
-      <BundleOrganizerLinkPreview
-        cards={cards}
-        className={className}
-        title={cards.length === 1 ? "SoundCloud link" : "SoundCloud links"}
-        description="Open the SoundCloud link in a new tab."
-      />
-    );
+    return null;
   }
 
   return (
@@ -2278,23 +2363,25 @@ function MessageDetail({
   );
   const soundCloudLinks = useMemo(
     () =>
-      collectLinkCards(
+      collectPreviewItems(
         bodyLines,
         message.bodyHtml,
         message.snippet,
         soundCloudLinkPattern,
-        buildSoundCloudLinkCard,
+        buildSoundCloudPreviewCandidate,
+        (candidate) => candidate.href,
       ),
     [bodyLines, message.bodyHtml, message.snippet],
   );
   const dropboxLinks = useMemo(
     () =>
-      collectLinkCards(
+      collectPreviewItems(
         bodyLines,
         message.bodyHtml,
         message.snippet,
         dropboxLinkPattern,
-        buildDropboxLinkCard,
+        buildDropboxPreviewLink,
+        (link) => link.href,
       ),
     [bodyLines, message.bodyHtml, message.snippet],
   );
@@ -2368,15 +2455,13 @@ function MessageDetail({
         />
 
         <BundleOrganizerSoundCloudPreview
-          cards={soundCloudLinks}
+          candidates={soundCloudLinks}
           className="mb-6 max-w-[780px]"
         />
 
-        <BundleOrganizerLinkPreview
-          cards={dropboxLinks}
+        <BundleOrganizerDropboxLinkPreview
+          links={dropboxLinks}
           className="mb-6 max-w-[780px]"
-          title={dropboxLinks.length === 1 ? "Dropbox link" : "Dropbox links"}
-          description="Open the shared files in Dropbox."
         />
 
         <div className="flex flex-wrap gap-3 border-t border-white/10 pt-6">
