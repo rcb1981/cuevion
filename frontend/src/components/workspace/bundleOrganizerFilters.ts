@@ -21,7 +21,6 @@ export type BundleOrganizerMessageLike = {
   ui_signal?: string | null;
   v7_final_priority?: string | null;
   active_work_status?: BundleOrganizerActiveWorkStatus | string | null;
-  organizerFollowUp?: boolean | null;
   unread?: boolean;
 };
 
@@ -104,10 +103,6 @@ export function shouldShowInPromoInbox(message: BundleOrganizerMessageLike) {
 }
 
 export function shouldShowInOrganizerPriority(message: BundleOrganizerMessageLike) {
-  if (message.organizerFollowUp === true) {
-    return true;
-  }
-
   const category = resolveOrganizerCategory(message);
 
   if (category === null) {

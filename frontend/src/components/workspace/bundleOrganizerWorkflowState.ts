@@ -10,8 +10,6 @@ export type BundleOrganizerWorkflowStateEntry = {
   manualCategoryAt?: string;
   manualPriority?: boolean;
   manualPriorityAt?: string;
-  organizerFollowUp?: boolean;
-  organizerFollowUpAt?: string;
   trashed?: boolean;
   trashedAt?: string;
 };
@@ -21,32 +19,11 @@ export type BundleOrganizerWorkflowState = Record<
   BundleOrganizerWorkflowStateEntry
 >;
 
-export type BundleOrganizerWorkspaceIdentitySource = {
-  id: string;
-  imapUid?: string | number | null;
-  threadId?: string | null;
-};
-
 export const BUNDLE_ORGANIZER_WORKFLOW_STATE_CHANGED_EVENT =
   "cuevion-bundle-organizer-workflow-state-changed";
 
 const bundleOrganizerWorkflowStorageKey =
   "cuevion-bundle-organizer-workflow-state";
-
-export function buildBundleOrganizerWorkspaceMessageIdentityKey(
-  mailboxId: string,
-  message: BundleOrganizerWorkspaceIdentitySource,
-) {
-  if (message.imapUid) {
-    return `${mailboxId}:imap:${message.imapUid}`;
-  }
-
-  if (message.threadId) {
-    return `${mailboxId}:thread:${message.threadId}`;
-  }
-
-  return `${mailboxId}:id:${message.id}`;
-}
 
 export function getBundleOrganizerWorkflowIdentityKey(message: {
   id: string;

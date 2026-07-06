@@ -115,8 +115,6 @@ type BundleOrganizerMessage = {
   declinedAt?: string | null;
   manualPriority?: boolean | null;
   manualPriorityAt?: string | null;
-  organizerFollowUp?: boolean | null;
-  organizerFollowUpAt?: string | null;
   active_work_status?: BundleOrganizerActiveWorkStatus | string | null;
   v7_final_priority?: string;
   priorityBadge?: string;
@@ -172,8 +170,6 @@ export type BundleOrganizerWorkspaceMessage = {
   declinedAt?: string | null;
   manualPriority?: boolean | null;
   manualPriorityAt?: string | null;
-  organizerFollowUp?: boolean | null;
-  organizerFollowUpAt?: string | null;
   active_work_status?: BundleOrganizerActiveWorkStatus | string | null;
   v7_final_priority?: string;
   priorityBadge?: string;
@@ -458,10 +454,6 @@ function resolvePriorityReason(message: BundleOrganizerMessage) {
 
   if (message.manualPriority === true) {
     return "Manual priority.";
-  }
-
-  if (message.organizerFollowUp === true) {
-    return "Organizer follow-up.";
   }
 
   if (
@@ -1308,12 +1300,6 @@ function applyBundleWorkflowState(
           : message.manualPriority,
       manualPriorityAt:
         workflowEntry.manualPriorityAt ?? message.manualPriorityAt,
-      organizerFollowUp:
-        typeof workflowEntry.organizerFollowUp === "boolean"
-          ? workflowEntry.organizerFollowUp
-          : message.organizerFollowUp,
-      organizerFollowUpAt:
-        workflowEntry.organizerFollowUpAt ?? message.organizerFollowUpAt,
       trashed:
         typeof workflowEntry.trashed === "boolean"
           ? workflowEntry.trashed
@@ -1790,7 +1776,6 @@ function getContextMenuActions(
   ) => void,
   onToggleShortlist: (message: BundleOrganizerMessage) => void,
   onTogglePriority: (message: BundleOrganizerMessage) => void,
-  onToggleOrganizerFollowUp: (message: BundleOrganizerMessage) => void,
   onToggleTrash: (message: BundleOrganizerMessage) => void,
 ): BundleOrganizerContextMenuAction[] {
   const actions: BundleOrganizerContextMenuAction[] = [
@@ -1856,14 +1841,6 @@ function getContextMenuActions(
       label: message.manualPriority === true ? "Remove Priority" : "Mark as Priority",
       onSelect: () => onTogglePriority(message),
     },
-    {
-      icon: message.organizerFollowUp === true ? "priorityOff" : "reply",
-      label:
-        message.organizerFollowUp === true
-          ? "Remove Organizer follow-up"
-          : "Mark as Organizer follow-up",
-      onSelect: () => onToggleOrganizerFollowUp(message),
-    },
   );
 
   if (sourceView === "promo" || (sourceView === "shortlist" && shouldShowInPromoInbox(message))) {
@@ -1919,9 +1896,6 @@ function MessagePills({ message }: { message: BundleOrganizerMessage }) {
       ) : null}
       {message.manualPriority === true ? (
         <span className={manualPillClass}>Manual Priority</span>
-      ) : null}
-      {message.organizerFollowUp === true ? (
-        <span className={manualPillClass}>Follow-up</span>
       ) : null}
       {message.shortlisted ? (
         <span className={shortlistedPillClass}>Shortlisted</span>
@@ -2769,7 +2743,6 @@ export function BundleOrganizerSurface({
         setMessageReadState,
         toggleMessageShortlist,
         toggleMessagePriority,
-        toggleMessageOrganizerFollowUp,
         toggleMessageTrash,
       )
     : [];
@@ -2932,33 +2905,6 @@ export function BundleOrganizerSurface({
     setContextMenu(null);
   }
 
-  function toggleMessageOrganizerFollowUp(message: BundleOrganizerMessage) {
-    const identityKey = getWorkflowIdentityKey(message);
-    const nextOrganizerFollowUp = message.organizerFollowUp !== true;
-    const organizerFollowUpAt = nextOrganizerFollowUp
-      ? new Date().toISOString()
-      : undefined;
-
-    setWorkflowState((currentState) => {
-      const nextState = {
-        ...currentState,
-        [identityKey]: {
-          ...currentState[identityKey],
-          organizerFollowUp: nextOrganizerFollowUp,
-          organizerFollowUpAt,
-        },
-      };
-
-      if (!nextOrganizerFollowUp) {
-        delete nextState[identityKey].organizerFollowUpAt;
-      }
-
-      writeBundleOrganizerWorkflowState(nextState, { notify: true });
-      return nextState;
-    });
-    setContextMenu(null);
-  }
-
   function toggleMessageTrash(message: BundleOrganizerMessage) {
     const identityKey = getWorkflowIdentityKey(message);
     const nextTrashed = message.trashed !== true;
@@ -2997,7 +2943,6 @@ export function BundleOrganizerSurface({
       setMessageReadState,
       toggleMessageShortlist,
       toggleMessagePriority,
-      toggleMessageOrganizerFollowUp,
       toggleMessageTrash,
     ).length;
     const position = resolveContextMenuPosition(
