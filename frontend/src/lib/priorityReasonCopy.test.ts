@@ -45,6 +45,22 @@ const knownSources: PrioritySource[] = [
   "none",
 ];
 
+const visibleSources: PrioritySource[] = [
+  "manual",
+  "learning",
+  "returned_reply",
+  "collaboration",
+  "assigned_review",
+  "reply_protection",
+];
+
+const hiddenGenericSources: PrioritySource[] = [
+  "backend_visibility",
+  "ai_heuristic",
+  "strong_system_rule",
+  "focus_preference",
+];
+
 const forbiddenTerms = [
   "backend_visibility",
   "ai_heuristic",
@@ -99,11 +115,30 @@ test("every known priority source maps to non-technical copy", () => {
     assert.equal(copy.title.length > 0, true);
     assertNoForbiddenTerms(copy);
 
-    if (source === "none") {
-      assert.equal(copy.shouldShow, false);
-    } else {
-      assert.equal(copy.shouldShow, true);
-    }
+    assert.equal(copy.shouldShow, visibleSources.includes(source));
+  });
+});
+
+test("concrete priority sources remain visible", () => {
+  visibleSources.forEach((source) => {
+    const copy = formatPriorityReasonCopy({
+      prioritySource: sourceResult(source),
+    });
+
+    assert.equal(copy.shouldShow, true);
+    assert.equal(copy.title, copy.title.trim());
+    assert.equal(copy.title.length > 0, true);
+  });
+});
+
+test("generic Cuevion and system sources are hidden", () => {
+  hiddenGenericSources.forEach((source) => {
+    const copy = formatPriorityReasonCopy({
+      prioritySource: sourceResult(source),
+    });
+
+    assert.equal(copy.shouldShow, false);
+    assert.equal(copy.title, "No clear priority reason yet");
   });
 });
 

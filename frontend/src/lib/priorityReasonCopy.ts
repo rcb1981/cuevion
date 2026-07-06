@@ -61,6 +61,15 @@ const priorityReasonCopyBySource: Record<
   },
 };
 
+const visiblePriorityReasonSources = new Set<PrioritySource>([
+  "manual",
+  "learning",
+  "returned_reply",
+  "collaboration",
+  "assigned_review",
+  "reply_protection",
+]);
+
 function isPriorityLevel(value: unknown): value is PriorityLevel {
   return value === "priority" || value === "normal" || value === "low";
 }
@@ -86,7 +95,8 @@ export function formatPriorityReasonCopy(
     !isPrioritySource(prioritySource.source) ||
     !isPriorityLevel(prioritySource.level) ||
     prioritySource.source === "none" ||
-    prioritySource.level !== "priority"
+    prioritySource.level !== "priority" ||
+    !visiblePriorityReasonSources.has(prioritySource.source)
   ) {
     return { ...hiddenPriorityReasonCopy };
   }
