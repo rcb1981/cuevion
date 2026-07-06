@@ -6350,25 +6350,29 @@ function getMailboxFolderBadgeCount(
   }
 
   if (folder === "Inbox" || folder === "Filtered") {
-    const seenIdentityKeys = new Set<string>();
-
-    return mailboxCollections[folder].filter((message) => {
-      if (!message.unread) {
-        return false;
-      }
-
-      const identityKeys = getCanonicalMessageIdentityKeys(message);
-
-      if (identityKeys.some((key) => seenIdentityKeys.has(key))) {
-        return false;
-      }
-
-      identityKeys.forEach((key) => seenIdentityKeys.add(key));
-      return true;
-    }).length;
+    return countUnreadMessagesByCanonicalIdentity(mailboxCollections[folder]);
   }
 
   return mailboxCollections[folder].length;
+}
+
+function countUnreadMessagesByCanonicalIdentity(messages: MailMessage[]) {
+  const seenIdentityKeys = new Set<string>();
+
+  return messages.filter((message) => {
+    if (!message.unread) {
+      return false;
+    }
+
+    const identityKeys = getCanonicalMessageIdentityKeys(message);
+
+    if (identityKeys.some((key) => seenIdentityKeys.has(key))) {
+      return false;
+    }
+
+    identityKeys.forEach((key) => seenIdentityKeys.add(key));
+    return true;
+  }).length;
 }
 
 function resolveMailboxTitleForCategory(
@@ -20442,7 +20446,7 @@ function MailboxView({
                   <div className="flex flex-wrap items-center justify-between gap-2 rounded-[14px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-3 py-2 text-[0.74rem] leading-5 text-[var(--workspace-text-faint)]">
                     <span>
                       {hideBundleOrganizerManagedMessages
-                        ? "Demo and promo messages are managed in Organizer. Mailbox counts may include messages managed in Organizer."
+                        ? "Demo and promo messages are managed in Organizer."
                         : "Organizer-managed demo and promo messages are visible in Cuevion App."}
                     </span>
                     <button
@@ -33663,6 +33667,54 @@ export function WorkspaceShell({
     );
     return nextValue;
   }, {});
+  const sidebarMailboxUnreadCounts = useMemo(() => {
+    if (productAccess !== "bundle" || showBundleOrganizerManagedMail) {
+      return mailboxUnreadCounts;
+    }
+
+    return Object.fromEntries(
+      orderedMailboxes.map((mailbox) => {
+        const mailboxCollections =
+          mailboxStore[mailbox.id] ?? createEmptyMailboxCollections();
+        const visibleInboxMessages = getMailboxReadyInboxMessagesForWorkspaceMailbox(
+          {
+            ...mailboxCollections,
+            Inbox: mailboxCollections.Inbox.filter(
+              (message) => !isWorkspaceMessageSpamSuppressed(message),
+            ),
+          },
+          manualPriorityOverrides,
+          manualLabelOverrides,
+          effectiveFocusPreferencesByMailbox[mailbox.id] ?? userConfig.focusPreferences,
+          {
+            preferPromoMailboxContext: isPromoMailboxContext(mailbox),
+          },
+        );
+        const normalAppInboxMessages =
+          filterBundleOrganizerManagedMessagesForNormalApp(
+            visibleInboxMessages,
+            productAccess,
+            showBundleOrganizerManagedMail,
+          );
+
+        return [
+          mailbox.id,
+          countUnreadMessagesByCanonicalIdentity(normalAppInboxMessages),
+        ];
+      }),
+    );
+  }, [
+    effectiveFocusPreferencesByMailbox,
+    mailboxStore,
+    mailboxUnreadCounts,
+    manualLabelOverrides,
+    manualPriorityOverrides,
+    orderedMailboxes,
+    productAccess,
+    showBundleOrganizerManagedMail,
+    spamSuppressionKeySet,
+    userConfig.focusPreferences,
+  ]);
 
   useEffect(() => {
     window.localStorage.setItem(
@@ -38700,7 +38752,7 @@ export function WorkspaceShell({
         activeSmartFolderId={activeSmartFolderId}
         hasPendingTeamInvitation={Boolean(pendingTeamInvitation)}
         notificationUnreadCount={notificationUnreadCount}
-        mailboxUnreadCounts={mailboxUnreadCounts}
+        mailboxUnreadCounts={sidebarMailboxUnreadCounts}
         showMailboxUnreadCounts={areMailboxCountsHydrated}
         orderedMailboxes={sidebarMailboxes}
         smartFolders={smartFolders}
