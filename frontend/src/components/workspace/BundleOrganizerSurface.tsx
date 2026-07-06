@@ -68,6 +68,8 @@ type BundleOrganizerContextMenuAction = {
   onSelect?: () => void;
 };
 
+type BundleOrganizerReadState = "read" | "unread";
+
 type BundleOrganizerSearchRow = {
   message: BundleOrganizerMessage;
   sourceView: BundleOrganizerView;
@@ -91,6 +93,9 @@ type BundleOrganizerMessage = {
   ui_signal?: string;
   uiSignal?: string;
   unread?: boolean;
+  readState?: BundleOrganizerReadState;
+  readAt?: string | null;
+  unreadAt?: string | null;
   shortlisted?: boolean;
   shortlistedAt?: string | null;
   trashed?: boolean;
@@ -143,6 +148,9 @@ export type BundleOrganizerWorkspaceMessage = {
   signal?: string;
   uiSignal?: string;
   unread?: boolean;
+  readState?: BundleOrganizerReadState;
+  readAt?: string | null;
+  unreadAt?: string | null;
   shortlisted?: boolean;
   shortlistedAt?: string | null;
   trashed?: boolean;
@@ -431,6 +439,9 @@ type SoundCloudResolutionState = {
 type BundleOrganizerWorkflowState = Record<
   string,
   {
+    readState?: BundleOrganizerReadState;
+    readAt?: string;
+    unreadAt?: string;
     shortlisted?: boolean;
     shortlistedAt?: string;
     manualCategory?: "demo" | "promo";
@@ -1312,6 +1323,19 @@ function applyBundleWorkflowState(
           ? workflowEntry.shortlisted
           : message.shortlisted,
       shortlistedAt: workflowEntry.shortlistedAt ?? message.shortlistedAt,
+      unread:
+        workflowEntry.readState === "read"
+          ? false
+          : workflowEntry.readState === "unread"
+          ? true
+          : message.unread,
+      readState:
+        workflowEntry.readState === "read" ||
+        workflowEntry.readState === "unread"
+          ? workflowEntry.readState
+          : message.readState,
+      readAt: workflowEntry.readAt ?? message.readAt,
+      unreadAt: workflowEntry.unreadAt ?? message.unreadAt,
       manualCategory:
         workflowEntry.manualCategory === "demo" ||
         workflowEntry.manualCategory === "promo"
@@ -1795,6 +1819,10 @@ function getContextMenuActions(
     message: BundleOrganizerMessage,
     manualCategory: "demo" | "promo",
   ) => void,
+  onSetReadState: (
+    message: BundleOrganizerMessage,
+    readState: BundleOrganizerReadState,
+  ) => void,
   onToggleShortlist: (message: BundleOrganizerMessage) => void,
   onTogglePriority: (message: BundleOrganizerMessage) => void,
   onToggleTrash: (message: BundleOrganizerMessage) => void,
@@ -1804,10 +1832,12 @@ function getContextMenuActions(
       icon: "forward",
       label: "Forward",
     }),
-    buildDisabledMenuAction({
+    {
       icon: message.unread ? "mailOpen" : "mail",
       label: message.unread ? "Mark as read" : "Mark as unread",
-    }),
+      onSelect: () =>
+        onSetReadState(message, message.unread ? "read" : "unread"),
+    },
   ];
 
   if (sourceView === "trash" || message.trashed === true) {
@@ -2391,11 +2421,16 @@ function DetailFooterActionButton({
 function MessageDetail({
   message,
   onBack,
+  onSetReadState,
   onToggleShortlist,
   onToggleTrash,
 }: {
   message: BundleOrganizerMessage;
   onBack: () => void;
+  onSetReadState: (
+    message: BundleOrganizerMessage,
+    readState: BundleOrganizerReadState,
+  ) => void;
   onToggleShortlist: (message: BundleOrganizerMessage) => void;
   onToggleTrash: (message: BundleOrganizerMessage) => void;
 }) {
@@ -2521,6 +2556,14 @@ function MessageDetail({
             title={bundleModeDisabledReason}
           >
             Forward
+          </DetailFooterActionButton>
+          <DetailFooterActionButton
+            icon={message.unread ? "mailOpen" : "mail"}
+            onClick={() =>
+              onSetReadState(message, message.unread ? "read" : "unread")
+            }
+          >
+            {message.unread ? "Mark as read" : "Mark as unread"}
           </DetailFooterActionButton>
           <DetailFooterActionButton
             disabled
@@ -2718,6 +2761,7 @@ export function BundleOrganizerSurface({
         contextMenuMessage.message,
         contextMenuMessage.sourceView,
         moveMessageToCategory,
+        setMessageReadState,
         toggleMessageShortlist,
         toggleMessagePriority,
         toggleMessageTrash,
@@ -2775,6 +2819,85 @@ export function BundleOrganizerSurface({
           }
         : currentMessage,
     );
+  }
+
+  function applyReadStateToMessage(
+    message: BundleOrganizerMessage,
+    readState: BundleOrganizerReadState,
+    timestamp: string,
+  ): BundleOrganizerMessage {
+    return {
+      ...message,
+      unread: readState === "unread",
+      readState,
+      readAt: readState === "read" ? timestamp : undefined,
+      unreadAt: readState === "unread" ? timestamp : undefined,
+    };
+  }
+
+  function setMessageReadState(
+    message: BundleOrganizerMessage,
+    readState: BundleOrganizerReadState,
+  ) {
+    const identityKey = getWorkflowIdentityKey(message);
+    const timestamp = new Date().toISOString();
+    const readAt = readState === "read" ? timestamp : undefined;
+    const unreadAt = readState === "unread" ? timestamp : undefined;
+
+    setWorkflowState((currentState) => {
+      const nextState = {
+        ...currentState,
+        [identityKey]: {
+          ...currentState[identityKey],
+          readState,
+          readAt,
+          unreadAt,
+        },
+      };
+
+      if (readState === "read") {
+        delete nextState[identityKey].unreadAt;
+      } else {
+        delete nextState[identityKey].readAt;
+      }
+
+      writeBundleOrganizerWorkflowState(nextState);
+      return nextState;
+    });
+    setContextMenu(null);
+    setSelectedMessage((currentMessage) =>
+      currentMessage && getWorkflowIdentityKey(currentMessage) === identityKey
+        ? applyReadStateToMessage(currentMessage, readState, timestamp)
+        : currentMessage,
+    );
+  }
+
+  function openMessage(message: BundleOrganizerMessage) {
+    setContextMenu(null);
+
+    if (message.unread === true) {
+      const timestamp = new Date().toISOString();
+      const identityKey = getWorkflowIdentityKey(message);
+
+      setWorkflowState((currentState) => {
+        const nextState = {
+          ...currentState,
+          [identityKey]: {
+            ...currentState[identityKey],
+            readState: "read" as const,
+            readAt: timestamp,
+          },
+        };
+
+        delete nextState[identityKey].unreadAt;
+        writeBundleOrganizerWorkflowState(nextState);
+        return nextState;
+      });
+      setSelectedMessage(applyReadStateToMessage(message, "read", timestamp));
+      return;
+    }
+
+    setSelectedMessage(message);
   }
 
   function toggleMessageShortlist(message: BundleOrganizerMessage) {
@@ -2893,6 +3016,7 @@ export function BundleOrganizerSurface({
       message,
       sourceView,
       moveMessageToCategory,
+      setMessageReadState,
       toggleMessageShortlist,
       toggleMessagePriority,
       toggleMessageTrash,
@@ -3291,6 +3415,7 @@ export function BundleOrganizerSurface({
                 <MessageDetail
                   message={selectedMessage}
                   onBack={() => setSelectedMessage(null)}
+                  onSetReadState={setMessageReadState}
                   onToggleShortlist={toggleMessageShortlist}
                   onToggleTrash={toggleMessageTrash}
                 />
@@ -3338,8 +3463,7 @@ export function BundleOrganizerSurface({
                             );
                           }}
                           onClick={() => {
-                            setContextMenu(null);
-                            setSelectedMessage(message);
+                            openMessage(message);
                           }}
                           className="grid w-full gap-3 px-3 py-3.5 pr-12 text-left transition-[background-color,border-color,box-shadow] sm:grid-cols-[minmax(150px,0.55fr)_minmax(0,2.6fr)_minmax(72px,auto)] sm:px-4 sm:pr-14 lg:grid-cols-[minmax(170px,0.46fr)_minmax(0,3fr)_minmax(82px,auto)] xl:px-5 xl:pr-14"
                         >
