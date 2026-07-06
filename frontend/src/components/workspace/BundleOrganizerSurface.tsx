@@ -228,35 +228,40 @@ const viewCopy: Record<
   priority: {
     title: "Priority",
     eyebrow: "Active Work Queue",
-    description: "Priority shows active work, replies, waiting items, and open follow-ups.",
+    description:
+      "Active follow-ups and manually prioritized messages. Counts reflect Organizer unread state.",
     emptyTitle: "No priority messages.",
     emptyDescription: "Priority demo and promo messages will appear here.",
   },
   shortlist: {
     title: "Shortlist",
     eyebrow: "Saved for follow-up",
-    description: "Messages you shortlist from Demo, Promo, and Priority stay collected here.",
+    description:
+      "Messages saved for follow-up. Counts reflect Organizer unread state.",
     emptyTitle: "No shortlisted messages yet.",
     emptyDescription: "Shortlisted demos and promos will appear here.",
   },
   demo: {
     title: "Demo Inbox",
     eyebrow: "Unified Demo Intake",
-    description: "Demos from connected workspace inboxes are filtered into one focused queue.",
+    description:
+      "Focused demo queue across connected inboxes. Counts reflect Organizer unread state.",
     emptyTitle: "No demo messages.",
     emptyDescription: "Demo messages from connected inboxes will appear here.",
   },
   promo: {
     title: "Promo Inbox",
     eyebrow: "Unified Promo Review",
-    description: "Promo mail and promo reminders are organized without mixing into demo review.",
+    description:
+      "Focused promo queue across connected inboxes. Counts reflect Organizer unread state.",
     emptyTitle: "No promo messages.",
     emptyDescription: "Promo messages from connected inboxes will appear here.",
   },
   trash: {
     title: "Trash",
     eyebrow: "Organizer-local trash",
-    description: "Messages moved out of Organizer views stay here until restored.",
+    description:
+      "Messages removed from Organizer views. This does not delete mailbox email.",
     emptyTitle: "Trash is empty.",
     emptyDescription: "Messages moved out of Organizer views will appear here.",
   },
@@ -3170,6 +3175,9 @@ export function BundleOrganizerSurface({
               </div>
               <p className="mt-1 truncate text-[0.68rem] font-medium leading-4 text-[rgba(167,203,181,0.72)]">
                 Workspace messages only
+              </p>
+              <p className="mt-1 text-[0.66rem] leading-4 text-[rgba(245,239,229,0.42)]">
+                Organizer counts may differ from mailbox unread counts.
               </p>
             </section>
 
