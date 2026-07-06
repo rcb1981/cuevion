@@ -121,7 +121,7 @@ import {
   INBOX_SNAPSHOT_RECENT_GUARD_MS,
 } from "../../lib/inboxEngine";
 import { buildPriorityRuntimeSignalsForCandidates } from "../../lib/priorityRuntimeSignals";
-import { formatPriorityReasonCopy } from "../../lib/priorityReasonCopy";
+import { formatPriorityReasonCopy, type PriorityReasonCopy } from "../../lib/priorityReasonCopy";
 import { applyLearningDecision } from "../../lib/applyLearningDecision";
 import type {
   MailMessageBehaviorSuggestion as EngineMailMessageBehaviorSuggestion,
@@ -12762,6 +12762,7 @@ function MailboxView({
   notificationNavigationRequest,
   onConsumeNotificationNavigation,
   manualPriorityOverrides,
+  priorityReasonCopyByMessageKey,
   manualLabelOverrides,
   spamSuppressionKeys,
   onSetManualPriority,
@@ -12836,6 +12837,7 @@ function MailboxView({
   notificationNavigationRequest?: NotificationNavigationRequest | null;
   onConsumeNotificationNavigation?: (requestKey: number) => void;
   manualPriorityOverrides: Partial<Record<string, ManualPriorityOverride>>;
+  priorityReasonCopyByMessageKey: Record<string, PriorityReasonCopy>;
   manualLabelOverrides: ManualLabelOverrideStore;
   spamSuppressionKeys: string[];
   onSetManualPriority: (
@@ -14608,6 +14610,16 @@ function MailboxView({
     null;
   const fullWidthMessage = selectedMessageFromFolder ?? selectedMessage;
   const renderTargetMessage = isFullMessageOpen ? fullWidthMessage : selectedMessage;
+  const getVisiblePriorityReasonCopyForMessage = (message: MailMessage | null) => {
+    if (!message || isSharedView || activeSmartFolder) {
+      return null;
+    }
+
+    const sourceMailboxId = currentMessageLocationById[message.id]?.mailboxId ?? mailbox.id;
+    const reason = priorityReasonCopyByMessageKey[`${sourceMailboxId}:${message.id}`];
+
+    return reason?.shouldShow && reason.title.trim().length > 0 ? reason : null;
+  };
 
   useEffect(() => {
     if (!hideBundleOrganizerManagedMessages || !selectedMessageId) {
@@ -20394,6 +20406,8 @@ function MailboxView({
 	              {(() => {
 	                const linkedReview = getLinkedReviewForMessage(fullWidthMessage.id);
 	                const linkedReviewLabel = getLinkedReviewBadgeLabel(fullWidthMessage.id);
+                    const priorityReasonCopy =
+                      getVisiblePriorityReasonCopyForMessage(fullWidthMessage);
 
 	                return (
 	              <div className="flex items-start justify-between gap-4">
@@ -20416,6 +20430,11 @@ function MailboxView({
 	                      {linkedReviewLabel}
 	                    </button>
 	                  ) : null}
+                      {priorityReasonCopy ? (
+                        <div className="text-[0.76rem] leading-5 text-[var(--workspace-text-soft)]">
+                          {priorityReasonCopy.title}
+                        </div>
+                      ) : null}
 	                </div>
 	                <div className="flex flex-none flex-wrap items-start justify-end gap-4 self-start">
 	                  {renderMessageActions(fullWidthMessage, "full")}
@@ -21284,6 +21303,8 @@ function MailboxView({
 	                    {(() => {
 	                      const linkedReview = getLinkedReviewForMessage(selectedMessage.id);
 	                      const linkedReviewLabel = getLinkedReviewBadgeLabel(selectedMessage.id);
+                          const priorityReasonCopy =
+                            getVisiblePriorityReasonCopyForMessage(selectedMessage);
 	                      return (
 	                    <div className="flex items-start justify-between gap-4">
 	                      <div className="min-w-0 flex-1 space-y-3">
@@ -21302,6 +21323,11 @@ function MailboxView({
 	                            {linkedReviewLabel}
 	                          </button>
 	                        ) : null}
+                            {priorityReasonCopy ? (
+                              <div className="text-[0.76rem] leading-5 text-[var(--workspace-text-soft)]">
+                                {priorityReasonCopy.title}
+                              </div>
+                            ) : null}
                           <div className="space-y-1.5 pb-1">
                             <div className="text-[0.84rem] leading-[1.45] text-[var(--workspace-text)] break-words">
                               <span className="text-[var(--workspace-text-faint)]">From:</span>{" "}
@@ -34604,7 +34630,6 @@ export function WorkspaceShell({
     [priorityRuntimeSignalsForCandidates],
   );
   void priorityRuntimeSignalsForCandidates;
-  void priorityReasonCopyForCandidates;
   const livePriorityInboxItems: ReviewItem[] = livePriorityInboxEntries.map(
     ({ mailboxId, mailboxTitle, message }) => {
       const resolvedPriorityMessageDateMs = resolveMailDateMs(message);
@@ -39404,6 +39429,7 @@ export function WorkspaceShell({
                   }}
                   isMobileViewport={isMobileWorkspaceViewport}
                   manualPriorityOverrides={manualPriorityOverrides}
+                  priorityReasonCopyByMessageKey={priorityReasonCopyForCandidates}
                   manualLabelOverrides={manualLabelOverrides}
                   spamSuppressionKeys={spamSuppressionKeys}
                   onSetManualPriority={handleSetManualPriority}
