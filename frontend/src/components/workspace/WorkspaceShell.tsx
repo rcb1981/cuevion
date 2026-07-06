@@ -7488,7 +7488,7 @@ function resolveDisplayContentLabel(
     return mapDisplayContentClassificationToLabel(underlyingClassification);
   }
 
-  return "Other";
+  return null;
 }
 
 const autoPriorityStrongKeywords = [
@@ -20883,6 +20883,9 @@ function MailboxView({
                                 demoFocusPreferenceLevel === "high"
                               ? "PRIORITY"
                               : priorityBadge;
+                      const hasMetadataBeforeConversationStatus = Boolean(
+                        signal || categoryLabel,
+                      );
                       const senderTextClass =
                         themeMode === "dark"
                           ? message.unread
@@ -21110,8 +21113,9 @@ function MailboxView({
                                     </span>
                                   ) : null}
                                   {conversationStatusLabel ? (
-                                    <span className="ml-1.5 text-[0.64rem] normal-case tracking-normal opacity-55">
-                                      · {conversationStatusLabel}
+                                    <span className={`${hasMetadataBeforeConversationStatus ? "ml-1.5" : ""} text-[0.64rem] normal-case tracking-normal opacity-55`}>
+                                      {hasMetadataBeforeConversationStatus ? "· " : ""}
+                                      {conversationStatusLabel}
                                     </span>
                                   ) : null}
                                 </div>
