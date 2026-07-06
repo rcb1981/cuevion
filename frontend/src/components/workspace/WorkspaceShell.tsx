@@ -12773,6 +12773,12 @@ function MailboxView({
   const [detailActionsMenuState, setDetailActionsMenuState] = useState<{
     messageId: string;
     placement: "split" | "full";
+    anchor: {
+      bottom: number;
+      left: number;
+      right: number;
+      top: number;
+    };
   } | null>(null);
   const [readingLearningMenuAnchor, setReadingLearningMenuAnchor] = useState<{
     top: number;
@@ -15586,6 +15592,139 @@ function MailboxView({
       "inline-flex h-8 cursor-pointer items-center justify-center rounded-full border border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] px-3 text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.16),0_8px_24px_rgba(118,170,112,0.08)] transition-[background-image,border-color,color,transform,box-shadow] duration-150 hover:bg-[linear-gradient(180deg,var(--workspace-accent-surface-hover-start),var(--workspace-accent-surface-hover-end))] active:translate-y-[0.5px] focus-visible:border-[var(--workspace-accent-border)] focus-visible:bg-[linear-gradient(180deg,var(--workspace-accent-surface-hover-start),var(--workspace-accent-surface-hover-end))] focus-visible:outline-none";
     const menuItemClass =
       "flex w-full cursor-pointer items-center rounded-[14px] px-3 py-2.5 text-left text-[0.82rem] text-[var(--workspace-text-soft)] transition-colors duration-150 hover:bg-[var(--workspace-menu-hover)] focus-visible:outline-none";
+    const menuWidth = 188;
+    const viewportPadding = 12;
+    const menuGap = 8;
+    const menuAnchor = menuOpen ? detailActionsMenuState.anchor : null;
+    const menuPosition =
+      menuAnchor && typeof window !== "undefined"
+        ? (() => {
+            const estimatedMenuHeight = messageIsVisiblePriority ? 286 : 236;
+            const availableBelow =
+              window.innerHeight - menuAnchor.bottom - viewportPadding - menuGap;
+            const availableAbove = menuAnchor.top - viewportPadding - menuGap;
+            const shouldOpenUp =
+              availableBelow < estimatedMenuHeight && availableAbove > availableBelow;
+            const preferredLeft =
+              placement === "full"
+                ? menuAnchor.right - menuWidth
+                : menuAnchor.left;
+            const left = Math.min(
+              Math.max(viewportPadding, preferredLeft),
+              Math.max(viewportPadding, window.innerWidth - menuWidth - viewportPadding),
+            );
+            const maxHeight = Math.max(
+              160,
+              shouldOpenUp ? availableAbove : availableBelow,
+            );
+
+            return shouldOpenUp
+              ? {
+                  bottom: Math.max(
+                    viewportPadding,
+                    window.innerHeight - menuAnchor.top + menuGap,
+                  ),
+                  left,
+                  maxHeight,
+                }
+              : {
+                  left,
+                  maxHeight,
+                  top: Math.min(
+                    menuAnchor.bottom + menuGap,
+                    Math.max(
+                      viewportPadding,
+                      window.innerHeight - viewportPadding - maxHeight,
+                    ),
+                  ),
+                };
+          })()
+        : null;
+    const menuContent =
+      menuOpen && menuPosition && typeof document !== "undefined" ? (
+        <div
+          ref={detailActionsMenuRef}
+          data-theme={themeMode}
+          className="cuevion-dark-scroll cuevion-soft-scroll fixed z-30 w-[188px] overflow-y-auto rounded-[18px] border border-[var(--workspace-menu-border)] bg-[var(--workspace-menu-bg)] p-2 shadow-[0_14px_32px_rgba(41,34,27,0.10)]"
+          style={menuPosition}
+        >
+          {messageIsVisiblePriority ? (
+            <>
+              <button
+                type="button"
+                onClick={() => {
+                  markPriorityMessageDone(message.id);
+                  setDetailActionsMenuState(null);
+                }}
+                className={menuItemClass}
+              >
+                Mark as done
+              </button>
+              <div className="my-1.5 h-px bg-[var(--workspace-divider)]" />
+            </>
+          ) : null}
+          <button
+            type="button"
+            onClick={() => {
+              openShareCollaboration(message.id);
+            }}
+            className={menuItemClass}
+          >
+            {message.collaboration ? "Open collaboration…" : "Start collaboration…"}
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              onSetManualPriority(message.id, !messageIsVisiblePriority);
+              setDetailActionsMenuState(null);
+            }}
+            className={menuItemClass}
+          >
+            {messageIsVisiblePriority ? "This is not priority" : "Mark as priority"}
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              if (isSharedView) {
+                moveMessagesAcrossWorkspace(mailbox.id, "Archive", [message.id]);
+                return;
+              }
+
+              // In smart folder context the message may belong to a non-active
+              // mailbox or a different source folder. Use the cross-workspace
+              // mover which resolves the actual source via currentMessageLocationById,
+              // preventing a silent no-op when the source differs from mailbox.id/activeFolder.
+              if (activeSmartFolder || activeFolder === "Spam") {
+                moveMessagesToFolderAcrossWorkspace("Archive", [message.id]);
+                return;
+              }
+
+              moveMessages(mailbox.id, activeFolder, mailbox.id, "Archive", [message.id]);
+            }}
+            className={menuItemClass}
+          >
+            Archive
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              deleteMessages([message.id]);
+            }}
+            className={menuItemClass}
+          >
+            Delete
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setMessageUnreadState(activeFolder, message.id, !message.unread);
+            }}
+            className={menuItemClass}
+          >
+            {message.unread ? "Mark as read" : "Mark as unread"}
+          </button>
+        </div>
+      ) : null;
 
     return (
       <div
@@ -15621,102 +15760,29 @@ function MailboxView({
             <button
               type="button"
               data-detail-actions-trigger
-              onClick={() => {
+              onClick={(event) => {
                 closeReadingLearningMenu();
+                const rect = event.currentTarget.getBoundingClientRect();
                 setDetailActionsMenuState((current) =>
                   current?.messageId === message.id && current.placement === placement
                     ? null
-                    : { messageId: message.id, placement },
+                    : {
+                        anchor: {
+                          bottom: rect.bottom,
+                          left: rect.left,
+                          right: rect.right,
+                          top: rect.top,
+                        },
+                        messageId: message.id,
+                        placement,
+                      },
                 );
               }}
               className={actionClass}
             >
               More ▾
             </button>
-            {menuOpen ? (
-              <div
-                ref={detailActionsMenuRef}
-                className={`absolute top-full z-20 mt-2 w-[188px] rounded-[18px] border border-[var(--workspace-menu-border)] bg-[var(--workspace-menu-bg)] p-2 shadow-[0_14px_32px_rgba(41,34,27,0.10)] ${
-                  placement === "full" ? "right-0" : "left-0"
-                }`}
-              >
-                {messageIsVisiblePriority ? (
-                  <>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        markPriorityMessageDone(message.id);
-                        setDetailActionsMenuState(null);
-                      }}
-                      className={menuItemClass}
-                    >
-                      Mark as done
-                    </button>
-                    <div className="my-1.5 h-px bg-[var(--workspace-divider)]" />
-                  </>
-                ) : null}
-                <button
-                  type="button"
-                  onClick={() => {
-                    openShareCollaboration(message.id);
-                  }}
-                  className={menuItemClass}
-                >
-                  {message.collaboration ? "Open collaboration…" : "Start collaboration…"}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    onSetManualPriority(message.id, !messageIsVisiblePriority);
-                    setDetailActionsMenuState(null);
-                  }}
-                  className={menuItemClass}
-                >
-                  {messageIsVisiblePriority ? "This is not priority" : "Mark as priority"}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (isSharedView) {
-                      moveMessagesAcrossWorkspace(mailbox.id, "Archive", [message.id]);
-                      return;
-                    }
-
-                    // In smart folder context the message may belong to a non-active
-                    // mailbox or a different source folder. Use the cross-workspace
-                    // mover which resolves the actual source via currentMessageLocationById,
-                    // preventing a silent no-op when the source differs from mailbox.id/activeFolder.
-                    if (activeSmartFolder || activeFolder === "Spam") {
-                      moveMessagesToFolderAcrossWorkspace("Archive", [message.id]);
-                      return;
-                    }
-
-                    moveMessages(mailbox.id, activeFolder, mailbox.id, "Archive", [message.id]);
-                  }}
-                  className={menuItemClass}
-                >
-                  Archive
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    deleteMessages([message.id]);
-                  }}
-                  className={menuItemClass}
-                >
-                  Delete
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setMessageUnreadState(activeFolder, message.id, !message.unread);
-                  }}
-                  className={menuItemClass}
-                >
-                  {message.unread ? "Mark as read" : "Mark as unread"}
-                </button>
-              </div>
-            ) : null}
+            {menuContent ? createPortal(menuContent, document.body) : null}
           </div>
         ) : null}
       </div>
