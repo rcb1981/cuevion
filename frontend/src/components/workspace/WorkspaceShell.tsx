@@ -732,7 +732,6 @@ type ManualLabelOverride =
 type ManualLabelOverrideStore = Partial<Record<string, ManualLabelOverride>>;
 
 const manualLabelOverrideOptions: ManualLabelOverride[] = [
-  "Reply",
   "Promo",
   "Update",
   "Finance",
