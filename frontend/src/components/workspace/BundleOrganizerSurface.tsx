@@ -2606,7 +2606,8 @@ export function BundleOrganizerSurface({
 }: BundleOrganizerSurfaceProps) {
   const menuRef = useRef<HTMLDivElement>(null);
   const [activeView, setActiveView] = useState<BundleOrganizerView>("priority");
-  const [selectedMessage, setSelectedMessage] = useState<BundleOrganizerMessage | null>(null);
+  const [selectedMessageIdentityKey, setSelectedMessageIdentityKey] =
+    useState<string | null>(null);
   const [contextMenu, setContextMenu] =
     useState<BundleOrganizerContextMenuState | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
@@ -2629,6 +2630,16 @@ export function BundleOrganizerSurface({
   const workspaceMessages = useMemo(
     () => applyBundleWorkflowState(baseWorkspaceMessages, workflowState),
     [baseWorkspaceMessages, workflowState],
+  );
+  const selectedMessage = useMemo(
+    () =>
+      selectedMessageIdentityKey
+        ? workspaceMessages.find(
+            (message) =>
+              getWorkflowIdentityKey(message) === selectedMessageIdentityKey,
+          ) ?? null
+        : null,
+    [selectedMessageIdentityKey, workspaceMessages],
   );
   const counts = useMemo(() => getCounts(workspaceMessages), [workspaceMessages]);
   const demoAllMessages = useMemo(
@@ -2785,7 +2796,7 @@ export function BundleOrganizerSurface({
 
   const selectView = (view: BundleOrganizerView) => {
     setActiveView(view);
-    setSelectedMessage(null);
+    setSelectedMessageIdentityKey(null);
     setContextMenu(null);
   };
 
@@ -2810,29 +2821,6 @@ export function BundleOrganizerSurface({
       return nextState;
     });
     setContextMenu(null);
-    setSelectedMessage((currentMessage) =>
-      currentMessage && getWorkflowIdentityKey(currentMessage) === identityKey
-        ? {
-            ...currentMessage,
-            manualCategory,
-            manualCategoryAt,
-          }
-        : currentMessage,
-    );
-  }
-
-  function applyReadStateToMessage(
-    message: BundleOrganizerMessage,
-    readState: BundleOrganizerReadState,
-    timestamp: string,
-  ): BundleOrganizerMessage {
-    return {
-      ...message,
-      unread: readState === "unread",
-      readState,
-      readAt: readState === "read" ? timestamp : undefined,
-      unreadAt: readState === "unread" ? timestamp : undefined,
-    };
   }
 
   function setMessageReadState(
@@ -2865,19 +2853,14 @@ export function BundleOrganizerSurface({
       return nextState;
     });
     setContextMenu(null);
-    setSelectedMessage((currentMessage) =>
-      currentMessage && getWorkflowIdentityKey(currentMessage) === identityKey
-        ? applyReadStateToMessage(currentMessage, readState, timestamp)
-        : currentMessage,
-    );
   }
 
   function openMessage(message: BundleOrganizerMessage) {
     setContextMenu(null);
+    const identityKey = getWorkflowIdentityKey(message);
 
     if (message.unread === true) {
       const timestamp = new Date().toISOString();
-      const identityKey = getWorkflowIdentityKey(message);
 
       setWorkflowState((currentState) => {
         const nextState = {
@@ -2893,11 +2876,11 @@ export function BundleOrganizerSurface({
         writeBundleOrganizerWorkflowState(nextState);
         return nextState;
       });
-      setSelectedMessage(applyReadStateToMessage(message, "read", timestamp));
+      setSelectedMessageIdentityKey(identityKey);
       return;
     }
 
-    setSelectedMessage(message);
+    setSelectedMessageIdentityKey(identityKey);
   }
 
   function toggleMessageShortlist(message: BundleOrganizerMessage) {
@@ -2925,15 +2908,6 @@ export function BundleOrganizerSurface({
       return nextState;
     });
     setContextMenu(null);
-    setSelectedMessage((currentMessage) =>
-      currentMessage && getWorkflowIdentityKey(currentMessage) === identityKey
-        ? {
-            ...currentMessage,
-            shortlisted: nextShortlisted,
-            shortlistedAt,
-          }
-        : currentMessage,
-    );
   }
 
   function toggleMessagePriority(message: BundleOrganizerMessage) {
@@ -2961,15 +2935,6 @@ export function BundleOrganizerSurface({
       return nextState;
     });
     setContextMenu(null);
-    setSelectedMessage((currentMessage) =>
-      currentMessage && getWorkflowIdentityKey(currentMessage) === identityKey
-        ? {
-            ...currentMessage,
-            manualPriority: nextManualPriority,
-            manualPriorityAt,
-          }
-        : currentMessage,
-    );
   }
 
   function toggleMessageTrash(message: BundleOrganizerMessage) {
@@ -2995,15 +2960,6 @@ export function BundleOrganizerSurface({
       return nextState;
     });
     setContextMenu(null);
-    setSelectedMessage((currentMessage) =>
-      currentMessage && getWorkflowIdentityKey(currentMessage) === identityKey
-        ? {
-            ...currentMessage,
-            trashed: nextTrashed,
-            trashedAt,
-          }
-        : currentMessage,
-    );
   }
 
   const openContextMenu = (
@@ -3175,7 +3131,7 @@ export function BundleOrganizerSurface({
                   value={searchQuery}
                   onChange={(event) => {
                     setSearchQuery(event.target.value);
-                    setSelectedMessage(null);
+                    setSelectedMessageIdentityKey(null);
                   }}
                   placeholder="Search messages..."
                   className="h-10 w-full rounded-full border border-white/10 bg-white/5 pl-10 pr-10 text-[0.86rem] font-medium text-[rgba(245,239,229,0.84)] outline-none transition-colors placeholder:text-[rgba(245,239,229,0.38)] hover:border-[rgba(143,179,159,0.24)] hover:bg-white/8 focus:border-[rgba(143,179,159,0.34)] focus:bg-white/10 focus:ring-2 focus:ring-[rgba(143,179,159,0.14)]"
@@ -3185,7 +3141,7 @@ export function BundleOrganizerSurface({
                     type="button"
                     onClick={() => {
                       setSearchQuery("");
-                      setSelectedMessage(null);
+                      setSelectedMessageIdentityKey(null);
                     }}
                     className="absolute right-2 top-1/2 inline-flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-full text-[0.78rem] font-semibold leading-none text-[rgba(245,239,229,0.46)] transition-colors hover:bg-[rgba(143,179,159,0.12)] hover:text-[rgba(198,228,209,0.9)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[rgba(143,179,159,0.2)]"
                     aria-label="Clear message search"
@@ -3287,7 +3243,7 @@ export function BundleOrganizerSurface({
                               type="button"
                               onClick={() => {
                                 setPromoFilter(option.id);
-                                setSelectedMessage(null);
+                                setSelectedMessageIdentityKey(null);
                                 setContextMenu(null);
                               }}
                               className={`inline-flex h-9 items-center justify-center gap-2 rounded-full border px-3.5 text-[0.74rem] font-medium uppercase tracking-[0.1em] transition-colors ${
@@ -3323,7 +3279,7 @@ export function BundleOrganizerSurface({
                         } else {
                           setPromoSourceFilterId(value);
                         }
-                        setSelectedMessage(null);
+                        setSelectedMessageIdentityKey(null);
                         setContextMenu(null);
                       }}
                     >
@@ -3346,7 +3302,7 @@ export function BundleOrganizerSurface({
                         value={demoStatusFilter}
                         onChange={(value) => {
                           setDemoStatusFilter(value as BundleOrganizerDemoStatusFilter);
-                          setSelectedMessage(null);
+                          setSelectedMessageIdentityKey(null);
                           setContextMenu(null);
                         }}
                       >
@@ -3361,7 +3317,7 @@ export function BundleOrganizerSurface({
                         value={demoSort}
                         onChange={(value) => {
                           setDemoSort(value as BundleOrganizerDateSort);
-                          setSelectedMessage(null);
+                          setSelectedMessageIdentityKey(null);
                           setContextMenu(null);
                         }}
                       >
@@ -3381,7 +3337,7 @@ export function BundleOrganizerSurface({
                         value={promoStatusFilter}
                         onChange={(value) => {
                           setPromoStatusFilter(value as BundleOrganizerPromoStatusFilter);
-                          setSelectedMessage(null);
+                          setSelectedMessageIdentityKey(null);
                           setContextMenu(null);
                         }}
                       >
@@ -3396,7 +3352,7 @@ export function BundleOrganizerSurface({
                         value={promoSort}
                         onChange={(value) => {
                           setPromoSort(value as BundleOrganizerDateSort);
-                          setSelectedMessage(null);
+                          setSelectedMessageIdentityKey(null);
                           setContextMenu(null);
                         }}
                       >
@@ -3414,7 +3370,7 @@ export function BundleOrganizerSurface({
               {selectedMessage ? (
                 <MessageDetail
                   message={selectedMessage}
-                  onBack={() => setSelectedMessage(null)}
+                  onBack={() => setSelectedMessageIdentityKey(null)}
                   onSetReadState={setMessageReadState}
                   onToggleShortlist={toggleMessageShortlist}
                   onToggleTrash={toggleMessageTrash}
