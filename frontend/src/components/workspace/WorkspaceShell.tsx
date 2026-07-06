@@ -1843,11 +1843,11 @@ const smartFolderLabelOptions = [
   { value: "finance", label: "Finance" },
   { value: "other", label: "Other" },
   { value: "promo", label: "Promo" },
-  { value: "reply", label: "Reply" },
   { value: "update", label: "Update" },
 ] as const;
 
-type SmartFolderNormalizedLabel = (typeof smartFolderLabelOptions)[number]["value"];
+type SmartFolderVisibleLabel = (typeof smartFolderLabelOptions)[number]["value"];
+type SmartFolderNormalizedLabel = SmartFolderVisibleLabel | "reply";
 type SmartFolderRuleMatchOptions = {
   mailboxContext?: Pick<ManagedWorkspaceInbox | OrderedMailbox, "id" | "title" | "email"> | null;
   manualLabelOverride?: ManualLabelOverride | null;
