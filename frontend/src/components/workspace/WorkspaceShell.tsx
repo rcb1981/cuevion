@@ -7372,6 +7372,11 @@ type DisplayContentClassification = Exclude<
   CuevionInternalClassification,
   "incomplete_demo" | "reply"
 >;
+type DisplayContentMailboxContext =
+  | Pick<ManagedWorkspaceInbox | OrderedMailbox, "id" | "title" | "email">
+  | null
+  | undefined;
+type DisplayContentLabel = "Demo" | "Promo" | "Business" | "Finance" | "Update" | "Other";
 
 const displayContentClassifications = new Set<DisplayContentClassification>([
   "demo",
@@ -7409,7 +7414,7 @@ function isDisplayContentClassification(
 
 function mapDisplayContentClassificationToLabel(
   classification: DisplayContentClassification,
-) {
+): DisplayContentLabel {
   switch (classification) {
     case "demo":
     case "high_priority_demo":
@@ -7430,6 +7435,98 @@ function mapDisplayContentClassificationToLabel(
     case "unknown":
       return "Other";
   }
+}
+
+function resolveExplicitMailboxContentLabel(
+  mailbox: DisplayContentMailboxContext,
+): Extract<DisplayContentLabel, "Demo" | "Promo" | "Business" | "Finance"> | null {
+  if (!mailbox) {
+    return null;
+  }
+
+  const id = mailbox.id.trim().toLowerCase();
+  const title = mailbox.title.trim().toLowerCase();
+  const emailLocalPart = mailbox.email.split("@")[0]?.trim().toLowerCase() ?? "";
+
+  if (
+    id === "demo" ||
+    title === "demo" ||
+    title === "demo inbox" ||
+    emailLocalPart === "demo" ||
+    emailLocalPart === "demos"
+  ) {
+    return "Demo";
+  }
+
+  if (
+    id === "promo" ||
+    title === "promo" ||
+    title === "promo inbox" ||
+    emailLocalPart === "promo" ||
+    emailLocalPart === "promos"
+  ) {
+    return "Promo";
+  }
+
+  if (
+    id === "business" ||
+    title === "business" ||
+    title === "business inbox" ||
+    emailLocalPart === "business"
+  ) {
+    return "Business";
+  }
+
+  if (
+    id === "finance" ||
+    title === "finance" ||
+    title === "finance inbox" ||
+    emailLocalPart === "finance"
+  ) {
+    return "Finance";
+  }
+
+  return null;
+}
+
+function hasContextualDemoSubjectSignal(subject: string) {
+  const subjectText = subject.trim();
+
+  return (
+    /\[\s*demo\s*\]/i.test(subjectText) ||
+    /^(?:re:\s*)?demo(?:\b|[\s:|/\\-])/i.test(subjectText) ||
+    /\bdemo submission\b/i.test(subjectText) ||
+    /\bsubmit(?:ting)?\s+(?:a\s+|my\s+|our\s+)?demo\b/i.test(subjectText)
+  );
+}
+
+function hasContextualPromoSubjectSignal(subject: string) {
+  const subjectText = subject.trim();
+
+  return (
+    hasMusicPromoSubjectMarker(subjectText) ||
+    /\bpromo\s+(?:support|feedback|access|request|download|servicing)\b/i.test(subjectText) ||
+    /\b(?:dj|radio)\s+support\b/i.test(subjectText)
+  );
+}
+
+function resolveContextualSubjectContentLabel(
+  message: Pick<MailMessage, "subject">,
+  mailbox: DisplayContentMailboxContext,
+): Extract<DisplayContentLabel, "Demo" | "Promo"> | null {
+  if (!mailbox) {
+    return null;
+  }
+
+  if (isDemoMailboxContext(mailbox) && hasContextualDemoSubjectSignal(message.subject)) {
+    return "Demo";
+  }
+
+  if (isPromoMailboxContext(mailbox) && hasContextualPromoSubjectSignal(message.subject)) {
+    return "Promo";
+  }
+
+  return null;
 }
 
 function resolveUnderlyingContentClassification(
@@ -7457,15 +7554,14 @@ function resolveUnderlyingContentClassification(
   return (
     contentCandidates.find(
       (candidate) => candidate.internalClassification !== "unknown",
-    )?.internalClassification ??
-    contentCandidates[0]?.internalClassification ??
-    null
+    )?.internalClassification ?? null
   );
 }
 
 function resolveDisplayContentLabel(
   message: MailMessage,
   threadMessages: MailMessage[],
+  options: { mailboxContext?: DisplayContentMailboxContext } = {},
 ) {
   if (!isReplyLikeConversationMessage(message)) {
     return getVisibleCategoryLabel(message);
@@ -7480,7 +7576,10 @@ function resolveDisplayContentLabel(
     return mapDisplayContentClassificationToLabel(underlyingClassification);
   }
 
-  return null;
+  return (
+    resolveExplicitMailboxContentLabel(options.mailboxContext) ??
+    resolveContextualSubjectContentLabel(message, options.mailboxContext)
+  );
 }
 
 const autoPriorityStrongKeywords = [
@@ -13830,6 +13929,7 @@ function MailboxView({
     message: MailMessage,
     threadMessages: MailMessage[],
     preferPromoMailboxContext: boolean,
+    mailboxContext?: DisplayContentMailboxContext,
   ) {
     const manualLabelOverride = resolveManualLabelOverride(message);
 
@@ -13848,7 +13948,9 @@ function MailboxView({
       );
     }
 
-    return resolveDisplayContentLabel(message, threadMessages);
+    return resolveDisplayContentLabel(message, threadMessages, {
+      mailboxContext,
+    });
   }
   function getVisiblePriorityBadgeForMessageInContext(
     message: MailMessage,
@@ -13887,6 +13989,7 @@ function MailboxView({
       message,
       threadMessages,
       shouldPreferCurrentMailboxPromoContext,
+      mailbox,
     );
   };
   const resolveOnboardingVisibilityMode = (message: MailMessage) => {
@@ -14308,6 +14411,7 @@ function MailboxView({
       return {
         focusPreferences,
         preferPromoMailboxContext: false,
+        mailboxContext: null,
       };
     }
 
@@ -14321,6 +14425,7 @@ function MailboxView({
       focusPreferences:
         effectiveFocusPreferencesByMailbox[sourceMailboxId] ?? focusPreferences,
       preferPromoMailboxContext: isPromoMailboxContext(mailboxContext),
+      mailboxContext,
     };
   };
   const resolveSmartFolderFocusPreferenceLevelForMessage = (message: MailMessage) => {
@@ -14342,6 +14447,7 @@ function MailboxView({
       message,
       threadMessages,
       renderContext.preferPromoMailboxContext,
+      renderContext.mailboxContext,
     );
   };
   const getSmartFolderVisiblePriorityBadgeForMessage = (message: MailMessage) => {
@@ -25585,6 +25691,22 @@ function isPromoMailboxContext(
       "radio plug",
       "press plug",
     ])
+  );
+}
+
+function isDemoMailboxContext(
+  mailbox: Pick<ManagedWorkspaceInbox | OrderedMailbox, "id" | "title" | "email">,
+) {
+  const id = mailbox.id.trim().toLowerCase();
+  const title = mailbox.title.trim().toLowerCase();
+  const emailLocalPart = mailbox.email.split("@")[0]?.trim().toLowerCase() ?? "";
+
+  return (
+    id === "demo" ||
+    title === "demo" ||
+    title === "demo inbox" ||
+    emailLocalPart === "demo" ||
+    emailLocalPart === "demos"
   );
 }
 const WorkspaceSettingsCard = memo(function WorkspaceSettingsCard({
