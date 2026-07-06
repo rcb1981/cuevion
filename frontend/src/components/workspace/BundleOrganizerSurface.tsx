@@ -16,6 +16,13 @@ import {
   shouldShowInPromoInbox,
   type BundleOrganizerActiveWorkStatus,
 } from "./bundleOrganizerFilters";
+import {
+  BUNDLE_ORGANIZER_WORKFLOW_STATE_CHANGED_EVENT,
+  getBundleOrganizerWorkflowIdentityKey,
+  readBundleOrganizerWorkflowState,
+  writeBundleOrganizerWorkflowState,
+  type BundleOrganizerWorkflowState,
+} from "./bundleOrganizerWorkflowState";
 
 type BundleOrganizerView = "priority" | "shortlist" | "demo" | "promo" | "trash";
 type BundleOrganizerDemoStatusFilter =
@@ -69,6 +76,7 @@ type BundleOrganizerContextMenuAction = {
 };
 
 type BundleOrganizerReadState = "read" | "unread";
+const getWorkflowIdentityKey = getBundleOrganizerWorkflowIdentityKey;
 
 type BundleOrganizerSearchRow = {
   message: BundleOrganizerMessage;
@@ -107,6 +115,8 @@ type BundleOrganizerMessage = {
   declinedAt?: string | null;
   manualPriority?: boolean | null;
   manualPriorityAt?: string | null;
+  organizerFollowUp?: boolean | null;
+  organizerFollowUpAt?: string | null;
   active_work_status?: BundleOrganizerActiveWorkStatus | string | null;
   v7_final_priority?: string;
   priorityBadge?: string;
@@ -162,6 +172,8 @@ export type BundleOrganizerWorkspaceMessage = {
   declinedAt?: string | null;
   manualPriority?: boolean | null;
   manualPriorityAt?: string | null;
+  organizerFollowUp?: boolean | null;
+  organizerFollowUpAt?: string | null;
   active_work_status?: BundleOrganizerActiveWorkStatus | string | null;
   v7_final_priority?: string;
   priorityBadge?: string;
@@ -268,8 +280,6 @@ const viewCopy: Record<
 };
 
 const bundleModeDisabledReason = "Not connected in Bundle mode yet";
-const bundleOrganizerWorkflowStorageKey =
-  "cuevion-bundle-organizer-workflow-state";
 const contextMenuGap = 8;
 const contextMenuViewportPadding = 12;
 const contextMenuWidth = 190;
@@ -441,23 +451,6 @@ type SoundCloudResolutionState = {
   signature: string;
 };
 
-type BundleOrganizerWorkflowState = Record<
-  string,
-  {
-    readState?: BundleOrganizerReadState;
-    readAt?: string;
-    unreadAt?: string;
-    shortlisted?: boolean;
-    shortlistedAt?: string;
-    manualCategory?: "demo" | "promo";
-    manualCategoryAt?: string;
-    manualPriority?: boolean;
-    manualPriorityAt?: string;
-    trashed?: boolean;
-    trashedAt?: string;
-  }
->;
-
 function resolvePriorityReason(message: BundleOrganizerMessage) {
   if (message.reason) {
     return message.reason;
@@ -465,6 +458,10 @@ function resolvePriorityReason(message: BundleOrganizerMessage) {
 
   if (message.manualPriority === true) {
     return "Manual priority.";
+  }
+
+  if (message.organizerFollowUp === true) {
+    return "Organizer follow-up.";
   }
 
   if (
@@ -1267,49 +1264,6 @@ function normalizeWorkspaceMessages(
   );
 }
 
-function getWorkflowIdentityKey(message: BundleOrganizerMessage) {
-  return message.identityKey ?? message.id;
-}
-
-function readBundleOrganizerWorkflowState(): BundleOrganizerWorkflowState {
-  if (typeof window === "undefined") {
-    return {};
-  }
-
-  try {
-    const storedValue = window.localStorage.getItem(
-      bundleOrganizerWorkflowStorageKey,
-    );
-    if (!storedValue) {
-      return {};
-    }
-
-    const parsedValue = JSON.parse(storedValue);
-    if (!parsedValue || typeof parsedValue !== "object") {
-      return {};
-    }
-
-    return parsedValue as BundleOrganizerWorkflowState;
-  } catch {
-    return {};
-  }
-}
-
-function writeBundleOrganizerWorkflowState(state: BundleOrganizerWorkflowState) {
-  if (typeof window === "undefined") {
-    return;
-  }
-
-  try {
-    window.localStorage.setItem(
-      bundleOrganizerWorkflowStorageKey,
-      JSON.stringify(state),
-    );
-  } catch {
-    // Local workflow state is optional; mailbox data must never depend on it.
-  }
-}
-
 function applyBundleWorkflowState(
   messages: BundleOrganizerMessage[],
   workflowState: BundleOrganizerWorkflowState,
@@ -1354,6 +1308,12 @@ function applyBundleWorkflowState(
           : message.manualPriority,
       manualPriorityAt:
         workflowEntry.manualPriorityAt ?? message.manualPriorityAt,
+      organizerFollowUp:
+        typeof workflowEntry.organizerFollowUp === "boolean"
+          ? workflowEntry.organizerFollowUp
+          : message.organizerFollowUp,
+      organizerFollowUpAt:
+        workflowEntry.organizerFollowUpAt ?? message.organizerFollowUpAt,
       trashed:
         typeof workflowEntry.trashed === "boolean"
           ? workflowEntry.trashed
@@ -1830,6 +1790,7 @@ function getContextMenuActions(
   ) => void,
   onToggleShortlist: (message: BundleOrganizerMessage) => void,
   onTogglePriority: (message: BundleOrganizerMessage) => void,
+  onToggleOrganizerFollowUp: (message: BundleOrganizerMessage) => void,
   onToggleTrash: (message: BundleOrganizerMessage) => void,
 ): BundleOrganizerContextMenuAction[] {
   const actions: BundleOrganizerContextMenuAction[] = [
@@ -1895,6 +1856,14 @@ function getContextMenuActions(
       label: message.manualPriority === true ? "Remove Priority" : "Mark as Priority",
       onSelect: () => onTogglePriority(message),
     },
+    {
+      icon: message.organizerFollowUp === true ? "priorityOff" : "reply",
+      label:
+        message.organizerFollowUp === true
+          ? "Remove Organizer follow-up"
+          : "Mark as Organizer follow-up",
+      onSelect: () => onToggleOrganizerFollowUp(message),
+    },
   );
 
   if (sourceView === "promo" || (sourceView === "shortlist" && shouldShowInPromoInbox(message))) {
@@ -1950,6 +1919,9 @@ function MessagePills({ message }: { message: BundleOrganizerMessage }) {
       ) : null}
       {message.manualPriority === true ? (
         <span className={manualPillClass}>Manual Priority</span>
+      ) : null}
+      {message.organizerFollowUp === true ? (
+        <span className={manualPillClass}>Follow-up</span>
       ) : null}
       {message.shortlisted ? (
         <span className={shortlistedPillClass}>Shortlisted</span>
@@ -2636,6 +2608,23 @@ export function BundleOrganizerSurface({
     () => applyBundleWorkflowState(baseWorkspaceMessages, workflowState),
     [baseWorkspaceMessages, workflowState],
   );
+  useEffect(() => {
+    const handleWorkflowStateChanged = () => {
+      setWorkflowState(readBundleOrganizerWorkflowState());
+    };
+
+    window.addEventListener(
+      BUNDLE_ORGANIZER_WORKFLOW_STATE_CHANGED_EVENT,
+      handleWorkflowStateChanged,
+    );
+
+    return () => {
+      window.removeEventListener(
+        BUNDLE_ORGANIZER_WORKFLOW_STATE_CHANGED_EVENT,
+        handleWorkflowStateChanged,
+      );
+    };
+  }, []);
   const selectedMessage = useMemo(
     () =>
       selectedMessageIdentityKey
@@ -2780,6 +2769,7 @@ export function BundleOrganizerSurface({
         setMessageReadState,
         toggleMessageShortlist,
         toggleMessagePriority,
+        toggleMessageOrganizerFollowUp,
         toggleMessageTrash,
       )
     : [];
@@ -2822,7 +2812,7 @@ export function BundleOrganizerSurface({
         },
       };
 
-      writeBundleOrganizerWorkflowState(nextState);
+      writeBundleOrganizerWorkflowState(nextState, { notify: true });
       return nextState;
     });
     setContextMenu(null);
@@ -2854,7 +2844,7 @@ export function BundleOrganizerSurface({
         delete nextState[identityKey].readAt;
       }
 
-      writeBundleOrganizerWorkflowState(nextState);
+      writeBundleOrganizerWorkflowState(nextState, { notify: true });
       return nextState;
     });
     setContextMenu(null);
@@ -2878,7 +2868,7 @@ export function BundleOrganizerSurface({
         };
 
         delete nextState[identityKey].unreadAt;
-        writeBundleOrganizerWorkflowState(nextState);
+        writeBundleOrganizerWorkflowState(nextState, { notify: true });
         return nextState;
       });
       setSelectedMessageIdentityKey(identityKey);
@@ -2909,7 +2899,7 @@ export function BundleOrganizerSurface({
         delete nextState[identityKey].shortlistedAt;
       }
 
-      writeBundleOrganizerWorkflowState(nextState);
+      writeBundleOrganizerWorkflowState(nextState, { notify: true });
       return nextState;
     });
     setContextMenu(null);
@@ -2936,7 +2926,34 @@ export function BundleOrganizerSurface({
         delete nextState[identityKey].manualPriorityAt;
       }
 
-      writeBundleOrganizerWorkflowState(nextState);
+      writeBundleOrganizerWorkflowState(nextState, { notify: true });
+      return nextState;
+    });
+    setContextMenu(null);
+  }
+
+  function toggleMessageOrganizerFollowUp(message: BundleOrganizerMessage) {
+    const identityKey = getWorkflowIdentityKey(message);
+    const nextOrganizerFollowUp = message.organizerFollowUp !== true;
+    const organizerFollowUpAt = nextOrganizerFollowUp
+      ? new Date().toISOString()
+      : undefined;
+
+    setWorkflowState((currentState) => {
+      const nextState = {
+        ...currentState,
+        [identityKey]: {
+          ...currentState[identityKey],
+          organizerFollowUp: nextOrganizerFollowUp,
+          organizerFollowUpAt,
+        },
+      };
+
+      if (!nextOrganizerFollowUp) {
+        delete nextState[identityKey].organizerFollowUpAt;
+      }
+
+      writeBundleOrganizerWorkflowState(nextState, { notify: true });
       return nextState;
     });
     setContextMenu(null);
@@ -2961,7 +2978,7 @@ export function BundleOrganizerSurface({
         delete nextState[identityKey].trashedAt;
       }
 
-      writeBundleOrganizerWorkflowState(nextState);
+      writeBundleOrganizerWorkflowState(nextState, { notify: true });
       return nextState;
     });
     setContextMenu(null);
@@ -2980,6 +2997,7 @@ export function BundleOrganizerSurface({
       setMessageReadState,
       toggleMessageShortlist,
       toggleMessagePriority,
+      toggleMessageOrganizerFollowUp,
       toggleMessageTrash,
     ).length;
     const position = resolveContextMenuPosition(

@@ -37,6 +37,13 @@ import {
   resolveOrganizerCategory,
   type BundleOrganizerVisibleCategory,
 } from "./bundleOrganizerFilters";
+import {
+  BUNDLE_ORGANIZER_WORKFLOW_STATE_CHANGED_EVENT,
+  buildBundleOrganizerWorkspaceMessageIdentityKey,
+  readBundleOrganizerWorkflowState,
+  writeBundleOrganizerWorkflowState,
+  type BundleOrganizerWorkflowState,
+} from "./bundleOrganizerWorkflowState";
 import type { ReviewItem, ReviewWorkspaceTarget } from "./review/types";
 import type {
   CustomInboxDefinition,
@@ -12564,6 +12571,8 @@ function MailboxView({
   productAccess,
   showBundleOrganizerManagedMail,
   onShowBundleOrganizerManagedMailChange,
+  bundleOrganizerWorkflowState,
+  onBundleOrganizerWorkflowStateChange,
   mobileComposeRequest = null,
   onConsumeMobileComposeRequest,
   onComposeOpenChange,
@@ -12642,6 +12651,10 @@ function MailboxView({
   productAccess: ProductAccess;
   showBundleOrganizerManagedMail: boolean;
   onShowBundleOrganizerManagedMailChange: (shouldShow: boolean) => void;
+  bundleOrganizerWorkflowState: BundleOrganizerWorkflowState;
+  onBundleOrganizerWorkflowStateChange: (
+    updater: (currentState: BundleOrganizerWorkflowState) => BundleOrganizerWorkflowState,
+  ) => void;
   /** Mobile compose request handoff. WorkspaceShell sets this when a mobile
    *  compose action is pending; MailboxView opens compose through its existing
    *  compose handlers and calls onConsumeMobileComposeRequest to acknowledge. */
@@ -14144,6 +14157,46 @@ function MailboxView({
     : isSharedView
       ? workspaceMessageLocationById
       : currentMailboxMessageLocationById;
+  const resolveBundleOrganizerWorkflowIdentityKeyForMessage = (
+    message: MailMessage,
+  ) => {
+    const sourceMailboxId =
+      currentMessageLocationById[message.id]?.mailboxId ?? mailbox.id;
+
+    return buildBundleOrganizerWorkspaceMessageIdentityKey(
+      sourceMailboxId,
+      message,
+    );
+  };
+  const isBundleOrganizerFollowUpMarked = (message: MailMessage) =>
+    bundleOrganizerWorkflowState[
+      resolveBundleOrganizerWorkflowIdentityKeyForMessage(message)
+    ]?.organizerFollowUp === true;
+  const toggleBundleOrganizerFollowUpMark = (message: MailMessage) => {
+    const identityKey = resolveBundleOrganizerWorkflowIdentityKeyForMessage(message);
+
+    onBundleOrganizerWorkflowStateChange((currentState) => {
+      const nextOrganizerFollowUp =
+        currentState[identityKey]?.organizerFollowUp !== true;
+      const organizerFollowUpAt = nextOrganizerFollowUp
+        ? new Date().toISOString()
+        : undefined;
+      const nextState = {
+        ...currentState,
+        [identityKey]: {
+          ...currentState[identityKey],
+          organizerFollowUp: nextOrganizerFollowUp,
+          organizerFollowUpAt,
+        },
+      };
+
+      if (!nextOrganizerFollowUp) {
+        delete nextState[identityKey].organizerFollowUpAt;
+      }
+
+      return nextState;
+    });
+  };
   const dedupeMessagesForRenderedRows = (
     messages: MailMessage[],
     messageLocationById: Record<string, { mailboxId: InboxId; folder: MailFolder }>,
@@ -21208,6 +21261,20 @@ function MailboxView({
                       className={contextMenuMainItemClass}
                     >
                       Mark as done
+                    </button>
+                  ) : null}
+                  {productAccess === "bundle" ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        toggleBundleOrganizerFollowUpMark(contextMenuMessage);
+                        closeMenus();
+                      }}
+                      className={contextMenuMainItemClass}
+                    >
+                      {isBundleOrganizerFollowUpMarked(contextMenuMessage)
+                        ? "Remove Organizer follow-up"
+                        : "Mark as Organizer follow-up"}
                     </button>
                   ) : null}
                 </div>
@@ -32104,6 +32171,43 @@ export function WorkspaceShell({
     setShowBundleOrganizerManagedMail(shouldShow);
     writeStoredBundleShowOrganizerManagedMail(shouldShow);
   }, []);
+  const [bundleOrganizerWorkflowState, setBundleOrganizerWorkflowState] =
+    useState<BundleOrganizerWorkflowState>(readBundleOrganizerWorkflowState);
+  const updateBundleOrganizerWorkflowState = useCallback(
+    (
+      updater: (
+        currentState: BundleOrganizerWorkflowState,
+      ) => BundleOrganizerWorkflowState,
+    ) => {
+      setBundleOrganizerWorkflowState((currentState) => {
+        const nextState = updater(currentState);
+        writeBundleOrganizerWorkflowState(nextState, { notify: true });
+        return nextState;
+      });
+    },
+    [],
+  );
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const handleWorkflowStateChanged = () => {
+      setBundleOrganizerWorkflowState(readBundleOrganizerWorkflowState());
+    };
+
+    window.addEventListener(
+      BUNDLE_ORGANIZER_WORKFLOW_STATE_CHANGED_EVENT,
+      handleWorkflowStateChanged,
+    );
+
+    return () => {
+      window.removeEventListener(
+        BUNDLE_ORGANIZER_WORKFLOW_STATE_CHANGED_EVENT,
+        handleWorkflowStateChanged,
+      );
+    };
+  }, []);
   const [systemColorMode, setSystemColorMode] = useState<"light" | "dark">(() =>
     typeof window !== "undefined" &&
     window.matchMedia &&
@@ -34265,6 +34369,13 @@ export function WorkspaceShell({
               ...mailboxCollections.Filtered,
             ].flatMap((message): BundleOrganizerWorkspaceMessage[] => {
               const messageKey = `${mailbox.id}:${message.id}`;
+              const identityKey = buildBundleOrganizerWorkspaceMessageIdentityKey(
+                mailbox.id,
+                message,
+              );
+              const workflowEntry = bundleOrganizerWorkflowState[identityKey];
+              const isOrganizerFollowUp =
+                workflowEntry?.organizerFollowUp === true;
 
               if (seenMessageKeys.has(messageKey)) {
                 return [];
@@ -34290,7 +34401,11 @@ export function WorkspaceShell({
                 normalizedOrganizerSignal === "shortlist" ||
                 normalizedOrganizerSignal === "promo";
 
-              if (!isOrganizerClassification && !hasOrganizerSignalFallback) {
+              if (
+                !isOrganizerClassification &&
+                !hasOrganizerSignalFallback &&
+                !isOrganizerFollowUp
+              ) {
                 return [];
               }
 
@@ -34318,13 +34433,11 @@ export function WorkspaceShell({
                   signal: message.signal,
                   uiSignal: message.ui_signal,
                   unread: message.unread,
+                  organizerFollowUp: workflowEntry?.organizerFollowUp,
+                  organizerFollowUpAt: workflowEntry?.organizerFollowUpAt,
                   priorityBadge,
                   reason,
-                  identityKey: message.imapUid
-                    ? `${mailbox.id}:imap:${message.imapUid}`
-                    : message.threadId
-                    ? `${mailbox.id}:thread:${message.threadId}`
-                    : `${mailbox.id}:id:${message.id}`,
+                  identityKey,
                   sortTimestamp: resolveMailDateMs(message),
                 },
               ];
@@ -39017,6 +39130,10 @@ export function WorkspaceShell({
                   showBundleOrganizerManagedMail={showBundleOrganizerManagedMail}
                   onShowBundleOrganizerManagedMailChange={
                     updateShowBundleOrganizerManagedMail
+                  }
+                  bundleOrganizerWorkflowState={bundleOrganizerWorkflowState}
+                  onBundleOrganizerWorkflowStateChange={
+                    updateBundleOrganizerWorkflowState
                   }
                 />
               </div>
