@@ -20,6 +20,14 @@ from beta_auth import parse_beta_session_token, read_beta_session_cookie  # noqa
 ALLOWED_INPUT_HOSTS = {"soundcloud.com", "www.soundcloud.com", "on.soundcloud.com"}
 ALLOWED_FINAL_HOSTS = {"soundcloud.com", "www.soundcloud.com"}
 PRESERVED_SOUNDCLOUD_QUERY_PARAMS = {"secret_token"}
+SOUNDCLOUD_TRACKING_QUERY_PARAMS = {
+    "si",
+    "utm_campaign",
+    "utm_content",
+    "utm_medium",
+    "utm_source",
+    "utm_term",
+}
 SOUNDCLOUD_OEMBED_ENDPOINT = "https://soundcloud.com/oembed"
 RESERVED_SOUNDCLOUD_PATHS = {
     "about",
@@ -163,6 +171,35 @@ def _canonicalize_soundcloud_url(parsed_url) -> str:
             "",
         )
     )
+
+
+def _strip_soundcloud_tracking_params(parsed_url) -> str:
+    cleaned_query = [
+        (name, value)
+        for name, value in parse_qsl(parsed_url.query, keep_blank_values=False)
+        if name not in SOUNDCLOUD_TRACKING_QUERY_PARAMS and value
+    ]
+    return urlunparse(
+        (
+            "https",
+            "soundcloud.com",
+            parsed_url.path.rstrip("/"),
+            "",
+            urlencode(cleaned_query),
+            "",
+        )
+    )
+
+
+def _dedupe_urls(urls: list[str]) -> list[str]:
+    seen = set()
+    deduped_urls = []
+    for url in urls:
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        deduped_urls.append(url)
+    return deduped_urls
 
 
 def _url_contains_set(value: str) -> bool:
@@ -337,7 +374,43 @@ def _resolve_soundcloud_preview(value: object) -> tuple[dict | None, str | None]
     if not accepted_url:
         return None, reason or "not_embeddable"
 
-    original_maxheight = None if needs_redirect_fallback or _url_contains_set(accepted_url) else 166
+    if needs_redirect_fallback:
+        resolved_url = _resolve_redirect_url(accepted_url)
+        resolved_parsed_url = urlparse(resolved_url)
+        if not _is_embeddable_soundcloud_permalink(resolved_parsed_url):
+            return None, "not_embeddable"
+
+        oembed_candidates = _dedupe_urls(
+            [
+                resolved_url,
+                _strip_soundcloud_tracking_params(resolved_parsed_url),
+                accepted_url,
+            ]
+        )
+        last_oembed_reason = None
+        for candidate_url in oembed_candidates:
+            oembed_payload, oembed_reason = _call_soundcloud_oembed(
+                candidate_url,
+                maxheight=None if _url_contains_set(candidate_url) else 166,
+            )
+            if not oembed_payload:
+                last_oembed_reason = oembed_reason
+                continue
+
+            parsed_candidate_url = urlparse(candidate_url)
+            canonical_url = (
+                accepted_url
+                if _hostname(parsed_candidate_url) == "on.soundcloud.com"
+                else _strip_soundcloud_tracking_params(parsed_candidate_url)
+            )
+            return {
+                **oembed_payload,
+                "canonicalUrl": canonical_url,
+            }, None
+
+        return None, last_oembed_reason or "oembed_failed"
+
+    original_maxheight = None if _url_contains_set(accepted_url) else 166
     oembed_payload, oembed_reason = _call_soundcloud_oembed(
         accepted_url,
         maxheight=original_maxheight,
@@ -367,26 +440,7 @@ def _resolve_soundcloud_preview(value: object) -> tuple[dict | None, str | None]
             "canonicalUrl": canonical_url,
         }, None
 
-    if not needs_redirect_fallback:
-        return None, oembed_reason or "oembed_failed"
-
-    resolved_url = _resolve_redirect_url(accepted_url)
-    resolved_parsed_url = urlparse(resolved_url)
-    if not _is_embeddable_soundcloud_permalink(resolved_parsed_url):
-        return None, "not_embeddable"
-
-    canonical_url = _canonicalize_soundcloud_url(resolved_parsed_url)
-    oembed_payload, oembed_reason = _call_soundcloud_oembed(
-        canonical_url,
-        maxheight=None if _url_contains_set(canonical_url) else 166,
-    )
-    if not oembed_payload:
-        return None, oembed_reason or "oembed_failed"
-
-    return {
-        **oembed_payload,
-        "canonicalUrl": canonical_url,
-    }, None
+    return None, oembed_reason or "oembed_failed"
 
 
 class handler(BaseHTTPRequestHandler):
