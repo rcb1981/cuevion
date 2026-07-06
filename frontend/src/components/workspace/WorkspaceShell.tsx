@@ -1222,6 +1222,11 @@ type BundleOrganizerManagedMessageInput = Pick<
   MailMessage,
   "internalClassification" | "category" | "signal" | "ui_signal"
 >;
+type BundleOrganizerManagedFilterOptions<T extends BundleOrganizerManagedMessageInput> = {
+  productAccess: ProductAccess;
+  showOrganizerManagedMail: boolean;
+  resolveVisibleCategoryLabel?: (message: T) => string | null | undefined;
+};
 const bundleOrganizerManagedCategories = new Set<BundleOrganizerVisibleCategory>([
   "demo",
   "high_priority_demo",
@@ -1229,25 +1234,46 @@ const bundleOrganizerManagedCategories = new Set<BundleOrganizerVisibleCategory>
   "promo_reminder",
 ]);
 
+function resolveBundleOrganizerVisibleLabelFallback(
+  visibleCategoryLabel: string | null | undefined,
+): BundleOrganizerVisibleCategory | null {
+  const normalizedLabel = visibleCategoryLabel?.trim().toLowerCase();
+
+  // Some normal-app rows display Promo through the visible label resolver even
+  // when a non-Organizer internalClassification prevents the Organizer resolver
+  // from falling through to category/ui_signal.
+  return normalizedLabel === "promo" ? "promo" : null;
+}
+
 function resolveBundleOrganizerManagedCategory(
   message: BundleOrganizerManagedMessageInput,
+  visibleCategoryLabel?: string | null,
 ): BundleOrganizerVisibleCategory | null {
-  return resolveOrganizerCategory({
+  const organizerCategory = resolveOrganizerCategory({
     internalClassification: message.internalClassification ?? null,
     category: message.category ?? null,
     ui_signal: message.ui_signal ?? message.signal ?? null,
   });
+
+  if (organizerCategory !== null) {
+    return organizerCategory;
+  }
+
+  return resolveBundleOrganizerVisibleLabelFallback(visibleCategoryLabel);
 }
 
-function isBundleOrganizerManagedMessage(
-  message: BundleOrganizerManagedMessageInput,
-  productAccess: ProductAccess,
+function shouldHideBundleOrganizerManagedMessage<T extends BundleOrganizerManagedMessageInput>(
+  message: T,
+  options: BundleOrganizerManagedFilterOptions<T>,
 ) {
-  if (productAccess !== "bundle") {
+  if (options.productAccess !== "bundle" || options.showOrganizerManagedMail) {
     return false;
   }
 
-  const organizerCategory = resolveBundleOrganizerManagedCategory(message);
+  const organizerCategory = resolveBundleOrganizerManagedCategory(
+    message,
+    options.resolveVisibleCategoryLabel?.(message),
+  );
   return (
     organizerCategory !== null &&
     bundleOrganizerManagedCategories.has(organizerCategory)
@@ -1256,15 +1282,14 @@ function isBundleOrganizerManagedMessage(
 
 function filterBundleOrganizerManagedMessagesForNormalApp<T extends BundleOrganizerManagedMessageInput>(
   messages: T[],
-  productAccess: ProductAccess,
-  showOrganizerManagedMail: boolean,
+  options: BundleOrganizerManagedFilterOptions<T>,
 ) {
-  if (productAccess !== "bundle" || showOrganizerManagedMail) {
+  if (options.productAccess !== "bundle" || options.showOrganizerManagedMail) {
     return messages;
   }
 
   return messages.filter(
-    (message) => !isBundleOrganizerManagedMessage(message, productAccess),
+    (message) => !shouldHideBundleOrganizerManagedMessage(message, options),
   );
 }
 type NotificationNavigationRequest = {
@@ -6373,6 +6398,32 @@ function countUnreadMessagesByCanonicalIdentity(messages: MailMessage[]) {
     identityKeys.forEach((key) => seenIdentityKeys.add(key));
     return true;
   }).length;
+}
+
+function dedupeMessagesForNormalAppRenderedRows(
+  messages: MailMessage[],
+  mailboxId: InboxId,
+  messageLocationById: Record<string, { mailboxId: InboxId; folder: MailFolder }> = {},
+) {
+  const uniqueRowMessages = Array.from(
+    new Map(
+      messages.map((message) => [
+        message.imapUid || message.id,
+        message,
+      ]),
+    ).values(),
+  );
+
+  return dedupeLatestMessagePerThread(
+    uniqueRowMessages.map((message) => ({
+      ...message,
+      threadId: resolveSafeThreadGroupingKey(
+        message,
+        messageLocationById[message.id]?.mailboxId ?? mailboxId,
+      ),
+      from: message.from ?? message.sender ?? "",
+    })),
+  );
 }
 
 function resolveMailboxTitleForCategory(
@@ -13808,8 +13859,11 @@ function MailboxView({
   const filterOrganizerManagedMessagesForMailboxView = (messages: MailMessage[]) =>
     filterBundleOrganizerManagedMessagesForNormalApp(
       messages,
-      productAccess,
-      showBundleOrganizerManagedMail,
+      {
+        productAccess,
+        showOrganizerManagedMail: showBundleOrganizerManagedMail,
+        resolveVisibleCategoryLabel: getVisibleCategoryLabelForMessage,
+      },
     );
   const visibleMailboxCollections: Record<MailFolder, MailMessage[]> = {
     Inbox: getMailboxReadyInboxMessagesForWorkspaceMailbox(
@@ -14039,8 +14093,22 @@ function MailboxView({
         smartFolderScopeMailboxIds.flatMap((mailboxId) =>
           getSmartFolderCandidateInboxRowSet(mailboxId, activeSmartFolder)
             .filter((message) =>
-              !hideBundleOrganizerManagedMessages ||
-              !isBundleOrganizerManagedMessage(message, productAccess),
+              !shouldHideBundleOrganizerManagedMessage(message, {
+                productAccess,
+                showOrganizerManagedMail: showBundleOrganizerManagedMail,
+                resolveVisibleCategoryLabel: (candidate) => {
+                  const manualLabelOverride = resolveManualLabelOverride(candidate);
+                  const mailboxContext = getSmartFolderMailboxContext(mailboxId);
+
+                  return (
+                    manualLabelOverride ??
+                    resolveVisibleCategoryLabelForMessageInContext(
+                      candidate,
+                      mailboxContext ? isPromoMailboxContext(mailboxContext) : false,
+                    )
+                  );
+                },
+              }),
             )
             .filter((message) =>
               doesMessageMatchSmartFolder(
@@ -14079,27 +14147,7 @@ function MailboxView({
   const dedupeMessagesForRenderedRows = (
     messages: MailMessage[],
     messageLocationById: Record<string, { mailboxId: InboxId; folder: MailFolder }>,
-  ) => {
-    const uniqueRowMessages = Array.from(
-      new Map(
-        messages.map((message) => [
-          message.imapUid || message.id,
-          message,
-        ]),
-      ).values(),
-    );
-
-    return dedupeLatestMessagePerThread(
-      uniqueRowMessages.map((message) => ({
-        ...message,
-        threadId: resolveSafeThreadGroupingKey(
-          message,
-          messageLocationById[message.id]?.mailboxId ?? mailbox.id,
-        ),
-        from: message.from ?? message.sender ?? "",
-      })),
-    );
-  };
+  ) => dedupeMessagesForNormalAppRenderedRows(messages, mailbox.id, messageLocationById);
   const resolveSmartFolderRenderContextForMessage = (message: MailMessage) => {
     if (!activeSmartFolder) {
       return {
@@ -14310,7 +14358,11 @@ function MailboxView({
 
     if (
       !hiddenSelectedMessage ||
-      !isBundleOrganizerManagedMessage(hiddenSelectedMessage, productAccess)
+      !shouldHideBundleOrganizerManagedMessage(hiddenSelectedMessage, {
+        productAccess,
+        showOrganizerManagedMail: showBundleOrganizerManagedMail,
+        resolveVisibleCategoryLabel: getVisibleCategoryLabelForMessage,
+      })
     ) {
       return;
     }
@@ -14387,8 +14439,11 @@ function MailboxView({
       .filter(
         (candidate) =>
           candidate.id === message.id ||
-          !hideBundleOrganizerManagedMessages ||
-          !isBundleOrganizerManagedMessage(candidate, productAccess),
+          !shouldHideBundleOrganizerManagedMessage(candidate, {
+            productAccess,
+            showOrganizerManagedMail: showBundleOrganizerManagedMail,
+            resolveVisibleCategoryLabel: getVisibleCategoryLabelForMessage,
+          }),
       )
       .filter(
         (candidate, index, candidates) =>
@@ -18982,21 +19037,32 @@ function MailboxView({
         : orderedMailboxes.map((candidate) => candidate.id);
     const candidateMessages = folder
       ? scopeMailboxIds.flatMap((mailboxId) =>
-          getSmartFolderCandidateInboxRowSet(mailboxId, folder)
-            .filter(
-              (message) =>
-                !hideBundleOrganizerManagedMessages ||
-                !isBundleOrganizerManagedMessage(message, productAccess),
-            )
-            .filter((message) =>
-              doesMessageMatchSmartFolder(
-                message,
-                folder,
-                {
-                  mailboxContext: getSmartFolderMailboxContext(mailboxId),
-                },
-              ),
-            ),
+          {
+            const mailboxContext = getSmartFolderMailboxContext(mailboxId);
+
+            return getSmartFolderCandidateInboxRowSet(mailboxId, folder)
+              .filter(
+                (message) =>
+                  !shouldHideBundleOrganizerManagedMessage(message, {
+                    productAccess,
+                    showOrganizerManagedMail: showBundleOrganizerManagedMail,
+                    resolveVisibleCategoryLabel: (candidate) =>
+                      getVisibleCategoryLabelForMessageInContext(
+                        candidate,
+                        mailboxContext ? isPromoMailboxContext(mailboxContext) : false,
+                      ),
+                  }),
+              )
+              .filter((message) =>
+                doesMessageMatchSmartFolder(
+                  message,
+                  folder,
+                  {
+                    mailboxContext,
+                  },
+                ),
+              );
+          },
         )
       : [];
     const nextMessageId = resolveNextMessageId(candidateMessages, "Inbox", false, folderId);
@@ -30469,8 +30535,10 @@ function ForYouView({
             ...collections,
             Inbox: filterBundleOrganizerManagedMessagesForNormalApp(
               collections.Inbox,
-              productAccess,
-              showBundleOrganizerManagedMail,
+              {
+                productAccess,
+                showOrganizerManagedMail: showBundleOrganizerManagedMail,
+              },
             ),
           },
         ]),
@@ -33693,13 +33761,33 @@ export function WorkspaceShell({
         const normalAppInboxMessages =
           filterBundleOrganizerManagedMessagesForNormalApp(
             visibleInboxMessages,
-            productAccess,
-            showBundleOrganizerManagedMail,
+            {
+              productAccess,
+              showOrganizerManagedMail: showBundleOrganizerManagedMail,
+              resolveVisibleCategoryLabel: (message) => {
+                const manualLabelOverride = resolveManualLabelOverrideFromStore(
+                  manualLabelOverrides,
+                  message,
+                );
+
+                return (
+                  manualLabelOverride ??
+                  resolveVisibleCategoryLabelForMessageInContext(
+                    message,
+                    isPromoMailboxContext(mailbox),
+                  )
+                );
+              },
+            },
           );
+        const renderedInboxMessages = dedupeMessagesForNormalAppRenderedRows(
+          normalAppInboxMessages,
+          mailbox.id,
+        );
 
         return [
           mailbox.id,
-          countUnreadMessagesByCanonicalIdentity(normalAppInboxMessages),
+          countUnreadMessagesByCanonicalIdentity(renderedInboxMessages),
         ];
       }),
     );
@@ -34039,8 +34127,24 @@ export function WorkspaceShell({
       const candidateNormalAppInboxMessages =
         filterBundleOrganizerManagedMessagesForNormalApp(
           candidateVisibleInboxMessages,
-          productAccess,
-          showBundleOrganizerManagedMail,
+          {
+            productAccess,
+            showOrganizerManagedMail: showBundleOrganizerManagedMail,
+            resolveVisibleCategoryLabel: (message) => {
+              const manualLabelOverride = resolveManualLabelOverrideFromStore(
+                manualLabelOverrides,
+                message,
+              );
+
+              return (
+                manualLabelOverride ??
+                resolveVisibleCategoryLabelForMessageInContext(
+                  message,
+                  isPromoMailboxContext(candidate),
+                )
+              );
+            },
+          },
         );
 
       for (const message of candidateNormalAppInboxMessages) {
@@ -34330,8 +34434,24 @@ export function WorkspaceShell({
     const mobileNormalAppInboxMessages =
       filterBundleOrganizerManagedMessagesForNormalApp(
         mobileVisibleInboxMessages,
-        productAccess,
-        showBundleOrganizerManagedMail,
+        {
+          productAccess,
+          showOrganizerManagedMail: showBundleOrganizerManagedMail,
+          resolveVisibleCategoryLabel: (message) => {
+            const manualLabelOverride = resolveManualLabelOverrideFromStore(
+              manualLabelOverrides,
+              message,
+            );
+
+            return (
+              manualLabelOverride ??
+              resolveVisibleCategoryLabelForMessageInContext(
+                message,
+                isPromoMailboxContext(mailbox),
+              )
+            );
+          },
+        },
       );
     const inboxMessages = mobileNormalAppInboxMessages
       .filter((message) => !isWorkspaceMessageSpamSuppressed(message))
