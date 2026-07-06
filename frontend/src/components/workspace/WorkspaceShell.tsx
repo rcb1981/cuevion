@@ -33,6 +33,10 @@ import {
   BundleOrganizerSurface,
   type BundleOrganizerWorkspaceMessage,
 } from "./BundleOrganizerSurface";
+import {
+  resolveOrganizerCategory,
+  type BundleOrganizerVisibleCategory,
+} from "./bundleOrganizerFilters";
 import type { ReviewItem, ReviewWorkspaceTarget } from "./review/types";
 import type {
   CustomInboxDefinition,
@@ -126,6 +130,8 @@ import type { ForYouLearningSuggestion } from "../../lib/forYouEngine";
 
 const PRODUCT_ACCESS_STORAGE_KEY = "cuevion-product-access";
 const BUNDLE_PILOT_ACCESS_CODE = "CUEVION-BUNDLE-PILOT";
+const BUNDLE_SHOW_ORGANIZER_MANAGED_MAIL_STORAGE_KEY =
+  "cuevion-bundle-show-organizer-managed-mail";
 
 const primaryNavigationItems = [
   { section: "Dashboard", label: "Dashboard", shortLabel: "Dash", icon: "dashboard" },
@@ -1212,6 +1218,55 @@ type MailFolder = "Inbox" | "Drafts" | "Sent" | "Archive" | "Filtered" | "Spam" 
 type MailSortOrder = "desc" | "asc";
 type MailboxCollections = Record<MailFolder, MailMessage[]>;
 type MailboxStore = Record<string, MailboxCollections>;
+type BundleOrganizerManagedMessageInput = Pick<
+  MailMessage,
+  "internalClassification" | "category" | "signal" | "ui_signal"
+>;
+const bundleOrganizerManagedCategories = new Set<BundleOrganizerVisibleCategory>([
+  "demo",
+  "high_priority_demo",
+  "promo",
+  "promo_reminder",
+]);
+
+function resolveBundleOrganizerManagedCategory(
+  message: BundleOrganizerManagedMessageInput,
+): BundleOrganizerVisibleCategory | null {
+  return resolveOrganizerCategory({
+    internalClassification: message.internalClassification ?? null,
+    category: message.category ?? null,
+    ui_signal: message.ui_signal ?? message.signal ?? null,
+  });
+}
+
+function isBundleOrganizerManagedMessage(
+  message: BundleOrganizerManagedMessageInput,
+  productAccess: ProductAccess,
+) {
+  if (productAccess !== "bundle") {
+    return false;
+  }
+
+  const organizerCategory = resolveBundleOrganizerManagedCategory(message);
+  return (
+    organizerCategory !== null &&
+    bundleOrganizerManagedCategories.has(organizerCategory)
+  );
+}
+
+function filterBundleOrganizerManagedMessagesForNormalApp<T extends BundleOrganizerManagedMessageInput>(
+  messages: T[],
+  productAccess: ProductAccess,
+  showOrganizerManagedMail: boolean,
+) {
+  if (productAccess !== "bundle" || showOrganizerManagedMail) {
+    return messages;
+  }
+
+  return messages.filter(
+    (message) => !isBundleOrganizerManagedMessage(message, productAccess),
+  );
+}
 type NotificationNavigationRequest = {
   mailboxId: InboxId;
   messageId: string;
@@ -10674,6 +10729,28 @@ function writeStoredProductAccess(nextAccess: ProductAccess) {
   window.localStorage.removeItem(PRODUCT_ACCESS_STORAGE_KEY);
 }
 
+function readStoredBundleShowOrganizerManagedMail() {
+  if (typeof window === "undefined") {
+    return false;
+  }
+
+  return (
+    window.localStorage.getItem(BUNDLE_SHOW_ORGANIZER_MANAGED_MAIL_STORAGE_KEY) ===
+    "true"
+  );
+}
+
+function writeStoredBundleShowOrganizerManagedMail(shouldShow: boolean) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  window.localStorage.setItem(
+    BUNDLE_SHOW_ORGANIZER_MANAGED_MAIL_STORAGE_KEY,
+    shouldShow ? "true" : "false",
+  );
+}
+
 function SidebarNavigationIcon({ name }: { name: SidebarNavigationIconName }) {
   return (
     <svg
@@ -12429,6 +12506,9 @@ function MailboxView({
   onSyncUnreadOverrides,
   initialSelectedMessageId = null,
   onMessageSelected,
+  productAccess,
+  showBundleOrganizerManagedMail,
+  onShowBundleOrganizerManagedMailChange,
   mobileComposeRequest = null,
   onConsumeMobileComposeRequest,
   onComposeOpenChange,
@@ -12504,6 +12584,9 @@ function MailboxView({
   onSyncUnreadOverrides: (messages: MessageIdentitySource[], unread: boolean) => void;
   initialSelectedMessageId?: string | null;
   onMessageSelected?: (messageId: string) => void;
+  productAccess: ProductAccess;
+  showBundleOrganizerManagedMail: boolean;
+  onShowBundleOrganizerManagedMailChange: (shouldShow: boolean) => void;
   /** Mobile compose request handoff. WorkspaceShell sets this when a mobile
    *  compose action is pending; MailboxView opens compose through its existing
    *  compose handlers and calls onConsumeMobileComposeRequest to acknowledge. */
@@ -13716,6 +13799,14 @@ function MailboxView({
     return entries;
   })();
   const unifiedSpamMessages = unifiedSpamEntries.map((entry) => entry.message);
+  const hideBundleOrganizerManagedMessages =
+    productAccess === "bundle" && !showBundleOrganizerManagedMail;
+  const filterOrganizerManagedMessagesForMailboxView = (messages: MailMessage[]) =>
+    filterBundleOrganizerManagedMessagesForNormalApp(
+      messages,
+      productAccess,
+      showBundleOrganizerManagedMail,
+    );
   const visibleMailboxCollections: Record<MailFolder, MailMessage[]> = {
     Inbox: getMailboxReadyInboxMessagesForWorkspaceMailbox(
       spamSuppressionFilteredMailboxCollections,
@@ -13944,6 +14035,10 @@ function MailboxView({
         smartFolderScopeMailboxIds.flatMap((mailboxId) =>
           getSmartFolderCandidateInboxRowSet(mailboxId, activeSmartFolder)
             .filter((message) =>
+              !hideBundleOrganizerManagedMessages ||
+              !isBundleOrganizerManagedMessage(message, productAccess),
+            )
+            .filter((message) =>
               doesMessageMatchSmartFolder(
                 message,
                 activeSmartFolder,
@@ -14061,11 +14156,26 @@ function MailboxView({
     : isSharedView
       ? workspaceSharedMessages
       : messageCollections[activeFolder];
-  const isFilteredViewEmpty = !isSharedView && !activeSmartFolder && activeFolder === "Filtered" && folderMessages.length === 0;
+  const normalAppFolderMessages = isSharedView
+    ? folderMessages
+    : filterOrganizerManagedMessagesForMailboxView(folderMessages);
+  const hiddenOrganizerManagedFolderMessageCount =
+    folderMessages.length - normalAppFolderMessages.length;
+  const isFilteredViewEmpty =
+    !isSharedView &&
+    !activeSmartFolder &&
+    activeFolder === "Filtered" &&
+    normalAppFolderMessages.length === 0 &&
+    hiddenOrganizerManagedFolderMessageCount === 0;
   const isSharedViewEmpty = isSharedView && workspaceSharedMessages.length === 0;
   const isSmartFolderViewEmpty = Boolean(activeSmartFolder) && smartFolderMessages.length === 0;
   const normalizedSearchQuery = searchQuery.trim().toLowerCase();
-  const visibleMessages = folderMessages.filter((message) => {
+  const isOrganizerManagedFilteredViewEmpty =
+    !isSharedView &&
+    hideBundleOrganizerManagedMessages &&
+    hiddenOrganizerManagedFolderMessageCount > 0 &&
+    normalAppFolderMessages.length === 0;
+  const visibleMessages = normalAppFolderMessages.filter((message) => {
     const matchesSearch =
       normalizedSearchQuery.length === 0 ||
       `${message.sender} ${message.subject} ${message.snippet} ${message.from} ${message.to}`
@@ -14111,7 +14221,7 @@ function MailboxView({
   const threadMessageCountByThreadId = useMemo(() => {
     const counts = new Map<string, number>();
 
-    folderMessages.forEach((message) => {
+    normalAppFolderMessages.forEach((message) => {
       const threadId = resolveSafeThreadGroupingKey(
         message,
         currentMessageLocationById[message.id]?.mailboxId ?? mailbox.id,
@@ -14120,11 +14230,11 @@ function MailboxView({
     });
 
     return counts;
-  }, [currentMessageLocationById, folderMessages, mailbox.id]);
+  }, [currentMessageLocationById, normalAppFolderMessages, mailbox.id]);
   const threadHasAttachmentsByThreadId = useMemo(() => {
     const threadsWithAttachments = new Map<string, boolean>();
 
-    folderMessages.forEach((message) => {
+    normalAppFolderMessages.forEach((message) => {
       if (!message.attachments?.some(shouldShowInAttachmentList)) {
         return;
       }
@@ -14137,7 +14247,7 @@ function MailboxView({
     });
 
     return threadsWithAttachments;
-  }, [currentMessageLocationById, folderMessages, mailbox.id]);
+  }, [currentMessageLocationById, normalAppFolderMessages, mailbox.id]);
   const sortedMessages = [...threadDedupedMessages].sort((firstMessage, secondMessage) => {
     const firstTime = resolveMailDateMs(firstMessage);
     const secondTime = resolveMailDateMs(secondMessage);
@@ -14148,14 +14258,14 @@ function MailboxView({
   });
   const selectedMessageFromFolder =
     // Primary: match by id (the common fast path).
-    folderMessages.find((message) => message.id === selectedMessageId) ??
+    normalAppFolderMessages.find((message) => message.id === selectedMessageId) ??
     // Fallback: match by imapUid. Handles the race where a background IMAP
     // sync reassigns a message's id (SHA1 snapshot id → imap-uid-X) after the
     // navigation useEffect already fixed selectedMessageId to the old id.
     // selectedMessageImapUid is set by the nav useEffect and cleared on every
     // manual selection, so this only fires during that narrow sync-race window.
     (selectedMessageImapUid
-      ? folderMessages.find((m) => m.imapUid === selectedMessageImapUid) ?? null
+      ? normalAppFolderMessages.find((m) => m.imapUid === selectedMessageImapUid) ?? null
       : null);
   const visibleSelectedMessageIds = selectedMessageIds.filter((messageId) =>
     sortedMessages.some((message) => message.id === messageId),
@@ -14180,6 +14290,41 @@ function MailboxView({
     null;
   const fullWidthMessage = selectedMessageFromFolder ?? selectedMessage;
   const renderTargetMessage = isFullMessageOpen ? fullWidthMessage : selectedMessage;
+
+  useEffect(() => {
+    if (!hideBundleOrganizerManagedMessages || !selectedMessageId) {
+      return;
+    }
+
+    if (sortedMessages.some((message) => message.id === selectedMessageId)) {
+      return;
+    }
+
+    const hiddenSelectedMessage = folderMessages.find(
+      (message) => message.id === selectedMessageId,
+    );
+
+    if (
+      !hiddenSelectedMessage ||
+      !isBundleOrganizerManagedMessage(hiddenSelectedMessage, productAccess)
+    ) {
+      return;
+    }
+
+    const nextMessage = sortedMessages[0] ?? null;
+    setSelectionState(
+      nextMessage ? [nextMessage.id] : [],
+      nextMessage?.id ?? null,
+      nextMessage?.id ?? null,
+    );
+    setIsFullMessageOpen(false);
+  }, [
+    folderMessages,
+    hideBundleOrganizerManagedMessages,
+    productAccess,
+    selectedMessageId,
+    sortedMessages,
+  ]);
 
   useEffect(() => {
     readingPaneViewportRef.current?.scrollTo({ top: 0, left: 0 });
@@ -14235,6 +14380,12 @@ function MailboxView({
         useSafeGrouping: true,
       }),
     ]
+      .filter(
+        (candidate) =>
+          candidate.id === message.id ||
+          !hideBundleOrganizerManagedMessages ||
+          !isBundleOrganizerManagedMessage(candidate, productAccess),
+      )
       .filter(
         (candidate, index, candidates) =>
           candidates.findIndex((entry) => entry.id === candidate.id) === index,
@@ -18827,15 +18978,21 @@ function MailboxView({
         : orderedMailboxes.map((candidate) => candidate.id);
     const candidateMessages = folder
       ? scopeMailboxIds.flatMap((mailboxId) =>
-          getSmartFolderCandidateInboxRowSet(mailboxId, folder).filter((message) =>
-            doesMessageMatchSmartFolder(
-              message,
-              folder,
-              {
-                mailboxContext: getSmartFolderMailboxContext(mailboxId),
-              },
+          getSmartFolderCandidateInboxRowSet(mailboxId, folder)
+            .filter(
+              (message) =>
+                !hideBundleOrganizerManagedMessages ||
+                !isBundleOrganizerManagedMessage(message, productAccess),
+            )
+            .filter((message) =>
+              doesMessageMatchSmartFolder(
+                message,
+                folder,
+                {
+                  mailboxContext: getSmartFolderMailboxContext(mailboxId),
+                },
+              ),
             ),
-          ),
         )
       : [];
     const nextMessageId = resolveNextMessageId(candidateMessages, "Inbox", false, folderId);
@@ -18856,7 +19013,7 @@ function MailboxView({
     if (activeSmartFolderId === null) {
       if (lastAppliedSmartFolderIdRef.current !== null) {
         const nextMessageId = resolveNextMessageId(
-          messageCollections.Inbox,
+          filterOrganizerManagedMessagesForMailboxView(messageCollections.Inbox),
           "Inbox",
           false,
           null,
@@ -18885,7 +19042,12 @@ function MailboxView({
   }, [activeSmartFolderId]);
 
   const switchToFolder = (folder: MailFolder) => {
-    const nextMessageId = resolveNextMessageId(messageCollections[folder], folder, false, null);
+    const nextMessageId = resolveNextMessageId(
+      filterOrganizerManagedMessagesForMailboxView(messageCollections[folder]),
+      folder,
+      false,
+      null,
+    );
 
     setActiveSmartFolderId(null);
     setIsSharedView(false);
@@ -20276,6 +20438,28 @@ function MailboxView({
                     ) : null}
                   </div>
                 </div>
+                {productAccess === "bundle" ? (
+                  <div className="flex flex-wrap items-center justify-between gap-2 rounded-[14px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-3 py-2 text-[0.74rem] leading-5 text-[var(--workspace-text-faint)]">
+                    <span>
+                      {hideBundleOrganizerManagedMessages
+                        ? "Demo and promo messages are managed in Organizer. Mailbox counts may include messages managed in Organizer."
+                        : "Organizer-managed demo and promo messages are visible in Cuevion App."}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        onShowBundleOrganizerManagedMailChange(
+                          hideBundleOrganizerManagedMessages,
+                        )
+                      }
+                      className="inline-flex h-7 items-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-3 text-[0.62rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-soft)] transition-[background-color,border-color,color] duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] focus-visible:outline-none"
+                    >
+                      {hideBundleOrganizerManagedMessages
+                        ? "Show in Cuevion App"
+                        : "Hide Organizer-managed messages"}
+                    </button>
+                  </div>
+                ) : null}
               </div>
 
               {/* Native macOS overlay scrollbars can ignore custom thumb styling; keep the real
@@ -20642,11 +20826,26 @@ function MailboxView({
                     })}
                     {visibleMessages.length === 0 ? (
                       <div className="rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-6 text-[0.84rem] leading-6 text-[var(--workspace-text-faint)]">
-                        {activeSmartFolder
-                          ? "No messages in this smart folder match the current search or filter."
-                          : activeFolder === "Drafts"
-                          ? "No drafts in this mailbox yet."
-                          : "No messages match the current search or filter."}
+                        {isOrganizerManagedFilteredViewEmpty ? (
+                          <div className="space-y-3">
+                            <div>Demo and promo messages are managed in Organizer.</div>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                onShowBundleOrganizerManagedMailChange(true)
+                              }
+                              className="inline-flex h-8 items-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-3 text-[0.62rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-soft)] transition-[background-color,border-color,color] duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] focus-visible:outline-none"
+                            >
+                              Show in Cuevion App
+                            </button>
+                          </div>
+                        ) : activeSmartFolder ? (
+                          "No messages in this smart folder match the current search or filter."
+                        ) : activeFolder === "Drafts" ? (
+                          "No drafts in this mailbox yet."
+                        ) : (
+                          "No messages match the current search or filter."
+                        )}
                       </div>
                     ) : null}
                   </div>
@@ -30153,6 +30352,8 @@ function ForYouView({
   learningLaunchRequest,
   onConsumeLearningLaunchRequest,
   aiSuggestionsEnabled,
+  productAccess,
+  showBundleOrganizerManagedMail,
 }: {
   context?: ForYouContext;
   onOpenTarget: (target: WorkspaceTarget) => void;
@@ -30178,6 +30379,8 @@ function ForYouView({
   learningLaunchRequest: LearningLaunchRequest;
   onConsumeLearningLaunchRequest: () => void;
   aiSuggestionsEnabled: boolean;
+  productAccess: ProductAccess;
+  showBundleOrganizerManagedMail: boolean;
 }) {
   const [activeLearningModal, setActiveLearningModal] = useState<
     | "paste-rule"
@@ -30254,9 +30457,24 @@ function ForYouView({
     setIsLearningFullMessageOpen(false);
     setActiveLearningModal("refine-cuevion");
   };
+  const forYouMailboxStore = productAccess === "bundle" && !showBundleOrganizerManagedMail
+    ? Object.fromEntries(
+        Object.entries(mailboxStore).map(([mailboxId, collections]) => [
+          mailboxId,
+          {
+            ...collections,
+            Inbox: filterBundleOrganizerManagedMessagesForNormalApp(
+              collections.Inbox,
+              productAccess,
+              showBundleOrganizerManagedMail,
+            ),
+          },
+        ]),
+      ) as MailboxStore
+    : mailboxStore;
   const { learningSuggestionPool, uncertainEmailPool } = forYouEngine.buildForYouLearningPools(
     aiSuggestionsEnabled,
-    mailboxStore,
+    forYouMailboxStore,
     resolveMailDateMs,
     (category) => formatCuevionCategoryLabel(category),
   );
@@ -31806,6 +32024,14 @@ export function WorkspaceShell({
   const [productAccess, setProductAccess] = useState<ProductAccess>(() =>
     readStoredProductAccess(),
   );
+  const [
+    showBundleOrganizerManagedMail,
+    setShowBundleOrganizerManagedMail,
+  ] = useState(() => readStoredBundleShowOrganizerManagedMail());
+  const updateShowBundleOrganizerManagedMail = useCallback((shouldShow: boolean) => {
+    setShowBundleOrganizerManagedMail(shouldShow);
+    writeStoredBundleShowOrganizerManagedMail(shouldShow);
+  }, []);
   const [systemColorMode, setSystemColorMode] = useState<"light" | "dark">(() =>
     typeof window !== "undefined" &&
     window.matchMedia &&
@@ -33758,8 +33984,14 @@ export function WorkspaceShell({
           preferPromoMailboxContext: isPromoMailboxContext(candidate),
         },
       );
+      const candidateNormalAppInboxMessages =
+        filterBundleOrganizerManagedMessagesForNormalApp(
+          candidateVisibleInboxMessages,
+          productAccess,
+          showBundleOrganizerManagedMail,
+        );
 
-      for (const message of candidateVisibleInboxMessages) {
+      for (const message of candidateNormalAppInboxMessages) {
         if (seenMessageIds.has(message.id)) {
           continue;
         }
@@ -34043,7 +34275,13 @@ export function WorkspaceShell({
         preferPromoMailboxContext: isPromoMailboxContext(mailbox),
       },
     );
-    const inboxMessages = mobileVisibleInboxMessages
+    const mobileNormalAppInboxMessages =
+      filterBundleOrganizerManagedMessagesForNormalApp(
+        mobileVisibleInboxMessages,
+        productAccess,
+        showBundleOrganizerManagedMail,
+      );
+    const inboxMessages = mobileNormalAppInboxMessages
       .filter((message) => !isWorkspaceMessageSpamSuppressed(message))
       .sort((first, second) => resolveMailDateMs(second) - resolveMailDateMs(first))
       .slice(0, 100)
@@ -38603,6 +38841,11 @@ export function WorkspaceShell({
                   onMessageSelected={(messageId) => {
                     lastMailboxSelectionRef.current[activeMailbox.id] = messageId;
                   }}
+                  productAccess={productAccess}
+                  showBundleOrganizerManagedMail={showBundleOrganizerManagedMail}
+                  onShowBundleOrganizerManagedMailChange={
+                    updateShowBundleOrganizerManagedMail
+                  }
                 />
               </div>
             ) : activeSection === "Dashboard" ? (
@@ -38772,6 +39015,8 @@ export function WorkspaceShell({
                   learningLaunchRequest={learningLaunchRequest}
                   onConsumeLearningLaunchRequest={() => setLearningLaunchRequest(null)}
                   aiSuggestionsEnabled={aiSuggestionsEnabled}
+                  productAccess={productAccess}
+                  showBundleOrganizerManagedMail={showBundleOrganizerManagedMail}
                 />
               </div>
 	            )}
