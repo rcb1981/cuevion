@@ -120,6 +120,7 @@ import {
   INBOX_SNAPSHOT_MAX_AGE_MS,
   INBOX_SNAPSHOT_RECENT_GUARD_MS,
 } from "../../lib/inboxEngine";
+import { buildPriorityRuntimeSignalsForCandidates } from "../../lib/priorityRuntimeSignals";
 import { applyLearningDecision } from "../../lib/applyLearningDecision";
 import type {
   MailMessageBehaviorSuggestion as EngineMailMessageBehaviorSuggestion,
@@ -34540,6 +34541,55 @@ export function WorkspaceShell({
       );
     });
   })();
+  const priorityRuntimeSignalsForCandidates = useMemo(() => {
+    const candidateMailboxIds = Array.from(
+      new Set(livePriorityInboxEntries.map(({ mailboxId }) => mailboxId)),
+    );
+    const messagesByMailboxId = Object.fromEntries(
+      candidateMailboxIds.map((mailboxId) => {
+        const collections = mailboxStore[mailboxId] ?? createEmptyMailboxCollections();
+
+        return [
+          mailboxId,
+          canonicalFolderOrder.flatMap((folder) => collections[folder]),
+        ];
+      }),
+    );
+    const sentMessagesByMailboxId = Object.fromEntries(
+      candidateMailboxIds.map((mailboxId) => {
+        const collections = mailboxStore[mailboxId] ?? createEmptyMailboxCollections();
+
+        return [mailboxId, collections.Sent];
+      }),
+    );
+    const runtimeManualPriorityOverrides = Object.fromEntries(
+      livePriorityInboxEntries.map(({ mailboxId, message }) => [
+        `${mailboxId}:${message.id}`,
+        resolveManualPriorityOverride(manualPriorityOverrides, message),
+      ]),
+    );
+
+    return buildPriorityRuntimeSignalsForCandidates({
+      candidateMessages: livePriorityInboxEntries.map(({ mailboxId, message }) => ({
+        ...message,
+        mailboxId,
+      })),
+      messagesByMailboxId,
+      sentMessagesByMailboxId,
+      ownEmailAddresses: connectedOrderedMailboxes.map((mailbox) => mailbox.email),
+      connectedMailboxes: connectedOrderedMailboxes,
+      authenticatedUserEmail: authenticatedUser?.email ?? activeWorkspaceEmail,
+      manualPriorityOverrides: runtimeManualPriorityOverrides,
+    });
+  }, [
+    activeWorkspaceEmail,
+    authenticatedUser?.email,
+    connectedOrderedMailboxes,
+    livePriorityInboxEntries,
+    mailboxStore,
+    manualPriorityOverrides,
+  ]);
+  void priorityRuntimeSignalsForCandidates;
   const livePriorityInboxItems: ReviewItem[] = livePriorityInboxEntries.map(
     ({ mailboxId, mailboxTitle, message }) => {
       const resolvedPriorityMessageDateMs = resolveMailDateMs(message);

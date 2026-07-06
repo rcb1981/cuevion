@@ -402,13 +402,22 @@ test("output keys are deterministic and can use a caller resolver", () => {
   assert.deepEqual(Object.keys(firstSignals), Object.keys(secondSignals));
 });
 
-test("selector is not imported into WorkspaceShell runtime", () => {
+test("WorkspaceShell imports selector for read-only computation only", () => {
   const workspaceShellSource = readFileSync(
     "src/components/workspace/WorkspaceShell.tsx",
     "utf8",
   );
 
-  assert.equal(workspaceShellSource.includes("priorityRuntimeSignals"), false);
+  assert.equal(
+    workspaceShellSource.includes("buildPriorityRuntimeSignalsForCandidates"),
+    true,
+  );
+  assert.equal(
+    workspaceShellSource.includes("void priorityRuntimeSignalsForCandidates"),
+    true,
+  );
+  assert.equal(workspaceShellSource.includes("console.log(priorityRuntimeSignals"), false);
+  assert.equal(workspaceShellSource.includes("console.info(priorityRuntimeSignals"), false);
 });
 
 if (failed > 0) {
