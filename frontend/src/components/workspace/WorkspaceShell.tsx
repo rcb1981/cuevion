@@ -7372,7 +7372,6 @@ type DisplayContentClassification = Exclude<
   CuevionInternalClassification,
   "incomplete_demo" | "reply"
 >;
-type ConversationStatusLabel = "Reply";
 
 const displayContentClassifications = new Set<DisplayContentClassification>([
   "demo",
@@ -7431,13 +7430,6 @@ function mapDisplayContentClassificationToLabel(
     case "unknown":
       return "Other";
   }
-}
-
-function resolveConversationStatus(
-  message: Pick<MailMessage, "internalClassification" | "signal" | "ui_signal">,
-  _threadMessages: MailMessage[] = [],
-): ConversationStatusLabel | null {
-  return isReplyLikeConversationMessage(message) ? "Reply" : null;
 }
 
 function resolveUnderlyingContentClassification(
@@ -13857,14 +13849,6 @@ function MailboxView({
     }
 
     return resolveDisplayContentLabel(message, threadMessages);
-  }
-  function getConversationStatusLabelForMessage(
-    message: MailMessage,
-    threadMessages: MailMessage[],
-  ) {
-    return resolveManualLabelOverride(message) === "Reply"
-      ? "Reply"
-      : resolveConversationStatus(message, threadMessages);
   }
   function getVisiblePriorityBadgeForMessageInContext(
     message: MailMessage,
@@ -20869,10 +20853,6 @@ function MailboxView({
                             displayThreadMessages,
                           )
                         : getDisplayContentLabelForMessage(message, displayThreadMessages);
-                      const conversationStatusLabel = getConversationStatusLabelForMessage(
-                        message,
-                        displayThreadMessages,
-                      );
                       const signal =
                         message.signal === "Sent"
                           ? ""
@@ -20883,9 +20863,6 @@ function MailboxView({
                                 demoFocusPreferenceLevel === "high"
                               ? "PRIORITY"
                               : priorityBadge;
-                      const hasMetadataBeforeConversationStatus = Boolean(
-                        signal || categoryLabel,
-                      );
                       const senderTextClass =
                         themeMode === "dark"
                           ? message.unread
@@ -21097,25 +21074,17 @@ function MailboxView({
                               <div className={`truncate text-[0.78rem] leading-5 ${snippetTextClass}`}>
                                 {compactSnippet}
                               </div>
-                              {signal || conversationStatusLabel ? (
+                              {signal ? (
                                 <div
                                   className={`pt-0.5 text-[0.6rem] font-medium uppercase tracking-[0.12em] ${signalTextClass}`}
                                 >
-                                  {signal ? (
-                                    <span className="text-xs opacity-80">
-                                      {signal}
-                                    </span>
-                                  ) : null}
+                                  <span className="text-xs opacity-80">
+                                    {signal}
+                                  </span>
                                   {categoryLabel ? (
-                                    <span className={`${signal ? "ml-1.5" : ""} text-[0.64rem] normal-case tracking-normal opacity-55`}>
-                                      {signal ? "· " : ""}
+                                    <span className="ml-1.5 text-[0.64rem] normal-case tracking-normal opacity-55">
+                                      ·{" "}
                                       {categoryLabel}
-                                    </span>
-                                  ) : null}
-                                  {conversationStatusLabel ? (
-                                    <span className={`${hasMetadataBeforeConversationStatus ? "ml-1.5" : ""} text-[0.64rem] normal-case tracking-normal opacity-55`}>
-                                      {hasMetadataBeforeConversationStatus ? "· " : ""}
-                                      {conversationStatusLabel}
                                     </span>
                                   ) : null}
                                 </div>
