@@ -121,6 +121,7 @@ import {
   INBOX_SNAPSHOT_RECENT_GUARD_MS,
 } from "../../lib/inboxEngine";
 import { buildPriorityRuntimeSignalsForCandidates } from "../../lib/priorityRuntimeSignals";
+import { formatPriorityReasonCopy } from "../../lib/priorityReasonCopy";
 import { applyLearningDecision } from "../../lib/applyLearningDecision";
 import type {
   MailMessageBehaviorSuggestion as EngineMailMessageBehaviorSuggestion,
@@ -34588,7 +34589,22 @@ export function WorkspaceShell({
     mailboxStore,
     manualPriorityOverrides,
   ]);
+  const priorityReasonCopyForCandidates = useMemo(
+    () =>
+      Object.fromEntries(
+        Object.entries(priorityRuntimeSignalsForCandidates).map(
+          ([messageKey, signal]) => [
+            messageKey,
+            formatPriorityReasonCopy({
+              prioritySource: signal.prioritySource,
+            }),
+          ],
+        ),
+      ),
+    [priorityRuntimeSignalsForCandidates],
+  );
   void priorityRuntimeSignalsForCandidates;
+  void priorityReasonCopyForCandidates;
   const livePriorityInboxItems: ReviewItem[] = livePriorityInboxEntries.map(
     ({ mailboxId, mailboxTitle, message }) => {
       const resolvedPriorityMessageDateMs = resolveMailDateMs(message);
