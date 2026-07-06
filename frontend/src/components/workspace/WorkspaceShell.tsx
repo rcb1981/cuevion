@@ -7368,6 +7368,129 @@ function getVisibleCategoryLabel(
   }
 }
 
+type DisplayContentClassification = Exclude<
+  CuevionInternalClassification,
+  "incomplete_demo" | "reply"
+>;
+type ConversationStatusLabel = "Reply";
+
+const displayContentClassifications = new Set<DisplayContentClassification>([
+  "demo",
+  "high_priority_demo",
+  "promo",
+  "promo_reminder",
+  "business",
+  "business_reminder",
+  "finance",
+  "royalty_statement",
+  "distributor_update",
+  "workflow_update",
+  "info",
+  "unknown",
+]);
+
+function isReplyLikeConversationMessage(
+  message: Pick<MailMessage, "internalClassification" | "signal" | "ui_signal">,
+) {
+  return (
+    message.internalClassification === "reply" ||
+    message.ui_signal === "REPLY" ||
+    message.signal === "Follow-up"
+  );
+}
+
+function isDisplayContentClassification(
+  value?: CuevionInternalClassification | null,
+): value is DisplayContentClassification {
+  return Boolean(
+    value &&
+      displayContentClassifications.has(value as DisplayContentClassification),
+  );
+}
+
+function mapDisplayContentClassificationToLabel(
+  classification: DisplayContentClassification,
+) {
+  switch (classification) {
+    case "demo":
+    case "high_priority_demo":
+      return "Demo";
+    case "promo":
+    case "promo_reminder":
+      return "Promo";
+    case "business":
+    case "business_reminder":
+      return "Business";
+    case "finance":
+    case "royalty_statement":
+      return "Finance";
+    case "workflow_update":
+    case "distributor_update":
+    case "info":
+      return "Update";
+    case "unknown":
+      return "Other";
+  }
+}
+
+function resolveConversationStatus(
+  message: Pick<MailMessage, "internalClassification" | "signal" | "ui_signal">,
+  _threadMessages: MailMessage[] = [],
+): ConversationStatusLabel | null {
+  return isReplyLikeConversationMessage(message) ? "Reply" : null;
+}
+
+function resolveUnderlyingContentClassification(
+  message: Pick<MailMessage, "id" | "internalClassification" | "signal" | "ui_signal">,
+  threadMessages: MailMessage[],
+): DisplayContentClassification | null {
+  if (!isReplyLikeConversationMessage(message)) {
+    return isDisplayContentClassification(message.internalClassification)
+      ? message.internalClassification
+      : null;
+  }
+
+  const contentCandidates = threadMessages
+    .filter((candidate) => candidate.id !== message.id)
+    .filter((candidate) => !isReplyLikeConversationMessage(candidate))
+    .filter(
+      (
+        candidate,
+      ): candidate is MailMessage & {
+        internalClassification: DisplayContentClassification;
+      } => isDisplayContentClassification(candidate.internalClassification),
+    )
+    .sort((first, second) => resolveMailDateMs(second) - resolveMailDateMs(first));
+
+  return (
+    contentCandidates.find(
+      (candidate) => candidate.internalClassification !== "unknown",
+    )?.internalClassification ??
+    contentCandidates[0]?.internalClassification ??
+    null
+  );
+}
+
+function resolveDisplayContentLabel(
+  message: MailMessage,
+  threadMessages: MailMessage[],
+) {
+  if (!isReplyLikeConversationMessage(message)) {
+    return getVisibleCategoryLabel(message);
+  }
+
+  const underlyingClassification = resolveUnderlyingContentClassification(
+    message,
+    threadMessages,
+  );
+
+  if (underlyingClassification) {
+    return mapDisplayContentClassificationToLabel(underlyingClassification);
+  }
+
+  return "Other";
+}
+
 const autoPriorityStrongKeywords = [
   "action required",
   "please review",
@@ -13711,6 +13834,38 @@ function MailboxView({
       preferPromoMailboxContext,
     );
   }
+  function getDisplayContentLabelForMessageInContext(
+    message: MailMessage,
+    threadMessages: MailMessage[],
+    preferPromoMailboxContext: boolean,
+  ) {
+    const manualLabelOverride = resolveManualLabelOverride(message);
+
+    if (manualLabelOverride && manualLabelOverride !== "Reply") {
+      return manualLabelOverride;
+    }
+
+    if (hasUserCorrectedBusinessCategory(message, manualLabelOverride)) {
+      return "Business";
+    }
+
+    if (!isReplyLikeConversationMessage(message)) {
+      return resolveVisibleCategoryLabelForMessageInContext(
+        message,
+        preferPromoMailboxContext,
+      );
+    }
+
+    return resolveDisplayContentLabel(message, threadMessages);
+  }
+  function getConversationStatusLabelForMessage(
+    message: MailMessage,
+    threadMessages: MailMessage[],
+  ) {
+    return resolveManualLabelOverride(message) === "Reply"
+      ? "Reply"
+      : resolveConversationStatus(message, threadMessages);
+  }
   function getVisiblePriorityBadgeForMessageInContext(
     message: MailMessage,
     nextFocusPreferences: UserConfig["focusPreferences"],
@@ -13737,6 +13892,16 @@ function MailboxView({
   const getVisibleCategoryLabelForMessage = (message: MailMessage) => {
     return getVisibleCategoryLabelForMessageInContext(
       message,
+      shouldPreferCurrentMailboxPromoContext,
+    );
+  };
+  const getDisplayContentLabelForMessage = (
+    message: MailMessage,
+    threadMessages: MailMessage[],
+  ) => {
+    return getDisplayContentLabelForMessageInContext(
+      message,
+      threadMessages,
       shouldPreferCurrentMailboxPromoContext,
     );
   };
@@ -14183,11 +14348,15 @@ function MailboxView({
       renderContext.preferPromoMailboxContext,
     );
   };
-  const getSmartFolderVisibleCategoryLabelForMessage = (message: MailMessage) => {
+  const getSmartFolderDisplayContentLabelForMessage = (
+    message: MailMessage,
+    threadMessages: MailMessage[],
+  ) => {
     const renderContext = resolveSmartFolderRenderContextForMessage(message);
 
-    return getVisibleCategoryLabelForMessageInContext(
+    return getDisplayContentLabelForMessageInContext(
       message,
+      threadMessages,
       renderContext.preferPromoMailboxContext,
     );
   };
@@ -20693,9 +20862,17 @@ function MailboxView({
                       const priorityBadge = activeSmartFolder
                         ? getSmartFolderVisiblePriorityBadgeForMessage(message)
                         : getVisiblePriorityBadgeForMessage(message);
+                      const displayThreadMessages = getThreadMessages(message);
                       const categoryLabel = activeSmartFolder
-                        ? getSmartFolderVisibleCategoryLabelForMessage(message)
-                        : getVisibleCategoryLabelForMessage(message);
+                        ? getSmartFolderDisplayContentLabelForMessage(
+                            message,
+                            displayThreadMessages,
+                          )
+                        : getDisplayContentLabelForMessage(message, displayThreadMessages);
+                      const conversationStatusLabel = getConversationStatusLabelForMessage(
+                        message,
+                        displayThreadMessages,
+                      );
                       const signal =
                         message.signal === "Sent"
                           ? ""
@@ -20917,16 +21094,24 @@ function MailboxView({
                               <div className={`truncate text-[0.78rem] leading-5 ${snippetTextClass}`}>
                                 {compactSnippet}
                               </div>
-                              {signal ? (
+                              {signal || conversationStatusLabel ? (
                                 <div
                                   className={`pt-0.5 text-[0.6rem] font-medium uppercase tracking-[0.12em] ${signalTextClass}`}
                                 >
-                                  <span className="text-xs opacity-80">
-                                    {signal}
-                                  </span>
+                                  {signal ? (
+                                    <span className="text-xs opacity-80">
+                                      {signal}
+                                    </span>
+                                  ) : null}
                                   {categoryLabel ? (
+                                    <span className={`${signal ? "ml-1.5" : ""} text-[0.64rem] normal-case tracking-normal opacity-55`}>
+                                      {signal ? "· " : ""}
+                                      {categoryLabel}
+                                    </span>
+                                  ) : null}
+                                  {conversationStatusLabel ? (
                                     <span className="ml-1.5 text-[0.64rem] normal-case tracking-normal opacity-55">
-                                      · {categoryLabel}
+                                      · {conversationStatusLabel}
                                     </span>
                                   ) : null}
                                 </div>
