@@ -89,6 +89,20 @@ function toReturnedReplyEvidenceMessage(
   };
 }
 
+function canCompareForReturnedReplyEvidence(
+  currentMessage: RuntimePriorityMessageLike,
+  candidateMessage: RuntimePriorityMessageLike,
+) {
+  const currentThreadId = resolveExplicitProviderThreadId(currentMessage);
+  const candidateThreadId = resolveExplicitProviderThreadId(candidateMessage);
+
+  if (currentThreadId) {
+    return candidateThreadId === currentThreadId;
+  }
+
+  return !candidateThreadId;
+}
+
 function buildOwnEmailAddressList({
   ownEmailAddresses,
   connectedMailboxes,
@@ -111,10 +125,17 @@ function buildOwnEmailAddressList({
 export function buildReturnedReplyEvidenceInput(
   options: BuildReturnedReplyEvidenceInputOptions,
 ): ResolveReturnedReplyEvidenceInput {
+  const comparableThreadMessages = (options.threadMessages ?? []).filter((message) =>
+    canCompareForReturnedReplyEvidence(options.currentMessage, message),
+  );
+  const comparableSentMessages = (options.sentMessages ?? []).filter((message) =>
+    canCompareForReturnedReplyEvidence(options.currentMessage, message),
+  );
+
   return {
     currentMessage: toReturnedReplyEvidenceMessage(options.currentMessage),
-    threadMessages: (options.threadMessages ?? []).map(toReturnedReplyEvidenceMessage),
-    sentMessages: (options.sentMessages ?? []).map(toReturnedReplyEvidenceMessage),
+    threadMessages: comparableThreadMessages.map(toReturnedReplyEvidenceMessage),
+    sentMessages: comparableSentMessages.map(toReturnedReplyEvidenceMessage),
     ownEmailAddresses: buildOwnEmailAddressList(options),
   };
 }
