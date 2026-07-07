@@ -1892,6 +1892,12 @@ function normalizeCategorySmartFolderLabel(value: string): SmartFolderVisibleLab
 function resolveBuiltInCategorySmartFolderLabel(
   folder: SmartFolderDefinition,
 ): SmartFolderVisibleLabel | null {
+  const nameLabel = normalizeCategorySmartFolderLabel(folder.name);
+
+  if (nameLabel) {
+    return nameLabel;
+  }
+
   const idLabel = normalizeCategorySmartFolderLabel(
     folder.id
       .trim()
@@ -1908,7 +1914,7 @@ function resolveBuiltInCategorySmartFolderLabel(
     return null;
   }
 
-  return normalizeCategorySmartFolderLabel(folder.name);
+  return null;
 }
 
 function normalizeVisibleCategoryLabelValue(label: string): SmartFolderNormalizedLabel {
@@ -14008,6 +14014,23 @@ function MailboxView({
       mailboxContext,
     });
   }
+  function getCanonicalDisplayContentCategoryForMessage(
+    message: MailMessage,
+    threadMessages: MailMessage[],
+    context: {
+      preferPromoMailboxContext: boolean;
+      mailboxContext?: DisplayContentMailboxContext;
+    },
+  ): DisplayContentLabel {
+    const contentLabel = getDisplayContentLabelForMessageInContext(
+      message,
+      threadMessages,
+      context.preferPromoMailboxContext,
+      context.mailboxContext,
+    );
+
+    return contentLabel && contentLabel !== "Reply" ? contentLabel : "Other";
+  }
   function getVisiblePriorityBadgeForMessageInContext(
     message: MailMessage,
     nextFocusPreferences: UserConfig["focusPreferences"],
@@ -14057,11 +14080,13 @@ function MailboxView({
     message: MailMessage,
     threadMessages: MailMessage[],
   ) => {
-    return getDisplayContentLabelForMessageInContext(
+    return getCanonicalDisplayContentCategoryForMessage(
       message,
       threadMessages,
-      shouldPreferCurrentMailboxPromoContext,
-      mailbox,
+      {
+        preferPromoMailboxContext: shouldPreferCurrentMailboxPromoContext,
+        mailboxContext: mailbox,
+      },
     );
   };
   const resolveOnboardingVisibilityMode = (message: MailMessage) => {
@@ -14418,14 +14443,16 @@ function MailboxView({
       }),
     ];
 
-    const contentLabel = getDisplayContentLabelForMessageInContext(
+    return getCanonicalDisplayContentCategoryForMessage(
       message,
       threadMessages,
-      mailboxContext ? isPromoMailboxContext(mailboxContext) : false,
-      mailboxContext,
+      {
+        preferPromoMailboxContext: mailboxContext
+          ? isPromoMailboxContext(mailboxContext)
+          : false,
+        mailboxContext,
+      },
     );
-
-    return contentLabel && contentLabel !== "Reply" ? contentLabel : "Other";
   };
   const doesMessageMatchCategorySmartFolder = (
     message: MailMessage,
@@ -14559,14 +14586,14 @@ function MailboxView({
   ) => {
     const renderContext = resolveSmartFolderRenderContextForMessage(message);
 
-    const contentLabel = getDisplayContentLabelForMessageInContext(
+    return getCanonicalDisplayContentCategoryForMessage(
       message,
       threadMessages,
-      renderContext.preferPromoMailboxContext,
-      renderContext.mailboxContext,
+      {
+        preferPromoMailboxContext: renderContext.preferPromoMailboxContext,
+        mailboxContext: renderContext.mailboxContext,
+      },
     );
-
-    return contentLabel && contentLabel !== "Reply" ? contentLabel : "Other";
   };
   const getSmartFolderVisiblePriorityBadgeForMessage = (message: MailMessage) => {
     const renderContext = resolveSmartFolderRenderContextForMessage(message);
