@@ -49,6 +49,11 @@ import type {
   PresetInboxId,
   ProviderId,
 } from "../../types/onboarding";
+import {
+  normalizeFocusPreferenceLevel,
+  normalizeFocusPreferences,
+  type SelectableFocusPreferenceLevel,
+} from "../../types/onboarding";
 import type { UserConfig } from "../../types/userConfig";
 import { NavigationBar } from "../onboarding/NavigationBar";
 import {
@@ -6990,7 +6995,7 @@ function resolveFocusPreferenceLevelForPriorityMessage(
   options?: PriorityVisibilityOptions,
 ) {
   if (hasUserCorrectedBusinessCategory(message, options?.manualLabelOverride)) {
-    return focusPreferences.business;
+    return normalizeFocusPreferenceLevel(focusPreferences.business);
   }
 
   const visibilityClassification = resolveVisibleClassification(message);
@@ -7007,31 +7012,31 @@ function resolveFocusPreferenceLevelForPriorityMessage(
     });
 
     if (heuristicCategorySignal === "Promo") {
-      return focusPreferences.promo;
+      return normalizeFocusPreferenceLevel(focusPreferences.promo);
     }
   }
 
   switch (visibilityClassification) {
     case "demo":
     case "high_priority_demo":
-      return focusPreferences.demos;
+      return normalizeFocusPreferenceLevel(focusPreferences.demos);
     case "promo":
-      return focusPreferences.promo;
+      return normalizeFocusPreferenceLevel(focusPreferences.promo);
     case "promo_reminder":
-      return focusPreferences.promoReminders;
+      return normalizeFocusPreferenceLevel(focusPreferences.promoReminders);
     case "finance":
-      return focusPreferences.finance;
+      return normalizeFocusPreferenceLevel(focusPreferences.finance);
     case "royalty_statement":
-      return focusPreferences.royalties;
+      return normalizeFocusPreferenceLevel(focusPreferences.royalties);
     case "business":
-      return focusPreferences.business;
+      return normalizeFocusPreferenceLevel(focusPreferences.business);
     case "business_reminder":
-      return focusPreferences.paymentReminders;
+      return normalizeFocusPreferenceLevel(focusPreferences.paymentReminders);
     case "distributor_update":
-      return focusPreferences.distribution;
+      return normalizeFocusPreferenceLevel(focusPreferences.distribution);
     case "workflow_update":
     case "info":
-      return focusPreferences.updates;
+      return normalizeFocusPreferenceLevel(focusPreferences.updates);
     default:
       return null;
   }
@@ -7072,10 +7077,6 @@ function getPriorityVisibilityAdjustedMessage(
     options,
   );
   const visibilityClassification = resolveVisibleClassification(message);
-  const shouldRespectPromoHighPreference =
-    focusPreferenceLevel === "high" &&
-    (visibilityClassification === "promo" ||
-      visibilityClassification === "promo_reminder");
   const shouldRespectFinanceNormalPreference =
     focusPreferenceLevel === "medium" && visibilityClassification === "finance";
   const hasCorrectedBusinessCategory = hasUserCorrectedBusinessCategory(
@@ -7091,7 +7092,6 @@ function getPriorityVisibilityAdjustedMessage(
 
   if (
     hasProtectedPriorityVisibility(message) &&
-    !shouldRespectPromoHighPreference &&
     !shouldRespectFinanceNormalPreference
   ) {
     return message;
@@ -7111,16 +7111,6 @@ function getPriorityVisibilityAdjustedMessage(
   // sole source of truth. Clear signal, final_visibility, and action so that stale
   // backend decisions (made without the user's focus preferences) cannot override
   // what the user explicitly configured.
-  if (focusPreferenceLevel === "high") {
-    return {
-      ...message,
-      signal: undefined,
-      final_visibility: undefined,
-      action: undefined,
-      priorityScore: "high" as const,
-    };
-  }
-
   if (focusPreferenceLevel === "medium") {
     return {
       ...message,
@@ -7194,10 +7184,6 @@ function getVisiblePriorityBadgeForWorkspaceMessage(
   ) {
     if (focusPreferenceLevel === "low") {
       return "LOW" as const;
-    }
-
-    if (focusPreferenceLevel === "high") {
-      return "PRIORITY" as const;
     }
   }
 
@@ -14000,10 +13986,6 @@ function MailboxView({
   const resolveOnboardingVisibilityMode = (message: MailMessage) => {
     const preferenceLevel = resolveFocusPreferenceLevelForMessage(message);
 
-    if (preferenceLevel === "high") {
-      return "show_priority" as const;
-    }
-
     if (preferenceLevel === "medium") {
       return "show_normal" as const;
     }
@@ -14033,11 +14015,9 @@ function MailboxView({
       ...message,
       signal: undefined,
       priorityScore:
-        visibilityMode === "show_priority"
-          ? ("high" as const)
-          : visibilityMode === "show_normal"
-            ? ("medium" as const)
-            : ("low" as const),
+        visibilityMode === "show_normal"
+          ? ("medium" as const)
+          : ("low" as const),
     };
   };
   const getVisiblePriorityBadgeForMessage = (message: MailMessage) => {
@@ -20987,10 +20967,7 @@ function MailboxView({
                           : hasOnboardingControlledDemoBadge &&
                               demoFocusPreferenceLevel === "low"
                             ? "LOW"
-                            : hasOnboardingControlledDemoBadge &&
-                                demoFocusPreferenceLevel === "high"
-                              ? "PRIORITY"
-                              : priorityBadge;
+                            : priorityBadge;
                       const senderTextClass =
                         themeMode === "dark"
                           ? message.unread
@@ -24677,11 +24654,10 @@ const settingsPrimaryActionClass =
   `inline-flex h-10 items-center justify-center rounded-full px-5 text-[0.72rem] font-medium uppercase tracking-[0.16em] ${primaryActionSurfaceClass}`;
 const settingsDangerActionClass =
   "inline-flex h-10 items-center justify-center rounded-full border border-[color:rgba(146,82,73,0.34)] bg-[linear-gradient(180deg,rgba(170,103,93,0.96),rgba(138,76,67,0.98))] px-5 text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[color:rgba(255,248,244,0.98)] shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_8px_18px_rgba(123,70,61,0.14)] transition-[background-color,border-color,color,transform,box-shadow] duration-150 hover:border-[color:rgba(132,72,64,0.42)] hover:bg-[linear-gradient(180deg,rgba(156,91,82,0.98),rgba(126,67,60,0.98))] active:scale-[0.99] focus-visible:outline-none";
-const focusPreferenceOptions: FocusPreferenceLevel[] = ["high", "medium", "low"];
-const focusPreferenceOptionLabels: Record<FocusPreferenceLevel, string> = {
+const focusPreferenceOptions: SelectableFocusPreferenceLevel[] = ["medium", "low"];
+const focusPreferenceOptionLabels: Record<SelectableFocusPreferenceLevel, string> = {
   low: "Low",
   medium: "Normal",
-  high: "Priority",
 };
 type FocusPreferences = UserConfig["focusPreferences"];
 type FocusPreferenceField = keyof FocusPreferences;
@@ -24742,12 +24718,8 @@ function normalizeFocusPreferenceOverrides(
   return focusPreferenceFields.reduce<FocusPreferenceOverrides>((nextValue, field) => {
     const fieldValue = (value as Partial<Record<FocusPreferenceField, unknown>>)[field];
 
-    if (
-      fieldValue === "high" ||
-      fieldValue === "medium" ||
-      fieldValue === "low"
-    ) {
-      nextValue[field] = fieldValue;
+    if (fieldValue === "high" || fieldValue === "medium" || fieldValue === "low") {
+      nextValue[field] = normalizeFocusPreferenceLevel(fieldValue);
     }
 
     return nextValue;
@@ -24779,7 +24751,7 @@ function resolveEffectiveFocusPreferences(
   overrides?: FocusPreferenceOverrides | null,
 ): FocusPreferences {
   return {
-    ...baseFocusPreferences,
+    ...normalizeFocusPreferences(baseFocusPreferences),
     ...normalizeFocusPreferenceOverrides(overrides),
   };
 }
@@ -24788,9 +24760,12 @@ function buildFocusPreferenceOverrides(
   baseFocusPreferences: FocusPreferences,
   nextFocusPreferences: FocusPreferences,
 ): FocusPreferenceOverrides {
+  const normalizedBaseFocusPreferences = normalizeFocusPreferences(baseFocusPreferences);
+  const normalizedNextFocusPreferences = normalizeFocusPreferences(nextFocusPreferences);
+
   return focusPreferenceFields.reduce<FocusPreferenceOverrides>((nextValue, field) => {
-    if (nextFocusPreferences[field] !== baseFocusPreferences[field]) {
-      nextValue[field] = nextFocusPreferences[field];
+    if (normalizedNextFocusPreferences[field] !== normalizedBaseFocusPreferences[field]) {
+      nextValue[field] = normalizedNextFocusPreferences[field];
     }
 
     return nextValue;
@@ -28706,7 +28681,7 @@ const FocusPreferencesSettingsCard = memo(function FocusPreferencesSettingsCard(
             Focus preferences
           </h2>
           <p className="max-w-xl text-[0.9rem] leading-6 text-[var(--workspace-text-muted)]">
-            Control what Cuevion prioritizes across your workspace.
+            Control which mail types stay normal or move lower across your workspace.
           </p>
         </div>
 
@@ -28838,7 +28813,7 @@ const FocusPreferencesSettingsCard = memo(function FocusPreferencesSettingsCard(
                     Unsaved changes
                   </div>
                   <div className="mt-1 text-[0.82rem] leading-6 text-[var(--workspace-text-muted)]">
-                    Apply to re-evaluate Inbox, Filtered, and Priority.
+                    Apply to update mail placement across this inbox.
                   </div>
                 </div>
                 <div className="flex items-center justify-end gap-3">
@@ -34095,17 +34070,21 @@ export function WorkspaceShell({
   const isWorkspaceMessageSpamSuppressed = (message: MessageIdentitySource) =>
     getCanonicalMessageIdentityKeys(message).some((key) => spamSuppressionKeySet.has(key));
   const isGuestInviteUser = authenticatedUser?.userType === "guest";
+  const normalizedUserFocusPreferences = useMemo(
+    () => normalizeFocusPreferences(userConfig.focusPreferences),
+    [userConfig.focusPreferences],
+  );
   const activeFocusPreferences = activeMailbox
     ? resolveEffectiveFocusPreferences(
-        userConfig.focusPreferences,
+        normalizedUserFocusPreferences,
         mailboxFocusPreferenceOverrides[activeMailbox.id],
       )
-    : userConfig.focusPreferences;
+    : normalizedUserFocusPreferences;
   const effectiveFocusPreferencesByMailbox = orderedMailboxes.reduce<
     Partial<Record<InboxId, FocusPreferences>>
   >((nextValue, candidate) => {
     nextValue[candidate.id] = resolveEffectiveFocusPreferences(
-      userConfig.focusPreferences,
+      normalizedUserFocusPreferences,
       mailboxFocusPreferenceOverrides[candidate.id],
     );
     return nextValue;
@@ -34128,7 +34107,7 @@ export function WorkspaceShell({
           },
           manualPriorityOverrides,
           manualLabelOverrides,
-          effectiveFocusPreferencesByMailbox[mailbox.id] ?? userConfig.focusPreferences,
+          effectiveFocusPreferencesByMailbox[mailbox.id] ?? normalizedUserFocusPreferences,
           {
             preferPromoMailboxContext: isPromoMailboxContext(mailbox),
           },
@@ -34176,7 +34155,7 @@ export function WorkspaceShell({
     productAccess,
     showBundleOrganizerManagedMail,
     spamSuppressionKeySet,
-    userConfig.focusPreferences,
+    normalizedUserFocusPreferences,
   ]);
 
   useEffect(() => {

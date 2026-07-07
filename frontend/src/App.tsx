@@ -13,7 +13,10 @@ import {
   saveUserAccountConfig,
   type UserAccountConfig,
 } from "./lib/userConfigApi";
-import type { OnboardingState } from "./types/onboarding";
+import {
+  normalizeFocusPreferences,
+  type OnboardingState,
+} from "./types/onboarding";
 import type { UserConfig } from "./types/userConfig";
 
 const ONBOARDING_STATE_STORAGE_KEY = "label-inbox-ai-onboarding-state";
@@ -129,7 +132,7 @@ function buildUserConfig(state: OnboardingState): UserConfig {
   return {
     primaryRole: state.primaryRole,
     internalRole: state.internalRole,
-    focusPreferences: state.focusPreferences,
+    focusPreferences: normalizeFocusPreferences(state.focusPreferences),
     inboxCount: state.inboxCount,
     selectedInboxes: state.selectedInboxes,
     primaryInboxType: state.primaryInboxType,
@@ -198,10 +201,7 @@ function normalizeOnboardingState(value: Partial<OnboardingState>): OnboardingSt
     internalRole: value.internalRole ?? null,
     primaryInbox: value.primaryInbox ?? initialOnboardingState.primaryInbox,
     primaryInboxType: value.primaryInboxType ?? null,
-    focusPreferences: {
-      ...initialOnboardingState.focusPreferences,
-      ...(value.focusPreferences ?? {}),
-    },
+    focusPreferences: normalizeFocusPreferences(value.focusPreferences),
     customInboxes: Array.isArray(value.customInboxes) ? value.customInboxes : [],
     inboxConnections: {
       ...initialOnboardingState.inboxConnections,
@@ -1582,9 +1582,11 @@ function CuevionApp() {
   );
   const [onboardingState, setOnboardingState] = useState<OnboardingState>(
     () =>
-      persistedOnboardingSession?.state ??
-      persistedOnboardingDraft?.state ??
-      initialOnboardingState,
+      normalizeOnboardingState(
+        persistedOnboardingSession?.state ??
+          persistedOnboardingDraft?.state ??
+          initialOnboardingState,
+      ),
   );
   const [userConfig, setUserConfig] = useState<UserConfig | null>(() =>
     persistedOnboardingSession?.state ? buildUserConfig(persistedOnboardingSession.state) : null,

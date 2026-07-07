@@ -17,11 +17,12 @@ import type {
   CustomInboxDefinition,
   CustomImapSettings,
   CustomSmtpSettings,
-  FocusPreferenceLevel,
   InboxId,
   OnboardingState,
   ProviderId,
+  SelectableFocusPreferenceLevel,
 } from "../../types/onboarding";
+import { normalizeFocusPreferences } from "../../types/onboarding";
 import type { UserConfig } from "../../types/userConfig";
 import { NavigationBar } from "./NavigationBar";
 import { ProgressIndicator } from "./ProgressIndicator";
@@ -63,7 +64,7 @@ export function OnboardingFlow({
   const sidebarHelperText =
     (
       {
-        1: "Choose what should land in Priority first. Everything else starts as Normal.",
+        1: "Choose which mail types stay Normal and which should be Low.",
         2: "Connect at least one source account. More inboxes can be added later.",
       } as const
     )[step as 1 | 2] ?? null;
@@ -90,9 +91,10 @@ export function OnboardingFlow({
     const connection = getInboxConnection(state, inboxId);
     return connection.connected || connection.connectionStatus === "connected";
   });
-  const priorityFocusLabels = onboardingFocusItems
+  const normalizedFocusPreferences = normalizeFocusPreferences(state.focusPreferences);
+  const lowFocusLabels = onboardingFocusItems
     .filter((item) =>
-      item.fields.some((field) => state.focusPreferences[field] === "high"),
+      item.fields.every((field) => normalizedFocusPreferences[field] === "low"),
     )
     .map((item) => item.label);
 
@@ -106,7 +108,7 @@ export function OnboardingFlow({
 
   const setFocusPreference = (
     fields: Array<keyof OnboardingState["focusPreferences"]>,
-    value: FocusPreferenceLevel,
+    value: SelectableFocusPreferenceLevel,
   ) => {
     onStateChange((current) => ({
       ...current,
@@ -120,7 +122,7 @@ export function OnboardingFlow({
   const userConfig: UserConfig = {
     primaryRole: state.primaryRole,
     internalRole: state.internalRole,
-    focusPreferences: state.focusPreferences,
+    focusPreferences: normalizedFocusPreferences,
     inboxCount: state.inboxCount,
     selectedInboxes: state.selectedInboxes,
     primaryInboxType: state.primaryInboxType,
@@ -379,7 +381,7 @@ export function OnboardingFlow({
         return (
           <StepComplete
             connectedInboxCount={connectedInboxIds.length}
-            priorityFocusLabels={priorityFocusLabels}
+            lowFocusLabels={lowFocusLabels}
           />
         );
       default:

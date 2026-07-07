@@ -1,4 +1,7 @@
-import type { FocusPreferenceLevel, OnboardingState } from "../../types/onboarding";
+import type {
+  OnboardingState,
+  SelectableFocusPreferenceLevel,
+} from "../../types/onboarding";
 
 type FocusPreferenceKey = keyof OnboardingState["focusPreferences"];
 
@@ -29,10 +32,9 @@ export const onboardingFocusItems: Array<{
   },
 ];
 
-const preferenceLevels: FocusPreferenceLevel[] = ["high", "medium", "low"];
+const preferenceLevels: SelectableFocusPreferenceLevel[] = ["medium", "low"];
 
-const preferenceLevelLabels: Record<FocusPreferenceLevel, string> = {
-  high: "Priority",
+const preferenceLevelLabels: Record<SelectableFocusPreferenceLevel, string> = {
   medium: "Normal",
   low: "Low",
 };
@@ -41,10 +43,6 @@ function resolveItemLevel(
   value: OnboardingState["focusPreferences"],
   fields: FocusPreferenceKey[],
 ) {
-  if (fields.some((field) => value[field] === "high")) {
-    return "high";
-  }
-
   if (fields.every((field) => value[field] === "low")) {
     return "low";
   }
@@ -54,7 +52,7 @@ function resolveItemLevel(
 
 interface StepFocusPreferencesProps {
   value: OnboardingState["focusPreferences"];
-  onChange: (fields: FocusPreferenceKey[], value: FocusPreferenceLevel) => void;
+  onChange: (fields: FocusPreferenceKey[], value: SelectableFocusPreferenceLevel) => void;
 }
 
 export function StepFocusPreferences({
@@ -68,8 +66,8 @@ export function StepFocusPreferences({
           Set your focus
         </h2>
         <p className="max-w-2xl text-base leading-7 text-ink/68">
-          Choose what Cuevion should prioritize first. You can change this later
-          in Settings &gt; Focus.
+          Choose which mail types stay normal and which should be lowered. You can
+          change this later in Settings &gt; Focus.
         </p>
       </div>
 
@@ -86,7 +84,7 @@ export function StepFocusPreferences({
                 <div className="text-[0.98rem] font-semibold tracking-[-0.015em] text-ink">
                   {item.label}
                 </div>
-                <div className="grid grid-cols-3 gap-1.5 md:w-[19rem]">
+                <div className="grid grid-cols-2 gap-1.5 md:w-[12.5rem]">
                   {preferenceLevels.map((level) => {
                     const selected = selectedLevel === level;
 
@@ -113,7 +111,7 @@ export function StepFocusPreferences({
       </div>
 
       <p className="text-sm leading-6 text-ink/52">
-        Normal is the default for anything you do not mark as Priority or Low.
+        Normal is the default for anything you do not mark as Low.
       </p>
     </section>
   );

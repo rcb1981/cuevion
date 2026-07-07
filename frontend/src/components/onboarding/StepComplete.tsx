@@ -2,12 +2,12 @@ import { onboardingText } from "../../copy/onboardingCopy";
 
 interface StepCompleteProps {
   connectedInboxCount: number;
-  priorityFocusLabels: string[];
+  lowFocusLabels: string[];
 }
 
 export function StepComplete({
   connectedInboxCount,
-  priorityFocusLabels,
+  lowFocusLabels,
 }: StepCompleteProps) {
   return (
     <section className="space-y-6 py-10">
@@ -24,12 +24,12 @@ export function StepComplete({
         <div className="grid gap-3 pt-2 md:grid-cols-2">
           <div className="rounded-[22px] border border-ink/10 bg-white/72 px-4 py-3">
             <div className="text-[0.7rem] font-semibold uppercase tracking-[0.16em] text-ink/42">
-              Priority focus
+              Low focus
             </div>
             <p className="mt-2 text-sm leading-6 text-ink/68">
-              {priorityFocusLabels.length > 0
-                ? priorityFocusLabels.join(", ")
-                : "No priority focus selected"}
+              {lowFocusLabels.length > 0
+                ? lowFocusLabels.join(", ")
+                : "No low focus selected"}
             </p>
           </div>
           <div className="rounded-[22px] border border-ink/10 bg-white/72 px-4 py-3">

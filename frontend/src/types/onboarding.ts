@@ -47,6 +47,7 @@ export type InboxConnectionStatus =
   | "connected"
   | "connection_failed";
 export type FocusPreferenceLevel = "high" | "medium" | "low";
+export type SelectableFocusPreferenceLevel = "medium" | "low";
 
 export interface CustomImapSettings {
   host: string;
@@ -106,4 +107,27 @@ export interface OnboardingState {
   selectedInboxes: InboxId[];
   customInboxes: CustomInboxDefinition[];
   inboxConnections: Record<string, InboxConnection>;
+}
+
+export function normalizeFocusPreferenceLevel(
+  value: unknown,
+): SelectableFocusPreferenceLevel {
+  return value === "low" ? "low" : "medium";
+}
+
+export function normalizeFocusPreferences(
+  value: Partial<OnboardingState["focusPreferences"]> | null | undefined,
+): OnboardingState["focusPreferences"] {
+  return {
+    demos: normalizeFocusPreferenceLevel(value?.demos),
+    promo: normalizeFocusPreferenceLevel(value?.promo),
+    finance: normalizeFocusPreferenceLevel(value?.finance),
+    legal: normalizeFocusPreferenceLevel(value?.legal),
+    business: normalizeFocusPreferenceLevel(value?.business),
+    updates: normalizeFocusPreferenceLevel(value?.updates),
+    distribution: normalizeFocusPreferenceLevel(value?.distribution),
+    royalties: normalizeFocusPreferenceLevel(value?.royalties),
+    promoReminders: normalizeFocusPreferenceLevel(value?.promoReminders),
+    paymentReminders: normalizeFocusPreferenceLevel(value?.paymentReminders),
+  };
 }
