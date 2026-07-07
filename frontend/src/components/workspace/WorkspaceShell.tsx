@@ -121,6 +121,8 @@ import {
   INBOX_SNAPSHOT_RECENT_GUARD_MS,
 } from "../../lib/inboxEngine";
 import { buildPriorityRuntimeSignalsForCandidates } from "../../lib/priorityRuntimeSignals";
+import { shouldAllowNormalPriority } from "../../lib/normalPriorityGate";
+import { buildNormalPriorityGateInput } from "../../lib/normalPriorityGateAdapter";
 import { formatPriorityReasonCopy, type PriorityReasonCopy } from "../../lib/priorityReasonCopy";
 import { applyLearningDecision } from "../../lib/applyLearningDecision";
 import type {
@@ -34471,7 +34473,7 @@ export function WorkspaceShell({
     getPriorityClearedIdentityKeys(mailboxId, message).some((key) =>
       priorityClearedKeySet.has(key),
     );
-  const livePriorityInboxEntries = (() => {
+  const broadLivePriorityInboxEntries = (() => {
     const seenMessageIds = new Set<string>();
     const uniqueEntries: Array<{
       mailboxId: InboxId;
@@ -34569,7 +34571,7 @@ export function WorkspaceShell({
   })();
   const priorityRuntimeSignalsForCandidates = useMemo(() => {
     const candidateMailboxIds = Array.from(
-      new Set(livePriorityInboxEntries.map(({ mailboxId }) => mailboxId)),
+      new Set(broadLivePriorityInboxEntries.map(({ mailboxId }) => mailboxId)),
     );
     const messagesByMailboxId = Object.fromEntries(
       candidateMailboxIds.map((mailboxId) => {
@@ -34589,14 +34591,27 @@ export function WorkspaceShell({
       }),
     );
     const runtimeManualPriorityOverrides = Object.fromEntries(
-      livePriorityInboxEntries.map(({ mailboxId, message }) => [
+      broadLivePriorityInboxEntries.map(({ mailboxId, message }) => [
         `${mailboxId}:${message.id}`,
         resolveManualPriorityOverride(manualPriorityOverrides, message),
       ]),
     );
+    const runtimeLearnedPrioritySelections = Object.fromEntries(
+      broadLivePriorityInboxEntries.map(({ mailboxId, message }) => [
+        `${mailboxId}:${message.id}`,
+        resolveSenderLearningEntry(message.from, senderCategoryLearning)?.entry
+          .sourcePrioritySelection,
+      ]),
+    );
+    const runtimeAssignedReviewContexts = Object.fromEntries(
+      broadLivePriorityInboxEntries.map(({ mailboxId, message }) => [
+        `${mailboxId}:${message.id}`,
+        Boolean(reviewController.getReviewBySourceId(message.id)),
+      ]),
+    );
 
     return buildPriorityRuntimeSignalsForCandidates({
-      candidateMessages: livePriorityInboxEntries.map(({ mailboxId, message }) => ({
+      candidateMessages: broadLivePriorityInboxEntries.map(({ mailboxId, message }) => ({
         ...message,
         mailboxId,
       })),
@@ -34606,15 +34621,51 @@ export function WorkspaceShell({
       connectedMailboxes: connectedOrderedMailboxes,
       authenticatedUserEmail: authenticatedUser?.email ?? activeWorkspaceEmail,
       manualPriorityOverrides: runtimeManualPriorityOverrides,
+      learnedPrioritySelections: runtimeLearnedPrioritySelections,
+      hasAssignedReviewContextByMessageKey: runtimeAssignedReviewContexts,
     });
   }, [
     activeWorkspaceEmail,
     authenticatedUser?.email,
+    broadLivePriorityInboxEntries,
     connectedOrderedMailboxes,
-    livePriorityInboxEntries,
     mailboxStore,
     manualPriorityOverrides,
+    reviewController,
+    senderCategoryLearning,
   ]);
+  const livePriorityInboxEntries = broadLivePriorityInboxEntries.filter(
+    ({ mailboxId, message }) => {
+      const messageKey = `${mailboxId}:${message.id}`;
+      const manualOverride = resolveManualPriorityOverride(
+        manualPriorityOverrides,
+        message,
+      );
+      const normalPriorityGateInput = buildNormalPriorityGateInput({
+        message,
+        runtimeSignal: priorityRuntimeSignalsForCandidates[messageKey],
+        currentLegacyPriority: {
+          hasVisiblePriorityBadge: true,
+          signal: message.signal ?? null,
+          ui_signal: message.ui_signal ?? null,
+          final_visibility: message.final_visibility ?? null,
+          priorityScore: message.priorityScore ?? null,
+          action: message.action ?? null,
+        },
+        manualOverride,
+        hasCollaborationContext: Boolean(
+          message.collaboration || message.isShared || message.sharedContext,
+        ),
+        hasAssignedReviewContext: Boolean(
+          reviewController.getReviewBySourceId(message.id),
+        ),
+        hasReplyProtection: message.internalClassification === "reply",
+        isStrongSystemRuleConcreteActionable: false,
+      });
+
+      return shouldAllowNormalPriority(normalPriorityGateInput);
+    },
+  );
   const priorityReasonCopyForCandidates = useMemo(
     () =>
       Object.fromEntries(
@@ -34629,7 +34680,6 @@ export function WorkspaceShell({
       ),
     [priorityRuntimeSignalsForCandidates],
   );
-  void priorityRuntimeSignalsForCandidates;
   const livePriorityInboxItems: ReviewItem[] = livePriorityInboxEntries.map(
     ({ mailboxId, mailboxTitle, message }) => {
       const resolvedPriorityMessageDateMs = resolveMailDateMs(message);
