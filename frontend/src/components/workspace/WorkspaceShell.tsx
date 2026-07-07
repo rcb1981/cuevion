@@ -14358,18 +14358,8 @@ function MailboxView({
       },
     );
   };
-  const getSmartFolderCandidateInboxRowSet = (
-    mailboxId: InboxId,
-    folder: SmartFolderDefinition,
-  ) => {
-    const hasLabelRule = folder.rules.some((rule) => rule.field === "Label");
-
-    if (hasLabelRule) {
-      return getSmartFolderMailboxCollections(mailboxId).Inbox;
-    }
-
-    return getSmartFolderVisibleInboxRowSet(mailboxId);
-  };
+  const getSmartFolderCandidateInboxRowSet = (mailboxId: InboxId) =>
+    getSmartFolderVisibleInboxRowSet(mailboxId);
   const resolveSmartFolderContentLabelForMessage = (
     message: MailMessage,
     mailboxId: InboxId,
@@ -14449,17 +14439,30 @@ function MailboxView({
   const getSmartFolderMessagesForMailbox = (
     mailboxId: InboxId,
     folder: SmartFolderDefinition,
-  ) =>
-    getSmartFolderOrganizerVisibleMessages(
-      getSmartFolderCandidateInboxRowSet(mailboxId, folder),
+  ) => {
+    const organizerVisibleMessages = getSmartFolderOrganizerVisibleMessages(
+      getSmartFolderCandidateInboxRowSet(mailboxId),
       mailboxId,
-    ).filter((message) =>
-      doesMessageMatchSmartFolder(
-        message,
-        folder,
-        resolveSmartFolderRuleMatchOptions(message, mailboxId),
-      ),
     );
+    const matchingThreadIds = new Set(
+      dedupeMessagesForNormalAppRenderedRows(
+        organizerVisibleMessages,
+        mailboxId,
+      )
+        .filter((message) =>
+          doesMessageMatchSmartFolder(
+            message,
+            folder,
+            resolveSmartFolderRuleMatchOptions(message, mailboxId),
+          ),
+        )
+        .map((message) => resolveSafeThreadGroupingKey(message, mailboxId)),
+    );
+
+    return organizerVisibleMessages.filter((message) =>
+      matchingThreadIds.has(resolveSafeThreadGroupingKey(message, mailboxId)),
+    );
+  };
   const smartFolderEntries = activeSmartFolder
     ? dedupeSmartFolderEntriesByCanonicalIdentity(
         smartFolderScopeMailboxIds.flatMap((mailboxId) =>
@@ -14613,12 +14616,12 @@ function MailboxView({
   // Only the newest one (by resolveMailDateMs) is kept as the representative row.
   // Older messages in the same thread remain accessible in the reading pane.
   //
-  // Scoped strictly to the Inbox folder — Sent, Drafts, Archive, etc. are unaffected.
-  // Smart Folder views keep their legacy flattened list; they are saved filters,
-  // not fixed system category inboxes.
-  const threadDedupedMessages = activeSmartFolder
-    ? visibleMessages
-    : dedupeMessagesForRenderedRows(visibleMessages, currentMessageLocationById);
+  // Smart Folder views are saved filters over the same rendered conversation rows
+  // as the normal inbox, so they share this representative-thread dedupe too.
+  const threadDedupedMessages = dedupeMessagesForRenderedRows(
+    visibleMessages,
+    currentMessageLocationById,
+  );
   const sharedRenderedMessages = dedupeMessagesForRenderedRows(
     workspaceSharedMessages,
     workspaceMessageLocationById,
