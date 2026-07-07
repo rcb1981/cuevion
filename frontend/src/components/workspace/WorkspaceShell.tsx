@@ -13984,6 +13984,10 @@ function MailboxView({
     message: MailMessage,
     nextFocusPreferences: UserConfig["focusPreferences"],
     preferPromoMailboxContext: boolean,
+    options?: {
+      applyStrictGateInSmartFolder?: boolean;
+      sourceMailboxId?: InboxId;
+    },
   ) {
     const manualOverride = resolveManualPriorityOverride(manualPriorityOverrides, message);
     const badge = getVisiblePriorityBadgeForWorkspaceMessage(
@@ -13999,14 +14003,14 @@ function MailboxView({
     if (
       badge !== "PRIORITY" ||
       manualOverride === "priority" ||
-      activeSmartFolderId !== null ||
+      (activeSmartFolderId !== null && !options?.applyStrictGateInSmartFolder) ||
       isSharedView
     ) {
       return badge;
     }
 
     return strictNormalPriorityAllowedMessageKeys.has(
-      createNormalPriorityMessageKey(mailbox.id, message),
+      createNormalPriorityMessageKey(options?.sourceMailboxId ?? mailbox.id, message),
     )
       ? "PRIORITY"
       : "NORMAL";
@@ -14501,6 +14505,7 @@ function MailboxView({
         focusPreferences,
         preferPromoMailboxContext: false,
         mailboxContext: null,
+        sourceMailboxId: mailbox.id,
       };
     }
 
@@ -14515,6 +14520,7 @@ function MailboxView({
         effectiveFocusPreferencesByMailbox[sourceMailboxId] ?? focusPreferences,
       preferPromoMailboxContext: isPromoMailboxContext(mailboxContext),
       mailboxContext,
+      sourceMailboxId,
     };
   };
   const resolveSmartFolderFocusPreferenceLevelForMessage = (message: MailMessage) => {
@@ -14548,6 +14554,10 @@ function MailboxView({
       message,
       renderContext.focusPreferences,
       renderContext.preferPromoMailboxContext,
+      {
+        applyStrictGateInSmartFolder: true,
+        sourceMailboxId: renderContext.sourceMailboxId,
+      },
     );
   };
   const getManualPriorityOverride = (message: MessageIdentitySource) =>
