@@ -182,6 +182,7 @@ type BundleOrganizerSurfaceProps = {
   liveMessages?: BundleOrganizerWorkspaceMessage[];
   hasLiveWorkspaceData?: boolean;
   connectedInboxCount?: number;
+  showLocalPriorityNav?: boolean;
 };
 
 const navItems: Array<{
@@ -2554,9 +2555,12 @@ export function BundleOrganizerSurface({
   liveMessages = [],
   hasLiveWorkspaceData = false,
   connectedInboxCount = 0,
+  showLocalPriorityNav = true,
 }: BundleOrganizerSurfaceProps) {
   const menuRef = useRef<HTMLDivElement>(null);
-  const [activeView, setActiveView] = useState<BundleOrganizerView>("priority");
+  const [activeView, setActiveView] = useState<BundleOrganizerView>(
+    showLocalPriorityNav ? "priority" : "demo",
+  );
   const [selectedMessageIdentityKey, setSelectedMessageIdentityKey] =
     useState<string | null>(null);
   const [contextMenu, setContextMenu] =
@@ -2582,6 +2586,13 @@ export function BundleOrganizerSurface({
     () => applyBundleWorkflowState(baseWorkspaceMessages, workflowState),
     [baseWorkspaceMessages, workflowState],
   );
+  const visibleNavItems = useMemo(
+    () =>
+      showLocalPriorityNav
+        ? navItems
+        : navItems.filter((item) => item.id !== "priority"),
+    [showLocalPriorityNav],
+  );
   useEffect(() => {
     const handleWorkflowStateChanged = () => {
       setWorkflowState(readBundleOrganizerWorkflowState());
@@ -2599,6 +2610,20 @@ export function BundleOrganizerSurface({
       );
     };
   }, []);
+  useEffect(() => {
+    if (showLocalPriorityNav || activeView !== "priority") {
+      return;
+    }
+
+    const fallbackView =
+      visibleNavItems.find((item) => item.id === "demo")?.id ??
+      visibleNavItems[0]?.id ??
+      "demo";
+
+    setActiveView(fallbackView);
+    setSelectedMessageIdentityKey(null);
+    setContextMenu(null);
+  }, [activeView, showLocalPriorityNav, visibleNavItems]);
   const selectedMessage = useMemo(
     () =>
       selectedMessageIdentityKey
@@ -3148,7 +3173,7 @@ export function BundleOrganizerSurface({
               aria-label="Organizer sections"
               className="flex gap-2 overflow-x-auto border-b border-white/10 pb-3 lg:block lg:overflow-visible lg:border-b-0 lg:border-r lg:bg-transparent lg:pb-0 lg:pr-4 xl:pr-5"
             >
-              {navItems.map((item) => {
+              {visibleNavItems.map((item) => {
                 const isActive = item.id === activeView;
                 const count = counts[item.id] ?? 0;
 

@@ -39631,6 +39631,7 @@ export function WorkspaceShell({
                 liveMessages={bundleOrganizerLiveMessages}
                 hasLiveWorkspaceData={bundleOrganizerHasLiveWorkspaceData}
                 connectedInboxCount={connectedInboxCount}
+                showLocalPriorityNav={false}
               />
             ) : activeSection === "Activity" ||
               activeSection === "Notifications" ||
