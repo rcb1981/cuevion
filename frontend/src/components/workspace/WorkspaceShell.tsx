@@ -7619,6 +7619,15 @@ function resolveDisplayContentLabel(
     return mapDisplayContentClassificationToLabel(underlyingClassification);
   }
 
+  const messageSignalContentLabel = getVisibleCategoryLabel({
+    ...message,
+    internalClassification: undefined,
+  });
+
+  if (messageSignalContentLabel !== "Reply" && messageSignalContentLabel !== "Other") {
+    return messageSignalContentLabel;
+  }
+
   return (
     resolveExplicitMailboxContentLabel(options.mailboxContext) ??
     resolveContextualSubjectContentLabel(message, options.mailboxContext)
