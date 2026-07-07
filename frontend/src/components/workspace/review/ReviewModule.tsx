@@ -958,8 +958,20 @@ export function ReviewListView({
           </div>
 
           <section className="rounded-[30px] border border-[var(--workspace-border)] bg-[var(--workspace-card)] p-6 shadow-panel">
-          <div className="space-y-3">
-            {items.map((item) => {
+            {items.length === 0 ? (
+              <div className="flex min-h-[18rem] items-center justify-center px-4 py-8 text-center">
+                <div className="max-w-[22rem]">
+                  <h2 className="text-[1.35rem] font-medium tracking-tight text-[var(--workspace-text)]">
+                    No priority items right now
+                  </h2>
+                  <p className="mt-3 text-[0.92rem] leading-7 text-[var(--workspace-text-soft)]">
+                    Everything else is still available in your inboxes.
+                  </p>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {items.map((item) => {
               const displayOverride = displayOverrides[item.id];
 
               const isActionMenuOpen = openActionItemId === item.id;
@@ -1052,11 +1064,12 @@ export function ReviewListView({
                   </div>
                 </div>
               </div>
-              );
-            })}
-          </div>
-        </section>
-      </div>
+                  );
+                })}
+              </div>
+            )}
+          </section>
+        </div>
       </div>
       <ReviewToastView toast={controller.toast} />
     </>

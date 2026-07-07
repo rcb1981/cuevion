@@ -111,7 +111,8 @@ export function StepFocusPreferences({
       </div>
 
       <p className="text-sm leading-6 text-ink/52">
-        Normal is the default for anything you do not mark as Low.
+        Normal is the default. Mail types set to Low stay available, but are shown
+        less prominently.
       </p>
     </section>
   );

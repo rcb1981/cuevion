@@ -7055,6 +7055,10 @@ type PriorityVisibilityOptions = {
   manualLabelOverride?: ManualLabelOverride | null;
 };
 
+function createNormalPriorityMessageKey(mailboxId: InboxId, message: Pick<MailMessage, "id">) {
+  return `${mailboxId}:${message.id}`;
+}
+
 function hasUserCorrectedBusinessCategory(
   message: Pick<MailMessage, "category" | "categorySource">,
   manualLabelOverride?: ManualLabelOverride | null,
@@ -12750,6 +12754,7 @@ function MailboxView({
   notificationNavigationRequest,
   onConsumeNotificationNavigation,
   manualPriorityOverrides,
+  strictNormalPriorityAllowedMessageKeys,
   priorityReasonCopyByMessageKey,
   manualLabelOverrides,
   spamSuppressionKeys,
@@ -12825,6 +12830,7 @@ function MailboxView({
   notificationNavigationRequest?: NotificationNavigationRequest | null;
   onConsumeNotificationNavigation?: (requestKey: number) => void;
   manualPriorityOverrides: Partial<Record<string, ManualPriorityOverride>>;
+  strictNormalPriorityAllowedMessageKeys: ReadonlySet<string>;
   priorityReasonCopyByMessageKey: Record<string, PriorityReasonCopy>;
   manualLabelOverrides: ManualLabelOverrideStore;
   spamSuppressionKeys: string[];
@@ -13948,15 +13954,31 @@ function MailboxView({
     nextFocusPreferences: UserConfig["focusPreferences"],
     preferPromoMailboxContext: boolean,
   ) {
-    return getVisiblePriorityBadgeForWorkspaceMessage(
+    const manualOverride = resolveManualPriorityOverride(manualPriorityOverrides, message);
+    const badge = getVisiblePriorityBadgeForWorkspaceMessage(
       message,
-      resolveManualPriorityOverride(manualPriorityOverrides, message),
+      manualOverride,
       nextFocusPreferences,
       {
         preferPromoMailboxContext,
         manualLabelOverride: resolveManualLabelOverride(message),
       },
     );
+
+    if (
+      badge !== "PRIORITY" ||
+      manualOverride === "priority" ||
+      activeSmartFolder ||
+      isSharedView
+    ) {
+      return badge;
+    }
+
+    return strictNormalPriorityAllowedMessageKeys.has(
+      createNormalPriorityMessageKey(mailbox.id, message),
+    )
+      ? "PRIORITY"
+      : "NORMAL";
   }
   const shouldPreferCurrentMailboxPromoContext = isPromoMailboxContext(mailbox);
   const resolveFocusPreferenceLevelForMessage = (message: MailMessage) => {
@@ -34452,7 +34474,7 @@ export function WorkspaceShell({
     getPriorityClearedIdentityKeys(mailboxId, message).some((key) =>
       priorityClearedKeySet.has(key),
     );
-  const broadLivePriorityInboxEntries = (() => {
+  const normalPriorityGateCandidateEntries = (() => {
     const seenMessageIds = new Set<string>();
     const uniqueEntries: Array<{
       mailboxId: InboxId;
@@ -34515,42 +34537,11 @@ export function WorkspaceShell({
       }
     }
 
-    // Thread-level dedup: keep only the latest message per conversation thread first,
-    // then apply the final visible-priority check to that thread representative.
-    // This prevents an older priority message in the same thread from backfilling
-    // the Priority queue/count after the latest visible message was manually set to
-    // "Not priority".
-    const latestByThread = new Map<string, typeof uniqueEntries[number]>();
-
-    for (const entry of uniqueEntries) {
-      const threadKey = resolveThreadKey({
-        threadId: entry.message.threadId,
-        subject: entry.message.subject,
-        from: entry.message.from ?? entry.message.sender ?? "",
-      });
-      const existing = latestByThread.get(threadKey);
-
-      if (
-        !existing ||
-        resolveMailDateMs(entry.message) >= resolveMailDateMs(existing.message)
-      ) {
-        latestByThread.set(threadKey, entry);
-      }
-    }
-
-    return Array.from(latestByThread.values()).filter(({ message, mailboxId }) => {
-      const override = resolveManualPriorityOverride(manualPriorityOverrides, message);
-
-      return (
-        !isPriorityMessageCleared(mailboxId, message) &&
-        isPriorityQueueEligibleMessage(message, override) &&
-        isPriorityPageVisiblePriorityMessage(message, mailboxId)
-      );
-    });
+    return uniqueEntries;
   })();
   const priorityRuntimeSignalsForCandidates = useMemo(() => {
     const candidateMailboxIds = Array.from(
-      new Set(broadLivePriorityInboxEntries.map(({ mailboxId }) => mailboxId)),
+      new Set(normalPriorityGateCandidateEntries.map(({ mailboxId }) => mailboxId)),
     );
     const messagesByMailboxId = Object.fromEntries(
       candidateMailboxIds.map((mailboxId) => {
@@ -34570,27 +34561,27 @@ export function WorkspaceShell({
       }),
     );
     const runtimeManualPriorityOverrides = Object.fromEntries(
-      broadLivePriorityInboxEntries.map(({ mailboxId, message }) => [
-        `${mailboxId}:${message.id}`,
+      normalPriorityGateCandidateEntries.map(({ mailboxId, message }) => [
+        createNormalPriorityMessageKey(mailboxId, message),
         resolveManualPriorityOverride(manualPriorityOverrides, message),
       ]),
     );
     const runtimeLearnedPrioritySelections = Object.fromEntries(
-      broadLivePriorityInboxEntries.map(({ mailboxId, message }) => [
-        `${mailboxId}:${message.id}`,
+      normalPriorityGateCandidateEntries.map(({ mailboxId, message }) => [
+        createNormalPriorityMessageKey(mailboxId, message),
         resolveSenderLearningEntry(message.from, senderCategoryLearning)?.entry
           .sourcePrioritySelection,
       ]),
     );
     const runtimeAssignedReviewContexts = Object.fromEntries(
-      broadLivePriorityInboxEntries.map(({ mailboxId, message }) => [
-        `${mailboxId}:${message.id}`,
+      normalPriorityGateCandidateEntries.map(({ mailboxId, message }) => [
+        createNormalPriorityMessageKey(mailboxId, message),
         Boolean(reviewController.getReviewBySourceId(message.id)),
       ]),
     );
 
     return buildPriorityRuntimeSignalsForCandidates({
-      candidateMessages: broadLivePriorityInboxEntries.map(({ mailboxId, message }) => ({
+      candidateMessages: normalPriorityGateCandidateEntries.map(({ mailboxId, message }) => ({
         ...message,
         mailboxId,
       })),
@@ -34606,16 +34597,18 @@ export function WorkspaceShell({
   }, [
     activeWorkspaceEmail,
     authenticatedUser?.email,
-    broadLivePriorityInboxEntries,
     connectedOrderedMailboxes,
     mailboxStore,
     manualPriorityOverrides,
+    normalPriorityGateCandidateEntries,
     reviewController,
     senderCategoryLearning,
   ]);
-  const livePriorityInboxEntries = broadLivePriorityInboxEntries.filter(
-    ({ mailboxId, message }) => {
-      const messageKey = `${mailboxId}:${message.id}`;
+  const strictNormalPriorityAllowedMessageKeys = useMemo(() => {
+    const nextKeys = new Set<string>();
+
+    normalPriorityGateCandidateEntries.forEach(({ mailboxId, message }) => {
+      const messageKey = createNormalPriorityMessageKey(mailboxId, message);
       const manualOverride = resolveManualPriorityOverride(
         manualPriorityOverrides,
         message,
@@ -34645,9 +34638,61 @@ export function WorkspaceShell({
         isStrongSystemRuleConcreteActionable: false,
       });
 
-      return shouldAllowNormalPriority(normalPriorityGateInput);
-    },
-  );
+      if (shouldAllowNormalPriority(normalPriorityGateInput)) {
+        nextKeys.add(messageKey);
+      }
+    });
+
+    return nextKeys;
+  }, [
+    activeWorkspaceEmail,
+    authenticatedUser?.email,
+    connectedOrderedMailboxes,
+    manualPriorityOverrides,
+    normalPriorityGateCandidateEntries,
+    priorityRuntimeSignalsForCandidates,
+    reviewController,
+  ]);
+  const broadLivePriorityInboxEntries = (() => {
+    // Thread-level dedup: keep only the latest message per conversation thread first,
+    // then apply the final visible-priority check to that thread representative.
+    // This prevents an older priority message in the same thread from backfilling
+    // the Priority queue/count after the latest visible message was manually set to
+    // "Not priority".
+    const latestByThread = new Map<
+      string,
+      typeof normalPriorityGateCandidateEntries[number]
+    >();
+
+    for (const entry of normalPriorityGateCandidateEntries) {
+      const threadKey = resolveThreadKey({
+        threadId: entry.message.threadId,
+        subject: entry.message.subject,
+        from: entry.message.from ?? entry.message.sender ?? "",
+      });
+      const existing = latestByThread.get(threadKey);
+
+      if (
+        !existing ||
+        resolveMailDateMs(entry.message) >= resolveMailDateMs(existing.message)
+      ) {
+        latestByThread.set(threadKey, entry);
+      }
+    }
+
+    return Array.from(latestByThread.values()).filter(({ message, mailboxId }) => {
+      const override = resolveManualPriorityOverride(manualPriorityOverrides, message);
+      const messageKey = createNormalPriorityMessageKey(mailboxId, message);
+
+      return (
+        !isPriorityMessageCleared(mailboxId, message) &&
+        isPriorityQueueEligibleMessage(message, override) &&
+        isPriorityPageVisiblePriorityMessage(message, mailboxId) &&
+        strictNormalPriorityAllowedMessageKeys.has(messageKey)
+      );
+    });
+  })();
+  const livePriorityInboxEntries = broadLivePriorityInboxEntries;
   const priorityReasonCopyForCandidates = useMemo(
     () =>
       Object.fromEntries(
@@ -39461,6 +39506,9 @@ export function WorkspaceShell({
                   }}
                   isMobileViewport={isMobileWorkspaceViewport}
                   manualPriorityOverrides={manualPriorityOverrides}
+                  strictNormalPriorityAllowedMessageKeys={
+                    strictNormalPriorityAllowedMessageKeys
+                  }
                   priorityReasonCopyByMessageKey={priorityReasonCopyForCandidates}
                   manualLabelOverrides={manualLabelOverrides}
                   spamSuppressionKeys={spamSuppressionKeys}
