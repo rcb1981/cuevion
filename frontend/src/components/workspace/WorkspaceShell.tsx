@@ -34568,30 +34568,9 @@ export function WorkspaceShell({
           preferPromoMailboxContext: isPromoMailboxContext(candidate),
         },
       );
-      const candidateNormalAppInboxMessages =
-        filterBundleOrganizerManagedMessagesForNormalApp(
-          candidateVisibleInboxMessages,
-          {
-            productAccess,
-            showOrganizerManagedMail: showBundleOrganizerManagedMail,
-            resolveVisibleCategoryLabel: (message) => {
-              const manualLabelOverride = resolveManualLabelOverrideFromStore(
-                manualLabelOverrides,
-                message,
-              );
-
-              return (
-                manualLabelOverride ??
-                resolveVisibleCategoryLabelForMessageInContext(
-                  message,
-                  isPromoMailboxContext(candidate),
-                )
-              );
-            },
-          },
-        );
-
-      for (const message of candidateNormalAppInboxMessages) {
+      // Central Priority must evaluate the ready inbox before Bundle UI hiding so
+      // strict Priority Demo/Promo work can surface without changing normal lists.
+      for (const message of candidateVisibleInboxMessages) {
         if (seenMessageIds.has(message.id)) {
           continue;
         }
@@ -34672,6 +34651,7 @@ export function WorkspaceShell({
     reviewController,
     senderCategoryLearning,
   ]);
+  void priorityRuntimeSignalsForCandidates;
   const strictNormalPriorityAllowedMessageKeys = useMemo(() => {
     const nextKeys = new Set<string>();
 
