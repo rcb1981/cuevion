@@ -1861,6 +1861,56 @@ type SmartFolderRuleMatchOptions = {
   manualLabelOverride?: ManualLabelOverride | null;
 };
 
+function normalizeCategorySmartFolderLabel(value: string): SmartFolderVisibleLabel | null {
+  const normalizedValue = value
+    .trim()
+    .toLowerCase()
+    .replace(/[’]/g, "'")
+    .replace(/\s+/g, " ");
+
+  switch (normalizedValue) {
+    case "business":
+      return "business";
+    case "demo":
+      return "demo";
+    case "finance":
+      return "finance";
+    case "other":
+      return "other";
+    case "promo":
+    case "promos":
+    case "promo's":
+      return "promo";
+    case "update":
+    case "updates":
+      return "update";
+    default:
+      return null;
+  }
+}
+
+function resolveBuiltInCategorySmartFolderLabel(
+  folder: SmartFolderDefinition,
+): SmartFolderVisibleLabel | null {
+  const idLabel = normalizeCategorySmartFolderLabel(
+    folder.id
+      .trim()
+      .toLowerCase()
+      .replace(/^(?:default|builtin|built-in|category)[-_]/, "")
+      .replace(/^smart-folder-/, ""),
+  );
+
+  if (idLabel) {
+    return idLabel;
+  }
+
+  if (/^smart-folder-\d+/.test(folder.id)) {
+    return null;
+  }
+
+  return normalizeCategorySmartFolderLabel(folder.name);
+}
+
 function normalizeVisibleCategoryLabelValue(label: string): SmartFolderNormalizedLabel {
   switch (label.trim().toLowerCase()) {
     case "business":
@@ -14329,6 +14379,10 @@ function MailboxView({
     mailboxId: InboxId,
     folder: SmartFolderDefinition,
   ) => {
+    if (resolveBuiltInCategorySmartFolderLabel(folder)) {
+      return getSmartFolderMailboxCollections(mailboxId).Inbox;
+    }
+
     const hasLabelRule = folder.rules.some((rule) => rule.field === "Label");
 
     if (hasLabelRule) {
@@ -14337,6 +14391,41 @@ function MailboxView({
 
     return getSmartFolderVisibleInboxRowSet(mailboxId);
   };
+  const resolveSmartFolderContentLabelForMessage = (
+    message: MailMessage,
+    mailboxId: InboxId,
+  ): DisplayContentLabel => {
+    const mailboxContext = getSmartFolderMailboxContext(mailboxId);
+    const mailboxCollectionsForThread =
+      mailboxStore[mailboxId] ?? createEmptyMailboxCollections();
+    const threadSourceMessages = canonicalFolderOrder.flatMap(
+      (folder) => mailboxCollectionsForThread[folder],
+    );
+    const threadMessages = [
+      message,
+      ...getRecentThreadMessages(message, threadSourceMessages, {
+        mailboxId,
+        useSafeGrouping: true,
+      }),
+    ];
+
+    const contentLabel = getDisplayContentLabelForMessageInContext(
+      message,
+      threadMessages,
+      mailboxContext ? isPromoMailboxContext(mailboxContext) : false,
+      mailboxContext,
+    );
+
+    return contentLabel && contentLabel !== "Reply" ? contentLabel : "Other";
+  };
+  const doesMessageMatchCategorySmartFolder = (
+    message: MailMessage,
+    mailboxId: InboxId,
+    label: SmartFolderVisibleLabel,
+  ) =>
+    normalizeVisibleCategoryLabelValue(
+      resolveSmartFolderContentLabelForMessage(message, mailboxId),
+    ) === label;
   const isArchivedInCuevionForMailbox = (
     mailboxId: InboxId,
     message: MailMessage,
@@ -14375,16 +14464,27 @@ function MailboxView({
                 },
               }),
             )
-            .filter((message) =>
-              doesMessageMatchSmartFolder(
+            .filter((message) => {
+              const categorySmartFolderLabel =
+                resolveBuiltInCategorySmartFolderLabel(activeSmartFolder);
+
+              if (categorySmartFolderLabel) {
+                return doesMessageMatchCategorySmartFolder(
+                  message,
+                  mailboxId,
+                  categorySmartFolderLabel,
+                );
+              }
+
+              return doesMessageMatchSmartFolder(
                 message,
                 activeSmartFolder,
                 {
                   mailboxContext: getSmartFolderMailboxContext(mailboxId),
                   manualLabelOverride: resolveManualLabelOverride(message),
                 },
-              ),
-            )
+              );
+            })
             .filter((message) => !isArchivedInCuevionForMailbox(mailboxId, message))
             .map((message) => ({
               mailboxId,
@@ -14450,12 +14550,14 @@ function MailboxView({
   ) => {
     const renderContext = resolveSmartFolderRenderContextForMessage(message);
 
-    return getDisplayContentLabelForMessageInContext(
+    const contentLabel = getDisplayContentLabelForMessageInContext(
       message,
       threadMessages,
       renderContext.preferPromoMailboxContext,
       renderContext.mailboxContext,
     );
+
+    return contentLabel && contentLabel !== "Reply" ? contentLabel : "Other";
   };
   const getSmartFolderVisiblePriorityBadgeForMessage = (message: MailMessage) => {
     const renderContext = resolveSmartFolderRenderContextForMessage(message);
@@ -19381,6 +19483,8 @@ function MailboxView({
       ? scopeMailboxIds.flatMap((mailboxId) =>
           {
             const mailboxContext = getSmartFolderMailboxContext(mailboxId);
+            const categorySmartFolderLabel =
+              resolveBuiltInCategorySmartFolderLabel(folder);
 
             return getSmartFolderCandidateInboxRowSet(mailboxId, folder)
               .filter(
@@ -19395,15 +19499,23 @@ function MailboxView({
                       ),
                   }),
               )
-              .filter((message) =>
-                doesMessageMatchSmartFolder(
+              .filter((message) => {
+                if (categorySmartFolderLabel) {
+                  return doesMessageMatchCategorySmartFolder(
+                    message,
+                    mailboxId,
+                    categorySmartFolderLabel,
+                  );
+                }
+
+                return doesMessageMatchSmartFolder(
                   message,
                   folder,
                   {
                     mailboxContext,
                   },
-                ),
-              );
+                );
+              });
           },
         )
       : [];
