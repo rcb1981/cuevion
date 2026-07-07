@@ -13,6 +13,8 @@ import type {
 export type NormalPriorityGateAdapterMessageLike = NormalPriorityLegacyState & {
   subject?: string | null;
   threadId?: string | null;
+  from?: string | null;
+  sender?: string | null;
   internalClassification?: string | null;
   category?: string | null;
   isShared?: boolean | null;
@@ -42,11 +44,23 @@ export type BuildNormalPriorityGateInputOptions = {
   hasCollaborationContext?: boolean | null;
   hasAssignedReviewContext?: boolean | null;
   hasReplyProtection?: boolean | null;
+  ownEmailAddresses?: string[] | null;
+  connectedMailboxes?: Array<{ email?: string | null }> | null;
+  authenticatedUserEmail?: string | null;
   isStrongSystemRuleConcreteActionable?: boolean | null;
 };
 
 function normalizeSignal(value: unknown) {
   return typeof value === "string" ? value.trim().toLowerCase() : "";
+}
+
+function normalizeEmailAddress(value: string | null | undefined) {
+  const normalizedValue = (value ?? "").trim().toLowerCase();
+  const emailMatch = normalizedValue.match(
+    /([a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,})/i,
+  );
+
+  return emailMatch?.[1] ?? normalizedValue;
 }
 
 function isPrioritySource(value: unknown): value is PrioritySource {
@@ -133,6 +147,26 @@ function hasReplyProtectionContext(
     hasExplicitReplyProtectionFlag(message, explicitContext) ||
       normalizeSignal(message?.internalClassification) === "reply",
   );
+}
+
+function buildOwnEmailAddressSet(options: BuildNormalPriorityGateInputOptions) {
+  return new Set(
+    [
+      ...(options.ownEmailAddresses ?? []),
+      ...(options.connectedMailboxes ?? []).map((mailbox) => mailbox.email ?? ""),
+      options.authenticatedUserEmail ?? "",
+    ]
+      .map(normalizeEmailAddress)
+      .filter(Boolean),
+  );
+}
+
+function isFromOwnAddress(options: BuildNormalPriorityGateInputOptions) {
+  const message = options.message ?? null;
+  const ownAddressSet = buildOwnEmailAddressSet(options);
+  const senderAddress = normalizeEmailAddress(message?.from || message?.sender);
+
+  return Boolean(senderAddress && ownAddressSet.has(senderAddress));
 }
 
 function hasBackendPriorityVisibility(
@@ -266,6 +300,7 @@ export function buildNormalPriorityGateInput(
       message,
       options.hasReplyProtection,
     ),
+    isFromOwnAddress: isFromOwnAddress(options),
     manualOverride: options.manualOverride ?? null,
     isStrongSystemRuleConcreteActionable:
       options.isStrongSystemRuleConcreteActionable ?? false,

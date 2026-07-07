@@ -34660,6 +34660,9 @@ export function WorkspaceShell({
           reviewController.getReviewBySourceId(message.id),
         ),
         hasReplyProtection: message.internalClassification === "reply",
+        ownEmailAddresses: connectedOrderedMailboxes.map((mailbox) => mailbox.email),
+        connectedMailboxes: connectedOrderedMailboxes,
+        authenticatedUserEmail: authenticatedUser?.email ?? activeWorkspaceEmail,
         isStrongSystemRuleConcreteActionable: false,
       });
 

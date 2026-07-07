@@ -31,6 +31,7 @@ export type NormalPriorityGateInput = {
   hasCollaborationContext?: boolean | null;
   hasAssignedReviewContext?: boolean | null;
   hasReplyProtection?: boolean | null;
+  isFromOwnAddress?: boolean | null;
   manualOverride?: PriorityManualOverride | null;
   isStrongSystemRuleConcreteActionable?: boolean | null;
 };
@@ -70,6 +71,9 @@ export function shouldAllowNormalPriority(input: NormalPriorityGateInput) {
   const source = isPrioritySource(prioritySource?.source)
     ? prioritySource.source
     : "none";
+  const hasHighConfidenceReturnedReply = hasHighConfidenceReturnedReplyEvidence(
+    input.returnedReplyEvidence ?? null,
+  );
 
   if (input.manualOverride === "priority") {
     return true;
@@ -85,7 +89,7 @@ export function shouldAllowNormalPriority(input: NormalPriorityGateInput) {
       return hasPriorityLevel(prioritySource);
 
     case "returned_reply":
-      return hasHighConfidenceReturnedReplyEvidence(input.returnedReplyEvidence ?? null);
+      return input.isFromOwnAddress === true ? false : hasHighConfidenceReturnedReply;
 
     case "collaboration":
       return true;
@@ -94,7 +98,7 @@ export function shouldAllowNormalPriority(input: NormalPriorityGateInput) {
       return true;
 
     case "reply_protection":
-      return true;
+      return input.isFromOwnAddress === true ? false : hasHighConfidenceReturnedReply;
 
     case "strong_system_rule":
       return input.isStrongSystemRuleConcreteActionable === true;
@@ -115,7 +119,7 @@ export function shouldAllowNormalPriority(input: NormalPriorityGateInput) {
   }
 
   if (input.hasReplyProtection === true) {
-    return true;
+    return input.isFromOwnAddress === true ? false : hasHighConfidenceReturnedReply;
   }
 
   return false;

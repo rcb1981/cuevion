@@ -182,7 +182,7 @@ test("review state maps to assigned_review", () => {
   assert.equal(shouldAllowNormalPriority(input), true);
 });
 
-test("reply internal classification can preserve reply_protection where appropriate", () => {
+test("reply internal classification preserves reply_protection but does not allow by itself", () => {
   const input = build({
     message: {
       internalClassification: "reply",
@@ -191,7 +191,40 @@ test("reply internal classification can preserve reply_protection where appropri
 
   assert.equal(input.prioritySource?.source, "reply_protection");
   assert.equal(input.hasReplyProtection, false);
-  assert.equal(shouldAllowNormalPriority(input), true);
+  assert.equal(shouldAllowNormalPriority(input), false);
+});
+
+test("subject Re: alone does not allow normal Priority", () => {
+  const input = build({
+    message: {
+      subject: "Re: ZG / New unsigned tracks for Hysteria",
+    },
+  });
+
+  assert.equal(input.prioritySource?.source, "none");
+  assert.equal(shouldAllowNormalPriority(input), false);
+});
+
+test("subject Fwd: alone does not allow normal Priority", () => {
+  const input = build({
+    message: {
+      subject: "Fwd: NEW DEMO",
+    },
+  });
+
+  assert.equal(input.prioritySource?.source, "none");
+  assert.equal(shouldAllowNormalPriority(input), false);
+});
+
+test("subject Fw: alone does not allow normal Priority", () => {
+  const input = build({
+    message: {
+      subject: "Fw: NEW DEMO",
+    },
+  });
+
+  assert.equal(input.prioritySource?.source, "none");
+  assert.equal(shouldAllowNormalPriority(input), false);
 });
 
 test("final_visibility show_priority alone maps to backend_visibility, not concrete", () => {
@@ -254,6 +287,40 @@ test("demo/high_priority_demo alone does not become concrete normal Priority", (
   assert.equal(shouldAllowNormalPriority(input), false);
 });
 
+test("demo/high_priority_demo reply-like message without high-confidence returned reply does not allow normal Priority", () => {
+  const input = build({
+    message: {
+      subject: "Re: ZG / New unsigned tracks for Hysteria",
+      internalClassification: "high_priority_demo",
+    },
+    returnedReplyEvidence: {
+      hasEvidence: true,
+      confidence: "medium",
+    },
+  });
+
+  assert.equal(input.prioritySource?.source, "returned_reply");
+  assert.equal(input.returnedReplyEvidence?.confidence, "medium");
+  assert.equal(shouldAllowNormalPriority(input), false);
+});
+
+test("forwarded demo from own connected inbox address does not allow normal Priority", () => {
+  const input = build({
+    message: {
+      from: "info@hysteriarecs.com",
+      subject: "Fwd: NEW DEMO",
+      internalClassification: "demo",
+      signal: "Priority",
+      priorityScore: "high",
+    },
+    ownEmailAddresses: ["info@hysteriarecs.com"],
+  });
+
+  assert.equal(input.isFromOwnAddress, true);
+  assert.equal(input.prioritySource?.source, "ai_heuristic");
+  assert.equal(shouldAllowNormalPriority(input), false);
+});
+
 test("finance alone does not become concrete normal Priority", () => {
   const input = build({
     message: {
@@ -280,6 +347,66 @@ test("subject fallback does not become returned_reply high confidence", () => {
   assert.equal(input.prioritySource?.source, "returned_reply");
   assert.equal(input.returnedReplyEvidence?.confidence, "medium");
   assert.equal(shouldAllowNormalPriority(input), false);
+});
+
+test("own-address high-confidence returned_reply evidence fails closed", () => {
+  const input = build({
+    message: {
+      from: "Me <me@cuevion.com>",
+      subject: "Re: Licensing question",
+    },
+    ownEmailAddresses: ["me@cuevion.com"],
+    returnedReplyEvidence: {
+      hasEvidence: true,
+      confidence: "high",
+    },
+  });
+
+  assert.equal(input.isFromOwnAddress, true);
+  assert.equal(input.prioritySource?.source, "returned_reply");
+  assert.equal(shouldAllowNormalPriority(input), false);
+});
+
+test("own-address manual priority remains allowed", () => {
+  const input = build({
+    manualOverride: "priority",
+    message: {
+      from: "me@cuevion.com",
+      subject: "Fwd: NEW DEMO",
+    },
+    ownEmailAddresses: ["me@cuevion.com"],
+  });
+
+  assert.equal(input.isFromOwnAddress, true);
+  assert.equal(shouldAllowNormalPriority(input), true);
+});
+
+test("own-address collaboration remains allowed", () => {
+  const input = build({
+    message: {
+      from: "me@cuevion.com",
+      isShared: true,
+    },
+    ownEmailAddresses: ["me@cuevion.com"],
+  });
+
+  assert.equal(input.isFromOwnAddress, true);
+  assert.equal(input.prioritySource?.source, "collaboration");
+  assert.equal(shouldAllowNormalPriority(input), true);
+});
+
+test("own-address assigned_review remains allowed", () => {
+  const input = build({
+    message: {
+      from: "me@cuevion.com",
+      assignedReviewId: "review-1",
+    },
+    ownEmailAddresses: ["me@cuevion.com"],
+  });
+
+  assert.equal(input.isFromOwnAddress, true);
+  assert.equal(input.prioritySource?.source, "assigned_review");
+  assert.equal(shouldAllowNormalPriority(input), true);
 });
 
 test("normalized thread subject alone does not create returned_reply evidence", () => {
@@ -314,7 +441,7 @@ test("explicit generic runtime source is preserved over collaboration-looking me
   assert.equal(shouldAllowNormalPriority(input), true);
 });
 
-test("explicit reply protection flag is preserved with generic runtime source", () => {
+test("explicit reply protection flag is preserved with generic runtime source but does not allow by itself", () => {
   const input = build({
     message: {
       hasReplyProtection: true,
@@ -329,6 +456,29 @@ test("explicit reply protection flag is preserved with generic runtime source", 
   });
 
   assert.equal(input.prioritySource?.source, "backend_visibility");
+  assert.equal(input.hasReplyProtection, true);
+  assert.equal(shouldAllowNormalPriority(input), false);
+});
+
+test("explicit reply protection flag allows with high-confidence returned_reply evidence", () => {
+  const input = build({
+    message: {
+      hasReplyProtection: true,
+    },
+    runtimeSignal: {
+      prioritySource: {
+        level: "priority",
+        source: "reply_protection",
+        confidence: "medium",
+      },
+      returnedReplyEvidence: {
+        hasEvidence: true,
+        confidence: "high",
+      },
+    },
+  });
+
+  assert.equal(input.prioritySource?.source, "reply_protection");
   assert.equal(input.hasReplyProtection, true);
   assert.equal(shouldAllowNormalPriority(input), true);
 });

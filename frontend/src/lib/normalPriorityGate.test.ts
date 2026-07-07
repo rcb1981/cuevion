@@ -169,20 +169,31 @@ test("assigned review flag allows Priority", () => {
   );
 });
 
-test("reply_protection source allows Priority", () => {
+test("reply_protection source alone does not allow Priority", () => {
   assert.equal(
     allows({
       prioritySource: source({ level: "normal", source: "reply_protection" }),
     }),
-    true,
+    false,
   );
 });
 
-test("reply protection flag allows Priority", () => {
+test("reply protection flag alone does not allow Priority", () => {
   assert.equal(
     allows({
       hasReplyProtection: true,
       prioritySource: source({ level: "normal", source: "none" }),
+    }),
+    false,
+  );
+});
+
+test("reply protection backed by high-confidence returned_reply evidence allows Priority", () => {
+  assert.equal(
+    allows({
+      hasReplyProtection: true,
+      prioritySource: source({ level: "normal", source: "reply_protection" }),
+      returnedReplyEvidence: returnedReplyEvidence({ confidence: "high" }),
     }),
     true,
   );
@@ -207,6 +218,48 @@ test("backend_visibility alone does not allow Priority", () => {
       },
     }),
     false,
+  );
+});
+
+test("own-address returned_reply fails closed without another concrete source", () => {
+  assert.equal(
+    allows({
+      isFromOwnAddress: true,
+      prioritySource: source({ source: "returned_reply" }),
+      returnedReplyEvidence: returnedReplyEvidence({ confidence: "high" }),
+    }),
+    false,
+  );
+});
+
+test("own-address manual priority remains allowed", () => {
+  assert.equal(
+    allows({
+      isFromOwnAddress: true,
+      manualOverride: "priority",
+      prioritySource: source({ source: "manual" }),
+    }),
+    true,
+  );
+});
+
+test("own-address collaboration remains allowed", () => {
+  assert.equal(
+    allows({
+      isFromOwnAddress: true,
+      prioritySource: source({ level: "normal", source: "collaboration" }),
+    }),
+    true,
+  );
+});
+
+test("own-address assigned_review remains allowed", () => {
+  assert.equal(
+    allows({
+      isFromOwnAddress: true,
+      prioritySource: source({ level: "normal", source: "assigned_review" }),
+    }),
+    true,
   );
 });
 
