@@ -13968,7 +13968,7 @@ function MailboxView({
     if (
       badge !== "PRIORITY" ||
       manualOverride === "priority" ||
-      activeSmartFolder ||
+      activeSmartFolderId !== null ||
       isSharedView
     ) {
       return badge;
