@@ -14105,10 +14105,6 @@ function MailboxView({
       resolveFocusPreferenceLevelForMessage(message) === "low"
     );
   };
-  const isVisiblePriorityMessageForMessage = (message: MailMessage) =>
-    // Delegate to the same badge function that drives the visible Priority
-    // indicator in the list — ensures menus and badge always agree.
-    getVisiblePriorityBadgeForMessage(message) === "PRIORITY";
   const lowSignalInboxMessages = spamSuppressionFilteredMailboxCollections.Inbox.filter(
     (message) =>
       !message.collaboration &&
@@ -14567,8 +14563,12 @@ function MailboxView({
       getPriorityVisibilityAdjustedMessage(message),
       getManualPriorityOverride(message),
     );
+  const getRenderedPriorityBadgeForMessage = (message: MailMessage) =>
+    activeSmartFolder
+      ? getSmartFolderVisiblePriorityBadgeForMessage(message)
+      : getVisiblePriorityBadgeForMessage(message);
   const isVisiblePriorityMessage = (message: MailMessage) =>
-    isVisiblePriorityMessageForMessage(message);
+    getRenderedPriorityBadgeForMessage(message) === "PRIORITY";
   const folderMessages = activeSmartFolder
     ? smartFolderMessages
     : isSharedView
@@ -21043,9 +21043,7 @@ function MailboxView({
                         !hasProtectedPriorityVisibility(message) &&
                         getManualPriorityOverride(message) !== "priority";
                       const visibleSignal = getVisibleMessageSignal(message);
-                      const priorityBadge = activeSmartFolder
-                        ? getSmartFolderVisiblePriorityBadgeForMessage(message)
-                        : getVisiblePriorityBadgeForMessage(message);
+                      const priorityBadge = getRenderedPriorityBadgeForMessage(message);
                       const displayThreadMessages = getThreadMessages(message);
                       const categoryLabel = activeSmartFolder
                         ? getSmartFolderDisplayContentLabelForMessage(
