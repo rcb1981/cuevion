@@ -1,0 +1,338 @@
+/**
+ * Tests for normalPriorityGate.ts.
+ *
+ * Run with:
+ *   cd frontend && node -e "require('./node_modules/sucrase/register/ts.js'); require('./src/lib/normalPriorityGate.test.ts')"
+ */
+
+import assert from "node:assert/strict";
+import { shouldAllowNormalPriority } from "./normalPriorityGate";
+import type {
+  NormalPriorityGateInput,
+  NormalPriorityGatePrioritySource,
+  NormalPriorityGateReturnedReplyEvidence,
+} from "./normalPriorityGate";
+
+let passed = 0;
+let failed = 0;
+
+function test(name: string, fn: () => void) {
+  try {
+    fn();
+    console.log(`  ✓ ${name}`);
+    passed++;
+  } catch (err) {
+    console.error(`  ✗ ${name}`);
+    console.error(`    ${(err as Error).message}`);
+    failed++;
+  }
+}
+
+function source(
+  overrides: NormalPriorityGatePrioritySource,
+): NormalPriorityGatePrioritySource {
+  return {
+    level: "priority",
+    confidence: "high",
+    ...overrides,
+  };
+}
+
+function returnedReplyEvidence(
+  overrides: NormalPriorityGateReturnedReplyEvidence,
+): NormalPriorityGateReturnedReplyEvidence {
+  return {
+    hasEvidence: true,
+    confidence: "high",
+    ...overrides,
+  };
+}
+
+function allows(input: NormalPriorityGateInput) {
+  return shouldAllowNormalPriority(input);
+}
+
+console.log("\nnormalPriorityGate");
+
+test("manual source allows Priority", () => {
+  assert.equal(
+    allows({
+      prioritySource: source({ source: "manual" }),
+    }),
+    true,
+  );
+});
+
+test("manual removed does not allow Priority", () => {
+  assert.equal(
+    allows({
+      manualOverride: "removed",
+      prioritySource: source({ source: "manual" }),
+    }),
+    false,
+  );
+});
+
+test("learning source allows Priority", () => {
+  assert.equal(
+    allows({
+      prioritySource: source({ source: "learning" }),
+    }),
+    true,
+  );
+});
+
+test("learning low source does not allow Priority", () => {
+  assert.equal(
+    allows({
+      prioritySource: source({ level: "low", source: "learning" }),
+    }),
+    false,
+  );
+});
+
+test("returned_reply with high confidence allows Priority", () => {
+  assert.equal(
+    allows({
+      prioritySource: source({ source: "returned_reply", confidence: "medium" }),
+      returnedReplyEvidence: returnedReplyEvidence({ confidence: "high" }),
+    }),
+    true,
+  );
+});
+
+test("returned_reply with medium confidence does not allow Priority", () => {
+  assert.equal(
+    allows({
+      prioritySource: source({ source: "returned_reply" }),
+      returnedReplyEvidence: returnedReplyEvidence({ confidence: "medium" }),
+    }),
+    false,
+  );
+});
+
+test("returned_reply with low confidence does not allow Priority", () => {
+  assert.equal(
+    allows({
+      prioritySource: source({ source: "returned_reply" }),
+      returnedReplyEvidence: returnedReplyEvidence({ confidence: "low" }),
+    }),
+    false,
+  );
+});
+
+test("returned_reply with no confidence does not allow Priority", () => {
+  assert.equal(
+    allows({
+      prioritySource: source({ source: "returned_reply" }),
+      returnedReplyEvidence: { hasEvidence: false },
+    }),
+    false,
+  );
+});
+
+test("collaboration source allows Priority", () => {
+  assert.equal(
+    allows({
+      prioritySource: source({ level: "normal", source: "collaboration" }),
+    }),
+    true,
+  );
+});
+
+test("collaboration flag allows Priority", () => {
+  assert.equal(
+    allows({
+      hasCollaborationContext: true,
+      prioritySource: source({ level: "normal", source: "none" }),
+    }),
+    true,
+  );
+});
+
+test("assigned_review source allows Priority", () => {
+  assert.equal(
+    allows({
+      prioritySource: source({ level: "normal", source: "assigned_review" }),
+    }),
+    true,
+  );
+});
+
+test("assigned review flag allows Priority", () => {
+  assert.equal(
+    allows({
+      hasAssignedReviewContext: true,
+      prioritySource: source({ level: "normal", source: "none" }),
+    }),
+    true,
+  );
+});
+
+test("reply_protection source allows Priority", () => {
+  assert.equal(
+    allows({
+      prioritySource: source({ level: "normal", source: "reply_protection" }),
+    }),
+    true,
+  );
+});
+
+test("reply protection flag allows Priority", () => {
+  assert.equal(
+    allows({
+      hasReplyProtection: true,
+      prioritySource: source({ level: "normal", source: "none" }),
+    }),
+    true,
+  );
+});
+
+test("old visible Reply category alone does not allow Priority", () => {
+  assert.equal(
+    allows({
+      internalClassification: "reply",
+      prioritySource: source({ level: "normal", source: "none" }),
+    }),
+    false,
+  );
+});
+
+test("backend_visibility alone does not allow Priority", () => {
+  assert.equal(
+    allows({
+      prioritySource: source({ source: "backend_visibility" }),
+      currentLegacyPriority: {
+        final_visibility: "show_priority",
+      },
+    }),
+    false,
+  );
+});
+
+test("ai_heuristic alone does not allow Priority", () => {
+  assert.equal(
+    allows({
+      prioritySource: source({ source: "ai_heuristic" }),
+      currentLegacyPriority: {
+        priorityScore: "high",
+        signal: "Priority",
+      },
+    }),
+    false,
+  );
+});
+
+test("focus_preference alone does not allow Priority", () => {
+  assert.equal(
+    allows({
+      prioritySource: source({ source: "focus_preference" }),
+    }),
+    false,
+  );
+});
+
+test("priorityScore high or legacy visible badge alone does not allow Priority when source is generic", () => {
+  assert.equal(
+    allows({
+      prioritySource: source({ source: "ai_heuristic" }),
+      currentLegacyPriority: {
+        hasVisiblePriorityBadge: true,
+        priorityScore: "high",
+      },
+    }),
+    false,
+  );
+});
+
+test("signal and final_visibility-style generic Priority is blocked without concrete source", () => {
+  assert.equal(
+    allows({
+      prioritySource: source({ source: "backend_visibility" }),
+      currentLegacyPriority: {
+        final_visibility: "show_priority",
+        signal: "Priority",
+        ui_signal: "Priority",
+      },
+    }),
+    false,
+  );
+});
+
+test("signal and final_visibility-style generic Priority is allowed with concrete source", () => {
+  assert.equal(
+    allows({
+      prioritySource: source({ source: "learning" }),
+      currentLegacyPriority: {
+        final_visibility: "show_priority",
+        signal: "Priority",
+      },
+    }),
+    true,
+  );
+});
+
+test("strong_system_rule allows Priority when explicitly concrete/actionable", () => {
+  assert.equal(
+    allows({
+      isStrongSystemRuleConcreteActionable: true,
+      prioritySource: source({ source: "strong_system_rule" }),
+    }),
+    true,
+  );
+});
+
+test("strong_system_rule does not allow Priority without explicit concrete/actionable flag", () => {
+  assert.equal(
+    allows({
+      prioritySource: source({ source: "strong_system_rule" }),
+    }),
+    false,
+  );
+});
+
+test("none does not allow Priority", () => {
+  assert.equal(
+    allows({
+      prioritySource: source({ level: "normal", source: "none" }),
+    }),
+    false,
+  );
+});
+
+test("demo/high_priority_demo classification alone does not allow normal Priority", () => {
+  assert.equal(
+    allows({
+      internalClassification: "high_priority_demo",
+      prioritySource: source({ source: "strong_system_rule" }),
+    }),
+    false,
+  );
+});
+
+test("finance classification alone does not allow normal Priority", () => {
+  assert.equal(
+    allows({
+      internalClassification: "finance",
+      prioritySource: source({ level: "normal", source: "none" }),
+    }),
+    false,
+  );
+});
+
+test("finance classification allows Priority when reinforced by concrete source", () => {
+  assert.equal(
+    allows({
+      internalClassification: "finance",
+      prioritySource: source({ level: "normal", source: "assigned_review" }),
+    }),
+    true,
+  );
+});
+
+if (failed > 0) {
+  console.error(`\n${failed} normalPriorityGate test${failed === 1 ? "" : "s"} failed.`);
+  process.exit(1);
+}
+
+console.log(`\n${passed} normalPriorityGate tests passed.`);
