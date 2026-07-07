@@ -1855,18 +1855,89 @@ const smartFolderLabelOptions = [
 ] as const;
 
 type SmartFolderVisibleLabel = (typeof smartFolderLabelOptions)[number]["value"];
+type SystemSmartFolderDefinition = SmartFolderDefinition & {
+  kind: "system";
+  systemCategory: SmartFolderVisibleLabel;
+};
+type CustomSmartFolderDefinition = SmartFolderDefinition & {
+  kind: "custom";
+};
+type DisplayedSmartFolderDefinition =
+  | SystemSmartFolderDefinition
+  | CustomSmartFolderDefinition;
 type SmartFolderNormalizedLabel = SmartFolderVisibleLabel | "reply";
 type SmartFolderRuleMatchOptions = {
   mailboxContext?: Pick<ManagedWorkspaceInbox | OrderedMailbox, "id" | "title" | "email"> | null;
   manualLabelOverride?: ManualLabelOverride | null;
 };
 
-function normalizeCategorySmartFolderLabel(value: string): SmartFolderVisibleLabel | null {
-  const normalizedValue = value
+const SYSTEM_SMART_FOLDER_DEFINITIONS: SystemSmartFolderDefinition[] = [
+  {
+    id: "system-smart-folder-finance",
+    name: "Finance",
+    scope: "all",
+    selectedInboxIds: [],
+    rules: [],
+    kind: "system",
+    systemCategory: "finance",
+  },
+  {
+    id: "system-smart-folder-other",
+    name: "Other",
+    scope: "all",
+    selectedInboxIds: [],
+    rules: [],
+    kind: "system",
+    systemCategory: "other",
+  },
+  {
+    id: "system-smart-folder-update",
+    name: "Update",
+    scope: "all",
+    selectedInboxIds: [],
+    rules: [],
+    kind: "system",
+    systemCategory: "update",
+  },
+  {
+    id: "system-smart-folder-business",
+    name: "Business",
+    scope: "all",
+    selectedInboxIds: [],
+    rules: [],
+    kind: "system",
+    systemCategory: "business",
+  },
+  {
+    id: "system-smart-folder-demo",
+    name: "Demo",
+    scope: "all",
+    selectedInboxIds: [],
+    rules: [],
+    kind: "system",
+    systemCategory: "demo",
+  },
+  {
+    id: "system-smart-folder-promo",
+    name: "Promo's",
+    scope: "all",
+    selectedInboxIds: [],
+    rules: [],
+    kind: "system",
+    systemCategory: "promo",
+  },
+];
+
+function normalizeSmartFolderName(value: string) {
+  return value
     .trim()
     .toLowerCase()
     .replace(/[’]/g, "'")
     .replace(/\s+/g, " ");
+}
+
+function normalizeCategorySmartFolderLabel(value: string): SmartFolderVisibleLabel | null {
+  const normalizedValue = normalizeSmartFolderName(value);
 
   switch (normalizedValue) {
     case "business":
@@ -1889,32 +1960,52 @@ function normalizeCategorySmartFolderLabel(value: string): SmartFolderVisibleLab
   }
 }
 
-function resolveBuiltInCategorySmartFolderLabel(
-  folder: SmartFolderDefinition,
+function resolveSystemSmartFolderCategory(
+  folder: Pick<DisplayedSmartFolderDefinition, "id"> | null,
 ): SmartFolderVisibleLabel | null {
-  const nameLabel = normalizeCategorySmartFolderLabel(folder.name);
-
-  if (nameLabel) {
-    return nameLabel;
-  }
-
-  const idLabel = normalizeCategorySmartFolderLabel(
-    folder.id
-      .trim()
-      .toLowerCase()
-      .replace(/^(?:default|builtin|built-in|category)[-_]/, "")
-      .replace(/^smart-folder-/, ""),
-  );
-
-  if (idLabel) {
-    return idLabel;
-  }
-
-  if (/^smart-folder-\d+/.test(folder.id)) {
+  if (!folder) {
     return null;
   }
 
-  return null;
+  if (!isSystemSmartFolderId(folder.id)) {
+    return null;
+  }
+
+  return (
+    SYSTEM_SMART_FOLDER_DEFINITIONS.find((entry) => entry.id === folder.id)
+      ?.systemCategory ?? null
+  );
+}
+
+function isSystemSmartFolderId(value: string) {
+  return SYSTEM_SMART_FOLDER_DEFINITIONS.some((folder) => folder.id === value);
+}
+
+function isSystemSmartFolderDefinition(
+  folder: DisplayedSmartFolderDefinition | null,
+): folder is SystemSmartFolderDefinition {
+  return Boolean(folder && folder.kind === "system" && resolveSystemSmartFolderCategory(folder));
+}
+
+function isBuiltInSmartFolderName(value: string) {
+  return normalizeCategorySmartFolderLabel(value) !== null;
+}
+
+function shouldShadowSavedSmartFolder(folder: SmartFolderDefinition) {
+  return isBuiltInSmartFolderName(folder.name);
+}
+
+function toDisplayedCustomSmartFolder(
+  folder: SmartFolderDefinition,
+): CustomSmartFolderDefinition {
+  return {
+    id: folder.id,
+    name: folder.name,
+    scope: folder.scope,
+    selectedInboxIds: folder.selectedInboxIds,
+    rules: folder.rules,
+    kind: "custom",
+  };
 }
 
 function normalizeVisibleCategoryLabelValue(label: string): SmartFolderNormalizedLabel {
@@ -11204,7 +11295,7 @@ function WorkspaceSidebar({
   mailboxUnreadCounts: Record<string, number>;
   showMailboxUnreadCounts: boolean;
   orderedMailboxes: OrderedMailbox[];
-  smartFolders: SmartFolderDefinition[];
+  smartFolders: DisplayedSmartFolderDefinition[];
   onLogoutClick: () => void;
   onChangeSection: (view: WorkspaceSection) => void;
   onOpenMailbox: (mailbox: OrderedMailbox) => void;
@@ -11293,6 +11384,7 @@ function WorkspaceSidebar({
             smartFolders.map((folder) => {
               const active = activeSmartFolderId === folder.id;
               const isMenuOpen = smartFolderMenuId === folder.id;
+              const isSystemFolder = isSystemSmartFolderDefinition(folder);
 
               return (
                 <li key={folder.id} className="group relative">
@@ -11310,33 +11402,35 @@ function WorkspaceSidebar({
                   >
                     <span className="block truncate pl-4">{folder.name}</span>
                   </button>
-                  <button
-                    type="button"
-                    aria-label={`Manage ${folder.name}`}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      setSmartFolderMenuId((current) =>
-                        current === folder.id ? null : folder.id,
-                      );
-                    }}
-                    className={`absolute right-2 top-1/2 inline-flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-full border border-[var(--workspace-sidebar-border)] bg-[var(--workspace-sidebar)] text-[var(--workspace-sidebar-text-muted)] transition-[opacity,background-color,border-color,color] duration-150 focus-visible:outline-none ${
-                      isMenuOpen
-                        ? "opacity-100"
-                        : "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100"
-                    } hover:bg-[var(--workspace-sidebar-hover)] hover:text-[var(--workspace-sidebar-text)]`}
-                  >
-                    <svg
-                      aria-hidden="true"
-                      viewBox="0 0 16 16"
-                      className="h-3.5 w-3.5"
-                      fill="currentColor"
+                  {!isSystemFolder ? (
+                    <button
+                      type="button"
+                      aria-label={`Manage ${folder.name}`}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        setSmartFolderMenuId((current) =>
+                          current === folder.id ? null : folder.id,
+                        );
+                      }}
+                      className={`absolute right-2 top-1/2 inline-flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-full border border-[var(--workspace-sidebar-border)] bg-[var(--workspace-sidebar)] text-[var(--workspace-sidebar-text-muted)] transition-[opacity,background-color,border-color,color] duration-150 focus-visible:outline-none ${
+                        isMenuOpen
+                          ? "opacity-100"
+                          : "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100"
+                      } hover:bg-[var(--workspace-sidebar-hover)] hover:text-[var(--workspace-sidebar-text)]`}
                     >
-                      <circle cx="3.5" cy="8" r="1.1" />
-                      <circle cx="8" cy="8" r="1.1" />
-                      <circle cx="12.5" cy="8" r="1.1" />
-                    </svg>
-                  </button>
-                  {isMenuOpen ? (
+                      <svg
+                        aria-hidden="true"
+                        viewBox="0 0 16 16"
+                        className="h-3.5 w-3.5"
+                        fill="currentColor"
+                      >
+                        <circle cx="3.5" cy="8" r="1.1" />
+                        <circle cx="8" cy="8" r="1.1" />
+                        <circle cx="12.5" cy="8" r="1.1" />
+                      </svg>
+                    </button>
+                  ) : null}
+                  {!isSystemFolder && isMenuOpen ? (
                     <div
                       className="absolute right-2 top-full z-20 mt-2 min-w-[180px] rounded-[18px] border border-[var(--workspace-menu-border)] bg-[var(--workspace-menu-bg)] p-2 shadow-panel"
                       onMouseDown={(event) => event.stopPropagation()}
@@ -12850,7 +12944,7 @@ function MailboxView({
   orderedMailboxes: OrderedMailbox[];
   managedInboxes: ManagedWorkspaceInbox[];
   credentialStatuses: MailboxCredentialStatusStore;
-  smartFolders: SmartFolderDefinition[];
+  smartFolders: DisplayedSmartFolderDefinition[];
   activeSmartFolderId: string | null;
   onActiveSmartFolderChange: (folderId: string | null) => void;
   onBack: () => void;
@@ -14376,6 +14470,9 @@ function MailboxView({
   }, {});
   const activeSmartFolder =
     smartFolders.find((folder) => folder.id === activeSmartFolderId) ?? null;
+  const activeSystemSmartFolder = isSystemSmartFolderDefinition(activeSmartFolder)
+    ? activeSmartFolder
+    : null;
   const smartFolderScopeMailboxIds =
     activeSmartFolder?.scope === "selected" && activeSmartFolder.selectedInboxIds.length > 0
       ? activeSmartFolder.selectedInboxIds
@@ -14411,10 +14508,10 @@ function MailboxView({
   };
   const getSmartFolderCandidateInboxRowSet = (
     mailboxId: InboxId,
-    folder: SmartFolderDefinition,
+    folder: DisplayedSmartFolderDefinition,
   ) => {
-    if (resolveBuiltInCategorySmartFolderLabel(folder)) {
-      return getSmartFolderMailboxCollections(mailboxId).Inbox;
+    if (isSystemSmartFolderDefinition(folder)) {
+      return getSmartFolderVisibleInboxRowSet(mailboxId);
     }
 
     const hasLabelRule = folder.rules.some((rule) => rule.field === "Label");
@@ -14454,14 +14551,20 @@ function MailboxView({
       },
     );
   };
-  const doesMessageMatchCategorySmartFolder = (
+  const doesMessageMatchSystemSmartFolder = (
     message: MailMessage,
     mailboxId: InboxId,
-    label: SmartFolderVisibleLabel,
-  ) =>
-    normalizeVisibleCategoryLabelValue(
-      resolveSmartFolderContentLabelForMessage(message, mailboxId),
-    ) === label;
+    folder: SystemSmartFolderDefinition,
+  ) => {
+    const systemCategory = resolveSystemSmartFolderCategory(folder);
+
+    return Boolean(
+      systemCategory &&
+        normalizeVisibleCategoryLabelValue(
+          resolveSmartFolderContentLabelForMessage(message, mailboxId),
+        ) === systemCategory,
+    );
+  };
   const isArchivedInCuevionForMailbox = (
     mailboxId: InboxId,
     message: MailMessage,
@@ -14478,49 +14581,80 @@ function MailboxView({
       ),
     );
   };
+  const getSmartFolderOrganizerVisibleMessages = (
+    messages: MailMessage[],
+    mailboxId: InboxId,
+  ) =>
+    messages.filter(
+      (message) =>
+        !shouldHideBundleOrganizerManagedMessage(message, {
+          productAccess,
+          showOrganizerManagedMail: showBundleOrganizerManagedMail,
+          resolveVisibleCategoryLabel: (candidate) => {
+            const manualLabelOverride = resolveManualLabelOverride(candidate);
+            const mailboxContext = getSmartFolderMailboxContext(mailboxId);
+
+            return (
+              manualLabelOverride ??
+              resolveVisibleCategoryLabelForMessageInContext(
+                candidate,
+                mailboxContext ? isPromoMailboxContext(mailboxContext) : false,
+              )
+            );
+          },
+        }),
+    );
+  const getSystemSmartFolderMessagesForMailbox = (
+    mailboxId: InboxId,
+    folder: SystemSmartFolderDefinition,
+  ) => {
+    const organizerVisibleMessages = getSmartFolderOrganizerVisibleMessages(
+      getSmartFolderVisibleInboxRowSet(mailboxId),
+      mailboxId,
+    );
+    const matchingThreadIds = new Set(
+      dedupeMessagesForNormalAppRenderedRows(
+        organizerVisibleMessages,
+        mailboxId,
+      )
+        .filter((message) =>
+          doesMessageMatchSystemSmartFolder(message, mailboxId, folder),
+        )
+        .map((message) => resolveSafeThreadGroupingKey(message, mailboxId)),
+    );
+
+    return organizerVisibleMessages.filter((message) =>
+      matchingThreadIds.has(resolveSafeThreadGroupingKey(message, mailboxId)),
+    );
+  };
+  const getCustomSmartFolderMessagesForMailbox = (
+    mailboxId: InboxId,
+    folder: CustomSmartFolderDefinition,
+  ) =>
+    getSmartFolderOrganizerVisibleMessages(
+      getSmartFolderCandidateInboxRowSet(mailboxId, folder),
+      mailboxId,
+    ).filter((message) =>
+      doesMessageMatchSmartFolder(
+        message,
+        folder,
+        {
+          mailboxContext: getSmartFolderMailboxContext(mailboxId),
+          manualLabelOverride: resolveManualLabelOverride(message),
+        },
+      ),
+    );
+  const getSmartFolderMessagesForMailbox = (
+    mailboxId: InboxId,
+    folder: DisplayedSmartFolderDefinition,
+  ) =>
+    isSystemSmartFolderDefinition(folder)
+      ? getSystemSmartFolderMessagesForMailbox(mailboxId, folder)
+      : getCustomSmartFolderMessagesForMailbox(mailboxId, folder);
   const smartFolderEntries = activeSmartFolder
     ? dedupeSmartFolderEntriesByCanonicalIdentity(
         smartFolderScopeMailboxIds.flatMap((mailboxId) =>
-          getSmartFolderCandidateInboxRowSet(mailboxId, activeSmartFolder)
-            .filter((message) =>
-              !shouldHideBundleOrganizerManagedMessage(message, {
-                productAccess,
-                showOrganizerManagedMail: showBundleOrganizerManagedMail,
-                resolveVisibleCategoryLabel: (candidate) => {
-                  const manualLabelOverride = resolveManualLabelOverride(candidate);
-                  const mailboxContext = getSmartFolderMailboxContext(mailboxId);
-
-                  return (
-                    manualLabelOverride ??
-                    resolveVisibleCategoryLabelForMessageInContext(
-                      candidate,
-                      mailboxContext ? isPromoMailboxContext(mailboxContext) : false,
-                    )
-                  );
-                },
-              }),
-            )
-            .filter((message) => {
-              const categorySmartFolderLabel =
-                resolveBuiltInCategorySmartFolderLabel(activeSmartFolder);
-
-              if (categorySmartFolderLabel) {
-                return doesMessageMatchCategorySmartFolder(
-                  message,
-                  mailboxId,
-                  categorySmartFolderLabel,
-                );
-              }
-
-              return doesMessageMatchSmartFolder(
-                message,
-                activeSmartFolder,
-                {
-                  mailboxContext: getSmartFolderMailboxContext(mailboxId),
-                  manualLabelOverride: resolveManualLabelOverride(message),
-                },
-              );
-            })
+          getSmartFolderMessagesForMailbox(mailboxId, activeSmartFolder)
             .filter((message) => !isArchivedInCuevionForMailbox(mailboxId, message))
             .map((message) => ({
               mailboxId,
@@ -14671,8 +14805,9 @@ function MailboxView({
   // Older messages in the same thread remain accessible in the reading pane.
   //
   // Scoped strictly to the Inbox folder — Sent, Drafts, Archive, etc. are unaffected.
-  // Smart-folder and shared-view modes are also excluded.
-  const threadDedupedMessages = activeSmartFolder
+  // Custom rule-based Smart Folders keep their legacy flattened list; system
+  // category Smart Folders use the same thread-row dedupe as the normal inbox.
+  const threadDedupedMessages = activeSmartFolder && !activeSystemSmartFolder
     ? visibleMessages
     : dedupeMessagesForRenderedRows(visibleMessages, currentMessageLocationById);
   const sharedRenderedMessages = dedupeMessagesForRenderedRows(
@@ -19517,42 +19652,7 @@ function MailboxView({
         : orderedMailboxes.map((candidate) => candidate.id);
     const candidateMessages = folder
       ? scopeMailboxIds.flatMap((mailboxId) =>
-          {
-            const mailboxContext = getSmartFolderMailboxContext(mailboxId);
-            const categorySmartFolderLabel =
-              resolveBuiltInCategorySmartFolderLabel(folder);
-
-            return getSmartFolderCandidateInboxRowSet(mailboxId, folder)
-              .filter(
-                (message) =>
-                  !shouldHideBundleOrganizerManagedMessage(message, {
-                    productAccess,
-                    showOrganizerManagedMail: showBundleOrganizerManagedMail,
-                    resolveVisibleCategoryLabel: (candidate) =>
-                      getVisibleCategoryLabelForMessageInContext(
-                        candidate,
-                        mailboxContext ? isPromoMailboxContext(mailboxContext) : false,
-                      ),
-                  }),
-              )
-              .filter((message) => {
-                if (categorySmartFolderLabel) {
-                  return doesMessageMatchCategorySmartFolder(
-                    message,
-                    mailboxId,
-                    categorySmartFolderLabel,
-                  );
-                }
-
-                return doesMessageMatchSmartFolder(
-                  message,
-                  folder,
-                  {
-                    mailboxContext,
-                  },
-                );
-              });
-          },
+          getSmartFolderMessagesForMailbox(mailboxId, folder),
         )
       : [];
     const nextMessageId = resolveNextMessageId(candidateMessages, "Inbox", false, folderId);
@@ -33683,6 +33783,15 @@ export function WorkspaceShell({
       return [];
     }
   });
+  const displayedSmartFolders = useMemo<DisplayedSmartFolderDefinition[]>(
+    () => [
+      ...SYSTEM_SMART_FOLDER_DEFINITIONS,
+      ...smartFolders
+        .filter((folder) => !shouldShadowSavedSmartFolder(folder))
+        .map(toDisplayedCustomSmartFolder),
+    ],
+    [smartFolders],
+  );
   const [activeSmartFolderId, setActiveSmartFolderId] = useState<string | null>(null);
   const [smartFolderDeleteId, setSmartFolderDeleteId] = useState<string | null>(null);
   const [lastViewedGuidance, setLastViewedGuidance] = useState<string | null>(null);
@@ -39536,7 +39645,7 @@ export function WorkspaceShell({
         mailboxUnreadCounts={sidebarMailboxUnreadCounts}
         showMailboxUnreadCounts={areMailboxCountsHydrated}
         orderedMailboxes={sidebarMailboxes}
-        smartFolders={smartFolders}
+        smartFolders={displayedSmartFolders}
         onLogoutClick={() => setIsLogoutConfirmationOpen(true)}
         onChangeSection={handleChangeSection}
         onOpenMailbox={(mailbox) =>
@@ -39592,7 +39701,7 @@ export function WorkspaceShell({
 		                  orderedMailboxes={orderedMailboxes}
 	                  managedInboxes={savedManagedInboxes}
                   credentialStatuses={mailboxCredentialStatuses}
-	                  smartFolders={smartFolders}
+	                  smartFolders={displayedSmartFolders}
                   activeSmartFolderId={activeSmartFolderId}
                   onActiveSmartFolderChange={setActiveSmartFolderId}
                   onBack={handleReturnFromMailbox}
