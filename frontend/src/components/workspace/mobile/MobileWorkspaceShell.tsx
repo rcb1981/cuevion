@@ -486,7 +486,7 @@ export function MobileWorkspaceShell({
         ) : activeTab === "priority" ? (
           <MessageList
             messages={priorityMessages}
-            emptyTitle="No priority mail yet"
+            emptyTitle="No priority items yet"
             emptyDetail="Messages Cuevion marks as important will appear here."
             onOpenMessage={openMessage}
           />

@@ -909,7 +909,7 @@ export function ReviewListView({
             {filter}
           </h1>
           <p className="max-w-3xl text-lg leading-8 text-[var(--workspace-text-muted)]">
-            Cross-inbox priority items collected in one place so you can open the right thread and act immediately.
+            Priority items collected in one place so you can open the right thread and act immediately.
           </p>
         </header>
 
@@ -965,7 +965,7 @@ export function ReviewListView({
                     No priority items right now
                   </h2>
                   <p className="mt-3 text-[0.92rem] leading-7 text-[var(--workspace-text-soft)]">
-                    Everything else is still available in your inboxes.
+                    Everything else is still available where it belongs.
                   </p>
                 </div>
               </div>
