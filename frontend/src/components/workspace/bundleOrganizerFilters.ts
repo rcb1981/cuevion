@@ -15,9 +15,12 @@ export type BundleOrganizerActiveWorkStatus =
 
 export type BundleOrganizerMessageLike = {
   manualCategory?: "demo" | "promo" | null;
+  manualLabelCategory?: "demo" | "promo" | null;
+  learnedLabelCategory?: "demo" | "promo" | null;
   manualPriority?: boolean | null;
   internalClassification?: string | null;
   category?: string | null;
+  signal?: string | null;
   ui_signal?: string | null;
   v7_final_priority?: string | null;
   active_work_status?: BundleOrganizerActiveWorkStatus | string | null;
@@ -36,6 +39,33 @@ export const ACTIVE_WORK_PRIORITY_STATUSES = new Set([
   "waiting",
   "needs_reply",
   "follow_up",
+]);
+
+const ORGANIZER_NEUTRAL_INTERNAL_CLASSIFICATIONS = new Set([
+  "unknown",
+  "other",
+  "info",
+  "reply",
+  "incomplete_demo",
+]);
+
+const ORGANIZER_HARD_BLOCKING_INTERNAL_CLASSIFICATIONS = new Set([
+  "finance",
+  "royalty_statement",
+  "business",
+  "business_reminder",
+  "workflow_update",
+  "distributor_update",
+  "update",
+  "updates",
+  "spam",
+  "system",
+  "security",
+  "security_update",
+  "account",
+  "account_update",
+  "notification",
+  "no_reply",
 ]);
 
 const normalizeSignal = (value: unknown) =>
@@ -77,11 +107,28 @@ export function resolveOrganizerCategory(
     return manualCategory;
   }
 
+  const manualLabelCategory = normalizeSignal(message.manualLabelCategory);
+  if (manualLabelCategory === "demo" || manualLabelCategory === "promo") {
+    return manualLabelCategory;
+  }
+
+  const learnedLabelCategory = normalizeSignal(message.learnedLabelCategory);
+  if (learnedLabelCategory === "demo" || learnedLabelCategory === "promo") {
+    return learnedLabelCategory;
+  }
+
   const internalClassification = normalizeSignal(message.internalClassification);
   if (internalClassification) {
-    return isOrganizerVisibleCategory(internalClassification)
-      ? internalClassification
-      : null;
+    if (isOrganizerVisibleCategory(internalClassification)) {
+      return internalClassification;
+    }
+
+    if (
+      ORGANIZER_HARD_BLOCKING_INTERNAL_CLASSIFICATIONS.has(internalClassification) ||
+      !ORGANIZER_NEUTRAL_INTERNAL_CLASSIFICATIONS.has(internalClassification)
+    ) {
+      return null;
+    }
   }
 
   const category = normalizeSignal(message.category);
@@ -89,7 +136,10 @@ export function resolveOrganizerCategory(
     return isOrganizerVisibleCategory(category) ? category : null;
   }
 
-  return resolveOrganizerSignalFallback(message.ui_signal);
+  return (
+    resolveOrganizerSignalFallback(message.ui_signal) ??
+    resolveOrganizerSignalFallback(message.signal)
+  );
 }
 
 export function shouldShowInDemoInbox(message: BundleOrganizerMessageLike) {

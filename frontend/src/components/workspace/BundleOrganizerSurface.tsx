@@ -95,6 +95,8 @@ type BundleOrganizerMessage = {
   sourceMailbox: string;
   manualCategory?: "demo" | "promo";
   manualCategoryAt?: string | null;
+  manualLabelCategory?: "demo" | "promo";
+  learnedLabelCategory?: "demo" | "promo";
   internalClassification?: BundleOrganizerInternalClassification;
   category?: string;
   signal?: string;
@@ -151,6 +153,8 @@ export type BundleOrganizerWorkspaceMessage = {
   sourceMailbox: string;
   manualCategory?: "demo" | "promo";
   manualCategoryAt?: string | null;
+  manualLabelCategory?: "demo" | "promo";
+  learnedLabelCategory?: "demo" | "promo";
   internalClassification?: BundleOrganizerInternalClassification;
   category?: string;
   signal?: string;

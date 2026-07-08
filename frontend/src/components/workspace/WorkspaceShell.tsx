@@ -1075,6 +1075,19 @@ type SenderCategoryLearningEntry = {
   updatedAt?: string;
 };
 type SenderCategoryLearningStore = Record<string, SenderCategoryLearningEntry>;
+
+function resolveDemoPromoOrganizerCategoryFromLabel(
+  label: string | null | undefined,
+): "demo" | "promo" | null {
+  const normalizedLabel = label?.trim().toLowerCase();
+
+  if (normalizedLabel === "demo" || normalizedLabel === "promo") {
+    return normalizedLabel;
+  }
+
+  return null;
+}
+
 type MessageOwnershipInteractionEntry = {
   userId: string;
   count: number;
@@ -1275,6 +1288,7 @@ function resolveBundleOrganizerManagedCategory(
   const organizerCategory = resolveOrganizerCategory({
     internalClassification: message.internalClassification ?? null,
     category: message.category ?? null,
+    signal: message.signal ?? null,
     ui_signal: message.ui_signal ?? message.signal ?? null,
   });
 
@@ -34980,33 +34994,50 @@ export function WorkspaceShell({
 
               seenMessageKeys.add(messageKey);
 
-              const isOrganizerClassification =
-                message.internalClassification === "demo" ||
-                message.internalClassification === "high_priority_demo" ||
-                message.internalClassification === "promo" ||
-                message.internalClassification === "promo_reminder";
-              const normalizedOrganizerSignal = (
-                message.ui_signal ??
-                message.signal ??
-                ""
-              )
-                .trim()
-                .toLowerCase();
-              const hasOrganizerSignalFallback =
-                normalizedOrganizerSignal === "demo" ||
-                normalizedOrganizerSignal === "for review" ||
-                normalizedOrganizerSignal === "shortlist" ||
-                normalizedOrganizerSignal === "promo";
               const manualOrganizerTarget = resolveManualOrganizerInclusionFromStore(
                 manualOrganizerInclusions,
                 message,
               );
+              const manualLabelOverride = resolveManualLabelOverrideFromStore(
+                manualLabelOverrides,
+                message,
+              );
+              const manualLabelCategory =
+                resolveDemoPromoOrganizerCategoryFromLabel(manualLabelOverride);
+              const learnedLabelCategory =
+                manualLabelOverride !== undefined
+                  ? null
+                  : resolveDemoPromoOrganizerCategoryFromLabel(
+                      learningEngine.resolveSenderLearningEntry(
+                        message.from,
+                        senderCategoryLearning,
+                      )?.entry.learnedLabel,
+                    );
+              const visibleLabelCategory =
+                manualLabelOverride !== undefined
+                  ? manualLabelCategory
+                  : resolveDemoPromoOrganizerCategoryFromLabel(
+                      resolveVisibleCategoryLabelForMessageInContext(
+                        message,
+                        isPromoMailboxContext(mailbox),
+                      ),
+                    );
+              const messageCategory =
+                manualLabelOverride !== undefined
+                  ? manualLabelCategory
+                  : visibleLabelCategory ??
+                    resolveDemoPromoOrganizerCategoryFromLabel(message.category);
+              const organizerCategory = resolveOrganizerCategory({
+                manualCategory: manualOrganizerTarget,
+                manualLabelCategory,
+                learnedLabelCategory,
+                internalClassification: message.internalClassification,
+                category: messageCategory,
+                signal: message.signal,
+                ui_signal: message.ui_signal,
+              });
 
-              if (
-                !manualOrganizerTarget &&
-                !isOrganizerClassification &&
-                !hasOrganizerSignalFallback
-              ) {
+              if (!organizerCategory) {
                 return [];
               }
 
@@ -35031,7 +35062,10 @@ export function WorkspaceShell({
                   timestamp: message.timestamp || message.time,
                   sourceMailbox: mailbox.title,
                   manualCategory: manualOrganizerTarget,
+                  manualLabelCategory: manualLabelCategory ?? undefined,
+                  learnedLabelCategory: learnedLabelCategory ?? undefined,
                   internalClassification: message.internalClassification,
+                  category: messageCategory ?? undefined,
                   signal: message.signal,
                   uiSignal: message.ui_signal,
                   unread: message.unread,
