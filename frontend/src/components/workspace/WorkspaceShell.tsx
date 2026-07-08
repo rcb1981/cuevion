@@ -22962,7 +22962,7 @@ function MailboxView({
                 <button
                   type="button"
                   onClick={discardCompose}
-                  className="inline-flex h-9 items-center justify-center rounded-full border border-[var(--workspace-border)] bg-[var(--workspace-card-subtle)] px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-soft)] transition-[background-color,border-color,color,transform] duration-150 hover:border-[var(--workspace-border-hover)] hover:bg-[var(--workspace-hover-surface)] active:scale-[0.99] focus-visible:outline-none"
+                  className="inline-flex h-9 items-center justify-center rounded-full border border-[color:rgba(146,82,73,0.34)] bg-[linear-gradient(180deg,rgba(170,103,93,0.96),rgba(138,76,67,0.98))] px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[color:rgba(255,248,244,0.98)] shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_8px_18px_rgba(123,70,61,0.14)] transition-[background-color,border-color,color,transform,box-shadow] duration-150 hover:border-[color:rgba(132,72,64,0.42)] hover:bg-[linear-gradient(180deg,rgba(156,91,82,0.98),rgba(126,67,60,0.98))] active:scale-[0.99] focus-visible:outline-none"
                 >
                   Discard
                 </button>
