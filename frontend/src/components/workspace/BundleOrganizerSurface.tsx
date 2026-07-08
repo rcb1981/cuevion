@@ -291,7 +291,7 @@ const viewCopy: Record<
   },
 };
 
-const bundleModeDisabledReason = "Not connected in Bundle mode yet";
+const bundleModeDisabledReason = "Connect this workspace to use this action.";
 const contextMenuGap = 8;
 const contextMenuViewportPadding = 12;
 const contextMenuWidth = 190;

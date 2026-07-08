@@ -29289,7 +29289,7 @@ const AccountSettingsCard = memo(function AccountSettingsCard({
 
   const handleApplyProductAccessCode = () => {
     if (accessCodeDraft.trim().toUpperCase() !== BUNDLE_PILOT_ACCESS_CODE) {
-      setAccessCodeError("This access code is not valid.");
+      setAccessCodeError("That workspace code is not valid.");
       return;
     }
 
@@ -29429,15 +29429,15 @@ const AccountSettingsCard = memo(function AccountSettingsCard({
         <div className="mb-4 flex items-start justify-between gap-4">
           <div>
             <h2 className="text-[1.1rem] font-medium tracking-tight text-[var(--workspace-text)]">
-              Product access
+              Workspace mode
             </h2>
             <p className="mt-1 max-w-xl text-[0.9rem] leading-6 text-[var(--workspace-text-muted)]">
-              Unlock internal Cuevion pilot features for this workspace.
+              Manage the Cuevion workspace modules available here.
             </p>
           </div>
           {productAccess === "bundle" ? (
             <span className="shrink-0 rounded-full border border-[var(--workspace-status-success-border)] bg-[var(--workspace-status-success-bg)] px-3 py-1 text-[0.62rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-status-success-text)]">
-              Organizer
+              Cuevion Bundle
             </span>
           ) : null}
         </div>
@@ -29447,10 +29447,10 @@ const AccountSettingsCard = memo(function AccountSettingsCard({
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <div>
                 <div className="text-[0.92rem] font-medium text-[var(--workspace-status-success-text)]">
-                  Organizer access enabled
+                  Cuevion Bundle enabled
                 </div>
                 <p className="mt-1 text-[0.82rem] leading-6 text-[var(--workspace-text-muted)]">
-                  Organizer access is visible in the workspace navigation.
+                  Email Client and Organizer are available in this workspace.
                 </p>
               </div>
               <button
@@ -29458,14 +29458,14 @@ const AccountSettingsCard = memo(function AccountSettingsCard({
                 onClick={handleRemoveProductAccess}
                 className={settingsSubtleActionClass}
               >
-                Remove access
+                Switch to Email Client only
               </button>
             </div>
           </div>
         ) : (
           <div className={settingsCardSectionClass}>
             <label className="mb-2 block text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
-              Access code
+              Workspace code
             </label>
             <div className="flex flex-col gap-3 sm:flex-row">
               <input
@@ -29481,14 +29481,14 @@ const AccountSettingsCard = memo(function AccountSettingsCard({
                   }
                 }}
                 className={accessCodeError ? inputFieldErrorClass : inputFieldClass}
-                placeholder="Enter access code"
+                placeholder="Enter workspace code"
               />
               <button
                 type="button"
                 onClick={handleApplyProductAccessCode}
                 className={`${settingsPrimaryActionClass} h-[3.05rem] shrink-0 px-5`}
               >
-                Unlock
+                Apply
               </button>
             </div>
             {accessCodeError ? (
