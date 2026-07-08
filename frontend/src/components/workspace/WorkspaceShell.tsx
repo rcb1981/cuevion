@@ -5992,7 +5992,6 @@ const cuevionLearningLabelOptions: CuevionLearningLabel[] = [
   "Business",
   "Finance",
   "Update",
-  "Reply",
   "Other",
   "Spam",
 ];
@@ -6030,7 +6029,7 @@ function resolveLearningLabelFromCategory(
   learnedLabel?: CuevionLearningLabel,
 ): CuevionLearningLabel {
   if (learnedLabel) {
-    return learnedLabel;
+    return learnedLabel === "Reply" ? "Other" : learnedLabel;
   }
 
   if (sourcePrioritySelection === "Spam") {
