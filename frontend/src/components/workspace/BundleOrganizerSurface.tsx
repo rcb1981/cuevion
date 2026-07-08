@@ -23,6 +23,7 @@ import {
   writeBundleOrganizerWorkflowState,
   type BundleOrganizerWorkflowState,
 } from "./bundleOrganizerWorkflowState";
+import { normalizeThreadSubject } from "../../lib/inboxEngine";
 
 type BundleOrganizerView = "priority" | "shortlist" | "demo" | "promo" | "trash";
 type BundleOrganizerDemoStatusFilter =
@@ -1485,13 +1486,167 @@ function sortMessagesByDate(
   });
 }
 
-function groupMessagesByExplicitThread(
+const organizerFallbackThreadWindowMs = 60 * 24 * 60 * 60 * 1000;
+const organizerGenericThreadSubjects = new Set([
+  "",
+  "demo",
+  "demos",
+  "new demo",
+  "new demos",
+  "music demo",
+  "music demos",
+  "submission",
+  "music submission",
+  "new music",
+  "track",
+  "tracks",
+  "promo",
+  "promos",
+  "new promo",
+  "new promos",
+  "music",
+  "hello",
+  "hi",
+  "question",
+  "follow up",
+  "follow-up",
+]);
+
+function normalizeOrganizerParticipant(value?: string | null) {
+  const normalizedValue = (value ?? "").trim().toLowerCase();
+  const emailMatch = normalizedValue.match(
+    /([a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,})/i,
+  );
+
+  return emailMatch?.[1] ?? normalizedValue;
+}
+
+function hasOrganizerReplySubjectPrefix(subject: string) {
+  return /^(re|fwd|fw):\s*/i.test(subject.trim());
+}
+
+function hasOrganizerQuotedReplyMarker(message: BundleOrganizerMessage) {
+  const text = [message.snippet, ...(message.body ?? [])].join("\n");
+
+  return /\bon .{1,240} wrote:/i.test(text) || /\bwrote:/i.test(text) || /^>/m.test(text);
+}
+
+function getOrganizerCategoryGroup(message: BundleOrganizerMessage) {
+  const category = resolveOrganizerCategory(message);
+
+  if (category === "demo" || category === "high_priority_demo") {
+    return "demo";
+  }
+
+  if (category === "promo" || category === "promo_reminder") {
+    return "promo";
+  }
+
+  return null;
+}
+
+function getOrganizerFallbackThreadSeed(message: BundleOrganizerMessage) {
+  const normalizedSubject = normalizeThreadSubject(message.subject);
+
+  if (
+    normalizedSubject.length < 6 ||
+    organizerGenericThreadSubjects.has(normalizedSubject)
+  ) {
+    return null;
+  }
+
+  const senderKey = normalizeOrganizerParticipant(message.from || message.sender);
+  const categoryGroup = getOrganizerCategoryGroup(message);
+
+  if (!senderKey || !categoryGroup) {
+    return null;
+  }
+
+  return {
+    categoryGroup,
+    hasReplyEvidence:
+      hasOrganizerReplySubjectPrefix(message.subject) ||
+      hasOrganizerQuotedReplyMarker(message),
+    key: `fallback:${categoryGroup}:${normalizedSubject}:${senderKey}`,
+    sortTimestamp: message.sortTimestamp ?? 0,
+  };
+}
+
+function buildOrganizerThreadGroupKey(
+  message: BundleOrganizerMessage,
+  fallbackEligibleThreadKeys: ReadonlySet<string>,
+) {
+  const explicitThreadKey = message.threadGroupingKey?.trim();
+
+  if (explicitThreadKey) {
+    return explicitThreadKey;
+  }
+
+  const fallbackSeed = getOrganizerFallbackThreadSeed(message);
+
+  if (!fallbackSeed || !fallbackEligibleThreadKeys.has(fallbackSeed.key)) {
+    return null;
+  }
+
+  return fallbackSeed.key;
+}
+
+function resolveOrganizerFallbackThreadKeys(messages: BundleOrganizerMessage[]) {
+  const candidatesByKey = new Map<
+    string,
+    { hasReplyEvidence: boolean; timestamps: number[] }
+  >();
+
+  messages.forEach((message) => {
+    const fallbackSeed = getOrganizerFallbackThreadSeed(message);
+
+    if (!fallbackSeed) {
+      return;
+    }
+
+    const candidate = candidatesByKey.get(fallbackSeed.key) ?? {
+      hasReplyEvidence: false,
+      timestamps: [],
+    };
+    candidate.hasReplyEvidence =
+      candidate.hasReplyEvidence || fallbackSeed.hasReplyEvidence;
+    candidate.timestamps.push(fallbackSeed.sortTimestamp);
+    candidatesByKey.set(fallbackSeed.key, candidate);
+  });
+
+  const eligibleKeys = new Set<string>();
+  candidatesByKey.forEach((candidate, key) => {
+    if (!candidate.hasReplyEvidence || candidate.timestamps.length < 2) {
+      return;
+    }
+
+    const sortedTimestamps = [...candidate.timestamps].sort((left, right) => left - right);
+    const oldestTimestamp = sortedTimestamps[0] ?? 0;
+    const newestTimestamp = sortedTimestamps[sortedTimestamps.length - 1] ?? 0;
+
+    if (
+      oldestTimestamp > 0 &&
+      newestTimestamp > 0 &&
+      newestTimestamp - oldestTimestamp <= organizerFallbackThreadWindowMs
+    ) {
+      eligibleKeys.add(key);
+    }
+  });
+
+  return eligibleKeys;
+}
+
+function groupOrganizerMessagesByThread(
   messages: BundleOrganizerMessage[],
 ): BundleOrganizerMessage[] {
   const representativeByThread = new Map<string, BundleOrganizerMessage>();
+  const fallbackEligibleThreadKeys = resolveOrganizerFallbackThreadKeys(messages);
 
   messages.forEach((message) => {
-    const threadGroupingKey = message.threadGroupingKey?.trim();
+    const threadGroupingKey = buildOrganizerThreadGroupKey(
+      message,
+      fallbackEligibleThreadKeys,
+    );
 
     if (!threadGroupingKey) {
       return;
@@ -1509,7 +1664,10 @@ function groupMessagesByExplicitThread(
 
   const emittedThreadKeys = new Set<string>();
   return messages.flatMap((message) => {
-    const threadGroupingKey = message.threadGroupingKey?.trim();
+    const threadGroupingKey = buildOrganizerThreadGroupKey(
+      message,
+      fallbackEligibleThreadKeys,
+    );
 
     if (!threadGroupingKey) {
       return [message];
@@ -2711,7 +2869,7 @@ export function BundleOrganizerSurface({
   const sortedVisibleDemoMessages = useMemo(
     () =>
       sortMessagesByDate(
-        groupMessagesByExplicitThread(
+        groupOrganizerMessagesByThread(
           filterMessagesByDemoStatus(sourceFilteredDemoMessages, demoStatusFilter),
         ),
         demoSort,
@@ -2750,7 +2908,7 @@ export function BundleOrganizerSurface({
   const sortedVisiblePromoMessages = useMemo(
     () =>
       sortMessagesByDate(
-        groupMessagesByExplicitThread(
+        groupOrganizerMessagesByThread(
           filterMessagesByPromoStatus(visiblePromoMessages, promoStatusFilter),
         ),
         promoSort,
