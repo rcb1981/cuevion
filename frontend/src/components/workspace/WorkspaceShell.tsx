@@ -21687,21 +21687,30 @@ function MailboxView({
                   </button>
                   <button
                     type="button"
-                    onClick={closeMenus}
+                    onClick={() => {
+                      openComposeFromMessage(contextMenuMessage, "reply");
+                      closeMenus();
+                    }}
                     className={contextMenuMainItemClass}
                   >
                     Reply
                   </button>
                   <button
                     type="button"
-                    onClick={closeMenus}
+                    onClick={() => {
+                      openComposeFromMessage(contextMenuMessage, "reply_all");
+                      closeMenus();
+                    }}
                     className={contextMenuMainItemClass}
                   >
                     Reply All
                   </button>
                   <button
                     type="button"
-                    onClick={closeMenus}
+                    onClick={() => {
+                      openComposeFromMessage(contextMenuMessage, "forward");
+                      closeMenus();
+                    }}
                     className={contextMenuMainItemClass}
                   >
                     Forward
