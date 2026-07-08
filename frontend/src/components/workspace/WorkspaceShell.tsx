@@ -35125,17 +35125,29 @@ export function WorkspaceShell({
                 message.internalClassification === "high_priority_demo"
                   ? "High-priority demo classification."
                   : undefined;
+              const normalizedThreadSubject = normalizeThreadSubject(message.subject);
+              const explicitProviderThreadId = message.threadId?.trim();
+              const threadGroupingKey =
+                explicitProviderThreadId &&
+                explicitProviderThreadId !== normalizedThreadSubject
+                  ? `${mailbox.id}:provider-thread:${explicitProviderThreadId}`
+                  : undefined;
 
               return [
                 {
                   id: `${mailbox.id}-${message.id}`,
                   sender: message.sender,
                   from: message.from,
+                  to: message.to,
+                  cc: message.cc,
                   subject: message.subject,
                   snippet: message.snippet,
                   body: message.body.length > 0 ? message.body : [message.snippet],
                   bodyHtml: message.bodyHtml,
                   timestamp: message.timestamp || message.time,
+                  createdAt: message.createdAt,
+                  threadId: message.threadId,
+                  threadGroupingKey,
                   sourceMailbox: mailbox.title,
                   manualCategory: manualOrganizerTarget,
                   manualLabelCategory: manualLabelCategory ?? undefined,

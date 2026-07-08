@@ -87,11 +87,16 @@ type BundleOrganizerMessage = {
   id: string;
   sender: string;
   from?: string;
+  to?: string;
+  cc?: string;
   subject: string;
   snippet: string;
   body: string[];
   bodyHtml?: string;
   timestamp: string;
+  createdAt?: string;
+  threadId?: string;
+  threadGroupingKey?: string;
   sourceMailbox: string;
   manualCategory?: "demo" | "promo";
   manualCategoryAt?: string | null;
@@ -145,11 +150,16 @@ export type BundleOrganizerWorkspaceMessage = {
   id: string;
   sender: string;
   from?: string;
+  to?: string;
+  cc?: string;
   subject: string;
   snippet: string;
   body: string[];
   bodyHtml?: string;
   timestamp: string;
+  createdAt?: string;
+  threadId?: string;
+  threadGroupingKey?: string;
   sourceMailbox: string;
   manualCategory?: "demo" | "promo";
   manualCategoryAt?: string | null;
@@ -1475,6 +1485,45 @@ function sortMessagesByDate(
   });
 }
 
+function groupMessagesByExplicitThread(
+  messages: BundleOrganizerMessage[],
+): BundleOrganizerMessage[] {
+  const representativeByThread = new Map<string, BundleOrganizerMessage>();
+
+  messages.forEach((message) => {
+    const threadGroupingKey = message.threadGroupingKey?.trim();
+
+    if (!threadGroupingKey) {
+      return;
+    }
+
+    const existingMessage = representativeByThread.get(threadGroupingKey);
+
+    if (
+      !existingMessage ||
+      (message.sortTimestamp ?? 0) >= (existingMessage.sortTimestamp ?? 0)
+    ) {
+      representativeByThread.set(threadGroupingKey, message);
+    }
+  });
+
+  const emittedThreadKeys = new Set<string>();
+  return messages.flatMap((message) => {
+    const threadGroupingKey = message.threadGroupingKey?.trim();
+
+    if (!threadGroupingKey) {
+      return [message];
+    }
+
+    if (emittedThreadKeys.has(threadGroupingKey)) {
+      return [];
+    }
+
+    emittedThreadKeys.add(threadGroupingKey);
+    return [representativeByThread.get(threadGroupingKey) ?? message];
+  });
+}
+
 function buildGlobalSearchSourceRows(
   liveMessages: BundleOrganizerMessage[],
   includeTrash: boolean,
@@ -2662,7 +2711,9 @@ export function BundleOrganizerSurface({
   const sortedVisibleDemoMessages = useMemo(
     () =>
       sortMessagesByDate(
-        filterMessagesByDemoStatus(sourceFilteredDemoMessages, demoStatusFilter),
+        groupMessagesByExplicitThread(
+          filterMessagesByDemoStatus(sourceFilteredDemoMessages, demoStatusFilter),
+        ),
         demoSort,
       ),
     [demoSort, demoStatusFilter, sourceFilteredDemoMessages],
@@ -2699,7 +2750,9 @@ export function BundleOrganizerSurface({
   const sortedVisiblePromoMessages = useMemo(
     () =>
       sortMessagesByDate(
-        filterMessagesByPromoStatus(visiblePromoMessages, promoStatusFilter),
+        groupMessagesByExplicitThread(
+          filterMessagesByPromoStatus(visiblePromoMessages, promoStatusFilter),
+        ),
         promoSort,
       ),
     [promoSort, promoStatusFilter, visiblePromoMessages],
