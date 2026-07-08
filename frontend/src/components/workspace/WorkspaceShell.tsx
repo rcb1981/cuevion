@@ -141,6 +141,8 @@ const PRODUCT_ACCESS_STORAGE_KEY = "cuevion-product-access";
 const BUNDLE_PILOT_ACCESS_CODE = "CUEVION-BUNDLE-PILOT";
 const BUNDLE_SHOW_ORGANIZER_MANAGED_MAIL_STORAGE_KEY =
   "cuevion-bundle-show-organizer-managed-mail";
+const BUNDLE_ORGANIZER_MANUAL_INCLUSIONS_STORAGE_KEY =
+  "cuevion-organizer-manual-inclusions";
 
 const primaryNavigationItems = [
   { section: "Dashboard", label: "Dashboard", shortLabel: "Dash", icon: "dashboard" },
@@ -738,6 +740,8 @@ type ManualLabelOverride =
   | "Demo"
   | "Other";
 type ManualLabelOverrideStore = Partial<Record<string, ManualLabelOverride>>;
+type ManualOrganizerInclusionTarget = "demo" | "promo";
+type ManualOrganizerInclusionStore = Partial<Record<string, ManualOrganizerInclusionTarget>>;
 
 const manualLabelOverrideOptions: ManualLabelOverride[] = [
   "Promo",
@@ -824,6 +828,17 @@ function resolveManualLabelOverrideFromStore(
   return getCanonicalMessageIdentityKeys(message)
     .map((key) => overrides[key])
     .find((override): override is ManualLabelOverride => Boolean(override));
+}
+
+function resolveManualOrganizerInclusionFromStore(
+  inclusions: ManualOrganizerInclusionStore,
+  message: MessageIdentitySource,
+) {
+  return getCanonicalMessageIdentityKeys(message)
+    .map((key) => inclusions[key])
+    .find((target): target is ManualOrganizerInclusionTarget =>
+      target === "demo" || target === "promo",
+    );
 }
 
 function findMatchingMessageByIdentity<T>(
@@ -1555,6 +1570,13 @@ function buildManualLabelOverridesStorageKey(
   orderedMailboxKey: string,
 ) {
   return `${CUEVION_MANUAL_LABEL_OVERRIDES_STORAGE_KEY}:${workspaceUserId}:${orderedMailboxKey}`;
+}
+
+function buildManualOrganizerInclusionsStorageKey(
+  workspaceUserId: string,
+  orderedMailboxKey: string,
+) {
+  return `${BUNDLE_ORGANIZER_MANUAL_INCLUSIONS_STORAGE_KEY}:${workspaceUserId}:${orderedMailboxKey}`;
 }
 
 function buildSpamSuppressionStorageKey(
@@ -12771,9 +12793,11 @@ function MailboxView({
   strictNormalPriorityAllowedMessageKeys,
   priorityReasonCopyByMessageKey,
   manualLabelOverrides,
+  manualOrganizerInclusions,
   spamSuppressionKeys,
   onSetManualPriority,
   onSetManualLabelOverride,
+  onSetManualOrganizerInclusion,
   onAddSpamSuppression,
   onRemoveSpamSuppression,
   getLinkedReviewForMessage,
@@ -12847,6 +12871,7 @@ function MailboxView({
   strictNormalPriorityAllowedMessageKeys: ReadonlySet<string>;
   priorityReasonCopyByMessageKey: Record<string, PriorityReasonCopy>;
   manualLabelOverrides: ManualLabelOverrideStore;
+  manualOrganizerInclusions: ManualOrganizerInclusionStore;
   spamSuppressionKeys: string[];
   onSetManualPriority: (
     messageId: string,
@@ -12854,6 +12879,10 @@ function MailboxView({
     options?: ManualPriorityUpdateOptions,
   ) => void;
   onSetManualLabelOverride: (message: MessageIdentitySource, label: ManualLabelOverride) => void;
+  onSetManualOrganizerInclusion: (
+    message: MessageIdentitySource,
+    target: ManualOrganizerInclusionTarget | null,
+  ) => void;
   onAddSpamSuppression: (messages: MessageIdentitySource[]) => void;
   onRemoveSpamSuppression: (messages: MessageIdentitySource[]) => void;
   getLinkedReviewForMessage: (messageId: string) => ReviewItem | null;
@@ -13012,6 +13041,10 @@ function MailboxView({
     learningAnchorHeight: number | null;
     learningChooserOpen: boolean;
     learningChooserMode: "label" | null;
+    organizerMenuOpen: boolean;
+    organizerAnchorX: number | null;
+    organizerAnchorY: number | null;
+    organizerAnchorHeight: number | null;
   } | null>(null);
   const [selectedMessageId, setSelectedMessageId] = useState<string | null>(() => {
     const inboxMessages = mailboxStore[mailbox.id]?.Inbox ?? [];
@@ -13764,6 +13797,10 @@ function MailboxView({
             learningMenuOpen: false,
             learningChooserOpen: false,
             learningChooserMode: null,
+            organizerMenuOpen: false,
+            organizerAnchorX: null,
+            organizerAnchorY: null,
+            organizerAnchorHeight: null,
           }
         : current,
     );
@@ -19206,6 +19243,27 @@ function MailboxView({
           });
         })()
       : null;
+  const organizerSubmenuPosition =
+    contextMenuState?.organizerMenuOpen &&
+    contextMenuPosition &&
+    contextMenuState.organizerAnchorX !== null &&
+    contextMenuState.organizerAnchorY !== null &&
+    contextMenuState.organizerAnchorHeight !== null
+      ? (() => {
+          const interactionRect =
+            inboxInteractionViewportRef.current?.getBoundingClientRect() ??
+            mailListViewportRef.current?.getBoundingClientRect();
+          return getAnchoredSubmenuPosition({
+            parentLeft: contextMenuPosition.left,
+            parentWidth: 238,
+            anchorY: contextMenuState.organizerAnchorY,
+            anchorHeight: contextMenuState.organizerAnchorHeight,
+            submenuWidth: 210,
+            submenuHeight: 140,
+            interactionRect,
+          });
+        })()
+      : null;
   const learningChooserPosition =
     contextMenuState?.learningChooserOpen &&
     contextMenuPosition &&
@@ -19279,6 +19337,11 @@ function MailboxView({
     closeMenus();
     return true;
   };
+  const canShowManualOrganizerAction =
+    productAccess === "bundle" &&
+    !isSharedView &&
+    !activeSmartFolder &&
+    activeFolder === "Inbox";
 
   useEffect(() => {
     setIsReadingLearningMenuOpen(false);
@@ -21158,6 +21221,10 @@ function MailboxView({
                               learningAnchorHeight: null,
                               learningChooserOpen: false,
                               learningChooserMode: null,
+                              organizerMenuOpen: false,
+                              organizerAnchorX: null,
+                              organizerAnchorY: null,
+                              organizerAnchorHeight: null,
                             });
                           }}
                           className={`flex min-h-[92px] w-full cursor-pointer flex-col rounded-[18px] border px-4 py-2.5 text-left transition-[background-color,background-image,border-color,box-shadow,transform] duration-150 ${
@@ -21727,6 +21794,7 @@ function MailboxView({
                                   learningMenuOpen: false,
                                   learningChooserOpen: false,
                                   learningChooserMode: null,
+                                  organizerMenuOpen: false,
                                 }
                               : current,
                           );
@@ -21744,6 +21812,7 @@ function MailboxView({
                                   learningMenuOpen: false,
                                   learningChooserOpen: false,
                                   learningChooserMode: null,
+                                  organizerMenuOpen: false,
                                 }
                               : current,
                           );
@@ -21766,6 +21835,7 @@ function MailboxView({
                                     moveMenuOpen: false,
                                     learningChooserOpen: false,
                                     learningChooserMode: null,
+                                    organizerMenuOpen: false,
                                   }
                                 : current,
                             );
@@ -21781,6 +21851,49 @@ function MailboxView({
                                     learningAnchorY: rect.top,
                                     learningAnchorHeight: rect.height,
                                     moveMenuOpen: false,
+                                    learningChooserOpen: false,
+                                    learningChooserMode: null,
+                                    organizerMenuOpen: false,
+                                  }
+                                : current,
+                            );
+                          }}
+                        />
+                      ) : null}
+                      {canShowManualOrganizerAction ? (
+                        <ContextSubmenuTriggerRow
+                          label="Show in Organizer"
+                          active={Boolean(contextMenuState?.organizerMenuOpen)}
+                          onClick={(event) => {
+                            const rect = event.currentTarget.getBoundingClientRect();
+                            setContextMenuState((current) =>
+                              current
+                                ? {
+                                    ...current,
+                                    organizerMenuOpen: !current.organizerMenuOpen,
+                                    organizerAnchorX: rect.right,
+                                    organizerAnchorY: rect.top,
+                                    organizerAnchorHeight: rect.height,
+                                    moveMenuOpen: false,
+                                    learningMenuOpen: false,
+                                    learningChooserOpen: false,
+                                    learningChooserMode: null,
+                                  }
+                                : current,
+                            );
+                          }}
+                          onMouseEnter={(event) => {
+                            const rect = event.currentTarget.getBoundingClientRect();
+                            setContextMenuState((current) =>
+                              current
+                                ? {
+                                    ...current,
+                                    organizerMenuOpen: true,
+                                    organizerAnchorX: rect.right,
+                                    organizerAnchorY: rect.top,
+                                    organizerAnchorHeight: rect.height,
+                                    moveMenuOpen: false,
+                                    learningMenuOpen: false,
                                     learningChooserOpen: false,
                                     learningChooserMode: null,
                                   }
@@ -21826,6 +21939,67 @@ function MailboxView({
                       {target.label}
                     </button>
                   ))}
+                </div>
+              </div>,
+              document.body,
+            )
+          : null}
+        {contextMenuState &&
+        contextMenuMessage &&
+        contextMenuState.organizerMenuOpen &&
+        organizerSubmenuPosition
+          ? createPortal(
+              <div
+                data-theme={themeMode}
+                className="cuevion-dark-scroll cuevion-soft-scroll fixed z-[31] w-[210px] max-h-[360px] overflow-y-auto rounded-[20px] border border-[var(--workspace-menu-border)] bg-[var(--workspace-menu-bg)] p-2 shadow-panel"
+                style={{
+                  ...organizerSubmenuPosition,
+                  colorScheme: themeMode,
+                  scrollbarWidth: "thin",
+                  scrollbarColor:
+                    "var(--workspace-scrollbar-thumb) var(--workspace-scrollbar-track)",
+                }}
+                onMouseDown={(event) => event.stopPropagation()}
+              >
+                <div className="space-y-1">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onSetManualOrganizerInclusion(contextMenuMessage, "demo");
+                      closeMenus();
+                    }}
+                    className={contextMenuItemClass}
+                  >
+                    Demo Inbox
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onSetManualOrganizerInclusion(contextMenuMessage, "promo");
+                      closeMenus();
+                    }}
+                    className={contextMenuItemClass}
+                  >
+                    Promo Inbox
+                  </button>
+                  {resolveManualOrganizerInclusionFromStore(
+                    manualOrganizerInclusions,
+                    contextMenuMessage,
+                  ) ? (
+                    <>
+                      <div className="my-1 h-px bg-[var(--workspace-divider)]" />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          onSetManualOrganizerInclusion(contextMenuMessage, null);
+                          closeMenus();
+                        }}
+                        className={contextMenuItemClass}
+                      >
+                        Remove from Organizer
+                      </button>
+                    </>
+                  ) : null}
                 </div>
               </div>,
               document.body,
@@ -32741,6 +32915,10 @@ export function WorkspaceShell({
     currentWorkspaceUserId,
     mailboxOrderKey,
   );
+  const manualOrganizerInclusionsStorageKey = buildManualOrganizerInclusionsStorageKey(
+    currentWorkspaceUserId,
+    mailboxOrderKey,
+  );
   const spamSuppressionStorageKey = buildSpamSuppressionStorageKey(
     currentWorkspaceUserId,
     mailboxOrderKey,
@@ -34130,6 +34308,30 @@ export function WorkspaceShell({
         return {};
       }
     });
+  const [manualOrganizerInclusions, setManualOrganizerInclusions] =
+    useState<ManualOrganizerInclusionStore>(() => {
+      if (typeof window === "undefined") {
+        return {};
+      }
+
+      const storedValue = window.localStorage.getItem(manualOrganizerInclusionsStorageKey);
+
+      if (!storedValue) {
+        return {};
+      }
+
+      try {
+        const parsedValue = JSON.parse(storedValue) as ManualOrganizerInclusionStore;
+        return Object.fromEntries(
+          Object.entries(parsedValue).filter(
+            (entry): entry is [string, ManualOrganizerInclusionTarget] =>
+              entry[1] === "demo" || entry[1] === "promo",
+          ),
+        );
+      } catch {
+        return {};
+      }
+    });
   const [manualChangeConfirmationMessage, setManualChangeConfirmationMessage] = useState<string | null>(
     null,
   );
@@ -34850,8 +35052,16 @@ export function WorkspaceShell({
                 normalizedOrganizerSignal === "for review" ||
                 normalizedOrganizerSignal === "shortlist" ||
                 normalizedOrganizerSignal === "promo";
+              const manualOrganizerTarget = resolveManualOrganizerInclusionFromStore(
+                manualOrganizerInclusions,
+                message,
+              );
 
-              if (!isOrganizerClassification && !hasOrganizerSignalFallback) {
+              if (
+                !manualOrganizerTarget &&
+                !isOrganizerClassification &&
+                !hasOrganizerSignalFallback
+              ) {
                 return [];
               }
 
@@ -34875,6 +35085,7 @@ export function WorkspaceShell({
                   bodyHtml: message.bodyHtml,
                   timestamp: message.timestamp || message.time,
                   sourceMailbox: mailbox.title,
+                  manualCategory: manualOrganizerTarget,
                   internalClassification: message.internalClassification,
                   signal: message.signal,
                   uiSignal: message.ui_signal,
@@ -36057,6 +36268,30 @@ export function WorkspaceShell({
       return next;
     });
     setManualChangeConfirmationMessage(`Label set to ${label}`);
+  };
+
+  const handleSetManualOrganizerInclusion = (
+    message: MessageIdentitySource,
+    target: ManualOrganizerInclusionTarget | null,
+  ) => {
+    setManualOrganizerInclusions((current) => {
+      const next = { ...current };
+
+      getCanonicalMessageIdentityKeys(message).forEach((key) => {
+        if (target) {
+          next[key] = target;
+        } else {
+          delete next[key];
+        }
+      });
+
+      return next;
+    });
+    setManualChangeConfirmationMessage(
+      target
+        ? `Shown in Organizer ${target === "demo" ? "Demo Inbox" : "Promo Inbox"}`
+        : "Removed from Organizer",
+    );
   };
 
   const handleAddSpamSuppression = (messages: MessageIdentitySource[]) => {
@@ -37869,6 +38104,33 @@ export function WorkspaceShell({
       return;
     }
 
+    const storedValue = window.localStorage.getItem(manualOrganizerInclusionsStorageKey);
+
+    if (!storedValue) {
+      setManualOrganizerInclusions({});
+      return;
+    }
+
+    try {
+      const parsedValue = JSON.parse(storedValue) as ManualOrganizerInclusionStore;
+      setManualOrganizerInclusions(
+        Object.fromEntries(
+          Object.entries(parsedValue).filter(
+            (entry): entry is [string, ManualOrganizerInclusionTarget] =>
+              entry[1] === "demo" || entry[1] === "promo",
+          ),
+        ),
+      );
+    } catch {
+      setManualOrganizerInclusions({});
+    }
+  }, [manualOrganizerInclusionsStorageKey]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
     const storedValue = window.localStorage.getItem(spamSuppressionStorageKey);
 
     if (!storedValue) {
@@ -37931,6 +38193,17 @@ export function WorkspaceShell({
       JSON.stringify(manualLabelOverrides),
     );
   }, [manualLabelOverrides, manualLabelOverridesStorageKey]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    window.localStorage.setItem(
+      manualOrganizerInclusionsStorageKey,
+      JSON.stringify(manualOrganizerInclusions),
+    );
+  }, [manualOrganizerInclusions, manualOrganizerInclusionsStorageKey]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -39559,9 +39832,11 @@ export function WorkspaceShell({
                   }
                   priorityReasonCopyByMessageKey={priorityReasonCopyForCandidates}
                   manualLabelOverrides={manualLabelOverrides}
+                  manualOrganizerInclusions={manualOrganizerInclusions}
                   spamSuppressionKeys={spamSuppressionKeys}
                   onSetManualPriority={handleSetManualPriority}
                   onSetManualLabelOverride={handleSetManualLabelOverride}
+                  onSetManualOrganizerInclusion={handleSetManualOrganizerInclusion}
                   onAddSpamSuppression={handleAddSpamSuppression}
                   onRemoveSpamSuppression={handleRemoveSpamSuppression}
                   getLinkedReviewForMessage={
