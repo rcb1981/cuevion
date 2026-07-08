@@ -31051,6 +31051,7 @@ function ForYouView({
   aiSuggestionsEnabled,
   productAccess,
   showBundleOrganizerManagedMail,
+  manualOrganizerInclusions,
 }: {
   context?: ForYouContext;
   onOpenTarget: (target: WorkspaceTarget) => void;
@@ -31078,6 +31079,7 @@ function ForYouView({
   aiSuggestionsEnabled: boolean;
   productAccess: ProductAccess;
   showBundleOrganizerManagedMail: boolean;
+  manualOrganizerInclusions: ManualOrganizerInclusionStore;
 }) {
   const [activeLearningModal, setActiveLearningModal] = useState<
     | "paste-rule"
@@ -40093,6 +40095,7 @@ export function WorkspaceShell({
                   aiSuggestionsEnabled={aiSuggestionsEnabled}
                   productAccess={productAccess}
                   showBundleOrganizerManagedMail={showBundleOrganizerManagedMail}
+                  manualOrganizerInclusions={manualOrganizerInclusions}
                 />
               </div>
 	            )}
