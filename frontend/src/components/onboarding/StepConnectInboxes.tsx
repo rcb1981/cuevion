@@ -253,9 +253,6 @@ export function StepConnectInboxes({
       return;
     }
 
-    console.log("[DEBUG] StepConnectInboxes selectedInboxes:", selectedInboxes);
-    console.log("[DEBUG] Sending to backend selectedInboxes:", selectedInboxes);
-
     const result = await beginInboxConnection({
       mailboxId: inboxId,
       provider: connection.provider as ProviderId,

@@ -2791,35 +2791,6 @@ function resolveVisibleClassification(
 
     return signalClassification;
   })();
-  const metaDiagnosticText = [
-    message.subject,
-    message.sender,
-    message.from,
-  ]
-    .join(" ")
-    .toLowerCase();
-
-  if (
-    includesAnyKeyword(metaDiagnosticText, [
-      "meta for business",
-      "facebook",
-      "business-updates.facebook.com",
-      "advertenties-ontvangstbewijs",
-    ])
-  ) {
-    console.info("[Cuevion] Meta Finance LOW diagnostic", {
-      subject: message.subject,
-      sender: message.sender,
-      from: message.from,
-      signal: message.signal,
-      ui_signal: message.ui_signal,
-      internalClassification: message.internalClassification,
-      signalClassification,
-      isMarketingNewsletterUpdateMessage: isMarketingNewsletterUpdate,
-      resolvedClassification,
-    });
-  }
-
   return resolvedClassification;
 }
 
@@ -5620,17 +5591,6 @@ function buildExternalCollaborationReviewLinkFromToken(
   inviteUrl.searchParams.set("invitee", email.toLowerCase());
 
   return inviteUrl.toString();
-}
-
-function isLocalDevelopmentEnvironment() {
-  if (typeof window === "undefined") {
-    return false;
-  }
-
-  return (
-    window.location.hostname === "localhost" ||
-    window.location.hostname === "127.0.0.1"
-  );
 }
 
 function getCollaborationParticipants(collaboration: MailMessageCollaboration) {
@@ -15946,7 +15906,6 @@ function MailboxView({
       const downloadedBlob = await fetchReceivedAttachmentBlob(attachment, sourceMessage);
       saveAttachmentBlob(downloadedBlob, attachment.name);
     } catch (error) {
-      console.error("Attachment download failed", error);
       window.alert(
         error instanceof Error
           ? error.message
@@ -24396,12 +24355,11 @@ function WorkbenchView({
                     <div className="flex h-14 w-14 items-center justify-center rounded-full bg-[color:rgba(78,32,112,0.12)] text-[0.92rem] font-medium uppercase tracking-[0.08em] text-[#4E2070]">
                       {getInitials(activeTeamMember.name)}
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => console.log(`upload_photo_${activeTeamMember.name}`)}
-                      className="inline-flex items-center rounded-full border border-transparent bg-transparent px-0 py-0 text-[0.68rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)] transition-colors duration-200 hover:text-[var(--workspace-text-soft)] focus-visible:outline-none"
-                    >
-                      Upload photo
+	                    <button
+	                      type="button"
+	                      className="inline-flex items-center rounded-full border border-transparent bg-transparent px-0 py-0 text-[0.68rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)] transition-colors duration-200 hover:text-[var(--workspace-text-soft)] focus-visible:outline-none"
+	                    >
+	                      Upload photo
                     </button>
                   </div>
 
@@ -24681,14 +24639,13 @@ function WorkbenchView({
                             return;
                           }
 
-                          setInviteFullName("");
-                          setInviteEmail("");
-                          setInviteAccessLevel("Shared");
-                          setIsInviteMemberOpen(false);
-                          console.log("confirm_invite_team_member");
-                        } finally {
-                          setIsSendingTeamInvite(false);
-                        }
+	                          setInviteFullName("");
+	                          setInviteEmail("");
+	                          setInviteAccessLevel("Shared");
+	                          setIsInviteMemberOpen(false);
+	                        } finally {
+	                          setIsSendingTeamInvite(false);
+	                        }
                         setActiveTeamConfirmation(null);
                         return;
                       }
@@ -24707,12 +24664,11 @@ function WorkbenchView({
                         setIsSendingTeamInvite(false);
                       }
 
-                      setInviteFullName("");
-                      setInviteEmail("");
-                      setInviteAccessLevel("Shared");
-                      setIsInviteMemberOpen(false);
-                      console.log("confirm_invite_team_member");
-                    } else if (
+	                      setInviteFullName("");
+	                      setInviteEmail("");
+	                      setInviteAccessLevel("Shared");
+	                      setIsInviteMemberOpen(false);
+	                    } else if (
                       activeTeamConfirmation === "cancel-invite" &&
                       activeTeamMemberIndex !== null
                     ) {
@@ -24749,8 +24705,7 @@ function WorkbenchView({
                             : member,
                         ),
                       );
-                      console.log(`confirm_cancel_invite_${activeTeamMember?.name ?? "member"}`);
-                    } else if (
+	                    } else if (
                       activeTeamConfirmation === "resend-invite" &&
                       activeTeamMemberIndex !== null &&
                       activeTeamMember
@@ -24770,8 +24725,7 @@ function WorkbenchView({
                             return;
                           }
 
-                          console.log(`confirm_resend_invite_${activeTeamMember.name}`);
-                        } finally {
+	                        } finally {
                           setIsSendingTeamInvite(false);
                         }
                         setActiveTeamConfirmation(null);
@@ -24792,17 +24746,9 @@ function WorkbenchView({
                       } finally {
                         setIsSendingTeamInvite(false);
                       }
-                      console.log(`confirm_resend_invite_${activeTeamMember.name}`);
-                    } else if (
-                      activeTeamConfirmation === "remove-member" &&
-                      activeTeamMember
-                    ) {
-                      console.log(`confirm_remove_member_${activeTeamMember.name}`);
-                    } else if (activeTeamMember) {
-                      console.log(`confirm_revoke_access_${activeTeamMember.name}`);
-                    }
+	                    }
 
-                    setActiveTeamConfirmation(null);
+	                    setActiveTeamConfirmation(null);
                   }}
                   className={
                     isSendingTeamInvite
@@ -24887,10 +24833,7 @@ function WorkbenchView({
                             : member,
                         ),
                       );
-                      console.log(
-                        `save_team_access_${activeTeamMember.name}_${selectedTeamAccessLevel.toLowerCase()}`,
-                      );
-                      setIsChangeAccessOpen(false);
+	                      setIsChangeAccessOpen(false);
                     }}
                     className={`${learningModalPrimaryActionButtonClass} ${
                       hasTeamAccessChanges
@@ -29586,10 +29529,9 @@ const AccountSettingsCard = memo(function AccountSettingsCard({
                 return;
               }
 
-              setSavedEmail(normalizedNextEmail);
-              handleCloseChangeEmail();
-              console.log("settings_change_email_continue");
-            }}
+	              setSavedEmail(normalizedNextEmail);
+	              handleCloseChangeEmail();
+	            }}
             disabled={!canSubmitEmailChange}
             className={`${settingsPrimaryActionClass} w-[7.5rem] disabled:cursor-not-allowed disabled:border-[color:rgba(120,104,89,0.14)] disabled:bg-[linear-gradient(180deg,rgba(167,174,167,0.42),rgba(131,137,131,0.52))] disabled:text-[color:rgba(251,248,242,0.78)] disabled:shadow-none`}
           >
@@ -29653,10 +29595,9 @@ const AccountSettingsCard = memo(function AccountSettingsCard({
               </button>
               <button
                 type="button"
-                onClick={() => {
-                  setIsResetPasswordSent(true);
-                  console.log("settings_send_reset_password_link");
-                }}
+	                onClick={() => {
+	                  setIsResetPasswordSent(true);
+	                }}
                 className={settingsPrimaryActionClass}
               >
                 Send reset link
@@ -29752,11 +29693,10 @@ const AccountSettingsCard = memo(function AccountSettingsCard({
             </button>
             <button
               type="button"
-              onClick={() => {
-                setSavedPlan(draftPlan);
-                setIsManagePlanOpen(false);
-                console.log("settings_change_plan");
-              }}
+	              onClick={() => {
+	                setSavedPlan(draftPlan);
+	                setIsManagePlanOpen(false);
+	              }}
               className={settingsPrimaryActionClass}
             >
               Continue
@@ -31628,11 +31568,10 @@ function ForYouView({
                   {cuevionLearningLabelOptions.map((label) => (
                     <button
                       key={`paste-rule-label-${label}`}
-                      type="button"
-                      onClick={() => {
-                        setSelectedPasteRuleLabel(label);
-                        console.log(`paste_rule_label_${label.toLowerCase()}`);
-                      }}
+	                      type="button"
+	                      onClick={() => {
+	                        setSelectedPasteRuleLabel(label);
+	                      }}
                       className={`inline-flex h-9 items-center justify-center rounded-full border px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color,box-shadow,transform] duration-150 focus-visible:outline-none ${
                         selectedPasteRuleLabel === label
                           ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_8px_24px_rgba(118,170,112,0.08)]"
@@ -31658,11 +31597,10 @@ function ForYouView({
                   {cuevionLearningPriorityOptions.map((priority) => (
                     <button
                       key={`paste-rule-priority-${priority}`}
-                      type="button"
-                      onClick={() => {
-                        setSelectedPasteRulePriority(priority);
-                        console.log(`paste_rule_priority_${priority.toLowerCase()}`);
-                      }}
+	                      type="button"
+	                      onClick={() => {
+	                        setSelectedPasteRulePriority(priority);
+	                      }}
                       className={`inline-flex h-9 items-center justify-center rounded-full border px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color,box-shadow,transform] duration-150 focus-visible:outline-none ${
                         selectedPasteRulePriority === priority
                           ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_8px_24px_rgba(118,170,112,0.08)]"
@@ -31688,11 +31626,10 @@ function ForYouView({
                   {pasteRuleSenderBehaviorOptions.map((option) => (
                     <button
                       key={`paste-rule-behavior-${option.value}`}
-                      type="button"
-                      onClick={() => {
-                        setSelectedPasteRuleSenderBehavior(option.value);
-                        console.log(`paste_rule_behavior_${option.value}`);
-                      }}
+	                      type="button"
+	                      onClick={() => {
+	                        setSelectedPasteRuleSenderBehavior(option.value);
+	                      }}
                       className={`inline-flex h-9 items-center justify-center rounded-full border px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color,box-shadow,transform] duration-150 focus-visible:outline-none ${
                         selectedPasteRuleSenderBehavior === option.value
                           ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_8px_24px_rgba(118,170,112,0.08)]"
@@ -31778,10 +31715,7 @@ function ForYouView({
                         ...matchedLearningKeys.filter((key) => !current.includes(key)),
                       ]);
                     }
-                    console.log(
-                      `save_learning_rule_${pasteRuleType}_${selectedPasteRulePriority?.toLowerCase().replace(/\s+/g, "_") ?? "unset"}`,
-                    );
-                    setPasteRuleSaveFeedback("saved");
+	                    setPasteRuleSaveFeedback("saved");
                     if (pasteRuleSaveTimeoutRef.current !== null) {
                       window.clearTimeout(pasteRuleSaveTimeoutRef.current);
                     }
@@ -31905,11 +31839,10 @@ function ForYouView({
                   {cuevionLearningLabelOptions.map((label) => (
                     <button
                       key={`review-uncertain-label-${label}`}
-                      type="button"
-                      onClick={() => {
-                        setSelectedUncertainLabel(label);
-                        console.log(`review_uncertain_label_${label.toLowerCase()}`);
-                      }}
+	                      type="button"
+	                      onClick={() => {
+	                        setSelectedUncertainLabel(label);
+	                      }}
                       className={`inline-flex h-9 items-center justify-center rounded-full border px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color,box-shadow,transform] duration-150 focus-visible:outline-none ${
                         selectedUncertainLabel === label
                           ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_8px_24px_rgba(118,170,112,0.08)]"
@@ -31935,11 +31868,10 @@ function ForYouView({
                   {cuevionLearningPriorityOptions.map((priority) => (
                     <button
                       key={`review-uncertain-priority-${priority}`}
-                      type="button"
-                      onClick={() => {
-                        setSelectedUncertainPriority(priority);
-                        console.log(`review_uncertain_priority_${priority.toLowerCase()}`);
-                      }}
+	                      type="button"
+	                      onClick={() => {
+	                        setSelectedUncertainPriority(priority);
+	                      }}
                       className={`inline-flex h-9 items-center justify-center rounded-full border px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color,box-shadow,transform] duration-150 focus-visible:outline-none ${
                         selectedUncertainPriority === priority
                           ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_8px_24px_rgba(118,170,112,0.08)]"
@@ -32251,8 +32183,7 @@ function ForYouView({
                       return;
                     }
 
-                    console.log("save_recent_learning_decision_changes");
-                    if (!selectedRecentDecisionLabel || !selectedRecentDecisionPriority) {
+	                    if (!selectedRecentDecisionLabel || !selectedRecentDecisionPriority) {
                       return;
                     }
                     const category = resolveCuevionCategoryFromLearningLabel(
@@ -32559,11 +32490,10 @@ function ForYouView({
                       {cuevionLearningLabelOptions.map((label) => (
                         <button
                           key={`refine-label-${label}`}
-                          type="button"
-                          onClick={() => {
-                            setSelectedLearningLabel(label);
-                            console.log(`refine_cuevion_label_${label.toLowerCase()}`);
-                          }}
+	                          type="button"
+	                          onClick={() => {
+	                            setSelectedLearningLabel(label);
+	                          }}
                           className={`inline-flex h-9 items-center justify-center rounded-full border px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color,box-shadow,transform] duration-150 focus-visible:outline-none ${
                             selectedLearningLabel === label
                               ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_8px_24px_rgba(118,170,112,0.08)]"
@@ -32589,11 +32519,10 @@ function ForYouView({
                       {cuevionLearningPriorityOptions.map((priority) => (
                         <button
                           key={`refine-priority-${priority}`}
-                          type="button"
-                          onClick={() => {
-                            setSelectedLearningPriority(priority);
-                            console.log(`refine_cuevion_priority_${priority.toLowerCase()}`);
-                          }}
+	                          type="button"
+	                          onClick={() => {
+	                            setSelectedLearningPriority(priority);
+	                          }}
                           className={`inline-flex h-9 items-center justify-center rounded-full border px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color,box-shadow,transform] duration-150 focus-visible:outline-none ${
                             selectedLearningPriority === priority
                               ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_8px_24px_rgba(118,170,112,0.08)]"
@@ -32619,11 +32548,10 @@ function ForYouView({
                       {senderLearningBehaviorOptions.map((option) => (
                         <button
                           key={`refine-behavior-${option.value}`}
-                          type="button"
-                          onClick={() => {
-                            setSelectedLearningSenderBehavior(option.value);
-                            console.log(`refine_cuevion_behavior_${option.value}`);
-                          }}
+	                          type="button"
+	                          onClick={() => {
+	                            setSelectedLearningSenderBehavior(option.value);
+	                          }}
                           className={`inline-flex h-9 items-center justify-center rounded-full border px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color,box-shadow,transform] duration-150 focus-visible:outline-none ${
                             selectedLearningSenderBehavior === option.value
                               ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_8px_24px_rgba(118,170,112,0.08)]"
@@ -32776,46 +32704,27 @@ export function WorkspaceShell({
       return onboardingSeed;
     }
 
-    const storedValue = window.localStorage.getItem(MANAGED_INBOXES_STORAGE_KEY);
+	    const storedValue = window.localStorage.getItem(MANAGED_INBOXES_STORAGE_KEY);
 
-    if (!storedValue) {
-      console.info("[MANAGED-INBOXES] loaded", {
-        count: onboardingSeed.length,
-        source: "onboarding",
-      });
-      return onboardingSeed;
-    }
+	    if (!storedValue) {
+	      return onboardingSeed;
+	    }
 
     try {
       const parsedInboxes = normalizeStoredManagedInboxList(JSON.parse(storedValue));
 
       if (parsedInboxes.length > 0) {
-        const mergedInboxes = mergeOnboardingSeedWithSavedInboxes(
-          onboardingSeed,
-          parsedInboxes,
-        );
-        console.info("[MANAGED-INBOXES] loaded", {
-          count: mergedInboxes.length,
-          source: "localStorage",
-        });
-        if (mergedInboxes.length > parsedInboxes.length) {
-          console.info("[MANAGED-INBOXES] seeded", { count: mergedInboxes.length });
-        }
-        return mergedInboxes;
-      }
+	        const mergedInboxes = mergeOnboardingSeedWithSavedInboxes(
+	          onboardingSeed,
+	          parsedInboxes,
+	        );
+	        return mergedInboxes;
+	      }
 
-      console.info("[MANAGED-INBOXES] loaded", {
-        count: onboardingSeed.length,
-        source: "onboarding",
-      });
-      return onboardingSeed;
-    } catch {
-      console.info("[MANAGED-INBOXES] loaded", {
-        count: onboardingSeed.length,
-        source: "onboarding",
-      });
-      return onboardingSeed;
-    }
+	      return onboardingSeed;
+	    } catch {
+	      return onboardingSeed;
+	    }
   });
   const [mailboxCredentialStatuses, setMailboxCredentialStatuses] =
     useState<MailboxCredentialStatusStore>({});
@@ -33533,7 +33442,7 @@ export function WorkspaceShell({
   const pendingMobileRefreshIdsRef = useRef<Set<string>>(new Set());
   // Stores the last raw diagnostic for each mailbox refresh, keyed by mailboxId.
   // Written by refreshMailboxById immediately before it returns. Read by onSyncMailbox
-  // after awaiting refreshMailboxById to build the mobile debug status line.
+  // after awaiting refreshMailboxById to build the mobile refresh status line.
   type MailboxRefreshDiagnostic = {
     email: string;
     host: string;
@@ -34027,9 +33936,8 @@ export function WorkspaceShell({
         return current;
       }
 
-      console.info("[MANAGED-INBOXES] seeded", { count: nextInboxes.length });
-      return nextInboxes;
-    });
+	      return nextInboxes;
+	    });
   }, [onboardingMailboxSeedKey, onboardingState]);
 
   useEffect(() => {
@@ -35310,20 +35218,7 @@ export function WorkspaceShell({
         buildMobileWorkspaceMessage(message, mailbox.id, mailbox.title),
       );
 
-    if ((import.meta as { env?: { DEV?: boolean } }).env?.DEV) {
-      const rawCount = mailboxCollections.Inbox.length;
-      const postSpamCount = spamFilteredInbox.length;
-      const visibleCount = inboxMessages.length;
-      const hasError = Boolean(mailboxSyncErrors[mailbox.id]);
-      if (rawCount > 0 || hasError) {
-        console.debug(
-          `[mobile] ${mailbox.title} <${mailbox.email}> id=${mailbox.id}` +
-          ` | raw=${rawCount} post-spam=${postSpamCount} visible=${visibleCount}` +
-          ` | syncError=${hasError ? normalizeMobileSyncError(mailboxSyncErrors[mailbox.id]) ?? "(none)" : "(none)"}`,
-        );
-      }
-    }
-    return {
+	    return {
       id: mailbox.id,
       title: mailbox.title,
       email: mailbox.email,
@@ -36991,25 +36886,11 @@ export function WorkspaceShell({
 
     syncingMailboxIdsRef.current.add(mailboxId);
     setSyncingMailboxId(mailboxId);
-    clearMailboxSyncError(mailboxId);
+	    clearMailboxSyncError(mailboxId);
 
-    try {
-      const syncStartedAt = performance.now();
-      if (canUseImapFetch) {
-        console.info("[SYNC-DIAGNOSTIC] custom IMAP refresh request", {
-          mailboxId,
-          title: managedMailbox.title,
-          email: managedMailbox.email.trim(),
-          host: managedMailbox.customImap.host.trim(),
-          port: managedMailbox.customImap.port.trim(),
-          ssl: managedMailbox.customImap.ssl,
-          username: managedMailbox.customImap.username.trim(),
-          hasInlineImapPassword: managedMailbox.customImap.password.trim().length > 0,
-          storedImapPasswordSet: mailboxCredentialStatuses[mailboxId]?.imapPasswordSet === true,
-        });
-      }
-      const buildCustomImapRefreshRequest = (limit?: number) =>
-        buildConnectInboxRequest({
+	    try {
+	      const buildCustomImapRefreshRequest = (limit?: number) =>
+	        buildConnectInboxRequest({
           mailboxId: managedMailbox.id,
           provider: managedMailbox.provider as ProviderId,
           email: managedMailbox.email,
@@ -37043,19 +36924,11 @@ export function WorkspaceShell({
       let diagnosticRetried = false;
       let diagnosticRetryOk: boolean | undefined;
       let diagnosticRetryMessageCount: number | undefined;
-      const firstAttemptWasQuota =
-        canUseImapFetch && !response.ok && isQuotaRefreshIssue(response.error);
-      if (firstAttemptWasQuota) {
-        diagnosticRetried = true;
-        console.info("[SYNC-DIAGNOSTIC] custom IMAP quota retry", {
-          mailboxId,
-          title: managedMailbox.title,
-          email: managedMailbox.email.trim(),
-          originalStage: response.error?.stage ?? null,
-          originalFetchedCount: response.error?.fetched_count ?? 0,
-          retryLimit: 5,
-        });
-        const retryResponse = await connectInboxWithImap(buildCustomImapRefreshRequest(5));
+	      const firstAttemptWasQuota =
+	        canUseImapFetch && !response.ok && isQuotaRefreshIssue(response.error);
+	      if (firstAttemptWasQuota) {
+	        diagnosticRetried = true;
+	        const retryResponse = await connectInboxWithImap(buildCustomImapRefreshRequest(5));
         diagnosticRetryOk = retryResponse.ok;
         diagnosticRetryMessageCount = retryResponse.messages?.length ?? 0;
 
@@ -37073,9 +36946,7 @@ export function WorkspaceShell({
           response = retryResponse;
         }
       }
-      const requestDurationMs = performance.now() - syncStartedAt;
-
-      if (!response.ok) {
+	      if (!response.ok) {
         const isQuotaFailure =
           firstAttemptWasQuota || (canUseImapFetch && isQuotaRefreshIssue(response.error));
         const restoredSnapshotCount = isQuotaFailure
@@ -37090,38 +36961,7 @@ export function WorkspaceShell({
               canUseImapFetch,
               canUseGmailOAuthFetch,
             );
-        console.info("[SYNC-TIMING] refreshMailboxById failed", {
-          mailboxId,
-          email: managedMailbox.email.trim(),
-          requestDurationMs: Math.round(requestDurationMs),
-          error: response.error?.message ?? response.error?.code ?? "unknown",
-          stage: response.error?.stage ?? null,
-          fetchedCount: response.error?.fetched_count ?? null,
-          restoredSnapshotCount,
-        });
-        console.info("[SYNC-DIAGNOSTIC] mailbox refresh failed", {
-          mailboxId,
-          title: managedMailbox.title,
-          email: managedMailbox.email.trim(),
-          provider: managedMailbox.provider,
-          connectionStatus: managedMailbox.connectionStatus,
-          host: canUseImapFetch ? managedMailbox.customImap.host.trim() : undefined,
-          port: canUseImapFetch ? managedMailbox.customImap.port.trim() : undefined,
-          ssl: canUseImapFetch ? managedMailbox.customImap.ssl : undefined,
-          username: canUseImapFetch ? managedMailbox.customImap.username.trim() : undefined,
-          hasInlineImapPassword: canUseImapFetch
-            ? managedMailbox.customImap.password.trim().length > 0
-            : undefined,
-          storedImapPasswordSet: canUseImapFetch
-            ? mailboxCredentialStatuses[mailboxId]?.imapPasswordSet === true
-            : undefined,
-          errorCode: response.error?.code,
-          errorStage: response.error?.stage,
-          errorMessage: response.error?.message,
-          fetchedCount: response.error?.fetched_count,
-          restoredSnapshotCount,
-        });
-        // Write diagnostic so onSyncMailbox can surface it on mobile.
+	        // Write diagnostic so onSyncMailbox can surface it on mobile.
         lastRefreshDiagnosticRef.current[mailboxId] = {
           email: managedMailbox.email.trim(),
           host: managedMailbox.customImap.host.trim(),
@@ -37165,8 +37005,7 @@ export function WorkspaceShell({
             storedUidValidity,
           );
       const messagesForSnapshot = messagesForReactState;
-      const mergeStartedAt = performance.now();
-      try {
+	      try {
         saveLiveInboxSnapshot({
           inboxId: managedMailbox.id,
           email: managedMailbox.email.trim().toLowerCase(),
@@ -37179,13 +37018,7 @@ export function WorkspaceShell({
           throw error;
         }
 
-        console.warn("[SYNC-TIMING] Gmail snapshot persistence skipped", {
-          mailboxId,
-          email: managedMailbox.email.trim(),
-          messageCount: messagesForSnapshot.length,
-          error,
-        });
-      }
+	      }
       // Compute the in-memory eviction set using the same guard conditions applied
       // in mergePersistedLiveInboxSnapshotMessages. Only evict when the server
       // supplied a trusted UID set and UIDVALIDITY. A UIDVALIDITY change evicts all
@@ -37241,16 +37074,7 @@ export function WorkspaceShell({
         cacheRestored: 0,
         mergedCount: messagesForReactState.length,
       };
-      console.info("[SYNC-TIMING] refreshMailboxById complete", {
-        mailboxId,
-        email: managedMailbox.email.trim(),
-        requestDurationMs: Math.round(requestDurationMs),
-        mergeDurationMs: Math.round(performance.now() - mergeStartedAt),
-        totalDurationMs: Math.round(performance.now() - syncStartedAt),
-        messageCount: messagesForReactState.length,
-        warning: response.warning?.code ?? null,
-      });
-      return refreshWarningMessage ? "partial" : "synced";
+	      return refreshWarningMessage ? "partial" : "synced";
     } finally {
       syncingMailboxIdsRef.current.delete(mailboxId);
       setSyncingMailboxId((current) => (current === mailboxId ? null : current));
@@ -37285,10 +37109,7 @@ export function WorkspaceShell({
     const runStartupSync = async () => {
       let didFailMailbox = false;
 
-      console.info("[STARTUP-SYNC] started", {
-        mailboxCount: startupSyncMailboxIds.length,
-      });
-      setStartupSyncStatus("running");
+	      setStartupSyncStatus("running");
       setMailboxSyncFeedbackMessage("Refreshing connected inboxes...");
 
       for (const mailboxId of startupSyncMailboxIds) {
@@ -37302,8 +37123,7 @@ export function WorkspaceShell({
           "inbox";
 
         try {
-          console.info("[STARTUP-SYNC] syncing mailbox", { mailboxId });
-          setMailboxSyncFeedbackMessage(`Syncing ${mailboxTitle}`);
+	          setMailboxSyncFeedbackMessage(`Syncing ${mailboxTitle}`);
 
           const refreshResult = await refreshMailboxById(mailboxId, { startup: true });
           if (refreshResult === "failed") {
@@ -37313,16 +37133,14 @@ export function WorkspaceShell({
               "Refresh failed — reconnect this inbox in Settings.",
               { preserveExisting: true },
             );
-            console.info("[STARTUP-SYNC] mailbox failed", { mailboxId });
-          } else if (refreshResult === "partial") {
+	          } else if (refreshResult === "partial") {
             didFailMailbox = true;
             setMailboxSyncError(
               mailboxId,
               "Some older messages could not be refreshed.",
               { preserveExisting: true },
             );
-            console.info("[STARTUP-SYNC] mailbox partially refreshed", { mailboxId });
-          }
+	          }
         } catch (error) {
           didFailMailbox = true;
           setMailboxSyncError(
@@ -37332,26 +37150,14 @@ export function WorkspaceShell({
               : "Refresh failed — reconnect this inbox in Settings.",
             { preserveExisting: true },
           );
-          console.info("[STARTUP-SYNC] mailbox failed", {
-            mailboxId,
-            error: error instanceof Error ? error.message : String(error),
-          });
-          console.info("[SYNC-TIMING] startup sync mailbox failed", {
-            mailboxId,
-            error: error instanceof Error ? error.message : String(error),
-          });
-        }
+	        }
       }
 
       if (cancelled) {
         return;
       }
 
-      console.info("[STARTUP-SYNC] completed", {
-        mailboxCount: startupSyncMailboxIds.length,
-        status: didFailMailbox ? "partial_error" : "done",
-      });
-      setStartupSyncStatus(didFailMailbox ? "partial_error" : "done");
+	      setStartupSyncStatus(didFailMailbox ? "partial_error" : "done");
       setMailboxSyncFeedbackMessage(
         didFailMailbox
           ? "Some inboxes could not be refreshed"
@@ -37459,11 +37265,10 @@ export function WorkspaceShell({
 
       return fallbackMailbox ? toOrderedMailboxFromManagedInbox(fallbackMailbox) : null;
     });
-    setPrimaryManagedInboxId(nextPrimaryInboxId);
-    setSavedManagedInboxes(nextManagedInboxes);
-    console.info("[MANAGED-INBOXES] applied", { count: nextManagedInboxes.length });
-    return true;
-  };
+	    setPrimaryManagedInboxId(nextPrimaryInboxId);
+	    setSavedManagedInboxes(nextManagedInboxes);
+	    return true;
+	  };
 
   const handleSetPrimaryManagedInbox = (inboxId: string) => {
     const mailbox = savedManagedInboxes.find((candidate) => candidate.id === inboxId);
@@ -38841,37 +38646,7 @@ export function WorkspaceShell({
           doesCollaborationMentionCandidateMatchQuery(candidate, inviteMentionQuery.query),
         )
       : [];
-    const isInviteErrorState =
-      inviteRouteState === "expired" ||
-      inviteRouteState === "invalid" ||
-      inviteRouteState === "unavailable" ||
-      inviteRouteState === "forbidden";
-    const inviteDebugPayload = isInviteErrorState
-      ? {
-          currentUrl:
-            typeof window !== "undefined"
-              ? `${window.location.origin}${window.location.pathname}${window.location.search}${window.location.hash}`
-              : "",
-          parsedRoute: collaborationInviteRoute,
-          parsedQueryParams:
-            typeof window !== "undefined"
-              ? Object.fromEntries(new URLSearchParams(window.location.search).entries())
-              : {},
-          resolvedInviteToken: collaborationInviteRoute.inviteToken,
-          decodedInvitePayload: decodedInvitePayload
-            ? {
-                inviteeEmail: decodedInvitePayload.inviteeEmail,
-                messageId: decodedInvitePayload.message.id,
-                collaborationState: decodedInvitePayload.message.collaboration?.state ?? null,
-              }
-            : null,
-          resolvedMessageId: inviteMessage?.id ?? collaborationInviteRoute.messageId ?? null,
-          resolvedCollaborationState: inviteCollaboration?.state ?? null,
-          failureReason: inviteRouteState,
-        }
-      : null;
-
-    const inviteStateTitle =
+	    const inviteStateTitle =
       inviteRouteState === "loading"
         ? "Loading collaboration"
         : inviteRouteState === "expired"
@@ -39341,21 +39116,11 @@ export function WorkspaceShell({
                     </div>
                   </div>
                 ) : (
-                  <div className="mx-auto max-w-[28rem] space-y-3">
-                    <p className="text-[0.96rem] leading-7 text-[var(--workspace-text-soft)]">
-                      {inviteStateDescription}
-                    </p>
-                    {isLocalDevelopmentEnvironment() && inviteDebugPayload ? (
-                      <div className="rounded-[20px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] p-4 text-left">
-                        <div className="text-[0.68rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)]">
-                          Dev only debug
-                        </div>
-                        <pre className="mt-3 overflow-x-auto whitespace-pre-wrap break-words text-[0.75rem] leading-6 text-[var(--workspace-text-soft)]">
-                          {JSON.stringify(inviteDebugPayload, null, 2)}
-                        </pre>
-                      </div>
-                    ) : null}
-                  </div>
+	                  <div className="mx-auto max-w-[28rem] space-y-3">
+	                    <p className="text-[0.96rem] leading-7 text-[var(--workspace-text-soft)]">
+	                      {inviteStateDescription}
+	                    </p>
+	                  </div>
                 )}
               </div>
             </div>

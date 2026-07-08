@@ -291,7 +291,6 @@ type SaveMailboxCredentialsResponse = {
 export async function connectInboxWithImap(
   request: ConnectInboxRequest,
 ): Promise<ConnectInboxResponse> {
-  const requestStartedAt = performance.now();
   try {
     const response = await fetch("/api/inboxes/connect-imap", {
       method: "POST",
@@ -303,16 +302,6 @@ export async function connectInboxWithImap(
     });
     
     const payload = (await response.json()) as ConnectInboxResponse;
-    console.info("[SYNC-TIMING] connectInboxWithImap response", {
-      ok: response.ok,
-      email: request.email,
-      durationMs: Math.round(performance.now() - requestStartedAt),
-      messageCount: payload.messages?.length ?? 0,
-      warning: payload.warning?.code ?? null,
-      warningStage: payload.warning?.stage ?? null,
-      fetchedCount: payload.warning?.fetched_count ?? null,
-    });
-
     if (!response.ok) {
       return {
         ok: false,
@@ -327,11 +316,6 @@ export async function connectInboxWithImap(
 
     return payload;
   } catch (error) {
-    console.error("[SYNC-TIMING] connectInboxWithImap failed", {
-      email: request.email,
-      durationMs: Math.round(performance.now() - requestStartedAt),
-      error: error instanceof Error ? error.message : String(error),
-    });
     return {
       ok: false,
       error: {
@@ -661,8 +645,6 @@ export async function saveMailboxCredentials({
 export async function fetchGmailInbox(
   request: FetchGmailInboxRequest,
 ): Promise<ConnectInboxResponse> {
-  const requestStartedAt = performance.now();
-
   try {
     const response = await fetch("/api/inboxes/fetch-gmail", {
       method: "POST",
@@ -673,14 +655,6 @@ export async function fetchGmailInbox(
     });
 
     const payload = (await response.json()) as ConnectInboxResponse;
-    console.info("[SYNC-TIMING] fetchGmailInbox response", {
-      ok: response.ok,
-      email: request.email,
-      durationMs: Math.round(performance.now() - requestStartedAt),
-      messageCount: payload.messages?.length ?? 0,
-      warning: payload.warning?.code ?? null,
-    });
-
     if (!response.ok) {
       return {
         ok: false,
@@ -693,11 +667,6 @@ export async function fetchGmailInbox(
 
     return payload;
   } catch (error) {
-    console.error("[SYNC-TIMING] fetchGmailInbox failed", {
-      email: request.email,
-      durationMs: Math.round(performance.now() - requestStartedAt),
-      error: error instanceof Error ? error.message : String(error),
-    });
     return {
       ok: false,
       error: {
