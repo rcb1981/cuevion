@@ -1270,6 +1270,7 @@ type BundleOrganizerManagedFilterOptions<T extends BundleOrganizerManagedMessage
   productAccess: ProductAccess;
   showOrganizerManagedMail: boolean;
   resolveLearnedLabel?: (message: T) => string | null | undefined;
+  resolveManualOrganizerCategory?: (message: T) => "demo" | "promo" | null | undefined;
   resolveVisibleCategoryLabel?: (message: T) => string | null | undefined;
 };
 const bundleOrganizerManagedCategories = new Set<BundleOrganizerVisibleCategory>([
@@ -1292,8 +1293,10 @@ function resolveBundleOrganizerManagedCategory(
   message: BundleOrganizerManagedMessageInput,
   visibleCategoryLabel?: string | null,
   learnedLabel?: string | null,
+  manualOrganizerCategory?: "demo" | "promo" | null,
 ): BundleOrganizerVisibleCategory | null {
   const organizerCategory = resolveOrganizerCategory({
+    manualCategory: manualOrganizerCategory,
     learnedLabelCategory: resolveDemoPromoOrganizerCategoryFromLabel(learnedLabel),
     internalClassification: message.internalClassification ?? null,
     category: message.category ?? null,
@@ -1320,6 +1323,7 @@ function shouldHideBundleOrganizerManagedMessage<T extends BundleOrganizerManage
     message,
     options.resolveVisibleCategoryLabel?.(message),
     options.resolveLearnedLabel?.(message),
+    options.resolveManualOrganizerCategory?.(message),
   );
   return (
     organizerCategory !== null &&
@@ -14225,6 +14229,11 @@ function MailboxView({
             senderCategoryLearning,
             message,
           ),
+        resolveManualOrganizerCategory: (message) =>
+          resolveManualOrganizerInclusionFromStore(
+            manualOrganizerInclusions,
+            message,
+          ),
         resolveVisibleCategoryLabel: getVisibleCategoryLabelForMessage,
       },
     );
@@ -14482,6 +14491,11 @@ function MailboxView({
           resolveLearnedLabel: (candidate) =>
             resolveLearnedLabelForOrganizerManagedMessage(
               senderCategoryLearning,
+              candidate,
+            ),
+          resolveManualOrganizerCategory: (candidate) =>
+            resolveManualOrganizerInclusionFromStore(
+              manualOrganizerInclusions,
               candidate,
             ),
           resolveVisibleCategoryLabel: (candidate) => {
@@ -14813,6 +14827,11 @@ function MailboxView({
             senderCategoryLearning,
             message,
           ),
+        resolveManualOrganizerCategory: (message) =>
+          resolveManualOrganizerInclusionFromStore(
+            manualOrganizerInclusions,
+            message,
+          ),
         resolveVisibleCategoryLabel: getVisibleCategoryLabelForMessage,
       })
     ) {
@@ -14897,6 +14916,11 @@ function MailboxView({
             resolveLearnedLabel: (message) =>
               resolveLearnedLabelForOrganizerManagedMessage(
                 senderCategoryLearning,
+                message,
+              ),
+            resolveManualOrganizerCategory: (message) =>
+              resolveManualOrganizerInclusionFromStore(
+                manualOrganizerInclusions,
                 message,
               ),
             resolveVisibleCategoryLabel: getVisibleCategoryLabelForMessage,
@@ -31146,6 +31170,11 @@ function ForYouView({
                     senderCategoryLearning,
                     message,
                   ),
+                resolveManualOrganizerCategory: (message) =>
+                  resolveManualOrganizerInclusionFromStore(
+                    manualOrganizerInclusions,
+                    message,
+                  ),
               },
             ),
           },
@@ -34409,6 +34438,11 @@ export function WorkspaceShell({
                   senderCategoryLearning,
                   message,
                 ),
+              resolveManualOrganizerCategory: (message) =>
+                resolveManualOrganizerInclusionFromStore(
+                  manualOrganizerInclusions,
+                  message,
+                ),
               resolveVisibleCategoryLabel: (message) => {
                 const manualLabelOverride = resolveManualLabelOverrideFromStore(
                   manualLabelOverrides,
@@ -35231,6 +35265,11 @@ export function WorkspaceShell({
           resolveLearnedLabel: (message) =>
             resolveLearnedLabelForOrganizerManagedMessage(
               senderCategoryLearning,
+              message,
+            ),
+          resolveManualOrganizerCategory: (message) =>
+            resolveManualOrganizerInclusionFromStore(
+              manualOrganizerInclusions,
               message,
             ),
           resolveVisibleCategoryLabel: (message) => {
