@@ -19246,27 +19246,6 @@ function MailboxView({
           });
         })()
       : null;
-  const organizerSubmenuPosition =
-    contextMenuState?.organizerMenuOpen &&
-    contextMenuPosition &&
-    contextMenuState.organizerAnchorX !== null &&
-    contextMenuState.organizerAnchorY !== null &&
-    contextMenuState.organizerAnchorHeight !== null
-      ? (() => {
-          const interactionRect =
-            inboxInteractionViewportRef.current?.getBoundingClientRect() ??
-            mailListViewportRef.current?.getBoundingClientRect();
-          return getAnchoredSubmenuPosition({
-            parentLeft: contextMenuPosition.left,
-            parentWidth: 238,
-            anchorY: contextMenuState.organizerAnchorY,
-            anchorHeight: contextMenuState.organizerAnchorHeight,
-            submenuWidth: 210,
-            submenuHeight: 140,
-            interactionRect,
-          });
-        })()
-      : null;
   const learningChooserPosition =
     contextMenuState?.learningChooserOpen &&
     contextMenuPosition &&
@@ -21719,6 +21698,11 @@ function MailboxView({
                         : "Start collaboration…"}
                     </button>
                   ) : null}
+                  {renderManualOrganizerMenuItems(
+                    contextMenuMessage,
+                    contextMenuMainItemClass,
+                    closeMenus,
+                  )}
                 </div>
 
                 <div className="my-2 h-px bg-[var(--workspace-divider)]" />
@@ -21925,48 +21909,6 @@ function MailboxView({
                           }}
                         />
                       ) : null}
-                      {canShowManualOrganizerAction ? (
-                        <ContextSubmenuTriggerRow
-                          label="Show in Organizer"
-                          active={Boolean(contextMenuState?.organizerMenuOpen)}
-                          onClick={(event) => {
-                            const rect = event.currentTarget.getBoundingClientRect();
-                            setContextMenuState((current) =>
-                              current
-                                ? {
-                                    ...current,
-                                    organizerMenuOpen: !current.organizerMenuOpen,
-                                    organizerAnchorX: rect.right,
-                                    organizerAnchorY: rect.top,
-                                    organizerAnchorHeight: rect.height,
-                                    moveMenuOpen: false,
-                                    learningMenuOpen: false,
-                                    learningChooserOpen: false,
-                                    learningChooserMode: null,
-                                  }
-                                : current,
-                            );
-                          }}
-                          onMouseEnter={(event) => {
-                            const rect = event.currentTarget.getBoundingClientRect();
-                            setContextMenuState((current) =>
-                              current
-                                ? {
-                                    ...current,
-                                    organizerMenuOpen: true,
-                                    organizerAnchorX: rect.right,
-                                    organizerAnchorY: rect.top,
-                                    organizerAnchorHeight: rect.height,
-                                    moveMenuOpen: false,
-                                    learningMenuOpen: false,
-                                    learningChooserOpen: false,
-                                    learningChooserMode: null,
-                                  }
-                                : current,
-                            );
-                          }}
-                        />
-                      ) : null}
                     </div>
                   </>
                 ) : null}
@@ -22004,67 +21946,6 @@ function MailboxView({
                       {target.label}
                     </button>
                   ))}
-                </div>
-              </div>,
-              document.body,
-            )
-          : null}
-        {contextMenuState &&
-        contextMenuMessage &&
-        contextMenuState.organizerMenuOpen &&
-        organizerSubmenuPosition
-          ? createPortal(
-              <div
-                data-theme={themeMode}
-                className="cuevion-dark-scroll cuevion-soft-scroll fixed z-[31] w-[210px] max-h-[360px] overflow-y-auto rounded-[20px] border border-[var(--workspace-menu-border)] bg-[var(--workspace-menu-bg)] p-2 shadow-panel"
-                style={{
-                  ...organizerSubmenuPosition,
-                  colorScheme: themeMode,
-                  scrollbarWidth: "thin",
-                  scrollbarColor:
-                    "var(--workspace-scrollbar-thumb) var(--workspace-scrollbar-track)",
-                }}
-                onMouseDown={(event) => event.stopPropagation()}
-              >
-                <div className="space-y-1">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      onSetManualOrganizerInclusion(contextMenuMessage, "demo");
-                      closeMenus();
-                    }}
-                    className={contextMenuItemClass}
-                  >
-                    Demo Inbox
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      onSetManualOrganizerInclusion(contextMenuMessage, "promo");
-                      closeMenus();
-                    }}
-                    className={contextMenuItemClass}
-                  >
-                    Promo Inbox
-                  </button>
-                  {resolveManualOrganizerInclusionFromStore(
-                    manualOrganizerInclusions,
-                    contextMenuMessage,
-                  ) ? (
-                    <>
-                      <div className="my-1 h-px bg-[var(--workspace-divider)]" />
-                      <button
-                        type="button"
-                        onClick={() => {
-                          onSetManualOrganizerInclusion(contextMenuMessage, null);
-                          closeMenus();
-                        }}
-                        className={contextMenuItemClass}
-                      >
-                        Remove from Organizer
-                      </button>
-                    </>
-                  ) : null}
                 </div>
               </div>,
               document.body,
