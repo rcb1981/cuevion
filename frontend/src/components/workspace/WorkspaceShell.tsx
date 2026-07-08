@@ -1088,6 +1088,14 @@ function resolveDemoPromoOrganizerCategoryFromLabel(
   return null;
 }
 
+function resolveLearnedLabelForOrganizerManagedMessage(
+  senderCategoryLearning: SenderCategoryLearningStore,
+  message: Pick<MailMessage, "from">,
+) {
+  return learningEngine.resolveSenderLearningEntry(message.from, senderCategoryLearning)
+    ?.entry.learnedLabel;
+}
+
 type MessageOwnershipInteractionEntry = {
   userId: string;
   count: number;
@@ -1261,6 +1269,7 @@ type BundleOrganizerManagedMessageInput = Pick<
 type BundleOrganizerManagedFilterOptions<T extends BundleOrganizerManagedMessageInput> = {
   productAccess: ProductAccess;
   showOrganizerManagedMail: boolean;
+  resolveLearnedLabel?: (message: T) => string | null | undefined;
   resolveVisibleCategoryLabel?: (message: T) => string | null | undefined;
 };
 const bundleOrganizerManagedCategories = new Set<BundleOrganizerVisibleCategory>([
@@ -1273,19 +1282,19 @@ const bundleOrganizerManagedCategories = new Set<BundleOrganizerVisibleCategory>
 function resolveBundleOrganizerVisibleLabelFallback(
   visibleCategoryLabel: string | null | undefined,
 ): BundleOrganizerVisibleCategory | null {
-  const normalizedLabel = visibleCategoryLabel?.trim().toLowerCase();
-
-  // Some normal-app rows display Promo through the visible label resolver even
+  // Some normal-app rows display Demo/Promo through the visible label resolver even
   // when a non-Organizer internalClassification prevents the Organizer resolver
   // from falling through to category/ui_signal.
-  return normalizedLabel === "promo" ? "promo" : null;
+  return resolveDemoPromoOrganizerCategoryFromLabel(visibleCategoryLabel);
 }
 
 function resolveBundleOrganizerManagedCategory(
   message: BundleOrganizerManagedMessageInput,
   visibleCategoryLabel?: string | null,
+  learnedLabel?: string | null,
 ): BundleOrganizerVisibleCategory | null {
   const organizerCategory = resolveOrganizerCategory({
+    learnedLabelCategory: resolveDemoPromoOrganizerCategoryFromLabel(learnedLabel),
     internalClassification: message.internalClassification ?? null,
     category: message.category ?? null,
     signal: message.signal ?? null,
@@ -1310,6 +1319,7 @@ function shouldHideBundleOrganizerManagedMessage<T extends BundleOrganizerManage
   const organizerCategory = resolveBundleOrganizerManagedCategory(
     message,
     options.resolveVisibleCategoryLabel?.(message),
+    options.resolveLearnedLabel?.(message),
   );
   return (
     organizerCategory !== null &&
@@ -14210,6 +14220,11 @@ function MailboxView({
       {
         productAccess,
         showOrganizerManagedMail: showBundleOrganizerManagedMail,
+        resolveLearnedLabel: (message) =>
+          resolveLearnedLabelForOrganizerManagedMessage(
+            senderCategoryLearning,
+            message,
+          ),
         resolveVisibleCategoryLabel: getVisibleCategoryLabelForMessage,
       },
     );
@@ -14464,6 +14479,11 @@ function MailboxView({
         !shouldHideBundleOrganizerManagedMessage(message, {
           productAccess,
           showOrganizerManagedMail: showBundleOrganizerManagedMail,
+          resolveLearnedLabel: (candidate) =>
+            resolveLearnedLabelForOrganizerManagedMessage(
+              senderCategoryLearning,
+              candidate,
+            ),
           resolveVisibleCategoryLabel: (candidate) => {
             const manualLabelOverride = resolveManualLabelOverride(candidate);
             const mailboxContext = getSmartFolderMailboxContext(mailboxId);
@@ -14788,6 +14808,11 @@ function MailboxView({
       !shouldHideBundleOrganizerManagedMessage(hiddenSelectedMessage, {
         productAccess,
         showOrganizerManagedMail: showBundleOrganizerManagedMail,
+        resolveLearnedLabel: (message) =>
+          resolveLearnedLabelForOrganizerManagedMessage(
+            senderCategoryLearning,
+            message,
+          ),
         resolveVisibleCategoryLabel: getVisibleCategoryLabelForMessage,
       })
     ) {
@@ -14869,6 +14894,11 @@ function MailboxView({
           !shouldHideBundleOrganizerManagedMessage(candidate, {
             productAccess,
             showOrganizerManagedMail: showBundleOrganizerManagedMail,
+            resolveLearnedLabel: (message) =>
+              resolveLearnedLabelForOrganizerManagedMessage(
+                senderCategoryLearning,
+                message,
+              ),
             resolveVisibleCategoryLabel: getVisibleCategoryLabelForMessage,
           }),
       )
@@ -31111,6 +31141,11 @@ function ForYouView({
               {
                 productAccess,
                 showOrganizerManagedMail: showBundleOrganizerManagedMail,
+                resolveLearnedLabel: (message) =>
+                  resolveLearnedLabelForOrganizerManagedMessage(
+                    senderCategoryLearning,
+                    message,
+                  ),
               },
             ),
           },
@@ -34369,6 +34404,11 @@ export function WorkspaceShell({
             {
               productAccess,
               showOrganizerManagedMail: showBundleOrganizerManagedMail,
+              resolveLearnedLabel: (message) =>
+                resolveLearnedLabelForOrganizerManagedMessage(
+                  senderCategoryLearning,
+                  message,
+                ),
               resolveVisibleCategoryLabel: (message) => {
                 const manualLabelOverride = resolveManualLabelOverrideFromStore(
                   manualLabelOverrides,
@@ -35188,6 +35228,11 @@ export function WorkspaceShell({
         {
           productAccess,
           showOrganizerManagedMail: showBundleOrganizerManagedMail,
+          resolveLearnedLabel: (message) =>
+            resolveLearnedLabelForOrganizerManagedMessage(
+              senderCategoryLearning,
+              message,
+            ),
           resolveVisibleCategoryLabel: (message) => {
             const manualLabelOverride = resolveManualLabelOverrideFromStore(
               manualLabelOverrides,
