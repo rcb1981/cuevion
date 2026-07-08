@@ -16027,6 +16027,9 @@ function MailboxView({
           >
             {message.collaboration ? "Open collaboration…" : "Start collaboration…"}
           </button>
+          {renderManualOrganizerMenuItems(message, menuItemClass, () =>
+            setDetailActionsMenuState(null),
+          )}
           <button
             type="button"
             onClick={() => {
@@ -19342,6 +19345,61 @@ function MailboxView({
     !isSharedView &&
     !activeSmartFolder &&
     activeFolder === "Inbox";
+  const renderManualOrganizerMenuItems = (
+    message: MessageIdentitySource | null | undefined,
+    itemClass: string,
+    onClose: () => void,
+  ) => {
+    if (!canShowManualOrganizerAction || !message) {
+      return null;
+    }
+
+    const existingInclusion = resolveManualOrganizerInclusionFromStore(
+      manualOrganizerInclusions,
+      message,
+    );
+
+    return (
+      <>
+        <div className="my-2 h-px bg-[var(--workspace-divider)]" />
+        <div className="px-3 pb-1 pt-0.5 text-[0.66rem] font-medium uppercase tracking-[0.12em] text-[var(--workspace-text-faint)]">
+          Show in Organizer
+        </div>
+        <button
+          type="button"
+          onClick={() => {
+            onSetManualOrganizerInclusion(message, "demo");
+            onClose();
+          }}
+          className={itemClass}
+        >
+          Demo Inbox
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            onSetManualOrganizerInclusion(message, "promo");
+            onClose();
+          }}
+          className={itemClass}
+        >
+          Promo Inbox
+        </button>
+        {existingInclusion ? (
+          <button
+            type="button"
+            onClick={() => {
+              onSetManualOrganizerInclusion(message, null);
+              onClose();
+            }}
+            className={itemClass}
+          >
+            Remove from Organizer
+          </button>
+        ) : null}
+      </>
+    );
+  };
 
   useEffect(() => {
     setIsReadingLearningMenuOpen(false);
@@ -20209,6 +20267,13 @@ function MailboxView({
                     ? "Open collaboration…"
                     : "Start collaboration…"}
                 </button>
+                {hasSingleSelection
+                  ? renderManualOrganizerMenuItems(
+                      fullWidthMessage ?? selectedMessage,
+                      contextMenuMainItemClass,
+                      closeMenus,
+                    )
+                  : null}
                 {hasSingleSelection && selectedMessage ? (
                   <>
                     <button
