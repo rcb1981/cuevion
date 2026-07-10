@@ -18349,6 +18349,38 @@ function MailboxView({
     }));
   };
 
+  const resolveUnreadActionTargetMessages = (messageIds: string[]) => {
+    const targetIdSet = new Set(messageIds);
+    const nextMessages: MailMessage[] = [];
+    const seenMessageIds = new Set<string>();
+
+    folderMessages.forEach((message) => {
+      if (!targetIdSet.has(message.id)) {
+        return;
+      }
+
+      const messageLocation = currentMessageLocationById[message.id];
+      const threadMessages = [
+        message,
+        ...getRecentThreadMessages(message, folderMessages, {
+          mailboxId: messageLocation?.mailboxId ?? mailbox.id,
+          useSafeGrouping: true,
+        }),
+      ];
+
+      threadMessages.forEach((threadMessage) => {
+        if (seenMessageIds.has(threadMessage.id)) {
+          return;
+        }
+
+        seenMessageIds.add(threadMessage.id);
+        nextMessages.push(threadMessage);
+      });
+    });
+
+    return nextMessages;
+  };
+
   const buildProviderMessageActionRequest = (
     message: MailMessage,
     action: InboxMessageAction,
@@ -18446,7 +18478,7 @@ function MailboxView({
       return;
     }
 
-    const targetMessages = folderMessages.filter((message) => messageIds.includes(message.id));
+    const targetMessages = resolveUnreadActionTargetMessages(messageIds);
     if (targetMessages.length === 0) {
       if (shouldCloseMenus) {
         closeMenus();
