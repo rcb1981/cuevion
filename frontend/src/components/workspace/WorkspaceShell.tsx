@@ -33159,6 +33159,33 @@ export function WorkspaceShell({
       return nextOverrides;
     });
   };
+  const clearUnreadOverridesForProviderMessages = (
+    messages: LiveInboxMessageSnapshot[],
+  ) => {
+    const providerStateKeys = new Set(
+      messages
+        .filter((message) => typeof message.unread === "boolean")
+        .flatMap((message) => getCanonicalMessageIdentityKeys(message)),
+    );
+
+    if (providerStateKeys.size === 0) {
+      return;
+    }
+
+    setMessageUnreadOverrides((current: MessageUnreadOverrideStore) => {
+      let changed = false;
+      const nextOverrides = { ...current };
+
+      providerStateKeys.forEach((key) => {
+        if (Object.prototype.hasOwnProperty.call(nextOverrides, key)) {
+          delete nextOverrides[key];
+          changed = true;
+        }
+      });
+
+      return changed ? nextOverrides : current;
+    });
+  };
   const buildMessageIdentityIndexes = <T extends MessageIdentitySource>(messages: T[]) => ({
     byId: new Map<string, T>(
       messages
@@ -33313,6 +33340,7 @@ export function WorkspaceShell({
     incomingMessages: LiveInboxMessageSnapshot[],
     currentInboxMessages: MailMessage[],
     currentStore: MailboxStore,
+    options?: { freshProviderStateKeys?: Set<string> },
   ) => {
     const bodyfulCurrentInboxMessages =
       currentInboxMessages.filter(hasRenderableMessagePayload);
@@ -33340,10 +33368,26 @@ export function WorkspaceShell({
         persistedMessage.isShared,
         existingMessage?.isShared,
       );
-      const unread =
+      const isFreshProviderMessage =
+        options?.freshProviderStateKeys != null &&
+        getCanonicalMessageIdentityKeys(persistedMessage).some((key) =>
+          options.freshProviderStateKeys?.has(key),
+        );
+      const providerUnread =
+        typeof message.unread === "boolean" ? message.unread : undefined;
+      const localUnread =
         resolveUnreadOverride(messageUnreadOverrides, persistedMessage) ??
-        existingMessage?.unread ??
-        message.unread;
+        existingMessage?.unread;
+      const providerFlagged =
+        typeof message.flagged === "boolean" ? message.flagged : undefined;
+      const unread =
+        isFreshProviderMessage
+          ? providerUnread ?? localUnread
+          : localUnread ?? providerUnread;
+      const flagged =
+        isFreshProviderMessage
+          ? providerFlagged ?? existingMessage?.flagged
+          : message.flagged;
       return normalizeMailMessage(
         {
           id: message.id,
@@ -33354,7 +33398,7 @@ export function WorkspaceShell({
           createdAt: message.createdAt,
           imapUid: message.imapUid,
           unread,
-          flagged: message.flagged,
+          flagged,
           signal: message.signal,
           ui_signal: message.ui_signal,
           internalClassification:
@@ -36943,7 +36987,7 @@ export function WorkspaceShell({
     mailboxId: InboxId,
     messages: LiveInboxMessageSnapshot[],
     evictImapUids?: Set<string>,
-    options?: { replaceInbox?: boolean },
+    options?: { replaceInbox?: boolean; freshProviderStateKeys?: Set<string> },
   ) => {
     const targetMailbox = orderedMailboxes.find((entry) => entry.id === mailboxId);
 
@@ -36975,6 +37019,7 @@ export function WorkspaceShell({
             messages,
             currentInbox,
             currentStore,
+            { freshProviderStateKeys: options?.freshProviderStateKeys },
           ),
         },
       };
@@ -37155,6 +37200,9 @@ export function WorkspaceShell({
       }
 
       const messages = response.messages ?? [];
+      const freshProviderStateKeys = new Set(
+        messages.flatMap((message) => getCanonicalMessageIdentityKeys(message)),
+      );
       const persistedSnapshot = canUseGmailOAuthFetch
         ? undefined
         : readLiveInboxSnapshots()[managedMailbox.id];
@@ -37216,8 +37264,9 @@ export function WorkspaceShell({
         managedMailbox.id as InboxId,
         messagesForReactState,
         evictImapUids,
-        { replaceInbox: canUseGmailOAuthFetch },
+        { replaceInbox: canUseGmailOAuthFetch, freshProviderStateKeys },
       );
+      clearUnreadOverridesForProviderMessages(messages);
       const refreshWarningMessage = resolveMailboxRefreshWarningMessage(response.warning);
       if (refreshWarningMessage) {
         setMailboxSyncError(mailboxId, refreshWarningMessage);
