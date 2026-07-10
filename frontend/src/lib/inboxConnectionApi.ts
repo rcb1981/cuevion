@@ -38,6 +38,7 @@ export type LiveInboxMessageSnapshot = {
   bodyHtml?: string;
   attachments?: LiveInboxAttachmentSnapshot[];
   unread?: boolean;
+  flagged?: boolean;
   category?: string;
   categorySource?: string;
   categoryConfidence?: string;
@@ -246,6 +247,44 @@ export type SendGmailMessageRequest = {
   attachments?: SendInboxAttachmentRequest[];
 };
 
+export type InboxMessageAction = "mark_read" | "mark_unread" | "flag" | "unflag";
+
+export type GmailInboxMessageActionRequest = {
+  provider: "gmail" | "google";
+  mailboxId?: string;
+  email: string;
+  messageId: string;
+  action: InboxMessageAction;
+};
+
+export type ImapInboxMessageActionRequest = {
+  provider: "imap" | "custom_imap";
+  mailboxId?: string;
+  email: string;
+  host: string;
+  port: string;
+  ssl: boolean;
+  username: string;
+  password?: string;
+  folder: string;
+  uid: string;
+  uidValidity?: string | null;
+  action: InboxMessageAction;
+};
+
+export type InboxMessageActionRequest =
+  | GmailInboxMessageActionRequest
+  | ImapInboxMessageActionRequest;
+
+export type InboxMessageActionResponse = {
+  ok: boolean;
+  action?: InboxMessageAction;
+  error?: {
+    code?: string;
+    message?: string;
+  };
+};
+
 type SendGmailMessageResponse = {
   ok: boolean;
   error?: {
@@ -260,6 +299,54 @@ type AttachmentDownloadErrorPayload = {
     message?: string;
   };
 };
+
+export async function mutateInboxMessageAction(
+  request: InboxMessageActionRequest,
+): Promise<InboxMessageActionResponse> {
+  try {
+    const response = await fetch("/api/inboxes/message-action", {
+      method: "POST",
+      credentials: "include",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(request),
+    });
+    const rawPayload = await response.text();
+    let payload: InboxMessageActionResponse | null = null;
+
+    if (rawPayload.trim()) {
+      try {
+        payload = JSON.parse(rawPayload) as InboxMessageActionResponse;
+      } catch {
+        payload = null;
+      }
+    }
+
+    if (!response.ok || payload?.ok === false) {
+      return {
+        ok: false,
+        error: payload?.error ?? {
+          code: "message_action_failed",
+          message: "Could not update this message in the connected mailbox.",
+        },
+      };
+    }
+
+    return payload ?? { ok: true, action: request.action };
+  } catch (error) {
+    return {
+      ok: false,
+      error: {
+        code: "message_action_failed",
+        message:
+          error instanceof Error
+            ? error.message
+            : "Could not update this message in the connected mailbox.",
+      },
+    };
+  }
+}
 
 export type MailboxCredentialStatus = {
   imapPasswordSet: boolean;

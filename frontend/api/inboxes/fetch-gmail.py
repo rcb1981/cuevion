@@ -260,6 +260,7 @@ class handler(BaseHTTPRequestHandler):
 
             label_ids = message_payload.get("labelIds") if isinstance(message_payload, dict) else None
             unread = isinstance(label_ids, list) and "UNREAD" in label_ids
+            flagged = isinstance(label_ids, list) and "STARRED" in label_ids
             gmail_internal_id = str(message_payload.get("id") or "").strip() or None
             if gmail_internal_id:
                 inbox_uid_set.append(gmail_internal_id)
@@ -272,6 +273,7 @@ class handler(BaseHTTPRequestHandler):
                         email_address,
                         unread,
                         gmail_internal_id,
+                        flagged,
                         internal_role=internal_role,
                         focus_preferences=focus_preferences,
                     ),

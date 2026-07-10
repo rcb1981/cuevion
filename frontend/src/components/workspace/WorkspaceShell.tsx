@@ -77,7 +77,10 @@ import {
   downloadAttachment,
   fetchGmailInbox,
   getMailboxCredentialStatuses,
+  mutateInboxMessageAction,
   sendGmailMessage,
+  type InboxMessageAction,
+  type InboxMessageActionRequest,
   type MailboxCredentialStatusStore,
   type SendInboxAttachmentRequest,
   type LiveInboxMessageSnapshot,
@@ -13068,6 +13071,7 @@ function MailboxView({
   } | null>(null);
   const [isEmptyTrashConfirmationOpen, setIsEmptyTrashConfirmationOpen] = useState(false);
   const [trashEmptiedToastMessage, setTrashEmptiedToastMessage] = useState<string | null>(null);
+  const [mailboxActionToastMessage, setMailboxActionToastMessage] = useState<string | null>(null);
   const dragPreviewCleanupRef = useRef<(() => void) | null>(null);
   const [composeTo, setComposeTo] = useState("");
   const [composeCc, setComposeCc] = useState("");
@@ -18317,13 +18321,108 @@ function MailboxView({
     await sendExternalReviewInviteToEmail(messageId, externalCollaborationEmail);
   };
 
-  const setMessagesUnreadState = (
+  const buildMailboxActionErrorMessage = (error?: { code?: string; message?: string }) => {
+    if (error?.code === "MISSING_GMAIL_MODIFY_SCOPE" || error?.code === "REAUTH_REQUIRED") {
+      return "Reconnect this Gmail inbox in Settings to enable mailbox actions.";
+    }
+
+    return error?.message ?? "Could not update this message in the connected mailbox.";
+  };
+
+  const updateUnreadStateInMailboxStore = (
+    folder: MailFolder,
+    messageIds: string[],
+    unread: boolean | undefined,
+  ) => {
+    const messageIdSet = new Set(messageIds);
+    updateFolderMessages(folder, (messages) =>
+      messages.map((message) =>
+        messageIdSet.has(message.id) ? { ...message, unread } : message,
+      ),
+    );
+  };
+
+  const updateFlagStateInMailboxStore = (messageId: string, flagged: boolean | undefined) => {
+    updateMessageById(messageId, (message) => ({
+      ...message,
+      flagged,
+    }));
+  };
+
+  const buildProviderMessageActionRequest = (
+    message: MailMessage,
+    action: InboxMessageAction,
+  ): InboxMessageActionRequest | null => {
+    const sourceMailboxId = currentMessageLocationById[message.id]?.mailboxId ?? mailbox.id;
+    const sourceMailbox = managedInboxes.find((candidate) => candidate.id === sourceMailboxId);
+
+    if (!sourceMailbox?.provider || !sourceMailbox.connected) {
+      setMailboxActionToastMessage("This message is missing connected mailbox metadata.");
+      return null;
+    }
+
+    const providerMessageId = message.imapUid?.trim();
+    if (!providerMessageId) {
+      setMailboxActionToastMessage("This message is missing provider message metadata.");
+      return null;
+    }
+
+    if (sourceMailbox.provider === "google") {
+      return {
+        provider: "gmail",
+        mailboxId: sourceMailbox.id,
+        email: sourceMailbox.email.trim(),
+        messageId: providerMessageId,
+        action,
+      };
+    }
+
+    if (isImapCredentialsProvider(sourceMailbox.provider)) {
+      if (activeFolder !== "Inbox" && activeFolder !== "Filtered") {
+        setMailboxActionToastMessage("Mailbox actions are only available for inbox messages right now.");
+        return null;
+      }
+
+      const resolvedImapSettings = applyProviderDefaults(
+        sourceMailbox.provider,
+        sourceMailbox.customImap,
+        sourceMailbox.email,
+      );
+      const snapshot = readLiveInboxSnapshots()[sourceMailbox.id];
+
+      return {
+        provider: "imap",
+        mailboxId: sourceMailbox.id,
+        email: sourceMailbox.email.trim(),
+        host: resolvedImapSettings.host.trim(),
+        port: resolvedImapSettings.port.trim(),
+        ssl: resolvedImapSettings.ssl,
+        username: resolvedImapSettings.username.trim() || sourceMailbox.email.trim(),
+        password: resolvedImapSettings.password,
+        folder: "INBOX",
+        uid: providerMessageId,
+        uidValidity: snapshot?.uidValidity ?? null,
+        action,
+      };
+    }
+
+    setMailboxActionToastMessage("Mailbox actions are not available for this provider.");
+    return null;
+  };
+
+  const setMessagesUnreadState = async (
     folder: MailFolder,
     messageIds: string[],
     unread: boolean,
+    options: { advanceSelection?: boolean; closeMenus?: boolean } = {},
   ) => {
+    const shouldCloseMenus = options.closeMenus ?? true;
+    const shouldAdvanceSelection = options.advanceSelection ?? true;
+
     if (messageIds.length === 0) {
-      closeMenus();
+      if (shouldCloseMenus) {
+        closeMenus();
+      }
       return;
     }
 
@@ -18331,56 +18430,81 @@ function MailboxView({
       return;
     }
 
-    onSyncUnreadOverrides(getMessagesByIds(messageIds), unread);
-
     if (isSharedView) {
-      const messageIdSet = new Set(messageIds);
-
-      setMailboxStore((currentStore) =>
-        Object.entries(currentStore).reduce<MailboxStore>((nextStore, [mailboxId, collections]) => {
-          nextStore[mailboxId as InboxId] = {
-            Inbox: collections.Inbox.map((message) =>
-              messageIdSet.has(message.id) ? { ...message, unread } : message,
-            ),
-            Drafts: collections.Drafts.map((message) =>
-              messageIdSet.has(message.id) ? { ...message, unread } : message,
-            ),
-            Sent: collections.Sent.map((message) =>
-              messageIdSet.has(message.id) ? { ...message, unread } : message,
-            ),
-            Archive: collections.Archive.map((message) =>
-              messageIdSet.has(message.id) ? { ...message, unread } : message,
-            ),
-            Filtered: collections.Filtered.map((message) =>
-              messageIdSet.has(message.id) ? { ...message, unread } : message,
-            ),
-            Spam: collections.Spam.map((message) =>
-              messageIdSet.has(message.id) ? { ...message, unread } : message,
-            ),
-            Trash: collections.Trash.map((message) =>
-              messageIdSet.has(message.id) ? { ...message, unread } : message,
-            ),
-          };
-          return nextStore;
-        }, {} as MailboxStore),
-      );
-      if (activeFilter === "Unread" && unread === false) {
-        advanceSelectionAfterAction(messageIds);
+      setMailboxActionToastMessage("Mailbox actions are not available in shared view.");
+      if (shouldCloseMenus) {
+        closeMenus();
       }
-      closeMenus();
       return;
     }
 
-    const messageIdSet = new Set(messageIds);
-    updateFolderMessages(folder, (messages) =>
-      messages.map((message) =>
-        messageIdSet.has(message.id) ? { ...message, unread } : message,
-      ),
-    );
-    if (activeFilter === "Unread" && unread === false) {
-      advanceSelectionAfterAction(messageIds);
+    if (folder !== "Inbox" && folder !== "Filtered") {
+      setMailboxActionToastMessage("Mailbox actions are only available for inbox messages right now.");
+      if (shouldCloseMenus) {
+        closeMenus();
+      }
+      return;
     }
-    closeMenus();
+
+    const targetMessages = folderMessages.filter((message) => messageIds.includes(message.id));
+    if (targetMessages.length === 0) {
+      if (shouldCloseMenus) {
+        closeMenus();
+      }
+      return;
+    }
+
+    const action: InboxMessageAction = unread ? "mark_unread" : "mark_read";
+    const requests = targetMessages.map((message) => ({
+      message,
+      request: buildProviderMessageActionRequest(message, action),
+      previousUnread: message.unread,
+    }));
+
+    if (requests.some((entry) => entry.request === null)) {
+      if (shouldCloseMenus) {
+        closeMenus();
+      }
+      return;
+    }
+
+    const targetMessageIds = targetMessages.map((message) => message.id);
+    updateUnreadStateInMailboxStore(folder, targetMessageIds, unread);
+    if (shouldCloseMenus) {
+      closeMenus();
+    }
+
+    const successfulMessages: MailMessage[] = [];
+    const failedMessages: typeof requests = [];
+    let firstError: { code?: string; message?: string } | undefined;
+
+    for (const entry of requests) {
+      const response = await mutateInboxMessageAction(entry.request as InboxMessageActionRequest);
+
+      if (response.ok) {
+        successfulMessages.push(entry.message);
+        continue;
+      }
+
+      failedMessages.push(entry);
+      firstError = firstError ?? response.error;
+    }
+
+    if (successfulMessages.length > 0) {
+      onSyncUnreadOverrides(successfulMessages, unread);
+    }
+
+    if (failedMessages.length > 0) {
+      failedMessages.forEach((entry) => {
+        updateUnreadStateInMailboxStore(folder, [entry.message.id], entry.previousUnread);
+      });
+      setMailboxActionToastMessage(buildMailboxActionErrorMessage(firstError));
+      return;
+    }
+
+    if (shouldAdvanceSelection && activeFilter === "Unread" && unread === false) {
+      advanceSelectionAfterAction(targetMessageIds);
+    }
   };
 
   const setMessageUnreadState = (
@@ -18388,42 +18512,57 @@ function MailboxView({
     messageId: string,
     unread: boolean,
   ) => {
-    setMessagesUnreadState(folder, [messageId], unread);
+    void setMessagesUnreadState(folder, [messageId], unread);
   };
 
   const markInboxMessageReadOnOpen = (message: MailMessage) => {
     if (
       (activeFolder !== "Inbox" && activeFolder !== "Filtered") ||
       isSharedView ||
-      activeSmartFolder
+      activeSmartFolder ||
+      !message.unread
     ) {
       return;
     }
 
-    onSyncUnreadOverrides([message], false);
-    updateFolderMessages(activeFolder, (messages) =>
-      messages.map((entry) =>
-        entry.id === message.id
-          ? {
-              ...entry,
-              imapUid: message.imapUid ?? entry.imapUid,
-              unread: false,
-            }
-          : entry,
-      ),
-    );
+    void setMessagesUnreadState(activeFolder, [message.id], false, {
+      advanceSelection: false,
+      closeMenus: false,
+    });
   };
 
-  const toggleMessageFlagState = (messageId: string) => {
+  const toggleMessageFlagState = async (messageId: string) => {
     if (shouldBlockSmartFolderMutation()) {
       return;
     }
 
-    updateMessageById(messageId, (message) => ({
-      ...message,
-      flagged: !message.flagged,
-    }));
+    if (isSharedView || (activeFolder !== "Inbox" && activeFolder !== "Filtered")) {
+      setMailboxActionToastMessage("Mailbox actions are only available for inbox messages right now.");
+      closeMenus();
+      return;
+    }
+
+    const message = getMessageById(messageId);
+    if (!message) {
+      closeMenus();
+      return;
+    }
+
+    const flagged = !message.flagged;
+    const request = buildProviderMessageActionRequest(message, flagged ? "flag" : "unflag");
+    if (!request) {
+      closeMenus();
+      return;
+    }
+
+    updateFlagStateInMailboxStore(messageId, flagged);
     closeMenus();
+
+    const response = await mutateInboxMessageAction(request);
+    if (!response.ok) {
+      updateFlagStateInMailboxStore(messageId, message.flagged);
+      setMailboxActionToastMessage(buildMailboxActionErrorMessage(response.error));
+    }
   };
 
   const acceptCategorySuggestion = (
@@ -19138,6 +19277,18 @@ function MailboxView({
     return () => window.clearTimeout(timeoutId);
   }, [trashEmptiedToastMessage]);
 
+  useEffect(() => {
+    if (!mailboxActionToastMessage) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      setMailboxActionToastMessage(null);
+    }, 3600);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [mailboxActionToastMessage]);
+
   const contextMenuMessage = contextMenuState
     ? folderMessages.find((message) => message.id === contextMenuState.messageId) ?? null
     : null;
@@ -19467,7 +19618,7 @@ function MailboxView({
       return;
     }
 
-    setMessagesUnreadState(
+    void setMessagesUnreadState(
       activeFolder,
       actionableSelectionIds,
       !shouldBulkMarkAsRead,
@@ -20186,7 +20337,7 @@ function MailboxView({
             active={Boolean(selectedMessage?.flagged)}
             onClick={() => {
               if (selectedMessage) {
-                toggleMessageFlagState(selectedMessage.id);
+                void toggleMessageFlagState(selectedMessage.id);
               }
             }}
           >
@@ -20244,7 +20395,7 @@ function MailboxView({
                 <button
                   type="button"
                   onClick={() =>
-                    setMessagesUnreadState(
+                    void setMessagesUnreadState(
                       activeFolder,
                       visibleSelectedMessageIds,
                       !shouldBulkMarkAsRead,
@@ -21750,7 +21901,7 @@ function MailboxView({
                         contextMenuMessage?.id ?? contextMenuSelectionIds[0] ?? null;
 
                       if (primaryContextMessageId) {
-                        toggleMessageFlagState(primaryContextMessageId);
+                        void toggleMessageFlagState(primaryContextMessageId);
                         return;
                       }
 
@@ -21797,7 +21948,7 @@ function MailboxView({
                       <button
                         type="button"
                         onClick={() =>
-                          setMessagesUnreadState(
+                          void setMessagesUnreadState(
                             activeFolder,
                             contextMenuSelectionIds,
                             !contextMenuSelectionIds.some((messageId) =>
@@ -22982,6 +23133,13 @@ function MailboxView({
           <div className="pointer-events-none fixed bottom-6 right-6 z-[220]">
             <div className="rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3 text-[0.86rem] font-medium text-[var(--workspace-text)] shadow-panel">
               {trashEmptiedToastMessage}
+            </div>
+          </div>
+        ) : null}
+        {mailboxActionToastMessage ? (
+          <div className="pointer-events-none fixed bottom-6 right-6 z-[220]">
+            <div className="max-w-[24rem] rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3 text-[0.86rem] font-medium text-[var(--workspace-text)] shadow-panel">
+              {mailboxActionToastMessage}
             </div>
           </div>
         ) : null}
@@ -33196,6 +33354,7 @@ export function WorkspaceShell({
           createdAt: message.createdAt,
           imapUid: message.imapUid,
           unread,
+          flagged: message.flagged,
           signal: message.signal,
           ui_signal: message.ui_signal,
           internalClassification:

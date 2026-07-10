@@ -320,7 +320,7 @@ def fetch_recent_messages(mailbox, folder: str = "INBOX", limit: int = DEFAULT_F
         id_collection_duration_ms,
     )
     latest_ids = message_ids[-limit:]
-    results: list[tuple[Message, bool, str | None]] = []
+    results: list[tuple[Message, bool, str | None, bool]] = []
     warnings: list[dict[str, Any]] = []
 
     for index, message_id in enumerate(reversed(latest_ids)):
@@ -429,7 +429,8 @@ def fetch_recent_messages(mailbox, folder: str = "INBOX", limit: int = DEFAULT_F
         if raw_email is None:
             continue
         unread = "\\Seen" not in flags_content
-        results.append((message_from_bytes(raw_email), unread, imap_uid))
+        flagged = "\\Flagged" in flags_content
+        results.append((message_from_bytes(raw_email), unread, imap_uid, flagged))
         logger.info(
             "IMAP preview stage=per_message_fetch_success idx=%s fetch_ms=%.1f total_ms=%.1f bytes=%s uid_present=%s unread=%s",
             index,
@@ -1057,6 +1058,7 @@ def to_message_preview(
     email_address: str,
     unread: bool,
     imap_uid: str | None,
+    flagged: bool = False,
     internal_role: str | None = None,
     focus_preferences: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -1096,6 +1098,7 @@ def to_message_preview(
       "body": body.split("\n\n") if body else [snippet or "No message preview available."],
       "attachments": attachments,
       "unread": unread,
+      "flagged": flagged,
       "imapUid": imap_uid,
       "signal": preview_routing.get("signal"),
       "ui_signal": preview_routing.get("ui_signal"),
@@ -1238,7 +1241,7 @@ def build_connect_preview_response(payload: dict[str, Any]) -> tuple[int, dict[s
             email_address,
         )
         previews = []
-        for index, (message, unread, imap_uid) in enumerate(messages):
+        for index, (message, unread, imap_uid, flagged) in enumerate(messages):
             try:
                 previews.append(
                     to_message_preview(
@@ -1247,6 +1250,7 @@ def build_connect_preview_response(payload: dict[str, Any]) -> tuple[int, dict[s
                         email_address,
                         unread,
                         imap_uid,
+                        flagged,
                         internal_role=internal_role,
                         focus_preferences=focus_preferences,
                     )
