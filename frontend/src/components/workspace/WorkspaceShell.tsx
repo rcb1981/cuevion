@@ -734,12 +734,6 @@ type MessageIdentitySource = {
 };
 
 type MessageUnreadOverrideStore = Record<string, boolean>;
-type MessageUnreadOverrideScope = {
-  provider?: string | null;
-  mailboxId?: string | null;
-  folder?: string | null;
-  uidValidity?: string | null;
-};
 type ManualLabelOverride =
   | "Reply"
   | "Promo"
@@ -942,9 +936,8 @@ function dedupeSmartFolderEntriesByCanonicalIdentity<
 function resolveUnreadOverride(
   overrides: MessageUnreadOverrideStore,
   message: MessageIdentitySource,
-  scope?: MessageUnreadOverrideScope,
 ) {
-  for (const key of getUnreadOverrideIdentityKeys(message, scope)) {
+  for (const key of getCanonicalMessageIdentityKeys(message)) {
     if (Object.prototype.hasOwnProperty.call(overrides, key)) {
       return overrides[key];
     }
@@ -953,57 +946,24 @@ function resolveUnreadOverride(
   return undefined;
 }
 
-function normalizeUnreadOverrideKeyPart(value?: string | null) {
-  return encodeURIComponent((value ?? "unknown").trim().toLowerCase() || "unknown");
+function isImapUnreadOverrideKey(key: string) {
+  return key.startsWith("imap:") || key.startsWith("imap-scoped:");
 }
 
-function buildScopedImapUnreadOverrideKey(
-  message: MessageIdentitySource,
-  scope?: MessageUnreadOverrideScope,
-) {
-  const imapUid = message.imapUid?.trim();
+function removeImapUnreadOverrideEntries(overrides: MessageUnreadOverrideStore) {
+  const nextOverrides: MessageUnreadOverrideStore = {};
+  let changed = false;
 
-  if (
-    !imapUid ||
-    scope?.provider !== "imap" ||
-    !scope.mailboxId?.trim() ||
-    !scope.folder?.trim()
-  ) {
-    return null;
-  }
+  Object.entries(overrides).forEach(([key, value]) => {
+    if (isImapUnreadOverrideKey(key)) {
+      changed = true;
+      return;
+    }
 
-  return [
-    "imap-scoped",
-    normalizeUnreadOverrideKeyPart(scope.mailboxId),
-    normalizeUnreadOverrideKeyPart(scope.folder),
-    normalizeUnreadOverrideKeyPart(scope.uidValidity),
-    normalizeUnreadOverrideKeyPart(imapUid),
-  ].join(":");
-}
+    nextOverrides[key] = value;
+  });
 
-function getUnreadOverrideIdentityKeys(
-  message: MessageIdentitySource,
-  scope?: MessageUnreadOverrideScope,
-) {
-  const scopedImapKey = buildScopedImapUnreadOverrideKey(message, scope);
-
-  if (scopedImapKey) {
-    return [scopedImapKey];
-  }
-
-  return getCanonicalMessageIdentityKeys(message);
-}
-
-function getUnreadOverrideCleanupKeys(
-  message: MessageIdentitySource,
-  scope?: MessageUnreadOverrideScope,
-) {
-  return Array.from(
-    new Set([
-      ...getUnreadOverrideIdentityKeys(message, scope),
-      ...getCanonicalMessageIdentityKeys(message),
-    ]),
-  );
+  return changed ? nextOverrides : overrides;
 }
 
 type LearningLaunchRequest =
@@ -12940,11 +12900,7 @@ function MailboxView({
   onOpenLinkedReview: (target: ReviewWorkspaceTarget) => void;
   onSyncMailbox: () => void;
   isSyncingMailbox: boolean;
-  onSyncUnreadOverrides: (
-    messages: MessageIdentitySource[],
-    unread: boolean,
-    scope?: MessageUnreadOverrideScope,
-  ) => void;
+  onSyncUnreadOverrides: (messages: MessageIdentitySource[], unread: boolean) => void;
   initialSelectedMessageId?: string | null;
   onMessageSelected?: (messageId: string) => void;
   productAccess: ProductAccess;
@@ -18413,24 +18369,11 @@ function MailboxView({
     }));
   };
 
-  const resolveUnreadOverrideScopeForMessage = (
-    message: MailMessage,
-  ): MessageUnreadOverrideScope | undefined => {
+  const isMessageFromImapMailbox = (message: MailMessage) => {
     const sourceMailboxId = currentMessageLocationById[message.id]?.mailboxId ?? mailbox.id;
     const sourceMailbox = managedInboxes.find((candidate) => candidate.id === sourceMailboxId);
 
-    if (!sourceMailbox || !isImapCredentialsProvider(sourceMailbox.provider)) {
-      return undefined;
-    }
-
-    const snapshot = readLiveInboxSnapshots()[sourceMailbox.id];
-
-    return {
-      provider: "imap",
-      mailboxId: sourceMailbox.id,
-      folder: "INBOX",
-      uidValidity: snapshot?.uidValidity ?? null,
-    };
+    return Boolean(sourceMailbox && isImapCredentialsProvider(sourceMailbox.provider));
   };
 
   const resolveUnreadActionTargetMessages = (messageIds: string[]) => {
@@ -18618,35 +18561,13 @@ function MailboxView({
     }
 
     if (successfulMessages.length > 0) {
-      const messagesByUnreadOverrideScope = new Map<
-        string,
-        { messages: MailMessage[]; scope?: MessageUnreadOverrideScope }
-      >();
+      const messagesForUnreadOverrides = successfulMessages.filter(
+        (message) => !isMessageFromImapMailbox(message),
+      );
 
-      successfulMessages.forEach((message) => {
-        const scope = resolveUnreadOverrideScopeForMessage(message);
-        const scopeKey =
-          scope?.provider === "imap"
-            ? [
-                scope.provider,
-                scope.mailboxId ?? "",
-                scope.folder ?? "",
-                scope.uidValidity ?? "",
-              ].join(":")
-            : "canonical";
-        const group =
-          messagesByUnreadOverrideScope.get(scopeKey) ?? {
-            messages: [],
-            scope,
-          };
-
-        group.messages.push(message);
-        messagesByUnreadOverrideScope.set(scopeKey, group);
-      });
-
-      messagesByUnreadOverrideScope.forEach(({ messages, scope }) => {
-        onSyncUnreadOverrides(messages, unread, scope);
-      });
+      if (messagesForUnreadOverrides.length > 0) {
+        onSyncUnreadOverrides(messagesForUnreadOverrides, unread);
+      }
     }
 
     if (failedMessages.length > 0) {
@@ -18675,6 +18596,7 @@ function MailboxView({
       (activeFolder !== "Inbox" && activeFolder !== "Filtered") ||
       isSharedView ||
       activeSmartFolder ||
+      isMessageFromImapMailbox(message) ||
       !message.unread
     ) {
       return;
@@ -33253,7 +33175,9 @@ export function WorkspaceShell({
       }
 
       try {
-        return JSON.parse(storedValue) as MessageUnreadOverrideStore;
+        return removeImapUnreadOverrideEntries(
+          JSON.parse(storedValue) as MessageUnreadOverrideStore,
+        );
       } catch {
         return {};
       }
@@ -33297,7 +33221,6 @@ export function WorkspaceShell({
   const syncUnreadOverrides = (
     messages: MessageIdentitySource[],
     unread: boolean,
-    scope?: MessageUnreadOverrideScope,
   ) => {
     if (messages.length === 0) {
       return;
@@ -33307,7 +33230,7 @@ export function WorkspaceShell({
       const nextOverrides = { ...current };
 
       messages.forEach((message) => {
-        getUnreadOverrideIdentityKeys(message, scope).forEach((key) => {
+        getCanonicalMessageIdentityKeys(message).forEach((key) => {
           nextOverrides[key] = unread;
         });
       });
@@ -33317,12 +33240,11 @@ export function WorkspaceShell({
   };
   const clearUnreadOverridesForProviderMessages = (
     messages: LiveInboxMessageSnapshot[],
-    scope?: MessageUnreadOverrideScope,
   ) => {
     const providerStateKeys = new Set(
       messages
         .filter((message) => typeof message.unread === "boolean")
-        .flatMap((message) => getUnreadOverrideCleanupKeys(message, scope)),
+        .flatMap((message) => getCanonicalMessageIdentityKeys(message)),
     );
 
     if (providerStateKeys.size === 0) {
@@ -33497,11 +33419,12 @@ export function WorkspaceShell({
     incomingMessages: LiveInboxMessageSnapshot[],
     currentInboxMessages: MailMessage[],
     currentStore: MailboxStore,
-    options?: {
-      freshProviderStateKeys?: Set<string>;
-      unreadOverrideScope?: MessageUnreadOverrideScope;
-    },
+    options?: { freshProviderStateKeys?: Set<string> },
   ) => {
+    const shouldIgnoreUnreadOverrides = savedManagedInboxes.some(
+      (mailbox) =>
+        mailbox.id === mailboxId && isImapCredentialsProvider(mailbox.provider),
+    );
     const bodyfulCurrentInboxMessages =
       currentInboxMessages.filter(hasRenderableMessagePayload);
     const currentInboxIndexes = buildMessageIdentityIndexes(bodyfulCurrentInboxMessages);
@@ -33536,22 +33459,21 @@ export function WorkspaceShell({
       const providerUnread =
         typeof message.unread === "boolean" ? message.unread : undefined;
       const localUnread =
-        resolveUnreadOverride(
-          messageUnreadOverrides,
-          persistedMessage,
-          options?.unreadOverrideScope,
-        ) ??
+        (shouldIgnoreUnreadOverrides
+          ? undefined
+          : resolveUnreadOverride(messageUnreadOverrides, persistedMessage)) ??
         existingMessage?.unread;
       const providerFlagged =
         typeof message.flagged === "boolean" ? message.flagged : undefined;
-      const unread =
-        isFreshProviderMessage
-          ? providerUnread ?? localUnread
-          : localUnread ?? providerUnread;
       const flagged =
         isFreshProviderMessage
           ? providerFlagged ?? existingMessage?.flagged
           : message.flagged;
+      const unread = shouldIgnoreUnreadOverrides
+        ? providerUnread ?? existingMessage?.unread
+        : isFreshProviderMessage
+          ? providerUnread ?? localUnread
+          : localUnread ?? providerUnread;
       return normalizeMailMessage(
         {
           id: message.id,
@@ -37151,11 +37073,7 @@ export function WorkspaceShell({
     mailboxId: InboxId,
     messages: LiveInboxMessageSnapshot[],
     evictImapUids?: Set<string>,
-    options?: {
-      replaceInbox?: boolean;
-      freshProviderStateKeys?: Set<string>;
-      unreadOverrideScope?: MessageUnreadOverrideScope;
-    },
+    options?: { replaceInbox?: boolean; freshProviderStateKeys?: Set<string> },
   ) => {
     const targetMailbox = orderedMailboxes.find((entry) => entry.id === mailboxId);
 
@@ -37187,10 +37105,7 @@ export function WorkspaceShell({
             messages,
             currentInbox,
             currentStore,
-            {
-              freshProviderStateKeys: options?.freshProviderStateKeys,
-              unreadOverrideScope: options?.unreadOverrideScope,
-            },
+            { freshProviderStateKeys: options?.freshProviderStateKeys },
           ),
         },
       };
@@ -37212,17 +37127,6 @@ export function WorkspaceShell({
       return 0;
     }
 
-    const managedMailbox = savedManagedInboxes.find((entry) => entry.id === mailboxId);
-    const unreadOverrideScope =
-      managedMailbox && isImapCredentialsProvider(managedMailbox.provider)
-        ? {
-            provider: "imap",
-            mailboxId: managedMailbox.id,
-            folder: "INBOX",
-            uidValidity: snapshot.uidValidity ?? null,
-          }
-        : undefined;
-
     setMailboxStore((currentStore) => {
       const currentCollections =
         currentStore[targetMailbox.id] ?? createEmptyMailboxCollections();
@@ -37235,7 +37139,6 @@ export function WorkspaceShell({
             snapshot.messages,
             currentCollections.Inbox,
             currentStore,
-            { unreadOverrideScope },
           ),
         },
       };
@@ -37392,15 +37295,6 @@ export function WorkspaceShell({
       const persistedSnapshotMessages =
         (persistedSnapshot?.messages as PersistedLiveInboxMessageSnapshot[]) ?? [];
       const storedUidValidity = persistedSnapshot?.uidValidity ?? null;
-      const unreadOverrideScope =
-        canUseImapFetch
-          ? {
-              provider: "imap",
-              mailboxId: managedMailbox.id,
-              folder: "INBOX",
-              uidValidity: response.uidValidity ?? storedUidValidity,
-            }
-          : undefined;
       const currentInboxMessages = mailboxStore[managedMailbox.id as InboxId]?.Inbox ?? [];
       const messagesForReactState = canUseGmailOAuthFetch
         ? messages
@@ -37459,10 +37353,9 @@ export function WorkspaceShell({
         {
           replaceInbox: canUseGmailOAuthFetch,
           freshProviderStateKeys,
-          unreadOverrideScope,
         },
       );
-      clearUnreadOverridesForProviderMessages(messages, unreadOverrideScope);
+      clearUnreadOverridesForProviderMessages(messages);
       const refreshWarningMessage = resolveMailboxRefreshWarningMessage(response.warning);
       if (refreshWarningMessage) {
         setMailboxSyncError(mailboxId, refreshWarningMessage);
@@ -37738,16 +37631,6 @@ export function WorkspaceShell({
       connectedSnapshots.forEach(({ mailbox, snapshot }) => {
         const currentCollections =
           nextStore[mailbox.id] ?? createEmptyMailboxCollections();
-        const managedMailbox = savedManagedInboxes.find((entry) => entry.id === mailbox.id);
-        const unreadOverrideScope =
-          managedMailbox && isImapCredentialsProvider(managedMailbox.provider)
-            ? {
-                provider: "imap",
-                mailboxId: managedMailbox.id,
-                folder: "INBOX",
-                uidValidity: snapshot.uidValidity ?? null,
-              }
-            : undefined;
 
         nextStore[mailbox.id] = {
           ...currentCollections,
@@ -37756,7 +37639,6 @@ export function WorkspaceShell({
             snapshot.messages,
             currentCollections.Inbox,
             currentStore,
-            { unreadOverrideScope },
           ),
         };
       });
@@ -37775,7 +37657,6 @@ export function WorkspaceShell({
     senderCategoryLearning,
     messageOwnershipInteractions,
     currentWorkspaceUserId,
-    savedManagedInboxes,
   ]);
 
   useEffect(() => {
@@ -38336,7 +38217,11 @@ export function WorkspaceShell({
     }
 
     try {
-      setMessageUnreadOverrides(JSON.parse(storedValue) as MessageUnreadOverrideStore);
+      setMessageUnreadOverrides(
+        removeImapUnreadOverrideEntries(
+          JSON.parse(storedValue) as MessageUnreadOverrideStore,
+        ),
+      );
     } catch {
       setMessageUnreadOverrides({});
     }
