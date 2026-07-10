@@ -1252,6 +1252,55 @@ type MailMessage = {
   aiSuggestionBanner?: MessageSuggestionBanner;
 };
 
+type ExactImapProviderMessageIdentity = {
+  mailboxId: string;
+  provider: string;
+  folder: string;
+  uid: string;
+  uidValidity?: string | null;
+};
+
+function isSameExactImapProviderMessage(
+  first: ExactImapProviderMessageIdentity,
+  second: ExactImapProviderMessageIdentity,
+) {
+  const firstMailboxId = first.mailboxId.trim();
+  const secondMailboxId = second.mailboxId.trim();
+  const firstProvider = first.provider.trim().toLowerCase();
+  const secondProvider = second.provider.trim().toLowerCase();
+  const firstFolder = first.folder.trim();
+  const secondFolder = second.folder.trim();
+  const firstUid = first.uid.trim();
+  const secondUid = second.uid.trim();
+
+  if (
+    !firstMailboxId ||
+    !secondMailboxId ||
+    !firstProvider ||
+    !secondProvider ||
+    !firstFolder ||
+    !secondFolder ||
+    !firstUid ||
+    !secondUid
+  ) {
+    return false;
+  }
+
+  if (
+    firstMailboxId !== secondMailboxId ||
+    firstProvider !== secondProvider ||
+    firstFolder !== secondFolder ||
+    firstUid !== secondUid
+  ) {
+    return false;
+  }
+
+  const firstUidValidity = first.uidValidity?.trim();
+  const secondUidValidity = second.uidValidity?.trim();
+
+  return !firstUidValidity || !secondUidValidity || firstUidValidity === secondUidValidity;
+}
+
 type MailMessageSeed = Omit<
   MailMessage,
   | "category"
@@ -18362,6 +18411,86 @@ function MailboxView({
     );
   };
 
+  const updateExactImapUnreadStateInMailboxStore = (
+    folder: MailFolder,
+    targetMessage: MailMessage,
+    request: Extract<InboxMessageActionRequest, { provider: "imap" | "custom_imap" }>,
+    unread: boolean | undefined,
+  ) => {
+    const targetMailboxId = request.mailboxId?.trim() as InboxId | undefined;
+    if (!targetMailboxId) {
+      return;
+    }
+
+    const sourceMailbox = managedInboxes.find(
+      (candidate) => candidate.id === targetMailboxId,
+    );
+    if (!sourceMailbox || !isImapCredentialsProvider(sourceMailbox.provider)) {
+      return;
+    }
+    const sourceProvider = sourceMailbox.provider;
+
+    const targetIdentity: ExactImapProviderMessageIdentity = {
+      mailboxId: targetMailboxId,
+      provider: sourceProvider,
+      folder: request.folder,
+      uid: request.uid,
+      uidValidity: request.uidValidity,
+    };
+    const currentUidValidity =
+      readLiveInboxSnapshots()[targetMailboxId]?.uidValidity ?? null;
+
+    const isExactProviderTarget = (message: MailMessage) =>
+      isSameExactImapProviderMessage(
+        {
+          mailboxId: targetMailboxId,
+          provider: sourceProvider,
+          folder: request.folder,
+          uid: message.imapUid ?? "",
+          uidValidity: currentUidValidity,
+        },
+        targetIdentity,
+      );
+
+    setMailboxStore((currentStore) => {
+      const collections = currentStore[targetMailboxId];
+      if (!collections) {
+        return currentStore;
+      }
+
+      const messages = collections[folder];
+      const exactObjectIndex = messages.findIndex((message) => message === targetMessage);
+      const confirmedExactObjectIndex =
+        exactObjectIndex >= 0 && isExactProviderTarget(messages[exactObjectIndex])
+          ? exactObjectIndex
+          : -1;
+      const exactProviderIndex = messages.findIndex(isExactProviderTarget);
+      const exactRowIdIndex = messages.findIndex(
+        (message) => message.id === targetMessage.id,
+      );
+      const targetIndex =
+        confirmedExactObjectIndex >= 0
+          ? confirmedExactObjectIndex
+          : exactProviderIndex >= 0
+            ? exactProviderIndex
+            : exactRowIdIndex;
+
+      if (targetIndex < 0) {
+        return currentStore;
+      }
+
+      return {
+        ...currentStore,
+        [targetMailboxId]: {
+          ...collections,
+          [folder]: messages.map((message, index) =>
+            index === targetIndex ? { ...message, unread } : message,
+          ),
+        },
+      };
+    });
+  };
+
   const updateFlagStateInMailboxStore = (messageId: string, flagged: boolean | undefined) => {
     updateMessageById(messageId, (message) => ({
       ...message,
@@ -18539,12 +18668,34 @@ function MailboxView({
     }
 
     const targetMessageIds = targetMessages.map((message) => message.id);
-    updateUnreadStateInMailboxStore(folder, targetMessageIds, unread);
+    const imapRequests = requests.filter(
+      (
+        entry,
+      ): entry is typeof entry & {
+        request: Extract<
+          InboxMessageActionRequest,
+          { provider: "imap" | "custom_imap" }
+        >;
+      } => entry.request?.provider === "imap" || entry.request?.provider === "custom_imap",
+    );
+    const nonImapTargetMessageIds = requests
+      .filter(
+        (entry) =>
+          entry.request?.provider !== "imap" && entry.request?.provider !== "custom_imap",
+      )
+      .map((entry) => entry.message.id);
+
+    if (nonImapTargetMessageIds.length > 0) {
+      updateUnreadStateInMailboxStore(folder, nonImapTargetMessageIds, unread);
+    }
+    imapRequests.forEach((entry) => {
+      updateExactImapUnreadStateInMailboxStore(folder, entry.message, entry.request, unread);
+    });
     if (shouldCloseMenus) {
       closeMenus();
     }
 
-    const successfulMessages: MailMessage[] = [];
+    const successfulEntries: typeof requests = [];
     const failedMessages: typeof requests = [];
     let firstError: { code?: string; message?: string } | undefined;
 
@@ -18552,7 +18703,7 @@ function MailboxView({
       const response = await mutateInboxMessageAction(entry.request as InboxMessageActionRequest);
 
       if (response.ok) {
-        successfulMessages.push(entry.message);
+        successfulEntries.push(entry);
         continue;
       }
 
@@ -18560,10 +18711,13 @@ function MailboxView({
       firstError = firstError ?? response.error;
     }
 
-    if (successfulMessages.length > 0) {
-      const messagesForUnreadOverrides = successfulMessages.filter(
-        (message) => !isMessageFromImapMailbox(message),
-      );
+    if (successfulEntries.length > 0) {
+      const messagesForUnreadOverrides = successfulEntries
+        .filter(
+          (entry) =>
+            entry.request?.provider !== "imap" && entry.request?.provider !== "custom_imap",
+        )
+        .map((entry) => entry.message);
 
       if (messagesForUnreadOverrides.length > 0) {
         onSyncUnreadOverrides(messagesForUnreadOverrides, unread);
@@ -18572,6 +18726,19 @@ function MailboxView({
 
     if (failedMessages.length > 0) {
       failedMessages.forEach((entry) => {
+        if (
+          entry.request?.provider === "imap" ||
+          entry.request?.provider === "custom_imap"
+        ) {
+          updateExactImapUnreadStateInMailboxStore(
+            folder,
+            entry.message,
+            entry.request,
+            entry.previousUnread,
+          );
+          return;
+        }
+
         updateUnreadStateInMailboxStore(folder, [entry.message.id], entry.previousUnread);
       });
       setMailboxActionToastMessage(buildMailboxActionErrorMessage(firstError));
