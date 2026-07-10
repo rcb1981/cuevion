@@ -1260,6 +1260,13 @@ type ExactImapProviderMessageIdentity = {
   uidValidity?: string | null;
 };
 
+type ExactImapUnreadActionSource = {
+  mailboxId: InboxId;
+  localFolder: "Inbox" | "Filtered";
+  providerFolder: string;
+  uidValidity?: string | null;
+};
+
 function isSameExactImapProviderMessage(
   first: ExactImapProviderMessageIdentity,
   second: ExactImapProviderMessageIdentity,
@@ -18551,8 +18558,12 @@ function MailboxView({
   const buildProviderMessageActionRequest = (
     message: MailMessage,
     action: InboxMessageAction,
+    exactImapSource?: ExactImapUnreadActionSource,
   ): InboxMessageActionRequest | null => {
-    const sourceMailboxId = currentMessageLocationById[message.id]?.mailboxId ?? mailbox.id;
+    const sourceMailboxId =
+      exactImapSource?.mailboxId ??
+      currentMessageLocationById[message.id]?.mailboxId ??
+      mailbox.id;
     const sourceMailbox = managedInboxes.find((candidate) => candidate.id === sourceMailboxId);
 
     if (!sourceMailbox?.provider || !sourceMailbox.connected) {
@@ -18598,9 +18609,9 @@ function MailboxView({
         ssl: resolvedImapSettings.ssl,
         username: resolvedImapSettings.username.trim() || sourceMailbox.email.trim(),
         password: resolvedImapSettings.password,
-        folder: "INBOX",
+        folder: exactImapSource?.providerFolder ?? "INBOX",
         uid: providerMessageId,
-        uidValidity: snapshot?.uidValidity ?? null,
+        uidValidity: exactImapSource?.uidValidity ?? snapshot?.uidValidity ?? null,
         action,
       };
     }
@@ -18613,7 +18624,12 @@ function MailboxView({
     folder: MailFolder,
     messageIds: string[],
     unread: boolean,
-    options: { advanceSelection?: boolean; closeMenus?: boolean } = {},
+    options: {
+      advanceSelection?: boolean;
+      closeMenus?: boolean;
+      exactImapSource?: ExactImapUnreadActionSource;
+      exactImapTargetMessage?: MailMessage;
+    } = {},
   ) => {
     const shouldCloseMenus = options.closeMenus ?? true;
     const shouldAdvanceSelection = options.advanceSelection ?? true;
@@ -18645,7 +18661,9 @@ function MailboxView({
       return;
     }
 
-    const targetMessages = resolveUnreadActionTargetMessages(messageIds);
+    const targetMessages = options.exactImapTargetMessage
+      ? [options.exactImapTargetMessage]
+      : resolveUnreadActionTargetMessages(messageIds);
     if (targetMessages.length === 0) {
       if (shouldCloseMenus) {
         closeMenus();
@@ -18656,7 +18674,11 @@ function MailboxView({
     const action: InboxMessageAction = unread ? "mark_unread" : "mark_read";
     const requests = targetMessages.map((message) => ({
       message,
-      request: buildProviderMessageActionRequest(message, action),
+      request: buildProviderMessageActionRequest(
+        message,
+        action,
+        options.exactImapSource,
+      ),
       previousUnread: message.unread,
     }));
 
@@ -18758,14 +18780,117 @@ function MailboxView({
     void setMessagesUnreadState(folder, [messageId], unread);
   };
 
-  const markInboxMessageReadOnOpen = (message: MailMessage) => {
+  const markInboxMessageReadOnOpen = (
+    message: MailMessage,
+    options: { imapOnly?: boolean } = {},
+  ) => {
     if (
       (activeFolder !== "Inbox" && activeFolder !== "Filtered") ||
       isSharedView ||
       activeSmartFolder ||
-      isMessageFromImapMailbox(message) ||
       !message.unread
     ) {
+      return;
+    }
+
+    const explicitLocation = currentMessageLocationById[message.id];
+    const candidateMailboxIds = Array.from(
+      new Set(
+        [explicitLocation?.mailboxId, mailbox.id].filter(
+          (mailboxId): mailboxId is InboxId => Boolean(mailboxId),
+        ),
+      ),
+    );
+    const exactImapTargets = candidateMailboxIds.flatMap((candidateMailboxId) => {
+      const sourceMailbox = managedInboxes.find(
+        (candidate) => candidate.id === candidateMailboxId,
+      );
+      const connectionMethod =
+        sourceMailbox?.connectionMethod ??
+        getProviderConnectionMethod(sourceMailbox?.provider ?? null);
+
+      if (
+        !sourceMailbox?.connected ||
+        !isImapCredentialsProvider(sourceMailbox.provider) ||
+        connectionMethod !== "imap" ||
+        !message.imapUid?.trim()
+      ) {
+        return [];
+      }
+
+      const collections = mailboxStore[candidateMailboxId];
+      if (!collections) {
+        return [];
+      }
+
+      const matchingLocations = (["Inbox", "Filtered"] as const).flatMap(
+        (localFolder) =>
+          collections[localFolder]
+            .filter(
+              (candidate) =>
+                candidate.id === message.id &&
+                candidate.imapUid?.trim() === message.imapUid?.trim(),
+            )
+            .map((candidate) => ({ localFolder, message: candidate })),
+      );
+
+      if (matchingLocations.length !== 1) {
+        return [];
+      }
+
+      return [
+        {
+          message: matchingLocations[0].message,
+          source: {
+            mailboxId: candidateMailboxId,
+            localFolder: matchingLocations[0].localFolder,
+            providerFolder: "INBOX",
+            uidValidity:
+              readLiveInboxSnapshots()[candidateMailboxId]?.uidValidity ?? null,
+          } satisfies ExactImapUnreadActionSource,
+        },
+      ];
+    });
+
+    if (exactImapTargets.length > 1) {
+      setMailboxActionToastMessage("This message is missing exact connected mailbox metadata.");
+      return;
+    }
+
+    if (exactImapTargets.length === 1) {
+      const exactTarget = exactImapTargets[0];
+
+      void setMessagesUnreadState(
+        exactTarget.source.localFolder,
+        [exactTarget.message.id],
+        false,
+        {
+          advanceSelection: false,
+          closeMenus: false,
+          exactImapSource: exactTarget.source,
+          exactImapTargetMessage: exactTarget.message,
+        },
+      );
+      return;
+    }
+
+    const possibleSourceMailboxId = explicitLocation?.mailboxId ?? mailbox.id;
+    const possibleSourceMailbox = managedInboxes.find(
+      (candidate) => candidate.id === possibleSourceMailboxId,
+    );
+    const possibleConnectionMethod =
+      possibleSourceMailbox?.connectionMethod ??
+      getProviderConnectionMethod(possibleSourceMailbox?.provider ?? null);
+
+    if (
+      possibleConnectionMethod === "imap" ||
+      isImapCredentialsProvider(possibleSourceMailbox?.provider ?? null)
+    ) {
+      setMailboxActionToastMessage("This message is missing exact connected mailbox metadata.");
+      return;
+    }
+
+    if (options.imapOnly) {
       return;
     }
 
@@ -22074,6 +22199,7 @@ function MailboxView({
                     type="button"
                     onClick={() => {
                       handleSelectMessage(activeFolder, contextMenuMessage.id);
+                      markInboxMessageReadOnOpen(contextMenuMessage, { imapOnly: true });
                       closeMenus();
                     }}
                     className={contextMenuMainItemClass}
