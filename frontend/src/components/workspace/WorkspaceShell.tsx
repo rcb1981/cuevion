@@ -37156,6 +37156,28 @@ export function WorkspaceShell({
     () => buildPrioritizedNotificationItems(groupedNotificationItems),
     [groupedNotificationItems],
   );
+  const markNotificationSourceIdsRead = useCallback((sourceIds: string[]) => {
+    setReadNotificationIds((current) => {
+      const readIds = new Set(current);
+
+      if (sourceIds.every((sourceId) => readIds.has(sourceId))) {
+        return current;
+      }
+
+      return Array.from(new Set([...current, ...sourceIds]));
+    });
+  }, []);
+
+  useEffect(() => {
+    if (activeSection !== "Notifications") {
+      return;
+    }
+
+    markNotificationSourceIdsRead(
+      prioritizedNotificationItems.flatMap((item) => item.sourceIds),
+    );
+  }, [activeSection, markNotificationSourceIdsRead, prioritizedNotificationItems]);
+
   const unreadNotificationIds = useMemo(
     () =>
       new Set(
@@ -37187,9 +37209,7 @@ export function WorkspaceShell({
     onOpenCollaborationNavigation: handleOpenNotificationNavigation,
   });
   const handleOpenNotificationItem = (item: VisibleNotificationItem) => {
-    setReadNotificationIds((current) =>
-      Array.from(new Set([...current, ...item.sourceIds])),
-    );
+    markNotificationSourceIdsRead(item.sourceIds);
     item.action();
   };
 
