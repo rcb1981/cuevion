@@ -34893,8 +34893,11 @@ export function WorkspaceShell({
     () => new Set(spamSuppressionKeys),
     [spamSuppressionKeys],
   );
-  const isWorkspaceMessageSpamSuppressed = (message: MessageIdentitySource) =>
-    getCanonicalMessageIdentityKeys(message).some((key) => spamSuppressionKeySet.has(key));
+  const isWorkspaceMessageSpamSuppressed = useCallback(
+    (message: MessageIdentitySource) =>
+      getCanonicalMessageIdentityKeys(message).some((key) => spamSuppressionKeySet.has(key)),
+    [spamSuppressionKeySet],
+  );
   const isGuestInviteUser = authenticatedUser?.userType === "guest";
   const normalizedUserFocusPreferences = useMemo(
     () => normalizeFocusPreferences(userConfig.focusPreferences),
@@ -34990,7 +34993,7 @@ export function WorkspaceShell({
     orderedMailboxes,
     productAccess,
     showBundleOrganizerManagedMail,
-    spamSuppressionKeySet,
+    isWorkspaceMessageSpamSuppressed,
     normalizedUserFocusPreferences,
   ]);
 
@@ -35548,20 +35551,33 @@ export function WorkspaceShell({
       },
     ]),
   );
-  const bundleOrganizerHasLiveWorkspaceData =
-    productAccess === "bundle" &&
-    connectedOrderedMailboxes.some((mailbox) => {
-      const mailboxCollections =
-        mailboxStore[mailbox.id] ?? createEmptyMailboxCollections();
+  const isMobileWorkspaceSurfaceActive =
+    !collaborationInviteRoute && isMobileWorkspaceViewport && !isMobileComposeActive;
+  const isBundleOrganizerSurfaceActive =
+    !collaborationInviteRoute &&
+    !isMobileWorkspaceSurfaceActive &&
+    !visibleActiveTarget &&
+    !activeMailbox &&
+    activeSection === "Organizer" &&
+    productAccess === "bundle";
+  const bundleOrganizerHasLiveWorkspaceData = useMemo(
+    () =>
+      isBundleOrganizerSurfaceActive &&
+      connectedOrderedMailboxes.some((mailbox) => {
+        const mailboxCollections =
+          mailboxStore[mailbox.id] ?? createEmptyMailboxCollections();
 
-      return (
-        mailboxCollections.Inbox.length > 0 ||
-        mailboxCollections.Filtered.length > 0
-      );
-    });
-  const bundleOrganizerLiveMessages: BundleOrganizerWorkspaceMessage[] =
-    productAccess === "bundle"
-      ? (() => {
+        return (
+          mailboxCollections.Inbox.length > 0 ||
+          mailboxCollections.Filtered.length > 0
+        );
+      }),
+    [connectedOrderedMailboxes, isBundleOrganizerSurfaceActive, mailboxStore],
+  );
+  const bundleOrganizerLiveMessages = useMemo<BundleOrganizerWorkspaceMessage[]>(
+    () =>
+      isBundleOrganizerSurfaceActive && productAccess === "bundle"
+        ? (() => {
           return connectedOrderedMailboxes.flatMap((mailbox) => {
             const mailboxCollections =
               mailboxStore[mailbox.id] ?? createEmptyMailboxCollections();
@@ -35678,8 +35694,18 @@ export function WorkspaceShell({
               ];
             });
           });
-        })()
-      : [];
+          })()
+        : [],
+    [
+      connectedOrderedMailboxes,
+      isBundleOrganizerSurfaceActive,
+      mailboxStore,
+      manualLabelOverrides,
+      manualOrganizerInclusions,
+      productAccess,
+      senderCategoryLearning,
+    ],
+  );
 
   const formatMobileMessageBadge = (value?: string | null) => {
     const normalizedValue = value?.trim().toLowerCase();
@@ -35734,25 +35760,41 @@ export function WorkspaceShell({
             message.ui_signal ?? message.signal ?? message.internalClassification,
           )),
   });
-  const mobilePriorityMessages: MobileWorkspaceMessage[] = [...livePriorityInboxEntries]
-    .sort(
-      (first, second) => resolveMailDateMs(second.message) - resolveMailDateMs(first.message),
-    )
-    .map(({ mailboxId, mailboxTitle, message }) =>
-      buildMobileWorkspaceMessage(message, mailboxId, mailboxTitle, "Priority"),
-    );
+  const mobilePriorityMessages = useMemo<MobileWorkspaceMessage[]>(
+    () =>
+      isMobileWorkspaceSurfaceActive
+        ? [...livePriorityInboxEntries]
+            .sort(
+              (first, second) =>
+                resolveMailDateMs(second.message) - resolveMailDateMs(first.message),
+            )
+            .map(({ mailboxId, mailboxTitle, message }) =>
+              buildMobileWorkspaceMessage(message, mailboxId, mailboxTitle, "Priority"),
+            )
+        : [],
+    [
+      buildMobileWorkspaceMessage,
+      isMobileWorkspaceSurfaceActive,
+      livePriorityInboxEntries,
+    ],
+  );
   // Defensive normalizer — last possible point before raw sync error strings reach
   // mobile render. Catches quota errors that arrive with a non-quota code (e.g.
   // "connection_failed") whose message text still contains the raw provider string.
-  const normalizeMobileSyncError = (message?: string | null): string | null => {
+  const normalizeMobileSyncError = useCallback((message?: string | null): string | null => {
     if (!message?.trim()) return null;
     const lower = message.toLowerCase();
     if (lower.includes("quota has been exceeded") || lower.includes("quota exceeded")) {
       return "Mailbox quota exceeded during refresh — existing messages are kept.";
     }
     return message;
-  };
-  const mobileMailboxes: MobileWorkspaceMailbox[] = orderedMailboxes.map((mailbox) => {
+  }, []);
+  const mobileMailboxes = useMemo<MobileWorkspaceMailbox[]>(() => {
+    if (!isMobileWorkspaceSurfaceActive) {
+      return [];
+    }
+
+    return orderedMailboxes.map((mailbox) => {
     const managedMailbox = savedManagedInboxes.find(
       (candidate) => candidate.id === mailbox.id,
     );
@@ -35832,7 +35874,26 @@ export function WorkspaceShell({
       cachedMessageCount: mailboxCollections.Inbox.length,
       messages: inboxMessages,
     };
-  });
+    });
+  }, [
+    activeFocusPreferences,
+    buildMobileWorkspaceMessage,
+    effectiveFocusPreferencesByMailbox,
+    isMobileWorkspaceSurfaceActive,
+    isWorkspaceMessageSpamSuppressed,
+    mailboxStore,
+    mailboxSyncErrors,
+    manualLabelOverrides,
+    manualOrganizerInclusions,
+    manualPriorityOverrides,
+    mobileMailboxRefreshStatus,
+    normalizeMobileSyncError,
+    orderedMailboxes,
+    productAccess,
+    savedManagedInboxes,
+    senderCategoryLearning,
+    showBundleOrganizerManagedMail,
+  ]);
 
   const decodedInvitePayload = collaborationInviteRoute
     ? decodeCollaborationInviteToken(collaborationInviteRoute.inviteToken)
