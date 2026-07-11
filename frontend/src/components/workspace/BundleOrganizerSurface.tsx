@@ -102,6 +102,7 @@ type BundleOrganizerMessage = {
   manualCategory?: "demo" | "promo";
   manualCategoryAt?: string | null;
   manualLabelCategory?: "demo" | "promo";
+  canonicalThreadCategory?: "demo" | "promo";
   learnedLabelCategory?: "demo" | "promo";
   internalClassification?: BundleOrganizerInternalClassification;
   category?: string;
@@ -165,6 +166,7 @@ export type BundleOrganizerWorkspaceMessage = {
   manualCategory?: "demo" | "promo";
   manualCategoryAt?: string | null;
   manualLabelCategory?: "demo" | "promo";
+  canonicalThreadCategory?: "demo" | "promo";
   learnedLabelCategory?: "demo" | "promo";
   internalClassification?: BundleOrganizerInternalClassification;
   category?: string;

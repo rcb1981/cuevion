@@ -7644,6 +7644,32 @@ function resolveUnderlyingContentClassification(
   );
 }
 
+function resolveCanonicalThreadOrganizerCategory(
+  message: MailMessage,
+  threadMessages: MailMessage[],
+): "demo" | "promo" | undefined {
+  const underlyingClassification = resolveUnderlyingContentClassification(
+    message,
+    threadMessages,
+  );
+
+  if (
+    underlyingClassification === "demo" ||
+    underlyingClassification === "high_priority_demo"
+  ) {
+    return "demo";
+  }
+
+  if (
+    underlyingClassification === "promo" ||
+    underlyingClassification === "promo_reminder"
+  ) {
+    return "promo";
+  }
+
+  return undefined;
+}
+
 function resolveDisplayContentLabel(
   message: MailMessage,
   threadMessages: MailMessage[],
@@ -35595,6 +35621,28 @@ export function WorkspaceShell({
 
               seenMessageKeys.add(messageKey);
 
+              const threadSourceMessages = canonicalFolderOrder.flatMap(
+                (folder) => mailboxCollections[folder],
+              );
+              const canonicalThreadMessages = [
+                message,
+                ...getRecentThreadMessages(message, threadSourceMessages, {
+                  mailboxId: mailbox.id,
+                  useSafeGrouping: true,
+                }),
+              ]
+                .filter(
+                  (candidate, index, candidates) =>
+                    candidates.findIndex((entry) => entry.id === candidate.id) === index,
+                )
+                .sort(
+                  (firstMessage, secondMessage) =>
+                    resolveMailDateMs(firstMessage) - resolveMailDateMs(secondMessage),
+                );
+              const canonicalThreadCategory = resolveCanonicalThreadOrganizerCategory(
+                message,
+                canonicalThreadMessages,
+              );
               const manualOrganizerTarget = resolveManualOrganizerInclusionFromStore(
                 manualOrganizerInclusions,
                 message,
@@ -35631,6 +35679,7 @@ export function WorkspaceShell({
               const organizerCategory = resolveOrganizerCategory({
                 manualCategory: manualOrganizerTarget,
                 manualLabelCategory,
+                canonicalThreadCategory,
                 learnedLabelCategory,
                 internalClassification: message.internalClassification,
                 category: messageCategory,
@@ -35676,6 +35725,7 @@ export function WorkspaceShell({
                   sourceMailbox: mailbox.title,
                   manualCategory: manualOrganizerTarget,
                   manualLabelCategory: manualLabelCategory ?? undefined,
+                  canonicalThreadCategory,
                   learnedLabelCategory: learnedLabelCategory ?? undefined,
                   internalClassification: message.internalClassification,
                   category: messageCategory ?? undefined,

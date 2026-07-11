@@ -16,6 +16,7 @@ export type BundleOrganizerActiveWorkStatus =
 export type BundleOrganizerMessageLike = {
   manualCategory?: "demo" | "promo" | null;
   manualLabelCategory?: "demo" | "promo" | null;
+  canonicalThreadCategory?: "demo" | "promo" | null;
   learnedLabelCategory?: "demo" | "promo" | null;
   manualPriority?: boolean | null;
   internalClassification?: string | null;
@@ -110,6 +111,11 @@ export function resolveOrganizerCategory(
   const manualLabelCategory = normalizeSignal(message.manualLabelCategory);
   if (manualLabelCategory === "demo" || manualLabelCategory === "promo") {
     return manualLabelCategory;
+  }
+
+  const canonicalThreadCategory = normalizeSignal(message.canonicalThreadCategory);
+  if (canonicalThreadCategory === "demo" || canonicalThreadCategory === "promo") {
+    return canonicalThreadCategory;
   }
 
   const learnedLabelCategory = normalizeSignal(message.learnedLabelCategory);
