@@ -29389,9 +29389,9 @@ const FocusPreferencesSettingsCard = memo(function FocusPreferencesSettingsCard(
   onApplyFocusPreferences: (inboxId: InboxId, nextValue: FocusPreferences) => void;
   isApplying: boolean;
 }) {
-  const orderedManagedInboxes = orderManagedWorkspaceInboxes(
-    managedInboxes,
-    primaryManagedInboxId,
+  const orderedManagedInboxes = useMemo(
+    () => orderManagedWorkspaceInboxes(managedInboxes, primaryManagedInboxId),
+    [managedInboxes, primaryManagedInboxId],
   );
   const [activeInboxId, setActiveInboxId] = useState<InboxId | null>(
     (orderedManagedInboxes[0]?.id as InboxId | undefined) ?? null,
@@ -33304,26 +33304,34 @@ export function WorkspaceShell({
     })),
   });
   const lastOnboardingMailboxSeedKeyRef = useRef(onboardingMailboxSeedKey);
-  const orderedManagedInboxes = orderManagedWorkspaceInboxes(
-    savedManagedInboxes,
-    primaryManagedInboxId,
+  const orderedManagedInboxes = useMemo(
+    () => orderManagedWorkspaceInboxes(savedManagedInboxes, primaryManagedInboxId),
+    [primaryManagedInboxId, savedManagedInboxes],
   );
-  const orderedMailboxes = orderedManagedInboxes
-    .map((mailbox) => ({
-      ...toOrderedMailboxFromManagedInbox(mailbox),
-    }))
-    .map((mailbox) => ({
-      ...mailbox,
-      title: mailboxTitleOverrides[mailbox.id]?.trim() || mailbox.title,
-    }));
-  const sidebarMailboxes = savedManagedInboxes
-    .map((mailbox) => ({
-      ...toOrderedMailboxFromManagedInbox(mailbox),
-    }))
-    .map((mailbox) => ({
-      ...mailbox,
-      title: mailboxTitleOverrides[mailbox.id]?.trim() || mailbox.title,
-    }));
+  const orderedMailboxes = useMemo(
+    () =>
+      orderedManagedInboxes
+        .map((mailbox) => ({
+          ...toOrderedMailboxFromManagedInbox(mailbox),
+        }))
+        .map((mailbox) => ({
+          ...mailbox,
+          title: mailboxTitleOverrides[mailbox.id]?.trim() || mailbox.title,
+        })),
+    [mailboxTitleOverrides, orderedManagedInboxes],
+  );
+  const sidebarMailboxes = useMemo(
+    () =>
+      savedManagedInboxes
+        .map((mailbox) => ({
+          ...toOrderedMailboxFromManagedInbox(mailbox),
+        }))
+        .map((mailbox) => ({
+          ...mailbox,
+          title: mailboxTitleOverrides[mailbox.id]?.trim() || mailbox.title,
+        })),
+    [mailboxTitleOverrides, savedManagedInboxes],
+  );
   const startupSyncMailboxIds = orderedMailboxes
     .map((mailbox) =>
       savedManagedInboxes.find((managedMailbox) => managedMailbox.id === mailbox.id),
