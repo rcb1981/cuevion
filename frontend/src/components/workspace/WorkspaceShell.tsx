@@ -33763,7 +33763,9 @@ export function WorkspaceShell({
           ? providerFlagged ?? existingMessage?.flagged
           : message.flagged;
       const unread = shouldIgnoreUnreadOverrides
-        ? providerUnread ?? existingMessage?.unread
+        ? isFreshProviderMessage
+          ? providerUnread ?? existingMessage?.unread
+          : existingMessage?.unread ?? providerUnread
         : isFreshProviderMessage
           ? providerUnread ?? localUnread
           : localUnread ?? providerUnread;
