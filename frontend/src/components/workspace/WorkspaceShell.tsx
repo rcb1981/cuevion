@@ -34940,15 +34940,24 @@ export function WorkspaceShell({
         mailboxFocusPreferenceOverrides[activeMailbox.id],
       )
     : normalizedUserFocusPreferences;
-  const effectiveFocusPreferencesByMailbox = orderedMailboxes.reduce<
-    Partial<Record<InboxId, FocusPreferences>>
-  >((nextValue, candidate) => {
-    nextValue[candidate.id] = resolveEffectiveFocusPreferences(
+  const effectiveFocusPreferencesByMailbox = useMemo(
+    () =>
+      orderedMailboxes.reduce<Partial<Record<InboxId, FocusPreferences>>>(
+        (nextValue, candidate) => {
+          nextValue[candidate.id] = resolveEffectiveFocusPreferences(
+            normalizedUserFocusPreferences,
+            mailboxFocusPreferenceOverrides[candidate.id],
+          );
+          return nextValue;
+        },
+        {},
+      ),
+    [
+      orderedMailboxes,
       normalizedUserFocusPreferences,
-      mailboxFocusPreferenceOverrides[candidate.id],
-    );
-    return nextValue;
-  }, {});
+      mailboxFocusPreferenceOverrides,
+    ],
+  );
   const sidebarMailboxUnreadCounts = useMemo(() => {
     if (productAccess !== "bundle" || showBundleOrganizerManagedMail) {
       return mailboxUnreadCounts;
