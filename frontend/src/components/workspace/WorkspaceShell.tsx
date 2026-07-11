@@ -14792,39 +14792,6 @@ function MailboxView({
     workspaceMessageLocationById,
   );
 
-  const threadSummaryByThreadId = useMemo(() => {
-    const summaries = new Map<
-      string,
-      {
-        messageCount: number;
-        hasAttachments: boolean;
-      }
-    >();
-
-    normalAppFolderMessages.forEach((message) => {
-      const threadId = resolveSafeThreadGroupingKey(
-        message,
-        currentMessageLocationById[message.id]?.mailboxId ?? mailbox.id,
-      );
-      const hasAttachments =
-        message.attachments?.some(shouldShowInAttachmentList) ?? false;
-      const currentSummary = summaries.get(threadId);
-
-      if (currentSummary) {
-        currentSummary.messageCount += 1;
-        currentSummary.hasAttachments =
-          currentSummary.hasAttachments || hasAttachments;
-        return;
-      }
-
-      summaries.set(threadId, {
-        messageCount: 1,
-        hasAttachments,
-      });
-    });
-
-    return summaries;
-  }, [currentMessageLocationById, normalAppFolderMessages, mailbox.id]);
   const sortedMessages = [...threadDedupedMessages].sort((firstMessage, secondMessage) => {
     const firstTime = resolveMailDateMs(firstMessage);
     const secondTime = resolveMailDateMs(secondMessage);
@@ -21732,6 +21699,12 @@ function MailboxView({
                       const visibleSignal = getVisibleMessageSignal(message);
                       const priorityBadge = getRenderedPriorityBadgeForMessage(message);
                       const displayThreadMessages = getThreadMessages(message);
+                      const threadMessageCount = displayThreadMessages.length;
+                      const hasThreadCountIndicator = threadMessageCount > 1;
+                      const hasThreadAttachmentIndicator = displayThreadMessages.some(
+                        (threadMessage) =>
+                          threadMessage.attachments?.some(shouldShowInAttachmentList) ?? false,
+                      );
                       const categoryLabel = activeSmartFolder
                         ? getSmartFolderDisplayContentLabelForMessage(
                             message,
@@ -21773,16 +21746,6 @@ function MailboxView({
                         themeMode === "dark"
                           ? "text-[color:rgba(220,212,202,0.84)]"
                           : "text-[color:rgba(120,111,100,0.76)]";
-                      const threadId = resolveSafeThreadGroupingKey(
-                        message,
-                        currentMessageLocationById[message.id]?.mailboxId ?? mailbox.id,
-                      );
-                      const threadSummary = threadSummaryByThreadId.get(threadId);
-                      const threadMessageCount =
-                        threadSummary?.messageCount ?? 1;
-                      const hasThreadCountIndicator = threadMessageCount > 1;
-                      const hasThreadAttachmentIndicator =
-                        threadSummary?.hasAttachments ?? false;
                       const hasUnreadCollaboration = hasUnreadCollaborationUpdate(message);
                       return (
                         <button
