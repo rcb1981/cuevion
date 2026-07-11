@@ -215,15 +215,14 @@ def fetch_recent_messages(mailbox, folder: str = "INBOX", limit: int = DEFAULT_F
     fetch_start = time.perf_counter()
     select_start = time.perf_counter()
     try:
-        logger.info("IMAP preview stage=select_folder folder=%s", folder)
         select_status, select_data = mailbox.select(folder)
     except imaplib.IMAP4.error as exc:
         select_duration_ms = (time.perf_counter() - select_start) * 1000
         logger.warning(
-            "IMAP preview stage=select_folder failed quota=%s fetched_count=0 select_ms=%.1f error=%s",
+            "IMAP preview failed stage=select_folder code=select_failed quota=%s fetched_count=0 select_ms=%.1f exception_type=%s",
             is_quota_error(exc),
             select_duration_ms,
-            str(exc),
+            type(exc).__name__,
         )
         return {
             "messages": [],
@@ -237,11 +236,10 @@ def fetch_recent_messages(mailbox, folder: str = "INBOX", limit: int = DEFAULT_F
     if select_status != "OK":
         select_text = normalize_imap_response_text(select_data)
         logger.warning(
-            "IMAP preview stage=select_folder failed status=%s quota=%s fetched_count=0 select_ms=%.1f response=%s",
+            "IMAP preview failed stage=select_folder code=select_failed status=%s quota=%s fetched_count=0 select_ms=%.1f",
             select_status,
             is_quota_error(select_text),
             select_duration_ms,
-            select_text[:160],
         )
         return {
             "messages": [],
@@ -253,15 +251,14 @@ def fetch_recent_messages(mailbox, folder: str = "INBOX", limit: int = DEFAULT_F
 
     search_start = time.perf_counter()
     try:
-        logger.info("IMAP preview stage=search folder=%s", folder)
         status, messages = mailbox.search(None, "ALL")
     except imaplib.IMAP4.error as exc:
         search_duration_ms = (time.perf_counter() - search_start) * 1000
         logger.warning(
-            "IMAP preview stage=search failed quota=%s fetched_count=0 search_ms=%.1f error=%s",
+            "IMAP preview failed stage=search code=search_failed quota=%s fetched_count=0 search_ms=%.1f exception_type=%s",
             is_quota_error(exc),
             search_duration_ms,
-            str(exc),
+            type(exc).__name__,
         )
         return {
             "messages": [],
@@ -275,13 +272,11 @@ def fetch_recent_messages(mailbox, folder: str = "INBOX", limit: int = DEFAULT_F
     if status != "OK":
         search_text = normalize_imap_response_text(messages)
         logger.warning(
-            "IMAP preview stage=search failed status=%s quota=%s fetched_count=0 folder=%s select_ms=%.1f search_ms=%.1f response=%s",
+            "IMAP preview failed stage=search code=search_failed status=%s quota=%s fetched_count=0 select_ms=%.1f search_ms=%.1f",
             status,
             is_quota_error(search_text),
-            folder,
             select_duration_ms,
             search_duration_ms,
-            search_text[:160],
         )
         return {
             "messages": [],
@@ -293,14 +288,13 @@ def fetch_recent_messages(mailbox, folder: str = "INBOX", limit: int = DEFAULT_F
 
     id_collection_start = time.perf_counter()
     try:
-        logger.info("IMAP preview stage=message_id_collection folder=%s", folder)
         message_ids = messages[0].split() if messages and messages[0] else []
     except Exception as exc:
         id_collection_duration_ms = (time.perf_counter() - id_collection_start) * 1000
         logger.warning(
-            "IMAP preview stage=message_id_collection failed fetched_count=0 collection_ms=%.1f error=%s",
+            "IMAP preview failed stage=message_id_collection code=message_id_collection_failed fetched_count=0 collection_ms=%.1f exception_type=%s",
             id_collection_duration_ms,
-            str(exc),
+            type(exc).__name__,
         )
         return {
             "messages": [],
@@ -312,50 +306,21 @@ def fetch_recent_messages(mailbox, folder: str = "INBOX", limit: int = DEFAULT_F
                 0,
             ),
         }
-    id_collection_duration_ms = (time.perf_counter() - id_collection_start) * 1000
-    logger.info(
-        "IMAP preview stage=message_id_collection success total_ids=%s limit=%s collection_ms=%.1f",
-        len(message_ids),
-        limit,
-        id_collection_duration_ms,
-    )
     latest_ids = message_ids[-limit:]
     results: list[tuple[Message, bool, str | None, bool]] = []
     warnings: list[dict[str, Any]] = []
 
     for index, message_id in enumerate(reversed(latest_ids)):
-        per_message_start = time.perf_counter()
-        logger.info(
-            "IMAP preview stage=per_message_fetch_start idx=%s fetched_count=%s",
-            index,
-            len(results),
-        )
         try:
             status, message_data = mailbox.fetch(message_id, "(UID FLAGS BODY.PEEK[])")
         except imaplib.IMAP4.error as exc:
-            fetch_duration_ms = (time.perf_counter() - per_message_start) * 1000
-            logger.warning(
-                "IMAP preview stage=per_message_fetch_failure idx=%s quota=%s fetch_ms=%.1f error=%s",
-                index,
-                is_quota_error(exc),
-                fetch_duration_ms,
-                str(exc),
-            )
             if is_quota_error(exc):
                 warnings.append(build_quota_issue("per_message_fetch", len(results)))
                 break
             continue
-        fetch_duration_ms = (time.perf_counter() - per_message_start) * 1000
 
         if status != "OK":
             status_text = normalize_imap_response_text(message_data)
-            logger.warning(
-                "IMAP preview stage=per_message_fetch_failure idx=%s status=%s fetch_ms=%.1f response=%s",
-                index,
-                status,
-                fetch_duration_ms,
-                status_text[:160],
-            )
             if is_quota_error(status_text):
                 warnings.append(build_quota_issue("per_message_fetch", len(results)))
                 break
@@ -384,14 +349,12 @@ def fetch_recent_messages(mailbox, folder: str = "INBOX", limit: int = DEFAULT_F
         uid_match = re.search(r"UID\s+(\d+)", combined_metadata)
         imap_uid = uid_match.group(1) if uid_match else None
         if imap_uid is None:
-            uid_fetch_start = time.perf_counter()
             try:
                 uid_status, uid_data = mailbox.fetch(message_id, "(UID)")
             except imaplib.IMAP4.error as exc:
                 uid_status, uid_data = "FAILED", []
                 if is_quota_error(exc):
                     warnings.append(build_quota_issue("per_message_uid_fetch", len(results)))
-            uid_fetch_duration_ms = (time.perf_counter() - uid_fetch_start) * 1000
             if uid_status == "OK":
                 uid_metadata_parts: list[str] = []
                 for item in uid_data:
@@ -411,41 +374,19 @@ def fetch_recent_messages(mailbox, folder: str = "INBOX", limit: int = DEFAULT_F
                 uid_match = re.search(r"UID\s+(\d+)", uid_combined_metadata)
                 if uid_match:
                     imap_uid = uid_match.group(1)
-            logger.info(
-                "IMAP preview UID fallback idx=%s uid_status=%s uid_fetch_ms=%.1f",
-                index,
-                uid_status,
-                uid_fetch_duration_ms,
-            )
-        if not flags_match:
-            logger.info(
-                "IMAP fetch missing FLAGS for %s | meta=%s",
-                message_id.decode("utf-8", errors="ignore")
-                if isinstance(message_id, bytes)
-                else str(message_id),
-                combined_metadata[:160],
-            )
 
         if raw_email is None:
             continue
         unread = "\\Seen" not in flags_content
         flagged = "\\Flagged" in flags_content
         results.append((message_from_bytes(raw_email), unread, imap_uid, flagged))
-        logger.info(
-            "IMAP preview stage=per_message_fetch_success idx=%s fetch_ms=%.1f total_ms=%.1f bytes=%s uid_present=%s unread=%s",
-            index,
-            fetch_duration_ms,
-            (time.perf_counter() - per_message_start) * 1000,
-            len(raw_email),
-            bool(imap_uid),
-            unread,
-        )
 
-    logger.warning(
-        "IMAP preview fetch_recent_messages complete folder=%s limit=%s returned=%s select_ms=%.1f search_ms=%.1f total_ms=%.1f",
-        folder,
+    logger.info(
+        "IMAP preview fetch complete requested=%s available=%s returned=%s warning_count=%s select_ms=%.1f search_ms=%.1f total_ms=%.1f",
         limit,
+        len(latest_ids),
         len(results),
+        len(warnings),
         select_duration_ms,
         search_duration_ms,
         (time.perf_counter() - fetch_start) * 1000,
@@ -660,8 +601,11 @@ def resolve_preview_routing(
         )
         from v7_config import EngineResult
         from v7_decision_layer import decide_message_behavior
-    except Exception:
-        logger.exception("Could not load ui_signal dependencies for message preview")
+    except Exception as exc:
+        logger.error(
+            "Could not load message preview dependencies error_code=preview_dependencies_unavailable exception_type=%s",
+            type(exc).__name__,
+        )
         return {
             "ui_signal": "NEW",
             "internalClassification": "unknown",
@@ -955,11 +899,6 @@ def resolve_preview_routing(
                 if has_demo_fallback_context:
                     result["category"] = "demo" if fallback_demo_links else "incomplete_demo"
                     result["usable_demo_links"] = fallback_demo_links
-                else:
-                    logger.info(
-                        "Blocked generic link/demo classification | reason=blocked_generic_link_to_demo_classification subject='%s'",
-                        subject,
-                    )
             elif any(keyword in classification_text for keyword in business_keywords):
                 result["category"] = "business"
 
@@ -1013,21 +952,12 @@ def resolve_preview_routing(
         result["signal"] = map_to_stable_signal(result)
         result["classifierVersion"] = MUSIC_CLASSIFIER_VERSION
 
-        logger.warning(
-            "Preview ui_signal resolved category=%s priority=%s workflow_links=%s usable_demo_links=%s analyze_ms=%.1f total_ms=%.1f subject=%s",
-            result.get("category"),
-            result.get("priority"),
-            result.get("workflow_links"),
-            result.get("usable_demo_links"),
-            0.0,
-            (time.perf_counter() - resolve_start) * 1000,
-            decode_mime_words(message.get("Subject", "")),
-        )
         return result
-    except Exception:
-        logger.exception(
-            "Could not resolve ui_signal for message preview after %.1f ms",
+    except Exception as exc:
+        logger.error(
+            "Could not resolve message preview routing error_code=preview_routing_failed total_ms=%.1f exception_type=%s",
             (time.perf_counter() - resolve_start) * 1000,
+            type(exc).__name__,
         )
         return {
             "ui_signal": "NEW",
@@ -1115,6 +1045,11 @@ def to_message_preview(
 def build_connect_preview_response(payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
     request_start = time.perf_counter()
     provider = str(payload.get("provider") or "").strip().lower()
+    log_provider = (
+        provider
+        if provider in {"google", "microsoft", "outlook", "imap", "custom_imap"}
+        else "unknown"
+    )
     email_address = str(payload.get("email") or "").strip()
     password = str(payload.get("password") or "")
     host = str(payload.get("host") or "").strip()
@@ -1160,24 +1095,15 @@ def build_connect_preview_response(payload: dict[str, Any]) -> tuple[int, dict[s
     try:
         connect_start = time.perf_counter()
         try:
-            logger.info(
-                "IMAP preview stage=connect host=%s port=%s ssl=%s email=%s",
-                host,
-                port,
-                ssl_enabled,
-                email_address,
-            )
             mailbox = open_mailbox_connection(host=host, port=port, ssl_enabled=ssl_enabled)
         except imaplib.IMAP4.error as exc:
             connect_duration_ms = (time.perf_counter() - connect_start) * 1000
             logger.warning(
-                "IMAP preview stage=connect failed quota=%s connect_ms=%.1f host=%s port=%s ssl=%s error=%s",
+                "IMAP preview failed stage=connect code=connection_failed provider=%s quota=%s connect_ms=%.1f exception_type=%s",
+                log_provider,
                 is_quota_error(exc),
                 connect_duration_ms,
-                host,
-                port,
-                ssl_enabled,
-                str(exc),
+                type(exc).__name__,
             )
             return 400, {
                 "ok": False,
@@ -1189,17 +1115,15 @@ def build_connect_preview_response(payload: dict[str, Any]) -> tuple[int, dict[s
 
         login_start = time.perf_counter()
         try:
-            logger.info("IMAP preview stage=login email=%s username=%s", email_address, username)
             mailbox.login(username, password)
         except imaplib.IMAP4.error as exc:
             login_duration_ms = (time.perf_counter() - login_start) * 1000
             logger.warning(
-                "IMAP preview stage=login failed quota=%s login_ms=%.1f email=%s username=%s error=%s",
+                "IMAP preview failed stage=login code=invalid_credentials provider=%s quota=%s login_ms=%.1f exception_type=%s",
+                log_provider,
                 is_quota_error(exc),
                 login_duration_ms,
-                email_address,
-                username,
-                str(exc),
+                type(exc).__name__,
             )
             return 400, {
                 "ok": False,
@@ -1217,12 +1141,11 @@ def build_connect_preview_response(payload: dict[str, Any]) -> tuple[int, dict[s
         fetch_duration_ms = (time.perf_counter() - fetch_start) * 1000
         if fetch_error:
             logger.warning(
-                "IMAP preview request failed stage=%s code=%s fetched_count=%s email=%s folder=%s limit=%s connect_ms=%.1f login_ms=%.1f fetch_ms=%.1f total_ms=%.1f",
+                "IMAP preview request failed provider=%s stage=%s code=%s fetched_count=%s limit=%s connect_ms=%.1f login_ms=%.1f fetch_ms=%.1f total_ms=%.1f",
+                log_provider,
                 fetch_error.get("stage"),
                 fetch_error.get("code"),
                 fetch_error.get("fetched_count"),
-                email_address,
-                folder,
                 limit,
                 connect_duration_ms,
                 login_duration_ms,
@@ -1235,11 +1158,6 @@ def build_connect_preview_response(payload: dict[str, Any]) -> tuple[int, dict[s
             }
 
         preview_build_start = time.perf_counter()
-        logger.info(
-            "IMAP preview stage=response_serialization_start fetched_count=%s email=%s",
-            len(messages),
-            email_address,
-        )
         previews = []
         for index, (message, unread, imap_uid, flagged) in enumerate(messages):
             try:
@@ -1258,11 +1176,11 @@ def build_connect_preview_response(payload: dict[str, Any]) -> tuple[int, dict[s
             except Exception as exc:
                 preview_build_duration_ms = (time.perf_counter() - preview_build_start) * 1000
                 logger.warning(
-                    "IMAP preview stage=response_serialization failed idx=%s fetched_count=%s serialization_ms=%.1f error=%s",
+                    "IMAP preview failed stage=response_serialization code=response_serialization_failed index=%s fetched_count=%s serialization_ms=%.1f exception_type=%s",
                     index,
                     len(previews),
                     preview_build_duration_ms,
-                    str(exc),
+                    type(exc).__name__,
                 )
                 return 400, {
                     "ok": False,
@@ -1275,15 +1193,8 @@ def build_connect_preview_response(payload: dict[str, Any]) -> tuple[int, dict[s
                 }
         preview_build_duration_ms = (time.perf_counter() - preview_build_start) * 1000
         logger.info(
-            "IMAP preview stage=response_serialization_success fetched_count=%s serialized_count=%s serialization_ms=%.1f",
-            len(messages),
-            len(previews),
-            preview_build_duration_ms,
-        )
-        logger.warning(
-            "IMAP preview request complete email=%s folder=%s limit=%s connect_ms=%.1f login_ms=%.1f fetch_ms=%.1f preview_build_ms=%.1f total_ms=%.1f messages=%s",
-            email_address,
-            folder,
+            "IMAP preview request complete provider=%s limit=%s connect_ms=%.1f login_ms=%.1f fetch_ms=%.1f preview_build_ms=%.1f total_ms=%.1f messages=%s warning_count=%s",
+            log_provider,
             limit,
             connect_duration_ms,
             login_duration_ms,
@@ -1291,6 +1202,7 @@ def build_connect_preview_response(payload: dict[str, Any]) -> tuple[int, dict[s
             preview_build_duration_ms,
             (time.perf_counter() - request_start) * 1000,
             len(previews),
+            len(fetch_warnings),
         )
 
         inbox_uid_set = None
@@ -1339,15 +1251,12 @@ def build_connect_preview_response(payload: dict[str, Any]) -> tuple[int, dict[s
     except imaplib.IMAP4.error as exc:
         code = "quota_exceeded" if is_quota_error(exc) else "invalid_credentials"
         message = QUOTA_REFRESH_KEEP_COPY if is_quota_error(exc) else str(exc)
-        logger.exception(
-            "IMAP connection failed with IMAP4 error",
-            extra={
-                "imap_host": host,
-                "imap_port": port,
-                "imap_ssl_enabled": ssl_enabled,
-                "imap_stage": "unknown",
-                "imap_error_message": str(exc),
-            },
+        logger.error(
+            "IMAP preview request failed provider=%s stage=unknown code=%s quota=%s exception_type=%s",
+            log_provider,
+            code,
+            is_quota_error(exc),
+            type(exc).__name__,
         )
         return 400, {
             "ok": False,
@@ -1359,14 +1268,10 @@ def build_connect_preview_response(payload: dict[str, Any]) -> tuple[int, dict[s
             },
         }
     except Exception as exc:
-        logger.exception(
-            "IMAP connection failed with unexpected error",
-            extra={
-                "imap_host": host,
-                "imap_port": port,
-                "imap_ssl_enabled": ssl_enabled,
-                "imap_error_message": str(exc),
-            },
+        logger.error(
+            "IMAP preview request failed provider=%s stage=unknown code=connection_failed exception_type=%s",
+            log_provider,
+            type(exc).__name__,
         )
         return 400, {
             "ok": False,

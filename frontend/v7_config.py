@@ -972,7 +972,7 @@ def user_config_to_dict(user_config: UserConfig) -> Dict[str, Any]:
 # ---------------------------------------------------------
 
 if __name__ == "__main__":
-    from v7_decision_layer import decide_message_behavior, decision_to_dict
+    from v7_decision_layer import decide_message_behavior
 
     mailbox_connections = [
         MailboxConnection(
@@ -1025,11 +1025,4 @@ if __name__ == "__main__":
         mailbox_config=mailbox_config,
     )
 
-    print("USER CONFIG:")
-    print(user_config_to_dict(user_config))
-
-    print("\nFINAL DECISION:")
-    print(decision_to_dict(decision))
-
-    print("ONBOARDING ENTRY PAYLOAD:")
-    print(build_onboarding_entry_payload(preview_user_config))
+    print("V7 configuration example complete")

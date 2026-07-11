@@ -218,28 +218,6 @@ def cleanup_extracted_url(url):
 
     return url.rstrip(").,]>'\"")
 
-def print_v7_summary(result: dict) -> None:
-    print(f"V7 FINAL PRIORITY: {result.get('v7_final_priority')}")
-    print(f"V7 FINAL VISIBILITY: {result.get('v7_final_visibility')}")
-    print(f"V7 ACTION: {result.get('v7_action')}")
-    print(f"UI SIGNAL: {result.get('ui_signal')}")
-
-    explanation = result.get("v7_explanation")
-
-    if isinstance(explanation, dict):
-        summary = explanation.get("final_summary")
-        hard_rules = explanation.get("hard_rule_adjustments", [])
-
-        if summary:
-            print(f"V7 EXPLANATION: {summary}")
-
-        if hard_rules:
-            print("V7 HARD RULES:")
-            for rule in hard_rules:
-                print(f"  - {rule}")
-    else:
-        print(f"V7 EXPLANATION: {explanation}")
-
 def map_to_ui_signal(result):
     category = result.get("category")
 
@@ -1312,24 +1290,8 @@ def _contains_any_phrase(text, phrases):
     return [phrase for phrase in phrases if _contains_phrase(text, phrase)]
 
 
-URL_TRACKING_QUERY_PARAMS = {
-    "utm_source",
-    "utm_medium",
-    "utm_campaign",
-    "utm_content",
-    "utm_term",
-    "si",
-    "text",
-    "fbclid",
-    "gclid",
-}
-
-
 def strip_url_tracking_params_for_keyword_matching(text):
-    ignored_tracking_params = False
-
     def sanitize_url(match):
-        nonlocal ignored_tracking_params
         url = match.group(0)
         trailing = ""
 
@@ -1341,18 +1303,9 @@ def strip_url_tracking_params_for_keyword_matching(text):
         if not parsed.query:
             return url + trailing
 
-        query_keys = {key.lower() for key in parse_qs(parsed.query, keep_blank_values=True)}
-        if query_keys & URL_TRACKING_QUERY_PARAMS or parsed.query:
-            ignored_tracking_params = True
-
         return parsed._replace(query="", fragment="").geturl() + trailing
 
     sanitized = re.sub(r"https?://[^\s<>\"]+", sanitize_url, text or "")
-
-    if ignored_tracking_params:
-        logger.info(
-            "Ignored URL tracking params for finance/meta keyword matching | reason=ignored_url_tracking_params_for_finance_detection"
-        )
 
     return sanitized
 
@@ -1686,17 +1639,9 @@ def detect_hard_music_category(
     has_only_weak_promo_subject = bool(subject_promo_hits) and subject_promo_hits.issubset({"promo", "promos", "release"})
 
     if has_subject_promo and has_body_demo and not (has_body_promo or promo_context):
-        logger.warning(
-            "Deterministic music category uncertainty: subject promo conflicts with demo body | subject='%s'",
-            subject,
-        )
         return None
 
     if has_subject_demo and has_body_promo and not (has_body_demo or demo_context):
-        logger.warning(
-            "Deterministic music category uncertainty: subject demo conflicts with promo body | subject='%s'",
-            subject,
-        )
         return None
 
     if has_website_demo_form_context:
@@ -1769,12 +1714,6 @@ def detect_hard_music_category(
             },
         }
 
-    if has_music_link and not (promo_hits or demo_hits):
-        logger.info(
-            "Music link treated as transport evidence, not demo trigger | reason=no_clear_music_intent subject='%s'",
-            subject,
-        )
-
     return None
 
 
@@ -1814,22 +1753,6 @@ def apply_deterministic_music_category_guardrails(
 
     new_category = hard_category["category"]
     reason = hard_category["reason"]
-    old_category = result.get("category") or "unknown"
-
-    if old_category != new_category:
-        logger.warning(
-            "Deterministic category override: %s -> %s | reason=%s | subject='%s'",
-            old_category,
-            new_category,
-            reason,
-            subject,
-        )
-
-    if hard_category.get("has_music_link") and new_category in ["promo", "promo_reminder"]:
-        logger.info(
-            "Music link treated as transport evidence, not demo trigger | reason=promo_intent_present subject='%s'",
-            subject,
-        )
 
     result["category"] = new_category
     result["deterministic_category_reason"] = reason
@@ -1975,14 +1898,6 @@ Body:
                 }
             ]
         )
-        openai_duration_ms = (time.perf_counter() - openai_start) * 1000
-        logger.warning(
-            "Preview classify_email_with_ai complete openai_ms=%.1f subject=%s sender=%s",
-            openai_duration_ms,
-            subject[:120],
-            sender_email,
-        )
-
         raw = response.choices[0].message.content.strip()
         raw = re.sub(r"^```json\s*", "", raw)
         raw = re.sub(r"^```\s*", "", raw)
@@ -1991,11 +1906,10 @@ Body:
         return data
 
     except Exception as e:
-        logger.exception(
-            "Preview classify_email_with_ai failed after %.1f ms subject=%s sender=%s",
+        logger.error(
+            "Message classification failed error_code=ai_classification_failed total_ms=%.1f exception_type=%s",
             (time.perf_counter() - openai_start) * 1000,
-            subject[:120],
-            sender_email,
+            type(e).__name__,
         )
         return {
             "artist": sender_name or "",
@@ -2287,7 +2201,6 @@ def analyze_email(
     user_reminder_settings=None,
     preview_mode=False
 ):
-    analyze_start = time.perf_counter()
     subject = decode_mime_words(msg.get("Subject", ""))
     from_header = decode_mime_words(msg.get("From", ""))
     to_header = decode_mime_words(msg.get("To", ""))
@@ -2329,15 +2242,6 @@ def analyze_email(
     result["inbox_name"] = inbox_name
     result["inbox_profile"] = inbox_profile
     result["classifierVersion"] = MUSIC_CLASSIFIER_VERSION
-    logger.warning(
-        "Preview analyze_email complete subject=%s sender=%s preview_mode=%s total_ms=%.1f category=%s priority=%s",
-        subject[:120],
-        sender_email,
-        preview_mode,
-        (time.perf_counter() - analyze_start) * 1000,
-        result.get("category"),
-        result.get("priority"),
-    )
     return result
 
 
@@ -2376,31 +2280,6 @@ def fetch_recent_messages(mail, folder="INBOX", limit=TEST_LIMIT):
 # OUTPUT
 # =========================
 def print_result(result, mailbox_label):
-    print("=" * 80)
-    print(f"INBOX: {mailbox_label}")
-    print(f"PROFILE: {result.get('inbox_profile', '')}")
-    print(f"FROM: {result.get('from', '')}")
-    print(f"SUBJECT: {result.get('subject', '')}")
-    print(f"ARTIST: {result.get('artist', '')}")
-    print(f"CATEGORY: {result.get('category', '')}")
-    print(f"SCORE: {result.get('score', '')}")
-    print(f"PRIORITY: {result.get('priority', '')}")
-    print(f"REASON: {result.get('reason', '')}")
-    print(f"SUGGESTED ACTION: {result.get('suggested_action', 'SHOW')}")
-    print(f"REMINDER MODE: {result.get('reminder_mode', '')}")
-    print(f"SPOTIFY: {json.dumps(result.get('spotify'), ensure_ascii=False) if isinstance(result.get('spotify'), dict) else result.get('spotify')}")
-    print(f"SOUNDCLOUD: {result.get('soundcloud_track', '')}")
-    print(f"DROPBOX: {result.get('dropbox', '')}")
-    print(f"WETRANSFER: {result.get('wetransfer', '')}")
-    print(f"DISCO: {result.get('disco', '')}")
-    print(f"GOOGLE DRIVE: {result.get('gdrive', '')}")
-    print(f"ONEDRIVE: {result.get('onedrive', '')}")
-    print(f"INSTAGRAM: {result.get('instagram', '')}")
-    print(f"USABLE DEMO LINKS: {result.get('usable_demo_links', [])}")
-    print(f"WORKFLOW LINKS: {result.get('workflow_links', [])}")
-    print(f"HTML URLS: {result.get('all_html_urls', [])}")
-    print(f"BULK SCORE: {result.get('bulk_score', 0)}")
-    
     mailbox_match = next(
         (
             m for m in V7_USER_CONFIG.mailboxes
@@ -2431,9 +2310,6 @@ def print_result(result, mailbox_label):
         result["v7_explanation"] = v7_decision.explanation.final_summary
         result["ui_signal"] = map_to_ui_signal(result)
 
-        print_v7_summary(result)
-        print("-" * 80)
-
 def process_mailbox(
     mailbox_config,
     limit=TEST_LIMIT,
@@ -2448,23 +2324,17 @@ def process_mailbox(
     inbox_profile = mailbox_config.get("profile", "business_mixed")
 
     if not email_address or not password:
-        print("=" * 80)
-        print(f"INBOX: {label}")
-        print(f"PROFILE: {inbox_profile}")
-        print("SKIPPED: missing email or password in .env")
+        print("Mailbox processing skipped code=missing_credentials")
         return
 
     try:
-        print("\n" + "#" * 80)
-        print(f"STARTING INBOX: {label}")
-        print(f"PROFILE: {inbox_profile}")
-        print("#" * 80)
+        print("Mailbox processing started")
 
         mail = connect_mailbox(email_address, password)
         messages = fetch_recent_messages(mail, folder=folder, limit=limit)
 
         if not messages:
-            print(f"INBOX: {label} - no messages found")
+            print("Mailbox processing complete messages=0")
             mail.logout()
             return
 
@@ -2479,12 +2349,10 @@ def process_mailbox(
             print_result(result, label)
 
         mail.logout()
+        print(f"Mailbox processing complete messages={len(messages)}")
 
     except Exception as e:
-        print("=" * 80)
-        print(f"INBOX: {label}")
-        print(f"PROFILE: {inbox_profile}")
-        print(f"ERROR: {str(e)}")
+        print(f"Mailbox processing failed exception_type={type(e).__name__}")
 
 
 # =========================
