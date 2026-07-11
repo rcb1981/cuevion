@@ -14792,35 +14792,38 @@ function MailboxView({
     workspaceMessageLocationById,
   );
 
-  const threadMessageCountByThreadId = useMemo(() => {
-    const counts = new Map<string, number>();
+  const threadSummaryByThreadId = useMemo(() => {
+    const summaries = new Map<
+      string,
+      {
+        messageCount: number;
+        hasAttachments: boolean;
+      }
+    >();
 
     normalAppFolderMessages.forEach((message) => {
       const threadId = resolveSafeThreadGroupingKey(
         message,
         currentMessageLocationById[message.id]?.mailboxId ?? mailbox.id,
       );
-      counts.set(threadId, (counts.get(threadId) ?? 0) + 1);
-    });
+      const hasAttachments =
+        message.attachments?.some(shouldShowInAttachmentList) ?? false;
+      const currentSummary = summaries.get(threadId);
 
-    return counts;
-  }, [currentMessageLocationById, normalAppFolderMessages, mailbox.id]);
-  const threadHasAttachmentsByThreadId = useMemo(() => {
-    const threadsWithAttachments = new Map<string, boolean>();
-
-    normalAppFolderMessages.forEach((message) => {
-      if (!message.attachments?.some(shouldShowInAttachmentList)) {
+      if (currentSummary) {
+        currentSummary.messageCount += 1;
+        currentSummary.hasAttachments =
+          currentSummary.hasAttachments || hasAttachments;
         return;
       }
 
-      const threadId = resolveSafeThreadGroupingKey(
-        message,
-        currentMessageLocationById[message.id]?.mailboxId ?? mailbox.id,
-      );
-      threadsWithAttachments.set(threadId, true);
+      summaries.set(threadId, {
+        messageCount: 1,
+        hasAttachments,
+      });
     });
 
-    return threadsWithAttachments;
+    return summaries;
   }, [currentMessageLocationById, normalAppFolderMessages, mailbox.id]);
   const sortedMessages = [...threadDedupedMessages].sort((firstMessage, secondMessage) => {
     const firstTime = resolveMailDateMs(firstMessage);
@@ -21774,11 +21777,12 @@ function MailboxView({
                         message,
                         currentMessageLocationById[message.id]?.mailboxId ?? mailbox.id,
                       );
+                      const threadSummary = threadSummaryByThreadId.get(threadId);
                       const threadMessageCount =
-                        threadMessageCountByThreadId.get(threadId) ?? 1;
+                        threadSummary?.messageCount ?? 1;
                       const hasThreadCountIndicator = threadMessageCount > 1;
                       const hasThreadAttachmentIndicator =
-                        threadHasAttachmentsByThreadId.get(threadId) ?? false;
+                        threadSummary?.hasAttachments ?? false;
                       const hasUnreadCollaboration = hasUnreadCollaborationUpdate(message);
                       return (
                         <button
