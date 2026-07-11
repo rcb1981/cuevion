@@ -1,4 +1,6 @@
 import {
+  Suspense,
+  lazy,
   memo,
   useCallback,
   useEffect,
@@ -29,10 +31,7 @@ import {
   type MobileWorkspaceMailbox,
   type MobileWorkspaceMessage,
 } from "./mobile/MobileWorkspaceShell";
-import {
-  BundleOrganizerSurface,
-  type BundleOrganizerWorkspaceMessage,
-} from "./BundleOrganizerSurface";
+import type { BundleOrganizerWorkspaceMessage } from "./BundleOrganizerSurface";
 import {
   resolveOrganizerCategory,
   type BundleOrganizerVisibleCategory,
@@ -139,6 +138,12 @@ import type {
   MessageSuggestionBanner,
 } from "../../lib/suggestionEngine";
 import type { ForYouLearningSuggestion } from "../../lib/forYouEngine";
+
+const BundleOrganizerSurface = lazy(() =>
+  import("./BundleOrganizerSurface").then((module) => ({
+    default: module.BundleOrganizerSurface,
+  })),
+);
 
 const PRODUCT_ACCESS_STORAGE_KEY = "cuevion-product-access";
 const BUNDLE_PILOT_ACCESS_CODE = "CUEVION-BUNDLE-PILOT";
@@ -40468,12 +40473,20 @@ export function WorkspaceShell({
                 onOpenMailbox={openMailboxFromContext}
               />
             ) : activeSection === "Organizer" && productAccess === "bundle" ? (
-              <BundleOrganizerSurface
-                liveMessages={bundleOrganizerLiveMessages}
-                hasLiveWorkspaceData={bundleOrganizerHasLiveWorkspaceData}
-                connectedInboxCount={connectedInboxCount}
-                showLocalPriorityNav={false}
-              />
+              <Suspense
+                fallback={
+                  <div className="flex min-h-0 flex-1 items-center justify-center text-sm text-[var(--workspace-text-faint)]">
+                    Opening Organizer…
+                  </div>
+                }
+              >
+                <BundleOrganizerSurface
+                  liveMessages={bundleOrganizerLiveMessages}
+                  hasLiveWorkspaceData={bundleOrganizerHasLiveWorkspaceData}
+                  connectedInboxCount={connectedInboxCount}
+                  showLocalPriorityNav={false}
+                />
+              </Suspense>
             ) : activeSection === "Activity" ||
               activeSection === "Notifications" ||
               activeSection === "Team" ? (
