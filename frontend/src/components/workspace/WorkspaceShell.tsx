@@ -37201,13 +37201,26 @@ export function WorkspaceShell({
     teamActivityEnabled,
     onOpenActivityNavigation: handleOpenNotificationNavigation,
   });
-  const liveTeamCollaborationItems = buildVisibleTeamCollaborationItems({
+  const liveTeamCollaborationItems = useMemo(() => {
+    if (activeSection !== "Team") {
+      return [];
+    }
+
+    return buildVisibleTeamCollaborationItems({
+      mailboxStore,
+      orderedMailboxes,
+      currentUserId: currentWorkspaceUserId,
+      currentUserName: activeWorkspaceUserName,
+      onOpenCollaborationNavigation: handleOpenNotificationNavigation,
+    });
+  }, [
+    activeSection,
     mailboxStore,
     orderedMailboxes,
-    currentUserId: currentWorkspaceUserId,
-    currentUserName: activeWorkspaceUserName,
-    onOpenCollaborationNavigation: handleOpenNotificationNavigation,
-  });
+    currentWorkspaceUserId,
+    activeWorkspaceUserName,
+    handleOpenNotificationNavigation,
+  ]);
   const handleOpenNotificationItem = (item: VisibleNotificationItem) => {
     markNotificationSourceIdsRead(item.sourceIds);
     item.action();
