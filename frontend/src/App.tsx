@@ -1,7 +1,6 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { OnboardingFlow } from "./components/onboarding/OnboardingFlow";
 import { WorkspaceTransition } from "./components/workspace/WorkspaceTransition";
-import { WorkspaceShell } from "./components/workspace/WorkspaceShell";
 import { initialOnboardingState } from "./data/onboardingOptions";
 import {
   fetchTeamInvite,
@@ -18,6 +17,12 @@ import {
   type OnboardingState,
 } from "./types/onboarding";
 import type { UserConfig } from "./types/userConfig";
+
+const WorkspaceShell = lazy(() =>
+  import("./components/workspace/WorkspaceShell").then((module) => ({
+    default: module.WorkspaceShell,
+  })),
+);
 
 const ONBOARDING_STATE_STORAGE_KEY = "label-inbox-ai-onboarding-state";
 const ONBOARDING_DRAFT_STATE_STORAGE_KEY = "label-inbox-ai-onboarding-draft-state";
@@ -162,6 +167,18 @@ function ComingSoonLanding() {
             Coming soon...
           </p>
         </div>
+      </div>
+    </div>
+  );
+}
+
+function WorkspaceLoadingFallback() {
+  return (
+    <div className="min-h-screen bg-[linear-gradient(180deg,#f6efe7_0%,#efe5da_100%)] px-6 py-10 text-[color:#2f2a24] dark:bg-[linear-gradient(180deg,#171411_0%,#221c17_100%)] dark:text-[color:#f1e9de]">
+      <div className="mx-auto flex min-h-[calc(100vh-5rem)] max-w-[560px] items-center justify-center text-center">
+        <p className="text-[0.98rem] leading-7 text-[rgba(88,80,71,0.84)] dark:text-[rgba(222,211,200,0.76)]">
+          Opening Cuevion…
+        </p>
       </div>
     </div>
   );
@@ -2053,15 +2070,17 @@ function CuevionApp() {
     }
 
     return (
-      <WorkspaceShell
-        userConfig={userConfig ?? buildUserConfig(onboardingState)}
-        onboardingState={onboardingState}
-        authenticatedUser={
-          collaborationInviteRoute.mode === "invite" ? activeCollaborationUser : null
-        }
-        collaborationInviteRoute={collaborationInviteRoute}
-        workspaceDataMode={workspaceDataMode}
-      />
+      <Suspense fallback={<WorkspaceLoadingFallback />}>
+        <WorkspaceShell
+          userConfig={userConfig ?? buildUserConfig(onboardingState)}
+          onboardingState={onboardingState}
+          authenticatedUser={
+            collaborationInviteRoute.mode === "invite" ? activeCollaborationUser : null
+          }
+          collaborationInviteRoute={collaborationInviteRoute}
+          workspaceDataMode={workspaceDataMode}
+        />
+      </Suspense>
     );
   }
 
@@ -2097,13 +2116,15 @@ function CuevionApp() {
 
   if (view === "workspace" && userConfig) {
     return (
-      <WorkspaceShell
-        userConfig={userConfig}
-        onboardingState={onboardingState}
-        authenticatedUser={effectiveBetaSessionUser}
-        onAuthenticatedUserNameChange={handleBetaSessionDisplayNameChange}
-        workspaceDataMode={workspaceDataMode}
-      />
+      <Suspense fallback={<WorkspaceLoadingFallback />}>
+        <WorkspaceShell
+          userConfig={userConfig}
+          onboardingState={onboardingState}
+          authenticatedUser={effectiveBetaSessionUser}
+          onAuthenticatedUserNameChange={handleBetaSessionDisplayNameChange}
+          workspaceDataMode={workspaceDataMode}
+        />
+      </Suspense>
     );
   }
 
