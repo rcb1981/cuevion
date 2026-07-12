@@ -1035,6 +1035,11 @@ type SmartFolderDefinition = {
   selectedInboxIds: InboxId[];
   rules: SmartFolderRule[];
 };
+type SmartFolderDraftInput = Omit<SmartFolderDefinition, "id">;
+type SmartFolderModalTarget =
+  | { mode: "create" }
+  | { mode: "edit"; folderId: string }
+  | null;
 
 type CuevionMessageCategory = "Primary" | "Promo" | "Updates";
 type CuevionCategorySource = "system" | "user" | "learned";
@@ -28926,54 +28931,66 @@ const OutOfOfficeSettingsModal = memo(function OutOfOfficeSettingsModal({
 });
 
 const SmartFolderModal = memo(function SmartFolderModal({
-  open,
   themeMode,
   connectedInboxes,
-  isEditing,
-  draftName,
-  draftScope,
-  draftSelectedInboxIds,
-  draftRules,
-  onChangeName,
-  onChangeScope,
-  onToggleInbox,
-  onChangeRuleField,
-  onChangeRuleValue,
-  onAddRule,
-  onRemoveRule,
+  mode,
+  initialFolder,
   onDelete,
   onCancel,
   onSave,
 }: {
-  open: boolean;
   themeMode: "light" | "dark";
   connectedInboxes: OrderedMailbox[];
-  isEditing: boolean;
-  draftName: string;
-  draftScope: "all" | "selected";
-  draftSelectedInboxIds: InboxId[];
-  draftRules: SmartFolderRule[];
-  onChangeName: (nextValue: string) => void;
-  onChangeScope: (nextValue: "all" | "selected") => void;
-  onToggleInbox: (inboxId: InboxId) => void;
-  onChangeRuleField: (ruleId: string, nextField: SmartFolderRuleField) => void;
-  onChangeRuleValue: (ruleId: string, nextValue: string) => void;
-  onAddRule: () => void;
-  onRemoveRule: (ruleId: string) => void;
+  mode: "create" | "edit";
+  initialFolder?: SmartFolderDefinition;
   onDelete?: () => void;
   onCancel: () => void;
-  onSave: () => void;
+  onSave: (input: SmartFolderDraftInput) => void;
 }) {
+  const [draftName, setDraftName] = useState(() => initialFolder?.name ?? "");
+  const [draftScope, setDraftScope] = useState<"all" | "selected">(
+    () => initialFolder?.scope ?? "all",
+  );
+  const [draftSelectedInboxIds, setDraftSelectedInboxIds] = useState<InboxId[]>(
+    () => [...(initialFolder?.selectedInboxIds ?? [])],
+  );
+  const [draftRules, setDraftRules] = useState<SmartFolderRule[]>(() =>
+    initialFolder?.rules.length
+      ? initialFolder.rules.map((rule) => ({ ...rule }))
+      : [createEmptySmartFolderRule()],
+  );
   const [isDeleteConfirmationOpen, setIsDeleteConfirmationOpen] = useState(false);
   const hasValidName = draftName.trim().length > 0;
   const hasValidRule = draftRules.some((rule) => rule.value.trim().length > 0);
   const hasValidInboxSelection =
     draftScope === "all" || draftSelectedInboxIds.length > 0;
   const canSave = hasValidName && hasValidRule && hasValidInboxSelection;
+  const handleSave = () => {
+    const trimmedName = draftName.trim();
+    const validRules = draftRules
+      .map((rule) => ({ ...rule, value: rule.value.trim() }))
+      .filter((rule) => rule.value.length > 0);
+
+    if (
+      trimmedName.length === 0 ||
+      validRules.length === 0 ||
+      (draftScope === "selected" && draftSelectedInboxIds.length === 0)
+    ) {
+      return;
+    }
+
+    onSave({
+      name: trimmedName,
+      scope: draftScope,
+      selectedInboxIds:
+        draftScope === "selected" ? [...draftSelectedInboxIds] : [],
+      rules: validRules,
+    });
+  };
 
   return (
     <SettingsModalShell
-      open={open}
+      open
       themeMode={themeMode}
       maxWidthClass="max-w-[760px]"
     >
@@ -28993,7 +29010,7 @@ const SmartFolderModal = memo(function SmartFolderModal({
           </button>
           <button
             type="button"
-            onClick={onSave}
+            onClick={handleSave}
             disabled={!canSave}
             className={`${settingsPrimaryActionClass} w-[7.5rem] disabled:cursor-not-allowed disabled:border-[color:rgba(120,104,89,0.14)] disabled:bg-[linear-gradient(180deg,rgba(167,174,167,0.42),rgba(131,137,131,0.52))] disabled:text-[color:rgba(251,248,242,0.78)] disabled:shadow-none`}
           >
@@ -29010,7 +29027,7 @@ const SmartFolderModal = memo(function SmartFolderModal({
           <input
             type="text"
             value={draftName}
-            onChange={(event) => onChangeName(event.target.value)}
+            onChange={(event) => setDraftName(event.target.value)}
             className={inputFieldClass}
             placeholder="e.g. Royalties"
           />
@@ -29023,14 +29040,14 @@ const SmartFolderModal = memo(function SmartFolderModal({
           <div className="flex flex-wrap gap-2">
             <button
               type="button"
-              onClick={() => onChangeScope("all")}
+              onClick={() => setDraftScope("all")}
               className={settingsPillButtonClass(draftScope === "all")}
             >
               All inboxes
             </button>
             <button
               type="button"
-              onClick={() => onChangeScope("selected")}
+              onClick={() => setDraftScope("selected")}
               className={settingsPillButtonClass(draftScope === "selected")}
             >
               Selected inboxes
@@ -29051,7 +29068,13 @@ const SmartFolderModal = memo(function SmartFolderModal({
                       <input
                         type="checkbox"
                         checked={selected}
-                        onChange={() => onToggleInbox(mailbox.id)}
+                        onChange={() =>
+                          setDraftSelectedInboxIds((current) =>
+                            current.includes(mailbox.id)
+                              ? current.filter((entry) => entry !== mailbox.id)
+                              : [...current, mailbox.id],
+                          )
+                        }
                         className="peer absolute inset-0 m-0 h-full w-full appearance-none rounded-[5px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-input-bg)] outline-none transition checked:border-moss/55 checked:bg-[linear-gradient(180deg,rgba(226,236,229,0.92),rgba(246,249,246,0.98))] cursor-pointer"
                       />
                       <span className="pointer-events-none absolute inset-0 flex items-center justify-center text-[10px] font-semibold leading-none text-moss opacity-0 transition peer-checked:opacity-100">
@@ -29079,7 +29102,16 @@ const SmartFolderModal = memo(function SmartFolderModal({
                     <select
                       value={rule.field}
                       onChange={(event) =>
-                        onChangeRuleField(rule.id, event.target.value as SmartFolderRuleField)
+                        setDraftRules((current) =>
+                          current.map((entry) =>
+                            entry.id === rule.id
+                              ? {
+                                  ...entry,
+                                  field: event.target.value as SmartFolderRuleField,
+                                }
+                              : entry,
+                          ),
+                        )
                       }
                       className={inputFieldClass}
                     >
@@ -29094,7 +29126,15 @@ const SmartFolderModal = memo(function SmartFolderModal({
                     {rule.field === "Label" ? (
                       <select
                         value={rule.value}
-                        onChange={(event) => onChangeRuleValue(rule.id, event.target.value)}
+                        onChange={(event) =>
+                          setDraftRules((current) =>
+                            current.map((entry) =>
+                              entry.id === rule.id
+                                ? { ...entry, value: event.target.value }
+                                : entry,
+                            ),
+                          )
+                        }
                         className={inputFieldClass}
                       >
                         <option value="">Choose label</option>
@@ -29111,7 +29151,15 @@ const SmartFolderModal = memo(function SmartFolderModal({
                       <input
                         type="text"
                         value={rule.value}
-                        onChange={(event) => onChangeRuleValue(rule.id, event.target.value)}
+                        onChange={(event) =>
+                          setDraftRules((current) =>
+                            current.map((entry) =>
+                              entry.id === rule.id
+                                ? { ...entry, value: event.target.value }
+                                : entry,
+                            ),
+                          )
+                        }
                         className={inputFieldClass}
                         placeholder={
                           rule.field === "From"
@@ -29125,7 +29173,11 @@ const SmartFolderModal = memo(function SmartFolderModal({
                     {draftRules.length > 1 ? (
                       <button
                         type="button"
-                        onClick={() => onRemoveRule(rule.id)}
+                        onClick={() =>
+                          setDraftRules((current) =>
+                            current.filter((entry) => entry.id !== rule.id),
+                          )
+                        }
                     className={settingsSecondaryGhostActionClass}
                   >
                     Remove
@@ -29137,7 +29189,9 @@ const SmartFolderModal = memo(function SmartFolderModal({
 
           <button
             type="button"
-            onClick={onAddRule}
+            onClick={() =>
+              setDraftRules((current) => [...current, createEmptySmartFolderRule()])
+            }
             className={`${settingsGhostActionClass} mt-4`}
           >
             + Add rule
@@ -29148,7 +29202,7 @@ const SmartFolderModal = memo(function SmartFolderModal({
           </p>
         </div>
 
-        {isEditing && onDelete ? (
+        {mode === "edit" && onDelete ? (
           <div className="border-t border-[var(--workspace-border-soft)] pt-4">
             <button
               type="button"
@@ -34546,16 +34600,8 @@ export function WorkspaceShell({
       (person, index, people) =>
         people.findIndex((candidate) => candidate.email === person.email) === index,
     );
-  const [isSmartFolderModalOpen, setIsSmartFolderModalOpen] = useState(false);
-  const [editingSmartFolderId, setEditingSmartFolderId] = useState<string | null>(null);
-  const [smartFolderDraftName, setSmartFolderDraftName] = useState("");
-  const [smartFolderDraftScope, setSmartFolderDraftScope] = useState<"all" | "selected">("all");
-  const [smartFolderDraftSelectedInboxIds, setSmartFolderDraftSelectedInboxIds] = useState<
-    InboxId[]
-  >([]);
-  const [smartFolderDraftRules, setSmartFolderDraftRules] = useState<SmartFolderRule[]>([
-    createEmptySmartFolderRule(),
-  ]);
+  const [smartFolderModalTarget, setSmartFolderModalTarget] =
+    useState<SmartFolderModalTarget>(null);
   const workspaceModalHostRef = useRef<HTMLDivElement | null>(null);
   const seenIncomingMessageIdsRef = useRef<Set<string>>(new Set());
   const isInboxView = activeMailbox !== null;
@@ -39221,16 +39267,8 @@ export function WorkspaceShell({
       : workspaceMode === "Dark"
         ? "dark"
         : "light";
-  const resetSmartFolderDraft = () => {
-    setEditingSmartFolderId(null);
-    setSmartFolderDraftName("");
-    setSmartFolderDraftScope("all");
-    setSmartFolderDraftSelectedInboxIds([]);
-    setSmartFolderDraftRules([createEmptySmartFolderRule()]);
-  };
   const openSmartFolderModal = () => {
-    resetSmartFolderDraft();
-    setIsSmartFolderModalOpen(true);
+    setSmartFolderModalTarget({ mode: "create" });
   };
   const editSmartFolder = (folderId: string) => {
     const folder = smartFolders.find((entry) => entry.id === folderId);
@@ -39239,15 +39277,12 @@ export function WorkspaceShell({
       return;
     }
 
-    setEditingSmartFolderId(folder.id);
-    setSmartFolderDraftName(folder.name);
-    setSmartFolderDraftScope(folder.scope);
-    setSmartFolderDraftSelectedInboxIds(folder.selectedInboxIds);
-    setSmartFolderDraftRules(
-      folder.rules.length > 0 ? folder.rules : [createEmptySmartFolderRule()],
-    );
-    setIsSmartFolderModalOpen(true);
+    setSmartFolderModalTarget({ mode: "edit", folderId: folder.id });
   };
+  const smartFolderModalInitialFolder =
+    smartFolderModalTarget?.mode === "edit"
+      ? smartFolders.find((folder) => folder.id === smartFolderModalTarget.folderId) ?? null
+      : null;
   const confirmSmartFolderDelete = () => {
     if (!smartFolderDeleteId) {
       return;
@@ -40729,116 +40764,62 @@ export function WorkspaceShell({
         onCancel={() => setSmartFolderDeleteId(null)}
         onConfirm={confirmSmartFolderDelete}
       />
-      <SmartFolderModal
-        open={isSmartFolderModalOpen}
-        themeMode={resolvedTheme}
-        connectedInboxes={orderedMailboxes}
-        isEditing={editingSmartFolderId !== null}
-        draftName={smartFolderDraftName}
-        draftScope={smartFolderDraftScope}
-        draftSelectedInboxIds={smartFolderDraftSelectedInboxIds}
-        draftRules={smartFolderDraftRules}
-        onChangeName={setSmartFolderDraftName}
-        onChangeScope={setSmartFolderDraftScope}
-        onToggleInbox={(inboxId) =>
-          setSmartFolderDraftSelectedInboxIds((current) =>
-            current.includes(inboxId)
-              ? current.filter((entry) => entry !== inboxId)
-              : [...current, inboxId],
-          )
-        }
-        onChangeRuleField={(ruleId, nextField) =>
-          setSmartFolderDraftRules((current) =>
-            current.map((rule) =>
-              rule.id === ruleId ? { ...rule, field: nextField } : rule,
-            ),
-          )
-        }
-        onChangeRuleValue={(ruleId, nextValue) =>
-          setSmartFolderDraftRules((current) =>
-            current.map((rule) =>
-              rule.id === ruleId ? { ...rule, value: nextValue } : rule,
-            ),
-          )
-        }
-        onAddRule={() =>
-          setSmartFolderDraftRules((current) => [...current, createEmptySmartFolderRule()])
-        }
-        onRemoveRule={(ruleId) =>
-          setSmartFolderDraftRules((current) =>
-            current.filter((rule) => rule.id !== ruleId),
-          )
-        }
-        onDelete={
-          editingSmartFolderId
-            ? () => {
-                if (editingSmartFolderId === activeSmartFolderId) {
-                  setActiveSmartFolderId(null);
-                }
-
-                setSmartFolders((current) =>
-                  current.filter((folder) => folder.id !== editingSmartFolderId),
-                );
-                setIsSmartFolderModalOpen(false);
-                resetSmartFolderDraft();
-              }
-            : undefined
-        }
-        onCancel={() => {
-          setIsSmartFolderModalOpen(false);
-          resetSmartFolderDraft();
-        }}
-        onSave={() => {
-          const trimmedName = smartFolderDraftName.trim();
-          const validRules = smartFolderDraftRules
-            .map((rule) => ({ ...rule, value: rule.value.trim() }))
-            .filter((rule) => rule.value.length > 0);
-
-          if (
-            trimmedName.length === 0 ||
-            validRules.length === 0 ||
-            (smartFolderDraftScope === "selected" &&
-              smartFolderDraftSelectedInboxIds.length === 0)
-          ) {
-            return;
+      {smartFolderModalTarget &&
+      (smartFolderModalTarget.mode === "create" || smartFolderModalInitialFolder) ? (
+        <SmartFolderModal
+          key={
+            smartFolderModalTarget.mode === "create"
+              ? "create"
+              : `edit:${smartFolderModalTarget.folderId}`
           }
+          themeMode={resolvedTheme}
+          connectedInboxes={orderedMailboxes}
+          mode={smartFolderModalTarget.mode}
+          initialFolder={smartFolderModalInitialFolder ?? undefined}
+          onDelete={
+            smartFolderModalTarget.mode === "edit"
+              ? () => {
+                  const folderId = smartFolderModalTarget.folderId;
 
-          setSmartFolders((current) => {
-            if (editingSmartFolderId) {
-              return current.map((folder) =>
-                folder.id === editingSmartFolderId
-                  ? {
-                      ...folder,
-                      name: trimmedName,
-                      scope: smartFolderDraftScope,
-                      selectedInboxIds:
-                        smartFolderDraftScope === "selected"
-                          ? smartFolderDraftSelectedInboxIds
-                          : [],
-                      rules: validRules,
-                    }
-                  : folder,
-              );
-            }
+                  if (folderId === activeSmartFolderId) {
+                    setActiveSmartFolderId(null);
+                  }
 
-            return [
-              {
-                id: `smart-folder-${Date.now()}`,
-                name: trimmedName,
-                scope: smartFolderDraftScope,
-                selectedInboxIds:
-                  smartFolderDraftScope === "selected"
-                    ? smartFolderDraftSelectedInboxIds
-                    : [],
-                rules: validRules,
-              },
-              ...current,
-            ];
-          });
-          setIsSmartFolderModalOpen(false);
-          resetSmartFolderDraft();
-        }}
-      />
+                  setSmartFolders((current) =>
+                    current.filter((folder) => folder.id !== folderId),
+                  );
+                  setSmartFolderModalTarget(null);
+                }
+              : undefined
+          }
+          onCancel={() => setSmartFolderModalTarget(null)}
+          onSave={(input) => {
+            const modalTarget = smartFolderModalTarget;
+
+            setSmartFolders((current) => {
+              if (modalTarget.mode === "edit") {
+                return current.map((folder) =>
+                  folder.id === modalTarget.folderId
+                    ? {
+                        ...folder,
+                        ...input,
+                      }
+                    : folder,
+                );
+              }
+
+              return [
+                {
+                  id: `smart-folder-${Date.now()}`,
+                  ...input,
+                },
+                ...current,
+              ];
+            });
+            setSmartFolderModalTarget(null);
+          }}
+        />
+      ) : null}
       <SettingsConfirmationModal
         open={Boolean(pendingManagedInboxNavigation)}
         themeMode={resolvedTheme}

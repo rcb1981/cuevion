@@ -525,6 +525,93 @@ test("WorkspaceShell lazily resolves Smart Folder labels from a local thread ind
   );
 });
 
+test("SmartFolderModal owns isolated local draft state", () => {
+  const workspaceShellSource = fs.readFileSync(
+    "src/components/workspace/WorkspaceShell.tsx",
+    "utf8",
+  );
+  const smartFolderModalSource = workspaceShellSource.match(
+    /const SmartFolderModal = memo\(function SmartFolderModal\([\s\S]*?\n}\);\n\nconst MailSettingsCard/,
+  )?.[0];
+  const smartFolderRootSource = workspaceShellSource.match(
+    /export function WorkspaceShell\([\s\S]*$/,
+  )?.[0];
+
+  assert.ok(smartFolderModalSource, "SmartFolderModal component must exist");
+  assert.ok(smartFolderRootSource, "WorkspaceShell component must exist");
+
+  for (const removedRootState of [
+    "isSmartFolderModalOpen",
+    "editingSmartFolderId",
+    "smartFolderDraftName",
+    "smartFolderDraftScope",
+    "smartFolderDraftSelectedInboxIds",
+    "smartFolderDraftRules",
+  ]) {
+    assert.doesNotMatch(smartFolderRootSource, new RegExp(removedRootState));
+  }
+
+  assert.match(
+    smartFolderRootSource,
+    /const \[smartFolderModalTarget, setSmartFolderModalTarget\] =\s+useState<SmartFolderModalTarget>\(null\);/,
+  );
+  assert.match(
+    workspaceShellSource,
+    /type SmartFolderModalTarget =\s+\| \{ mode: "create" \}\s+\| \{ mode: "edit"; folderId: string \}\s+\| null;/,
+  );
+  assert.match(smartFolderModalSource, /const \[draftName, setDraftName\] = useState/);
+  assert.match(smartFolderModalSource, /const \[draftScope, setDraftScope\] = useState/);
+  assert.match(
+    smartFolderModalSource,
+    /const \[draftSelectedInboxIds, setDraftSelectedInboxIds\] = useState/,
+  );
+  assert.match(smartFolderModalSource, /const \[draftRules, setDraftRules\] = useState/);
+  assert.match(smartFolderModalSource, /initialFolder\?\.name \?\? ""/);
+  assert.match(smartFolderModalSource, /initialFolder\?\.scope \?\? "all"/);
+  assert.match(
+    smartFolderModalSource,
+    /\[\.\.\.\(initialFolder\?\.selectedInboxIds \?\? \[]\)\]/,
+  );
+  assert.match(
+    smartFolderModalSource,
+    /initialFolder\.rules\.map\(\(rule\) => \(\{ \.\.\.rule \}\)\)/,
+  );
+  assert.match(smartFolderModalSource, /\[createEmptySmartFolderRule\(\)\]/);
+  assert.match(smartFolderModalSource, /const trimmedName = draftName\.trim\(\);/);
+  assert.match(
+    smartFolderModalSource,
+    /\.map\(\(rule\) => \(\{ \.\.\.rule, value: rule\.value\.trim\(\) \}\)\)\s+\.filter\(\(rule\) => rule\.value\.length > 0\)/,
+  );
+  assert.match(
+    smartFolderModalSource,
+    /draftScope === "selected" \? \[\.\.\.draftSelectedInboxIds\] : \[]/,
+  );
+  assert.match(
+    smartFolderRootSource,
+    /setSmartFolderModalTarget\(\{ mode: "create" \}\)/,
+  );
+  assert.match(
+    smartFolderRootSource,
+    /setSmartFolderModalTarget\(\{ mode: "edit", folderId: folder\.id \}\)/,
+  );
+  assert.match(
+    smartFolderRootSource,
+    /return current\.map\(\(folder\) =>\s+folder\.id === modalTarget\.folderId/,
+  );
+  assert.match(
+    smartFolderRootSource,
+    /id: `smart-folder-\$\{Date\.now\(\)\}`,\s+\.\.\.input,\s+},\s+\.\.\.current,/,
+  );
+  assert.match(
+    smartFolderRootSource,
+    /onCancel=\{\(\) => setSmartFolderModalTarget\(null\)\}/,
+  );
+  assert.match(
+    smartFolderRootSource,
+    /key=\{\s+smartFolderModalTarget\.mode === "create"\s+\? "create"\s+: `edit:\$\{smartFolderModalTarget\.folderId\}`/,
+  );
+});
+
 test("drops stale snapshots without current classifier version", () => {
   const store = new Map<string, string>();
   const previousWindow = (globalThis as { window?: unknown }).window;
