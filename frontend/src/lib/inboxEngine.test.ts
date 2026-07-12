@@ -427,6 +427,42 @@ test("WorkspaceShell preserves provider thread metadata during message normaliza
   );
 });
 
+test("WorkspaceShell uses symmetric safe keys for Smart Folder thread retention", () => {
+  const representative = { threadId: "abc", subject: "Business", from: "sender@example.com" };
+  const producerKey = resolveThreadKey(representative);
+  const consumerKey = resolveThreadKey(representative);
+
+  assert.equal(producerKey, "thread:abc");
+  assert.equal(consumerKey, producerKey);
+  assert.equal(representative.threadId, "abc");
+
+  const workspaceShellSource = fs.readFileSync(
+    "src/components/workspace/WorkspaceShell.tsx",
+    "utf8",
+  );
+  const smartFolderThreadMatchSource = workspaceShellSource.match(
+    /const matchingThreadIds = new Set\([\s\S]*?return organizerVisibleMessages\.filter\([\s\S]*?\n    \);/,
+  )?.[0];
+
+  assert.ok(smartFolderThreadMatchSource, "Smart Folder thread matching block must exist");
+  assert.match(
+    smartFolderThreadMatchSource,
+    /\.map\(\(message\) => resolveSafeThreadGroupingKey\(message, mailboxId\)\)/,
+  );
+  assert.match(
+    smartFolderThreadMatchSource,
+    /matchingThreadIds\.has\(resolveSafeThreadGroupingKey\(message, mailboxId\)\)/,
+  );
+  assert.doesNotMatch(smartFolderThreadMatchSource, /message\.threadId\s*\?\?/);
+  assert.match(
+    workspaceShellSource,
+    /return dedupedRowRecords\.map\(\(record\) => \(\{\s+\.\.\.record\.message,/,
+  );
+  assert.match(workspaceShellSource, /\{ value: "demo", label: "Demo" \}/);
+  assert.match(workspaceShellSource, /\{ value: "business", label: "Business" \}/);
+  assert.match(workspaceShellSource, /return matchValue\.includes\(ruleValue\);/);
+});
+
 test("drops stale snapshots without current classifier version", () => {
   const store = new Map<string, string>();
   const previousWindow = (globalThis as { window?: unknown }).window;

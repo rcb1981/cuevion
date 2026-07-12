@@ -14622,7 +14622,7 @@ function MailboxView({
             resolveSmartFolderRuleMatchOptions(message, mailboxId),
           ),
         )
-        .map((message) => message.threadId ?? resolveSafeThreadGroupingKey(message, mailboxId)),
+        .map((message) => resolveSafeThreadGroupingKey(message, mailboxId)),
     );
 
     return organizerVisibleMessages.filter((message) =>
