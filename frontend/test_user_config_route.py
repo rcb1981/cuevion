@@ -340,8 +340,11 @@ class ModuleCompatibilityTests(unittest.TestCase):
                 continue
             if "user_config_store" in path.read_text(encoding="utf-8"):
                 production_imports.append(path.relative_to(FRONTEND_DIR).as_posix())
-        self.assertEqual(production_imports, ["api/user/config.py"])
-        self.assertFalse((API_DIR / "inboxes" / "fetch-gmail-thread.py").exists())
+        self.assertEqual(
+            sorted(production_imports),
+            ["api/inboxes/fetch-gmail-thread.py", "api/user/config.py"],
+        )
+        self.assertTrue((API_DIR / "inboxes" / "fetch-gmail-thread.py").exists())
 
 
 if __name__ == "__main__":

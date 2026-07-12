@@ -121,6 +121,58 @@ export type FetchGmailInboxRequest = {
   limit?: number | null;
 };
 
+export type FetchGmailThreadRequest = {
+  mailboxId: string;
+  providerThreadId: string;
+};
+
+export type GmailThreadAttachment = {
+  partId: string;
+  providerAttachmentId: string | null;
+  name: string;
+  mimeType: string | null;
+  size: number | null;
+  contentId: string | null;
+  disposition: string | null;
+};
+
+export type GmailThreadMessage = {
+  providerMessageId: string;
+  providerThreadId: string;
+  rfcMessageId: string | null;
+  internalDate: string;
+  createdAt: string;
+  dateHeader: string | null;
+  sender: string;
+  from: string;
+  to: string;
+  cc: string;
+  subject: string;
+  snippet: string;
+  bodyText: string;
+  bodyHtml: string | null;
+  labelIds: string[];
+  unread: boolean;
+  flagged: boolean;
+  attachments: GmailThreadAttachment[];
+};
+
+export type FetchGmailThreadSuccess = {
+  ok: true;
+  providerThreadId: string;
+  messages: GmailThreadMessage[];
+};
+
+export type FetchGmailThreadError = {
+  ok: false;
+  error: {
+    code: string;
+    message: string;
+  };
+};
+
+export type FetchGmailThreadResponse = FetchGmailThreadSuccess | FetchGmailThreadError;
+
 export type InboxConnectionAttemptResult = {
   ok: boolean;
   connected: boolean;
@@ -761,6 +813,48 @@ export async function fetchGmailInbox(
         code: "gmail_fetch_failed",
         message:
           error instanceof Error ? error.message : "Could not fetch Gmail inbox.",
+      },
+    };
+  }
+}
+
+export async function fetchGmailThread(
+  request: FetchGmailThreadRequest,
+): Promise<FetchGmailThreadResponse> {
+  try {
+    const response = await fetch("/api/inboxes/fetch-gmail-thread", {
+      method: "POST",
+      credentials: "include",
+      cache: "no-store",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(request),
+    });
+    const payload = (await response.json()) as FetchGmailThreadResponse;
+
+    if (!response.ok || payload.ok === false) {
+      return payload.ok === false
+        ? payload
+        : {
+            ok: false,
+            error: {
+              code: "gmail_thread_fetch_failed",
+              message: "Could not fetch this Gmail conversation.",
+            },
+          };
+    }
+
+    return payload;
+  } catch (error) {
+    return {
+      ok: false,
+      error: {
+        code: "gmail_thread_fetch_failed",
+        message:
+          error instanceof Error
+            ? error.message
+            : "Could not fetch this Gmail conversation.",
       },
     };
   }
