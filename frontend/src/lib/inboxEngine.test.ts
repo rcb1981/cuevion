@@ -463,6 +463,68 @@ test("WorkspaceShell uses symmetric safe keys for Smart Folder thread retention"
   assert.match(workspaceShellSource, /return matchValue\.includes\(ruleValue\);/);
 });
 
+test("WorkspaceShell lazily resolves Smart Folder labels from a local thread index", () => {
+  const workspaceShellSource = fs.readFileSync(
+    "src/components/workspace/WorkspaceShell.tsx",
+    "utf8",
+  );
+  const smartFolderEvaluatorSource = workspaceShellSource.match(
+    /function doesMessageMatchSmartFolder\([\s\S]*?\n}\n\nfunction hasSignatureContent/,
+  )?.[0];
+  const smartFolderRuntimeSource = workspaceShellSource.match(
+    /const resolveSmartFolderContentLabelForMessage = \([\s\S]*?const smartFolderEntries =/,
+  )?.[0];
+
+  assert.ok(smartFolderEvaluatorSource, "Smart Folder rule evaluator must exist");
+  assert.match(smartFolderEvaluatorSource, /return folder\.rules\.some\(\(rule\) => \{/);
+  assert.match(
+    smartFolderEvaluatorSource,
+    /if \(rule\.field === "Label" && !didResolveLabelOptions\) \{\s+labelOptions = resolveLabelOptions\?\.\(\);\s+didResolveLabelOptions = true;/,
+  );
+  assert.match(
+    smartFolderEvaluatorSource,
+    /rule\.field === "Label" \? labelOptions : undefined/,
+  );
+
+  assert.ok(smartFolderRuntimeSource, "Smart Folder mailbox runtime must exist");
+  assert.match(
+    smartFolderRuntimeSource,
+    /let threadMessagesBySafeKey: Map<string, MailMessage\[]> \| null = null;/,
+  );
+  assert.match(
+    smartFolderRuntimeSource,
+    /mailboxStore\[mailboxId\] \?\? createEmptyMailboxCollections\(\)/,
+  );
+  assert.match(
+    smartFolderRuntimeSource,
+    /canonicalFolderOrder\.forEach\(\(sourceFolder\) => \{\s+mailboxCollectionsForThread\[sourceFolder\]\.forEach\(\(sourceMessage\) => \{/,
+  );
+  assert.match(
+    smartFolderRuntimeSource,
+    /existingThreadMessages\.push\(sourceMessage\)/,
+  );
+  assert.match(
+    smartFolderRuntimeSource,
+    /nextThreadMessagesBySafeKey\.set\(safeThreadKey, \[sourceMessage\]\)/,
+  );
+  assert.match(
+    smartFolderRuntimeSource,
+    /threadMessagesBySafeKey\.get\(resolveSafeThreadGroupingKey\(message, mailboxId\)\) \?\? \[]/,
+  );
+  assert.match(
+    smartFolderRuntimeSource,
+    /getRecentThreadMessages\(message, threadSourceMessages, \{\s+mailboxId,\s+useSafeGrouping: true,/,
+  );
+  assert.match(
+    smartFolderRuntimeSource,
+    /\(\) =>\s+resolveSmartFolderRuleMatchOptions\(\s+message,\s+mailboxId,\s+getThreadSourceMessagesForSmartFolderLabel\(message\),/,
+  );
+  assert.match(
+    workspaceShellSource,
+    /const recentWindowMs = 30 \* 24 \* 60 \* 60 \* 1000;/,
+  );
+});
+
 test("drops stale snapshots without current classifier version", () => {
   const store = new Map<string, string>();
   const previousWindow = (globalThis as { window?: unknown }).window;

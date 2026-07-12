@@ -2974,11 +2974,23 @@ function resolveVisibleSmartFolderLabelValue(
 function doesMessageMatchSmartFolder(
   message: MailMessage,
   folder: SmartFolderDefinition,
-  options?: SmartFolderRuleMatchOptions,
+  resolveLabelOptions?: () => SmartFolderRuleMatchOptions,
 ) {
-  return folder.rules.some((rule) =>
-    doesMessageMatchSmartFolderRule(message, rule, options),
-  );
+  let didResolveLabelOptions = false;
+  let labelOptions: SmartFolderRuleMatchOptions | undefined;
+
+  return folder.rules.some((rule) => {
+    if (rule.field === "Label" && !didResolveLabelOptions) {
+      labelOptions = resolveLabelOptions?.();
+      didResolveLabelOptions = true;
+    }
+
+    return doesMessageMatchSmartFolderRule(
+      message,
+      rule,
+      rule.field === "Label" ? labelOptions : undefined,
+    );
+  });
 }
 
 function hasSignatureContent(signature: InboxSignatureSettings) {
@@ -14519,13 +14531,9 @@ function MailboxView({
   const resolveSmartFolderContentLabelForMessage = (
     message: MailMessage,
     mailboxId: InboxId,
+    threadSourceMessages: MailMessage[],
   ): DisplayContentLabel => {
     const mailboxContext = getSmartFolderMailboxContext(mailboxId);
-    const mailboxCollectionsForThread =
-      mailboxStore[mailboxId] ?? createEmptyMailboxCollections();
-    const threadSourceMessages = canonicalFolderOrder.flatMap(
-      (folder) => mailboxCollectionsForThread[folder],
-    );
     const threadMessages = [
       message,
       ...getRecentThreadMessages(message, threadSourceMessages, {
@@ -14597,15 +14605,48 @@ function MailboxView({
   const resolveSmartFolderRuleMatchOptions = (
     message: MailMessage,
     mailboxId: InboxId,
+    threadSourceMessages: MailMessage[],
   ): SmartFolderRuleMatchOptions => ({
     mailboxContext: getSmartFolderMailboxContext(mailboxId),
     manualLabelOverride: resolveManualLabelOverride(message),
-    visibleContentLabel: resolveSmartFolderContentLabelForMessage(message, mailboxId),
+    visibleContentLabel: resolveSmartFolderContentLabelForMessage(
+      message,
+      mailboxId,
+      threadSourceMessages,
+    ),
   });
   const getSmartFolderMessagesForMailbox = (
     mailboxId: InboxId,
     folder: SmartFolderDefinition,
   ) => {
+    let threadMessagesBySafeKey: Map<string, MailMessage[]> | null = null;
+    const getThreadSourceMessagesForSmartFolderLabel = (message: MailMessage) => {
+      if (!threadMessagesBySafeKey) {
+        const mailboxCollectionsForThread =
+          mailboxStore[mailboxId] ?? createEmptyMailboxCollections();
+        const nextThreadMessagesBySafeKey = new Map<string, MailMessage[]>();
+
+        canonicalFolderOrder.forEach((sourceFolder) => {
+          mailboxCollectionsForThread[sourceFolder].forEach((sourceMessage) => {
+            const safeThreadKey = resolveSafeThreadGroupingKey(sourceMessage, mailboxId);
+            const existingThreadMessages = nextThreadMessagesBySafeKey.get(safeThreadKey);
+
+            if (existingThreadMessages) {
+              existingThreadMessages.push(sourceMessage);
+              return;
+            }
+
+            nextThreadMessagesBySafeKey.set(safeThreadKey, [sourceMessage]);
+          });
+        });
+
+        threadMessagesBySafeKey = nextThreadMessagesBySafeKey;
+      }
+
+      return (
+        threadMessagesBySafeKey.get(resolveSafeThreadGroupingKey(message, mailboxId)) ?? []
+      );
+    };
     const organizerVisibleMessages = getSmartFolderOrganizerVisibleMessages(
       getSmartFolderCandidateInboxRowSet(mailboxId),
       mailboxId,
@@ -14619,7 +14660,12 @@ function MailboxView({
           doesMessageMatchSmartFolder(
             message,
             folder,
-            resolveSmartFolderRuleMatchOptions(message, mailboxId),
+            () =>
+              resolveSmartFolderRuleMatchOptions(
+                message,
+                mailboxId,
+                getThreadSourceMessagesForSmartFolderLabel(message),
+              ),
           ),
         )
         .map((message) => resolveSafeThreadGroupingKey(message, mailboxId)),
