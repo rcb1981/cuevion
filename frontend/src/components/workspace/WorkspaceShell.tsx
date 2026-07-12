@@ -39283,21 +39283,33 @@ export function WorkspaceShell({
     smartFolderModalTarget?.mode === "edit"
       ? smartFolders.find((folder) => folder.id === smartFolderModalTarget.folderId) ?? null
       : null;
+  const deleteSmartFolder = (folderId: string) => {
+    const deletedIndex = smartFolders.findIndex((folder) => folder.id === folderId);
+
+    if (deletedIndex === -1) {
+      return;
+    }
+
+    const remainingFolders = smartFolders.filter((folder) => folder.id !== folderId);
+    const replacementFolderId =
+      activeSmartFolderId === folderId
+        ? remainingFolders[deletedIndex]?.id ??
+          remainingFolders[deletedIndex - 1]?.id ??
+          null
+        : activeSmartFolderId;
+
+    setSmartFolders(remainingFolders);
+
+    if (activeSmartFolderId === folderId) {
+      setActiveSmartFolderId(replacementFolderId);
+    }
+  };
   const confirmSmartFolderDelete = () => {
     if (!smartFolderDeleteId) {
       return;
     }
 
-    const deletingActiveFolder = smartFolderDeleteId === activeSmartFolderId;
-
-    setSmartFolders((current) =>
-      current.filter((folder) => folder.id !== smartFolderDeleteId),
-    );
-
-    if (deletingActiveFolder) {
-      setActiveSmartFolderId(null);
-    }
-
+    deleteSmartFolder(smartFolderDeleteId);
     setSmartFolderDeleteId(null);
   };
 
@@ -40781,13 +40793,7 @@ export function WorkspaceShell({
               ? () => {
                   const folderId = smartFolderModalTarget.folderId;
 
-                  if (folderId === activeSmartFolderId) {
-                    setActiveSmartFolderId(null);
-                  }
-
-                  setSmartFolders((current) =>
-                    current.filter((folder) => folder.id !== folderId),
-                  );
+                  deleteSmartFolder(folderId);
                   setSmartFolderModalTarget(null);
                 }
               : undefined

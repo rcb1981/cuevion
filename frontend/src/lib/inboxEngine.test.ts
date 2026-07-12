@@ -612,6 +612,89 @@ test("SmartFolderModal owns isolated local draft state", () => {
   );
 });
 
+test("Smart Folder deletion preserves navigation within the ordered folder list", () => {
+  const workspaceShellSource = fs.readFileSync(
+    "src/components/workspace/WorkspaceShell.tsx",
+    "utf8",
+  );
+  const deleteSmartFolderSource = workspaceShellSource.match(
+    /const deleteSmartFolder = \(folderId: string\) => \{[\s\S]*?\n  \};\n  const confirmSmartFolderDelete/,
+  )?.[0];
+  const confirmSmartFolderDeleteSource = workspaceShellSource.match(
+    /const confirmSmartFolderDelete = \(\) => \{[\s\S]*?\n  \};\n\n  useEffect/,
+  )?.[0];
+  const modalDeleteSource = workspaceShellSource.match(
+    /onDelete=\{[\s\S]*?\n              : undefined\n          \}/,
+  )?.[0];
+
+  assert.ok(deleteSmartFolderSource, "shared Smart Folder deletion helper must exist");
+  assert.ok(confirmSmartFolderDeleteSource, "sidebar delete handler must exist");
+  assert.ok(modalDeleteSource, "modal delete callback must exist");
+  assert.equal(workspaceShellSource.match(/\bdeleteSmartFolder\b/g)?.length, 3);
+  assert.match(
+    deleteSmartFolderSource,
+    /const deletedIndex = smartFolders\.findIndex\(\(folder\) => folder\.id === folderId\);[\s\S]*const remainingFolders = smartFolders\.filter\(\(folder\) => folder\.id !== folderId\);/,
+  );
+  assert.match(
+    deleteSmartFolderSource,
+    /activeSmartFolderId === folderId\s+\? remainingFolders\[deletedIndex\]\?\.id \?\?\s+remainingFolders\[deletedIndex - 1\]\?\.id \?\?\s+null\s+: activeSmartFolderId/,
+  );
+  assert.match(deleteSmartFolderSource, /setSmartFolders\(remainingFolders\);/);
+  assert.match(
+    deleteSmartFolderSource,
+    /if \(activeSmartFolderId === folderId\) \{\s+setActiveSmartFolderId\(replacementFolderId\);\s+\}/,
+  );
+  assert.doesNotMatch(deleteSmartFolderSource, /handleOpenSmartFolder|openSmartFolder/);
+  assert.match(
+    confirmSmartFolderDeleteSource,
+    /if \(!smartFolderDeleteId\) \{\s+return;\s+\}\s+deleteSmartFolder\(smartFolderDeleteId\);\s+setSmartFolderDeleteId\(null\);/,
+  );
+  assert.doesNotMatch(
+    confirmSmartFolderDeleteSource,
+    /\.filter\(|setSmartFolders|setActiveSmartFolderId|handleOpenSmartFolder|openSmartFolder/,
+  );
+  assert.match(
+    modalDeleteSource,
+    /const folderId = smartFolderModalTarget\.folderId;\s+deleteSmartFolder\(folderId\);\s+setSmartFolderModalTarget\(null\);/,
+  );
+  assert.doesNotMatch(
+    modalDeleteSource,
+    /\.filter\(|setSmartFolders|setActiveSmartFolderId|handleOpenSmartFolder|openSmartFolder/,
+  );
+
+  const resolveDeletion = (folderIds: string[], activeId: string, deletedId: string) => {
+    const deletedIndex = folderIds.findIndex((folderId) => folderId === deletedId);
+    const remainingFolderIds = folderIds.filter((folderId) => folderId !== deletedId);
+    const replacementId =
+      activeId === deletedId
+        ? remainingFolderIds[deletedIndex] ?? remainingFolderIds[deletedIndex - 1] ?? null
+        : activeId;
+
+    return { remainingFolderIds, replacementId };
+  };
+
+  assert.deepEqual(resolveDeletion(["A", "B", "C"], "A", "A"), {
+    remainingFolderIds: ["B", "C"],
+    replacementId: "B",
+  });
+  assert.deepEqual(resolveDeletion(["A", "B", "C"], "B", "B"), {
+    remainingFolderIds: ["A", "C"],
+    replacementId: "C",
+  });
+  assert.deepEqual(resolveDeletion(["A", "B", "C"], "C", "C"), {
+    remainingFolderIds: ["A", "B"],
+    replacementId: "B",
+  });
+  assert.deepEqual(resolveDeletion(["A", "B", "C"], "A", "B"), {
+    remainingFolderIds: ["A", "C"],
+    replacementId: "A",
+  });
+  assert.deepEqual(resolveDeletion(["A"], "A", "A"), {
+    remainingFolderIds: [],
+    replacementId: null,
+  });
+});
+
 test("drops stale snapshots without current classifier version", () => {
   const store = new Map<string, string>();
   const previousWindow = (globalThis as { window?: unknown }).window;
