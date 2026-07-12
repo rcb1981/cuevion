@@ -26,6 +26,7 @@ export type LiveInboxAttachmentSnapshot = {
 export type LiveInboxMessageSnapshot = {
   id: string;
   imapUid?: string;
+  providerThreadId?: string;
   sender: string;
   subject: string;
   snippet: string;

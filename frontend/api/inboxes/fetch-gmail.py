@@ -266,18 +266,20 @@ class handler(BaseHTTPRequestHandler):
                 inbox_uid_set.append(gmail_internal_id)
 
             try:
-                previews.append(
-                    to_message_preview(
-                        parsed_message,
-                        index,
-                        email_address,
-                        unread,
-                        gmail_internal_id,
-                        flagged,
-                        internal_role=internal_role,
-                        focus_preferences=focus_preferences,
-                    ),
+                preview = to_message_preview(
+                    parsed_message,
+                    index,
+                    email_address,
+                    unread,
+                    gmail_internal_id,
+                    flagged,
+                    internal_role=internal_role,
+                    focus_preferences=focus_preferences,
                 )
+                gmail_thread_id = message_payload.get("threadId")
+                if isinstance(gmail_thread_id, str) and gmail_thread_id.strip():
+                    preview["providerThreadId"] = gmail_thread_id
+                previews.append(preview)
             except Exception:
                 continue
 

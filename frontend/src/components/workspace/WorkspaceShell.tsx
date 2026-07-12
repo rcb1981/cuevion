@@ -1214,6 +1214,7 @@ type ComposeRecipientField = "to" | "cc" | "bcc";
 type MailMessage = {
   id: string;
   threadId?: string;
+  providerThreadId?: string;
   sender: string;
   subject: string;
   snippet: string;
@@ -9730,6 +9731,7 @@ function createInitialMailboxStore(
             {
               id: message.id,
               threadId: message.threadId,
+              providerThreadId: message.providerThreadId,
               sender: message.sender,
               subject: message.subject,
               snippet: message.snippet,
@@ -33787,6 +33789,7 @@ export function WorkspaceShell({
       return normalizeMailMessage(
         {
           id: message.id,
+          providerThreadId: message.providerThreadId,
           sender: message.sender,
           subject: message.subject,
           snippet: message.snippet,

@@ -8,6 +8,7 @@
  */
 
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import {
   normalizeThreadSubject,
   resolveThreadKey,
@@ -410,6 +411,22 @@ test("preserves distinct threads", () => {
 
 console.log("\nliveInboxSnapshots — classifier version");
 
+test("WorkspaceShell preserves provider thread metadata during message normalization", () => {
+  const workspaceShellSource = fs.readFileSync(
+    "src/components/workspace/WorkspaceShell.tsx",
+    "utf8",
+  );
+
+  assert.match(
+    workspaceShellSource,
+    /threadId: message\.threadId,\s+providerThreadId: message\.providerThreadId,/,
+  );
+  assert.match(
+    workspaceShellSource,
+    /id: message\.id,\s+providerThreadId: message\.providerThreadId,\s+sender: message\.sender,/,
+  );
+});
+
 test("drops stale snapshots without current classifier version", () => {
   const store = new Map<string, string>();
   const previousWindow = (globalThis as { window?: unknown }).window;
@@ -459,6 +476,8 @@ test("drops stale snapshots without current classifier version", () => {
       messages: [
         {
           id: "fresh-promo",
+          threadId: "existing-thread-456",
+          providerThreadId: "provider-thread-123",
           sender: "Sender",
           subject: "Promo nieuw vuur!",
           snippet: "Hier echt een dikke promo!!",
@@ -478,6 +497,37 @@ test("drops stale snapshots without current classifier version", () => {
     assert.equal(
       snapshots.promo?.messages[0]?.classifierVersion,
       MUSIC_CLASSIFIER_VERSION,
+    );
+    assert.equal(
+      snapshots.promo?.messages[0]?.providerThreadId,
+      "provider-thread-123",
+    );
+    assert.equal(snapshots.promo?.messages[0]?.threadId, "existing-thread-456");
+
+    saveLiveInboxSnapshot({
+      inboxId: "legacy",
+      email: "legacy@example.com",
+      fetchedAt: new Date().toISOString(),
+      messages: [
+        {
+          id: "legacy-message",
+          sender: "Sender",
+          subject: "Legacy message",
+          snippet: "Snapshot without provider thread metadata",
+          from: "sender@example.com",
+          to: "recipient@example.com",
+          timestamp: "March 27 at 11:00",
+          createdAt: new Date().toISOString(),
+          body: ["Snapshot without provider thread metadata"],
+          ui_signal: "NEW",
+        },
+      ],
+    });
+
+    const snapshotsWithLegacyMessage = readLiveInboxSnapshots();
+    assert.equal(
+      snapshotsWithLegacyMessage.legacy?.messages[0]?.providerThreadId,
+      undefined,
     );
   } finally {
     (globalThis as { window?: unknown }).window = previousWindow;
