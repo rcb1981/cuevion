@@ -2,14 +2,10 @@ from __future__ import annotations
 
 import copy
 import json
-import os
 import sys
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
-from urllib.error import HTTPError, URLError
-from urllib.parse import quote
-from urllib.request import Request, urlopen
 
 CURRENT_DIR = Path(__file__).resolve().parent
 API_DIR = CURRENT_DIR.parent
@@ -18,13 +14,14 @@ if str(API_DIR) not in sys.path:
 
 from beta_auth import (  # noqa: E402
     normalize_auth_email,
-    parse_beta_session_token,
-    read_beta_session_cookie,
-    resolve_beta_session_secret,
 )
-
-USER_CONFIG_SCHEMA_VERSION = 1
-USER_CONFIG_KEY_PREFIX = "cuevion:user:v1"
+from user_config_store import (  # noqa: E402
+    USER_CONFIG_SCHEMA_VERSION,
+    read_user_config_record,
+    resolve_authenticated_user,
+    resolve_user_config_store,
+    write_user_config_record,
+)
 
 SENSITIVE_FIELD_NAMES = {
     "access_token",
@@ -113,19 +110,6 @@ ALLOWED_CONFIG_FIELDS = {
 }
 
 
-def _resolve_durable_store_config() -> dict | None:
-    rest_url = os.getenv("KV_REST_API_URL", "").strip()
-    rest_token = os.getenv("KV_REST_API_TOKEN", "").strip()
-
-    if not rest_url or not rest_token:
-        return None
-
-    return {
-        "rest_url": rest_url.rstrip("/"),
-        "rest_token": rest_token,
-    }
-
-
 def _send_json(handler: BaseHTTPRequestHandler, status_code: int, payload: dict):
     response_body = json.dumps(payload).encode("utf-8")
     handler.send_response(status_code)
@@ -144,106 +128,6 @@ def _build_error(code: str, message: str) -> dict:
             "message": message,
         },
     }
-
-
-def _perform_rest_request(
-    config: dict,
-    method: str,
-    path: str,
-    body: bytes | None = None,
-) -> tuple[dict | None, dict | None]:
-    request = Request(
-        f"{config['rest_url']}{path}",
-        data=body,
-        headers={
-            "Authorization": f"Bearer {config['rest_token']}",
-            "Content-Type": "application/json",
-        },
-        method=method,
-    )
-
-    try:
-        with urlopen(request, timeout=20) as response:
-            payload = response.read().decode("utf-8")
-            return json.loads(payload) if payload else {}, None
-    except HTTPError as error:
-        error_body = error.read().decode("utf-8", errors="replace")
-        try:
-            parsed_error = json.loads(error_body) if error_body else {}
-        except json.JSONDecodeError:
-            parsed_error = {}
-
-        return None, {
-            "code": "user_config_store_unavailable",
-            "message": (
-                parsed_error.get("error")
-                or parsed_error.get("message")
-                or f"User config store request failed with HTTP {error.code}."
-            ),
-        }
-    except URLError as error:
-        return None, {
-            "code": "user_config_store_unavailable",
-            "message": (
-                str(error.reason)
-                if getattr(error, "reason", None)
-                else "Could not reach the user config store."
-            ),
-        }
-
-
-def _read_durable_record(config: dict, store_key: str) -> tuple[dict | None, dict | None]:
-    payload, error = _perform_rest_request(
-        config,
-        "GET",
-        f"/get/{quote(store_key, safe='')}",
-    )
-    if error:
-        return None, error
-
-    if not isinstance(payload, dict):
-        return None, {
-            "code": "user_config_store_unavailable",
-            "message": "User config store returned an unreadable response.",
-        }
-
-    result = payload.get("result")
-    if result is None:
-        return None, None
-
-    if isinstance(result, str):
-        try:
-            parsed = json.loads(result)
-        except json.JSONDecodeError:
-            return None, {
-                "code": "user_config_store_unavailable",
-                "message": "User config store returned malformed JSON.",
-            }
-        return parsed if isinstance(parsed, dict) else None, None
-
-    return result if isinstance(result, dict) else None, None
-
-
-def _write_durable_record(config: dict, store_key: str, record: dict) -> tuple[dict | None, dict | None]:
-    encoded_record = json.dumps(record, separators=(",", ":"), sort_keys=True).encode("utf-8")
-    return _perform_rest_request(
-        config,
-        "POST",
-        f"/set/{quote(store_key, safe='')}",
-        body=encoded_record,
-    )
-
-
-def _get_authenticated_user(headers) -> dict | None:
-    if not resolve_beta_session_secret():
-        return None
-
-    session_token = read_beta_session_cookie(headers)
-    return parse_beta_session_token(session_token or "")
-
-
-def _build_user_config_key(email: str) -> str:
-    return f"{USER_CONFIG_KEY_PREFIX}:{normalize_auth_email(email)}"
 
 
 def _is_blocked_field_name(key: str) -> bool:
@@ -405,25 +289,25 @@ def _read_json_body(handler: BaseHTTPRequestHandler) -> tuple[dict | None, dict 
 
 class handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        session_user = _get_authenticated_user(self.headers)
+        session_user, _ = resolve_authenticated_user(self.headers)
         if not session_user:
             _send_json(self, 401, _build_error("unauthorized", "A valid beta session is required."))
             return
 
-        config = _resolve_durable_store_config()
-        if not config:
+        store, _ = resolve_user_config_store()
+        if not store:
             _send_json(self, 200, {"ok": True, "config": None})
             return
 
-        record, error = _read_durable_record(config, _build_user_config_key(session_user["email"]))
-        if error:
+        read_result = read_user_config_record(store, session_user["email"])
+        if read_result["status"] != "ok":
             _send_json(self, 200, {"ok": True, "config": None})
             return
 
-        _send_json(self, 200, {"ok": True, "config": record})
+        _send_json(self, 200, {"ok": True, "config": read_result["config"]})
 
     def do_POST(self):
-        session_user = _get_authenticated_user(self.headers)
+        session_user, _ = resolve_authenticated_user(self.headers)
         if not session_user:
             _send_json(self, 401, _build_error("unauthorized", "A valid beta session is required."))
             return
@@ -434,8 +318,8 @@ class handler(BaseHTTPRequestHandler):
             return
 
         sanitized_config = _sanitize_user_config(payload or {}, session_user["email"])
-        config = _resolve_durable_store_config()
-        if not config:
+        store, _ = resolve_user_config_store()
+        if not store:
             _send_json(
                 self,
                 503,
@@ -443,19 +327,17 @@ class handler(BaseHTTPRequestHandler):
             )
             return
 
-        existing_record, _ = _read_durable_record(
-            config,
-            _build_user_config_key(session_user["email"]),
-        )
+        read_result = read_user_config_record(store, session_user["email"])
+        existing_record = read_result["config"] if read_result["status"] == "ok" else None
         merged_config = _merge_user_config(existing_record, sanitized_config)
 
-        _, store_error = _write_durable_record(
-            config,
-            _build_user_config_key(session_user["email"]),
+        write_result = write_user_config_record(
+            store,
+            session_user["email"],
             merged_config,
         )
-        if store_error:
-            _send_json(self, 503, {"ok": False, "error": store_error})
+        if write_result["status"] != "ok":
+            _send_json(self, 503, {"ok": False, "error": write_result["error"]})
             return
 
         _send_json(self, 200, {"ok": True, "config": merged_config})
