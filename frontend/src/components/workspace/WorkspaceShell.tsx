@@ -6520,16 +6520,25 @@ function dedupeMessagesForNormalAppRenderedRows(
     ).values(),
   );
 
-  return dedupeLatestMessagePerThread(
+  const dedupedRowRecords = dedupeLatestMessagePerThread(
     uniqueRowMessages.map((message) => ({
-      ...message,
+      message,
+      id: message.id,
       threadId: resolveSafeThreadGroupingKey(
         message,
         messageLocationById[message.id]?.mailboxId ?? mailboxId,
       ),
+      subject: message.subject,
       from: message.from ?? message.sender ?? "",
+      createdAt: message.createdAt,
+      timestamp: message.timestamp,
     })),
   );
+
+  return dedupedRowRecords.map((record) => ({
+    ...record.message,
+    from: record.from,
+  }));
 }
 
 function resolveMailboxTitleForCategory(
