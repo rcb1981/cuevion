@@ -333,6 +333,8 @@ class ModuleCompatibilityTests(unittest.TestCase):
 
         production_imports = []
         for path in API_DIR.rglob("*.py"):
+            if path.name.startswith("test_"):
+                continue
             if path in {
                 API_DIR / "user_config_store.py",
                 API_DIR / "inboxes" / "oauth_google.py",
