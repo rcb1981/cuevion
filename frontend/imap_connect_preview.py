@@ -5,6 +5,7 @@ import logging
 import base64
 import re
 import time
+import unicodedata
 from dataclasses import replace
 from datetime import datetime, timezone
 from email import message_from_bytes
@@ -12,6 +13,7 @@ from email.header import decode_header
 from email.message import Message
 from email.utils import parseaddr, parsedate_to_datetime
 from typing import Any
+from urllib.parse import quote
 
 
 DEFAULT_GMAIL_HOST = "imap.gmail.com"
@@ -20,9 +22,26 @@ DEFAULT_MICROSOFT_HOST = "outlook.office365.com"
 DEFAULT_MICROSOFT_PORT = 993
 DEFAULT_FETCH_LIMIT = 50
 MAX_FETCH_LIMIT = 100
+MAX_MESSAGE_ID_HEADER_LENGTH = 16_384
+MAX_MESSAGE_ID_HEADER_INSTANCES = 32
+MAX_MESSAGE_ID_TOKEN_LENGTH = 512
+MAX_THREAD_COMPONENT_LENGTH = 192
+MAX_THREAD_ID_LENGTH = 512
+MAX_THREAD_PARENT_TRAVERSAL = 100
 logger = logging.getLogger(__name__)
 QUOTA_REFRESH_KEEP_COPY = "Mailbox quota exceeded during refresh — existing messages are kept."
 QUOTA_PARTIAL_COPY = "Some older messages could not be refreshed."
+
+MESSAGE_ID_DOT_ATOM = r"[A-Za-z0-9!#$%&'*+\-/=?^_`{|}~]+(?:\.[A-Za-z0-9!#$%&'*+\-/=?^_`{|}~]+)*"
+MESSAGE_ID_QUOTED_LOCAL = r'"(?:\\[\x20-\x7e]|[^"\\\x00-\x1f\x7f])*"'
+MESSAGE_ID_DOMAIN = (
+    r"(?:(?:[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)"
+    r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?)*"
+    r"|\[[^\[\]\s\x00-\x1f\x7f]+\])"
+)
+MESSAGE_ID_TOKEN_PATTERN = re.compile(
+    rf"^(?:{MESSAGE_ID_DOT_ATOM}|{MESSAGE_ID_QUOTED_LOCAL})@{MESSAGE_ID_DOMAIN}$"
+)
 
 
 def map_to_ui_signal(result: dict[str, Any]) -> str:
@@ -133,6 +152,292 @@ def clean_text(value: str | None) -> str:
         normalized = normalized.replace("\n\n\n", "\n\n")
 
     return normalized.strip()
+
+
+def normalize_message_id_token(value: Any) -> str | None:
+    """Return a bounded canonical RFC Message-ID token without angle brackets."""
+    if not isinstance(value, str):
+        return None
+
+    token = value.strip()
+    if token.startswith("<") or token.endswith(">"):
+        if not (token.startswith("<") and token.endswith(">")):
+            return None
+        token = token[1:-1]
+
+    if (
+        not token
+        or token != token.strip()
+        or len(token) > MAX_MESSAGE_ID_TOKEN_LENGTH
+        or any(
+            ord(character) < 32
+            or ord(character) == 127
+            or unicodedata.category(character) in {"Cc", "Cf"}
+            for character in token
+        )
+        or not MESSAGE_ID_TOKEN_PATTERN.fullmatch(token)
+    ):
+        return None
+
+    local_part, domain = token.rsplit("@", 1)
+    return f"{local_part}@{domain.lower()}"
+
+
+def parse_message_id_tokens(value: Any) -> list[str]:
+    """Parse bounded Message-ID fields without treating surrounding prose as IDs."""
+    if isinstance(value, str):
+        header_values = [value]
+    elif isinstance(value, (list, tuple)):
+        header_values = list(value)
+    else:
+        return []
+
+    if not header_values or len(header_values) > MAX_MESSAGE_ID_HEADER_INSTANCES:
+        return []
+
+    if any(not isinstance(header_value, str) for header_value in header_values):
+        return []
+
+    if sum(len(header_value) for header_value in header_values) > MAX_MESSAGE_ID_HEADER_LENGTH:
+        return []
+
+    tokens: list[str] = []
+    for header_value in header_values:
+        unfolded = re.sub(r"\r?\n[ \t]+", " ", header_value).strip()
+        if not unfolded:
+            continue
+
+        bracketed_tokens: list[str] = []
+        bracket_buffer: list[str] = []
+        inside_brackets = False
+        saw_angle_bracket = False
+        malformed_brackets = False
+
+        for character in unfolded:
+            if character == "<":
+                saw_angle_bracket = True
+                if inside_brackets:
+                    malformed_brackets = True
+                    break
+                inside_brackets = True
+                bracket_buffer = []
+                continue
+
+            if character == ">":
+                saw_angle_bracket = True
+                if not inside_brackets:
+                    malformed_brackets = True
+                    break
+                normalized = normalize_message_id_token(
+                    f"<{''.join(bracket_buffer)}>"
+                )
+                if normalized:
+                    bracketed_tokens.append(normalized)
+                inside_brackets = False
+                bracket_buffer = []
+                continue
+
+            if inside_brackets:
+                bracket_buffer.append(character)
+
+        if inside_brackets:
+            malformed_brackets = True
+
+        if malformed_brackets:
+            continue
+
+        if saw_angle_bracket:
+            tokens.extend(bracketed_tokens)
+            continue
+
+        normalized = normalize_message_id_token(unfolded)
+        if normalized:
+            tokens.append(normalized)
+    return tokens
+
+
+def extract_message_thread_metadata(
+    message: Message,
+    imap_uid: str | None,
+    fallback_id: str,
+) -> dict[str, Any]:
+    message_ids = parse_message_id_tokens(message.get_all("Message-ID", []))
+    unique_message_ids = list(dict.fromkeys(message_ids))
+    in_reply_to_ids = parse_message_id_tokens(message.get_all("In-Reply-To", []))
+    references = parse_message_id_tokens(message.get_all("References", []))
+
+    return {
+        "message_id": unique_message_ids[0] if len(unique_message_ids) == 1 else None,
+        "message_id_ambiguous": len(unique_message_ids) > 1,
+        "in_reply_to": in_reply_to_ids[0] if in_reply_to_ids else None,
+        "references": references,
+        "imap_uid": str(imap_uid or "").strip() or None,
+        "fallback_id": str(fallback_id or "").strip(),
+    }
+
+
+def encode_thread_identity_component(value: Any) -> str:
+    normalized = str(value or "").strip() or "missing"
+    encoded = quote(normalized, safe="")
+    if len(encoded) <= MAX_THREAD_COMPONENT_LENGTH:
+        return encoded
+
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:24]
+    suffix = f"~{digest}"
+    encoded_prefix: list[str] = []
+    remaining_length = MAX_THREAD_COMPONENT_LENGTH - len(suffix)
+    for encoded_unit in _encoded_character_units(normalized):
+        if len(encoded_unit) > remaining_length:
+            break
+        encoded_prefix.append(encoded_unit)
+        remaining_length -= len(encoded_unit)
+    return f"{''.join(encoded_prefix)}{suffix}"
+
+
+def _encoded_character_units(value: str) -> list[str]:
+    """Encode each Unicode character as one indivisible percent-safe unit."""
+    return [quote(character, safe="") for character in value]
+
+
+def build_bounded_thread_identity(prefix: str, *components: Any) -> str:
+    normalized_components = [str(component or "").strip() or "missing" for component in components]
+    encoded_components = [quote(component, safe="") for component in normalized_components]
+    candidate = ":".join([prefix, *encoded_components])
+    if len(candidate) <= MAX_THREAD_ID_LENGTH:
+        return candidate
+
+    complete_scoped_value = "\x00".join([prefix, *normalized_components])
+    digest = hashlib.sha256(complete_scoped_value.encode("utf-8")).hexdigest()[:24]
+    suffix = f"~{digest}"
+    content_budget = MAX_THREAD_ID_LENGTH - len(suffix)
+    bounded_parts = [prefix]
+    bounded_length = len(prefix)
+
+    for index, component in enumerate(normalized_components):
+        bounded_parts.append(":")
+        bounded_length += 1
+        remaining_separators = len(normalized_components) - index - 1
+        component_budget = content_budget - bounded_length - remaining_separators
+
+        for encoded_unit in _encoded_character_units(component):
+            if len(encoded_unit) > component_budget:
+                break
+            bounded_parts.append(encoded_unit)
+            bounded_length += len(encoded_unit)
+            component_budget -= len(encoded_unit)
+
+    return f"{''.join(bounded_parts)}{suffix}"
+
+
+def _resolve_in_reply_to_root(
+    direct_parent_id: str,
+    records_by_message_id: dict[str, dict[str, Any]],
+    ambiguous_message_ids: set[str],
+) -> str | None:
+    current_id = direct_parent_id
+    visited: set[str] = set()
+
+    for _ in range(MAX_THREAD_PARENT_TRAVERSAL):
+        if current_id in ambiguous_message_ids:
+            return None
+        if current_id in visited:
+            return direct_parent_id
+        visited.add(current_id)
+
+        parent = records_by_message_id.get(current_id)
+        if not parent:
+            return current_id
+
+        references = parent.get("references") or []
+        if references:
+            return None if references[0] in ambiguous_message_ids else references[0]
+
+        next_parent_id = parent.get("in_reply_to")
+        if not next_parent_id:
+            return parent.get("message_id") or current_id
+        current_id = next_parent_id
+
+    return direct_parent_id
+
+
+def resolve_custom_imap_thread_ids(
+    records: list[dict[str, Any]],
+    mailbox_key: str,
+    folder: str,
+    uid_validity: str | None,
+) -> list[str | None]:
+    """Resolve one authoritative, non-subject thread ID per custom-IMAP message."""
+    record_indexes_by_message_id: dict[str, list[int]] = {}
+    for index, record in enumerate(records):
+        message_id = record.get("message_id")
+        if message_id:
+            record_indexes_by_message_id.setdefault(message_id, []).append(index)
+
+    ambiguous_message_ids = {
+        message_id
+        for message_id, indexes in record_indexes_by_message_id.items()
+        if len(indexes) > 1
+    }
+    records_by_message_id = {
+        message_id: records[indexes[0]]
+        for message_id, indexes in record_indexes_by_message_id.items()
+        if len(indexes) == 1
+    }
+
+    resolved: list[str | None] = []
+    normalized_uid_validity = str(uid_validity or "").strip()
+
+    for record in records:
+        references = record.get("references") or []
+        in_reply_to = record.get("in_reply_to")
+        own_message_id = record.get("message_id")
+        selected_reference = references[0] if references else None
+        touches_ambiguous_id = bool(
+            record.get("message_id_ambiguous")
+            or own_message_id in ambiguous_message_ids
+            or in_reply_to in ambiguous_message_ids
+            or selected_reference in ambiguous_message_ids
+        )
+
+        root_message_id = None if touches_ambiguous_id else selected_reference
+        if not touches_ambiguous_id and not root_message_id and in_reply_to:
+            root_message_id = _resolve_in_reply_to_root(
+                in_reply_to,
+                records_by_message_id,
+                ambiguous_message_ids,
+            )
+            if root_message_id is None:
+                touches_ambiguous_id = True
+        if not touches_ambiguous_id and not root_message_id:
+            root_message_id = own_message_id
+
+        if root_message_id:
+            resolved.append(
+                build_bounded_thread_identity(
+                    "imap:rfc",
+                    mailbox_key,
+                    folder,
+                    root_message_id,
+                )
+            )
+            continue
+
+        imap_uid = str(record.get("imap_uid") or "").strip()
+        if imap_uid and normalized_uid_validity:
+            resolved.append(
+                build_bounded_thread_identity(
+                    "imap:uid",
+                    mailbox_key,
+                    folder,
+                    normalized_uid_validity,
+                    imap_uid,
+                )
+            )
+            continue
+
+        resolved.append(None)
+
+    return resolved
 
 
 def html_to_text(value: str | None) -> str:
@@ -1159,20 +1464,28 @@ def build_connect_preview_response(payload: dict[str, Any]) -> tuple[int, dict[s
 
         preview_build_start = time.perf_counter()
         previews = []
+        threading_records: list[dict[str, Any]] = []
         for index, (message, unread, imap_uid, flagged) in enumerate(messages):
             try:
-                previews.append(
-                    to_message_preview(
-                        message,
-                        index,
-                        email_address,
-                        unread,
-                        imap_uid,
-                        flagged,
-                        internal_role=internal_role,
-                        focus_preferences=focus_preferences,
-                    )
+                preview = to_message_preview(
+                    message,
+                    index,
+                    email_address,
+                    unread,
+                    imap_uid,
+                    flagged,
+                    internal_role=internal_role,
+                    focus_preferences=focus_preferences,
                 )
+                previews.append(preview)
+                if provider == "custom_imap":
+                    threading_records.append(
+                        extract_message_thread_metadata(
+                            message,
+                            imap_uid,
+                            preview["id"],
+                        )
+                    )
             except Exception as exc:
                 preview_build_duration_ms = (time.perf_counter() - preview_build_start) * 1000
                 logger.warning(
@@ -1230,6 +1543,28 @@ def build_connect_preview_response(payload: dict[str, Any]) -> tuple[int, dict[s
         except Exception:
             inbox_uid_set = None
             uid_validity = None
+
+        if provider == "custom_imap":
+            thread_ids = resolve_custom_imap_thread_ids(
+                threading_records,
+                mailbox_key=str(payload.get("mailboxId") or email_address),
+                folder=folder,
+                uid_validity=uid_validity,
+            )
+            identifiable_previews = []
+            for index, (preview, thread_id) in enumerate(zip(previews, thread_ids)):
+                if thread_id is None:
+                    record = threading_records[index]
+                    logger.warning(
+                        "IMAP preview omitted unidentifiable message stage=thread_identity index=%s uid_present=%s uidvalidity_present=%s",
+                        index,
+                        bool(record.get("imap_uid")),
+                        bool(uid_validity),
+                    )
+                    continue
+                preview["threadId"] = thread_id
+                identifiable_previews.append(preview)
+            previews = identifiable_previews
 
         if not previews and any(warning.get("code") == "quota_exceeded" for warning in fetch_warnings):
             return 400, {

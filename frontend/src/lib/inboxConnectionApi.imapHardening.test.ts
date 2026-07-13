@@ -64,6 +64,25 @@ async function run() {
     if (url.endsWith("/download-attachment")) {
       return response(null);
     }
+    if (url.endsWith("/connect-imap")) {
+      return response({
+        ok: true,
+        messages: [{
+          id: "message-1",
+          imapUid: "42",
+          threadId: "imap:rfc:stable-mailbox:INBOX:root%40example.com",
+          sender: "Sender",
+          subject: "Subject",
+          snippet: "Body",
+          from: "sender@example.com",
+          to: "owner@example.com",
+          timestamp: "July 13 at 10:00",
+          createdAt: "2026-07-13T08:00:00.000Z",
+          body: ["Body"],
+        }],
+        uidValidity: "900",
+      });
+    }
     return response({ ok: true, action: requestBody(lastCaptured(captured)).action });
   };
 
@@ -73,7 +92,12 @@ async function run() {
       limit: 25,
       focusPreferences: { newsletters: "low" } as any,
     });
-    await connectInboxWithImap(refresh);
+    const refreshResponse = await connectInboxWithImap(refresh);
+    assert.equal(
+      refreshResponse.messages?.[0]?.threadId,
+      "imap:rfc:stable-mailbox:INBOX:root%40example.com",
+    );
+    assert.equal(refreshResponse.uidValidity, "900");
     assert.deepEqual(Object.keys(requestBody(lastCaptured(captured))).sort(), [
       "focusPreferences",
       "limit",

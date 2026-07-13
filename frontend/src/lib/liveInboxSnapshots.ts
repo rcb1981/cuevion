@@ -1,20 +1,80 @@
 import type { LiveInboxMessageSnapshot } from "./inboxConnectionApi";
+import {
+  applyLiveThreadIdentity,
+  buildConservativeLiveCustomImapThreadId,
+  normalizeThreadSubject,
+  type LiveInboxProvider,
+  type LiveThreadIdentityContext,
+} from "./inboxEngine";
 
 const LIVE_INBOX_SNAPSHOTS_STORAGE_KEY = "cuevion-live-inbox-snapshots";
 const LIVE_INBOX_SNAPSHOT_SCHEMA_VERSION = 5;
+export const LIVE_INBOX_THREAD_IDENTITY_VERSION = 1;
 export const MUSIC_CLASSIFIER_VERSION = "2026-07-01-universal-music-subject-v3";
 
 export type LiveInboxSnapshot = {
   schemaVersion?: number;
+  threadIdentityVersion?: number;
   classifierVersion?: string;
+  provider?: LiveInboxProvider;
   inboxId: string;
   email: string;
   fetchedAt: string;
   messages: LiveInboxMessageSnapshot[];
+  folder?: string;
   uidValidity?: string | null;
 };
 
 type LiveInboxSnapshotStore = Record<string, LiveInboxSnapshot>;
+export type TrustedLiveInboxSnapshotContext = Pick<
+  LiveThreadIdentityContext,
+  "mailboxId" | "provider" | "folder"
+>;
+export type TrustedLiveInboxSnapshotContexts = Record<
+  string,
+  TrustedLiveInboxSnapshotContext
+>;
+
+export function buildLiveInboxSnapshotThreadIdentityContext(
+  snapshot: LiveInboxSnapshot,
+): LiveThreadIdentityContext | null {
+  if (!snapshot.provider) {
+    return null;
+  }
+
+  return {
+    mailboxId: snapshot.inboxId,
+    provider: snapshot.provider,
+    folder: snapshot.folder?.trim() || "INBOX",
+    uidValidity: snapshot.uidValidity ?? null,
+  };
+}
+
+export function hydrateLiveInboxSnapshot(snapshot: LiveInboxSnapshot) {
+  const context = buildLiveInboxSnapshotThreadIdentityContext(snapshot);
+
+  return {
+    context,
+    messages: context
+      ? snapshot.messages.map((message) => applyLiveThreadIdentity(message, context))
+      : snapshot.messages,
+  };
+}
+
+function migrateCustomImapMessageThreadIdentity(
+  message: LiveInboxMessageSnapshot,
+  context: LiveThreadIdentityContext,
+): LiveInboxMessageSnapshot {
+  const threadId = message.threadId?.trim();
+  if (threadId && threadId !== normalizeThreadSubject(message.subject)) {
+    return message;
+  }
+
+  return {
+    ...message,
+    threadId: buildConservativeLiveCustomImapThreadId(message, context),
+  };
+}
 
 function isSnapshotUiSignalComplete(snapshot: LiveInboxSnapshot) {
   return snapshot.messages.every(
@@ -35,6 +95,7 @@ function hasMessageBodyPayload(message: LiveInboxMessageSnapshot) {
 function normalizeSnapshot(
   inboxId: string,
   snapshot: LiveInboxSnapshot,
+  trustedContext?: TrustedLiveInboxSnapshotContext,
 ): LiveInboxSnapshot | null {
   if (snapshot.classifierVersion !== MUSIC_CLASSIFIER_VERSION) {
     return null;
@@ -55,30 +116,75 @@ function normalizeSnapshot(
     return null;
   }
 
+  const normalizedInboxId = snapshot.inboxId || inboxId;
+  const storedProvider =
+    snapshot.provider === "google" || snapshot.provider === "custom_imap"
+      ? snapshot.provider
+      : undefined;
+  if (
+    storedProvider &&
+    trustedContext?.provider &&
+    storedProvider !== trustedContext.provider
+  ) {
+    return null;
+  }
+  const provider = storedProvider ?? trustedContext?.provider;
+  const folder = String(snapshot.folder ?? trustedContext?.folder ?? "INBOX").trim() || "INBOX";
+  const uidValidity =
+    typeof snapshot.uidValidity === "string" || snapshot.uidValidity === null
+      ? snapshot.uidValidity
+      : undefined;
+  const threadIdentityContext = provider
+    ? {
+        mailboxId: normalizedInboxId,
+        provider,
+        folder,
+        uidValidity: uidValidity ?? null,
+      }
+    : null;
+
   return {
     ...snapshot,
     schemaVersion: LIVE_INBOX_SNAPSHOT_SCHEMA_VERSION,
+    threadIdentityVersion: provider
+      ? LIVE_INBOX_THREAD_IDENTITY_VERSION
+      : snapshot.threadIdentityVersion,
     classifierVersion: MUSIC_CLASSIFIER_VERSION,
-    inboxId: snapshot.inboxId || inboxId,
+    provider,
+    inboxId: normalizedInboxId,
     email: String(snapshot.email ?? "").trim().toLowerCase(),
     fetchedAt: String(snapshot.fetchedAt ?? new Date().toISOString()),
-    messages: messages.map((message) => ({
-      ...message,
-      classifierVersion: MUSIC_CLASSIFIER_VERSION,
-    })),
-    uidValidity:
-      typeof snapshot.uidValidity === "string" || snapshot.uidValidity === null
-        ? snapshot.uidValidity
-        : undefined,
+    messages: messages.map((message) => {
+      const normalizedMessage = {
+        ...message,
+        classifierVersion: MUSIC_CLASSIFIER_VERSION,
+      };
+
+      return threadIdentityContext?.provider === "custom_imap"
+        ? migrateCustomImapMessageThreadIdentity(
+            normalizedMessage,
+            threadIdentityContext,
+          )
+        : normalizedMessage;
+    }),
+    folder,
+    uidValidity,
   };
 }
 
-function normalizeSnapshotStore(store: LiveInboxSnapshotStore): LiveInboxSnapshotStore {
+function normalizeSnapshotStore(
+  store: LiveInboxSnapshotStore,
+  trustedContexts: TrustedLiveInboxSnapshotContexts,
+): LiveInboxSnapshotStore {
   return Object.fromEntries(
     Object.entries(store)
       .map(([inboxId, snapshot]): [string, LiveInboxSnapshot | null] => [
         inboxId,
-        normalizeSnapshot(inboxId, snapshot as LiveInboxSnapshot),
+        normalizeSnapshot(
+          inboxId,
+          snapshot as LiveInboxSnapshot,
+          trustedContexts[inboxId],
+        ),
       ])
       .filter(
         (entry): entry is [string, LiveInboxSnapshot] =>
@@ -96,7 +202,9 @@ function writeSnapshotStore(store: LiveInboxSnapshotStore) {
   );
 }
 
-export function readLiveInboxSnapshots(): LiveInboxSnapshotStore {
+export function readLiveInboxSnapshots(
+  trustedContexts: TrustedLiveInboxSnapshotContexts = {},
+): LiveInboxSnapshotStore {
   if (typeof window === "undefined") {
     return {};
   }
@@ -110,7 +218,10 @@ export function readLiveInboxSnapshots(): LiveInboxSnapshotStore {
   try {
     const parsed = JSON.parse(storedValue) as LiveInboxSnapshotStore;
     const sourceSnapshots = parsed && typeof parsed === "object" ? parsed : {};
-    const nextSnapshots = normalizeSnapshotStore(sourceSnapshots as LiveInboxSnapshotStore);
+    const nextSnapshots = normalizeSnapshotStore(
+      sourceSnapshots as LiveInboxSnapshotStore,
+      trustedContexts,
+    );
     const nextStoredValue = JSON.stringify(nextSnapshots);
 
     if (
@@ -135,16 +246,32 @@ export function saveLiveInboxSnapshot(snapshot: LiveInboxSnapshot) {
     return;
   }
 
-  const currentSnapshots = readLiveInboxSnapshots();
+  if (
+    (snapshot.provider !== "google" && snapshot.provider !== "custom_imap") ||
+    !snapshot.folder?.trim()
+  ) {
+    return;
+  }
+
+  const trustedContext = {
+    mailboxId: snapshot.inboxId,
+    provider: snapshot.provider,
+    folder: snapshot.folder,
+  };
+  const trustedContexts = { [snapshot.inboxId]: trustedContext };
+  const currentSnapshots = readLiveInboxSnapshots(trustedContexts);
   const nextSnapshot = normalizeSnapshot(snapshot.inboxId, {
     ...snapshot,
     schemaVersion: LIVE_INBOX_SNAPSHOT_SCHEMA_VERSION,
+    threadIdentityVersion: LIVE_INBOX_THREAD_IDENTITY_VERSION,
     classifierVersion: MUSIC_CLASSIFIER_VERSION,
+    provider: snapshot.provider,
+    folder: snapshot.folder,
     messages: snapshot.messages.map((message) => ({
       ...message,
       classifierVersion: message.classifierVersion ?? MUSIC_CLASSIFIER_VERSION,
     })),
-  });
+  }, trustedContext);
 
   if (!nextSnapshot) {
     return;

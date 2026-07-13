@@ -10,7 +10,14 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import {
+  applyLiveThreadIdentity,
+  buildMailboxScopedThreadGroupingKey,
+  buildConservativeLiveCustomImapThreadId,
+  buildRenderedConversationRows,
+  dedupeMailboxScopedMessageCopies,
+  mergeLiveInboxMessageState,
   normalizeThreadSubject,
+  resolveLiveCustomImapThreadId,
   resolveThreadKey,
   resolveMessageDateMs,
   dedupeLatestMessagePerThread,
@@ -18,8 +25,11 @@ import {
   INBOX_SNAPSHOT_MAX_MESSAGES,
   INBOX_SNAPSHOT_MAX_AGE_MS,
   INBOX_SNAPSHOT_RECENT_GUARD_MS,
+  type LiveThreadIdentityContext,
 } from "./inboxEngine";
 import {
+  hydrateLiveInboxSnapshot,
+  LIVE_INBOX_THREAD_IDENTITY_VERSION,
   MUSIC_CLASSIFIER_VERSION,
   readLiveInboxSnapshots,
   saveLiveInboxSnapshot,
@@ -77,6 +87,23 @@ function oldMsgs(n: number, baseAgo = 100 * DAY): Msg[] {
       createdAt: msAgo(baseAgo + i * 1000),
     }),
   );
+}
+
+function withMemoryLocalStorage(fn: (store: Map<string, string>) => void) {
+  const store = new Map<string, string>();
+  const previousWindow = (globalThis as { window?: unknown }).window;
+  (globalThis as { window?: unknown }).window = {
+    localStorage: {
+      getItem: (key: string) => store.get(key) ?? null,
+      setItem: (key: string, value: string) => store.set(key, value),
+    },
+  };
+
+  try {
+    fn(store);
+  } finally {
+    (globalThis as { window?: unknown }).window = previousWindow;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -405,62 +432,507 @@ test("preserves distinct threads", () => {
   assert.equal(result.length, 2);
 });
 
+test("authoritative IMAP IDs keep same-subject submissions in separate rendered rows", () => {
+  const messages = [
+    {
+      id: "submission-1",
+      threadId: "imap:rfc:first%40example.com",
+      subject: "Demo Submission via website",
+      from: "Hysteriarecs.com <forms@example.com>",
+      createdAt: msAgo(2 * DAY),
+    },
+    {
+      id: "submission-2",
+      threadId: "imap:rfc:second%40example.com",
+      subject: "Demo Submission via website",
+      from: "Hysteriarecs.com <forms@example.com>",
+      createdAt: msAgo(1 * DAY),
+    },
+  ];
+  const renderedRows = dedupeLatestMessagePerThread(messages);
+
+  assert.equal(renderedRows.length, 2);
+  renderedRows.forEach((row) => {
+    const rowThreadKey = resolveThreadKey(row);
+    assert.equal(
+      messages.filter((message) => resolveThreadKey(message) === rowThreadKey).length,
+      1,
+    );
+  });
+});
+
+test("authoritative RFC root groups a real reply chain with the complete count", () => {
+  const messages = [
+    { id: "root", threadId: "imap:rfc:root%40example.com", subject: "Question", createdAt: msAgo(3 * DAY) },
+    { id: "reply", threadId: "imap:rfc:root%40example.com", subject: "Re: Question", createdAt: msAgo(2 * DAY) },
+    { id: "reply-2", threadId: "imap:rfc:root%40example.com", subject: "Re: Question", createdAt: msAgo(1 * DAY) },
+  ];
+  const renderedRows = dedupeLatestMessagePerThread(messages);
+
+  assert.equal(renderedRows.length, 1);
+  assert.equal(
+    messages.filter(
+      (message) => resolveThreadKey(message) === resolveThreadKey(renderedRows[0]),
+    ).length,
+    3,
+  );
+});
+
+test("missing live IMAP thread IDs receive message-unique non-subject fallbacks", () => {
+  const context: LiveThreadIdentityContext = {
+    mailboxId: "demo-mailbox",
+    provider: "custom_imap",
+    folder: "INBOX",
+    uidValidity: "900",
+  };
+  const first = resolveLiveCustomImapThreadId(
+    { id: "message-1", imapUid: "1" },
+    context,
+  );
+  const second = resolveLiveCustomImapThreadId(
+    { id: "message-2", imapUid: "2" },
+    context,
+  );
+
+  assert.notEqual(first, second);
+  assert.match(first, /^imap:uid:/);
+  assert.doesNotMatch(first, /demo submission via website/);
+  assert.equal(
+    resolveLiveCustomImapThreadId(
+      { id: "message-1", imapUid: "1", threadId: "imap:rfc:root%40example.com" },
+      context,
+    ),
+    "imap:rfc:root%40example.com",
+  );
+  assert.equal(
+    first,
+    buildConservativeLiveCustomImapThreadId(
+      { id: "message-1", imapUid: "1" },
+      context,
+    ),
+  );
+});
+
+test("live identity context is stable across refresh/reload and changes with UIDVALIDITY", () => {
+  const message = { id: "message-1", imapUid: "42" };
+  const inboxContext: LiveThreadIdentityContext = {
+    mailboxId: "mailbox-1",
+    provider: "custom_imap",
+    folder: "INBOX",
+    uidValidity: "900",
+  };
+  const archiveContext = { ...inboxContext, folder: "Archive" };
+  const nextUidValidityContext = { ...inboxContext, uidValidity: "901" };
+
+  const refreshed = applyLiveThreadIdentity(message, inboxContext);
+  const reloaded = applyLiveThreadIdentity(message, inboxContext);
+  assert.equal(refreshed.threadId, reloaded.threadId);
+  assert.notEqual(refreshed.threadId, applyLiveThreadIdentity(message, archiveContext).threadId);
+  assert.notEqual(
+    refreshed.threadId,
+    applyLiveThreadIdentity(message, nextUidValidityContext).threadId,
+  );
+  assert.equal(
+    applyLiveThreadIdentity(
+      { ...message, threadId: "imap:rfc:server-root" },
+      inboxContext,
+    ).threadId,
+    "imap:rfc:server-root",
+  );
+});
+
 // ---------------------------------------------------------------------------
 // liveInboxSnapshots — classifier version
 // ---------------------------------------------------------------------------
 
 console.log("\nliveInboxSnapshots — classifier version");
 
-test("WorkspaceShell preserves provider thread metadata during message normalization", () => {
-  const workspaceShellSource = fs.readFileSync(
-    "src/components/workspace/WorkspaceShell.tsx",
-    "utf8",
-  );
+test("mailbox-scoped message dedupe retains cross-mailbox UID collisions", () => {
+  const mailboxA: LiveThreadIdentityContext = {
+    mailboxId: "mailbox-a",
+    provider: "custom_imap",
+    folder: "INBOX",
+    uidValidity: "900",
+  };
+  const mailboxB = { ...mailboxA, mailboxId: "mailbox-b" };
+  const first = { id: "same-provider-id", imapUid: "42", threadId: "same-rfc-root" };
+  const duplicateFirst = { ...first };
+  const second = { id: "same-provider-id", imapUid: "42", threadId: "same-rfc-root" };
 
-  assert.match(
-    workspaceShellSource,
-    /threadId: message\.threadId,\s+providerThreadId: message\.providerThreadId,/,
+  const deduped = dedupeMailboxScopedMessageCopies([
+    { message: first, context: mailboxA },
+    { message: duplicateFirst, context: mailboxA },
+    { message: second, context: mailboxB },
+  ]);
+
+  assert.equal(deduped.length, 2);
+  assert.deepEqual(
+    deduped.map((record) => record.context.mailboxId).sort(),
+    ["mailbox-a", "mailbox-b"],
   );
-  assert.match(
-    workspaceShellSource,
-    /id: message\.id,\s+providerThreadId: message\.providerThreadId,\s+sender: message\.sender,/,
+  assert.notEqual(
+    buildMailboxScopedThreadGroupingKey("same-rfc-root", "mailbox-a"),
+    buildMailboxScopedThreadGroupingKey("same-rfc-root", "mailbox-b"),
   );
 });
 
-test("WorkspaceShell uses symmetric safe keys for Smart Folder thread retention", () => {
-  const representative = { threadId: "abc", subject: "Business", from: "sender@example.com" };
-  const producerKey = resolveThreadKey(representative);
-  const consumerKey = resolveThreadKey(representative);
+type RenderedMessage = {
+  id: string;
+  imapUid?: string;
+  threadId?: string;
+  subject: string;
+  from: string;
+  to: string;
+  createdAt: string;
+};
 
-  assert.equal(producerKey, "thread:abc");
-  assert.equal(consumerKey, producerKey);
-  assert.equal(representative.threadId, "abc");
+const mailboxAContext: LiveThreadIdentityContext = {
+  mailboxId: "mailbox-a",
+  provider: "custom_imap",
+  folder: "INBOX",
+  uidValidity: "900",
+};
+const mailboxBContext: LiveThreadIdentityContext = {
+  ...mailboxAContext,
+  mailboxId: "mailbox-b",
+};
 
-  const workspaceShellSource = fs.readFileSync(
-    "src/components/workspace/WorkspaceShell.tsx",
-    "utf8",
-  );
-  const smartFolderThreadMatchSource = workspaceShellSource.match(
-    /const matchingThreadIds = new Set\([\s\S]*?return organizerVisibleMessages\.filter\([\s\S]*?\n    \);/,
-  )?.[0];
+function renderedMessage(
+  id: string,
+  overrides: Partial<RenderedMessage> = {},
+): RenderedMessage {
+  return {
+    id,
+    imapUid: id,
+    threadId: `imap:rfc:${id}`,
+    subject: "Shared subject",
+    from: "sender@example.com",
+    to: "owner@example.com",
+    createdAt: "2026-07-13T08:00:00.000Z",
+    ...overrides,
+  };
+}
 
-  assert.ok(smartFolderThreadMatchSource, "Smart Folder thread matching block must exist");
-  assert.match(
-    smartFolderThreadMatchSource,
-    /\.map\(\(message\) => resolveSafeThreadGroupingKey\(message, mailboxId\)\)/,
+test("normal Inbox row pipeline retains cross-mailbox UID collisions", () => {
+  const rows = buildRenderedConversationRows([
+    {
+      message: renderedMessage("mailbox-a-message", {
+        imapUid: "42",
+        threadId: "imap:uid:shared",
+      }),
+      context: mailboxAContext,
+    },
+    {
+      message: renderedMessage("mailbox-b-message", {
+        imapUid: "42",
+        threadId: "imap:uid:shared",
+      }),
+      context: mailboxBContext,
+    },
+  ]);
+
+  assert.equal(rows.length, 2);
+  assert.deepEqual(rows.map((row) => row.context.mailboxId).sort(), ["mailbox-a", "mailbox-b"]);
+});
+
+test("Smart Folder row pipeline retains cross-mailbox UID collisions", () => {
+  const smartFolderRecords = [
+    {
+      message: renderedMessage("smart-a", { imapUid: "42", threadId: "imap:uid:shared" }),
+      context: mailboxAContext,
+    },
+    {
+      message: renderedMessage("smart-b", { imapUid: "42", threadId: "imap:uid:shared" }),
+      context: mailboxBContext,
+    },
+  ];
+  const smartFolderRows = buildRenderedConversationRows(smartFolderRecords);
+  const normalInboxRows = buildRenderedConversationRows(smartFolderRecords);
+
+  assert.equal(smartFolderRows.length, 2);
+  assert.deepEqual(smartFolderRows, normalInboxRows);
+});
+
+test("same RFC identity in two mailboxes remains two rendered rows", () => {
+  const rows = buildRenderedConversationRows([
+    {
+      message: renderedMessage("rfc-a", { threadId: "imap:rfc:shared-root" }),
+      context: mailboxAContext,
+    },
+    {
+      message: renderedMessage("rfc-b", { threadId: "imap:rfc:shared-root" }),
+      context: mailboxBContext,
+    },
+  ]);
+
+  assert.equal(rows.length, 2);
+  assert.notEqual(rows[0]?.threadKey, rows[1]?.threadKey);
+});
+
+test("same-mailbox duplicate message produces one rendered row", () => {
+  const duplicate = renderedMessage("duplicate", { imapUid: "42" });
+  const rows = buildRenderedConversationRows([
+    { message: duplicate, context: mailboxAContext },
+    { message: { ...duplicate }, context: mailboxAContext },
+  ]);
+
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]?.threadCount, 1);
+});
+
+test("genuine parent and reply produce one newest representative with count two", () => {
+  const rows = buildRenderedConversationRows([
+    {
+      message: renderedMessage("parent", {
+        imapUid: "1",
+        threadId: "imap:rfc:root",
+        subject: "Question",
+        createdAt: "2026-07-13T08:00:00.000Z",
+      }),
+      context: mailboxAContext,
+    },
+    {
+      message: renderedMessage("reply", {
+        imapUid: "2",
+        threadId: "imap:rfc:root",
+        subject: "Re: Question",
+        createdAt: "2026-07-13T09:00:00.000Z",
+      }),
+      context: mailboxAContext,
+    },
+  ]);
+
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]?.threadCount, 2);
+  assert.equal(rows[0]?.message.id, "reply");
+});
+
+test("eight same-subject authoritative threads remain eight single-message rows", () => {
+  const records = Array.from({ length: 8 }, (_, index) => ({
+    message: renderedMessage(`submission-${index}`, {
+      imapUid: String(index + 1),
+      threadId: `imap:rfc:submission-${index}`,
+      subject: "Demo Submission via website",
+    }),
+    context: mailboxAContext,
+  }));
+  const rows = buildRenderedConversationRows(records);
+
+  assert.equal(rows.length, 8);
+  assert.ok(rows.every((row) => row.threadCount === 1));
+});
+
+test("different authoritative thread IDs never regroup by equal subject and participants", () => {
+  const rows = buildRenderedConversationRows([
+    {
+      message: renderedMessage("first", { threadId: "imap:rfc:first" }),
+      context: mailboxAContext,
+    },
+    {
+      message: renderedMessage("second", { threadId: "imap:rfc:second" }),
+      context: mailboxAContext,
+    },
+  ]);
+
+  assert.equal(rows.length, 2);
+  assert.ok(rows.every((row) => row.threadCount === 1));
+});
+
+function richLiveMessage(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "message-42",
+    imapUid: "42",
+    sender: "Sender",
+    subject: "Same subject",
+    snippet: "Fresh snippet",
+    from: "sender@example.com",
+    to: "owner@example.com",
+    timestamp: "July 13 at 10:00",
+    createdAt: "2026-07-13T08:00:00.000Z",
+    body: ["Fresh body"],
+    bodyHtml: "<p>Fresh body</p>",
+    attachments: [{ id: "attachment-1", name: "demo.wav" }],
+    unread: false,
+    flagged: true,
+    ui_signal: "DEMO",
+    internalClassification: "demo",
+    category: "Primary",
+    classifierVersion: MUSIC_CLASSIFIER_VERSION,
+    collaboration: { updatedAt: 10, messages: [{ id: "fresh-note" }] },
+    isShared: true,
+    ...overrides,
+  };
+}
+
+test("direct refresh merge replaces stale identity and preserves current state rules", () => {
+  const existing = richLiveMessage({
+    threadId: "same subject",
+    unread: true,
+    flagged: false,
+    collaboration: { updatedAt: 20, messages: [{ id: "newer-local-note" }] },
+  });
+  const incoming = richLiveMessage({
+    threadId: "imap:rfc:mailbox-a:INBOX:root%40example.com",
+    collaboration: { updatedAt: 10, messages: [{ id: "older-server-note" }] },
+  });
+  const merged = mergeLiveInboxMessageState(
+    incoming,
+    existing,
+    mailboxAContext,
+    {
+      providerStateIsFresh: true,
+      preferExistingUnreadWhenProviderStateIsNotFresh: true,
+    },
   );
-  assert.match(
-    smartFolderThreadMatchSource,
-    /matchingThreadIds\.has\(resolveSafeThreadGroupingKey\(message, mailboxId\)\)/,
-  );
-  assert.doesNotMatch(smartFolderThreadMatchSource, /message\.threadId\s*\?\?/);
-  assert.match(
-    workspaceShellSource,
-    /return dedupedRowRecords\.map\(\(record\) => \(\{\s+\.\.\.record\.message,/,
-  );
-  assert.match(workspaceShellSource, /\{ value: "demo", label: "Demo" \}/);
-  assert.match(workspaceShellSource, /\{ value: "business", label: "Business" \}/);
-  assert.match(workspaceShellSource, /return matchValue\.includes\(ruleValue\);/);
+
+  assert.equal(merged.threadId, "imap:rfc:mailbox-a:INBOX:root%40example.com");
+  assert.equal(merged.unread, false);
+  assert.equal(merged.flagged, true);
+  assert.deepEqual(merged.attachments, [{ id: "attachment-1", name: "demo.wav" }]);
+  assert.equal(merged.internalClassification, "demo");
+  assert.equal(merged.category, "Primary");
+  assert.deepEqual(merged.body, ["Fresh body"]);
+  assert.equal(merged.bodyHtml, "<p>Fresh body</p>");
+  assert.deepEqual(merged.collaboration, {
+    updatedAt: 20,
+    messages: [{ id: "newer-local-note" }],
+  });
+});
+
+test("snapshot save/read/hydration and cached recovery preserve authoritative identity and state", () => {
+  withMemoryLocalStorage(() => {
+    const frontendFallback = mergeLiveInboxMessageState(
+      richLiveMessage({ threadId: undefined }),
+      undefined,
+      mailboxAContext,
+      {
+        providerStateIsFresh: false,
+        preferExistingUnreadWhenProviderStateIsNotFresh: true,
+      },
+    );
+    const authoritative = mergeLiveInboxMessageState(
+      richLiveMessage({ threadId: "imap:rfc:mailbox-a:INBOX:root%40example.com" }),
+      frontendFallback,
+      mailboxAContext,
+      {
+        providerStateIsFresh: true,
+        preferExistingUnreadWhenProviderStateIsNotFresh: true,
+      },
+    );
+
+    assert.notEqual(frontendFallback.threadId, authoritative.threadId);
+    saveLiveInboxSnapshot({
+      provider: "custom_imap",
+      inboxId: "mailbox-a",
+      email: "owner@example.com",
+      fetchedAt: "2026-07-13T08:00:00.000Z",
+      folder: "INBOX",
+      uidValidity: "900",
+      messages: [authoritative] as any,
+    });
+
+    const snapshot = readLiveInboxSnapshots({
+      "mailbox-a": {
+        mailboxId: "mailbox-a",
+        provider: "custom_imap",
+        folder: "INBOX",
+      },
+    })["mailbox-a"];
+    assert.ok(snapshot);
+    assert.equal(snapshot.provider, "custom_imap");
+    assert.equal(snapshot.inboxId, "mailbox-a");
+    assert.equal(snapshot.folder, "INBOX");
+    assert.equal(snapshot.uidValidity, "900");
+    assert.equal(snapshot.threadIdentityVersion, LIVE_INBOX_THREAD_IDENTITY_VERSION);
+
+    const hydrated = hydrateLiveInboxSnapshot(snapshot);
+    assert.ok(hydrated.context);
+    assert.equal(hydrated.messages[0]?.threadId, authoritative.threadId);
+    const cached = mergeLiveInboxMessageState(
+      hydrated.messages[0] as any,
+      undefined,
+      hydrated.context as LiveThreadIdentityContext,
+      {
+        providerStateIsFresh: false,
+        preferExistingUnreadWhenProviderStateIsNotFresh: true,
+      },
+    );
+    assert.equal(cached.threadId, authoritative.threadId);
+    assert.doesNotMatch(cached.threadId ?? "", /^same subject$/);
+
+    for (const key of [
+      "id",
+      "unread",
+      "flagged",
+      "attachments",
+      "internalClassification",
+      "category",
+      "body",
+      "bodyHtml",
+      "collaboration",
+    ] as const) {
+      assert.deepEqual((cached as any)[key], (authoritative as any)[key], key);
+    }
+  });
+});
+
+test("non-default folder survives save/read/hydration and UIDVALIDITY changes fallback identity", () => {
+  withMemoryLocalStorage(() => {
+    const archiveContext: LiveThreadIdentityContext = {
+      ...mailboxAContext,
+      folder: "Archive/2026",
+    };
+    const fallback = mergeLiveInboxMessageState(
+      richLiveMessage({ threadId: undefined }),
+      undefined,
+      archiveContext,
+      {
+        providerStateIsFresh: false,
+        preferExistingUnreadWhenProviderStateIsNotFresh: true,
+      },
+    );
+    saveLiveInboxSnapshot({
+      provider: "custom_imap",
+      inboxId: "mailbox-a",
+      email: "owner@example.com",
+      fetchedAt: "2026-07-13T08:00:00.000Z",
+      folder: "Archive/2026",
+      uidValidity: "900",
+      messages: [fallback] as any,
+    });
+    const snapshot = readLiveInboxSnapshots({
+      "mailbox-a": {
+        mailboxId: "mailbox-a",
+        provider: "custom_imap",
+        folder: "Archive/2026",
+      },
+    })["mailbox-a"];
+    const hydrated = hydrateLiveInboxSnapshot(snapshot);
+    const refreshed = mergeLiveInboxMessageState(
+      richLiveMessage({ threadId: undefined }),
+      undefined,
+      hydrated.context as LiveThreadIdentityContext,
+      {
+        providerStateIsFresh: true,
+        preferExistingUnreadWhenProviderStateIsNotFresh: true,
+      },
+    );
+    const nextUidValidity = mergeLiveInboxMessageState(
+      richLiveMessage({ threadId: undefined }),
+      undefined,
+      { ...(hydrated.context as LiveThreadIdentityContext), uidValidity: "901" },
+      {
+        providerStateIsFresh: true,
+        preferExistingUnreadWhenProviderStateIsNotFresh: true,
+      },
+    );
+
+    assert.equal(snapshot.folder, "Archive/2026");
+    assert.equal(hydrated.context?.folder, "Archive/2026");
+    assert.equal(refreshed.threadId, fallback.threadId);
+    assert.match(refreshed.threadId ?? "", /Archive%2F2026/);
+    assert.notEqual(nextUidValidity.threadId, refreshed.threadId);
+  });
 });
 
 test("WorkspaceShell lazily resolves Smart Folder labels from a local thread index", () => {
@@ -738,6 +1210,7 @@ test("drops stale snapshots without current classifier version", () => {
     assert.deepEqual(readLiveInboxSnapshots(), {});
 
     saveLiveInboxSnapshot({
+      provider: "google",
       inboxId: "promo",
       email: "promo@example.com",
       fetchedAt: new Date().toISOString(),
@@ -758,6 +1231,8 @@ test("drops stale snapshots without current classifier version", () => {
           internalClassification: "promo",
         },
       ],
+      folder: "INBOX",
+      uidValidity: "gmail-api",
     });
 
     const snapshots = readLiveInboxSnapshots();
@@ -771,6 +1246,8 @@ test("drops stale snapshots without current classifier version", () => {
       "provider-thread-123",
     );
     assert.equal(snapshots.promo?.messages[0]?.threadId, "existing-thread-456");
+    assert.equal(snapshots.promo?.provider, "google");
+    assert.equal(snapshots.promo?.folder, "INBOX");
 
     saveLiveInboxSnapshot({
       inboxId: "legacy",
@@ -793,10 +1270,239 @@ test("drops stale snapshots without current classifier version", () => {
     });
 
     const snapshotsWithLegacyMessage = readLiveInboxSnapshots();
-    assert.equal(
-      snapshotsWithLegacyMessage.legacy?.messages[0]?.providerThreadId,
-      undefined,
+    assert.equal(snapshotsWithLegacyMessage.legacy, undefined);
+  } finally {
+    (globalThis as { window?: unknown }).window = previousWindow;
+  }
+});
+
+test("migrates stale custom-IMAP subject thread IDs without losing message state", () => {
+  const store = new Map<string, string>();
+  const previousWindow = (globalThis as { window?: unknown }).window;
+  (globalThis as { window?: unknown }).window = {
+    localStorage: {
+      getItem: (key: string) => store.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        store.set(key, value);
+      },
+    },
+  };
+
+  const buildMessage = (id: string, imapUid: string) => ({
+    id,
+    imapUid,
+    threadId: "demo submission via website",
+    sender: "Hysteriarecs.com",
+    subject: "Demo Submission via website",
+    snippet: "Submission",
+    from: "forms@example.com",
+    to: "demo@example.com",
+    timestamp: "July 13 at 10:00",
+    createdAt: "2026-07-13T08:00:00.000Z",
+    body: ["Submission body"],
+    bodyHtml: "<p>Submission body</p>",
+    attachments: [{ id: "attachment-1", name: "demo.wav" }],
+    unread: true,
+    flagged: true,
+    ui_signal: "DEMO",
+    internalClassification: "demo",
+    category: "Primary",
+    collaboration: { updatedAt: 12, messages: [{ id: "note-1" }] },
+    classifierVersion: MUSIC_CLASSIFIER_VERSION,
+  });
+
+  try {
+    store.set(
+      "cuevion-live-inbox-snapshots",
+      JSON.stringify({
+        demo: {
+          schemaVersion: 5,
+          classifierVersion: MUSIC_CLASSIFIER_VERSION,
+          provider: "custom_imap",
+          inboxId: "demo",
+          email: "demo@example.com",
+          fetchedAt: "2026-07-13T08:00:00.000Z",
+          folder: "INBOX",
+          uidValidity: "900",
+          messages: [buildMessage("message-1", "1"), buildMessage("message-2", "2")],
+        },
+      }),
     );
+
+    const migrated = readLiveInboxSnapshots().demo;
+    assert.ok(migrated);
+    assert.equal(migrated.provider, "custom_imap");
+    assert.equal(migrated.folder, "INBOX");
+    assert.equal(migrated.uidValidity, "900");
+    assert.equal(migrated.threadIdentityVersion, LIVE_INBOX_THREAD_IDENTITY_VERSION);
+    assert.equal(migrated.messages.length, 2);
+    assert.notEqual(migrated.messages[0]?.threadId, migrated.messages[1]?.threadId);
+    assert.match(migrated.messages[0]?.threadId ?? "", /^imap:uid:/);
+    assert.equal(migrated.messages[0]?.id, "message-1");
+    assert.equal(migrated.messages[0]?.unread, true);
+    assert.equal(migrated.messages[0]?.flagged, true);
+    assert.equal(migrated.messages[0]?.internalClassification, "demo");
+    assert.equal((migrated.messages[0] as any)?.category, "Primary");
+    assert.equal(migrated.messages[0]?.bodyHtml, "<p>Submission body</p>");
+    assert.deepEqual((migrated.messages[0] as any)?.collaboration, {
+      updatedAt: 12,
+      messages: [{ id: "note-1" }],
+    });
+    assert.equal(migrated.messages[0]?.attachments?.[0]?.name, "demo.wav");
+    const persistedFallback = migrated.messages[1]?.threadId;
+
+    saveLiveInboxSnapshot({
+      ...migrated,
+      messages: migrated.messages.map((message, index) =>
+        index === 0 ? { ...message, threadId: "imap:rfc:fresh%40example.com" } : message,
+      ),
+    });
+    assert.equal(
+      readLiveInboxSnapshots().demo?.messages[0]?.threadId,
+      "imap:rfc:fresh%40example.com",
+    );
+    const reloaded = readLiveInboxSnapshots().demo;
+    assert.equal(reloaded?.messages[1]?.threadId, persistedFallback);
+    const rawSavedSnapshot = JSON.parse(
+      store.get("cuevion-live-inbox-snapshots") ?? "{}",
+    ).demo;
+    assert.equal(rawSavedSnapshot.provider, "custom_imap");
+    assert.equal(rawSavedSnapshot.folder, "INBOX");
+    assert.equal(rawSavedSnapshot.uidValidity, "900");
+    assert.equal(
+      rawSavedSnapshot.threadIdentityVersion,
+      LIVE_INBOX_THREAD_IDENTITY_VERSION,
+    );
+  } finally {
+    (globalThis as { window?: unknown }).window = previousWindow;
+  }
+});
+
+test("legacy snapshot migration requires trusted provider context", () => {
+  const store = new Map<string, string>();
+  const previousWindow = (globalThis as { window?: unknown }).window;
+  (globalThis as { window?: unknown }).window = {
+    localStorage: {
+      getItem: (key: string) => store.get(key) ?? null,
+      setItem: (key: string, value: string) => store.set(key, value),
+    },
+  };
+  const legacyStore = JSON.stringify({
+    legacy: {
+      schemaVersion: 5,
+      classifierVersion: MUSIC_CLASSIFIER_VERSION,
+      inboxId: "legacy",
+      email: "owner@example.com",
+      fetchedAt: "2026-07-13T08:00:00.000Z",
+      uidValidity: "900",
+      messages: [{
+        id: "legacy-message",
+        imapUid: "42",
+        threadId: "same subject",
+        sender: "Sender",
+        subject: "Same subject",
+        snippet: "Body",
+        from: "sender@example.com",
+        to: "owner@example.com",
+        timestamp: "July 13 at 10:00",
+        createdAt: "2026-07-13T08:00:00.000Z",
+        body: ["Body"],
+        ui_signal: "NEW",
+      }],
+    },
+  });
+
+  try {
+    store.set("cuevion-live-inbox-snapshots", legacyStore);
+    const ambiguous = readLiveInboxSnapshots().legacy;
+    assert.equal(ambiguous.provider, undefined);
+    assert.equal(ambiguous.messages[0]?.threadId, "same subject");
+
+    store.set("cuevion-live-inbox-snapshots", legacyStore);
+    const customImap = readLiveInboxSnapshots({
+      legacy: { mailboxId: "legacy", provider: "custom_imap", folder: "Archive" },
+    }).legacy;
+    assert.equal(customImap.provider, "custom_imap");
+    assert.equal(customImap.folder, "Archive");
+    assert.match(customImap.messages[0]?.threadId ?? "", /^imap:uid:legacy:Archive:900:42$/);
+
+    store.set("cuevion-live-inbox-snapshots", legacyStore);
+    const google = readLiveInboxSnapshots({
+      legacy: { mailboxId: "legacy", provider: "google", folder: "INBOX" },
+    }).legacy;
+    assert.equal(google.provider, "google");
+    assert.equal(google.messages[0]?.threadId, "same subject");
+  } finally {
+    (globalThis as { window?: unknown }).window = previousWindow;
+  }
+});
+
+test("thread migration leaves Gmail provider snapshots unchanged", () => {
+  const store = new Map<string, string>();
+  const previousWindow = (globalThis as { window?: unknown }).window;
+  (globalThis as { window?: unknown }).window = {
+    localStorage: {
+      getItem: (key: string) => store.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        store.set(key, value);
+      },
+    },
+  };
+
+  try {
+    store.set(
+      "cuevion-live-inbox-snapshots",
+      JSON.stringify({
+        gmail: {
+          schemaVersion: 5,
+          classifierVersion: MUSIC_CLASSIFIER_VERSION,
+          provider: "google",
+          inboxId: "gmail",
+          email: "owner@example.com",
+          fetchedAt: "2026-07-13T08:00:00.000Z",
+          folder: "INBOX",
+          messages: [{
+            id: "gmail-message",
+            imapUid: "provider-message",
+            threadId: "same subject",
+            providerThreadId: "gmail-thread-123",
+            sender: "Sender",
+            subject: "Same subject",
+            snippet: "Body",
+            from: "sender@example.com",
+            to: "owner@example.com",
+            timestamp: "July 13 at 10:00",
+            createdAt: "2026-07-13T08:00:00.000Z",
+            body: ["Body"],
+            bodyHtml: "<p>Body</p>",
+            attachments: [{ id: "gmail-attachment", name: "note.txt" }],
+            unread: true,
+            flagged: true,
+            ui_signal: "NEW",
+            internalClassification: "info",
+            category: "Updates",
+            collaboration: { updatedAt: 5, messages: [{ id: "gmail-note" }] },
+            classifierVersion: MUSIC_CLASSIFIER_VERSION,
+          }],
+        },
+      }),
+    );
+
+    const gmailSnapshot = readLiveInboxSnapshots().gmail;
+    assert.ok(gmailSnapshot);
+    const gmailMessage = hydrateLiveInboxSnapshot(gmailSnapshot).messages[0];
+    assert.equal(gmailMessage?.providerThreadId, "gmail-thread-123");
+    assert.equal(gmailMessage?.threadId, "same subject");
+    assert.equal(gmailMessage?.unread, true);
+    assert.equal(gmailMessage?.flagged, true);
+    assert.equal(gmailMessage?.bodyHtml, "<p>Body</p>");
+    assert.equal(gmailMessage?.attachments?.[0]?.name, "note.txt");
+    assert.equal(gmailMessage?.internalClassification, "info");
+    assert.equal((gmailMessage as any)?.category, "Updates");
+    assert.deepEqual((gmailMessage as any)?.collaboration, {
+      updatedAt: 5,
+      messages: [{ id: "gmail-note" }],
+    });
   } finally {
     (globalThis as { window?: unknown }).window = previousWindow;
   }

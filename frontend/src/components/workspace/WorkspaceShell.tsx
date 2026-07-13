@@ -66,8 +66,10 @@ import {
   usesEmailAsImapUsername,
 } from "../../lib/inboxProviderDefaults";
 import {
+  hydrateLiveInboxSnapshot,
   readLiveInboxSnapshots,
   saveLiveInboxSnapshot,
+  type TrustedLiveInboxSnapshotContexts,
 } from "../../lib/liveInboxSnapshots";
 import {
   sanitizeManagedInboxCredentials,
@@ -125,13 +127,18 @@ import * as learningEngine from "../../lib/learningEngine";
 import * as forYouEngine from "../../lib/forYouEngine";
 import * as suggestionEngine from "../../lib/suggestionEngine";
 import {
-  dedupeLatestMessagePerThread,
+  applyLiveThreadIdentity,
+  buildRenderedConversationRows,
+  mergeLiveInboxMessageState,
   normalizeThreadSubject,
+  resolveSafeThreadGroupingKey,
   resolveThreadKey,
   pruneInboxSnapshot,
   INBOX_SNAPSHOT_MAX_MESSAGES,
   INBOX_SNAPSHOT_MAX_AGE_MS,
   INBOX_SNAPSHOT_RECENT_GUARD_MS,
+  type LiveInboxProvider,
+  type LiveThreadIdentityContext,
 } from "../../lib/inboxEngine";
 import { buildPriorityRuntimeSignalsForCandidates } from "../../lib/priorityRuntimeSignals";
 import { shouldAllowNormalPriority } from "../../lib/normalPriorityGate";
@@ -1226,6 +1233,7 @@ type MailMessage = {
   id: string;
   threadId?: string;
   providerThreadId?: string;
+  threadIdentityContext?: LiveThreadIdentityContext;
   sender: string;
   subject: string;
   snippet: string;
@@ -6535,34 +6543,19 @@ function dedupeMessagesForNormalAppRenderedRows(
   mailboxId: InboxId,
   messageLocationById: Record<string, { mailboxId: InboxId; folder: MailFolder }> = {},
 ) {
-  const uniqueRowMessages = Array.from(
-    new Map(
-      messages.map((message) => [
-        message.imapUid || message.id,
-        message,
-      ]),
-    ).values(),
-  );
+  return buildRenderedConversationRows(
+    messages.map((message) => {
+      const messageLocation = messageLocationById[message.id];
+      const context = message.threadIdentityContext ?? {
+        mailboxId: messageLocation?.mailboxId ?? mailboxId,
+        provider: message.imapUid ? "custom_imap" : "google",
+        folder: messageLocation?.folder ?? "INBOX",
+        uidValidity: null,
+      } satisfies LiveThreadIdentityContext;
 
-  const dedupedRowRecords = dedupeLatestMessagePerThread(
-    uniqueRowMessages.map((message) => ({
-      message,
-      id: message.id,
-      threadId: resolveSafeThreadGroupingKey(
-        message,
-        messageLocationById[message.id]?.mailboxId ?? mailboxId,
-      ),
-      subject: message.subject,
-      from: message.from ?? message.sender ?? "",
-      createdAt: message.createdAt,
-      timestamp: message.timestamp,
-    })),
-  );
-
-  return dedupedRowRecords.map((record) => ({
-    ...record.message,
-    from: record.from,
-  }));
+      return { message, context };
+    }),
+  ).map((row) => row.message);
 }
 
 function resolveMailboxTitleForCategory(
@@ -8168,128 +8161,6 @@ function resolveMailThreadId(message: Pick<MailMessageSeed, "threadId" | "subjec
   return message.threadId?.trim() || normalizeThreadSubject(message.subject);
 }
 
-type SafeThreadGroupingMessage = Pick<MailMessageSeed, "id" | "threadId" | "subject" | "timestamp"> &
-  Partial<
-    Pick<
-      MailMessageSeed,
-      | "imapUid"
-      | "from"
-      | "to"
-      | "cc"
-      | "sender"
-      | "snippet"
-      | "body"
-      | "signal"
-      | "ui_signal"
-      | "internalClassification"
-      | "collaboration"
-      | "createdAt"
-    >
-  >;
-
-const genericThreadSubjects = new Set([
-  "demo",
-  "promo",
-  "submission",
-  "new demo",
-  "track",
-  "music",
-  "hello",
-  "hi",
-  "question",
-  "follow up",
-  "follow-up",
-]);
-
-function isLikelySubjectFallbackThreadId(
-  message: Pick<MailMessageSeed, "threadId" | "subject">,
-) {
-  const threadId = message.threadId?.trim();
-
-  return Boolean(threadId) && threadId === normalizeThreadSubject(message.subject);
-}
-
-function isGenericThreadSubject(subject: string) {
-  return genericThreadSubjects.has(normalizeThreadSubject(subject));
-}
-
-function hasReplySubjectPrefix(subject: string) {
-  return /^(re|fwd|fw):\s*/i.test(subject.trim());
-}
-
-function hasQuotedReplyMarker(message: Pick<SafeThreadGroupingMessage, "snippet" | "body">) {
-  const text = [message.snippet ?? "", ...(message.body ?? [])].join("\n");
-
-  return /\bon .{1,240} wrote:/i.test(text) || /\bwrote:/i.test(text) || /^>/m.test(text);
-}
-
-function hasNonSubjectReplyEvidence(message: SafeThreadGroupingMessage) {
-  return (
-    hasQuotedReplyMarker(message) ||
-    message.internalClassification === "reply" ||
-    message.signal === "Follow-up" ||
-    message.ui_signal === "REPLY" ||
-    Boolean(message.collaboration?.messages?.length)
-  );
-}
-
-function hasStrongReplyThreadEvidence(message: SafeThreadGroupingMessage) {
-  if (isGenericThreadSubject(message.subject)) {
-    return hasNonSubjectReplyEvidence(message);
-  }
-
-  return hasReplySubjectPrefix(message.subject) || hasNonSubjectReplyEvidence(message);
-}
-
-function buildReplyParticipantKey(message: SafeThreadGroupingMessage) {
-  const participants = [message.from, message.to, message.cc]
-    .flatMap((value) => (value ?? "").split(/[,;]/))
-    .map((value) => normalizeSenderLearningKey(value))
-    .filter(Boolean)
-    .sort();
-
-  return Array.from(new Set(participants)).join(",");
-}
-
-function buildConversationGroupingKey(
-  normalizedSubject: string,
-  mailboxPrefix: string,
-  participantKey: string,
-) {
-  return `conversation:${mailboxPrefix}${normalizedSubject}|${participantKey}`;
-}
-
-function resolveSafeThreadGroupingKey(
-  message: SafeThreadGroupingMessage,
-  mailboxId?: InboxId | string,
-) {
-  const normalizedSubject = normalizeThreadSubject(message.subject);
-  const threadId = message.threadId?.trim();
-  const mailboxPrefix = mailboxId ? `${mailboxId}|` : "";
-  const isGenericSubject = isGenericThreadSubject(message.subject);
-  const participantKey = buildReplyParticipantKey(message);
-
-  if (threadId && threadId !== normalizedSubject) {
-    return `thread:${threadId}`;
-  }
-
-  if (hasStrongReplyThreadEvidence(message)) {
-    return buildConversationGroupingKey(normalizedSubject, mailboxPrefix, participantKey);
-  }
-
-  if (isGenericSubject && (!threadId || isLikelySubjectFallbackThreadId(message))) {
-    return `message:${message.imapUid || message.id || `${normalizedSubject}|${message.from ?? ""}|${message.timestamp}`}`;
-  }
-
-  if (participantKey) {
-    return buildConversationGroupingKey(normalizedSubject, mailboxPrefix, participantKey);
-  }
-
-  const normalizedSender = normalizeSenderLearningKey(message.from ?? message.sender ?? "");
-
-  return `fallback:${mailboxPrefix}${normalizedSubject}|${normalizedSender}`;
-}
-
 // pruneInboxSnapshot is imported from inboxEngine.ts above.
 
 function maxCategoryConfidence(
@@ -9723,7 +9594,9 @@ function createInitialMailboxStore(
     new Set<InboxId>([...presetInboxIds, ...orderedMailboxes.map((mailbox) => mailbox.id)]),
   );
   const liveInboxSnapshots =
-    workspaceDataMode === "live" ? readLiveInboxSnapshots() : {};
+    workspaceDataMode === "live"
+      ? readLiveInboxSnapshots(buildTrustedLiveInboxSnapshotContexts(managedInboxes))
+      : {};
 
   const initialStore = inboxIds.reduce<MailboxStore>((store, inboxId) => {
     const mailboxInfo = orderedMailboxMap.get(inboxId);
@@ -9746,15 +9619,19 @@ function createInitialMailboxStore(
         return store;
       }
 
-      const snapshotMessages = liveInboxSnapshots[inboxId]?.messages ?? [];
+      const snapshot = liveInboxSnapshots[inboxId];
+      const hydratedSnapshot = snapshot ? hydrateLiveInboxSnapshot(snapshot) : null;
+      const snapshotMessages = hydratedSnapshot?.messages ?? [];
+      const threadIdentityContext = hydratedSnapshot?.context ?? null;
       store[inboxId] = {
         ...createEmptyMailboxCollections(),
         Inbox: snapshotMessages.map((message) =>
           normalizeMailMessage(
             {
               id: message.id,
-              threadId: message.threadId,
+              threadId: message.threadId ?? undefined,
               providerThreadId: message.providerThreadId,
+              threadIdentityContext: threadIdentityContext ?? undefined,
               sender: message.sender,
               subject: message.subject,
               snippet: message.snippet,
@@ -14726,7 +14603,11 @@ function MailboxView({
       };
     }
 
-    const sourceMailboxId = smartFolderMessageLocationById[message.id]?.mailboxId ?? mailbox.id;
+    const sourceMailboxId = (
+      message.threadIdentityContext?.mailboxId ??
+      smartFolderMessageLocationById[message.id]?.mailboxId ??
+      mailbox.id
+    ) as InboxId;
     const mailboxContext =
       orderedMailboxes.find((candidate) => candidate.id === sourceMailboxId) ??
       managedInboxes.find((candidate) => candidate.id === sourceMailboxId) ??
@@ -15000,7 +14881,13 @@ function MailboxView({
       return [];
     }
 
-    const messageLocation = currentMessageLocationById[message.id];
+    const contextMailboxId = message.threadIdentityContext?.mailboxId as InboxId | undefined;
+    const messageLocation = contextMailboxId
+      ? {
+          mailboxId: contextMailboxId,
+          folder: currentMessageLocationById[message.id]?.folder ?? ("Inbox" as MailFolder),
+        }
+      : currentMessageLocationById[message.id];
     const threadSourceMessages = messageLocation
       ? canonicalFolderOrder.flatMap(
           (folder) => mailboxStore[messageLocation.mailboxId][folder],
@@ -16013,7 +15900,9 @@ function MailboxView({
     }
 
     if (sourceMailbox.provider === "custom_imap") {
-      const snapshot = readLiveInboxSnapshots()[sourceMailbox.id];
+      const snapshot = readLiveInboxSnapshots(
+        buildTrustedLiveInboxSnapshotContexts(managedInboxes),
+      )[sourceMailbox.id];
 
       return downloadAttachment({
         mailboxId: sourceMailbox.id,
@@ -16844,7 +16733,9 @@ function MailboxView({
       );
 
       if (updatedMessage) {
-        const snapshots = readLiveInboxSnapshots();
+        const snapshots = readLiveInboxSnapshots(
+          buildTrustedLiveInboxSnapshotContexts(managedInboxes),
+        );
 
         Object.entries(snapshots).forEach(([snapshotMailboxId, snapshot]) => {
           const nextMessages = snapshot.messages.map((snapshotMessage) => {
@@ -17002,7 +16893,9 @@ function MailboxView({
       return;
     }
 
-    const snapshots = readLiveInboxSnapshots();
+    const snapshots = readLiveInboxSnapshots(
+      buildTrustedLiveInboxSnapshotContexts(managedInboxes),
+    );
     const matchingSnapshot = Object.values(snapshots).find((snapshot) =>
       snapshot.messages.some((message) => message.id === messageId),
     );
@@ -18432,7 +18325,9 @@ function MailboxView({
       uidValidity: request.uidValidity,
     };
     const currentUidValidity =
-      readLiveInboxSnapshots()[targetMailboxId]?.uidValidity ?? null;
+      readLiveInboxSnapshots(
+        buildTrustedLiveInboxSnapshotContexts(managedInboxes),
+      )[targetMailboxId]?.uidValidity ?? null;
 
     const isExactProviderTarget = (message: MailMessage) =>
       isSameExactImapProviderMessage(
@@ -18578,7 +18473,9 @@ function MailboxView({
         return null;
       }
 
-      const snapshot = readLiveInboxSnapshots()[sourceMailbox.id];
+      const snapshot = readLiveInboxSnapshots(
+        buildTrustedLiveInboxSnapshotContexts(managedInboxes),
+      )[sourceMailbox.id];
 
       return {
         mailboxId: sourceMailbox.id,
@@ -18813,7 +18710,9 @@ function MailboxView({
             localFolder: matchingLocations[0].localFolder,
             providerFolder: "INBOX",
             uidValidity:
-              readLiveInboxSnapshots()[candidateMailboxId]?.uidValidity ?? null,
+              readLiveInboxSnapshots(
+                buildTrustedLiveInboxSnapshotContexts(managedInboxes),
+              )[candidateMailboxId]?.uidValidity ?? null,
           } satisfies ExactImapUnreadActionSource,
         },
       ];
@@ -25607,6 +25506,42 @@ type ManagedWorkspaceInbox = {
   customImap: CustomImapSettings;
   customSmtp: CustomSmtpSettings;
 };
+
+function resolveLiveInboxProvider(provider: ProviderId | null): LiveInboxProvider | null {
+  if (provider === "google" || provider === "custom_imap") {
+    return provider;
+  }
+
+  return null;
+}
+
+function buildTrustedLiveInboxSnapshotContexts(
+  managedInboxes: ManagedWorkspaceInbox[],
+): TrustedLiveInboxSnapshotContexts {
+  return Object.fromEntries(
+    managedInboxes.flatMap((mailbox) => {
+      const provider = resolveLiveInboxProvider(mailbox.provider);
+      return provider
+        ? [[mailbox.id, { mailboxId: mailbox.id, provider, folder: "INBOX" }]]
+        : [];
+    }),
+  );
+}
+
+function buildLiveThreadIdentityContext(
+  mailboxId: string,
+  provider: LiveInboxProvider,
+  uidValidity: string | null | undefined,
+  folder = "INBOX",
+): LiveThreadIdentityContext {
+  return {
+    mailboxId,
+    provider,
+    folder: folder.trim() || "INBOX",
+    uidValidity: uidValidity ?? null,
+  };
+}
+
 type MailboxRefreshResult = "synced" | "skipped" | "failed" | "partial";
 type InboxRefreshIssue = {
   code?: string;
@@ -27538,11 +27473,19 @@ const ManageInboxesView = memo(function ManageInboxesView({
     });
 
     if (response.connected) {
+      const provider = resolveLiveInboxProvider(mailbox.provider);
+
+      if (!provider) {
+        return response;
+      }
+
       saveLiveInboxSnapshot({
+        provider,
         inboxId: mailbox.id,
         email: mailbox.email.trim().toLowerCase(),
         fetchedAt: new Date().toISOString(),
         messages: response.messages ?? [],
+        folder: "INBOX",
         uidValidity: response.uidValidity ?? null,
       });
     }
@@ -33728,7 +33671,10 @@ export function WorkspaceShell({
     incomingMessages: LiveInboxMessageSnapshot[],
     currentInboxMessages: MailMessage[],
     currentStore: MailboxStore,
-    options?: { freshProviderStateKeys?: Set<string> },
+    options: {
+      threadIdentityContext: LiveThreadIdentityContext;
+      freshProviderStateKeys?: Set<string>;
+    },
   ) => {
     const shouldIgnoreUnreadOverrides = savedManagedInboxes.some(
       (mailbox) =>
@@ -33752,67 +33698,59 @@ export function WorkspaceShell({
     });
 
     const normalizedIncoming = uniqueIncomingMessages.map((message) => {
-      const persistedMessage = message as PersistedLiveInboxMessageSnapshot;
-      const existingMessage = findMatchingMessageByIdentity(persistedMessage, currentInboxIndexes);
-      const preferredSnapshotState = resolvePreferredCollaborationSnapshotState(
-        persistedMessage.collaboration,
-        existingMessage?.collaboration,
-        persistedMessage.isShared,
-        existingMessage?.isShared,
+      const messageWithThreadIdentity = applyLiveThreadIdentity(
+        message,
+        options.threadIdentityContext,
       );
+      const persistedMessage = messageWithThreadIdentity as PersistedLiveInboxMessageSnapshot;
+      const existingMessage = findMatchingMessageByIdentity(persistedMessage, currentInboxIndexes);
       const isFreshProviderMessage =
         options?.freshProviderStateKeys != null &&
         getCanonicalMessageIdentityKeys(persistedMessage).some((key) =>
           options.freshProviderStateKeys?.has(key),
         );
-      const providerUnread =
-        typeof message.unread === "boolean" ? message.unread : undefined;
-      const localUnread =
-        (shouldIgnoreUnreadOverrides
-          ? undefined
-          : resolveUnreadOverride(messageUnreadOverrides, persistedMessage)) ??
-        existingMessage?.unread;
-      const providerFlagged =
-        typeof message.flagged === "boolean" ? message.flagged : undefined;
-      const flagged =
-        isFreshProviderMessage
-          ? providerFlagged ?? existingMessage?.flagged
-          : message.flagged;
-      const unread = shouldIgnoreUnreadOverrides
-        ? isFreshProviderMessage
-          ? providerUnread ?? existingMessage?.unread
-          : existingMessage?.unread ?? providerUnread
-        : isFreshProviderMessage
-          ? providerUnread ?? localUnread
-          : localUnread ?? providerUnread;
+      const mergedMessageState = mergeLiveInboxMessageState(
+        persistedMessage,
+        existingMessage,
+        options.threadIdentityContext,
+        {
+          providerStateIsFresh: isFreshProviderMessage,
+          preferExistingUnreadWhenProviderStateIsNotFresh: shouldIgnoreUnreadOverrides,
+          localUnread: shouldIgnoreUnreadOverrides
+            ? undefined
+            : resolveUnreadOverride(messageUnreadOverrides, persistedMessage),
+        },
+      );
       return normalizeMailMessage(
         {
-          id: message.id,
-          providerThreadId: message.providerThreadId,
-          sender: message.sender,
-          subject: message.subject,
-          snippet: message.snippet,
-          time: message.timestamp,
-          createdAt: message.createdAt,
-          imapUid: message.imapUid,
-          unread,
-          flagged,
-          signal: message.signal,
-          ui_signal: message.ui_signal,
+          id: mergedMessageState.id,
+          threadId: mergedMessageState.threadId ?? undefined,
+          providerThreadId: mergedMessageState.providerThreadId,
+          threadIdentityContext: mergedMessageState.threadIdentityContext,
+          sender: mergedMessageState.sender,
+          subject: mergedMessageState.subject,
+          snippet: mergedMessageState.snippet,
+          time: mergedMessageState.timestamp,
+          createdAt: mergedMessageState.createdAt,
+          imapUid: mergedMessageState.imapUid,
+          unread: mergedMessageState.unread ?? undefined,
+          flagged: mergedMessageState.flagged ?? undefined,
+          signal: mergedMessageState.signal,
+          ui_signal: mergedMessageState.ui_signal,
           internalClassification:
-            message.internalClassification as CuevionInternalClassification | undefined,
-          classifierVersion: message.classifierVersion,
-          final_visibility: message.final_visibility,
-          action: message.action,
-          from: message.from,
-          to: message.to,
-          cc: message.cc,
-          timestamp: message.timestamp,
-          body: message.body,
-          bodyHtml: message.bodyHtml,
-          attachments: message.attachments,
-          isShared: preferredSnapshotState.isShared,
-          collaboration: preferredSnapshotState.collaboration,
+            mergedMessageState.internalClassification as CuevionInternalClassification | undefined,
+          classifierVersion: mergedMessageState.classifierVersion,
+          final_visibility: mergedMessageState.final_visibility,
+          action: mergedMessageState.action,
+          from: mergedMessageState.from,
+          to: mergedMessageState.to,
+          cc: mergedMessageState.cc,
+          timestamp: mergedMessageState.timestamp,
+          body: mergedMessageState.body,
+          bodyHtml: mergedMessageState.bodyHtml,
+          attachments: mergedMessageState.attachments,
+          isShared: mergedMessageState.isShared,
+          collaboration: mergedMessageState.collaboration,
         },
         mailboxId,
         senderCategoryLearning,
@@ -35072,7 +35010,9 @@ export function WorkspaceShell({
         {} as MailboxStore,
       );
 
-      const liveInboxSnapshots = readLiveInboxSnapshots();
+      const liveInboxSnapshots = readLiveInboxSnapshots(
+        buildTrustedLiveInboxSnapshotContexts(savedManagedInboxes),
+      );
 
       updatedMessagesByMailbox.forEach((updatedMessage, mailboxId) => {
         const snapshot = liveInboxSnapshots[mailboxId];
@@ -36109,7 +36049,9 @@ export function WorkspaceShell({
         }
       }
 
-      const liveInboxSnapshots = readLiveInboxSnapshots();
+      const liveInboxSnapshots = readLiveInboxSnapshots(
+        buildTrustedLiveInboxSnapshotContexts(savedManagedInboxes),
+      );
 
       updatedMessagesByMailbox.forEach((updatedMessage, mailboxId) => {
         const snapshot = liveInboxSnapshots[mailboxId];
@@ -37504,8 +37446,12 @@ export function WorkspaceShell({
   const applyLiveInboxMessagesToMailboxStore = (
     mailboxId: InboxId,
     messages: LiveInboxMessageSnapshot[],
-    evictImapUids?: Set<string>,
-    options?: { replaceInbox?: boolean; freshProviderStateKeys?: Set<string> },
+    evictImapUids: Set<string> | undefined,
+    options: {
+      replaceInbox?: boolean;
+      freshProviderStateKeys?: Set<string>;
+      threadIdentityContext: LiveThreadIdentityContext;
+    },
   ) => {
     const targetMailbox = orderedMailboxes.find((entry) => entry.id === mailboxId);
 
@@ -37520,7 +37466,7 @@ export function WorkspaceShell({
       // Gmail OAuth applies fresh server rows directly; IMAP keeps the existing
       // upsert merge and optional UID eviction behavior.
       const currentInbox =
-        options?.replaceInbox
+        options.replaceInbox
           ? []
           : evictImapUids && evictImapUids.size > 0
             ? currentCollections.Inbox.filter(
@@ -37537,7 +37483,10 @@ export function WorkspaceShell({
             messages,
             currentInbox,
             currentStore,
-            { freshProviderStateKeys: options?.freshProviderStateKeys },
+            {
+              threadIdentityContext: options.threadIdentityContext,
+              freshProviderStateKeys: options.freshProviderStateKeys,
+            },
           ),
         },
       };
@@ -37553,9 +37502,13 @@ export function WorkspaceShell({
   };
   const applyCachedLiveInboxSnapshotToMailboxStore = (mailboxId: InboxId) => {
     const targetMailbox = orderedMailboxes.find((entry) => entry.id === mailboxId);
-    const snapshot = readLiveInboxSnapshots()[mailboxId];
+    const snapshot = readLiveInboxSnapshots(
+      buildTrustedLiveInboxSnapshotContexts(savedManagedInboxes),
+    )[mailboxId];
+    const hydratedSnapshot = snapshot ? hydrateLiveInboxSnapshot(snapshot) : null;
+    const threadIdentityContext = hydratedSnapshot?.context ?? null;
 
-    if (!targetMailbox || !snapshot?.messages.length) {
+    if (!targetMailbox || !hydratedSnapshot?.messages.length || !threadIdentityContext) {
       return 0;
     }
 
@@ -37568,9 +37521,10 @@ export function WorkspaceShell({
           ...currentCollections,
           Inbox: mergeLiveInboxMessages(
             targetMailbox.id,
-            snapshot.messages,
+            hydratedSnapshot.messages,
             currentCollections.Inbox,
             currentStore,
+            { threadIdentityContext },
           ),
         },
       };
@@ -37584,7 +37538,7 @@ export function WorkspaceShell({
       );
     });
 
-    return snapshot.messages.length;
+    return hydratedSnapshot.messages.length;
   };
 
   const refreshMailboxById = async (
@@ -37739,7 +37693,9 @@ export function WorkspaceShell({
       );
       const persistedSnapshot = canUseGmailOAuthFetch
         ? undefined
-        : readLiveInboxSnapshots()[managedMailbox.id];
+        : readLiveInboxSnapshots(
+            buildTrustedLiveInboxSnapshotContexts(savedManagedInboxes),
+          )[managedMailbox.id];
       const persistedSnapshotMessages =
         (persistedSnapshot?.messages as PersistedLiveInboxMessageSnapshot[]) ?? [];
       const storedUidValidity = persistedSnapshot?.uidValidity ?? null;
@@ -37755,12 +37711,20 @@ export function WorkspaceShell({
             storedUidValidity,
           );
       const messagesForSnapshot = messagesForReactState;
-	      try {
+      const threadIdentityContext = buildLiveThreadIdentityContext(
+        managedMailbox.id,
+        canUseGmailOAuthFetch ? "google" : "custom_imap",
+        response.uidValidity,
+        "INBOX",
+      );
+      try {
         saveLiveInboxSnapshot({
+          provider: threadIdentityContext.provider,
           inboxId: managedMailbox.id,
           email: managedMailbox.email.trim().toLowerCase(),
           fetchedAt: new Date().toISOString(),
           messages: messagesForSnapshot,
+          folder: threadIdentityContext.folder,
           uidValidity: response.uidValidity ?? null,
         });
       } catch (error) {
@@ -37768,7 +37732,7 @@ export function WorkspaceShell({
           throw error;
         }
 
-	      }
+      }
       // Compute the in-memory eviction set using the same guard conditions applied
       // in mergePersistedLiveInboxSnapshotMessages. Only evict when the server
       // supplied a trusted UID set and UIDVALIDITY. A UIDVALIDITY change evicts all
@@ -37801,6 +37765,7 @@ export function WorkspaceShell({
         {
           replaceInbox: canUseGmailOAuthFetch,
           freshProviderStateKeys,
+          threadIdentityContext,
         },
       );
       clearUnreadOverridesForProviderMessages(messages);
@@ -38056,7 +38021,9 @@ export function WorkspaceShell({
   }, [mailboxOrderKey]);
 
   useEffect(() => {
-    const snapshots = readLiveInboxSnapshots();
+    const snapshots = readLiveInboxSnapshots(
+      buildTrustedLiveInboxSnapshotContexts(savedManagedInboxes),
+    );
     const connectedSnapshots = orderedMailboxes
       .map((mailbox) => ({
         mailbox,
@@ -38079,14 +38046,21 @@ export function WorkspaceShell({
       connectedSnapshots.forEach(({ mailbox, snapshot }) => {
         const currentCollections =
           nextStore[mailbox.id] ?? createEmptyMailboxCollections();
+        const hydratedSnapshot = hydrateLiveInboxSnapshot(snapshot);
+        const threadIdentityContext = hydratedSnapshot.context;
+
+        if (!threadIdentityContext) {
+          return;
+        }
 
         nextStore[mailbox.id] = {
           ...currentCollections,
           Inbox: mergeLiveInboxMessages(
             mailbox.id,
-            snapshot.messages,
+            hydratedSnapshot.messages,
             currentCollections.Inbox,
             currentStore,
+            { threadIdentityContext },
           ),
         };
       });
