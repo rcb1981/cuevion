@@ -1,8 +1,10 @@
 import base64
+import binascii
 import json
 import sys
-from datetime import datetime, timezone
 from email import message_from_bytes
+from email.errors import MessageError
+from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -13,293 +15,236 @@ CURRENT_DIR = Path(__file__).resolve().parent
 if str(CURRENT_DIR) not in sys.path:
     sys.path.insert(0, str(CURRENT_DIR))
 
-from oauth_token_store import (
-    get_google_token_record_with_metadata,
-    refresh_google_token_record,
+from authenticated_gmail import (  # noqa: E402
+    MAX_GMAIL_RESPONSE_BYTES,
+    error_payload,
+    gmail_http_error_code,
+    read_bounded_response,
+    read_json_body,
+    refresh_gmail_context,
+    reject_unknown_fields,
+    resolve_authenticated_gmail,
+    send_json,
+    send_method_not_allowed,
+    validate_focus_preferences,
+    valid_identifier,
 )
 
 GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1/users/me"
 DEFAULT_FETCH_LIMIT = 50
 MAX_FETCH_LIMIT = 100
+def _validate_focus_preferences(value: object) -> tuple[dict | None, dict | None]:
+    return validate_focus_preferences(value)
 
 
 def _base64url_decode(value: str) -> bytes:
     padding = "=" * (-len(value) % 4)
-    return base64.urlsafe_b64decode(f"{value}{padding}".encode("ascii"))
-
-
-def _send_json(handler: BaseHTTPRequestHandler, status_code: int, payload: dict):
-    response_body = json.dumps(payload).encode("utf-8")
-    handler.send_response(status_code)
-    handler.send_header("Content-Type", "application/json")
-    handler.send_header("Content-Length", str(len(response_body)))
-    handler.end_headers()
-    handler.wfile.write(response_body)
-
-
-def _build_error(code: str, message: str) -> dict:
-    return {
-        "ok": False,
-        "error": {
-            "code": code,
-            "message": message,
-        },
-    }
-
-
-def _is_token_expired(token_record: dict) -> bool:
-    expires_at = token_record.get("expires_at")
-    if not isinstance(expires_at, str) or not expires_at.strip():
-        return False
-
-    try:
-        parsed = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
-    except ValueError:
-        return False
-
-    return parsed <= datetime.now(timezone.utc)
+    return base64.b64decode(
+        f"{value}{padding}".encode("ascii"),
+        altchars=b"-_",
+        validate=True,
+    )
 
 
 def _gmail_request(access_token: str, path: str) -> tuple[dict | None, dict | None]:
     request = Request(
         f"{GMAIL_API_BASE_URL}{path}",
-        headers={
-            "Authorization": f"Bearer {access_token}",
-            "Accept": "application/json",
-        },
+        headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
         method="GET",
     )
-
     try:
         with urlopen(request, timeout=20) as response:
-            payload = response.read().decode("utf-8")
-            return json.loads(payload) if payload else {}, None
+            body = read_bounded_response(response, MAX_GMAIL_RESPONSE_BYTES)
+            if body is None:
+                return None, {"code": "gmail_response_too_large"}
+            try:
+                payload = json.loads(body.decode("utf-8")) if body else {}
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                return None, {"code": "gmail_response_invalid"}
+            if not isinstance(payload, dict):
+                return None, {"code": "gmail_response_invalid"}
+            return payload, None
     except HTTPError as error:
-        error_body = error.read().decode("utf-8", errors="replace")
-        try:
-            parsed_error = json.loads(error_body) if error_body else {}
-        except json.JSONDecodeError:
-            parsed_error = {}
+        return None, {"code": gmail_http_error_code(error.code, "gmail_fetch_failed")}
+    except (URLError, TimeoutError):
+        return None, {"code": "gmail_unavailable"}
 
-        error_message = (
-            parsed_error.get("error", {}).get("message")
-            if isinstance(parsed_error.get("error"), dict)
-            else None
-        ) or f"Gmail request failed with HTTP {error.code}."
 
-        error_code = "gmail_fetch_failed"
-        if error.code in {401, 403}:
-            error_code = "gmail_token_invalid"
+def _send_gmail_error(handler, error: dict):
+    code = error.get("code")
+    mapping = {
+        "gmail_token_invalid": (401, "reconnect_required", "Reconnect this Gmail inbox to continue."),
+        "gmail_permission_denied": (403, "gmail_permission_denied", "Gmail did not permit this operation."),
+        "gmail_rate_limited": (502, "gmail_rate_limited", "Gmail is temporarily rate limited."),
+        "gmail_unavailable": (502, "gmail_unavailable", "Gmail is temporarily unavailable."),
+        "gmail_response_invalid": (502, "gmail_response_invalid", "Gmail returned an invalid response."),
+        "gmail_response_too_large": (502, "gmail_response_too_large", "Gmail returned a response that is too large."),
+    }
+    status, safe_code, message = mapping.get(
+        code,
+        (502, "gmail_fetch_failed", "Gmail inbox could not be loaded."),
+    )
+    send_json(handler, status, error_payload(safe_code, message))
 
-        return None, {
-            "code": error_code,
-            "message": error_message,
-            "status_code": error.code,
-        }
-    except URLError as error:
-        return None, {
-            "code": "gmail_unavailable",
-            "message": (
-                str(error.reason)
-                if getattr(error, "reason", None)
-                else "Could not reach Gmail."
-            ),
-        }
+
+def _request_with_one_refresh(context: dict, path: str):
+    payload, error = _gmail_request(context["access_token"], path)
+    if error and error.get("code") == "gmail_token_invalid" and not context["refresh_attempted"]:
+        refreshed = refresh_gmail_context(context)
+        if refreshed["status"] != "ok":
+            return None, error, context, refreshed
+        context = refreshed["context"]
+        payload, error = _gmail_request(context["access_token"], path)
+    return payload, error, context, None
 
 
 class handler(BaseHTTPRequestHandler):
+    def send_error(self, code, message=None, explain=None):
+        if code == HTTPStatus.NOT_IMPLEMENTED:
+            self.close_connection = True
+            send_method_not_allowed(
+                self,
+                "Use POST for Gmail mailbox fetch.",
+                write_body=getattr(self, "command", "") != "HEAD",
+            )
+            return
+        super().send_error(code, message, explain)
+
     def do_POST(self):
-        content_length = int(self.headers.get("content-length", "0"))
-        raw_body = self.rfile.read(content_length).decode("utf-8") if content_length > 0 else ""
-
         try:
-            payload = json.loads(raw_body or "{}")
-        except json.JSONDecodeError:
-            _send_json(self, 400, _build_error("invalid_request", "Request body must be valid JSON."))
-            return
-
-        provider = str(payload.get("provider") or "").strip().lower()
-        email_address = str(payload.get("email") or "").strip().lower()
-        internal_role = payload.get("internalRole", None)
-        focus_preferences = payload.get("focusPreferences", None)
-        limit = max(1, min(int(payload.get("limit") or DEFAULT_FETCH_LIMIT), MAX_FETCH_LIMIT))
-
-        if provider != "google":
-            _send_json(
+            handler._handle_post(self)
+        except Exception:
+            send_json(
                 self,
-                400,
-                _build_error("unsupported_provider", "Only Gmail OAuth fetch is supported by this endpoint."),
+                500,
+                error_payload("internal_error", "The Gmail request could not be completed."),
             )
+
+    def _handle_post(self):
+        payload, request_error = read_json_body(self)
+        if request_error:
+            send_json(self, 400 if request_error["error"]["code"] != "request_too_large" else 413, request_error)
+            return
+        field_error = reject_unknown_fields(payload, {"mailboxId", "focusPreferences", "limit"})
+        if field_error:
+            send_json(self, 400, field_error)
             return
 
-        if not email_address:
-            _send_json(
-                self,
-                400,
-                _build_error("invalid_request", "A connected Gmail address is required."),
-            )
+        limit_value = payload.get("limit", DEFAULT_FETCH_LIMIT)
+        if limit_value is None:
+            limit_value = DEFAULT_FETCH_LIMIT
+        if not isinstance(limit_value, int) or isinstance(limit_value, bool):
+            send_json(self, 400, error_payload("invalid_request", "Fetch limit must be an integer."))
             return
+        limit = max(1, min(limit_value, MAX_FETCH_LIMIT))
 
-        token_record = get_google_token_record_with_metadata(email_address)
-        if not token_record:
-            _send_json(
-                self,
-                401,
-                _build_error(
-                    "gmail_token_missing",
-                    "No stored Gmail token is available for this mailbox.",
-                ),
+        focus_preferences = None
+        if "focusPreferences" in payload:
+            focus_preferences, focus_error = _validate_focus_preferences(
+                payload.get("focusPreferences")
             )
-            return
-
-        access_token = token_record.get("access_token")
-        if not isinstance(access_token, str) or not access_token.strip():
-            _send_json(
-                self,
-                401,
-                _build_error(
-                    "gmail_token_missing",
-                    "The stored Gmail token record is incomplete.",
-                ),
-            )
-            return
-
-        if _is_token_expired(token_record):
-            refreshed_record, refresh_error = refresh_google_token_record(email_address)
-            if refresh_error:
-                _send_json(
-                    self,
-                    401,
-                    _build_error(refresh_error["code"], refresh_error["message"]),
-                )
+            if focus_error:
+                send_json(self, 400, focus_error)
                 return
 
-            token_record = refreshed_record or token_record
-            access_token = token_record.get("access_token")
-            if not isinstance(access_token, str) or not access_token.strip():
-                _send_json(
-                    self,
-                    401,
-                    _build_error(
-                        "gmail_token_missing",
-                        "The refreshed Gmail token record is incomplete.",
-                    ),
-                )
-                return
+        resolution = resolve_authenticated_gmail(self.headers, payload.get("mailboxId"))
+        if resolution["status"] != "ok":
+            send_json(self, resolution["status_code"], resolution["error"])
+            return
+        context = resolution["context"]
 
-        list_payload, list_error = _gmail_request(
-            access_token,
-            f"/messages?{urlencode({'labelIds': 'INBOX', 'maxResults': limit})}",
-        )
-        if list_error and list_error.get("code") == "gmail_token_invalid":
-            # Access token was rejected (expired or revoked). Attempt one proactive
-            # refresh so that a stale-but-not-clock-expired token (null expires_at,
-            # clock skew, etc.) recovers without user action. If the refresh_token
-            # itself is revoked, refresh_google_token_record will fail and we fall
-            # through to the original error below.
-            refreshed_record, refresh_error = refresh_google_token_record(email_address)
-            if not refresh_error and isinstance(refreshed_record, dict):
-                new_access_token = refreshed_record.get("access_token")
-                if isinstance(new_access_token, str) and new_access_token.strip():
-                    access_token = new_access_token
-                    token_record = refreshed_record
-                    list_payload, list_error = _gmail_request(
-                        access_token,
-                        f"/messages?{urlencode({'labelIds': 'INBOX', 'maxResults': limit})}",
-                    )
+        list_path = f"/messages?{urlencode({'labelIds': 'INBOX', 'maxResults': limit})}"
+        list_payload, list_error, context, refresh_failure = _request_with_one_refresh(context, list_path)
+        if refresh_failure:
+            send_json(self, refresh_failure["status_code"], refresh_failure["error"])
+            return
         if list_error:
-            _send_json(self, 401 if list_error.get("code") == "gmail_token_invalid" else 502, _build_error(list_error["code"], list_error["message"]))
+            _send_gmail_error(self, list_error)
             return
 
         message_refs = list_payload.get("messages") if isinstance(list_payload, dict) else None
         if not isinstance(message_refs, list):
             message_refs = []
+        message_refs = message_refs[:MAX_FETCH_LIMIT]
 
-        try:
-            from imap_connect_preview import to_message_preview
-        except Exception:
-            _send_json(
-                self,
-                500,
-                _build_error(
-                    "server_error",
-                    "Cuevion could not load the mailbox preview pipeline for Gmail fetch.",
-                ),
-            )
-            return
+        from imap_connect_preview import to_message_preview
 
         previews = []
         inbox_uid_set: list[str] = []
-
+        result_bytes = 0
         for index, message_ref in enumerate(message_refs):
-            message_id = str((message_ref or {}).get("id") or "").strip()
-            if not message_id:
+            message_id = (message_ref or {}).get("id") if isinstance(message_ref, dict) else None
+            if not valid_identifier(message_id):
                 continue
-
-            message_payload, message_error = _gmail_request(
-                access_token,
+            message_payload, message_error, context, refresh_failure = _request_with_one_refresh(
+                context,
                 f"/messages/{quote(message_id, safe='')}?format=raw",
             )
-            if message_error:
-                _send_json(
-                    self,
-                    401 if message_error.get("code") == "gmail_token_invalid" else 502,
-                    _build_error(message_error["code"], message_error["message"]),
-                )
+            if refresh_failure:
+                send_json(self, refresh_failure["status_code"], refresh_failure["error"])
                 return
-
+            if message_error:
+                _send_gmail_error(self, message_error)
+                return
             raw_message = message_payload.get("raw") if isinstance(message_payload, dict) else None
             if not isinstance(raw_message, str) or not raw_message:
                 continue
-
             try:
-                message_bytes = _base64url_decode(raw_message)
-                parsed_message = message_from_bytes(message_bytes)
-            except Exception as error:
+                decoded_message = _base64url_decode(raw_message)
+            except (binascii.Error, UnicodeEncodeError):
                 continue
-
+            try:
+                parsed_message = message_from_bytes(decoded_message)
+            except MessageError:
+                continue
             label_ids = message_payload.get("labelIds") if isinstance(message_payload, dict) else None
             unread = isinstance(label_ids, list) and "UNREAD" in label_ids
             flagged = isinstance(label_ids, list) and "STARRED" in label_ids
             gmail_internal_id = str(message_payload.get("id") or "").strip() or None
+            preview = to_message_preview(
+                parsed_message,
+                index,
+                context["mailbox_email"],
+                unread,
+                gmail_internal_id,
+                flagged,
+                internal_role=None,
+                focus_preferences=focus_preferences,
+            )
+            gmail_thread_id = message_payload.get("threadId")
+            if valid_identifier(gmail_thread_id):
+                preview["providerThreadId"] = gmail_thread_id
+            preview_size = len(json.dumps(preview).encode("utf-8"))
+            if result_bytes + preview_size > MAX_GMAIL_RESPONSE_BYTES:
+                break
+            result_bytes += preview_size
+            previews.append(preview)
             if gmail_internal_id:
                 inbox_uid_set.append(gmail_internal_id)
 
-            try:
-                preview = to_message_preview(
-                    parsed_message,
-                    index,
-                    email_address,
-                    unread,
-                    gmail_internal_id,
-                    flagged,
-                    internal_role=internal_role,
-                    focus_preferences=focus_preferences,
-                )
-                gmail_thread_id = message_payload.get("threadId")
-                if isinstance(gmail_thread_id, str) and gmail_thread_id.strip():
-                    preview["providerThreadId"] = gmail_thread_id
-                previews.append(preview)
-            except Exception:
-                continue
-
-        _send_json(
+        send_json(
             self,
             200,
-            {
-                "ok": True,
-                "messages": previews,
-                "inboxUidSet": inbox_uid_set,
-                "uidValidity": "gmail-api",
-            },
+            {"ok": True, "messages": previews, "inboxUidSet": inbox_uid_set, "uidValidity": "gmail-api"},
         )
 
     def do_GET(self):
-        _send_json(
-            self,
-            405,
-            _build_error("method_not_allowed", "Use POST for Gmail mailbox fetch."),
-        )
+        send_method_not_allowed(self, "Use POST for Gmail mailbox fetch.")
+
+    def do_PUT(self):
+        self.do_GET()
+
+    def do_PATCH(self):
+        self.do_GET()
+
+    def do_DELETE(self):
+        self.do_GET()
+
+    def do_HEAD(self):
+        send_method_not_allowed(self, "Use POST for Gmail mailbox fetch.", write_body=False)
+
+    def do_OPTIONS(self):
+        send_json(self, 200, {"ok": True})
 
     def log_message(self, format, *args):
         return

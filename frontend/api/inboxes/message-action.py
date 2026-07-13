@@ -2,7 +2,7 @@ import imaplib
 import json
 import re
 import sys
-from datetime import datetime, timezone
+from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -24,25 +24,35 @@ from authenticated_imap import (  # noqa: E402
     resolve_authenticated_imap_mailbox,
 )
 from imap_connect_preview import connect_mailbox_with_settings  # noqa: E402
-from oauth_token_store import (  # noqa: E402
-    get_google_token_record_with_metadata,
-    refresh_google_token_record,
+from authenticated_gmail import (  # noqa: E402
+    MAX_GMAIL_RESPONSE_BYTES,
+    error_payload,
+    gmail_http_error_code,
+    read_bounded_response,
+    read_json_body,
+    refresh_gmail_context,
+    reject_unknown_fields,
+    resolve_gmail_context,
+    resolve_owned_mailbox,
+    send_json,
+    send_method_not_allowed,
+    valid_identifier,
 )
 
 GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1/users/me"
 GMAIL_MODIFY_SCOPE = "https://www.googleapis.com/auth/gmail.modify"
-SUPPORTED_ACTIONS = {"mark_read", "mark_unread", "flag", "unflag"}
+SUPPORTED_ACTIONS = {"mark_read", "mark_unread", "star", "unstar"}
 GMAIL_ACTION_LABELS = {
     "mark_read": {"removeLabelIds": ["UNREAD"]},
     "mark_unread": {"addLabelIds": ["UNREAD"]},
-    "flag": {"addLabelIds": ["STARRED"]},
-    "unflag": {"removeLabelIds": ["STARRED"]},
+    "star": {"addLabelIds": ["STARRED"]},
+    "unstar": {"removeLabelIds": ["STARRED"]},
 }
 IMAP_ACTION_FLAGS = {
     "mark_read": ("+FLAGS.SILENT", "\\Seen"),
     "mark_unread": ("-FLAGS.SILENT", "\\Seen"),
-    "flag": ("+FLAGS.SILENT", "\\Flagged"),
-    "unflag": ("-FLAGS.SILENT", "\\Flagged"),
+    "star": ("+FLAGS.SILENT", "\\Flagged"),
+    "unstar": ("-FLAGS.SILENT", "\\Flagged"),
 }
 
 
@@ -60,36 +70,8 @@ def _error(code: str, message: str) -> dict:
     return {"ok": False, "error": {"code": code, "message": message}}
 
 
-def _read_json_body(handler: BaseHTTPRequestHandler) -> tuple[dict | None, dict | None]:
-    content_length = int(handler.headers.get("content-length", "0"))
-    raw_body = handler.rfile.read(content_length).decode("utf-8") if content_length > 0 else ""
-
-    try:
-        payload = json.loads(raw_body or "{}")
-    except json.JSONDecodeError:
-        return None, _error("invalid_request", "Request body must be valid JSON.")
-
-    if not isinstance(payload, dict):
-        return None, _error("invalid_request", "Request body must be a JSON object.")
-
-    return payload, None
-
-
 def _has_unsafe_auth_chars(value: str) -> bool:
     return "\r" in value or "\n" in value
-
-
-def _is_token_expired(token_record: dict) -> bool:
-    expires_at = token_record.get("expires_at")
-    if not isinstance(expires_at, str) or not expires_at.strip():
-        return False
-
-    try:
-        parsed = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
-    except ValueError:
-        return False
-
-    return parsed <= datetime.now(timezone.utc)
 
 
 def _token_record_has_known_modify_scope(token_record: dict) -> bool | None:
@@ -119,139 +101,57 @@ def _gmail_modify_request(
 
     try:
         with urlopen(request, timeout=20) as response:
-            payload = response.read().decode("utf-8")
-            return json.loads(payload) if payload else {}, None
+            body = read_bounded_response(response, MAX_GMAIL_RESPONSE_BYTES)
+            if body is None:
+                return None, {"code": "gmail_response_too_large"}
+            try:
+                payload = json.loads(body.decode("utf-8")) if body else {}
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                return None, {"code": "gmail_response_invalid"}
+            if not isinstance(payload, dict):
+                return None, {"code": "gmail_response_invalid"}
+            return payload, None
     except HTTPError as error:
-        error_body = error.read().decode("utf-8", errors="replace")
-        try:
-            parsed_error = json.loads(error_body) if error_body else {}
-        except json.JSONDecodeError:
-            parsed_error = {}
-
-        gmail_error = parsed_error.get("error") if isinstance(parsed_error, dict) else None
-        error_message = (
-            gmail_error.get("message")
-            if isinstance(gmail_error, dict)
-            else None
-        ) or f"Gmail mailbox action failed with HTTP {error.code}."
-        status = (
-            str(gmail_error.get("status") or "").strip().lower()
-            if isinstance(gmail_error, dict)
-            else ""
-        )
-
-        error_code = "gmail_message_action_failed"
-        if error.code == 401:
-            error_code = "gmail_token_invalid"
-        elif error.code == 403:
-            error_code = "REAUTH_REQUIRED"
-            if (
-                "insufficient" in error_message.lower()
-                or "scope" in error_message.lower()
-                or status == "permission_denied"
-            ):
-                error_code = "MISSING_GMAIL_MODIFY_SCOPE"
-
         return None, {
-            "code": error_code,
-            "message": error_message,
-            "status_code": error.code,
-        }
-    except URLError as error:
-        return None, {
-            "code": "gmail_unavailable",
-            "message": (
-                str(error.reason)
-                if getattr(error, "reason", None)
-                else "Could not reach Gmail."
-            ),
-        }
-
-
-def _perform_gmail_action(handler: BaseHTTPRequestHandler, payload: dict, action: str):
-    email_address = str(payload.get("email") or "").strip().lower()
-    message_id = str(payload.get("messageId") or payload.get("providerMessageId") or "").strip()
-
-    if not email_address or not message_id:
-        _json_response(
-            handler,
-            400,
-            _error("invalid_request", "Gmail mailbox actions require email and message id."),
-        )
-        return
-
-    token_record = get_google_token_record_with_metadata(email_address)
-    if not token_record:
-        _json_response(
-            handler,
-            401,
-            _error("gmail_token_missing", "No stored Gmail token is available for this mailbox."),
-        )
-        return
-
-    known_modify_scope = _token_record_has_known_modify_scope(token_record)
-    if known_modify_scope is False:
-        _json_response(
-            handler,
-            403,
-            _error(
-                "MISSING_GMAIL_MODIFY_SCOPE",
-                "Reconnect this Gmail inbox to enable read/unread and star actions.",
-            ),
-        )
-        return
-
-    access_token = token_record.get("access_token")
-    if not isinstance(access_token, str) or not access_token.strip():
-        _json_response(
-            handler,
-            401,
-            _error("gmail_token_missing", "The stored Gmail token record is incomplete."),
-        )
-        return
-
-    if _is_token_expired(token_record):
-        refreshed_record, refresh_error = refresh_google_token_record(email_address)
-        if refresh_error:
-            _json_response(handler, 401, _error(refresh_error["code"], refresh_error["message"]))
-            return
-
-        token_record = refreshed_record or token_record
-        access_token = token_record.get("access_token")
-        if not isinstance(access_token, str) or not access_token.strip():
-            _json_response(
-                handler,
-                401,
-                _error("gmail_token_missing", "The refreshed Gmail token record is incomplete."),
+            "code": gmail_http_error_code(
+                error.code,
+                "gmail_message_action_failed",
             )
-            return
+        }
+    except (URLError, TimeoutError):
+        return None, {"code": "gmail_unavailable"}
 
-    _, modify_error = _gmail_modify_request(access_token.strip(), message_id, action)
-    if modify_error and modify_error.get("code") == "gmail_token_invalid":
-        refreshed_record, refresh_error = refresh_google_token_record(email_address)
-        if not refresh_error and isinstance(refreshed_record, dict):
-            refreshed_token = refreshed_record.get("access_token")
-            if isinstance(refreshed_token, str) and refreshed_token.strip():
-                _, modify_error = _gmail_modify_request(
-                    refreshed_token.strip(),
-                    message_id,
-                    action,
-                )
+
+def _perform_gmail_action(handler: BaseHTTPRequestHandler, payload: dict, action: str, context: dict):
+    message_id = payload.get("messageId")
+    if not valid_identifier(message_id):
+        send_json(handler, 400, error_payload("invalid_request", "Message id is invalid."))
+        return
+
+    _, modify_error = _gmail_modify_request(context["access_token"], message_id, action)
+    if modify_error and modify_error.get("code") == "gmail_token_invalid" and not context["refresh_attempted"]:
+        refreshed = refresh_gmail_context(context)
+        if refreshed["status"] != "ok":
+            send_json(handler, refreshed["status_code"], refreshed["error"])
+            return
+        context = refreshed["context"]
+        _, modify_error = _gmail_modify_request(context["access_token"], message_id, action)
 
     if modify_error:
-        status_code = 502
-        if modify_error.get("code") in {"REAUTH_REQUIRED", "MISSING_GMAIL_MODIFY_SCOPE"}:
-            status_code = 403
-        elif modify_error.get("code") == "gmail_token_invalid":
-            status_code = 401
-        _json_response(
-            handler,
-            status_code,
-            _error(modify_error["code"], modify_error["message"]),
-        )
+        code = modify_error.get("code")
+        if code == "gmail_token_invalid":
+            send_json(handler, 401, error_payload("reconnect_required", "Reconnect this Gmail inbox to continue."))
+        elif code == "gmail_permission_denied":
+            send_json(handler, 403, error_payload("gmail_permission_denied", "Gmail did not permit this mailbox action."))
+        elif code == "gmail_rate_limited":
+            send_json(handler, 502, error_payload("gmail_rate_limited", "Gmail is temporarily rate limited."))
+        elif code == "gmail_unavailable":
+            send_json(handler, 502, error_payload("gmail_unavailable", "Gmail is temporarily unavailable."))
+        else:
+            send_json(handler, 502, error_payload("gmail_message_action_failed", "Gmail could not update this message."))
         return
 
-    _json_response(handler, 200, {"ok": True, "action": action})
+    send_json(handler, 200, {"ok": True, "action": action})
 
 
 def _read_uid_validity(mailbox, folder: str) -> str | None:
@@ -389,51 +289,85 @@ def _perform_imap_action(handler: BaseHTTPRequestHandler, payload: dict, action:
 
 
 class handler(BaseHTTPRequestHandler):
+    def send_error(self, code, message=None, explain=None):
+        if code == HTTPStatus.NOT_IMPLEMENTED:
+            self.close_connection = True
+            send_method_not_allowed(
+                self,
+                "Use POST for mailbox message actions.",
+                write_body=getattr(self, "command", "") != "HEAD",
+            )
+            return
+        super().send_error(code, message, explain)
+
     def do_POST(self):
-        payload, error = _read_json_body(self)
+        try:
+            handler._handle_post(self)
+        except Exception:
+            send_json(
+                self,
+                500,
+                error_payload("internal_error", "The mailbox action could not be completed."),
+            )
+
+    def _handle_post(self):
+        payload, error = read_json_body(self)
         if error:
-            _json_response(self, 400, error)
+            send_json(self, 413 if error["error"]["code"] == "request_too_large" else 400, error)
             return
 
-        action = str((payload or {}).get("action") or "").strip()
-        provider = str((payload or {}).get("provider") or "").strip().lower()
+        action = payload.get("action")
 
         if action not in SUPPORTED_ACTIONS:
-            _json_response(
-                self,
-                400,
-                _error("unsupported_action", "This mailbox action is not supported."),
-            )
+            send_json(self, 400, error_payload("unsupported_action", "This mailbox action is not supported."))
             return
 
-        if provider in {"gmail", "google"}:
-            _perform_gmail_action(self, payload or {}, action)
-            return
-
-        if not provider:
-            _perform_imap_action(self, payload or {}, action)
-            return
-
-        if provider in {"imap", "custom_imap"}:
-            _json_response(
-                self,
-                400,
-                _error("forbidden_connection_fields", "Connection details are not accepted."),
-            )
-            return
-
-        _json_response(
-            self,
-            400,
-            _error("unsupported_provider", "Mailbox actions require Gmail or IMAP."),
+        field_error = reject_unknown_fields(
+            payload,
+            {"mailboxId", "messageId", "folder", "uid", "uidValidity", "action"},
         )
+        if field_error or find_forbidden_custom_request_fields(payload):
+            send_json(self, 400, error_payload("forbidden_connection_fields", "Connection and identity details are not accepted."))
+            return
+
+        owned = resolve_owned_mailbox(self.headers, payload.get("mailboxId"))
+        if owned["status"] != "ok":
+            send_json(self, owned["status_code"], owned["error"])
+            return
+        provider = owned["inbox"].get("provider")
+        if provider == "google":
+            field_error = reject_unknown_fields(payload, {"mailboxId", "messageId", "action"})
+            if field_error:
+                send_json(self, 400, field_error)
+                return
+            gmail = resolve_gmail_context(owned)
+            if gmail["status"] != "ok":
+                send_json(self, gmail["status_code"], gmail["error"])
+                return
+            _perform_gmail_action(self, payload, action, gmail["context"])
+            return
+        if provider == "custom_imap":
+            _perform_imap_action(self, payload, action)
+            return
+        send_json(self, 400, error_payload("unsupported_provider", "Mailbox actions require Gmail or IMAP."))
 
     def do_GET(self):
-        _json_response(
-            self,
-            405,
-            _error("method_not_allowed", "Use POST for mailbox message actions."),
-        )
+        send_method_not_allowed(self, "Use POST for mailbox message actions.")
+
+    def do_PUT(self):
+        self.do_GET()
+
+    def do_PATCH(self):
+        self.do_GET()
+
+    def do_DELETE(self):
+        self.do_GET()
+
+    def do_HEAD(self):
+        send_method_not_allowed(self, "Use POST for mailbox message actions.", write_body=False)
+
+    def do_OPTIONS(self):
+        send_json(self, 200, {"ok": True})
 
     def log_message(self, format, *args):
         return

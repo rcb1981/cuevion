@@ -1,10 +1,11 @@
 import base64
+import binascii
 import json
 import smtplib
 import sys
-from datetime import datetime, timezone
 from email.message import EmailMessage
 from email.utils import getaddresses
+from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -21,9 +22,27 @@ from authenticated_imap import (
     find_forbidden_custom_request_fields,
     resolve_authenticated_imap_mailbox,
 )
-from oauth_token_store import get_google_token_record_with_metadata, refresh_google_token_record
+from authenticated_gmail import (
+    MAX_GMAIL_RESPONSE_BYTES,
+    MAX_SEND_REQUEST_BODY_BYTES,
+    error_payload,
+    gmail_http_error_code,
+    read_bounded_response,
+    read_json_body,
+    refresh_gmail_context,
+    reject_unknown_fields,
+    resolve_gmail_context,
+    resolve_owned_mailbox,
+    send_json,
+    send_method_not_allowed,
+)
 
 GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1/users/me"
+MAX_ATTACHMENTS = 10
+MAX_TOTAL_ATTACHMENT_BYTES = 8 * 1024 * 1024
+MAX_RECIPIENTS = 100
+MAX_SUBJECT_CHARACTERS = 998
+MAX_BODY_CHARACTERS = 2 * 1024 * 1024
 
 
 def _json_response(handler: BaseHTTPRequestHandler, status_code: int, payload: dict):
@@ -59,19 +78,6 @@ def _is_safe_auth_value(value: str):
     return bool(value) and not _has_unsafe_header_chars(value)
 
 
-def _is_token_expired(token_record: dict) -> bool:
-    expires_at = token_record.get("expires_at")
-    if not isinstance(expires_at, str) or not expires_at:
-        return False
-
-    try:
-        parsed = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
-    except ValueError:
-        return False
-
-    return parsed <= datetime.now(timezone.utc)
-
-
 def _gmail_api_send(access_token: str, message: EmailMessage) -> tuple[dict | None, dict | None]:
     encoded_message = base64.urlsafe_b64encode(message.as_bytes()).decode("ascii").rstrip("=")
     request = Request(
@@ -86,69 +92,31 @@ def _gmail_api_send(access_token: str, message: EmailMessage) -> tuple[dict | No
 
     try:
         with urlopen(request, timeout=30) as response:
-            payload = response.read().decode("utf-8")
-            return json.loads(payload) if payload else {}, None
+            body = read_bounded_response(response, MAX_GMAIL_RESPONSE_BYTES)
+            if body is None:
+                return None, {"code": "gmail_response_too_large"}
+            try:
+                payload = json.loads(body.decode("utf-8")) if body else {}
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                return None, {"code": "gmail_response_invalid"}
+            if not isinstance(payload, dict):
+                return None, {"code": "gmail_response_invalid"}
+            return payload, None
     except HTTPError as error:
-        error_body = error.read().decode("utf-8", errors="replace")
-        error_code = "gmail_send_failed"
-        error_message = "Gmail could not send this message."
-
-        try:
-            parsed_error = json.loads(error_body) if error_body else {}
-            gmail_error = parsed_error.get("error") if isinstance(parsed_error, dict) else None
-            if isinstance(gmail_error, dict):
-                error_message = str(gmail_error.get("message") or error_message)
-                status = str(gmail_error.get("status") or "").strip().lower()
-                if error.code in {401, 403} or status in {"unauthenticated", "permission_denied"}:
-                    error_code = "gmail_token_invalid"
-        except json.JSONDecodeError:
-            pass
-
-        return None, {"code": error_code, "message": error_message}
-    except URLError as error:
-        return None, {
-            "code": "gmail_unavailable",
-            "message": (
-                str(error.reason)
-                if getattr(error, "reason", None)
-                else "Could not reach Gmail."
-            ),
-        }
+        return None, {"code": gmail_http_error_code(error.code, "gmail_send_failed")}
+    except (URLError, TimeoutError):
+        return None, {"code": "gmail_unavailable"}
 
 
-def _send_with_gmail_oauth(mailbox_email: str, message: EmailMessage) -> tuple[bool, dict | None]:
-    token_record = get_google_token_record_with_metadata(mailbox_email)
-    if not token_record:
-        return False, {
-            "code": "gmail_token_missing",
-            "message": "No stored Gmail token is available for this mailbox.",
-        }
-
-    access_token = token_record.get("access_token")
-    if not isinstance(access_token, str) or not access_token.strip():
-        return False, {
-            "code": "gmail_token_missing",
-            "message": "The stored Gmail token record is incomplete.",
-        }
-
-    if _is_token_expired(token_record):
-        refreshed_record, refresh_error = refresh_google_token_record(mailbox_email)
-        if refresh_error:
-            return False, refresh_error
-
-        token_record = refreshed_record or token_record
-        access_token = token_record.get("access_token")
-        if not isinstance(access_token, str) or not access_token.strip():
-            return False, {
-                "code": "gmail_token_missing",
-                "message": "The refreshed Gmail token record is incomplete.",
-            }
-
-    _, send_error = _gmail_api_send(access_token.strip(), message)
-    if send_error:
-        return False, send_error
-
-    return True, None
+def _send_with_gmail_oauth(context: dict, message: EmailMessage) -> tuple[bool, dict | None, dict | None]:
+    _, send_error = _gmail_api_send(context["access_token"], message)
+    if send_error and send_error.get("code") == "gmail_token_invalid" and not context["refresh_attempted"]:
+        refreshed = refresh_gmail_context(context)
+        if refreshed["status"] != "ok":
+            return False, None, refreshed
+        context = refreshed["context"]
+        _, send_error = _gmail_api_send(context["access_token"], message)
+    return send_error is None, send_error, None
 
 
 def _build_message(payload: dict, *, require_password: bool = True):
@@ -179,8 +147,16 @@ def _build_message(payload: dict, *, require_password: bool = True):
         raise ValueError("Gmail username must match the connected mailbox email.")
     if _has_unsafe_header_chars(subject):
         raise ValueError("Subject is invalid.")
+    if any(_has_unsafe_header_chars(value) for value in (to_value, cc_value, bcc_value)):
+        raise ValueError("Recipient headers are invalid.")
     if not isinstance(attachments, list):
         raise ValueError("Attachments payload is invalid.")
+    if len(subject) > MAX_SUBJECT_CHARACTERS:
+        raise ValueError("Subject is too long.")
+    if len(body_html) > MAX_BODY_CHARACTERS or len(body_text) > MAX_BODY_CHARACTERS:
+        raise ValueError("Message body is too large.")
+    if len(attachments) > MAX_ATTACHMENTS:
+        raise ValueError("Too many attachments.")
 
     to_recipients = _split_recipients(to_value)
     cc_recipients = _split_recipients(cc_value)
@@ -189,6 +165,8 @@ def _build_message(payload: dict, *, require_password: bool = True):
 
     if not all_recipients:
         raise ValueError("Add at least one recipient before sending.")
+    if len(all_recipients) > MAX_RECIPIENTS:
+        raise ValueError("Too many recipients.")
     if not all(_is_valid_address(address) for address in all_recipients):
         raise ValueError("One or more recipient addresses are invalid.")
 
@@ -204,6 +182,7 @@ def _build_message(payload: dict, *, require_password: bool = True):
     if body_html.strip():
         message.add_alternative(body_html, subtype="html")
 
+    total_attachment_bytes = 0
     for attachment in attachments:
         if not isinstance(attachment, dict):
             raise ValueError("Attachment payload is invalid.")
@@ -211,7 +190,13 @@ def _build_message(payload: dict, *, require_password: bool = True):
         mime_type = str((attachment or {}).get("mimeType", "")).strip() or "application/octet-stream"
         content_base64 = str((attachment or {}).get("contentBase64", "")).strip()
 
-        if not name or not content_base64 or _has_unsafe_header_chars(name):
+        if (
+            not name
+            or len(name) > 255
+            or not content_base64
+            or _has_unsafe_header_chars(name)
+            or _has_unsafe_header_chars(mime_type)
+        ):
             raise ValueError("Attachment payload is invalid.")
 
         maintype, _, subtype = mime_type.partition("/")
@@ -221,8 +206,11 @@ def _build_message(payload: dict, *, require_password: bool = True):
 
         try:
             content_bytes = base64.b64decode(content_base64, validate=True)
-        except Exception as exc:
-            raise ValueError(f"Attachment {name} could not be decoded.") from exc
+        except (binascii.Error, ValueError) as exc:
+            raise ValueError("Attachment content could not be decoded.") from exc
+        total_attachment_bytes += len(content_bytes)
+        if total_attachment_bytes > MAX_TOTAL_ATTACHMENT_BYTES:
+            raise ValueError("Attachments are too large.")
 
         message.add_attachment(
             content_bytes,
@@ -258,258 +246,163 @@ def _build_custom_smtp_config(payload: dict):
 
 
 class handler(BaseHTTPRequestHandler):
+    def send_error(self, code, message=None, explain=None):
+        if code == HTTPStatus.NOT_IMPLEMENTED:
+            self.close_connection = True
+            send_method_not_allowed(
+                self,
+                "Use POST for mailbox sending.",
+                write_body=getattr(self, "command", "") != "HEAD",
+            )
+            return
+        super().send_error(code, message, explain)
+
     def do_POST(self):
-        content_length = int(self.headers.get("content-length", "0"))
-        raw_body = self.rfile.read(content_length).decode("utf-8") if content_length > 0 else ""
-
         try:
-            payload = json.loads(raw_body or "{}")
-        except json.JSONDecodeError:
-            _json_response(
-                self,
-                400,
-                {
-                    "ok": False,
-                    "error": {
-                        "code": "invalid_request",
-                        "message": "Request body must be valid JSON.",
-                    },
-                },
-            )
-            return
-
-        if not isinstance(payload, dict):
-            _json_response(
-                self,
-                400,
-                {"ok": False, "error": {"code": "invalid_request", "message": "Request body must be a JSON object."}},
-            )
-            return
-
-        provider = str(payload.get("provider", "")).strip().lower()
-        is_owned_custom_smtp = not provider
-        if is_owned_custom_smtp:
-            allowed_fields = {
-                "mailboxId",
-                "to",
-                "cc",
-                "bcc",
-                "subject",
-                "bodyHtml",
-                "bodyText",
-                "attachments",
-            }
-            if set(payload) - allowed_fields or find_forbidden_custom_request_fields(payload):
-                _json_response(
-                    self,
-                    400,
-                    {"ok": False, "error": {"code": "forbidden_connection_fields", "message": "Connection details are not accepted."}},
-                )
-                return
-            mailbox_id = payload.get("mailboxId")
-            resolved = resolve_authenticated_imap_mailbox(
-                self.headers,
-                mailbox_id,
-                require_smtp=True,
-            )
-            if resolved["status"] != "ok" or not resolved["mailbox"]:
-                error = resolved["error"] or {
-                    "code": "mailbox_configuration_malformed",
-                    "message": "Mailbox configuration is invalid.",
-                    "status_code": 500,
-                }
-                _json_response(
-                    self,
-                    error["status_code"],
-                    {"ok": False, "error": {"code": error["code"], "message": error["message"]}},
-                )
-                return
-            mailbox = resolved["mailbox"]
-            payload = {
-                **payload,
-                "provider": "custom_imap",
-                "authMode": "smtp",
-                "email": mailbox["email"],
-                "from": mailbox["email"],
-                "username": mailbox["smtp"]["username"],
-                "password": mailbox["smtp"]["password"],
-                "smtpHost": mailbox["smtp"]["host"],
-                "smtpPort": str(mailbox["smtp"]["port"]),
-                "smtpSecurity": mailbox["smtp"]["security"],
-                "useSameCredentials": mailbox["smtp"]["useSameCredentials"],
-            }
-            provider = "custom_imap"
-        elif provider == "custom_imap":
-            _json_response(
-                self,
-                400,
-                {"ok": False, "error": {"code": "forbidden_connection_fields", "message": "Connection details are not accepted."}},
-            )
-            return
-
-        auth_mode = str(payload.get("authMode", "smtp")).strip().lower()
-        use_gmail_oauth = auth_mode == "oauth" and provider == "google"
-        use_custom_smtp = auth_mode == "smtp" and provider == "custom_imap"
-
-        try:
-            username, password, recipients, message = _build_message(
-                payload,
-                require_password=not use_gmail_oauth,
-            )
-            custom_smtp_config = (
-                _build_custom_smtp_config(payload) if use_custom_smtp else None
-            )
-        except ValueError as exc:
-            _json_response(
-                self,
-                400,
-                {
-                    "ok": False,
-                    "error": {
-                        "code": "invalid_request",
-                        "message": str(exc),
-                    },
-                },
-            )
-            return
-
-        if use_gmail_oauth:
-            sent, send_error = _send_with_gmail_oauth(username, message)
-            if not sent:
-                status_code = 401 if send_error and send_error.get("code") in {
-                    "gmail_token_invalid",
-                    "gmail_token_missing",
-                    "gmail_refresh_token_missing",
-                } else 502
-                _json_response(
-                    self,
-                    status_code,
-                    {
-                        "ok": False,
-                        "error": send_error or {
-                            "code": "send_failed",
-                            "message": "Gmail could not send this message.",
-                        },
-                    },
-                )
-                return
-
-            _json_response(self, 200, {"ok": True})
-            return
-
-        if use_custom_smtp:
-            smtp_host, smtp_port, smtp_security = custom_smtp_config
-            try:
-                if smtp_security == "ssl":
-                    with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=30) as smtp:
-                        smtp.login(username, password)
-                        smtp.send_message(message, to_addrs=recipients)
-                else:
-                    with smtplib.SMTP(smtp_host, smtp_port, timeout=30) as smtp:
-                        smtp.starttls()
-                        smtp.login(username, password)
-                        smtp.send_message(message, to_addrs=recipients)
-            except smtplib.SMTPAuthenticationError:
-                _json_response(
-                    self,
-                    401,
-                    {
-                        "ok": False,
-                        "error": {
-                            "code": "invalid_credentials",
-                            "message": "SMTP rejected the username or password.",
-                        },
-                    },
-                )
-                return
-            except smtplib.SMTPException:
-                _json_response(
-                    self,
-                    502,
-                    {
-                        "ok": False,
-                        "error": {
-                            "code": "send_failed",
-                            "message": "SMTP could not send this message.",
-                        },
-                    },
-                )
-                return
-            except Exception:
-                _json_response(
-                    self,
-                    500,
-                    {
-                        "ok": False,
-                        "error": {
-                            "code": "server_error",
-                            "message": "Could not send email.",
-                        },
-                    },
-                )
-                return
-
-            _json_response(self, 200, {"ok": True})
-            return
-
-        try:
-            with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as smtp:
-                smtp.login(username, password)
-                smtp.send_message(message, to_addrs=recipients)
-        except smtplib.SMTPAuthenticationError:
-            _json_response(
-                self,
-                401,
-                {
-                    "ok": False,
-                    "error": {
-                        "code": "invalid_credentials",
-                        "message": "Gmail rejected the username or app password.",
-                    },
-                },
-            )
-            return
-        except smtplib.SMTPException:
-            _json_response(
-                self,
-                502,
-                {
-                    "ok": False,
-                    "error": {
-                        "code": "send_failed",
-                        "message": "Gmail could not send this message.",
-                    },
-                },
-            )
-            return
+            handler._handle_post(self)
         except Exception:
-            _json_response(
+            send_json(
                 self,
                 500,
-                {
-                    "ok": False,
-                    "error": {
-                        "code": "server_error",
-                        "message": "Could not send email.",
-                    },
-                },
+                error_payload("internal_error", "The email could not be sent."),
+            )
+
+    def _handle_post(self):
+        payload, request_error = read_json_body(self, max_bytes=MAX_SEND_REQUEST_BODY_BYTES)
+        if request_error:
+            send_json(self, 413 if request_error["error"]["code"] == "request_too_large" else 400, request_error)
+            return
+
+        allowed_fields = {
+            "mailboxId", "to", "cc", "bcc", "subject", "bodyHtml", "bodyText", "attachments",
+        }
+        field_error = reject_unknown_fields(payload, allowed_fields)
+        if field_error or find_forbidden_custom_request_fields(payload):
+            send_json(
+                self,
+                400,
+                error_payload("forbidden_connection_fields", "Connection and identity details are not accepted."),
             )
             return
 
-        _json_response(self, 200, {"ok": True})
+        owned = resolve_owned_mailbox(self.headers, payload.get("mailboxId"))
+        if owned["status"] != "ok":
+            send_json(self, owned["status_code"], owned["error"])
+            return
+        provider = owned["inbox"].get("provider")
+
+        if provider == "google":
+            gmail = resolve_gmail_context(owned)
+            if gmail["status"] != "ok":
+                send_json(self, gmail["status_code"], gmail["error"])
+                return
+            context = gmail["context"]
+            internal_payload = {
+                **payload,
+                "provider": "google",
+                "email": context["mailbox_email"],
+                "username": context["mailbox_email"],
+                "password": "",
+            }
+            try:
+                _, _, _, message = _build_message(internal_payload, require_password=False)
+            except ValueError as error:
+                send_json(self, 400, error_payload("invalid_request", str(error)))
+                return
+
+            sent, send_error, refresh_failure = _send_with_gmail_oauth(context, message)
+            if refresh_failure:
+                send_json(self, refresh_failure["status_code"], refresh_failure["error"])
+                return
+            if not sent:
+                code = (send_error or {}).get("code")
+                if code == "gmail_token_invalid":
+                    send_json(self, 401, error_payload("reconnect_required", "Reconnect this Gmail inbox to continue."))
+                elif code == "gmail_permission_denied":
+                    send_json(self, 403, error_payload("gmail_permission_denied", "Gmail did not permit this operation."))
+                elif code == "gmail_rate_limited":
+                    send_json(self, 502, error_payload("gmail_rate_limited", "Gmail is temporarily rate limited."))
+                elif code == "gmail_unavailable":
+                    send_json(self, 502, error_payload("gmail_unavailable", "Gmail is temporarily unavailable."))
+                else:
+                    send_json(self, 502, error_payload("gmail_send_failed", "Gmail could not send this message."))
+                return
+            send_json(self, 200, {"ok": True})
+            return
+
+        if provider != "custom_imap":
+            send_json(self, 400, error_payload("unsupported_provider", "Sending is not available for this mailbox."))
+            return
+
+        resolved = resolve_authenticated_imap_mailbox(
+            self.headers,
+            payload.get("mailboxId"),
+            require_smtp=True,
+        )
+        if resolved["status"] != "ok" or not resolved["mailbox"]:
+            error = resolved["error"] or {
+                "code": "mailbox_configuration_malformed",
+                "message": "Mailbox configuration is invalid.",
+                "status_code": 500,
+            }
+            send_json(self, error["status_code"], error_payload(error["code"], error["message"]))
+            return
+        mailbox = resolved["mailbox"]
+        internal_payload = {
+            **payload,
+            "provider": "custom_imap",
+            "email": mailbox["email"],
+            "username": mailbox["smtp"]["username"],
+            "password": mailbox["smtp"]["password"],
+            "smtpHost": mailbox["smtp"]["host"],
+            "smtpPort": str(mailbox["smtp"]["port"]),
+            "smtpSecurity": mailbox["smtp"]["security"],
+        }
+        try:
+            username, password, recipients, message = _build_message(internal_payload)
+            smtp_host, smtp_port, smtp_security = _build_custom_smtp_config(internal_payload)
+        except ValueError as error:
+            send_json(self, 400, error_payload("invalid_request", str(error)))
+            return
+
+        try:
+            if smtp_security == "ssl":
+                with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=30) as smtp:
+                    smtp.login(username, password)
+                    smtp.send_message(message, to_addrs=recipients)
+            else:
+                with smtplib.SMTP(smtp_host, smtp_port, timeout=30) as smtp:
+                    smtp.starttls()
+                    smtp.login(username, password)
+                    smtp.send_message(message, to_addrs=recipients)
+        except smtplib.SMTPAuthenticationError:
+            send_json(self, 401, error_payload("invalid_credentials", "Stored SMTP credentials were rejected."))
+            return
+        except smtplib.SMTPException:
+            send_json(self, 502, error_payload("send_failed", "SMTP could not send this message."))
+            return
+        except Exception:
+            send_json(self, 500, error_payload("internal_error", "Could not send email."))
+            return
+        send_json(self, 200, {"ok": True})
 
     def do_GET(self):
-        _json_response(
-            self,
-            405,
-            {
-                "ok": False,
-                "error": {
-                    "code": "method_not_allowed",
-                    "message": "Use POST for Gmail sending.",
-                },
-            },
-        )
+        send_method_not_allowed(self, "Use POST for mailbox sending.")
+
+    def do_PUT(self):
+        self.do_GET()
+
+    def do_PATCH(self):
+        self.do_GET()
+
+    def do_DELETE(self):
+        self.do_GET()
+
+    def do_HEAD(self):
+        send_method_not_allowed(self, "Use POST for mailbox sending.", write_body=False)
+
+    def do_OPTIONS(self):
+        send_json(self, 200, {"ok": True})
 
     def log_message(self, format, *args):
         return

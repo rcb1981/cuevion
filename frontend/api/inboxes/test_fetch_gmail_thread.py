@@ -112,18 +112,17 @@ def nested_part_payload(depth):
     return part
 
 
-def owned_inbox(**overrides):
+def owned_context(**overrides):
     return {
         "status": "ok",
-        "inbox": {
-            "id": "mailbox-1",
-            "email": "owner@gmail.com",
-            "provider": "google",
-            "connected": True,
-            "connectionStatus": "connected",
+        "context": {
+            "mailbox_id": "mailbox-1",
+            "mailbox_email": "owner@gmail.com",
+            "owner_email": "owner@example.com",
+            "access_token": "token",
+            "refresh_attempted": False,
             **overrides,
         },
-        "error": None,
     }
 
 
@@ -157,7 +156,7 @@ def parse_http_response(raw_response):
 class RequestValidationTests(unittest.TestCase):
     def invoke(self, payload=None, raw_body=None, headers=None):
         handler = FakeHandler(payload, raw_body, headers)
-        with patch.object(route, "resolve_owned_managed_inbox") as ownership:
+        with patch.object(route, "resolve_authenticated_gmail") as ownership:
             route.handler.do_POST(handler)
         return handler, ownership
 
@@ -194,10 +193,8 @@ class RequestValidationTests(unittest.TestCase):
         self.assertEqual(options_handler.response(), {"ok": True})
 
     def test_unknown_methods_use_json_405_via_real_dispatch(self):
-        with patch.object(route, "resolve_owned_managed_inbox") as ownership, patch.object(
-            route, "get_google_token_record_with_metadata"
-        ) as token_lookup, patch.object(
-            route, "refresh_google_token_record"
+        with patch.object(route, "resolve_authenticated_gmail") as ownership, patch.object(
+            route, "refresh_gmail_context"
         ) as refresh, patch.object(
             route, "_gmail_thread_request"
         ) as gmail_request, patch.object(
@@ -218,7 +215,6 @@ class RequestValidationTests(unittest.TestCase):
                     self.assertNotIn(b"<html", body.lower())
 
         ownership.assert_not_called()
-        token_lookup.assert_not_called()
         refresh.assert_not_called()
         gmail_request.assert_not_called()
         parser.assert_not_called()
@@ -286,73 +282,51 @@ class RequestValidationTests(unittest.TestCase):
 class OwnershipAndTokenTests(unittest.TestCase):
     request = {"mailboxId": "mailbox-1", "providerThreadId": "thread-1"}
 
-    def invoke(self, ownership, token=None, gmail=None, refresh=None):
+    def invoke(self, resolution, gmail=None, refresh=None):
         handler = FakeHandler(self.request)
-        with patch.object(route, "resolve_owned_managed_inbox", return_value=ownership), patch.object(
+        with patch.object(route, "resolve_authenticated_gmail", return_value=resolution) as resolver, patch.object(
             route,
-            "get_google_token_record_with_metadata",
-            return_value=token,
-        ) as token_lookup, patch.object(
-            route,
-            "refresh_google_token_record",
-            return_value=refresh or (None, {"code": "gmail_token_invalid"}),
+            "refresh_gmail_context",
+            return_value=refresh or {
+                "status": "error",
+                "status_code": 401,
+                "error": route._error("reconnect_required", "Gmail authorization must be renewed."),
+            },
         ) as refresh_mock, patch.object(
             route,
             "_gmail_thread_request",
             side_effect=gmail,
         ) as gmail_mock:
             route.handler.do_POST(handler)
-        return handler, token_lookup, refresh_mock, gmail_mock
+        return handler, resolver, refresh_mock, gmail_mock
 
     def test_strict_ownership_status_mapping(self):
-        cases = [
-            ({"status": "unauthorized", "inbox": None, "error": None}, 401, "unauthorized"),
-            ({"status": "not_found", "inbox": None, "error": None}, 404, "gmail_connection_not_found"),
-            ({"status": "unavailable", "inbox": None, "error": None}, 503, "user_config_store_unavailable"),
-            ({"status": "malformed", "inbox": None, "error": None}, 503, "user_config_store_unavailable"),
-        ]
-        for ownership, status, code in cases:
-            with self.subTest(ownership=ownership):
-                handler, token_lookup, _, _ = self.invoke(ownership)
+        cases = [(401, "unauthorized"), (404, "gmail_connection_not_found"), (503, "user_config_store_unavailable")]
+        for status, code in cases:
+            with self.subTest(status=status):
+                resolution = {"status": "error", "status_code": status, "error": route._error(code, "Safe error")}
+                handler, resolver, _, _ = self.invoke(resolution)
                 self.assertEqual(handler.status, status)
                 self.assertEqual(handler.response()["error"]["code"], code)
-                token_lookup.assert_not_called()
-
-    def test_provider_readiness_and_server_email(self):
-        cases = [
-            (owned_inbox(provider="custom_imap"), 400, "unsupported_provider"),
-            (owned_inbox(connected=False), 409, "gmail_connection_not_ready"),
-            (owned_inbox(connectionStatus="connection_failed"), 409, "gmail_connection_not_ready"),
-            (owned_inbox(email=""), 503, "user_config_store_unavailable"),
-        ]
-        for ownership, status, code in cases:
-            with self.subTest(ownership=ownership):
-                handler, token_lookup, _, _ = self.invoke(ownership)
-                self.assertEqual(handler.status, status)
-                self.assertEqual(handler.response()["error"]["code"], code)
-                token_lookup.assert_not_called()
+                resolver.assert_called_once_with(handler.headers, "mailbox-1")
 
     def test_missing_and_refresh_token_errors(self):
-        handler, token_lookup, _, gmail = self.invoke(owned_inbox(), token=None)
-        self.assertEqual(handler.response()["error"]["code"], "gmail_token_missing")
-        token_lookup.assert_called_once_with("owner@gmail.com")
+        resolution = {"status": "error", "status_code": 401, "error": route._error("reconnect_required", "Reconnect Gmail.")}
+        handler, resolver, _, gmail = self.invoke(resolution)
+        self.assertEqual(handler.response()["error"]["code"], "reconnect_required")
+        resolver.assert_called_once()
         gmail.assert_not_called()
 
-        expired = {"access_token": "old", "expires_at": "2000-01-01T00:00:00Z"}
         handler, _, refresh, gmail = self.invoke(
-            owned_inbox(),
-            token=expired,
-            refresh=(None, {"code": "gmail_refresh_token_missing"}),
+            owned_context(),
+            gmail=[(None, {"code": "gmail_token_invalid"})],
         )
-        self.assertEqual(handler.response()["error"]["code"], "gmail_refresh_token_missing")
-        refresh.assert_called_once_with("owner@gmail.com")
-        gmail.assert_not_called()
+        self.assertEqual(handler.response()["error"]["code"], "reconnect_required")
+        refresh.assert_called_once()
 
     def test_normal_success_one_request_and_stale_token_one_retry(self):
-        valid = {"access_token": "token", "expires_at": None}
         handler, _, refresh, gmail = self.invoke(
-            owned_inbox(),
-            token=valid,
+            owned_context(),
             gmail=[(thread_payload(), None)],
         )
         self.assertEqual(handler.status, 200)
@@ -361,28 +335,25 @@ class OwnershipAndTokenTests(unittest.TestCase):
         refresh.assert_not_called()
 
         handler, _, refresh, gmail = self.invoke(
-            owned_inbox(),
-            token=valid,
+            owned_context(),
             gmail=[
                 (None, {"code": "gmail_token_invalid"}),
                 (thread_payload(), None),
             ],
-            refresh=({"access_token": "new"}, None),
+            refresh={"status": "ok", "context": owned_context(access_token="new")["context"]},
         )
         self.assertEqual(handler.status, 200)
         self.assertEqual(gmail.call_count, 2)
-        refresh.assert_called_once_with("owner@gmail.com")
+        refresh.assert_called_once()
 
     def test_revoked_after_retry_and_provider_errors(self):
-        valid = {"access_token": "token", "expires_at": None}
         handler, _, refresh, gmail = self.invoke(
-            owned_inbox(),
-            token=valid,
+            owned_context(),
             gmail=[
                 (None, {"code": "gmail_token_invalid"}),
                 (None, {"code": "gmail_token_invalid"}),
             ],
-            refresh=({"access_token": "new"}, None),
+            refresh={"status": "ok", "context": owned_context(access_token="new")["context"]},
         )
         self.assertEqual(handler.status, 401)
         self.assertEqual(gmail.call_count, 2)
@@ -396,12 +367,11 @@ class OwnershipAndTokenTests(unittest.TestCase):
             ({"code": "gmail_thread_too_large"}, 502),
         ):
             with self.subTest(error=error):
-                handler, _, _, _ = self.invoke(owned_inbox(), token=valid, gmail=[(None, error)])
+                handler, _, _, _ = self.invoke(owned_context(), gmail=[(None, error)])
                 self.assertEqual(handler.status, status)
                 self.assertNotIn("token", json.dumps(handler.response()).lower())
 
     def test_parser_depth_and_cycle_errors_map_to_safe_response(self):
-        valid = {"access_token": "token", "expires_at": None}
         deep_message = gmail_message()
         deep_message["payload"] = nested_part_payload(
             gmail_thread_parser.MAX_MESSAGE_PART_DEPTH + 1
@@ -418,8 +388,7 @@ class OwnershipAndTokenTests(unittest.TestCase):
         ):
             with self.subTest(case=case):
                 handler, _, _, _ = self.invoke(
-                    owned_inbox(),
-                    token=valid,
+                    owned_context(),
                     gmail=[(payload, None)],
                 )
                 self.assertEqual(handler.status, 502)
@@ -465,6 +434,8 @@ class TransportTests(unittest.TestCase):
             (FakeProviderResponse(b"not-json"), None, "gmail_response_invalid"),
             (None, HTTPError("url", 404, "", {}, io.BytesIO(b"secret")), "gmail_thread_not_found"),
             (None, HTTPError("url", 401, "", {}, io.BytesIO(b"secret")), "gmail_token_invalid"),
+            (None, HTTPError("url", 403, "", {}, io.BytesIO(b"secret")), "gmail_permission_denied"),
+            (None, HTTPError("url", 429, "", {}, io.BytesIO(b"secret")), "gmail_rate_limited"),
             (None, HTTPError("url", 500, "", {}, io.BytesIO(b"secret")), "gmail_thread_fetch_failed"),
             (None, URLError("offline"), "gmail_unavailable"),
         ]

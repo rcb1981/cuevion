@@ -18,6 +18,7 @@ from beta_auth import (
 
 USER_CONFIG_SCHEMA_VERSION = 1
 USER_CONFIG_KEY_PREFIX = "cuevion:user:v1"
+MAX_USER_CONFIG_STORE_RESPONSE_BYTES = 256 * 1024
 
 
 class AuthenticatedUserContext(TypedDict):
@@ -188,27 +189,43 @@ def _perform_rest_request(
 
     try:
         with urlopen(request, timeout=20) as response:
-            payload = response.read().decode("utf-8")
-            return json.loads(payload) if payload else {}, None
-    except HTTPError as error:
-        error_body = error.read().decode("utf-8", errors="replace")
-        try:
-            parsed_error = json.loads(error_body) if error_body else {}
-        except json.JSONDecodeError:
-            parsed_error = {}
-
+            raw_payload = response.read(MAX_USER_CONFIG_STORE_RESPONSE_BYTES + 1)
+            if len(raw_payload) > MAX_USER_CONFIG_STORE_RESPONSE_BYTES:
+                return None, _error(
+                    "user_config_store_unavailable",
+                    "User config storage returned an invalid response.",
+                )
+            if not raw_payload:
+                return None, _error(
+                    "user_config_store_unavailable",
+                    "User config storage returned an invalid response.",
+                )
+            payload = json.loads(raw_payload.decode("utf-8"))
+            if not isinstance(payload, dict):
+                return None, _error(
+                    "user_config_store_unavailable",
+                    "User config storage returned an invalid response.",
+                )
+            return payload, None
+    except HTTPError:
         return None, _error(
             "user_config_store_unavailable",
-            parsed_error.get("error")
-            or parsed_error.get("message")
-            or f"User config store request failed with HTTP {error.code}.",
+            "User config storage is temporarily unavailable.",
         )
-    except URLError as error:
+    except (TimeoutError, URLError, OSError):
         return None, _error(
             "user_config_store_unavailable",
-            str(error.reason)
-            if getattr(error, "reason", None)
-            else "Could not reach the user config store.",
+            "User config storage is temporarily unavailable.",
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        return None, _error(
+            "user_config_store_unavailable",
+            "User config storage returned an invalid response.",
+        )
+    except Exception:
+        return None, _error(
+            "user_config_store_unavailable",
+            "User config storage is temporarily unavailable.",
         )
 
 
@@ -234,6 +251,15 @@ def read_user_config_record(
             ),
         }
 
+    if "result" not in payload:
+        return {
+            "status": "unavailable",
+            "config": None,
+            "error": _error(
+                "user_config_store_unavailable",
+                "User config storage returned an invalid response.",
+            ),
+        }
     result = payload.get("result")
     if result is None:
         return {
@@ -280,9 +306,19 @@ def write_user_config_record(
     if error:
         return {"status": "unavailable", "record": None, "error": error}
 
+    if not isinstance(payload, dict) or payload.get("result") != "OK":
+        return {
+            "status": "unavailable",
+            "record": None,
+            "error": _error(
+                "user_config_store_unavailable",
+                "User config storage did not confirm the write.",
+            ),
+        }
+
     return {
         "status": "ok",
-        "record": payload if isinstance(payload, dict) else None,
+        "record": payload,
         "error": None,
     }
 

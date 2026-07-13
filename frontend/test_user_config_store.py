@@ -21,8 +21,8 @@ class FakeResponse:
     def __init__(self, payload):
         self.payload = payload if isinstance(payload, bytes) else payload.encode("utf-8")
 
-    def read(self):
-        return self.payload
+    def read(self, amount=None):
+        return self.payload if amount is None else self.payload[:amount]
 
     def __enter__(self):
         return self
@@ -173,9 +173,10 @@ class StoreTests(unittest.TestCase):
     def test_missing_and_malformed_records_retain_precise_status(self):
         cases = [
             ({"result": None}, "missing"),
+            ({}, "unavailable"),
             ({"result": "not-json"}, "malformed"),
             ({"result": ["not", "a", "record"]}, "malformed"),
-            (["not", "a", "provider-response"], "malformed"),
+            (["not", "a", "provider-response"], "unavailable"),
         ]
         for payload, expected_status in cases:
             with self.subTest(payload=payload), patch.object(
@@ -212,6 +213,59 @@ class StoreTests(unittest.TestCase):
                 )
             self.assertEqual(result["status"], "unavailable")
             self.assertEqual(result["error"]["code"], "user_config_store_unavailable")
+
+    def test_success_response_boundary_failures_are_bounded_and_sanitized(self):
+        failures = [
+            FakeResponse(b""),
+            FakeResponse(b"{"),
+            FakeResponse(b"\xff"),
+            FakeResponse(b"x" * (user_config_store.MAX_USER_CONFIG_STORE_RESPONSE_BYTES + 1)),
+        ]
+        for response in failures:
+            with self.subTest(size=len(response.payload)), patch.object(
+                user_config_store,
+                "urlopen",
+                return_value=response,
+            ):
+                result = user_config_store.read_user_config_record(
+                    self.store,
+                    "user@example.com",
+                )
+            self.assertEqual(result["status"], "unavailable")
+            serialized = json.dumps(result)
+            self.assertNotIn("kv.example", serialized)
+            self.assertNotIn("kv-secret", serialized)
+
+        for failure in (TimeoutError("raw timeout"), OSError("raw os detail"), RuntimeError("raw unexpected")):
+            with self.subTest(failure=type(failure).__name__), patch.object(
+                user_config_store,
+                "urlopen",
+                side_effect=failure,
+            ):
+                result = user_config_store.read_user_config_record(
+                    self.store,
+                    "user@example.com",
+                )
+            self.assertEqual(result["status"], "unavailable")
+            self.assertNotIn("raw", json.dumps(result))
+
+    def test_write_requires_exact_ok_acknowledgement(self):
+        for payload in ({}, {"result": None}, {"result": "STALE"}, []):
+            with self.subTest(payload=payload), patch.object(
+                user_config_store,
+                "urlopen",
+                return_value=FakeResponse(json.dumps(payload)),
+            ):
+                result = user_config_store.write_user_config_record(
+                    self.store,
+                    "user@example.com",
+                    {"v": 1},
+                )
+            self.assertEqual(result["status"], "unavailable")
+            self.assertEqual(
+                result["error"]["code"],
+                "user_config_store_unavailable",
+            )
 
     def test_write_uses_exact_rest_contract_without_mutating_record(self):
         captured = []

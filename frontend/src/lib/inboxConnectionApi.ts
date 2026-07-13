@@ -7,7 +7,6 @@ import {
 import type {
   CustomImapSettings,
   CustomSmtpSettings,
-  CustomSmtpSecurity,
   InboxConnectionMethod,
   InboxConnectionStatus,
   OnboardingState,
@@ -130,9 +129,7 @@ export type OAuthInboxResponse = {
 };
 
 export type FetchGmailInboxRequest = {
-  provider: ProviderId;
-  email: string;
-  internalRole?: string | null;
+  mailboxId: string;
   focusPreferences?: OnboardingState["focusPreferences"] | null;
   limit?: number | null;
 };
@@ -295,8 +292,7 @@ export type SendInboxAttachmentRequest = {
 };
 
 export type DownloadAttachmentGmailRequest = {
-  provider: "gmail";
-  email: string;
+  mailboxId: string;
   messageId: string;
   attachmentId: string;
 };
@@ -314,17 +310,7 @@ export type DownloadAttachmentRequest =
   | DownloadAttachmentImapRequest;
 
 export type SendGmailMessageRequest = {
-  mailboxId?: string;
-  provider: ProviderId;
-  authMode?: "smtp" | "oauth";
-  useSameCredentials?: boolean;
-  email: string;
-  username: string;
-  password: string;
-  smtpHost?: string;
-  smtpPort?: string;
-  smtpSecurity?: CustomSmtpSecurity;
-  from: string;
+  mailboxId: string;
   to: string;
   cc?: string;
   bcc?: string;
@@ -334,20 +320,11 @@ export type SendGmailMessageRequest = {
   attachments?: SendInboxAttachmentRequest[];
 };
 
-export type CustomSmtpWireRequest = Omit<Pick<
-  SendGmailMessageRequest,
-  "mailboxId" | "to" | "cc" | "bcc" | "subject" | "bodyHtml" | "bodyText" | "attachments"
->, "mailboxId"> & { mailboxId: string };
-
 export function buildSendInboxWireRequest(
   request: SendGmailMessageRequest,
-): SendGmailMessageRequest | CustomSmtpWireRequest {
-  if (request.provider !== "custom_imap") {
-    return request;
-  }
-
+): SendGmailMessageRequest {
   return {
-    mailboxId: request.mailboxId ?? "",
+    mailboxId: request.mailboxId,
     to: request.to,
     cc: request.cc,
     bcc: request.bcc,
@@ -358,12 +335,10 @@ export function buildSendInboxWireRequest(
   };
 }
 
-export type InboxMessageAction = "mark_read" | "mark_unread" | "flag" | "unflag";
+export type InboxMessageAction = "mark_read" | "mark_unread" | "star" | "unstar";
 
 export type GmailInboxMessageActionRequest = {
-  provider: "gmail" | "google";
-  mailboxId?: string;
-  email: string;
+  mailboxId: string;
   messageId: string;
   action: InboxMessageAction;
 };
@@ -407,6 +382,13 @@ type AttachmentDownloadErrorPayload = {
 export async function mutateInboxMessageAction(
   request: InboxMessageActionRequest,
 ): Promise<InboxMessageActionResponse> {
+  const wireRequest = "messageId" in request
+    ? {
+        mailboxId: request.mailboxId,
+        messageId: request.messageId,
+        action: request.action,
+      }
+    : request;
   try {
     const response = await fetch("/api/inboxes/message-action", {
       method: "POST",
@@ -414,7 +396,7 @@ export async function mutateInboxMessageAction(
       headers: {
         "Content-Type": "application/json",
       },
-      body: JSON.stringify(request),
+      body: JSON.stringify(wireRequest),
     });
     const rawPayload = await response.text();
     let payload: InboxMessageActionResponse | null = null;
@@ -515,6 +497,7 @@ export async function connectInboxWithOAuth(
   try {
     const response = await fetch("/api/inboxes/connect-oauth", {
       method: "POST",
+      credentials: "include",
       headers: {
         "Content-Type": "application/json",
       },
@@ -731,13 +714,20 @@ async function readAttachmentDownloadError(
 export async function downloadAttachment(
   request: DownloadAttachmentRequest,
 ): Promise<Blob> {
+  const wireRequest = "messageId" in request
+    ? {
+        mailboxId: request.mailboxId,
+        messageId: request.messageId,
+        attachmentId: request.attachmentId,
+      }
+    : request;
   const response = await fetch("/api/inboxes/download-attachment", {
     method: "POST",
     credentials: "include",
     headers: {
       "Content-Type": "application/json",
     },
-    body: JSON.stringify(request),
+    body: JSON.stringify(wireRequest),
   });
 
   if (!response.ok) {
@@ -791,10 +781,15 @@ export async function fetchGmailInbox(
   try {
     const response = await fetch("/api/inboxes/fetch-gmail", {
       method: "POST",
+      credentials: "include",
       headers: {
         "Content-Type": "application/json",
       },
-      body: JSON.stringify(request),
+      body: JSON.stringify({
+        mailboxId: request.mailboxId,
+        focusPreferences: request.focusPreferences,
+        limit: request.limit,
+      }),
     });
 
     const payload = (await response.json()) as ConnectInboxResponse;

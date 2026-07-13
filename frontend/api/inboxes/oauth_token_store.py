@@ -9,6 +9,7 @@ from urllib.request import Request, urlopen
 
 GMAIL_OAUTH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60
 GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
+MAX_OAUTH_RESPONSE_BYTES = 256 * 1024
 
 
 def _resolve_runtime_store_path() -> Path:
@@ -90,6 +91,7 @@ def _build_microsoft_store_key(state_or_mailbox_id: str) -> str:
 def build_google_token_record(
     *,
     email: str,
+    owner_email: str,
     token_payload: dict,
     existing_record: dict | None = None,
 ) -> dict:
@@ -109,6 +111,7 @@ def build_google_token_record(
     return {
         "provider": "google",
         "email": email,
+        "owner_email": owner_email.strip().lower(),
         "access_token": token_payload.get("access_token"),
         "refresh_token": refresh_token,
         "token_type": token_type if isinstance(token_type, str) else None,
@@ -181,31 +184,43 @@ def _perform_rest_request(
 
     try:
         with urlopen(request, timeout=20) as response:
-            payload = response.read().decode("utf-8")
-            return json.loads(payload) if payload else {}, None
-    except HTTPError as error:
-        error_body = error.read().decode("utf-8", errors="replace")
-        try:
-            parsed_error = json.loads(error_body) if error_body else {}
-        except json.JSONDecodeError:
-            parsed_error = {}
-
+            raw_payload = response.read(MAX_OAUTH_RESPONSE_BYTES + 1)
+            if len(raw_payload) > MAX_OAUTH_RESPONSE_BYTES:
+                return None, {
+                    "code": "gmail_token_store_unavailable",
+                    "message": "Durable mailbox token storage returned an invalid response.",
+                }
+            if not raw_payload:
+                return None, {
+                    "code": "gmail_token_store_unavailable",
+                    "message": "Durable mailbox token storage returned an invalid response.",
+                }
+            payload = json.loads(raw_payload.decode("utf-8"))
+            if not isinstance(payload, dict):
+                return None, {
+                    "code": "gmail_token_store_unavailable",
+                    "message": "Durable mailbox token storage returned an invalid response.",
+                }
+            return payload, None
+    except HTTPError:
         return None, {
-            "code": "token_persistence_failed",
-            "message": (
-                parsed_error.get("error")
-                or parsed_error.get("message")
-                or f"Durable mailbox token storage failed with HTTP {error.code}."
-            ),
+            "code": "gmail_token_store_unavailable",
+            "message": "Durable mailbox token storage is temporarily unavailable.",
         }
-    except URLError as error:
+    except (TimeoutError, URLError, OSError):
         return None, {
-            "code": "token_persistence_failed",
-            "message": (
-                str(error.reason)
-                if getattr(error, "reason", None)
-                else "Could not reach the durable mailbox token store."
-            ),
+            "code": "gmail_token_store_unavailable",
+            "message": "Durable mailbox token storage is temporarily unavailable.",
+        }
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        return None, {
+            "code": "gmail_token_store_unavailable",
+            "message": "Durable mailbox token storage returned an invalid response.",
+        }
+    except Exception:
+        return None, {
+            "code": "gmail_token_store_unavailable",
+            "message": "Durable mailbox token storage is temporarily unavailable.",
         }
 
 
@@ -218,21 +233,36 @@ def _read_durable_record(config: dict, store_key: str) -> tuple[dict | None, dic
     if error:
         return None, error
 
-    result = payload.get("result") if isinstance(payload, dict) else None
+    if not isinstance(payload, dict) or "result" not in payload:
+        return None, {
+            "code": "gmail_token_store_unavailable",
+            "message": "Durable mailbox token storage returned an unreadable token record.",
+        }
+    result = payload.get("result")
     if result is None:
         return None, None
 
     if isinstance(result, str):
         try:
             parsed = json.loads(result)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
             return None, {
-                "code": "token_persistence_failed",
+                "code": "gmail_token_store_unavailable",
                 "message": "Durable mailbox token storage returned an unreadable token record.",
             }
-        return parsed if isinstance(parsed, dict) else None, None
+        if not isinstance(parsed, dict):
+            return None, {
+                "code": "gmail_token_store_unavailable",
+                "message": "Durable mailbox token storage returned an unreadable token record.",
+            }
+        return parsed, None
 
-    return result if isinstance(result, dict) else None, None
+    if not isinstance(result, dict):
+        return None, {
+            "code": "gmail_token_store_unavailable",
+            "message": "Durable mailbox token storage returned an unreadable token record.",
+        }
+    return result, None
 
 
 def _write_durable_record(
@@ -269,10 +299,10 @@ def _persist_runtime_record(store_key: str, record: dict) -> tuple[dict | None, 
 
     try:
         _write_runtime_store(store_path, store)
-    except OSError as error:
+    except OSError:
         return None, {
             "code": "token_persistence_failed",
-            "message": f"Google authentication succeeded, but mailbox token storage failed: {error}",
+            "message": "Google authentication succeeded, but mailbox token storage failed.",
         }
 
     persisted_store = _read_runtime_store(store_path)
@@ -328,6 +358,8 @@ def _persist_google_record(
     if (
         persisted_record.get("provider") != "google"
         or persisted_record.get("email") != normalized_email
+        or not isinstance(persisted_record.get("owner_email"), str)
+        or not persisted_record.get("owner_email")
         or not isinstance(persisted_record.get("access_token"), str)
         or not persisted_record.get("access_token")
     ):
@@ -373,10 +405,16 @@ def _exchange_google_refresh_token(
 
     try:
         with urlopen(request, timeout=20) as response:
-            payload = response.read().decode("utf-8")
+            raw_payload = response.read(MAX_OAUTH_RESPONSE_BYTES + 1)
+            if len(raw_payload) > MAX_OAUTH_RESPONSE_BYTES:
+                return None, {
+                    "code": "gmail_refresh_failed",
+                    "message": "Google returned an invalid refresh response.",
+                }
+            payload = raw_payload.decode("utf-8")
             return json.loads(payload) if payload else {}, None
     except HTTPError as error:
-        error_body = error.read().decode("utf-8", errors="replace")
+        error_body = error.read(MAX_OAUTH_RESPONSE_BYTES + 1).decode("utf-8", errors="replace")
         try:
             parsed_error = json.loads(error_body) if error_body else {}
         except json.JSONDecodeError:
@@ -399,11 +437,17 @@ def _exchange_google_refresh_token(
                 else "Could not reach Google."
             ),
         }
+    except (TimeoutError, UnicodeDecodeError, json.JSONDecodeError):
+        return None, {
+            "code": "gmail_refresh_unavailable",
+            "message": "Google token refresh was unavailable.",
+        }
 
 
 def persist_google_token_record(
     *,
     email: str,
+    owner_email: str,
     token_payload: dict,
 ) -> tuple[dict | None, dict | None]:
     access_token = token_payload.get("access_token")
@@ -414,6 +458,12 @@ def persist_google_token_record(
         }
 
     normalized_email = email.strip().lower()
+    normalized_owner_email = owner_email.strip().lower()
+    if not normalized_owner_email:
+        return None, {
+            "code": "invalid_token_owner",
+            "message": "Authenticated Gmail token ownership is required.",
+        }
     store_key, durable_config, existing_record, existing_error = _load_existing_google_record(
         normalized_email
     )
@@ -422,6 +472,7 @@ def persist_google_token_record(
 
     next_record = build_google_token_record(
         email=normalized_email,
+        owner_email=normalized_owner_email,
         token_payload=token_payload,
         existing_record=existing_record if isinstance(existing_record, dict) else None,
     )
@@ -505,8 +556,13 @@ def persist_microsoft_token_record(
     }, None
 
 
-def refresh_google_token_record(email: str) -> tuple[dict | None, dict | None]:
+def refresh_google_token_record(
+    email: str,
+    *,
+    owner_email: str,
+) -> tuple[dict | None, dict | None]:
     normalized_email = email.strip().lower()
+    normalized_owner_email = owner_email.strip().lower()
     store_key, durable_config, existing_record, existing_error = _load_existing_google_record(
         normalized_email
     )
@@ -517,6 +573,17 @@ def refresh_google_token_record(email: str) -> tuple[dict | None, dict | None]:
         return None, {
             "code": "gmail_token_missing",
             "message": "No stored Gmail token is available for this mailbox.",
+        }
+
+    stored_owner_email = existing_record.get("owner_email")
+    if (
+        not normalized_owner_email
+        or not isinstance(stored_owner_email, str)
+        or stored_owner_email.strip().lower() != normalized_owner_email
+    ):
+        return None, {
+            "code": "gmail_reconnect_required",
+            "message": "Gmail authorization must be securely reconnected.",
         }
 
     refresh_token = existing_record.get("refresh_token")
@@ -541,6 +608,7 @@ def refresh_google_token_record(email: str) -> tuple[dict | None, dict | None]:
 
     next_record = build_google_token_record(
         email=normalized_email,
+        owner_email=normalized_owner_email,
         token_payload=refreshed_payload if isinstance(refreshed_payload, dict) else {},
         existing_record=existing_record,
     )
@@ -592,3 +660,37 @@ def get_google_token_record_with_metadata(email: str) -> dict | None:
         "_storage_backend": "runtime_tmp_file",
         "_storage_durable": False,
     }
+
+
+def load_google_token_record_with_metadata(
+    email: str,
+) -> tuple[dict | None, dict | None]:
+    """Load one Gmail token without hiding a configured durable-store outage."""
+    normalized_email = email.strip().lower()
+    store_key = _build_store_key(normalized_email)
+    durable_config = _resolve_durable_store_config()
+
+    if durable_config:
+        record, error = _read_durable_record(durable_config, store_key)
+        if error:
+            return None, {
+                "code": "gmail_token_store_unavailable",
+                "message": "Gmail authorization storage is temporarily unavailable.",
+            }
+        if not isinstance(record, dict):
+            return None, None
+        return {
+            **record,
+            "_storage_backend": durable_config["backend"],
+            "_storage_durable": True,
+        }, None
+
+    runtime_store = _read_runtime_store(_resolve_runtime_store_path())
+    record = runtime_store.get(store_key)
+    if not isinstance(record, dict):
+        return None, None
+    return {
+        **record,
+        "_storage_backend": "runtime_tmp_file",
+        "_storage_durable": False,
+    }, None

@@ -7,6 +7,7 @@ import re
 import sys
 import tempfile
 import time
+from http import HTTPStatus
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
@@ -15,14 +16,21 @@ from urllib.parse import parse_qs, quote, urlencode, urlparse
 from urllib.request import Request, urlopen
 
 GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
+GOOGLE_USERINFO_ENDPOINT = "https://openidconnect.googleapis.com/v1/userinfo"
 MICROSOFT_TOKEN_ENDPOINT_TEMPLATE = (
     "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
 )
 STATE_MAX_AGE_SECONDS = 15 * 60
+MAX_OAUTH_RESPONSE_BYTES = 256 * 1024
 GMAIL_OAUTH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60
 USER_CONFIG_SCHEMA_VERSION = 1
 USER_CONFIG_KEY_PREFIX = "cuevion:user:v1"
 EMAIL_PATTERN = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+OAUTH_STATE_VERSION = 1
+MAX_STATE_CLOCK_SKEW_SECONDS = 60
+STATE_SIGNATURE_DOMAIN = "cuevion-oauth-state-signature:v1"
+OWNER_BINDING_DOMAIN = "cuevion-oauth-owner-binding:v1"
+PKCE_DERIVATION_DOMAIN = "cuevion-oauth-pkce:v1"
 
 CURRENT_DIR = Path(__file__).resolve().parent
 API_DIR = CURRENT_DIR.parent
@@ -49,6 +57,50 @@ def base64url_decode(value: str) -> bytes:
     return base64.urlsafe_b64decode(f"{value}{padding}".encode("ascii"))
 
 
+def build_owner_binding(
+    *,
+    owner_email: str,
+    provider: str,
+    email_hint: str,
+    nonce: str,
+    issued_at: int,
+    expires_at: int,
+    signing_secret: str,
+) -> str:
+    binding_message = "\n".join(
+        (
+            OWNER_BINDING_DOMAIN,
+            str(OAUTH_STATE_VERSION),
+            normalize_auth_email(owner_email),
+            provider,
+            email_hint,
+            nonce,
+            str(issued_at),
+            str(expires_at),
+        )
+    )
+    return base64url_encode(
+        hmac.new(
+            signing_secret.encode("utf-8"),
+            binding_message.encode("utf-8"),
+            hashlib.sha256,
+        ).digest()
+    )
+
+
+def verify_owner_binding(payload: dict, owner_email: str, signing_secret: str) -> bool:
+    expected_binding = build_owner_binding(
+        owner_email=owner_email,
+        provider=payload["provider"],
+        email_hint=payload["email_hint"],
+        nonce=payload["nonce"],
+        issued_at=payload["issued_at"],
+        expires_at=payload["expires_at"],
+        signing_secret=signing_secret,
+    )
+    return hmac.compare_digest(payload["owner_binding"], expected_binding)
+
+
 def verify_signed_state(
     state: str,
     signing_secret: str,
@@ -61,7 +113,7 @@ def verify_signed_state(
     expected_signature = base64url_encode(
         hmac.new(
             signing_secret.encode("utf-8"),
-            encoded_payload.encode("utf-8"),
+            f"{STATE_SIGNATURE_DOMAIN}:{encoded_payload}".encode("utf-8"),
             hashlib.sha256,
         ).digest(),
     )
@@ -74,21 +126,52 @@ def verify_signed_state(
     except (ValueError, json.JSONDecodeError, UnicodeDecodeError):
         return None, "invalid_state"
 
+    if not isinstance(payload, dict):
+        return None, "invalid_state"
     if expected_provider is not None and payload.get("provider") != expected_provider:
+        return None, "invalid_state"
+    if payload.get("provider") not in {"google", "microsoft"}:
         return None, "invalid_state"
 
     issued_at = payload.get("issued_at")
-    if not isinstance(issued_at, int):
+    expires_at = payload.get("expires_at")
+    current_time = int(time.time())
+    if (
+        payload.get("v") != OAUTH_STATE_VERSION
+        or not isinstance(issued_at, int)
+        or isinstance(issued_at, bool)
+        or not isinstance(expires_at, int)
+        or isinstance(expires_at, bool)
+        or issued_at > current_time + MAX_STATE_CLOCK_SKEW_SECONDS
+        or expires_at <= issued_at
+        or expires_at - issued_at > STATE_MAX_AGE_SECONDS
+    ):
         return None, "invalid_state"
 
-    if int(time.time()) - issued_at > STATE_MAX_AGE_SECONDS:
+    if current_time >= expires_at:
         return None, "expired_state"
 
-    if not isinstance(payload.get("code_verifier"), str) or not payload.get("code_verifier"):
+    email_hint = payload.get("email_hint")
+    nonce = payload.get("nonce")
+    owner_binding = payload.get("owner_binding")
+    if (
+        not isinstance(email_hint, str)
+        or not EMAIL_PATTERN.match(email_hint.strip().lower())
+        or not isinstance(nonce, str)
+        or not 16 <= len(nonce) <= 128
+        or not isinstance(owner_binding, str)
+        or len(owner_binding) != 43
+        or "owner_email" in payload
+    ):
         return None, "invalid_state"
 
-    if not isinstance(payload.get("email"), str):
-        return None, "invalid_state"
+    payload["code_verifier"] = base64url_encode(
+        hmac.new(
+            signing_secret.encode("utf-8"),
+            f"{PKCE_DERIVATION_DOMAIN}:{encoded_payload}".encode("utf-8"),
+            hashlib.sha256,
+        ).digest(),
+    )
 
     return payload, None
 
@@ -164,6 +247,7 @@ def _build_store_key(state_or_mailbox_id: str) -> str:
 def build_google_token_record(
     *,
     email: str,
+    owner_email: str,
     token_payload: dict,
     existing_record: dict | None = None,
 ) -> dict:
@@ -183,6 +267,7 @@ def build_google_token_record(
     return {
         "provider": "google",
         "email": email,
+        "owner_email": owner_email.strip().lower(),
         "access_token": token_payload.get("access_token"),
         "refresh_token": refresh_token,
         "token_type": token_type if isinstance(token_type, str) else None,
@@ -217,31 +302,38 @@ def _perform_rest_request(
 
     try:
         with urlopen(request, timeout=20) as response:
-            payload = response.read().decode("utf-8")
-            return json.loads(payload) if payload else {}, None
-    except HTTPError as error:
-        error_body = error.read().decode("utf-8", errors="replace")
-        try:
-            parsed_error = json.loads(error_body) if error_body else {}
-        except json.JSONDecodeError:
-            parsed_error = {}
-
+            raw_payload = response.read(MAX_OAUTH_RESPONSE_BYTES + 1)
+            if len(raw_payload) > MAX_OAUTH_RESPONSE_BYTES or not raw_payload:
+                return None, {
+                    "code": "token_persistence_failed",
+                    "message": "Durable mailbox storage returned an invalid response.",
+                }
+            payload = json.loads(raw_payload.decode("utf-8"))
+            if not isinstance(payload, dict):
+                return None, {
+                    "code": "token_persistence_failed",
+                    "message": "Durable mailbox storage returned an invalid response.",
+                }
+            return payload, None
+    except HTTPError:
         return None, {
             "code": "token_persistence_failed",
-            "message": (
-                parsed_error.get("error")
-                or parsed_error.get("message")
-                or f"Durable mailbox token storage failed with HTTP {error.code}."
-            ),
+            "message": "Durable mailbox storage is temporarily unavailable.",
         }
-    except URLError as error:
+    except (TimeoutError, URLError, OSError):
         return None, {
             "code": "token_persistence_failed",
-            "message": (
-                str(error.reason)
-                if getattr(error, "reason", None)
-                else "Could not reach the durable mailbox token store."
-            ),
+            "message": "Durable mailbox storage is temporarily unavailable.",
+        }
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        return None, {
+            "code": "token_persistence_failed",
+            "message": "Durable mailbox storage returned an invalid response.",
+        }
+    except Exception:
+        return None, {
+            "code": "token_persistence_failed",
+            "message": "Durable mailbox storage is temporarily unavailable.",
         }
 
 
@@ -254,21 +346,36 @@ def _read_durable_record(config: dict, store_key: str) -> tuple[dict | None, dic
     if error:
         return None, error
 
-    result = payload.get("result") if isinstance(payload, dict) else None
+    if not isinstance(payload, dict) or "result" not in payload:
+        return None, {
+            "code": "token_persistence_failed",
+            "message": "Durable mailbox token storage returned an unreadable token record.",
+        }
+    result = payload.get("result")
     if result is None:
         return None, None
 
     if isinstance(result, str):
         try:
             parsed = json.loads(result)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
             return None, {
                 "code": "token_persistence_failed",
                 "message": "Durable mailbox token storage returned an unreadable token record.",
             }
-        return parsed if isinstance(parsed, dict) else None, None
+        if not isinstance(parsed, dict):
+            return None, {
+                "code": "token_persistence_failed",
+                "message": "Durable mailbox token storage returned an unreadable token record.",
+            }
+        return parsed, None
 
-    return result if isinstance(result, dict) else None, None
+    if not isinstance(result, dict):
+        return None, {
+            "code": "token_persistence_failed",
+            "message": "Durable mailbox token storage returned an unreadable token record.",
+        }
+    return result, None
 
 
 def _write_durable_record(
@@ -305,10 +412,10 @@ def _persist_runtime_record(store_key: str, record: dict) -> tuple[dict | None, 
 
     try:
         _write_runtime_store(store_path, store)
-    except OSError as error:
+    except OSError:
         return None, {
             "code": "token_persistence_failed",
-            "message": f"Google authentication succeeded, but mailbox token storage failed: {error}",
+            "message": "Google authentication succeeded, but mailbox token storage failed.",
         }
 
     persisted_store = _read_runtime_store(store_path)
@@ -319,6 +426,7 @@ def _persist_runtime_record(store_key: str, record: dict) -> tuple[dict | None, 
 def persist_google_token_record(
     *,
     email: str,
+    owner_email: str,
     token_payload: dict,
 ) -> tuple[dict | None, dict | None]:
     access_token = token_payload.get("access_token")
@@ -329,6 +437,12 @@ def persist_google_token_record(
         }
 
     normalized_email = email.strip().lower()
+    normalized_owner_email = owner_email.strip().lower()
+    if not EMAIL_PATTERN.match(normalized_owner_email):
+        return None, {
+            "code": "invalid_token_owner",
+            "message": "Authenticated Gmail token ownership is required.",
+        }
     store_key = _build_store_key(normalized_email)
     durable_config = _resolve_durable_store_config()
     existing_record = None
@@ -343,6 +457,7 @@ def persist_google_token_record(
 
     next_record = build_google_token_record(
         email=normalized_email,
+        owner_email=normalized_owner_email,
         token_payload=token_payload,
         existing_record=existing_record if isinstance(existing_record, dict) else None,
     )
@@ -372,6 +487,7 @@ def persist_google_token_record(
     if (
         persisted_record.get("provider") != "google"
         or persisted_record.get("email") != normalized_email
+        or persisted_record.get("owner_email") != normalized_owner_email
         or not isinstance(persisted_record.get("access_token"), str)
         or not persisted_record.get("access_token")
     ):
@@ -397,32 +513,6 @@ def _get_authenticated_user(headers) -> dict | None:
 
 def _build_user_config_key(email: str) -> str:
     return f"{USER_CONFIG_KEY_PREFIX}:{normalize_auth_email(email)}"
-
-
-def _extract_oauth_identity(token_payload: dict, fallback_email: str) -> dict:
-    identity = {
-        "email": fallback_email.strip().lower(),
-        "display_name": None,
-    }
-    id_token = token_payload.get("id_token")
-    if not isinstance(id_token, str) or id_token.count(".") < 2:
-        return identity
-
-    try:
-        payload_segment = id_token.split(".")[1]
-        claims = json.loads(base64url_decode(payload_segment).decode("utf-8"))
-    except (ValueError, json.JSONDecodeError, UnicodeDecodeError):
-        return identity
-
-    email = claims.get("email") if isinstance(claims, dict) else None
-    if isinstance(email, str) and EMAIL_PATTERN.match(email.strip().lower()):
-        identity["email"] = email.strip().lower()
-
-    name = claims.get("name") if isinstance(claims, dict) else None
-    if isinstance(name, str) and name.strip():
-        identity["display_name"] = name.strip()
-
-    return identity
 
 
 def _format_name_from_email(email: str) -> str:
@@ -476,6 +566,7 @@ def _upsert_gmail_managed_inbox_record(
     *,
     email: str,
     display_name: str | None,
+    owner_email: str,
     message: str,
 ) -> list:
     normalized_email = email.strip().lower()
@@ -511,8 +602,10 @@ def _upsert_gmail_managed_inbox_record(
         "title": title,
         "email": normalized_email,
         "provider": "google",
+        "oauthOwnerEmail": normalize_auth_email(owner_email),
         "connected": True,
         "connectionMethod": "oauth",
+        "connectionType": "oauth",
         "connectionStatus": "connected",
         "connectionMessage": message,
         "oauthAuthorizationUrl": None,
@@ -554,11 +647,90 @@ def _write_user_config_durable_record(
     store_key: str,
     record: dict,
 ) -> tuple[dict | None, dict | None]:
-    return _perform_rest_request(
+    payload, error = _perform_rest_request(
         config,
         "POST",
         f"/set/{quote(store_key, safe='')}",
         json.dumps(record, separators=(",", ":"), sort_keys=True).encode("utf-8"),
+    )
+    if error:
+        return None, {
+            "code": "user_config_persistence_failed",
+            "message": "User config storage is temporarily unavailable.",
+        }
+    if not isinstance(payload, dict) or payload.get("result") != "OK":
+        return None, {
+            "code": "user_config_persistence_failed",
+            "message": "User config storage did not confirm the write.",
+        }
+    return payload, None
+
+
+def _read_user_config_durable_record(
+    config: dict,
+    store_key: str,
+    *,
+    allow_missing: bool = False,
+) -> tuple[dict | None, dict | None]:
+    payload, error = _perform_rest_request(
+        config,
+        "GET",
+        f"/get/{quote(store_key, safe='')}",
+    )
+    if error:
+        return None, {
+            "code": "user_config_persistence_failed",
+            "message": "User config storage is temporarily unavailable.",
+        }
+    if not isinstance(payload, dict) or "result" not in payload:
+        return None, {
+            "code": "user_config_persistence_failed",
+            "message": "User config storage could not verify the saved mailbox.",
+        }
+    result = payload.get("result")
+    if result is None and allow_missing:
+        return None, None
+    if isinstance(result, str):
+        try:
+            result = json.loads(result)
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+            result = None
+    if not isinstance(result, dict):
+        return None, {
+            "code": "user_config_persistence_failed",
+            "message": "User config storage could not verify the saved mailbox.",
+        }
+    return result, None
+
+
+def _verify_saved_gmail_mailbox(
+    record: dict,
+    intended_mailbox: dict,
+    owner_email: str,
+    expected_updated_at: str,
+) -> bool:
+    managed_inboxes = record.get("managedInboxes")
+    if not isinstance(managed_inboxes, list):
+        return False
+    intended_id = intended_mailbox.get("id")
+    matches = [
+        mailbox
+        for mailbox in managed_inboxes
+        if isinstance(mailbox, dict) and mailbox.get("id") == intended_id
+    ]
+    if len(matches) != 1:
+        return False
+    saved = matches[0]
+    return (
+        saved.get("id") == intended_id
+        and saved.get("email") == intended_mailbox.get("email")
+        and saved.get("provider") == "google"
+        and saved.get("connected") is True
+        and saved.get("connectionStatus") == "connected"
+        and saved.get("oauthOwnerEmail") == normalize_auth_email(owner_email)
+        and normalize_auth_email(str(record.get("email") or ""))
+        == normalize_auth_email(owner_email)
+        and record.get("updatedAt") == expected_updated_at
     )
 
 
@@ -567,15 +739,25 @@ def _upsert_gmail_managed_inbox_in_user_config(
     *,
     email: str,
     display_name: str | None,
+    owner_email: str,
     message: str,
 ) -> dict | None:
     session_user = _get_authenticated_user(headers)
     durable_config = _resolve_durable_store_config()
-    if not session_user or not durable_config:
-        return None
+    if (
+        not session_user
+        or normalize_auth_email(session_user["email"]) != normalize_auth_email(owner_email)
+    ):
+        return {"code": "unauthorized", "message": "OAuth session ownership could not be verified."}
+    if not durable_config:
+        return {"code": "user_config_store_unavailable", "message": "User config storage is unavailable."}
 
     store_key = _build_user_config_key(session_user["email"])
-    existing_record, existing_error = _read_durable_record(durable_config, store_key)
+    existing_record, existing_error = _read_user_config_durable_record(
+        durable_config,
+        store_key,
+        allow_missing=True,
+    )
     if existing_error:
         return existing_error
 
@@ -606,15 +788,50 @@ def _upsert_gmail_managed_inbox_in_user_config(
         existing_managed_inboxes,
         email=email,
         display_name=display_name,
+        owner_email=owner_email,
         message=message,
     )
+
+    intended_mailboxes = [
+        mailbox
+        for mailbox in next_record["managedInboxes"]
+        if isinstance(mailbox, dict)
+        and mailbox.get("provider") == "google"
+        and mailbox.get("email") == email.strip().lower()
+        and mailbox.get("oauthOwnerEmail") == normalize_auth_email(owner_email)
+    ]
+    if len(intended_mailboxes) != 1:
+        return {
+            "code": "user_config_persistence_failed",
+            "message": "User config storage could not prepare the verified Gmail mailbox.",
+        }
+    intended_mailbox = intended_mailboxes[0]
 
     _, write_error = _write_user_config_durable_record(
         durable_config,
         store_key,
         next_record,
     )
-    return write_error
+    if write_error:
+        return write_error
+
+    verified_record, verify_error = _read_user_config_durable_record(
+        durable_config,
+        store_key,
+    )
+    if verify_error:
+        return verify_error
+    if not _verify_saved_gmail_mailbox(
+        verified_record,
+        intended_mailbox,
+        owner_email,
+        next_record["updatedAt"],
+    ):
+        return {
+            "code": "user_config_persistence_failed",
+            "message": "User config storage could not verify the saved Gmail mailbox.",
+        }
+    return None
 
 OAUTH_CALLBACK_RESULT_STORAGE_KEY = "cuevion-oauth-callback-result"
 
@@ -711,9 +928,15 @@ def _exchange_google_code(
 
     try:
         with urlopen(request, timeout=20) as response:
-            return json.loads(response.read().decode("utf-8")), None
+            body = response.read(MAX_OAUTH_RESPONSE_BYTES + 1)
+            if len(body) > MAX_OAUTH_RESPONSE_BYTES:
+                return None, {"code": "token_exchange_failed", "message": "Google returned an invalid token response."}
+            payload = json.loads(body.decode("utf-8"))
+            if not isinstance(payload, dict):
+                return None, {"code": "token_exchange_failed", "message": "Google returned an invalid token response."}
+            return payload, None
     except HTTPError as error:
-        error_body = error.read().decode("utf-8", errors="replace")
+        error_body = error.read(MAX_OAUTH_RESPONSE_BYTES + 1).decode("utf-8", errors="replace")
         try:
             parsed_error = json.loads(error_body) if error_body else {}
         except json.JSONDecodeError:
@@ -726,11 +949,44 @@ def _exchange_google_code(
                 or "Google token exchange failed."
             ),
         }
-    except URLError as error:
+    except (URLError, TimeoutError, UnicodeDecodeError, json.JSONDecodeError):
         return None, {
             "code": "token_exchange_unavailable",
-            "message": str(error.reason) if getattr(error, "reason", None) else "Could not reach Google.",
+            "message": "Google token exchange was unavailable.",
         }
+
+
+def _fetch_verified_google_identity(access_token: str) -> tuple[dict | None, dict | None]:
+    request = Request(
+        GOOGLE_USERINFO_ENDPOINT,
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Accept": "application/json",
+        },
+        method="GET",
+    )
+    try:
+        with urlopen(request, timeout=20) as response:
+            body = response.read(64 * 1024 + 1)
+            if len(body) > 64 * 1024:
+                return None, {"code": "google_identity_invalid"}
+            payload = json.loads(body.decode("utf-8"))
+    except (HTTPError, URLError, TimeoutError, UnicodeDecodeError, json.JSONDecodeError):
+        return None, {"code": "google_identity_unavailable"}
+
+    email = payload.get("email") if isinstance(payload, dict) else None
+    email_verified = payload.get("email_verified") if isinstance(payload, dict) else None
+    if (
+        not isinstance(email, str)
+        or not EMAIL_PATTERN.match(email.strip().lower())
+        or email_verified is not True
+    ):
+        return None, {"code": "google_identity_invalid"}
+    name = payload.get("name") if isinstance(payload.get("name"), str) else None
+    return {
+        "email": email.strip().lower(),
+        "display_name": name.strip() if isinstance(name, str) and name.strip() else None,
+    }, None
 
 
 def _exchange_microsoft_code(
@@ -761,9 +1017,15 @@ def _exchange_microsoft_code(
 
     try:
         with urlopen(request, timeout=20) as response:
-            return json.loads(response.read().decode("utf-8")), None
+            body = response.read(MAX_OAUTH_RESPONSE_BYTES + 1)
+            if len(body) > MAX_OAUTH_RESPONSE_BYTES:
+                return None, {"code": "token_exchange_failed", "message": "Microsoft returned an invalid token response."}
+            payload = json.loads(body.decode("utf-8"))
+            if not isinstance(payload, dict):
+                return None, {"code": "token_exchange_failed", "message": "Microsoft returned an invalid token response."}
+            return payload, None
     except HTTPError as error:
-        error_body = error.read().decode("utf-8", errors="replace")
+        error_body = error.read(MAX_OAUTH_RESPONSE_BYTES + 1).decode("utf-8", errors="replace")
         try:
             parsed_error = json.loads(error_body) if error_body else {}
         except json.JSONDecodeError:
@@ -776,18 +1038,16 @@ def _exchange_microsoft_code(
                 or "Microsoft token exchange failed."
             ),
         }
-    except URLError as error:
+    except (URLError, TimeoutError, UnicodeDecodeError, json.JSONDecodeError):
         return None, {
             "code": "token_exchange_unavailable",
-            "message": (
-                str(error.reason)
-                if getattr(error, "reason", None)
-                else "Could not reach Microsoft."
-            ),
+            "message": "Microsoft token exchange was unavailable.",
         }
 
 
-def _verify_signed_state_with_secrets(state: str) -> tuple[dict | None, str | None]:
+def _verify_signed_state_with_secrets(
+    state: str,
+) -> tuple[dict | None, str | None, str | None]:
     shared_secret = os.getenv("CUEVION_OAUTH_STATE_SECRET", "").strip()
     google_client_secret = os.getenv("GOOGLE_CLIENT_SECRET", "").strip()
     microsoft_client_secret = os.getenv("MICROSOFT_CLIENT_SECRET", "").strip()
@@ -805,14 +1065,31 @@ def _verify_signed_state_with_secrets(state: str) -> tuple[dict | None, str | No
             expected_provider=None,
         )
         if payload is not None:
-            return payload, None
+            return payload, None, secret
         if error == "expired_state":
             saw_expired_state = True
 
-    return None, "expired_state" if saw_expired_state else "invalid_state"
+    return None, "expired_state" if saw_expired_state else "invalid_state", None
 
 
 class handler(BaseHTTPRequestHandler):
+    def send_error(self, code, message=None, explain=None):
+        if code == HTTPStatus.NOT_IMPLEMENTED:
+            self.close_connection = True
+            self._send_method_not_allowed(write_body=getattr(self, "command", "") != "HEAD")
+            return
+        super().send_error(code, message, explain)
+
+    def _send_method_not_allowed(self, *, write_body: bool = True):
+        response_body = json.dumps({"ok": False, "error": {"code": "method_not_allowed", "message": "Use GET for OAuth callbacks"}}).encode("utf-8")
+        self.send_response(405)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(response_body)))
+        self.end_headers()
+        if write_body:
+            self.wfile.write(response_body)
+
     def _send_callback_page(self, payload: dict):
         page = _render_callback_bridge_page(
             _build_app_redirect_url(self.headers),
@@ -830,7 +1107,9 @@ class handler(BaseHTTPRequestHandler):
         params = parse_qs(parsed_url.query)
         oauth_error = params.get("error", [None])[0]
         state = params.get("state", [None])[0]
-        state_payload, state_error = _verify_signed_state_with_secrets(state or "")
+        state_payload, state_error, state_signing_secret = _verify_signed_state_with_secrets(
+            state or ""
+        )
 
         provider = (
             state_payload.get("provider")
@@ -839,11 +1118,12 @@ class handler(BaseHTTPRequestHandler):
             else "google"
         )
         provider_name = "Microsoft" if provider == "microsoft" else "Google"
-        email = (
-            state_payload.get("email", "")
+        email_hint = (
+            state_payload.get("email_hint", state_payload.get("email", ""))
             if state_payload is not None
             else ""
         )
+        email = email_hint if provider == "microsoft" else ""
 
         if state_error:
             self._send_callback_page(
@@ -856,6 +1136,28 @@ class handler(BaseHTTPRequestHandler):
                 )
             )
             return
+
+        session_user = _get_authenticated_user(self.headers)
+        if (
+            not session_user
+            or not state_signing_secret
+            or not verify_owner_binding(
+                state_payload,
+                session_user["email"],
+                state_signing_secret,
+            )
+        ):
+            self._send_callback_page(
+                _build_callback_payload(
+                    provider=provider,
+                    email="",
+                    connection_status="connection_failed",
+                    message=f"{provider_name} authentication session could not be verified. Please try again.",
+                    connected=False,
+                )
+            )
+            return
+        state_owner_email = normalize_auth_email(session_user["email"])
 
         if oauth_error:
             self._send_callback_page(
@@ -943,7 +1245,7 @@ class handler(BaseHTTPRequestHandler):
                     provider=provider,
                     email=email,
                     connection_status="connection_failed",
-                    message=token_error["message"],
+                    message=f"{provider_name} authentication could not be completed. Please try again.",
                     connected=False,
                 )
             )
@@ -961,17 +1263,30 @@ class handler(BaseHTTPRequestHandler):
             )
             return
 
-        oauth_identity = (
-            _extract_oauth_identity(token_payload, email)
-            if provider == "google"
-            else {"email": email.strip().lower(), "display_name": None}
-        )
-        mailbox_email = oauth_identity["email"] or email.strip().lower()
+        if provider == "google":
+            oauth_identity, identity_error = _fetch_verified_google_identity(
+                str(token_payload["access_token"]),
+            )
+            if identity_error or not oauth_identity:
+                self._send_callback_page(
+                    _build_callback_payload(
+                        provider=provider,
+                        email="",
+                        connection_status="connection_failed",
+                        message="Google account identity could not be verified. Please try again.",
+                        connected=False,
+                    )
+                )
+                return
+        else:
+            oauth_identity = {"email": email.strip().lower(), "display_name": None}
+        mailbox_email = oauth_identity["email"]
         display_name = oauth_identity.get("display_name")
 
         if provider == "google":
             persisted_record, persistence_error = persist_google_token_record(
                 email=mailbox_email,
+                owner_email=state_owner_email,
                 token_payload=token_payload,
             )
         else:
@@ -986,10 +1301,7 @@ class handler(BaseHTTPRequestHandler):
                     provider=provider,
                     email=mailbox_email,
                     connection_status="authenticated_pending_activation",
-                    message=(
-                        persistence_error["message"]
-                        or f"{provider_name} authentication completed. Tokens are stored only in the current server runtime. Final mailbox activation requires durable secure mailbox token storage."
-                    ),
+                    message=f"{provider_name} authentication completed, but secure authorization storage is unavailable.",
                     connected=False,
                     display_name=display_name,
                 )
@@ -1033,6 +1345,7 @@ class handler(BaseHTTPRequestHandler):
                 self.headers,
                 email=mailbox_email,
                 display_name=display_name,
+                owner_email=state_owner_email,
                 message=connected_message,
             )
             if user_config_error:
@@ -1041,10 +1354,7 @@ class handler(BaseHTTPRequestHandler):
                         provider=provider,
                         email=mailbox_email,
                         connection_status="authenticated_pending_activation",
-                        message=(
-                            user_config_error.get("message")
-                            or "Google authentication completed, but the Gmail inbox could not be saved to user config."
-                        ),
+                        message="Google authentication completed, but the Gmail inbox could not be saved securely.",
                         connected=False,
                         display_name=display_name,
                     )
@@ -1063,20 +1373,28 @@ class handler(BaseHTTPRequestHandler):
         )
 
     def do_POST(self):
-        self.send_response(405)
+        self._send_method_not_allowed()
+
+    def do_PUT(self):
+        self._send_method_not_allowed()
+
+    def do_PATCH(self):
+        self._send_method_not_allowed()
+
+    def do_DELETE(self):
+        self._send_method_not_allowed()
+
+    def do_HEAD(self):
+        self._send_method_not_allowed(write_body=False)
+
+    def do_OPTIONS(self):
+        response_body = b'{"ok":true}'
+        self.send_response(200)
         self.send_header("Content-Type", "application/json")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(response_body)))
         self.end_headers()
-        self.wfile.write(
-            json.dumps(
-                {
-                    "ok": False,
-                    "error": {
-                        "code": "method_not_allowed",
-                        "message": "Use GET for OAuth callbacks",
-                    },
-                }
-            ).encode("utf-8")
-        )
+        self.wfile.write(response_body)
 
     def log_message(self, format, *args):
         return

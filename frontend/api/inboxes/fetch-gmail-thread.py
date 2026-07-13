@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
@@ -18,11 +17,11 @@ if str(API_DIR) not in sys.path:
     sys.path.insert(0, str(API_DIR))
 
 from gmail_thread_parser import GmailThreadParseError, parse_gmail_thread  # noqa: E402
-from oauth_token_store import (  # noqa: E402
-    get_google_token_record_with_metadata,
-    refresh_google_token_record,
+from authenticated_gmail import (  # noqa: E402
+    gmail_http_error_code,
+    refresh_gmail_context,
+    resolve_authenticated_gmail,
 )
-from user_config_store import resolve_owned_managed_inbox  # noqa: E402
 
 GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1/users/me"
 MAX_REQUEST_BODY_BYTES = 16 * 1024
@@ -31,6 +30,16 @@ NETWORK_TIMEOUT_SECONDS = 20
 SENSITIVE_REQUEST_FIELDS = {
     "email",
     "provider",
+    "authMode",
+    "from",
+    "username",
+    "password",
+    "host",
+    "port",
+    "smtpHost",
+    "smtpPort",
+    "smtpUsername",
+    "smtpPassword",
     "accessToken",
     "access_token",
     "refreshToken",
@@ -100,18 +109,6 @@ def _valid_identifier(value: object) -> bool:
     )
 
 
-def _is_token_expired(token_record: dict) -> bool:
-    expires_at = token_record.get("expires_at")
-    if not isinstance(expires_at, str) or not expires_at.strip():
-        return False
-    try:
-        return datetime.fromisoformat(expires_at.replace("Z", "+00:00")) <= datetime.now(
-            timezone.utc
-        )
-    except ValueError:
-        return False
-
-
 def _gmail_thread_request(access_token: str, thread_id: str) -> tuple[object | None, dict | None]:
     request = Request(
         f"{GMAIL_API_BASE_URL}/threads/{quote(thread_id, safe='')}?format=full",
@@ -137,23 +134,14 @@ def _gmail_thread_request(access_token: str, thread_id: str) -> tuple[object | N
     except HTTPError as error:
         if error.code == 404:
             return None, {"code": "gmail_thread_not_found"}
-        if error.code in {401, 403}:
-            return None, {"code": "gmail_token_invalid"}
-        return None, {"code": "gmail_thread_fetch_failed"}
+        return None, {
+            "code": gmail_http_error_code(
+                error.code,
+                "gmail_thread_fetch_failed",
+            )
+        }
     except (URLError, TimeoutError):
         return None, {"code": "gmail_unavailable"}
-
-
-def _token_error_response(error: dict | None) -> tuple[int, dict]:
-    code = str((error or {}).get("code") or "gmail_token_invalid")
-    if code not in {"gmail_token_missing", "gmail_refresh_token_missing"}:
-        code = "gmail_token_invalid"
-    messages = {
-        "gmail_token_missing": "No stored Gmail authorization is available.",
-        "gmail_refresh_token_missing": "Gmail authorization must be renewed.",
-        "gmail_token_invalid": "Gmail authorization is no longer valid.",
-    }
-    return 401, _error(code, messages[code])
 
 
 def _gmail_error_response(error: dict) -> tuple[int, dict]:
@@ -164,10 +152,13 @@ def _gmail_error_response(error: dict) -> tuple[int, dict]:
         "gmail_response_invalid": (502, "Gmail returned an invalid conversation response."),
         "gmail_thread_too_large": (502, "The Gmail conversation is too large to load."),
         "gmail_thread_fetch_failed": (502, "The Gmail conversation could not be loaded."),
-        "gmail_token_invalid": (401, "Gmail authorization is no longer valid."),
+        "gmail_token_invalid": (401, "Gmail authorization must be renewed."),
+        "gmail_permission_denied": (403, "Gmail did not permit this operation."),
+        "gmail_rate_limited": (502, "Gmail is temporarily rate limited."),
     }
     status, message = mapping.get(code, (502, "The Gmail conversation could not be loaded."))
-    return status, _error(code if code in mapping else "gmail_thread_fetch_failed", message)
+    response_code = "reconnect_required" if code == "gmail_token_invalid" else code
+    return status, _error(response_code if code in mapping else "gmail_thread_fetch_failed", message)
 
 
 class handler(BaseHTTPRequestHandler):
@@ -185,6 +176,16 @@ class handler(BaseHTTPRequestHandler):
         super().send_error(code, message, explain)
 
     def do_POST(self):
+        try:
+            handler._handle_post(self)
+        except Exception:
+            _send_json(
+                self,
+                500,
+                _error("internal_error", "The Gmail conversation could not be loaded."),
+            )
+
+    def _handle_post(self):
         payload, request_error = _read_json_body(self)
         if request_error:
             _send_json(self, 400, request_error)
@@ -196,69 +197,23 @@ class handler(BaseHTTPRequestHandler):
             _send_json(self, 400, _error("invalid_request", "Valid mailbox and thread ids are required."))
             return
 
-        ownership = resolve_owned_managed_inbox(self.headers, mailbox_id)
-        if ownership["status"] != "ok" or not ownership["inbox"]:
-            if ownership["status"] == "unauthorized":
-                status, code, message = 401, "unauthorized", "An authenticated session is required."
-            elif ownership["status"] == "not_found":
-                status, code, message = 404, "gmail_connection_not_found", "Gmail connection was not found."
-            else:
-                status, code, message = 503, "user_config_store_unavailable", "Mailbox ownership could not be verified."
-            _send_json(self, status, _error(code, message))
+        resolution = resolve_authenticated_gmail(self.headers, mailbox_id)
+        if resolution["status"] != "ok":
+            _send_json(self, int(resolution["status_code"]), resolution["error"])
             return
+        context = resolution["context"]
 
-        inbox = ownership["inbox"]
-        if inbox["provider"] != "google":
-            _send_json(self, 400, _error("unsupported_provider", "This mailbox is not a Gmail connection."))
-            return
-        if inbox["connected"] is not True or inbox["connectionStatus"] != "connected":
-            _send_json(self, 409, _error("gmail_connection_not_ready", "Gmail connection is not ready."))
-            return
-        mailbox_email = inbox["email"]
-        if not mailbox_email:
-            _send_json(self, 503, _error("user_config_store_unavailable", "Mailbox ownership could not be verified."))
-            return
-
-        token_record = get_google_token_record_with_metadata(mailbox_email)
-        if not token_record:
-            status, response = _token_error_response({"code": "gmail_token_missing"})
-            _send_json(self, status, response)
-            return
-        access_token = token_record.get("access_token")
-        if not isinstance(access_token, str) or not access_token.strip():
-            status, response = _token_error_response({"code": "gmail_token_missing"})
-            _send_json(self, status, response)
-            return
-
-        did_refresh = False
-        if _is_token_expired(token_record):
-            token_record, refresh_error = refresh_google_token_record(mailbox_email)
-            did_refresh = True
-            if refresh_error or not token_record:
-                status, response = _token_error_response(refresh_error)
-                _send_json(self, status, response)
+        gmail_payload, gmail_error = _gmail_thread_request(
+            context["access_token"], provider_thread_id
+        )
+        if gmail_error and gmail_error.get("code") == "gmail_token_invalid" and not context["refresh_attempted"]:
+            refreshed = refresh_gmail_context(context)
+            if refreshed["status"] != "ok":
+                _send_json(self, int(refreshed["status_code"]), refreshed["error"])
                 return
-            access_token = token_record.get("access_token")
-            if not isinstance(access_token, str) or not access_token.strip():
-                status, response = _token_error_response({"code": "gmail_token_invalid"})
-                _send_json(self, status, response)
-                return
-
-        gmail_payload, gmail_error = _gmail_thread_request(access_token.strip(), provider_thread_id)
-        if gmail_error and gmail_error.get("code") == "gmail_token_invalid" and not did_refresh:
-            token_record, refresh_error = refresh_google_token_record(mailbox_email)
-            did_refresh = True
-            if refresh_error or not token_record:
-                status, response = _token_error_response(refresh_error)
-                _send_json(self, status, response)
-                return
-            refreshed_access_token = token_record.get("access_token")
-            if not isinstance(refreshed_access_token, str) or not refreshed_access_token.strip():
-                status, response = _token_error_response({"code": "gmail_token_invalid"})
-                _send_json(self, status, response)
-                return
+            context = refreshed["context"]
             gmail_payload, gmail_error = _gmail_thread_request(
-                refreshed_access_token.strip(), provider_thread_id
+                context["access_token"], provider_thread_id
             )
 
         if gmail_error:

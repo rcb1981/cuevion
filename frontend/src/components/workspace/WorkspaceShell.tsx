@@ -16006,8 +16006,7 @@ function MailboxView({
 
     if (sourceMailbox.provider === "google") {
       return downloadAttachment({
-        provider: "gmail",
-        email: sourceMailbox.email.trim(),
+        mailboxId: sourceMailbox.id,
         messageId: sourceMessageUid,
         attachmentId: attachment.id,
       });
@@ -16411,15 +16410,6 @@ function MailboxView({
       return;
     }
 
-    const resolvedImapSettings = applyProviderDefaults(
-      sendProvider,
-      managedMailbox.customImap,
-      managedMailbox.email,
-    );
-    const resolvedSmtpSettings =
-      sendProvider === "custom_imap"
-        ? resolveCustomSmtpCredentials(managedMailbox)
-        : null;
     const toRecipients = composeTo.trim();
 
     if (!toRecipients) {
@@ -16444,23 +16434,7 @@ function MailboxView({
 
       const bodyPreview = extractComposePlainText(activeBodyHtml);
       const sendResponse = await sendGmailMessage({
-        provider: sendProvider,
         mailboxId: managedMailbox.id,
-        authMode: sendProvider === "google" ? "oauth" : "smtp",
-        useSameCredentials: resolvedSmtpSettings?.useSameCredentials,
-        email: managedMailbox.email.trim(),
-        username:
-          sendProvider === "google"
-            ? managedMailbox.email.trim()
-            : resolvedSmtpSettings?.username.trim() ?? "",
-        password:
-          sendProvider === "google"
-            ? resolvedImapSettings.password
-            : resolvedSmtpSettings?.password ?? "",
-        smtpHost: resolvedSmtpSettings?.host.trim(),
-        smtpPort: resolvedSmtpSettings?.port.trim(),
-        smtpSecurity: resolvedSmtpSettings?.security,
-        from: activeComposeMailbox.email,
         to: toRecipients,
         cc: composeCc.trim() || undefined,
         bcc: composeBcc.trim() || undefined,
@@ -18261,16 +18235,6 @@ function MailboxView({
       return;
     }
 
-    const resolvedImapSettings = applyProviderDefaults(
-      sendProvider,
-      managedMailbox.customImap,
-      managedMailbox.email,
-    );
-    const resolvedSmtpSettings =
-      sendProvider === "custom_imap"
-        ? resolveCustomSmtpCredentials(managedMailbox)
-        : null;
-
     let inviteLink = "";
     let inviteParticipantName = formatCollaborationParticipantNameFromEmail(normalizedEmail);
     let issuedInviteThread: CollaborationThread | null = null;
@@ -18368,23 +18332,7 @@ function MailboxView({
 
     try {
       const sendResponse = await sendGmailMessage({
-        provider: sendProvider,
         mailboxId: managedMailbox.id,
-        authMode: sendProvider === "google" ? "oauth" : "smtp",
-        useSameCredentials: resolvedSmtpSettings?.useSameCredentials,
-        email: managedMailbox.email.trim(),
-        username:
-          sendProvider === "google"
-            ? managedMailbox.email.trim()
-            : resolvedSmtpSettings?.username.trim() ?? "",
-        password:
-          sendProvider === "google"
-            ? resolvedImapSettings.password
-            : resolvedSmtpSettings?.password ?? "",
-        smtpHost: resolvedSmtpSettings?.host.trim(),
-        smtpPort: resolvedSmtpSettings?.port.trim(),
-        smtpSecurity: resolvedSmtpSettings?.security,
-        from: sendingMailbox.email,
         to: normalizedEmail,
         subject: inviteSubject,
         bodyHtml: inviteBodyHtml,
@@ -18618,9 +18566,7 @@ function MailboxView({
 
     if (sourceMailbox.provider === "google") {
       return {
-        provider: "gmail",
         mailboxId: sourceMailbox.id,
-        email: sourceMailbox.email.trim(),
         messageId: providerMessageId,
         action,
       };
@@ -18722,12 +18668,12 @@ function MailboxView({
         entry,
       ): entry is typeof entry & {
         request: ImapInboxMessageActionRequest;
-      } => Boolean(entry.request && !("provider" in entry.request)),
+      } => Boolean(entry.request && "uid" in entry.request),
     );
     const nonImapTargetMessageIds = requests
       .filter(
         (entry) =>
-          Boolean(entry.request && "provider" in entry.request),
+          Boolean(entry.request && "messageId" in entry.request),
       )
       .map((entry) => entry.message.id);
 
@@ -18761,7 +18707,7 @@ function MailboxView({
       const messagesForUnreadOverrides = successfulEntries
         .filter(
           (entry) =>
-            Boolean(entry.request && "provider" in entry.request),
+            Boolean(entry.request && "messageId" in entry.request),
         )
         .map((entry) => entry.message);
 
@@ -18772,7 +18718,7 @@ function MailboxView({
 
     if (failedMessages.length > 0) {
       failedMessages.forEach((entry) => {
-        if (entry.request && !("provider" in entry.request)) {
+        if (entry.request && "uid" in entry.request) {
           updateExactImapUnreadStateInMailboxStore(
             folder,
             entry.message,
@@ -18939,7 +18885,7 @@ function MailboxView({
     }
 
     const flagged = !message.flagged;
-    const request = buildProviderMessageActionRequest(message, flagged ? "flag" : "unflag");
+    const request = buildProviderMessageActionRequest(message, flagged ? "star" : "unstar");
     if (!request) {
       closeMenus();
       return;
@@ -24000,16 +23946,6 @@ function WorkbenchView({
       };
     }
 
-    const resolvedImapSettings = applyProviderDefaults(
-      sendProvider,
-      managedMailbox.customImap,
-      managedMailbox.email,
-    );
-    const resolvedSmtpSettings =
-      sendProvider === "custom_imap"
-        ? resolveCustomSmtpCredentials(managedMailbox)
-        : null;
-
     const escapeInviteHtml = (value: string) =>
       value
         .replace(/&/g, "&amp;")
@@ -24041,23 +23977,7 @@ function WorkbenchView({
     )}</p></div>`;
 
     const sendResponse = await sendGmailMessage({
-      provider: sendProvider,
       mailboxId: managedMailbox.id,
-      authMode: sendProvider === "google" ? "oauth" : "smtp",
-      useSameCredentials: resolvedSmtpSettings?.useSameCredentials,
-      email: managedMailbox.email.trim(),
-      username:
-        sendProvider === "google"
-          ? managedMailbox.email.trim()
-          : resolvedSmtpSettings?.username.trim() ?? "",
-      password:
-        sendProvider === "google"
-          ? resolvedImapSettings.password
-          : resolvedSmtpSettings?.password ?? "",
-      smtpHost: resolvedSmtpSettings?.host.trim(),
-      smtpPort: resolvedSmtpSettings?.port.trim(),
-      smtpSecurity: resolvedSmtpSettings?.security,
-      from: orderedMailbox.email,
       to: invite.inviteeEmail,
       subject: `${invite.createdByUserName} invited you to Cuevion`,
       bodyHtml: inviteBodyHtml,
@@ -37716,8 +37636,7 @@ export function WorkspaceShell({
       const diagnosticRequestedLimit: number | "default" = options?.startup ? 20 : "default";
       let response = canUseGmailOAuthFetch
         ? await fetchGmailInbox({
-            provider: managedMailbox.provider,
-            email: managedMailbox.email,
+            mailboxId: managedMailbox.id,
             focusPreferences: effectiveFocusPreferencesByMailbox[mailboxId],
           })
         : await connectInboxWithImap(
@@ -37755,7 +37674,10 @@ export function WorkspaceShell({
         }
       }
 	      if (!response.ok) {
-        if (canUseImapFetch && response.error?.code === "reconnect_required") {
+        if (
+          (canUseImapFetch || canUseGmailOAuthFetch) &&
+          response.error?.code === "reconnect_required"
+        ) {
           const reconnectMessage = "Reconnect mailbox to continue syncing.";
           setSavedManagedInboxes((current) =>
             current.map((candidate) =>

@@ -13,6 +13,7 @@ if str(API_DIR) not in sys.path:
     sys.path.insert(0, str(API_DIR))
 
 import user_config_store
+import beta_auth
 
 
 def load_config_route(module_name="user_config_route_under_test"):
@@ -237,7 +238,7 @@ class PostRouteTests(unittest.TestCase):
         )
         write_mock.assert_not_called()
 
-    def test_read_error_is_ignored_and_defaults_are_written_once(self):
+    def test_read_unavailable_fails_closed_without_writing(self):
         read_error = {
             "status": "unavailable",
             "config": None,
@@ -247,22 +248,36 @@ class PostRouteTests(unittest.TestCase):
             {"config": {"uiPreferences": {"themeMode": "Dark"}}},
             read_result=read_error,
         )
-        self.assertEqual(handler.status_code, 200)
+        self.assertEqual(handler.status_code, 503)
         read_mock.assert_called_once_with(STORE, "owner@example.com")
-        write_mock.assert_called_once()
-        written = write_mock.call_args.args[2]
-        self.assertEqual(written["v"], 1)
-        self.assertEqual(written["email"], "owner@example.com")
-        self.assertEqual(written["managedInboxes"], [])
-        self.assertEqual(written["uiPreferences"], {"themeMode": "Dark"})
-        self.assertEqual(handler.payload(), {"ok": True, "config": written})
+        write_mock.assert_not_called()
+        self.assertEqual(
+            handler.payload(),
+            {
+                "ok": False,
+                "error": {
+                    "code": "user_config_store_unavailable",
+                    "message": "User config storage is temporarily unavailable.",
+                },
+            },
+        )
 
     def test_merge_sanitization_owner_and_timestamp_behavior_are_unchanged(self):
         existing = {
             "v": 1,
             "email": "owner@example.com",
             "updatedAt": "old",
-            "managedInboxes": [],
+            "managedInboxes": [{
+                "id": "mailbox-a",
+                "email": "verified@gmail.com",
+                "provider": "google",
+                "connectionMethod": "oauth",
+                "connectionType": "oauth",
+                "connected": True,
+                "connectionStatus": "connected",
+                "oauthOwnerEmail": "owner@example.com",
+                "title": "Old title",
+            }],
             "smartFolders": [{"id": "keep"}],
         }
         read_result = {"status": "ok", "config": existing, "error": None}
@@ -277,6 +292,7 @@ class PostRouteTests(unittest.TestCase):
                         "provider": "google",
                         "connected": True,
                         "connectionStatus": "connected",
+                        "title": "New title",
                         "oauthAuthorizationUrl": "https://secret.example",
                         "customImap": {"host": "imap.example", "password": "secret"},
                         "customSmtp": {"host": "smtp.example", "password": "secret"},
@@ -295,10 +311,59 @@ class PostRouteTests(unittest.TestCase):
         self.assertNotIn("access_token", written)
         self.assertEqual(written["smartFolders"], [{"id": "keep"}])
         inbox = written["managedInboxes"][0]
-        self.assertEqual(inbox["customImap"]["password"], "")
-        self.assertEqual(inbox["customSmtp"]["password"], "")
+        self.assertEqual(inbox["email"], "verified@gmail.com")
+        self.assertEqual(inbox["provider"], "google")
+        self.assertEqual(inbox["oauthOwnerEmail"], "owner@example.com")
+        self.assertEqual(inbox["title"], "New title")
         self.assertNotIn("oauthAuthorizationUrl", inbox)
         self.assertEqual(handler.payload(), {"ok": True, "config": written})
+
+    def test_protected_google_field_attacks_preserve_server_values(self):
+        existing_inbox = {
+            "id": "mailbox-a",
+            "email": "verified@gmail.com",
+            "provider": "google",
+            "connectionMethod": "oauth",
+            "connectionType": "oauth",
+            "connected": True,
+            "connectionStatus": "connected",
+            "oauthOwnerEmail": "owner@example.com",
+            "title": "Server title",
+            "internalRole": "management",
+            "focusPreferences": {"promo": "medium"},
+        }
+        read_result = {
+            "status": "ok",
+            "config": {
+                "v": 1,
+                "email": "owner@example.com",
+                "managedInboxes": [existing_inbox],
+            },
+            "error": None,
+        }
+        payload = {
+            "config": {
+                "managedInboxes": [
+                    {
+                        "id": " MAILBOX-A ",
+                        "title": {"nested": "attack"},
+                        "internalRole": ["producer"],
+                        "focusPreferences": {"promo": "low", "unknown": "high"},
+                        "email": "attacker@gmail.com",
+                        "provider": "custom_imap",
+                        "connected": False,
+                        "connectionStatus": "connection_failed",
+                        "oauthOwnerEmail": "attacker@example.com",
+                    },
+                    {"id": "mailbox-a", "title": "duplicate"},
+                ]
+            }
+        }
+        handler, _, write_mock = self.invoke(payload, read_result=read_result)
+        written = write_mock.call_args.args[2]
+
+        self.assertEqual(handler.status_code, 200)
+        self.assertEqual(written["managedInboxes"], [existing_inbox])
 
     def test_write_failure_shape_and_success_headers_are_unchanged(self):
         error = {"code": "user_config_store_unavailable", "message": "write failed"}
@@ -314,6 +379,221 @@ class PostRouteTests(unittest.TestCase):
         self.assertEqual(success_handler.status_code, 200)
         self.assertIn(("Cache-Control", "no-store"), success_handler.response_headers)
         success_write.assert_called_once()
+
+
+class PostReadStatusHandlerTests(unittest.TestCase):
+    environment = {
+        "CUEVION_BETA_SESSION_SECRET": "session-secret",
+        "KV_REST_API_URL": "https://kv.example",
+        "KV_REST_API_TOKEN": "kv-secret",
+    }
+
+    def session_cookie(self):
+        with patch.dict(beta_auth.os.environ, self.environment, clear=False):
+            token = beta_auth.build_beta_session_token(
+                name="Owner",
+                email="owner@example.com",
+            )
+        return f"cuevion_beta_session={token}"
+
+    def invoke(self, payload, read_result):
+        body = json.dumps(payload).encode("utf-8")
+        request = FakeHandler(body, headers={"cookie": self.session_cookie()})
+        with patch.dict(beta_auth.os.environ, self.environment, clear=False), patch.object(
+            config_route,
+            "read_user_config_record",
+            return_value=read_result,
+        ) as read_mock, patch.object(
+            config_route,
+            "write_user_config_record",
+            return_value={"status": "ok", "record": {"result": "OK"}, "error": None},
+        ) as write_mock:
+            config_route.handler.do_POST(request)
+        return request, read_mock, write_mock
+
+    def assert_no_store_detail(self, request, *details):
+        response_text = json.dumps(request.payload())
+        self.assertEqual(request.status_code, 503)
+        self.assertEqual(
+            request.payload()["error"]["code"],
+            "user_config_store_unavailable",
+        )
+        self.assertIn(("Cache-Control", "no-store"), request.response_headers)
+        for detail in details:
+            self.assertNotIn(detail, response_text)
+
+    def test_missing_initializes_and_writes_first_time_config(self):
+        request, read_mock, write_mock = self.invoke(
+            {"config": {"uiPreferences": {"themeMode": "Dark"}}},
+            {
+                "status": "missing",
+                "config": None,
+                "error": {"code": "user_config_not_found", "message": "not found"},
+            },
+        )
+        self.assertEqual(request.status_code, 200)
+        read_mock.assert_called_once_with(
+            {"rest_url": "https://kv.example", "rest_token": "kv-secret"},
+            "owner@example.com",
+        )
+        write_mock.assert_called_once()
+        written = write_mock.call_args.args[2]
+        self.assertEqual(written["email"], "owner@example.com")
+        self.assertEqual(written["managedInboxes"], [])
+        self.assertEqual(written["uiPreferences"], {"themeMode": "Dark"})
+        self.assertEqual(request.payload(), {"ok": True, "config": written})
+        self.assertIn(("Cache-Control", "no-store"), request.response_headers)
+
+    def test_unavailable_cannot_erase_protected_google_config(self):
+        protected = {
+            "id": "gmail-1",
+            "email": "verified@gmail.com",
+            "provider": "google",
+            "connected": True,
+            "connectionStatus": "connected",
+            "oauthOwnerEmail": "owner@example.com",
+        }
+        request, _, write_mock = self.invoke(
+            {"config": {"managedInboxes": []}},
+            {
+                "status": "unavailable",
+                "config": {"managedInboxes": [protected]},
+                "error": {
+                    "code": "user_config_store_unavailable",
+                    "message": "raw read failure https://storage.invalid",
+                },
+            },
+        )
+        self.assert_no_store_detail(request, "raw read failure", "storage.invalid")
+        write_mock.assert_not_called()
+
+    def test_malformed_fails_closed_without_exposing_or_writing(self):
+        request, _, write_mock = self.invoke(
+            {"config": {"managedInboxes": []}},
+            {
+                "status": "malformed",
+                "config": {"raw": "stored-secret"},
+                "error": {
+                    "code": "user_config_malformed",
+                    "message": "JSON parse failed at https://storage.invalid",
+                },
+            },
+        )
+        self.assert_no_store_detail(
+            request,
+            "stored-secret",
+            "JSON parse failed",
+            "storage.invalid",
+        )
+        write_mock.assert_not_called()
+
+    def test_unexpected_typed_read_status_fails_closed_without_writing(self):
+        request, _, write_mock = self.invoke(
+            {"config": {"managedInboxes": []}},
+            {
+                "status": "future_status",
+                "config": {"raw": "unexpected-record"},
+                "error": {"code": "future_error", "message": "raw future detail"},
+            },
+        )
+        self.assert_no_store_detail(request, "unexpected-record", "raw future detail")
+        write_mock.assert_not_called()
+
+    def test_invalid_ok_payload_fails_closed_without_writing(self):
+        for invalid_payload, raw_marker in ((None, "null"), ([], "[]")):
+            with self.subTest(invalid_payload=invalid_payload):
+                request, _, write_mock = self.invoke(
+                    {"config": {"managedInboxes": []}},
+                    {"status": "ok", "config": invalid_payload},
+                )
+                self.assert_no_store_detail(
+                    request,
+                    raw_marker,
+                    "storage.invalid",
+                    "parser",
+                    "exception",
+                    "traceback",
+                )
+                self.assertNotIn("config", request.payload())
+                write_mock.assert_not_called()
+
+    def test_ok_preserves_google_identity_and_accepts_safe_presentation_update(self):
+        protected = {
+            "id": "gmail-1",
+            "email": "verified@gmail.com",
+            "provider": "google",
+            "connectionMethod": "oauth",
+            "connectionType": "oauth",
+            "connected": True,
+            "connectionStatus": "connected",
+            "oauthOwnerEmail": "owner@example.com",
+            "title": "Old title",
+        }
+        request, _, write_mock = self.invoke(
+            {
+                "config": {
+                    "managedInboxes": [
+                        {
+                            "id": "gmail-1",
+                            "email": "attacker@gmail.com",
+                            "provider": "custom_imap",
+                            "connected": False,
+                            "title": "New title",
+                        }
+                    ]
+                }
+            },
+            {
+                "status": "ok",
+                "config": {
+                    "v": 1,
+                    "email": "owner@example.com",
+                    "managedInboxes": [protected],
+                },
+                "error": None,
+            },
+        )
+        self.assertEqual(request.status_code, 200)
+        saved = write_mock.call_args.args[2]["managedInboxes"][0]
+        self.assertEqual(saved["email"], "verified@gmail.com")
+        self.assertEqual(saved["provider"], "google")
+        self.assertTrue(saved["connected"])
+        self.assertEqual(saved["oauthOwnerEmail"], "owner@example.com")
+        self.assertEqual(saved["title"], "New title")
+
+    def test_ok_custom_imap_behavior_is_unchanged(self):
+        custom_imap = {
+            "id": "imap-1",
+            "email": "artist@example.com",
+            "provider": "custom_imap",
+            "connected": True,
+            "connectionStatus": "connected",
+            "customImap": {"host": "imap.example.com", "username": "artist"},
+            "customSmtp": {"host": "smtp.example.com", "username": "artist"},
+        }
+        request, _, write_mock = self.invoke(
+            {"config": {"managedInboxes": [custom_imap]}},
+            {
+                "status": "ok",
+                "config": {
+                    "v": 1,
+                    "email": "owner@example.com",
+                    "managedInboxes": [custom_imap],
+                },
+                "error": None,
+            },
+        )
+        self.assertEqual(request.status_code, 200)
+        saved = write_mock.call_args.args[2]["managedInboxes"][0]
+        self.assertEqual(saved["id"], custom_imap["id"])
+        self.assertEqual(saved["email"], custom_imap["email"])
+        self.assertEqual(saved["provider"], "custom_imap")
+        self.assertEqual(saved["customImap"]["host"], "imap.example.com")
+        self.assertEqual(saved["customImap"]["username"], "artist")
+        self.assertEqual(saved["customImap"]["password"], "")
+        self.assertEqual(saved["customSmtp"]["host"], "smtp.example.com")
+        self.assertEqual(saved["customSmtp"]["username"], "artist")
+        self.assertEqual(saved["customSmtp"]["password"], "")
 
 
 class ModuleCompatibilityTests(unittest.TestCase):
@@ -368,10 +648,12 @@ class ModuleCompatibilityTests(unittest.TestCase):
         self.assertEqual(
             sorted(production_imports),
             [
+                "api/inboxes/authenticated_gmail.py",
                 "api/inboxes/authenticated_imap.py",
                 "api/inboxes/connect-imap.py",
+                "api/inboxes/connect-oauth.py",
                 "api/inboxes/credentials.py",
-                "api/inboxes/fetch-gmail-thread.py",
+                "api/inboxes/oauth-callback.py",
                 "api/user/config.py",
             ],
         )

@@ -121,7 +121,7 @@ async function run() {
       );
     }
 
-    for (const action of ["mark_read", "mark_unread", "flag", "unflag"] as const) {
+    for (const action of ["mark_read", "mark_unread", "star", "unstar"] as const) {
       await mutateInboxMessageAction({
         mailboxId: "stable-mailbox",
         folder: "INBOX",
@@ -176,7 +176,7 @@ async function run() {
         mimeType: "text/plain",
         contentBase64: "bm90ZQ==",
       }],
-    });
+    } as any);
     assert.deepEqual(Object.keys(requestBody(lastCaptured(captured))).sort(), [
       "attachments",
       "bcc",

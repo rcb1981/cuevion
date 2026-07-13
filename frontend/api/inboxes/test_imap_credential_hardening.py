@@ -450,6 +450,10 @@ class ExistingMailboxOperationTests(unittest.TestCase):
         )
         with patch.object(action_route, "resolve_authenticated_imap_mailbox", return_value=resolved_mailbox()), patch.object(
             action_route,
+            "resolve_owned_mailbox",
+            return_value={"status": "ok", "inbox": {"provider": "custom_imap"}},
+        ), patch.object(
+            action_route,
             "connect_mailbox_with_settings",
             return_value=mailbox,
         ) as connect:
@@ -468,18 +472,25 @@ class ExistingMailboxOperationTests(unittest.TestCase):
     def test_gmail_action_dispatch_remains_on_existing_branch(self):
         handler = FakeHandler(
             {
-                "provider": "gmail",
-                "email": "owner@gmail.com",
+                "mailboxId": "gmail-1",
                 "messageId": "message-1",
-                "action": "flag",
+                "action": "star",
             }
         )
         with patch.object(action_route, "_perform_gmail_action") as gmail_action, patch.object(
             action_route,
+            "resolve_owned_mailbox",
+            return_value={"status": "ok", "inbox": {"provider": "google"}},
+        ), patch.object(
+            action_route,
+            "resolve_gmail_context",
+            return_value={"status": "ok", "context": {"access_token": "mock", "refresh_attempted": False}},
+        ), patch.object(
+            action_route,
             "resolve_authenticated_imap_mailbox",
         ) as imap_resolver:
             action_route.handler.do_POST(handler)
-        gmail_action.assert_called_once_with(handler, ANY, "flag")
+        gmail_action.assert_called_once_with(handler, ANY, "star", ANY)
         imap_resolver.assert_not_called()
 
     def test_custom_smtp_uses_server_derived_from_transport_and_password(self):
@@ -498,6 +509,10 @@ class ExistingMailboxOperationTests(unittest.TestCase):
         smtp_context.__enter__ = Mock(return_value=smtp_instance)
         smtp_context.__exit__ = Mock(return_value=False)
         with patch.object(send_route, "resolve_authenticated_imap_mailbox", return_value=resolved_mailbox()), patch.object(
+            send_route,
+            "resolve_owned_mailbox",
+            return_value={"status": "ok", "inbox": {"provider": "custom_imap"}},
+        ), patch.object(
             send_route.smtplib,
             "SMTP",
             return_value=smtp_context,
@@ -537,7 +552,6 @@ class ChangedScopeGuardTests(unittest.TestCase):
                 "--quiet",
                 "HEAD",
                 "--",
-                "frontend/api/inboxes/fetch-gmail-thread.py",
                 "frontend/api/inboxes/gmail_thread_parser.py",
                 "frontend/src/lib/inboxConnectionApi.test.ts",
             ],
