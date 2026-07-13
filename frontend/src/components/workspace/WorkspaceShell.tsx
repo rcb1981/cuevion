@@ -73,6 +73,7 @@ import {
   sanitizeManagedInboxCredentials,
   sanitizeStoredMailboxCredentialJson,
 } from "../../lib/mailboxCredentialPersistence";
+import { isCustomSmtpSendAvailable } from "../../lib/customSmtpAvailability";
 import {
   beginInboxConnection,
   buildRefreshInboxRequest,
@@ -12888,7 +12889,6 @@ function MailboxView({
   mailboxTitleOverrides,
   orderedMailboxes,
   managedInboxes,
-  credentialStatuses,
   smartFolders,
   activeSmartFolderId,
   onActiveSmartFolderChange,
@@ -12952,7 +12952,6 @@ function MailboxView({
   mailboxTitleOverrides: Partial<Record<InboxId, string>>;
   orderedMailboxes: OrderedMailbox[];
   managedInboxes: ManagedWorkspaceInbox[];
-  credentialStatuses: MailboxCredentialStatusStore;
   smartFolders: SmartFolderDefinition[];
   activeSmartFolderId: string | null;
   onActiveSmartFolderChange: (folderId: string | null) => void;
@@ -16401,7 +16400,7 @@ function MailboxView({
       (candidate) => candidate.id === activeComposeMailbox.id,
     );
 
-    if (!managedMailbox || !canSendFromManagedMailbox(managedMailbox, credentialStatuses)) {
+    if (!managedMailbox || !canSendFromManagedMailbox(managedMailbox)) {
       setComposeSendError("Email sending is not available for this mailbox.");
       return;
     }
@@ -16425,14 +16424,6 @@ function MailboxView({
 
     if (!toRecipients) {
       setComposeSendError("Add at least one recipient before sending.");
-      return;
-    }
-
-    if (
-      sendProvider !== "google" &&
-      !(resolvedSmtpSettings?.username.trim() && hasUsableSmtpPassword(managedMailbox, credentialStatuses))
-    ) {
-      setComposeSendError("SMTP credentials are missing for this mailbox.");
       return;
     }
 
@@ -18259,7 +18250,7 @@ function MailboxView({
       (candidate) => candidate.id === sourceMailboxId,
     );
 
-    if (!managedMailbox || !canSendFromManagedMailbox(managedMailbox, credentialStatuses)) {
+    if (!managedMailbox || !canSendFromManagedMailbox(managedMailbox)) {
       setExternalInviteEmailFeedback("Email sending is not available for this mailbox.");
       return;
     }
@@ -18279,14 +18270,6 @@ function MailboxView({
       sendProvider === "custom_imap"
         ? resolveCustomSmtpCredentials(managedMailbox)
         : null;
-
-    if (
-      sendProvider !== "google" &&
-      !(resolvedSmtpSettings?.username.trim() && hasUsableSmtpPassword(managedMailbox, credentialStatuses))
-    ) {
-      setExternalInviteEmailFeedback("SMTP credentials are missing for this mailbox.");
-      return;
-    }
 
     let inviteLink = "";
     let inviteParticipantName = formatCollaborationParticipantNameFromEmail(normalizedEmail);
@@ -23735,7 +23718,6 @@ function WorkbenchView({
   section,
   orderedMailboxes,
   managedInboxes,
-  credentialStatuses,
   currentUserName,
   onOpenDemoInbox,
   onOpenLearningRequest,
@@ -23762,7 +23744,6 @@ function WorkbenchView({
   section: WorkbenchSection;
   orderedMailboxes: OrderedMailbox[];
   managedInboxes: ManagedWorkspaceInbox[];
-  credentialStatuses: MailboxCredentialStatusStore;
   currentUserName: string;
   onOpenDemoInbox: () => void;
   onOpenLearningRequest: (request: NonNullable<LearningLaunchRequest>) => void;
@@ -23984,7 +23965,7 @@ function WorkbenchView({
           candidate.email.trim().toLowerCase() === primaryMailbox.email.trim().toLowerCase(),
       );
 
-    if (!managedMailbox || !canSendFromManagedMailbox(managedMailbox, credentialStatuses)) {
+    if (!managedMailbox || !canSendFromManagedMailbox(managedMailbox)) {
       return null;
     }
 
@@ -24028,16 +24009,6 @@ function WorkbenchView({
       sendProvider === "custom_imap"
         ? resolveCustomSmtpCredentials(managedMailbox)
         : null;
-
-    if (
-      sendProvider !== "google" &&
-      !(resolvedSmtpSettings?.username.trim() && hasUsableSmtpPassword(managedMailbox, credentialStatuses))
-    ) {
-      return {
-        ok: false,
-        message: "SMTP credentials are missing for the primary mailbox.",
-      };
-    }
 
     const escapeInviteHtml = (value: string) =>
       value
@@ -25846,27 +25817,8 @@ function hasUsableSmtpPassword(
   return false;
 }
 
-function isCustomSmtpSendReady(
-  mailbox: ManagedWorkspaceInbox,
-  credentialStatuses: MailboxCredentialStatusStore = {},
-) {
-  if (mailbox.provider !== "custom_imap" || !mailbox.connected) {
-    return false;
-  }
-
-  const smtpSettings = resolveCustomSmtpCredentials(mailbox);
-
-  return Boolean(
-    smtpSettings.host.trim() &&
-      smtpSettings.port.trim() &&
-      smtpSettings.username.trim() &&
-      hasUsableSmtpPassword(mailbox, credentialStatuses),
-  );
-}
-
 function canSendFromManagedMailbox(
   mailbox: ManagedWorkspaceInbox | null | undefined,
-  credentialStatuses: MailboxCredentialStatusStore = {},
 ) {
   if (!mailbox || !mailbox.connected) {
     return false;
@@ -25876,7 +25828,7 @@ function canSendFromManagedMailbox(
     return mailbox.connectionStatus === "connected";
   }
 
-  return isCustomSmtpSendReady(mailbox, credentialStatuses);
+  return isCustomSmtpSendAvailable(mailbox);
 }
 
 function isManagedInboxSyncCapable(
@@ -40491,7 +40443,6 @@ export function WorkspaceShell({
 		                  mailboxTitleOverrides={mailboxTitleOverrides}
 		                  orderedMailboxes={orderedMailboxes}
 	                  managedInboxes={savedManagedInboxes}
-                  credentialStatuses={mailboxCredentialStatuses}
 	                  smartFolders={smartFolders}
                   activeSmartFolderId={activeSmartFolderId}
                   onActiveSmartFolderChange={setActiveSmartFolderId}
@@ -40651,7 +40602,6 @@ export function WorkspaceShell({
                   section={activeSection}
                   orderedMailboxes={orderedMailboxes}
                   managedInboxes={savedManagedInboxes}
-                  credentialStatuses={mailboxCredentialStatuses}
                   currentUserName={activeWorkspaceUserName}
                   onOpenDemoInbox={handleOpenDemoInbox}
                   onOpenLearningRequest={handleOpenLearningRequest}
