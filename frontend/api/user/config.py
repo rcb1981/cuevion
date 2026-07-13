@@ -245,6 +245,21 @@ def _sanitize_user_config(payload: dict, owner_email: str) -> dict:
     return sanitized
 
 
+def _sanitize_stored_user_config(record: dict) -> dict:
+    sanitized = _strip_sensitive_fields(record)
+    if not isinstance(sanitized, dict):
+        return {}
+    if "onboardingSession" in sanitized:
+        sanitized["onboardingSession"] = _sanitize_onboarding_session(
+            sanitized.get("onboardingSession")
+        ) or {}
+    if "managedInboxes" in sanitized:
+        sanitized["managedInboxes"] = _sanitize_managed_inboxes(
+            sanitized.get("managedInboxes")
+        )
+    return sanitized
+
+
 def _merge_user_config(existing_record: dict | None, sanitized_update: dict) -> dict:
     merged = {
         "v": USER_CONFIG_SCHEMA_VERSION,
@@ -304,7 +319,26 @@ class handler(BaseHTTPRequestHandler):
             _send_json(self, 200, {"ok": True, "config": None})
             return
 
-        _send_json(self, 200, {"ok": True, "config": read_result["config"]})
+        stored_config = read_result["config"]
+        sanitized_config = _sanitize_stored_user_config(stored_config)
+        if sanitized_config != stored_config:
+            write_result = write_user_config_record(
+                store,
+                session_user["email"],
+                sanitized_config,
+            )
+            if write_result["status"] != "ok":
+                _send_json(
+                    self,
+                    503,
+                    _build_error(
+                        "user_config_store_unavailable",
+                        "User configuration could not be sanitized.",
+                    ),
+                )
+                return
+
+        _send_json(self, 200, {"ok": True, "config": sanitized_config})
 
     def do_POST(self):
         session_user, _ = resolve_authenticated_user(self.headers)

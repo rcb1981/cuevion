@@ -17,8 +17,10 @@ if str(CURRENT_DIR) not in sys.path:
 if str(API_DIR) not in sys.path:
     sys.path.insert(0, str(API_DIR))
 
-from beta_auth import parse_beta_session_token, read_beta_session_cookie
-from mailbox_secret_store import get_mailbox_secret, save_mailbox_secret
+from authenticated_imap import (
+    find_forbidden_custom_request_fields,
+    resolve_authenticated_imap_mailbox,
+)
 from oauth_token_store import get_google_token_record_with_metadata, refresh_google_token_record
 
 GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1/users/me"
@@ -55,11 +57,6 @@ def _is_valid_address(value: str):
 
 def _is_safe_auth_value(value: str):
     return bool(value) and not _has_unsafe_header_chars(value)
-
-
-def _get_authenticated_user(headers) -> dict | None:
-    session_token = read_beta_session_cookie(headers)
-    return parse_beta_session_token(session_token or "")
 
 
 def _is_token_expired(token_record: dict) -> bool:
@@ -281,32 +278,78 @@ class handler(BaseHTTPRequestHandler):
             )
             return
 
-        auth_mode = str(payload.get("authMode", "smtp")).strip().lower()
+        if not isinstance(payload, dict):
+            _json_response(
+                self,
+                400,
+                {"ok": False, "error": {"code": "invalid_request", "message": "Request body must be a JSON object."}},
+            )
+            return
+
         provider = str(payload.get("provider", "")).strip().lower()
+        is_owned_custom_smtp = not provider
+        if is_owned_custom_smtp:
+            allowed_fields = {
+                "mailboxId",
+                "to",
+                "cc",
+                "bcc",
+                "subject",
+                "bodyHtml",
+                "bodyText",
+                "attachments",
+            }
+            if set(payload) - allowed_fields or find_forbidden_custom_request_fields(payload):
+                _json_response(
+                    self,
+                    400,
+                    {"ok": False, "error": {"code": "forbidden_connection_fields", "message": "Connection details are not accepted."}},
+                )
+                return
+            mailbox_id = payload.get("mailboxId")
+            resolved = resolve_authenticated_imap_mailbox(
+                self.headers,
+                mailbox_id,
+                require_smtp=True,
+            )
+            if resolved["status"] != "ok" or not resolved["mailbox"]:
+                error = resolved["error"] or {
+                    "code": "mailbox_configuration_malformed",
+                    "message": "Mailbox configuration is invalid.",
+                    "status_code": 500,
+                }
+                _json_response(
+                    self,
+                    error["status_code"],
+                    {"ok": False, "error": {"code": error["code"], "message": error["message"]}},
+                )
+                return
+            mailbox = resolved["mailbox"]
+            payload = {
+                **payload,
+                "provider": "custom_imap",
+                "authMode": "smtp",
+                "email": mailbox["email"],
+                "from": mailbox["email"],
+                "username": mailbox["smtp"]["username"],
+                "password": mailbox["smtp"]["password"],
+                "smtpHost": mailbox["smtp"]["host"],
+                "smtpPort": str(mailbox["smtp"]["port"]),
+                "smtpSecurity": mailbox["smtp"]["security"],
+                "useSameCredentials": mailbox["smtp"]["useSameCredentials"],
+            }
+            provider = "custom_imap"
+        elif provider == "custom_imap":
+            _json_response(
+                self,
+                400,
+                {"ok": False, "error": {"code": "forbidden_connection_fields", "message": "Connection details are not accepted."}},
+            )
+            return
+
+        auth_mode = str(payload.get("authMode", "smtp")).strip().lower()
         use_gmail_oauth = auth_mode == "oauth" and provider == "google"
         use_custom_smtp = auth_mode == "smtp" and provider == "custom_imap"
-        session_user = _get_authenticated_user(self.headers)
-        mailbox_id = str(payload.get("mailboxId") or "").strip()
-        provided_password = str(payload.get("password") or "")
-        use_same_credentials = payload.get("useSameCredentials") is True
-
-        if use_custom_smtp and not provided_password and session_user and mailbox_id:
-            secret_record = get_mailbox_secret(session_user["email"], mailbox_id)
-            stored_smtp_password = (
-                secret_record.get("smtpPassword")
-                if isinstance(secret_record, dict)
-                else None
-            )
-            stored_imap_password = (
-                secret_record.get("imapPassword")
-                if isinstance(secret_record, dict)
-                else None
-            )
-            resolved_password = stored_smtp_password or (
-                stored_imap_password if use_same_credentials else None
-            )
-            if isinstance(resolved_password, str) and resolved_password:
-                payload["password"] = resolved_password
 
         try:
             username, password, recipients, message = _build_message(
@@ -406,12 +449,6 @@ class handler(BaseHTTPRequestHandler):
                 )
                 return
 
-            if provided_password and session_user and mailbox_id:
-                save_mailbox_secret(
-                    session_user["email"],
-                    mailbox_id,
-                    smtp_password=provided_password,
-                )
             _json_response(self, 200, {"ok": True})
             return
 

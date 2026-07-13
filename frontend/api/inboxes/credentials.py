@@ -13,9 +13,9 @@ if str(API_DIR) not in sys.path:
 
 from beta_auth import parse_beta_session_token, read_beta_session_cookie  # noqa: E402
 from mailbox_secret_store import (  # noqa: E402
-    get_mailbox_secret_statuses,
-    save_mailbox_secret,
+    read_mailbox_secret,
 )
+from user_config_store import resolve_owned_managed_inbox  # noqa: E402
 
 
 def _send_json(handler: BaseHTTPRequestHandler, status_code: int, payload: dict):
@@ -81,56 +81,59 @@ class handler(BaseHTTPRequestHandler):
             return
 
         mailbox_ids = _parse_mailbox_ids_from_query(self.path)
+        credentials: dict[str, dict] = {}
+        for mailbox_id in mailbox_ids:
+            owned_result = resolve_owned_managed_inbox(self.headers, mailbox_id)
+            if owned_result["status"] != "ok":
+                status_code = 503 if owned_result["status"] == "unavailable" else 404
+                _send_json(
+                    self,
+                    status_code,
+                    _build_error(
+                        "mailbox_status_unavailable"
+                        if status_code == 503
+                        else "managed_inbox_not_found",
+                        "Mailbox credential status is unavailable."
+                        if status_code == 503
+                        else "The requested mailbox was not found.",
+                    ),
+                )
+                return
+
+            secret_result = read_mailbox_secret(session_user["email"], mailbox_id)
+            if secret_result["status"] in {"unavailable", "malformed"}:
+                _send_json(
+                    self,
+                    503,
+                    _build_error(
+                        "mailbox_secret_store_unavailable",
+                        "Mailbox credential status is temporarily unavailable.",
+                    ),
+                )
+                return
+            secret_record = secret_result["record"]
+            credentials[mailbox_id] = {
+                "imapPasswordSet": bool(secret_record and secret_record.get("imapPassword")),
+                "smtpPasswordSet": bool(secret_record and secret_record.get("smtpPassword")),
+            }
+
         _send_json(
             self,
             200,
             {
                 "ok": True,
-                "credentials": get_mailbox_secret_statuses(
-                    session_user["email"],
-                    mailbox_ids,
-                ),
+                "credentials": credentials,
             },
         )
 
     def do_POST(self):
-        session_user = _get_authenticated_user(self.headers)
-        if not session_user:
-            _send_json(self, 401, _build_error("unauthorized", "A valid beta session is required."))
-            return
-
-        payload, error = _read_json_body(self)
-        if error:
-            _send_json(self, 400, error)
-            return
-
-        mailbox_id = str((payload or {}).get("mailboxId") or "").strip()
-        imap_password = (payload or {}).get("imapPassword")
-        smtp_password = (payload or {}).get("smtpPassword")
-
-        if not mailbox_id:
-            _send_json(self, 400, _build_error("invalid_request", "Mailbox id is required."))
-            return
-
-        saved_record, save_error = save_mailbox_secret(
-            session_user["email"],
-            mailbox_id,
-            imap_password if isinstance(imap_password, str) and imap_password else None,
-            smtp_password if isinstance(smtp_password, str) and smtp_password else None,
-        )
-        if save_error:
-            _send_json(self, 503, {"ok": False, "error": save_error})
-            return
-
         _send_json(
             self,
-            200,
-            {
-                "ok": True,
-                "mailboxId": mailbox_id,
-                "imapPasswordSet": bool(saved_record and saved_record.get("imapPassword")),
-                "smtpPasswordSet": bool(saved_record and saved_record.get("smtpPassword")),
-            },
+            405,
+            _build_error(
+                "method_not_allowed",
+                "Mailbox credentials can only be saved during authenticated connection.",
+            ),
         )
 
     def do_OPTIONS(self):

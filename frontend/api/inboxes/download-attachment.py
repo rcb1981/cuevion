@@ -21,12 +21,14 @@ if str(API_DIR) not in sys.path:
 if str(FRONTEND_DIR) not in sys.path:
     sys.path.insert(0, str(FRONTEND_DIR))
 
-from beta_auth import parse_beta_session_token, read_beta_session_cookie
+from authenticated_imap import (
+    find_forbidden_custom_request_fields,
+    resolve_authenticated_imap_mailbox,
+)
 from imap_connect_preview import (
     connect_mailbox_with_settings,
     get_message_attachment_payload,
 )
-from mailbox_secret_store import get_mailbox_secret
 from oauth_token_store import (
     get_google_token_record_with_metadata,
     refresh_google_token_record,
@@ -159,11 +161,6 @@ def _read_uid_validity(mailbox, folder: str) -> str | None:
     return match.group(1) if match else None
 
 
-def _get_authenticated_user(headers) -> dict | None:
-    session_token = read_beta_session_cookie(headers)
-    return parse_beta_session_token(session_token or "")
-
-
 def _download_gmail_attachment(handler: BaseHTTPRequestHandler, payload: dict):
     email_address = str(payload.get("email") or "").strip().lower()
     message_id = str(payload.get("messageId") or "").strip()
@@ -260,59 +257,71 @@ def _download_gmail_attachment(handler: BaseHTTPRequestHandler, payload: dict):
 
 
 def _download_imap_attachment(handler: BaseHTTPRequestHandler, payload: dict):
-    email_address = str(payload.get("email") or "").strip()
-    host = str(payload.get("host") or "").strip()
-    raw_port = str(payload.get("port") or "").strip()
-    ssl_enabled = bool(payload.get("ssl", True))
-    username = str(payload.get("username") or "").strip() or email_address
-    password = str(payload.get("password") or "")
-    mailbox_id = str(payload.get("mailboxId") or "").strip()
-    folder = str(payload.get("folder") or "INBOX").strip() or "INBOX"
-    uid = str(payload.get("uid") or "").strip()
-    uid_validity = str(payload.get("uidValidity") or "").strip() or None
-    attachment_id = str(payload.get("attachmentId") or "").strip()
+    if set(payload) - {"mailboxId", "folder", "uid", "uidValidity", "attachmentId"}:
+        _json_response(
+            handler,
+            400,
+            _error("forbidden_connection_fields", "Connection details are not accepted."),
+        )
+        return
+    if find_forbidden_custom_request_fields(payload):
+        _json_response(
+            handler,
+            400,
+            _error("forbidden_connection_fields", "Connection details are not accepted."),
+        )
+        return
 
-    try:
-        port = int(raw_port)
-    except ValueError:
-        port = 0
-
-    if not password and mailbox_id:
-        session_user = _get_authenticated_user(handler.headers)
-        if session_user:
-            secret_record = get_mailbox_secret(session_user["email"], mailbox_id)
-            stored_imap_password = (
-                secret_record.get("imapPassword")
-                if isinstance(secret_record, dict)
-                else None
-            )
-            if isinstance(stored_imap_password, str) and stored_imap_password:
-                password = stored_imap_password
+    mailbox_id = payload.get("mailboxId")
+    folder = payload.get("folder")
+    uid = payload.get("uid")
+    uid_validity = payload.get("uidValidity")
+    attachment_id = payload.get("attachmentId")
 
     if (
-        not email_address
-        or not host
-        or port <= 0
-        or not _safe_auth_value(username)
-        or not password
-        or not uid
+        not isinstance(folder, str)
+        or not folder
+        or folder != folder.strip()
+        or "\r" in folder
+        or "\n" in folder
+        or not isinstance(uid, str)
+        or not uid.isdigit()
+        or uid == "0"
+        or (uid_validity is not None and (
+            not isinstance(uid_validity, str) or not uid_validity.isdigit()
+        ))
+        or not isinstance(attachment_id, str)
         or not attachment_id
+        or attachment_id != attachment_id.strip()
+        or "\r" in attachment_id
+        or "\n" in attachment_id
     ):
         _json_response(
             handler,
             400,
-            _error("invalid_request", "Mailbox credentials, UID, and attachment id are required."),
+            _error("invalid_request", "Mailbox UID and attachment id are required."),
         )
         return
+
+    resolved = resolve_authenticated_imap_mailbox(handler.headers, mailbox_id)
+    if resolved["status"] != "ok" or not resolved["mailbox"]:
+        error = resolved["error"] or {
+            "code": "mailbox_configuration_malformed",
+            "message": "Mailbox configuration is invalid.",
+            "status_code": 500,
+        }
+        _json_response(handler, error["status_code"], _error(error["code"], error["message"]))
+        return
+    imap = resolved["mailbox"]["imap"]
 
     mailbox = None
     try:
         mailbox = connect_mailbox_with_settings(
-            host=host,
-            port=port,
-            username=username,
-            password=password,
-            ssl_enabled=ssl_enabled,
+            host=imap["host"],
+            port=imap["port"],
+            username=imap["username"],
+            password=imap["password"],
+            ssl_enabled=imap["ssl"],
         )
 
         select_status, _ = mailbox.select(folder, readonly=True)
@@ -370,11 +379,11 @@ def _download_imap_attachment(handler: BaseHTTPRequestHandler, payload: dict):
             attachment["filename"],
             attachment["mimeType"],
         )
-    except imaplib.IMAP4.error as exc:
+    except imaplib.IMAP4.error:
         _json_response(
             handler,
             401,
-            _error("invalid_credentials", str(exc) or "IMAP credentials were rejected."),
+            _error("invalid_credentials", "Stored IMAP credentials were rejected."),
         )
     except Exception:
         _json_response(
@@ -401,14 +410,26 @@ class handler(BaseHTTPRequestHandler):
             _json_response(self, 400, _error("invalid_request", "Request body must be valid JSON."))
             return
 
+        if not isinstance(payload, dict):
+            _json_response(self, 400, _error("invalid_request", "Request body must be a JSON object."))
+            return
+
         provider = str(payload.get("provider") or "").strip().lower()
 
         if provider == "gmail":
             _download_gmail_attachment(self, payload)
             return
 
-        if provider == "imap":
+        if not provider:
             _download_imap_attachment(self, payload)
+            return
+
+        if provider in {"imap", "custom_imap"}:
+            _json_response(
+                self,
+                400,
+                _error("forbidden_connection_fields", "Connection details are not accepted."),
+            )
             return
 
         _json_response(

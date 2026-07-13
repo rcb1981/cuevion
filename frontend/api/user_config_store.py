@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+from copy import deepcopy
+from datetime import datetime, timezone
 from typing import Literal, TypedDict
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
@@ -40,6 +42,8 @@ UserConfigAccessErrorCode = Literal[
     "managed_inbox_not_found",
     "duplicate_mailbox_id",
     "managed_inbox_malformed",
+    "mailbox_id_conflict",
+    "managed_inbox_provider_mismatch",
 ]
 
 
@@ -71,6 +75,21 @@ class OwnedManagedInboxContext(TypedDict):
 class OwnedManagedInboxResult(TypedDict):
     status: Literal["ok", "unauthorized", "unavailable", "not_found", "malformed"]
     inbox: OwnedManagedInboxContext | None
+    error: UserConfigAccessError | None
+
+
+class OwnedManagedInboxRecordResult(TypedDict):
+    status: Literal[
+        "ok",
+        "unauthorized",
+        "unavailable",
+        "not_found",
+        "malformed",
+        "conflict",
+    ]
+    user: AuthenticatedUserContext | None
+    inbox: dict | None
+    config: dict | None
     error: UserConfigAccessError | None
 
 
@@ -121,6 +140,34 @@ def resolve_user_config_store(
 
 def build_user_config_key(owner_email: str) -> str:
     return f"{USER_CONFIG_KEY_PREFIX}:{normalize_auth_email(owner_email)}"
+
+
+def _strip_known_mailbox_passwords(config: dict) -> dict:
+    sanitized = deepcopy(config)
+
+    def strip_connection(connection):
+        if not isinstance(connection, dict):
+            return
+        for settings_name in ("customImap", "customSmtp"):
+            settings = connection.get(settings_name)
+            if isinstance(settings, dict):
+                settings.pop("password", None)
+
+    managed_inboxes = sanitized.get("managedInboxes")
+    if isinstance(managed_inboxes, list):
+        for inbox in managed_inboxes:
+            strip_connection(inbox)
+
+    onboarding_session = sanitized.get("onboardingSession")
+    if isinstance(onboarding_session, dict):
+        state = onboarding_session.get("state")
+        if isinstance(state, dict):
+            connections = state.get("inboxConnections")
+            if isinstance(connections, dict):
+                for connection in connections.values():
+                    strip_connection(connection)
+
+    return sanitized
 
 
 def _perform_rest_request(
@@ -409,3 +456,296 @@ def resolve_owned_managed_inbox(
         )
 
     return resolve_managed_inbox(config, mailbox_id)
+
+
+def resolve_owned_managed_inbox_record(
+    headers,
+    mailbox_id: str,
+) -> OwnedManagedInboxRecordResult:
+    """Resolve a full mailbox record without changing the Gmail-safe helper above."""
+    user, read_result = read_user_config_for_authenticated_user(headers)
+    if not user:
+        return {
+            "status": "unavailable"
+            if read_result["status"] == "unavailable"
+            else "unauthorized",
+            "user": None,
+            "inbox": None,
+            "config": None,
+            "error": read_result["error"],
+        }
+
+    if read_result["status"] == "missing":
+        return {
+            "status": "not_found",
+            "user": user,
+            "inbox": None,
+            "config": None,
+            "error": read_result["error"],
+        }
+    if read_result["status"] != "ok" or not read_result["config"]:
+        return {
+            "status": "unavailable"
+            if read_result["status"] == "unavailable"
+            else "malformed",
+            "user": user,
+            "inbox": None,
+            "config": None,
+            "error": read_result["error"],
+        }
+
+    config = read_result["config"]
+    stored_owner_email = config.get("email")
+    if stored_owner_email is not None and (
+        not isinstance(stored_owner_email, str)
+        or normalize_auth_email(stored_owner_email) != user["email"]
+    ):
+        return {
+            "status": "malformed",
+            "user": user,
+            "inbox": None,
+            "config": None,
+            "error": _error(
+                "user_config_malformed",
+                "User config ownership could not be verified.",
+            ),
+        }
+
+    minimal_result = resolve_managed_inbox(config, mailbox_id)
+    if minimal_result["status"] != "ok":
+        return {
+            "status": minimal_result["status"],
+            "user": user,
+            "inbox": None,
+            "config": config,
+            "error": minimal_result["error"],
+        }
+
+    matching_inbox = next(
+        inbox
+        for inbox in config["managedInboxes"]
+        if isinstance(inbox, dict) and inbox.get("id") == mailbox_id
+    )
+    return {
+        "status": "ok",
+        "user": user,
+        "inbox": deepcopy(matching_inbox),
+        "config": deepcopy(config),
+        "error": None,
+    }
+
+
+def upsert_owned_custom_imap_mailbox(
+    headers,
+    mailbox_id: str,
+    mode: Literal["initial", "reconnect"],
+    connection_metadata: dict,
+    approved_updates: dict | None = None,
+) -> OwnedManagedInboxRecordResult:
+    """Persist non-secret connection metadata in the authenticated user's config."""
+    user, auth_error = resolve_authenticated_user(headers)
+    if auth_error or not user:
+        return {
+            "status": "unavailable"
+            if auth_error and auth_error["code"] == "session_auth_unavailable"
+            else "unauthorized",
+            "user": None,
+            "inbox": None,
+            "config": None,
+            "error": auth_error,
+        }
+    if (
+        mode not in {"initial", "reconnect"}
+        or not isinstance(mailbox_id, str)
+        or not mailbox_id
+        or mailbox_id != mailbox_id.strip()
+        or mailbox_id.startswith("draft-")
+    ):
+        return {
+            "status": "malformed",
+            "user": user,
+            "inbox": None,
+            "config": None,
+            "error": _error("invalid_mailbox_id", "Mailbox id is invalid."),
+        }
+
+    store, store_error = resolve_user_config_store()
+    if store_error or not store:
+        return {
+            "status": "unavailable",
+            "user": user,
+            "inbox": None,
+            "config": None,
+            "error": store_error,
+        }
+
+    read_result = read_user_config_record(store, user["email"])
+    if read_result["status"] in {"unavailable", "malformed"}:
+        return {
+            "status": read_result["status"],
+            "user": user,
+            "inbox": None,
+            "config": None,
+            "error": read_result["error"],
+        }
+
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    if read_result["status"] == "missing":
+        config: dict = {
+            "v": USER_CONFIG_SCHEMA_VERSION,
+            "email": user["email"],
+            "updatedAt": now,
+            "managedInboxes": [],
+        }
+    else:
+        config = deepcopy(read_result["config"])
+        stored_owner = config.get("email")
+        if stored_owner is not None and (
+            not isinstance(stored_owner, str)
+            or normalize_auth_email(stored_owner) != user["email"]
+        ):
+            return {
+                "status": "malformed",
+                "user": user,
+                "inbox": None,
+                "config": None,
+                "error": _error(
+                    "user_config_malformed",
+                    "User config ownership could not be verified.",
+                ),
+            }
+
+    managed_inboxes = config.get("managedInboxes")
+    if not isinstance(managed_inboxes, list) or any(
+        not isinstance(inbox, dict) for inbox in managed_inboxes
+    ):
+        return {
+            "status": "malformed",
+            "user": user,
+            "inbox": None,
+            "config": None,
+            "error": _error(
+                "managed_inbox_malformed",
+                "Managed inbox configuration is malformed.",
+            ),
+        }
+
+    matching_indexes = [
+        index
+        for index, inbox in enumerate(managed_inboxes)
+        if inbox.get("id") == mailbox_id
+    ]
+    if len(matching_indexes) > 1:
+        if mode == "initial":
+            return {
+                "status": "conflict",
+                "user": user,
+                "inbox": None,
+                "config": deepcopy(config),
+                "error": _error(
+                    "mailbox_id_conflict",
+                    "A managed inbox with this id already exists.",
+                ),
+            }
+        return {
+            "status": "malformed",
+            "user": user,
+            "inbox": None,
+            "config": None,
+            "error": _error(
+                "duplicate_mailbox_id",
+                "Managed inbox configuration contains duplicate ids.",
+            ),
+        }
+
+    if mode == "initial" and matching_indexes:
+        return {
+            "status": "conflict",
+            "user": user,
+            "inbox": None,
+            "config": deepcopy(config),
+            "error": _error(
+                "mailbox_id_conflict",
+                "A managed inbox with this id already exists.",
+            ),
+        }
+    if mode == "reconnect" and not matching_indexes:
+        return {
+            "status": "not_found",
+            "user": user,
+            "inbox": None,
+            "config": deepcopy(config),
+            "error": _error(
+                "managed_inbox_not_found",
+                "The reconnect target was not found.",
+            ),
+        }
+    if (
+        mode == "reconnect"
+        and managed_inboxes[matching_indexes[0]].get("provider") != "custom_imap"
+    ):
+        return {
+            "status": "conflict",
+            "user": user,
+            "inbox": None,
+            "config": deepcopy(config),
+            "error": _error(
+                "managed_inbox_provider_mismatch",
+                "Only an existing Custom IMAP mailbox can be reconnected.",
+            ),
+        }
+
+    existing = (
+        deepcopy(managed_inboxes[matching_indexes[0]]) if matching_indexes else {}
+    )
+    next_inbox = {
+        **existing,
+        **deepcopy(connection_metadata),
+        "id": mailbox_id,
+        "title": existing.get("title")
+        or connection_metadata.get("email")
+        or "Custom Inbox",
+        "provider": "custom_imap",
+        "connected": True,
+        "connectionMethod": "imap",
+        "connectionStatus": "connected",
+        "connectionMessage": None,
+        "oauthAuthorizationUrl": None,
+    }
+    for field in ("internalRole", "focusPreferences"):
+        if approved_updates and field in approved_updates:
+            next_inbox[field] = deepcopy(approved_updates[field])
+
+    for settings_name in ("customImap", "customSmtp"):
+        settings = next_inbox.get(settings_name)
+        if isinstance(settings, dict):
+            settings = deepcopy(settings)
+            settings.pop("password", None)
+            next_inbox[settings_name] = settings
+
+    if matching_indexes:
+        managed_inboxes[matching_indexes[0]] = next_inbox
+    else:
+        managed_inboxes.append(next_inbox)
+
+    config["v"] = USER_CONFIG_SCHEMA_VERSION
+    config["email"] = user["email"]
+    config["updatedAt"] = now
+    config = _strip_known_mailbox_passwords(config)
+    write_result = write_user_config_record(store, user["email"], config)
+    if write_result["status"] != "ok":
+        return {
+            "status": "unavailable",
+            "user": user,
+            "inbox": None,
+            "config": None,
+            "error": write_result["error"],
+        }
+
+    return {
+        "status": "ok",
+        "user": user,
+        "inbox": deepcopy(next_inbox),
+        "config": deepcopy(config),
+        "error": None,
+    }

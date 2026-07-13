@@ -13,6 +13,12 @@ import {
   type UserAccountConfig,
 } from "./lib/userConfigApi";
 import {
+  sanitizeAccountConfigCredentials,
+  sanitizeMailboxConnectionCredentials,
+  sanitizeManagedInboxCredentials,
+  sanitizeStoredMailboxCredentialJson,
+} from "./lib/mailboxCredentialPersistence";
+import {
   normalizeFocusPreferences,
   type OnboardingState,
 } from "./types/onboarding";
@@ -483,7 +489,12 @@ function parsePersistedOnboardingSession(): PersistedOnboardingSession | null {
   }
 
   try {
-    const parsed = JSON.parse(storedState) as Partial<PersistedOnboardingSession>;
+    const migrated = sanitizeStoredMailboxCredentialJson(storedState);
+    const parsed = migrated.value as Partial<PersistedOnboardingSession>;
+
+    if (migrated.rewriteRequired && migrated.serialized) {
+      window.localStorage.setItem(ONBOARDING_STATE_STORAGE_KEY, migrated.serialized);
+    }
 
     if (!parsed || parsed.completed !== true || !parsed.state) {
       window.localStorage.removeItem(ONBOARDING_STATE_STORAGE_KEY);
@@ -508,7 +519,12 @@ function parsePersistedOnboardingDraft(): PersistedOnboardingDraft | null {
   }
 
   try {
-    const parsed = JSON.parse(storedState) as Partial<PersistedOnboardingDraft>;
+    const migrated = sanitizeStoredMailboxCredentialJson(storedState);
+    const parsed = migrated.value as Partial<PersistedOnboardingDraft>;
+
+    if (migrated.rewriteRequired && migrated.serialized) {
+      window.localStorage.setItem(ONBOARDING_DRAFT_STATE_STORAGE_KEY, migrated.serialized);
+    }
 
     if (!parsed || !parsed.state) {
       window.localStorage.removeItem(ONBOARDING_DRAFT_STATE_STORAGE_KEY);
@@ -542,7 +558,11 @@ function parseStoredManagedWorkspaceInboxes(): StoredManagedWorkspaceInbox[] {
   }
 
   try {
-    const parsed = JSON.parse(storedValue) as StoredManagedWorkspaceInbox[];
+    const migrated = sanitizeStoredMailboxCredentialJson(storedValue);
+    if (migrated.rewriteRequired && migrated.serialized) {
+      window.localStorage.setItem(MANAGED_INBOXES_STORAGE_KEY, migrated.serialized);
+    }
+    const parsed = migrated.value as StoredManagedWorkspaceInbox[];
     return Array.isArray(parsed) ? parsed : [];
   } catch {
     return [];
@@ -605,23 +625,9 @@ function parseStoredJsonValue<T>(storageKey: string, fallback: T): T {
 function sanitizeConnectionForAccountConfig(
   connection: Record<string, unknown>,
 ): Record<string, unknown> {
-  const nextConnection = {
-    ...connection,
-  };
-
-  if (nextConnection.customImap && typeof nextConnection.customImap === "object") {
-    nextConnection.customImap = {
-      ...(nextConnection.customImap as Record<string, unknown>),
-      password: "",
-    };
-  }
-
-  if (nextConnection.customSmtp && typeof nextConnection.customSmtp === "object") {
-    nextConnection.customSmtp = {
-      ...(nextConnection.customSmtp as Record<string, unknown>),
-      password: "",
-    };
-  }
+  const nextConnection = sanitizeMailboxConnectionCredentials(
+    connection,
+  ) as Record<string, unknown>;
 
   if ("oauthAuthorizationUrl" in nextConnection) {
     nextConnection.oauthAuthorizationUrl = null;
@@ -660,9 +666,7 @@ function sanitizeOnboardingSessionForAccountConfig(
 function sanitizeManagedInboxesForAccountConfig(
   managedInboxes: StoredManagedWorkspaceInbox[],
 ): StoredManagedWorkspaceInbox[] {
-  return managedInboxes.map((mailbox) =>
-    sanitizeConnectionForAccountConfig(mailbox as Record<string, unknown>),
-  ) as StoredManagedWorkspaceInbox[];
+  return sanitizeManagedInboxCredentials(managedInboxes) as StoredManagedWorkspaceInbox[];
 }
 
 function isRecordValue(value: unknown): value is Record<string, unknown> {
@@ -732,16 +736,13 @@ function mergeStoredManagedInboxCredentials(
 
   return {
     ...next,
-    customImap: mergeStoredCredentialFields(next.customImap, previous.customImap, [
-      "password",
-    ]),
+    customImap: mergeStoredCredentialFields(next.customImap, previous.customImap, []),
     customSmtp: mergeStoredCredentialFields(next.customSmtp, previous.customSmtp, [
       "host",
       "port",
       "username",
-      "password",
     ]),
-  };
+  } as StoredManagedWorkspaceInbox;
 }
 
 function formatStoredInboxTitleFromEmail(email: string) {
@@ -858,13 +859,48 @@ function normalizeStoredWorkspaceThemeMode(value: unknown): "Light" | "Dark" | "
   return null;
 }
 
+function buildManagedInboxesFromOnboardingSession(
+  session: PersistedOnboardingSession | null,
+): StoredManagedWorkspaceInbox[] {
+  if (!session) {
+    return [];
+  }
+
+  return session.state.selectedInboxes.flatMap((inboxId) => {
+    const connection = session.state.inboxConnections[inboxId];
+    if (!connection?.provider) {
+      return [];
+    }
+    const customTitle = session.state.customInboxes.find(
+      (inbox) => inbox.id === inboxId,
+    )?.name;
+
+    return [{
+      id: inboxId,
+      title: customTitle?.trim() || connection.email.trim() || String(inboxId),
+      email: connection.email.trim().toLowerCase(),
+      provider: connection.provider,
+      connected: connection.connected,
+      connectionMethod: connection.connectionMethod,
+      connectionStatus: connection.connectionStatus,
+      connectionMessage: connection.connectionMessage ?? null,
+      oauthAuthorizationUrl: null,
+      customImap: connection.customImap,
+      customSmtp: connection.customSmtp,
+    }];
+  });
+}
+
 function buildAccountConfigFromLocalStorage(
   ownerEmail: string,
   onboardingSession: PersistedOnboardingSession | null = parsePersistedOnboardingSession(),
   displayNameOverrides: DisplayNameOverrideStore = parseDisplayNameOverrides(),
 ): UserAccountConfig {
+  const locallyStoredManagedInboxes = parseStoredManagedWorkspaceInboxes();
   const managedInboxes = sanitizeManagedInboxesForAccountConfig(
-    parseStoredManagedWorkspaceInboxes(),
+    locallyStoredManagedInboxes.length > 0
+      ? locallyStoredManagedInboxes
+      : buildManagedInboxesFromOnboardingSession(onboardingSession),
   );
   const workspaceUserId = normalizeAccountStorageKey(ownerEmail);
   const themeMode =
@@ -927,6 +963,9 @@ function writeAccountConfigToLocalStorage(config: UserAccountConfig, ownerEmail:
       findMatchingStoredManagedInbox(mailbox, locallyStoredManagedInboxes),
     ),
   );
+  const sanitizedManagedInboxes = sanitizeManagedInboxCredentials(
+    mergedManagedInboxes,
+  ) as StoredManagedWorkspaceInbox[];
   const workspaceUserId = normalizeAccountStorageKey(ownerEmail);
 
   if (onboardingSession) {
@@ -939,7 +978,7 @@ function writeAccountConfigToLocalStorage(config: UserAccountConfig, ownerEmail:
 
   window.localStorage.setItem(
     MANAGED_INBOXES_STORAGE_KEY,
-    JSON.stringify(mergedManagedInboxes),
+    JSON.stringify(sanitizedManagedInboxes),
   );
   window.localStorage.setItem(
     MAILBOX_TITLE_OVERRIDES_STORAGE_KEY,
@@ -964,7 +1003,7 @@ function writeAccountConfigToLocalStorage(config: UserAccountConfig, ownerEmail:
 
   const primaryStorageKey = buildPrimaryManagedInboxStorageKey(
     workspaceUserId,
-    mergedManagedInboxes,
+    sanitizedManagedInboxes,
   );
   if (config.primaryManagedInboxId) {
     window.localStorage.setItem(primaryStorageKey, config.primaryManagedInboxId);
@@ -1696,7 +1735,7 @@ function CuevionApp() {
 
     window.localStorage.setItem(
       ONBOARDING_DRAFT_STATE_STORAGE_KEY,
-      JSON.stringify({ state: onboardingState }),
+      JSON.stringify(sanitizeAccountConfigCredentials({ state: onboardingState })),
     );
   }, [onboardingState, persistedOnboardingSession, view]);
 
@@ -1961,7 +2000,7 @@ function CuevionApp() {
         };
         window.localStorage.setItem(
           ONBOARDING_STATE_STORAGE_KEY,
-          JSON.stringify(nextSession),
+          JSON.stringify(sanitizeAccountConfigCredentials(nextSession)),
         );
         setPersistedOnboardingSession(nextSession);
       }
@@ -1977,7 +2016,7 @@ function CuevionApp() {
     );
     window.localStorage.setItem(
       MANAGED_INBOXES_STORAGE_KEY,
-      JSON.stringify(nextManagedInboxes),
+      JSON.stringify(sanitizeManagedInboxCredentials(nextManagedInboxes)),
     );
     if (
       pendingOAuthManagedInbox?.provider === parsedCallbackResult.provider &&
@@ -2145,10 +2184,10 @@ function CuevionApp() {
       state={onboardingState}
       onStateChange={setOnboardingState}
       onOpenWorkspace={(nextUserConfig) => {
-        const completedSession: PersistedOnboardingSession = {
+        const completedSession = sanitizeAccountConfigCredentials({
           completed: true,
           state: onboardingState,
-        };
+        }) as PersistedOnboardingSession;
 
         window.localStorage.setItem(
           ONBOARDING_STATE_STORAGE_KEY,

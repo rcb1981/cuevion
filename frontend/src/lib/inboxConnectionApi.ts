@@ -6,6 +6,7 @@ import {
 } from "./inboxProviderDefaults";
 import type {
   CustomImapSettings,
+  CustomSmtpSettings,
   CustomSmtpSecurity,
   InboxConnectionMethod,
   InboxConnectionStatus,
@@ -53,20 +54,35 @@ export type LiveInboxMessageSnapshot = {
   classifierVersion?: string;
 };
 
-export type ConnectInboxRequest = {
-  mailboxId?: string;
-  provider: ProviderId;
-  email: string;
-  host: string;
-  port: string;
-  ssl: boolean;
-  username: string;
-  password: string;
+export type InitialConnectInboxRequest = {
+  mode: "initial";
+  mailboxId: string;
+  connection: {
+    provider: "custom_imap";
+    email: string;
+    imap: CustomImapSettings;
+    smtp: CustomSmtpSettings;
+  };
   internalRole?: string | null;
   focusPreferences?: OnboardingState["focusPreferences"] | null;
-  selectedInboxes?: string[] | null;
   limit?: number | null;
 };
+
+export type ReconnectInboxRequest = Omit<InitialConnectInboxRequest, "mode"> & {
+  mode: "reconnect";
+};
+
+export type RefreshConnectInboxRequest = {
+  mode: "refresh";
+  mailboxId: string;
+  focusPreferences?: OnboardingState["focusPreferences"] | null;
+  limit?: number | null;
+};
+
+export type ConnectInboxRequest =
+  | InitialConnectInboxRequest
+  | ReconnectInboxRequest
+  | RefreshConnectInboxRequest;
 
 export type ConnectInboxResponse = {
   ok: boolean;
@@ -197,15 +213,17 @@ export type InboxConnectionAttemptResult = {
 };
 
 export function buildConnectInboxRequest(options: {
-  mailboxId?: string;
+  mode: "initial" | "reconnect";
+  mailboxId: string;
   provider: ProviderId;
   email: string;
   customImap: CustomImapSettings;
+  customSmtp: CustomSmtpSettings;
   internalRole?: string | null;
   focusPreferences?: OnboardingState["focusPreferences"] | null;
   selectedInboxes?: string[] | null;
   limit?: number | null;
-}): ConnectInboxRequest {
+}): InitialConnectInboxRequest | ReconnectInboxRequest {
   const email = options.email.trim();
   const resolvedImapSettings = applyProviderDefaults(
     options.provider,
@@ -214,19 +232,42 @@ export function buildConnectInboxRequest(options: {
   );
 
   return {
+    mode: options.mode,
     mailboxId: options.mailboxId,
-    provider: options.provider,
-    email,
-    host: resolvedImapSettings.host.trim(),
-    port: resolvedImapSettings.port.trim(),
-    ssl: resolvedImapSettings.ssl,
-    username: usesEmailAsImapUsername(options.provider)
-      ? email
-      : resolvedImapSettings.username.trim(),
-    password: resolvedImapSettings.password,
+    connection: {
+      provider: "custom_imap",
+      email,
+      imap: {
+        host: resolvedImapSettings.host.trim(),
+        port: resolvedImapSettings.port.trim(),
+        ssl: resolvedImapSettings.ssl,
+        username: usesEmailAsImapUsername(options.provider)
+          ? email
+          : resolvedImapSettings.username.trim(),
+        password: resolvedImapSettings.password,
+      },
+      smtp: {
+        ...options.customSmtp,
+        host: options.customSmtp.host.trim(),
+        port: options.customSmtp.port.trim(),
+        username: options.customSmtp.username.trim(),
+      },
+    },
     internalRole: options.internalRole,
     focusPreferences: options.focusPreferences,
-    selectedInboxes: options.selectedInboxes,
+    limit: options.limit,
+  };
+}
+
+export function buildRefreshInboxRequest(options: {
+  mailboxId: string;
+  focusPreferences?: OnboardingState["focusPreferences"] | null;
+  limit?: number | null;
+}): RefreshConnectInboxRequest {
+  return {
+    mode: "refresh",
+    mailboxId: options.mailboxId,
+    focusPreferences: options.focusPreferences,
     limit: options.limit,
   };
 }
@@ -261,14 +302,7 @@ export type DownloadAttachmentGmailRequest = {
 };
 
 export type DownloadAttachmentImapRequest = {
-  provider: "imap";
-  mailboxId?: string;
-  email: string;
-  host: string;
-  port: string;
-  ssl: boolean;
-  username: string;
-  password: string;
+  mailboxId: string;
   folder: string;
   uid: string;
   uidValidity?: string | null;
@@ -300,6 +334,30 @@ export type SendGmailMessageRequest = {
   attachments?: SendInboxAttachmentRequest[];
 };
 
+export type CustomSmtpWireRequest = Omit<Pick<
+  SendGmailMessageRequest,
+  "mailboxId" | "to" | "cc" | "bcc" | "subject" | "bodyHtml" | "bodyText" | "attachments"
+>, "mailboxId"> & { mailboxId: string };
+
+export function buildSendInboxWireRequest(
+  request: SendGmailMessageRequest,
+): SendGmailMessageRequest | CustomSmtpWireRequest {
+  if (request.provider !== "custom_imap") {
+    return request;
+  }
+
+  return {
+    mailboxId: request.mailboxId ?? "",
+    to: request.to,
+    cc: request.cc,
+    bcc: request.bcc,
+    subject: request.subject,
+    bodyHtml: request.bodyHtml,
+    bodyText: request.bodyText,
+    attachments: request.attachments,
+  };
+}
+
 export type InboxMessageAction = "mark_read" | "mark_unread" | "flag" | "unflag";
 
 export type GmailInboxMessageActionRequest = {
@@ -311,14 +369,7 @@ export type GmailInboxMessageActionRequest = {
 };
 
 export type ImapInboxMessageActionRequest = {
-  provider: "imap" | "custom_imap";
-  mailboxId?: string;
-  email: string;
-  host: string;
-  port: string;
-  ssl: boolean;
-  username: string;
-  password?: string;
+  mailboxId: string;
   folder: string;
   uid: string;
   uidValidity?: string | null;
@@ -411,17 +462,6 @@ export type MailboxCredentialStatusStore = Record<string, MailboxCredentialStatu
 type MailboxCredentialStatusResponse = {
   ok: boolean;
   credentials?: MailboxCredentialStatusStore;
-  error?: {
-    code?: string;
-    message?: string;
-  };
-};
-
-type SaveMailboxCredentialsResponse = {
-  ok: boolean;
-  mailboxId?: string;
-  imapPasswordSet?: boolean;
-  smtpPasswordSet?: boolean;
   error?: {
     code?: string;
     message?: string;
@@ -532,10 +572,12 @@ export async function connectInboxWithOAuth(
 }
 
 export async function beginInboxConnection(options: {
-  mailboxId?: string;
+  imapMode: "initial" | "reconnect";
+  mailboxId: string;
   provider: ProviderId;
   email: string;
   customImap: CustomImapSettings;
+  customSmtp: CustomSmtpSettings;
   internalRole?: string | null;
   focusPreferences?: OnboardingState["focusPreferences"] | null;
   selectedInboxes?: string[] | null;
@@ -577,7 +619,10 @@ export async function beginInboxConnection(options: {
   }
 
   const response = await connectInboxWithImap(
-    buildConnectInboxRequest(options),
+    buildConnectInboxRequest({
+      ...options,
+      mode: options.imapMode,
+    }),
   );
 
   if (!response.ok) {
@@ -621,7 +666,7 @@ export async function sendGmailMessage(
         "Content-Type": "application/json",
       },
       signal: abortController.signal,
-      body: JSON.stringify(request),
+      body: JSON.stringify(buildSendInboxWireRequest(request)),
     });
     const rawPayload = await response.text();
     let payload: SendGmailMessageResponse | null = null;
@@ -739,48 +784,6 @@ export async function getMailboxCredentialStatuses(
   }
 }
 
-export async function saveMailboxCredentials({
-  mailboxId,
-  imapPassword,
-  smtpPassword,
-}: {
-  mailboxId: string;
-  imapPassword?: string;
-  smtpPassword?: string;
-}): Promise<SaveMailboxCredentialsResponse> {
-  try {
-    const response = await fetch("/api/inboxes/credentials", {
-      method: "POST",
-      credentials: "include",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        mailboxId,
-        imapPassword,
-        smtpPassword,
-      }),
-    });
-    const payload = (await response.json()) as SaveMailboxCredentialsResponse;
-
-    if (!response.ok || !payload.ok) {
-      return {
-        ok: false,
-        error: payload.error,
-      };
-    }
-
-    return payload;
-  } catch {
-    return {
-      ok: false,
-      error: {
-        code: "mailbox_credentials_unavailable",
-        message: "Mailbox credentials could not be saved.",
-      },
-    };
-  }
-}
 
 export async function fetchGmailInbox(
   request: FetchGmailInboxRequest,

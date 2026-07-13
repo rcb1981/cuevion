@@ -71,6 +71,7 @@ class GetRouteTests(unittest.TestCase):
         ) as read_mock, patch.object(
             config_route,
             "write_user_config_record",
+            return_value={"status": "ok", "record": {"result": "OK"}, "error": None},
         ) as write_mock:
             config_route.handler.do_GET(handler)
         return handler, read_mock, write_mock
@@ -153,6 +154,28 @@ class GetRouteTests(unittest.TestCase):
             },
         )
         write_mock.assert_not_called()
+
+    def test_legacy_passwords_are_stripped_rewritten_and_never_returned(self):
+        legacy = {
+            "v": 1,
+            "email": "owner@example.com",
+            "managedInboxes": [
+                {
+                    "id": "demo",
+                    "customImap": {"host": "imap.example.com", "password": "imap-secret"},
+                    "customSmtp": {"host": "smtp.example.com", "password": "smtp-secret"},
+                }
+            ],
+        }
+        handler, _, write_mock = self.invoke(
+            read_result={"status": "ok", "config": legacy, "error": None},
+        )
+        self.assertEqual(handler.status_code, 200)
+        returned = handler.payload()["config"]
+        self.assertNotIn("imap-secret", json.dumps(returned))
+        self.assertNotIn("smtp-secret", json.dumps(returned))
+        write_mock.assert_called_once()
+        self.assertEqual(write_mock.call_args.args[2], returned)
 
 
 class PostRouteTests(unittest.TestCase):
@@ -344,7 +367,13 @@ class ModuleCompatibilityTests(unittest.TestCase):
                 production_imports.append(path.relative_to(FRONTEND_DIR).as_posix())
         self.assertEqual(
             sorted(production_imports),
-            ["api/inboxes/fetch-gmail-thread.py", "api/user/config.py"],
+            [
+                "api/inboxes/authenticated_imap.py",
+                "api/inboxes/connect-imap.py",
+                "api/inboxes/credentials.py",
+                "api/inboxes/fetch-gmail-thread.py",
+                "api/user/config.py",
+            ],
         )
         self.assertTrue((API_DIR / "inboxes" / "fetch-gmail-thread.py").exists())
 

@@ -254,10 +254,12 @@ export function StepConnectInboxes({
     }
 
     const result = await beginInboxConnection({
+      imapMode: "initial",
       mailboxId: inboxId,
       provider: connection.provider as ProviderId,
       email: connection.email,
       customImap: connection.customImap,
+      customSmtp: connection.customSmtp,
       internalRole,
       focusPreferences,
       selectedInboxes,

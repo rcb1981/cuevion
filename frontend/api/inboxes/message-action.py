@@ -19,9 +19,11 @@ if str(API_DIR) not in sys.path:
 if str(FRONTEND_DIR) not in sys.path:
     sys.path.insert(0, str(FRONTEND_DIR))
 
-from beta_auth import parse_beta_session_token, read_beta_session_cookie  # noqa: E402
+from authenticated_imap import (  # noqa: E402
+    find_forbidden_custom_request_fields,
+    resolve_authenticated_imap_mailbox,
+)
 from imap_connect_preview import connect_mailbox_with_settings  # noqa: E402
-from mailbox_secret_store import get_mailbox_secret  # noqa: E402
 from oauth_token_store import (  # noqa: E402
     get_google_token_record_with_metadata,
     refresh_google_token_record,
@@ -71,11 +73,6 @@ def _read_json_body(handler: BaseHTTPRequestHandler) -> tuple[dict | None, dict 
         return None, _error("invalid_request", "Request body must be a JSON object.")
 
     return payload, None
-
-
-def _get_authenticated_user(headers) -> dict | None:
-    session_token = read_beta_session_cookie(headers)
-    return parse_beta_session_token(session_token or "")
 
 
 def _has_unsafe_auth_chars(value: str) -> bool:
@@ -268,34 +265,33 @@ def _read_uid_validity(mailbox, folder: str) -> str | None:
 
 
 def _perform_imap_action(handler: BaseHTTPRequestHandler, payload: dict, action: str):
-    session_user = _get_authenticated_user(handler.headers)
-    email_address = str(payload.get("email") or "").strip()
-    host = str(payload.get("host") or "").strip()
-    raw_port = str(payload.get("port") or "").strip()
-    ssl_enabled = bool(payload.get("ssl", True))
-    username = str(payload.get("username") or "").strip() or email_address
-    password = str(payload.get("password") or "")
-    mailbox_id = str(payload.get("mailboxId") or "").strip()
-    folder = str(payload.get("folder") or "").strip()
-    uid = str(payload.get("uid") or payload.get("imapUid") or "").strip()
-    uid_validity = str(payload.get("uidValidity") or "").strip() or None
-
-    try:
-        port = int(raw_port)
-    except ValueError:
-        port = 0
-
-    if not password and session_user and mailbox_id:
-        secret_record = get_mailbox_secret(session_user["email"], mailbox_id)
-        stored_imap_password = (
-            secret_record.get("imapPassword")
-            if isinstance(secret_record, dict)
-            else None
+    if set(payload) - {"mailboxId", "folder", "uid", "uidValidity", "action"}:
+        _json_response(
+            handler,
+            400,
+            _error("forbidden_connection_fields", "Connection details are not accepted."),
         )
-        if isinstance(stored_imap_password, str) and stored_imap_password:
-            password = stored_imap_password
+        return
+    if find_forbidden_custom_request_fields(payload):
+        _json_response(
+            handler,
+            400,
+            _error("forbidden_connection_fields", "Connection details are not accepted."),
+        )
+        return
 
-    if not folder:
+    mailbox_id = payload.get("mailboxId")
+    folder = payload.get("folder")
+    uid = payload.get("uid")
+    uid_validity = payload.get("uidValidity")
+
+    if (
+        not isinstance(folder, str)
+        or not folder
+        or folder != folder.strip()
+        or "\r" in folder
+        or "\n" in folder
+    ):
         _json_response(
             handler,
             400,
@@ -303,7 +299,7 @@ def _perform_imap_action(handler: BaseHTTPRequestHandler, payload: dict, action:
         )
         return
 
-    if not uid:
+    if not isinstance(uid, str) or not uid.isdigit() or uid == "0":
         _json_response(
             handler,
             400,
@@ -311,29 +307,35 @@ def _perform_imap_action(handler: BaseHTTPRequestHandler, payload: dict, action:
         )
         return
 
-    if (
-        not email_address
-        or not host
-        or port <= 0
-        or not username
-        or _has_unsafe_auth_chars(username)
-        or not password
+    if uid_validity is not None and (
+        not isinstance(uid_validity, str) or not uid_validity.isdigit()
     ):
         _json_response(
             handler,
             400,
-            _error("invalid_request", "IMAP mailbox credentials and message metadata are required."),
+            _error("invalid_request", "IMAP UIDVALIDITY is invalid."),
         )
         return
+
+    resolved = resolve_authenticated_imap_mailbox(handler.headers, mailbox_id)
+    if resolved["status"] != "ok" or not resolved["mailbox"]:
+        error = resolved["error"] or {
+            "code": "mailbox_configuration_malformed",
+            "message": "Mailbox configuration is invalid.",
+            "status_code": 500,
+        }
+        _json_response(handler, error["status_code"], _error(error["code"], error["message"]))
+        return
+    imap = resolved["mailbox"]["imap"]
 
     mailbox = None
     try:
         mailbox = connect_mailbox_with_settings(
-            host=host,
-            port=port,
-            username=username,
-            password=password,
-            ssl_enabled=ssl_enabled,
+            host=imap["host"],
+            port=imap["port"],
+            username=imap["username"],
+            password=imap["password"],
+            ssl_enabled=imap["ssl"],
         )
 
         select_status, _ = mailbox.select(folder)
@@ -366,11 +368,11 @@ def _perform_imap_action(handler: BaseHTTPRequestHandler, payload: dict, action:
             return
 
         _json_response(handler, 200, {"ok": True, "action": action})
-    except imaplib.IMAP4.error as exc:
+    except imaplib.IMAP4.error:
         _json_response(
             handler,
             401,
-            _error("invalid_credentials", str(exc) or "IMAP credentials were rejected."),
+            _error("invalid_credentials", "Stored IMAP credentials were rejected."),
         )
     except Exception:
         _json_response(
@@ -408,8 +410,16 @@ class handler(BaseHTTPRequestHandler):
             _perform_gmail_action(self, payload or {}, action)
             return
 
-        if provider in {"imap", "custom_imap"}:
+        if not provider:
             _perform_imap_action(self, payload or {}, action)
+            return
+
+        if provider in {"imap", "custom_imap"}:
+            _json_response(
+                self,
+                400,
+                _error("forbidden_connection_fields", "Connection details are not accepted."),
+            )
             return
 
         _json_response(

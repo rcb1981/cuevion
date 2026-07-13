@@ -70,8 +70,12 @@ import {
   saveLiveInboxSnapshot,
 } from "../../lib/liveInboxSnapshots";
 import {
+  sanitizeManagedInboxCredentials,
+  sanitizeStoredMailboxCredentialJson,
+} from "../../lib/mailboxCredentialPersistence";
+import {
   beginInboxConnection,
-  buildConnectInboxRequest,
+  buildRefreshInboxRequest,
   connectInboxWithImap,
   downloadAttachment,
   fetchGmailInbox,
@@ -80,6 +84,7 @@ import {
   sendGmailMessage,
   type InboxMessageAction,
   type InboxMessageActionRequest,
+  type ImapInboxMessageActionRequest,
   type MailboxCredentialStatusStore,
   type SendInboxAttachmentRequest,
   type LiveInboxMessageSnapshot,
@@ -16010,22 +16015,10 @@ function MailboxView({
     }
 
     if (sourceMailbox.provider === "custom_imap") {
-      const resolvedImapSettings = applyProviderDefaults(
-        sourceMailbox.provider,
-        sourceMailbox.customImap,
-        sourceMailbox.email,
-      );
       const snapshot = readLiveInboxSnapshots()[sourceMailbox.id];
 
       return downloadAttachment({
-        provider: "imap",
         mailboxId: sourceMailbox.id,
-        email: sourceMailbox.email.trim(),
-        host: resolvedImapSettings.host.trim(),
-        port: resolvedImapSettings.port.trim(),
-        ssl: resolvedImapSettings.ssl,
-        username: resolvedImapSettings.username.trim() || sourceMailbox.email.trim(),
-        password: resolvedImapSettings.password,
         folder: "INBOX",
         uid: sourceMessageUid,
         uidValidity: snapshot?.uidValidity ?? null,
@@ -18484,10 +18477,10 @@ function MailboxView({
   const updateExactImapUnreadStateInMailboxStore = (
     folder: MailFolder,
     targetMessage: MailMessage,
-    request: Extract<InboxMessageActionRequest, { provider: "imap" | "custom_imap" }>,
+    request: ImapInboxMessageActionRequest,
     unread: boolean | undefined,
   ) => {
-    const targetMailboxId = request.mailboxId?.trim() as InboxId | undefined;
+    const targetMailboxId = request.mailboxId.trim() as InboxId | undefined;
     if (!targetMailboxId) {
       return;
     }
@@ -18656,22 +18649,10 @@ function MailboxView({
         return null;
       }
 
-      const resolvedImapSettings = applyProviderDefaults(
-        sourceMailbox.provider,
-        sourceMailbox.customImap,
-        sourceMailbox.email,
-      );
       const snapshot = readLiveInboxSnapshots()[sourceMailbox.id];
 
       return {
-        provider: "imap",
         mailboxId: sourceMailbox.id,
-        email: sourceMailbox.email.trim(),
-        host: resolvedImapSettings.host.trim(),
-        port: resolvedImapSettings.port.trim(),
-        ssl: resolvedImapSettings.ssl,
-        username: resolvedImapSettings.username.trim() || sourceMailbox.email.trim(),
-        password: resolvedImapSettings.password,
         folder: exactImapSource?.providerFolder ?? "INBOX",
         uid: providerMessageId,
         uidValidity: exactImapSource?.uidValidity ?? snapshot?.uidValidity ?? null,
@@ -18757,16 +18738,13 @@ function MailboxView({
       (
         entry,
       ): entry is typeof entry & {
-        request: Extract<
-          InboxMessageActionRequest,
-          { provider: "imap" | "custom_imap" }
-        >;
-      } => entry.request?.provider === "imap" || entry.request?.provider === "custom_imap",
+        request: ImapInboxMessageActionRequest;
+      } => Boolean(entry.request && !("provider" in entry.request)),
     );
     const nonImapTargetMessageIds = requests
       .filter(
         (entry) =>
-          entry.request?.provider !== "imap" && entry.request?.provider !== "custom_imap",
+          Boolean(entry.request && "provider" in entry.request),
       )
       .map((entry) => entry.message.id);
 
@@ -18800,7 +18778,7 @@ function MailboxView({
       const messagesForUnreadOverrides = successfulEntries
         .filter(
           (entry) =>
-            entry.request?.provider !== "imap" && entry.request?.provider !== "custom_imap",
+            Boolean(entry.request && "provider" in entry.request),
         )
         .map((entry) => entry.message);
 
@@ -18811,10 +18789,7 @@ function MailboxView({
 
     if (failedMessages.length > 0) {
       failedMessages.forEach((entry) => {
-        if (
-          entry.request?.provider === "imap" ||
-          entry.request?.provider === "custom_imap"
-        ) {
+        if (entry.request && !("provider" in entry.request)) {
           updateExactImapUnreadStateInMailboxStore(
             folder,
             entry.message,
@@ -26088,10 +26063,7 @@ function mergeManagedInboxCredentials(
     ...next,
     customImap: {
       ...nextImap,
-      password:
-        nextImap.password.trim().length > 0
-          ? nextImap.password
-          : previousImap.password,
+      password: nextImap.password,
     },
     customSmtp: {
       ...nextSmtp,
@@ -26103,10 +26075,7 @@ function mergeManagedInboxCredentials(
         nextSmtp.username.trim().length > 0
           ? nextSmtp.username
           : previousSmtp.username,
-      password:
-        nextSmtp.password.trim().length > 0
-          ? nextSmtp.password
-          : previousSmtp.password,
+      password: nextSmtp.password,
     },
   };
 }
@@ -27285,6 +27254,19 @@ function ManagedInboxEditor({
                 </span>
                 {onboardingText.connect.ssl}
               </label>
+              {isExisting &&
+              mailbox.provider === "custom_imap" &&
+              mailbox.connectionStatus === "connection_failed" &&
+              !editable &&
+              onReconnectAction ? (
+                <button
+                  type="button"
+                  onClick={onReconnectAction}
+                  className={settingsSubtleActionClass}
+                >
+                  Reconnect mailbox
+                </button>
+              ) : null}
             </div>
           ) : isOAuthConnectionProvider(mailbox.provider) ? (
             <div className="space-y-3 rounded-[24px] border border-moss/10 bg-[var(--workspace-card-subtle)] p-5">
@@ -27656,6 +27638,7 @@ const ManageInboxesView = memo(function ManageInboxesView({
 
   const validateManagedInbox = async (
     mailbox: ManagedWorkspaceInbox,
+    imapMode: "initial" | "reconnect",
   ) => {
     if (!mailbox.provider) {
       return {
@@ -27674,10 +27657,12 @@ const ManageInboxesView = memo(function ManageInboxesView({
     }
 
     const response = await beginInboxConnection({
+      imapMode,
       mailboxId: mailbox.id,
       provider: mailbox.provider,
       email: mailbox.email,
       customImap: mailbox.customImap,
+      customSmtp: mailbox.customSmtp,
     });
 
     if (response.connected) {
@@ -27780,7 +27765,10 @@ const ManageInboxesView = memo(function ManageInboxesView({
       clearConnectionError(inboxId);
 
       try {
-        const response = await validateManagedInbox(mailboxForStorage);
+        const response = await validateManagedInbox(
+          mailboxForStorage,
+          inboxId.startsWith("draft-") ? "initial" : "reconnect",
+        );
 
         if (!response.ok) {
           setConnectionErrors((current) => ({
@@ -27813,6 +27801,16 @@ const ManageInboxesView = memo(function ManageInboxesView({
         mailboxForStorage.connectionStatus = response.connectionStatus;
         mailboxForStorage.connectionMessage = response.connectionMessage ?? null;
         mailboxForStorage.oauthAuthorizationUrl = response.oauthAuthorizationUrl ?? null;
+        if (response.connected && mailboxForStorage.provider === "custom_imap") {
+          mailboxForStorage.customImap = {
+            ...mailboxForStorage.customImap,
+            password: "",
+          };
+          mailboxForStorage.customSmtp = {
+            ...mailboxForStorage.customSmtp,
+            password: "",
+          };
+        }
 
         const authorizationUrl =
           response.connectionStatus === "waiting_for_authentication"
@@ -27869,7 +27867,10 @@ const ManageInboxesView = memo(function ManageInboxesView({
     setValidatingInboxId(inboxId);
     clearConnectionError(inboxId);
 
-    const response = await validateManagedInbox(mailboxForConnection);
+    const response = await validateManagedInbox(
+      mailboxForConnection,
+      savedMailbox ? "reconnect" : "initial",
+    );
 
     if (!response.ok) {
       setConnectionErrors((current) => ({
@@ -27912,6 +27913,20 @@ const ManageInboxesView = memo(function ManageInboxesView({
               connectionStatus: response.connectionStatus,
               connectionMessage: response.connectionMessage ?? null,
               oauthAuthorizationUrl: response.oauthAuthorizationUrl ?? null,
+              customImap: {
+                ...candidate.customImap,
+                password:
+                  response.connected && candidate.provider === "custom_imap"
+                    ? ""
+                    : candidate.customImap.password,
+              },
+              customSmtp: {
+                ...candidate.customSmtp,
+                password:
+                  response.connected && candidate.provider === "custom_imap"
+                    ? ""
+                    : candidate.customSmtp.password,
+              },
             }
           : candidate,
       ),
@@ -28208,6 +28223,14 @@ const ManageInboxesView = memo(function ManageInboxesView({
 
   const handleReconnectInbox = (inboxId: string) => {
     if (validatingInboxId) {
+      return;
+    }
+
+    const mailbox = draftManagedInboxes.find((candidate) => candidate.id === inboxId);
+    if (mailbox?.provider === "custom_imap") {
+      setEditingInboxId(inboxId);
+      setSelectedInboxId(inboxId);
+      setActiveInboxEditorTab("Receiving");
       return;
     }
 
@@ -33357,7 +33380,11 @@ export function WorkspaceShell({
 	    }
 
     try {
-      const parsedInboxes = normalizeStoredManagedInboxList(JSON.parse(storedValue));
+      const migrated = sanitizeStoredMailboxCredentialJson(storedValue);
+      if (migrated.rewriteRequired && migrated.serialized) {
+        window.localStorage.setItem(MANAGED_INBOXES_STORAGE_KEY, migrated.serialized);
+      }
+      const parsedInboxes = normalizeStoredManagedInboxList(migrated.value);
 
       if (parsedInboxes.length > 0) {
 	        const mergedInboxes = mergeOnboardingSeedWithSavedInboxes(
@@ -34646,7 +34673,7 @@ export function WorkspaceShell({
   useEffect(() => {
     window.localStorage.setItem(
       MANAGED_INBOXES_STORAGE_KEY,
-      JSON.stringify(savedManagedInboxes),
+      JSON.stringify(sanitizeManagedInboxCredentials(savedManagedInboxes)),
     );
   }, [savedManagedInboxes]);
 
@@ -34657,6 +34684,7 @@ export function WorkspaceShell({
     }
 
     const mailboxIds = savedManagedInboxes
+      .filter((mailbox) => mailbox.provider === "custom_imap")
       .map((mailbox) => mailbox.id.trim())
       .filter(Boolean);
 
@@ -37721,11 +37749,8 @@ export function WorkspaceShell({
 
 	    try {
 	      const buildCustomImapRefreshRequest = (limit?: number) =>
-	        buildConnectInboxRequest({
+	        buildRefreshInboxRequest({
           mailboxId: managedMailbox.id,
-          provider: managedMailbox.provider as ProviderId,
-          email: managedMailbox.email,
-          customImap: managedMailbox.customImap,
           // Pass the current effective focus preferences for this mailbox so the
           // backend's decide_message_behavior() computes final_visibility, action,
           // and v7_final_priority using the user's actual settings rather than
@@ -37778,6 +37803,23 @@ export function WorkspaceShell({
         }
       }
 	      if (!response.ok) {
+        if (canUseImapFetch && response.error?.code === "reconnect_required") {
+          const reconnectMessage = "Reconnect mailbox to continue syncing.";
+          setSavedManagedInboxes((current) =>
+            current.map((candidate) =>
+              candidate.id === mailboxId
+                ? {
+                    ...candidate,
+                    connected: false,
+                    connectionStatus: "connection_failed",
+                    connectionMessage: reconnectMessage,
+                  }
+                : candidate,
+            ),
+          );
+          setMailboxSyncError(mailboxId, reconnectMessage);
+          return "failed";
+        }
         const isQuotaFailure =
           firstAttemptWasQuota || (canUseImapFetch && isQuotaRefreshIssue(response.error));
         const restoredSnapshotCount = isQuotaFailure

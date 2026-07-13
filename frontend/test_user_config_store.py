@@ -414,6 +414,143 @@ class ManagedInboxTests(unittest.TestCase):
         self.assertEqual(result["status"], "malformed")
         self.assertIsNone(result["inbox"])
 
+    def test_full_owned_resolver_is_separate_and_returns_a_copy(self):
+        user = {"email": "owner@example.com", "name": "Owner", "userType": "member"}
+        source = managed_inbox(
+            provider="custom_imap",
+            customImap={"host": "imap.example.com", "password": "legacy"},
+            customSmtp={"host": "smtp.example.com", "password": "legacy"},
+        )
+        read_result = {
+            "status": "ok",
+            "config": {"email": "owner@example.com", "managedInboxes": [source]},
+            "error": None,
+        }
+        with patch.object(
+            user_config_store,
+            "read_user_config_for_authenticated_user",
+            return_value=(user, read_result),
+        ):
+            result = user_config_store.resolve_owned_managed_inbox_record({}, "mailbox-a")
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["inbox"]["customImap"]["host"], "imap.example.com")
+        result["inbox"]["customImap"]["host"] = "changed"
+        self.assertEqual(source["customImap"]["host"], "imap.example.com")
+
+    def test_owned_upsert_preserves_unrelated_config_and_strips_legacy_passwords(self):
+        user = {"email": "owner@example.com", "name": "Owner", "userType": "member"}
+        existing = {
+            "v": 1,
+            "email": "owner@example.com",
+            "smartFolders": [{"id": "keep"}],
+            "managedInboxes": [
+                managed_inbox(
+                    provider="custom_imap",
+                    internalRole="artist_manager",
+                    classificationSettings={"keep": True},
+                    customImap={"host": "old", "password": "legacy"},
+                    customSmtp={"host": "old-smtp", "password": "legacy"},
+                )
+            ],
+        }
+        store = {"rest_url": "https://kv.example", "rest_token": "token"}
+        with patch.object(
+            user_config_store,
+            "resolve_authenticated_user",
+            return_value=(user, None),
+        ), patch.object(
+            user_config_store,
+            "resolve_user_config_store",
+            return_value=(store, None),
+        ), patch.object(
+            user_config_store,
+            "read_user_config_record",
+            return_value={"status": "ok", "config": existing, "error": None},
+        ), patch.object(
+            user_config_store,
+            "write_user_config_record",
+            return_value={"status": "ok", "record": {}, "error": None},
+        ) as write:
+            result = user_config_store.upsert_owned_custom_imap_mailbox(
+                {},
+                "mailbox-a",
+                "reconnect",
+                {
+                    "email": "new@example.com",
+                    "customImap": {"host": "imap.new", "port": "993", "ssl": True, "username": "u"},
+                    "customSmtp": {"host": "smtp.new", "port": "587", "security": "starttls", "username": "u", "useSameCredentials": True},
+                },
+            )
+
+        self.assertEqual(result["status"], "ok")
+        written = write.call_args.args[2]
+        self.assertEqual(written["smartFolders"], [{"id": "keep"}])
+        inbox = written["managedInboxes"][0]
+        self.assertEqual(inbox["id"], "mailbox-a")
+        self.assertEqual(inbox["internalRole"], "artist_manager")
+        self.assertEqual(inbox["classificationSettings"], {"keep": True})
+        self.assertNotIn("password", inbox["customImap"])
+        self.assertNotIn("password", inbox["customSmtp"])
+
+    def test_upsert_initial_rejects_any_existing_id_and_reconnect_requires_custom_imap(self):
+        user = {"email": "owner@example.com", "name": "Owner", "userType": "member"}
+        store = {"rest_url": "https://kv.example", "rest_token": "token"}
+        metadata = {
+            "email": "new@example.com",
+            "customImap": {"host": "imap.new", "port": "993", "ssl": True, "username": "u"},
+            "customSmtp": {"host": "smtp.new", "port": "587", "security": "starttls", "username": "u", "useSameCredentials": True},
+        }
+
+        def run(mode, managed_inboxes):
+            with patch.object(
+                user_config_store,
+                "resolve_authenticated_user",
+                return_value=(user, None),
+            ), patch.object(
+                user_config_store,
+                "resolve_user_config_store",
+                return_value=(store, None),
+            ), patch.object(
+                user_config_store,
+                "read_user_config_record",
+                return_value={
+                    "status": "ok",
+                    "config": {
+                        "email": "owner@example.com",
+                        "managedInboxes": managed_inboxes,
+                    },
+                    "error": None,
+                },
+            ), patch.object(
+                user_config_store,
+                "write_user_config_record",
+            ) as write:
+                result = user_config_store.upsert_owned_custom_imap_mailbox(
+                    {},
+                    "mailbox-a",
+                    mode,
+                    metadata,
+                )
+            return result, write
+
+        gmail = managed_inbox(provider="google")
+        initial_result, initial_write = run("initial", [gmail])
+        self.assertEqual(initial_result["status"], "conflict")
+        initial_write.assert_not_called()
+
+        missing_result, missing_write = run("reconnect", [])
+        self.assertEqual(missing_result["status"], "not_found")
+        missing_write.assert_not_called()
+
+        gmail_result, gmail_write = run("reconnect", [gmail])
+        self.assertEqual(gmail_result["status"], "conflict")
+        self.assertEqual(
+            gmail_result["error"]["code"],
+            "managed_inbox_provider_mismatch",
+        )
+        gmail_write.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

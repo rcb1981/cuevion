@@ -321,6 +321,18 @@ export function OnboardingFlow({
           connectionStatus: result.connectionStatus,
           connectionMessage: result.connectionMessage ?? null,
           oauthAuthorizationUrl: result.oauthAuthorizationUrl ?? null,
+          customImap: {
+            ...getInboxConnection(current, inboxId).customImap,
+            password: result.connected
+              ? ""
+              : getInboxConnection(current, inboxId).customImap.password,
+          },
+          customSmtp: {
+            ...getInboxConnection(current, inboxId).customSmtp,
+            password: result.connected
+              ? ""
+              : getInboxConnection(current, inboxId).customSmtp.password,
+          },
         },
       },
     }));
