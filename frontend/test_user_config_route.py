@@ -369,6 +369,7 @@ class ModuleCompatibilityTests(unittest.TestCase):
             sorted(production_imports),
             [
                 "api/inboxes/authenticated_imap.py",
+                "api/inboxes/cleanup-mailbox-secret-v1.py",
                 "api/inboxes/connect-imap.py",
                 "api/inboxes/credentials.py",
                 "api/inboxes/fetch-gmail-thread.py",
