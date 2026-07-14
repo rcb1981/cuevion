@@ -39,7 +39,7 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
             from unittest.mock import patch
 
             {DEPLOYMENT_PATH_ASSERTIONS}
-            short_names = ("models", "redis_store", "authorization", "source_message", "guest_session", "mutations")
+            short_names = ("models", "redis_store", "authorization", "source_message", "guest_session", "mutations", "http_boundary")
             with patch.dict(os.environ, {{}}, clear=True), patch(
                 "urllib.request.urlopen", side_effect=AssertionError("network during import")
             ), patch(
@@ -87,7 +87,7 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
         forwarding_aliases = {"models", "redis_store"}
         short_names = (
             "models", "redis_store", "authorization", "source_message",
-            "guest_session", "mutations",
+            "guest_session", "mutations", "http_boundary",
         )
         for short_name in short_names:
             for order in ("package_first", "top_level_first"):
@@ -247,6 +247,7 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
             "api.collaboration.source_message",
             "api.collaboration.guest_session",
             "api.collaboration.mutations",
+            "api.collaboration.http_boundary",
             "api.user_config_store",
             "api.inboxes.mailbox_secret_store",
             "api.inboxes.authenticated_gmail",
@@ -324,6 +325,65 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
                 msg=f"{order}: stdout={result.stdout!r} stderr={result.stderr!r}",
             )
 
+    def test_active_collaboration_and_inbox_handlers_do_not_import_http_boundary(self):
+        active_handlers = (
+            "api.collaboration.thread",
+            "api.collaboration.invite",
+            "api.inboxes.connect-imap",
+            "api.inboxes.connect-oauth",
+            "api.inboxes.credentials",
+            "api.inboxes.download-attachment",
+            "api.inboxes.fetch-gmail-thread",
+            "api.inboxes.fetch-gmail",
+            "api.inboxes.message-action",
+            "api.inboxes.oauth-callback",
+            "api.inboxes.send-gmail",
+        )
+        script = textwrap.dedent(
+            f"""
+            import importlib
+            import imaplib
+            import os
+            import smtplib
+            import sys
+            from unittest.mock import patch
+
+            {DEPLOYMENT_PATH_ASSERTIONS}
+            boundary_names = ("api.collaboration.http_boundary", "http_boundary")
+            assert all(name not in sys.modules for name in boundary_names)
+            with patch.dict(os.environ, {{}}, clear=True), patch(
+                "urllib.request.urlopen", side_effect=AssertionError("network during import")
+            ), patch(
+                "socket.create_connection", side_effect=AssertionError("socket during import")
+            ), patch(
+                "imaplib.IMAP4", side_effect=AssertionError("IMAP during import")
+            ), patch(
+                "imaplib.IMAP4_SSL", side_effect=AssertionError("IMAPS during import")
+            ), patch(
+                "smtplib.SMTP", side_effect=AssertionError("SMTP during import")
+            ), patch(
+                "smtplib.SMTP_SSL", side_effect=AssertionError("SMTPS during import")
+            ):
+                for handler_name in {active_handlers!r}:
+                    importlib.import_module(handler_name)
+                    assert all(name not in sys.modules for name in boundary_names), handler_name
+            """
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=FRONTEND_ROOT,
+            env=_deployment_env(),
+            text=True,
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+        self.assertEqual(
+            result.returncode,
+            0,
+            msg=f"stdout={result.stdout!r} stderr={result.stderr!r}",
+        )
+
     def test_arbitrary_alternate_dotted_identities_fail(self):
         modules = (
             ("api.collaboration.models_copy", "api/collaboration/models.py"),
@@ -332,6 +392,7 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
             ("api.collaboration.source_message_copy", "api/collaboration/source_message.py"),
             ("api.collaboration.guest_session_copy", "api/collaboration/guest_session.py"),
             ("api.collaboration.mutations_copy", "api/collaboration/mutations.py"),
+            ("api.collaboration.http_boundary_copy", "api/collaboration/http_boundary.py"),
             ("api.user_config_store_copy", "api/user_config_store.py"),
             ("api.inboxes.mailbox_secret_store_copy", "api/inboxes/mailbox_secret_store.py"),
             ("api.inboxes.authenticated_gmail_copy", "api/inboxes/authenticated_gmail.py"),
@@ -728,9 +789,83 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
                 "from authorization", "import authorization",
                 "from guest_session", "import guest_session",
                 "from mutations", "import mutations",
-                "resolve_internal_collaboration_context", "collab:v2",
+                "http_boundary", "resolve_internal_collaboration_context", "collab:v2",
             ):
                 self.assertNotIn(forbidden, source)
+
+    def test_http_boundary_import_is_canonical_inactive_and_io_free(self):
+        script = textwrap.dedent(
+            f"""
+            import builtins
+            import importlib
+            import json
+            import os
+            import re
+            import sys
+            from unittest.mock import patch
+
+            {DEPLOYMENT_PATH_ASSERTIONS}
+            forbidden_modules = (
+                "api.collaboration.redis_store",
+                "api.user_config_store",
+                "api.inboxes.authenticated_gmail",
+                "api.inboxes.authenticated_imap",
+                "api.inboxes.oauth_token_store",
+                "imaplib",
+                "smtplib",
+            )
+            assert all(name not in sys.modules for name in forbidden_modules)
+            with patch("os.getenv", side_effect=AssertionError("environment read")), patch.object(
+                os._Environ, "__getitem__", side_effect=AssertionError("environment read")
+            ), patch(
+                "builtins.open", side_effect=AssertionError("file I/O during import")
+            ), patch(
+                "urllib.request.urlopen", side_effect=AssertionError("network during import")
+            ), patch(
+                "socket.create_connection", side_effect=AssertionError("socket during import")
+            ):
+                boundary = importlib.import_module("api.collaboration.http_boundary")
+            assert boundary.__name__ == "api.collaboration.http_boundary"
+            assert all(name.lower() != "handler" for name in vars(boundary))
+            assert all(name not in sys.modules for name in forbidden_modules)
+            assert {{
+                name for name in sys.modules
+                if name.startswith("api.")
+            }} <= {{"api.collaboration", "api.collaboration.http_boundary"}}
+            """
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=FRONTEND_ROOT,
+            env=_deployment_env(),
+            text=True,
+            capture_output=True,
+            timeout=15,
+            check=False,
+        )
+        self.assertEqual(
+            result.returncode,
+            0,
+            msg=f"stdout={result.stdout!r} stderr={result.stderr!r}",
+        )
+
+        source = (CURRENT_DIR / "http_boundary.py").read_text()
+        self.assertNotIn("BaseHTTPRequestHandler", source)
+        self.assertNotIn("os.environ", source)
+        self.assertNotIn("os.getenv", source)
+
+    def test_active_inbox_routes_and_frontend_do_not_reference_http_boundary(self):
+        inbox_dir = FRONTEND_ROOT / "api" / "inboxes"
+        for path in inbox_dir.glob("*.py"):
+            if not path.name.startswith("test_"):
+                self.assertNotIn("http_boundary", path.read_text(), msg=str(path))
+
+        frontend_src = FRONTEND_ROOT / "src"
+        for path in frontend_src.rglob("*"):
+            if path.is_file() and path.suffix in {
+                ".css", ".html", ".js", ".jsx", ".json", ".ts", ".tsx",
+            }:
+                self.assertNotIn("http_boundary", path.read_text(), msg=str(path))
 
 
 if __name__ == "__main__":
