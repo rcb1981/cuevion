@@ -10,6 +10,8 @@ from urllib.error import HTTPError, URLError
 
 FRONTEND_DIR = Path(__file__).resolve().parent
 API_DIR = FRONTEND_DIR / "api"
+if str(FRONTEND_DIR) not in sys.path:
+    sys.path.insert(0, str(FRONTEND_DIR))
 if str(API_DIR) not in sys.path:
     sys.path.insert(0, str(API_DIR))
 

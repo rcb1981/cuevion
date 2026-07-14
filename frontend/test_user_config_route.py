@@ -9,6 +9,8 @@ from unittest.mock import Mock, patch
 FRONTEND_DIR = Path(__file__).resolve().parent
 API_DIR = FRONTEND_DIR / "api"
 CONFIG_PATH = API_DIR / "user" / "config.py"
+if str(FRONTEND_DIR) not in sys.path:
+    sys.path.insert(0, str(FRONTEND_DIR))
 if str(API_DIR) not in sys.path:
     sys.path.insert(0, str(API_DIR))
 

@@ -1,6 +1,5 @@
 import imaplib
 import json
-import re
 import sys
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler
@@ -22,6 +21,10 @@ if str(FRONTEND_DIR) not in sys.path:
 from authenticated_imap import (  # noqa: E402
     find_forbidden_custom_request_fields,
     resolve_authenticated_imap_mailbox,
+)
+from api.inboxes.imap_uid_validity import (  # noqa: E402
+    is_canonical_uid_validity,
+    read_selected_mailbox_uid_validity,
 )
 from imap_connect_preview import connect_mailbox_with_settings  # noqa: E402
 from authenticated_gmail import (  # noqa: E402
@@ -155,13 +158,8 @@ def _perform_gmail_action(handler: BaseHTTPRequestHandler, payload: dict, action
 
 
 def _read_uid_validity(mailbox, folder: str) -> str | None:
-    status, data = mailbox.status(folder, "(UIDVALIDITY)")
-    if status != "OK" or not data or not data[0]:
-        return None
-
-    metadata = data[0].decode("utf-8", errors="ignore") if isinstance(data[0], bytes) else str(data[0])
-    match = re.search(r"UIDVALIDITY\s+(\d+)", metadata)
-    return match.group(1) if match else None
+    del folder
+    return read_selected_mailbox_uid_validity(mailbox)
 
 
 def _perform_imap_action(handler: BaseHTTPRequestHandler, payload: dict, action: str):
@@ -207,9 +205,7 @@ def _perform_imap_action(handler: BaseHTTPRequestHandler, payload: dict, action:
         )
         return
 
-    if uid_validity is not None and (
-        not isinstance(uid_validity, str) or not uid_validity.isdigit()
-    ):
+    if uid_validity is not None and not is_canonical_uid_validity(uid_validity):
         _json_response(
             handler,
             400,
@@ -249,7 +245,7 @@ def _perform_imap_action(handler: BaseHTTPRequestHandler, payload: dict, action:
 
         if uid_validity:
             current_uid_validity = _read_uid_validity(mailbox, folder)
-            if current_uid_validity and current_uid_validity != uid_validity:
+            if current_uid_validity != uid_validity:
                 _json_response(
                     handler,
                     409,

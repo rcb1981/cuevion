@@ -38,7 +38,7 @@ def load_route(filename, name):
 connect_oauth = load_route("connect-oauth.py", "connect_oauth_ownership_test")
 oauth_callback = load_route("oauth-callback.py", "oauth_callback_ownership_test")
 config_route = load_route("../user/config.py", "user_config_google_ownership_test")
-fetch_gmail = load_route("fetch-gmail.py", "fetch_gmail_ownership_test")
+fetch_gmail = importlib.import_module("api.inboxes.fetch-gmail")
 message_action = load_route("message-action.py", "message_action_ownership_test")
 send_gmail = load_route("send-gmail.py", "send_gmail_ownership_test")
 download_attachment = load_route("download-attachment.py", "download_attachment_ownership_test")
@@ -2331,7 +2331,7 @@ class OAuthAndConfigTests(unittest.TestCase):
         with patch.object(authenticated_gmail, "resolve_owned_managed_inbox_record") as ownership, patch.object(
             authenticated_gmail, "load_google_token_record_with_metadata"
         ) as token_load, patch.object(authenticated_gmail, "refresh_google_token_record") as refresh:
-            load_route("authenticated_gmail.py", "authenticated_gmail_import_safety_test")
+            importlib.reload(authenticated_gmail)
         ownership.assert_not_called()
         token_load.assert_not_called()
         refresh.assert_not_called()

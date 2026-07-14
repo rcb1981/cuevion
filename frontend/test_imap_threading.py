@@ -1,12 +1,18 @@
 import importlib
 import imaplib
 import re
+import sys
 import unittest
 from email import message_from_string
+from pathlib import Path
 from unittest.mock import Mock, patch
 from urllib.parse import unquote_to_bytes
 
-from frontend import imap_connect_preview
+FRONTEND_DIR = Path(__file__).resolve().parent
+if str(FRONTEND_DIR) not in sys.path:
+    sys.path.insert(0, str(FRONTEND_DIR))
+
+import imap_connect_preview
 
 
 def threading_record(
@@ -530,10 +536,10 @@ class CustomImapThreadResolutionTests(unittest.TestCase):
 
 
 class CustomImapPreviewIntegrationTests(unittest.TestCase):
-    def build_preview(self, message, uid, status_response):
+    def build_preview(self, message, uid, uidvalidity_response):
         mailbox = Mock()
         mailbox.uid.return_value = ("OK", [str(uid or "").encode()])
-        mailbox.status.return_value = status_response
+        mailbox.response.return_value = uidvalidity_response
         with patch.object(
             imap_connect_preview,
             "open_mailbox_connection",
@@ -582,7 +588,7 @@ class CustomImapPreviewIntegrationTests(unittest.TestCase):
         ]
         mailbox = Mock()
         mailbox.uid.return_value = ("OK", [b"1 2"])
-        mailbox.status.return_value = ("OK", [b'"INBOX" (UIDVALIDITY 77)'])
+        mailbox.response.return_value = ("UIDVALIDITY", [b"77"])
 
         with patch.object(
             imap_connect_preview,
@@ -638,7 +644,7 @@ class CustomImapPreviewIntegrationTests(unittest.TestCase):
         status, payload = self.build_preview(
             message,
             "42",
-            ("OK", [b'"INBOX" (UIDVALIDITY 900)']),
+            ("UIDVALIDITY", [b"900"]),
         )
         self.assertEqual(status, 200)
         self.assertEqual(
@@ -655,7 +661,7 @@ class CustomImapPreviewIntegrationTests(unittest.TestCase):
             status, payload = self.build_preview(
                 message,
                 None,
-                ("OK", [b'"INBOX" (UIDVALIDITY 900)']),
+                ("UIDVALIDITY", [b"900"]),
             )
         self.assertEqual(status, 200)
         self.assertEqual(payload["messages"], [])

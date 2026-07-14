@@ -26,6 +26,10 @@ from authenticated_imap import (
     find_forbidden_custom_request_fields,
     resolve_authenticated_imap_mailbox,
 )
+from api.inboxes.imap_uid_validity import (
+    is_canonical_uid_validity,
+    read_selected_mailbox_uid_validity,
+)
 from imap_connect_preview import (
     connect_mailbox_with_settings,
     get_message_attachment_payload,
@@ -140,13 +144,8 @@ def _extract_raw_email(message_data) -> bytes | None:
 
 
 def _read_uid_validity(mailbox, folder: str) -> str | None:
-    status, data = mailbox.status(folder, "(UIDVALIDITY)")
-    if status != "OK" or not data or not data[0]:
-        return None
-
-    metadata = data[0].decode("utf-8", errors="ignore") if isinstance(data[0], bytes) else str(data[0])
-    match = re.search(r"UIDVALIDITY\s+(\d+)", metadata)
-    return match.group(1) if match else None
+    del folder
+    return read_selected_mailbox_uid_validity(mailbox)
 
 
 def _download_gmail_attachment(handler: BaseHTTPRequestHandler, payload: dict, context: dict):
@@ -241,9 +240,7 @@ def _download_imap_attachment(handler: BaseHTTPRequestHandler, payload: dict):
         or not isinstance(uid, str)
         or not uid.isdigit()
         or uid == "0"
-        or (uid_validity is not None and (
-            not isinstance(uid_validity, str) or not uid_validity.isdigit()
-        ))
+        or (uid_validity is not None and not is_canonical_uid_validity(uid_validity))
         or not isinstance(attachment_id, str)
         or not attachment_id
         or attachment_id != attachment_id.strip()
@@ -289,7 +286,7 @@ def _download_imap_attachment(handler: BaseHTTPRequestHandler, payload: dict):
 
         if uid_validity:
             current_uid_validity = _read_uid_validity(mailbox, folder)
-            if current_uid_validity and current_uid_validity != uid_validity:
+            if current_uid_validity != uid_validity:
                 _json_response(
                     handler,
                     409,

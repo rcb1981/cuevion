@@ -437,7 +437,7 @@ class ExistingMailboxOperationTests(unittest.TestCase):
     def test_imap_action_uses_owned_credentials_and_uid_store(self):
         mailbox = Mock()
         mailbox.select.return_value = ("OK", [])
-        mailbox.status.return_value = ("OK", [b'"INBOX" (UIDVALIDITY 456)'])
+        mailbox.response.return_value = ("UIDVALIDITY", [b"456"])
         mailbox.uid.return_value = ("OK", [])
         handler = FakeHandler(
             {

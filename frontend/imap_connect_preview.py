@@ -1,3 +1,7 @@
+_CANONICAL_MODULE_NAME = "imap_connect_preview"
+if __name__ != _CANONICAL_MODULE_NAME:
+    raise ImportError("IMAP preview must use its canonical top-level identity")
+
 import hashlib
 import html
 import imaplib
@@ -15,6 +19,10 @@ from email.utils import parseaddr, parsedate_to_datetime
 from typing import Any
 from urllib.parse import quote
 
+from api.inboxes.imap_uid_validity import (
+    is_canonical_uid_validity,
+    read_selected_mailbox_uid_validity,
+)
 
 DEFAULT_GMAIL_HOST = "imap.gmail.com"
 DEFAULT_GMAIL_PORT = 993
@@ -385,7 +393,9 @@ def resolve_custom_imap_thread_ids(
     }
 
     resolved: list[str | None] = []
-    normalized_uid_validity = str(uid_validity or "").strip()
+    normalized_uid_validity = (
+        uid_validity if is_canonical_uid_validity(uid_validity) else None
+    )
 
     for record in records:
         references = record.get("references") or []
@@ -1534,12 +1544,7 @@ def build_connect_preview_response(payload: dict[str, Any]) -> tuple[int, dict[s
                 raw = uid_data[0]
                 uid_str = raw.decode("utf-8", errors="ignore") if isinstance(raw, bytes) else str(raw)
                 inbox_uid_set = uid_str.split() if uid_str.strip() else []
-            sv_status, sv_data = mailbox.status(folder, "(UIDVALIDITY)")
-            if sv_status == "OK" and sv_data and sv_data[0]:
-                sv_str = sv_data[0].decode("utf-8", errors="ignore") if isinstance(sv_data[0], bytes) else str(sv_data[0])
-                uidv_match = re.search(r"UIDVALIDITY\s+(\d+)", sv_str)
-                if uidv_match:
-                    uid_validity = uidv_match.group(1)
+            uid_validity = read_selected_mailbox_uid_validity(mailbox)
         except Exception:
             inbox_uid_set = None
             uid_validity = None

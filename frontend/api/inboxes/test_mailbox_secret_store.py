@@ -8,10 +8,13 @@ from unittest.mock import patch
 
 CURRENT_DIR = Path(__file__).resolve().parent
 API_DIR = CURRENT_DIR.parent
+FRONTEND_DIR = API_DIR.parent
 if str(CURRENT_DIR) not in sys.path:
     sys.path.insert(0, str(CURRENT_DIR))
 if str(API_DIR) not in sys.path:
     sys.path.insert(0, str(API_DIR))
+if str(FRONTEND_DIR) not in sys.path:
+    sys.path.insert(0, str(FRONTEND_DIR))
 
 import mailbox_secret_store as store
 

@@ -1,21 +1,43 @@
+import sys as _identity_sys
+
+_CANONICAL_MODULE_NAME = "api.inboxes.fetch-gmail"
+_LEGACY_MODULE_NAME = "fetch-gmail"
+_CANONICAL_PACKAGE_NAME = "api.inboxes"
+
+_loaded_module_name = __name__
+_current_module = _identity_sys.modules[_loaded_module_name]
+if _loaded_module_name not in {_CANONICAL_MODULE_NAME, _LEGACY_MODULE_NAME}:
+    raise ImportError(
+        "Gmail route helpers must be imported as " + _CANONICAL_MODULE_NAME
+    )
+
+_existing_canonical = _identity_sys.modules.get(_CANONICAL_MODULE_NAME)
+_existing_legacy = _identity_sys.modules.get(_LEGACY_MODULE_NAME)
+if (
+    (_existing_canonical is not None and _existing_canonical is not _current_module)
+    or (_existing_legacy is not None and _existing_legacy is not _current_module)
+):
+    raise ImportError("canonical and legacy Gmail route identities cannot coexist")
+
+if _loaded_module_name == _LEGACY_MODULE_NAME:
+    _current_module.__name__ = _CANONICAL_MODULE_NAME
+    _current_module.__package__ = _CANONICAL_PACKAGE_NAME
+
+_identity_sys.modules[_CANONICAL_MODULE_NAME] = _current_module
+_identity_sys.modules[_LEGACY_MODULE_NAME] = _current_module
+
 import base64
 import binascii
 import json
-import sys
 from email import message_from_bytes
 from email.errors import MessageError
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler
-from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
-CURRENT_DIR = Path(__file__).resolve().parent
-if str(CURRENT_DIR) not in sys.path:
-    sys.path.insert(0, str(CURRENT_DIR))
-
-from authenticated_gmail import (  # noqa: E402
+from .authenticated_gmail import (
     MAX_GMAIL_RESPONSE_BYTES,
     error_payload,
     gmail_http_error_code,
@@ -33,6 +55,8 @@ from authenticated_gmail import (  # noqa: E402
 GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1/users/me"
 DEFAULT_FETCH_LIMIT = 50
 MAX_FETCH_LIMIT = 100
+
+
 def _validate_focus_preferences(value: object) -> tuple[dict | None, dict | None]:
     return validate_focus_preferences(value)
 
