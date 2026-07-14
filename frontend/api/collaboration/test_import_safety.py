@@ -797,6 +797,7 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
                 "from mutations", "import mutations",
                 "http_boundary", "from application", "import application",
                 "collaboration.application", "resolve_internal_collaboration_context",
+                "create_v2_collaboration_for_owner",
                 "collab:v2",
             ):
                 self.assertNotIn(forbidden, source)
@@ -883,11 +884,12 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
                 "api.collaboration.redis_store",
                 "api.collaboration.authorization",
                 "api.collaboration.guest_session",
+                "api.collaboration.source_message",
+                "api.inboxes.imap_uid_validity",
             )
             forbidden_modules = (
                 "api.collaboration.thread",
                 "api.collaboration.invite",
-                "api.collaboration.source_message",
                 "api.collaboration.mutations",
                 "api.collaboration.http_boundary",
                 "api.inboxes.connect-imap",
@@ -994,6 +996,7 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
                     "collaboration/application",
                     "from application",
                     "import application",
+                    "create_v2_collaboration_for_owner",
                 ):
                     self.assertNotIn(forbidden, source, msg=str(path))
 
@@ -1008,6 +1011,7 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
                     "api.collaboration.application",
                     "collaboration/application",
                     "application.py",
+                    "create_v2_collaboration_for_owner",
                 ):
                     self.assertNotIn(forbidden, source, msg=str(path))
 

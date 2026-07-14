@@ -1,13 +1,24 @@
 from __future__ import annotations
 
+import base64
 import inspect
 import json
+import sys
 import unittest
+from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
+from types import SimpleNamespace
 from unittest.mock import patch
 
-from api.collaboration import application, authorization, guest_session, models, redis_store
+from api.collaboration import (
+    application,
+    authorization,
+    guest_session,
+    models,
+    redis_store,
+    source_message,
+)
 from api.collaboration.v2_stateful_test_store import StatefulV2Store
 
 
@@ -18,6 +29,7 @@ MAILBOX_ID = "mailbox-1"
 OWNER_EMAIL = "owner@example.com"
 OTHER_OWNER_EMAIL = "other@example.com"
 NOW = 1_800_000_000
+NOW_MILLISECONDS = NOW * 1000
 RAW_SESSION_ID = "RawGuestSessionPrivateMarker" + ("x" * 15)
 PRIVATE_SOURCE_MARKER = "PrivateProviderMessageMarker_42"
 PRIVATE_EXCEPTION_MARKER = "PrivateRedisExceptionMarker_42"
@@ -179,6 +191,99 @@ def _owner_capability(thread: dict | None = None):
     return result["context"]
 
 
+def _create_capability(
+    provider: str = "google",
+    *,
+    mailbox_id: str = MAILBOX_ID,
+    owner_email: str = OWNER_EMAIL,
+):
+    result = authorization.resolve_internal_collaboration_context(
+        [("Authorization", "private-request-marker")],
+        mailbox_id,
+        required_action="create",
+        user_resolver=lambda _headers: (
+            {"email": owner_email, "name": "Owner Person"},
+            None,
+        ),
+        mailbox_resolver=lambda _headers, received_mailbox_id: {
+            "status": "ok",
+            "user": {"email": owner_email, "name": "Owner Person"},
+            "inbox": {"id": received_mailbox_id, "provider": provider},
+        },
+    )
+    assert result["status"] == "ok"
+    assert authorization._is_internal_capability(
+        result["context"], actions={"create"}
+    )
+    return result["context"]
+
+
+def _create_payload(provider: str = "google", *, state: str = "needs_review") -> dict:
+    source_ref = (
+        {"providerMessageId": PRIVATE_SOURCE_MARKER}
+        if provider == "google"
+        else {"folder": "INBOX", "uidValidity": "123", "imapUid": "456"}
+    )
+    return {
+        "mailboxId": MAILBOX_ID,
+        "sourceRef": source_ref,
+        "state": state,
+    }
+
+
+def _raw_source_message() -> bytes:
+    return (
+        b"From: Alex Sender <alex@example.net>\r\n"
+        b"Subject: Quarterly launch review\r\n"
+        b"Date: Tue, 02 Jan 2024 10:30:00 +0000\r\n"
+        b"Content-Type: text/plain; charset=utf-8\r\n"
+        b"\r\n"
+        b"Please review the launch details."
+    )
+
+
+def _source_resolver_with_fake_providers(
+    events: list[tuple[str, object]] | None = None,
+):
+    def resolve(
+        headers: object,
+        payload: object,
+        *,
+        authorization_resolver,
+    ) -> dict:
+        def google_fetcher(
+            received_headers: object,
+            mailbox_id: str,
+            source_ref: dict,
+        ) -> dict:
+            if events is not None:
+                events.append(("provider_fetch", "google"))
+            return {"status": "ok", "rawMessage": _raw_source_message()}
+
+        def imap_fetcher(
+            received_headers: object,
+            mailbox_id: str,
+            source_ref: dict,
+        ) -> dict:
+            if events is not None:
+                events.append(("provider_fetch", "custom_imap"))
+            return {
+                "status": "ok",
+                "rawMessage": _raw_source_message(),
+                "uidValidity": source_ref["uidValidity"],
+            }
+
+        return source_message.resolve_source_message(
+            headers,
+            payload,
+            authorization_resolver=authorization_resolver,
+            google_fetcher=google_fetcher,
+            imap_fetcher=imap_fetcher,
+        )
+
+    return resolve
+
+
 def _guest_store(
     *,
     thread: dict | None = None,
@@ -254,6 +359,1467 @@ def _guest_read_capability_and_session() -> tuple[object, dict]:
     assert guest_session._is_guest_read_capability(capability)
     assert type(session) is dict
     return capability, session
+
+
+class OwnerCreateApplicationTests(unittest.TestCase):
+    def _assert_exact_payload_rejected_without_side_effects(
+        self,
+        payload: object,
+    ) -> None:
+        with patch.object(
+            application,
+            "resolve_internal_collaboration_context",
+        ) as authorize, patch.object(
+            authorization,
+            "_shared_config_helper",
+        ) as shared_config_helper, patch.object(
+            application,
+            "resolve_source_message",
+        ) as resolve_source, patch.object(
+            application,
+            "_create_v2_thread",
+        ) as creator, patch.object(
+            application,
+            "_load_v2_thread",
+        ) as loader:
+            result = application.create_v2_collaboration_for_owner([], payload)
+
+        self.assertEqual(
+            result,
+            {
+                "status": "malformed",
+                "collaboration": None,
+                "error": {"code": "invalid_request"},
+            },
+        )
+        authorize.assert_not_called()
+        shared_config_helper.assert_not_called()
+        resolve_source.assert_not_called()
+        creator.assert_not_called()
+        loader.assert_not_called()
+
+    def test_public_create_uses_real_authorization_source_and_exact_storage_paths(self):
+        headers = [("Authorization", "private-request-marker")]
+        payload = _create_payload("google")
+        stored_thread = _thread_record()
+        store = StatefulV2Store()
+        events: list[tuple[str, object]] = []
+
+        with patch.object(
+            redis_store,
+            "resolve_v2_index_hmac_keys",
+            return_value=(b"k" * 32, None),
+        ):
+            prepared = redis_store._create_v2_thread(
+                stored_thread,
+                command_transport=store,
+            )
+        self.assertIs(type(prepared), redis_store._V2RecordResult)
+        self.assertTrue(prepared.created)
+        store.commands.clear()
+
+        def shared_config_helper(name: str):
+            if name == "resolve_authenticated_user":
+                def resolve_authenticated_user(received_headers: object):
+                    self.assertIs(received_headers, headers)
+                    events.append(("authentication", None))
+                    return {"email": OWNER_EMAIL, "name": "Owner Person"}, None
+
+                return resolve_authenticated_user
+            if name == "resolve_owned_managed_inbox_record":
+                def resolve_owned_mailbox(
+                    received_headers: object,
+                    mailbox_id: str,
+                ) -> dict:
+                    self.assertIs(received_headers, headers)
+                    events.append(("mailbox_authorization", mailbox_id))
+                    return {
+                        "status": "ok",
+                        "user": {"email": OWNER_EMAIL, "name": "Owner Person"},
+                        "inbox": {"id": mailbox_id, "provider": "google"},
+                    }
+
+                return resolve_owned_mailbox
+            self.fail(f"unexpected shared configuration helper: {name}")
+
+        def resolve_authenticated_gmail(
+            received_headers: object,
+            mailbox_id: str,
+        ) -> dict:
+            self.assertIs(received_headers, headers)
+            self.assertEqual(mailbox_id, MAILBOX_ID)
+            events.append(("provider_authorization", "google"))
+            return {
+                "status": "ok",
+                "context": {
+                    "owner_email": OWNER_EMAIL,
+                    "mailbox_id": MAILBOX_ID,
+                    "refresh_attempted": False,
+                },
+            }
+
+        encoded = base64.urlsafe_b64encode(_raw_source_message()).decode(
+            "ascii"
+        ).rstrip("=")
+
+        def request_with_one_refresh(context: dict, path: str):
+            self.assertEqual(context["owner_email"], OWNER_EMAIL)
+            self.assertEqual(
+                path,
+                f"/messages/{PRIVATE_SOURCE_MARKER}?format=raw",
+            )
+            events.append(("provider_fetch", "google"))
+            return {"raw": encoded}, None, context, None
+
+        authenticated_gmail = SimpleNamespace(
+            __name__="api.inboxes.authenticated_gmail",
+            resolve_authenticated_gmail=resolve_authenticated_gmail,
+        )
+        fetch_module = SimpleNamespace(
+            _request_with_one_refresh=request_with_one_refresh,
+        )
+
+        genuine_capability_check = authorization._is_internal_capability
+
+        def check_source_capability(value: object, *, actions=None) -> bool:
+            self.assertTrue(
+                genuine_capability_check(value, actions={"create"})
+            )
+            self.assertEqual(value.mailbox_provider, "google")
+            events.append(("source_capability", value.mailbox_provider))
+            return genuine_capability_check(value, actions=actions)
+
+        def atomic_create(record: dict) -> object:
+            events.append(("atomic_create", record["collaborationId"]))
+            return redis_store._create_v2_thread(record)
+
+        def exact_reload(collaboration_id: str) -> object:
+            events.append(("exact_reload", collaboration_id))
+            return redis_store._load_v2_thread(collaboration_id)
+
+        with patch.dict(
+            sys.modules,
+            {
+                "api.inboxes.authenticated_gmail": authenticated_gmail,
+                "authenticated_gmail": authenticated_gmail,
+            },
+        ), patch.object(
+            authorization,
+            "_shared_config_helper",
+            side_effect=shared_config_helper,
+        ), patch.object(
+            source_message,
+            "_load_fetch_gmail_module",
+            return_value=fetch_module,
+        ), patch.object(
+            source_message,
+            "_is_internal_capability",
+            side_effect=check_source_capability,
+        ) as source_capability_check, patch.object(
+            redis_store,
+            "resolve_v2_index_hmac_keys",
+            return_value=(b"k" * 32, None),
+        ), _stateful_backend(store, events), patch.object(
+            application,
+            "generate_v2_opaque_id",
+            return_value=OTHER_COLLABORATION_ID,
+        ), patch.object(
+            application.time,
+            "time_ns",
+            return_value=NOW_MILLISECONDS * 1_000_000,
+        ), patch.object(
+            application,
+            "_create_v2_thread",
+            side_effect=atomic_create,
+        ) as creator, patch.object(
+            application,
+            "_load_v2_thread",
+            side_effect=exact_reload,
+        ) as loader:
+            result = application.create_v2_collaboration_for_owner(
+                headers,
+                payload,
+            )
+
+        self.assertEqual(
+            [event for event in events if event[0] != "storage"],
+            [
+                ("authentication", None),
+                ("mailbox_authorization", MAILBOX_ID),
+                ("source_capability", "google"),
+                ("provider_authorization", "google"),
+                ("provider_fetch", "google"),
+                ("atomic_create", OTHER_COLLABORATION_ID),
+                ("exact_reload", COLLABORATION_ID),
+            ],
+        )
+        first_storage_event = next(
+            index for index, event in enumerate(events) if event[0] == "storage"
+        )
+        self.assertGreater(
+            first_storage_event,
+            events.index(("atomic_create", OTHER_COLLABORATION_ID)),
+        )
+        source_capability_check.assert_called_once()
+        checked_capability = source_capability_check.call_args.args[0]
+        self.assertTrue(
+            authorization._is_internal_capability(
+                checked_capability,
+                actions={"create"},
+            )
+        )
+        self.assertIsNone(checked_capability.collaboration_id)
+        creator.assert_called_once()
+        loader.assert_called_once_with(COLLABORATION_ID)
+
+        self.assertEqual(
+            result,
+            {
+                "created": False,
+                "collaboration": {
+                    "collaborationId": COLLABORATION_ID,
+                    "mailboxId": MAILBOX_ID,
+                    "state": "needs_review",
+                    "createdAt": (NOW * 1000) - 1000,
+                    "updatedAt": NOW * 1000,
+                    "source": {
+                        "subject": "Quarterly launch review",
+                        "senderDisplay": "Alex Sender",
+                        "fromDisplay": "Alex Sender <alex@example.net>",
+                        "timestamp": "1712345678901",
+                        "bodyText": "Please review the launch details.",
+                    },
+                    "messages": [
+                        {
+                            "id": "S" * 22,
+                            "authorDisplayName": "Owner Person",
+                            "authorRole": "Cuevion user",
+                            "text": "Shared owner reply",
+                            "visibility": "shared",
+                            "timestamp": (NOW * 1000) - 300,
+                        },
+                        {
+                            "id": "N" * 22,
+                            "authorDisplayName": "Internal Teammate",
+                            "authorRole": "Cuevion user",
+                            "text": "Internal-only note",
+                            "visibility": "internal",
+                            "timestamp": (NOW * 1000) - 200,
+                        },
+                        {
+                            "id": "G" * 22,
+                            "authorDisplayName": "Guest Reviewer",
+                            "authorRole": "Guest reviewer",
+                            "text": "Shared guest reply",
+                            "visibility": "shared",
+                            "timestamp": (NOW * 1000) - 100,
+                        },
+                    ],
+                },
+            },
+        )
+        self.assertNotIn(PRIVATE_SOURCE_MARKER, _public_text(result))
+        self.assertEqual(
+            [command[0] for command in store.commands],
+            ["EVAL", "EVAL", "GET", "GET"],
+        )
+        for command in store.commands:
+            self.assertIn(command[0], {"EVAL", "GET"})
+            if command[0] == "GET":
+                keys = command[1:2]
+            else:
+                key_count = command[2]
+                keys = command[3 : 3 + key_count]
+            self.assertTrue(keys)
+            self.assertTrue(
+                all(
+                    "collab:v2" in key
+                    and "collab:v1" not in key
+                    and not any(character in key for character in "*?[]")
+                    for key in keys
+                )
+            )
+
+    def test_authorized_google_and_imap_creation_use_owner_boundary_and_exact_dto(self):
+        for provider in ("google", "custom_imap"):
+            for state in ("needs_review", "needs_action", "note_only"):
+                with self.subTest(provider=provider, state=state):
+                    headers = [("Authorization", "private-request-marker")]
+                    payload = _create_payload(provider, state=state)
+                    capability = _create_capability(provider)
+                    authorization_result = {
+                        "status": "ok",
+                        "context": capability,
+                        "error": None,
+                    }
+                    events: list[tuple[str, object]] = []
+                    stored: list[dict] = []
+
+                    def authorize(
+                        received_headers: object,
+                        mailbox_id: object,
+                        *,
+                        required_action: str,
+                    ) -> dict:
+                        self.assertIs(received_headers, headers)
+                        self.assertEqual(mailbox_id, MAILBOX_ID)
+                        self.assertEqual(required_action, "create")
+                        events.append(("owner_mailbox_authorization", provider))
+                        return authorization_result
+
+                    def create(record: dict) -> object:
+                        events.append(("atomic_create", provider))
+                        stored.append(record)
+                        return redis_store._V2RecordResult(record, created=True)
+
+                    with patch.object(
+                        application,
+                        "resolve_internal_collaboration_context",
+                        side_effect=authorize,
+                    ) as authorize_mock, patch.object(
+                        application,
+                        "resolve_source_message",
+                        side_effect=_source_resolver_with_fake_providers(events),
+                    ), patch.object(
+                        application,
+                        "generate_v2_opaque_id",
+                        return_value=COLLABORATION_ID,
+                    ) as id_generator, patch.object(
+                        application.time,
+                        "time_ns",
+                        return_value=NOW_MILLISECONDS * 1_000_000,
+                    ), patch.object(
+                        application,
+                        "_create_v2_thread",
+                        side_effect=create,
+                    ) as creator:
+                        result = application.create_v2_collaboration_for_owner(
+                            headers,
+                            payload,
+                        )
+
+                    self.assertEqual(
+                        events,
+                        [
+                            ("owner_mailbox_authorization", provider),
+                            ("provider_fetch", provider),
+                            ("atomic_create", provider),
+                        ],
+                    )
+                    authorize_mock.assert_called_once_with(
+                        headers,
+                        MAILBOX_ID,
+                        required_action="create",
+                    )
+                    id_generator.assert_called_once_with()
+                    creator.assert_called_once_with(stored[0])
+                    self.assertEqual(
+                        stored[0],
+                        {
+                            "v": 2,
+                            "collaborationId": COLLABORATION_ID,
+                            "ownerEmail": OWNER_EMAIL,
+                            "workspaceId": OWNER_EMAIL,
+                            "mailboxId": MAILBOX_ID,
+                            "sourceRef": {
+                                "provider": provider,
+                                **payload["sourceRef"],
+                            },
+                            "sourceMessage": {
+                                "subject": "Quarterly launch review",
+                                "senderDisplay": "Alex Sender",
+                                "fromDisplay": "Alex Sender <alex@example.net>",
+                                "timestamp": "Tue, 02 Jan 2024 10:30:00 +0000",
+                                "bodyText": "Please review the launch details.",
+                            },
+                            "state": state,
+                            "messages": [],
+                            "createdAt": NOW_MILLISECONDS,
+                            "updatedAt": NOW_MILLISECONDS,
+                        },
+                    )
+                    self.assertEqual(
+                        result,
+                        {
+                            "created": True,
+                            "collaboration": {
+                                "collaborationId": COLLABORATION_ID,
+                                "mailboxId": MAILBOX_ID,
+                                "state": state,
+                                "createdAt": NOW_MILLISECONDS,
+                                "updatedAt": NOW_MILLISECONDS,
+                                "source": {
+                                    "subject": "Quarterly launch review",
+                                    "senderDisplay": "Alex Sender",
+                                    "fromDisplay": "Alex Sender <alex@example.net>",
+                                    "timestamp": "Tue, 02 Jan 2024 10:30:00 +0000",
+                                    "bodyText": "Please review the launch details.",
+                                },
+                                "messages": [],
+                            },
+                        },
+                    )
+                    self.assertEqual(
+                        set(result["collaboration"]),
+                        {
+                            "collaborationId",
+                            "mailboxId",
+                            "state",
+                            "createdAt",
+                            "updatedAt",
+                            "source",
+                            "messages",
+                        },
+                    )
+                    self.assertNotIn(PRIVATE_SOURCE_MARKER, _public_text(result))
+                    self.assertFalse(
+                        any(
+                            type(value) is redis_store._V2RecordResult
+                            for value in _walk(result)
+                        )
+                    )
+
+    def test_payload_is_exact_and_caller_cannot_supply_server_owned_fields(self):
+        class PayloadDictSubclass(dict):
+            pass
+
+        class CustomPayloadMapping(Mapping):
+            def __init__(self, value: dict):
+                self._value = value
+
+            def __getitem__(self, key: object) -> object:
+                return self._value[key]
+
+            def __iter__(self):
+                return iter(self._value)
+
+            def __len__(self) -> int:
+                return len(self._value)
+
+        class DuckTypedPayload:
+            def __init__(self, value: dict):
+                self._value = value
+
+            def get(self, key: object, default=None):
+                return self._value.get(key, default)
+
+            def keys(self):
+                return self._value.keys()
+
+            def __iter__(self):
+                return iter(self._value)
+
+            def __len__(self) -> int:
+                return len(self._value)
+
+        for missing_field in ("mailboxId", "sourceRef", "state"):
+            payload = _create_payload()
+            payload.pop(missing_field)
+            with self.subTest(missing=missing_field):
+                self._assert_exact_payload_rejected_without_side_effects(payload)
+
+        non_exact_payloads = (
+            ("none", None),
+            ("list", list(_create_payload().items())),
+            ("tuple", tuple(_create_payload().items())),
+            ("string", PRIVATE_SOURCE_MARKER),
+            ("integer", 42),
+            ("boolean", True),
+            ("dict-subclass", PayloadDictSubclass(_create_payload())),
+            ("custom-mapping", CustomPayloadMapping(_create_payload())),
+            ("duck-typed-mapping", DuckTypedPayload(_create_payload())),
+        )
+        for label, payload in non_exact_payloads:
+            with self.subTest(payload_type=label):
+                self._assert_exact_payload_rejected_without_side_effects(payload)
+
+        forbidden_fields = (
+            "collaborationId",
+            "ownerEmail",
+            "workspaceId",
+            "sourceMessage",
+            "subject",
+            "sender",
+            "body",
+            "provider",
+            "createdAt",
+            "updatedAt",
+            "messages",
+            "participants",
+            "invitations",
+            "guest",
+            "actor",
+            "visibility",
+            "credentials",
+        )
+        for field in forbidden_fields:
+            payload = {**_create_payload(), field: PRIVATE_SOURCE_MARKER}
+            with self.subTest(field=field):
+                self._assert_exact_payload_rejected_without_side_effects(payload)
+
+        for state in ("resolved", "unknown", "", None, 1):
+            payload = _create_payload()
+            payload["state"] = state
+            with self.subTest(state=state):
+                self._assert_exact_payload_rejected_without_side_effects(payload)
+
+    def test_repeated_source_creation_is_atomic_and_reloads_exact_duplicate(self):
+        headers = [("Authorization", "private-request-marker")]
+        payload = _create_payload()
+        capability = _create_capability("google")
+        authorization_result = {
+            "status": "ok",
+            "context": capability,
+            "error": None,
+        }
+        store = StatefulV2Store()
+
+        with _stateful_backend(store), patch.object(
+            redis_store,
+            "resolve_v2_index_hmac_keys",
+            return_value=(b"k" * 32, None),
+        ), patch.object(
+            application,
+            "resolve_internal_collaboration_context",
+            return_value=authorization_result,
+        ), patch.object(
+            application,
+            "resolve_source_message",
+            side_effect=_source_resolver_with_fake_providers(),
+        ), patch.object(
+            application,
+            "generate_v2_opaque_id",
+            side_effect=(COLLABORATION_ID, OTHER_COLLABORATION_ID),
+        ), patch.object(
+            application.time,
+            "time_ns",
+            return_value=NOW_MILLISECONDS * 1_000_000,
+        ):
+            first = application.create_v2_collaboration_for_owner(headers, payload)
+            second = application.create_v2_collaboration_for_owner(headers, payload)
+
+        self.assertTrue(first["created"])
+        self.assertFalse(second["created"])
+        self.assertEqual(second["collaboration"], first["collaboration"])
+        self.assertEqual(first["collaboration"]["collaborationId"], COLLABORATION_ID)
+        self.assertNotIn(
+            redis_store.build_v2_thread_key(OTHER_COLLABORATION_ID),
+            store.values,
+        )
+        thread_keys = [
+            key
+            for key in store.values
+            if key.startswith(redis_store.V2_THREAD_KEY_PREFIX)
+        ]
+        self.assertEqual(
+            thread_keys,
+            [redis_store.build_v2_thread_key(COLLABORATION_ID)],
+        )
+        self.assertEqual(
+            [command[0] for command in store.commands],
+            ["EVAL", "EVAL", "EVAL", "GET", "GET"],
+        )
+        self.assertEqual(
+            store.commands[-1],
+            ["GET", redis_store.build_v2_thread_key(COLLABORATION_ID)],
+        )
+        self.assertTrue(
+            all(command[0] not in {"SCAN", "KEYS", "SET"} for command in store.commands)
+        )
+        self.assertTrue(
+            all(
+                "collab:v1" not in str(command) and "collab:v2" in str(command)
+                for command in store.commands
+            )
+        )
+        self.assertFalse(
+            any(type(value) is redis_store._V2RecordResult for value in _walk(second))
+        )
+
+    def test_unauthorized_invalid_and_mismatched_sources_fail_before_provider_or_storage(self):
+        unauthorized = {
+            "status": "unauthorized",
+            "context": None,
+            "error": {"code": "auth_required"},
+        }
+        with patch.object(
+            application,
+            "resolve_internal_collaboration_context",
+            return_value=unauthorized,
+        ), patch.object(
+            application,
+            "resolve_source_message",
+        ) as resolve_source, patch.object(
+            application,
+            "_create_v2_thread",
+        ) as creator, patch.object(
+            application,
+            "_load_v2_thread",
+        ) as loader:
+            result = application.create_v2_collaboration_for_owner(
+                [], _create_payload()
+            )
+        self.assertEqual(result["error"], {"code": "auth_required"})
+        resolve_source.assert_not_called()
+        creator.assert_not_called()
+        loader.assert_not_called()
+
+        invalid_sources = (
+            (
+                "noncanonical-uidvalidity",
+                "custom_imap",
+                {"folder": "INBOX", "uidValidity": "01", "imapUid": "456"},
+            ),
+            (
+                "noncanonical-uid",
+                "custom_imap",
+                {"folder": "INBOX", "uidValidity": "123", "imapUid": "0"},
+            ),
+            (
+                "provider-mismatch",
+                "custom_imap",
+                {"providerMessageId": "gmail-id"},
+            ),
+        )
+        for label, provider, source_ref in invalid_sources:
+            payload = _create_payload(provider)
+            payload["sourceRef"] = source_ref
+            capability = _create_capability(provider)
+            events: list[tuple[str, object]] = []
+            with self.subTest(label=label), patch.object(
+                application,
+                "resolve_internal_collaboration_context",
+                return_value={"status": "ok", "context": capability, "error": None},
+            ), patch.object(
+                application,
+                "resolve_source_message",
+                side_effect=_source_resolver_with_fake_providers(events),
+            ), patch.object(
+                application,
+                "_create_v2_thread",
+            ) as creator:
+                result = application.create_v2_collaboration_for_owner([], payload)
+            self.assertEqual(result["error"], {"code": "invalid_request"})
+            self.assertEqual(events, [])
+            creator.assert_not_called()
+
+    def test_real_custom_imap_create_uses_authorized_provider_and_safe_dto(self):
+        headers = [("Authorization", "private-request-marker")]
+        payload = _create_payload("custom_imap")
+        events: list[tuple[str, object]] = []
+        stored: list[dict] = []
+
+        class Mailbox:
+            def select(self, folder: str, readonly: bool):
+                events.append(("imap_select", (folder, readonly)))
+                return "OK", []
+
+            def response(self, name: str):
+                events.append(("imap_uidvalidity", name))
+                return "UIDVALIDITY", [b"123"]
+
+            def uid(self, *args):
+                events.append(("imap_fetch", args))
+                return "OK", [(b"bounded-message", _raw_source_message())]
+
+            def logout(self):
+                events.append(("imap_logout", None))
+
+        mailbox = Mailbox()
+
+        def shared_config_helper(name: str):
+            if name == "resolve_authenticated_user":
+                def resolve_authenticated_user(received_headers: object):
+                    self.assertIs(received_headers, headers)
+                    events.append(("authentication", None))
+                    return {"email": OWNER_EMAIL, "name": "Owner Person"}, None
+
+                return resolve_authenticated_user
+            if name == "resolve_owned_managed_inbox_record":
+                def resolve_owned_mailbox(
+                    received_headers: object,
+                    mailbox_id: str,
+                ) -> dict:
+                    self.assertIs(received_headers, headers)
+                    events.append(("mailbox_authorization", mailbox_id))
+                    return {
+                        "status": "ok",
+                        "user": {"email": OWNER_EMAIL, "name": "Owner Person"},
+                        "inbox": {
+                            "id": mailbox_id,
+                            "provider": "custom_imap",
+                        },
+                    }
+
+                return resolve_owned_mailbox
+            self.fail(f"unexpected shared configuration helper: {name}")
+
+        def resolve_authenticated_imap_mailbox(
+            received_headers: object,
+            mailbox_id: str,
+        ) -> dict:
+            self.assertIs(received_headers, headers)
+            self.assertEqual(mailbox_id, MAILBOX_ID)
+            events.append(("provider_authorization", "custom_imap"))
+            return {
+                "status": "ok",
+                "mailbox": {
+                    "imap": {
+                        "host": "imap.test.invalid",
+                        "port": 993,
+                        "username": "owner",
+                        "password": "private-test-password",
+                        "ssl": True,
+                    },
+                },
+            }
+
+        def connect_mailbox_with_settings(*settings):
+            self.assertEqual(
+                settings,
+                (
+                    "imap.test.invalid",
+                    993,
+                    "owner",
+                    "private-test-password",
+                    True,
+                ),
+            )
+            events.append(("provider_connect", "custom_imap"))
+            return mailbox
+
+        authenticated_imap = SimpleNamespace(
+            __name__="api.inboxes.authenticated_imap",
+            resolve_authenticated_imap_mailbox=resolve_authenticated_imap_mailbox,
+        )
+        imap_connect_preview = SimpleNamespace(
+            __name__="imap_connect_preview",
+            connect_mailbox_with_settings=connect_mailbox_with_settings,
+        )
+
+        def create(record: dict) -> object:
+            events.append(("atomic_create", "custom_imap"))
+            stored.append(record)
+            return redis_store._V2RecordResult(record, created=True)
+
+        with patch.dict(
+            sys.modules,
+            {
+                "api.inboxes.authenticated_imap": authenticated_imap,
+                "authenticated_imap": authenticated_imap,
+                "imap_connect_preview": imap_connect_preview,
+            },
+        ), patch.object(
+            authorization,
+            "_shared_config_helper",
+            side_effect=shared_config_helper,
+        ), patch.object(
+            source_message,
+            "_load_fetch_gmail_module",
+        ) as google_loader, patch.object(
+            application,
+            "generate_v2_opaque_id",
+            return_value=COLLABORATION_ID,
+        ), patch.object(
+            application.time,
+            "time_ns",
+            return_value=NOW_MILLISECONDS * 1_000_000,
+        ), patch.object(
+            application,
+            "_create_v2_thread",
+            side_effect=create,
+        ) as creator, patch.object(
+            application,
+            "_load_v2_thread",
+        ) as loader:
+            result = application.create_v2_collaboration_for_owner(
+                headers,
+                payload,
+            )
+
+        self.assertEqual(
+            events,
+            [
+                ("authentication", None),
+                ("mailbox_authorization", MAILBOX_ID),
+                ("provider_authorization", "custom_imap"),
+                ("provider_connect", "custom_imap"),
+                ("imap_select", ("INBOX", True)),
+                ("imap_uidvalidity", "UIDVALIDITY"),
+                (
+                    "imap_fetch",
+                    (
+                        "fetch",
+                        "456",
+                        f"(UID BODY.PEEK[]<0.{source_message.MAX_SOURCE_MESSAGE_BYTES + 1}>)",
+                    ),
+                ),
+                ("imap_logout", None),
+                ("atomic_create", "custom_imap"),
+            ],
+        )
+        self.assertNotIn("sourceMessage", payload)
+        self.assertNotIn("provider", payload["sourceRef"])
+        self.assertEqual(
+            stored[0]["sourceRef"],
+            {
+                "provider": "custom_imap",
+                "folder": "INBOX",
+                "uidValidity": "123",
+                "imapUid": "456",
+            },
+        )
+        self.assertEqual(
+            stored[0]["sourceMessage"],
+            {
+                "subject": "Quarterly launch review",
+                "senderDisplay": "Alex Sender",
+                "fromDisplay": "Alex Sender <alex@example.net>",
+                "timestamp": "Tue, 02 Jan 2024 10:30:00 +0000",
+                "bodyText": "Please review the launch details.",
+            },
+        )
+        self.assertEqual(result["created"], True)
+        self.assertEqual(
+            result["collaboration"]["source"],
+            stored[0]["sourceMessage"],
+        )
+        self.assertTrue(
+            {
+                "folder",
+                "uidValidity",
+                "imapUid",
+                "sourceRef",
+                "provider",
+                "providerMessageId",
+            }.isdisjoint(_all_keys(result))
+        )
+        self.assertNotIn("private-test-password", _public_text(result))
+        google_loader.assert_not_called()
+        creator.assert_called_once_with(stored[0])
+        loader.assert_not_called()
+
+    def test_real_custom_imap_create_rejects_changed_and_noncanonical_uids(self):
+        headers = [("Authorization", "private-request-marker")]
+        cases = (
+            (
+                "uidvalidity-mismatch",
+                {"folder": "INBOX", "uidValidity": "123", "imapUid": "456"},
+                "124",
+                {
+                    "status": "error",
+                    "collaboration": None,
+                    "error": {"code": "source_changed"},
+                },
+                True,
+            ),
+            (
+                "noncanonical-uidvalidity",
+                {"folder": "INBOX", "uidValidity": "0123", "imapUid": "456"},
+                "123",
+                {
+                    "status": "malformed",
+                    "collaboration": None,
+                    "error": {"code": "invalid_request"},
+                },
+                False,
+            ),
+            (
+                "noncanonical-imap-uid",
+                {"folder": "INBOX", "uidValidity": "123", "imapUid": "0456"},
+                "123",
+                {
+                    "status": "malformed",
+                    "collaboration": None,
+                    "error": {"code": "invalid_request"},
+                },
+                False,
+            ),
+        )
+
+        for label, source_ref, selected_uidvalidity, expected, provider_called in cases:
+            events: list[tuple[str, object]] = []
+
+            class Mailbox:
+                def select(self, folder: str, readonly: bool):
+                    events.append(("imap_select", (folder, readonly)))
+                    return "OK", []
+
+                def response(self, name: str):
+                    events.append(("imap_uidvalidity", name))
+                    return "UIDVALIDITY", [selected_uidvalidity.encode("ascii")]
+
+                def uid(self, *args):
+                    events.append(("imap_fetch", args))
+                    return "OK", [(b"bounded-message", _raw_source_message())]
+
+                def logout(self):
+                    events.append(("imap_logout", None))
+
+            mailbox = Mailbox()
+
+            def shared_config_helper(name: str):
+                if name == "resolve_authenticated_user":
+                    def resolve_authenticated_user(received_headers: object):
+                        self.assertIs(received_headers, headers)
+                        events.append(("authentication", None))
+                        return {
+                            "email": OWNER_EMAIL,
+                            "name": "Owner Person",
+                        }, None
+
+                    return resolve_authenticated_user
+                if name == "resolve_owned_managed_inbox_record":
+                    def resolve_owned_mailbox(
+                        received_headers: object,
+                        mailbox_id: str,
+                    ) -> dict:
+                        self.assertIs(received_headers, headers)
+                        events.append(("mailbox_authorization", mailbox_id))
+                        return {
+                            "status": "ok",
+                            "user": {
+                                "email": OWNER_EMAIL,
+                                "name": "Owner Person",
+                            },
+                            "inbox": {
+                                "id": mailbox_id,
+                                "provider": "custom_imap",
+                            },
+                        }
+
+                    return resolve_owned_mailbox
+                self.fail(f"unexpected shared configuration helper: {name}")
+
+            def resolve_authenticated_imap_mailbox(
+                received_headers: object,
+                mailbox_id: str,
+            ) -> dict:
+                self.assertIs(received_headers, headers)
+                self.assertEqual(mailbox_id, MAILBOX_ID)
+                events.append(("provider_authorization", "custom_imap"))
+                return {
+                    "status": "ok",
+                    "mailbox": {
+                        "imap": {
+                            "host": "imap.test.invalid",
+                            "port": 993,
+                            "username": "owner",
+                            "password": "private-test-password",
+                            "ssl": True,
+                        },
+                    },
+                }
+
+            def connect_mailbox_with_settings(*_settings):
+                events.append(("provider_connect", "custom_imap"))
+                return mailbox
+
+            authenticated_imap = SimpleNamespace(
+                __name__="api.inboxes.authenticated_imap",
+                resolve_authenticated_imap_mailbox=resolve_authenticated_imap_mailbox,
+            )
+            imap_connect_preview = SimpleNamespace(
+                __name__="imap_connect_preview",
+                connect_mailbox_with_settings=connect_mailbox_with_settings,
+            )
+            payload = {
+                "mailboxId": MAILBOX_ID,
+                "sourceRef": source_ref,
+                "state": "needs_review",
+            }
+
+            with self.subTest(label=label), patch.dict(
+                sys.modules,
+                {
+                    "api.inboxes.authenticated_imap": authenticated_imap,
+                    "authenticated_imap": authenticated_imap,
+                    "imap_connect_preview": imap_connect_preview,
+                },
+            ), patch.object(
+                authorization,
+                "_shared_config_helper",
+                side_effect=shared_config_helper,
+            ), patch.object(
+                source_message,
+                "_load_fetch_gmail_module",
+            ) as google_loader, patch.object(
+                application,
+                "_create_v2_thread",
+            ) as creator, patch.object(
+                application,
+                "_load_v2_thread",
+            ) as loader:
+                result = application.create_v2_collaboration_for_owner(
+                    headers,
+                    payload,
+                )
+
+            self.assertEqual(result, expected)
+            self.assertEqual(
+                events[:2],
+                [
+                    ("authentication", None),
+                    ("mailbox_authorization", MAILBOX_ID),
+                ],
+            )
+            self.assertEqual(
+                ("provider_authorization", "custom_imap") in events,
+                provider_called,
+            )
+            if provider_called:
+                self.assertIn(("imap_uidvalidity", "UIDVALIDITY"), events)
+                self.assertNotIn("imap_fetch", [event[0] for event in events])
+                self.assertEqual(events[-1], ("imap_logout", None))
+            else:
+                self.assertEqual(len(events), 2)
+            self.assertNotIn("private-test-password", _public_text(result))
+            google_loader.assert_not_called()
+            creator.assert_not_called()
+            loader.assert_not_called()
+
+    def test_source_failures_are_allowlisted_and_do_not_expose_provider_data(self):
+        capability = _create_capability("google")
+        authorization_result = {
+            "status": "ok",
+            "context": capability,
+            "error": None,
+        }
+        cases = (
+            ("stale-gmail", "not_found", "source_not_found"),
+            ("imap-uidvalidity", "conflict", "source_changed"),
+            ("provider-outage", "unavailable", "provider_unavailable"),
+        )
+        for label, status, code in cases:
+            with self.subTest(label=label), patch.object(
+                application,
+                "resolve_internal_collaboration_context",
+                return_value=authorization_result,
+            ), patch.object(
+                application,
+                "resolve_source_message",
+                return_value={
+                    "status": status,
+                    "source": None,
+                    "error": {
+                        "code": code,
+                        "private": PRIVATE_SOURCE_MARKER,
+                    },
+                },
+            ), patch.object(
+                application,
+                "_create_v2_thread",
+            ) as creator:
+                result = application.create_v2_collaboration_for_owner(
+                    [], _create_payload()
+                )
+            self.assertEqual(result["error"], {"code": code})
+            self.assertNotIn(PRIVATE_SOURCE_MARKER, _public_text(result))
+            self.assertFalse(
+                any(isinstance(value, BaseException) for value in _walk(result))
+            )
+            creator.assert_not_called()
+
+    def test_duplicate_scope_source_and_record_mismatches_fail_closed(self):
+        capability = _create_capability("google")
+        authorization_result = {
+            "status": "ok",
+            "context": capability,
+            "error": None,
+        }
+        candidate = _thread_record()
+        cases: list[tuple[str, dict, str]] = []
+
+        cross_owner = _thread_record()
+        cross_owner["ownerEmail"] = OTHER_OWNER_EMAIL
+        cross_owner["workspaceId"] = OTHER_OWNER_EMAIL
+        cases.append(("cross-owner", cross_owner, "forbidden"))
+
+        cross_workspace = _thread_record()
+        cross_workspace["workspaceId"] = OTHER_OWNER_EMAIL
+        cases.append(("cross-workspace", cross_workspace, "storage_protocol_error"))
+
+        cross_mailbox = _thread_record()
+        cross_mailbox["mailboxId"] = "mailbox-2"
+        cases.append(("cross-mailbox", cross_mailbox, "forbidden"))
+
+        wrong_source = _thread_record()
+        wrong_source["sourceRef"] = {
+            "provider": "google",
+            "providerMessageId": "different-source",
+        }
+        cases.append(("source-mismatch", wrong_source, "forbidden"))
+
+        wrong_collaboration = _thread_record()
+        wrong_collaboration["collaborationId"] = OTHER_COLLABORATION_ID
+        cases.append(("collaboration-id-mismatch", wrong_collaboration, "forbidden"))
+
+        malformed = _thread_record()
+        malformed.pop("sourceMessage")
+        cases.append(("malformed", malformed, "storage_protocol_error"))
+
+        for label, loaded, expected_code in cases:
+            with self.subTest(label=label), patch.object(
+                application,
+                "resolve_internal_collaboration_context",
+                return_value=authorization_result,
+            ), patch.object(
+                application,
+                "resolve_source_message",
+                side_effect=_source_resolver_with_fake_providers(),
+            ), patch.object(
+                application,
+                "generate_v2_opaque_id",
+                return_value=OTHER_COLLABORATION_ID,
+            ), patch.object(
+                application.time,
+                "time_ns",
+                return_value=NOW_MILLISECONDS * 1_000_000,
+            ), patch.object(
+                application,
+                "_create_v2_thread",
+                return_value=redis_store._V2RecordResult(
+                    candidate,
+                    created=False,
+                ),
+            ), patch.object(
+                application,
+                "_load_v2_thread",
+                return_value=redis_store._V2RecordResult(loaded),
+            ) as loader:
+                result = application.create_v2_collaboration_for_owner(
+                    [], _create_payload()
+                )
+            self.assertEqual(result["error"], {"code": expected_code})
+            self.assertIsNone(result["collaboration"])
+            loader.assert_called_once_with(COLLABORATION_ID)
+
+    def test_duplicate_final_reload_failures_are_strict_and_private(self):
+        capability = _create_capability("google")
+        authorization_result = {
+            "status": "ok",
+            "context": capability,
+            "error": None,
+        }
+        candidate = redis_store._V2RecordResult(
+            _thread_record(),
+            created=False,
+        )
+        cases = (
+            (
+                "missing",
+                {"status": "missing"},
+                {
+                    "status": "not_found",
+                    "collaboration": None,
+                    "error": {"code": "collaboration_not_found"},
+                },
+            ),
+            (
+                "malformed-thread",
+                {"status": "malformed"},
+                {
+                    "status": "malformed",
+                    "collaboration": None,
+                    "error": {"code": "storage_protocol_error"},
+                },
+            ),
+            (
+                "storage-unavailable",
+                {
+                    "status": "unavailable",
+                    "error": {"code": "storage_unavailable"},
+                },
+                {
+                    "status": "unavailable",
+                    "collaboration": None,
+                    "error": {"code": "storage_unavailable"},
+                },
+            ),
+            (
+                "storage-protocol-error",
+                {
+                    "status": "unavailable",
+                    "error": {"code": "storage_protocol_error"},
+                },
+                {
+                    "status": "unavailable",
+                    "collaboration": None,
+                    "error": {"code": "storage_protocol_error"},
+                },
+            ),
+            (
+                "unknown-storage-error",
+                {
+                    "status": "unavailable",
+                    "error": {
+                        "code": "private-" + PRIVATE_EXCEPTION_MARKER,
+                    },
+                },
+                {
+                    "status": "unavailable",
+                    "collaboration": None,
+                    "error": {"code": "storage_protocol_error"},
+                },
+            ),
+            (
+                "malformed-storage-error",
+                {
+                    "status": "unavailable",
+                    "error": {
+                        "code": "storage_unavailable",
+                        "privateRawKey": PRIVATE_EXCEPTION_MARKER,
+                    },
+                },
+                {
+                    "status": "unavailable",
+                    "collaboration": None,
+                    "error": {"code": "storage_protocol_error"},
+                },
+            ),
+        )
+
+        for label, loaded, expected in cases:
+            with self.subTest(label=label), patch.object(
+                application,
+                "resolve_internal_collaboration_context",
+                return_value=authorization_result,
+            ), patch.object(
+                application,
+                "resolve_source_message",
+                side_effect=_source_resolver_with_fake_providers(),
+            ), patch.object(
+                application,
+                "generate_v2_opaque_id",
+                return_value=OTHER_COLLABORATION_ID,
+            ), patch.object(
+                application.time,
+                "time_ns",
+                return_value=NOW_MILLISECONDS * 1_000_000,
+            ), patch.object(
+                application,
+                "_create_v2_thread",
+                return_value=candidate,
+            ) as creator, patch.object(
+                application,
+                "_load_v2_thread",
+                return_value=loaded,
+            ) as loader:
+                result = application.create_v2_collaboration_for_owner(
+                    [],
+                    _create_payload(),
+                )
+
+            self.assertEqual(result, expected)
+            self.assertIsNone(result["collaboration"])
+            self.assertNotIn(PRIVATE_EXCEPTION_MARKER, _public_text(result))
+            self.assertNotIn("privateRawKey", _public_text(result))
+            self.assertFalse(
+                any(
+                    type(value) is redis_store._V2RecordResult
+                    for value in _walk(result)
+                )
+            )
+            creator.assert_called_once()
+            loader.assert_called_once_with(COLLABORATION_ID)
+
+        trusted_defect = RuntimeError(PRIVATE_EXCEPTION_MARKER)
+        with patch.object(
+            application,
+            "resolve_internal_collaboration_context",
+            return_value=authorization_result,
+        ), patch.object(
+            application,
+            "resolve_source_message",
+            side_effect=_source_resolver_with_fake_providers(),
+        ), patch.object(
+            application,
+            "generate_v2_opaque_id",
+            return_value=OTHER_COLLABORATION_ID,
+        ), patch.object(
+            application.time,
+            "time_ns",
+            return_value=NOW_MILLISECONDS * 1_000_000,
+        ), patch.object(
+            application,
+            "_create_v2_thread",
+            return_value=candidate,
+        ) as creator, patch.object(
+            application,
+            "_load_v2_thread",
+            side_effect=trusted_defect,
+        ) as loader:
+            with self.assertRaises(RuntimeError) as raised:
+                application.create_v2_collaboration_for_owner(
+                    [],
+                    _create_payload(),
+                )
+
+        self.assertIs(raised.exception, trusted_defect)
+        creator.assert_called_once()
+        loader.assert_called_once_with(COLLABORATION_ID)
+
+    def test_storage_errors_are_strict_and_private_results_never_escape(self):
+        capability = _create_capability("google")
+        authorization_result = {
+            "status": "ok",
+            "context": capability,
+            "error": None,
+        }
+        cases = (
+            (
+                "protocol",
+                {"status": "unavailable", "error": {"code": "storage_protocol_error"}},
+                "storage_protocol_error",
+            ),
+            (
+                "outage",
+                {"status": "unavailable", "error": {"code": "storage_unavailable"}},
+                "storage_unavailable",
+            ),
+            (
+                "unknown",
+                {
+                    "status": "unavailable",
+                    "error": {"code": "private-" + PRIVATE_EXCEPTION_MARKER},
+                },
+                "storage_protocol_error",
+            ),
+            (
+                "malformed-envelope",
+                {
+                    "status": "unavailable",
+                    "error": {
+                        "code": "storage_unavailable",
+                        "rawKey": "cuevion:collab:v2:private",
+                    },
+                },
+                "storage_protocol_error",
+            ),
+        )
+        for label, storage_result, expected_code in cases:
+            with self.subTest(label=label), patch.object(
+                application,
+                "resolve_internal_collaboration_context",
+                return_value=authorization_result,
+            ), patch.object(
+                application,
+                "resolve_source_message",
+                side_effect=_source_resolver_with_fake_providers(),
+            ), patch.object(
+                application,
+                "generate_v2_opaque_id",
+                return_value=COLLABORATION_ID,
+            ), patch.object(
+                application.time,
+                "time_ns",
+                return_value=NOW_MILLISECONDS * 1_000_000,
+            ), patch.object(
+                application,
+                "_create_v2_thread",
+                return_value=storage_result,
+            ):
+                result = application.create_v2_collaboration_for_owner(
+                    [], _create_payload()
+                )
+            self.assertEqual(result["error"], {"code": expected_code})
+            text = _public_text(result)
+            self.assertNotIn(PRIVATE_EXCEPTION_MARKER, text)
+            self.assertNotIn("rawKey", text)
+            self.assertNotIn("source-thread", text)
+            self.assertFalse(
+                any(type(value) is redis_store._V2RecordResult for value in _walk(result))
+            )
+
+    def test_forged_capabilities_and_unexpected_helper_defects_are_not_hidden(self):
+        @dataclass(frozen=True)
+        class ForgedCreateCapability:
+            owner_email: str = OWNER_EMAIL
+            workspace_id: str = OWNER_EMAIL
+            mailbox_id: str = MAILBOX_ID
+            mailbox_provider: str = "google"
+            collaboration_id: None = None
+            action: str = "create"
+
+        forged_values = (
+            {
+                "owner_email": OWNER_EMAIL,
+                "workspace_id": OWNER_EMAIL,
+                "mailbox_id": MAILBOX_ID,
+                "mailbox_provider": "google",
+                "collaboration_id": None,
+                "action": "create",
+            },
+            ForgedCreateCapability(),
+        )
+        for forged in forged_values:
+            with self.subTest(kind=type(forged).__name__), patch.object(
+                application,
+                "resolve_internal_collaboration_context",
+                return_value={"status": "ok", "context": forged, "error": None},
+            ), patch.object(
+                application,
+                "resolve_source_message",
+            ) as resolve_source, patch.object(
+                application,
+                "_create_v2_thread",
+            ) as creator:
+                result = application.create_v2_collaboration_for_owner(
+                    [], _create_payload()
+                )
+            self.assertEqual(result["error"], {"code": "forbidden"})
+            resolve_source.assert_not_called()
+            creator.assert_not_called()
+
+        with patch.object(
+            application,
+            "resolve_internal_collaboration_context",
+            side_effect=AssertionError,
+        ):
+            with self.assertRaises(AssertionError):
+                application.create_v2_collaboration_for_owner([], _create_payload())
+
+        capability = _create_capability("google")
+        authorization_result = {
+            "status": "ok",
+            "context": capability,
+            "error": None,
+        }
+        with patch.object(
+            application,
+            "resolve_internal_collaboration_context",
+            return_value=authorization_result,
+        ), patch.object(
+            application,
+            "resolve_source_message",
+            side_effect=TypeError,
+        ):
+            with self.assertRaises(TypeError):
+                application.create_v2_collaboration_for_owner([], _create_payload())
+
+        with patch.object(
+            application,
+            "resolve_internal_collaboration_context",
+            return_value=authorization_result,
+        ), patch.object(
+            application,
+            "resolve_source_message",
+            side_effect=_source_resolver_with_fake_providers(),
+        ), patch.object(
+            application,
+            "generate_v2_opaque_id",
+            return_value=COLLABORATION_ID,
+        ), patch.object(
+            application.time,
+            "time_ns",
+            return_value=NOW_MILLISECONDS * 1_000_000,
+        ), patch.object(
+            application,
+            "_create_v2_thread",
+            side_effect=AttributeError,
+        ):
+            with self.assertRaises(AttributeError):
+                application.create_v2_collaboration_for_owner([], _create_payload())
 
 
 class OwnerReadApplicationTests(unittest.TestCase):
@@ -720,8 +2286,17 @@ class GuestReadApplicationTests(unittest.TestCase):
             ["headers", "collaboration_id"],
         )
         self.assertEqual(
+            list(
+                inspect.signature(
+                    application.create_v2_collaboration_for_owner
+                ).parameters
+            ),
+            ["headers", "payload"],
+        )
+        self.assertEqual(
             application.__all__,
             [
+                "create_v2_collaboration_for_owner",
                 "read_v2_collaboration_for_guest",
                 "read_v2_collaboration_for_owner",
             ],
