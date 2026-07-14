@@ -20,12 +20,15 @@ from .guest_session import (
 from .models import (
     COLLABORATION_V2_THREAD_SCHEMA_VERSION,
     COLLABORATION_V2_SAFE_ERROR_CODES,
+    MAX_V2_MESSAGE_TEXT,
     MAX_V2_TIMESTAMP_MILLISECONDS,
     MAX_V2_TIMESTAMP_SECONDS,
     MIN_V2_TIMESTAMP_MILLISECONDS,
     MIN_V2_TIMESTAMP_SECONDS,
+    _v2_free_text,
     build_v2_guest_thread_dto,
     generate_v2_opaque_id,
+    is_v2_opaque_id,
     normalize_v2_source_ref,
     normalize_v2_thread_record,
 )
@@ -59,6 +62,26 @@ _ALLOWED_INITIAL_STATES = frozenset(
         "needs_review",
         "needs_action",
         "note_only",
+    }
+)
+
+_CANONICAL_OWNER_MUTATION_ERROR_CODES = {
+    "collaboration_not_found": "collaboration_not_found",
+    "forbidden": "forbidden",
+    "invalid_request": "invalid_request",
+    "stale_thread": "stale_thread",
+    "storage_protocol_error": "storage_protocol_error",
+    "storage_unavailable": "storage_unavailable",
+}
+
+_OWNER_MUTATION_MESSAGE_FIELDS = frozenset(
+    {
+        "id",
+        "authorDisplayName",
+        "authorRole",
+        "text",
+        "timestamp",
+        "visibility",
     }
 )
 
@@ -233,6 +256,199 @@ def _create_storage_failure(value: object) -> dict[str, Any]:
     if type(code) is not str or code not in COLLABORATION_V2_SAFE_ERROR_CODES:
         return _failure("malformed", "storage_protocol_error")
     return _failure(status, code)
+
+
+def _owner_mutation_failure(value: object) -> dict[str, Any]:
+    if type(value) is not dict or set(value) != {"status", "error"}:
+        return _failure("malformed", "storage_protocol_error")
+    status = value.get("status")
+    error = value.get("error")
+    code = error.get("code") if type(error) is dict else None
+    if (
+        type(status) is not str
+        or status != "error"
+        or type(error) is not dict
+        or set(error) != {"code"}
+        or type(code) is not str
+    ):
+        return _failure("malformed", "storage_protocol_error")
+    canonical_code = _CANONICAL_OWNER_MUTATION_ERROR_CODES.get(code)
+    if canonical_code is None:
+        return _failure("malformed", "storage_protocol_error")
+    return _failure("error", canonical_code)
+
+
+def _owner_mutation_dto(
+    value: object,
+    *,
+    capability: object,
+    text: str,
+    visibility: str,
+) -> dict[str, Any] | None:
+    status = value.get("status") if type(value) is dict else None
+    if (
+        type(value) is not dict
+        or set(value) != {"status", "message", "updatedAt", "error"}
+        or type(status) is not str
+        or status != "ok"
+        or value.get("error") is not None
+    ):
+        return None
+
+    message = value.get("message")
+    updated_at = value.get("updatedAt")
+    message_id = message.get("id") if type(message) is dict else None
+    author_display_name = (
+        message.get("authorDisplayName") if type(message) is dict else None
+    )
+    author_role = message.get("authorRole") if type(message) is dict else None
+    message_text = message.get("text") if type(message) is dict else None
+    message_visibility = (
+        message.get("visibility") if type(message) is dict else None
+    )
+    if (
+        type(message) is not dict
+        or set(message) != _OWNER_MUTATION_MESSAGE_FIELDS
+        or type(message_id) is not str
+        or not is_v2_opaque_id(message_id)
+        or type(author_display_name) is not str
+        or author_display_name != capability.actor_display_name
+        or type(author_role) is not str
+        or author_role != "Cuevion user"
+        or type(message_text) is not str
+        or message_text != text
+        or type(message_visibility) is not str
+        or message_visibility != visibility
+        or type(message.get("timestamp")) is not int
+        or message.get("timestamp") < MIN_V2_TIMESTAMP_MILLISECONDS
+        or message.get("timestamp") > MAX_V2_TIMESTAMP_MILLISECONDS
+        or type(updated_at) is not int
+        or updated_at != message.get("timestamp")
+    ):
+        return None
+
+    return {
+        "message": {
+            "id": message["id"],
+            "authorDisplayName": message["authorDisplayName"],
+            "authorRole": message["authorRole"],
+            "text": message["text"],
+            "timestamp": message["timestamp"],
+            "visibility": message["visibility"],
+        },
+        "updatedAt": updated_at,
+    }
+
+
+def _append_internal_v2_message(
+    capability: object,
+    text: str,
+) -> dict:
+    # Keep application.py's inactive import graph stable; the mutation foundation
+    # is loaded only if one of the inactive mutation services is explicitly called.
+    from .mutations import append_internal_v2_message
+
+    if capability.action == "reply":
+        visibility = "shared"
+    elif capability.action == "internal_note":
+        visibility = "internal"
+    else:
+        return {"status": "error", "error": {"code": "forbidden"}}
+    return append_internal_v2_message(
+        capability,
+        text,
+        visibility=visibility,
+    )
+
+
+def _append_v2_owner_message(
+    headers: object,
+    collaboration_id: object,
+    payload: object,
+    *,
+    required_action: str,
+) -> dict[str, Any]:
+    if required_action == "reply":
+        visibility = "shared"
+    elif required_action == "internal_note":
+        visibility = "internal"
+    else:
+        return _failure("malformed", "invalid_request")
+    if type(payload) is not dict or set(payload) != {"text"}:
+        return _failure("malformed", "invalid_request")
+    text = payload.get("text")
+    if (
+        type(text) is not str
+        or _v2_free_text(text, max_length=MAX_V2_MESSAGE_TEXT) != text
+    ):
+        return _failure("malformed", "invalid_request")
+
+    authorized = resolve_internal_collaboration_context(
+        headers,
+        collaboration_id=collaboration_id,
+        required_action=required_action,
+    )
+    if type(authorized) is not dict or authorized.get("status") != "ok":
+        return _failure_from_result(
+            authorized,
+            default_status="error",
+            default_code="storage_protocol_error",
+        )
+    if (
+        set(authorized) != {"status", "context", "error"}
+        or authorized.get("error") is not None
+    ):
+        return _failure("malformed", "storage_protocol_error")
+
+    capability = authorized.get("context")
+    if (
+        not _is_internal_capability(
+            capability,
+            actions=frozenset({required_action}),
+        )
+        or capability.collaboration_id != collaboration_id
+    ):
+        return _failure("forbidden", "forbidden")
+
+    mutated = _append_internal_v2_message(
+        capability,
+        text,
+    )
+    dto = _owner_mutation_dto(
+        mutated,
+        capability=capability,
+        text=text,
+        visibility=visibility,
+    )
+    if dto is not None:
+        return dto
+    return _owner_mutation_failure(mutated)
+
+
+def append_v2_shared_message_for_owner(
+    headers: object,
+    collaboration_id: object,
+    payload: object,
+) -> dict[str, Any]:
+    return _append_v2_owner_message(
+        headers,
+        collaboration_id,
+        payload,
+        required_action="reply",
+    )
+
+
+def append_v2_internal_note_for_owner(
+    headers: object,
+    collaboration_id: object,
+    payload: object,
+) -> dict[str, Any]:
+    return _append_v2_owner_message(
+        headers,
+        collaboration_id,
+        payload,
+        required_action="internal_note",
+    )
 
 
 def create_v2_collaboration_for_owner(
@@ -472,6 +688,8 @@ def read_v2_collaboration_for_guest(
 
 
 __all__ = [
+    "append_v2_internal_note_for_owner",
+    "append_v2_shared_message_for_owner",
     "create_v2_collaboration_for_owner",
     "read_v2_collaboration_for_guest",
     "read_v2_collaboration_for_owner",

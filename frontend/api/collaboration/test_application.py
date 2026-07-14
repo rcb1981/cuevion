@@ -16,6 +16,7 @@ from api.collaboration import (
     authorization,
     guest_session,
     models,
+    mutations,
     redis_store,
     source_message,
 )
@@ -167,12 +168,12 @@ def _public_text(value: object) -> str:
     return json.dumps(value, ensure_ascii=True, sort_keys=True)
 
 
-def _owner_capability(thread: dict | None = None):
+def _owner_capability(thread: dict | None = None, *, action: str = "read"):
     record = _thread_record() if thread is None else thread
     result = authorization.resolve_internal_collaboration_context(
         [("Authorization", "private-request-marker")],
         collaboration_id=COLLABORATION_ID,
-        required_action="read",
+        required_action=action,
         user_resolver=lambda _headers: (
             {"email": OWNER_EMAIL, "name": "Owner Person"},
             None,
@@ -186,7 +187,7 @@ def _owner_capability(thread: dict | None = None):
     )
     assert result["status"] == "ok"
     assert authorization._is_internal_capability(
-        result["context"], actions={"read"}
+        result["context"], actions={action}
     )
     return result["context"]
 
@@ -1822,6 +1823,898 @@ class OwnerCreateApplicationTests(unittest.TestCase):
                 application.create_v2_collaboration_for_owner([], _create_payload())
 
 
+class OwnerMutationApplicationTests(unittest.TestCase):
+    SERVICES = (
+        (
+            "shared",
+            application.append_v2_shared_message_for_owner,
+            "reply",
+            "shared",
+        ),
+        (
+            "internal",
+            application.append_v2_internal_note_for_owner,
+            "internal_note",
+            "internal",
+        ),
+    )
+
+    @staticmethod
+    def _authorization_result(action: str) -> dict:
+        return {
+            "status": "ok",
+            "context": _owner_capability(action=action),
+            "error": None,
+        }
+
+    @staticmethod
+    def _mutation_success(
+        capability: object,
+        text: str,
+        visibility: str,
+        *,
+        message_id: str = "M" * 22,
+        timestamp: int = NOW_MILLISECONDS + 1,
+    ) -> dict:
+        return {
+            "status": "ok",
+            "message": {
+                "id": message_id,
+                "authorDisplayName": capability.actor_display_name,
+                "authorRole": "Cuevion user",
+                "text": text,
+                "timestamp": timestamp,
+                "visibility": visibility,
+            },
+            "updatedAt": timestamp,
+            "error": None,
+        }
+
+    def _assert_payload_rejected_without_side_effects(
+        self,
+        service,
+        payload: object,
+    ) -> None:
+        with patch.object(
+            application,
+            "resolve_internal_collaboration_context",
+        ) as authorize, patch.object(
+            authorization,
+            "_shared_config_helper",
+        ) as authenticate, patch.object(
+            application,
+            "_append_internal_v2_message",
+        ) as mutate, patch.object(
+            application,
+            "_load_v2_thread",
+        ) as load:
+            result = service([], COLLABORATION_ID, payload)
+
+        self.assertEqual(
+            result,
+            {
+                "status": "malformed",
+                "collaboration": None,
+                "error": {"code": "invalid_request"},
+            },
+        )
+        authorize.assert_not_called()
+        authenticate.assert_not_called()
+        mutate.assert_not_called()
+        load.assert_not_called()
+
+    def test_public_signatures_inventory_and_explicit_service_separation(self):
+        for service in (
+            application.append_v2_shared_message_for_owner,
+            application.append_v2_internal_note_for_owner,
+        ):
+            self.assertEqual(
+                list(inspect.signature(service).parameters),
+                ["headers", "collaboration_id", "payload"],
+            )
+        self.assertEqual(
+            application.__all__,
+            [
+                "append_v2_internal_note_for_owner",
+                "append_v2_shared_message_for_owner",
+                "create_v2_collaboration_for_owner",
+                "read_v2_collaboration_for_guest",
+                "read_v2_collaboration_for_owner",
+            ],
+        )
+        for prohibited in (
+            "append_v2_message",
+            "append_v2_guest_reply",
+            "append_v2_owner_message",
+            "handle_append_v2_message",
+            "handler",
+        ):
+            self.assertFalse(hasattr(application, prohibited))
+
+    def test_payload_must_be_one_exact_text_field_before_authentication(self):
+        class DictSubclass(dict):
+            pass
+
+        class CustomMapping(Mapping):
+            def __init__(self):
+                self._value = {"text": "mapping text"}
+
+            def __getitem__(self, key):
+                return self._value[key]
+
+            def __iter__(self):
+                return iter(self._value)
+
+            def __len__(self):
+                return len(self._value)
+
+        class DuckMapping:
+            def get(self, key, default=None):
+                return "duck text" if key == "text" else default
+
+            def keys(self):
+                return ("text",)
+
+        invalid_payloads = (
+            ("missing-text", {}),
+            ("none", None),
+            ("list", ["text"]),
+            ("tuple", ("text",)),
+            ("string", "text"),
+            ("integer", 1),
+            ("boolean", True),
+            ("dict-subclass", DictSubclass(text="subclass")),
+            ("custom-mapping", CustomMapping()),
+            ("duck-mapping", DuckMapping()),
+            ("none-text", {"text": None}),
+            ("list-text", {"text": ["text"]}),
+            ("tuple-text", {"text": ("text",)}),
+            ("integer-text", {"text": 1}),
+            ("boolean-text", {"text": False}),
+            ("dict-text", {"text": {"body": "text"}}),
+            ("hidden-control", {"text": "private\x00text"}),
+            (
+                "oversized-utf8",
+                {"text": "\N{LATIN SMALL LETTER E WITH ACUTE}" * 8193},
+            ),
+        )
+        forbidden_fields = (
+            "visibility",
+            "action",
+            "authorId",
+            "authorDisplayName",
+            "authorRole",
+            "timestamp",
+            "messageId",
+            "createdAt",
+            "updatedAt",
+            "ownerEmail",
+            "workspaceId",
+            "mailboxId",
+            "state",
+            "mentions",
+            "participants",
+            "attachments",
+            "bodyHtml",
+            "sourceRef",
+            "expectedUpdatedAt",
+            "capability",
+        )
+        invalid_payloads += tuple(
+            (
+                "forbidden-" + field,
+                {"text": "valid text", field: PRIVATE_EXCEPTION_MARKER},
+            )
+            for field in forbidden_fields
+        )
+
+        for service_label, service, _action, _visibility in self.SERVICES:
+            for payload_label, payload in invalid_payloads:
+                with self.subTest(service=service_label, payload=payload_label):
+                    self._assert_payload_rejected_without_side_effects(
+                        service,
+                        payload,
+                    )
+
+    def test_empty_and_whitespace_text_follow_the_existing_canonical_foundation(self):
+        # The current canonical v2 free-text validator deliberately preserves both.
+        # This slice must not silently replace that foundation contract.
+        for text in ("", " \t\r\n "):
+            self.assertEqual(
+                models._v2_free_text(text, max_length=models.MAX_V2_MESSAGE_TEXT),
+                text,
+            )
+            authorization_result = self._authorization_result("reply")
+            capability = authorization_result["context"]
+            mutation_result = self._mutation_success(capability, text, "shared")
+            with self.subTest(text=repr(text)), patch.object(
+                application,
+                "resolve_internal_collaboration_context",
+                return_value=authorization_result,
+            ) as authorize, patch.object(
+                application,
+                "_append_internal_v2_message",
+                return_value=mutation_result,
+            ) as mutate:
+                result = application.append_v2_shared_message_for_owner(
+                    [], COLLABORATION_ID, {"text": text}
+                )
+
+            self.assertEqual(result["message"]["text"], text)
+            authorize.assert_called_once_with(
+                [],
+                collaboration_id=COLLABORATION_ID,
+                required_action="reply",
+            )
+            mutate.assert_called_once_with(
+                capability,
+                text,
+            )
+
+    def test_services_request_exact_actions_and_hard_code_visibility(self):
+        headers = [("Authorization", "private-request-marker")]
+        for label, service, action, visibility in self.SERVICES:
+            authorization_result = self._authorization_result(action)
+            capability = authorization_result["context"]
+            text = label + " owner message"
+            mutation_result = self._mutation_success(
+                capability,
+                text,
+                visibility,
+            )
+            with self.subTest(label=label), patch.object(
+                application,
+                "resolve_internal_collaboration_context",
+                return_value=authorization_result,
+            ) as authorize, patch.object(
+                application,
+                "_append_internal_v2_message",
+                return_value=mutation_result,
+            ) as mutate:
+                result = service(headers, COLLABORATION_ID, {"text": text})
+
+            authorize.assert_called_once_with(
+                headers,
+                collaboration_id=COLLABORATION_ID,
+                required_action=action,
+            )
+            mutate.assert_called_once_with(
+                capability,
+                text,
+            )
+            self.assertEqual(
+                result,
+                {
+                    "message": {
+                        "id": "M" * 22,
+                        "authorDisplayName": "Owner Person",
+                        "authorRole": "Cuevion user",
+                        "text": text,
+                        "timestamp": NOW_MILLISECONDS + 1,
+                        "visibility": visibility,
+                    },
+                    "updatedAt": NOW_MILLISECONDS + 1,
+                },
+            )
+
+    def test_lazy_foundation_adapter_binds_capability_action_to_visibility(self):
+        for action, visibility in (("reply", "shared"), ("internal_note", "internal")):
+            capability = _owner_capability(action=action)
+            foundation_result = {
+                "status": "error",
+                "error": {"code": "stale_thread"},
+            }
+            with self.subTest(action=action), patch.object(
+                mutations,
+                "append_internal_v2_message",
+                return_value=foundation_result,
+            ) as foundation:
+                result = application._append_internal_v2_message(
+                    capability,
+                    "message",
+                )
+
+            self.assertIs(result, foundation_result)
+            foundation.assert_called_once_with(
+                capability,
+                "message",
+                visibility=visibility,
+            )
+
+        create_capability = _create_capability()
+        with patch.object(mutations, "append_internal_v2_message") as foundation:
+            result = application._append_internal_v2_message(
+                create_capability,
+                "message",
+            )
+        self.assertEqual(result["error"], {"code": "forbidden"})
+        foundation.assert_not_called()
+
+    def test_real_authorization_and_atomic_mutation_return_only_safe_dto(self):
+        headers = [("Authorization", "private-request-marker")]
+        for label, service, _action, visibility in self.SERVICES:
+            store = StatefulV2Store()
+            events: list[tuple[str, object]] = []
+            with patch.object(
+                redis_store,
+                "resolve_v2_index_hmac_keys",
+                return_value=(b"k" * 32, None),
+            ):
+                prepared = redis_store._create_v2_thread(
+                    _thread_record(),
+                    command_transport=store,
+                )
+            self.assertIs(type(prepared), redis_store._V2RecordResult)
+            self.assertTrue(prepared.created)
+            store.commands.clear()
+            text = label + " message from authenticated owner"
+
+            def shared_config_helper(name: str):
+                if name == "resolve_authenticated_user":
+                    def resolve_authenticated_user(received_headers: object):
+                        self.assertIs(received_headers, headers)
+                        events.append(("authentication", None))
+                        return {
+                            "email": OWNER_EMAIL,
+                            "name": "Owner Person",
+                        }, None
+
+                    return resolve_authenticated_user
+                if name == "resolve_owned_managed_inbox_record":
+                    def resolve_owned_mailbox(
+                        received_headers: object,
+                        mailbox_id: str,
+                    ) -> dict:
+                        self.assertIs(received_headers, headers)
+                        events.append(("mailbox_authorization", mailbox_id))
+                        return {
+                            "status": "ok",
+                            "user": {
+                                "email": OWNER_EMAIL,
+                                "name": "Owner Person",
+                            },
+                            "inbox": {
+                                "id": mailbox_id,
+                                "provider": "google",
+                            },
+                        }
+
+                    return resolve_owned_mailbox
+                self.fail(f"unexpected shared helper: {name}")
+
+            with self.subTest(label=label), patch.object(
+                authorization,
+                "_shared_config_helper",
+                side_effect=shared_config_helper,
+            ), patch.object(
+                redis_store,
+                "resolve_v2_index_hmac_keys",
+                return_value=(b"k" * 32, None),
+            ), patch.object(
+                mutations.time,
+                "time_ns",
+                return_value=(NOW_MILLISECONDS + 1) * 1_000_000,
+            ), _stateful_backend(store, events):
+                result = service(headers, COLLABORATION_ID, {"text": text})
+
+            self.assertEqual(set(result), {"message", "updatedAt"})
+            self.assertEqual(
+                set(result["message"]),
+                {
+                    "id",
+                    "authorDisplayName",
+                    "authorRole",
+                    "text",
+                    "timestamp",
+                    "visibility",
+                },
+            )
+            self.assertRegex(result["message"]["id"], r"^[A-Za-z0-9_-]{22,128}$")
+            self.assertEqual(result["message"]["authorDisplayName"], "Owner Person")
+            self.assertEqual(result["message"]["authorRole"], "Cuevion user")
+            self.assertEqual(result["message"]["text"], text)
+            self.assertEqual(result["message"]["visibility"], visibility)
+            self.assertEqual(result["message"]["timestamp"], NOW_MILLISECONDS + 1)
+            self.assertEqual(result["updatedAt"], NOW_MILLISECONDS + 1)
+            self.assertFalse(
+                any(type(value) is redis_store._V2RecordResult for value in _walk(result))
+            )
+            self.assertFalse(
+                any(authorization._is_internal_capability(value) for value in _walk(result))
+            )
+            self.assertTrue(
+                {
+                    "status",
+                    "error",
+                    "v",
+                    "ownerEmail",
+                    "workspaceId",
+                    "mailboxId",
+                    "collaborationId",
+                    "sourceRef",
+                    "sourceMessage",
+                    "provider",
+                    "participants",
+                    "mentions",
+                    "invitations",
+                    "sessionHash",
+                    "csrfTokenHash",
+                    "bodyHtml",
+                    "attachments",
+                }.isdisjoint(_all_keys(result))
+            )
+            self.assertEqual(
+                [command[0] for command in store.commands],
+                ["GET", "GET", "EVAL"],
+            )
+            self.assertTrue(
+                all(
+                    command[0] not in {"SCAN", "KEYS"}
+                    and not any(
+                        isinstance(part, str) and any(marker in part for marker in "*?[]")
+                        for part in command[2:]
+                        if command[0] == "GET"
+                    )
+                    for command in store.commands
+                )
+            )
+            stored = store.get_json(redis_store.build_v2_thread_key(COLLABORATION_ID))
+            self.assertIsNotNone(stored)
+            self.assertEqual(stored["messages"][-1]["text"], text)
+            self.assertEqual(stored["messages"][-1]["visibility"], visibility)
+            self.assertEqual(stored["messages"][-1]["id"], result["message"]["id"])
+            self.assertEqual(
+                [event for event in events if event[0] != "storage"][:2],
+                [
+                    ("authentication", None),
+                    ("mailbox_authorization", MAILBOX_ID),
+                ],
+            )
+
+    def test_cross_action_and_wrong_collaboration_capabilities_fail_before_mutation(self):
+        reply = self._authorization_result("reply")
+        internal_note = self._authorization_result("internal_note")
+        cases = (
+            (
+                "reply-for-internal-note",
+                application.append_v2_internal_note_for_owner,
+                reply,
+                COLLABORATION_ID,
+            ),
+            (
+                "internal-note-for-shared",
+                application.append_v2_shared_message_for_owner,
+                internal_note,
+                COLLABORATION_ID,
+            ),
+            (
+                "wrong-collaboration",
+                application.append_v2_shared_message_for_owner,
+                reply,
+                OTHER_COLLABORATION_ID,
+            ),
+        )
+        for label, service, authorization_result, collaboration_id in cases:
+            with self.subTest(label=label), patch.object(
+                application,
+                "resolve_internal_collaboration_context",
+                return_value=authorization_result,
+            ), patch.object(
+                application,
+                "_append_internal_v2_message",
+            ) as mutate:
+                result = service([], collaboration_id, {"text": "message"})
+
+            self.assertEqual(result["error"], {"code": "forbidden"})
+            self.assertIsNone(result["collaboration"])
+            mutate.assert_not_called()
+
+    def test_real_foundation_rejects_scope_and_malformed_records_before_write(self):
+        authorization_result = self._authorization_result("reply")
+        real_mutation = mutations.append_internal_v2_message
+        cases: list[tuple[str, dict]] = []
+
+        cross_owner = _thread_record()
+        cross_owner["ownerEmail"] = OTHER_OWNER_EMAIL
+        cross_owner["workspaceId"] = OTHER_OWNER_EMAIL
+        cases.append(("cross-owner", cross_owner))
+
+        cross_workspace = _thread_record()
+        cross_workspace["workspaceId"] = OTHER_OWNER_EMAIL
+        cases.append(("cross-workspace", cross_workspace))
+
+        cross_mailbox = _thread_record()
+        cross_mailbox["mailboxId"] = "mailbox-2"
+        cases.append(("cross-mailbox", cross_mailbox))
+
+        wrong_collaboration = _thread_record()
+        wrong_collaboration["collaborationId"] = OTHER_COLLABORATION_ID
+        cases.append(("wrong-collaboration", wrong_collaboration))
+
+        malformed = _thread_record()
+        malformed.pop("sourceMessage")
+        cases.append(("malformed", malformed))
+
+        for label, record in cases:
+            loads: list[str] = []
+            writes: list[object] = []
+
+            def invoke_foundation(capability, text, *, visibility):
+                return real_mutation(
+                    capability,
+                    text,
+                    visibility=visibility,
+                    thread_loader=lambda collaboration_id, **_kwargs: (
+                        loads.append(collaboration_id)
+                        or {"status": "ok", "record": record}
+                    ),
+                    thread_saver=lambda *_args, **_kwargs: writes.append(_args),
+                )
+
+            with self.subTest(label=label), patch.object(
+                application,
+                "resolve_internal_collaboration_context",
+                return_value=authorization_result,
+            ), patch.object(
+                mutations,
+                "append_internal_v2_message",
+                side_effect=invoke_foundation,
+            ):
+                result = application.append_v2_shared_message_for_owner(
+                    [], COLLABORATION_ID, {"text": "message"}
+                )
+
+            self.assertEqual(
+                result["error"],
+                {
+                    "code": (
+                        "storage_protocol_error"
+                        if label in {"cross-workspace", "malformed"}
+                        else "forbidden"
+                    )
+                },
+            )
+            self.assertEqual(loads, [COLLABORATION_ID])
+            self.assertEqual(writes, [])
+
+    def test_unauthenticated_and_scope_authorization_failures_precede_mutation(self):
+        cases = (
+            (
+                "unauthenticated",
+                {
+                    "status": "unauthorized",
+                    "context": None,
+                    "error": {"code": "auth_required"},
+                },
+                "unauthorized",
+                "auth_required",
+            ),
+            (
+                "cross-owner",
+                {
+                    "status": "forbidden",
+                    "context": None,
+                    "error": {"code": "forbidden"},
+                },
+                "forbidden",
+                "forbidden",
+            ),
+            (
+                "cross-workspace",
+                {
+                    "status": "forbidden",
+                    "context": None,
+                    "error": {"code": "forbidden"},
+                },
+                "forbidden",
+                "forbidden",
+            ),
+            (
+                "cross-mailbox",
+                {
+                    "status": "forbidden",
+                    "context": None,
+                    "error": {"code": "forbidden"},
+                },
+                "forbidden",
+                "forbidden",
+            ),
+            (
+                "not-found",
+                {
+                    "status": "not_found",
+                    "context": None,
+                    "error": {"code": "collaboration_not_found"},
+                },
+                "not_found",
+                "collaboration_not_found",
+            ),
+            (
+                "malformed-id",
+                {
+                    "status": "malformed",
+                    "context": None,
+                    "error": {"code": "invalid_request"},
+                },
+                "malformed",
+                "invalid_request",
+            ),
+        )
+        for label, authorized, expected_status, expected_code in cases:
+            with self.subTest(label=label), patch.object(
+                application,
+                "resolve_internal_collaboration_context",
+                return_value=authorized,
+            ), patch.object(
+                application,
+                "_append_internal_v2_message",
+            ) as mutate:
+                result = application.append_v2_shared_message_for_owner(
+                    [], COLLABORATION_ID, {"text": "message"}
+                )
+
+            self.assertEqual(result["status"], expected_status)
+            self.assertEqual(result["error"], {"code": expected_code})
+            self.assertIsNone(result["collaboration"])
+            mutate.assert_not_called()
+
+    def test_forged_capability_shapes_never_reach_mutation(self):
+        @dataclass(frozen=True)
+        class ForgedCapability:
+            collaboration_id: str = COLLABORATION_ID
+            action: str = "reply"
+            actor_display_name: str = "Owner Person"
+
+        class DuckCapability:
+            collaboration_id = COLLABORATION_ID
+            action = "reply"
+            actor_display_name = "Owner Person"
+
+        for forged in (
+            {
+                "collaboration_id": COLLABORATION_ID,
+                "action": "reply",
+                "actor_display_name": "Owner Person",
+            },
+            ForgedCapability(),
+            DuckCapability(),
+            SimpleNamespace(
+                collaboration_id=COLLABORATION_ID,
+                action="reply",
+                actor_display_name="Owner Person",
+            ),
+        ):
+            with self.subTest(kind=type(forged).__name__), patch.object(
+                application,
+                "resolve_internal_collaboration_context",
+                return_value={"status": "ok", "context": forged, "error": None},
+            ), patch.object(
+                application,
+                "_append_internal_v2_message",
+            ) as mutate:
+                result = application.append_v2_shared_message_for_owner(
+                    [], COLLABORATION_ID, {"text": "message"}
+                )
+
+            self.assertEqual(result["error"], {"code": "forbidden"})
+            mutate.assert_not_called()
+
+    def test_mutation_errors_are_allowlisted_preserved_and_never_retried(self):
+        for _name, service, action, _visibility in self.SERVICES:
+            authorization_result = self._authorization_result(action)
+            for code in (
+                "collaboration_not_found",
+                "forbidden",
+                "invalid_request",
+                "stale_thread",
+                "storage_unavailable",
+                "storage_protocol_error",
+            ):
+                source_code = bytearray(code, "ascii").decode("ascii")
+                with self.subTest(service=service.__name__, code=code), patch.object(
+                    application,
+                    "resolve_internal_collaboration_context",
+                    return_value=authorization_result,
+                ), patch.object(
+                    application,
+                    "_append_internal_v2_message",
+                    return_value={
+                        "status": "error",
+                        "error": {"code": source_code},
+                    },
+                ) as mutate:
+                    result = service([], COLLABORATION_ID, {"text": "message"})
+
+                self.assertEqual(
+                    result,
+                    {
+                        "status": "error",
+                        "collaboration": None,
+                        "error": {"code": code},
+                    },
+                )
+                self.assertIs(type(result["error"]["code"]), str)
+                self.assertIs(
+                    result["error"]["code"],
+                    application._CANONICAL_OWNER_MUTATION_ERROR_CODES[code],
+                )
+                mutate.assert_called_once()
+
+    def test_malformed_and_private_mutation_results_fail_closed(self):
+        class StringSubclass(str):
+            pass
+
+        class HashableEqualityCode:
+            def __hash__(self):
+                return hash("forbidden")
+
+            def __eq__(self, other):
+                return other == "forbidden"
+
+            def __str__(self):
+                return PRIVATE_EXCEPTION_MARKER
+
+            def __repr__(self):
+                return PRIVATE_EXCEPTION_MARKER
+
+        malformed_codes = (
+            ["storage_unavailable"],
+            {"code": "storage_unavailable"},
+            7,
+            True,
+            None,
+            StringSubclass("storage_unavailable"),
+            HashableEqualityCode(),
+        )
+
+        for _name, service, action, visibility in self.SERVICES:
+            authorization_result = self._authorization_result(action)
+            capability = authorization_result["context"]
+            safe_success = self._mutation_success(
+                capability, "message", visibility
+            )
+            wrong_author = self._mutation_success(
+                capability, "message", visibility
+            )
+            wrong_author["message"]["authorDisplayName"] = PRIVATE_EXCEPTION_MARKER
+            wrong_time = self._mutation_success(
+                capability, "message", visibility
+            )
+            wrong_time["updatedAt"] += 1
+            malformed_results = [
+                None,
+                redis_store._V2RecordResult(_thread_record()),
+                *(
+                    {"status": "error", "error": {"code": code}}
+                    for code in malformed_codes
+                ),
+                {"status": "error", "error": {}},
+                {"status": "error", "error": {"code": PRIVATE_EXCEPTION_MARKER}},
+                {
+                    "status": "error",
+                    "error": {
+                        "code": "storage_unavailable",
+                        "details": PRIVATE_EXCEPTION_MARKER,
+                    },
+                },
+                {
+                    "status": "error",
+                    "error": {"code": "storage_unavailable"},
+                    "private": PRIVATE_EXCEPTION_MARKER,
+                },
+                {**safe_success, "record": _thread_record()},
+                wrong_author,
+                wrong_time,
+            ]
+            for index, value in enumerate(malformed_results):
+                with self.subTest(
+                    service=service.__name__, case=index
+                ), patch.object(
+                    application,
+                    "resolve_internal_collaboration_context",
+                    return_value=authorization_result,
+                ), patch.object(
+                    application,
+                    "_append_internal_v2_message",
+                    return_value=value,
+                ) as mutate:
+                    result = service(
+                        [("Authorization", PRIVATE_EXCEPTION_MARKER)],
+                        COLLABORATION_ID,
+                        {"text": "message"},
+                    )
+
+                self.assertEqual(
+                    result,
+                    {
+                        "status": "malformed",
+                        "collaboration": None,
+                        "error": {"code": "storage_protocol_error"},
+                    },
+                )
+                self.assertIs(type(result["error"]["code"]), str)
+                mutate.assert_called_once()
+                for rendered in (
+                    _public_text(result),
+                    str(result),
+                    repr(result),
+                    str(result["error"]),
+                    repr(result["error"]),
+                    repr(getattr(result["error"]["code"], "args", ())),
+                ):
+                    self.assertNotIn(PRIVATE_EXCEPTION_MARKER, rendered)
+                    self.assertNotIn(PRIVATE_SOURCE_MARKER, rendered)
+                    self.assertNotIn(OWNER_EMAIL, rendered)
+                self.assertFalse(
+                    any(
+                        type(item) is redis_store._V2RecordResult
+                        for item in _walk(result)
+                    )
+                )
+                self.assertFalse(
+                    any(
+                        authorization._is_internal_capability(item)
+                        for item in _walk(result)
+                    )
+                )
+
+    def test_services_fail_closed_on_inverted_foundation_visibility(self):
+        for _name, service, action, visibility in self.SERVICES:
+            authorization_result = self._authorization_result(action)
+            capability = authorization_result["context"]
+            wrong_visibility = "internal" if visibility == "shared" else "shared"
+            with self.subTest(service=service.__name__), patch.object(
+                application,
+                "resolve_internal_collaboration_context",
+                return_value=authorization_result,
+            ), patch.object(
+                application,
+                "_append_internal_v2_message",
+                return_value=self._mutation_success(
+                    capability,
+                    "message",
+                    wrong_visibility,
+                ),
+            ) as mutate:
+                result = service([], COLLABORATION_ID, {"text": "message"})
+
+            self.assertEqual(
+                result,
+                {
+                    "status": "malformed",
+                    "collaboration": None,
+                    "error": {"code": "storage_protocol_error"},
+                },
+            )
+            mutate.assert_called_once()
+
+    def test_unexpected_trusted_helper_exceptions_propagate(self):
+        with patch.object(
+            application,
+            "resolve_internal_collaboration_context",
+            side_effect=AssertionError(PRIVATE_EXCEPTION_MARKER),
+        ):
+            with self.assertRaisesRegex(AssertionError, PRIVATE_EXCEPTION_MARKER):
+                application.append_v2_shared_message_for_owner(
+                    [], COLLABORATION_ID, {"text": "message"}
+                )
+
+        authorization_result = self._authorization_result("internal_note")
+        with patch.object(
+            application,
+            "resolve_internal_collaboration_context",
+            return_value=authorization_result,
+        ), patch.object(
+            application,
+            "_append_internal_v2_message",
+            side_effect=TypeError(PRIVATE_EXCEPTION_MARKER),
+        ):
+            with self.assertRaisesRegex(TypeError, PRIVATE_EXCEPTION_MARKER):
+                application.append_v2_internal_note_for_owner(
+                    [], COLLABORATION_ID, {"text": "message"}
+                )
+
+
 class OwnerReadApplicationTests(unittest.TestCase):
     def _read_with_store(self, thread: dict):
         capability = _owner_capability()
@@ -2296,6 +3189,8 @@ class GuestReadApplicationTests(unittest.TestCase):
         self.assertEqual(
             application.__all__,
             [
+                "append_v2_internal_note_for_owner",
+                "append_v2_shared_message_for_owner",
                 "create_v2_collaboration_for_owner",
                 "read_v2_collaboration_for_guest",
                 "read_v2_collaboration_for_owner",

@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 import os
 
-from . import guest_session, mutations
+from . import guest_session, mutations, redis_store
 from .authorization import resolve_internal_collaboration_context
 from .models import hash_v2_secret
 from .mutations import append_guest_v2_reply, append_internal_v2_message
@@ -196,6 +196,235 @@ class CollaborationV2MutationTests(unittest.TestCase):
                     thread_saver=lambda *_args, **_kwargs: {"status": "revoked", "error": {"code": code}},
                 )
             self.assertEqual(result, {"status": "error", "error": {"code": code}})
+
+    def test_owner_saver_is_called_once_for_every_result_and_exception(self):
+        context = internal_capability("reply")
+        command_transport = object()
+        result_cases = (
+            ("success", None, None),
+            (
+                "conflict",
+                {"status": "conflict", "error": {"code": "stale_thread"}},
+                "stale_thread",
+            ),
+            (
+                "unavailable",
+                {
+                    "status": "unavailable",
+                    "error": {"code": "storage_unavailable"},
+                },
+                "storage_unavailable",
+            ),
+            (
+                "protocol",
+                {
+                    "status": "unavailable",
+                    "error": {"code": "storage_protocol_error"},
+                },
+                "storage_protocol_error",
+            ),
+            (
+                "malformed-result",
+                {
+                    "status": "unavailable",
+                    "error": {"code": "storage_unavailable"},
+                    "private": "private-saver-marker",
+                },
+                "storage_protocol_error",
+            ),
+        )
+        for name, saver_result, expected_code in result_cases:
+            calls = []
+
+            def save(record, expected, **kwargs):
+                calls.append((record, expected, kwargs))
+                if name == "success":
+                    return redis_store._V2RecordResult(record)
+                return saver_result
+
+            with self.subTest(case=name), patch.object(
+                mutations.time,
+                "time_ns",
+                return_value=(MS + 101) * 1_000_000,
+            ):
+                result = append_internal_v2_message(
+                    context,
+                    "Shared reply",
+                    visibility="shared",
+                    thread_loader=lambda *_args, **_kwargs: (
+                        redis_store._V2RecordResult(thread_record())
+                    ),
+                    thread_saver=save,
+                    command_transport=command_transport,
+                )
+
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0][1], MS + 100)
+            self.assertEqual(
+                calls[0][2], {"command_transport": command_transport}
+            )
+            if expected_code is None:
+                self.assertEqual(result["status"], "ok")
+            else:
+                self.assertEqual(
+                    result, {"status": "error", "error": {"code": expected_code}}
+                )
+                self.assertNotIn("private-saver-marker", repr(result))
+
+        for exception_type in (
+            TypeError,
+            AssertionError,
+            AttributeError,
+            RuntimeError,
+        ):
+            calls = []
+            original = exception_type("private-saver-exception")
+
+            def raise_once(record, expected, **kwargs):
+                calls.append((record, expected, kwargs))
+                raise original
+
+            with self.subTest(exception=exception_type.__name__), patch.object(
+                mutations.time,
+                "time_ns",
+                return_value=(MS + 101) * 1_000_000,
+            ):
+                with self.assertRaises(exception_type) as caught:
+                    append_internal_v2_message(
+                        context,
+                        "Shared reply",
+                        visibility="shared",
+                        thread_loader=lambda *_args, **_kwargs: (
+                            redis_store._V2RecordResult(thread_record())
+                        ),
+                        thread_saver=raise_once,
+                        command_transport=command_transport,
+                    )
+
+            self.assertIs(caught.exception, original)
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(
+                calls[0][2], {"command_transport": command_transport}
+            )
+
+    def test_owner_reload_preserves_exact_storage_and_scope_semantics(self):
+        context = internal_capability("reply")
+        command_transport = object()
+        malformed_record = {**thread_record(), "messages": "private-record-marker"}
+        wrong_scope = {**thread_record(), "mailboxId": "mailbox-other"}
+        cases = (
+            ("success", redis_store._V2RecordResult(thread_record()), None),
+            ("missing", {"status": "missing"}, "collaboration_not_found"),
+            ("malformed", {"status": "malformed"}, "storage_protocol_error"),
+            ("malformed-record", redis_store._V2RecordResult(malformed_record), "storage_protocol_error"),
+            (
+                "unavailable",
+                {
+                    "status": "unavailable",
+                    "error": {"code": "storage_unavailable"},
+                },
+                "storage_unavailable",
+            ),
+            (
+                "protocol",
+                {
+                    "status": "unavailable",
+                    "error": {"code": "storage_protocol_error"},
+                },
+                "storage_protocol_error",
+            ),
+            (
+                "unknown-code",
+                {
+                    "status": "unavailable",
+                    "error": {"code": "private-loader-marker"},
+                },
+                "storage_protocol_error",
+            ),
+            (
+                "malformed-envelope",
+                {
+                    "status": "unavailable",
+                    "error": {"code": "storage_unavailable"},
+                    "private": "private-loader-marker",
+                },
+                "storage_protocol_error",
+            ),
+            ("scope-mismatch", redis_store._V2RecordResult(wrong_scope), "forbidden"),
+        )
+        for name, loaded, expected_code in cases:
+            load_calls = []
+            save_calls = []
+
+            def load(collaboration_id, *, command_transport=None):
+                load_calls.append((collaboration_id, command_transport))
+                return loaded
+
+            def save(record, expected, **kwargs):
+                save_calls.append((record, expected, kwargs))
+                return redis_store._V2RecordResult(record)
+
+            with self.subTest(case=name), patch.object(
+                mutations.time,
+                "time_ns",
+                return_value=(MS + 101) * 1_000_000,
+            ):
+                result = append_internal_v2_message(
+                    context,
+                    "Shared reply",
+                    visibility="shared",
+                    thread_loader=load,
+                    thread_saver=save,
+                    command_transport=command_transport,
+                )
+
+            self.assertEqual(load_calls, [("A" * 22, command_transport)])
+            if expected_code is None:
+                self.assertEqual(result["status"], "ok")
+                self.assertEqual(len(save_calls), 1)
+            else:
+                self.assertEqual(
+                    result, {"status": "error", "error": {"code": expected_code}}
+                )
+                self.assertEqual(save_calls, [])
+            for marker in (
+                "private-record-marker",
+                "private-loader-marker",
+                "mailbox-other",
+            ):
+                self.assertNotIn(marker, repr(result))
+
+    def test_owner_loader_exceptions_propagate_once_without_write(self):
+        context = internal_capability("reply")
+        command_transport = object()
+        for exception_type in (
+            TypeError,
+            AssertionError,
+            AttributeError,
+            RuntimeError,
+        ):
+            load_calls = []
+            original = exception_type("private-loader-exception")
+
+            def load(collaboration_id, *, command_transport=None):
+                load_calls.append((collaboration_id, command_transport))
+                raise original
+
+            with self.subTest(exception=exception_type.__name__):
+                with self.assertRaises(exception_type) as caught:
+                    append_internal_v2_message(
+                        context,
+                        "Shared reply",
+                        visibility="shared",
+                        thread_loader=load,
+                        thread_saver=lambda *_args, **_kwargs: self.fail(
+                            "loader failure must precede write"
+                        ),
+                        command_transport=command_transport,
+                    )
+
+            self.assertIs(caught.exception, original)
+            self.assertEqual(load_calls, [("A" * 22, command_transport)])
 
     def test_mutation_rejects_untrusted_roles_timestamps_and_extra_content(self):
         context = internal_capability("reply")

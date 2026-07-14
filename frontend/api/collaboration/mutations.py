@@ -21,6 +21,7 @@ from .models import (
 from .authorization import _is_internal_capability
 from .guest_session import _is_guest_mutation_capability
 from .redis_store import (
+    _V2RecordResult,
     _append_v2_guest_reply_if_expected,
     _load_v2_thread,
     _save_v2_thread_if_expected,
@@ -31,25 +32,68 @@ def _failure(code: str) -> dict:
     return {"status": "error", "error": {"code": code}}
 
 
+_CANONICAL_MUTATION_STORAGE_ERRORS = {
+    ("conflict", "stale_thread"): "stale_thread",
+    ("expired", "session_expired"): "session_expired",
+    ("forbidden", "forbidden"): "forbidden",
+    ("malformed", "storage_protocol_error"): "storage_protocol_error",
+    ("missing", "collaboration_not_found"): "collaboration_not_found",
+    ("revoked", "session_expired"): "session_expired",
+    ("revoked", "session_revoked"): "session_revoked",
+    ("unavailable", "storage_protocol_error"): "storage_protocol_error",
+    ("unavailable", "storage_unavailable"): "storage_unavailable",
+}
+
+
+def _canonical_storage_error(value: object) -> str:
+    if type(value) is not dict or set(value) != {"status", "error"}:
+        return "storage_protocol_error"
+    status = value.get("status")
+    error = value.get("error")
+    code = error.get("code") if type(error) is dict else None
+    if (
+        type(status) is not str
+        or type(error) is not dict
+        or set(error) != {"code"}
+        or type(code) is not str
+        or (status, code) not in _CANONICAL_MUTATION_STORAGE_ERRORS
+    ):
+        return "storage_protocol_error"
+    return _CANONICAL_MUTATION_STORAGE_ERRORS[(status, code)]
+
+
 def _load_scoped_thread(capability: object, *, thread_loader, command_transport=None) -> tuple[dict | None, dict | None]:
     if not (_is_internal_capability(capability) or _is_guest_mutation_capability(capability)):
         return None, _failure("invalid_request")
     collaboration_id = capability.collaboration_id
     if not isinstance(collaboration_id, str):
         return None, _failure("invalid_request")
-    try:
-        loaded = thread_loader(collaboration_id, command_transport=command_transport)
-    except TypeError:
-        loaded = thread_loader(collaboration_id)
-    except Exception:
-        return None, _failure("storage_unavailable")
-    if not hasattr(loaded, "get") or loaded.get("status") != "ok":
-        code = "collaboration_not_found" if hasattr(loaded, "get") and loaded.get("status") == "missing" else "storage_protocol_error"
-        return None, _failure(code)
-    thread = normalize_v2_thread_record(loaded.get("record"))
+    loaded = thread_loader(
+        collaboration_id,
+        command_transport=command_transport,
+    )
+    if type(loaded) is _V2RecordResult:
+        if type(loaded.status) is not str or loaded.status != "ok":
+            return None, _failure("storage_protocol_error")
+        record = loaded.record
+    elif type(loaded) is dict:
+        if set(loaded) == {"status"} and loaded.get("status") == "missing":
+            return None, _failure("collaboration_not_found")
+        if set(loaded) == {"status"} and loaded.get("status") == "malformed":
+            return None, _failure("storage_protocol_error")
+        if type(loaded.get("status")) is not str or loaded.get("status") != "ok":
+            return None, _failure(_canonical_storage_error(loaded))
+        if set(loaded) != {"status", "record"}:
+            return None, _failure("storage_protocol_error")
+        record = loaded.get("record")
+    else:
+        return None, _failure("storage_protocol_error")
+
+    thread = normalize_v2_thread_record(record)
+    if thread is None:
+        return None, _failure("storage_protocol_error")
     if (
-        thread is None
-        or thread["collaborationId"] != collaboration_id
+        thread["collaborationId"] != collaboration_id
         or thread["ownerEmail"] != capability.owner_email
         or thread["workspaceId"] != capability.workspace_id
         or thread["mailboxId"] != capability.mailbox_id
@@ -86,30 +130,38 @@ def _append_message(
     )
     if replacement is None:
         return _failure("invalid_request")
-    try:
+    if allow_simple_saver:
         saved = thread_saver(
             replacement,
             expected,
             command_transport=command_transport,
             **(saver_kwargs or {}),
         )
-    except TypeError:
-        if not allow_simple_saver:
+    else:
+        try:
+            saved = thread_saver(
+                replacement,
+                expected,
+                command_transport=command_transport,
+                **(saver_kwargs or {}),
+            )
+        except Exception:
             return _failure("storage_unavailable")
-        saved = thread_saver(replacement, expected)
-    except Exception:
-        return _failure("storage_unavailable")
-    if not hasattr(saved, "get") or saved.get("status") != "ok":
-        code = (saved.get("error") or {}).get("code") if hasattr(saved, "get") else None
-        return _failure(
-            code
-            if code in {
-                "stale_thread", "session_revoked", "session_expired", "forbidden",
-                "storage_unavailable", "storage_protocol_error",
-            }
-            else "storage_protocol_error"
-        )
-    saved_thread = normalize_v2_thread_record(saved.get("record"))
+
+    if type(saved) is _V2RecordResult:
+        if type(saved.status) is not str or saved.status != "ok":
+            return _failure("storage_protocol_error")
+        saved_record = saved.record
+    elif type(saved) is dict:
+        if type(saved.get("status")) is not str or saved.get("status") != "ok":
+            return _failure(_canonical_storage_error(saved))
+        if set(saved) != {"status", "record"}:
+            return _failure("storage_protocol_error")
+        saved_record = saved.get("record")
+    else:
+        return _failure("storage_protocol_error")
+
+    saved_thread = normalize_v2_thread_record(saved_record)
     if saved_thread != replacement:
         return _failure("storage_protocol_error")
     return {
