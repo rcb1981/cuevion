@@ -8,6 +8,20 @@ The shared `api.collaboration.http_adapter` module now provides the import-safe 
 
 This Phase 2A slice activates no v1, v2, or frontend behavior. HTTP activation remains blocked on owner CSRF, atomic idempotency/recovery, durable rate limiting, missing owner and guest application services, retention approval, and production KV `EVAL`, Lua, response-shape, race, and TTL evidence.
 
+## Phase 2A inactive owner request security
+
+The provider-independent `api.collaboration.owner_request_security` module now contains inactive primitives for a future verified owner-authentication context, exact configured-Origin checks, stateless owner-CSRF tokens, rollout allowlist digests, and fixed failure normalization. It is not a route, exposes no `handler`, and is not imported by production routes. The current beta authentication is explicitly not accepted as verified owner authentication: a future real provider must supply a stable subject, canonical owner email, unpredictable per-login session ID, credential binding, and trusted authentication expiry before an owner request context can be resolved.
+
+The owner-security parser accepts only an explicitly supplied exact built-in `dict` snapshot and performs no environment read. Future deployment configuration must supply `CUEVION_APP_ORIGIN`, `CUEVION_COLLAB_V2_OWNER_CSRF_KEY`, optional rotation-only `CUEVION_COLLAB_V2_OWNER_CSRF_KEY_PREVIOUS`, `CUEVION_COLLAB_V2_ALLOWLIST_HMAC_KEY`, `CUEVION_COLLAB_V2_OWNER_ALLOWLIST`, and `CUEVION_COLLAB_V2_MAILBOX_ALLOWLIST`. Parsed owner-security configuration objects are opaque, immutable, and intentionally nonserializable; generic dataclass, pickle, copy, string, and representation paths must not disclose their internal key or allowlist material.
+
+Owner CSRF, rollout allowlist, collaboration index, guest credential, invitation credential, and future rate-limit keys must all be cryptographically distinct. Production activation requires a separately audited offline allowlist-generation and deployment procedure that never places raw identities in deployed allowlist settings, plus an explicit operational bound on allowlist cardinality. No actual key, allowlist entry, identity digest, or operational secret is documented here.
+
+The owner-CSRF session-binding digest is stable within one authentication session and signing-key epoch, so tokens are linkable within that scope. That limited linkability is accepted only for same-origin, short-lived CSRF use; the token must not be repurposed as an identity, authorization, invitation, guest-session, or cross-origin credential.
+
+`OwnerRequestContext` is a resolver-minted, immutable, nonserializable request capability intended to prevent request-level confusion and accidental generic misuse. It is not a sandbox against hostile arbitrary code executing in the same Python process, which remains outside this capability boundary. The public resolver remains the only supported minting path and must eventually be backed by real reviewed authentication; current beta authentication remains unacceptable.
+
+Owner HTTP activation remains blocked. The Origin, owner-CSRF, and owner/mailbox rollout allowlist primitives are unused by production routes; no owner route or handler is active, and no claim is made that owner authentication or owner CSRF is implemented. Real authentication, route integration, durable rate limiting, atomic idempotency and recovery, and production KV compatibility evidence are still required in separately reviewed work. This slice changes no Collaboration v1 or frontend behavior and does not make owner routes safe to enable.
+
 Activation requires all of the following in a separate change and review:
 
 - Set `CUEVION_APP_ORIGIN=https://app.cuevion.com` in production.

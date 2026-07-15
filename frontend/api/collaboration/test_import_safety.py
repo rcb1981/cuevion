@@ -39,7 +39,7 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
             from unittest.mock import patch
 
             {DEPLOYMENT_PATH_ASSERTIONS}
-            short_names = ("models", "redis_store", "authorization", "source_message", "guest_session", "mutations", "http_boundary", "http_adapter", "application")
+            short_names = ("models", "redis_store", "authorization", "source_message", "guest_session", "mutations", "http_boundary", "http_adapter", "owner_request_security", "application")
             with patch.dict(os.environ, {{}}, clear=True), patch(
                 "urllib.request.urlopen", side_effect=AssertionError("network during import")
             ), patch(
@@ -87,7 +87,8 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
         forwarding_aliases = {"models", "redis_store"}
         short_names = (
             "models", "redis_store", "authorization", "source_message",
-            "guest_session", "mutations", "http_boundary", "http_adapter", "application",
+            "guest_session", "mutations", "http_boundary", "http_adapter",
+            "owner_request_security", "application",
         )
         for short_name in short_names:
             for order in ("package_first", "top_level_first"):
@@ -249,6 +250,7 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
             "api.collaboration.mutations",
             "api.collaboration.http_boundary",
             "api.collaboration.http_adapter",
+            "api.collaboration.owner_request_security",
             "api.collaboration.application",
             "api.user_config_store",
             "api.inboxes.mailbox_secret_store",
@@ -327,10 +329,14 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
                 msg=f"{order}: stdout={result.stdout!r} stderr={result.stderr!r}",
             )
 
-    def test_active_collaboration_and_inbox_handlers_do_not_import_inactive_boundaries(self):
+    def test_active_handlers_do_not_import_inactive_boundaries(self):
         active_handlers = (
+            "api.beta.login",
+            "api.beta.logout",
+            "api.beta.session",
             "api.collaboration.thread",
             "api.collaboration.invite",
+            "api.contact.support",
             "api.inboxes.connect-imap",
             "api.inboxes.connect-oauth",
             "api.inboxes.credentials",
@@ -340,6 +346,10 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
             "api.inboxes.message-action",
             "api.inboxes.oauth-callback",
             "api.inboxes.send-gmail",
+            "api.organizer.soundcloud-resolve",
+            "api.team.invite",
+            "api.team.members",
+            "api.user.config",
         )
         script = textwrap.dedent(
             f"""
@@ -354,6 +364,7 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
             inactive_names = (
                 "api.collaboration.http_boundary", "http_boundary",
                 "api.collaboration.http_adapter", "http_adapter",
+                "api.collaboration.owner_request_security", "owner_request_security",
                 "api.collaboration.application", "application",
             )
             assert all(name not in sys.modules for name in inactive_names)
@@ -400,6 +411,8 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
             ("api.collaboration.mutations_copy", "api/collaboration/mutations.py"),
             ("api.collaboration.http_boundary_copy", "api/collaboration/http_boundary.py"),
             ("api.collaboration.http_adapter_copy", "api/collaboration/http_adapter.py"),
+            ("api.collaboration.owner_request_security_copy", "api/collaboration/owner_request_security.py"),
+            ("collaboration.owner_request_security", "api/collaboration/owner_request_security.py"),
             ("api.collaboration.application_copy", "api/collaboration/application.py"),
             ("collaboration.application", "api/collaboration/application.py"),
             ("api.user_config_store_copy", "api/user_config_store.py"),
@@ -798,7 +811,7 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
                 "from authorization", "import authorization",
                 "from guest_session", "import guest_session",
                 "from mutations", "import mutations",
-                "http_boundary", "http_adapter",
+                "http_boundary", "http_adapter", "owner_request_security",
                 "from application", "import application",
                 "collaboration.application", "resolve_internal_collaboration_context",
                 "create_v2_collaboration_for_owner",
@@ -958,6 +971,108 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, source)
 
+    def test_owner_request_security_import_is_canonical_inactive_and_io_free(self):
+        script = textwrap.dedent(
+            f"""
+            import builtins
+            import importlib
+            import io
+            import os
+            import subprocess
+            import sys
+            from unittest.mock import patch
+
+            {DEPLOYMENT_PATH_ASSERTIONS}
+            forbidden_modules = (
+                "api.beta_auth",
+                "api.beta.login",
+                "api.beta.logout",
+                "api.beta.session",
+                "api.collaboration.application",
+                "api.collaboration.http_adapter",
+                "api.collaboration.authorization",
+                "api.collaboration.models",
+                "api.collaboration.redis_store",
+                "api.collaboration.source_message",
+                "api.collaboration.guest_session",
+                "api.collaboration.mutations",
+                "api.user_config_store",
+                "api.inboxes.authenticated_gmail",
+                "api.inboxes.authenticated_imap",
+                "api.inboxes.oauth_token_store",
+                "imaplib",
+                "smtplib",
+            )
+            assert all(name not in sys.modules for name in forbidden_modules)
+            before_path = list(sys.path)
+            with patch("os.getenv", side_effect=AssertionError("environment read")), patch.object(
+                os._Environ, "__getitem__", side_effect=AssertionError("environment read")
+            ), patch(
+                "builtins.open", side_effect=AssertionError("file I/O during import")
+            ), patch(
+                "io.open", side_effect=AssertionError("file I/O during import")
+            ), patch(
+                "os.open", side_effect=AssertionError("file I/O during import")
+            ), patch(
+                "urllib.request.urlopen", side_effect=AssertionError("network during import")
+            ), patch(
+                "socket.create_connection", side_effect=AssertionError("socket during import")
+            ), patch(
+                "subprocess.Popen", side_effect=AssertionError("process startup during import")
+            ):
+                owner_security = importlib.import_module(
+                    "api.collaboration.owner_request_security"
+                )
+            assert owner_security.__name__ == "api.collaboration.owner_request_security"
+            assert all(name.lower() != "handler" for name in vars(owner_security))
+            assert "owner_request_security" not in sys.modules
+            assert all(name not in sys.modules for name in forbidden_modules)
+            assert sys.path == before_path
+            assert {{
+                name for name in sys.modules
+                if name.startswith("api.")
+            }} <= {{
+                "api.collaboration",
+                "api.collaboration.http_boundary",
+                "api.collaboration.owner_request_security",
+            }}
+            """
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=FRONTEND_ROOT,
+            env=_deployment_env(),
+            text=True,
+            capture_output=True,
+            timeout=15,
+            check=False,
+        )
+        self.assertEqual(
+            result.returncode,
+            0,
+            msg=f"stdout={result.stdout!r} stderr={result.stderr!r}",
+        )
+
+        source = (CURRENT_DIR / "owner_request_security.py").read_text()
+        for forbidden in (
+            "BaseHTTPRequestHandler",
+            "def handler",
+            "class handler",
+            "os.environ",
+            "os.getenv",
+            "sys.path",
+            "beta_auth",
+            "import application",
+            "import authorization",
+            "import models",
+            "import redis_store",
+            "import source_message",
+            "import guest_session",
+            "import mutations",
+            "api.inboxes",
+        ):
+            self.assertNotIn(forbidden, source)
+
     def test_application_import_is_canonical_inactive_and_io_free(self):
         script = textwrap.dedent(
             f"""
@@ -1087,6 +1202,7 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
                 source = path.read_text()
                 self.assertNotIn("http_boundary", source, msg=str(path))
                 self.assertNotIn("http_adapter", source, msg=str(path))
+                self.assertNotIn("owner_request_security", source, msg=str(path))
                 for forbidden in (
                     "api.collaboration.application",
                     "collaboration/application",
@@ -1104,6 +1220,7 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
                 source = path.read_text()
                 self.assertNotIn("http_boundary", source, msg=str(path))
                 self.assertNotIn("http_adapter", source, msg=str(path))
+                self.assertNotIn("owner_request_security", source, msg=str(path))
                 for forbidden in (
                     "api.collaboration.application",
                     "collaboration/application",
