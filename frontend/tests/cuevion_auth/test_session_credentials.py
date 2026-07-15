@@ -512,11 +512,16 @@ class ModuleIdentityAndInactivityTests(unittest.TestCase):
         self.assertFalse((_FRONTEND_DIRECTORY / "tests" / "__init__.py").exists())
         self.assertEqual(
             {path.name for path in _SOURCE_DIRECTORY.iterdir() if path.is_file()},
-            {"session_credentials.py", "AUTH_B1_ACTIVATION_REQUIREMENTS.md"},
+            {
+                "session_credentials.py",
+                "AUTH_B1_ACTIVATION_REQUIREMENTS.md",
+                "account_record_ids.py",
+                "AUTH_RECORD_ID_ACTIVATION_REQUIREMENTS.md",
+            },
         )
         self.assertEqual(
             {path.name for path in _TEST_DIRECTORY.iterdir() if path.is_file()},
-            {"test_session_credentials.py"},
+            {"test_session_credentials.py", "test_account_record_ids.py"},
         )
 
     def test_top_level_and_alternate_dotted_imports_fail(self):
@@ -718,7 +723,9 @@ class ModuleIdentityAndInactivityTests(unittest.TestCase):
         )
         for relative_path in (
             "cuevion_auth/session_credentials.py",
+            "cuevion_auth/account_record_ids.py",
             "tests/cuevion_auth/test_session_credentials.py",
+            "tests/cuevion_auth/test_account_record_ids.py",
         ):
             with self.subTest(relative_path=relative_path):
                 self.assertTrue(
