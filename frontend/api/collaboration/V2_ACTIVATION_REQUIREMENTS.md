@@ -2,6 +2,12 @@
 
 Collaboration v2 is an inactive private-beta foundation. Its modules are not route-wired, must not be imported by the active frontend or active API routes, and must not be activated as part of security-foundation work.
 
+## Phase 2A inactive HTTP adapter
+
+The shared `api.collaboration.http_adapter` module now provides the import-safe transport boundary for future Collaboration v2 Python handlers. It is not a route, exposes no `handler`, and does not import application services. `CUEVION_COLLAB_V2_HTTP_MODE` remains fail-closed to `off`; no production route currently reads or activates it. Future route modules must evaluate their exact allowed mode before importing application services or reading a request body. They must preserve duplicate raw headers through `headers.raw_items()`, validate body framing and limits before `rfile.read`, and use the centralized public response and error serialization.
+
+This Phase 2A slice activates no v1, v2, or frontend behavior. HTTP activation remains blocked on owner CSRF, atomic idempotency/recovery, durable rate limiting, missing owner and guest application services, retention approval, and production KV `EVAL`, Lua, response-shape, race, and TTL evidence.
+
 Activation requires all of the following in a separate change and review:
 
 - Set `CUEVION_APP_ORIGIN=https://app.cuevion.com` in production.

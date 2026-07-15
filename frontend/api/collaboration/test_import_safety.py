@@ -39,7 +39,7 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
             from unittest.mock import patch
 
             {DEPLOYMENT_PATH_ASSERTIONS}
-            short_names = ("models", "redis_store", "authorization", "source_message", "guest_session", "mutations", "http_boundary", "application")
+            short_names = ("models", "redis_store", "authorization", "source_message", "guest_session", "mutations", "http_boundary", "http_adapter", "application")
             with patch.dict(os.environ, {{}}, clear=True), patch(
                 "urllib.request.urlopen", side_effect=AssertionError("network during import")
             ), patch(
@@ -87,7 +87,7 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
         forwarding_aliases = {"models", "redis_store"}
         short_names = (
             "models", "redis_store", "authorization", "source_message",
-            "guest_session", "mutations", "http_boundary", "application",
+            "guest_session", "mutations", "http_boundary", "http_adapter", "application",
         )
         for short_name in short_names:
             for order in ("package_first", "top_level_first"):
@@ -248,6 +248,7 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
             "api.collaboration.guest_session",
             "api.collaboration.mutations",
             "api.collaboration.http_boundary",
+            "api.collaboration.http_adapter",
             "api.collaboration.application",
             "api.user_config_store",
             "api.inboxes.mailbox_secret_store",
@@ -352,6 +353,7 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
             {DEPLOYMENT_PATH_ASSERTIONS}
             inactive_names = (
                 "api.collaboration.http_boundary", "http_boundary",
+                "api.collaboration.http_adapter", "http_adapter",
                 "api.collaboration.application", "application",
             )
             assert all(name not in sys.modules for name in inactive_names)
@@ -397,6 +399,7 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
             ("api.collaboration.guest_session_copy", "api/collaboration/guest_session.py"),
             ("api.collaboration.mutations_copy", "api/collaboration/mutations.py"),
             ("api.collaboration.http_boundary_copy", "api/collaboration/http_boundary.py"),
+            ("api.collaboration.http_adapter_copy", "api/collaboration/http_adapter.py"),
             ("api.collaboration.application_copy", "api/collaboration/application.py"),
             ("collaboration.application", "api/collaboration/application.py"),
             ("api.user_config_store_copy", "api/user_config_store.py"),
@@ -795,7 +798,8 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
                 "from authorization", "import authorization",
                 "from guest_session", "import guest_session",
                 "from mutations", "import mutations",
-                "http_boundary", "from application", "import application",
+                "http_boundary", "http_adapter",
+                "from application", "import application",
                 "collaboration.application", "resolve_internal_collaboration_context",
                 "create_v2_collaboration_for_owner",
                 "collab:v2",
@@ -862,6 +866,97 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
         self.assertNotIn("BaseHTTPRequestHandler", source)
         self.assertNotIn("os.environ", source)
         self.assertNotIn("os.getenv", source)
+
+    def test_http_adapter_import_is_canonical_inactive_and_io_free(self):
+        script = textwrap.dedent(
+            f"""
+            import builtins
+            import importlib
+            import io
+            import os
+            import subprocess
+            import sys
+            from unittest.mock import patch
+
+            {DEPLOYMENT_PATH_ASSERTIONS}
+            forbidden_modules = (
+                "api.collaboration.application",
+                "api.collaboration.redis_store",
+                "api.collaboration.authorization",
+                "api.collaboration.source_message",
+                "api.collaboration.guest_session",
+                "api.collaboration.mutations",
+                "api.user_config_store",
+                "api.inboxes.authenticated_gmail",
+                "api.inboxes.authenticated_imap",
+                "api.inboxes.oauth_token_store",
+                "imaplib",
+                "smtplib",
+            )
+            assert all(name not in sys.modules for name in forbidden_modules)
+            before_path = list(sys.path)
+            with patch("os.getenv", side_effect=AssertionError("environment read")), patch.object(
+                os._Environ, "__getitem__", side_effect=AssertionError("environment read")
+            ), patch(
+                "builtins.open", side_effect=AssertionError("file I/O during import")
+            ), patch(
+                "io.open", side_effect=AssertionError("file I/O during import")
+            ), patch(
+                "os.open", side_effect=AssertionError("file I/O during import")
+            ), patch(
+                "urllib.request.urlopen", side_effect=AssertionError("network during import")
+            ), patch(
+                "socket.create_connection", side_effect=AssertionError("socket during import")
+            ), patch(
+                "subprocess.Popen", side_effect=AssertionError("process startup during import")
+            ):
+                adapter = importlib.import_module("api.collaboration.http_adapter")
+            assert adapter.__name__ == "api.collaboration.http_adapter"
+            assert all(name.lower() != "handler" for name in vars(adapter))
+            assert "http_adapter" not in sys.modules
+            assert all(name not in sys.modules for name in forbidden_modules)
+            assert sys.path == before_path
+            assert {{
+                name for name in sys.modules
+                if name.startswith("api.")
+            }} <= {{
+                "api.collaboration",
+                "api.collaboration.http_boundary",
+                "api.collaboration.http_adapter",
+            }}
+            """
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=FRONTEND_ROOT,
+            env=_deployment_env(),
+            text=True,
+            capture_output=True,
+            timeout=15,
+            check=False,
+        )
+        self.assertEqual(
+            result.returncode,
+            0,
+            msg=f"stdout={result.stdout!r} stderr={result.stderr!r}",
+        )
+
+        source = (CURRENT_DIR / "http_adapter.py").read_text()
+        for forbidden in (
+            "class handler",
+            "def handler",
+            "os.environ",
+            "os.getenv",
+            "import application",
+            "import redis_store",
+            "import authorization",
+            "import source_message",
+            "import guest_session",
+            "import mutations",
+            "api.inboxes",
+            "sys.path",
+        ):
+            self.assertNotIn(forbidden, source)
 
     def test_application_import_is_canonical_inactive_and_io_free(self):
         script = textwrap.dedent(
@@ -991,6 +1086,7 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
             if not path.name.startswith("test_"):
                 source = path.read_text()
                 self.assertNotIn("http_boundary", source, msg=str(path))
+                self.assertNotIn("http_adapter", source, msg=str(path))
                 for forbidden in (
                     "api.collaboration.application",
                     "collaboration/application",
@@ -1007,6 +1103,7 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
             }:
                 source = path.read_text()
                 self.assertNotIn("http_boundary", source, msg=str(path))
+                self.assertNotIn("http_adapter", source, msg=str(path))
                 for forbidden in (
                     "api.collaboration.application",
                     "collaboration/application",
