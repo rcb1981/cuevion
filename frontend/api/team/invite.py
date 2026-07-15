@@ -22,6 +22,56 @@ LEGACY_TEAM_ROLE_MAP = {
 }
 
 
+_LEGACY_HTTP_MODE_ENVIRONMENT_NAME = "CUEVION_LEGACY_COLLAB_V1_HTTP_MODE"
+_LEGACY_HTTP_UNSAFE_VALUE = "legacy_unsafe_on"
+_DISABLED_RESPONSE_BODY = b'{"ok":false,"error":{"code":"not_found","message":"Not found."}}'
+_DISABLED_RESPONSE_CONTENT_LENGTH = str(len(_DISABLED_RESPONSE_BODY))
+_UNSUPPORTED_METHOD_RESPONSE_BODY = (
+    b'{"ok":false,"error":{"code":"not_implemented","message":"Unsupported method."}}'
+)
+_UNSUPPORTED_METHOD_RESPONSE_CONTENT_LENGTH = str(len(_UNSUPPORTED_METHOD_RESPONSE_BODY))
+
+
+def _legacy_http_is_enabled() -> bool:
+    try:
+        mode = os.getenv(_LEGACY_HTTP_MODE_ENVIRONMENT_NAME)
+    except Exception:
+        return False
+    return type(mode) is str and mode == _LEGACY_HTTP_UNSAFE_VALUE
+
+
+def _send_disabled_response(
+    handler: BaseHTTPRequestHandler,
+    *,
+    include_body: bool = True,
+) -> bool:
+    if _legacy_http_is_enabled():
+        return False
+
+    handler.send_response_only(404)
+    handler.send_header("Content-Type", "application/json")
+    handler.send_header("Cache-Control", "no-store")
+    handler.send_header("Content-Length", _DISABLED_RESPONSE_CONTENT_LENGTH)
+    handler.end_headers()
+    if include_body:
+        handler.wfile.write(_DISABLED_RESPONSE_BODY)
+    return True
+
+
+def _send_unsupported_method_response(
+    handler: BaseHTTPRequestHandler,
+    *,
+    include_body: bool = True,
+):
+    handler.send_response_only(501)
+    handler.send_header("Content-Type", "application/json")
+    handler.send_header("Cache-Control", "no-store")
+    handler.send_header("Content-Length", _UNSUPPORTED_METHOD_RESPONSE_CONTENT_LENGTH)
+    handler.end_headers()
+    if include_body:
+        handler.wfile.write(_UNSUPPORTED_METHOD_RESPONSE_BODY)
+
+
 def _send_json(handler: BaseHTTPRequestHandler, status_code: int, payload: dict):
     response_body = json.dumps(payload).encode("utf-8")
     handler.send_response(status_code)
@@ -623,6 +673,9 @@ def _handle_action(handler: BaseHTTPRequestHandler, payload: dict):
 
 class handler(BaseHTTPRequestHandler):
     def do_GET(self):
+        if _send_disabled_response(self):
+            return
+
         operation = _get_operation(self)
 
         if operation == "lookup":
@@ -632,6 +685,9 @@ class handler(BaseHTTPRequestHandler):
         _send_json(self, 404, _build_error("not_found", "Unsupported team invite operation."))
 
     def do_POST(self):
+        if _send_disabled_response(self):
+            return
+
         operation = _get_operation(self)
         payload, payload_error = _read_json_body(self)
 
@@ -648,3 +704,28 @@ class handler(BaseHTTPRequestHandler):
             return
 
         _send_json(self, 404, _build_error("not_found", "Unsupported team invite operation."))
+
+    def do_HEAD(self):
+        if _send_disabled_response(self, include_body=False):
+            return
+        _send_unsupported_method_response(self, include_body=False)
+
+    def do_OPTIONS(self):
+        if _send_disabled_response(self):
+            return
+        _send_unsupported_method_response(self)
+
+    def do_PUT(self):
+        if _send_disabled_response(self):
+            return
+        _send_unsupported_method_response(self)
+
+    def do_PATCH(self):
+        if _send_disabled_response(self):
+            return
+        _send_unsupported_method_response(self)
+
+    def do_DELETE(self):
+        if _send_disabled_response(self):
+            return
+        _send_unsupported_method_response(self)
