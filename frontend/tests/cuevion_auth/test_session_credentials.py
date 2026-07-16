@@ -519,6 +519,8 @@ class ModuleIdentityAndInactivityTests(unittest.TestCase):
                 "AUTH_RECORD_ID_ACTIVATION_REQUIREMENTS.md",
                 "account_repository_contract.py",
                 "ACCOUNT_REPOSITORY_ACTIVATION_REQUIREMENTS.md",
+                "relational_account_store_contract.py",
+                "RELATIONAL_ACCOUNT_STORE_ACTIVATION_REQUIREMENTS.md",
             },
         )
         self.assertEqual(
@@ -527,6 +529,7 @@ class ModuleIdentityAndInactivityTests(unittest.TestCase):
                 "test_session_credentials.py",
                 "test_account_record_ids.py",
                 "test_account_repository_contract.py",
+                "test_relational_account_store_contract.py",
             },
         )
 

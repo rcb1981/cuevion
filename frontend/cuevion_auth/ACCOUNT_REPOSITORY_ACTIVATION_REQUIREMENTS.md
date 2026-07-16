@@ -181,6 +181,10 @@ rollback, and an explicit activation decision all require later review. No futur
 phase may treat this contract's presence or importability as permission to bypass
 those gates.
 
+The separate `RELATIONAL_ACCOUNT_STORE_ACTIVATION_REQUIREMENTS.md` freezes the
+inactive logical schema, migration-compatibility, and consistent-read requirements
+that a future relational implementation must satisfy.
+
 ## Product entitlement boundary
 
 One Cuevion account can later use multiple products. Product access is determined
