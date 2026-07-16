@@ -102,11 +102,11 @@ This module enforces syntax and injected snapshot consistency but uses no clock.
 
 Actual production keys, deployable credentials, and production configuration values must never appear in source, tests, documentation, logs, metrics, analytics, traces, audit payloads, support output, or examples. Tests may use only clearly synthetic, fixed non-production fixtures.
 
-## Remaining review gates before Auth-B1b and Auth-B2
+## Remaining review gates before a future trusted resolver and Auth-B2
 
 Auth-B1a does not revise or activate Auth-A. A future trusted resolver may own and call this helper, but this helper is not itself a resolver or session authority.
 
-Auth-B1b requires a separate review of the resolver and authoritative session semantics: exact key-epoch persistence, digest-only lookup, constant-time binding verification, account and session state validation, expiry and security-epoch behavior, outage classification, and fixed error mapping. It must prove that raw headers, cookie values, and key material never reach repositories or observability surfaces.
+A future trusted resolver requires a separate review of the resolver and authoritative session semantics: exact key-epoch persistence, digest-only lookup, constant-time binding verification, account and session state validation, expiry and security-epoch behavior, outage classification, and fixed error mapping. It must prove that raw headers, cookie values, and key material never reach repositories or observability surfaces.
 
 Auth-B2 requires separately reviewed repositories and production storage with uniqueness, transactions, atomic rotation and revocation, idle-touch and absolute-expiry enforcement, TTL behavior, concurrency, retry, partial-failure, corruption, and outage evidence. Secure operational configuration loading, key custody, scheduled and emergency rotation, and production/preview isolation remain unresolved.
 

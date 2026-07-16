@@ -517,11 +517,17 @@ class ModuleIdentityAndInactivityTests(unittest.TestCase):
                 "AUTH_B1_ACTIVATION_REQUIREMENTS.md",
                 "account_record_ids.py",
                 "AUTH_RECORD_ID_ACTIVATION_REQUIREMENTS.md",
+                "account_repository_contract.py",
+                "ACCOUNT_REPOSITORY_ACTIVATION_REQUIREMENTS.md",
             },
         )
         self.assertEqual(
             {path.name for path in _TEST_DIRECTORY.iterdir() if path.is_file()},
-            {"test_session_credentials.py", "test_account_record_ids.py"},
+            {
+                "test_session_credentials.py",
+                "test_account_record_ids.py",
+                "test_account_repository_contract.py",
+            },
         )
 
     def test_top_level_and_alternate_dotted_imports_fail(self):
@@ -2450,7 +2456,7 @@ class ActivationDocumentationTests(unittest.TestCase):
             "remove a previous key only after no affected credential can remain valid",
             "reject the affected epoch and require fresh login and session invalidation",
             "production and preview keys, epochs, and namespaces fully separate",
-            "auth-b1b requires a separate review",
+            "a future trusted resolver requires a separate review",
             "auth-b2 requires separately reviewed repositories and production storage",
             "explicit activation decision",
         )

@@ -1,6 +1,6 @@
 # Auth record-ID activation requirements
 
-## Status: inactive candidate generation only
+## Status: Auth-B1b is inactive candidate generation only
 
 This slice is completely inactive. `cuevion_auth.account_record_ids` is a pure,
 provider-independent generator of unpersisted account-record ID candidates. It
