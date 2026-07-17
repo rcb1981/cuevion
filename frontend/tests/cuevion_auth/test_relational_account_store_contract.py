@@ -47,6 +47,7 @@ EXPECTED_ALL = (
     "ConsistentReadRequirementManifest",
     "RelationalRelationManifest",
     "RelationalSchemaManifest",
+    "ACCOUNT_SECURITY_EVENT_STREAM_NAME",
     "RELATIONAL_ACCOUNT_SCHEMA_1",
     "relational_schema_manifest_is_valid",
     "relational_version_is_supported",
@@ -994,7 +995,6 @@ EXPECTED_INVARIANTS = {
             "snapshot_authentication_evidence_verified_at",
             "snapshot_authentication_evidence_issued_at",
             "snapshot_authentication_evidence_expires_at",
-            "committed_at",
         ),
         _expected_invariant(
             contract.RelationalConstraintCategory.EXACT_FIELD_EQUALITY,
@@ -1066,6 +1066,10 @@ EXPECTED_INVARIANTS = {
         _expected_invariant(
             contract.RelationalConstraintCategory.VALID_EVENT_TYPE,
             "event_type",
+        ),
+        _expected_invariant(
+            contract.RelationalConstraintCategory.EXACT_CASE_SENSITIVE_VALUE,
+            "event_stream_name",
         ),
         _expected_invariant(
             contract.RelationalConstraintCategory.TIMESTAMP_ORDER,
@@ -1231,6 +1235,8 @@ EXPECTED_RELATION_METADATA = {
             "event_id_from_validated_request",
             "event_time_repository_generated",
             "append_position_repository_generated",
+            "event_stream_name_repository_generated",
+            "event_stream_name_exact_cuevion.account.security",
             "commit_metadata_repository_generated",
             "row_version_exactly_one",
         ),
@@ -2627,7 +2633,7 @@ for name in ('handler', 'route', 'router', 'app', 'server'):
                 )
             )
 
-    def test_requirements_are_unchanged_and_have_no_storage_dependency(self):
+    def test_requirements_allow_only_the_reviewed_foundation_dependencies(self):
         requirements = tuple(
             line.strip()
             for line in (_FRONTEND_DIRECTORY / "requirements.txt")
@@ -2635,15 +2641,22 @@ for name in ('handler', 'route', 'router', 'app', 'server'):
             .splitlines()
             if line.strip()
         )
-        self.assertEqual(requirements, ("cryptography~=46.0.0",))
+        self.assertEqual(
+            requirements,
+            (
+                "cryptography~=46.0.0",
+                "psycopg[binary]~=3.3.4",
+                "SQLAlchemy~=2.0.51",
+            ),
+        )
         normalized = " ".join(requirements).casefold()
         for forbidden in (
-            "sqlalchemy",
             "django",
-            "psycopg",
             "mysql",
             "redis",
             "alembic",
+            "psycopg_pool",
+            "sqlalchemy.orm",
         ):
             self.assertNotIn(forbidden, normalized)
 

@@ -15,6 +15,19 @@ provider call, OAuth flow, session, cookie, route, handler, app, router, fronten
 beta-auth behavior, mailbox behavior, Team behavior, or Collaboration
 integration. It performs no feature activation.
 
+The separate inactive `cuevion_db` foundation now provides a concrete
+PostgreSQL schema-one and reviewed offline Alembic revision. That foundation is
+not a repository adapter and changes none of this module's pure, database-free
+surface. It opens no connection and activates nothing; see
+`cuevion_db/DATABASE_FOUNDATION_ACTIVATION_REQUIREMENTS.md`.
+
+Every account, evidence, operation, receipt, and security-event timestamp in this
+contract is an exact built-in Python `int`: integral Unix UTC seconds in the
+inclusive range `0..253402300799`. `bool`, integer subclasses, floats, negative
+values, milliseconds, microseconds, implicit defaults, and timezone-naive
+semantics are rejected. Evidence preserves `verified_at <= issued_at <
+expires_at`; repository-generated times remain outside caller control.
+
 ## Transactional initial-account aggregate
 
 A future implementation must treat initial-account creation as one transaction.
@@ -34,6 +47,22 @@ provider assertion, or a constructed receipt cannot prove that the aggregate was
 persisted. Future relational constraints must authoritatively enforce record-ID,
 identity, evidence-claim, operation-reference, membership, and other approved
 uniqueness rules in the same transaction.
+
+The schema-one security event stream name is exactly the case-sensitive
+`cuevion.account.security`. Name and positive position are repository-generated,
+not request, browser, or provider fields, and remain outside the immutable caller
+request snapshot. Operation and event are nevertheless bound across the complete
+receipt and provenance graph.
+
+Conflict handling is closed before any adapter exists. Existing operation lookup
+always precedes current policy: the exact same immutable request is
+`EXACT_REPLAY`, while a mismatch is `CONFLICT` with
+`OPERATION_REFERENCE_MISMATCH`. Only for a genuinely new operation whose
+non-commit is known, the exact remaining precedence is
+`EVIDENCE_ALREADY_CONSUMED`, then `AUTHORITY_ALREADY_CLAIMED`, then
+`RECORD_ID_COLLISION`. Insert order, race order, query plans, vendor error codes,
+and constraint names may never determine this result. Unknown commit status
+continues to take precedence as `AMBIGUOUS`.
 
 ## Closed outcomes and caller knowledge
 

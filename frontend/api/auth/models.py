@@ -307,6 +307,7 @@ _EMAIL_DOMAIN_MAX_CHARACTERS = 253
 _VERIFICATION_SOURCE_MAX_CHARACTERS = 128
 _ISSUER_MAX_CHARACTERS = 512
 _SUBJECT_MAX_CHARACTERS = 512
+MAX_UNIX_UTC_SECONDS = 253_402_300_799
 
 _CUEVION_USER_FIELDS = (
     "schema_version",
@@ -507,12 +508,15 @@ def _is_positive_int(value: object) -> bool:
     return type(value) is int and value > 0
 
 
-def _is_nonnegative_int(value: object) -> bool:
-    return type(value) is int and value >= 0
+def _is_timestamp(value: object) -> bool:
+    return (
+        type(value) is int
+        and 0 <= value <= MAX_UNIX_UTC_SECONDS
+    )
 
 
-def _is_optional_nonnegative_int(value: object) -> bool:
-    return value is None or _is_nonnegative_int(value)
+def _is_optional_timestamp(value: object) -> bool:
+    return value is None or _is_timestamp(value)
 
 
 def _cuevion_user_values(value: object) -> tuple[object, ...] | None:
@@ -541,8 +545,8 @@ def _cuevion_user_values(value: object) -> tuple[object, ...] | None:
         or (status is UserStatus.ACTIVE and primary_verified_email_id is None)
         or not _valid_display_name(display_name)
         or not _is_positive_int(security_epoch)
-        or not _is_nonnegative_int(created_at)
-        or not _is_nonnegative_int(updated_at)
+        or not _is_timestamp(created_at)
+        or not _is_timestamp(updated_at)
         or created_at > updated_at
         or not _is_positive_int(row_version)
     ):
@@ -575,9 +579,9 @@ def _verified_email_values(value: object) -> tuple[object, ...] | None:
         or not _valid_ascii_security_identifier(
             verification_source, _VERIFICATION_SOURCE_MAX_CHARACTERS
         )
-        or not _is_nonnegative_int(created_at)
-        or not _is_optional_nonnegative_int(verified_at)
-        or not _is_optional_nonnegative_int(retired_at)
+        or not _is_timestamp(created_at)
+        or not _is_optional_timestamp(verified_at)
+        or not _is_optional_timestamp(retired_at)
         or not _is_positive_int(row_version)
     ):
         return None
@@ -632,8 +636,8 @@ def _authentication_identity_values(value: object) -> tuple[object, ...] | None:
             verified_email_id is not None
             and not _valid_verified_email_id(verified_email_id)
         )
-        or not _is_nonnegative_int(created_at)
-        or not _is_optional_nonnegative_int(last_used_at)
+        or not _is_timestamp(created_at)
+        or not _is_optional_timestamp(last_used_at)
         or (last_used_at is not None and created_at > last_used_at)
         or not _is_positive_int(row_version)
     ):
@@ -659,8 +663,8 @@ def _workspace_values(value: object) -> tuple[object, ...] | None:
         or not _valid_workspace_id(workspace_id)
         or type(status) is not WorkspaceStatus
         or not _valid_user_id(created_by_user_id)
-        or not _is_nonnegative_int(created_at)
-        or not _is_nonnegative_int(updated_at)
+        or not _is_timestamp(created_at)
+        or not _is_timestamp(updated_at)
         or created_at > updated_at
         or not _is_positive_int(row_version)
     ):
@@ -690,8 +694,8 @@ def _workspace_membership_values(value: object) -> tuple[object, ...] | None:
         or not _valid_user_id(user_id)
         or type(role) is not WorkspaceRole
         or type(status) is not WorkspaceMembershipStatus
-        or not _is_nonnegative_int(created_at)
-        or not _is_nonnegative_int(updated_at)
+        or not _is_timestamp(created_at)
+        or not _is_timestamp(updated_at)
         or created_at > updated_at
         or not _is_positive_int(row_version)
     ):
@@ -734,12 +738,12 @@ def _stored_session_values(value: object) -> tuple[object, ...] | None:
         or not _is_positive_int(credential_epoch)
         or not _is_positive_int(security_epoch)
         or type(status) is not SessionStatus
-        or not _is_nonnegative_int(authenticated_at)
-        or not _is_nonnegative_int(issued_at)
-        or not _is_nonnegative_int(last_used_at)
-        or not _is_nonnegative_int(idle_expires_at)
-        or not _is_nonnegative_int(absolute_expires_at)
-        or not _is_optional_nonnegative_int(revoked_at)
+        or not _is_timestamp(authenticated_at)
+        or not _is_timestamp(issued_at)
+        or not _is_timestamp(last_used_at)
+        or not _is_timestamp(idle_expires_at)
+        or not _is_timestamp(absolute_expires_at)
+        or not _is_optional_timestamp(revoked_at)
         or (
             revocation_reason is not None
             and type(revocation_reason) is not SessionRevocationReason
@@ -869,7 +873,7 @@ def validate_session_snapshot(
         session_values is None
         or user_values is None
         or identity_values is None
-        or not _is_nonnegative_int(now)
+        or not _is_timestamp(now)
     ):
         _raise_validation_error()
     session_user_id = session_values[2]
@@ -904,6 +908,7 @@ def validate_session_snapshot(
 
 
 __all__ = (
+    "MAX_UNIX_UTC_SECONDS",
     "ModelValidationError",
     "UserStatus",
     "VerifiedEmailStatus",

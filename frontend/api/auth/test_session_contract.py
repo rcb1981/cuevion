@@ -1102,6 +1102,96 @@ class AuthenticatedAccountSessionTests(unittest.TestCase):
         self.assertAuthenticationRequired(
             user, primary_email, identity, stale_epoch, now=150
         )
+        maximum = models.MAX_UNIX_UTC_SECONDS
+        near_maximum = dataclasses.replace(
+            session,
+            authenticated_at=maximum - 4,
+            issued_at=maximum - 3,
+            last_used_at=maximum - 2,
+            idle_expires_at=maximum - 1,
+            absolute_expires_at=maximum,
+        )
+        capability = contract._mint_authenticated_account_session(
+            user,
+            primary_email,
+            identity,
+            near_maximum,
+            now=maximum - 2,
+        )
+        self.assertIs(type(capability), contract.AuthenticatedAccountSession)
+
+    def test_now_boundaries_and_helper_dispatch_are_mutation_resistant(self):
+        class IntegerSubclass(int):
+            pass
+
+        user, primary_email, identity, session = _valid_records()
+        zero_session = dataclasses.replace(
+            session,
+            authenticated_at=0,
+            issued_at=0,
+            last_used_at=0,
+            idle_expires_at=1,
+            absolute_expires_at=2,
+        )
+        canonical_helper = models._is_timestamp
+        with mock.patch.object(
+            models, "_is_timestamp", wraps=canonical_helper
+        ) as helper_spy:
+            capability = contract._mint_authenticated_account_session(
+                user,
+                primary_email,
+                identity,
+                zero_session,
+                now=0,
+            )
+        self.assertIs(type(capability), contract.AuthenticatedAccountSession)
+        self.assertEqual(helper_spy.call_args_list[-1], mock.call(0))
+
+        maximum = models.MAX_UNIX_UTC_SECONDS
+        near_maximum = dataclasses.replace(
+            session,
+            authenticated_at=maximum - 4,
+            issued_at=maximum - 3,
+            last_used_at=maximum - 2,
+            idle_expires_at=maximum - 1,
+            absolute_expires_at=maximum,
+        )
+        for rejected_now in (maximum, maximum + 1):
+            with self.subTest(rejected_now=rejected_now):
+                canonical_helper = models._is_timestamp
+                with mock.patch.object(
+                    models, "_is_timestamp", wraps=canonical_helper
+                ) as helper_spy:
+                    self.assertAuthenticationRequired(
+                        user,
+                        primary_email,
+                        identity,
+                        near_maximum,
+                        now=rejected_now,
+                    )
+                self.assertEqual(
+                    helper_spy.call_args_list[-1],
+                    mock.call(rejected_now),
+                )
+
+        for rejected_now in (
+            False,
+            True,
+            IntegerSubclass(0),
+        ):
+            with self.subTest(rejected_type=type(rejected_now).__name__):
+                canonical_helper = models._is_timestamp
+                with mock.patch.object(
+                    models, "_is_timestamp", wraps=canonical_helper
+                ) as helper_spy:
+                    self.assertAuthenticationRequired(
+                        user,
+                        primary_email,
+                        identity,
+                        session,
+                        now=rejected_now,
+                    )
+                helper_spy.assert_not_called()
 
     def test_factory_revalidates_corrupted_exact_session_records(self):
         user, primary_email, identity, original = _valid_records()

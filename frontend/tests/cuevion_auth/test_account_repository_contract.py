@@ -440,6 +440,7 @@ class PublicSurfaceTests(ContractTestCase):
         "AccountRepositoryContractValidationError",
         "InitialAccountCreationOutcome",
         "InitialAccountConflictReason",
+        "NEW_OPERATION_CONFLICT_PRECEDENCE",
         "InitialSecurityEventType",
         "InitialAccountOperationReference",
         "VerifiedAuthenticationEvidence",
@@ -569,6 +570,22 @@ class PublicSurfaceTests(ContractTestCase):
         self.assertNotIn(
             "OPERATION_AUTHORIZATION_EXPIRED",
             contract.InitialAccountConflictReason.__members__,
+        )
+
+    def test_new_operation_conflict_precedence_is_exact_and_reuses_enum(self):
+        self.assertEqual(
+            contract.NEW_OPERATION_CONFLICT_PRECEDENCE,
+            (
+                contract.InitialAccountConflictReason.EVIDENCE_ALREADY_CONSUMED,
+                contract.InitialAccountConflictReason.AUTHORITY_ALREADY_CLAIMED,
+                contract.InitialAccountConflictReason.RECORD_ID_COLLISION,
+            ),
+        )
+        self.assertTrue(
+            all(
+                type(reason) is contract.InitialAccountConflictReason
+                for reason in contract.NEW_OPERATION_CONFLICT_PRECEDENCE
+            )
         )
 
     def test_records_have_exact_fields_and_exact_public_signatures(self):
@@ -827,7 +844,7 @@ class StructuralRecordValidationTests(ContractTestCase):
             (_evidence, "expires_at", 3),
             (_security_event, "schema_version", 1),
         ):
-            for rejected in (True, IntegerSubclass(valid_value)):
+            for rejected in (False, True, IntegerSubclass(valid_value)):
                 with self.subTest(factory=factory.__name__, field=field):
                     self.assert_contract_error(
                         lambda factory=factory, field=field, rejected=rejected: factory(
@@ -1131,6 +1148,11 @@ class AggregateValidationTests(ContractTestCase):
             {"verified_at": 0, "issued_at": 0, "expires_at": 1},
             {"verified_at": 1, "issued_at": 1, "expires_at": 2},
             {"verified_at": 1, "issued_at": 2, "expires_at": 3},
+            {
+                "verified_at": auth_models.MAX_UNIX_UTC_SECONDS - 2,
+                "issued_at": auth_models.MAX_UNIX_UTC_SECONDS - 1,
+                "expires_at": auth_models.MAX_UNIX_UTC_SECONDS,
+            },
         ):
             with self.subTest(values=values):
                 self.assertIs(
@@ -1154,6 +1176,122 @@ class AggregateValidationTests(ContractTestCase):
             contract.validate_initial_account_creation_request(
                 request_with_historic_numeric_expiry
             )
+        )
+
+    def test_evidence_timestamp_fields_dispatch_their_exact_values(self):
+        canonical_helper = auth_models._is_timestamp
+        with mock.patch.object(
+            auth_models, "_is_timestamp", wraps=canonical_helper
+        ) as helper_spy:
+            evidence = _evidence(
+                verified_at=101,
+                issued_at=102,
+                expires_at=103,
+            )
+        self.assertIs(type(evidence), contract.VerifiedAuthenticationEvidence)
+        self.assertEqual(
+            helper_spy.call_args_list,
+            [
+                mock.call(101),
+                mock.call(102),
+                mock.call(103),
+                mock.call(101),
+                mock.call(102),
+                mock.call(103),
+            ],
+        )
+
+    def test_each_evidence_timestamp_routes_maximum_plus_one_to_helper(self):
+        maximum_plus_one = auth_models.MAX_UNIX_UTC_SECONDS + 1
+        for field in ("verified_at", "issued_at", "expires_at"):
+            with self.subTest(field=field):
+                canonical_helper = auth_models._is_timestamp
+                with mock.patch.object(
+                    auth_models, "_is_timestamp", wraps=canonical_helper
+                ) as helper_spy:
+                    self.assert_contract_error(
+                        lambda field=field: _evidence(
+                            **{field: maximum_plus_one}
+                        )
+                    )
+                self.assertIn(
+                    mock.call(maximum_plus_one),
+                    helper_spy.call_args_list,
+                )
+
+    def test_contract_record_direct_timestamp_field_inventory_is_explicit(self):
+        expected = {
+            contract.InitialAccountOperationReference: (),
+            contract.VerifiedAuthenticationEvidence: (
+                "verified_at",
+                "issued_at",
+                "expires_at",
+            ),
+            contract.InitialSecurityEventRequest: (),
+            contract.InitialAccountCreationRequest: (),
+            contract.InitialAccountCreationReceipt: (),
+            contract.InitialAccountCreationResult: (),
+        }
+        for record_type, timestamp_fields in expected.items():
+            with self.subTest(record_type=record_type.__name__):
+                self.assertEqual(
+                    tuple(
+                        field_name
+                        for field_name in record_type.__slots__
+                        if field_name.endswith("_at")
+                    ),
+                    timestamp_fields,
+                )
+
+    def test_complete_request_revalidation_dispatches_all_nested_timestamps(self):
+        request = _request(
+            user=_user(created_at=10, updated_at=11),
+            verified_email=_email(created_at=12, verified_at=13),
+            authentication_identity=_identity(
+                created_at=14,
+                last_used_at=15,
+            ),
+            workspace=_workspace(created_at=16, updated_at=17),
+            workspace_membership=_membership(created_at=18, updated_at=19),
+            authentication_evidence=_evidence(
+                verified_at=13,
+                issued_at=20,
+                expires_at=21,
+            ),
+        )
+        canonical_helper = auth_models._is_timestamp
+        with mock.patch.object(
+            auth_models, "_is_timestamp", wraps=canonical_helper
+        ) as helper_spy:
+            self.assertIsNone(
+                contract.validate_initial_account_creation_request(request)
+            )
+        self.assertEqual(
+            helper_spy.call_args_list,
+            [
+                mock.call(13),
+                mock.call(20),
+                mock.call(21),
+                mock.call(10),
+                mock.call(11),
+                mock.call(12),
+                mock.call(13),
+                mock.call(14),
+                mock.call(15),
+                mock.call(10),
+                mock.call(11),
+                mock.call(12),
+                mock.call(13),
+                mock.call(18),
+                mock.call(19),
+                mock.call(16),
+                mock.call(17),
+                mock.call(10),
+                mock.call(11),
+                mock.call(13),
+                mock.call(20),
+                mock.call(21),
+            ],
         )
 
     def test_public_validation_rechecks_corrupted_exact_records(self):

@@ -64,6 +64,7 @@ __all__ = (
     "ConsistentReadRequirementManifest",
     "RelationalRelationManifest",
     "RelationalSchemaManifest",
+    "ACCOUNT_SECURITY_EVENT_STREAM_NAME",
     "RELATIONAL_ACCOUNT_SCHEMA_1",
     "relational_schema_manifest_is_valid",
     "relational_version_is_supported",
@@ -179,6 +180,9 @@ class ConsistentReadRequirementCategory(
     SESSION_EXPIRY_AND_REVOCATION = "session_expiry_and_revocation"
     WORKSPACE_AUTHORIZATION_EXCLUDED = "workspace_authorization_excluded"
     PRODUCT_AUTHORIZATION_EXCLUDED = "product_authorization_excluded"
+
+
+ACCOUNT_SECURITY_EVENT_STREAM_NAME = "cuevion.account.security"
 
 
 _RECORD_DEFINITION_OPEN = True
@@ -1583,7 +1587,6 @@ _INITIAL_ACCOUNT_OPERATIONS = RelationalRelationManifest(
             "snapshot_authentication_evidence_verified_at",
             "snapshot_authentication_evidence_issued_at",
             "snapshot_authentication_evidence_expires_at",
-            "committed_at",
         ),
         _invariant(
             RelationalConstraintCategory.EXACT_FIELD_EQUALITY,
@@ -1779,6 +1782,10 @@ _SECURITY_EVENTS = RelationalRelationManifest(
         ),
         _invariant(RelationalConstraintCategory.VALID_EVENT_TYPE, "event_type"),
         _invariant(
+            RelationalConstraintCategory.EXACT_CASE_SENSITIVE_VALUE,
+            "event_stream_name",
+        ),
+        _invariant(
             RelationalConstraintCategory.TIMESTAMP_ORDER,
             "event_at",
             "recorded_at",
@@ -1810,6 +1817,8 @@ _SECURITY_EVENTS = RelationalRelationManifest(
         "event_id_from_validated_request",
         "event_time_repository_generated",
         "append_position_repository_generated",
+        "event_stream_name_repository_generated",
+        f"event_stream_name_exact_{ACCOUNT_SECURITY_EVENT_STREAM_NAME}",
         "commit_metadata_repository_generated",
         "row_version_exactly_one",
     ),

@@ -29,6 +29,7 @@ __all__ = (
     "AccountRepositoryContractValidationError",
     "InitialAccountCreationOutcome",
     "InitialAccountConflictReason",
+    "NEW_OPERATION_CONFLICT_PRECEDENCE",
     "InitialSecurityEventType",
     "InitialAccountOperationReference",
     "VerifiedAuthenticationEvidence",
@@ -142,6 +143,13 @@ class InitialAccountConflictReason(str, _Enum, metaclass=_ClosedStringEnumMeta):
     AUTHORITY_ALREADY_CLAIMED = "authority_already_claimed"
     EVIDENCE_ALREADY_CONSUMED = "evidence_already_consumed"
     RECORD_ID_COLLISION = "record_id_collision"
+
+
+NEW_OPERATION_CONFLICT_PRECEDENCE = (
+    InitialAccountConflictReason.EVIDENCE_ALREADY_CONSUMED,
+    InitialAccountConflictReason.AUTHORITY_ALREADY_CLAIMED,
+    InitialAccountConflictReason.RECORD_ID_COLLISION,
+)
 
 
 class InitialSecurityEventType(str, _Enum, metaclass=_ClosedStringEnumMeta):
@@ -708,10 +716,6 @@ def _is_schema_one(value: object) -> bool:
     return type(value) is int and value == 1
 
 
-def _is_nonnegative_int(value: object) -> bool:
-    return type(value) is int and value >= 0
-
-
 def _is_digest_identifier(value: object) -> bool:
     if type(value) is not str or len(value) != _DIGEST_ENCODED_LENGTH:
         return False
@@ -808,9 +812,9 @@ def _authentication_evidence_fields_are_valid(
         or not _is_auth_security_identifier(subject, 512)
         or type(authentication_method) is not _models.AuthenticationMethod
         or not _models._valid_canonical_email(canonical_verified_email)
-        or not _is_nonnegative_int(verified_at)
-        or not _is_nonnegative_int(issued_at)
-        or not _is_nonnegative_int(expires_at)
+        or not _models._is_timestamp(verified_at)
+        or not _models._is_timestamp(issued_at)
+        or not _models._is_timestamp(expires_at)
         or not verified_at <= issued_at < expires_at
     )
 

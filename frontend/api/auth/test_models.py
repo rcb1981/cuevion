@@ -11,6 +11,7 @@ import subprocess
 import sys
 import types
 import unittest
+from unittest import mock
 
 from . import models
 
@@ -468,11 +469,11 @@ class RecordConstructionTests(unittest.TestCase):
         )
         for factory, fields in attempts:
             for field in fields:
-                for rejected in (True, IntegerSubclass(1)):
+                for rejected in (False, True, IntegerSubclass(1)):
                     with self.subTest(factory=factory.__name__, field=field, rejected_type=type(rejected).__name__):
                         with self.assertRaises(models.ModelValidationError):
                             factory(**{field: rejected})
-        for rejected in (True, IntegerSubclass(150)):
+        for rejected in (False, True, IntegerSubclass(150)):
             with self.assertRaises(models.ModelValidationError):
                 revoked_session(revoked_at=rejected)
             with self.assertRaises(models.ModelValidationError):
@@ -712,6 +713,179 @@ class IdentifierAndEmailTests(unittest.TestCase):
 
 
 class StatusAndTimestampTests(unittest.TestCase):
+    def test_canonical_timestamp_helper_has_one_exact_closed_domain(self):
+        class IntegerSubclass(int):
+            pass
+
+        maximum = models.MAX_UNIX_UTC_SECONDS
+        self.assertEqual(maximum, 253_402_300_799)
+        for accepted in (0, maximum):
+            with self.subTest(accepted=accepted):
+                self.assertIs(models._is_timestamp(accepted), True)
+        for rejected in (
+            -1,
+            maximum + 1,
+            False,
+            True,
+            IntegerSubclass(0),
+            0.0,
+        ):
+            with self.subTest(rejected_type=type(rejected).__name__):
+                self.assertIs(models._is_timestamp(rejected), False)
+
+        self.assertIs(models._is_optional_timestamp(None), True)
+        self.assertIs(models._is_optional_timestamp(maximum), True)
+        self.assertIs(models._is_optional_timestamp(maximum + 1), False)
+
+    def test_timestamp_domain_has_one_exact_inclusive_maximum(self):
+        maximum = models.MAX_UNIX_UTC_SECONDS
+        self.assertEqual(sample_user(created_at=maximum, updated_at=maximum).updated_at, maximum)
+        self.assertEqual(sample_email(created_at=maximum, verified_at=maximum).verified_at, maximum)
+        self.assertEqual(sample_identity(created_at=maximum, last_used_at=maximum).last_used_at, maximum)
+        self.assertEqual(sample_workspace(created_at=maximum, updated_at=maximum).updated_at, maximum)
+        self.assertEqual(sample_membership(created_at=maximum, updated_at=maximum).updated_at, maximum)
+        near_maximum_session = sample_session(
+            authenticated_at=maximum - 4,
+            issued_at=maximum - 3,
+            last_used_at=maximum - 2,
+            idle_expires_at=maximum - 1,
+            absolute_expires_at=maximum,
+        )
+        self.assertEqual(near_maximum_session.absolute_expires_at, maximum)
+
+    def test_every_model_timestamp_field_dispatches_its_exact_value(self):
+        cases = (
+            (
+                models.CuevionUser,
+                user_values(created_at=11, updated_at=12),
+                (11, 12),
+            ),
+            (
+                models.VerifiedEmail,
+                email_values(
+                    status=models.VerifiedEmailStatus.RETIRED,
+                    created_at=21,
+                    verified_at=22,
+                    retired_at=23,
+                ),
+                (21, 22, 23),
+            ),
+            (
+                models.AuthenticationIdentity,
+                identity_values(created_at=31, last_used_at=32),
+                (31, 32),
+            ),
+            (
+                models.Workspace,
+                workspace_values(created_at=41, updated_at=42),
+                (41, 42),
+            ),
+            (
+                models.WorkspaceMembership,
+                membership_values(created_at=51, updated_at=52),
+                (51, 52),
+            ),
+            (
+                models.StoredSessionSnapshot,
+                session_values(
+                    status=models.SessionStatus.REVOKED,
+                    authenticated_at=61,
+                    issued_at=62,
+                    last_used_at=63,
+                    idle_expires_at=65,
+                    absolute_expires_at=67,
+                    revoked_at=66,
+                    revocation_reason=models.SessionRevocationReason.LOGOUT,
+                ),
+                (61, 62, 63, 65, 67, 66),
+            ),
+        )
+        canonical_helper = models._is_timestamp
+        for record_type, values, expected_values in cases:
+            with self.subTest(record_type=record_type.__name__):
+                with mock.patch.object(
+                    models, "_is_timestamp", wraps=canonical_helper
+                ) as helper_spy:
+                    record_type(**values)
+                self.assertEqual(
+                    helper_spy.call_args_list,
+                    [mock.call(value) for value in expected_values],
+                )
+
+    def test_every_model_timestamp_field_routes_maximum_plus_one_to_helper(self):
+        maximum_plus_one = models.MAX_UNIX_UTC_SECONDS + 1
+        timestamp_fields = (
+            (sample_user, ("created_at", "updated_at")),
+            (sample_email, ("created_at", "verified_at", "retired_at")),
+            (sample_identity, ("created_at", "last_used_at")),
+            (sample_workspace, ("created_at", "updated_at")),
+            (sample_membership, ("created_at", "updated_at")),
+            (
+                sample_session,
+                (
+                    "authenticated_at",
+                    "issued_at",
+                    "last_used_at",
+                    "idle_expires_at",
+                    "absolute_expires_at",
+                    "revoked_at",
+                ),
+            ),
+        )
+        for factory, fields in timestamp_fields:
+            for field in fields:
+                with self.subTest(factory=factory.__name__, field=field):
+                    canonical_helper = models._is_timestamp
+                    with mock.patch.object(
+                        models, "_is_timestamp", wraps=canonical_helper
+                    ) as helper_spy:
+                        with self.assertRaises(models.ModelValidationError):
+                            factory(**{field: maximum_plus_one})
+                    self.assertIn(
+                        mock.call(maximum_plus_one),
+                        helper_spy.call_args_list,
+                    )
+
+    def test_optional_timestamp_fields_accept_none_and_exact_maximum(self):
+        maximum = models.MAX_UNIX_UTC_SECONDS
+        pending_email = sample_email(
+            status=models.VerifiedEmailStatus.PENDING,
+            verified_at=None,
+            retired_at=None,
+        )
+        self.assertIsNone(pending_email.verified_at)
+        self.assertIsNone(pending_email.retired_at)
+        self.assertEqual(
+            sample_email(created_at=0, verified_at=maximum).verified_at,
+            maximum,
+        )
+        self.assertEqual(
+            sample_email(
+                status=models.VerifiedEmailStatus.RETIRED,
+                created_at=0,
+                verified_at=0,
+                retired_at=maximum,
+            ).retired_at,
+            maximum,
+        )
+        self.assertIsNone(sample_identity(last_used_at=None).last_used_at)
+        self.assertEqual(
+            sample_identity(created_at=0, last_used_at=maximum).last_used_at,
+            maximum,
+        )
+        self.assertIsNone(sample_session().revoked_at)
+        self.assertEqual(
+            revoked_session(
+                authenticated_at=0,
+                issued_at=0,
+                last_used_at=0,
+                idle_expires_at=maximum,
+                absolute_expires_at=maximum,
+                revoked_at=maximum,
+            ).revoked_at,
+            maximum,
+        )
+
     def test_user_primary_email_and_timestamp_invariants(self):
         self.assertEqual(sample_user(created_at=100, updated_at=100).updated_at, 100)
         for status in (models.UserStatus.SUSPENDED, models.UserStatus.DISABLED):
@@ -1016,6 +1190,44 @@ class CrossRecordValidationTests(unittest.TestCase):
             user,
             identity,
             150,
+        )
+
+    def test_session_validator_dispatches_now_to_canonical_timestamp_helper(self):
+        session = sample_session(
+            authenticated_at=61,
+            issued_at=62,
+            last_used_at=63,
+            idle_expires_at=65,
+            absolute_expires_at=67,
+        )
+        user = sample_user(created_at=11, updated_at=12)
+        identity = sample_identity(created_at=31, last_used_at=32)
+        canonical_helper = models._is_timestamp
+        with mock.patch.object(
+            models, "_is_timestamp", wraps=canonical_helper
+        ) as helper_spy:
+            self.assertIsNone(
+                models.validate_session_snapshot(
+                    session,
+                    user,
+                    identity,
+                    64,
+                )
+            )
+        self.assertEqual(
+            helper_spy.call_args_list,
+            [
+                mock.call(61),
+                mock.call(62),
+                mock.call(63),
+                mock.call(65),
+                mock.call(67),
+                mock.call(11),
+                mock.call(12),
+                mock.call(31),
+                mock.call(32),
+                mock.call(64),
+            ],
         )
 
     def test_corrupted_exact_session_timestamp_records_are_revalidated(self):

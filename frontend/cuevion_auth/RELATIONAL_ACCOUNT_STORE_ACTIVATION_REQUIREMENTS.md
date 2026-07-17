@@ -9,14 +9,22 @@ table, migration, connection, transaction, account, verified email,
 authentication identity, workspace, membership, operation result, security
 event, session, cookie, entitlement, route, or other authority.
 
-This slice selects no database vendor, cloud provider, ORM, driver, SQL dialect,
-migration system, connection library, serialization format, authentication
-provider, session store, login host, or deployment topology. It contains no DDL,
-SQL, generated migration, repository adapter, database configuration, environment
-loader, credential, secret, network call, filesystem write, provider call, HTTP
-handler, route, frontend behavior, rollout control, or feature activation. The
-presence of this document is not approval to implement or activate any of those
-components.
+This abstract contract module itself selects no database vendor, cloud provider,
+ORM, driver, SQL dialect, migration system, connection library, authentication
+provider, session store, login host, or deployment topology. The separate
+inactive `cuevion_db` foundation now selects PostgreSQL, Psycopg 3 binary,
+SQLAlchemy Core, and Alembic solely for concrete schema-one metadata and reviewed
+offline DDL. It contains no repository adapter, Engine, connection, environment
+access, route, handler, session, cookie, provider flow, product authorization, or
+runtime activation. See
+`cuevion_db/DATABASE_FOUNDATION_ACTIVATION_REQUIREMENTS.md`.
+
+All logical timestamps are exact built-in Python integers representing integral
+Unix UTC seconds in the inclusive range `0..253402300799`. `bool`, integer
+subclasses, floats, negative values, millisecond or microsecond values, implicit
+defaults, and timezone-naive semantics are invalid. The PostgreSQL foundation
+uses finite UTC-aware whole-second `TIMESTAMP WITH TIME ZONE` values with the
+same range and preserves every existing lifecycle ordering.
 
 The existing immutable account records and initial-account repository request
 remain the public logical source of field and aggregate semantics. A future
@@ -86,8 +94,8 @@ The relation contains the logical fields of `VerifiedEmail`:
   boundary. Database comparison must not introduce locale, case, provider-alias,
   plus-address, dot-address, or other implicit equivalence.
 - At most one current `VERIFIED` and non-retired row may hold a canonical email
-  authority claim. The physical mechanism for conditional uniqueness is deferred,
-  but application-level check-then-insert is insufficient.
+  authority claim. PostgreSQL schema one uses a named partial unique index for
+  this conditional uniqueness; application-level check-then-insert is insufficient.
 - Status and timestamps obey the existing `PENDING`, `VERIFIED`, and `RETIRED`
   lifecycle. Initial creation persists `VERIFIED`, a non-null `verified_at`, a
   null `retired_at`, and `row_version == 1`.
@@ -186,8 +194,8 @@ Each committed row contains, at minimum:
 The exact request snapshot must remain independently comparable after the current
 user, email, identity, workspace, or membership rows later change. Reconstructing
 historical request equality from mutable current rows, comparing only selected
-fields, or relying only on a digest is insufficient. The future physical storage
-format for the lossless snapshot is deferred; it must have an explicit format
+fields, or relying only on a digest is insufficient. PostgreSQL schema one uses
+one typed scalar column per logical snapshot field; that explicit format must have
 version and an injective, deterministic mapping to all request fields before use.
 
 Replay comparison must fail closed before testing equality unless both the stored
@@ -252,12 +260,19 @@ This append-only relation contains, at minimum:
 - foreign keys to the affected user, verified email, authentication identity,
   workspace, and composite initial membership;
 - a repository-generated event time and recorded time; and
-- a positive immutable append position unique in its defined event stream.
+- the exact case-sensitive stream name `cuevion.account.security`; and
+- a positive immutable append position unique with that stream name.
+
+The stream name and position are repository-generated and never originate in
+browser, provider, or request input. They remain outside the caller-controlled
+request snapshot. Position allocation may contain rollback gaps and is not by
+itself commit-order or wall-clock authority.
 
 The operation and event form a mandatory one-to-one relationship at commit: a
 committed initial-account operation cannot exist without its event, and an
-initial-account-created event cannot exist without its operation. The physical
-commit-time foreign-key technique is deferred, but compensating writes, an
+initial-account-created event cannot exist without its operation. PostgreSQL
+schema one uses reviewed carrier uniques, cyclic foreign keys, and a deferred
+graph constraint trigger; compensating writes, an
 out-of-transaction event, or a best-effort event sink are not equivalent.
 
 The event contains no raw operation key, provider token or payload, session
@@ -291,20 +306,24 @@ identities so a future adapter can map a database violation to one closed confli
 class without exposing vendor codes, constraint names, record values, or storage
 details to callers.
 
-The physical implementation must prove commit-time integrity for the cyclic
-user/primary-email and operation/security-event references. Whether that uses
-deferred constraints or another relationally equivalent layout is a later
-vendor-specific decision.
+The abstract relational contract remains vendor-independent and requires
+commit-time integrity for the cyclic user/primary-email and
+operation/security-event references. The concrete PostgreSQL schema-one
+foundation has now chosen those two necessary cyclic bindings as
+`DEFERRABLE INITIALLY DEFERRED`. Further database and adapter decisions remain
+deferred. This concrete PostgreSQL choice activates neither a repository nor an
+account flow.
 
 Snapshot-to-receipt, snapshot-to-event, operation-to-event, evidence-to-operation,
 and receipt-to-aggregate bindings must be enforced with database primary, foreign,
 unique, and check constraints wherever the selected relational system can express
 them. Any cross-record or exact-type invariant that cannot be expressed there must
 be validated by the repository against one authoritative transaction snapshot
-before commit. This is a vendor-neutral allocation of responsibility, not approval
-for a particular SQL dialect, constraint mechanism, trigger, ORM, or write order.
-Application prechecks outside the transaction, post-commit comparison, asynchronous
-audit repair, or eventual reconciliation do not enforce the committed graph.
+before commit. The abstract allocation of responsibility remains vendor-neutral;
+the concrete PostgreSQL mechanism is not approval to activate an adapter, ORM, or
+write flow. Application prechecks outside the transaction, post-commit
+comparison, asynchronous audit repair, or eventual reconciliation do not enforce
+the committed graph.
 
 ## Repository-enforced invariants
 
@@ -326,10 +345,14 @@ that cannot be reduced to independent row constraints:
 - last-owner protection for later membership or workspace mutations; and
 - fixed, value-free failure mapping that does not enumerate existing authority.
 
-For a request capable of violating multiple constraints, operation-reference
-mismatch is resolved first. A future contract revision must freeze the remaining
-closed conflict precedence before an adapter is implemented; it must not be left
-to nondeterministic statement order or vendor error ordering.
+For a request capable of violating multiple constraints, an existing operation
+reference is resolved first: exact immutable equality is `EXACT_REPLAY`, and a
+mismatch is `OPERATION_REFERENCE_MISMATCH`. For a genuinely new operation whose
+commit is known not to have occurred, the remaining closed precedence is exactly
+`EVIDENCE_ALREADY_CONSUMED`, `AUTHORITY_ALREADY_CLAIMED`, then
+`RECORD_ID_COLLISION`. It never depends on statement order, query plans, race
+order, vendor errors, or constraint names. Unknown commit status remains
+`AMBIGUOUS` before this definitive-conflict classification.
 
 ## Coordinator and policy invariants outside storage
 
@@ -625,30 +648,22 @@ limited scopes.
 
 ## Deferred implementation decisions and activation blockers
 
-Only after a database vendor and migration system are selected and separately
-reviewed may a later phase decide or implement:
+PostgreSQL schema one now fixes physical column types, `COLLATE "C"`, BYTEA
+digests, UTC-aware timestamp encoding, named checks, the current-email partial
+index, cyclic foreign keys, scalar snapshot encoding, append-only and
+immutability trigger DDL, a schema ledger, and one forward-only revision. The
+foundation still performs no online migration or database call.
 
-- physical column types, collations, encodings, timestamp units, and size limits;
-- the concrete conditional-uniqueness mechanism;
-- commit-time handling of cyclic foreign keys;
-- transaction isolation, locking, serialization, and deadlock behavior;
-- constraint names and vendor-error translation;
-- DDL, schema ledger, generated or handwritten migrations, online index creation,
-  validation, and rollback mechanics;
-- the exact physical encoding of historical request snapshots and event payloads;
-- event append-position generation;
-- connection configuration, pooling, credentials, TLS, timeouts, cancellation,
-  retries, and failover;
-- authoritative post-timeout commit-status resolution;
-- production/preview databases, namespaces, credentials, and key isolation;
-- a concrete repository adapter and session/account snapshot adapter; and
-- real-database tests for concurrency, duplicate creation, exact replay, partial
-  failure, event failure, constraint races, stale row versions, isolation,
-  ambiguous commit, failover, corruption, migration, application rollback, and
-  recovery.
-
-Choosing or implementing any item in that list is outside this slice. A concrete
-adapter must not be written merely because this abstract contract exists.
+A later separately reviewed phase must still decide and prove transaction
+isolation, advisory locking, serialization and deadlock behavior, vendor-error
+translation under the frozen conflict precedence, pooled runtime and direct
+migration execution, credentials and least-privilege roles, TLS/timeouts/failover,
+authoritative post-timeout commit resolution, explicit event-position allocation,
+production/preview resource isolation, a concrete repository adapter, a
+session/account snapshot adapter, and real-database tests for concurrency,
+duplicate creation, replay, rollback, triggers, stale row versions, ambiguity,
+failover, corruption, migration, application rollback, and recovery. A concrete
+adapter must not be written merely because the metadata and DDL now exist.
 
 ## Required evidence before any future activation
 
