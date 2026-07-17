@@ -41,8 +41,11 @@ Schema one is `cuevion_account` and contains exactly seven authority tables:
 The Alembic ledger is separate at
 `public.cuevion_account_alembic_version`. Revision
 `0001_account_schema_1` is the single base and head. Authority migrations are
-forward-only; repair or rollback requires a new reviewed forward revision and a
-reader/writer-compatible application rollout.
+forward-only after activation; repair or rollback of an activated authority
+database requires a new reviewed forward revision and a reader/writer-compatible
+application rollout. The explicitly empty pre-Production Preview baseline is an
+exception: it must be rebuilt from the corrected revision 0001 before activation
+and does not create a revision 0002.
 
 ## Secret-safe configuration boundary
 
@@ -132,11 +135,31 @@ using only the validated direct URL, its own migration role, review/approval,
 locking, audit evidence, and post-run head verification. Runtime must later use
 only the pooled URL and a separate least-privilege runtime role.
 
+PostgreSQL grants `EXECUTE` on newly created functions to `PUBLIC` by default.
+Revision 0001 therefore changes the executing migrator's global function default
+ACL before its first `CREATE FUNCTION`, without `FOR ROLE` or `IN SCHEMA`, and
+revokes `PUBLIC EXECUTE` from all functions in `cuevion_account` after creating
+the three fixed functions. A per-schema default-privilege revoke cannot remove
+PostgreSQL's global `PUBLIC EXECUTE` default. Default privileges are specific to
+the current object-creating role and are not retroactive; the explicit
+schema-wide revoke closes that gap for the functions created by this revision.
+The owner/migrator retains its implicit rights. No function privilege is granted
+to the runtime role, directly or through `PUBLIC`.
+
 Current evidence is offline and static only. No socket or database call is part
 of these tests. Before any adapter or route activation, live PostgreSQL tests must
 prove all constraints, collations, deferred cycles, triggers, transaction
 rollback, concurrent conflicts, exact replay, CAS, sequence behavior, unknown
-commit reconciliation, migration execution, and application compatibility.
+commit reconciliation, migration execution, and application compatibility. The
+live privilege evidence must additionally prove the exact creator-role global
+default ACL, absence of `PUBLIC EXECUTE`, migrator ownership, `SECURITY INVOKER`
+and fixed function `search_path` behavior, and
+`has_function_privilege(runtime_role, function_oid, 'EXECUTE') = false` after
+accounting for `PUBLIC` and inherited memberships. Trigger behavior must still
+succeed without runtime function-`EXECUTE` privileges. Preview and Production
+must establish this evidence independently; an environment with an earlier 0001
+must be rebuilt before activation because a default-ACL change is not
+retroactive.
 
 Sessions and login remain separate later phases. Session lookup-key and
 binding-key epochs and the closed session-error taxonomy remain explicit

@@ -368,6 +368,10 @@ _DEFERRED_FOREIGN_KEY_DDL = (
 )
 
 
+_FUNCTION_DEFAULT_PRIVILEGES_DDL = r"""ALTER DEFAULT PRIVILEGES
+REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC"""
+
+
 _APPEND_ONLY_FUNCTION_SQL = """
 CREATE FUNCTION cuevion_account.fn_reject_append_only_change()
 RETURNS trigger
@@ -611,6 +615,11 @@ $function$
 """
 
 
+_FUNCTION_PUBLIC_EXECUTE_REVOKE_DDL = r"""REVOKE EXECUTE
+ON ALL FUNCTIONS IN SCHEMA cuevion_account
+FROM PUBLIC"""
+
+
 _TRIGGER_SQL = (
     """
 CREATE TRIGGER trg_initial_ops_append_only
@@ -675,9 +684,11 @@ def upgrade() -> None:
         op.execute(statement)
     for statement in _DEFERRED_FOREIGN_KEY_DDL:
         op.execute(statement)
+    op.execute(_FUNCTION_DEFAULT_PRIVILEGES_DDL)
     op.execute(_APPEND_ONLY_FUNCTION_SQL)
     op.execute(_MUTATION_GUARD_FUNCTION_SQL)
     op.execute(_GRAPH_FUNCTION_SQL)
+    op.execute(_FUNCTION_PUBLIC_EXECUTE_REVOKE_DDL)
     for statement in _TRIGGER_SQL:
         op.execute(statement)
 
