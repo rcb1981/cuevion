@@ -302,7 +302,14 @@ for _table in ACCOUNT_TABLES:
         if _name.endswith("verification_source"):
             _check(_table, _column.op("~")(r"^[!-~]{1,128}$"), f"{_name}_ascii")
         if _name.endswith("issuer") or _name.endswith("subject"):
-            _check(_table, _column.op("~")(r"^[!-~]{1,512}$"), f"{_name}_ascii")
+            _check(
+                _table,
+                _sa.and_(
+                    _column.op("~")(r"^[!-~]+$"),
+                    _sa.func.octet_length(_column) <= 512,
+                ),
+                f"{_name}_ascii",
+            )
         if _name.endswith("trust_domain") or _name.endswith("verification_coordinator_id"):
             _check(_table, _column.op("~")(r"^[A-Za-z0-9._:-]{1,128}$"), f"{_name}_opaque")
         if _name.endswith("display_name"):

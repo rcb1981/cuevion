@@ -36,6 +36,39 @@ _EXPECTED_EMAIL_CHECKS = {
         "ck_initial_account_operations_snapshot_authentication__90799ed9",
     ),
 }
+_EXPECTED_AUTHORITY_ASCII_CHECKS = {
+    (
+        "authentication_identities",
+        "ck_authentication_identities_issuer_ascii",
+    ): "issuer",
+    (
+        "authentication_identities",
+        "ck_authentication_identities_subject_ascii",
+    ): "subject",
+    (
+        "initial_account_operations",
+        "ck_initial_account_operations_snapshot_authentication__04890265",
+    ): "snapshot_authentication_identity_issuer",
+    (
+        "initial_account_operations",
+        "ck_initial_account_operations_snapshot_authentication__b9d2e30f",
+    ): "snapshot_authentication_identity_subject",
+    (
+        "initial_account_operations",
+        "ck_initial_account_operations_snapshot_authentication__0c556b23",
+    ): "snapshot_authentication_evidence_issuer",
+    (
+        "initial_account_operations",
+        "ck_initial_account_operations_snapshot_authentication__525f7f77",
+    ): "snapshot_authentication_evidence_subject",
+}
+_POSTGRESQL_ARE_MAX_COUNT = 255
+_POSTGRESQL_REGEX_LITERAL_PATTERN = re.compile(
+    r"~\s*'(?P<pattern>(?:''|[^'])*)'",
+)
+_POSTGRESQL_COUNTED_REPETITION_PATTERN = re.compile(
+    r"(?<!\\)\{(?P<minimum>\d+)(?:(?P<comma>,)(?P<maximum>\d*))?\}",
+)
 
 _EXPECTED_PRIMARY_KEYS = {
     "users": ("pk_users", ("user_id",)),
@@ -376,6 +409,41 @@ _EXPECTED_INDEXES = {
 }
 
 
+def _compiled_account_table_ddl() -> str:
+    return "\n".join(
+        str(CreateTable(table).compile(dialect=postgresql.dialect()))
+        for table in schema.ACCOUNT_TABLES
+    )
+
+
+def _postgresql_check_regex_patterns(sql: str) -> tuple[str, ...]:
+    return tuple(
+        match.group("pattern").replace("''", "'")
+        for line in sql.splitlines()
+        if " CHECK " in line.upper()
+        for match in _POSTGRESQL_REGEX_LITERAL_PATTERN.finditer(line)
+    )
+
+
+def _postgresql_counted_repetition_bounds(
+    sql: str,
+) -> tuple[tuple[str, int, int | None], ...]:
+    inventory = []
+    for pattern in _postgresql_check_regex_patterns(sql):
+        for match in _POSTGRESQL_COUNTED_REPETITION_PATTERN.finditer(pattern):
+            minimum = int(match.group("minimum"))
+            maximum_text = match.group("maximum")
+            maximum = (
+                minimum
+                if match.group("comma") is None
+                else int(maximum_text)
+                if maximum_text
+                else None
+            )
+            inventory.append((pattern, minimum, maximum))
+    return tuple(inventory)
+
+
 class AccountSchemaInventoryTests(unittest.TestCase):
     def test_exact_seven_schema_tables_and_dynamic_manifest_parity(self):
         manifests = relational.RELATIONAL_ACCOUNT_SCHEMA_1.relations
@@ -444,6 +512,61 @@ class AccountSchemaInventoryTests(unittest.TestCase):
             for table in schema.ACCOUNT_TABLES
         }
         self.assertEqual(checks, _EXPECTED_CHECKS)
+
+    def test_authority_ascii_checks_use_postgresql_safe_length_guard(self):
+        tables = {table.name: table for table in schema.ACCOUNT_TABLES}
+        for identity, column_name in _EXPECTED_AUTHORITY_ASCII_CHECKS.items():
+            table_name, constraint_name = identity
+            table = tables[table_name]
+            constraint = next(
+                item
+                for item in table.constraints
+                if item.name == constraint_name
+            )
+            with self.subTest(identity=identity):
+                self.assertIsInstance(constraint, sa.CheckConstraint)
+                self.assertEqual(table.c[column_name].type.length, 512)
+                patterns = tuple(
+                    node.value
+                    for node in visitors.iterate(constraint.sqltext)
+                    if isinstance(node, BindParameter)
+                    and isinstance(node.value, str)
+                )
+                self.assertEqual(patterns, (r"^[!-~]+$",))
+                ddl = str(
+                    CreateTable(table).compile(dialect=postgresql.dialect())
+                )
+                self.assertIn(
+                    f"CONSTRAINT {constraint_name} CHECK "
+                    f"(({column_name} ~ '^[!-~]+$') AND "
+                    f"octet_length({column_name}) <= 512)",
+                    ddl,
+                )
+                self.assertNotIn(r"{1,512}", ddl)
+
+    def test_compiled_postgresql_check_regex_bounds_do_not_exceed_are_limit(self):
+        ddl = _compiled_account_table_ddl()
+        patterns = _postgresql_check_regex_patterns(ddl)
+        inventory = _postgresql_counted_repetition_bounds(ddl)
+        self.assertEqual(len(patterns), 50)
+        self.assertEqual(len(inventory), 47)
+        for pattern, minimum, maximum in inventory:
+            with self.subTest(pattern=pattern, minimum=minimum, maximum=maximum):
+                self.assertLessEqual(minimum, _POSTGRESQL_ARE_MAX_COUNT)
+                if maximum is not None:
+                    self.assertLessEqual(maximum, _POSTGRESQL_ARE_MAX_COUNT)
+
+    def test_postgresql_counted_repetition_oracle_detects_unsafe_bounds(self):
+        ddl = "\n".join(
+            (
+                r"CONSTRAINT minimum CHECK (value ~ '^x{256,}$')",
+                r"CONSTRAINT maximum CHECK (value ~ '^x{1,256}$')",
+            )
+        )
+        self.assertEqual(
+            _postgresql_counted_repetition_bounds(ddl),
+            ((r"^x{256,}$", 256, None), (r"^x{1,256}$", 1, 256)),
+        )
 
     def test_indexes_match_independent_schema_one_oracle(self):
         indexes = {}

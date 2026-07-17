@@ -49,6 +49,22 @@ _EXPECTED_EMAIL_CHECKS = {
         _EXPECTED_EMAIL_PATTERN,
     ),
 }
+_EXPECTED_AUTHORITY_ASCII_CHECKS = {
+    "ck_authentication_identities_issuer_ascii": "issuer",
+    "ck_authentication_identities_subject_ascii": "subject",
+    "ck_initial_account_operations_snapshot_authentication__04890265": (
+        "snapshot_authentication_identity_issuer"
+    ),
+    "ck_initial_account_operations_snapshot_authentication__b9d2e30f": (
+        "snapshot_authentication_identity_subject"
+    ),
+    "ck_initial_account_operations_snapshot_authentication__0c556b23": (
+        "snapshot_authentication_evidence_issuer"
+    ),
+    "ck_initial_account_operations_snapshot_authentication__525f7f77": (
+        "snapshot_authentication_evidence_subject"
+    ),
+}
 _EXPECTED_TRIGGERS = {
     (
         "trg_initial_ops_append_only",
@@ -167,6 +183,20 @@ _EMAIL_CHECK_PATTERN = re.compile(
     r"(?P<column>[a-z0-9_]+)\s+~\s+'(?P<pattern>(?:''|[^'])+)'",
     re.IGNORECASE,
 )
+_AUTHORITY_ASCII_CHECK_PATTERN = re.compile(
+    r"CONSTRAINT\s+(?P<name>[a-z0-9_]+)\s+CHECK\s+\(\("
+    r"(?P<column>[a-z0-9_]+)\s+~\s+'(?P<pattern>(?:''|[^'])+)'\)\s+AND\s+"
+    r"octet_length\((?P<length_column>[a-z0-9_]+)\)\s*<=\s*"
+    r"(?P<maximum>\d+)\)",
+    re.IGNORECASE,
+)
+_POSTGRESQL_ARE_MAX_COUNT = 255
+_POSTGRESQL_REGEX_LITERAL_PATTERN = re.compile(
+    r"~\s*'(?P<pattern>(?:''|[^'])*)'",
+)
+_POSTGRESQL_COUNTED_REPETITION_PATTERN = re.compile(
+    r"(?<!\\)\{(?P<minimum>\d+)(?:(?P<comma>,)(?P<maximum>\d*))?\}",
+)
 _TRIGGER_PATTERN = re.compile(
     r"CREATE\s+(?P<constraint>CONSTRAINT\s+)?TRIGGER\s+"
     r"(?P<name>[a-z0-9_]+)\s+"
@@ -189,6 +219,48 @@ def _email_check_inventory(sql: str):
         for match in _EMAIL_CHECK_PATTERN.finditer(sql)
         if match.group("name").casefold() in _EXPECTED_EMAIL_CHECKS
     }
+
+
+def _authority_ascii_check_inventory(sql: str):
+    normalized = " ".join(sql.split())
+    return {
+        match.group("name").casefold(): (
+            match.group("column").casefold(),
+            match.group("pattern").replace("''", "'"),
+            match.group("length_column").casefold(),
+            int(match.group("maximum")),
+        )
+        for match in _AUTHORITY_ASCII_CHECK_PATTERN.finditer(normalized)
+        if match.group("name").casefold() in _EXPECTED_AUTHORITY_ASCII_CHECKS
+    }
+
+
+def _postgresql_check_regex_patterns(sql: str) -> tuple[str, ...]:
+    return tuple(
+        match.group("pattern").replace("''", "'")
+        for line in sql.splitlines()
+        if " CHECK " in line.upper()
+        for match in _POSTGRESQL_REGEX_LITERAL_PATTERN.finditer(line)
+    )
+
+
+def _postgresql_counted_repetition_bounds(
+    sql: str,
+) -> tuple[tuple[str, int, int | None], ...]:
+    inventory = []
+    for pattern in _postgresql_check_regex_patterns(sql):
+        for match in _POSTGRESQL_COUNTED_REPETITION_PATTERN.finditer(pattern):
+            minimum = int(match.group("minimum"))
+            maximum_text = match.group("maximum")
+            maximum = (
+                minimum
+                if match.group("comma") is None
+                else int(maximum_text)
+                if maximum_text
+                else None
+            )
+            inventory.append((pattern, minimum, maximum))
+    return tuple(inventory)
 
 
 def _trigger_inventory(sql: str):
@@ -313,6 +385,43 @@ class MigrationHistoryTests(unittest.TestCase):
                 self.assertIn("[.]", pattern)
                 self.assertNotIn("\\", pattern)
 
+    def test_frozen_revision_authority_ascii_checks_are_postgresql_safe(self):
+        module = _revision_module()
+        ddl = "\n".join(module._TABLE_DDL)
+        inventory = _authority_ascii_check_inventory(ddl)
+        self.assertEqual(
+            inventory,
+            {
+                name: (column, r"^[!-~]+$", column, 512)
+                for name, column in _EXPECTED_AUTHORITY_ASCII_CHECKS.items()
+            },
+        )
+        self.assertNotIn(r"{1,512}", ddl)
+
+    def test_frozen_postgresql_check_regex_bounds_do_not_exceed_are_limit(self):
+        ddl = "\n".join(_revision_module()._TABLE_DDL)
+        patterns = _postgresql_check_regex_patterns(ddl)
+        inventory = _postgresql_counted_repetition_bounds(ddl)
+        self.assertEqual(len(patterns), 50)
+        self.assertEqual(len(inventory), 47)
+        for pattern, minimum, maximum in inventory:
+            with self.subTest(pattern=pattern, minimum=minimum, maximum=maximum):
+                self.assertLessEqual(minimum, _POSTGRESQL_ARE_MAX_COUNT)
+                if maximum is not None:
+                    self.assertLessEqual(maximum, _POSTGRESQL_ARE_MAX_COUNT)
+
+    def test_postgresql_counted_repetition_oracle_detects_unsafe_bounds(self):
+        ddl = "\n".join(
+            (
+                r"CONSTRAINT minimum CHECK (value ~ '^x{256,}$')",
+                r"CONSTRAINT maximum CHECK (value ~ '^x{1,256}$')",
+            )
+        )
+        self.assertEqual(
+            _postgresql_counted_repetition_bounds(ddl),
+            ((r"^x{256,}$", 256, None), (r"^x{1,256}$", 1, 256)),
+        )
+
     def test_frozen_revision_defines_exact_trigger_architecture(self):
         module = _revision_module()
         inventory = _trigger_inventory("\n".join(module._TRIGGER_SQL))
@@ -354,6 +463,28 @@ class OfflineMigrationTests(unittest.TestCase):
             with self.subTest(constraint=name):
                 self.assertIn("[.]", pattern)
                 self.assertNotIn("\\", pattern)
+
+    def test_offline_authority_ascii_checks_are_postgresql_safe(self):
+        inventory = _authority_ascii_check_inventory(self.sql)
+        self.assertEqual(
+            inventory,
+            {
+                name: (column, r"^[!-~]+$", column, 512)
+                for name, column in _EXPECTED_AUTHORITY_ASCII_CHECKS.items()
+            },
+        )
+        self.assertNotIn(r"{1,512}", self.sql)
+
+    def test_offline_postgresql_check_regex_bounds_do_not_exceed_are_limit(self):
+        patterns = _postgresql_check_regex_patterns(self.sql)
+        inventory = _postgresql_counted_repetition_bounds(self.sql)
+        self.assertEqual(len(patterns), 50)
+        self.assertEqual(len(inventory), 47)
+        for pattern, minimum, maximum in inventory:
+            with self.subTest(pattern=pattern, minimum=minimum, maximum=maximum):
+                self.assertLessEqual(minimum, _POSTGRESQL_ARE_MAX_COUNT)
+                if maximum is not None:
+                    self.assertLessEqual(maximum, _POSTGRESQL_ARE_MAX_COUNT)
 
     def test_append_only_mutation_cas_epoch_and_graph_guards_are_present(self):
         for phrase in (
