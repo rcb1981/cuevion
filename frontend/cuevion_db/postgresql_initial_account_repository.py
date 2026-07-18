@@ -832,7 +832,12 @@ def _remaining_lock_materials(
 
 def _acquire_lock(cursor: object, material: str) -> None:
     rows = _fetch_all(cursor, _ADVISORY_LOCK_SQL, (material,))
-    if len(rows) != 1 or rows[0] != (None,):
+    if (
+        len(rows) != 1
+        or len(rows[0]) != 1
+        or type(rows[0][0]) is not str
+        or rows[0][0] != ""
+    ):
         raise _StorageCorruption()
 
 

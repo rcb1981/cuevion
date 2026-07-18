@@ -809,7 +809,7 @@ def _initial_steps(
 ) -> list[ScriptedStep]:
     return [
         ScriptedStep("set_transaction", None),
-        ScriptedStep("lock", (_lock_materials(request)[0],), [(None,)]),
+        ScriptedStep("lock", (_lock_materials(request)[0],), [("",)]),
         ScriptedStep(
             "operation", _operation_parameters(request), operation_rows
         ),
@@ -837,7 +837,7 @@ def _authorized_prefix_steps(
 ) -> list[ScriptedStep]:
     steps = _initial_steps(request, [])
     steps.extend(
-        ScriptedStep("lock", (material,), [(None,)])
+        ScriptedStep("lock", (material,), [("",)])
         for material in _lock_materials(request)[1:]
     )
     steps.append(
@@ -1105,6 +1105,101 @@ class PostgreSQLInitialAccountRepositoryTests(unittest.TestCase):
         self.assertIsNone(caught.exception.__context__)
         self.assertEqual(factory.calls, 0)
         self.assertEqual(authorizer.calls, 0)
+
+    def test_exact_psycopg_void_lock_result_reaches_operation_lookup(self):
+        request = _request()
+        connection = ScriptedConnection(
+            [
+                ScriptedStep("set_transaction", None),
+                ScriptedStep(
+                    "lock", (_lock_materials(request)[0],), [("",)]
+                ),
+                ScriptedStep(
+                    "operation", _operation_parameters(request), []
+                ),
+            ]
+        )
+        authorizer = Authorizer(None)
+        result = _repository(
+            ConnectionFactory(connection), authorizer
+        ).create_initial_account(request)
+        self.assert_result(
+            result, contract.InitialAccountCreationOutcome.UNAVAILABLE
+        )
+        self.assertEqual(
+            [key for key, *_ in connection.calls],
+            ["set_transaction", "lock", "operation"],
+        )
+        self.assertEqual(authorizer.calls, 1)
+        self.assertEqual(connection.commit_count, 0)
+        self.assertEqual(connection.rollback_count, 1)
+        self.assert_cleaned(connection)
+
+    def test_invalid_advisory_lock_results_fail_closed_before_lookup(self):
+        request = _request()
+
+        class TextSubclass(str):
+            pass
+
+        invalid_rows: tuple[tuple[str, object], ...] = (
+            ("null", [(None,)]),
+            ("non_empty_text", [("postgresql-void-detail",)]),
+            ("bytes", [(b"",)]),
+            ("boolean", [(True,)]),
+            ("integer", [(0,)]),
+            ("text_subclass", [(TextSubclass(""),)]),
+            ("empty_row", [()]),
+            ("multiple_columns", [("", "")]),
+            ("zero_rows", []),
+            ("multiple_rows", [("",), ("",)]),
+            ("rows_not_list", (("",),)),
+            ("row_not_tuple", [[""]]),
+        )
+        for case, rows in invalid_rows:
+            with self.subTest(case=case):
+                operation_sentinel = ScriptedStep(
+                    "operation", _operation_parameters(request), []
+                )
+                connection = ScriptedConnection(
+                    [
+                        ScriptedStep("set_transaction", None),
+                        ScriptedStep(
+                            "lock",
+                            (_lock_materials(request)[0],),
+                            rows,
+                        ),
+                        operation_sentinel,
+                    ]
+                )
+                factory = ConnectionFactory(connection)
+                authorizer = Authorizer(
+                    AssertionError("must not authorize corrupt lock result")
+                )
+                result = _repository(
+                    factory, authorizer
+                ).create_initial_account(request)
+
+                self.assert_result(
+                    result,
+                    contract.InitialAccountCreationOutcome.INTERNAL_ERROR,
+                )
+                self.assertEqual(factory.calls, 1)
+                self.assertEqual(authorizer.calls, 0)
+                self.assertEqual(
+                    [key for key, *_ in connection.calls],
+                    ["set_transaction", "lock"],
+                )
+                self.assertEqual(connection.script, [operation_sentinel])
+                self.assertEqual(connection.commit_count, 0)
+                self.assertEqual(connection.rollback_count, 1)
+                self.assertEqual(connection.cursor_close_count, 1)
+                self.assertEqual(connection.close_count, 1)
+                self.assertEqual(len(connection.cursors), 1)
+                self.assertTrue(connection.cursors[0].closed)
+                rendered = repr(result)
+                self.assertNotIn("postgresql-void-detail", rendered)
+                for marker in SENSITIVE_MARKERS:
+                    self.assertNotIn(marker, rendered)
 
     def test_exact_replay_uses_snapshot_and_historical_receipt_without_authorizer(self):
         request = _request()
@@ -2221,6 +2316,9 @@ print("safe")
             "record_id_collision",
             "commit ambiguity",
             "sequence gaps",
+            "built-in empty string",
+            '("",)',
+            "storage-protocol corruption",
             "preview",
             "production",
             "explicit activation decision",

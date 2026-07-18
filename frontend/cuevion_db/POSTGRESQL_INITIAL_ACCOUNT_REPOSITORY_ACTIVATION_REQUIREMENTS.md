@@ -100,6 +100,12 @@ length-framed, domain-separated material. Their fixed order is:
 9. candidate membership pair; and
 10. candidate security-event ID.
 
+With Psycopg 3's binary implementation, PostgreSQL's `void` result from
+`pg_advisory_xact_lock()` decodes as an exact built-in empty string. The adapter
+therefore accepts only exactly one row shaped as `("",)`; every other row shape
+or scalar is storage-protocol corruption. This decoding correction activates no
+route, connection bootstrap, or database connection.
+
 The operation is read again after all locks. Hash collisions can only add
 serialization; they do not merge claims or weaken exact database equality. Only
 the existing operation digest/reference crosses this boundary; a raw operation
