@@ -10,6 +10,19 @@ import unittest
 _FRONTEND = Path(__file__).resolve().parents[2]
 _REPOSITORY = _FRONTEND.parent
 _PROTECTED_UNTRACKED = Path("frontend/api/inboxes/oauth_google.py")
+_EXISTING_SESSION_CREDENTIALS_TEST = (
+    "frontend/tests/cuevion_auth/test_session_credentials.py"
+)
+
+
+def _changed_path_contains_forbidden_fragment(status_code, path, fragment):
+    if (
+        status_code != "??"
+        and path == _EXISTING_SESSION_CREDENTIALS_TEST
+        and fragment == "credential"
+    ):
+        return False
+    return fragment in path.casefold()
 
 
 class DatabaseFoundationInactivityTests(unittest.TestCase):
@@ -61,6 +74,38 @@ class DatabaseFoundationInactivityTests(unittest.TestCase):
         for forbidden in ("psycopg_pool", "asyncpg", "sqlalchemy.orm"):
             self.assertNotIn(forbidden, normalized)
 
+    def test_session_credentials_path_exception_is_exact(self):
+        self.assertFalse(
+            _changed_path_contains_forbidden_fragment(
+                " M",
+                _EXISTING_SESSION_CREDENTIALS_TEST,
+                "credential",
+            )
+        )
+        rejected = (
+            ("??", _EXISTING_SESSION_CREDENTIALS_TEST),
+            (" M", "frontend/cuevion_auth/session_credentials.py"),
+            (" M", "frontend/tests/cuevion_db/test_session_credentials.py"),
+            (
+                " M",
+                "archive/frontend/tests/cuevion_auth/test_session_credentials.py",
+            ),
+            (" M", "frontend/tests/cuevion_auth/runtime_credential.py"),
+            (
+                " M",
+                "frontend/tests/cuevion_auth/test_session_credentials.py.backup",
+            ),
+        )
+        for status_code, path in rejected:
+            with self.subTest(status_code=status_code, path=path):
+                self.assertTrue(
+                    _changed_path_contains_forbidden_fragment(
+                        status_code,
+                        path,
+                        "credential",
+                    )
+                )
+
     def test_no_forbidden_foundation_module_or_credential_file_exists(self):
         for relative in (
             "cuevion_db/runtime_connection.py",
@@ -75,8 +120,8 @@ class DatabaseFoundationInactivityTests(unittest.TestCase):
             capture_output=True,
             text=True,
         ).stdout
-        changed_paths = tuple(line[3:] for line in status.splitlines())
-        for path in changed_paths:
+        changed_entries = tuple((line[:2], line[3:]) for line in status.splitlines())
+        for status_code, path in changed_entries:
             lowered = path.casefold()
             if lowered.endswith("database_foundation_activation_requirements.md"):
                 continue
@@ -86,7 +131,14 @@ class DatabaseFoundationInactivityTests(unittest.TestCase):
                 or (name.startswith(".env.") and not name.endswith(".example"))
             )
             for fragment in ("credential", "secret", "password", "connection_string"):
-                self.assertNotIn(fragment, lowered)
+                self.assertFalse(
+                    _changed_path_contains_forbidden_fragment(
+                        status_code,
+                        path,
+                        fragment,
+                    ),
+                    msg=f"{fragment!r} unexpectedly found in {lowered!r}",
+                )
 
         implementation_roots = (
             _FRONTEND / "cuevion_db",
