@@ -62,18 +62,40 @@ foundation.
 
 ## Read-only transaction and cleanup boundary
 
-Every call uses one caller-supplied non-autocommit connection and one
-`REPEATABLE READ READ ONLY` transaction. Transaction configuration is the first
-SQL statement. Exactly one fixed aggregate `SELECT` follows. Each query begins
-with one parameterized synthetic `VALUES` request row and reaches current tables
-through explicit `LEFT JOIN`s, producing one deterministic tuple even for normal
-authority absence.
+Every read that passes initial connection validation uses one caller-supplied
+non-autocommit connection and one `REPEATABLE READ READ ONLY` transaction.
+Transaction configuration is the first SQL statement. Exactly one fixed aggregate
+`SELECT` follows. Each query begins with one parameterized synthetic `VALUES`
+request row and reaches current tables through explicit `LEFT JOIN`s, producing
+one deterministic tuple even for normal authority absence.
 
 There is no `COMMIT`, write, row lock, advisory lock, retry loop, sequence
 allocation, function call, second independently timed authority lookup, or
-historical-table fallback. The cursor is closed, every read transaction is asked
-to roll back even after success, and the connection is closed or returned
-exactly once. Confirmed rollback is part of safe pooled-connection hygiene.
+historical-table fallback. Before cursor acquisition or SQL, the adapter requires
+non-autocommit mode and an exact Psycopg `TransactionStatus.IDLE` value. Exact
+`UNKNOWN` is operational unavailability. `ACTIVE`, `INTRANS`, `INERROR`, and any
+malformed or unexpected status representation are internal errors. An operational
+failure while reading the status is unavailable; a missing interface or unexpected
+access failure is an internal error. Every acquired connection follows the same
+cleanup path without status coercion or numeric fallback: the cursor, if any, is
+closed, rollback is attempted even after success, and connection `close` is
+invoked exactly once.
+
+The repository owns initial transaction validation and these logical rollback and
+close calls. The injected factory owns how a physical connection or future client
+pool lease is represented. For a direct connection, `close` closes the physical
+connection. For a future lease proxy, `close` may return or discard the lease. A
+lease may be returned for reuse only after successful rollback and verification
+that the underlying connection is safe and idle. The proxy must track rollback
+success and must discard or physically close the connection after any operational
+or unexpected rollback failure, an `UNKNOWN` status, an invalidated or closed
+state, or any state whose safety cannot be proved.
+
+The current adapter does not implement discard behavior and does not construct,
+configure, activate, or test an application pool. Server-side or endpoint pooling
+is distinct from a reusable client-side connection pool. Any future client-pool
+integration requires separate review and evidence of correct return and discard
+behavior.
 
 A committed-before snapshot is visible and a committed-after snapshot is not.
 The result proves authority only at that consistency point; a later mutating
@@ -86,11 +108,13 @@ The public outcome set is exactly:
 - `FOUND`: one complete, structurally valid, internally consistent, active
   aggregate is returned;
 - `NOT_AUTHORIZED`: expected absence or valid but inactive current authority;
-- `UNAVAILABLE`: operational connection, transport, timeout, disconnect,
-  serialization, or rollback failure; and
+- `UNAVAILABLE`: an exact Psycopg `UNKNOWN` transaction status, or an operational
+  connection, transport, timeout, disconnect, serialization, deadlock,
+  transaction-status access, rollback, or close failure; and
 - `INTERNAL_ERROR`: storage corruption, unsupported values, malformed driver
-  protocol, wrong row shape/count, schema or permission failure, or unexpected
-  implementation failure.
+  protocol, an active, in-transaction, in-error, malformed, or unexpected
+  transaction status, wrong row shape/count, schema or permission failure,
+  non-operational cleanup failure, or unexpected implementation failure.
 
 Only `FOUND` carries an aggregate. All other outcomes are value-free. They expose
 no identifier, email, issuer, subject, SQL text, row value, reason string,

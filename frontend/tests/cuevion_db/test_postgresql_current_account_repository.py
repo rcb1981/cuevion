@@ -1489,24 +1489,196 @@ class PostgreSQLCurrentAccountRepositoryTests(unittest.TestCase):
 
     def test_unsafe_connection_state_fails_closed_without_authority_select(self):
         cases = (
-            {"autocommit": True},
-            {"transaction_status": psycopg.pq.TransactionStatus.INTRANS},
+            ("autocommit", {"autocommit": True}),
+            (
+                "active",
+                {"transaction_status": psycopg.pq.TransactionStatus.ACTIVE},
+            ),
+            (
+                "in-transaction",
+                {"transaction_status": psycopg.pq.TransactionStatus.INTRANS},
+            ),
+            (
+                "in-error",
+                {"transaction_status": psycopg.pq.TransactionStatus.INERROR},
+            ),
         )
-        for keywords in cases:
-            with self.subTest(keywords=keywords):
+        for name, keywords in cases:
+            with self.subTest(name=name):
                 connection = ScriptedConnection([], **keywords)
-                result = _new_repository(
-                    ConnectionFactory(connection)
-                ).read_current_account_by_user(USER_ID, WORKSPACE_ID)
+                factory = ConnectionFactory(connection)
+                result = _new_repository(factory).read_current_account_by_user(
+                    USER_ID, WORKSPACE_ID
+                )
                 self.assert_result(
                     result,
                     contract.CurrentAccountReadOutcome.INTERNAL_ERROR,
                     identity_operation=False,
                 )
+                self.assert_value_free(result)
+                self.assertEqual(factory.calls, 1)
                 self.assertEqual(connection.calls, [])
                 self.assert_connection_cleaned(
                     connection, cursor_expected=False
                 )
+
+    def test_unknown_transaction_status_is_unavailable_for_both_reads(self):
+        operations = (
+            (
+                "identity",
+                True,
+                lambda instance: instance.resolve_current_account_by_identity(
+                    _identity_key(), WORKSPACE_ID
+                ),
+            ),
+            (
+                "user",
+                False,
+                lambda instance: instance.read_current_account_by_user(
+                    USER_ID, WORKSPACE_ID
+                ),
+            ),
+        )
+        for name, identity_operation, operation in operations:
+            with self.subTest(name=name):
+                connection = ScriptedConnection(
+                    [],
+                    transaction_status=psycopg.pq.TransactionStatus.UNKNOWN,
+                )
+                factory = ConnectionFactory(connection)
+                result = operation(_new_repository(factory))
+                self.assert_result(
+                    result,
+                    contract.CurrentAccountReadOutcome.UNAVAILABLE,
+                    identity_operation=identity_operation,
+                )
+                self.assert_value_free(result)
+                self.assertNotIn("UNKNOWN", repr(result))
+                self.assertEqual(factory.calls, 1)
+                self.assertEqual(connection.calls, [])
+                self.assertEqual(connection.fetchall_count, 0)
+                self.assert_connection_cleaned(
+                    connection, cursor_expected=False
+                )
+
+    def test_unknown_transaction_status_cleanup_failure_precedence(self):
+        cases = (
+            (
+                "operational-rollback",
+                psycopg.OperationalError("private rollback " + EMAIL),
+                contract.CurrentAccountReadOutcome.UNAVAILABLE,
+            ),
+            (
+                "unexpected-rollback",
+                RuntimeError("private rollback " + SUBJECT),
+                contract.CurrentAccountReadOutcome.INTERNAL_ERROR,
+            ),
+        )
+        for name, rollback_failure, expected in cases:
+            with self.subTest(name=name):
+                connection = ScriptedConnection(
+                    [],
+                    transaction_status=psycopg.pq.TransactionStatus.UNKNOWN,
+                    rollback_failure=rollback_failure,
+                )
+                factory = ConnectionFactory(connection)
+                result = _new_repository(
+                    factory
+                ).read_current_account_by_user(USER_ID, WORKSPACE_ID)
+                self.assert_result(result, expected, identity_operation=False)
+                self.assert_value_free(result)
+                self.assertEqual(factory.calls, 1)
+                self.assertEqual(connection.calls, [])
+                self.assertEqual(connection.fetchall_count, 0)
+                self.assert_connection_cleaned(
+                    connection, cursor_expected=False
+                )
+
+    def test_invalid_transaction_status_protocol_is_classified(self):
+        class RaisingTransactionStatus:
+            def __init__(self, failure: BaseException) -> None:
+                self.failure = failure
+
+            @property
+            def transaction_status(self) -> object:
+                raise self.failure
+
+        cases = (
+            (
+                "wrong-built-in-type",
+                ScriptedConnectionInfo("IDLE"),
+                contract.CurrentAccountReadOutcome.INTERNAL_ERROR,
+            ),
+            (
+                "raw-idle-integer",
+                ScriptedConnectionInfo(
+                    int(psycopg.pq.TransactionStatus.IDLE)
+                ),
+                contract.CurrentAccountReadOutcome.INTERNAL_ERROR,
+            ),
+            (
+                "arbitrary-integer",
+                ScriptedConnectionInfo(8675309),
+                contract.CurrentAccountReadOutcome.INTERNAL_ERROR,
+            ),
+            (
+                "missing-status",
+                object(),
+                contract.CurrentAccountReadOutcome.INTERNAL_ERROR,
+            ),
+            (
+                "operational-access",
+                RaisingTransactionStatus(
+                    psycopg.OperationalError("private status " + EMAIL)
+                ),
+                contract.CurrentAccountReadOutcome.UNAVAILABLE,
+            ),
+            (
+                "unexpected-access",
+                RaisingTransactionStatus(
+                    RuntimeError("private status " + SUBJECT)
+                ),
+                contract.CurrentAccountReadOutcome.INTERNAL_ERROR,
+            ),
+        )
+        for name, connection_info, expected in cases:
+            with self.subTest(name=name):
+                connection = ScriptedConnection([])
+                connection.info = connection_info
+                factory = ConnectionFactory(connection)
+                result = _new_repository(
+                    factory
+                ).read_current_account_by_user(USER_ID, WORKSPACE_ID)
+                self.assert_result(result, expected, identity_operation=False)
+                self.assert_value_free(result)
+                self.assertEqual(factory.calls, 1)
+                self.assertEqual(connection.calls, [])
+                self.assertEqual(connection.fetchall_count, 0)
+                self.assert_connection_cleaned(
+                    connection, cursor_expected=False
+                )
+
+    def test_idle_transaction_status_runs_one_complete_read(self):
+        connection = ScriptedConnection(
+            _user_steps([_user_row()]),
+            transaction_status=psycopg.pq.TransactionStatus.IDLE,
+        )
+        factory = ConnectionFactory(connection)
+        result = _new_repository(factory).read_current_account_by_user(
+            USER_ID, WORKSPACE_ID
+        )
+        self.assert_result(
+            result,
+            contract.CurrentAccountReadOutcome.FOUND,
+            identity_operation=False,
+        )
+        self.assertEqual(factory.calls, 1)
+        self.assertEqual(
+            [key for key, _sql, _parameters in connection.calls],
+            ["set_transaction", "user"],
+        )
+        self.assertEqual(connection.fetchall_count, 1)
+        self.assert_connection_cleaned(connection)
 
     def test_baseexception_propagates_after_all_cleanup(self):
         class Fatal(BaseException):

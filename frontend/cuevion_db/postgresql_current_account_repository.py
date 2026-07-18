@@ -336,6 +336,13 @@ class _StorageCorruption(Exception):
         Exception.__init__(self)
 
 
+class _UnavailableConnectionState(Exception):
+    __slots__ = ()
+
+    def __init__(self) -> None:
+        Exception.__init__(self)
+
+
 def _text_from_database(value: object) -> str:
     if type(value) is not str:
         raise _StorageCorruption()
@@ -965,10 +972,19 @@ def _decode_user_authority(
     return (_contract.CurrentAccountReadOutcome.FOUND, authority)
 
 
+def _validate_initial_transaction_status(value: object) -> None:
+    if value is _psycopg.pq.TransactionStatus.IDLE:
+        return
+    if value is _psycopg.pq.TransactionStatus.UNKNOWN:
+        raise _UnavailableConnectionState()
+    raise _StorageCorruption()
+
+
 def _is_availability_failure(error: BaseException) -> bool:
     return isinstance(
         error,
         (
+            _UnavailableConnectionState,
             _psycopg.OperationalError,
             _psycopg.errors.SerializationFailure,
             _psycopg.errors.DeadlockDetected,
@@ -1116,11 +1132,9 @@ class PostgreSQLCurrentAccountRepository:
             if getattr(connection, "autocommit") is not False:
                 raise _StorageCorruption()
             connection_info = getattr(connection, "info")
-            if (
+            _validate_initial_transaction_status(
                 getattr(connection_info, "transaction_status")
-                is not _psycopg.pq.TransactionStatus.IDLE
-            ):
-                raise _StorageCorruption()
+            )
             cursor = getattr(connection, "cursor")()
             getattr(cursor, "execute")(_SET_TRANSACTION_SQL)
             row = _exact_result_row(
