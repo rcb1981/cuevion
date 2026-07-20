@@ -385,10 +385,23 @@ class SessionContractImportTests(unittest.TestCase):
             {path.name for path in _AUTH_DIRECTORY.iterdir() if path.is_file()},
             {
                 "AUTH_ACTIVATION_REQUIREMENTS.md",
+                "account_authority.py",
+                "auth0_flow.py",
+                "callback.py",
+                "http.py",
+                "login.py",
+                "logout.py",
                 "models.py",
+                "runtime.py",
+                "session.py",
                 "session_contract.py",
+                "session_store.py",
+                "test_account_authority.py",
+                "test_auth0_flow.py",
+                "test_auth_routes.py",
                 "test_models.py",
                 "test_session_contract.py",
+                "test_session_store.py",
             },
         )
 

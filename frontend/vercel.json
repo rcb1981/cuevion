@@ -7,6 +7,10 @@
   },
   "rewrites": [
     {
+      "source": "/login",
+      "destination": "/"
+    },
+    {
       "source": "/onboarding-preview",
       "destination": "/"
     }

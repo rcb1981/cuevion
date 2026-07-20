@@ -118,6 +118,12 @@ import {
 } from "../../lib/userConfigApi";
 import { sendContactSupportRequest } from "../../lib/contactSupportApi";
 import {
+  getSessionAccountStorageKey,
+  getSessionViewerStorageKey,
+  logoutSession,
+  type AuthSource,
+} from "../../lib/authApi";
+import {
   TEAM_ROLES,
   getTeamRoleLabel,
   normalizeTeamRole,
@@ -543,6 +549,8 @@ type AuthenticatedCuevionUser = {
   email: string;
   name: string;
   userType: "member" | "guest";
+  userId?: string;
+  workspaceId?: string;
 };
 type CollaborationInviteRoute = {
   mode: "invite" | "external_review";
@@ -1550,7 +1558,6 @@ const AI_SUGGESTIONS_STORAGE_KEY = "cuevion-ai-suggestions-enabled";
 const INBOX_CHANGES_STORAGE_KEY = "cuevion-inbox-changes-enabled";
 const TEAM_ACTIVITY_STORAGE_KEY = "cuevion-team-activity-enabled";
 const CUEVION_AUTH_STORAGE_KEY = "label-inbox-ai-auth-user";
-const BETA_LOGOUT_ENDPOINT = "/api/beta/logout";
 const CUEVION_NOTIFICATION_READ_STORAGE_KEY = "cuevion-notification-read";
 const buildTeamMembersStorageKey = (workspaceKey: string) =>
   `cuevion-team-members:${workspaceKey}`;
@@ -11730,6 +11737,7 @@ function buildVisibleNotificationItems({
   collaborationLastSeenByKey,
   currentUserId,
   currentUserEmail,
+  currentViewerPersistenceKey,
   currentUserName,
   teamActivityEnabled,
   onOpenNotificationNavigation,
@@ -11740,6 +11748,7 @@ function buildVisibleNotificationItems({
   collaborationLastSeenByKey: Record<string, number>;
   currentUserId: string;
   currentUserEmail: string;
+  currentViewerPersistenceKey: string;
   currentUserName: string;
   teamActivityEnabled: boolean;
   onOpenNotificationNavigation: (
@@ -11751,7 +11760,12 @@ function buildVisibleNotificationItems({
   }
 
   const viewerType = authenticatedUser?.userType === "guest" ? "external" : "workspace";
-  const viewerKey = normalizeSenderLearningKey(currentUserEmail || currentUserId);
+  const operationalViewerKey = normalizeSenderLearningKey(
+    currentUserEmail || currentUserId,
+  );
+  const persistenceViewerKey = normalizeSenderLearningKey(
+    currentViewerPersistenceKey,
+  );
   const seenItemIds = new Set<string>();
   const sharedNavigationMailboxId = orderedMailboxes[0]?.id ?? null;
   const sharedCollaborationMessages =
@@ -11797,7 +11811,7 @@ function buildVisibleNotificationItems({
             !hasUnreadCollaborationUpdateForViewer(
               message,
               collaborationLastSeenByKey,
-              viewerKey,
+              persistenceViewerKey,
               currentUserId,
             )
           ) {
@@ -11810,7 +11824,7 @@ function buildVisibleNotificationItems({
             message.collaboration.requestedBy === currentUserName;
           const collaborationSeenKey = buildCollaborationLastSeenKey(
             message,
-            viewerKey,
+            persistenceViewerKey,
             currentUserId,
           );
           const collaborationSeenAt = collaborationSeenKey
@@ -11852,7 +11866,7 @@ function buildVisibleNotificationItems({
           if (
             message.collaboration.resolvedAt &&
             message.collaboration.resolvedByUserName &&
-            message.collaboration.resolvedByUserId !== viewerKey &&
+            message.collaboration.resolvedByUserId !== operationalViewerKey &&
             message.collaboration.resolvedByUserName !== currentUserName
           ) {
             items.push({
@@ -11876,21 +11890,28 @@ function buildVisibleNotificationItems({
 
           message.collaboration.messages
             .filter((entry) => canViewerSeeCollaborationMessage(entry, viewerType))
-            .filter((entry) => entry.authorId !== viewerKey && entry.authorName !== currentUserName)
+            .filter(
+              (entry) =>
+                entry.authorId !== operationalViewerKey &&
+                entry.authorName !== currentUserName,
+            )
             .filter((entry) => entry.timestamp !== message.collaboration?.createdAt)
             .filter((entry) => !sharedProjectionOnly || entry.timestamp > collaborationSeenAt)
             .forEach((entry) => {
               const mentionsCurrentUser = (entry.mentions ?? []).filter(
                 (mention) =>
                   mention.notify &&
-                  (mention.id === viewerKey ||
-                    normalizeSenderLearningKey(mention.email) === viewerKey),
+                  (mention.id === operationalViewerKey ||
+                    normalizeSenderLearningKey(mention.email) ===
+                      operationalViewerKey),
               );
 
               if (mentionsCurrentUser.length > 0) {
                 items.push({
-                  id: `notification:mention:${messageNotificationKey}:${entry.id}:${viewerKey}`,
-                  sourceIds: [`notification:mention:${message.id}:${entry.id}:${viewerKey}`],
+                  id: `notification:mention:${messageNotificationKey}:${entry.id}:${persistenceViewerKey}`,
+                  sourceIds: [
+                    `notification:mention:${message.id}:${entry.id}:${persistenceViewerKey}`,
+                  ],
                   kind: "mention",
                   mailboxId,
                   messageId: message.id,
@@ -12070,7 +12091,7 @@ function buildVisibleActivityItems({
   authenticatedUser,
   collaborationLastSeenByKey,
   currentUserId,
-  currentUserEmail,
+  currentViewerPersistenceKey,
   teamActivityEnabled,
   onOpenActivityNavigation,
 }: {
@@ -12079,7 +12100,7 @@ function buildVisibleActivityItems({
   authenticatedUser?: AuthenticatedCuevionUser | null;
   collaborationLastSeenByKey: Record<string, number>;
   currentUserId: string;
-  currentUserEmail: string;
+  currentViewerPersistenceKey: string;
   teamActivityEnabled: boolean;
   onOpenActivityNavigation: (
     request: Omit<NotificationNavigationRequest, "requestKey">,
@@ -12090,7 +12111,9 @@ function buildVisibleActivityItems({
   }
 
   const viewerType = authenticatedUser?.userType === "guest" ? "external" : "workspace";
-  const viewerKey = normalizeSenderLearningKey(currentUserEmail || currentUserId);
+  const persistenceViewerKey = normalizeSenderLearningKey(
+    currentViewerPersistenceKey,
+  );
   const seenItemIds = new Set<string>();
   const sharedNavigationMailboxId = orderedMailboxes[0]?.id ?? null;
   const sharedCollaborationMessages =
@@ -12126,7 +12149,7 @@ function buildVisibleActivityItems({
           !hasUnreadCollaborationUpdateForViewer(
             message,
             collaborationLastSeenByKey,
-            viewerKey,
+            persistenceViewerKey,
             currentUserId,
           )
         ) {
@@ -12136,7 +12159,7 @@ function buildVisibleActivityItems({
         const subjectDetail = message.subject;
         const collaborationSeenKey = buildCollaborationLastSeenKey(
           message,
-          viewerKey,
+          persistenceViewerKey,
           currentUserId,
         );
         const collaborationSeenAt = collaborationSeenKey
@@ -12782,6 +12805,7 @@ function MailboxView({
   currentUserId,
   currentUserName,
   currentUserEmail,
+  currentViewerPersistenceKey,
   onCollaborationLastSeenChange,
   workspaceCollaborationPeople,
   inviteOnlyCollaborationPeople,
@@ -12859,6 +12883,7 @@ function MailboxView({
   currentUserId: string;
   currentUserName: string;
   currentUserEmail: string;
+  currentViewerPersistenceKey: string;
   onCollaborationLastSeenChange?: Dispatch<SetStateAction<Record<string, number>>>;
   workspaceCollaborationPeople: Array<{ id: string; name: string; email: string }>;
   inviteOnlyCollaborationPeople: Array<{ id: string; name: string; email: string }>;
@@ -12925,7 +12950,7 @@ function MailboxView({
   isMobileViewport?: boolean;
 }) {
   const collaborationLastSeenStorageKey = buildCollaborationLastSeenStorageKey(
-    currentUserEmail || currentUserId,
+    currentViewerPersistenceKey,
   );
   const [activeFilter, setActiveFilter] = useState<MailFilter>("All");
   const [sortOrder, setSortOrder] = useState<MailSortOrder>("desc");
@@ -16822,7 +16847,7 @@ function MailboxView({
     onCollaborationLastSeenChange?.(updater);
   };
   const getCollaborationLastSeenKeyForMessage = (message: MailMessage) => {
-    const viewerKey = normalizeSenderLearningKey(currentUserEmail || currentUserId);
+    const viewerKey = normalizeSenderLearningKey(currentViewerPersistenceKey);
     const canonicalMessageId = getCollaborationMessageIdForMessage(message.id);
     return buildCollaborationLastSeenKey(
       message,
@@ -16832,7 +16857,7 @@ function MailboxView({
     );
   };
   const hasUnreadCollaborationUpdate = (message: MailMessage) => {
-    const viewerKey = normalizeSenderLearningKey(currentUserEmail || currentUserId);
+    const viewerKey = normalizeSenderLearningKey(currentViewerPersistenceKey);
     const canonicalMessageId = getCollaborationMessageIdForMessage(message.id);
     return hasUnreadCollaborationUpdateForViewer(
       message,
@@ -16864,7 +16889,7 @@ function MailboxView({
     );
   };
   const markCanonicalCollaborationThreadSeen = (thread: CollaborationThread) => {
-    const viewerKey = normalizeSenderLearningKey(currentUserEmail || currentUserId);
+    const viewerKey = normalizeSenderLearningKey(currentViewerPersistenceKey);
     const workspaceId = thread.workspaceId.trim().toLowerCase();
     const canonicalMessageId = thread.messageId.trim();
 
@@ -33120,6 +33145,7 @@ export function WorkspaceShell({
   userConfig,
   onboardingState,
   authenticatedUser = null,
+  authSource = "beta",
   onAuthenticatedUserNameChange,
   collaborationInviteRoute = null,
   workspaceDataMode = "live",
@@ -33128,6 +33154,7 @@ export function WorkspaceShell({
   userConfig: UserConfig;
   onboardingState: OnboardingState;
   authenticatedUser?: AuthenticatedCuevionUser | null;
+  authSource?: AuthSource;
   onAuthenticatedUserNameChange?: (name: string) => void;
   collaborationInviteRoute?: CollaborationInviteRoute | null;
   workspaceDataMode?: WorkspaceDataMode;
@@ -33216,26 +33243,36 @@ export function WorkspaceShell({
   });
   const [mailboxCredentialStatuses, setMailboxCredentialStatuses] =
     useState<MailboxCredentialStatusStore>({});
-  const primaryManagedInboxStorageOwnerKey = authenticatedUser?.email?.trim()
-    ? normalizeSenderLearningKey(authenticatedUser.email)
-    : "guest";
+  const auth0WorkspaceStorageScope =
+    authSource === "auth0"
+      ? normalizeSenderLearningKey(
+          getSessionAccountStorageKey(authSource, authenticatedUser),
+        ) || "auth0-workspace"
+      : "";
+  const auth0ViewerStorageScope =
+    authSource === "auth0"
+      ? normalizeSenderLearningKey(
+          getSessionViewerStorageKey(authSource, authenticatedUser),
+        ) || "auth0-viewer"
+      : "";
+  const primaryManagedInboxStorageOwnerKey =
+    auth0WorkspaceStorageScope ||
+    (authenticatedUser?.email?.trim()
+      ? normalizeSenderLearningKey(authenticatedUser.email)
+      : "guest");
   const primaryManagedInboxStorageKey = buildPrimaryManagedInboxStorageKey(
     primaryManagedInboxStorageOwnerKey,
     savedManagedInboxes,
   );
   const [primaryManagedInboxId, setPrimaryManagedInboxId] = useState<string | null>(() => {
     const initialManagedInboxes = buildManagedWorkspaceInboxes(onboardingState);
-    const initialPrimaryManagedInboxStorageOwnerKey = authenticatedUser?.email?.trim()
-      ? normalizeSenderLearningKey(authenticatedUser.email)
-      : "guest";
-
     if (typeof window === "undefined") {
       return resolvePrimaryManagedInboxId(initialManagedInboxes, null);
     }
 
     const storedPrimaryInboxId = window.localStorage.getItem(
       buildPrimaryManagedInboxStorageKey(
-        initialPrimaryManagedInboxStorageOwnerKey,
+        primaryManagedInboxStorageOwnerKey,
         savedManagedInboxes,
       ),
     );
@@ -33302,63 +33339,69 @@ export function WorkspaceShell({
   const activeWorkspaceUserName =
     accountDisplayName;
   const currentWorkspaceUserId = normalizeSenderLearningKey(activeWorkspaceEmail);
-  const workspaceNameStorageKey = buildWorkspaceNameStorageKey(currentWorkspaceUserId);
+  const workspacePersistenceScope =
+    auth0WorkspaceStorageScope || currentWorkspaceUserId;
+  const viewerPersistenceScope =
+    auth0ViewerStorageScope ||
+    activeCollaborationViewerEmail ||
+    currentWorkspaceUserId;
+  const workspaceNameStorageKey = buildWorkspaceNameStorageKey(workspacePersistenceScope);
   const defaultWorkspaceName = resolveDefaultWorkspaceName({
     authenticatedUser,
     managedInboxes: savedManagedInboxes,
   });
   const teamPendingInvitationStorageKey =
-    buildTeamPendingInvitationStorageKey(currentWorkspaceUserId);
-  const teamMembersStorageKey = buildTeamMembersStorageKey(currentWorkspaceUserId);
+    buildTeamPendingInvitationStorageKey(workspacePersistenceScope);
+  const teamMembersStorageKey = buildTeamMembersStorageKey(workspacePersistenceScope);
   const teamMembershipsStorageKey =
-    buildTeamMembershipsStorageKey(currentWorkspaceUserId);
+    buildTeamMembershipsStorageKey(workspacePersistenceScope);
   const mailboxOrderKey = orderedMailboxes.map((mailbox) => mailbox.id).join("|");
   const messageUnreadOverridesStorageKey = buildMessageUnreadOverridesStorageKey(
-    currentWorkspaceUserId,
+    workspacePersistenceScope,
     mailboxOrderKey,
   );
   const sentMessagesStorageKey = buildSentMessagesStorageKey(
-    currentWorkspaceUserId,
+    workspacePersistenceScope,
     mailboxOrderKey,
   );
   const trashMessagesStorageKey = buildTrashMessagesStorageKey(
-    currentWorkspaceUserId,
+    workspacePersistenceScope,
     mailboxOrderKey,
   );
   const spamMessagesStorageKey = buildSpamMessagesStorageKey(
-    currentWorkspaceUserId,
+    workspacePersistenceScope,
     mailboxOrderKey,
   );
   const archiveMessagesStorageKey = buildArchiveMessagesStorageKey(
-    currentWorkspaceUserId,
+    workspacePersistenceScope,
     mailboxOrderKey,
   );
   const manualPriorityOverridesStorageKey = buildManualPriorityOverridesStorageKey(
-    currentWorkspaceUserId,
+    workspacePersistenceScope,
     mailboxOrderKey,
   );
   const priorityClearedStorageKey = buildPriorityClearedStorageKey(
-    currentWorkspaceUserId,
+    workspacePersistenceScope,
     mailboxOrderKey,
   );
   const manualLabelOverridesStorageKey = buildManualLabelOverridesStorageKey(
-    currentWorkspaceUserId,
+    workspacePersistenceScope,
     mailboxOrderKey,
   );
   const manualOrganizerInclusionsStorageKey = buildManualOrganizerInclusionsStorageKey(
-    currentWorkspaceUserId,
+    workspacePersistenceScope,
     mailboxOrderKey,
   );
   const spamSuppressionStorageKey = buildSpamSuppressionStorageKey(
-    currentWorkspaceUserId,
+    workspacePersistenceScope,
     mailboxOrderKey,
   );
-  const notificationReadStorageKey = buildNotificationReadStorageKey(currentWorkspaceUserId);
+  const notificationReadStorageKey = buildNotificationReadStorageKey(workspacePersistenceScope);
   const collaborationLastSeenStorageKey = buildCollaborationLastSeenStorageKey(
-    activeCollaborationViewerEmail || currentWorkspaceUserId,
+    viewerPersistenceScope,
   );
   const mailboxFocusPreferenceOverridesStorageKey =
-    buildMailboxFocusPreferenceOverridesStorageKey(currentWorkspaceUserId);
+    buildMailboxFocusPreferenceOverridesStorageKey(workspacePersistenceScope);
   const liveMailboxSyncKey = orderedMailboxes
     .map((mailbox) => `${mailbox.id}:${mailbox.email}:${mailbox.title}`)
     .join("|");
@@ -37057,6 +37100,7 @@ export function WorkspaceShell({
     collaborationLastSeenByKey,
     currentUserId: currentWorkspaceUserId,
     currentUserEmail: activeCollaborationViewerEmail,
+    currentViewerPersistenceKey: viewerPersistenceScope,
     currentUserName: authenticatedUser?.name ?? "You",
     teamActivityEnabled,
     onOpenNotificationNavigation: handleOpenNotificationNavigation,
@@ -37110,7 +37154,7 @@ export function WorkspaceShell({
     authenticatedUser,
     collaborationLastSeenByKey,
     currentUserId: currentWorkspaceUserId,
-    currentUserEmail: activeCollaborationViewerEmail,
+    currentViewerPersistenceKey: viewerPersistenceScope,
     teamActivityEnabled,
     onOpenActivityNavigation: handleOpenNotificationNavigation,
   });
@@ -39336,17 +39380,20 @@ export function WorkspaceShell({
 
   const handleConfirmLogout = async () => {
     try {
-      const response = await fetch(BETA_LOGOUT_ENDPOINT, {
-        method: "POST",
-        credentials: "include",
-      });
+      const result = await logoutSession(authSource);
 
-      if (!response.ok) {
+      if (!result.ok) {
         return;
       }
 
       window.localStorage.removeItem(CUEVION_AUTH_STORAGE_KEY);
       setIsLogoutConfirmationOpen(false);
+
+      if (result.logoutUrl) {
+        window.location.assign(result.logoutUrl);
+        return;
+      }
+
       window.location.reload();
     } catch {
       return;
@@ -40357,6 +40404,7 @@ export function WorkspaceShell({
                   currentUserId={currentWorkspaceUserId}
                   currentUserName={activeWorkspaceUserName}
                   currentUserEmail={activeCollaborationViewerEmail}
+                  currentViewerPersistenceKey={viewerPersistenceScope}
                   onCollaborationLastSeenChange={setCollaborationLastSeenByKey}
                   workspaceCollaborationPeople={workspaceCollaborationPeople}
                   inviteOnlyCollaborationPeople={inviteOnlyCollaborationPeople}
@@ -40524,7 +40572,7 @@ export function WorkspaceShell({
                     setPendingTeamInvitation(null);
                   }}
                   showDemoContent={isDemoWorkspace}
-                  workspacePersistenceKey={currentWorkspaceUserId}
+                  workspacePersistenceKey={workspacePersistenceScope}
                   shouldPollTeamMembers={Boolean(
                     authenticatedUser?.userType === "member" &&
                       !collaborationInviteRoute &&

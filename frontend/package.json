@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "test": "node -e \"require('./node_modules/sucrase/register/ts.js'); require('./src/lib/inboxEngine.test.ts'); require('./src/lib/bundleOrganizerFilters.test.ts'); require('./src/lib/prioritySource.test.ts'); require('./src/lib/returnedReplyEvidence.test.ts'); require('./src/lib/priorityRuntimeAdapter.test.ts'); require('./src/lib/priorityRuntimeSignals.test.ts'); require('./src/lib/priorityReasonCopy.test.ts'); require('./src/lib/inboxConnectionApi.test.ts'); require('./src/lib/mailboxCredentialPersistence.test.ts'); require('./src/lib/inboxConnectionApi.imapHardening.test.ts'); require('./src/lib/customSmtpAvailability.test.ts')\""
+    "test": "node -e \"require('./node_modules/sucrase/register/ts.js'); require('./src/lib/inboxEngine.test.ts'); require('./src/lib/bundleOrganizerFilters.test.ts'); require('./src/lib/prioritySource.test.ts'); require('./src/lib/returnedReplyEvidence.test.ts'); require('./src/lib/priorityRuntimeAdapter.test.ts'); require('./src/lib/priorityRuntimeSignals.test.ts'); require('./src/lib/priorityReasonCopy.test.ts'); require('./src/lib/inboxConnectionApi.test.ts'); require('./src/lib/mailboxCredentialPersistence.test.ts'); require('./src/lib/inboxConnectionApi.imapHardening.test.ts'); require('./src/lib/customSmtpAvailability.test.ts'); require('./src/lib/authApi.test.ts')\""
   },
   "dependencies": {
     "react": "^18.3.1",

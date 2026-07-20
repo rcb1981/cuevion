@@ -1,4 +1,5 @@
 import { lazy, Suspense, useEffect, useState } from "react";
+import { Auth0LoginView } from "./components/auth/Auth0LoginView";
 import { OnboardingFlow } from "./components/onboarding/OnboardingFlow";
 import { WorkspaceTransition } from "./components/workspace/WorkspaceTransition";
 import { initialOnboardingState } from "./data/onboardingOptions";
@@ -23,6 +24,12 @@ import {
   type OnboardingState,
 } from "./types/onboarding";
 import type { UserConfig } from "./types/userConfig";
+import {
+  getSessionAccountStorageKey,
+  isAuth0LoginPath,
+  loadStartupSession,
+  type AuthSource,
+} from "./lib/authApi";
 
 const WorkspaceShell = lazy(() =>
   import("./components/workspace/WorkspaceShell").then((module) => ({
@@ -42,7 +49,6 @@ const CUEVION_DISPLAY_NAME_OVERRIDES_STORAGE_KEY = "cuevion-display-name-overrid
 const PENDING_COLLAB_INVITE_STORAGE_KEY = "label-inbox-ai-pending-collab-invite";
 const PENDING_COLLAB_INVITE_URL_STORAGE_KEY = "label-inbox-ai-pending-collab-invite-url";
 const OAUTH_CALLBACK_RESULT_STORAGE_KEY = "cuevion-oauth-callback-result";
-const BETA_SESSION_ENDPOINT = "/api/beta/session";
 const BETA_LOGIN_ENDPOINT = "/api/beta/login";
 const WORKSPACE_THEME_MODE_STORAGE_KEY = "cuevion-workspace-theme-mode";
 const AI_SUGGESTIONS_STORAGE_KEY = "cuevion-ai-suggestions-enabled";
@@ -61,9 +67,12 @@ type AuthenticatedCuevionUser = {
   email: string;
   name: string;
   userType: "member" | "guest";
+  userId?: string;
+  workspaceId?: string;
 };
 
 type BetaAccessRoute = "login" | "app";
+type RootAppRoute = "login" | "preview" | "app";
 
 type CollaborationInviteRoute = {
   mode: "invite" | "external_review";
@@ -131,6 +140,18 @@ function isOnboardingPreviewRoute() {
     window.location.pathname.replace(/\/+$/, "") === "/onboarding-preview" ||
     params.get("preview") === "onboarding"
   );
+}
+
+function resolveRootAppRoute(): RootAppRoute {
+  if (typeof window === "undefined") {
+    return "app";
+  }
+
+  if (isAuth0LoginPath(window.location.pathname)) {
+    return "login";
+  }
+
+  return isOnboardingPreviewRoute() ? "preview" : "app";
 }
 
 function createPreviewOnboardingState(): OnboardingState {
@@ -892,7 +913,7 @@ function buildManagedInboxesFromOnboardingSession(
 }
 
 function buildAccountConfigFromLocalStorage(
-  ownerEmail: string,
+  accountStorageOwnerKey: string,
   onboardingSession: PersistedOnboardingSession | null = parsePersistedOnboardingSession(),
   displayNameOverrides: DisplayNameOverrideStore = parseDisplayNameOverrides(),
 ): UserAccountConfig {
@@ -902,7 +923,7 @@ function buildAccountConfigFromLocalStorage(
       ? locallyStoredManagedInboxes
       : buildManagedInboxesFromOnboardingSession(onboardingSession),
   );
-  const workspaceUserId = normalizeAccountStorageKey(ownerEmail);
+  const workspaceUserId = normalizeAccountStorageKey(accountStorageOwnerKey);
   const themeMode =
     normalizeStoredWorkspaceThemeMode(
       window.localStorage.getItem(WORKSPACE_THEME_MODE_STORAGE_KEY),
@@ -945,7 +966,10 @@ function isPersistedOnboardingSession(value: unknown): value is PersistedOnboard
   );
 }
 
-function writeAccountConfigToLocalStorage(config: UserAccountConfig, ownerEmail: string) {
+function writeAccountConfigToLocalStorage(
+  config: UserAccountConfig,
+  accountStorageOwnerKey: string,
+) {
   const onboardingSession = isPersistedOnboardingSession(config.onboardingSession)
     ? {
         completed: true,
@@ -966,7 +990,7 @@ function writeAccountConfigToLocalStorage(config: UserAccountConfig, ownerEmail:
   const sanitizedManagedInboxes = sanitizeManagedInboxCredentials(
     mergedManagedInboxes,
   ) as StoredManagedWorkspaceInbox[];
-  const workspaceUserId = normalizeAccountStorageKey(ownerEmail);
+  const workspaceUserId = normalizeAccountStorageKey(accountStorageOwnerKey);
 
   if (onboardingSession) {
     window.localStorage.setItem(
@@ -1604,12 +1628,13 @@ function CuevionApp() {
   const [betaAccessRoute, setBetaAccessRoute] = useState<BetaAccessRoute>(() =>
     resolveBetaAccessRoute(),
   );
-  const [betaSessionUser, setBetaSessionUser] = useState<AuthenticatedCuevionUser | null>(null);
+  const [sessionUser, setSessionUser] = useState<AuthenticatedCuevionUser | null>(null);
+  const [authSource, setAuthSource] = useState<AuthSource | null>(null);
   const [displayNameOverrides, setDisplayNameOverrides] = useState<DisplayNameOverrideStore>(() =>
     parseDisplayNameOverrides(),
   );
-  const [betaSessionStatus, setBetaSessionStatus] = useState<
-    "loading" | "authenticated" | "unauthenticated"
+  const [sessionStatus, setSessionStatus] = useState<
+    "loading" | "authenticated" | "unauthenticated" | "unavailable"
   >("loading");
   const [accountConfigHydrationStatus, setAccountConfigHydrationStatus] = useState<
     "idle" | "loading" | "ready"
@@ -1648,16 +1673,27 @@ function CuevionApp() {
     persistedOnboardingSession?.state ? buildUserConfig(persistedOnboardingSession.state) : null,
   );
   const recognizedInviteUsers = resolveWorkspaceInviteUsers(onboardingState);
-  const effectiveBetaSessionUser =
-    betaSessionUser && betaSessionUser.userType === "member"
+  const effectiveSessionUser =
+    sessionUser && sessionUser.userType === "member"
       ? {
-          ...betaSessionUser,
+          ...sessionUser,
           name:
-            displayNameOverrides[betaSessionUser.email.toLowerCase()]?.trim() ||
-            betaSessionUser.name,
+            (authSource === "beta"
+              ? displayNameOverrides[sessionUser.email.toLowerCase()]?.trim()
+              : "") ||
+            sessionUser.name,
         }
-      : betaSessionUser;
-  const activeCollaborationUser = authenticatedUser ?? effectiveBetaSessionUser;
+      : sessionUser;
+  const sessionAccountStorageKey = getSessionAccountStorageKey(
+    authSource,
+    sessionUser?.userType === "member" ? sessionUser : null,
+  );
+  const activeCollaborationUser = authenticatedUser ?? effectiveSessionUser;
+  const activeCollaborationAuthSource: AuthSource = authenticatedUser
+    ? "beta"
+    : effectiveSessionUser
+      ? authSource ?? "beta"
+      : "beta";
 
   useEffect(() => {
     if (authenticatedUser) {
@@ -1681,8 +1717,9 @@ function CuevionApp() {
   useEffect(() => {
     if (
       accountConfigHydrationStatus !== "ready" ||
-      !betaSessionUser ||
-      betaSessionUser.userType !== "member"
+      !sessionUser ||
+      sessionUser.userType !== "member" ||
+      !sessionAccountStorageKey
     ) {
       return;
     }
@@ -1690,7 +1727,7 @@ function CuevionApp() {
     const timeoutId = window.setTimeout(() => {
       void saveUserAccountConfig(
         buildAccountConfigFromLocalStorage(
-          betaSessionUser.email,
+          sessionAccountStorageKey,
           persistedOnboardingSession,
           displayNameOverrides,
         ),
@@ -1700,13 +1737,18 @@ function CuevionApp() {
     return () => window.clearTimeout(timeoutId);
   }, [
     accountConfigHydrationStatus,
-    betaSessionUser,
+    sessionUser,
+    sessionAccountStorageKey,
     displayNameOverrides,
     persistedOnboardingSession,
   ]);
 
-  const handleBetaSessionDisplayNameChange = (nextName: string) => {
-    if (!betaSessionUser || betaSessionUser.userType !== "member") {
+  const handleSessionDisplayNameChange = (nextName: string) => {
+    if (
+      authSource !== "beta" ||
+      !sessionUser ||
+      sessionUser.userType !== "member"
+    ) {
       return;
     }
 
@@ -1716,7 +1758,7 @@ function CuevionApp() {
       return;
     }
 
-    const normalizedEmail = betaSessionUser.email.toLowerCase();
+    const normalizedEmail = sessionUser.email.toLowerCase();
     setDisplayNameOverrides((current) => ({
       ...current,
       [normalizedEmail]: trimmedName,
@@ -1789,58 +1831,47 @@ function CuevionApp() {
 
   useEffect(() => {
     if (collaborationInviteRoute || teamInviteRoute) {
-      setBetaSessionStatus("unauthenticated");
-      setBetaSessionUser(null);
+      setSessionStatus("unauthenticated");
+      setSessionUser(null);
+      setAuthSource(null);
       setAccountConfigHydrationStatus("ready");
       return;
     }
 
     let cancelled = false;
 
-    const loadBetaSession = async () => {
-      setBetaSessionStatus("loading");
+    const loadSession = async () => {
+      setSessionStatus("loading");
 
       try {
-        const response = await fetch(BETA_SESSION_ENDPOINT, {
-          method: "GET",
-          credentials: "include",
-          cache: "no-store",
-        });
-        const payload = (await response.json()) as {
-          user?: unknown;
-          error?: { message?: string };
-        };
+        const startupResult = await loadStartupSession();
 
         if (cancelled) {
           return;
         }
 
-        if (!response.ok) {
-          setBetaSessionUser(null);
-          setBetaSessionStatus("unauthenticated");
+        if (startupResult.status !== "authenticated") {
+          setSessionUser(null);
+          setAuthSource(null);
+          setSessionStatus(startupResult.status);
           return;
         }
 
-        const nextUser = normalizeAuthenticatedUser(payload.user);
-        if (!nextUser || nextUser.userType !== "member") {
-          setBetaSessionUser(null);
-          setBetaSessionStatus("unauthenticated");
-          return;
-        }
-
-        setBetaSessionUser(nextUser);
-        setBetaSessionStatus("authenticated");
+        setSessionUser(startupResult.user);
+        setAuthSource(startupResult.authSource);
+        setSessionStatus("authenticated");
       } catch {
         if (cancelled) {
           return;
         }
 
-        setBetaSessionUser(null);
-        setBetaSessionStatus("unauthenticated");
+        setSessionUser(null);
+        setAuthSource(null);
+        setSessionStatus("unavailable");
       }
     };
 
-    void loadBetaSession();
+    void loadSession();
 
     return () => {
       cancelled = true;
@@ -1853,9 +1884,13 @@ function CuevionApp() {
       return;
     }
 
-    if (betaSessionStatus !== "authenticated" || !betaSessionUser) {
+    if (
+      sessionStatus !== "authenticated" ||
+      !sessionUser ||
+      !sessionAccountStorageKey
+    ) {
       setAccountConfigHydrationStatus(
-        betaSessionStatus === "loading" ? "idle" : "ready",
+        sessionStatus === "loading" ? "idle" : "ready",
       );
       return;
     }
@@ -1879,7 +1914,7 @@ function CuevionApp() {
             : {};
 
         setDisplayNameOverrides(nextDisplayNameOverrides);
-        writeAccountConfigToLocalStorage(result.config, betaSessionUser.email);
+        writeAccountConfigToLocalStorage(result.config, sessionAccountStorageKey);
 
         if (isPersistedOnboardingSession(rawOnboardingSession)) {
           const nextSession: PersistedOnboardingSession = {
@@ -1909,7 +1944,7 @@ function CuevionApp() {
       if (localSession) {
         void saveUserAccountConfig(
           buildAccountConfigFromLocalStorage(
-            betaSessionUser.email,
+            sessionAccountStorageKey,
             localSession,
             displayNameOverrides,
           ),
@@ -1925,8 +1960,9 @@ function CuevionApp() {
       cancelled = true;
     };
   }, [
-    betaSessionStatus,
-    betaSessionUser,
+    sessionStatus,
+    sessionUser,
+    sessionAccountStorageKey,
     collaborationInviteRoute,
     teamInviteRoute,
   ]);
@@ -1936,12 +1972,12 @@ function CuevionApp() {
       shouldShowLandingPage ||
       collaborationInviteRoute ||
       teamInviteRoute ||
-      betaSessionStatus === "loading"
+      sessionStatus === "loading"
     ) {
       return;
     }
 
-    if (betaSessionUser) {
+    if (sessionUser) {
       if (window.location.pathname !== "/") {
         replaceBetaAccessRoute("app");
       }
@@ -1953,8 +1989,8 @@ function CuevionApp() {
     }
   }, [
     betaAccessRoute,
-    betaSessionStatus,
-    betaSessionUser,
+    sessionStatus,
+    sessionUser,
     collaborationInviteRoute,
     teamInviteRoute,
     shouldShowLandingPage,
@@ -2059,8 +2095,9 @@ function CuevionApp() {
         return;
       }
 
-      setBetaSessionUser(nextUser);
-      setBetaSessionStatus("authenticated");
+      setSessionUser(nextUser);
+      setAuthSource("beta");
+      setSessionStatus("authenticated");
       replaceBetaAccessRoute("app");
       setBetaAccessRoute("app");
     } catch {
@@ -2116,6 +2153,7 @@ function CuevionApp() {
           authenticatedUser={
             collaborationInviteRoute.mode === "invite" ? activeCollaborationUser : null
           }
+          authSource={activeCollaborationAuthSource}
           collaborationInviteRoute={collaborationInviteRoute}
           workspaceDataMode={workspaceDataMode}
         />
@@ -2124,8 +2162,8 @@ function CuevionApp() {
   }
 
   if (
-    betaSessionStatus === "loading" ||
-    (betaSessionUser && accountConfigHydrationStatus !== "ready")
+    sessionStatus === "loading" ||
+    (sessionUser && accountConfigHydrationStatus !== "ready")
   ) {
     return (
       <div className="min-h-screen bg-[linear-gradient(180deg,#f6efe7_0%,#efe5da_100%)] px-6 py-10 text-[color:#2f2a24] dark:bg-[linear-gradient(180deg,#171411_0%,#221c17_100%)] dark:text-[color:#f1e9de]">
@@ -2143,7 +2181,24 @@ function CuevionApp() {
     );
   }
 
-  if (!betaSessionUser) {
+  if (sessionStatus === "unavailable") {
+    return (
+      <div className="min-h-screen bg-[linear-gradient(180deg,#f6efe7_0%,#efe5da_100%)] px-6 py-10 text-[color:#2f2a24] dark:bg-[linear-gradient(180deg,#171411_0%,#221c17_100%)] dark:text-[color:#f1e9de]">
+        <div className="mx-auto flex min-h-[calc(100vh-5rem)] max-w-[560px] items-center justify-center text-center">
+          <div className="space-y-3">
+            <div className="text-[0.72rem] font-medium uppercase tracking-[0.22em] text-[rgba(120,104,89,0.7)] dark:text-[rgba(214,201,189,0.64)]">
+              Cuevion
+            </div>
+            <p className="text-[0.98rem] leading-7 text-[rgba(88,80,71,0.84)] dark:text-[rgba(222,211,200,0.76)]">
+              Sign-in is temporarily unavailable. Please try again.
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (!sessionUser) {
     return (
       <BetaAccessGate
         error={betaLoginError}
@@ -2159,8 +2214,11 @@ function CuevionApp() {
         <WorkspaceShell
           userConfig={userConfig}
           onboardingState={onboardingState}
-          authenticatedUser={effectiveBetaSessionUser}
-          onAuthenticatedUserNameChange={handleBetaSessionDisplayNameChange}
+          authenticatedUser={effectiveSessionUser}
+          authSource={authSource ?? "beta"}
+          onAuthenticatedUserNameChange={
+            authSource === "beta" ? handleSessionDisplayNameChange : undefined
+          }
           workspaceDataMode={workspaceDataMode}
         />
       </Suspense>
@@ -2197,10 +2255,10 @@ function CuevionApp() {
         window.localStorage.removeItem(ONBOARDING_DRAFT_STATE_STORAGE_KEY);
         setPersistedOnboardingSession(completedSession);
         setUserConfig(nextUserConfig);
-        if (betaSessionUser?.userType === "member") {
+        if (sessionUser?.userType === "member" && sessionAccountStorageKey) {
           void saveUserAccountConfig(
             buildAccountConfigFromLocalStorage(
-              betaSessionUser.email,
+              sessionAccountStorageKey,
               completedSession,
               displayNameOverrides,
             ),
@@ -2213,23 +2271,27 @@ function CuevionApp() {
 }
 
 export default function App() {
-  const [isPreviewMode, setIsPreviewMode] = useState(() => isOnboardingPreviewRoute());
+  const [appRoute, setAppRoute] = useState<RootAppRoute>(() => resolveRootAppRoute());
 
   useEffect(() => {
     const handlePopState = () => {
-      setIsPreviewMode(isOnboardingPreviewRoute());
+      setAppRoute(resolveRootAppRoute());
     };
 
     window.addEventListener("popstate", handlePopState);
     return () => window.removeEventListener("popstate", handlePopState);
   }, []);
 
-  if (isPreviewMode) {
+  if (appRoute === "login") {
+    return <Auth0LoginView />;
+  }
+
+  if (appRoute === "preview") {
     return (
       <OnboardingPreviewRoute
         onExit={() => {
           window.history.replaceState(null, "", "/");
-          setIsPreviewMode(false);
+          setAppRoute("app");
         }}
       />
     );

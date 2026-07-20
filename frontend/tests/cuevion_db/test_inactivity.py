@@ -1,6 +1,6 @@
 """Repository-boundary tests proving the database foundation is inactive."""
 
-import hashlib
+import json
 import os
 from pathlib import Path, PurePosixPath
 import subprocess
@@ -10,6 +10,7 @@ import unittest
 _FRONTEND = Path(__file__).resolve().parents[2]
 _REPOSITORY = _FRONTEND.parent
 _PROTECTED_UNTRACKED = Path("frontend/api/inboxes/oauth_google.py")
+_ACTIVATED_AUTHORITY_MODULE = Path("frontend/api/auth/account_authority.py")
 _EXISTING_SESSION_CREDENTIALS_TEST = (
     "frontend/tests/cuevion_auth/test_session_credentials.py"
 )
@@ -41,7 +42,13 @@ class DatabaseFoundationInactivityTests(unittest.TestCase):
                 continue
             source = (_REPOSITORY / relative).read_text(encoding="utf-8")
             normalized = source.casefold()
-            self.assertNotIn("cuevion_db", normalized)
+            if relative == _ACTIVATED_AUTHORITY_MODULE:
+                self.assertIn(
+                    "cuevion_db.postgresql_current_account_repository",
+                    normalized,
+                )
+            else:
+                self.assertNotIn("cuevion_db", normalized)
             self.assertNotIn("alembic", normalized)
             self.assertNotIn("metadata.create_all", normalized)
 
@@ -56,9 +63,25 @@ class DatabaseFoundationInactivityTests(unittest.TestCase):
         ):
             self.assertTrue(all(not PurePosixPath(relative).match(pattern) for pattern in patterns))
 
-    def test_vercel_configuration_is_byte_identical_to_baseline(self):
-        digest = hashlib.sha256((_FRONTEND / "vercel.json").read_bytes()).hexdigest()
-        self.assertEqual(digest, "d8be3937a733e64b540edbb472c2a6d02c3d576cb3d20c360af2cdabdc223c09")
+    def test_vercel_configuration_has_only_reviewed_function_and_login_routing(self):
+        configuration = json.loads(
+            (_FRONTEND / "vercel.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            configuration.get("functions"),
+            {
+                "api/**/*.py": {
+                    "excludeFiles": "{venv/**,frontend/**,__pycache__/**,dist/**,node_modules/**}"
+                }
+            },
+        )
+        self.assertEqual(
+            configuration.get("rewrites"),
+            [
+                {"source": "/login", "destination": "/"},
+                {"source": "/onboarding-preview", "destination": "/"},
+            ],
+        )
 
     def test_python_and_dependency_contract_is_exact(self):
         self.assertEqual((_FRONTEND / ".python-version").read_text(encoding="utf-8"), "3.12\n")
