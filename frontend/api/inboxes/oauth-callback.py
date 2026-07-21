@@ -40,12 +40,8 @@ if str(API_DIR) not in sys.path:
     sys.path.insert(0, str(API_DIR))
 
 from oauth_token_store import persist_microsoft_token_record
-from beta_auth import (
-    normalize_auth_email,
-    parse_beta_session_token,
-    read_beta_session_cookie,
-    resolve_beta_session_secret,
-)
+from api.auth import http, runtime
+from api.auth.email_address import normalize_auth_email
 
 
 def base64url_encode(value: bytes) -> str:
@@ -503,12 +499,18 @@ def persist_google_token_record(
     }, None
 
 
-def _get_authenticated_user(headers) -> dict | None:
-    if not resolve_beta_session_secret():
-        return None
-
-    session_token = read_beta_session_cookie(headers)
-    return parse_beta_session_token(session_token or "")
+def _resolve_authenticated_member_request(request: BaseHTTPRequestHandler):
+    try:
+        raw_headers = http.snapshot_request_headers(request)
+        resolution = runtime.resolve_authenticated_member(raw_headers)
+        if (
+            resolution.outcome is runtime.MemberResolutionOutcome.AUTHENTICATED
+            and resolution.member is not None
+        ):
+            return resolution.member, resolution.set_cookies
+        return None, resolution.set_cookies
+    except Exception:
+        return None, ()
 
 
 def _build_user_config_key(email: str) -> str:
@@ -735,24 +737,22 @@ def _verify_saved_gmail_mailbox(
 
 
 def _upsert_gmail_managed_inbox_in_user_config(
-    headers,
+    member: runtime.AuthenticatedMemberContext,
     *,
     email: str,
     display_name: str | None,
     owner_email: str,
     message: str,
 ) -> dict | None:
-    session_user = _get_authenticated_user(headers)
-    durable_config = _resolve_durable_store_config()
     if (
-        not session_user
-        or normalize_auth_email(session_user["email"]) != normalize_auth_email(owner_email)
+        normalize_auth_email(member.email) != normalize_auth_email(owner_email)
     ):
         return {"code": "unauthorized", "message": "OAuth session ownership could not be verified."}
+    durable_config = _resolve_durable_store_config()
     if not durable_config:
         return {"code": "user_config_store_unavailable", "message": "User config storage is unavailable."}
 
-    store_key = _build_user_config_key(session_user["email"])
+    store_key = _build_user_config_key(member.email)
     existing_record, existing_error = _read_user_config_durable_record(
         durable_config,
         store_key,
@@ -768,7 +768,7 @@ def _upsert_gmail_managed_inbox_in_user_config(
 
     next_record = {
         "v": USER_CONFIG_SCHEMA_VERSION,
-        "email": normalize_auth_email(session_user["email"]),
+        "email": normalize_auth_email(member.email),
         "updatedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "onboardingSession": {},
         "managedInboxes": [],
@@ -782,7 +782,7 @@ def _upsert_gmail_managed_inbox_in_user_config(
         **existing_config,
     }
     next_record["v"] = USER_CONFIG_SCHEMA_VERSION
-    next_record["email"] = normalize_auth_email(session_user["email"])
+    next_record["email"] = normalize_auth_email(member.email)
     next_record["updatedAt"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     next_record["managedInboxes"] = _upsert_gmail_managed_inbox_record(
         existing_managed_inboxes,
@@ -1090,7 +1090,12 @@ class handler(BaseHTTPRequestHandler):
         if write_body:
             self.wfile.write(response_body)
 
-    def _send_callback_page(self, payload: dict):
+    def _send_callback_page(
+        self,
+        payload: dict,
+        *,
+        set_cookies: tuple[str, ...] = (),
+    ):
         page = _render_callback_bridge_page(
             _build_app_redirect_url(self.headers),
             payload,
@@ -1098,6 +1103,8 @@ class handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
+        for cookie in set_cookies:
+            self.send_header("Set-Cookie", cookie)
         self.send_header("Content-Length", str(len(page)))
         self.end_headers()
         self.wfile.write(page)
@@ -1107,6 +1114,20 @@ class handler(BaseHTTPRequestHandler):
         params = parse_qs(parsed_url.query)
         oauth_error = params.get("error", [None])[0]
         state = params.get("state", [None])[0]
+        member, auth_set_cookies = _resolve_authenticated_member_request(self)
+        if member is None:
+            self._send_callback_page(
+                _build_callback_payload(
+                    provider="google",
+                    email="",
+                    connection_status="connection_failed",
+                    message="Mailbox authentication session could not be verified. Please try again.",
+                    connected=False,
+                ),
+                set_cookies=auth_set_cookies,
+            )
+            return
+
         state_payload, state_error, state_signing_secret = _verify_signed_state_with_secrets(
             state or ""
         )
@@ -1137,13 +1158,11 @@ class handler(BaseHTTPRequestHandler):
             )
             return
 
-        session_user = _get_authenticated_user(self.headers)
         if (
-            not session_user
-            or not state_signing_secret
+            not state_signing_secret
             or not verify_owner_binding(
                 state_payload,
-                session_user["email"],
+                member.email,
                 state_signing_secret,
             )
         ):
@@ -1157,7 +1176,7 @@ class handler(BaseHTTPRequestHandler):
                 )
             )
             return
-        state_owner_email = normalize_auth_email(session_user["email"])
+        state_owner_email = normalize_auth_email(member.email)
 
         if oauth_error:
             self._send_callback_page(
@@ -1342,7 +1361,7 @@ class handler(BaseHTTPRequestHandler):
         )
         if provider == "google":
             user_config_error = _upsert_gmail_managed_inbox_in_user_config(
-                self.headers,
+                member,
                 email=mailbox_email,
                 display_name=display_name,
                 owner_email=state_owner_email,

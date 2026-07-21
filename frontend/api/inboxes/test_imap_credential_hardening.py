@@ -573,8 +573,16 @@ class CredentialsRouteTests(unittest.TestCase):
         handler.path = "/api/inboxes/credentials?mailboxIds=demo"
         with patch.object(
             credentials_route,
-            "_get_authenticated_user",
-            return_value={"email": "owner@example.com"},
+            "resolve_authenticated_user",
+            return_value=(
+                {
+                    "email": "owner@example.com",
+                    "name": "Owner",
+                    "userType": "member",
+                    "authSource": "auth0",
+                },
+                None,
+            ),
         ), patch.object(
             credentials_route,
             "resolve_owned_managed_inbox",

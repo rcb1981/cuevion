@@ -5,16 +5,13 @@ import {
   AUTH0_LOGIN_ENDPOINT,
   AUTH0_LOGOUT_ENDPOINT,
   AUTH0_SESSION_ENDPOINT,
-  BETA_LOGOUT_ENDPOINT,
-  BETA_SESSION_ENDPOINT,
-  getLogoutEndpoint,
   getSessionAccountStorageKey,
   getSessionViewerStorageKey,
   hasAuthCallbackError,
   isAllowedAuth0LogoutUrl,
   isAuth0LoginPath,
   loadStartupSession,
-  logoutSession,
+  logoutAuth0Session,
 } from "./authApi";
 
 type FakeResponse = {
@@ -55,6 +52,20 @@ function sourceBetween(source: string, startMarker: string, endMarker: string) {
   return source.slice(start, end);
 }
 
+function enclosingEffect(source: string, callMarker: string) {
+  const callIndex = source.lastIndexOf(callMarker);
+  assert.notEqual(callIndex, -1, `Missing effect call marker: ${callMarker}`);
+  const start = source.lastIndexOf("  useEffect(() => {", callIndex);
+  assert.notEqual(start, -1, `Missing effect start for: ${callMarker}`);
+  const endCandidates = [
+    source.indexOf("\n  useEffect(", callIndex),
+    source.indexOf("\n  const handle", callIndex),
+  ].filter((candidate) => candidate !== -1);
+  assert.ok(endCandidates.length > 0, `Missing effect end for: ${callMarker}`);
+  const end = Math.min(...endCandidates);
+  return source.slice(start, end);
+}
+
 assert.equal(AUTH0_LOGIN_ENDPOINT, "/api/auth/login");
 assert.equal(isAuth0LoginPath("/login"), true);
 assert.equal(isAuth0LoginPath("/login/"), true);
@@ -64,8 +75,6 @@ assert.equal(hasAuthCallbackError("?error=anything-sensitive"), true);
 assert.equal(hasAuthCallbackError("?auth_error=callback_failed"), true);
 assert.equal(hasAuthCallbackError("?next=%2F"), false);
 
-assert.equal(getLogoutEndpoint("auth0"), AUTH0_LOGOUT_ENDPOINT);
-assert.equal(getLogoutEndpoint("beta"), BETA_LOGOUT_ENDPOINT);
 assert.equal(
   getSessionAccountStorageKey("auth0", {
     email: "member@example.com",
@@ -74,11 +83,11 @@ assert.equal(
   "workspace-1",
 );
 assert.equal(
-  getSessionAccountStorageKey("beta", {
-    email: "legacy@example.com",
+  getSessionAccountStorageKey("collaboration", {
+    email: " Collaborator@Example.com ",
     workspaceId: "workspace-ignored",
   }),
-  "legacy@example.com",
+  "collaborator@example.com",
 );
 assert.equal(
   getSessionAccountStorageKey("auth0", { email: "member@example.com" }),
@@ -92,11 +101,11 @@ assert.equal(
   "user-1",
 );
 assert.equal(
-  getSessionViewerStorageKey("beta", {
-    email: "legacy@example.com",
+  getSessionViewerStorageKey("collaboration", {
+    email: " Collaborator@Example.com ",
     userId: "user-ignored",
   }),
-  "legacy@example.com",
+  "collaborator@example.com",
 );
 assert.equal(
   JSON.stringify({
@@ -162,6 +171,7 @@ const startupRegion = sourceBetween(
   "void loadSession();",
 );
 assert.equal(startupRegion.includes("loadStartupSession"), true);
+assert.equal((startupRegion.match(/loadStartupSession\(\)/g) ?? []).length, 1);
 assert.equal(startupRegion.includes("setSessionUser(startupResult.user)"), true);
 assert.equal(startupRegion.includes("localStorage"), false);
 assert.equal(startupRegion.includes("setAuthenticatedUser"), false);
@@ -173,20 +183,105 @@ const accountHydrationRegion = sourceBetween(
 );
 assert.equal(accountHydrationRegion.includes("sessionAccountStorageKey"), true);
 assert.equal(accountHydrationRegion.includes("sessionUser.email"), false);
-assert.equal(appSource.includes("const activeCollaborationAuthSource"), true);
-assert.equal(appSource.includes("authSource={activeCollaborationAuthSource}"), true);
+assert.equal(appSource.includes("const activeCollaborationUser"), true);
+assert.equal(appSource.includes('authenticationContext="collaboration"'), true);
+assert.equal(appSource.includes('authenticationContext="auth0"'), true);
+assert.equal(appSource.includes("normalizeCollaborationUser"), true);
+assert.equal(appSource.includes("memberSessionProbeRef.current ??= loadStartupSession()"), true);
+assert.equal(appSource.includes("if (!sessionUser) {\n    return <Auth0LoginView />;"), true);
+
+const collaborationNormalizerRegion = sourceBetween(
+  appSource,
+  "function normalizeCollaborationUser",
+  "function parseCollaborationInviteRoute",
+);
+assert.equal(
+  collaborationNormalizerRegion.includes(
+    'nextValue.userType !== "member" && nextValue.userType !== "guest"',
+  ),
+  true,
+);
+assert.equal(
+  collaborationNormalizerRegion.includes("userType: nextValue.userType"),
+  true,
+);
+
+const authApiSource = fs.readFileSync(path.resolve(__dirname, "./authApi.ts"), "utf8");
+const removedLegacyRoutePrefix = ["/api", "beta"].join("/") + "/";
+const removedLegacyGateName = ["Beta", "AccessGate"].join("");
+const removedLegacySource = ["\"", "beta", "\""].join("");
+assert.equal(authApiSource.includes(removedLegacyRoutePrefix), false);
+assert.equal(appSource.includes(removedLegacyRoutePrefix), false);
+assert.equal(appSource.includes(removedLegacyGateName), false);
+assert.equal(appSource.includes(`authSource: ${removedLegacySource}`), false);
 
 const workspaceSource = fs.readFileSync(
   path.resolve(__dirname, "../components/workspace/WorkspaceShell.tsx"),
   "utf8",
+);
+assert.equal(
+  workspaceSource.includes(
+    'authenticationContext === "auth0" && authenticatedUser?.userType === "member"',
+  ),
+  true,
+);
+for (const memberApiCall of [
+  "getMailboxCredentialStatuses(mailboxIds)",
+  "fetchParticipantCollaborationThreads({})",
+  "saveUserAccountConfig(nextAccountConfig)",
+]) {
+  assert.equal(
+    enclosingEffect(workspaceSource, memberApiCall).includes(
+      "hasAuthenticatedMemberAuthority",
+    ),
+    true,
+    `${memberApiCall} must require explicit Auth0 member authority`,
+  );
+}
+const mailboxRefreshRegion = sourceBetween(
+  workspaceSource,
+  "const refreshMailboxById = async",
+  "const handleSyncActiveMailbox = async",
+);
+assert.ok(
+  mailboxRefreshRegion.indexOf("if (!hasAuthenticatedMemberAuthority)") <
+    mailboxRefreshRegion.indexOf("fetchGmailInbox("),
+  "Mailbox provider I/O must be behind explicit Auth0 member authority",
+);
+assert.ok(
+  mailboxRefreshRegion.indexOf("if (!hasAuthenticatedMemberAuthority)") <
+    mailboxRefreshRegion.indexOf("connectInboxWithImap("),
+  "IMAP provider I/O must be behind explicit Auth0 member authority",
+);
+assert.ok(
+  (workspaceSource.match(/!hasAuthenticatedMemberAuthority \|\| !activeMailbox/g) ?? [])
+    .length >= 2,
+  "Immediate and interval mailbox refresh effects must require Auth0 member authority",
+);
+const startupSyncRegion = enclosingEffect(
+  workspaceSource,
+  "refreshMailboxById(mailboxId, { startup: true })",
+);
+assert.equal(startupSyncRegion.includes("!hasAuthenticatedMemberAuthority"), true);
+assert.equal(
+  workspaceSource.includes(
+    "shouldPollTeamMembers={Boolean(\n                    hasAuthenticatedMemberAuthority &&",
+  ),
+  true,
 );
 const logoutRegion = sourceBetween(
   workspaceSource,
   "const handleConfirmLogout = async () =>",
   "if (collaborationInviteRoute)",
 );
-assert.equal(logoutRegion.includes("logoutSession(authSource)"), true);
+assert.equal(logoutRegion.includes('authenticationContext === "collaboration"'), true);
+assert.equal(logoutRegion.includes("logoutAuth0Session()"), true);
 assert.equal(logoutRegion.includes("window.location.assign(result.logoutUrl)"), true);
+assert.ok(
+  logoutRegion.indexOf('authenticationContext === "collaboration"') <
+    logoutRegion.indexOf("logoutAuth0Session()"),
+  "Collaboration logout must exit before the Auth0 member logout request",
+);
 assert.equal(workspaceSource.includes("getSessionViewerStorageKey("), true);
 assert.equal(workspaceSource.includes("workspacePersistenceScope"), true);
 assert.equal(
@@ -248,8 +343,8 @@ async function runAsyncTests() {
           payload: {
             authenticated: true,
             user: {
-              email: "legacy@example.com",
-              name: "Legacy Member",
+              email: "must-not-be-used@example.com",
+              name: "Must Not Be Used",
               userType: "member",
             },
           },
@@ -259,12 +354,25 @@ async function runAsyncTests() {
     );
 
     const result = await loadStartupSession(fetchImplementation);
-    assert.equal(result.status, "authenticated");
-    assert.equal(result.authSource, "beta");
-    assert.deepEqual(calls.map((call) => call.url), [
-      AUTH0_SESSION_ENDPOINT,
-      BETA_SESSION_ENDPOINT,
-    ]);
+    assert.deepEqual(result, {
+      status: "unauthenticated",
+      authSource: null,
+      user: null,
+    });
+    assert.deepEqual(calls.map((call) => call.url), [AUTH0_SESSION_ENDPOINT]);
+  }
+
+  {
+    const calls: FetchCall[] = [];
+    const result = await loadStartupSession(
+      createFetch([{ status: 200, payload: { authenticated: false } }], calls),
+    );
+    assert.deepEqual(result, {
+      status: "unauthenticated",
+      authSource: null,
+      user: null,
+    });
+    assert.deepEqual(calls.map((call) => call.url), [AUTH0_SESSION_ENDPOINT]);
   }
 
   {
@@ -291,14 +399,45 @@ async function runAsyncTests() {
     );
 
     const result = await loadStartupSession(fetchImplementation);
-    assert.equal(result.status, "unavailable");
+    assert.deepEqual(result, {
+      status: "unavailable",
+      authSource: null,
+      user: null,
+    });
     assert.deepEqual(calls.map((call) => call.url), [AUTH0_SESSION_ENDPOINT]);
   }
 
   {
     const calls: FetchCall[] = [];
-    const result = await logoutSession(
-      "auth0",
+    const result = await loadStartupSession(
+      createFetch([{ status: 200, jsonError: true }], calls),
+    );
+    assert.deepEqual(result, {
+      status: "unavailable",
+      authSource: null,
+      user: null,
+    });
+    assert.deepEqual(calls.map((call) => call.url), [AUTH0_SESSION_ENDPOINT]);
+  }
+
+  {
+    const calls: FetchCall[] = [];
+    const fetchImplementation = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(input), init });
+      throw new Error("network unavailable");
+    }) as typeof fetch;
+    const result = await loadStartupSession(fetchImplementation);
+    assert.deepEqual(result, {
+      status: "unavailable",
+      authSource: null,
+      user: null,
+    });
+    assert.deepEqual(calls.map((call) => call.url), [AUTH0_SESSION_ENDPOINT]);
+  }
+
+  {
+    const calls: FetchCall[] = [];
+    const result = await logoutAuth0Session(
       createFetch([{ status: 200, payload: { logoutUrl: allowedLogoutUrl } }], calls),
     );
     assert.deepEqual(result, { ok: true, logoutUrl: allowedLogoutUrl });
@@ -308,12 +447,11 @@ async function runAsyncTests() {
 
   {
     const calls: FetchCall[] = [];
-    const result = await logoutSession(
-      "beta",
-      createFetch([{ status: 200, payload: { ok: true } }], calls),
+    const result = await logoutAuth0Session(
+      createFetch([{ status: 200, payload: { logoutUrl: null } }], calls),
     );
-    assert.deepEqual(result, { ok: true, logoutUrl: null });
-    assert.equal(calls[0]?.url, BETA_LOGOUT_ENDPOINT);
+    assert.deepEqual(result, { ok: false, logoutUrl: null });
+    assert.deepEqual(calls.map((call) => call.url), [AUTH0_LOGOUT_ENDPOINT]);
   }
 
   console.log("authApi tests passed");

@@ -14,7 +14,13 @@ if str(CURRENT_DIR) not in sys.path:
 if str(API_DIR) not in sys.path:
     sys.path.insert(0, str(API_DIR))
 
-from beta_auth import normalize_auth_email, parse_beta_session_token, read_beta_session_cookie  # noqa: E402
+from api.auth.email_address import normalize_auth_email  # noqa: E402
+from api.auth.http import HttpBoundaryError, snapshot_request_headers  # noqa: E402
+from api.auth.runtime import (  # noqa: E402
+    AuthenticatedMemberContext,
+    MemberResolutionOutcome,
+    resolve_authenticated_member,
+)
 from models import (
     COLLABORATION_THREAD_SCHEMA_VERSION,
     normalize_collaboration_mention_record,
@@ -83,12 +89,20 @@ def _send_unsupported_method_response(
         handler.wfile.write(_UNSUPPORTED_METHOD_RESPONSE_BODY)
 
 
-def _send_json(handler: BaseHTTPRequestHandler, status_code: int, payload: dict):
+def _send_json(
+    handler: BaseHTTPRequestHandler,
+    status_code: int,
+    payload: dict,
+    *,
+    set_cookies: tuple[str, ...] = (),
+):
     response_body = json.dumps(payload).encode("utf-8")
     handler.send_response(status_code)
     handler.send_header("Content-Type", "application/json")
     handler.send_header("Cache-Control", "no-store")
     handler.send_header("Content-Length", str(len(response_body)))
+    for cookie in set_cookies:
+        handler.send_header("Set-Cookie", cookie)
     handler.end_headers()
     handler.wfile.write(response_body)
 
@@ -126,9 +140,64 @@ def _read_json_body(handler: BaseHTTPRequestHandler) -> tuple[dict | None, dict 
     return payload, None
 
 
-def _get_authenticated_user(headers) -> dict | None:
-    session_token = read_beta_session_cookie(headers)
-    return parse_beta_session_token(session_token or "")
+def _require_authenticated_member(
+    handler: BaseHTTPRequestHandler,
+) -> AuthenticatedMemberContext | None:
+    try:
+        resolution = resolve_authenticated_member(snapshot_request_headers(handler))
+    except HttpBoundaryError:
+        _send_json(
+            handler,
+            401,
+            _build_error("unauthorized", "Authentication is required."),
+        )
+        return None
+    except Exception:
+        _send_json(
+            handler,
+            503,
+            _build_error(
+                "authentication_unavailable",
+                "Authentication is temporarily unavailable.",
+            ),
+        )
+        return None
+
+    if (
+        resolution.outcome is MemberResolutionOutcome.AUTHENTICATED
+        and resolution.member is not None
+    ):
+        return resolution.member
+
+    status_code = (
+        503
+        if resolution.outcome is MemberResolutionOutcome.UNAVAILABLE
+        else 401
+    )
+    error_code = (
+        "authentication_unavailable"
+        if status_code == 503
+        else "unauthorized"
+    )
+    message = (
+        "Authentication is temporarily unavailable."
+        if status_code == 503
+        else "Authentication is required."
+    )
+    _send_json(
+        handler,
+        status_code,
+        _build_error(error_code, message),
+        set_cookies=resolution.set_cookies,
+    )
+    return None
+
+
+def _workspace_is_authorized(
+    authenticated_member: AuthenticatedMemberContext,
+    workspace_id: str,
+) -> bool:
+    return workspace_id == authenticated_member.workspace_id
 
 
 def _normalize_expected_updated_at(value):
@@ -247,7 +316,11 @@ def _resolve_thread_for_lookup_record(workspace_id: str, lookup_record: dict) ->
     return None
 
 
-def _handle_get_many(handler: BaseHTTPRequestHandler, payload: dict):
+def _handle_get_many(
+    handler: BaseHTTPRequestHandler,
+    payload: dict,
+    authenticated_member: AuthenticatedMemberContext,
+):
     workspace_id = str(payload.get("workspaceId") or "").strip().lower()
     mailbox_id = payload.get("mailboxId")
     message_ids = payload.get("messageIds")
@@ -255,6 +328,13 @@ def _handle_get_many(handler: BaseHTTPRequestHandler, payload: dict):
 
     if not workspace_id:
         _send_json(handler, 400, _build_error("invalid_request", "workspaceId is required.", {"threadsByMessageId": {}}))
+        return
+    if not _workspace_is_authorized(authenticated_member, workspace_id):
+        _send_json(
+            handler,
+            403,
+            _build_error("forbidden", "Workspace access is forbidden.", {"threadsByMessageId": {}}),
+        )
         return
 
     if mailbox_id is not None and not isinstance(mailbox_id, str):
@@ -297,19 +377,22 @@ def _handle_get_many(handler: BaseHTTPRequestHandler, payload: dict):
     _send_json(handler, 200, {"ok": True, "threadsByMessageId": threads_by_message_id})
 
 
-def _handle_get_participant(handler: BaseHTTPRequestHandler, payload: dict):
-    session_user = _get_authenticated_user(handler.headers)
-    if not session_user:
-        _send_json(
-            handler,
-            401,
-            _build_error("unauthorized", "A valid beta session is required.", {"threads": []}),
-        )
-        return
-
-    authenticated_email = normalize_auth_email(session_user["email"])
+def _handle_get_participant(
+    handler: BaseHTTPRequestHandler,
+    payload: dict,
+    authenticated_member: AuthenticatedMemberContext,
+):
+    authenticated_email = authenticated_member.email
     requested_participant_email = str(payload.get("participantEmail") or "").strip()
     workspace_id = str(payload.get("workspaceId") or "").strip().lower()
+
+    if workspace_id and not _workspace_is_authorized(authenticated_member, workspace_id):
+        _send_json(
+            handler,
+            403,
+            _build_error("forbidden", "Workspace access is forbidden.", {"threads": []}),
+        )
+        return
 
     if (
         requested_participant_email
@@ -320,7 +403,7 @@ def _handle_get_participant(handler: BaseHTTPRequestHandler, payload: dict):
             403,
             _build_error(
                 "forbidden",
-                "participantEmail must match the authenticated beta session.",
+                "participantEmail must match the authenticated member.",
                 {"threads": []},
             ),
         )
@@ -328,7 +411,7 @@ def _handle_get_participant(handler: BaseHTTPRequestHandler, payload: dict):
 
     threads, error = get_participant_threads(
         authenticated_email,
-        workspace_id=workspace_id or None,
+        workspace_id=authenticated_member.workspace_id,
     )
     if error:
         _send_json(
@@ -345,7 +428,11 @@ def _handle_get_participant(handler: BaseHTTPRequestHandler, payload: dict):
     _send_json(handler, 200, {"ok": True, "threads": threads})
 
 
-def _handle_create(handler: BaseHTTPRequestHandler, payload: dict):
+def _handle_create(
+    handler: BaseHTTPRequestHandler,
+    payload: dict,
+    authenticated_member: AuthenticatedMemberContext,
+):
     workspace_id = str(payload.get("workspaceId") or "").strip().lower()
     mailbox_id = str(payload.get("mailboxId") or "").strip()
     source_message = normalize_source_message_snapshot(payload.get("sourceMessage"))
@@ -358,6 +445,9 @@ def _handle_create(handler: BaseHTTPRequestHandler, payload: dict):
             400,
             _build_error("invalid_request", "workspaceId, mailboxId, sourceMessage, and collaboration are required."),
         )
+        return
+    if not _workspace_is_authorized(authenticated_member, workspace_id):
+        _send_json(handler, 403, _build_error("forbidden", "Workspace access is forbidden."))
         return
 
     thread_record = normalize_collaboration_thread_record(
@@ -394,7 +484,11 @@ def _handle_create(handler: BaseHTTPRequestHandler, payload: dict):
     _send_json(handler, 200, {"ok": True, "thread": saved_thread})
 
 
-def _handle_action(handler: BaseHTTPRequestHandler, payload: dict):
+def _handle_action(
+    handler: BaseHTTPRequestHandler,
+    payload: dict,
+    authenticated_member: AuthenticatedMemberContext,
+):
     workspace_id = str(payload.get("workspaceId") or "").strip().lower()
     message_id = str(payload.get("messageId") or "").strip()
     expected_updated_at = _normalize_expected_updated_at(payload.get("expectedUpdatedAt"))
@@ -406,6 +500,9 @@ def _handle_action(handler: BaseHTTPRequestHandler, payload: dict):
             400,
             _build_error("invalid_request", "workspaceId, messageId, and action are required."),
         )
+        return
+    if not _workspace_is_authorized(authenticated_member, workspace_id):
+        _send_json(handler, 403, _build_error("forbidden", "Workspace access is forbidden."))
         return
 
     current_thread = get_thread(workspace_id, message_id)
@@ -429,16 +526,14 @@ def _handle_action(handler: BaseHTTPRequestHandler, payload: dict):
     next_collaboration["updatedAt"] = next_timestamp
 
     if action_type == "reply":
-        author_id = str(action.get("authorId") or "").strip()
-        author_name = str(action.get("authorName") or "").strip()
         text = str(action.get("text") or "").strip()
         visibility = str(action.get("visibility") or "").strip()
 
-        if not author_id or not author_name or not text or visibility not in {"internal", "shared"}:
+        if not text or visibility not in {"internal", "shared"}:
             _send_json(
                 handler,
                 400,
-                _build_error("invalid_request", "Reply action requires authorId, authorName, text, and visibility."),
+                _build_error("invalid_request", "Reply action requires text and visibility."),
             )
             return
 
@@ -452,8 +547,8 @@ def _handle_action(handler: BaseHTTPRequestHandler, payload: dict):
             *current_thread["collaboration"]["messages"],
             {
                 "id": f"{message_id}-collaboration-reply-{next_timestamp}",
-                "authorId": author_id,
-                "authorName": author_name,
+                "authorId": authenticated_member.user_id,
+                "authorName": authenticated_member.name,
                 "text": text,
                 "timestamp": next_timestamp,
                 "visibility": visibility,
@@ -472,21 +567,10 @@ def _handle_action(handler: BaseHTTPRequestHandler, payload: dict):
             return
         next_collaboration["participants"] = normalized_participants
     elif action_type == "resolve":
-        resolved_by_user_id = str(action.get("resolvedByUserId") or "").strip()
-        resolved_by_user_name = str(action.get("resolvedByUserName") or "").strip()
-
-        if not resolved_by_user_id or not resolved_by_user_name:
-            _send_json(
-                handler,
-                400,
-                _build_error("invalid_request", "resolve requires resolvedByUserId and resolvedByUserName."),
-            )
-            return
-
         next_collaboration["state"] = "resolved"
         next_collaboration["resolvedAt"] = next_timestamp
-        next_collaboration["resolvedByUserId"] = resolved_by_user_id
-        next_collaboration["resolvedByUserName"] = resolved_by_user_name
+        next_collaboration["resolvedByUserId"] = authenticated_member.user_id
+        next_collaboration["resolvedByUserName"] = authenticated_member.name
         next_thread["isShared"] = False
     elif action_type == "reopen":
         next_collaboration["state"] = "needs_review"
@@ -534,6 +618,10 @@ class handler(BaseHTTPRequestHandler):
         if _send_disabled_response(self):
             return
 
+        authenticated_member = _require_authenticated_member(self)
+        if authenticated_member is None:
+            return
+
         operation = _get_operation(self)
         payload, error = _read_json_body(self)
         if error:
@@ -544,19 +632,19 @@ class handler(BaseHTTPRequestHandler):
             return
 
         if operation == "get-many":
-            _handle_get_many(self, payload or {})
+            _handle_get_many(self, payload or {}, authenticated_member)
             return
 
         if operation == "get-participant":
-            _handle_get_participant(self, payload or {})
+            _handle_get_participant(self, payload or {}, authenticated_member)
             return
 
         if operation == "create":
-            _handle_create(self, payload or {})
+            _handle_create(self, payload or {}, authenticated_member)
             return
 
         if operation == "action":
-            _handle_action(self, payload or {})
+            _handle_action(self, payload or {}, authenticated_member)
             return
 
         _send_json(

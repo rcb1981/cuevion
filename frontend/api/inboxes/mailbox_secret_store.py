@@ -44,7 +44,7 @@ else:
     from cryptography.exceptions import InvalidTag
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-    from ..beta_auth import normalize_auth_email
+    from ..auth.email_address import normalize_auth_email
 
     MAILBOX_SECRET_SCHEMA_VERSION = 1
     MAILBOX_SECRET_ENCRYPTED_SCHEMA_VERSION = 2

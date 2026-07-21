@@ -1,13 +1,11 @@
 export const AUTH0_LOGIN_ENDPOINT = "/api/auth/login";
 export const AUTH0_SESSION_ENDPOINT = "/api/auth/session";
 export const AUTH0_LOGOUT_ENDPOINT = "/api/auth/logout";
-export const BETA_SESSION_ENDPOINT = "/api/beta/session";
-export const BETA_LOGOUT_ENDPOINT = "/api/beta/logout";
 
 const CANONICAL_LOGIN_URL = "https://app.cuevion.com/login";
 const AUTH0_LOGOUT_HOSTNAME = "cuevion-dev.eu.auth0.com";
 
-export type AuthSource = "auth0" | "beta";
+export type AuthenticationContext = "auth0" | "collaboration";
 
 export type CuevionSessionUser = {
   email: string;
@@ -20,7 +18,7 @@ export type CuevionSessionUser = {
 export type StartupSessionResult =
   | {
       status: "authenticated";
-      authSource: AuthSource;
+      authSource: "auth0";
       user: CuevionSessionUser;
     }
   | {
@@ -43,10 +41,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
-function normalizeMember(
-  value: unknown,
-  options: { requireAccountIds: boolean },
-): CuevionSessionUser | null {
+function normalizeMember(value: unknown): CuevionSessionUser | null {
   if (!isRecord(value)) {
     return null;
   }
@@ -61,7 +56,8 @@ function normalizeMember(
     !email ||
     !name ||
     value.userType !== "member" ||
-    (options.requireAccountIds && (!userId || !workspaceId))
+    !userId ||
+    !workspaceId
   ) {
     return null;
   }
@@ -120,39 +116,10 @@ async function probeAuth0Session(
     return { status: "unavailable", user: null };
   }
 
-  const user = normalizeMember(payload, { requireAccountIds: true });
+  const user = normalizeMember(payload);
   return user
     ? { status: "authenticated", user }
     : { status: "unavailable", user: null };
-}
-
-async function probeBetaSession(
-  fetchImplementation: FetchImplementation,
-): Promise<SessionProbeResult> {
-  try {
-    const response = await fetchImplementation(BETA_SESSION_ENDPOINT, {
-      method: "GET",
-      credentials: "include",
-      cache: "no-store",
-      headers: { Accept: "application/json" },
-    });
-
-    if (!response.ok) {
-      return { status: "unauthenticated", user: null };
-    }
-
-    const payload = await readJson(response);
-    const user = isRecord(payload)
-      ? normalizeMember(payload.user, { requireAccountIds: false })
-      : null;
-
-    return user
-      ? { status: "authenticated", user }
-      : { status: "unauthenticated", user: null };
-  } catch {
-    // Preserve the legacy gate behavior when its session check cannot complete.
-    return { status: "unauthenticated", user: null };
-  }
 }
 
 export async function loadStartupSession(
@@ -168,20 +135,7 @@ export async function loadStartupSession(
     };
   }
 
-  if (auth0Session.status === "unavailable") {
-    return { status: "unavailable", authSource: null, user: null };
-  }
-
-  const betaSession = await probeBetaSession(fetchImplementation);
-  if (betaSession.status === "authenticated") {
-    return {
-      status: "authenticated",
-      authSource: "beta",
-      user: betaSession.user,
-    };
-  }
-
-  return { status: "unauthenticated", authSource: null, user: null };
+  return { status: auth0Session.status, authSource: null, user: null };
 }
 
 export function isAuth0LoginPath(pathname: string) {
@@ -194,30 +148,30 @@ export function hasAuthCallbackError(search: string) {
   return params.has("error") || params.has("auth_error");
 }
 
-export function getLogoutEndpoint(authSource: AuthSource) {
-  return authSource === "auth0" ? AUTH0_LOGOUT_ENDPOINT : BETA_LOGOUT_ENDPOINT;
-}
-
 export function getSessionAccountStorageKey(
-  authSource: AuthSource | null,
+  authenticationContext: AuthenticationContext | null,
   user: Pick<CuevionSessionUser, "email" | "workspaceId"> | null,
 ) {
-  if (!authSource || !user) {
+  if (!authenticationContext || !user) {
     return "";
   }
 
-  return authSource === "auth0" ? user.workspaceId?.trim() ?? "" : user.email;
+  return authenticationContext === "auth0"
+    ? user.workspaceId?.trim() ?? ""
+    : user.email.trim().toLowerCase();
 }
 
 export function getSessionViewerStorageKey(
-  authSource: AuthSource | null,
+  authenticationContext: AuthenticationContext | null,
   user: Pick<CuevionSessionUser, "email" | "userId"> | null,
 ) {
-  if (!authSource || !user) {
+  if (!authenticationContext || !user) {
     return "";
   }
 
-  return authSource === "auth0" ? user.userId?.trim() ?? "" : user.email;
+  return authenticationContext === "auth0"
+    ? user.userId?.trim() ?? ""
+    : user.email.trim().toLowerCase();
 }
 
 export function isAllowedAuth0LogoutUrl(value: unknown): value is string {
@@ -251,12 +205,11 @@ export function isAllowedAuth0LogoutUrl(value: unknown): value is string {
   }
 }
 
-export async function logoutSession(
-  authSource: AuthSource,
+export async function logoutAuth0Session(
   fetchImplementation: FetchImplementation = fetch,
 ): Promise<LogoutResult> {
   try {
-    const response = await fetchImplementation(getLogoutEndpoint(authSource), {
+    const response = await fetchImplementation(AUTH0_LOGOUT_ENDPOINT, {
       method: "POST",
       credentials: "include",
       cache: "no-store",
@@ -265,10 +218,6 @@ export async function logoutSession(
 
     if (!response.ok) {
       return { ok: false, logoutUrl: null };
-    }
-
-    if (authSource === "beta") {
-      return { ok: true, logoutUrl: null };
     }
 
     const payload = await readJson(response);

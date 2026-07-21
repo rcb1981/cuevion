@@ -388,6 +388,7 @@ class SessionContractImportTests(unittest.TestCase):
                 "account_authority.py",
                 "auth0_flow.py",
                 "callback.py",
+                "email_address.py",
                 "http.py",
                 "login.py",
                 "logout.py",

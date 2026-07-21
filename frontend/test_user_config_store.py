@@ -15,8 +15,9 @@ if str(FRONTEND_DIR) not in sys.path:
 if str(API_DIR) not in sys.path:
     sys.path.insert(0, str(API_DIR))
 
-import beta_auth
 import user_config_store
+from api.auth import http as auth_http
+from api.auth import runtime as auth_runtime
 
 
 class FakeResponse:
@@ -33,10 +34,6 @@ class FakeResponse:
         return False
 
 
-def cookie_headers(token: str | None = None):
-    return {"cookie": f"cuevion_beta_session={token}" if token else ""}
-
-
 def managed_inbox(mailbox_id="mailbox-a", **overrides):
     return {
         "id": mailbox_id,
@@ -50,58 +47,87 @@ def managed_inbox(mailbox_id="mailbox-a", **overrides):
 
 
 class AuthenticationTests(unittest.TestCase):
-    def test_missing_cookie_and_missing_secret_are_distinct(self):
-        with patch.dict(os.environ, {"CUEVION_BETA_SESSION_SECRET": "secret"}, clear=False):
+    member = auth_runtime.AuthenticatedMemberContext(
+        user_id="usr_test",
+        email="user@example.com",
+        name="User Name",
+        workspace_id="wsp_test",
+        membership_role="member",
+    )
+
+    def test_missing_session_and_authentication_unavailability_are_distinct(self):
+        missing = auth_runtime.AuthenticatedMemberResolution(
+            auth_runtime.MemberResolutionOutcome.UNAUTHENTICATED,
+            None,
+        )
+        with patch.object(
+            user_config_store.auth_runtime,
+            "resolve_authenticated_member",
+            return_value=missing,
+        ):
             user, error = user_config_store.resolve_authenticated_user({})
         self.assertIsNone(user)
         self.assertEqual(error["code"], "missing_session")
 
-        with patch.dict(os.environ, {}, clear=True):
-            user, error = user_config_store.resolve_authenticated_user(cookie_headers("value"))
+        unavailable = auth_runtime.AuthenticatedMemberResolution(
+            auth_runtime.MemberResolutionOutcome.UNAVAILABLE,
+            None,
+        )
+        with patch.object(
+            user_config_store.auth_runtime,
+            "resolve_authenticated_member",
+            return_value=unavailable,
+        ):
+            user, error = user_config_store.resolve_authenticated_user({})
         self.assertIsNone(user)
         self.assertEqual(error["code"], "session_auth_unavailable")
 
-    def test_invalid_expired_and_bad_signature_tokens_are_rejected(self):
-        with patch.dict(os.environ, {"CUEVION_BETA_SESSION_SECRET": "secret"}, clear=False):
-            _, malformed_error = user_config_store.resolve_authenticated_user(
-                cookie_headers("malformed"),
-            )
-            with patch.object(beta_auth.time, "time", return_value=100):
-                expired_token = beta_auth.build_beta_session_token(
-                    name="User",
-                    email="user@example.com",
-                )
-            with patch.object(
-                beta_auth.time,
-                "time",
-                return_value=100 + beta_auth.DEFAULT_BETA_SESSION_TTL_SECONDS + 1,
-            ):
-                _, expired_error = user_config_store.resolve_authenticated_user(
-                    cookie_headers(expired_token),
-                )
-            encoded_payload, _ = expired_token.split(".", 1)
-            _, signature_error = user_config_store.resolve_authenticated_user(
-                cookie_headers(f"{encoded_payload}.invalid"),
-            )
+    def test_invalid_session_and_malformed_headers_are_rejected(self):
+        invalid = auth_runtime.AuthenticatedMemberResolution(
+            auth_runtime.MemberResolutionOutcome.UNAUTHENTICATED,
+            None,
+            ("clear-session",),
+        )
+        with patch.object(
+            user_config_store.auth_runtime,
+            "resolve_authenticated_member",
+            return_value=invalid,
+        ):
+            _, invalid_error = user_config_store.resolve_authenticated_user({})
 
+        with patch.object(
+            user_config_store.auth_runtime,
+            "resolve_authenticated_member",
+            side_effect=auth_http.HttpBoundaryError("invalid_request", 400),
+        ):
+            _, malformed_error = user_config_store.resolve_authenticated_user({})
+
+        self.assertEqual(invalid_error["code"], "invalid_session")
         self.assertEqual(malformed_error["code"], "invalid_session")
-        self.assertEqual(expired_error["code"], "invalid_session")
-        self.assertEqual(signature_error["code"], "invalid_session")
 
-    def test_valid_session_returns_normalized_context_without_token(self):
-        with patch.dict(os.environ, {"CUEVION_BETA_SESSION_SECRET": "secret"}, clear=False):
-            token = beta_auth.build_beta_session_token(
-                name="  User Name  ",
-                email="USER@EXAMPLE.COM",
+    def test_valid_member_returns_only_canonical_context(self):
+        authenticated = auth_runtime.AuthenticatedMemberResolution(
+            auth_runtime.MemberResolutionOutcome.AUTHENTICATED,
+            self.member,
+        )
+        with patch.object(
+            user_config_store.auth_runtime,
+            "resolve_authenticated_member",
+            return_value=authenticated,
+        ) as resolver:
+            user, error = user_config_store.resolve_authenticated_user(
+                {"cookie": "__Host-cuevion_session=opaque"}
             )
-            user, error = user_config_store.resolve_authenticated_user(cookie_headers(token))
 
         self.assertIsNone(error)
         self.assertEqual(
             user,
             {"email": "user@example.com", "name": "User Name", "userType": "member"},
         )
-        self.assertNotIn(token, repr(user))
+        resolver.assert_called_once_with(
+            (("cookie", "__Host-cuevion_session=opaque"),)
+        )
+        self.assertNotIn("opaque", repr(user))
 
 
 class StoreTests(unittest.TestCase):

@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { Auth0LoginView } from "./components/auth/Auth0LoginView";
 import { OnboardingFlow } from "./components/onboarding/OnboardingFlow";
 import { WorkspaceTransition } from "./components/workspace/WorkspaceTransition";
@@ -28,7 +28,6 @@ import {
   getSessionAccountStorageKey,
   isAuth0LoginPath,
   loadStartupSession,
-  type AuthSource,
 } from "./lib/authApi";
 
 const WorkspaceShell = lazy(() =>
@@ -49,7 +48,6 @@ const CUEVION_DISPLAY_NAME_OVERRIDES_STORAGE_KEY = "cuevion-display-name-overrid
 const PENDING_COLLAB_INVITE_STORAGE_KEY = "label-inbox-ai-pending-collab-invite";
 const PENDING_COLLAB_INVITE_URL_STORAGE_KEY = "label-inbox-ai-pending-collab-invite-url";
 const OAUTH_CALLBACK_RESULT_STORAGE_KEY = "cuevion-oauth-callback-result";
-const BETA_LOGIN_ENDPOINT = "/api/beta/login";
 const WORKSPACE_THEME_MODE_STORAGE_KEY = "cuevion-workspace-theme-mode";
 const AI_SUGGESTIONS_STORAGE_KEY = "cuevion-ai-suggestions-enabled";
 const INBOX_CHANGES_STORAGE_KEY = "cuevion-inbox-changes-enabled";
@@ -71,7 +69,6 @@ type AuthenticatedCuevionUser = {
   workspaceId?: string;
 };
 
-type BetaAccessRoute = "login" | "app";
 type RootAppRoute = "login" | "preview" | "app";
 
 type CollaborationInviteRoute = {
@@ -221,23 +218,6 @@ function isPublicLandingHost() {
   return hostname === "cuevion.com" || hostname === "www.cuevion.com";
 }
 
-function resolveBetaAccessRoute(): BetaAccessRoute {
-  if (typeof window === "undefined") {
-    return "app";
-  }
-
-  return "app";
-}
-
-function replaceBetaAccessRoute(route: BetaAccessRoute) {
-  const nextPath = "/";
-  if (window.location.pathname === nextPath) {
-    return;
-  }
-
-  window.history.replaceState(null, "", `${nextPath}${window.location.search}${window.location.hash}`);
-}
-
 function normalizeOnboardingState(value: Partial<OnboardingState>): OnboardingState {
   return {
     ...initialOnboardingState,
@@ -276,7 +256,7 @@ function formatUserNameFromEmail(email: string) {
   );
 }
 
-function normalizeAuthenticatedUser(value: unknown): AuthenticatedCuevionUser | null {
+function normalizeCollaborationUser(value: unknown): AuthenticatedCuevionUser | null {
   if (!value || typeof value !== "object") {
     return null;
   }
@@ -285,7 +265,8 @@ function normalizeAuthenticatedUser(value: unknown): AuthenticatedCuevionUser | 
 
   if (
     typeof nextValue.email !== "string" ||
-    typeof nextValue.name !== "string"
+    typeof nextValue.name !== "string" ||
+    (nextValue.userType !== "member" && nextValue.userType !== "guest")
   ) {
     return null;
   }
@@ -293,128 +274,8 @@ function normalizeAuthenticatedUser(value: unknown): AuthenticatedCuevionUser | 
   return {
     email: nextValue.email.toLowerCase(),
     name: nextValue.name,
-    userType: nextValue.userType === "guest" ? "guest" : "member",
+    userType: nextValue.userType,
   };
-}
-
-type BetaAccessGateProps = {
-  error: string | null;
-  loading: boolean;
-  onSubmit: (credentials: {
-    name: string;
-    email: string;
-    inviteCode: string;
-  }) => Promise<void>;
-};
-
-function BetaAccessGate({
-  error,
-  loading,
-  onSubmit,
-}: BetaAccessGateProps) {
-  const [name, setName] = useState("");
-  const [email, setEmail] = useState("");
-  const [inviteCode, setInviteCode] = useState("");
-  const [localError, setLocalError] = useState<string | null>(null);
-
-  return (
-    <div className="min-h-screen bg-[linear-gradient(180deg,#f6efe7_0%,#efe5da_100%)] px-6 py-10 text-[color:#2f2a24] dark:bg-[linear-gradient(180deg,#171411_0%,#221c17_100%)] dark:text-[color:#f1e9de]">
-      <div className="mx-auto flex min-h-[calc(100vh-5rem)] max-w-[560px] items-center justify-center">
-        <div className="w-full rounded-[32px] border border-[rgba(120,104,89,0.14)] bg-[rgba(255,252,247,0.82)] p-8 shadow-[0_28px_80px_rgba(61,44,32,0.12)] backdrop-blur dark:border-[rgba(255,255,255,0.08)] dark:bg-[rgba(33,28,24,0.82)]">
-          <div className="space-y-3 text-center">
-            <div className="text-[0.72rem] font-medium uppercase tracking-[0.22em] text-[rgba(120,104,89,0.7)] dark:text-[rgba(214,201,189,0.64)]">
-              Private beta
-            </div>
-            <h1 className="text-[1.7rem] font-medium tracking-[-0.03em]">
-              Sign in to Cuevion
-            </h1>
-            <p className="text-[0.96rem] leading-7 text-[rgba(88,80,71,0.84)] dark:text-[rgba(222,211,200,0.76)]">
-              Enter your beta invite details to open the active Cuevion app.
-            </p>
-          </div>
-
-          <div className="mt-8 space-y-3">
-            <input
-              value={name}
-              onChange={(event) => {
-                setName(event.target.value);
-                setLocalError(null);
-              }}
-              placeholder="Your name"
-              autoCorrect="off"
-              spellCheck={false}
-              className="w-full rounded-[20px] border border-[rgba(120,104,89,0.16)] bg-[rgba(255,255,255,0.78)] px-4 py-3 text-[0.98rem] leading-7 outline-none placeholder:text-[rgba(120,104,89,0.56)] dark:border-[rgba(255,255,255,0.08)] dark:bg-[rgba(44,38,33,0.86)] dark:placeholder:text-[rgba(210,196,183,0.42)]"
-            />
-            <input
-              value={email}
-              onChange={(event) => {
-                setEmail(event.target.value);
-                setLocalError(null);
-              }}
-              placeholder="name@company.com"
-              autoCorrect="off"
-              autoCapitalize="none"
-              spellCheck={false}
-              className="w-full rounded-[20px] border border-[rgba(120,104,89,0.16)] bg-[rgba(255,255,255,0.78)] px-4 py-3 text-[0.98rem] leading-7 outline-none placeholder:text-[rgba(120,104,89,0.56)] dark:border-[rgba(255,255,255,0.08)] dark:bg-[rgba(44,38,33,0.86)] dark:placeholder:text-[rgba(210,196,183,0.42)]"
-            />
-            <input
-              value={inviteCode}
-              onChange={(event) => {
-                setInviteCode(event.target.value);
-                setLocalError(null);
-              }}
-              placeholder="Invite code"
-              autoCorrect="off"
-              autoCapitalize="none"
-              spellCheck={false}
-              className="w-full rounded-[20px] border border-[rgba(120,104,89,0.16)] bg-[rgba(255,255,255,0.78)] px-4 py-3 text-[0.98rem] leading-7 outline-none placeholder:text-[rgba(120,104,89,0.56)] dark:border-[rgba(255,255,255,0.08)] dark:bg-[rgba(44,38,33,0.86)] dark:placeholder:text-[rgba(210,196,183,0.42)]"
-            />
-            {localError || error ? (
-              <div className="text-[0.84rem] leading-6 text-[rgba(132,77,63,0.94)] dark:text-[rgba(244,186,168,0.84)]">
-                {localError ?? error}
-              </div>
-            ) : null}
-          </div>
-
-          <div className="mt-6 flex justify-end">
-            <button
-              type="button"
-              disabled={loading}
-              onClick={() => {
-                const trimmedName = name.trim();
-                const normalizedEmail = email.trim().toLowerCase();
-                const trimmedInviteCode = inviteCode.trim();
-
-                if (!trimmedName) {
-                  setLocalError("Enter your name to continue.");
-                  return;
-                }
-
-                if (!isValidAuthEmail(normalizedEmail)) {
-                  setLocalError("Enter a valid email address to continue.");
-                  return;
-                }
-
-                if (!trimmedInviteCode) {
-                  setLocalError("Enter your invite code to continue.");
-                  return;
-                }
-
-                void onSubmit({
-                  name: trimmedName,
-                  email: normalizedEmail,
-                  inviteCode: trimmedInviteCode,
-                });
-              }}
-              className={premiumAccessButtonClass}
-            >
-              {loading ? "Checking access..." : "Open beta"}
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
 }
 
 function parseCollaborationInviteRoute(): CollaborationInviteRoute | null {
@@ -1625,11 +1486,8 @@ function CuevionApp() {
       ? "workspace"
       : "onboarding",
   );
-  const [betaAccessRoute, setBetaAccessRoute] = useState<BetaAccessRoute>(() =>
-    resolveBetaAccessRoute(),
-  );
   const [sessionUser, setSessionUser] = useState<AuthenticatedCuevionUser | null>(null);
-  const [authSource, setAuthSource] = useState<AuthSource | null>(null);
+  const memberSessionProbeRef = useRef<ReturnType<typeof loadStartupSession> | null>(null);
   const [displayNameOverrides, setDisplayNameOverrides] = useState<DisplayNameOverrideStore>(() =>
     parseDisplayNameOverrides(),
   );
@@ -1639,9 +1497,7 @@ function CuevionApp() {
   const [accountConfigHydrationStatus, setAccountConfigHydrationStatus] = useState<
     "idle" | "loading" | "ready"
   >("idle");
-  const [betaLoginError, setBetaLoginError] = useState<string | null>(null);
-  const [betaLoginPending, setBetaLoginPending] = useState(false);
-  const [authenticatedUser, setAuthenticatedUser] = useState<AuthenticatedCuevionUser | null>(
+  const [collaborationUser, setCollaborationUser] = useState<AuthenticatedCuevionUser | null>(
     () => {
       const storedAuthUser = window.localStorage.getItem(CUEVION_AUTH_STORAGE_KEY);
 
@@ -1650,7 +1506,7 @@ function CuevionApp() {
       }
 
       try {
-        return normalizeAuthenticatedUser(JSON.parse(storedAuthUser));
+        return normalizeCollaborationUser(JSON.parse(storedAuthUser));
       } catch {
         return null;
       }
@@ -1673,39 +1529,23 @@ function CuevionApp() {
     persistedOnboardingSession?.state ? buildUserConfig(persistedOnboardingSession.state) : null,
   );
   const recognizedInviteUsers = resolveWorkspaceInviteUsers(onboardingState);
-  const effectiveSessionUser =
-    sessionUser && sessionUser.userType === "member"
-      ? {
-          ...sessionUser,
-          name:
-            (authSource === "beta"
-              ? displayNameOverrides[sessionUser.email.toLowerCase()]?.trim()
-              : "") ||
-            sessionUser.name,
-        }
-      : sessionUser;
   const sessionAccountStorageKey = getSessionAccountStorageKey(
-    authSource,
+    "auth0",
     sessionUser?.userType === "member" ? sessionUser : null,
   );
-  const activeCollaborationUser = authenticatedUser ?? effectiveSessionUser;
-  const activeCollaborationAuthSource: AuthSource = authenticatedUser
-    ? "beta"
-    : effectiveSessionUser
-      ? authSource ?? "beta"
-      : "beta";
+  const activeCollaborationUser = collaborationUser ?? sessionUser;
 
   useEffect(() => {
-    if (authenticatedUser) {
+    if (collaborationUser) {
       window.localStorage.setItem(
         CUEVION_AUTH_STORAGE_KEY,
-        JSON.stringify(authenticatedUser),
+        JSON.stringify(collaborationUser),
       );
       return;
     }
 
     window.localStorage.removeItem(CUEVION_AUTH_STORAGE_KEY);
-  }, [authenticatedUser]);
+  }, [collaborationUser]);
 
   useEffect(() => {
     window.localStorage.setItem(
@@ -1742,28 +1582,6 @@ function CuevionApp() {
     displayNameOverrides,
     persistedOnboardingSession,
   ]);
-
-  const handleSessionDisplayNameChange = (nextName: string) => {
-    if (
-      authSource !== "beta" ||
-      !sessionUser ||
-      sessionUser.userType !== "member"
-    ) {
-      return;
-    }
-
-    const trimmedName = nextName.trim();
-
-    if (!trimmedName) {
-      return;
-    }
-
-    const normalizedEmail = sessionUser.email.toLowerCase();
-    setDisplayNameOverrides((current) => ({
-      ...current,
-      [normalizedEmail]: trimmedName,
-    }));
-  };
 
   useEffect(() => {
     if (persistedOnboardingSession) {
@@ -1820,7 +1638,6 @@ function CuevionApp() {
 
   useEffect(() => {
     const handlePopState = () => {
-      setBetaAccessRoute(resolveBetaAccessRoute());
       setCollaborationInviteRoute(parseCollaborationInviteRoute());
       setTeamInviteRoute(parseTeamInviteRoute());
     };
@@ -1833,7 +1650,6 @@ function CuevionApp() {
     if (collaborationInviteRoute || teamInviteRoute) {
       setSessionStatus("unauthenticated");
       setSessionUser(null);
-      setAuthSource(null);
       setAccountConfigHydrationStatus("ready");
       return;
     }
@@ -1844,7 +1660,9 @@ function CuevionApp() {
       setSessionStatus("loading");
 
       try {
-        const startupResult = await loadStartupSession();
+        const startupResult = await (
+          memberSessionProbeRef.current ??= loadStartupSession()
+        );
 
         if (cancelled) {
           return;
@@ -1852,13 +1670,11 @@ function CuevionApp() {
 
         if (startupResult.status !== "authenticated") {
           setSessionUser(null);
-          setAuthSource(null);
           setSessionStatus(startupResult.status);
           return;
         }
 
         setSessionUser(startupResult.user);
-        setAuthSource(startupResult.authSource);
         setSessionStatus("authenticated");
       } catch {
         if (cancelled) {
@@ -1866,7 +1682,6 @@ function CuevionApp() {
         }
 
         setSessionUser(null);
-        setAuthSource(null);
         setSessionStatus("unavailable");
       }
     };
@@ -1968,35 +1783,6 @@ function CuevionApp() {
   ]);
 
   useEffect(() => {
-    if (
-      shouldShowLandingPage ||
-      collaborationInviteRoute ||
-      teamInviteRoute ||
-      sessionStatus === "loading"
-    ) {
-      return;
-    }
-
-    if (sessionUser) {
-      if (window.location.pathname !== "/") {
-        replaceBetaAccessRoute("app");
-      }
-    } else if (window.location.pathname !== "/") {
-      replaceBetaAccessRoute("login");
-    }
-    if (betaAccessRoute !== "app") {
-      setBetaAccessRoute("app");
-    }
-  }, [
-    betaAccessRoute,
-    sessionStatus,
-    sessionUser,
-    collaborationInviteRoute,
-    teamInviteRoute,
-    shouldShowLandingPage,
-  ]);
-
-  useEffect(() => {
     const storedCallbackResult = window.localStorage.getItem(
       OAUTH_CALLBACK_RESULT_STORAGE_KEY,
     );
@@ -2062,51 +1848,6 @@ function CuevionApp() {
     }
   }, [persistedOnboardingSession]);
 
-  const handleBetaLogin = async (credentials: {
-    name: string;
-    email: string;
-    inviteCode: string;
-  }) => {
-    setBetaLoginPending(true);
-    setBetaLoginError(null);
-
-    try {
-      const response = await fetch(BETA_LOGIN_ENDPOINT, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        credentials: "include",
-        body: JSON.stringify(credentials),
-      });
-      const payload = (await response.json()) as {
-        user?: unknown;
-        error?: { message?: string };
-      };
-
-      if (!response.ok) {
-        setBetaLoginError(payload.error?.message ?? "Access could not be granted.");
-        return;
-      }
-
-      const nextUser = normalizeAuthenticatedUser(payload.user);
-      if (!nextUser || nextUser.userType !== "member") {
-        setBetaLoginError("Access could not be granted.");
-        return;
-      }
-
-      setSessionUser(nextUser);
-      setAuthSource("beta");
-      setSessionStatus("authenticated");
-      replaceBetaAccessRoute("app");
-      setBetaAccessRoute("app");
-    } catch {
-      setBetaLoginError("Access could not be granted.");
-    } finally {
-      setBetaLoginPending(false);
-    }
-  };
-
   if (teamInviteRoute) {
     return <TeamInviteRouteView route={teamInviteRoute} />;
   }
@@ -2138,7 +1879,7 @@ function CuevionApp() {
               );
             }
 
-            setAuthenticatedUser(user);
+            setCollaborationUser(user);
             setView("workspace");
           }}
         />
@@ -2153,7 +1894,7 @@ function CuevionApp() {
           authenticatedUser={
             collaborationInviteRoute.mode === "invite" ? activeCollaborationUser : null
           }
-          authSource={activeCollaborationAuthSource}
+          authenticationContext="collaboration"
           collaborationInviteRoute={collaborationInviteRoute}
           workspaceDataMode={workspaceDataMode}
         />
@@ -2170,7 +1911,7 @@ function CuevionApp() {
         <div className="mx-auto flex min-h-[calc(100vh-5rem)] max-w-[560px] items-center justify-center text-center">
           <div className="space-y-3">
             <div className="text-[0.72rem] font-medium uppercase tracking-[0.22em] text-[rgba(120,104,89,0.7)] dark:text-[rgba(214,201,189,0.64)]">
-              Private beta
+              Cuevion
             </div>
             <p className="text-[0.98rem] leading-7 text-[rgba(88,80,71,0.84)] dark:text-[rgba(222,211,200,0.76)]">
               Verifying access…
@@ -2199,13 +1940,7 @@ function CuevionApp() {
   }
 
   if (!sessionUser) {
-    return (
-      <BetaAccessGate
-        error={betaLoginError}
-        loading={betaLoginPending}
-        onSubmit={handleBetaLogin}
-      />
-    );
+    return <Auth0LoginView />;
   }
 
   if (view === "workspace" && userConfig) {
@@ -2214,11 +1949,8 @@ function CuevionApp() {
         <WorkspaceShell
           userConfig={userConfig}
           onboardingState={onboardingState}
-          authenticatedUser={effectiveSessionUser}
-          authSource={authSource ?? "beta"}
-          onAuthenticatedUserNameChange={
-            authSource === "beta" ? handleSessionDisplayNameChange : undefined
-          }
+          authenticatedUser={sessionUser}
+          authenticationContext="auth0"
           workspaceDataMode={workspaceDataMode}
         />
       </Suspense>

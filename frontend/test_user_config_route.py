@@ -15,7 +15,6 @@ if str(API_DIR) not in sys.path:
     sys.path.insert(0, str(API_DIR))
 
 import user_config_store
-import beta_auth
 
 
 def load_config_route(module_name="user_config_route_under_test"):
@@ -152,10 +151,30 @@ class GetRouteTests(unittest.TestCase):
                 "ok": False,
                 "error": {
                     "code": "unauthorized",
-                    "message": "A valid beta session is required.",
+                    "message": "A valid member session is required.",
                 },
             },
         )
+        write_mock.assert_not_called()
+
+    def test_authentication_unavailable_is_503_before_storage_io(self):
+        auth_error = {
+            "code": "session_auth_unavailable",
+            "message": "internal detail must not escape",
+        }
+        handler, read_mock, write_mock = self.invoke(auth=(None, auth_error))
+        self.assertEqual(handler.status_code, 503)
+        self.assertEqual(
+            handler.payload(),
+            {
+                "ok": False,
+                "error": {
+                    "code": "authentication_unavailable",
+                    "message": "Authentication is temporarily unavailable.",
+                },
+            },
+        )
+        read_mock.assert_not_called()
         write_mock.assert_not_called()
 
     def test_legacy_passwords_are_stripped_rewritten_and_never_returned(self):
@@ -223,6 +242,28 @@ class PostRouteTests(unittest.TestCase):
                 self.assertEqual(handler.status_code, 400)
                 self.assertEqual(handler.payload()["error"]["code"], "invalid_request")
                 write_mock.assert_not_called()
+
+    def test_authentication_failure_precedes_body_and_storage_io(self):
+        for auth_error, expected_status in (
+            ({"code": "missing_session", "message": "missing"}, 401),
+            (
+                {
+                    "code": "session_auth_unavailable",
+                    "message": "private outage detail",
+                },
+                503,
+            ),
+        ):
+            with self.subTest(auth_error=auth_error):
+                handler, read_mock, write_mock = self.invoke(
+                    {"config": {"uiPreferences": {"themeMode": "Dark"}}},
+                    auth=(None, auth_error),
+                )
+                self.assertEqual(handler.status_code, expected_status)
+                self.assertEqual(handler.rfile.tell(), 0)
+                read_mock.assert_not_called()
+                write_mock.assert_not_called()
+                self.assertNotIn("private outage detail", json.dumps(handler.payload()))
 
     def test_store_unavailable_is_existing_503(self):
         error = {"code": "user_config_store_unavailable", "message": "not configured"}
@@ -384,24 +425,21 @@ class PostRouteTests(unittest.TestCase):
 
 
 class PostReadStatusHandlerTests(unittest.TestCase):
-    environment = {
-        "CUEVION_BETA_SESSION_SECRET": "session-secret",
-        "KV_REST_API_URL": "https://kv.example",
-        "KV_REST_API_TOKEN": "kv-secret",
-    }
-
-    def session_cookie(self):
-        with patch.dict(beta_auth.os.environ, self.environment, clear=False):
-            token = beta_auth.build_beta_session_token(
-                name="Owner",
-                email="owner@example.com",
-            )
-        return f"cuevion_beta_session={token}"
-
     def invoke(self, payload, read_result):
         body = json.dumps(payload).encode("utf-8")
-        request = FakeHandler(body, headers={"cookie": self.session_cookie()})
-        with patch.dict(beta_auth.os.environ, self.environment, clear=False), patch.object(
+        request = FakeHandler(
+            body,
+            headers={"cookie": "__Host-cuevion_session=opaque"},
+        )
+        with patch.object(
+            config_route,
+            "resolve_authenticated_user",
+            return_value=(SESSION_USER, None),
+        ), patch.object(
+            config_route,
+            "resolve_user_config_store",
+            return_value=(STORE, None),
+        ), patch.object(
             config_route,
             "read_user_config_record",
             return_value=read_result,
@@ -435,7 +473,7 @@ class PostReadStatusHandlerTests(unittest.TestCase):
         )
         self.assertEqual(request.status_code, 200)
         read_mock.assert_called_once_with(
-            {"rest_url": "https://kv.example", "rest_token": "kv-secret"},
+            STORE,
             "owner@example.com",
         )
         write_mock.assert_called_once()

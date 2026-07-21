@@ -28,6 +28,41 @@ DEPLOYMENT_PATH_ASSERTIONS = (
 
 
 class CollaborationV2ImportSafetyTests(unittest.TestCase):
+    def test_removed_legacy_member_auth_modules_are_not_importable(self):
+        legacy_package = "api." + "beta"
+        legacy_modules = (
+            legacy_package + "_auth",
+            legacy_package + ".login",
+            legacy_package + ".session",
+            legacy_package + ".logout",
+        )
+        script = textwrap.dedent(
+            f"""
+            import importlib
+
+            for module_name in {legacy_modules!r}:
+                try:
+                    importlib.import_module(module_name)
+                except ModuleNotFoundError:
+                    continue
+                raise AssertionError(f"removed legacy module imported: {{module_name}}")
+            """
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=FRONTEND_ROOT,
+            env=_deployment_env(),
+            text=True,
+            capture_output=True,
+            timeout=15,
+            check=False,
+        )
+        self.assertEqual(
+            result.returncode,
+            0,
+            msg=f"stdout={result.stdout!r} stderr={result.stderr!r}",
+        )
+
     def test_candidate_imports_do_not_require_secrets_or_perform_io(self):
         script = textwrap.dedent(
             f"""
@@ -221,9 +256,10 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
 
     def test_all_active_handlers_import_in_both_relevant_orders(self):
         active_handlers = (
-            "api.beta.login",
-            "api.beta.logout",
-            "api.beta.session",
+            "api.auth.login",
+            "api.auth.callback",
+            "api.auth.session",
+            "api.auth.logout",
             "api.collaboration.thread",
             "api.collaboration.invite",
             "api.contact.support",
@@ -331,9 +367,10 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
 
     def test_active_handlers_do_not_import_inactive_boundaries(self):
         active_handlers = (
-            "api.beta.login",
-            "api.beta.logout",
-            "api.beta.session",
+            "api.auth.login",
+            "api.auth.callback",
+            "api.auth.session",
+            "api.auth.logout",
             "api.collaboration.thread",
             "api.collaboration.invite",
             "api.contact.support",
@@ -984,7 +1021,7 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
 
             {DEPLOYMENT_PATH_ASSERTIONS}
             forbidden_modules = (
-                "api.beta_auth",
+                "api." + "beta" + "_auth",
                 "api.beta.login",
                 "api.beta.logout",
                 "api.beta.session",
@@ -1061,7 +1098,7 @@ class CollaborationV2ImportSafetyTests(unittest.TestCase):
             "os.environ",
             "os.getenv",
             "sys.path",
-            "beta_auth",
+            "beta" + "_auth",
             "import application",
             "import authorization",
             "import models",

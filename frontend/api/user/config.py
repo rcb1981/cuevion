@@ -16,9 +16,7 @@ INBOXES_DIR = API_DIR / "inboxes"
 if str(INBOXES_DIR) not in sys.path:
     sys.path.insert(0, str(INBOXES_DIR))
 
-from beta_auth import (  # noqa: E402
-    normalize_auth_email,
-)
+from api.auth.email_address import normalize_auth_email  # noqa: E402
 from authenticated_gmail import validate_focus_preferences  # noqa: E402
 from user_config_store import (  # noqa: E402
     USER_CONFIG_SCHEMA_VERSION,
@@ -436,9 +434,26 @@ def _read_json_body(handler: BaseHTTPRequestHandler) -> tuple[dict | None, dict 
 
 class handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        session_user, _ = resolve_authenticated_user(self.headers)
+        session_user, auth_error = resolve_authenticated_user(self.headers)
         if not session_user:
-            _send_json(self, 401, _build_error("unauthorized", "A valid beta session is required."))
+            if auth_error and auth_error["code"] == "session_auth_unavailable":
+                _send_json(
+                    self,
+                    503,
+                    _build_error(
+                        "authentication_unavailable",
+                        "Authentication is temporarily unavailable.",
+                    ),
+                )
+            else:
+                _send_json(
+                    self,
+                    401,
+                    _build_error(
+                        "unauthorized",
+                        "A valid member session is required.",
+                    ),
+                )
             return
 
         store, _ = resolve_user_config_store()
@@ -473,9 +488,26 @@ class handler(BaseHTTPRequestHandler):
         _send_json(self, 200, {"ok": True, "config": sanitized_config})
 
     def do_POST(self):
-        session_user, _ = resolve_authenticated_user(self.headers)
+        session_user, auth_error = resolve_authenticated_user(self.headers)
         if not session_user:
-            _send_json(self, 401, _build_error("unauthorized", "A valid beta session is required."))
+            if auth_error and auth_error["code"] == "session_auth_unavailable":
+                _send_json(
+                    self,
+                    503,
+                    _build_error(
+                        "authentication_unavailable",
+                        "Authentication is temporarily unavailable.",
+                    ),
+                )
+            else:
+                _send_json(
+                    self,
+                    401,
+                    _build_error(
+                        "unauthorized",
+                        "A valid member session is required.",
+                    ),
+                )
             return
 
         payload, error = _read_json_body(self)

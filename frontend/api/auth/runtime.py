@@ -7,6 +7,8 @@ import re
 import secrets
 import time
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from enum import Enum
 from urllib.parse import parse_qsl, urlsplit
 
 from api.auth import account_authority, auth0_flow, http, session_store
@@ -24,7 +26,79 @@ _LOGIN_ERROR_LOCATION = "/login?error=authentication_failed"
 _APP_LOCATION = "/"
 
 
-def _authentication_unavailable_response() -> http.PublicResponse:
+class MemberResolutionOutcome(str, Enum):
+    """Closed outcomes for the ordinary-member authentication boundary."""
+
+    AUTHENTICATED = "authenticated"
+    UNAUTHENTICATED = "unauthenticated"
+    UNAVAILABLE = "unavailable"
+
+
+@dataclass(frozen=True, slots=True)
+class AuthenticatedMemberContext:
+    """Canonical, non-secret member context from the current account graph."""
+
+    user_id: str
+    email: str
+    name: str
+    workspace_id: str
+    membership_role: str
+    user_type: str = "member"
+    auth_source: str = "auth0"
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.user_id) is not str
+            or not self.user_id
+            or type(self.email) is not str
+            or not self.email
+            or type(self.name) is not str
+            or not self.name
+            or type(self.workspace_id) is not str
+            or not self.workspace_id
+            or type(self.membership_role) is not str
+            or not self.membership_role
+            or self.user_type != "member"
+            or self.auth_source != "auth0"
+        ):
+            raise ValueError("invalid authenticated member context")
+
+
+@dataclass(frozen=True, slots=True)
+class AuthenticatedMemberResolution:
+    """Fail-closed ordinary-member resolution plus any cookie invalidation."""
+
+    outcome: MemberResolutionOutcome
+    member: AuthenticatedMemberContext | None
+    set_cookies: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        authenticated = self.outcome is MemberResolutionOutcome.AUTHENTICATED
+        if (
+            type(self.outcome) is not MemberResolutionOutcome
+            or authenticated != (type(self.member) is AuthenticatedMemberContext)
+            or type(self.set_cookies) is not tuple
+            or any(type(cookie) is not str or not cookie for cookie in self.set_cookies)
+        ):
+            raise ValueError("invalid authenticated member resolution")
+
+
+def _member_resolution(
+    outcome: MemberResolutionOutcome,
+    member: AuthenticatedMemberContext | None = None,
+    *,
+    clear_session: bool = False,
+) -> AuthenticatedMemberResolution:
+    return AuthenticatedMemberResolution(
+        outcome,
+        member,
+        (session_store.clear_session_cookie(),) if clear_session else (),
+    )
+
+
+def _authentication_unavailable_response(
+    *, set_cookies: tuple[str, ...] = ()
+) -> http.PublicResponse:
     return http.json_response(
         503,
         {
@@ -34,6 +108,7 @@ def _authentication_unavailable_response() -> http.PublicResponse:
                 "message": "Sign-in is temporarily unavailable.",
             },
         },
+        set_cookies=set_cookies,
     )
 
 
@@ -247,50 +322,84 @@ def callback_response(
 def _revalidation_failed(
     store: session_store.AuthSessionStore,
     lookup_digest: str | None,
-) -> http.PublicResponse:
+) -> AuthenticatedMemberResolution:
     try:
         if lookup_digest is not None:
             store.delete(lookup_digest)
     except session_store.SessionStoreUnavailable:
-        return http.json_response(
-            503,
-            {
-                "authenticated": False,
-                "error": {
-                    "code": "authentication_unavailable",
-                    "message": "Sign-in is temporarily unavailable.",
-                },
-            },
-            set_cookies=(session_store.clear_session_cookie(),),
+        return _member_resolution(
+            MemberResolutionOutcome.UNAVAILABLE,
+            clear_session=True,
         )
-    return _unauthenticated_response(
-        set_cookies=(session_store.clear_session_cookie(),)
+    return _member_resolution(
+        MemberResolutionOutcome.UNAUTHENTICATED,
+        clear_session=True,
     )
 
 
-def session_response(
-    method: str,
+def _current_authority_member_context(
+    record: session_store.ServerSessionRecord,
+    authority: object,
+) -> AuthenticatedMemberContext | None:
+    try:
+        user = authority.user  # type: ignore[attr-defined]
+        email = authority.primary_verified_email  # type: ignore[attr-defined]
+        workspace = authority.workspace  # type: ignore[attr-defined]
+        membership = authority.workspace_membership  # type: ignore[attr-defined]
+        valid = (
+            type(user) is models.CuevionUser
+            and type(email) is models.VerifiedEmail
+            and type(workspace) is models.Workspace
+            and type(membership) is models.WorkspaceMembership
+            and user.user_id == record.user_id
+            and workspace.workspace_id == record.workspace_id
+            and user.security_epoch == record.security_epoch
+            and user.status is models.UserStatus.ACTIVE
+            and email.status is models.VerifiedEmailStatus.VERIFIED
+            and user.primary_verified_email_id == email.email_id
+            and email.user_id == user.user_id
+            and workspace.status is models.WorkspaceStatus.ACTIVE
+            and membership.user_id == user.user_id
+            and membership.workspace_id == workspace.workspace_id
+            and membership.status is models.WorkspaceMembershipStatus.ACTIVE
+            and type(membership.role) is models.WorkspaceRole
+        )
+        if not valid:
+            return None
+        return AuthenticatedMemberContext(
+            user_id=user.user_id,
+            email=email.canonical_email,
+            name=user.display_name,
+            workspace_id=workspace.workspace_id,
+            membership_role=membership.role.value,
+        )
+    except Exception:
+        return None
+
+
+def resolve_authenticated_member(
     raw_headers: tuple[tuple[str, str], ...],
     *,
     environment: Mapping[str, str] | None = None,
     now: int | None = None,
     session_store_factory: Callable[[Mapping[str, str]], session_store.AuthSessionStore] = session_store.build_runtime_session_store,
     authority_factory: Callable[[Mapping[str, str]], object] = account_authority.build_runtime_account_authority,
-) -> http.PublicResponse:
+) -> AuthenticatedMemberResolution:
+    """Resolve one ordinary member from the Auth0 server session only.
+
+    HTTP boundary failures remain explicit ``HttpBoundaryError`` instances for
+    route adapters. All trusted-runtime, session-store, and account-authority
+    failures collapse to a fixed unavailable outcome without exposing details.
+    """
+
     source = os.environ if environment is None else environment
-    timestamp = int(time.time()) if now is None else now
-    try:
-        http.require_method(method, "GET")
-        headers = http.validate_header_pairs(raw_headers)
-        http.require_canonical_host(headers)
-        session_cookie = http.read_cookie(
-            headers, session_store.SESSION_COOKIE_NAME
-        )
-    except http.HttpBoundaryError as error:
-        return _boundary_error_response(error)
+    headers = http.validate_header_pairs(raw_headers)
+    session_cookie = http.read_cookie(headers, session_store.SESSION_COOKIE_NAME)
     if session_cookie is None:
-        return _unauthenticated_response()
+        return _member_resolution(MemberResolutionOutcome.UNAUTHENTICATED)
+
     try:
+        timestamp = int(time.time()) if now is None else now
         secret = session_store.resolve_session_secret(source)
         store = session_store_factory(source)
         record, lookup_digest = session_store.load_server_session(
@@ -309,36 +418,70 @@ def session_response(
             CurrentAccountReadOutcome.UNAVAILABLE,
             CurrentAccountReadOutcome.INTERNAL_ERROR,
         ):
-            return _authentication_unavailable_response()
+            return _member_resolution(MemberResolutionOutcome.UNAVAILABLE)
         authority = result.authority
         if (
             result.outcome is not CurrentAccountReadOutcome.FOUND
             or authority is None
-            or authority.user.user_id != record.user_id
-            or authority.workspace.workspace_id != record.workspace_id
-            or authority.user.security_epoch != record.security_epoch
-            or authority.user.status is not models.UserStatus.ACTIVE
-            or authority.workspace.status is not models.WorkspaceStatus.ACTIVE
-            or authority.workspace_membership.status
-            is not models.WorkspaceMembershipStatus.ACTIVE
         ):
             return _revalidation_failed(store, lookup_digest)
-        return http.json_response(
-            200,
-            {
-                "authenticated": True,
-                "authSource": "auth0",
-                "userId": authority.user.user_id,
-                "workspaceId": authority.workspace.workspace_id,
-                "email": authority.primary_verified_email.canonical_email,
-                "name": authority.user.display_name,
-                "userType": "member",
-            },
+        member = _current_authority_member_context(record, authority)
+        if member is None:
+            return _revalidation_failed(store, lookup_digest)
+        return _member_resolution(
+            MemberResolutionOutcome.AUTHENTICATED,
+            member,
         )
     except (session_store.SessionStoreUnavailable, session_store.SessionConfigurationError):
-        return _authentication_unavailable_response()
+        return _member_resolution(MemberResolutionOutcome.UNAVAILABLE)
+    except Exception:
+        return _member_resolution(MemberResolutionOutcome.UNAVAILABLE)
+
+
+def session_response(
+    method: str,
+    raw_headers: tuple[tuple[str, str], ...],
+    *,
+    environment: Mapping[str, str] | None = None,
+    now: int | None = None,
+    session_store_factory: Callable[[Mapping[str, str]], session_store.AuthSessionStore] = session_store.build_runtime_session_store,
+    authority_factory: Callable[[Mapping[str, str]], object] = account_authority.build_runtime_account_authority,
+) -> http.PublicResponse:
+    try:
+        http.require_method(method, "GET")
+        headers = http.validate_header_pairs(raw_headers)
+        http.require_canonical_host(headers)
+        resolution = resolve_authenticated_member(
+            headers,
+            environment=environment,
+            now=now,
+            session_store_factory=session_store_factory,
+            authority_factory=authority_factory,
+        )
+    except http.HttpBoundaryError as error:
+        return _boundary_error_response(error)
     except Exception:
         return _authentication_unavailable_response()
+
+    if resolution.outcome is MemberResolutionOutcome.UNAUTHENTICATED:
+        return _unauthenticated_response(set_cookies=resolution.set_cookies)
+    if resolution.outcome is MemberResolutionOutcome.UNAVAILABLE:
+        return _authentication_unavailable_response(set_cookies=resolution.set_cookies)
+    member = resolution.member
+    if member is None:
+        return _authentication_unavailable_response()
+    return http.json_response(
+        200,
+        {
+            "authenticated": True,
+            "authSource": member.auth_source,
+            "userId": member.user_id,
+            "workspaceId": member.workspace_id,
+            "email": member.email,
+            "name": member.name,
+            "userType": member.user_type,
+        },
+    )
 
 
 def logout_response(
@@ -392,6 +535,10 @@ def logout_response(
 
 
 __all__ = (
+    "AuthenticatedMemberContext",
+    "AuthenticatedMemberResolution",
+    "MemberResolutionOutcome",
+    "resolve_authenticated_member",
     "login_response",
     "callback_response",
     "session_response",

@@ -210,7 +210,7 @@ class handler(BaseHTTPRequestHandler):
                     _error("session_auth_unavailable", "Authentication is temporarily unavailable."),
                 )
             else:
-                self._send_json(401, _error("unauthorized", "A valid beta session is required."))
+                self._send_json(401, _error("unauthorized", "A valid member session is required."))
             return
 
         content_length = int(self.headers.get("content-length", "0"))

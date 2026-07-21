@@ -151,7 +151,7 @@ else:
             return _failure(
                 "unauthorized",
                 "unauthorized",
-                "A valid beta session is required.",
+                "A valid member session is required.",
                 401,
             )
         if owned_result["status"] == "not_found":

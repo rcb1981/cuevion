@@ -16,7 +16,7 @@ API_DIR = CURRENT_DIR.parent
 if str(API_DIR) not in sys.path:
     sys.path.insert(0, str(API_DIR))
 
-from beta_auth import parse_beta_session_token, read_beta_session_cookie, resolve_beta_session_secret  # noqa: E402
+from api.auth import http, runtime  # noqa: E402
 
 MAX_SUBJECT_LENGTH = 160
 MAX_MESSAGE_LENGTH = 5000
@@ -37,11 +37,19 @@ SUPPORT_TOPICS = {
 }
 
 
-def _send_json(handler: BaseHTTPRequestHandler, status_code: int, payload: dict):
+def _send_json(
+    handler: BaseHTTPRequestHandler,
+    status_code: int,
+    payload: dict,
+    *,
+    set_cookies: tuple[str, ...] = (),
+):
     response_body = json.dumps(payload).encode("utf-8")
     handler.send_response(status_code)
     handler.send_header("Content-Type", "application/json")
     handler.send_header("Cache-Control", "no-store")
+    for cookie in set_cookies:
+        handler.send_header("Set-Cookie", cookie)
     handler.send_header("Content-Length", str(len(response_body)))
     handler.end_headers()
     handler.wfile.write(response_body)
@@ -107,13 +115,24 @@ def _normalize_created_at(value: object) -> str:
     return raw_value
 
 
-def _resolve_authenticated_user(headers) -> dict | None:
-    session_secret = resolve_beta_session_secret()
-    if not session_secret:
-        return None
-
-    session_token = read_beta_session_cookie(headers)
-    return parse_beta_session_token(session_token or "")
+def _resolve_authenticated_member_request(request: BaseHTTPRequestHandler):
+    try:
+        raw_headers = http.snapshot_request_headers(request)
+        resolution = runtime.resolve_authenticated_member(raw_headers)
+        if (
+            resolution.outcome is runtime.MemberResolutionOutcome.AUTHENTICATED
+            and resolution.member is not None
+        ):
+            return resolution.member, None, resolution.set_cookies
+        if resolution.outcome is runtime.MemberResolutionOutcome.UNAVAILABLE:
+            return None, 503, resolution.set_cookies
+        if resolution.outcome is runtime.MemberResolutionOutcome.UNAUTHENTICATED:
+            return None, 401, resolution.set_cookies
+        return None, 503, ()
+    except http.HttpBoundaryError:
+        return None, 401, ()
+    except Exception:
+        return None, 503, ()
 
 
 def _resolve_smtp_config() -> tuple[dict | None, dict | None]:
@@ -162,12 +181,19 @@ def _resolve_smtp_config() -> tuple[dict | None, dict | None]:
     }, None
 
 
-def _normalize_support_payload(payload: dict) -> tuple[dict | None, dict | None]:
+def _normalize_support_payload(
+    payload: dict,
+    member: runtime.AuthenticatedMemberContext,
+) -> tuple[dict | None, dict | None]:
     subject = _clean_text(payload.get("subject"), MAX_SUBJECT_LENGTH)
     message = _clean_text(payload.get("message"), MAX_MESSAGE_LENGTH)
     request_id = _clean_text(payload.get("id"), MAX_REQUEST_ID_LENGTH)
-    submitted_by = _clean_text(payload.get("submittedBy"), MAX_IDENTITY_LENGTH) or "Beta tester"
-    workspace_name = _clean_text(payload.get("workspaceName"), MAX_WORKSPACE_NAME_LENGTH) or "Workspace"
+    canonical_name = _clean_text(member.name, MAX_IDENTITY_LENGTH) or member.email
+    submitted_by = _clean_text(
+        f"{canonical_name} <{member.email}>",
+        MAX_IDENTITY_LENGTH,
+    )
+    workspace_name = _clean_text(member.workspace_id, MAX_WORKSPACE_NAME_LENGTH)
     topic = _clean_text(payload.get("topic"), MAX_TOPIC_LENGTH) or "General"
     created_at = _normalize_created_at(payload.get("createdAt"))
 
@@ -238,10 +264,28 @@ def _send_support_email(config: dict, message: EmailMessage):
 
 class handler(BaseHTTPRequestHandler):
     def do_POST(self):
-        session_secret = resolve_beta_session_secret()
-        session_user = _resolve_authenticated_user(self.headers)
-        if session_secret and not session_user:
-            _send_json(self, 401, _build_error("unauthorized", "A valid beta session is required."))
+        member, auth_status, set_cookies = _resolve_authenticated_member_request(self)
+        if member is None:
+            if auth_status == 503:
+                _send_json(
+                    self,
+                    503,
+                    _build_error(
+                        "authentication_unavailable",
+                        "Authentication is temporarily unavailable.",
+                    ),
+                    set_cookies=set_cookies,
+                )
+            else:
+                _send_json(
+                    self,
+                    401,
+                    _build_error(
+                        "unauthorized",
+                        "A valid member session is required.",
+                    ),
+                    set_cookies=set_cookies,
+                )
             return
 
         payload, payload_error = _read_json_body(self)
@@ -254,7 +298,10 @@ class handler(BaseHTTPRequestHandler):
             _send_json(self, 503, config_error)
             return
 
-        support_request, request_error = _normalize_support_payload(payload or {})
+        support_request, request_error = _normalize_support_payload(
+            payload or {},
+            member,
+        )
         if request_error:
             _send_json(self, 400, request_error)
             return

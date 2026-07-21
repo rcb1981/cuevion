@@ -8,6 +8,7 @@ import textwrap
 import unittest
 from contextlib import ExitStack
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from api.collaboration import invite as collaboration_invite
@@ -324,14 +325,15 @@ class LegacyCollaborationHttpContainmentTests(unittest.TestCase):
                 "_build_error",
                 "_get_operation",
                 "_read_json_body",
-                "_get_authenticated_user",
+                "_require_authenticated_member",
+                "_workspace_is_authorized",
                 "_resolve_thread_for_lookup_record",
                 "_handle_get_many",
                 "_handle_get_participant",
                 "_handle_create",
                 "_handle_action",
-                "read_beta_session_cookie",
-                "parse_beta_session_token",
+                "resolve_authenticated_member",
+                "snapshot_request_headers",
                 "normalize_auth_email",
                 "get_thread",
                 "get_threads_many",
@@ -392,7 +394,7 @@ class LegacyCollaborationHttpContainmentTests(unittest.TestCase):
                 "_get_operation",
                 "_get_workspace_id",
                 "_read_json_body",
-                "_get_authenticated_user",
+                "_require_authenticated_member",
                 "_resolve_durable_store_config",
                 "_perform_rest_request",
                 "_read_durable_value",
@@ -402,9 +404,8 @@ class LegacyCollaborationHttpContainmentTests(unittest.TestCase):
                 "_remove_team_member",
                 "_handle_list",
                 "_handle_remove",
-                "read_beta_session_cookie",
-                "parse_beta_session_token",
-                "normalize_auth_email",
+                "resolve_authenticated_member",
+                "snapshot_request_headers",
                 "is_valid_auth_email",
                 "parse_qs",
                 "urlsplit",
@@ -452,6 +453,171 @@ class LegacyCollaborationHttpContainmentTests(unittest.TestCase):
                     self.assert_disabled_direct(request_handler, method=method)
                 for mocked in forbidden_calls:
                     mocked.assert_not_called()
+
+    def test_enabled_member_routes_reject_legacy_cookie_before_storage(self):
+        cases = (
+            (
+                team_members,
+                "GET",
+                "/api/team/members?op=list&workspaceId=workspace-a",
+                b"",
+                "_list_team_members",
+            ),
+            (
+                collaboration_thread,
+                "POST",
+                "/api/collaboration/thread?op=get-many",
+                b'{"workspaceId":"workspace-a","messageIds":[]}',
+                "get_threads_many",
+            ),
+        )
+        with patch.dict(os.environ, {MODE_ENVIRONMENT_NAME: UNSAFE_MODE}, clear=True):
+            for route, method, path, body, storage_name in cases:
+                with self.subTest(route=route.__name__), patch.object(
+                    route,
+                    storage_name,
+                    side_effect=AssertionError("storage called without Auth0 member authority"),
+                ) as storage:
+                    raw_response, _unread_body = _dispatch_raw_http(
+                        route,
+                        method,
+                        path,
+                        body,
+                    )
+                status, _headers, response_body, _raw_headers = _parse_raw_response(raw_response)
+                self.assertEqual(status, 401)
+                self.assertIn(b'"code": "unauthorized"', response_body)
+                storage.assert_not_called()
+
+    def test_enabled_member_routes_use_canonical_auth0_member_context(self):
+        member = SimpleNamespace(
+            user_id="user-a",
+            email="owner@example.test",
+            name="Owner",
+            workspace_id="workspace-a",
+            membership_role="owner",
+            user_type="member",
+            auth_source="auth0",
+        )
+        resolution = SimpleNamespace(
+            outcome=team_members.MemberResolutionOutcome.AUTHENTICATED,
+            member=member,
+            set_cookies=(),
+        )
+        with patch.dict(os.environ, {MODE_ENVIRONMENT_NAME: UNSAFE_MODE}, clear=True):
+            with patch.object(
+                team_members,
+                "resolve_authenticated_member",
+                return_value=resolution,
+            ) as resolve_member, patch.object(
+                team_members,
+                "_list_team_members",
+                return_value=([], None),
+            ) as list_members:
+                raw_response, _unread_body = _dispatch_raw_http(
+                    team_members,
+                    "GET",
+                    "/api/team/members?op=list&workspaceId=workspace-a",
+                    b"",
+                )
+            status, _headers, _body, _raw_headers = _parse_raw_response(raw_response)
+            self.assertEqual(status, 200)
+            resolve_member.assert_called_once()
+            list_members.assert_called_once_with("workspace-a")
+
+            with patch.object(
+                collaboration_thread,
+                "resolve_authenticated_member",
+                return_value=resolution,
+            ) as resolve_member, patch.object(
+                collaboration_thread,
+                "get_participant_threads",
+                return_value=([], None),
+            ) as get_threads:
+                body = b'{"workspaceId":"workspace-a","participantEmail":"owner@example.test"}'
+                raw_response, _unread_body = _dispatch_raw_http(
+                    collaboration_thread,
+                    "POST",
+                    "/api/collaboration/thread?op=get-participant",
+                    body,
+                )
+            status, _headers, _body, _raw_headers = _parse_raw_response(raw_response)
+            self.assertEqual(status, 200)
+            resolve_member.assert_called_once()
+            get_threads.assert_called_once_with(
+                "owner@example.test",
+                workspace_id="workspace-a",
+            )
+
+    def test_enabled_collaboration_actions_use_canonical_member_actor(self):
+        member = SimpleNamespace(
+            user_id="usr-canonical",
+            email="owner@example.test",
+            name="Canonical Owner",
+            workspace_id="workspace-a",
+            membership_role="owner",
+        )
+        current_thread = {
+            "isShared": True,
+            "collaboration": {
+                "state": "needs_review",
+                "messages": [],
+            },
+        }
+
+        def invoke(action):
+            request_handler = _controlled_handler(collaboration_thread)
+            with patch.object(
+                collaboration_thread,
+                "get_thread",
+                return_value=current_thread,
+            ), patch.object(
+                collaboration_thread,
+                "normalize_collaboration_thread_record",
+                side_effect=lambda value: value,
+            ), patch.object(
+                collaboration_thread,
+                "save_thread_if_expected",
+                side_effect=lambda value, **_kwargs: (value, None),
+            ) as save_thread, patch.object(
+                collaboration_thread,
+                "time",
+                return_value=123.0,
+            ):
+                collaboration_thread._handle_action(
+                    request_handler,
+                    {
+                        "workspaceId": "workspace-a",
+                        "messageId": "message-a",
+                        "action": action,
+                    },
+                    member,
+                )
+            self.assertEqual(request_handler.status_normal, [200])
+            return save_thread.call_args.args[0]
+
+        replied = invoke(
+            {
+                "type": "reply",
+                "authorId": "forged-user",
+                "authorName": "Forged Name",
+                "text": "Canonical actor only",
+                "visibility": "shared",
+            }
+        )
+        reply = replied["collaboration"]["messages"][-1]
+        self.assertEqual(reply["authorId"], member.user_id)
+        self.assertEqual(reply["authorName"], member.name)
+
+        resolved = invoke(
+            {
+                "type": "resolve",
+                "resolvedByUserId": "forged-user",
+                "resolvedByUserName": "Forged Name",
+            }
+        )
+        self.assertEqual(resolved["collaboration"]["resolvedByUserId"], member.user_id)
+        self.assertEqual(resolved["collaboration"]["resolvedByUserName"], member.name)
 
     def test_disabled_responses_create_no_operation_or_existence_oracle(self):
         scenarios = (
@@ -538,6 +704,11 @@ class LegacyCollaborationHttpContainmentTests(unittest.TestCase):
             self.assertNotIn(marker, response)
 
     def test_exact_unsafe_mode_reaches_each_existing_get_and_post_dispatch(self):
+        authenticated_member = SimpleNamespace(
+            email="owner@example.test",
+            workspace_id="workspace-a",
+            membership_role="owner",
+        )
         forbidden_modules = {
             "api.collaboration.http_adapter",
             "api.collaboration.http_boundary",
@@ -559,13 +730,18 @@ class LegacyCollaborationHttpContainmentTests(unittest.TestCase):
             self.assertNotEqual(get_handler.wfile.getvalue(), DISABLED_BODY)
 
             post_handler = _controlled_handler(collaboration_thread)
-            with patch.object(collaboration_thread, "_get_operation", return_value="get-many") as operation, patch.object(
+            with patch.object(
+                collaboration_thread,
+                "_require_authenticated_member",
+                return_value=authenticated_member,
+            ) as require_member, patch.object(collaboration_thread, "_get_operation", return_value="get-many") as operation, patch.object(
                 collaboration_thread, "_read_json_body", return_value=({}, None)
             ) as read_body, patch.object(collaboration_thread, "_handle_get_many") as handle:
                 collaboration_thread.handler.do_POST(post_handler)
+            require_member.assert_called_once_with(post_handler)
             operation.assert_called_once_with(post_handler)
             read_body.assert_called_once_with(post_handler)
-            handle.assert_called_once_with(post_handler, {})
+            handle.assert_called_once_with(post_handler, {}, authenticated_member)
             self.assertEqual(post_handler.status_only, [])
             self.assertEqual(post_handler.wfile.getvalue(), b"")
 
@@ -577,25 +753,52 @@ class LegacyCollaborationHttpContainmentTests(unittest.TestCase):
         for route, get_operation, post_operation, get_callback, post_callback, post_reads_body in unsafe_cases:
             with self.subTest(route=route.__name__), patch.object(route.os, "getenv", return_value=UNSAFE_MODE):
                 get_handler = _controlled_handler(route)
-                with patch.object(route, "_get_operation", return_value=get_operation) as operation, patch.object(
-                    route, get_callback
-                ) as callback:
+                with ExitStack() as stack:
+                    operation = stack.enter_context(patch.object(route, "_get_operation", return_value=get_operation))
+                    callback = stack.enter_context(patch.object(route, get_callback))
+                    require_member = None
+                    if route is team_members:
+                        require_member = stack.enter_context(
+                            patch.object(
+                                route,
+                                "_require_authenticated_member",
+                                return_value=authenticated_member,
+                            )
+                        )
                     route.handler.do_GET(get_handler)
+                if require_member is not None:
+                    require_member.assert_called_once_with(get_handler)
                 operation.assert_called_once_with(get_handler)
-                callback.assert_called_once_with(get_handler)
+                if route is team_members:
+                    callback.assert_called_once_with(get_handler, authenticated_member)
+                else:
+                    callback.assert_called_once_with(get_handler)
                 self.assertEqual(get_handler.status_only, [])
 
                 post_handler = _controlled_handler(route)
                 with ExitStack() as stack:
                     operation = stack.enter_context(patch.object(route, "_get_operation", return_value=post_operation))
                     callback = stack.enter_context(patch.object(route, post_callback))
+                    require_member = None
+                    if route is team_members:
+                        require_member = stack.enter_context(
+                            patch.object(
+                                route,
+                                "_require_authenticated_member",
+                                return_value=authenticated_member,
+                            )
+                        )
                     if post_reads_body:
                         read_body = stack.enter_context(patch.object(route, "_read_json_body", return_value=({}, None)))
                     route.handler.do_POST(post_handler)
+                if require_member is not None:
+                    require_member.assert_called_once_with(post_handler)
                 operation.assert_called_once_with(post_handler)
                 if post_reads_body:
                     read_body.assert_called_once_with(post_handler)
                     callback.assert_called_once_with(post_handler, {})
+                elif route is team_members:
+                    callback.assert_called_once_with(post_handler, authenticated_member)
                 else:
                     callback.assert_called_once_with(post_handler)
                 self.assertEqual(post_handler.status_only, [])

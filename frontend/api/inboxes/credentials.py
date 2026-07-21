@@ -11,11 +11,13 @@ if str(CURRENT_DIR) not in sys.path:
 if str(API_DIR) not in sys.path:
     sys.path.insert(0, str(API_DIR))
 
-from beta_auth import parse_beta_session_token, read_beta_session_cookie  # noqa: E402
 from mailbox_secret_store import (  # noqa: E402
     read_mailbox_secret,
 )
-from user_config_store import resolve_owned_managed_inbox  # noqa: E402
+from user_config_store import (  # noqa: E402
+    resolve_authenticated_user,
+    resolve_owned_managed_inbox,
+)
 
 
 def _send_json(handler: BaseHTTPRequestHandler, status_code: int, payload: dict):
@@ -36,11 +38,6 @@ def _build_error(code: str, message: str) -> dict:
             "message": message,
         },
     }
-
-
-def _get_authenticated_user(headers) -> dict | None:
-    session_token = read_beta_session_cookie(headers)
-    return parse_beta_session_token(session_token or "")
 
 
 def _read_json_body(handler: BaseHTTPRequestHandler) -> tuple[dict | None, dict | None]:
@@ -75,9 +72,26 @@ def _parse_mailbox_ids_from_query(path: str) -> list[str]:
 
 class handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        session_user = _get_authenticated_user(self.headers)
+        session_user, auth_error = resolve_authenticated_user(self.headers)
         if not session_user:
-            _send_json(self, 401, _build_error("unauthorized", "A valid beta session is required."))
+            if auth_error and auth_error.get("code") == "session_auth_unavailable":
+                _send_json(
+                    self,
+                    503,
+                    _build_error(
+                        "session_auth_unavailable",
+                        "Authentication is temporarily unavailable.",
+                    ),
+                )
+            else:
+                _send_json(
+                    self,
+                    401,
+                    _build_error(
+                        "unauthorized",
+                        "A valid member session is required.",
+                    ),
+                )
             return
 
         mailbox_ids = _parse_mailbox_ids_from_query(self.path)

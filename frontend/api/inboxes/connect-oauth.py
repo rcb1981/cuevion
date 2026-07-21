@@ -18,6 +18,7 @@ if str(API_DIR) not in sys.path:
     sys.path.insert(0, str(API_DIR))
 
 from user_config_store import resolve_authenticated_user  # noqa: E402
+from api.auth.email_address import normalize_auth_email  # noqa: E402
 
 GOOGLE_AUTHORIZATION_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth"
 MICROSOFT_AUTHORIZATION_ENDPOINT_TEMPLATE = (
@@ -60,7 +61,7 @@ def build_owner_binding(
     expires_at: int,
     signing_secret: str,
 ) -> str:
-    normalized_owner = owner_email.strip().lower()
+    normalized_owner = normalize_auth_email(owner_email)
     binding_message = "\n".join(
         (
             OWNER_BINDING_DOMAIN,
@@ -174,12 +175,18 @@ class handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         try:
-            session_user, _ = resolve_authenticated_user(self.headers)
+            session_user, auth_error = resolve_authenticated_user(self.headers)
             if not session_user:
-                self._send_json(
-                    401,
-                    {"ok": False, "error": {"code": "unauthorized", "message": "A valid beta session is required."}},
-                )
+                if auth_error and auth_error.get("code") == "session_auth_unavailable":
+                    self._send_json(
+                        503,
+                        {"ok": False, "error": {"code": "session_auth_unavailable", "message": "Authentication is temporarily unavailable."}},
+                    )
+                else:
+                    self._send_json(
+                        401,
+                        {"ok": False, "error": {"code": "unauthorized", "message": "A valid member session is required."}},
+                    )
                 return
 
             try:

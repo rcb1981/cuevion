@@ -2,6 +2,7 @@ import importlib.util
 import base64
 import io
 import json
+import os
 import sys
 import unittest
 from contextlib import ExitStack
@@ -22,9 +23,9 @@ if str(FRONTEND_DIR) not in sys.path:
     sys.path.insert(0, str(FRONTEND_DIR))
 
 import authenticated_gmail
-import beta_auth
 import imap_connect_preview
 import oauth_token_store
+from api.auth import runtime as auth_runtime
 
 
 def load_route(filename, name):
@@ -102,10 +103,56 @@ def token(**overrides):
     }
 
 
+class HeaderMap(dict):
+    def raw_items(self):
+        return iter(list(self.items()))
+
+
+def authenticated_member(email="owner@example.com"):
+    return auth_runtime.AuthenticatedMemberContext(
+        user_id="user-1",
+        email=email.strip().lower(),
+        name="Owner",
+        workspace_id="workspace-1",
+        membership_role="owner",
+    )
+
+
+def member_session_cookie(email="owner@example.com"):
+    return f"__Host-cuevion_session=test-member:{email.strip().lower()}"
+
+
+def resolve_test_user(headers):
+    raw_cookie = str(headers.get("cookie", ""))
+    marker = "__Host-cuevion_session=test-member:"
+    if not raw_cookie.startswith(marker):
+        return None, {
+            "code": "missing_session" if not raw_cookie else "invalid_session",
+            "message": "An authenticated session is required.",
+        }
+    email = raw_cookie[len(marker):].strip().lower()
+    if not email or "@" not in email:
+        return None, {
+            "code": "invalid_session",
+            "message": "The authenticated session is invalid.",
+        }
+    return {
+        "userId": "user-1",
+        "email": email,
+        "name": "Owner",
+        "workspaceId": "workspace-1",
+        "membershipRole": "owner",
+        "userType": "member",
+        "authSource": "auth0",
+    }, None
+
+
 class FakeHandler:
     def __init__(self, payload=None, raw_body=None, headers=None):
         body = raw_body if raw_body is not None else json.dumps(payload or {}).encode()
-        self.headers = {"content-length": str(len(body)), **(headers or {})}
+        self.headers = HeaderMap(
+            {"content-length": str(len(body)), **(headers or {})}
+        )
         self.rfile = io.BytesIO(body)
         self.wfile = io.BytesIO()
         self.status = None
@@ -129,7 +176,6 @@ class FakeHandler:
 
 class RealHandlerOwnershipMatrixTests(unittest.TestCase):
     environment = {
-        "CUEVION_BETA_SESSION_SECRET": "session-secret",
         "KV_REST_API_URL": "https://kv.example",
         "KV_REST_API_TOKEN": "kv-secret",
         "GOOGLE_CLIENT_ID": "client-id",
@@ -137,9 +183,7 @@ class RealHandlerOwnershipMatrixTests(unittest.TestCase):
     }
 
     def _session_cookie(self, email="owner@example.com"):
-        with patch.dict(beta_auth.os.environ, self.environment, clear=False):
-            value = beta_auth.build_beta_session_token(name="Owner", email=email)
-        return f"cuevion_beta_session={value}"
+        return member_session_cookie(email)
 
     def _route_cases(self):
         raw_message = base64.urlsafe_b64encode(
@@ -240,7 +284,14 @@ class RealHandlerOwnershipMatrixTests(unittest.TestCase):
             )
         )
         with ExitStack() as stack:
-            stack.enter_context(patch.dict(beta_auth.os.environ, self.environment, clear=False))
+            stack.enter_context(patch.dict(os.environ, self.environment, clear=False))
+            stack.enter_context(
+                patch.object(
+                    sys.modules["user_config_store"],
+                    "resolve_authenticated_user",
+                    side_effect=resolve_test_user,
+                )
+            )
             stack.enter_context(patch.object(sys.modules["user_config_store"], "urlopen", config_transport))
             stack.enter_context(patch.object(oauth_token_store, "urlopen", token_transport))
             stack.enter_context(patch.object(route, "urlopen", provider_transport))
@@ -313,15 +364,11 @@ class RealHandlerOwnershipMatrixTests(unittest.TestCase):
         )
 
     def test_each_route_rejects_missing_session_and_other_users_mailbox(self):
-        with patch.dict(beta_auth.os.environ, self.environment, clear=False), patch.object(
-            beta_auth.time,
-            "time",
-            return_value=100,
-        ):
-            expired = beta_auth.build_beta_session_token(
-                name="Expired", email="owner@example.com"
-            )
-        invalid_cookies = ("", "cuevion_beta_session=malformed", f"cuevion_beta_session={expired}")
+        invalid_cookies = (
+            "",
+            "__Host-cuevion_session=malformed",
+            "cuevion_beta_session=historical-member-cookie",
+        )
         for route, payload, provider_payload, _ in self._route_cases():
             for invalid_cookie in invalid_cookies:
                 with self.subTest(route=route.__name__, cookie=invalid_cookie[:30]):
@@ -650,7 +697,14 @@ class RealHandlerOwnershipMatrixTests(unittest.TestCase):
                 headers={"cookie": self._session_cookie()},
             )
             with self.subTest(route=route.__name__), ExitStack() as stack:
-                stack.enter_context(patch.dict(beta_auth.os.environ, environment, clear=False))
+                stack.enter_context(patch.dict(os.environ, environment, clear=False))
+                stack.enter_context(
+                    patch.object(
+                        sys.modules["user_config_store"],
+                        "resolve_authenticated_user",
+                        side_effect=resolve_test_user,
+                    )
+                )
                 stack.enter_context(
                     patch.object(sys.modules["user_config_store"], "urlopen", config_transport)
                 )
@@ -893,7 +947,11 @@ class RealHandlerOwnershipMatrixTests(unittest.TestCase):
         )
         token_transport = Mock()
         provider_transport = Mock()
-        with patch.dict(beta_auth.os.environ, self.environment, clear=False), patch.object(
+        with patch.dict(os.environ, self.environment, clear=False), patch.object(
+            sys.modules["user_config_store"],
+            "resolve_authenticated_user",
+            side_effect=resolve_test_user,
+        ), patch.object(
             sys.modules["user_config_store"],
             "urlopen",
             side_effect=RuntimeError("raw storage URL https://secret.example token=secret"),
@@ -1440,9 +1498,13 @@ class SendLimitTests(unittest.TestCase):
         token_transport = Mock()
         provider_transport = Mock()
         with patch.dict(
-            beta_auth.os.environ,
+            os.environ,
             self.matrix.environment,
             clear=False,
+        ), patch.object(
+            sys.modules["user_config_store"],
+            "resolve_authenticated_user",
+            side_effect=resolve_test_user,
         ), patch.object(
             sys.modules["user_config_store"],
             "urlopen",
@@ -1667,13 +1729,7 @@ class AttachmentDownloadLimitTests(unittest.TestCase):
 
 class OAuthAndConfigTests(unittest.TestCase):
     def _authenticated_headers(self, email="owner@example.com"):
-        with patch.dict(
-            beta_auth.os.environ,
-            {"CUEVION_BETA_SESSION_SECRET": "session-secret"},
-            clear=False,
-        ):
-            session = beta_auth.build_beta_session_token(name="Owner", email=email)
-        return {"cookie": f"cuevion_beta_session={session}"}
+        return HeaderMap({"cookie": member_session_cookie(email)})
 
     def test_connect_oauth_requires_session_and_signed_state_has_owner(self):
         handler = FakeHandler({"provider": "google", "email": "hint@gmail.com"})
@@ -1712,6 +1768,25 @@ class OAuthAndConfigTests(unittest.TestCase):
             )
         )
 
+    def test_config_upsert_rejects_noncanonical_owner_before_storage_resolution(self):
+        with patch.object(
+            oauth_callback,
+            "_resolve_durable_store_config",
+        ) as store_config, patch.object(
+            oauth_callback,
+            "_read_user_config_durable_record",
+        ) as storage_read:
+            error = oauth_callback._upsert_gmail_managed_inbox_in_user_config(
+                authenticated_member("canonical@example.com"),
+                email="verified@gmail.com",
+                display_name="Verified",
+                owner_email="other@example.com",
+                message="Connected",
+            )
+        self.assertEqual(error["code"], "unauthorized")
+        store_config.assert_not_called()
+        storage_read.assert_not_called()
+
     def test_authenticated_oauth_start_uses_real_session_and_opaque_state(self):
         headers = self._authenticated_headers()
         request = FakeHandler(
@@ -1719,13 +1794,16 @@ class OAuthAndConfigTests(unittest.TestCase):
             headers=headers,
         )
         environment = {
-            "CUEVION_BETA_SESSION_SECRET": "session-secret",
             "CUEVION_OAUTH_STATE_SECRET": "state-secret",
             "GOOGLE_CLIENT_ID": "client-id",
             "GOOGLE_CLIENT_SECRET": "client-secret",
             "GOOGLE_OAUTH_REDIRECT_URI": "https://app.example.com/api/inboxes/oauth-callback",
         }
-        with patch.dict(connect_oauth.os.environ, environment, clear=False):
+        with patch.dict(connect_oauth.os.environ, environment, clear=False), patch.object(
+            connect_oauth,
+            "resolve_authenticated_user",
+            side_effect=resolve_test_user,
+        ):
             connect_oauth.handler.do_POST(request)
         self.assertEqual(request.status, 200)
         authorization_url = request.payload()["authorizationUrl"]
@@ -1794,29 +1872,20 @@ class OAuthAndConfigTests(unittest.TestCase):
         self.assertEqual(separate_state, state)
         self.assertEqual(separate_verifier, verifier)
 
-    def test_beta_cookie_is_redirect_compatible_and_callback_requires_it(self):
-        cookie = beta_auth.build_beta_session_cookie(
-            "session-token",
-            {"host": "app.example.com", "x-forwarded-proto": "https"},
-        )
-        self.assertIn("Path=/", cookie)
-        self.assertIn("HttpOnly", cookie)
-        self.assertIn("SameSite=Lax", cookie)
-        self.assertIn("Secure", cookie)
-        self.assertNotIn("Domain=", cookie)
-
+    def test_historical_beta_cookie_cannot_authorize_oauth_callback(self):
         state, _ = connect_oauth.build_signed_state(
             "google", "hint@gmail.com", "owner@example.com", "state-secret"
         )
         callback = Mock()
         callback.path = f"/api/inboxes/oauth-callback?code=code&state={state}"
-        callback.headers = {"host": "app.example.com"}
+        callback.headers = HeaderMap(
+            {"cookie": "cuevion_beta_session=historical-member-cookie"}
+        )
         callback._send_callback_page = Mock()
         with patch.dict(
             oauth_callback.os.environ,
             {
                 "CUEVION_OAUTH_STATE_SECRET": "state-secret",
-                "CUEVION_BETA_SESSION_SECRET": "session-secret",
                 "GOOGLE_OAUTH_REDIRECT_URI": "https://app.example.com/api/inboxes/oauth-callback",
             },
             clear=False,
@@ -1830,24 +1899,19 @@ class OAuthAndConfigTests(unittest.TestCase):
         state_value, _ = connect_oauth.build_signed_state(
             "google", "attacker@gmail.com", "owner@example.com", "state-secret"
         )
-        with patch.dict(
-            beta_auth.os.environ,
-            {"CUEVION_BETA_SESSION_SECRET": "session-secret"},
-            clear=False,
-        ):
-            session = beta_auth.build_beta_session_token(
-                name="Other", email="other@example.com"
-            )
         callback.path = f"/api/inboxes/oauth-callback?code=code&state={state_value}"
-        callback.headers = {"cookie": f"cuevion_beta_session={session}"}
+        callback.headers = HeaderMap()
         callback._send_callback_page = Mock()
         with patch.dict(
             oauth_callback.os.environ,
             {
                 "CUEVION_OAUTH_STATE_SECRET": "state-secret",
-                "CUEVION_BETA_SESSION_SECRET": "session-secret",
             },
             clear=False,
+        ), patch.object(
+            oauth_callback,
+            "_resolve_authenticated_member_request",
+            return_value=(authenticated_member("other@example.com"), ()),
         ), patch.object(oauth_callback, "_exchange_google_code") as exchange:
             oauth_callback.handler.do_GET(callback)
         exchange.assert_not_called()
@@ -1860,25 +1924,20 @@ class OAuthAndConfigTests(unittest.TestCase):
         state_value, _ = connect_oauth.build_signed_state(
             "google", "attacker@gmail.com", "owner@example.com", "state-secret"
         )
-        with patch.dict(
-            beta_auth.os.environ,
-            {"CUEVION_BETA_SESSION_SECRET": "session-secret"},
-            clear=False,
-        ):
-            session = beta_auth.build_beta_session_token(
-                name="Owner", email="owner@example.com"
-            )
         callback.path = f"/api/inboxes/oauth-callback?code=code&state={state_value}"
-        callback.headers = {"cookie": f"cuevion_beta_session={session}"}
+        callback.headers = HeaderMap()
         callback._send_callback_page = Mock()
         environment = {
             "GOOGLE_CLIENT_ID": "client",
             "GOOGLE_CLIENT_SECRET": "secret",
             "GOOGLE_OAUTH_REDIRECT_URI": "https://example.test/callback",
             "CUEVION_OAUTH_STATE_SECRET": "state-secret",
-            "CUEVION_BETA_SESSION_SECRET": "session-secret",
         }
         with patch.dict(oauth_callback.os.environ, environment, clear=False), patch.object(
+            oauth_callback,
+            "_resolve_authenticated_member_request",
+            return_value=(authenticated_member(), ()),
+        ), patch.object(
             oauth_callback, "_exchange_google_code", return_value=({"access_token": "secret-token"}, None)
         ), patch.object(
             oauth_callback,
@@ -1899,6 +1958,7 @@ class OAuthAndConfigTests(unittest.TestCase):
         )
         self.assertEqual(upsert.call_args.kwargs["email"], "verified@gmail.com")
         self.assertEqual(upsert.call_args.kwargs["owner_email"], "owner@example.com")
+        self.assertEqual(upsert.call_args.args[0].email, "owner@example.com")
         response = callback._send_callback_page.call_args.args[0]
         self.assertEqual(response["email"], "verified@gmail.com")
         self.assertNotIn("attacker@gmail.com", json.dumps(response))
@@ -1943,7 +2003,6 @@ class OAuthAndConfigTests(unittest.TestCase):
 
     def test_config_write_requires_ok_and_exact_readback(self):
         environment = {
-            "CUEVION_BETA_SESSION_SECRET": "session-secret",
             "KV_REST_API_URL": "https://kv.example",
             "KV_REST_API_TOKEN": "kv-secret",
         }
@@ -1966,7 +2025,7 @@ class OAuthAndConfigTests(unittest.TestCase):
             side_effect=successful_transport,
         ):
             error = oauth_callback._upsert_gmail_managed_inbox_in_user_config(
-                self._authenticated_headers(),
+                authenticated_member(),
                 email="verified@gmail.com",
                 display_name="Verified",
                 owner_email="owner@example.com",
@@ -1990,7 +2049,7 @@ class OAuthAndConfigTests(unittest.TestCase):
                 side_effect=failed_ack_transport,
             ):
                 error = oauth_callback._upsert_gmail_managed_inbox_in_user_config(
-                    self._authenticated_headers(),
+                    authenticated_member(),
                     email="verified@gmail.com",
                     display_name="Verified",
                     owner_email="owner@example.com",
@@ -2000,7 +2059,6 @@ class OAuthAndConfigTests(unittest.TestCase):
 
     def test_config_readback_rejects_missing_stale_email_owner_and_oversize(self):
         environment = {
-            "CUEVION_BETA_SESSION_SECRET": "session-secret",
             "KV_REST_API_URL": "https://kv.example",
             "KV_REST_API_TOKEN": "kv-secret",
         }
@@ -2023,7 +2081,7 @@ class OAuthAndConfigTests(unittest.TestCase):
                 side_effect=transport,
             ):
                 return oauth_callback._upsert_gmail_managed_inbox_in_user_config(
-                    self._authenticated_headers(),
+                    authenticated_member(),
                     email="verified@gmail.com",
                     display_name="Verified",
                     owner_email="owner@example.com",
@@ -2064,7 +2122,7 @@ class OAuthAndConfigTests(unittest.TestCase):
             side_effect=TimeoutError("raw timeout detail"),
         ):
             error = oauth_callback._upsert_gmail_managed_inbox_in_user_config(
-                self._authenticated_headers(),
+                authenticated_member(),
                 email="verified@gmail.com",
                 display_name="Verified",
                 owner_email="owner@example.com",
@@ -2075,7 +2133,6 @@ class OAuthAndConfigTests(unittest.TestCase):
 
     def test_real_callback_transport_chain_requires_config_persistence_before_success(self):
         environment = {
-            "CUEVION_BETA_SESSION_SECRET": "session-secret",
             "CUEVION_OAUTH_STATE_SECRET": "state-secret",
             "GOOGLE_CLIENT_ID": "client-id",
             "GOOGLE_CLIENT_SECRET": "client-secret",
@@ -2139,6 +2196,10 @@ class OAuthAndConfigTests(unittest.TestCase):
                 raise AssertionError(f"Unexpected mocked transport URL: {url}")
 
             with patch.dict(oauth_callback.os.environ, environment, clear=False), patch.object(
+                oauth_callback,
+                "_resolve_authenticated_member_request",
+                return_value=(authenticated_member(), ()),
+            ), patch.object(
                 oauth_callback,
                 "urlopen",
                 side_effect=transport,

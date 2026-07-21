@@ -251,7 +251,7 @@ else:
         if owned["status"] != "ok" or not owned.get("user") or not owned.get("inbox"):
             status = owned.get("status")
             if status == "unauthorized":
-                return result_error(401, "unauthorized", "A valid beta session is required.")
+                return result_error(401, "unauthorized", "A valid member session is required.")
             if status == "not_found":
                 return result_error(404, "gmail_connection_not_found", "Mailbox connection was not found.")
             if status in {"unavailable", "malformed"}:

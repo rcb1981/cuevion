@@ -120,8 +120,8 @@ import { sendContactSupportRequest } from "../../lib/contactSupportApi";
 import {
   getSessionAccountStorageKey,
   getSessionViewerStorageKey,
-  logoutSession,
-  type AuthSource,
+  logoutAuth0Session,
+  type AuthenticationContext,
 } from "../../lib/authApi";
 import {
   TEAM_ROLES,
@@ -33145,7 +33145,7 @@ export function WorkspaceShell({
   userConfig,
   onboardingState,
   authenticatedUser = null,
-  authSource = "beta",
+  authenticationContext,
   onAuthenticatedUserNameChange,
   collaborationInviteRoute = null,
   workspaceDataMode = "live",
@@ -33154,7 +33154,7 @@ export function WorkspaceShell({
   userConfig: UserConfig;
   onboardingState: OnboardingState;
   authenticatedUser?: AuthenticatedCuevionUser | null;
-  authSource?: AuthSource;
+  authenticationContext: AuthenticationContext;
   onAuthenticatedUserNameChange?: (name: string) => void;
   collaborationInviteRoute?: CollaborationInviteRoute | null;
   workspaceDataMode?: WorkspaceDataMode;
@@ -33243,16 +33243,18 @@ export function WorkspaceShell({
   });
   const [mailboxCredentialStatuses, setMailboxCredentialStatuses] =
     useState<MailboxCredentialStatusStore>({});
+  const hasAuthenticatedMemberAuthority =
+    authenticationContext === "auth0" && authenticatedUser?.userType === "member";
   const auth0WorkspaceStorageScope =
-    authSource === "auth0"
+    authenticationContext === "auth0"
       ? normalizeSenderLearningKey(
-          getSessionAccountStorageKey(authSource, authenticatedUser),
+          getSessionAccountStorageKey(authenticationContext, authenticatedUser),
         ) || "auth0-workspace"
       : "";
   const auth0ViewerStorageScope =
-    authSource === "auth0"
+    authenticationContext === "auth0"
       ? normalizeSenderLearningKey(
-          getSessionViewerStorageKey(authSource, authenticatedUser),
+          getSessionViewerStorageKey(authenticationContext, authenticatedUser),
         ) || "auth0-viewer"
       : "";
   const primaryManagedInboxStorageOwnerKey =
@@ -34531,7 +34533,7 @@ export function WorkspaceShell({
   }, [savedManagedInboxes]);
 
   useEffect(() => {
-    if (!authenticatedUser || authenticatedUser.userType !== "member") {
+    if (!hasAuthenticatedMemberAuthority) {
       setMailboxCredentialStatuses({});
       return;
     }
@@ -34562,7 +34564,7 @@ export function WorkspaceShell({
     return () => {
       cancelled = true;
     };
-  }, [authenticatedUser, savedManagedInboxes]);
+  }, [hasAuthenticatedMemberAuthority, savedManagedInboxes]);
 
   useEffect(() => {
     const nextPrimaryInboxId = resolvePrimaryManagedInboxId(
@@ -34591,7 +34593,7 @@ export function WorkspaceShell({
   }, [mailboxTitleOverrides]);
 
   useEffect(() => {
-    if (!activeMailbox) {
+    if (!hasAuthenticatedMemberAuthority || !activeMailbox) {
       return;
     }
 
@@ -34616,10 +34618,15 @@ export function WorkspaceShell({
     }
 
     void refreshMailboxById(activeMailbox.id);
-  }, [activeMailbox, isMobileWorkspaceViewport, savedManagedInboxes]);
+  }, [
+    activeMailbox,
+    hasAuthenticatedMemberAuthority,
+    isMobileWorkspaceViewport,
+    savedManagedInboxes,
+  ]);
 
   useEffect(() => {
-    if (!activeMailbox) {
+    if (!hasAuthenticatedMemberAuthority || !activeMailbox) {
       return;
     }
 
@@ -34648,7 +34655,13 @@ export function WorkspaceShell({
     }, ACTIVE_MAILBOX_AUTO_REFRESH_INTERVAL_MS);
 
     return () => window.clearInterval(intervalId);
-  }, [activeMailbox, isMobileWorkspaceViewport, savedManagedInboxes, syncingMailboxId]);
+  }, [
+    activeMailbox,
+    hasAuthenticatedMemberAuthority,
+    isMobileWorkspaceViewport,
+    savedManagedInboxes,
+    syncingMailboxId,
+  ]);
   const workspaceShellPaddingClass = usesOrganizerWorkspaceLayout
     ? "p-0"
     : usesExpandedInboxWorkspaceLayout
@@ -37589,6 +37602,10 @@ export function WorkspaceShell({
     mailboxId: InboxId,
     options?: { startup?: boolean },
   ): Promise<MailboxRefreshResult> => {
+    if (!hasAuthenticatedMemberAuthority) {
+      return "skipped";
+    }
+
     if (syncingMailboxIdsRef.current.has(mailboxId) || syncingMailboxId === mailboxId) {
       return "skipped";
     }
@@ -37862,7 +37879,11 @@ export function WorkspaceShell({
   };
 
   useEffect(() => {
-    if (startupSyncHasRunRef.current || startupSyncMailboxIds.length === 0) {
+    if (
+      !hasAuthenticatedMemberAuthority ||
+      startupSyncHasRunRef.current ||
+      startupSyncMailboxIds.length === 0
+    ) {
       return;
     }
 
@@ -37933,12 +37954,15 @@ export function WorkspaceShell({
     return () => {
       cancelled = true;
     };
-  }, [startupSyncMailboxKey]);
+  }, [hasAuthenticatedMemberAuthority, startupSyncMailboxKey]);
 
   // When startup sync finishes, retry any mobile mailbox opens that were skipped because
   // startup was already syncing that exact mailbox at the time the user tapped.
   useEffect(() => {
-    if (startupSyncStatus !== "done" && startupSyncStatus !== "partial_error") {
+    if (
+      !hasAuthenticatedMemberAuthority ||
+      (startupSyncStatus !== "done" && startupSyncStatus !== "partial_error")
+    ) {
       return;
     }
     const pendingIds = [...pendingMobileRefreshIdsRef.current];
@@ -37957,7 +37981,7 @@ export function WorkspaceShell({
     // render; including it would cause infinite loops. The effect only fires on the
     // "done"/"partial_error" transition so the captured closure is always current.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [startupSyncStatus]);
+  }, [hasAuthenticatedMemberAuthority, startupSyncStatus]);
 
   const handleApplyManagedInboxes = (nextMailboxes: ManagedWorkspaceInbox[]) => {
     const nextManagedInboxes = nextMailboxes
@@ -38326,7 +38350,7 @@ export function WorkspaceShell({
 
     const participantEmail = authenticatedUser?.email?.trim().toLowerCase();
     if (
-      authenticatedUser?.userType !== "member" ||
+      !hasAuthenticatedMemberAuthority ||
       !participantEmail ||
       !isValidInviteEmail(participantEmail)
     ) {
@@ -38461,9 +38485,9 @@ export function WorkspaceShell({
     };
   }, [
     authenticatedUser?.email,
-    authenticatedUser?.userType,
     collaborationInviteRoute,
     currentWorkspaceUserId,
+    hasAuthenticatedMemberAuthority,
   ]);
 
   useEffect(() => {
@@ -39333,7 +39357,7 @@ export function WorkspaceShell({
   }, [smartFolders]);
 
   useEffect(() => {
-    if (!authenticatedUser || authenticatedUser.userType !== "member") {
+    if (!hasAuthenticatedMemberAuthority) {
       return;
     }
 
@@ -39366,6 +39390,7 @@ export function WorkspaceShell({
   }, [
     aiSuggestionsEnabled,
     authenticatedUser,
+    hasAuthenticatedMemberAuthority,
     inboxChangesEnabled,
     inboxSignatures,
     mailboxFocusPreferenceOverrides,
@@ -39379,14 +39404,20 @@ export function WorkspaceShell({
   ]);
 
   const handleConfirmLogout = async () => {
+    if (authenticationContext === "collaboration") {
+      window.localStorage.removeItem(CUEVION_AUTH_STORAGE_KEY);
+      setIsLogoutConfirmationOpen(false);
+      window.location.reload();
+      return;
+    }
+
     try {
-      const result = await logoutSession(authSource);
+      const result = await logoutAuth0Session();
 
       if (!result.ok) {
         return;
       }
 
-      window.localStorage.removeItem(CUEVION_AUTH_STORAGE_KEY);
       setIsLogoutConfirmationOpen(false);
 
       if (result.logoutUrl) {
@@ -40574,7 +40605,7 @@ export function WorkspaceShell({
                   showDemoContent={isDemoWorkspace}
                   workspacePersistenceKey={workspacePersistenceScope}
                   shouldPollTeamMembers={Boolean(
-                    authenticatedUser?.userType === "member" &&
+                    hasAuthenticatedMemberAuthority &&
                       !collaborationInviteRoute &&
                       currentWorkspaceUserId,
                   )}

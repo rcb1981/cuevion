@@ -10,7 +10,14 @@ from types import SimpleNamespace
 from unittest import mock
 from urllib.parse import parse_qs, urlsplit
 
-from api.auth import account_authority, auth0_flow, models, runtime, session_store
+from api.auth import (
+    account_authority,
+    auth0_flow,
+    email_address,
+    models,
+    runtime,
+    session_store,
+)
 from api.auth.callback import handler as CallbackHandler
 from api.auth.test_account_authority import (
     EMAIL,
@@ -64,6 +71,18 @@ class FixedSessionRandom:
         if len(value) != length:
             raise AssertionError(length)
         return value
+
+
+class NeutralEmailHelperTests(unittest.TestCase):
+    def test_established_normalization_and_validation_contract_is_preserved(self):
+        self.assertEqual(
+            email_address.normalize_auth_email("  USER@Example.COM  "),
+            "user@example.com",
+        )
+        self.assertTrue(email_address.is_valid_auth_email(" user+tag@example.com "))
+        for invalid in ("", "user@example", "user @example.com", "user@localhost"):
+            with self.subTest(invalid=invalid):
+                self.assertFalse(email_address.is_valid_auth_email(invalid))
 
 
 class MemoryCommands:
@@ -370,6 +389,88 @@ class SessionAndLogoutTests(unittest.TestCase):
         cookie_pair = cookie.split(";", 1)[0]
         commands.commands.clear()
         return commands, store, (("host", "app.cuevion.com"), ("cookie", cookie_pair))
+
+    def test_shared_member_resolver_returns_canonical_current_account_context(self):
+        _commands, store, headers = self._stored_session()
+        authority = FakeAuthority(user_result=_user_result())
+        resolution = runtime.resolve_authenticated_member(
+            headers,
+            environment=ENVIRONMENT,
+            now=NOW + 1,
+            session_store_factory=lambda _environment: store,
+            authority_factory=lambda _environment: authority,
+        )
+
+        self.assertIs(
+            resolution.outcome,
+            runtime.MemberResolutionOutcome.AUTHENTICATED,
+        )
+        self.assertEqual(resolution.set_cookies, ())
+        self.assertEqual(
+            resolution.member,
+            runtime.AuthenticatedMemberContext(
+                user_id=USER_ID,
+                email=EMAIL,
+                name="Cuevion Member",
+                workspace_id=WORKSPACE_ID,
+                membership_role="member",
+            ),
+        )
+        self.assertEqual(authority.user_calls, [(USER_ID, WORKSPACE_ID)])
+
+    def test_shared_member_resolver_ignores_unrelated_legacy_cookie(self):
+        store_factory = mock.Mock(side_effect=AssertionError("must not resolve store"))
+        authority_factory = mock.Mock(side_effect=AssertionError("must not read authority"))
+        resolution = runtime.resolve_authenticated_member(
+            (("cookie", "cuevion_beta_session=legacy"),),
+            environment={},
+            session_store_factory=store_factory,
+            authority_factory=authority_factory,
+        )
+
+        self.assertIs(
+            resolution.outcome,
+            runtime.MemberResolutionOutcome.UNAUTHENTICATED,
+        )
+        self.assertIsNone(resolution.member)
+        self.assertEqual(resolution.set_cookies, ())
+        store_factory.assert_not_called()
+        authority_factory.assert_not_called()
+
+    def test_shared_member_resolver_malformed_and_expired_sessions_fail_closed(self):
+        malformed_commands = MemoryCommands()
+        malformed_store = session_store.AuthSessionStore(malformed_commands)
+        authority_factory = mock.Mock(side_effect=AssertionError("must not read authority"))
+        malformed = runtime.resolve_authenticated_member(
+            (("cookie", "__Host-cuevion_session=malformed"),),
+            environment=ENVIRONMENT,
+            now=NOW,
+            session_store_factory=lambda _environment: malformed_store,
+            authority_factory=authority_factory,
+        )
+        self.assertIs(
+            malformed.outcome,
+            runtime.MemberResolutionOutcome.UNAUTHENTICATED,
+        )
+        self.assertTrue(any("Max-Age=0" in value for value in malformed.set_cookies))
+        self.assertEqual(malformed_commands.commands, [])
+        authority_factory.assert_not_called()
+
+        expired_commands, expired_store, expired_headers = self._stored_session()
+        expired = runtime.resolve_authenticated_member(
+            expired_headers,
+            environment=ENVIRONMENT,
+            now=NOW + session_store.SESSION_TTL_SECONDS,
+            session_store_factory=lambda _environment: expired_store,
+            authority_factory=authority_factory,
+        )
+        self.assertIs(
+            expired.outcome,
+            runtime.MemberResolutionOutcome.UNAUTHENTICATED,
+        )
+        self.assertIsNone(expired.member)
+        self.assertIn("DEL", [command[0] for command in expired_commands.commands])
+        authority_factory.assert_not_called()
 
     def test_no_auth0_cookie_returns_401_before_runtime_configuration(self):
         response = runtime.session_response(

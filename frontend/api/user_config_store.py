@@ -30,6 +30,7 @@ else:
 
     import json
     import os
+    from collections.abc import Mapping
     from copy import deepcopy
     from datetime import datetime, timezone
     from typing import Literal, TypedDict
@@ -37,12 +38,9 @@ else:
     from urllib.parse import quote
     from urllib.request import Request, urlopen
 
-    from .beta_auth import (
-        normalize_auth_email,
-        parse_beta_session_token,
-        read_beta_session_cookie,
-        resolve_beta_session_secret,
-    )
+    from .auth import http as auth_http
+    from .auth import runtime as auth_runtime
+    from .auth.email_address import normalize_auth_email
 
     USER_CONFIG_SCHEMA_VERSION = 1
     USER_CONFIG_KEY_PREFIX = "cuevion:user:v1"
@@ -129,24 +127,58 @@ else:
     def resolve_authenticated_user(
         headers,
     ) -> tuple[AuthenticatedUserContext | None, UserConfigAccessError | None]:
-        if not resolve_beta_session_secret():
+        try:
+            if type(headers) in (list, tuple):
+                raw_headers = tuple(headers)
+            elif callable(getattr(headers, "raw_items", None)):
+                raw_headers = tuple(headers.raw_items())
+            elif isinstance(headers, Mapping):
+                raw_headers = tuple(headers.items())
+            else:
+                raw_headers = ()
+            resolution = auth_runtime.resolve_authenticated_member(raw_headers)
+        except auth_http.HttpBoundaryError:
+            return None, _error(
+                "invalid_session",
+                "The authenticated session is invalid.",
+            )
+        except Exception:
             return None, _error(
                 "session_auth_unavailable",
                 "Authenticated session validation is unavailable.",
             )
 
-        session_token = read_beta_session_cookie(headers)
-        if not session_token:
+        if resolution.outcome is auth_runtime.MemberResolutionOutcome.UNAVAILABLE:
+            return None, _error(
+                "session_auth_unavailable",
+                "Authenticated session validation is unavailable.",
+            )
+
+        if resolution.outcome is auth_runtime.MemberResolutionOutcome.UNAUTHENTICATED:
+            error_code: UserConfigAccessErrorCode = (
+                "invalid_session" if resolution.set_cookies else "missing_session"
+            )
+            message = (
+                "The authenticated session is invalid."
+                if error_code == "invalid_session"
+                else "An authenticated session is required."
+            )
+            return None, _error(error_code, message)
+
+        member = resolution.member
+        if member is None:
+            return None, _error(
+                "session_auth_unavailable",
+                "Authenticated session validation is unavailable.",
+            )
+
+        if member.auth_source != "auth0" or member.user_type != "member":
             return None, _error("missing_session", "An authenticated session is required.")
 
-        session_user = parse_beta_session_token(session_token)
-        if not session_user:
-            return None, _error("invalid_session", "The authenticated session is invalid.")
-
         return {
-            "email": session_user["email"],
-            "name": session_user["name"],
-            "userType": session_user["userType"],
+            "email": member.email,
+            "name": member.name,
+            "userType": member.user_type,
         }, None
 
 
