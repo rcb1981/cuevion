@@ -184,7 +184,7 @@ else:
                 "The requested mailbox was not found.",
                 404,
             )
-        if inbox.get("connected") is not True and inbox.get("connectionStatus") != "reconnect_required":
+        if inbox.get("connected") is not True or inbox.get("connectionStatus") != "connected":
             return _failure(
                 "reconnect_required",
                 "reconnect_required",

@@ -111,12 +111,12 @@ ALLOWED_CONFIG_FIELDS = {
     "uiPreferences",
     "displayNameOverrides",
 }
-SAFE_GOOGLE_INBOX_CLIENT_FIELDS = {
+SAFE_MANAGED_INBOX_PRESENTATION_FIELDS = {
     "title",
     "internalRole",
     "focusPreferences",
 }
-MAX_GOOGLE_INBOX_TITLE_LENGTH = 160
+MAX_MANAGED_INBOX_TITLE_LENGTH = 160
 SUPPORTED_INTERNAL_ROLES = {
     "management",
     "label_manager",
@@ -304,14 +304,13 @@ def _merge_user_config(existing_record: dict | None, sanitized_update: dict) -> 
         merged[key] = value
 
     if "managedInboxes" in sanitized_update:
-        existing_inboxes = (
+        existing_inboxes = _sanitize_managed_inboxes(
             existing_record.get("managedInboxes")
             if isinstance(existing_record, dict)
-            and isinstance(existing_record.get("managedInboxes"), list)
-            else []
+            else None
         )
         requested_inboxes = sanitized_update.get("managedInboxes")
-        merged["managedInboxes"] = _merge_server_owned_google_inboxes(
+        merged["managedInboxes"] = _merge_server_owned_managed_inboxes(
             existing_inboxes,
             requested_inboxes if isinstance(requested_inboxes, list) else [],
         )
@@ -323,14 +322,17 @@ def _has_control_characters(value: str) -> bool:
     return any(unicodedata.category(character).startswith("C") for character in value)
 
 
-def _validate_google_client_field(field: str, value: object) -> tuple[bool, object]:
+def _validate_managed_inbox_presentation_field(
+    field: str,
+    value: object,
+) -> tuple[bool, object]:
     if field == "title":
         if not isinstance(value, str):
             return False, None
         normalized = value.strip()
         if (
             not normalized
-            or len(normalized) > MAX_GOOGLE_INBOX_TITLE_LENGTH
+            or len(normalized) > MAX_MANAGED_INBOX_TITLE_LENGTH
             or _has_control_characters(normalized)
         ):
             return False, None
@@ -354,65 +356,54 @@ def _validate_google_client_field(field: str, value: object) -> tuple[bool, obje
     return False, None
 
 
-def _merge_server_owned_google_inboxes(existing: list, requested: list) -> list:
-    existing_by_id = {
-        inbox.get("id"): inbox
-        for inbox in existing
-        if isinstance(inbox, dict) and isinstance(inbox.get("id"), str)
-    }
-    protected_google_by_normalized_id = {
-        inbox_id.strip().casefold(): inbox
-        for inbox_id, inbox in existing_by_id.items()
-        if inbox_id.strip() and inbox.get("provider") == "google"
-    }
-    next_inboxes: list[dict] = []
-    seen_google_ids: set[str] = set()
+def _merge_server_owned_managed_inboxes(existing: list, requested: list) -> list:
+    """Apply presentation-only edits without changing mailbox authority.
 
-    for requested_inbox in requested:
-        if not isinstance(requested_inbox, dict):
+    Existing records and their order are authoritative. A client snapshot cannot
+    create, remove, reorder, claim, connect, or change the transport identity of
+    a mailbox. Ambiguous duplicate ids fail closed by applying no edits.
+    """
+
+    next_inboxes = [copy.deepcopy(inbox) for inbox in existing]
+    existing_indexes_by_id: dict[str, list[int]] = {}
+    requested_by_id: dict[str, list[dict]] = {}
+
+    for index, inbox in enumerate(existing):
+        if not isinstance(inbox, dict):
             continue
-        inbox_id = requested_inbox.get("id")
-        normalized_inbox_id = (
-            inbox_id.strip().casefold()
-            if isinstance(inbox_id, str) and inbox_id.strip()
-            else None
-        )
-        existing_inbox = existing_by_id.get(inbox_id) if isinstance(inbox_id, str) else None
-        protected_google_inbox = (
-            protected_google_by_normalized_id.get(normalized_inbox_id)
-            if normalized_inbox_id is not None
-            else None
-        )
+        inbox_id = inbox.get("id")
+        if not isinstance(inbox_id, str) or not inbox_id.strip():
+            continue
+        normalized_inbox_id = inbox_id.strip().casefold()
+        existing_indexes_by_id.setdefault(normalized_inbox_id, []).append(index)
 
-        if requested_inbox.get("provider") == "google" and not (
-            isinstance(protected_google_inbox, dict)
-        ):
-            # Public settings writes cannot claim or convert a Google mailbox.
-            if isinstance(existing_inbox, dict):
-                next_inboxes.append(copy.deepcopy(existing_inbox))
+    for inbox in requested:
+        if not isinstance(inbox, dict):
+            continue
+        inbox_id = inbox.get("id")
+        if not isinstance(inbox_id, str) or not inbox_id.strip():
+            continue
+        normalized_inbox_id = inbox_id.strip().casefold()
+        requested_by_id.setdefault(normalized_inbox_id, []).append(inbox)
+
+    for normalized_inbox_id, existing_indexes in existing_indexes_by_id.items():
+        requested_matches = requested_by_id.get(normalized_inbox_id, [])
+        if len(existing_indexes) != 1 or len(requested_matches) != 1:
             continue
 
-        if isinstance(protected_google_inbox, dict) and normalized_inbox_id is not None:
-            if normalized_inbox_id in seen_google_ids:
+        existing_index = existing_indexes[0]
+        preserved = copy.deepcopy(existing[existing_index])
+        requested_inbox = requested_matches[0]
+        for field in SAFE_MANAGED_INBOX_PRESENTATION_FIELDS:
+            if field not in requested_inbox:
                 continue
-            preserved = copy.deepcopy(protected_google_inbox)
-            for field in SAFE_GOOGLE_INBOX_CLIENT_FIELDS:
-                if field in requested_inbox:
-                    is_valid, validated_value = _validate_google_client_field(
-                        field,
-                        requested_inbox[field],
-                    )
-                    if is_valid:
-                        preserved[field] = copy.deepcopy(validated_value)
-            next_inboxes.append(preserved)
-            seen_google_ids.add(normalized_inbox_id)
-            continue
-
-        next_inboxes.append(copy.deepcopy(requested_inbox))
-
-    for normalized_inbox_id, protected_google_inbox in protected_google_by_normalized_id.items():
-        if normalized_inbox_id not in seen_google_ids:
-            next_inboxes.append(copy.deepcopy(protected_google_inbox))
+            is_valid, validated_value = _validate_managed_inbox_presentation_field(
+                field,
+                requested_inbox[field],
+            )
+            if is_valid:
+                preserved[field] = copy.deepcopy(validated_value)
+        next_inboxes[existing_index] = preserved
 
     return next_inboxes
 

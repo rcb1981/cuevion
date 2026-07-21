@@ -601,7 +601,7 @@ class PostReadStatusHandlerTests(unittest.TestCase):
         self.assertEqual(saved["oauthOwnerEmail"], "owner@example.com")
         self.assertEqual(saved["title"], "New title")
 
-    def test_ok_custom_imap_behavior_is_unchanged(self):
+    def test_unchanged_existing_custom_imap_snapshot_remains_compatible(self):
         custom_imap = {
             "id": "imap-1",
             "email": "artist@example.com",
@@ -634,6 +634,260 @@ class PostReadStatusHandlerTests(unittest.TestCase):
         self.assertEqual(saved["customSmtp"]["host"], "smtp.example.com")
         self.assertEqual(saved["customSmtp"]["username"], "artist")
         self.assertEqual(saved["customSmtp"]["password"], "")
+
+    def test_new_connected_mailboxes_are_ignored_and_existing_records_cannot_be_omitted(self):
+        existing = {
+            "id": "imap-existing",
+            "title": "Existing mailbox",
+            "email": "verified@example.com",
+            "provider": "custom_imap",
+            "connected": True,
+            "connectionMethod": "imap",
+            "connectionStatus": "connected",
+        }
+        requested_new = [
+            {
+                "id": "imap-new",
+                "title": "Claimed IMAP mailbox",
+                "email": "claimed@example.com",
+                "provider": "custom_imap",
+                "connected": True,
+                "connectionMethod": "imap",
+                "connectionStatus": "connected",
+            },
+            {
+                "id": "gmail-new",
+                "title": "Claimed Gmail mailbox",
+                "email": "claimed@gmail.com",
+                "provider": "google",
+                "connected": True,
+                "connectionMethod": "oauth",
+                "connectionStatus": "connected",
+            },
+        ]
+
+        request, _, write_mock = self.invoke(
+            {"config": {"managedInboxes": requested_new}},
+            {
+                "status": "ok",
+                "config": {
+                    "v": 1,
+                    "email": "owner@example.com",
+                    "managedInboxes": [existing],
+                },
+                "error": None,
+            },
+        )
+        self.assertEqual(request.status_code, 200)
+        self.assertEqual(write_mock.call_args.args[2]["managedInboxes"], [existing])
+
+        missing_request, _, missing_write = self.invoke(
+            {"config": {"managedInboxes": requested_new}},
+            {
+                "status": "missing",
+                "config": None,
+                "error": {"code": "user_config_not_found", "message": "not found"},
+            },
+        )
+        self.assertEqual(missing_request.status_code, 200)
+        self.assertEqual(missing_write.call_args.args[2]["managedInboxes"], [])
+
+    def test_existing_custom_imap_allows_only_validated_presentation_updates(self):
+        existing = {
+            "id": "imap-1",
+            "title": "Old title",
+            "email": "verified@example.com",
+            "provider": "custom_imap",
+            "connected": True,
+            "connectionMethod": "imap",
+            "connectionStatus": "connected",
+            "connectionMessage": None,
+            "customImap": {
+                "host": "imap.verified.example",
+                "port": "993",
+                "ssl": True,
+                "username": "verified-user",
+                "password": "",
+            },
+            "customSmtp": {
+                "host": "smtp.verified.example",
+                "port": "587",
+                "security": "starttls",
+                "username": "verified-user",
+                "useSameCredentials": True,
+                "password": "",
+            },
+            "internalRole": "management",
+            "focusPreferences": {"promo": "medium"},
+        }
+        request, _, write_mock = self.invoke(
+            {
+                "config": {
+                    "managedInboxes": [
+                        {
+                            "id": "IMAP-1",
+                            "title": "  New title  ",
+                            "email": "attacker@example.com",
+                            "provider": "google",
+                            "connected": False,
+                            "connectionMethod": "oauth",
+                            "connectionStatus": "connection_failed",
+                            "connectionMessage": "attacker-controlled",
+                            "customImap": {
+                                "host": "imap.attacker.example",
+                                "port": "143",
+                                "ssl": False,
+                                "username": "attacker",
+                            },
+                            "customSmtp": {
+                                "host": "smtp.attacker.example",
+                                "port": "25",
+                                "security": "ssl",
+                                "username": "attacker",
+                                "useSameCredentials": False,
+                            },
+                            "internalRole": "producer",
+                            "focusPreferences": {"promo": "low"},
+                        }
+                    ]
+                }
+            },
+            {
+                "status": "ok",
+                "config": {
+                    "v": 1,
+                    "email": "owner@example.com",
+                    "managedInboxes": [existing],
+                },
+                "error": None,
+            },
+        )
+        self.assertEqual(request.status_code, 200)
+        saved = write_mock.call_args.args[2]["managedInboxes"][0]
+        for authoritative_field in (
+            "id",
+            "email",
+            "provider",
+            "connected",
+            "connectionMethod",
+            "connectionStatus",
+            "connectionMessage",
+            "customImap",
+            "customSmtp",
+        ):
+            self.assertEqual(saved[authoritative_field], existing[authoritative_field])
+        self.assertEqual(saved["title"], "New title")
+        self.assertEqual(saved["internalRole"], "producer")
+        self.assertEqual(saved["focusPreferences"], {"promo": "low"})
+
+    def test_identity_only_attack_preserves_the_complete_existing_record(self):
+        existing = {
+            "id": "imap-1",
+            "title": "Server title",
+            "email": "verified@example.com",
+            "provider": "custom_imap",
+            "connected": True,
+            "connectionMethod": "imap",
+            "connectionStatus": "connected",
+            "connectionMessage": None,
+            "customImap": {
+                "host": "imap.verified.example",
+                "port": "993",
+                "ssl": True,
+                "username": "verified-user",
+                "password": "",
+            },
+            "customSmtp": {
+                "host": "smtp.verified.example",
+                "port": "587",
+                "security": "starttls",
+                "username": "verified-user",
+                "useSameCredentials": True,
+                "password": "",
+            },
+            "internalRole": "management",
+            "focusPreferences": {"promo": "medium"},
+        }
+        request, _, write_mock = self.invoke(
+            {
+                "config": {
+                    "managedInboxes": [
+                        {
+                            "id": "imap-1",
+                            "email": "attacker@example.com",
+                            "provider": "google",
+                            "connected": False,
+                            "connectionMethod": "oauth",
+                            "connectionStatus": "connection_failed",
+                            "connectionMessage": "attacker-controlled",
+                            "customImap": {
+                                "host": "imap.attacker.example",
+                                "port": "143",
+                                "ssl": False,
+                                "username": "attacker",
+                            },
+                            "customSmtp": {
+                                "host": "smtp.attacker.example",
+                                "port": "25",
+                                "security": "ssl",
+                                "username": "attacker",
+                                "useSameCredentials": False,
+                            },
+                        }
+                    ]
+                }
+            },
+            {
+                "status": "ok",
+                "config": {
+                    "v": 1,
+                    "email": "owner@example.com",
+                    "managedInboxes": [existing],
+                },
+                "error": None,
+            },
+        )
+        self.assertEqual(request.status_code, 200)
+        write_mock.assert_called_once()
+        self.assertEqual(write_mock.call_args.args[2]["managedInboxes"], [existing])
+
+    def test_duplicate_requested_or_existing_ids_fail_closed_without_reordering(self):
+        existing = [
+            {
+                "id": "imap-1",
+                "title": "First",
+                "email": "first@example.com",
+                "provider": "custom_imap",
+                "connected": True,
+                "connectionStatus": "connected",
+            },
+            {
+                "id": " IMAP-1 ",
+                "title": "Second",
+                "email": "second@example.com",
+                "provider": "custom_imap",
+                "connected": False,
+                "connectionStatus": "connection_failed",
+            },
+        ]
+        requested = [
+            {"id": "imap-1", "title": "Attacker one"},
+            {"id": "IMAP-1", "title": "Attacker two"},
+        ]
+        request, _, write_mock = self.invoke(
+            {"config": {"managedInboxes": requested}},
+            {
+                "status": "ok",
+                "config": {
+                    "v": 1,
+                    "email": "owner@example.com",
+                    "managedInboxes": existing,
+                },
+                "error": None,
+            },
+        )
+        self.assertEqual(request.status_code, 200)
+        self.assertEqual(write_mock.call_args.args[2]["managedInboxes"], existing)
 
 
 class ModuleCompatibilityTests(unittest.TestCase):

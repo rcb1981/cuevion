@@ -229,6 +229,116 @@ class ResolverTests(unittest.TestCase):
 
 
 class InitialAndRefreshTests(unittest.TestCase):
+    def test_refresh_status_gate_truth_table_stops_before_secrets_and_provider(self):
+        missing = object()
+        connected_values = (missing, False, True, 1)
+        statuses = (
+            missing,
+            "not_connected",
+            "oauth_required",
+            "waiting_for_authentication",
+            "authenticated_pending_activation",
+            "connected",
+            "connection_failed",
+            "reconnect_required",
+            "CONNECTED",
+            "connected ",
+        )
+
+        for connected in connected_values:
+            for connection_status in statuses:
+                should_connect = connected is True and connection_status == "connected"
+                with self.subTest(
+                    connected=("missing" if connected is missing else repr(connected)),
+                    connection_status=(
+                        "missing"
+                        if connection_status is missing
+                        else repr(connection_status)
+                    ),
+                ):
+                    handler = FakeHandler(
+                        {
+                            "mode": "refresh",
+                            "mailboxId": "demo",
+                            "limit": 20,
+                        }
+                    )
+                    inbox = {
+                        "id": "demo",
+                        "email": "demo@example.com",
+                        "provider": "custom_imap",
+                        "customImap": {
+                            "host": "imap.example.com",
+                            "port": "993",
+                            "ssl": True,
+                            "username": "imap-user",
+                        },
+                        "customSmtp": {
+                            "host": "smtp.example.com",
+                            "port": "587",
+                            "security": "starttls",
+                            "username": "smtp-user",
+                            "useSameCredentials": False,
+                        },
+                    }
+                    if connected is not missing:
+                        inbox["connected"] = connected
+                    if connection_status is not missing:
+                        inbox["connectionStatus"] = connection_status
+
+                    owned = {
+                        "status": "ok",
+                        "user": {"email": "owner@example.com"},
+                        "config": {},
+                        "inbox": inbox,
+                        "error": None,
+                    }
+                    with patch.object(
+                        connect_route,
+                        "resolve_authenticated_user",
+                        return_value=({"email": "owner@example.com"}, None),
+                    ), patch.object(
+                        authenticated_imap,
+                        "resolve_owned_managed_inbox_record",
+                        return_value=owned,
+                    ), patch.object(
+                        authenticated_imap,
+                        "read_mailbox_secret",
+                        return_value={
+                            "status": "present",
+                            "record": {
+                                "imapPassword": "imap-secret",
+                                "smtpPassword": "smtp-secret",
+                            },
+                            "error": None,
+                        },
+                    ) as secret_lookup, patch.object(
+                        imap_connect_preview,
+                        "build_connect_preview_response",
+                        return_value=(200, {"ok": True, "messages": []}),
+                    ) as provider_fetch, patch.object(
+                        imap_connect_preview,
+                        "open_mailbox_connection",
+                    ) as provider_connection:
+                        invoke_connect(handler)
+
+                    provider_connection.assert_not_called()
+                    if should_connect:
+                        self.assertEqual(handler.status, 200)
+                        secret_lookup.assert_called_once_with(
+                            "owner@example.com",
+                            "demo",
+                        )
+                        provider_fetch.assert_called_once()
+                    else:
+                        self.assertEqual(handler.status, 409)
+                        self.assertEqual(
+                            handler.response()["error"]["code"],
+                            "reconnect_required",
+                        )
+                        secret_lookup.assert_not_called()
+                        provider_fetch.assert_not_called()
+
     def test_unauthenticated_initial_stops_before_imap_and_storage(self):
         handler = FakeHandler(initial_payload())
         with patch.object(connect_route, "resolve_authenticated_user", return_value=(None, {})), patch.object(
