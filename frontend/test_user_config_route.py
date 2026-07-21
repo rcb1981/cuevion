@@ -55,12 +55,19 @@ STORE = {"rest_url": "https://kv.example", "rest_token": "token"}
 
 
 class GetRouteTests(unittest.TestCase):
-    def invoke(self, auth=(SESSION_USER, None), store=(STORE, None), read_result=None):
-        read_result = read_result or {
-            "status": "ok",
-            "config": {"v": 1, "email": "owner@example.com"},
-            "error": None,
-        }
+    def invoke(
+        self,
+        auth=(SESSION_USER, None),
+        store=(STORE, None),
+        read_result=None,
+        read_side_effect=None,
+    ):
+        if read_result is None:
+            read_result = {
+                "status": "ok",
+                "config": {"v": 1, "email": "owner@example.com"},
+                "error": None,
+            }
         handler = FakeHandler()
         with patch.object(config_route, "resolve_authenticated_user", return_value=auth), patch.object(
             config_route,
@@ -70,6 +77,7 @@ class GetRouteTests(unittest.TestCase):
             config_route,
             "read_user_config_record",
             return_value=read_result,
+            side_effect=read_side_effect,
         ) as read_mock, patch.object(
             config_route,
             "write_user_config_record",
@@ -78,12 +86,16 @@ class GetRouteTests(unittest.TestCase):
             config_route.handler.do_GET(handler)
         return handler, read_mock, write_mock
 
-    def test_found_record_and_headers_are_unchanged(self):
+    def test_found_record_has_explicit_state_and_preserves_response_headers(self):
         handler, read_mock, write_mock = self.invoke()
         self.assertEqual(handler.status_code, 200)
         self.assertEqual(
             handler.payload(),
-            {"ok": True, "config": {"v": 1, "email": "owner@example.com"}},
+            {
+                "ok": True,
+                "configState": "found",
+                "config": {"v": 1, "email": "owner@example.com"},
+            },
         )
         self.assertIn(("Content-Type", "application/json"), handler.response_headers)
         self.assertIn(("Cache-Control", "no-store"), handler.response_headers)
@@ -94,52 +106,188 @@ class GetRouteTests(unittest.TestCase):
         read_mock.assert_called_once_with(STORE, "owner@example.com")
         write_mock.assert_not_called()
 
-    def test_missing_unconfigured_and_read_failures_still_return_null(self):
-        results = [
-            (
-                (STORE, None),
-                {
-                    "status": "missing",
-                    "config": None,
-                    "error": {"code": "user_config_not_found", "message": "missing"},
-                },
-            ),
-            (
-                (STORE, None),
-                {
-                    "status": "unavailable",
-                    "config": None,
-                    "error": {
-                        "code": "user_config_store_unavailable",
-                        "message": "unavailable",
-                    },
-                },
-            ),
-            (
-                (STORE, None),
-                {
-                    "status": "malformed",
-                    "config": None,
-                    "error": {"code": "user_config_malformed", "message": "malformed"},
-                },
-            ),
-            (
-                (
-                    None,
-                    {
-                        "code": "user_config_store_unavailable",
-                        "message": "not configured",
-                    },
-                ),
+    def test_only_a_precise_missing_result_returns_missing_state(self):
+        handler, read_mock, write_mock = self.invoke(
+            read_result={
+                "status": "missing",
+                "config": None,
+                "error": {"code": "user_config_not_found", "message": "missing"},
+            },
+        )
+        self.assertEqual(handler.status_code, 200)
+        self.assertEqual(
+            handler.payload(),
+            {"ok": True, "configState": "missing", "config": None},
+        )
+        read_mock.assert_called_once_with(STORE, "owner@example.com")
+        write_mock.assert_not_called()
+
+    def test_unconfigured_store_is_config_unavailable_before_read(self):
+        handler, read_mock, write_mock = self.invoke(
+            store=(
                 None,
+                {
+                    "code": "user_config_store_unavailable",
+                    "message": "private configuration detail",
+                },
             ),
-        ]
-        for store, read_result in results:
-            with self.subTest(store=store, read_result=read_result):
-                handler, _, write_mock = self.invoke(store=store, read_result=read_result)
-                self.assertEqual(handler.status_code, 200)
-                self.assertEqual(handler.payload(), {"ok": True, "config": None})
+        )
+        self.assertEqual(handler.status_code, 503)
+        self.assertEqual(
+            handler.payload(),
+            {
+                "ok": False,
+                "error": {
+                    "code": "config_unavailable",
+                    "message": "User configuration is temporarily unavailable.",
+                },
+            },
+        )
+        self.assertNotIn("private configuration detail", json.dumps(handler.payload()))
+        read_mock.assert_not_called()
+        write_mock.assert_not_called()
+
+    def test_unavailable_read_or_read_exception_is_config_unavailable(self):
+        unavailable = {
+            "status": "unavailable",
+            "config": None,
+            "error": {
+                "code": "user_config_store_unavailable",
+                "message": "private storage detail",
+            },
+        }
+        cases = (
+            {"read_result": unavailable},
+            {"read_side_effect": RuntimeError("private exception detail")},
+        )
+        for invocation in cases:
+            with self.subTest(invocation=invocation):
+                handler, read_mock, write_mock = self.invoke(**invocation)
+                self.assertEqual(handler.status_code, 503)
+                self.assertEqual(
+                    handler.payload()["error"],
+                    {
+                        "code": "config_unavailable",
+                        "message": "User configuration is temporarily unavailable.",
+                    },
+                )
+                response = json.dumps(handler.payload())
+                self.assertNotIn("private storage detail", response)
+                self.assertNotIn("private exception detail", response)
+                read_mock.assert_called_once_with(STORE, "owner@example.com")
                 write_mock.assert_not_called()
+
+    def test_malformed_or_inconsistent_read_results_are_config_invalid(self):
+        cases = (
+            {
+                "status": "malformed",
+                "config": None,
+                "error": {
+                    "code": "user_config_malformed",
+                    "message": "private malformed detail",
+                },
+            },
+            {"status": "missing", "config": {"unexpected": True}, "error": None},
+            {"status": "ok", "config": None, "error": None},
+            {"status": "ok", "config": [], "error": None},
+            {"status": "future_status", "config": {}, "error": None},
+            {},
+            [],
+        )
+        for read_result in cases:
+            with self.subTest(read_result=read_result):
+                handler, _, write_mock = self.invoke(read_result=read_result)
+                self.assertEqual(handler.status_code, 503)
+                self.assertEqual(
+                    handler.payload()["error"],
+                    {
+                        "code": "config_invalid",
+                        "message": "User configuration is invalid.",
+                    },
+                )
+                self.assertNotIn("private malformed detail", json.dumps(handler.payload()))
+                write_mock.assert_not_called()
+
+    def test_known_corrupt_stored_config_shapes_are_config_invalid_before_sanitization(self):
+        invalid_records = {
+            "onboarding session": {"onboardingSession": []},
+            "managed inbox collection": {"managedInboxes": {}},
+            "managed inbox entry": {"managedInboxes": ["invalid"]},
+            "schema version": {"v": True},
+            "email": {"email": 1},
+            "updated timestamp": {"updatedAt": []},
+            "title overrides": {"mailboxTitleOverrides": []},
+            "focus overrides": {"mailboxFocusPreferenceOverrides": []},
+            "signatures": {"inboxSignatures": []},
+            "smart folders": {"smartFolders": {}},
+            "primary mailbox id": {"primaryManagedInboxId": 1},
+            "ui preferences": {"uiPreferences": []},
+            "theme type": {"uiPreferences": {"themeMode": 1}},
+            "theme value": {"uiPreferences": {"themeMode": "Sepia"}},
+            "ai preference": {"uiPreferences": {"aiSuggestionsEnabled": "yes"}},
+            "inbox preference": {"uiPreferences": {"inboxChangesEnabled": 1}},
+            "team preference": {"uiPreferences": {"teamActivityEnabled": None}},
+            "display overrides": {"displayNameOverrides": []},
+            "display override value": {"displayNameOverrides": {"mailbox": 1}},
+        }
+
+        for name, stored_config in invalid_records.items():
+            with self.subTest(name=name), patch.object(
+                config_route,
+                "_sanitize_stored_user_config",
+            ) as sanitize_mock:
+                handler, _, write_mock = self.invoke(
+                    read_result={
+                        "status": "ok",
+                        "config": stored_config,
+                        "error": None,
+                    },
+                )
+
+            self.assertEqual(handler.status_code, 503)
+            self.assertEqual(
+                handler.payload(),
+                {
+                    "ok": False,
+                    "error": {
+                        "code": "config_invalid",
+                        "message": "User configuration is invalid.",
+                    },
+                },
+            )
+            sanitize_mock.assert_not_called()
+            write_mock.assert_not_called()
+
+    def test_valid_known_shapes_and_unknown_top_level_fields_remain_compatible(self):
+        stored_config = {
+            "v": 1,
+            "email": "owner@example.com",
+            "updatedAt": "2026-07-21T12:00:00Z",
+            "onboardingSession": {},
+            "managedInboxes": [{"id": "mailbox-a"}],
+            "mailboxTitleOverrides": {},
+            "mailboxFocusPreferenceOverrides": {},
+            "inboxSignatures": {},
+            "smartFolders": [],
+            "primaryManagedInboxId": None,
+            "uiPreferences": {
+                "themeMode": "System",
+                "aiSuggestionsEnabled": True,
+                "inboxChangesEnabled": False,
+                "teamActivityEnabled": True,
+                "futurePreference": {"opaque": True},
+            },
+            "displayNameOverrides": {"mailbox-a": "Main inbox"},
+            "futureTopLevelField": {"opaque": True},
+        }
+        handler, _, write_mock = self.invoke(
+            read_result={"status": "ok", "config": stored_config, "error": None},
+        )
+
+        self.assertEqual(handler.status_code, 200)
+        self.assertEqual(handler.payload()["configState"], "found")
+        self.assertEqual(handler.payload()["config"], stored_config)
+        write_mock.assert_not_called()
 
     def test_unauthorized_shape_is_exact(self):
         auth_error = {"code": "missing_session", "message": "missing"}
@@ -177,7 +325,7 @@ class GetRouteTests(unittest.TestCase):
         read_mock.assert_not_called()
         write_mock.assert_not_called()
 
-    def test_legacy_passwords_are_stripped_rewritten_and_never_returned(self):
+    def test_legacy_passwords_are_stripped_without_a_get_side_effect(self):
         legacy = {
             "v": 1,
             "email": "owner@example.com",
@@ -193,11 +341,38 @@ class GetRouteTests(unittest.TestCase):
             read_result={"status": "ok", "config": legacy, "error": None},
         )
         self.assertEqual(handler.status_code, 200)
+        self.assertEqual(handler.payload()["configState"], "found")
         returned = handler.payload()["config"]
         self.assertNotIn("imap-secret", json.dumps(returned))
         self.assertNotIn("smtp-secret", json.dumps(returned))
-        write_mock.assert_called_once()
-        self.assertEqual(write_mock.call_args.args[2], returned)
+        write_mock.assert_not_called()
+
+    def test_configuration_that_cannot_be_safely_normalized_is_config_invalid(self):
+        normalization_behaviors = (
+            {"side_effect": ValueError("private normalization detail")},
+            {"return_value": []},
+        )
+        for behavior in normalization_behaviors:
+            with self.subTest(behavior=behavior), patch.object(
+                config_route,
+                "_sanitize_stored_user_config",
+                **behavior,
+            ):
+                handler, _, write_mock = self.invoke()
+
+            self.assertEqual(handler.status_code, 503)
+            self.assertEqual(
+                handler.payload(),
+                {
+                    "ok": False,
+                    "error": {
+                        "code": "config_invalid",
+                        "message": "User configuration is invalid.",
+                    },
+                },
+            )
+            self.assertNotIn("private normalization detail", json.dumps(handler.payload()))
+            write_mock.assert_not_called()
 
 
 class PostRouteTests(unittest.TestCase):

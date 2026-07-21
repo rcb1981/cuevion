@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { Auth0LoginView } from "./components/auth/Auth0LoginView";
 import { OnboardingFlow } from "./components/onboarding/OnboardingFlow";
 import { WorkspaceTransition } from "./components/workspace/WorkspaceTransition";
@@ -9,9 +9,12 @@ import {
   type TeamInvite,
 } from "./lib/teamInviteApi";
 import {
-  getUserAccountConfig,
+  loadUserAccountConfig,
   saveUserAccountConfig,
+  setUserAccountConfigHydrationEchoExpectation,
   type UserAccountConfig,
+  type UserAccountConfigReadResult,
+  type UserAccountConfigSaveResult,
 } from "./lib/userConfigApi";
 import {
   sanitizeAccountConfigCredentials,
@@ -39,8 +42,6 @@ const WorkspaceShell = lazy(() =>
 const ONBOARDING_STATE_STORAGE_KEY = "label-inbox-ai-onboarding-state";
 const ONBOARDING_DRAFT_STATE_STORAGE_KEY = "label-inbox-ai-onboarding-draft-state";
 const CUEVION_APP_VIEW_STORAGE_KEY = "cuevion-app-view";
-const CATEGORY_LEARNING_STORAGE_KEY = "cuevion-sender-category-learning";
-const MESSAGE_OWNERSHIP_STORAGE_KEY = "cuevion-message-ownership";
 const MANAGED_INBOXES_STORAGE_KEY = "cuevion-managed-inboxes";
 const PENDING_OAUTH_MANAGED_INBOX_STORAGE_KEY = "cuevion-pending-oauth-managed-inbox";
 const CUEVION_AUTH_STORAGE_KEY = "label-inbox-ai-auth-user";
@@ -91,6 +92,16 @@ type PersistedOnboardingDraft = {
 };
 type AppView = "onboarding" | "transition" | "workspace";
 type WorkspaceDataMode = "demo" | "live";
+type AccountConfigHydrationStatus = "idle" | "loading" | "ready" | "error";
+type RetryableAccountConfigStatus = Exclude<
+  UserAccountConfigReadResult["status"],
+  "found" | "missing" | "unauthorized"
+>;
+type MemberSessionStatus =
+  | "loading"
+  | "authenticated"
+  | "unauthenticated"
+  | "unavailable";
 type StoredManagedWorkspaceInbox = {
   id?: string;
   title?: string;
@@ -126,6 +137,242 @@ type PendingOAuthManagedInbox = {
 };
 
 type DisplayNameOverrideStore = Record<string, string>;
+
+type AccountConfigStorage = Pick<
+  Storage,
+  "getItem" | "setItem" | "removeItem"
+>;
+
+type AccountConfigStartupAccountState = {
+  displayNameOverrides: DisplayNameOverrideStore;
+  persistedOnboardingSession: PersistedOnboardingSession | null;
+  onboardingState: OnboardingState;
+  userConfig: UserConfig | null;
+  view: Extract<AppView, "onboarding" | "workspace">;
+};
+
+function canUseHydratedLocalAccountState(
+  sessionStatus: MemberSessionStatus,
+  hydrationStatus: AccountConfigHydrationStatus,
+) {
+  return sessionStatus === "authenticated" && hydrationStatus === "ready";
+}
+
+function resolveAccountConfigSessionDisposition({
+  hasInviteRoute,
+  sessionStatus,
+  userType,
+  accountStorageKey,
+}: {
+  hasInviteRoute: boolean;
+  sessionStatus: MemberSessionStatus;
+  userType: AuthenticatedCuevionUser["userType"] | null;
+  accountStorageKey: string;
+}): "invite" | "guest" | "member" | "idle" {
+  if (hasInviteRoute) {
+    return "invite";
+  }
+  if (sessionStatus === "authenticated" && userType === "guest") {
+    return "guest";
+  }
+  if (
+    sessionStatus === "authenticated" &&
+    userType === "member" &&
+    accountStorageKey
+  ) {
+    return "member";
+  }
+  return "idle";
+}
+
+type AccountConfigHydrationOutcome =
+  | {
+      status: "found";
+      accountState: AccountConfigStartupAccountState;
+      didResetOnboarding: boolean;
+      clearResetQuery: boolean;
+      expectedWorkspaceHydrationEcho: UserAccountConfig | null;
+    }
+  | {
+      status: "missing";
+      accountState: AccountConfigStartupAccountState;
+      didResetOnboarding: boolean;
+      clearResetQuery: boolean;
+    }
+  | { status: "unauthorized" }
+  | { status: "error"; errorStatus: RetryableAccountConfigStatus };
+
+type AccountConfigSaveQueueRequest = {
+  accountKey: string;
+  revision: number;
+  config: UserAccountConfig;
+};
+
+function createAccountConfigSaveQueue({
+  save = saveUserAccountConfig,
+  onClean,
+}: {
+  save?: (config: UserAccountConfig) => Promise<UserAccountConfigSaveResult>;
+  onClean?: (saved: { accountKey: string; revision: number }) => void;
+} = {}) {
+  let activeAccountKey = "";
+  let generation = 0;
+  let isSaving = false;
+  let dirty = false;
+  let latestRevision = 0;
+  let pendingRequest: AccountConfigSaveQueueRequest | null = null;
+
+  const drain = async () => {
+    if (isSaving || !pendingRequest) {
+      return;
+    }
+
+    const request = pendingRequest;
+    const requestGeneration = generation;
+    pendingRequest = null;
+    isSaving = true;
+
+    let success = false;
+    try {
+      const result = await save(request.config);
+      success = result.status === "found";
+    } catch {
+      success = false;
+    }
+
+    if (
+      requestGeneration !== generation ||
+      request.accountKey !== activeAccountKey
+    ) {
+      isSaving = false;
+      if (pendingRequest) {
+        void drain();
+      }
+      return;
+    }
+
+    isSaving = false;
+    dirty =
+      !success ||
+      pendingRequest !== null ||
+      request.revision < latestRevision;
+
+    if (success && !dirty) {
+      try {
+        onClean?.({
+          accountKey: request.accountKey,
+          revision: request.revision,
+        });
+      } catch {
+        // Saving succeeded; URL cleanup can safely be retried on the next startup.
+      }
+    }
+
+    if (pendingRequest) {
+      void drain();
+    }
+  };
+
+  return {
+    reset(accountKey: string) {
+      generation += 1;
+      activeAccountKey = accountKey;
+      dirty = false;
+      latestRevision = 0;
+      pendingRequest = null;
+    },
+    markDirty(accountKey: string) {
+      if (!accountKey || accountKey !== activeAccountKey) {
+        return null;
+      }
+
+      latestRevision += 1;
+      dirty = true;
+      return latestRevision;
+    },
+    isDirty(accountKey: string) {
+      return accountKey === activeAccountKey && dirty;
+    },
+    enqueue({
+      accountKey,
+      config,
+    }: Omit<AccountConfigSaveQueueRequest, "revision">) {
+      if (
+        !accountKey ||
+        accountKey !== activeAccountKey ||
+        !dirty ||
+        latestRevision < 1
+      ) {
+        return false;
+      }
+
+      pendingRequest = {
+        accountKey,
+        revision: latestRevision,
+        config,
+      };
+      void drain();
+      return true;
+    },
+  };
+}
+
+function createAccountConfigHydrator(
+  load: () => Promise<UserAccountConfigReadResult> = loadUserAccountConfig,
+) {
+  let generation = 0;
+
+  return {
+    cancel() {
+      generation += 1;
+    },
+    async hydrate({
+      accountStorageOwnerKey,
+      storage,
+      resetOnboarding,
+      clearResetQuery,
+    }: {
+      accountStorageOwnerKey: string;
+      storage: AccountConfigStorage;
+      resetOnboarding: boolean;
+      clearResetQuery: () => void;
+    }): Promise<AccountConfigHydrationOutcome | { status: "cancelled" }> {
+      const requestGeneration = ++generation;
+      let result: UserAccountConfigReadResult;
+      try {
+        result = await load();
+      } catch {
+        if (requestGeneration !== generation) {
+          return { status: "cancelled" };
+        }
+        return { status: "error", errorStatus: "network_error" };
+      }
+
+      if (requestGeneration !== generation) {
+        return { status: "cancelled" };
+      }
+
+      try {
+        const outcome = applyLoadedUserAccountConfig(
+          result,
+          accountStorageOwnerKey,
+          storage,
+          resetOnboarding,
+        );
+        if (
+          (outcome.status === "found" || outcome.status === "missing") &&
+          outcome.clearResetQuery &&
+          !(outcome.status === "found" && outcome.didResetOnboarding)
+        ) {
+          clearResetQuery();
+        }
+        return outcome;
+      } catch {
+        return { status: "error", errorStatus: "unavailable" };
+      }
+    },
+  };
+}
 
 function isOnboardingPreviewRoute() {
   if (typeof window === "undefined") {
@@ -333,13 +580,6 @@ function clearOnboardingResetQueryParam() {
   window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
 }
 
-function clearOnboardingDependentWorkspaceState() {
-  window.localStorage.removeItem(CATEGORY_LEARNING_STORAGE_KEY);
-  window.localStorage.removeItem(MESSAGE_OWNERSHIP_STORAGE_KEY);
-  window.localStorage.removeItem(MANAGED_INBOXES_STORAGE_KEY);
-  window.localStorage.removeItem(ONBOARDING_DRAFT_STATE_STORAGE_KEY);
-}
-
 function resolveWorkspaceDataMode(): WorkspaceDataMode {
   if (typeof window === "undefined") {
     return "live";
@@ -363,7 +603,9 @@ function resolveWorkspaceDataMode(): WorkspaceDataMode {
     : "live";
 }
 
-function parsePersistedOnboardingSession(): PersistedOnboardingSession | null {
+function parsePersistedOnboardingSession(
+  persistSanitizedValue = true,
+): PersistedOnboardingSession | null {
   const storedState = window.localStorage.getItem(ONBOARDING_STATE_STORAGE_KEY);
 
   if (!storedState) {
@@ -374,12 +616,14 @@ function parsePersistedOnboardingSession(): PersistedOnboardingSession | null {
     const migrated = sanitizeStoredMailboxCredentialJson(storedState);
     const parsed = migrated.value as Partial<PersistedOnboardingSession>;
 
-    if (migrated.rewriteRequired && migrated.serialized) {
+    if (persistSanitizedValue && migrated.rewriteRequired && migrated.serialized) {
       window.localStorage.setItem(ONBOARDING_STATE_STORAGE_KEY, migrated.serialized);
     }
 
     if (!parsed || parsed.completed !== true || !parsed.state) {
-      window.localStorage.removeItem(ONBOARDING_STATE_STORAGE_KEY);
+      if (persistSanitizedValue) {
+        window.localStorage.removeItem(ONBOARDING_STATE_STORAGE_KEY);
+      }
       return null;
     }
 
@@ -388,12 +632,16 @@ function parsePersistedOnboardingSession(): PersistedOnboardingSession | null {
       state: normalizeOnboardingState(parsed.state),
     };
   } catch {
-    window.localStorage.removeItem(ONBOARDING_STATE_STORAGE_KEY);
+    if (persistSanitizedValue) {
+      window.localStorage.removeItem(ONBOARDING_STATE_STORAGE_KEY);
+    }
     return null;
   }
 }
 
-function parsePersistedOnboardingDraft(): PersistedOnboardingDraft | null {
+function parsePersistedOnboardingDraft(
+  persistSanitizedValue = true,
+): PersistedOnboardingDraft | null {
   const storedState = window.localStorage.getItem(ONBOARDING_DRAFT_STATE_STORAGE_KEY);
 
   if (!storedState) {
@@ -404,12 +652,14 @@ function parsePersistedOnboardingDraft(): PersistedOnboardingDraft | null {
     const migrated = sanitizeStoredMailboxCredentialJson(storedState);
     const parsed = migrated.value as Partial<PersistedOnboardingDraft>;
 
-    if (migrated.rewriteRequired && migrated.serialized) {
+    if (persistSanitizedValue && migrated.rewriteRequired && migrated.serialized) {
       window.localStorage.setItem(ONBOARDING_DRAFT_STATE_STORAGE_KEY, migrated.serialized);
     }
 
     if (!parsed || !parsed.state) {
-      window.localStorage.removeItem(ONBOARDING_DRAFT_STATE_STORAGE_KEY);
+      if (persistSanitizedValue) {
+        window.localStorage.removeItem(ONBOARDING_DRAFT_STATE_STORAGE_KEY);
+      }
       return null;
     }
 
@@ -417,7 +667,9 @@ function parsePersistedOnboardingDraft(): PersistedOnboardingDraft | null {
       state: normalizeOnboardingState(parsed.state),
     };
   } catch {
-    window.localStorage.removeItem(ONBOARDING_DRAFT_STATE_STORAGE_KEY);
+    if (persistSanitizedValue) {
+      window.localStorage.removeItem(ONBOARDING_DRAFT_STATE_STORAGE_KEY);
+    }
     return null;
   }
 }
@@ -432,23 +684,39 @@ function parsePersistedAppView(): AppView | null {
   return null;
 }
 
-function parseStoredManagedWorkspaceInboxes(): StoredManagedWorkspaceInbox[] {
-  const storedValue = window.localStorage.getItem(MANAGED_INBOXES_STORAGE_KEY);
+type StoredManagedWorkspaceInboxReadResult =
+  | { status: "missing" | "invalid"; value: [] }
+  | { status: "valid"; value: StoredManagedWorkspaceInbox[] };
+
+function readStoredManagedWorkspaceInboxes(
+  persistSanitizedValue = true,
+  storage: AccountConfigStorage = window.localStorage,
+): StoredManagedWorkspaceInboxReadResult {
+  const storedValue = storage.getItem(MANAGED_INBOXES_STORAGE_KEY);
 
   if (!storedValue) {
-    return [];
+    return { status: "missing", value: [] };
   }
 
   try {
     const migrated = sanitizeStoredMailboxCredentialJson(storedValue);
-    if (migrated.rewriteRequired && migrated.serialized) {
-      window.localStorage.setItem(MANAGED_INBOXES_STORAGE_KEY, migrated.serialized);
+    if (persistSanitizedValue && migrated.rewriteRequired && migrated.serialized) {
+      storage.setItem(MANAGED_INBOXES_STORAGE_KEY, migrated.serialized);
     }
     const parsed = migrated.value as StoredManagedWorkspaceInbox[];
-    return Array.isArray(parsed) ? parsed : [];
+    return Array.isArray(parsed)
+      ? { status: "valid", value: parsed }
+      : { status: "invalid", value: [] };
   } catch {
-    return [];
+    return { status: "invalid", value: [] };
   }
+}
+
+function parseStoredManagedWorkspaceInboxes(
+  persistSanitizedValue = true,
+  storage: AccountConfigStorage = window.localStorage,
+): StoredManagedWorkspaceInbox[] {
+  return readStoredManagedWorkspaceInboxes(persistSanitizedValue, storage).value;
 }
 
 function parseDisplayNameOverrides(): DisplayNameOverrideStore {
@@ -490,8 +758,12 @@ function buildPrimaryManagedInboxStorageKey(
   return `${PRIMARY_MANAGED_INBOX_ID_STORAGE_KEY}:${workspaceUserId}:${managedInboxSetKey}`;
 }
 
-function parseStoredJsonValue<T>(storageKey: string, fallback: T): T {
-  const storedValue = window.localStorage.getItem(storageKey);
+function parseStoredJsonValue<T>(
+  storageKey: string,
+  fallback: T,
+  storage: AccountConfigStorage = window.localStorage,
+): T {
+  const storedValue = storage.getItem(storageKey);
 
   if (!storedValue) {
     return fallback;
@@ -549,82 +821,6 @@ function sanitizeManagedInboxesForAccountConfig(
   managedInboxes: StoredManagedWorkspaceInbox[],
 ): StoredManagedWorkspaceInbox[] {
   return sanitizeManagedInboxCredentials(managedInboxes) as StoredManagedWorkspaceInbox[];
-}
-
-function isRecordValue(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === "object";
-}
-
-function getStoredManagedInboxEmail(mailbox: StoredManagedWorkspaceInbox) {
-  return typeof mailbox.email === "string" ? mailbox.email.trim().toLowerCase() : "";
-}
-
-function findMatchingStoredManagedInbox(
-  next: StoredManagedWorkspaceInbox,
-  savedInboxes: StoredManagedWorkspaceInbox[],
-) {
-  const nextId = typeof next.id === "string" ? next.id.trim() : "";
-
-  if (nextId) {
-    const matchedById = savedInboxes.find(
-      (mailbox) => typeof mailbox.id === "string" && mailbox.id.trim() === nextId,
-    );
-
-    if (matchedById) {
-      return matchedById;
-    }
-  }
-
-  const nextEmail = getStoredManagedInboxEmail(next);
-
-  if (!nextEmail) {
-    return undefined;
-  }
-
-  return savedInboxes.find((mailbox) => getStoredManagedInboxEmail(mailbox) === nextEmail);
-}
-
-function mergeStoredCredentialFields(
-  nextValue: unknown,
-  previousValue: unknown,
-  preservedStringFields: string[],
-) {
-  const next = isRecordValue(nextValue) ? { ...nextValue } : {};
-  const previous = isRecordValue(previousValue) ? previousValue : {};
-
-  preservedStringFields.forEach((field) => {
-    const nextFieldValue = next[field];
-    const previousFieldValue = previous[field];
-
-    if (
-      (typeof nextFieldValue !== "string" || nextFieldValue.trim().length === 0) &&
-      typeof previousFieldValue === "string" &&
-      previousFieldValue.trim().length > 0
-    ) {
-      next[field] = previousFieldValue;
-    }
-  });
-
-  return next;
-}
-
-function mergeStoredManagedInboxCredentials(
-  next: StoredManagedWorkspaceInbox,
-  previous?: StoredManagedWorkspaceInbox,
-): StoredManagedWorkspaceInbox {
-  if (!previous || (next.provider && previous.provider && next.provider !== previous.provider)) {
-    return next;
-  }
-
-  return {
-    ...next,
-    customImap: mergeStoredCredentialFields(next.customImap, previous.customImap, []),
-    customSmtp: mergeStoredCredentialFields(next.customSmtp, previous.customSmtp, [
-      "host",
-      "port",
-      "username",
-    ]),
-  } as StoredManagedWorkspaceInbox;
 }
 
 function formatStoredInboxTitleFromEmail(email: string) {
@@ -777,45 +973,86 @@ function buildAccountConfigFromLocalStorage(
   accountStorageOwnerKey: string,
   onboardingSession: PersistedOnboardingSession | null = parsePersistedOnboardingSession(),
   displayNameOverrides: DisplayNameOverrideStore = parseDisplayNameOverrides(),
+  storage: AccountConfigStorage = window.localStorage,
+  preserveExplicitEmptyManagedInboxes = false,
 ): UserAccountConfig {
-  const locallyStoredManagedInboxes = parseStoredManagedWorkspaceInboxes();
+  const storedManagedInboxes = readStoredManagedWorkspaceInboxes(
+    true,
+    storage,
+  );
+  const shouldUseStoredManagedInboxes =
+    storedManagedInboxes.status === "valid" &&
+    (preserveExplicitEmptyManagedInboxes || storedManagedInboxes.value.length > 0);
   const managedInboxes = sanitizeManagedInboxesForAccountConfig(
-    locallyStoredManagedInboxes.length > 0
-      ? locallyStoredManagedInboxes
+    shouldUseStoredManagedInboxes
+      ? storedManagedInboxes.value
       : buildManagedInboxesFromOnboardingSession(onboardingSession),
   );
   const workspaceUserId = normalizeAccountStorageKey(accountStorageOwnerKey);
+  const storedPrimaryManagedInboxId = storage.getItem(
+    buildPrimaryManagedInboxStorageKey(workspaceUserId, managedInboxes),
+  );
+  const normalizedStoredPrimaryManagedInboxId =
+    storedPrimaryManagedInboxId?.trim() ?? "";
+  const normalizedManagedInboxIds = managedInboxes.flatMap((mailbox) => {
+    const inboxId = typeof mailbox.id === "string" ? mailbox.id.trim() : "";
+    return inboxId ? [inboxId] : [];
+  });
+  const echoPrimaryManagedInboxId = normalizedManagedInboxIds.includes(
+    normalizedStoredPrimaryManagedInboxId,
+  )
+    ? normalizedStoredPrimaryManagedInboxId
+    : normalizedManagedInboxIds[0] ?? null;
   const themeMode =
     normalizeStoredWorkspaceThemeMode(
-      window.localStorage.getItem(WORKSPACE_THEME_MODE_STORAGE_KEY),
+      storage.getItem(WORKSPACE_THEME_MODE_STORAGE_KEY),
     ) ?? "Light";
 
   return {
     v: 1,
     onboardingSession: sanitizeOnboardingSessionForAccountConfig(onboardingSession) ?? {},
     managedInboxes,
-    mailboxTitleOverrides: parseStoredJsonValue(MAILBOX_TITLE_OVERRIDES_STORAGE_KEY, {}),
-    primaryManagedInboxId:
-      window.localStorage.getItem(
-        buildPrimaryManagedInboxStorageKey(workspaceUserId, managedInboxes),
-      ) ?? null,
+    mailboxTitleOverrides: parseStoredJsonValue(
+      MAILBOX_TITLE_OVERRIDES_STORAGE_KEY,
+      {},
+      storage,
+    ),
+    primaryManagedInboxId: preserveExplicitEmptyManagedInboxes
+      ? storedPrimaryManagedInboxId
+      : echoPrimaryManagedInboxId,
     mailboxFocusPreferenceOverrides: parseStoredJsonValue(
       buildMailboxFocusPreferenceOverridesStorageKey(workspaceUserId),
       {},
+      storage,
     ),
-    inboxSignatures: parseStoredJsonValue(MAIL_SIGNATURES_STORAGE_KEY, {}),
-    smartFolders: parseStoredJsonValue(SMART_FOLDERS_STORAGE_KEY, []),
+    inboxSignatures: parseStoredJsonValue(MAIL_SIGNATURES_STORAGE_KEY, {}, storage),
+    smartFolders: parseStoredJsonValue(SMART_FOLDERS_STORAGE_KEY, [], storage),
     uiPreferences: {
       themeMode,
       aiSuggestionsEnabled:
-        window.localStorage.getItem(AI_SUGGESTIONS_STORAGE_KEY) !== "false",
+        storage.getItem(AI_SUGGESTIONS_STORAGE_KEY) !== "false",
       inboxChangesEnabled:
-        window.localStorage.getItem(INBOX_CHANGES_STORAGE_KEY) !== "false",
+        storage.getItem(INBOX_CHANGES_STORAGE_KEY) !== "false",
       teamActivityEnabled:
-        window.localStorage.getItem(TEAM_ACTIVITY_STORAGE_KEY) !== "false",
+        storage.getItem(TEAM_ACTIVITY_STORAGE_KEY) !== "false",
     },
     displayNameOverrides,
   };
+}
+
+function buildAuthoritativeAccountConfigFromLocalStorage(
+  accountStorageOwnerKey: string,
+  onboardingSession: PersistedOnboardingSession | null,
+  displayNameOverrides: DisplayNameOverrideStore,
+  storage: AccountConfigStorage = window.localStorage,
+) {
+  return buildAccountConfigFromLocalStorage(
+    accountStorageOwnerKey,
+    onboardingSession,
+    displayNameOverrides,
+    storage,
+    true,
+  );
 }
 
 function isPersistedOnboardingSession(value: unknown): value is PersistedOnboardingSession {
@@ -827,61 +1064,93 @@ function isPersistedOnboardingSession(value: unknown): value is PersistedOnboard
   );
 }
 
-function writeAccountConfigToLocalStorage(
+function getServerManagedInboxesForHydration(
+  config: UserAccountConfig,
+): StoredManagedWorkspaceInbox[] {
+  return Array.isArray(config.managedInboxes)
+    ? (config.managedInboxes as StoredManagedWorkspaceInbox[])
+    : [];
+}
+
+function createCleanAccountConfigStartupState(): AccountConfigStartupAccountState {
+  const onboardingState = normalizeOnboardingState(initialOnboardingState);
+
+  return {
+    displayNameOverrides: {},
+    persistedOnboardingSession: null,
+    onboardingState,
+    userConfig: null,
+    view: "onboarding",
+  };
+}
+
+function createCleanUserAccountConfig(): UserAccountConfig {
+  return {
+    v: 1,
+    onboardingSession: {},
+    managedInboxes: [],
+    mailboxTitleOverrides: {},
+    primaryManagedInboxId: null,
+    mailboxFocusPreferenceOverrides: {},
+    inboxSignatures: {},
+    smartFolders: [],
+    uiPreferences: {},
+    displayNameOverrides: {},
+  };
+}
+
+function writeFoundAccountConfigToLocalStorage(
   config: UserAccountConfig,
   accountStorageOwnerKey: string,
+  accountState: AccountConfigStartupAccountState,
+  storage: AccountConfigStorage,
 ) {
-  const onboardingSession = isPersistedOnboardingSession(config.onboardingSession)
-    ? {
-        completed: true,
-        state: sanitizeOnboardingStateForAccountConfig(config.onboardingSession.state),
-      }
+  const onboardingSession = accountState.persistedOnboardingSession
+    ? sanitizeOnboardingSessionForAccountConfig(
+        accountState.persistedOnboardingSession,
+      )
     : null;
-  const locallyStoredManagedInboxes = parseStoredManagedWorkspaceInboxes();
-  const managedInboxes =
-    Array.isArray(config.managedInboxes) && config.managedInboxes.length > 0
-      ? (config.managedInboxes as StoredManagedWorkspaceInbox[])
-      : locallyStoredManagedInboxes;
-  const mergedManagedInboxes = managedInboxes.map((mailbox) =>
-    mergeStoredManagedInboxCredentials(
-      mailbox,
-      findMatchingStoredManagedInbox(mailbox, locallyStoredManagedInboxes),
-    ),
+  const previousManagedInboxes = parseStoredManagedWorkspaceInboxes(
+    false,
+    storage,
   );
+  const managedInboxes = getServerManagedInboxesForHydration(config);
   const sanitizedManagedInboxes = sanitizeManagedInboxCredentials(
-    mergedManagedInboxes,
+    managedInboxes,
   ) as StoredManagedWorkspaceInbox[];
   const workspaceUserId = normalizeAccountStorageKey(accountStorageOwnerKey);
+  storage.removeItem(
+    buildPrimaryManagedInboxStorageKey(workspaceUserId, previousManagedInboxes),
+  );
 
   if (onboardingSession) {
-    window.localStorage.setItem(
-      ONBOARDING_STATE_STORAGE_KEY,
-      JSON.stringify(onboardingSession),
-    );
-    window.localStorage.removeItem(ONBOARDING_DRAFT_STATE_STORAGE_KEY);
+    storage.setItem(ONBOARDING_STATE_STORAGE_KEY, JSON.stringify(onboardingSession));
+  } else {
+    storage.removeItem(ONBOARDING_STATE_STORAGE_KEY);
   }
-
-  window.localStorage.setItem(
+  storage.removeItem(ONBOARDING_DRAFT_STATE_STORAGE_KEY);
+  storage.setItem(CUEVION_APP_VIEW_STORAGE_KEY, accountState.view);
+  storage.setItem(
     MANAGED_INBOXES_STORAGE_KEY,
     JSON.stringify(sanitizedManagedInboxes),
   );
-  window.localStorage.setItem(
+  storage.setItem(
     MAILBOX_TITLE_OVERRIDES_STORAGE_KEY,
     JSON.stringify(config.mailboxTitleOverrides ?? {}),
   );
-  window.localStorage.setItem(
+  storage.setItem(
     buildMailboxFocusPreferenceOverridesStorageKey(workspaceUserId),
     JSON.stringify(config.mailboxFocusPreferenceOverrides ?? {}),
   );
-  window.localStorage.setItem(
+  storage.setItem(
     MAIL_SIGNATURES_STORAGE_KEY,
     JSON.stringify(config.inboxSignatures ?? {}),
   );
-  window.localStorage.setItem(
+  storage.setItem(
     SMART_FOLDERS_STORAGE_KEY,
     JSON.stringify(config.smartFolders ?? []),
   );
-  window.localStorage.setItem(
+  storage.setItem(
     CUEVION_DISPLAY_NAME_OVERRIDES_STORAGE_KEY,
     JSON.stringify(config.displayNameOverrides ?? {}),
   );
@@ -891,38 +1160,198 @@ function writeAccountConfigToLocalStorage(
     sanitizedManagedInboxes,
   );
   if (config.primaryManagedInboxId) {
-    window.localStorage.setItem(primaryStorageKey, config.primaryManagedInboxId);
+    storage.setItem(primaryStorageKey, config.primaryManagedInboxId);
   } else {
-    window.localStorage.removeItem(primaryStorageKey);
+    storage.removeItem(primaryStorageKey);
   }
 
   const uiPreferences = config.uiPreferences ?? {};
   const themeMode = normalizeStoredWorkspaceThemeMode(uiPreferences.themeMode);
   if (themeMode) {
-    window.localStorage.setItem(WORKSPACE_THEME_MODE_STORAGE_KEY, themeMode);
+    storage.setItem(WORKSPACE_THEME_MODE_STORAGE_KEY, themeMode);
+  } else {
+    storage.removeItem(WORKSPACE_THEME_MODE_STORAGE_KEY);
   }
 
   if (typeof uiPreferences.aiSuggestionsEnabled === "boolean") {
-    window.localStorage.setItem(
+    storage.setItem(
       AI_SUGGESTIONS_STORAGE_KEY,
       String(uiPreferences.aiSuggestionsEnabled),
     );
+  } else {
+    storage.removeItem(AI_SUGGESTIONS_STORAGE_KEY);
   }
 
   if (typeof uiPreferences.inboxChangesEnabled === "boolean") {
-    window.localStorage.setItem(
+    storage.setItem(
       INBOX_CHANGES_STORAGE_KEY,
       String(uiPreferences.inboxChangesEnabled),
     );
+  } else {
+    storage.removeItem(INBOX_CHANGES_STORAGE_KEY);
   }
 
   if (typeof uiPreferences.teamActivityEnabled === "boolean") {
-    window.localStorage.setItem(
+    storage.setItem(
       TEAM_ACTIVITY_STORAGE_KEY,
       String(uiPreferences.teamActivityEnabled),
     );
+  } else {
+    storage.removeItem(TEAM_ACTIVITY_STORAGE_KEY);
   }
 }
+
+function prepareMissingAccountConfigForFirstExplicitSave({
+  accountStorageOwnerKey,
+  storage,
+}: {
+  accountStorageOwnerKey: string;
+  storage: AccountConfigStorage;
+}) {
+  const cleanAccountState = createCleanAccountConfigStartupState();
+  writeFoundAccountConfigToLocalStorage(
+    createCleanUserAccountConfig(),
+    accountStorageOwnerKey,
+    cleanAccountState,
+    storage,
+  );
+}
+
+function mirrorCompletedOnboardingManagedInboxes({
+  onboardingState,
+  storage,
+}: {
+  onboardingState: OnboardingState;
+  storage: AccountConfigStorage;
+}) {
+  const managedInboxes = buildManagedInboxesFromOnboardingSession({
+    completed: true,
+    state: onboardingState,
+  });
+
+  storage.setItem(
+    MANAGED_INBOXES_STORAGE_KEY,
+    JSON.stringify(sanitizeManagedInboxCredentials(managedInboxes)),
+  );
+}
+
+function applyLoadedUserAccountConfig(
+  result: UserAccountConfigReadResult,
+  accountStorageOwnerKey: string,
+  storage: AccountConfigStorage,
+  resetOnboarding = false,
+): AccountConfigHydrationOutcome {
+  if (result.status === "found") {
+    const rawOnboardingSession = result.config.onboardingSession;
+    const persistedOnboardingSession = isPersistedOnboardingSession(
+      rawOnboardingSession,
+    )
+      ? {
+          completed: true as const,
+          state: normalizeOnboardingState(
+            rawOnboardingSession.state as Partial<OnboardingState>,
+          ),
+        }
+      : null;
+    const onboardingState =
+      persistedOnboardingSession?.state ??
+      normalizeOnboardingState(initialOnboardingState);
+    let accountState: AccountConfigStartupAccountState = {
+      displayNameOverrides:
+        result.config.displayNameOverrides &&
+        typeof result.config.displayNameOverrides === "object"
+          ? result.config.displayNameOverrides
+          : {},
+      persistedOnboardingSession,
+      onboardingState,
+      userConfig: persistedOnboardingSession
+        ? buildUserConfig(onboardingState)
+        : null,
+      view: persistedOnboardingSession ? "workspace" : "onboarding",
+    };
+
+    writeFoundAccountConfigToLocalStorage(
+      result.config,
+      accountStorageOwnerKey,
+      accountState,
+      storage,
+    );
+
+    const didResetOnboarding = resetOnboarding && persistedOnboardingSession !== null;
+    if (didResetOnboarding) {
+      accountState = {
+        ...createCleanAccountConfigStartupState(),
+        displayNameOverrides: accountState.displayNameOverrides,
+      };
+      storage.removeItem(ONBOARDING_STATE_STORAGE_KEY);
+      storage.removeItem(ONBOARDING_DRAFT_STATE_STORAGE_KEY);
+      storage.setItem(CUEVION_APP_VIEW_STORAGE_KEY, "onboarding");
+    }
+
+    return {
+      status: "found",
+      accountState,
+      didResetOnboarding,
+      clearResetQuery: resetOnboarding,
+      expectedWorkspaceHydrationEcho:
+        accountState.view === "workspace"
+          ? buildExpectedWorkspaceHydrationEcho(
+              accountStorageOwnerKey,
+              accountState,
+              storage,
+            )
+          : null,
+    };
+  }
+
+  if (result.status === "missing") {
+    if (resetOnboarding) {
+      storage.removeItem(ONBOARDING_STATE_STORAGE_KEY);
+      storage.removeItem(ONBOARDING_DRAFT_STATE_STORAGE_KEY);
+      storage.setItem(CUEVION_APP_VIEW_STORAGE_KEY, "onboarding");
+    }
+    return {
+      status: "missing",
+      accountState: createCleanAccountConfigStartupState(),
+      didResetOnboarding: false,
+      clearResetQuery: resetOnboarding,
+    };
+  }
+
+  if (result.status === "unauthorized") {
+    return { status: "unauthorized" };
+  }
+
+  return {
+    status: "error",
+    errorStatus: result.status,
+  };
+}
+
+function buildExpectedWorkspaceHydrationEcho(
+  accountStorageOwnerKey: string,
+  accountState: AccountConfigStartupAccountState,
+  storage: AccountConfigStorage,
+): UserAccountConfig {
+  const {
+    v: _version,
+    displayNameOverrides: _displayNameOverrides,
+    ...expectedWorkspacePayload
+  } = buildAccountConfigFromLocalStorage(
+    accountStorageOwnerKey,
+    accountState.persistedOnboardingSession,
+    accountState.displayNameOverrides,
+    storage,
+  );
+
+  return expectedWorkspacePayload;
+}
+
+export const accountConfigOrchestration = {
+  createHydrator: createAccountConfigHydrator,
+  createSaveQueue: createAccountConfigSaveQueue,
+  resolveSessionDisposition: resolveAccountConfigSessionDisposition,
+};
 
 function normalizeOAuthCallbackStorageResult(
   value: unknown,
@@ -1105,7 +1534,7 @@ function applyOAuthCallbackResultToManagedInboxes(
 function resolveWorkspaceInviteUsers(
   onboardingState: OnboardingState,
 ): AuthenticatedCuevionUser[] {
-  const managedInboxes = parseStoredManagedWorkspaceInboxes();
+  const managedInboxes = parseStoredManagedWorkspaceInboxes(false);
   const primaryManagedInbox = managedInboxes.find(
     (mailbox) => typeof mailbox.email === "string" && mailbox.email.trim().length > 0,
   );
@@ -1467,19 +1896,11 @@ function CuevionApp() {
 
   const workspaceDataMode = resolveWorkspaceDataMode();
   const [persistedOnboardingSession, setPersistedOnboardingSession] =
-    useState<PersistedOnboardingSession | null>(() => {
-      if (shouldResetOnboardingFromQuery()) {
-        window.localStorage.removeItem(ONBOARDING_STATE_STORAGE_KEY);
-        window.localStorage.removeItem(CUEVION_APP_VIEW_STORAGE_KEY);
-        clearOnboardingDependentWorkspaceState();
-        clearOnboardingResetQueryParam();
-        return null;
-      }
-
-      return parsePersistedOnboardingSession();
-    });
+    useState<PersistedOnboardingSession | null>(() =>
+      parsePersistedOnboardingSession(false),
+    );
   const [persistedOnboardingDraft] = useState<PersistedOnboardingDraft | null>(() =>
-    persistedOnboardingSession ? null : parsePersistedOnboardingDraft(),
+    persistedOnboardingSession ? null : parsePersistedOnboardingDraft(false),
   );
   const [view, setView] = useState<AppView>(() =>
     persistedOnboardingSession || parsePersistedAppView() === "workspace"
@@ -1491,12 +1912,36 @@ function CuevionApp() {
   const [displayNameOverrides, setDisplayNameOverrides] = useState<DisplayNameOverrideStore>(() =>
     parseDisplayNameOverrides(),
   );
-  const [sessionStatus, setSessionStatus] = useState<
-    "loading" | "authenticated" | "unauthenticated" | "unavailable"
-  >("loading");
-  const [accountConfigHydrationStatus, setAccountConfigHydrationStatus] = useState<
-    "idle" | "loading" | "ready"
-  >("idle");
+  const [sessionStatus, setSessionStatus] = useState<MemberSessionStatus>("loading");
+  const [accountConfigHydrationStatus, setAccountConfigHydrationStatus] =
+    useState<AccountConfigHydrationStatus>("idle");
+  const [accountConfigErrorStatus, setAccountConfigErrorStatus] =
+    useState<RetryableAccountConfigStatus | null>(null);
+  const [accountConfigRetryVersion, setAccountConfigRetryVersion] = useState(0);
+  const [accountConfigMutationVersion, setAccountConfigMutationVersion] = useState(0);
+  const accountConfigHydratedForOnboardingRef = useRef(false);
+  const missingAccountConfigNeedsCleanMirrorRef = useRef(false);
+  const pendingResetSaveAccountKeyRef = useRef<string | null>(null);
+  const accountConfigHydratorRef = useRef<
+    ReturnType<typeof accountConfigOrchestration.createHydrator> | null
+  >(null);
+  if (!accountConfigHydratorRef.current) {
+    accountConfigHydratorRef.current = accountConfigOrchestration.createHydrator();
+  }
+  const accountConfigSaveQueueRef = useRef<
+    ReturnType<typeof accountConfigOrchestration.createSaveQueue> | null
+  >(null);
+  if (!accountConfigSaveQueueRef.current) {
+    accountConfigSaveQueueRef.current = accountConfigOrchestration.createSaveQueue({
+      onClean: ({ accountKey }) => {
+        if (pendingResetSaveAccountKeyRef.current !== accountKey) {
+          return;
+        }
+        clearOnboardingResetQueryParam();
+        pendingResetSaveAccountKeyRef.current = null;
+      },
+    });
+  }
   const [collaborationUser, setCollaborationUser] = useState<AuthenticatedCuevionUser | null>(
     () => {
       const storedAuthUser = window.localStorage.getItem(CUEVION_AUTH_STORAGE_KEY);
@@ -1534,6 +1979,80 @@ function CuevionApp() {
     sessionUser?.userType === "member" ? sessionUser : null,
   );
   const activeCollaborationUser = collaborationUser ?? sessionUser;
+  const canProcessLocalOAuthCallback =
+    Boolean(collaborationInviteRoute || teamInviteRoute) ||
+    (sessionUser?.userType === "member" &&
+      canUseHydratedLocalAccountState(
+        sessionStatus,
+        accountConfigHydrationStatus,
+      ));
+  const canPersistLocalAccountState =
+    Boolean(collaborationInviteRoute || teamInviteRoute) ||
+    (accountConfigSaveQueueRef.current?.isDirty(sessionAccountStorageKey) === true &&
+      canUseHydratedLocalAccountState(
+        sessionStatus,
+        accountConfigHydrationStatus,
+      ));
+  const markAccountConfigDirty = useCallback((accountKey: string) => {
+    const nextRevision = accountConfigSaveQueueRef.current?.markDirty(accountKey);
+    if (nextRevision !== null && nextRevision !== undefined) {
+      setAccountConfigMutationVersion(nextRevision);
+    }
+  }, []);
+  const resetAccountConfigSaveState = useCallback((
+    accountKey: string,
+    updateMutationVersion = true,
+  ) => {
+    pendingResetSaveAccountKeyRef.current = null;
+    if (updateMutationVersion) {
+      setAccountConfigMutationVersion(0);
+    }
+    accountConfigSaveQueueRef.current?.reset(accountKey);
+  }, []);
+  const registerAccountConfigMutation = useCallback(() => {
+    if (
+      sessionStatus !== "authenticated" ||
+      sessionUser?.userType !== "member" ||
+      accountConfigHydrationStatus !== "ready" ||
+      !sessionAccountStorageKey
+    ) {
+      return false;
+    }
+
+    if (missingAccountConfigNeedsCleanMirrorRef.current) {
+      prepareMissingAccountConfigForFirstExplicitSave({
+        accountStorageOwnerKey: sessionAccountStorageKey,
+        storage: window.localStorage,
+      });
+      missingAccountConfigNeedsCleanMirrorRef.current = false;
+    }
+
+    markAccountConfigDirty(sessionAccountStorageKey);
+    return true;
+  }, [
+    accountConfigHydrationStatus,
+    markAccountConfigDirty,
+    sessionAccountStorageKey,
+    sessionStatus,
+    sessionUser,
+  ]);
+  const applyAccountConfigMutation = useCallback((
+    mutation: (canPersistLocally: boolean) => void,
+  ) => {
+    const isMemberMutation = registerAccountConfigMutation();
+    mutation(
+      isMemberMutation || Boolean(collaborationInviteRoute || teamInviteRoute),
+    );
+  }, [
+    collaborationInviteRoute,
+    registerAccountConfigMutation,
+    teamInviteRoute,
+  ]);
+  const handleOnboardingStateChange = (
+    value: OnboardingState | ((current: OnboardingState) => OnboardingState),
+  ) => {
+    applyAccountConfigMutation(() => setOnboardingState(value));
+  };
 
   useEffect(() => {
     if (collaborationUser) {
@@ -1548,35 +2067,46 @@ function CuevionApp() {
   }, [collaborationUser]);
 
   useEffect(() => {
+    if (!canPersistLocalAccountState) {
+      return;
+    }
+
     window.localStorage.setItem(
       CUEVION_DISPLAY_NAME_OVERRIDES_STORAGE_KEY,
       JSON.stringify(displayNameOverrides),
     );
-  }, [displayNameOverrides]);
+  }, [canPersistLocalAccountState, displayNameOverrides]);
 
   useEffect(() => {
     if (
       accountConfigHydrationStatus !== "ready" ||
-      !sessionUser ||
-      sessionUser.userType !== "member" ||
-      !sessionAccountStorageKey
+      sessionUser?.userType !== "member" ||
+      !sessionAccountStorageKey ||
+      accountConfigSaveQueueRef.current?.isDirty(sessionAccountStorageKey) !== true ||
+      accountConfigMutationVersion < 1
     ) {
       return;
     }
 
     const timeoutId = window.setTimeout(() => {
-      void saveUserAccountConfig(
-        buildAccountConfigFromLocalStorage(
+      if (!accountConfigSaveQueueRef.current?.isDirty(sessionAccountStorageKey)) {
+        return;
+      }
+
+      accountConfigSaveQueueRef.current?.enqueue({
+        accountKey: sessionAccountStorageKey,
+        config: buildAuthoritativeAccountConfigFromLocalStorage(
           sessionAccountStorageKey,
           persistedOnboardingSession,
           displayNameOverrides,
         ),
-      );
+      });
     }, 700);
 
     return () => window.clearTimeout(timeoutId);
   }, [
     accountConfigHydrationStatus,
+    accountConfigMutationVersion,
     sessionUser,
     sessionAccountStorageKey,
     displayNameOverrides,
@@ -1584,6 +2114,10 @@ function CuevionApp() {
   ]);
 
   useEffect(() => {
+    if (!canPersistLocalAccountState) {
+      return;
+    }
+
     if (persistedOnboardingSession) {
       window.localStorage.removeItem(ONBOARDING_DRAFT_STATE_STORAGE_KEY);
       return;
@@ -1597,9 +2131,18 @@ function CuevionApp() {
       ONBOARDING_DRAFT_STATE_STORAGE_KEY,
       JSON.stringify(sanitizeAccountConfigCredentials({ state: onboardingState })),
     );
-  }, [onboardingState, persistedOnboardingSession, view]);
+  }, [
+    canPersistLocalAccountState,
+    onboardingState,
+    persistedOnboardingSession,
+    view,
+  ]);
 
   useEffect(() => {
+    if (!canPersistLocalAccountState) {
+      return;
+    }
+
     if (collaborationInviteRoute || teamInviteRoute) {
       return;
     }
@@ -1612,7 +2155,13 @@ function CuevionApp() {
     }
 
     window.localStorage.setItem(CUEVION_APP_VIEW_STORAGE_KEY, "onboarding");
-  }, [collaborationInviteRoute, persistedOnboardingSession, teamInviteRoute, view]);
+  }, [
+    canPersistLocalAccountState,
+    collaborationInviteRoute,
+    persistedOnboardingSession,
+    teamInviteRoute,
+    view,
+  ]);
 
   useEffect(() => {
     const nextInviteRoute = parseCollaborationInviteRoute();
@@ -1694,85 +2243,111 @@ function CuevionApp() {
   }, [collaborationInviteRoute, teamInviteRoute]);
 
   useEffect(() => {
-    if (collaborationInviteRoute || teamInviteRoute) {
+    const sessionDisposition = accountConfigOrchestration.resolveSessionDisposition({
+      hasInviteRoute: Boolean(collaborationInviteRoute || teamInviteRoute),
+      sessionStatus,
+      userType: sessionUser?.userType ?? null,
+      accountStorageKey: sessionAccountStorageKey,
+    });
+
+    if (sessionDisposition === "invite" || sessionDisposition === "guest") {
+      accountConfigHydratorRef.current?.cancel();
+      setUserAccountConfigHydrationEchoExpectation(null, null);
+      resetAccountConfigSaveState("");
+      accountConfigHydratedForOnboardingRef.current = false;
+      missingAccountConfigNeedsCleanMirrorRef.current = false;
+      setAccountConfigErrorStatus(null);
       setAccountConfigHydrationStatus("ready");
       return;
     }
 
-    if (
-      sessionStatus !== "authenticated" ||
-      !sessionUser ||
-      !sessionAccountStorageKey
-    ) {
-      setAccountConfigHydrationStatus(
-        sessionStatus === "loading" ? "idle" : "ready",
-      );
+    if (sessionDisposition !== "member" || !sessionUser) {
+      accountConfigHydratorRef.current?.cancel();
+      setUserAccountConfigHydrationEchoExpectation(null, null);
+      resetAccountConfigSaveState("");
+      accountConfigHydratedForOnboardingRef.current = false;
+      missingAccountConfigNeedsCleanMirrorRef.current = false;
+      setAccountConfigErrorStatus(null);
+      setAccountConfigHydrationStatus("idle");
       return;
     }
-
-    let cancelled = false;
 
     const hydrateAccountConfig = async () => {
+      resetAccountConfigSaveState(sessionAccountStorageKey);
+      accountConfigHydratedForOnboardingRef.current = false;
+      missingAccountConfigNeedsCleanMirrorRef.current = false;
+      setUserAccountConfigHydrationEchoExpectation(null, null);
+      setUserAccountConfigHydrationEchoExpectation(
+        sessionAccountStorageKey,
+        null,
+      );
+      setAccountConfigErrorStatus(null);
       setAccountConfigHydrationStatus("loading");
-      const result = await getUserAccountConfig();
+      const outcome = await accountConfigHydratorRef.current!.hydrate({
+        accountStorageOwnerKey: sessionAccountStorageKey,
+        storage: window.localStorage,
+        resetOnboarding: shouldResetOnboardingFromQuery(),
+        clearResetQuery: clearOnboardingResetQueryParam,
+      });
 
-      if (cancelled) {
+      if (outcome.status === "cancelled") {
         return;
       }
 
-      if (result.ok && result.config) {
-        const rawOnboardingSession = result.config.onboardingSession;
-        const nextDisplayNameOverrides =
-          result.config.displayNameOverrides &&
-          typeof result.config.displayNameOverrides === "object"
-            ? result.config.displayNameOverrides
-            : {};
-
-        setDisplayNameOverrides(nextDisplayNameOverrides);
-        writeAccountConfigToLocalStorage(result.config, sessionAccountStorageKey);
-
-        if (isPersistedOnboardingSession(rawOnboardingSession)) {
-          const nextSession: PersistedOnboardingSession = {
-            completed: true,
-            state: normalizeOnboardingState(
-              rawOnboardingSession.state as Partial<OnboardingState>,
-            ),
-          };
-
-          setPersistedOnboardingSession(nextSession);
-          setOnboardingState(nextSession.state);
-          setUserConfig(buildUserConfig(nextSession.state));
-          window.localStorage.setItem(CUEVION_APP_VIEW_STORAGE_KEY, "workspace");
-          setView("workspace");
-        } else {
-          setPersistedOnboardingSession(null);
-          setUserConfig(null);
-          window.localStorage.setItem(CUEVION_APP_VIEW_STORAGE_KEY, "onboarding");
-          setView("onboarding");
-        }
-
-        setAccountConfigHydrationStatus("ready");
-        return;
-      }
-
-      const localSession = parsePersistedOnboardingSession();
-      if (localSession) {
-        void saveUserAccountConfig(
-          buildAccountConfigFromLocalStorage(
+      if (outcome.status === "found" || outcome.status === "missing") {
+        const { accountState } = outcome;
+        if (
+          outcome.status === "found" &&
+          outcome.expectedWorkspaceHydrationEcho
+        ) {
+          setUserAccountConfigHydrationEchoExpectation(
             sessionAccountStorageKey,
-            localSession,
-            displayNameOverrides,
-          ),
-        );
+            outcome.expectedWorkspaceHydrationEcho,
+          );
+        } else {
+          setUserAccountConfigHydrationEchoExpectation(
+            sessionAccountStorageKey,
+            null,
+          );
+        }
+        accountConfigHydratedForOnboardingRef.current =
+          accountState.view === "onboarding";
+        missingAccountConfigNeedsCleanMirrorRef.current =
+          outcome.status === "missing" && !outcome.didResetOnboarding;
+        setAccountConfigErrorStatus(null);
+        setDisplayNameOverrides(accountState.displayNameOverrides);
+        setPersistedOnboardingSession(accountState.persistedOnboardingSession);
+        setOnboardingState(accountState.onboardingState);
+        setUserConfig(accountState.userConfig);
+        setView(accountState.view);
+        setAccountConfigHydrationStatus("ready");
+
+        if (outcome.status === "found" && outcome.didResetOnboarding) {
+          pendingResetSaveAccountKeyRef.current = sessionAccountStorageKey;
+          markAccountConfigDirty(sessionAccountStorageKey);
+        }
+        return;
       }
 
-      setAccountConfigHydrationStatus("ready");
+      setUserAccountConfigHydrationEchoExpectation(null, null);
+      if (outcome.status === "unauthorized") {
+        setAccountConfigErrorStatus(null);
+        setAccountConfigHydrationStatus("idle");
+        setSessionUser(null);
+        setSessionStatus("unauthenticated");
+        return;
+      }
+
+      setAccountConfigErrorStatus(outcome.errorStatus);
+      setAccountConfigHydrationStatus("error");
     };
 
     void hydrateAccountConfig();
 
     return () => {
-      cancelled = true;
+      accountConfigHydratorRef.current?.cancel();
+      setUserAccountConfigHydrationEchoExpectation(null, null);
+      resetAccountConfigSaveState("", false);
     };
   }, [
     sessionStatus,
@@ -1780,9 +2355,16 @@ function CuevionApp() {
     sessionAccountStorageKey,
     collaborationInviteRoute,
     teamInviteRoute,
+    accountConfigRetryVersion,
+    markAccountConfigDirty,
+    resetAccountConfigSaveState,
   ]);
 
   useEffect(() => {
+    if (!canProcessLocalOAuthCallback) {
+      return;
+    }
+
     const storedCallbackResult = window.localStorage.getItem(
       OAUTH_CALLBACK_RESULT_STORAGE_KEY,
     );
@@ -1806,47 +2388,59 @@ function CuevionApp() {
       return;
     }
 
-    setOnboardingState((current) => {
-      const nextState = applyOAuthCallbackResultToOnboardingState(
-        current,
-        parsedCallbackResult as OAuthCallbackStorageResult,
-      );
-
-      if (
-        persistedOnboardingSession &&
-        JSON.stringify(nextState) !== JSON.stringify(persistedOnboardingSession.state)
-      ) {
-        const nextSession: PersistedOnboardingSession = {
-          completed: true,
-          state: nextState,
-        };
-        window.localStorage.setItem(
-          ONBOARDING_STATE_STORAGE_KEY,
-          JSON.stringify(sanitizeAccountConfigCredentials(nextSession)),
+    const callbackResult = parsedCallbackResult;
+    applyAccountConfigMutation((canPersistLocally) => {
+      setOnboardingState((current) => {
+        const nextState = applyOAuthCallbackResultToOnboardingState(
+          current,
+          callbackResult,
         );
-        setPersistedOnboardingSession(nextSession);
+
+        if (
+          canPersistLocally &&
+          persistedOnboardingSession &&
+          JSON.stringify(nextState) !== JSON.stringify(persistedOnboardingSession.state)
+        ) {
+          const nextSession: PersistedOnboardingSession = {
+            completed: true,
+            state: nextState,
+          };
+          window.localStorage.setItem(
+            ONBOARDING_STATE_STORAGE_KEY,
+            JSON.stringify(sanitizeAccountConfigCredentials(nextSession)),
+          );
+          setPersistedOnboardingSession(nextSession);
+        }
+
+        return nextState;
+      });
+
+      if (!canPersistLocally) {
+        return;
       }
 
-      return nextState;
+      const pendingOAuthManagedInbox = parsePendingOAuthManagedInbox();
+      const nextManagedInboxes = applyOAuthCallbackResultToManagedInboxes(
+        parseStoredManagedWorkspaceInboxes(),
+        callbackResult,
+        pendingOAuthManagedInbox,
+      );
+      window.localStorage.setItem(
+        MANAGED_INBOXES_STORAGE_KEY,
+        JSON.stringify(sanitizeManagedInboxCredentials(nextManagedInboxes)),
+      );
+      if (
+        pendingOAuthManagedInbox?.provider === callbackResult.provider &&
+        pendingOAuthManagedInbox?.email?.trim().toLowerCase() === callbackResult.email
+      ) {
+        window.localStorage.removeItem(PENDING_OAUTH_MANAGED_INBOX_STORAGE_KEY);
+      }
     });
-
-    const pendingOAuthManagedInbox = parsePendingOAuthManagedInbox();
-    const nextManagedInboxes = applyOAuthCallbackResultToManagedInboxes(
-      parseStoredManagedWorkspaceInboxes(),
-      parsedCallbackResult,
-      pendingOAuthManagedInbox,
-    );
-    window.localStorage.setItem(
-      MANAGED_INBOXES_STORAGE_KEY,
-      JSON.stringify(sanitizeManagedInboxCredentials(nextManagedInboxes)),
-    );
-    if (
-      pendingOAuthManagedInbox?.provider === parsedCallbackResult.provider &&
-      pendingOAuthManagedInbox?.email?.trim().toLowerCase() === parsedCallbackResult.email
-    ) {
-      window.localStorage.removeItem(PENDING_OAUTH_MANAGED_INBOX_STORAGE_KEY);
-    }
-  }, [persistedOnboardingSession]);
+  }, [
+    applyAccountConfigMutation,
+    canProcessLocalOAuthCallback,
+    persistedOnboardingSession,
+  ]);
 
   if (teamInviteRoute) {
     return <TeamInviteRouteView route={teamInviteRoute} />;
@@ -1904,7 +2498,9 @@ function CuevionApp() {
 
   if (
     sessionStatus === "loading" ||
-    (sessionUser && accountConfigHydrationStatus !== "ready")
+    (sessionUser &&
+      (accountConfigHydrationStatus === "idle" ||
+        accountConfigHydrationStatus === "loading"))
   ) {
     return (
       <div className="min-h-screen bg-[linear-gradient(180deg,#f6efe7_0%,#efe5da_100%)] px-6 py-10 text-[color:#2f2a24] dark:bg-[linear-gradient(180deg,#171411_0%,#221c17_100%)] dark:text-[color:#f1e9de]">
@@ -1916,6 +2512,43 @@ function CuevionApp() {
             <p className="text-[0.98rem] leading-7 text-[rgba(88,80,71,0.84)] dark:text-[rgba(222,211,200,0.76)]">
               Verifying access…
             </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (
+    sessionUser &&
+    accountConfigHydrationStatus === "error" &&
+    accountConfigErrorStatus
+  ) {
+    return (
+      <div className="min-h-screen bg-[linear-gradient(180deg,#f6efe7_0%,#efe5da_100%)] px-6 py-10 text-[color:#2f2a24] dark:bg-[linear-gradient(180deg,#171411_0%,#221c17_100%)] dark:text-[color:#f1e9de]">
+        <div className="mx-auto flex min-h-[calc(100vh-5rem)] max-w-[560px] items-center justify-center text-center">
+          <div className="space-y-5">
+            <div className="text-[0.72rem] font-medium uppercase tracking-[0.22em] text-[rgba(120,104,89,0.7)] dark:text-[rgba(214,201,189,0.64)]">
+              Cuevion
+            </div>
+            <div className="space-y-2">
+              <h1 className="text-2xl font-semibold tracking-tight">
+                Workspace settings are temporarily unavailable
+              </h1>
+              <p className="text-[0.98rem] leading-7 text-[rgba(88,80,71,0.84)] dark:text-[rgba(222,211,200,0.76)]">
+                Your saved setup could not be verified. No local setup was opened or
+                uploaded.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                setAccountConfigHydrationStatus("loading");
+                setAccountConfigRetryVersion((current) => current + 1);
+              }}
+              className="inline-flex h-11 items-center justify-center rounded-full border border-moss/24 bg-white/80 px-6 text-sm font-semibold text-moss transition hover:border-moss/38 hover:bg-white"
+            >
+              Retry
+            </button>
           </div>
         </div>
       </div>
@@ -1972,31 +2605,33 @@ function CuevionApp() {
   return (
     <OnboardingFlow
       state={onboardingState}
-      onStateChange={setOnboardingState}
+      onStateChange={handleOnboardingStateChange}
       onOpenWorkspace={(nextUserConfig) => {
-        const completedSession = sanitizeAccountConfigCredentials({
-          completed: true,
-          state: onboardingState,
-        }) as PersistedOnboardingSession;
+        applyAccountConfigMutation((canPersistLocally) => {
+          const completedSession = sanitizeAccountConfigCredentials({
+            completed: true,
+            state: onboardingState,
+          }) as PersistedOnboardingSession;
 
-        window.localStorage.setItem(
-          ONBOARDING_STATE_STORAGE_KEY,
-          JSON.stringify(completedSession),
-        );
-        window.localStorage.setItem(CUEVION_APP_VIEW_STORAGE_KEY, "workspace");
-        window.localStorage.removeItem(ONBOARDING_DRAFT_STATE_STORAGE_KEY);
-        setPersistedOnboardingSession(completedSession);
-        setUserConfig(nextUserConfig);
-        if (sessionUser?.userType === "member" && sessionAccountStorageKey) {
-          void saveUserAccountConfig(
-            buildAccountConfigFromLocalStorage(
-              sessionAccountStorageKey,
-              completedSession,
-              displayNameOverrides,
-            ),
-          );
-        }
-        setView("transition");
+          if (canPersistLocally) {
+            if (accountConfigHydratedForOnboardingRef.current) {
+              mirrorCompletedOnboardingManagedInboxes({
+                onboardingState: completedSession.state,
+                storage: window.localStorage,
+              });
+            }
+
+            window.localStorage.setItem(
+              ONBOARDING_STATE_STORAGE_KEY,
+              JSON.stringify(completedSession),
+            );
+            window.localStorage.setItem(CUEVION_APP_VIEW_STORAGE_KEY, "workspace");
+            window.localStorage.removeItem(ONBOARDING_DRAFT_STATE_STORAGE_KEY);
+          }
+          setPersistedOnboardingSession(completedSession);
+          setUserConfig(nextUserConfig);
+          setView("transition");
+        });
       }}
     />
   );

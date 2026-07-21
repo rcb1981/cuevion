@@ -279,6 +279,81 @@ def _sanitize_stored_user_config(record: dict) -> dict:
     return sanitized
 
 
+def _has_valid_known_stored_config_shapes(record: dict) -> bool:
+    if "v" in record and (
+        type(record["v"]) not in (int, float)
+        or record["v"] != record["v"]
+        or record["v"] in (float("inf"), float("-inf"))
+    ):
+        return False
+    for field in ("email", "updatedAt"):
+        if field in record and not isinstance(record[field], str):
+            return False
+
+    onboarding_session = record.get("onboardingSession")
+    if "onboardingSession" in record and not isinstance(onboarding_session, dict):
+        return False
+
+    managed_inboxes = record.get("managedInboxes")
+    if "managedInboxes" in record and (
+        not isinstance(managed_inboxes, list)
+        or any(not isinstance(inbox, dict) for inbox in managed_inboxes)
+    ):
+        return False
+
+    for field in (
+        "mailboxTitleOverrides",
+        "mailboxFocusPreferenceOverrides",
+        "inboxSignatures",
+    ):
+        if field in record and not isinstance(record[field], dict):
+            return False
+
+    if "smartFolders" in record and not isinstance(record["smartFolders"], list):
+        return False
+
+    primary_managed_inbox_id = record.get("primaryManagedInboxId")
+    if "primaryManagedInboxId" in record and not (
+        primary_managed_inbox_id is None
+        or isinstance(primary_managed_inbox_id, str)
+    ):
+        return False
+
+    ui_preferences = record.get("uiPreferences")
+    if "uiPreferences" in record:
+        if not isinstance(ui_preferences, dict):
+            return False
+        theme_mode = ui_preferences.get("themeMode")
+        if "themeMode" in ui_preferences and (
+            not isinstance(theme_mode, str)
+            or theme_mode
+            not in {
+                "Light",
+                "Dark",
+                "System",
+                "light",
+                "dark",
+            }
+        ):
+            return False
+        for field in (
+            "aiSuggestionsEnabled",
+            "inboxChangesEnabled",
+            "teamActivityEnabled",
+        ):
+            if field in ui_preferences and type(ui_preferences[field]) is not bool:
+                return False
+
+    display_name_overrides = record.get("displayNameOverrides")
+    if "displayNameOverrides" in record and (
+        not isinstance(display_name_overrides, dict)
+        or any(not isinstance(value, str) for value in display_name_overrides.values())
+    ):
+        return False
+
+    return True
+
+
 def _merge_user_config(existing_record: dict | None, sanitized_update: dict) -> dict:
     merged = {
         "v": USER_CONFIG_SCHEMA_VERSION,
@@ -449,34 +524,93 @@ class handler(BaseHTTPRequestHandler):
 
         store, _ = resolve_user_config_store()
         if not store:
-            _send_json(self, 200, {"ok": True, "config": None})
-            return
-
-        read_result = read_user_config_record(store, session_user["email"])
-        if read_result["status"] != "ok":
-            _send_json(self, 200, {"ok": True, "config": None})
-            return
-
-        stored_config = read_result["config"]
-        sanitized_config = _sanitize_stored_user_config(stored_config)
-        if sanitized_config != stored_config:
-            write_result = write_user_config_record(
-                store,
-                session_user["email"],
-                sanitized_config,
+            _send_json(
+                self,
+                503,
+                _build_error(
+                    "config_unavailable",
+                    "User configuration is temporarily unavailable.",
+                ),
             )
-            if write_result["status"] != "ok":
-                _send_json(
-                    self,
-                    503,
-                    _build_error(
-                        "user_config_store_unavailable",
-                        "User configuration could not be sanitized.",
-                    ),
-                )
-                return
+            return
 
-        _send_json(self, 200, {"ok": True, "config": sanitized_config})
+        try:
+            read_result = read_user_config_record(store, session_user["email"])
+        except Exception:
+            _send_json(
+                self,
+                503,
+                _build_error(
+                    "config_unavailable",
+                    "User configuration is temporarily unavailable.",
+                ),
+            )
+            return
+
+        if not isinstance(read_result, dict):
+            _send_json(
+                self,
+                503,
+                _build_error("config_invalid", "User configuration is invalid."),
+            )
+            return
+
+        read_status = read_result.get("status")
+        stored_config = read_result.get("config")
+        if read_status == "missing" and stored_config is None:
+            _send_json(
+                self,
+                200,
+                {"ok": True, "configState": "missing", "config": None},
+            )
+            return
+        if read_status == "unavailable":
+            _send_json(
+                self,
+                503,
+                _build_error(
+                    "config_unavailable",
+                    "User configuration is temporarily unavailable.",
+                ),
+            )
+            return
+        if read_status != "ok" or not isinstance(stored_config, dict):
+            _send_json(
+                self,
+                503,
+                _build_error("config_invalid", "User configuration is invalid."),
+            )
+            return
+        if not _has_valid_known_stored_config_shapes(stored_config):
+            _send_json(
+                self,
+                503,
+                _build_error("config_invalid", "User configuration is invalid."),
+            )
+            return
+
+        try:
+            sanitized_config = _sanitize_stored_user_config(stored_config)
+        except Exception:
+            _send_json(
+                self,
+                503,
+                _build_error("config_invalid", "User configuration is invalid."),
+            )
+            return
+        if not isinstance(sanitized_config, dict):
+            _send_json(
+                self,
+                503,
+                _build_error("config_invalid", "User configuration is invalid."),
+            )
+            return
+
+        _send_json(
+            self,
+            200,
+            {"ok": True, "configState": "found", "config": sanitized_config},
+        )
 
     def do_POST(self):
         session_user, auth_error = resolve_authenticated_user(self.headers)
