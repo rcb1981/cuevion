@@ -22,7 +22,12 @@ import type {
   ProviderId,
   SelectableFocusPreferenceLevel,
 } from "../../types/onboarding";
-import { normalizeFocusPreferences } from "../../types/onboarding";
+import {
+  clampOnboardingStep,
+  normalizeFocusPreferences,
+  ONBOARDING_STEP_MAX,
+  ONBOARDING_STEP_MIN,
+} from "../../types/onboarding";
 import type { UserConfig } from "../../types/userConfig";
 import { NavigationBar } from "./NavigationBar";
 import { ProgressIndicator } from "./ProgressIndicator";
@@ -34,8 +39,28 @@ import {
 } from "./StepFocusPreferences";
 import { StepWelcome } from "./StepWelcome";
 
-const totalScreens = 4;
 const totalProgressSteps = 3;
+
+export function attemptWorkspaceOpen(
+  canOpenWorkspace: boolean,
+  openWorkspace: () => void,
+): boolean {
+  if (!canOpenWorkspace) {
+    return false;
+  }
+
+  openWorkspace();
+  return true;
+}
+
+export const onboardingFlowProgression = {
+  minStep: ONBOARDING_STEP_MIN,
+  maxStep: ONBOARDING_STEP_MAX,
+  clamp: clampOnboardingStep,
+  next: (step: number) => clampOnboardingStep(step + 1),
+  back: (step: number) => clampOnboardingStep(step - 1),
+  attemptWorkspaceOpen,
+} as const;
 
 function dedupeInboxes(inboxes: Array<InboxId | null | undefined>) {
   return [...new Set(inboxes.filter((inboxId): inboxId is InboxId => Boolean(inboxId)))];
@@ -43,22 +68,34 @@ function dedupeInboxes(inboxes: Array<InboxId | null | undefined>) {
 
 interface OnboardingFlowProps {
   state: OnboardingState;
+  currentStep: number;
+  onStepChange: (step: number) => void;
   onStateChange: (
     value: OnboardingState | ((current: OnboardingState) => OnboardingState),
   ) => void;
+  onSafeStateChange: (
+    value: OnboardingState | ((current: OnboardingState) => OnboardingState),
+  ) => void;
   onOpenWorkspace: (userConfig: UserConfig) => void;
+  canOpenWorkspace?: boolean;
   isPreviewMode?: boolean;
   previewControls?: ReactNode;
 }
 
 export function OnboardingFlow({
   state,
+  currentStep,
+  onStepChange,
   onStateChange,
+  onSafeStateChange,
   onOpenWorkspace,
+  canOpenWorkspace = false,
   isPreviewMode = false,
   previewControls,
 }: OnboardingFlowProps) {
-  const [step, setStep] = useState(0);
+  const [showWorkspaceBlockedMessage, setShowWorkspaceBlockedMessage] =
+    useState(false);
+  const step = onboardingFlowProgression.clamp(currentStep);
   const showSetupProgress = step > 0;
   const isFinalScreen = step === 3;
   const sidebarHelperText =
@@ -110,7 +147,7 @@ export function OnboardingFlow({
     fields: Array<keyof OnboardingState["focusPreferences"]>,
     value: SelectableFocusPreferenceLevel,
   ) => {
-    onStateChange((current) => ({
+    onSafeStateChange((current) => ({
       ...current,
       focusPreferences: {
         ...current.focusPreferences,
@@ -129,7 +166,7 @@ export function OnboardingFlow({
   };
 
   const addSourceInbox = () => {
-    onStateChange((current) => {
+    onSafeStateChange((current) => {
       const id = createCustomInboxId(`Inbox ${current.selectedInboxes.length + 1}`);
       const customInbox: CustomInboxDefinition = {
         id,
@@ -153,7 +190,7 @@ export function OnboardingFlow({
     state.selectedInboxes.length > 1 && state.selectedInboxes.includes(inboxId);
 
   const removeSelectedInbox = (inboxId: InboxId) => {
-    onStateChange((current) => {
+    onSafeStateChange((current) => {
       if (!current.selectedInboxes.includes(inboxId)) {
         return current;
       }
@@ -351,11 +388,29 @@ export function OnboardingFlow({
 
   const next = () => {
     if (!canGoNext) return;
-    setStep((current) => Math.min(current + 1, totalScreens - 1));
+    const nextStep = onboardingFlowProgression.next(step);
+
+    if (nextStep !== step) {
+      onStepChange(nextStep);
+    }
   };
 
   const back = () => {
-    setStep((current) => Math.max(current - 1, 0));
+    setShowWorkspaceBlockedMessage(false);
+    const previousStep = onboardingFlowProgression.back(step);
+
+    if (previousStep !== step) {
+      onStepChange(previousStep);
+    }
+  };
+
+  const openWorkspace = () => {
+    const didOpenWorkspace = onboardingFlowProgression.attemptWorkspaceOpen(
+      canOpenWorkspace,
+      () => onOpenWorkspace(userConfig),
+    );
+
+    setShowWorkspaceBlockedMessage(!didOpenWorkspace);
   };
 
   const renderStep = () => {
@@ -478,15 +533,20 @@ export function OnboardingFlow({
                 </div>
               ) : null}
               <div className="flex-1">{renderStep()}</div>
+              {isFinalScreen && showWorkspaceBlockedMessage ? (
+                <p
+                  role="status"
+                  className="mb-4 text-center text-sm leading-6 text-ink/60"
+                >
+                  Mailbox setup must be safely completed before you can open your
+                  workspace.
+                </p>
+              ) : null}
               <NavigationBar
                 canGoBack={step > 0}
                 backLabel={step === 3 ? "Edit setup" : undefined}
                 onBack={back}
-                onNext={
-                  step === 3
-                    ? () => onOpenWorkspace(userConfig)
-                    : next
-                }
+                onNext={step === 3 ? openWorkspace : next}
                 nextLabel={nextLabel}
                 isNextDisabled={step === 3 ? false : !canGoNext}
               />

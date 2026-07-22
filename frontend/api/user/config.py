@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 import sys
 import unicodedata
 from datetime import datetime, timezone
+from enum import Enum
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
@@ -127,6 +129,125 @@ SUPPORTED_INTERNAL_ROLES = {
     "dj",
     "producer",
 }
+ONBOARDING_SESSION_SCHEMA_VERSION = 1
+ONBOARDING_MIN_CURRENT_STEP = 0
+ONBOARDING_MAX_CURRENT_STEP = 3
+ONBOARDING_ROLE_IDS = {
+    "label_ar_manager",
+    "label_manager",
+    "ar_manager",
+    "dj",
+    "producer",
+    "dj_producer",
+    "label_owner",
+    "legal",
+    "finance",
+    "royalty",
+    "sync_licensing",
+    "social_media_manager",
+    "promo_manager",
+    "distribution",
+    "admin",
+}
+ONBOARDING_PRESET_INBOX_IDS = {
+    "main",
+    "demo",
+    "business",
+    "promo",
+    "legal",
+    "finance",
+    "royalty",
+    "sync",
+}
+ONBOARDING_INBOX_COUNTS = {"1", "2", "3", "4+", "not_sure"}
+ONBOARDING_PRIMARY_INBOX_TYPES = {"personal", "work"}
+ONBOARDING_FOCUS_FIELDS = (
+    "demos",
+    "promo",
+    "finance",
+    "legal",
+    "business",
+    "updates",
+    "distribution",
+    "royalties",
+    "promoReminders",
+    "paymentReminders",
+)
+ONBOARDING_FOCUS_VALUES = {"medium", "low"}
+ONBOARDING_CHOICE_FIELDS = (
+    "primaryRole",
+    "internalRole",
+    "secondaryRole",
+    "primaryInbox",
+    "primaryInboxType",
+    "focusPreferences",
+    "inboxCount",
+    "selectedInboxes",
+    "customInboxes",
+)
+ONBOARDING_FORBIDDEN_EXACT_KEYS = {
+    "account",
+    "authorizationcode",
+    "connected",
+    "connectionstatus",
+    "email",
+    "host",
+    "hostname",
+    "inboxconnections",
+    "oauthcode",
+    "oauthstate",
+    "owneremail",
+    "port",
+    "reconnectstatus",
+    "state",
+    "userid",
+    "username",
+    "workspaceid",
+}
+ONBOARDING_FORBIDDEN_KEY_PATTERNS = {
+    "auth0",
+    "authorization",
+    "ciphertext",
+    "connection",
+    "credential",
+    "email",
+    "imap",
+    "oauth",
+    "password",
+    "provider",
+    "reconnect",
+    "session",
+    "smtp",
+    "status",
+    "token",
+}
+MAX_ONBOARDING_CUSTOM_INBOXES = 64
+MAX_ONBOARDING_INBOX_ID_LENGTH = 160
+MAX_ONBOARDING_INBOX_NAME_LENGTH = 160
+MAX_USER_CONFIG_BODY_BYTES = 512 * 1024
+MAX_USER_CONFIG_JSON_DEPTH = 32
+MAX_USER_CONFIG_JSON_NODES = 8192
+ONBOARDING_CUSTOM_INBOX_ID_PATTERN = re.compile(
+    r"^custom:[a-z0-9]+(?:-[a-z0-9]+)*$"
+)
+
+
+class _OnboardingSessionValidationError(ValueError):
+    pass
+
+
+class _StoredUserConfigValidationError(ValueError):
+    pass
+
+
+class _JsonStructureLimitError(ValueError):
+    pass
+
+
+class _StoredOnboardingSessionState(Enum):
+    NOT_STARTED = "not_started"
+    VALID = "valid"
+    INVALID = "invalid"
 
 
 def _send_json(handler: BaseHTTPRequestHandler, status_code: int, payload: dict):
@@ -207,25 +328,286 @@ def _sanitize_connection(value):
     return sanitized
 
 
-def _sanitize_onboarding_session(value):
+def _compact_field_name(key: str) -> str:
+    return "".join(character for character in key.strip().lower() if character.isalnum())
+
+
+def _iter_bounded_json_nodes(value):
+    pending = [(value, 1)]
+    visited_container_ids = set()
+    node_count = 0
+
+    while pending:
+        current, depth = pending.pop()
+        node_count += 1
+        if node_count > MAX_USER_CONFIG_JSON_NODES:
+            raise _JsonStructureLimitError
+        if depth > MAX_USER_CONFIG_JSON_DEPTH:
+            raise _JsonStructureLimitError
+
+        if isinstance(current, dict):
+            container_id = id(current)
+            if container_id in visited_container_ids:
+                raise _JsonStructureLimitError
+            visited_container_ids.add(container_id)
+            if any(not isinstance(key, str) for key in current):
+                raise _JsonStructureLimitError
+            pending.extend(
+                (item, depth + 1)
+                for item in reversed(tuple(current.values()))
+            )
+        elif isinstance(current, list):
+            container_id = id(current)
+            if container_id in visited_container_ids:
+                raise _JsonStructureLimitError
+            visited_container_ids.add(container_id)
+            pending.extend((item, depth + 1) for item in reversed(current))
+
+        yield current
+
+
+def _validate_json_structure(value) -> None:
+    for _ in _iter_bounded_json_nodes(value):
+        pass
+
+
+def _contains_forbidden_onboarding_key(value) -> bool:
+    for current in _iter_bounded_json_nodes(value):
+        if isinstance(current, dict):
+            for key in current:
+                if not isinstance(key, str):
+                    return True
+                compact_key = _compact_field_name(key)
+                if compact_key in ONBOARDING_FORBIDDEN_EXACT_KEYS or any(
+                    pattern in compact_key
+                    for pattern in ONBOARDING_FORBIDDEN_KEY_PATTERNS
+                ):
+                    return True
+    return False
+
+
+def _validate_nullable_enum(value, allowed_values: set[str]):
+    if value is None:
+        return None
+    if not isinstance(value, str) or value not in allowed_values:
+        raise _OnboardingSessionValidationError
+    return value
+
+
+def _validate_onboarding_inbox_id(value) -> str:
+    if not isinstance(value, str):
+        raise _OnboardingSessionValidationError
+    if value in ONBOARDING_PRESET_INBOX_IDS:
+        return value
+    if (
+        len(value) > MAX_ONBOARDING_INBOX_ID_LENGTH
+        or _has_control_characters(value)
+        or ONBOARDING_CUSTOM_INBOX_ID_PATTERN.fullmatch(value) is None
+    ):
+        raise _OnboardingSessionValidationError
+    return value
+
+
+def _validate_onboarding_choice(field: str, value, *, allow_legacy_high: bool):
+    if field in {"primaryRole", "secondaryRole"}:
+        return _validate_nullable_enum(value, ONBOARDING_ROLE_IDS)
+    if field == "internalRole":
+        return _validate_nullable_enum(value, SUPPORTED_INTERNAL_ROLES)
+    if field == "primaryInbox":
+        return None if value is None else _validate_onboarding_inbox_id(value)
+    if field == "primaryInboxType":
+        return _validate_nullable_enum(value, ONBOARDING_PRIMARY_INBOX_TYPES)
+    if field == "inboxCount":
+        return _validate_nullable_enum(value, ONBOARDING_INBOX_COUNTS)
+
+    if field == "focusPreferences":
+        if not isinstance(value, dict) or any(
+            not isinstance(key, str) or key not in ONBOARDING_FOCUS_FIELDS
+            for key in value
+        ):
+            raise _OnboardingSessionValidationError
+        normalized_focus = {}
+        for key in ONBOARDING_FOCUS_FIELDS:
+            if key not in value:
+                continue
+            focus_value = value[key]
+            if allow_legacy_high and focus_value == "high":
+                focus_value = "medium"
+            if (
+                not isinstance(focus_value, str)
+                or focus_value not in ONBOARDING_FOCUS_VALUES
+            ):
+                raise _OnboardingSessionValidationError
+            normalized_focus[key] = focus_value
+        return normalized_focus
+
+    if field == "selectedInboxes":
+        if not isinstance(value, list) or len(value) > MAX_ONBOARDING_CUSTOM_INBOXES:
+            raise _OnboardingSessionValidationError
+        normalized_ids = [_validate_onboarding_inbox_id(item) for item in value]
+        if len(normalized_ids) != len(set(normalized_ids)):
+            raise _OnboardingSessionValidationError
+        return normalized_ids
+
+    if field == "customInboxes":
+        if not isinstance(value, list) or len(value) > MAX_ONBOARDING_CUSTOM_INBOXES:
+            raise _OnboardingSessionValidationError
+        normalized_custom_inboxes = []
+        seen_ids = set()
+        for custom_inbox in value:
+            if not isinstance(custom_inbox, dict) or set(custom_inbox) != {"id", "name"}:
+                raise _OnboardingSessionValidationError
+            inbox_id = _validate_onboarding_inbox_id(custom_inbox["id"])
+            if not inbox_id.startswith("custom:") or inbox_id in seen_ids:
+                raise _OnboardingSessionValidationError
+            name = custom_inbox["name"]
+            if not isinstance(name, str):
+                raise _OnboardingSessionValidationError
+            normalized_name = name.strip()
+            if (
+                not normalized_name
+                or len(normalized_name) > MAX_ONBOARDING_INBOX_NAME_LENGTH
+                or _has_control_characters(normalized_name)
+            ):
+                raise _OnboardingSessionValidationError
+            seen_ids.add(inbox_id)
+            normalized_custom_inboxes.append({"id": inbox_id, "name": normalized_name})
+        return normalized_custom_inboxes
+
+    raise _OnboardingSessionValidationError
+
+
+def _normalize_onboarding_choices(
+    value,
+    *,
+    strict: bool,
+    allow_legacy_high: bool = False,
+) -> dict:
     if not isinstance(value, dict):
-        return None
+        raise _OnboardingSessionValidationError
+    if strict and any(
+        not isinstance(key, str) or key not in ONBOARDING_CHOICE_FIELDS
+        for key in value
+    ):
+        raise _OnboardingSessionValidationError
 
-    sanitized = _strip_sensitive_fields(value)
-    if not isinstance(sanitized, dict):
-        return None
+    normalized = {}
+    for field in ONBOARDING_CHOICE_FIELDS:
+        if field not in value:
+            continue
+        try:
+            normalized[field] = _validate_onboarding_choice(
+                field,
+                value[field],
+                allow_legacy_high=allow_legacy_high,
+            )
+        except _OnboardingSessionValidationError:
+            if strict:
+                raise
+    return normalized
 
-    state = sanitized.get("state")
-    if isinstance(state, dict):
-        connections = state.get("inboxConnections")
-        if isinstance(connections, dict):
-            state["inboxConnections"] = {
-                key: _sanitize_connection(connection)
-                for key, connection in connections.items()
-                if isinstance(key, str)
+
+def _validate_onboarding_session_write(value) -> dict:
+    if value == {}:
+        return {}
+    if not isinstance(value, dict):
+        raise _OnboardingSessionValidationError
+    if set(value) != {"schemaVersion", "completed", "currentStep", "choices"}:
+        raise _OnboardingSessionValidationError
+    if type(value["schemaVersion"]) is not int or value["schemaVersion"] != 1:
+        raise _OnboardingSessionValidationError
+    if value["completed"] is not False:
+        raise _OnboardingSessionValidationError
+    current_step = value["currentStep"]
+    if (
+        type(current_step) is not int
+        or current_step < ONBOARDING_MIN_CURRENT_STEP
+        or current_step > ONBOARDING_MAX_CURRENT_STEP
+    ):
+        raise _OnboardingSessionValidationError
+    if not isinstance(value["choices"], dict):
+        raise _OnboardingSessionValidationError
+    try:
+        contains_forbidden_key = _contains_forbidden_onboarding_key(value)
+    except _JsonStructureLimitError as error:
+        raise _OnboardingSessionValidationError from error
+    if contains_forbidden_key:
+        raise _OnboardingSessionValidationError
+
+    return {
+        "schemaVersion": ONBOARDING_SESSION_SCHEMA_VERSION,
+        "completed": False,
+        "currentStep": current_step,
+        "choices": _normalize_onboarding_choices(value["choices"], strict=True),
+    }
+
+
+def _classify_stored_onboarding_session(
+    value,
+) -> tuple[_StoredOnboardingSessionState, dict | None]:
+    if isinstance(value, dict) and not value:
+        return _StoredOnboardingSessionState.NOT_STARTED, {}
+    if not isinstance(value, dict):
+        return _StoredOnboardingSessionState.INVALID, None
+
+    try:
+        _validate_json_structure(value)
+
+        legacy_fields = set(value)
+        if legacy_fields in (
+            {"completed", "state"},
+            {"completed", "completedAt", "state"},
+        ):
+            if value["completed"] is not True or not isinstance(value["state"], dict):
+                raise _OnboardingSessionValidationError
+            if "completedAt" in value and not isinstance(value["completedAt"], str):
+                raise _OnboardingSessionValidationError
+            if _contains_forbidden_onboarding_key(value["state"]):
+                raise _OnboardingSessionValidationError
+            normalized_choices = _normalize_onboarding_choices(
+                value["state"],
+                strict=True,
+                allow_legacy_high=True,
+            )
+            return _StoredOnboardingSessionState.VALID, {
+                "schemaVersion": ONBOARDING_SESSION_SCHEMA_VERSION,
+                "completed": True,
+                "currentStep": ONBOARDING_MAX_CURRENT_STEP,
+                "choices": normalized_choices,
             }
 
-    return sanitized
+        if set(value) != {"schemaVersion", "completed", "currentStep", "choices"}:
+            raise _OnboardingSessionValidationError
+        if (
+            type(value["schemaVersion"]) is not int
+            or value["schemaVersion"] != ONBOARDING_SESSION_SCHEMA_VERSION
+            or type(value["completed"]) is not bool
+            or type(value["currentStep"]) is not int
+            or value["currentStep"] < ONBOARDING_MIN_CURRENT_STEP
+            or value["currentStep"] > ONBOARDING_MAX_CURRENT_STEP
+            or not isinstance(value["choices"], dict)
+            or _contains_forbidden_onboarding_key(value)
+        ):
+            raise _OnboardingSessionValidationError
+        normalized_choices = _normalize_onboarding_choices(
+            value["choices"],
+            strict=True,
+        )
+        return _StoredOnboardingSessionState.VALID, {
+            "schemaVersion": ONBOARDING_SESSION_SCHEMA_VERSION,
+            "completed": value["completed"],
+            "currentStep": value["currentStep"],
+            "choices": normalized_choices,
+        }
+    except (_JsonStructureLimitError, _OnboardingSessionValidationError):
+        return _StoredOnboardingSessionState.INVALID, None
+
+
+def _normalize_stored_onboarding_session(value) -> dict:
+    session_state, normalized = _classify_stored_onboarding_session(value)
+    if session_state is _StoredOnboardingSessionState.INVALID or normalized is None:
+        raise _StoredUserConfigValidationError
+    return normalized
 
 
 def _sanitize_managed_inboxes(value):
@@ -253,9 +635,7 @@ def _sanitize_user_config(payload: dict, owner_email: str) -> dict:
 
         value = source_config[key]
         if key == "onboardingSession":
-            sanitized_value = _sanitize_onboarding_session(value)
-            if sanitized_value is not None:
-                sanitized[key] = sanitized_value
+            sanitized[key] = _validate_onboarding_session_write(value)
         elif key == "managedInboxes":
             sanitized[key] = _sanitize_managed_inboxes(value)
         else:
@@ -269,9 +649,9 @@ def _sanitize_stored_user_config(record: dict) -> dict:
     if not isinstance(sanitized, dict):
         return {}
     if "onboardingSession" in sanitized:
-        sanitized["onboardingSession"] = _sanitize_onboarding_session(
-            sanitized.get("onboardingSession")
-        ) or {}
+        sanitized["onboardingSession"] = _normalize_stored_onboarding_session(
+            record.get("onboardingSession")
+        )
     if "managedInboxes" in sanitized:
         sanitized["managedInboxes"] = _sanitize_managed_inboxes(
             sanitized.get("managedInboxes")
@@ -280,6 +660,14 @@ def _sanitize_stored_user_config(record: dict) -> dict:
 
 
 def _has_valid_known_stored_config_shapes(record: dict) -> bool:
+    try:
+        _validate_json_structure(record)
+    except _JsonStructureLimitError:
+        return False
+
+    if "onboardingSession" not in record:
+        return False
+
     if "v" in record and (
         type(record["v"]) not in (int, float)
         or record["v"] != record["v"]
@@ -290,9 +678,12 @@ def _has_valid_known_stored_config_shapes(record: dict) -> bool:
         if field in record and not isinstance(record[field], str):
             return False
 
-    onboarding_session = record.get("onboardingSession")
-    if "onboardingSession" in record and not isinstance(onboarding_session, dict):
-        return False
+    if "onboardingSession" in record:
+        session_state, _ = _classify_stored_onboarding_session(
+            record["onboardingSession"]
+        )
+        if session_state is _StoredOnboardingSessionState.INVALID:
+            return False
 
     managed_inboxes = record.get("managedInboxes")
     if "managedInboxes" in record and (
@@ -370,10 +761,30 @@ def _merge_user_config(existing_record: dict | None, sanitized_update: dict) -> 
         "displayNameOverrides": {},
     }
 
+    existing_session_is_completed = False
     if isinstance(existing_record, dict):
         for key in ALLOWED_CONFIG_FIELDS:
             if key in existing_record:
-                merged[key] = _strip_sensitive_fields(existing_record[key])
+                if key == "onboardingSession":
+                    session_state, normalized_session = (
+                        _classify_stored_onboarding_session(existing_record[key])
+                    )
+                    if session_state is _StoredOnboardingSessionState.INVALID:
+                        raise _StoredUserConfigValidationError
+                    merged[key] = copy.deepcopy(existing_record[key])
+                    existing_session_is_completed = (
+                        session_state is _StoredOnboardingSessionState.VALID
+                        and isinstance(normalized_session, dict)
+                        and normalized_session.get("completed") is True
+                    )
+                else:
+                    merged[key] = _strip_sensitive_fields(existing_record[key])
+
+    if (
+        "onboardingSession" in sanitized_update
+        and existing_session_is_completed
+    ):
+        raise _OnboardingSessionValidationError
 
     for key, value in sanitized_update.items():
         merged[key] = value
@@ -483,19 +894,82 @@ def _merge_server_owned_managed_inboxes(existing: list, requested: list) -> list
     return next_inboxes
 
 
-def _read_json_body(handler: BaseHTTPRequestHandler) -> tuple[dict | None, dict | None]:
-    content_length = int(handler.headers.get("content-length", "0"))
-    raw_body = handler.rfile.read(content_length).decode("utf-8") if content_length > 0 else ""
+def _read_json_body(
+    handler: BaseHTTPRequestHandler,
+) -> tuple[dict | None, int | None, dict | None]:
+    raw_content_length = handler.headers.get("content-length")
+    if raw_content_length is None:
+        content_length = 0
+    else:
+        try:
+            if not isinstance(raw_content_length, str):
+                raise ValueError
+            normalized_content_length = raw_content_length.strip()
+            if (
+                not normalized_content_length.isascii()
+                or not normalized_content_length.isdecimal()
+            ):
+                raise ValueError
+            content_length = int(normalized_content_length, 10)
+        except (ValueError, OverflowError):
+            return (
+                None,
+                400,
+                _build_error("invalid_request", "Content-Length header is invalid."),
+            )
+
+    if content_length > MAX_USER_CONFIG_BODY_BYTES:
+        return (
+            None,
+            413,
+            _build_error("request_body_too_large", "Request body is too large."),
+        )
 
     try:
+        raw_body_bytes = (
+            handler.rfile.read(content_length) if content_length > 0 else b""
+        )
+        if len(raw_body_bytes) > MAX_USER_CONFIG_BODY_BYTES:
+            return (
+                None,
+                413,
+                _build_error("request_body_too_large", "Request body is too large."),
+            )
+        raw_body = raw_body_bytes.decode("utf-8")
         payload = json.loads(raw_body or "{}")
-    except json.JSONDecodeError:
-        return None, _build_error("invalid_request", "Request body must be valid JSON.")
+    except (
+        json.JSONDecodeError,
+        UnicodeDecodeError,
+        RecursionError,
+        ValueError,
+        OverflowError,
+    ):
+        return (
+            None,
+            400,
+            _build_error("invalid_request", "Request body must be valid JSON."),
+        )
 
     if not isinstance(payload, dict):
-        return None, _build_error("invalid_request", "Request body must be a JSON object.")
+        return (
+            None,
+            400,
+            _build_error("invalid_request", "Request body must be a JSON object."),
+        )
 
-    return payload, None
+    try:
+        _validate_json_structure(payload)
+    except _JsonStructureLimitError:
+        return (
+            None,
+            400,
+            _build_error(
+                "invalid_json_structure",
+                "Request body JSON structure is invalid.",
+            ),
+        )
+
+    return payload, None, None
 
 
 class handler(BaseHTTPRequestHandler):
@@ -520,6 +994,20 @@ class handler(BaseHTTPRequestHandler):
                         "A valid member session is required.",
                     ),
                 )
+            return
+
+        if (
+            not isinstance(session_user, dict)
+            or session_user.get("userType") != "member"
+        ):
+            _send_json(
+                self,
+                401,
+                _build_error(
+                    "unauthorized",
+                    "A valid member session is required.",
+                ),
+            )
             return
 
         store, _ = resolve_user_config_store()
@@ -635,9 +1123,39 @@ class handler(BaseHTTPRequestHandler):
                 )
             return
 
-        payload, error = _read_json_body(self)
+        if (
+            not isinstance(session_user, dict)
+            or session_user.get("userType") != "member"
+        ):
+            _send_json(
+                self,
+                401,
+                _build_error(
+                    "unauthorized",
+                    "A valid member session is required.",
+                ),
+            )
+            return
+
+        payload, error_status, error = _read_json_body(self)
         if error:
-            _send_json(self, 400, error)
+            _send_json(self, error_status or 400, error)
+            return
+
+        try:
+            sanitized_config = _sanitize_user_config(
+                payload or {},
+                session_user["email"],
+            )
+        except _OnboardingSessionValidationError:
+            _send_json(
+                self,
+                400,
+                _build_error(
+                    "invalid_onboarding_session",
+                    "Onboarding session is invalid.",
+                ),
+            )
             return
 
         store, _ = resolve_user_config_store()
@@ -651,11 +1169,42 @@ class handler(BaseHTTPRequestHandler):
 
         read_result = read_user_config_record(store, session_user["email"])
         read_status = read_result.get("status") if isinstance(read_result, dict) else None
-        if read_status == "ok" and isinstance(read_result.get("config"), dict):
-            existing_record = read_result["config"]
-        elif read_status == "missing":
+        stored_config = read_result.get("config") if isinstance(read_result, dict) else None
+        if read_status == "ok":
+            if not isinstance(stored_config, dict):
+                _send_json(
+                    self,
+                    503,
+                    _build_error(
+                        "config_invalid",
+                        "User configuration is invalid.",
+                    ),
+                )
+                return
+            existing_record = stored_config
+            if not _has_valid_known_stored_config_shapes(existing_record):
+                _send_json(
+                    self,
+                    503,
+                    _build_error(
+                        "config_invalid",
+                        "User configuration is invalid.",
+                    ),
+                )
+                return
+        elif read_status == "missing" and stored_config is None:
             existing_record = None
-        else:
+        elif read_status == "missing":
+            _send_json(
+                self,
+                503,
+                _build_error(
+                    "config_invalid",
+                    "User configuration is invalid.",
+                ),
+            )
+            return
+        elif read_status == "unavailable":
             _send_json(
                 self,
                 503,
@@ -665,9 +1214,39 @@ class handler(BaseHTTPRequestHandler):
                 ),
             )
             return
+        else:
+            _send_json(
+                self,
+                503,
+                _build_error(
+                    "config_invalid",
+                    "User configuration is invalid.",
+                ),
+            )
+            return
 
-        sanitized_config = _sanitize_user_config(payload or {}, session_user["email"])
-        merged_config = _merge_user_config(existing_record, sanitized_config)
+        try:
+            merged_config = _merge_user_config(existing_record, sanitized_config)
+        except _StoredUserConfigValidationError:
+            _send_json(
+                self,
+                503,
+                _build_error(
+                    "config_invalid",
+                    "User configuration is invalid.",
+                ),
+            )
+            return
+        except _OnboardingSessionValidationError:
+            _send_json(
+                self,
+                400,
+                _build_error(
+                    "invalid_onboarding_session",
+                    "Onboarding session is invalid.",
+                ),
+            )
+            return
 
         write_result = write_user_config_record(
             store,
@@ -678,7 +1257,14 @@ class handler(BaseHTTPRequestHandler):
             _send_json(self, 503, {"ok": False, "error": write_result["error"]})
             return
 
-        _send_json(self, 200, {"ok": True, "config": merged_config})
+        response_config = copy.deepcopy(merged_config)
+        if "onboardingSession" in response_config:
+            response_config["onboardingSession"] = (
+                _normalize_stored_onboarding_session(
+                    response_config["onboardingSession"]
+                )
+            )
+        _send_json(self, 200, {"ok": True, "config": response_config})
 
     def do_OPTIONS(self):
         _send_json(self, 200, {"ok": True})

@@ -85,7 +85,7 @@ export interface CustomInboxDefinition {
   name: string;
 }
 
-export interface OnboardingState {
+export interface OnboardingChoices {
   primaryRole: RoleId | null;
   internalRole: InternalRole | null;
   secondaryRole: RoleId | null;
@@ -106,6 +106,33 @@ export interface OnboardingState {
   inboxCount: InboxCountId | null;
   selectedInboxes: InboxId[];
   customInboxes: CustomInboxDefinition[];
+}
+
+interface OnboardingSessionV1Base {
+  schemaVersion: 1;
+  currentStep: number;
+  choices: OnboardingChoices;
+}
+
+export type OnboardingSessionV1 =
+  | (OnboardingSessionV1Base & { completed: false })
+  | (OnboardingSessionV1Base & { completed: true });
+
+export const ONBOARDING_STEP_MIN = 0;
+export const ONBOARDING_STEP_MAX = 3;
+
+export function clampOnboardingStep(step: number): number {
+  if (!Number.isFinite(step)) {
+    return ONBOARDING_STEP_MIN;
+  }
+
+  return Math.min(
+    ONBOARDING_STEP_MAX,
+    Math.max(ONBOARDING_STEP_MIN, Math.trunc(step)),
+  );
+}
+
+export interface OnboardingState extends OnboardingChoices {
   inboxConnections: Record<string, InboxConnection>;
 }
 

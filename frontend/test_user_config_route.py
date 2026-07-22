@@ -52,6 +52,39 @@ class FakeHandler:
 
 SESSION_USER = {"email": "owner@example.com", "name": "Owner", "userType": "member"}
 STORE = {"rest_url": "https://kv.example", "rest_token": "token"}
+VALID_ONBOARDING_SESSION = {
+    "schemaVersion": 1,
+    "completed": False,
+    "currentStep": 2,
+    "choices": {
+        "primaryRole": "label_owner",
+        "internalRole": "label_ar_manager",
+        "secondaryRole": "producer",
+        "primaryInbox": "custom:vip-mabc123",
+        "primaryInboxType": "work",
+        "focusPreferences": {
+            "demos": "medium",
+            "promo": "low",
+            "finance": "medium",
+            "legal": "low",
+            "business": "medium",
+            "updates": "low",
+            "distribution": "medium",
+            "royalties": "low",
+            "promoReminders": "medium",
+            "paymentReminders": "low",
+        },
+        "inboxCount": "4+",
+        "selectedInboxes": ["main", "custom:vip-mabc123"],
+        "customInboxes": [{"id": "custom:vip-mabc123", "name": "VIP requests"}],
+    },
+}
+
+
+def onboarding_session(**updates):
+    session = json.loads(json.dumps(VALID_ONBOARDING_SESSION))
+    session.update(updates)
+    return session
 
 
 class GetRouteTests(unittest.TestCase):
@@ -65,7 +98,11 @@ class GetRouteTests(unittest.TestCase):
         if read_result is None:
             read_result = {
                 "status": "ok",
-                "config": {"v": 1, "email": "owner@example.com"},
+                "config": {
+                    "v": 1,
+                    "email": "owner@example.com",
+                    "onboardingSession": {},
+                },
                 "error": None,
             }
         handler = FakeHandler()
@@ -94,7 +131,11 @@ class GetRouteTests(unittest.TestCase):
             {
                 "ok": True,
                 "configState": "found",
-                "config": {"v": 1, "email": "owner@example.com"},
+                "config": {
+                    "v": 1,
+                    "email": "owner@example.com",
+                    "onboardingSession": {},
+                },
             },
         )
         self.assertIn(("Content-Type", "application/json"), handler.response_headers)
@@ -210,6 +251,7 @@ class GetRouteTests(unittest.TestCase):
 
     def test_known_corrupt_stored_config_shapes_are_config_invalid_before_sanitization(self):
         invalid_records = {
+            "missing onboarding session": {},
             "onboarding session": {"onboardingSession": []},
             "managed inbox collection": {"managedInboxes": {}},
             "managed inbox entry": {"managedInboxes": ["invalid"]},
@@ -325,10 +367,33 @@ class GetRouteTests(unittest.TestCase):
         read_mock.assert_not_called()
         write_mock.assert_not_called()
 
+    def test_guest_is_unauthorized_before_storage_io(self):
+        guest = {
+            "email": "guest@example.com",
+            "name": "Guest",
+            "userType": "guest",
+        }
+        handler, read_mock, write_mock = self.invoke(auth=(guest, None))
+
+        self.assertEqual(handler.status_code, 401)
+        self.assertEqual(
+            handler.payload(),
+            {
+                "ok": False,
+                "error": {
+                    "code": "unauthorized",
+                    "message": "A valid member session is required.",
+                },
+            },
+        )
+        read_mock.assert_not_called()
+        write_mock.assert_not_called()
+
     def test_legacy_passwords_are_stripped_without_a_get_side_effect(self):
         legacy = {
             "v": 1,
             "email": "owner@example.com",
+            "onboardingSession": {},
             "managedInboxes": [
                 {
                     "id": "demo",
@@ -374,6 +439,111 @@ class GetRouteTests(unittest.TestCase):
             self.assertNotIn("private normalization detail", json.dumps(handler.payload()))
             write_mock.assert_not_called()
 
+    def test_get_returns_the_same_safe_incomplete_v1_session_read_only(self):
+        stored_config = {
+            "v": 1,
+            "email": "owner@example.com",
+            "onboardingSession": onboarding_session(),
+        }
+        handler, read_mock, write_mock = self.invoke(
+            read_result={"status": "ok", "config": stored_config, "error": None},
+        )
+
+        self.assertEqual(handler.status_code, 200)
+        self.assertEqual(
+            handler.payload()["config"]["onboardingSession"],
+            VALID_ONBOARDING_SESSION,
+        )
+        read_mock.assert_called_once_with(STORE, "owner@example.com")
+        write_mock.assert_not_called()
+
+    def test_get_rejects_malformed_or_unsafe_stored_v1_sessions(self):
+        unsafe_choices = onboarding_session()
+        unsafe_choices["choices"]["provider"] = "google"
+        malformed_sessions = (
+            {"completed": False},
+            onboarding_session(currentStep=99),
+            onboarding_session(currentStep="2"),
+            onboarding_session(choices={"futureChoice": "discard-me"}),
+            unsafe_choices,
+            {**onboarding_session(), "unexpected": True},
+            {
+                "completed": True,
+                "state": {"inboxConnections": {"main": {"provider": "google"}}},
+            },
+        )
+
+        for stored_session in malformed_sessions:
+            with self.subTest(stored_session=stored_session):
+                handler, _, write_mock = self.invoke(
+                    read_result={
+                        "status": "ok",
+                        "config": {"onboardingSession": stored_session},
+                        "error": None,
+                    },
+                )
+
+                self.assertEqual(handler.status_code, 503)
+                self.assertEqual(handler.payload()["error"]["code"], "config_invalid")
+                self.assertNotIn("config", handler.payload())
+                write_mock.assert_not_called()
+
+    def test_get_normalizes_legacy_completed_record_without_connections(self):
+        legacy = {
+            "completed": True,
+            "completedAt": "2026-07-01T12:00:00Z",
+            "state": {
+                "primaryRole": "producer",
+                "focusPreferences": {"demos": "high", "promo": "low"},
+            },
+        }
+        handler, _, write_mock = self.invoke(
+            read_result={
+                "status": "ok",
+                "config": {"onboardingSession": legacy},
+                "error": None,
+            },
+        )
+
+        self.assertEqual(handler.status_code, 200)
+        self.assertEqual(
+            handler.payload()["config"]["onboardingSession"],
+            {
+                "schemaVersion": 1,
+                "completed": True,
+                "currentStep": 3,
+                "choices": {
+                    "primaryRole": "producer",
+                    "focusPreferences": {"demos": "medium", "promo": "low"},
+                },
+            },
+        )
+        write_mock.assert_not_called()
+
+    def test_get_malformed_session_is_config_invalid_and_read_only(self):
+        malformed = onboarding_session(currentStep="2")
+        handler, read_mock, write_mock = self.invoke(
+            read_result={
+                "status": "ok",
+                "config": {"onboardingSession": malformed},
+                "error": None,
+            },
+        )
+
+        self.assertEqual(handler.status_code, 503)
+        self.assertEqual(
+            handler.payload(),
+            {
+                "ok": False,
+                "error": {
+                    "code": "config_invalid",
+                    "message": "User configuration is invalid.",
+                },
+            },
+        )
+        read_mock.assert_called_once_with(STORE, "owner@example.com")
+        write_mock.assert_not_called()
+
 
 class PostRouteTests(unittest.TestCase):
     def invoke(
@@ -381,13 +551,14 @@ class PostRouteTests(unittest.TestCase):
         payload,
         *,
         raw_body=None,
+        headers=None,
         auth=(SESSION_USER, None),
         store=(STORE, None),
         read_result=None,
         write_result=None,
     ):
         body = raw_body if raw_body is not None else json.dumps(payload).encode("utf-8")
-        handler = FakeHandler(body)
+        handler = FakeHandler(body, headers=headers)
         read_result = read_result or {"status": "missing", "config": None, "error": None}
         write_result = write_result or {
             "status": "ok",
@@ -411,12 +582,91 @@ class PostRouteTests(unittest.TestCase):
         return handler, read_mock, write_mock
 
     def test_invalid_json_and_non_object_json_are_unchanged(self):
-        for raw_body in (b"{", b"[]"):
+        for raw_body in (b"{", b"[]", b'\xff'):
             with self.subTest(raw_body=raw_body):
-                handler, _, write_mock = self.invoke({}, raw_body=raw_body)
+                handler, read_mock, write_mock = self.invoke({}, raw_body=raw_body)
                 self.assertEqual(handler.status_code, 400)
                 self.assertEqual(handler.payload()["error"]["code"], "invalid_request")
+                read_mock.assert_not_called()
                 write_mock.assert_not_called()
+
+    def test_body_at_limit_is_accepted_and_declared_oversize_is_413_before_read(self):
+        exact_limit_body = b"{}" + b" " * (
+            config_route.MAX_USER_CONFIG_BODY_BYTES - 2
+        )
+        accepted, read_mock, write_mock = self.invoke(
+            {},
+            raw_body=exact_limit_body,
+        )
+        self.assertEqual(accepted.status_code, 200)
+        read_mock.assert_called_once()
+        write_mock.assert_called_once()
+
+        rejected, read_mock, write_mock = self.invoke(
+            {},
+            raw_body=b"{}",
+            headers={
+                "content-length": str(config_route.MAX_USER_CONFIG_BODY_BYTES + 1)
+            },
+        )
+        self.assertEqual(rejected.status_code, 413)
+        self.assertEqual(
+            rejected.payload()["error"]["code"],
+            "request_body_too_large",
+        )
+        self.assertEqual(rejected.rfile.tell(), 0)
+        read_mock.assert_not_called()
+        write_mock.assert_not_called()
+
+    def test_invalid_content_length_is_400_before_body_or_storage_io(self):
+        for content_length in ("-1", "not-a-number", "1.5", ""):
+            with self.subTest(content_length=content_length):
+                handler, read_mock, write_mock = self.invoke(
+                    {},
+                    raw_body=b"{}",
+                    headers={"content-length": content_length},
+                )
+                self.assertEqual(handler.status_code, 400)
+                self.assertEqual(
+                    handler.payload()["error"]["code"],
+                    "invalid_request",
+                )
+                self.assertEqual(handler.rfile.tell(), 0)
+                read_mock.assert_not_called()
+                write_mock.assert_not_called()
+
+    def test_json_depth_and_node_budgets_are_400_before_storage_io(self):
+        too_deep = {}
+        cursor = too_deep
+        for _ in range(config_route.MAX_USER_CONFIG_JSON_DEPTH):
+            child = {}
+            cursor["child"] = child
+            cursor = child
+
+        too_many_nodes = {
+            "items": [None] * config_route.MAX_USER_CONFIG_JSON_NODES,
+        }
+        for payload in (too_deep, too_many_nodes):
+            with self.subTest(kind="depth" if payload is too_deep else "nodes"):
+                handler, read_mock, write_mock = self.invoke(payload)
+                self.assertEqual(handler.status_code, 400)
+                self.assertEqual(
+                    handler.payload()["error"]["code"],
+                    "invalid_json_structure",
+                )
+                read_mock.assert_not_called()
+                write_mock.assert_not_called()
+
+    def test_json_loads_recursion_error_is_a_safe_400_without_storage_io(self):
+        nesting = 10000
+        raw_body = b'{"value":' + b"[" * nesting + b"0" + b"]" * nesting + b"}"
+        handler, read_mock, write_mock = self.invoke({}, raw_body=raw_body)
+
+        self.assertEqual(handler.status_code, 400)
+        self.assertEqual(handler.payload()["error"]["code"], "invalid_request")
+        self.assertNotIn("recursion", json.dumps(handler.payload()).lower())
+        read_mock.assert_not_called()
+        write_mock.assert_not_called()
 
     def test_authentication_failure_precedes_body_and_storage_io(self):
         for auth_error, expected_status in (
@@ -439,6 +689,32 @@ class PostRouteTests(unittest.TestCase):
                 read_mock.assert_not_called()
                 write_mock.assert_not_called()
                 self.assertNotIn("private outage detail", json.dumps(handler.payload()))
+
+    def test_guest_is_unauthorized_before_body_and_storage_io(self):
+        guest = {
+            "email": "guest@example.com",
+            "name": "Guest",
+            "userType": "guest",
+        }
+        handler, read_mock, write_mock = self.invoke(
+            {"config": {"onboardingSession": onboarding_session()}},
+            auth=(guest, None),
+        )
+
+        self.assertEqual(handler.status_code, 401)
+        self.assertEqual(handler.rfile.tell(), 0)
+        self.assertEqual(
+            handler.payload(),
+            {
+                "ok": False,
+                "error": {
+                    "code": "unauthorized",
+                    "message": "A valid member session is required.",
+                },
+            },
+        )
+        read_mock.assert_not_called()
+        write_mock.assert_not_called()
 
     def test_store_unavailable_is_existing_503(self):
         error = {"code": "user_config_store_unavailable", "message": "not configured"}
@@ -480,11 +756,337 @@ class PostRouteTests(unittest.TestCase):
             },
         )
 
+    def assert_invalid_onboarding_session(self, session, *, existing=None):
+        read_result = (
+            {"status": "ok", "config": existing, "error": None}
+            if existing is not None
+            else None
+        )
+        handler, _, write_mock = self.invoke(
+            {
+                "config": {
+                    "onboardingSession": session,
+                    "uiPreferences": {"themeMode": "Dark"},
+                }
+            },
+            read_result=read_result,
+        )
+        self.assertEqual(handler.status_code, 400)
+        self.assertEqual(
+            handler.payload(),
+            {
+                "ok": False,
+                "error": {
+                    "code": "invalid_onboarding_session",
+                    "message": "Onboarding session is invalid.",
+                },
+            },
+        )
+        write_mock.assert_not_called()
+
+    def test_valid_incomplete_v1_session_is_stored_as_one_safe_object(self):
+        handler, _, write_mock = self.invoke(
+            {"config": {"onboardingSession": onboarding_session()}},
+        )
+
+        self.assertEqual(handler.status_code, 200)
+        written = write_mock.call_args.args[2]
+        self.assertEqual(written["onboardingSession"], VALID_ONBOARDING_SESSION)
+        self.assertEqual(
+            handler.payload()["config"]["onboardingSession"],
+            VALID_ONBOARDING_SESSION,
+        )
+
+    def test_incomplete_session_replaces_previous_incomplete_session_whole(self):
+        replacement = onboarding_session(
+            currentStep=1,
+            choices={"primaryRole": "dj", "selectedInboxes": ["demo"]},
+        )
+        handler, _, write_mock = self.invoke(
+            {"config": {"onboardingSession": replacement}},
+            read_result={
+                "status": "ok",
+                "config": {"onboardingSession": onboarding_session()},
+                "error": None,
+            },
+        )
+
+        self.assertEqual(handler.status_code, 200)
+        self.assertEqual(write_mock.call_args.args[2]["onboardingSession"], replacement)
+
+    def test_omission_preserves_not_started_and_incomplete_sessions(self):
+        for stored_session in ({}, onboarding_session(currentStep=1)):
+            with self.subTest(stored_session=stored_session):
+                handler, _, write_mock = self.invoke(
+                    {"config": {"uiPreferences": {"themeMode": "Dark"}}},
+                    read_result={
+                        "status": "ok",
+                        "config": {"onboardingSession": stored_session},
+                        "error": None,
+                    },
+                )
+
+                self.assertEqual(handler.status_code, 200)
+                self.assertEqual(
+                    write_mock.call_args.args[2]["onboardingSession"],
+                    stored_session,
+                )
+
+    def test_current_step_requires_a_non_boolean_integer_in_screen_bounds(self):
+        for current_step in (-1, 4, True, 1.5, "1"):
+            with self.subTest(current_step=current_step):
+                self.assert_invalid_onboarding_session(
+                    onboarding_session(currentStep=current_step),
+                )
+
+    def test_unknown_choice_and_malformed_safe_values_are_rejected(self):
+        invalid_choices = (
+            {"futureChoice": True},
+            {"primaryRole": "unknown-role"},
+            {"primaryInbox": "provider-mailbox-id"},
+            {"focusPreferences": {"demos": "high"}},
+            {"selectedInboxes": ["main", "main"]},
+            {"customInboxes": [{"id": "main", "name": "Main"}]},
+        )
+        for choices in invalid_choices:
+            with self.subTest(choices=choices):
+                self.assert_invalid_onboarding_session(
+                    onboarding_session(choices=choices),
+                )
+
+    def test_custom_inbox_ids_require_the_internal_ascii_slug_namespace(self):
+        valid_id = "custom:release-requests-mabc123"
+        handler, _, write_mock = self.invoke(
+            {
+                "config": {
+                    "onboardingSession": onboarding_session(
+                        choices={
+                            "primaryInbox": valid_id,
+                            "selectedInboxes": [valid_id],
+                            "customInboxes": [
+                                {"id": valid_id, "name": "Release requests"}
+                            ],
+                        },
+                    )
+                }
+            }
+        )
+        self.assertEqual(handler.status_code, 200)
+        self.assertEqual(
+            write_mock.call_args.args[2]["onboardingSession"]["choices"],
+            {
+                "primaryInbox": valid_id,
+                "selectedInboxes": [valid_id],
+                "customInboxes": [{"id": valid_id, "name": "Release requests"}],
+            },
+        )
+
+        invalid_ids = (
+            "custom:",
+            "custom:-vip-mabc123",
+            "custom:vip-mabc123-",
+            "custom:vip--mabc123",
+            "custom:VIP-mabc123",
+            "custom:owner@example.com",
+            "custom: access-token=secret",
+            "custom:imap://user:password@host",
+            "custom:provider:google",
+        )
+        for inbox_id in invalid_ids:
+            with self.subTest(inbox_id=inbox_id):
+                self.assert_invalid_onboarding_session(
+                    onboarding_session(choices={"primaryInbox": inbox_id}),
+                )
+
+    def test_deeply_nested_attacker_session_is_a_400_without_storage_io(self):
+        deeply_nested = "attacker-controlled"
+        for _ in range(400):
+            deeply_nested = [deeply_nested]
+
+        handler, read_mock, write_mock = self.invoke(
+            {
+                "config": {
+                    "onboardingSession": onboarding_session(
+                        choices={"futureChoice": deeply_nested},
+                    ),
+                    "uiPreferences": {"themeMode": "Dark"},
+                }
+            }
+        )
+
+        self.assertEqual(handler.status_code, 400)
+        self.assertEqual(
+            handler.payload()["error"]["code"],
+            "invalid_json_structure",
+        )
+        read_mock.assert_not_called()
+        write_mock.assert_not_called()
+
+    def test_credential_connection_and_provider_authority_keys_are_rejected(self):
+        forbidden_fields = (
+            "inboxConnections",
+            "provider",
+            "email",
+            "host",
+            "username",
+            "password",
+            "token",
+            "accessToken",
+            "refreshToken",
+            "credentialRef",
+            "ciphertext",
+            "oauthAuthorizationUrl",
+            "oauthCode",
+            "oauthState",
+            "imapPort",
+            "smtpSecurity",
+            "connectedStatus",
+            "reconnectStatus",
+        )
+        for field in forbidden_fields:
+            with self.subTest(field=field):
+                self.assert_invalid_onboarding_session(
+                    onboarding_session(choices={field: "attacker-controlled"}),
+                )
+
+        nested_secret = onboarding_session()
+        nested_secret["choices"]["customInboxes"][0]["password"] = "private"
+        self.assert_invalid_onboarding_session(nested_secret)
+
+    def test_user_workspace_owner_and_auth_session_keys_are_rejected(self):
+        for field in ("userId", "workspaceId", "owner-email", "auth0Data", "session"):
+            with self.subTest(field=field):
+                self.assert_invalid_onboarding_session(
+                    onboarding_session(choices={field: "attacker-controlled"}),
+                )
+
+    def test_completed_true_is_rejected_from_an_ordinary_config_write(self):
+        self.assert_invalid_onboarding_session(
+            onboarding_session(completed=True),
+        )
+
+    def test_existing_completed_true_cannot_be_reset_or_cleared(self):
+        existing = {
+            "onboardingSession": {
+                "completed": True,
+                "state": {"primaryRole": "producer"},
+            },
+        }
+        for session in (onboarding_session(), {}):
+            with self.subTest(session=session):
+                self.assert_invalid_onboarding_session(session, existing=existing)
+
+    def test_unrelated_update_preserves_raw_legacy_completed_session(self):
+        legacy_session = {
+            "completed": True,
+            "completedAt": "2026-07-01T12:00:00Z",
+            "state": {
+                "primaryRole": "producer",
+                "internalRole": "management",
+                "focusPreferences": {"demos": "high"},
+            },
+        }
+        existing = {"onboardingSession": legacy_session}
+        handler, _, write_mock = self.invoke(
+            {"config": {"uiPreferences": {"themeMode": "Dark"}}},
+            read_result={"status": "ok", "config": existing, "error": None},
+        )
+
+        self.assertEqual(handler.status_code, 200)
+        written = write_mock.call_args.args[2]
+        self.assertEqual(written["onboardingSession"], legacy_session)
+        self.assertEqual(written["uiPreferences"], {"themeMode": "Dark"})
+        self.assertEqual(
+            handler.payload()["config"]["onboardingSession"],
+            {
+                "schemaVersion": 1,
+                "completed": True,
+                "currentStep": 3,
+                "choices": {
+                    "primaryRole": "producer",
+                    "internalRole": "management",
+                    "focusPreferences": {"demos": "medium"},
+                },
+            },
+        )
+
+    def test_unrelated_update_preserves_raw_v1_completed_session(self):
+        completed_session = onboarding_session(completed=True, currentStep=3)
+        existing = {"onboardingSession": completed_session}
+        handler, _, write_mock = self.invoke(
+            {"config": {"uiPreferences": {"themeMode": "Light"}}},
+            read_result={"status": "ok", "config": existing, "error": None},
+        )
+
+        self.assertEqual(handler.status_code, 200)
+        written_session = write_mock.call_args.args[2]["onboardingSession"]
+        self.assertEqual(written_session, completed_session)
+        self.assertEqual(
+            handler.payload()["config"]["onboardingSession"],
+            completed_session,
+        )
+
+    def test_malformed_stored_sessions_fail_closed_on_post_without_write(self):
+        malformed_completed = {
+            "completed": True,
+            "state": {"primaryRole": "producer"},
+            "unexpected": True,
+        }
+        malformed_incomplete = onboarding_session(currentStep="2")
+
+        for stored_session in (malformed_completed, malformed_incomplete):
+            with self.subTest(stored_session=stored_session):
+                handler, read_mock, write_mock = self.invoke(
+                    {"config": {"uiPreferences": {"themeMode": "Dark"}}},
+                    read_result={
+                        "status": "ok",
+                        "config": {"onboardingSession": stored_session},
+                        "error": None,
+                    },
+                )
+
+                self.assertEqual(handler.status_code, 503)
+                self.assertEqual(
+                    handler.payload(),
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "config_invalid",
+                            "message": "User configuration is invalid.",
+                        },
+                    },
+                )
+                read_mock.assert_called_once_with(STORE, "owner@example.com")
+                write_mock.assert_not_called()
+
+    def test_malformed_session_rejects_entire_config_without_partial_write(self):
+        malformed_sessions = (
+            None,
+            [],
+            {"schemaVersion": 1, "completed": False, "currentStep": 1},
+            onboarding_session(schemaVersion=2),
+            onboarding_session(choices=[]),
+            {**onboarding_session(), "unexpected": True},
+        )
+        for session in malformed_sessions:
+            with self.subTest(session=session):
+                self.assert_invalid_onboarding_session(session)
+
+    def test_empty_session_remains_valid_not_started_state(self):
+        handler, _, write_mock = self.invoke(
+            {"config": {"onboardingSession": {}}},
+        )
+
+        self.assertEqual(handler.status_code, 200)
+        self.assertEqual(write_mock.call_args.args[2]["onboardingSession"], {})
+        self.assertEqual(handler.payload()["config"]["onboardingSession"], {})
+
     def test_merge_sanitization_owner_and_timestamp_behavior_are_unchanged(self):
         existing = {
             "v": 1,
             "email": "owner@example.com",
             "updatedAt": "old",
+            "onboardingSession": {},
             "managedInboxes": [{
                 "id": "mailbox-a",
                 "email": "verified@gmail.com",
@@ -555,6 +1157,7 @@ class PostRouteTests(unittest.TestCase):
             "config": {
                 "v": 1,
                 "email": "owner@example.com",
+                "onboardingSession": {},
                 "managedInboxes": [existing_inbox],
             },
             "error": None,
@@ -626,12 +1229,17 @@ class PostReadStatusHandlerTests(unittest.TestCase):
             config_route.handler.do_POST(request)
         return request, read_mock, write_mock
 
-    def assert_no_store_detail(self, request, *details):
+    def assert_no_store_detail(
+        self,
+        request,
+        *details,
+        error_code="user_config_store_unavailable",
+    ):
         response_text = json.dumps(request.payload())
         self.assertEqual(request.status_code, 503)
         self.assertEqual(
             request.payload()["error"]["code"],
-            "user_config_store_unavailable",
+            error_code,
         )
         self.assertIn(("Cache-Control", "no-store"), request.response_headers)
         for detail in details:
@@ -699,6 +1307,7 @@ class PostReadStatusHandlerTests(unittest.TestCase):
             "stored-secret",
             "JSON parse failed",
             "storage.invalid",
+            error_code="config_invalid",
         )
         write_mock.assert_not_called()
 
@@ -711,7 +1320,12 @@ class PostReadStatusHandlerTests(unittest.TestCase):
                 "error": {"code": "future_error", "message": "raw future detail"},
             },
         )
-        self.assert_no_store_detail(request, "unexpected-record", "raw future detail")
+        self.assert_no_store_detail(
+            request,
+            "unexpected-record",
+            "raw future detail",
+            error_code="config_invalid",
+        )
         write_mock.assert_not_called()
 
     def test_invalid_ok_payload_fails_closed_without_writing(self):
@@ -721,16 +1335,34 @@ class PostReadStatusHandlerTests(unittest.TestCase):
                     {"config": {"managedInboxes": []}},
                     {"status": "ok", "config": invalid_payload},
                 )
-                self.assert_no_store_detail(
-                    request,
-                    raw_marker,
-                    "storage.invalid",
-                    "parser",
-                    "exception",
-                    "traceback",
+                self.assertEqual(request.status_code, 503)
+                self.assertEqual(
+                    request.payload(),
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "config_invalid",
+                            "message": "User configuration is invalid.",
+                        },
+                    },
                 )
+                self.assertNotIn(raw_marker, json.dumps(request.payload()))
                 self.assertNotIn("config", request.payload())
                 write_mock.assert_not_called()
+
+    def test_inconsistent_missing_payload_is_config_invalid_without_writing(self):
+        request, _, write_mock = self.invoke(
+            {"config": {"uiPreferences": {"themeMode": "Dark"}}},
+            {
+                "status": "missing",
+                "config": {"onboardingSession": {}},
+                "error": None,
+            },
+        )
+
+        self.assertEqual(request.status_code, 503)
+        self.assertEqual(request.payload()["error"]["code"], "config_invalid")
+        write_mock.assert_not_called()
 
     def test_ok_preserves_google_identity_and_accepts_safe_presentation_update(self):
         protected = {
@@ -763,6 +1395,7 @@ class PostReadStatusHandlerTests(unittest.TestCase):
                 "config": {
                     "v": 1,
                     "email": "owner@example.com",
+                    "onboardingSession": {},
                     "managedInboxes": [protected],
                 },
                 "error": None,
@@ -793,6 +1426,7 @@ class PostReadStatusHandlerTests(unittest.TestCase):
                 "config": {
                     "v": 1,
                     "email": "owner@example.com",
+                    "onboardingSession": {},
                     "managedInboxes": [custom_imap],
                 },
                 "error": None,
@@ -848,6 +1482,7 @@ class PostReadStatusHandlerTests(unittest.TestCase):
                 "config": {
                     "v": 1,
                     "email": "owner@example.com",
+                    "onboardingSession": {},
                     "managedInboxes": [existing],
                 },
                 "error": None,
@@ -932,6 +1567,7 @@ class PostReadStatusHandlerTests(unittest.TestCase):
                 "config": {
                     "v": 1,
                     "email": "owner@example.com",
+                    "onboardingSession": {},
                     "managedInboxes": [existing],
                 },
                 "error": None,
@@ -1017,6 +1653,7 @@ class PostReadStatusHandlerTests(unittest.TestCase):
                 "config": {
                     "v": 1,
                     "email": "owner@example.com",
+                    "onboardingSession": {},
                     "managedInboxes": [existing],
                 },
                 "error": None,
@@ -1056,6 +1693,7 @@ class PostReadStatusHandlerTests(unittest.TestCase):
                 "config": {
                     "v": 1,
                     "email": "owner@example.com",
+                    "onboardingSession": {},
                     "managedInboxes": existing,
                 },
                 "error": None,

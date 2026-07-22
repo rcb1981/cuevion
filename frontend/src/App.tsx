@@ -17,13 +17,16 @@ import {
   type UserAccountConfigSaveResult,
 } from "./lib/userConfigApi";
 import {
-  sanitizeAccountConfigCredentials,
-  sanitizeMailboxConnectionCredentials,
   sanitizeManagedInboxCredentials,
   sanitizeStoredMailboxCredentialJson,
 } from "./lib/mailboxCredentialPersistence";
 import {
+  ONBOARDING_STEP_MAX,
+  ONBOARDING_STEP_MIN,
+  clampOnboardingStep,
   normalizeFocusPreferences,
+  type OnboardingChoices,
+  type OnboardingSessionV1,
   type OnboardingState,
 } from "./types/onboarding";
 import type { UserConfig } from "./types/userConfig";
@@ -83,13 +86,7 @@ type TeamInviteRoute = {
   inviteToken: string;
 };
 
-type PersistedOnboardingSession = {
-  completed: true;
-  state: OnboardingState;
-};
-type PersistedOnboardingDraft = {
-  state: OnboardingState;
-};
+type PersistedOnboardingSession = OnboardingSessionV1;
 type AppView = "onboarding" | "transition" | "workspace";
 type WorkspaceDataMode = "demo" | "live";
 type AccountConfigHydrationStatus = "idle" | "loading" | "ready" | "error";
@@ -143,13 +140,38 @@ type AccountConfigStorage = Pick<
   "getItem" | "setItem" | "removeItem"
 >;
 
+type LocalOnboardingStorageKeys = {
+  state: string;
+  draft: string;
+  view: string;
+};
+
+type LocalOnboardingIdentityScope = {
+  hydrationKey: string;
+  storageKeys: LocalOnboardingStorageKeys | null;
+};
+
+type LocalOnboardingIdentityInput = {
+  userType: AuthenticatedCuevionUser["userType"] | null;
+  userEmail?: string | null;
+  ephemeralIdentity?: string | null;
+  collaborationInvite?: CollaborationInviteRoute | null;
+  teamInviteToken?: string | null;
+};
+
 type AccountConfigStartupAccountState = {
   displayNameOverrides: DisplayNameOverrideStore;
   persistedOnboardingSession: PersistedOnboardingSession | null;
   onboardingState: OnboardingState;
+  onboardingStep: number;
   userConfig: UserConfig | null;
   view: Extract<AppView, "onboarding" | "workspace">;
 };
+
+type LocalOnboardingHydrationState = Omit<
+  AccountConfigStartupAccountState,
+  "displayNameOverrides"
+>;
 
 function canUseHydratedLocalAccountState(
   sessionStatus: MemberSessionStatus,
@@ -185,6 +207,12 @@ function resolveAccountConfigSessionDisposition({
   return "idle";
 }
 
+function canOpenWorkspaceWithoutServerCompletion(
+  userType: AuthenticatedCuevionUser["userType"] | null,
+) {
+  return userType === "guest";
+}
+
 type AccountConfigHydrationOutcome =
   | {
       status: "found";
@@ -213,7 +241,11 @@ function createAccountConfigSaveQueue({
   onClean,
 }: {
   save?: (config: UserAccountConfig) => Promise<UserAccountConfigSaveResult>;
-  onClean?: (saved: { accountKey: string; revision: number }) => void;
+  onClean?: (saved: {
+    accountKey: string;
+    revision: number;
+    config: UserAccountConfig;
+  }) => void;
 } = {}) {
   let activeAccountKey = "";
   let generation = 0;
@@ -233,9 +265,13 @@ function createAccountConfigSaveQueue({
     isSaving = true;
 
     let success = false;
+    let savedConfig: UserAccountConfig | null = null;
     try {
       const result = await save(request.config);
       success = result.status === "found";
+      if (result.status === "found") {
+        savedConfig = result.config;
+      }
     } catch {
       success = false;
     }
@@ -262,6 +298,7 @@ function createAccountConfigSaveQueue({
         onClean?.({
           accountKey: request.accountKey,
           revision: request.revision,
+          config: savedConfig ?? request.config,
         });
       } catch {
         // Saving succeeded; URL cleanup can safely be retried on the next startup.
@@ -565,6 +602,78 @@ function parseTeamInviteRoute(): TeamInviteRoute | null {
   };
 }
 
+function createLocalOnboardingStorageKeys(
+  identityScope: string,
+): LocalOnboardingStorageKeys {
+  const suffix = encodeURIComponent(identityScope);
+
+  return {
+    state: `${ONBOARDING_STATE_STORAGE_KEY}:guest-v1:${suffix}`,
+    draft: `${ONBOARDING_DRAFT_STATE_STORAGE_KEY}:guest-v1:${suffix}`,
+    view: `${CUEVION_APP_VIEW_STORAGE_KEY}:guest-v1:${suffix}`,
+  };
+}
+
+function resolveLocalOnboardingIdentityScope({
+  userType,
+  userEmail,
+  ephemeralIdentity,
+  collaborationInvite,
+  teamInviteToken,
+}: LocalOnboardingIdentityInput): LocalOnboardingIdentityScope | null {
+  const normalizedUserEmail = userEmail?.trim().toLowerCase() ?? "";
+  const normalizedEphemeralIdentity = ephemeralIdentity?.trim() ?? "";
+
+  if (collaborationInvite) {
+    const inviteToken = collaborationInvite.inviteToken.trim();
+    const messageId = collaborationInvite.messageId?.trim() ?? "";
+    const inviteeEmail =
+      collaborationInvite.inviteeEmail?.trim().toLowerCase() ?? "";
+    const safeIdentityScope = messageId
+      ? `collaboration-message:${messageId}:invitee:${inviteeEmail}`
+      : inviteeEmail
+        ? `collaboration-invitee:${inviteeEmail}`
+        : userType === "guest" && normalizedUserEmail
+          ? `collaboration-guest:${normalizedUserEmail}`
+          : null;
+
+    return {
+      // The token is deliberately confined to this in-memory identity key.
+      hydrationKey: `collaboration:${inviteToken}:${safeIdentityScope ?? "ephemeral"}`,
+      storageKeys: safeIdentityScope
+        ? createLocalOnboardingStorageKeys(safeIdentityScope)
+        : null,
+    };
+  }
+
+  if (teamInviteToken) {
+    return {
+      // Team invites expose no non-secret identity suitable for localStorage.
+      hydrationKey: `team-invite:${teamInviteToken}`,
+      storageKeys: null,
+    };
+  }
+
+  if (userType === "guest") {
+    if (!normalizedUserEmail) {
+      return normalizedEphemeralIdentity
+        ? {
+            hydrationKey: `guest-ephemeral:${normalizedEphemeralIdentity}`,
+            storageKeys: null,
+          }
+        : null;
+    }
+    const safeIdentityScope = `guest-email:${normalizedUserEmail}`;
+
+    return {
+      hydrationKey: `guest:${safeIdentityScope}`,
+      storageKeys: createLocalOnboardingStorageKeys(safeIdentityScope),
+    };
+  }
+
+  return null;
+}
+
 function getCurrentInviteUrl() {
   return `${window.location.pathname}${window.location.search}${window.location.hash}`;
 }
@@ -603,85 +712,530 @@ function resolveWorkspaceDataMode(): WorkspaceDataMode {
     : "live";
 }
 
+const ONBOARDING_CHOICE_KEYS = [
+  "primaryRole",
+  "internalRole",
+  "secondaryRole",
+  "primaryInbox",
+  "primaryInboxType",
+  "focusPreferences",
+  "inboxCount",
+  "selectedInboxes",
+  "customInboxes",
+] as const satisfies readonly (keyof OnboardingChoices)[];
+const ONBOARDING_SESSION_V1_KEYS = [
+  "schemaVersion",
+  "completed",
+  "currentStep",
+  "choices",
+] as const;
+const ONBOARDING_FOCUS_KEYS = [
+  "demos",
+  "promo",
+  "finance",
+  "legal",
+  "business",
+  "updates",
+  "distribution",
+  "royalties",
+  "promoReminders",
+  "paymentReminders",
+] as const satisfies readonly (keyof OnboardingChoices["focusPreferences"])[];
+const ONBOARDING_ROLE_IDS = new Set([
+  "label_ar_manager",
+  "label_manager",
+  "ar_manager",
+  "dj",
+  "producer",
+  "dj_producer",
+  "label_owner",
+  "legal",
+  "finance",
+  "royalty",
+  "sync_licensing",
+  "social_media_manager",
+  "promo_manager",
+  "distribution",
+  "admin",
+]);
+const ONBOARDING_INTERNAL_ROLES = new Set([
+  "management",
+  "label_ar_manager",
+  "label_manager",
+  "ar_manager",
+  "product_manager",
+  "artist_manager",
+  "dj",
+  "producer",
+]);
+const ONBOARDING_PRESET_INBOX_IDS = new Set([
+  "main",
+  "demo",
+  "business",
+  "promo",
+  "legal",
+  "finance",
+  "royalty",
+  "sync",
+]);
+const ONBOARDING_FOCUS_LEVELS = new Set(["medium", "low"]);
+const LEGACY_ONBOARDING_FOCUS_LEVELS = new Set(["high", "medium", "low"]);
+const ONBOARDING_INBOX_COUNTS = new Set(["1", "2", "3", "4+", "not_sure"]);
+
+type ParsedAccountOnboardingSession =
+  | { status: "not_started"; session: null }
+  | { status: "valid"; session: PersistedOnboardingSession }
+  | { status: "invalid"; session: null };
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasOnlyKeys(value: Record<string, unknown>, allowedKeys: readonly string[]) {
+  const allowed = new Set(allowedKeys);
+  return Object.keys(value).every((key) => allowed.has(key));
+}
+
+function hasOwn(value: Record<string, unknown>, key: string) {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function isInboxId(value: unknown): value is OnboardingChoices["primaryInbox"] & string {
+  return (
+    typeof value === "string" &&
+    (ONBOARDING_PRESET_INBOX_IDS.has(value) ||
+      (value.startsWith("custom:") &&
+        /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(value.slice("custom:".length))))
+  );
+}
+
+function isCustomInboxId(value: unknown): value is `custom:${string}` {
+  return (
+    typeof value === "string" &&
+    value.startsWith("custom:") &&
+    /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(value.slice("custom:".length))
+  );
+}
+
+function canonicalizeFocusLevel(value: "high" | "medium" | "low") {
+  return value === "low" ? "low" : "medium";
+}
+
+function isValidOnboardingStep(value: unknown): value is number {
+  return (
+    typeof value === "number" &&
+    Number.isInteger(value) &&
+    value >= ONBOARDING_STEP_MIN &&
+    value <= ONBOARDING_STEP_MAX
+  );
+}
+
+function projectOnboardingChoices(state: OnboardingState): OnboardingChoices {
+  const focusPreferences = normalizeFocusPreferences(state.focusPreferences);
+  const customInboxes = Array.from(
+    new Map(
+      state.customInboxes
+        .filter(
+          (inbox) =>
+            isCustomInboxId(inbox.id) && typeof inbox.name === "string",
+        )
+        .map((inbox) => [inbox.id, { id: inbox.id, name: inbox.name }]),
+    ).values(),
+  );
+  const selectedInboxes = Array.from(
+    new Set(state.selectedInboxes.filter(isInboxId)),
+  );
+
+  return {
+    primaryRole:
+      state.primaryRole === null || ONBOARDING_ROLE_IDS.has(state.primaryRole)
+        ? state.primaryRole
+        : initialOnboardingState.primaryRole,
+    internalRole:
+      state.internalRole === null || ONBOARDING_INTERNAL_ROLES.has(state.internalRole)
+        ? state.internalRole
+        : initialOnboardingState.internalRole,
+    secondaryRole:
+      state.secondaryRole === null || ONBOARDING_ROLE_IDS.has(state.secondaryRole)
+        ? state.secondaryRole
+        : initialOnboardingState.secondaryRole,
+    primaryInbox:
+      state.primaryInbox === null || isInboxId(state.primaryInbox)
+        ? state.primaryInbox
+        : initialOnboardingState.primaryInbox,
+    primaryInboxType:
+      state.primaryInboxType === null ||
+      state.primaryInboxType === "personal" ||
+      state.primaryInboxType === "work"
+        ? state.primaryInboxType
+        : initialOnboardingState.primaryInboxType,
+    focusPreferences: {
+      demos: canonicalizeFocusLevel(focusPreferences.demos),
+      promo: canonicalizeFocusLevel(focusPreferences.promo),
+      finance: canonicalizeFocusLevel(focusPreferences.finance),
+      legal: canonicalizeFocusLevel(focusPreferences.legal),
+      business: canonicalizeFocusLevel(focusPreferences.business),
+      updates: canonicalizeFocusLevel(focusPreferences.updates),
+      distribution: canonicalizeFocusLevel(focusPreferences.distribution),
+      royalties: canonicalizeFocusLevel(focusPreferences.royalties),
+      promoReminders: canonicalizeFocusLevel(focusPreferences.promoReminders),
+      paymentReminders: canonicalizeFocusLevel(focusPreferences.paymentReminders),
+    },
+    inboxCount:
+      state.inboxCount === null || ONBOARDING_INBOX_COUNTS.has(state.inboxCount)
+        ? state.inboxCount
+        : initialOnboardingState.inboxCount,
+    selectedInboxes,
+    customInboxes,
+  };
+}
+
+function parseOnboardingChoices(
+  value: unknown,
+  { allowLegacyHigh = false }: { allowLegacyHigh?: boolean } = {},
+): OnboardingChoices | null {
+  if (!isPlainRecord(value) || !hasOnlyKeys(value, ONBOARDING_CHOICE_KEYS)) {
+    return null;
+  }
+
+  if (
+    hasOwn(value, "primaryRole") &&
+    value.primaryRole !== null &&
+    (typeof value.primaryRole !== "string" || !ONBOARDING_ROLE_IDS.has(value.primaryRole))
+  ) {
+    return null;
+  }
+  if (
+    hasOwn(value, "internalRole") &&
+    value.internalRole !== null &&
+    (typeof value.internalRole !== "string" ||
+      !ONBOARDING_INTERNAL_ROLES.has(value.internalRole))
+  ) {
+    return null;
+  }
+  if (
+    hasOwn(value, "secondaryRole") &&
+    value.secondaryRole !== null &&
+    (typeof value.secondaryRole !== "string" || !ONBOARDING_ROLE_IDS.has(value.secondaryRole))
+  ) {
+    return null;
+  }
+  if (
+    hasOwn(value, "primaryInbox") &&
+    value.primaryInbox !== null &&
+    !isInboxId(value.primaryInbox)
+  ) {
+    return null;
+  }
+  if (
+    hasOwn(value, "primaryInboxType") &&
+    value.primaryInboxType !== null &&
+    value.primaryInboxType !== "personal" &&
+    value.primaryInboxType !== "work"
+  ) {
+    return null;
+  }
+  if (
+    hasOwn(value, "inboxCount") &&
+    value.inboxCount !== null &&
+    (typeof value.inboxCount !== "string" || !ONBOARDING_INBOX_COUNTS.has(value.inboxCount))
+  ) {
+    return null;
+  }
+  if (
+    hasOwn(value, "selectedInboxes") &&
+    (!Array.isArray(value.selectedInboxes) ||
+      !value.selectedInboxes.every(isInboxId) ||
+      new Set(value.selectedInboxes).size !== value.selectedInboxes.length)
+  ) {
+    return null;
+  }
+  if (
+    hasOwn(value, "customInboxes") &&
+    (!Array.isArray(value.customInboxes) ||
+      !value.customInboxes.every(
+        (entry) =>
+          isPlainRecord(entry) &&
+          hasOnlyKeys(entry, ["id", "name"]) &&
+          isCustomInboxId(entry.id) &&
+          typeof entry.name === "string",
+      ) ||
+      new Set(
+        value.customInboxes.flatMap((entry) =>
+          isPlainRecord(entry) && typeof entry.id === "string" ? [entry.id] : [],
+        ),
+      ).size !== value.customInboxes.length)
+  ) {
+    return null;
+  }
+  if (hasOwn(value, "focusPreferences")) {
+    if (
+      !isPlainRecord(value.focusPreferences) ||
+      !hasOnlyKeys(value.focusPreferences, ONBOARDING_FOCUS_KEYS) ||
+      !Object.values(value.focusPreferences).every(
+        (entry) =>
+          typeof entry === "string" &&
+          (allowLegacyHigh
+            ? LEGACY_ONBOARDING_FOCUS_LEVELS.has(entry)
+            : ONBOARDING_FOCUS_LEVELS.has(entry)),
+      )
+    ) {
+      return null;
+    }
+  }
+
+  const defaults = projectOnboardingChoices(
+    normalizeOnboardingState(initialOnboardingState),
+  );
+  const rawFocusPreferences = isPlainRecord(value.focusPreferences)
+    ? value.focusPreferences
+    : {};
+  const focusPreferences = { ...defaults.focusPreferences };
+  for (const key of ONBOARDING_FOCUS_KEYS) {
+    if (hasOwn(rawFocusPreferences, key)) {
+      focusPreferences[key] = canonicalizeFocusLevel(
+        rawFocusPreferences[key] as "high" | "medium" | "low",
+      );
+    }
+  }
+
+  return {
+    primaryRole: hasOwn(value, "primaryRole")
+      ? (value.primaryRole as OnboardingChoices["primaryRole"])
+      : defaults.primaryRole,
+    internalRole: hasOwn(value, "internalRole")
+      ? (value.internalRole as OnboardingChoices["internalRole"])
+      : defaults.internalRole,
+    secondaryRole: hasOwn(value, "secondaryRole")
+      ? (value.secondaryRole as OnboardingChoices["secondaryRole"])
+      : defaults.secondaryRole,
+    primaryInbox: hasOwn(value, "primaryInbox")
+      ? (value.primaryInbox as OnboardingChoices["primaryInbox"])
+      : defaults.primaryInbox,
+    primaryInboxType: hasOwn(value, "primaryInboxType")
+      ? (value.primaryInboxType as OnboardingChoices["primaryInboxType"])
+      : defaults.primaryInboxType,
+    focusPreferences,
+    inboxCount: hasOwn(value, "inboxCount")
+      ? (value.inboxCount as OnboardingChoices["inboxCount"])
+      : defaults.inboxCount,
+    selectedInboxes: hasOwn(value, "selectedInboxes")
+      ? [...(value.selectedInboxes as OnboardingChoices["selectedInboxes"])]
+      : defaults.selectedInboxes,
+    customInboxes: hasOwn(value, "customInboxes")
+      ? (value.customInboxes as OnboardingChoices["customInboxes"]).map((inbox) => ({
+          id: inbox.id,
+          name: inbox.name,
+        }))
+      : defaults.customInboxes,
+  };
+}
+
+function parseLegacyOnboardingChoices(value: unknown): OnboardingChoices | null {
+  if (!isPlainRecord(value)) {
+    return null;
+  }
+
+  const safeProjection: Record<string, unknown> = {};
+  for (const key of ONBOARDING_CHOICE_KEYS) {
+    if (hasOwn(value, key)) {
+      safeProjection[key] = value[key];
+    }
+  }
+  return parseOnboardingChoices(safeProjection, { allowLegacyHigh: true });
+}
+
+function parseAccountOnboardingSession(value: unknown): ParsedAccountOnboardingSession {
+  if (!isPlainRecord(value)) {
+    return { status: "invalid", session: null };
+  }
+  if (Object.keys(value).length === 0) {
+    return { status: "not_started", session: null };
+  }
+
+  if (hasOwn(value, "schemaVersion")) {
+    if (
+      !hasOnlyKeys(value, ONBOARDING_SESSION_V1_KEYS) ||
+      value.schemaVersion !== 1 ||
+      typeof value.completed !== "boolean" ||
+      !isValidOnboardingStep(value.currentStep)
+    ) {
+      return { status: "invalid", session: null };
+    }
+    const choices = parseOnboardingChoices(value.choices);
+    if (!choices) {
+      return { status: "invalid", session: null };
+    }
+    return {
+      status: "valid",
+      session: value.completed
+        ? { schemaVersion: 1, completed: true, currentStep: value.currentStep, choices }
+        : { schemaVersion: 1, completed: false, currentStep: value.currentStep, choices },
+    };
+  }
+
+  if (
+    value.completed === true &&
+    hasOnlyKeys(value, ["completed", "state"]) &&
+    hasOwn(value, "state")
+  ) {
+    const choices = parseLegacyOnboardingChoices(value.state);
+    if (!choices) {
+      return { status: "invalid", session: null };
+    }
+    return {
+      status: "valid",
+      session: {
+        schemaVersion: 1,
+        completed: true,
+        currentStep: ONBOARDING_STEP_MAX,
+        choices,
+      },
+    };
+  }
+
+  return { status: "invalid", session: null };
+}
+
+function buildOnboardingStateFromChoices(choices: OnboardingChoices): OnboardingState {
+  const cleanDefaults = normalizeOnboardingState(initialOnboardingState);
+  const normalized = normalizeOnboardingState({
+    ...cleanDefaults,
+    primaryRole: choices.primaryRole,
+    internalRole: choices.internalRole,
+    secondaryRole: choices.secondaryRole,
+    primaryInbox: choices.primaryInbox,
+    primaryInboxType: choices.primaryInboxType,
+    focusPreferences: choices.focusPreferences,
+    inboxCount: choices.inboxCount,
+    selectedInboxes: choices.selectedInboxes,
+    customInboxes: choices.customInboxes,
+    inboxConnections: cleanDefaults.inboxConnections,
+  });
+
+  return {
+    ...normalized,
+    inboxConnections: cleanDefaults.inboxConnections,
+  };
+}
+
+function createIncompleteOnboardingSession(
+  state: OnboardingState,
+  currentStep: number,
+): OnboardingSessionV1 {
+  return {
+    schemaVersion: 1,
+    completed: false,
+    currentStep: clampOnboardingStep(currentStep),
+    choices: projectOnboardingChoices(state),
+  };
+}
+
 function parsePersistedOnboardingSession(
+  storage: AccountConfigStorage,
+  storageKeys: LocalOnboardingStorageKeys,
   persistSanitizedValue = true,
 ): PersistedOnboardingSession | null {
-  const storedState = window.localStorage.getItem(ONBOARDING_STATE_STORAGE_KEY);
+  const storedState = storage.getItem(storageKeys.state);
 
   if (!storedState) {
     return null;
   }
 
   try {
-    const migrated = sanitizeStoredMailboxCredentialJson(storedState);
-    const parsed = migrated.value as Partial<PersistedOnboardingSession>;
-
-    if (persistSanitizedValue && migrated.rewriteRequired && migrated.serialized) {
-      window.localStorage.setItem(ONBOARDING_STATE_STORAGE_KEY, migrated.serialized);
-    }
-
-    if (!parsed || parsed.completed !== true || !parsed.state) {
+    const parsed = parseAccountOnboardingSession(JSON.parse(storedState));
+    if (parsed.status !== "valid" || !parsed.session.completed) {
       if (persistSanitizedValue) {
-        window.localStorage.removeItem(ONBOARDING_STATE_STORAGE_KEY);
+        storage.removeItem(storageKeys.state);
       }
       return null;
     }
-
-    return {
-      completed: true,
-      state: normalizeOnboardingState(parsed.state),
-    };
+    const serialized = JSON.stringify(parsed.session);
+    if (persistSanitizedValue && serialized !== storedState) {
+      storage.setItem(storageKeys.state, serialized);
+    }
+    return parsed.session;
   } catch {
     if (persistSanitizedValue) {
-      window.localStorage.removeItem(ONBOARDING_STATE_STORAGE_KEY);
+      storage.removeItem(storageKeys.state);
     }
     return null;
   }
 }
 
 function parsePersistedOnboardingDraft(
+  storage: AccountConfigStorage,
+  storageKeys: LocalOnboardingStorageKeys,
   persistSanitizedValue = true,
-): PersistedOnboardingDraft | null {
-  const storedState = window.localStorage.getItem(ONBOARDING_DRAFT_STATE_STORAGE_KEY);
+): PersistedOnboardingSession | null {
+  const storedState = storage.getItem(storageKeys.draft);
 
   if (!storedState) {
     return null;
   }
 
   try {
-    const migrated = sanitizeStoredMailboxCredentialJson(storedState);
-    const parsed = migrated.value as Partial<PersistedOnboardingDraft>;
-
-    if (persistSanitizedValue && migrated.rewriteRequired && migrated.serialized) {
-      window.localStorage.setItem(ONBOARDING_DRAFT_STATE_STORAGE_KEY, migrated.serialized);
+    const rawValue = JSON.parse(storedState) as unknown;
+    let parsed = parseAccountOnboardingSession(rawValue);
+    if (
+      parsed.status === "invalid" &&
+      isPlainRecord(rawValue) &&
+      hasOnlyKeys(rawValue, ["state"]) &&
+      hasOwn(rawValue, "state")
+    ) {
+      const choices = parseLegacyOnboardingChoices(rawValue.state);
+      if (choices) {
+        parsed = {
+          status: "valid",
+          session: {
+            schemaVersion: 1,
+            completed: false,
+            currentStep: ONBOARDING_STEP_MIN,
+            choices,
+          },
+        };
+      }
     }
 
-    if (!parsed || !parsed.state) {
+    if (parsed.status !== "valid" || parsed.session.completed) {
       if (persistSanitizedValue) {
-        window.localStorage.removeItem(ONBOARDING_DRAFT_STATE_STORAGE_KEY);
+        storage.removeItem(storageKeys.draft);
       }
       return null;
     }
-
-    return {
-      state: normalizeOnboardingState(parsed.state),
-    };
+    const serialized = JSON.stringify(parsed.session);
+    if (persistSanitizedValue && serialized !== storedState) {
+      storage.setItem(storageKeys.draft, serialized);
+    }
+    return parsed.session;
   } catch {
     if (persistSanitizedValue) {
-      window.localStorage.removeItem(ONBOARDING_DRAFT_STATE_STORAGE_KEY);
+      storage.removeItem(storageKeys.draft);
     }
     return null;
   }
 }
 
-function parsePersistedAppView(): AppView | null {
-  const storedValue = window.localStorage.getItem(CUEVION_APP_VIEW_STORAGE_KEY);
+function hydrateLocalOnboardingIdentityScope(
+  identityScope: LocalOnboardingIdentityScope,
+  storage: AccountConfigStorage,
+): LocalOnboardingHydrationState {
+  const localSession = identityScope.storageKeys
+    ? parsePersistedOnboardingSession(storage, identityScope.storageKeys) ??
+      parsePersistedOnboardingDraft(storage, identityScope.storageKeys)
+    : null;
+  const onboardingState = localSession
+    ? buildOnboardingStateFromChoices(localSession.choices)
+    : normalizeOnboardingState(initialOnboardingState);
+  const isCompleted = localSession?.completed === true;
 
-  if (storedValue === "onboarding" || storedValue === "workspace") {
-    return storedValue;
-  }
-
-  return null;
+  return {
+    persistedOnboardingSession: localSession,
+    onboardingState,
+    onboardingStep: localSession?.currentStep ?? ONBOARDING_STEP_MIN,
+    userConfig: isCompleted ? buildUserConfig(onboardingState) : null,
+    view: isCompleted ? "workspace" : "onboarding",
+  };
 }
 
 type StoredManagedWorkspaceInboxReadResult =
@@ -776,34 +1330,6 @@ function parseStoredJsonValue<T>(
   }
 }
 
-function sanitizeConnectionForAccountConfig(
-  connection: Record<string, unknown>,
-): Record<string, unknown> {
-  const nextConnection = sanitizeMailboxConnectionCredentials(
-    connection,
-  ) as Record<string, unknown>;
-
-  if ("oauthAuthorizationUrl" in nextConnection) {
-    nextConnection.oauthAuthorizationUrl = null;
-  }
-
-  return nextConnection;
-}
-
-function sanitizeOnboardingStateForAccountConfig(state: OnboardingState): OnboardingState {
-  const nextState = normalizeOnboardingState(state);
-
-  return {
-    ...nextState,
-    inboxConnections: Object.fromEntries(
-      Object.entries(nextState.inboxConnections).map(([inboxId, connection]) => [
-        inboxId,
-        sanitizeConnectionForAccountConfig(connection as unknown as Record<string, unknown>),
-      ]),
-    ) as unknown as OnboardingState["inboxConnections"],
-  };
-}
-
 function sanitizeOnboardingSessionForAccountConfig(
   session: PersistedOnboardingSession | null,
 ): PersistedOnboardingSession | null {
@@ -812,8 +1338,12 @@ function sanitizeOnboardingSessionForAccountConfig(
   }
 
   return {
-    completed: true,
-    state: sanitizeOnboardingStateForAccountConfig(session.state),
+    ...session,
+    schemaVersion: 1,
+    currentStep: clampOnboardingStep(session.currentStep),
+    choices: projectOnboardingChoices(
+      buildOnboardingStateFromChoices(session.choices),
+    ),
   };
 }
 
@@ -937,41 +1467,9 @@ function normalizeStoredWorkspaceThemeMode(value: unknown): "Light" | "Dark" | "
   return null;
 }
 
-function buildManagedInboxesFromOnboardingSession(
-  session: PersistedOnboardingSession | null,
-): StoredManagedWorkspaceInbox[] {
-  if (!session) {
-    return [];
-  }
-
-  return session.state.selectedInboxes.flatMap((inboxId) => {
-    const connection = session.state.inboxConnections[inboxId];
-    if (!connection?.provider) {
-      return [];
-    }
-    const customTitle = session.state.customInboxes.find(
-      (inbox) => inbox.id === inboxId,
-    )?.name;
-
-    return [{
-      id: inboxId,
-      title: customTitle?.trim() || connection.email.trim() || String(inboxId),
-      email: connection.email.trim().toLowerCase(),
-      provider: connection.provider,
-      connected: connection.connected,
-      connectionMethod: connection.connectionMethod,
-      connectionStatus: connection.connectionStatus,
-      connectionMessage: connection.connectionMessage ?? null,
-      oauthAuthorizationUrl: null,
-      customImap: connection.customImap,
-      customSmtp: connection.customSmtp,
-    }];
-  });
-}
-
 function buildAccountConfigFromLocalStorage(
   accountStorageOwnerKey: string,
-  onboardingSession: PersistedOnboardingSession | null = parsePersistedOnboardingSession(),
+  onboardingSession: PersistedOnboardingSession | null = null,
   displayNameOverrides: DisplayNameOverrideStore = parseDisplayNameOverrides(),
   storage: AccountConfigStorage = window.localStorage,
   preserveExplicitEmptyManagedInboxes = false,
@@ -986,7 +1484,7 @@ function buildAccountConfigFromLocalStorage(
   const managedInboxes = sanitizeManagedInboxesForAccountConfig(
     shouldUseStoredManagedInboxes
       ? storedManagedInboxes.value
-      : buildManagedInboxesFromOnboardingSession(onboardingSession),
+      : [],
   );
   const workspaceUserId = normalizeAccountStorageKey(accountStorageOwnerKey);
   const storedPrimaryManagedInboxId = storage.getItem(
@@ -1010,7 +1508,12 @@ function buildAccountConfigFromLocalStorage(
 
   return {
     v: 1,
-    onboardingSession: sanitizeOnboardingSessionForAccountConfig(onboardingSession) ?? {},
+    ...(onboardingSession?.completed
+      ? {}
+      : {
+          onboardingSession:
+            sanitizeOnboardingSessionForAccountConfig(onboardingSession) ?? {},
+        }),
     managedInboxes,
     mailboxTitleOverrides: parseStoredJsonValue(
       MAILBOX_TITLE_OVERRIDES_STORAGE_KEY,
@@ -1055,15 +1558,6 @@ function buildAuthoritativeAccountConfigFromLocalStorage(
   );
 }
 
-function isPersistedOnboardingSession(value: unknown): value is PersistedOnboardingSession {
-  return (
-    Boolean(value) &&
-    typeof value === "object" &&
-    (value as Partial<PersistedOnboardingSession>).completed === true &&
-    Boolean((value as Partial<PersistedOnboardingSession>).state)
-  );
-}
-
 function getServerManagedInboxesForHydration(
   config: UserAccountConfig,
 ): StoredManagedWorkspaceInbox[] {
@@ -1079,6 +1573,7 @@ function createCleanAccountConfigStartupState(): AccountConfigStartupAccountStat
     displayNameOverrides: {},
     persistedOnboardingSession: null,
     onboardingState,
+    onboardingStep: ONBOARDING_STEP_MIN,
     userConfig: null,
     view: "onboarding",
   };
@@ -1099,17 +1594,33 @@ function createCleanUserAccountConfig(): UserAccountConfig {
   };
 }
 
+function writeOnboardingSessionMirror(
+  session: PersistedOnboardingSession | null,
+  storage: AccountConfigStorage,
+  storageKeys: LocalOnboardingStorageKeys,
+) {
+  const safeSession = sanitizeOnboardingSessionForAccountConfig(session);
+  if (safeSession?.completed) {
+    storage.setItem(storageKeys.state, JSON.stringify(safeSession));
+    storage.removeItem(storageKeys.draft);
+    storage.setItem(storageKeys.view, "workspace");
+    return;
+  }
+
+  storage.removeItem(storageKeys.state);
+  if (safeSession) {
+    storage.setItem(storageKeys.draft, JSON.stringify(safeSession));
+  } else {
+    storage.removeItem(storageKeys.draft);
+  }
+  storage.setItem(storageKeys.view, "onboarding");
+}
+
 function writeFoundAccountConfigToLocalStorage(
   config: UserAccountConfig,
   accountStorageOwnerKey: string,
-  accountState: AccountConfigStartupAccountState,
   storage: AccountConfigStorage,
 ) {
-  const onboardingSession = accountState.persistedOnboardingSession
-    ? sanitizeOnboardingSessionForAccountConfig(
-        accountState.persistedOnboardingSession,
-      )
-    : null;
   const previousManagedInboxes = parseStoredManagedWorkspaceInboxes(
     false,
     storage,
@@ -1123,13 +1634,6 @@ function writeFoundAccountConfigToLocalStorage(
     buildPrimaryManagedInboxStorageKey(workspaceUserId, previousManagedInboxes),
   );
 
-  if (onboardingSession) {
-    storage.setItem(ONBOARDING_STATE_STORAGE_KEY, JSON.stringify(onboardingSession));
-  } else {
-    storage.removeItem(ONBOARDING_STATE_STORAGE_KEY);
-  }
-  storage.removeItem(ONBOARDING_DRAFT_STATE_STORAGE_KEY);
-  storage.setItem(CUEVION_APP_VIEW_STORAGE_KEY, accountState.view);
   storage.setItem(
     MANAGED_INBOXES_STORAGE_KEY,
     JSON.stringify(sanitizedManagedInboxes),
@@ -1208,30 +1712,10 @@ function prepareMissingAccountConfigForFirstExplicitSave({
   accountStorageOwnerKey: string;
   storage: AccountConfigStorage;
 }) {
-  const cleanAccountState = createCleanAccountConfigStartupState();
   writeFoundAccountConfigToLocalStorage(
     createCleanUserAccountConfig(),
     accountStorageOwnerKey,
-    cleanAccountState,
     storage,
-  );
-}
-
-function mirrorCompletedOnboardingManagedInboxes({
-  onboardingState,
-  storage,
-}: {
-  onboardingState: OnboardingState;
-  storage: AccountConfigStorage;
-}) {
-  const managedInboxes = buildManagedInboxesFromOnboardingSession({
-    completed: true,
-    state: onboardingState,
-  });
-
-  storage.setItem(
-    MANAGED_INBOXES_STORAGE_KEY,
-    JSON.stringify(sanitizeManagedInboxCredentials(managedInboxes)),
   );
 }
 
@@ -1242,20 +1726,34 @@ function applyLoadedUserAccountConfig(
   resetOnboarding = false,
 ): AccountConfigHydrationOutcome {
   if (result.status === "found") {
+    if (
+      !hasOwn(
+        result.config as Record<string, unknown>,
+        "onboardingSession",
+      )
+    ) {
+      throw new Error("The stored onboarding session was missing.");
+    }
     const rawOnboardingSession = result.config.onboardingSession;
-    const persistedOnboardingSession = isPersistedOnboardingSession(
+    const parsedSession = parseAccountOnboardingSession(
       rawOnboardingSession,
-    )
-      ? {
-          completed: true as const,
-          state: normalizeOnboardingState(
-            rawOnboardingSession.state as Partial<OnboardingState>,
-          ),
-        }
-      : null;
+    );
+    if (parsedSession.status === "invalid") {
+      throw new Error("The stored onboarding session was malformed.");
+    }
+    const didResetOnboarding =
+      resetOnboarding &&
+      parsedSession.status === "valid" &&
+      parsedSession.session.completed === false;
+    const persistedOnboardingSession = didResetOnboarding
+      ? null
+      : parsedSession.session;
     const onboardingState =
-      persistedOnboardingSession?.state ??
+      persistedOnboardingSession
+        ? buildOnboardingStateFromChoices(persistedOnboardingSession.choices)
+        :
       normalizeOnboardingState(initialOnboardingState);
+    const isCompleted = persistedOnboardingSession?.completed === true;
     let accountState: AccountConfigStartupAccountState = {
       displayNameOverrides:
         result.config.displayNameOverrides &&
@@ -1264,28 +1762,25 @@ function applyLoadedUserAccountConfig(
           : {},
       persistedOnboardingSession,
       onboardingState,
-      userConfig: persistedOnboardingSession
+      onboardingStep:
+        persistedOnboardingSession?.currentStep ?? ONBOARDING_STEP_MIN,
+      userConfig: isCompleted
         ? buildUserConfig(onboardingState)
         : null,
-      view: persistedOnboardingSession ? "workspace" : "onboarding",
+      view: isCompleted ? "workspace" : "onboarding",
     };
 
     writeFoundAccountConfigToLocalStorage(
       result.config,
       accountStorageOwnerKey,
-      accountState,
       storage,
     );
 
-    const didResetOnboarding = resetOnboarding && persistedOnboardingSession !== null;
     if (didResetOnboarding) {
       accountState = {
         ...createCleanAccountConfigStartupState(),
         displayNameOverrides: accountState.displayNameOverrides,
       };
-      storage.removeItem(ONBOARDING_STATE_STORAGE_KEY);
-      storage.removeItem(ONBOARDING_DRAFT_STATE_STORAGE_KEY);
-      storage.setItem(CUEVION_APP_VIEW_STORAGE_KEY, "onboarding");
     }
 
     return {
@@ -1305,11 +1800,6 @@ function applyLoadedUserAccountConfig(
   }
 
   if (result.status === "missing") {
-    if (resetOnboarding) {
-      storage.removeItem(ONBOARDING_STATE_STORAGE_KEY);
-      storage.removeItem(ONBOARDING_DRAFT_STATE_STORAGE_KEY);
-      storage.setItem(CUEVION_APP_VIEW_STORAGE_KEY, "onboarding");
-    }
     return {
       status: "missing",
       accountState: createCleanAccountConfigStartupState(),
@@ -1347,10 +1837,80 @@ function buildExpectedWorkspaceHydrationEcho(
   return expectedWorkspacePayload;
 }
 
+type OnboardingStateChange =
+  | OnboardingState
+  | ((current: OnboardingState) => OnboardingState);
+
+function createOnboardingAppHandlers({
+  getOnboardingState,
+  getOnboardingStep,
+  commitAccountConfigMutation,
+  setOnboardingState,
+  setOnboardingStep,
+  setPersistedOnboardingSession,
+  canOpenWorkspace,
+  openWorkspace,
+}: {
+  getOnboardingState: () => OnboardingState;
+  getOnboardingStep: () => number;
+  commitAccountConfigMutation: (mutation: () => void) => void;
+  setOnboardingState: (state: OnboardingState) => void;
+  setOnboardingStep: (step: number) => void;
+  setPersistedOnboardingSession: (
+    session: PersistedOnboardingSession,
+  ) => void;
+  canOpenWorkspace: boolean;
+  openWorkspace: (config: UserConfig) => void;
+}) {
+  const resolveStateChange = (value: OnboardingStateChange) =>
+    typeof value === "function" ? value(getOnboardingState()) : value;
+
+  return {
+    onStateChange(value: OnboardingStateChange) {
+      setOnboardingState(resolveStateChange(value));
+    },
+    onSafeStateChange(value: OnboardingStateChange) {
+      const nextState = resolveStateChange(value);
+      commitAccountConfigMutation(() => {
+        setOnboardingState(nextState);
+        setPersistedOnboardingSession(
+          createIncompleteOnboardingSession(nextState, getOnboardingStep()),
+        );
+      });
+    },
+    onStepChange(nextStep: number) {
+      const safeStep = clampOnboardingStep(nextStep);
+      commitAccountConfigMutation(() => {
+        setOnboardingStep(safeStep);
+        setPersistedOnboardingSession(
+          createIncompleteOnboardingSession(getOnboardingState(), safeStep),
+        );
+      });
+    },
+    onOpenWorkspace(config: UserConfig) {
+      if (!canOpenWorkspace) {
+        return;
+      }
+      openWorkspace(config);
+    },
+  };
+}
+
 export const accountConfigOrchestration = {
+  buildAuthoritativeConfig: buildAuthoritativeAccountConfigFromLocalStorage,
+  canOpenWorkspaceWithoutServerCompletion,
+  createCleanStartupState: createCleanAccountConfigStartupState,
+  createIncompleteSession: createIncompleteOnboardingSession,
   createHydrator: createAccountConfigHydrator,
+  createOnboardingHandlers: createOnboardingAppHandlers,
   createSaveQueue: createAccountConfigSaveQueue,
+  hydrateLocalOnboardingScope: hydrateLocalOnboardingIdentityScope,
+  hydrateChoices: buildOnboardingStateFromChoices,
+  parseOnboardingSession: parseAccountOnboardingSession,
+  projectChoices: projectOnboardingChoices,
+  resolveLocalOnboardingIdentityScope,
   resolveSessionDisposition: resolveAccountConfigSessionDisposition,
+  writeOnboardingSessionMirror,
 };
 
 function normalizeOAuthCallbackStorageResult(
@@ -1802,12 +2362,14 @@ function TeamInviteRouteView({ route }: { route: TeamInviteRoute }) {
 
 function OnboardingPreviewRoute({ onExit }: { onExit: () => void }) {
   const [previewRunId, setPreviewRunId] = useState(0);
+  const [previewStep, setPreviewStep] = useState(ONBOARDING_STEP_MIN);
   const [previewState, setPreviewState] = useState<OnboardingState>(() =>
     createPreviewOnboardingState(),
   );
   const [isComplete, setIsComplete] = useState(false);
 
   const restartPreview = () => {
+    setPreviewStep(ONBOARDING_STEP_MIN);
     setPreviewState(createPreviewOnboardingState());
     setIsComplete(false);
     setPreviewRunId((current) => current + 1);
@@ -1879,8 +2441,12 @@ function OnboardingPreviewRoute({ onExit }: { onExit: () => void }) {
     <OnboardingFlow
       key={previewRunId}
       state={previewState}
+      currentStep={previewStep}
+      onStepChange={setPreviewStep}
       onStateChange={setPreviewState}
+      onSafeStateChange={setPreviewState}
       onOpenWorkspace={() => setIsComplete(true)}
+      canOpenWorkspace
       previewControls={previewControls}
       isPreviewMode
     />
@@ -1895,18 +2461,12 @@ function CuevionApp() {
   }
 
   const workspaceDataMode = resolveWorkspaceDataMode();
+  const [initialAccountState] = useState(createCleanAccountConfigStartupState);
   const [persistedOnboardingSession, setPersistedOnboardingSession] =
-    useState<PersistedOnboardingSession | null>(() =>
-      parsePersistedOnboardingSession(false),
+    useState<PersistedOnboardingSession | null>(
+      initialAccountState.persistedOnboardingSession,
     );
-  const [persistedOnboardingDraft] = useState<PersistedOnboardingDraft | null>(() =>
-    persistedOnboardingSession ? null : parsePersistedOnboardingDraft(false),
-  );
-  const [view, setView] = useState<AppView>(() =>
-    persistedOnboardingSession || parsePersistedAppView() === "workspace"
-      ? "workspace"
-      : "onboarding",
-  );
+  const [view, setView] = useState<AppView>(initialAccountState.view);
   const [sessionUser, setSessionUser] = useState<AuthenticatedCuevionUser | null>(null);
   const memberSessionProbeRef = useRef<ReturnType<typeof loadStartupSession> | null>(null);
   const [displayNameOverrides, setDisplayNameOverrides] = useState<DisplayNameOverrideStore>(() =>
@@ -1917,11 +2477,12 @@ function CuevionApp() {
     useState<AccountConfigHydrationStatus>("idle");
   const [accountConfigErrorStatus, setAccountConfigErrorStatus] =
     useState<RetryableAccountConfigStatus | null>(null);
+  const [hydratedMemberAccountKey, setHydratedMemberAccountKey] = useState("");
   const [accountConfigRetryVersion, setAccountConfigRetryVersion] = useState(0);
   const [accountConfigMutationVersion, setAccountConfigMutationVersion] = useState(0);
-  const accountConfigHydratedForOnboardingRef = useRef(false);
   const missingAccountConfigNeedsCleanMirrorRef = useRef(false);
   const pendingResetSaveAccountKeyRef = useRef<string | null>(null);
+  const localOnboardingHydratedScopeRef = useRef<string | null>(null);
   const accountConfigHydratorRef = useRef<
     ReturnType<typeof accountConfigOrchestration.createHydrator> | null
   >(null);
@@ -1934,11 +2495,10 @@ function CuevionApp() {
   if (!accountConfigSaveQueueRef.current) {
     accountConfigSaveQueueRef.current = accountConfigOrchestration.createSaveQueue({
       onClean: ({ accountKey }) => {
-        if (pendingResetSaveAccountKeyRef.current !== accountKey) {
-          return;
+        if (pendingResetSaveAccountKeyRef.current === accountKey) {
+          clearOnboardingResetQueryParam();
+          pendingResetSaveAccountKeyRef.current = null;
         }
-        clearOnboardingResetQueryParam();
-        pendingResetSaveAccountKeyRef.current = null;
       },
     });
   }
@@ -1963,36 +2523,70 @@ function CuevionApp() {
     parseTeamInviteRoute(),
   );
   const [onboardingState, setOnboardingState] = useState<OnboardingState>(
-    () =>
-      normalizeOnboardingState(
-        persistedOnboardingSession?.state ??
-          persistedOnboardingDraft?.state ??
-          initialOnboardingState,
-      ),
+    initialAccountState.onboardingState,
   );
-  const [userConfig, setUserConfig] = useState<UserConfig | null>(() =>
-    persistedOnboardingSession?.state ? buildUserConfig(persistedOnboardingSession.state) : null,
+  const [onboardingStep, setOnboardingStep] = useState(
+    initialAccountState.onboardingStep,
   );
+  const [userConfig, setUserConfig] = useState<UserConfig | null>(
+    initialAccountState.userConfig,
+  );
+  const onboardingStateRef = useRef(onboardingState);
+  const onboardingStepRef = useRef(onboardingStep);
+  const localOnboardingEphemeralIdentityCounterRef = useRef(0);
+  const localOnboardingEphemeralIdentityRef = useRef<{
+    user: AuthenticatedCuevionUser | null;
+    identity: string;
+  }>({ user: null, identity: "" });
   const recognizedInviteUsers = resolveWorkspaceInviteUsers(onboardingState);
   const sessionAccountStorageKey = getSessionAccountStorageKey(
     "auth0",
     sessionUser?.userType === "member" ? sessionUser : null,
   );
   const activeCollaborationUser = collaborationUser ?? sessionUser;
+  const localOnboardingIdentityUser = collaborationInviteRoute
+    ? activeCollaborationUser
+    : sessionUser;
+  if (
+    localOnboardingEphemeralIdentityRef.current.user !==
+    localOnboardingIdentityUser
+  ) {
+    localOnboardingEphemeralIdentityCounterRef.current += 1;
+    localOnboardingEphemeralIdentityRef.current = {
+      user: localOnboardingIdentityUser,
+      identity: `local-session-${localOnboardingEphemeralIdentityCounterRef.current}`,
+    };
+  }
+  const localOnboardingIdentityScope =
+    accountConfigOrchestration.resolveLocalOnboardingIdentityScope({
+      userType: localOnboardingIdentityUser?.userType ?? null,
+      userEmail: localOnboardingIdentityUser?.email ?? null,
+      ephemeralIdentity:
+        localOnboardingIdentityUser?.userId ??
+        localOnboardingEphemeralIdentityRef.current.identity,
+      collaborationInvite: collaborationInviteRoute,
+      teamInviteToken: teamInviteRoute?.inviteToken ?? null,
+    });
+  const hasHydratedCurrentLocalOnboardingScope = Boolean(
+    localOnboardingIdentityScope &&
+      localOnboardingHydratedScopeRef.current ===
+        localOnboardingIdentityScope.hydrationKey,
+  );
+  const hasHydratedCurrentMemberAccount =
+    sessionUser?.userType === "member" &&
+    Boolean(sessionAccountStorageKey) &&
+    hydratedMemberAccountKey === sessionAccountStorageKey &&
+    canUseHydratedLocalAccountState(
+      sessionStatus,
+      accountConfigHydrationStatus,
+    );
   const canProcessLocalOAuthCallback =
     Boolean(collaborationInviteRoute || teamInviteRoute) ||
-    (sessionUser?.userType === "member" &&
-      canUseHydratedLocalAccountState(
-        sessionStatus,
-        accountConfigHydrationStatus,
-      ));
+    hasHydratedCurrentMemberAccount;
   const canPersistLocalAccountState =
     Boolean(collaborationInviteRoute || teamInviteRoute) ||
     (accountConfigSaveQueueRef.current?.isDirty(sessionAccountStorageKey) === true &&
-      canUseHydratedLocalAccountState(
-        sessionStatus,
-        accountConfigHydrationStatus,
-      ));
+      hasHydratedCurrentMemberAccount);
   const markAccountConfigDirty = useCallback((accountKey: string) => {
     const nextRevision = accountConfigSaveQueueRef.current?.markDirty(accountKey);
     if (nextRevision !== null && nextRevision !== undefined) {
@@ -2014,7 +2608,8 @@ function CuevionApp() {
       sessionStatus !== "authenticated" ||
       sessionUser?.userType !== "member" ||
       accountConfigHydrationStatus !== "ready" ||
-      !sessionAccountStorageKey
+      !sessionAccountStorageKey ||
+      hydratedMemberAccountKey !== sessionAccountStorageKey
     ) {
       return false;
     }
@@ -2031,6 +2626,7 @@ function CuevionApp() {
     return true;
   }, [
     accountConfigHydrationStatus,
+    hydratedMemberAccountKey,
     markAccountConfigDirty,
     sessionAccountStorageKey,
     sessionStatus,
@@ -2048,11 +2644,6 @@ function CuevionApp() {
     registerAccountConfigMutation,
     teamInviteRoute,
   ]);
-  const handleOnboardingStateChange = (
-    value: OnboardingState | ((current: OnboardingState) => OnboardingState),
-  ) => {
-    applyAccountConfigMutation(() => setOnboardingState(value));
-  };
 
   useEffect(() => {
     if (collaborationUser) {
@@ -2114,52 +2705,40 @@ function CuevionApp() {
   ]);
 
   useEffect(() => {
-    if (!canPersistLocalAccountState) {
+    if (!hasHydratedCurrentMemberAccount || !sessionAccountStorageKey) {
       return;
     }
 
-    if (persistedOnboardingSession) {
-      window.localStorage.removeItem(ONBOARDING_DRAFT_STATE_STORAGE_KEY);
-      return;
-    }
+    const retryDirtyAccountConfig = () => {
+      if (accountConfigSaveQueueRef.current?.isDirty(sessionAccountStorageKey)) {
+        setAccountConfigMutationVersion((current) => current + 1);
+      }
+    };
 
-    if (view !== "onboarding") {
-      return;
-    }
-
-    window.localStorage.setItem(
-      ONBOARDING_DRAFT_STATE_STORAGE_KEY,
-      JSON.stringify(sanitizeAccountConfigCredentials({ state: onboardingState })),
-    );
-  }, [
-    canPersistLocalAccountState,
-    onboardingState,
-    persistedOnboardingSession,
-    view,
-  ]);
+    window.addEventListener("online", retryDirtyAccountConfig);
+    return () => window.removeEventListener("online", retryDirtyAccountConfig);
+  }, [hasHydratedCurrentMemberAccount, sessionAccountStorageKey]);
 
   useEffect(() => {
-    if (!canPersistLocalAccountState) {
+    if (
+      !localOnboardingIdentityScope?.storageKeys ||
+      localOnboardingHydratedScopeRef.current !==
+        localOnboardingIdentityScope.hydrationKey ||
+      view !== "onboarding" ||
+      !persistedOnboardingSession ||
+      persistedOnboardingSession.completed
+    ) {
       return;
     }
 
-    if (collaborationInviteRoute || teamInviteRoute) {
-      return;
-    }
-
-    if (view === "workspace" || view === "transition") {
-      if (persistedOnboardingSession) {
-        window.localStorage.setItem(CUEVION_APP_VIEW_STORAGE_KEY, "workspace");
-      }
-      return;
-    }
-
-    window.localStorage.setItem(CUEVION_APP_VIEW_STORAGE_KEY, "onboarding");
+    accountConfigOrchestration.writeOnboardingSessionMirror(
+      persistedOnboardingSession,
+      window.localStorage,
+      localOnboardingIdentityScope.storageKeys,
+    );
   }, [
-    canPersistLocalAccountState,
-    collaborationInviteRoute,
+    localOnboardingIdentityScope,
     persistedOnboardingSession,
-    teamInviteRoute,
     view,
   ]);
 
@@ -2254,18 +2833,40 @@ function CuevionApp() {
       accountConfigHydratorRef.current?.cancel();
       setUserAccountConfigHydrationEchoExpectation(null, null);
       resetAccountConfigSaveState("");
-      accountConfigHydratedForOnboardingRef.current = false;
+      setHydratedMemberAccountKey("");
       missingAccountConfigNeedsCleanMirrorRef.current = false;
       setAccountConfigErrorStatus(null);
       setAccountConfigHydrationStatus("ready");
+
+      if (
+        localOnboardingIdentityScope &&
+        localOnboardingHydratedScopeRef.current !==
+          localOnboardingIdentityScope.hydrationKey
+      ) {
+        const localState =
+          accountConfigOrchestration.hydrateLocalOnboardingScope(
+            localOnboardingIdentityScope,
+            window.localStorage,
+          );
+        localOnboardingHydratedScopeRef.current =
+          localOnboardingIdentityScope.hydrationKey;
+        setPersistedOnboardingSession(localState.persistedOnboardingSession);
+        onboardingStateRef.current = localState.onboardingState;
+        setOnboardingState(localState.onboardingState);
+        onboardingStepRef.current = localState.onboardingStep;
+        setOnboardingStep(localState.onboardingStep);
+        setUserConfig(localState.userConfig);
+        setView(localState.view);
+      }
       return;
     }
 
     if (sessionDisposition !== "member" || !sessionUser) {
+      localOnboardingHydratedScopeRef.current = null;
       accountConfigHydratorRef.current?.cancel();
       setUserAccountConfigHydrationEchoExpectation(null, null);
       resetAccountConfigSaveState("");
-      accountConfigHydratedForOnboardingRef.current = false;
+      setHydratedMemberAccountKey("");
       missingAccountConfigNeedsCleanMirrorRef.current = false;
       setAccountConfigErrorStatus(null);
       setAccountConfigHydrationStatus("idle");
@@ -2273,8 +2874,9 @@ function CuevionApp() {
     }
 
     const hydrateAccountConfig = async () => {
+      localOnboardingHydratedScopeRef.current = null;
       resetAccountConfigSaveState(sessionAccountStorageKey);
-      accountConfigHydratedForOnboardingRef.current = false;
+      setHydratedMemberAccountKey("");
       missingAccountConfigNeedsCleanMirrorRef.current = false;
       setUserAccountConfigHydrationEchoExpectation(null, null);
       setUserAccountConfigHydrationEchoExpectation(
@@ -2310,16 +2912,18 @@ function CuevionApp() {
             null,
           );
         }
-        accountConfigHydratedForOnboardingRef.current =
-          accountState.view === "onboarding";
         missingAccountConfigNeedsCleanMirrorRef.current =
           outcome.status === "missing" && !outcome.didResetOnboarding;
         setAccountConfigErrorStatus(null);
         setDisplayNameOverrides(accountState.displayNameOverrides);
         setPersistedOnboardingSession(accountState.persistedOnboardingSession);
+        onboardingStateRef.current = accountState.onboardingState;
         setOnboardingState(accountState.onboardingState);
+        onboardingStepRef.current = accountState.onboardingStep;
+        setOnboardingStep(accountState.onboardingStep);
         setUserConfig(accountState.userConfig);
         setView(accountState.view);
+        setHydratedMemberAccountKey(sessionAccountStorageKey);
         setAccountConfigHydrationStatus("ready");
 
         if (outcome.status === "found" && outcome.didResetOnboarding) {
@@ -2331,6 +2935,7 @@ function CuevionApp() {
 
       setUserAccountConfigHydrationEchoExpectation(null, null);
       if (outcome.status === "unauthorized") {
+        setHydratedMemberAccountKey("");
         setAccountConfigErrorStatus(null);
         setAccountConfigHydrationStatus("idle");
         setSessionUser(null);
@@ -2339,6 +2944,7 @@ function CuevionApp() {
       }
 
       setAccountConfigErrorStatus(outcome.errorStatus);
+      setHydratedMemberAccountKey("");
       setAccountConfigHydrationStatus("error");
     };
 
@@ -2356,6 +2962,7 @@ function CuevionApp() {
     collaborationInviteRoute,
     teamInviteRoute,
     accountConfigRetryVersion,
+    localOnboardingIdentityScope?.hydrationKey,
     markAccountConfigDirty,
     resetAccountConfigSaveState,
   ]);
@@ -2395,23 +3002,7 @@ function CuevionApp() {
           current,
           callbackResult,
         );
-
-        if (
-          canPersistLocally &&
-          persistedOnboardingSession &&
-          JSON.stringify(nextState) !== JSON.stringify(persistedOnboardingSession.state)
-        ) {
-          const nextSession: PersistedOnboardingSession = {
-            completed: true,
-            state: nextState,
-          };
-          window.localStorage.setItem(
-            ONBOARDING_STATE_STORAGE_KEY,
-            JSON.stringify(sanitizeAccountConfigCredentials(nextSession)),
-          );
-          setPersistedOnboardingSession(nextSession);
-        }
-
+        onboardingStateRef.current = nextState;
         return nextState;
       });
 
@@ -2439,8 +3030,14 @@ function CuevionApp() {
   }, [
     applyAccountConfigMutation,
     canProcessLocalOAuthCallback,
-    persistedOnboardingSession,
   ]);
+
+  if (
+    (teamInviteRoute || collaborationInviteRoute) &&
+    !hasHydratedCurrentLocalOnboardingScope
+  ) {
+    return <WorkspaceLoadingFallback />;
+  }
 
   if (teamInviteRoute) {
     return <TeamInviteRouteView route={teamInviteRoute} />;
@@ -2500,7 +3097,12 @@ function CuevionApp() {
     sessionStatus === "loading" ||
     (sessionUser &&
       (accountConfigHydrationStatus === "idle" ||
-        accountConfigHydrationStatus === "loading"))
+        accountConfigHydrationStatus === "loading" ||
+        (sessionUser.userType === "guest" &&
+          !hasHydratedCurrentLocalOnboardingScope) ||
+        (sessionUser.userType === "member" &&
+          accountConfigHydrationStatus === "ready" &&
+          hydratedMemberAccountKey !== sessionAccountStorageKey)))
   ) {
     return (
       <div className="min-h-screen bg-[linear-gradient(180deg,#f6efe7_0%,#efe5da_100%)] px-6 py-10 text-[color:#2f2a24] dark:bg-[linear-gradient(180deg,#171411_0%,#221c17_100%)] dark:text-[color:#f1e9de]">
@@ -2576,6 +3178,32 @@ function CuevionApp() {
     return <Auth0LoginView />;
   }
 
+  const canOpenWorkspaceInMemory = canOpenWorkspaceWithoutServerCompletion(
+    sessionUser.userType,
+  );
+  const onboardingHandlers =
+    accountConfigOrchestration.createOnboardingHandlers({
+      getOnboardingState: () => onboardingStateRef.current,
+      getOnboardingStep: () => onboardingStepRef.current,
+      commitAccountConfigMutation: (mutation) => {
+        applyAccountConfigMutation(() => mutation());
+      },
+      setOnboardingState: (nextState) => {
+        onboardingStateRef.current = nextState;
+        setOnboardingState(nextState);
+      },
+      setOnboardingStep: (nextStep) => {
+        onboardingStepRef.current = nextStep;
+        setOnboardingStep(nextStep);
+      },
+      setPersistedOnboardingSession,
+      canOpenWorkspace: canOpenWorkspaceInMemory,
+      openWorkspace: (nextUserConfig) => {
+        setUserConfig(nextUserConfig);
+        setView("transition");
+      },
+    });
+
   if (view === "workspace" && userConfig) {
     return (
       <Suspense fallback={<WorkspaceLoadingFallback />}>
@@ -2590,7 +3218,7 @@ function CuevionApp() {
     );
   }
 
-  if (view === "transition") {
+  if (view === "transition" && canOpenWorkspaceInMemory) {
     return (
       <WorkspaceTransition
         connectedInboxIds={onboardingState.selectedInboxes.filter((inboxId) => {
@@ -2605,34 +3233,12 @@ function CuevionApp() {
   return (
     <OnboardingFlow
       state={onboardingState}
-      onStateChange={handleOnboardingStateChange}
-      onOpenWorkspace={(nextUserConfig) => {
-        applyAccountConfigMutation((canPersistLocally) => {
-          const completedSession = sanitizeAccountConfigCredentials({
-            completed: true,
-            state: onboardingState,
-          }) as PersistedOnboardingSession;
-
-          if (canPersistLocally) {
-            if (accountConfigHydratedForOnboardingRef.current) {
-              mirrorCompletedOnboardingManagedInboxes({
-                onboardingState: completedSession.state,
-                storage: window.localStorage,
-              });
-            }
-
-            window.localStorage.setItem(
-              ONBOARDING_STATE_STORAGE_KEY,
-              JSON.stringify(completedSession),
-            );
-            window.localStorage.setItem(CUEVION_APP_VIEW_STORAGE_KEY, "workspace");
-            window.localStorage.removeItem(ONBOARDING_DRAFT_STATE_STORAGE_KEY);
-          }
-          setPersistedOnboardingSession(completedSession);
-          setUserConfig(nextUserConfig);
-          setView("transition");
-        });
-      }}
+      currentStep={onboardingStep}
+      onStepChange={onboardingHandlers.onStepChange}
+      onStateChange={onboardingHandlers.onStateChange}
+      onSafeStateChange={onboardingHandlers.onSafeStateChange}
+      onOpenWorkspace={onboardingHandlers.onOpenWorkspace}
+      canOpenWorkspace={canOpenWorkspaceInMemory}
     />
   );
 }
