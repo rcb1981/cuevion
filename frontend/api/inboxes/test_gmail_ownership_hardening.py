@@ -3868,6 +3868,50 @@ class OAuthAndConfigTests(unittest.TestCase):
                 oauth_callback.GOOGLE_TOKEN_RECORD_MALFORMED_OR_AMBIGUOUS,
             )
 
+        invalid_equal_email = "not-a-mailbox"
+        invalid_identity_records = (
+            {
+                **current_record,
+                "email": invalid_equal_email,
+                "owner_email": "",
+            },
+            {
+                **{
+                    key: value
+                    for key, value in current_record.items()
+                    if key != "provider"
+                },
+                "email": invalid_equal_email,
+            },
+        )
+        for record in invalid_identity_records:
+            classification = oauth_callback._classify_existing_google_token_record(
+                record,
+                normalized_email=invalid_equal_email,
+                normalized_owner_email="owner@example.com",
+            )
+            self.assertEqual(
+                classification,
+                oauth_callback.GOOGLE_TOKEN_RECORD_MALFORMED_OR_AMBIGUOUS,
+            )
+            self.assertEqual(
+                oauth_callback._resolve_google_token_conflict_diagnostic_code(
+                    record,
+                    record_classification=classification,
+                    normalized_email=invalid_equal_email,
+                ),
+                "token_record_malformed",
+            )
+
+        self.assertEqual(
+            oauth_callback._resolve_google_token_conflict_diagnostic_code(
+                current_record,
+                record_classification="CANARY_UNKNOWN_CLASSIFICATION",
+                normalized_email="verified@gmail.com",
+            ),
+            "token_owner_conflict",
+        )
+
     def test_absent_and_exact_owner_google_tokens_keep_existing_paths(self):
         durable_config = {
             "backend": "vercel_kv_rest",
@@ -3958,28 +4002,119 @@ class OAuthAndConfigTests(unittest.TestCase):
             for key, value in current_record.items()
             if key != "owner_email"
         }
+        partial_owner_record = {
+            key: value
+            for key, value in current_record.items()
+            if key != "provider"
+        }
+        partial_owner_without_email = {
+            key: value
+            for key, value in current_record.items()
+            if key != "email"
+        }
         invalid_existing_records = (
-            ("wrong_owner", {**current_record, "owner_email": "other@example.com"}),
-            ("owner_null", {**current_record, "owner_email": None}),
-            ("owner_empty", {**current_record, "owner_email": ""}),
-            ("owner_whitespace", {**current_record, "owner_email": "   "}),
-            ("owner_wrong_type", {**current_record, "owner_email": []}),
-            ("partial_owner", {**legacy_record, "ownerEmail": "owner@example.com"}),
+            (
+                "wrong_owner",
+                {**current_record, "owner_email": "other@example.com"},
+                "token_owner_mismatch",
+            ),
+            (
+                "legacy_owner_equals_mailbox",
+                {**current_record, "owner_email": "verified@gmail.com"},
+                "token_legacy_owner_equals_mailbox",
+            ),
+            (
+                "owner_null",
+                {**current_record, "owner_email": None},
+                "token_record_malformed",
+            ),
+            (
+                "owner_empty",
+                {**current_record, "owner_email": ""},
+                "token_owner_fields_empty",
+            ),
+            (
+                "owner_whitespace",
+                {**current_record, "owner_email": "   "},
+                "token_owner_fields_empty",
+            ),
+            (
+                "owner_wrong_type",
+                {**current_record, "owner_email": []},
+                "token_record_malformed",
+            ),
+            (
+                "partial_owner_identity",
+                partial_owner_record,
+                "token_owner_fields_partial",
+            ),
+            (
+                "partial_owner_identity_without_email",
+                partial_owner_without_email,
+                "token_owner_fields_partial",
+            ),
+            (
+                "partial_owner_identity_without_access",
+                {
+                    key: value
+                    for key, value in partial_owner_record.items()
+                    if key != "access_token"
+                },
+                "token_record_malformed",
+            ),
+            (
+                "partial_owner_identity_with_invalid_refresh",
+                {**partial_owner_record, "refresh_token": []},
+                "token_record_malformed",
+            ),
+            (
+                "partial_owner_identity_with_unknown_field",
+                {**partial_owner_record, "ownerEmail": "owner@example.com"},
+                "token_record_malformed",
+            ),
+            (
+                "unknown_owner_alias",
+                {**legacy_record, "ownerEmail": "owner@example.com"},
+                "token_record_malformed",
+            ),
             (
                 "matching_owner_with_conflicting_owner_identity",
                 {**current_record, "ownerEmail": "other@example.com"},
+                "token_record_malformed",
             ),
             (
                 "matching_owner_with_malformed_refresh",
                 {**current_record, "refresh_token": []},
+                "token_record_malformed",
             ),
-            ("wrong_provider", {**legacy_record, "provider": "microsoft"}),
-            ("wrong_email", {**legacy_record, "email": "other@gmail.com"}),
-            ("malformed_record", {**legacy_record, "access_token": None}),
-            ("non_dict_record", [legacy_record]),
+            (
+                "empty_owner_with_noncanonical_email",
+                {
+                    **current_record,
+                    "email": "Verified@gmail.com",
+                    "owner_email": "",
+                },
+                "token_record_malformed",
+            ),
+            (
+                "wrong_provider",
+                {**legacy_record, "provider": "microsoft"},
+                "token_provider_mismatch",
+            ),
+            (
+                "wrong_email",
+                {**legacy_record, "email": "other@gmail.com"},
+                "token_email_mismatch",
+            ),
+            (
+                "malformed_record",
+                {**legacy_record, "access_token": None},
+                "token_record_malformed",
+            ),
+            ("non_dict_record", [legacy_record], "token_record_malformed"),
         )
 
-        for label, existing_record in invalid_existing_records:
+        for label, existing_record, expected_diagnostic in invalid_existing_records:
             snapshot = json.dumps(existing_record, sort_keys=True)
             with self.subTest(label=label), patch.object(
                 oauth_callback,
@@ -4009,11 +4144,300 @@ class OAuthAndConfigTests(unittest.TestCase):
             self.assertEqual(error["code"], "token_owner_conflict")
             self.assertEqual(
                 error[oauth_callback.GMAIL_CALLBACK_FAILURE_CODE_FIELD],
-                "token_owner_conflict",
+                expected_diagnostic,
             )
             durable_write.assert_not_called()
             legacy_write.assert_not_called()
             self.assertEqual(json.dumps(existing_record, sort_keys=True), snapshot)
+
+    def test_rejected_google_token_diagnostics_are_log_only_and_never_write(self):
+        from urllib.parse import urlencode
+
+        verified_email = "verified@gmail.com"
+        current_owner = "current-owner-canary@example.invalid"
+        wrong_owner = "wrong-owner-canary@example.invalid"
+        stored_email = "stored-mailbox-canary@example.invalid"
+        stored_provider = "CANARY_STORED_PROVIDER"
+        malformed_owner = "CANARY_MALFORMED_OWNER_VALUE"
+        old_access = "CANARY_DIAGNOSTIC_OLD_ACCESS_TOKEN"
+        old_refresh = "CANARY_DIAGNOSTIC_OLD_REFRESH_TOKEN"
+        fresh_access = "CANARY_DIAGNOSTIC_FRESH_ACCESS_TOKEN"
+        fresh_refresh = "CANARY_DIAGNOSTIC_FRESH_REFRESH_TOKEN"
+        state_secret = "CANARY_DIAGNOSTIC_STATE_SECRET"
+        client_secret = "CANARY_DIAGNOSTIC_CLIENT_SECRET"
+        request_cookie = "CANARY_DIAGNOSTIC_REQUEST_COOKIE"
+        user_id = "CANARY_DIAGNOSTIC_USER_ID"
+        workspace_id = "CANARY_DIAGNOSTIC_WORKSPACE_ID"
+        mailbox_id = "CANARY_DIAGNOSTIC_MAILBOX_ID"
+        durable_config = {
+            "backend": "vercel_kv_rest",
+            "rest_url": "https://kv.example",
+            "rest_token": "CANARY_DIAGNOSTIC_KV_TOKEN",
+        }
+        current_record = durable_google_token(
+            owner_email=current_owner,
+            access_token=old_access,
+            refresh_token=old_refresh,
+        )
+        legacy_record = {
+            key: value
+            for key, value in current_record.items()
+            if key != "owner_email"
+        }
+        partial_owner_record = {
+            key: value
+            for key, value in current_record.items()
+            if key != "provider"
+        }
+        cases = (
+            (
+                "wrong_owner",
+                {**current_record, "owner_email": wrong_owner},
+                "token_owner_mismatch",
+                True,
+            ),
+            (
+                "legacy_owner_equals_mailbox",
+                {**current_record, "owner_email": verified_email},
+                "token_legacy_owner_equals_mailbox",
+                True,
+            ),
+            (
+                "empty_owner",
+                {**current_record, "owner_email": "   "},
+                "token_owner_fields_empty",
+                True,
+            ),
+            (
+                "partial_owner_identity",
+                partial_owner_record,
+                "token_owner_fields_partial",
+                True,
+            ),
+            (
+                "provider_mismatch",
+                {**legacy_record, "provider": stored_provider},
+                "token_provider_mismatch",
+                True,
+            ),
+            (
+                "email_mismatch",
+                {**legacy_record, "email": stored_email},
+                "token_email_mismatch",
+                True,
+            ),
+            (
+                "malformed_owner",
+                {**current_record, "owner_email": [malformed_owner]},
+                "token_record_malformed",
+                True,
+            ),
+            (
+                "safe_runtime_fallback",
+                legacy_record,
+                "token_owner_conflict",
+                False,
+            ),
+        )
+        expected_payload = {
+            "status": "error",
+            "provider": "google",
+            "email": verified_email,
+            "message": (
+                "Google authentication completed, but secure authorization "
+                "storage is unavailable."
+            ),
+        }
+        expected_html = None
+        member = auth_runtime.AuthenticatedMemberContext(
+            user_id=user_id,
+            email=current_owner,
+            name="Diagnostic Owner",
+            workspace_id=workspace_id,
+            membership_role="owner",
+        )
+
+        class CapturingCallback(FakeHandler):
+            def __init__(self, path):
+                super().__init__(
+                    raw_body=b"",
+                    headers={"cookie": request_cookie},
+                )
+                self.path = path
+                self.callback_payload = None
+
+            def _send_callback_page(self, payload, *, set_cookies=()):
+                self.callback_payload = payload
+                oauth_callback.handler._send_callback_page(
+                    self,
+                    payload,
+                    set_cookies=set_cookies,
+                )
+
+        for label, existing_record, expected_code, use_durable_store in cases:
+            authorization_code = f"CANARY_DIAGNOSTIC_AUTH_CODE_{label}"
+            state, verifier = connect_oauth.build_signed_state(
+                "google",
+                "hint@gmail.com",
+                current_owner,
+                state_secret,
+                "main",
+            )
+            request_path = (
+                "/api/inboxes/oauth-callback?"
+                + urlencode({"code": authorization_code, "state": state})
+            )
+            callback = CapturingCallback(request_path)
+            logger = Mock()
+            store_key = oauth_callback._build_store_key(verified_email)
+            record_snapshot = json.dumps(existing_record, sort_keys=True)
+
+            with self.subTest(label=label), patch.dict(
+                oauth_callback.os.environ,
+                self._production_oauth_environment(
+                    CUEVION_OAUTH_STATE_SECRET=state_secret,
+                    GOOGLE_CLIENT_SECRET=client_secret,
+                ),
+                clear=True,
+            ), patch.object(
+                oauth_callback,
+                "_GMAIL_CALLBACK_LOGGER",
+                logger,
+            ), patch.object(
+                oauth_callback,
+                "_resolve_authenticated_member_request",
+                return_value=(member, ()),
+            ), patch.object(
+                oauth_callback,
+                "_exchange_google_code",
+                return_value=(
+                    {
+                        "access_token": fresh_access,
+                        "refresh_token": fresh_refresh,
+                    },
+                    None,
+                ),
+            ), patch.object(
+                oauth_callback,
+                "_fetch_verified_google_identity",
+                return_value=(
+                    {"email": verified_email, "display_name": "Verified"},
+                    None,
+                ),
+            ), patch.object(
+                oauth_callback,
+                "_prepare_gmail_managed_inbox_registration",
+                return_value=({"prepared": True, "mailboxId": mailbox_id}, None),
+            ), patch.object(
+                oauth_callback,
+                "_resolve_durable_store_config",
+                return_value=(durable_config if use_durable_store else None),
+            ), patch.object(
+                oauth_callback,
+                "_read_durable_record",
+                return_value=(existing_record, None),
+            ) as durable_read, patch.object(
+                oauth_callback,
+                "_read_runtime_store",
+                return_value={store_key: existing_record},
+            ) as runtime_read, patch.object(
+                oauth_callback,
+                "_write_durable_record",
+            ) as durable_write, patch.object(
+                oauth_callback,
+                "_adopt_legacy_durable_record",
+            ) as legacy_write, patch.object(
+                oauth_callback,
+                "_persist_runtime_record",
+            ) as runtime_write, patch.object(
+                oauth_callback,
+                "_register_gmail_managed_inbox_in_user_config",
+            ) as config_write, patch.object(
+                oauth_callback,
+                "urlopen",
+            ) as outbound_request:
+                oauth_callback.handler.do_GET(callback)
+
+            if use_durable_store:
+                durable_read.assert_called_once()
+                runtime_read.assert_not_called()
+            else:
+                durable_read.assert_not_called()
+                runtime_read.assert_called_once()
+            durable_write.assert_not_called()
+            legacy_write.assert_not_called()
+            runtime_write.assert_not_called()
+            config_write.assert_not_called()
+            outbound_request.assert_not_called()
+            self.assertEqual(
+                json.dumps(existing_record, sort_keys=True),
+                record_snapshot,
+            )
+            logger.warning.assert_called_once_with(
+                "event=gmail_oauth_callback_failure "
+                f"failure_code={expected_code} provider=google "
+                "inbox_position=main"
+            )
+            self.assertIn(expected_code, oauth_callback.GMAIL_CALLBACK_FAILURE_CODES)
+            self.assertEqual(callback.status, 200)
+            self.assertEqual(callback.callback_payload, expected_payload)
+
+            response_body = callback.wfile.getvalue().decode("utf-8")
+            if expected_html is None:
+                expected_html = response_body
+            self.assertEqual(response_body, expected_html)
+            response_artifacts = "\n".join(
+                (
+                    json.dumps(callback.callback_payload, sort_keys=True),
+                    json.dumps(callback.response_headers, sort_keys=True),
+                    response_body,
+                )
+            )
+            for failure_code in oauth_callback.GMAIL_CALLBACK_FAILURE_CODES:
+                self.assertNotIn(failure_code, response_artifacts)
+            for forbidden_field in (
+                "owner_email",
+                "ownerEmail",
+                "owner_binding",
+                "access_token",
+                "refresh_token",
+                "userId",
+                "workspaceId",
+                "mailboxId",
+            ):
+                self.assertNotIn(forbidden_field, response_artifacts)
+
+            combined_artifacts = "\n".join(
+                (
+                    logger.warning.call_args.args[0],
+                    response_artifacts,
+                )
+            )
+            for canary in (
+                wrong_owner,
+                stored_email,
+                stored_provider,
+                malformed_owner,
+                old_access,
+                old_refresh,
+                fresh_access,
+                fresh_refresh,
+                current_owner,
+                authorization_code,
+                state,
+                verifier,
+                store_key,
+                state_secret,
+                client_secret,
+                request_cookie,
+                user_id,
+                workspace_id,
+                mailbox_id,
+                durable_config["rest_token"],
+            ):
+                self.assertNotIn(canary, combined_artifacts)
+
+            self.assertNotIn(verified_email, logger.warning.call_args.args[0])
 
     def test_legacy_ownerless_token_adoption_uses_only_fresh_credentials_and_is_one_shot(self):
         durable_config = {
@@ -4450,7 +4874,7 @@ class OAuthAndConfigTests(unittest.TestCase):
             (
                 "wrong_owner",
                 wrong_owner_record,
-                "token_owner_conflict",
+                "token_owner_mismatch",
                 None,
             ),
             (

@@ -65,9 +65,16 @@ GMAIL_CALLBACK_FAILURE_CODES = frozenset(
         "state_invalid",
         "token_exchange_failed",
         "token_exchange_unavailable",
+        "token_email_mismatch",
+        "token_legacy_owner_equals_mailbox",
         "token_owner_conflict",
+        "token_owner_fields_empty",
+        "token_owner_fields_partial",
+        "token_owner_mismatch",
         "token_payload_invalid",
         "token_persistence_failed",
+        "token_provider_mismatch",
+        "token_record_malformed",
         "token_store_unavailable",
         "unexpected_callback_failure",
         "user_config_invalid",
@@ -102,6 +109,9 @@ LEGACY_GOOGLE_TOKEN_RECORD_FIELDS = frozenset(
 )
 CURRENT_GOOGLE_TOKEN_RECORD_FIELDS = frozenset(
     {*LEGACY_GOOGLE_TOKEN_RECORD_FIELDS, "owner_email"}
+)
+GOOGLE_TOKEN_OWNER_IDENTITY_FIELDS = frozenset(
+    {"provider", "email", "owner_email"}
 )
 LEGACY_GOOGLE_TOKEN_ADOPTION_SCRIPT = (
     "local current=redis.call('GET',KEYS[1]);"
@@ -704,6 +714,92 @@ def _classify_existing_google_token_record(
     return GOOGLE_TOKEN_RECORD_MALFORMED_OR_AMBIGUOUS
 
 
+def _resolve_google_token_conflict_diagnostic_code(
+    existing_record,
+    *,
+    record_classification: str,
+    normalized_email: str,
+) -> str:
+    if record_classification == GOOGLE_TOKEN_RECORD_OWNER_MISMATCH:
+        if (
+            isinstance(existing_record, dict)
+            and existing_record.get("owner_email") == normalized_email
+        ):
+            return "token_legacy_owner_equals_mailbox"
+        return "token_owner_mismatch"
+
+    if record_classification == GOOGLE_TOKEN_RECORD_PROVIDER_OR_EMAIL_MISMATCH:
+        if isinstance(existing_record, dict):
+            existing_provider = existing_record.get("provider")
+            if isinstance(existing_provider, str) and existing_provider != "google":
+                return "token_provider_mismatch"
+
+            existing_email = existing_record.get("email")
+            if (
+                existing_provider == "google"
+                and _is_canonical_token_email(existing_email)
+                and existing_email != normalized_email
+            ):
+                return "token_email_mismatch"
+        return "token_owner_conflict"
+
+    if record_classification == GOOGLE_TOKEN_RECORD_MALFORMED_OR_AMBIGUOUS:
+        if not isinstance(existing_record, dict):
+            return "token_record_malformed"
+
+        existing_provider = existing_record.get("provider")
+        existing_email = existing_record.get("email")
+        existing_owner = existing_record.get("owner_email")
+        normalized_email_is_canonical = _is_canonical_token_email(
+            normalized_email
+        )
+        if (
+            normalized_email_is_canonical
+            and existing_provider == "google"
+            and _is_canonical_token_email(existing_email)
+            and existing_email == normalized_email
+        ):
+            if (
+                "owner_email" in existing_record
+                and isinstance(existing_owner, str)
+                and not existing_owner.strip()
+                and _has_supported_current_google_token_record_shape(
+                    existing_record
+                )
+            ):
+                return "token_owner_fields_empty"
+
+        fields = frozenset(existing_record)
+        present_owner_identity_fields = fields & GOOGLE_TOKEN_OWNER_IDENTITY_FIELDS
+        # A canonical owner plus exactly one provider/mailbox identity component
+        # is a provable partial subset of the current owner identity tuple.
+        if (
+            normalized_email_is_canonical
+            and "owner_email" in existing_record
+            and _is_canonical_token_email(existing_owner)
+            and len(present_owner_identity_fields) == 2
+            and "access_token" in existing_record
+            and fields.issubset(CURRENT_GOOGLE_TOKEN_RECORD_FIELDS)
+            and (
+                "provider" not in existing_record
+                or existing_provider == "google"
+            )
+            and (
+                "email" not in existing_record
+                or _is_canonical_token_email(existing_email)
+                and existing_email == normalized_email
+            )
+            and _has_supported_current_google_token_record_shape(
+                existing_record
+            )
+        ):
+            return "token_owner_fields_partial"
+
+        return "token_record_malformed"
+
+    return "token_owner_conflict"
+
+
 def build_google_token_record(
     *,
     email: str,
@@ -1009,10 +1105,15 @@ def persist_google_token_record(
         GOOGLE_TOKEN_RECORD_PROVIDER_OR_EMAIL_MISMATCH,
         GOOGLE_TOKEN_RECORD_MALFORMED_OR_AMBIGUOUS,
     }:
+        diagnostic_code = _resolve_google_token_conflict_diagnostic_code(
+            existing_record,
+            record_classification=record_classification,
+            normalized_email=normalized_email,
+        )
         return None, {
             "code": "token_owner_conflict",
             "message": "This Google mailbox is already linked to another account owner.",
-            GMAIL_CALLBACK_FAILURE_CODE_FIELD: "token_owner_conflict",
+            GMAIL_CALLBACK_FAILURE_CODE_FIELD: diagnostic_code,
         }
 
     if (
