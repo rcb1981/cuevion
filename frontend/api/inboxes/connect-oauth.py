@@ -10,7 +10,7 @@ import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 CURRENT_DIR = Path(__file__).resolve().parent
 API_DIR = CURRENT_DIR.parent
@@ -26,6 +26,10 @@ from api.auth.email_address import normalize_auth_email  # noqa: E402
 from api.user.config import _classify_stored_onboarding_session  # noqa: E402
 
 GOOGLE_AUTHORIZATION_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth"
+OAUTH_CALLBACK_PATH = "/api/inboxes/oauth-callback"
+PUBLIC_APP_ORIGIN_ENV = "CUEVION_APP_URL"
+PRODUCTION_APP_ORIGIN = "https://app.cuevion.com"
+LOCAL_APP_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 MICROSOFT_AUTHORIZATION_ENDPOINT_TEMPLATE = (
     "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/authorize"
 )
@@ -57,6 +61,139 @@ ONBOARDING_CONFLICT_ERROR = {
         "message": "The selected onboarding inbox is no longer available. Reload and try again.",
     },
 }
+PUBLIC_APP_ORIGIN_ERROR = {
+    "ok": False,
+    "error": {
+        "code": "oauth_public_origin_invalid",
+        "message": "OAuth public application origin is not configured safely.",
+    },
+}
+
+
+def _deployment_environment() -> str:
+    return os.getenv("VERCEL_ENV", "").strip().lower()
+
+
+def _is_production_environment() -> bool:
+    return _deployment_environment() == "production"
+
+
+def _normalize_public_app_origin(
+    value: str,
+    *,
+    production: bool,
+) -> str | None:
+    candidate = value.strip()
+    if (
+        not candidate
+        or "?" in candidate
+        or "#" in candidate
+        or "\\" in candidate
+        or any(character.isspace() for character in candidate)
+    ):
+        return None
+
+    if candidate.endswith("/"):
+        candidate = candidate[:-1]
+
+    try:
+        parsed = urlsplit(candidate)
+        port = parsed.port
+    except ValueError:
+        return None
+
+    hostname = parsed.hostname.lower() if isinstance(parsed.hostname, str) else ""
+    if (
+        not hostname
+        or "*" in hostname
+        or not parsed.netloc
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        return None
+
+    scheme = parsed.scheme.lower()
+    is_local = hostname in LOCAL_APP_HOSTS
+    if production:
+        if scheme != "https" or hostname != "app.cuevion.com" or port is not None:
+            return None
+    elif scheme != "https" and not (scheme == "http" and is_local):
+        return None
+
+    normalized_host = f"[{hostname}]" if ":" in hostname else hostname
+    normalized_netloc = (
+        f"{normalized_host}:{port}" if port is not None else normalized_host
+    )
+    if parsed.netloc.lower() != normalized_netloc.lower():
+        return None
+
+    normalized_origin = f"{scheme}://{normalized_netloc}"
+    if production and normalized_origin != PRODUCTION_APP_ORIGIN:
+        return None
+    return normalized_origin
+
+
+def resolve_public_app_origin(headers=None) -> str | None:
+    deployment_environment = _deployment_environment()
+    production = _is_production_environment()
+    configured_origin = os.getenv(PUBLIC_APP_ORIGIN_ENV, "")
+    if configured_origin.strip():
+        normalized_origin = _normalize_public_app_origin(
+            configured_origin,
+            production=production,
+        )
+        if not normalized_origin:
+            return None
+        if normalized_origin == PRODUCTION_APP_ORIGIN:
+            return normalized_origin
+
+        parsed_origin = urlsplit(normalized_origin)
+        if (
+            deployment_environment == "preview"
+            and parsed_origin.scheme == "https"
+            and parsed_origin.hostname not in LOCAL_APP_HOSTS
+        ):
+            return normalized_origin
+        if (
+            deployment_environment in {"", "development"}
+            and parsed_origin.hostname in LOCAL_APP_HOSTS
+        ):
+            return normalized_origin
+        return None
+
+    if deployment_environment not in {"", "development"} or headers is None:
+        return None
+
+    request_host = headers.get("host")
+    if not isinstance(request_host, str) or not request_host.strip():
+        return None
+
+    forwarded_protocol = headers.get("x-forwarded-proto")
+    protocol = (
+        forwarded_protocol.strip().lower()
+        if isinstance(forwarded_protocol, str) and forwarded_protocol.strip()
+        else "http"
+    )
+    local_origin = _normalize_public_app_origin(
+        f"{protocol}://{request_host.strip()}",
+        production=False,
+    )
+    if not local_origin:
+        return None
+    parsed_local_origin = urlsplit(local_origin)
+    if parsed_local_origin.hostname not in LOCAL_APP_HOSTS:
+        return None
+    return local_origin
+
+
+def resolve_google_redirect_uri(headers=None) -> str | None:
+    public_origin = resolve_public_app_origin(headers)
+    if not public_origin:
+        return None
+    return f"{public_origin}{OAUTH_CALLBACK_PATH}"
 
 
 def base64url_encode(value: bytes) -> str:
@@ -377,7 +514,7 @@ class handler(BaseHTTPRequestHandler):
             if provider == "google":
                 client_id = os.getenv("GOOGLE_CLIENT_ID", "").strip()
                 client_secret = os.getenv("GOOGLE_CLIENT_SECRET", "").strip()
-                redirect_uri = os.getenv("GOOGLE_OAUTH_REDIRECT_URI", "").strip()
+                redirect_uri = resolve_google_redirect_uri(self.headers)
                 oauth_state_secret = (
                     os.getenv("CUEVION_OAUTH_STATE_SECRET", "").strip() or client_secret
                 )
@@ -389,10 +526,13 @@ class handler(BaseHTTPRequestHandler):
                     os.getenv("CUEVION_OAUTH_STATE_SECRET", "").strip() or client_secret
                 )
 
-            if not client_id or not client_secret or not redirect_uri:
+            if (
+                not client_id
+                or not client_secret
+                or (provider == "microsoft" and not redirect_uri)
+            ):
                 config_message = (
-                    "Google OAuth is not configured. Set GOOGLE_CLIENT_ID, "
-                    "GOOGLE_CLIENT_SECRET, and GOOGLE_OAUTH_REDIRECT_URI."
+                    "Google OAuth is not configured safely."
                     if provider == "google"
                     else "Microsoft OAuth is not configured. Set MICROSOFT_CLIENT_ID, "
                     "MICROSOFT_CLIENT_SECRET, and MICROSOFT_OAUTH_REDIRECT_URI."
@@ -409,19 +549,21 @@ class handler(BaseHTTPRequestHandler):
                 )
                 return
 
-            if not redirect_uri.startswith(("https://", "http://")):
-                redirect_message = (
-                    "GOOGLE_OAUTH_REDIRECT_URI must be an absolute URL."
-                    if provider == "google"
-                    else "MICROSOFT_OAUTH_REDIRECT_URI must be an absolute URL."
-                )
+            if provider == "google" and not redirect_uri:
+                self._send_json(503, PUBLIC_APP_ORIGIN_ERROR)
+                return
+
+            if provider == "microsoft" and (
+                not redirect_uri
+                or not redirect_uri.startswith(("https://", "http://"))
+            ):
                 self._send_json(
                     503,
                     {
                         "ok": False,
                         "error": {
                             "code": "oauth_invalid_redirect_uri",
-                            "message": redirect_message,
+                            "message": "MICROSOFT_OAUTH_REDIRECT_URI must be an absolute URL.",
                         },
                     },
                 )

@@ -1758,6 +1758,16 @@ class OAuthAndConfigTests(unittest.TestCase):
         callback._send_callback_page = Mock()
         return callback
 
+    def _production_oauth_environment(self, **overrides):
+        return {
+            "VERCEL_ENV": "production",
+            "CUEVION_APP_URL": "https://app.cuevion.com",
+            "CUEVION_OAUTH_STATE_SECRET": "state-secret",
+            "GOOGLE_CLIENT_ID": "client-id",
+            "GOOGLE_CLIENT_SECRET": "client-secret",
+            **overrides,
+        }
+
     def test_connect_oauth_requires_session_and_signed_state_has_owner(self):
         handler = FakeHandler({"provider": "google", "email": "hint@gmail.com"})
         with patch.object(connect_oauth, "resolve_authenticated_user", return_value=(None, None)):
@@ -1824,6 +1834,8 @@ class OAuthAndConfigTests(unittest.TestCase):
             "CUEVION_OAUTH_STATE_SECRET": "state-secret",
             "GOOGLE_CLIENT_ID": "client-id",
             "GOOGLE_CLIENT_SECRET": "client-secret",
+            "CUEVION_APP_URL": "https://app.cuevion.com",
+            "VERCEL_ENV": "production",
             "GOOGLE_OAUTH_REDIRECT_URI": "https://app.example.com/api/inboxes/oauth-callback",
         }
         with patch.dict(connect_oauth.os.environ, environment, clear=False), patch.object(
@@ -1841,11 +1853,474 @@ class OAuthAndConfigTests(unittest.TestCase):
         self.assertNotIn("owner_email", decoded)
         self.assertNotIn("owner@example.com", json.dumps(decoded))
 
+    def test_google_start_and_exchange_share_canonical_production_redirect_uri(self):
+        from urllib.parse import parse_qs, urlencode, urlparse
+
+        expected_redirect_uri = (
+            "https://app.cuevion.com/api/inboxes/oauth-callback"
+        )
+        environment = self._production_oauth_environment(
+            CUEVION_APP_URL="https://app.cuevion.com/",
+            GOOGLE_OAUTH_REDIRECT_URI=(
+                "https://cuevion.vercel.app/api/inboxes/oauth-callback"
+            ),
+            VERCEL_URL="cuevion.vercel.app",
+        )
+        hostile_headers = self._authenticated_headers()
+        hostile_headers.update(
+            {
+                "host": "attacker.example",
+                "x-forwarded-host": "preview-attacker.vercel.app",
+                "x-forwarded-proto": "http",
+            }
+        )
+        request = FakeHandler(
+            {"provider": "google", "email": "hint@gmail.com"},
+            headers=hostile_headers,
+        )
+
+        with patch.dict(os.environ, environment, clear=True), patch.object(
+            connect_oauth,
+            "resolve_authenticated_user",
+            side_effect=resolve_test_user,
+        ):
+            connect_oauth.handler.do_POST(request)
+
+            self.assertEqual(request.status, 200)
+            authorization_url = request.payload()["authorizationUrl"]
+            authorization_params = parse_qs(urlparse(authorization_url).query)
+            self.assertEqual(
+                authorization_params["redirect_uri"],
+                [expected_redirect_uri],
+            )
+            self.assertEqual(
+                authorization_params["code_challenge_method"],
+                ["S256"],
+            )
+
+            state = authorization_params["state"][0]
+            verified_state, state_error = oauth_callback.verify_signed_state(
+                state,
+                "state-secret",
+            )
+            self.assertIsNone(state_error)
+            self.assertEqual(
+                authorization_params["code_challenge"],
+                [
+                    connect_oauth.build_code_challenge(
+                        verified_state["code_verifier"]
+                    )
+                ],
+            )
+            self.assertNotIn(
+                verified_state["code_verifier"],
+                authorization_url,
+            )
+
+            callback = Mock()
+            callback_query = urlencode(
+                {
+                    "code": "provider-code",
+                    "state": state,
+                    "returnTo": "https://attacker.example/steal",
+                    "origin": "https://attacker.example",
+                    "redirect_uri": "https://attacker.example/callback",
+                }
+            )
+            callback.path = f"/api/inboxes/oauth-callback?{callback_query}"
+            callback.headers = HeaderMap(hostile_headers)
+            callback._send_callback_page = Mock()
+            with patch.object(
+                oauth_callback,
+                "_resolve_authenticated_member_request",
+                return_value=(authenticated_member(), ()),
+            ), patch.object(
+                oauth_callback,
+                "_exchange_google_code",
+                return_value=(
+                    None,
+                    {
+                        "code": "token_exchange_failed",
+                        "message": "Mocked provider failure.",
+                    },
+                ),
+            ) as exchange:
+                oauth_callback.handler.do_GET(callback)
+
+        exchange.assert_called_once_with(
+            code="provider-code",
+            code_verifier=verified_state["code_verifier"],
+            client_id="client-id",
+            client_secret="client-secret",
+            redirect_uri=expected_redirect_uri,
+        )
+        self.assertEqual(
+            callback._callback_app_redirect_url,
+            "https://app.cuevion.com/",
+        )
+        callback_payload = callback._send_callback_page.call_args.args[0]
+        serialized_payload = json.dumps(callback_payload)
+        self.assertNotIn(state, serialized_payload)
+        for forbidden in (
+            "provider-code",
+            "state-secret",
+            "client-secret",
+            "code_verifier",
+            "attacker.example",
+            "cuevion.vercel.app",
+        ):
+            self.assertNotIn(forbidden, serialized_payload)
+
+    def test_oauth_start_rejects_browser_selected_origins_and_redirect_targets(self):
+        for field in ("origin", "returnTo", "redirect_uri"):
+            with self.subTest(field=field):
+                request = FakeHandler(
+                    {
+                        "provider": "google",
+                        "email": "hint@gmail.com",
+                        field: "https://attacker.example/redirect",
+                    },
+                    headers=self._authenticated_headers(),
+                )
+                with patch.dict(
+                    os.environ,
+                    self._production_oauth_environment(),
+                    clear=True,
+                ), patch.object(
+                    connect_oauth,
+                    "resolve_authenticated_user",
+                    side_effect=resolve_test_user,
+                ), patch.object(
+                    connect_oauth,
+                    "build_signed_state",
+                ) as state_builder:
+                    connect_oauth.handler.do_POST(request)
+
+                self.assertEqual(request.status, 400)
+                self.assertEqual(
+                    request.payload()["error"]["code"],
+                    "invalid_request",
+                )
+                state_builder.assert_not_called()
+
+    def test_invalid_or_missing_production_origin_fails_before_oauth_state(self):
+        invalid_origins = (
+            ("missing", None),
+            ("http", "http://app.cuevion.com"),
+            ("preview", "https://cuevion.vercel.app"),
+            ("path", "https://app.cuevion.com/oauth"),
+            ("double_slash_path", "https://app.cuevion.com//"),
+            ("query", "https://app.cuevion.com?returnTo=/inbox"),
+            ("fragment", "https://app.cuevion.com#callback"),
+            ("userinfo", "https://user:password@app.cuevion.com"),
+            ("wildcard", "https://*.cuevion.com"),
+            ("port", "https://app.cuevion.com:443"),
+        )
+
+        for label, configured_origin in invalid_origins:
+            with self.subTest(label=label):
+                environment = self._production_oauth_environment(
+                    GOOGLE_OAUTH_REDIRECT_URI=(
+                        "https://cuevion.vercel.app/api/inboxes/oauth-callback"
+                    ),
+                    VERCEL_URL="cuevion.vercel.app",
+                )
+                if configured_origin is None:
+                    environment.pop("CUEVION_APP_URL")
+                else:
+                    environment["CUEVION_APP_URL"] = configured_origin
+                headers = self._authenticated_headers()
+                headers.update(
+                    {
+                        "host": "app.cuevion.com",
+                        "x-forwarded-host": "cuevion.vercel.app",
+                        "x-forwarded-proto": "https",
+                    }
+                )
+                request = FakeHandler(
+                    {"provider": "google", "email": "hint@gmail.com"},
+                    headers=headers,
+                )
+                with patch.dict(os.environ, environment, clear=True), patch.object(
+                    connect_oauth,
+                    "resolve_authenticated_user",
+                    side_effect=resolve_test_user,
+                ), patch.object(
+                    connect_oauth,
+                    "build_signed_state",
+                ) as state_builder:
+                    connect_oauth.handler.do_POST(request)
+
+                self.assertEqual(request.status, 503)
+                self.assertEqual(
+                    request.payload()["error"]["code"],
+                    "oauth_public_origin_invalid",
+                )
+                state_builder.assert_not_called()
+
+    def test_local_origin_fallback_is_limited_to_exact_loopback_hosts(self):
+        with patch.dict(os.environ, {}, clear=True):
+            for module in (connect_oauth, oauth_callback):
+                with self.subTest(module=module.__name__, host="localhost"):
+                    self.assertEqual(
+                        module.resolve_public_app_origin(
+                            HeaderMap({"host": "localhost:3000"})
+                        ),
+                        "http://localhost:3000",
+                    )
+                with self.subTest(module=module.__name__, host="ipv4"):
+                    self.assertEqual(
+                        module.resolve_public_app_origin(
+                            HeaderMap(
+                                {
+                                    "host": "127.0.0.1:5173",
+                                    "x-forwarded-proto": "http",
+                                }
+                            )
+                        ),
+                        "http://127.0.0.1:5173",
+                    )
+                for invalid_host in (
+                    "localhost.attacker.example",
+                    "cuevion.vercel.app",
+                    "app.cuevion.com",
+                ):
+                    with self.subTest(
+                        module=module.__name__,
+                        host=invalid_host,
+                    ):
+                        self.assertIsNone(
+                            module.resolve_public_app_origin(
+                                HeaderMap({"host": invalid_host})
+                            )
+                        )
+                with self.subTest(module=module.__name__, host="forwarded"):
+                    self.assertIsNone(
+                        module.resolve_public_app_origin(
+                            HeaderMap(
+                                {
+                                    "host": "internal.invalid",
+                                    "x-forwarded-host": "localhost:5173",
+                                    "x-forwarded-proto": "http",
+                                }
+                            )
+                        )
+                    )
+
+        preview_environment = {
+            "VERCEL_ENV": "preview",
+            "CUEVION_APP_URL": "https://explicit-preview.vercel.app",
+        }
+        with patch.dict(os.environ, preview_environment, clear=True):
+            for module in (connect_oauth, oauth_callback):
+                self.assertEqual(
+                    module.resolve_public_app_origin(HeaderMap()),
+                    "https://explicit-preview.vercel.app",
+                )
+
+        for preview_loopback in (
+            "https://localhost",
+            "https://127.0.0.1",
+            "https://[::1]",
+        ):
+            with patch.dict(
+                os.environ,
+                {
+                    "VERCEL_ENV": "preview",
+                    "CUEVION_APP_URL": preview_loopback,
+                },
+                clear=True,
+            ):
+                for module in (connect_oauth, oauth_callback):
+                    self.assertIsNone(
+                        module.resolve_public_app_origin(HeaderMap())
+                    )
+
+        missing_preview_origin_environment = {
+            "VERCEL_ENV": "preview",
+            "VERCEL_URL": "implicit-preview.vercel.app",
+            "GOOGLE_OAUTH_REDIRECT_URI": (
+                "https://implicit-preview.vercel.app/api/inboxes/oauth-callback"
+            ),
+        }
+        preview_headers = HeaderMap(
+            {
+                "host": "implicit-preview.vercel.app",
+                "x-forwarded-host": "localhost:3000",
+                "x-forwarded-proto": "https",
+            }
+        )
+        with patch.dict(
+            os.environ,
+            missing_preview_origin_environment,
+            clear=True,
+        ):
+            for module in (connect_oauth, oauth_callback):
+                self.assertIsNone(
+                    module.resolve_public_app_origin(preview_headers)
+                )
+
+        with patch.dict(
+            os.environ,
+            {"CUEVION_APP_URL": "https://unclassified.example"},
+            clear=True,
+        ):
+            for module in (connect_oauth, oauth_callback):
+                self.assertIsNone(
+                    module.resolve_public_app_origin(HeaderMap())
+                )
+
+    def test_invalid_production_origin_stops_callback_before_provider_or_storage(self):
+        state, _ = connect_oauth.build_signed_state(
+            "google",
+            "hint@gmail.com",
+            "owner@example.com",
+            "state-secret",
+            "main",
+        )
+        invalid_origins = (
+            ("missing", None),
+            ("http", "http://app.cuevion.com"),
+            ("path", "https://app.cuevion.com/callback"),
+            ("query", "https://app.cuevion.com?next=/"),
+            ("fragment", "https://app.cuevion.com#next"),
+            ("userinfo", "https://user@app.cuevion.com"),
+        )
+
+        for label, configured_origin in invalid_origins:
+            with self.subTest(label=label):
+                environment = self._production_oauth_environment(
+                    VERCEL_URL="cuevion.vercel.app",
+                )
+                if configured_origin is None:
+                    environment.pop("CUEVION_APP_URL")
+                else:
+                    environment["CUEVION_APP_URL"] = configured_origin
+                callback = self._google_callback(state)
+                callback.headers = HeaderMap(
+                    {
+                        "host": "app.cuevion.com",
+                        "x-forwarded-host": "cuevion.vercel.app",
+                        "x-forwarded-proto": "https",
+                    }
+                )
+
+                with patch.dict(os.environ, environment, clear=True), patch.object(
+                    oauth_callback,
+                    "_resolve_authenticated_member_request",
+                    return_value=(authenticated_member(), ()),
+                ), patch.object(
+                    oauth_callback,
+                    "_exchange_google_code",
+                ) as exchange, patch.object(
+                    oauth_callback,
+                    "_fetch_verified_google_identity",
+                ) as identity, patch.object(
+                    oauth_callback,
+                    "_prepare_gmail_managed_inbox_registration",
+                ) as preflight, patch.object(
+                    oauth_callback,
+                    "persist_google_token_record",
+                ) as token_store, patch.object(
+                    oauth_callback,
+                    "_register_gmail_managed_inbox_in_user_config",
+                ) as config_store:
+                    oauth_callback.handler.do_GET(callback)
+
+                exchange.assert_not_called()
+                identity.assert_not_called()
+                preflight.assert_not_called()
+                token_store.assert_not_called()
+                config_store.assert_not_called()
+                response = callback._send_callback_page.call_args.args[0]
+                self.assertEqual(response["status"], "error")
+                self.assertEqual(response["provider"], "google")
+                serialized_response = json.dumps(response)
+                for forbidden in (
+                    "provider-code",
+                    "state-secret",
+                    "code_verifier",
+                    "cuevion.vercel.app",
+                ):
+                    self.assertNotIn(forbidden, serialized_response)
+
+    def test_callback_bridge_uses_only_canonical_origin_and_fails_closed_without_it(self):
+        safe_payload = oauth_callback._build_callback_payload(
+            provider="google",
+            email="",
+            connection_status="connection_failed",
+            message="Google authentication could not be completed.",
+            connected=False,
+        )
+        hostile_headers = HeaderMap(
+            {
+                "host": "attacker.example",
+                "x-forwarded-host": "cuevion.vercel.app",
+                "x-forwarded-proto": "http",
+            }
+        )
+        configured_handler = FakeHandler(headers=hostile_headers)
+        with patch.dict(
+            os.environ,
+            self._production_oauth_environment(
+                VERCEL_URL="cuevion.vercel.app",
+            ),
+            clear=True,
+        ):
+            oauth_callback.handler._send_callback_page(
+                configured_handler,
+                safe_payload,
+            )
+
+        configured_page = configured_handler.wfile.getvalue().decode("utf-8")
+        self.assertEqual(configured_handler.status, 200)
+        self.assertIn(
+            ("Referrer-Policy", "no-referrer"),
+            configured_handler.response_headers,
+        )
+        self.assertIn('const redirectUrl = "https://app.cuevion.com/";', configured_page)
+        self.assertIn(
+            'window.history.replaceState(null, "", "/api/inboxes/oauth-callback")',
+            configured_page,
+        )
+        self.assertIn("window.localStorage.setItem", configured_page)
+        self.assertIn("window.location.replace(redirectUrl)", configured_page)
+        self.assertNotIn("attacker.example", configured_page)
+        self.assertNotIn("cuevion.vercel.app", configured_page)
+
+        unconfigured_handler = FakeHandler(headers=hostile_headers)
+        missing_origin_environment = self._production_oauth_environment(
+            VERCEL_URL="cuevion.vercel.app",
+        )
+        missing_origin_environment.pop("CUEVION_APP_URL")
+        with patch.dict(os.environ, missing_origin_environment, clear=True):
+            oauth_callback.handler._send_callback_page(
+                unconfigured_handler,
+                safe_payload,
+            )
+
+        unconfigured_page = unconfigured_handler.wfile.getvalue().decode("utf-8")
+        self.assertEqual(unconfigured_handler.status, 503)
+        self.assertIn(
+            ("Referrer-Policy", "no-referrer"),
+            unconfigured_handler.response_headers,
+        )
+        self.assertIn(
+            'window.history.replaceState(null, "", "/api/inboxes/oauth-callback")',
+            unconfigured_page,
+        )
+        self.assertNotIn("window.localStorage", unconfigured_page)
+        self.assertNotIn("window.location.replace", unconfigured_page)
+        self.assertNotIn("attacker.example", unconfigured_page)
+        self.assertNotIn("cuevion.vercel.app", unconfigured_page)
+
     def test_onboarding_oauth_start_requires_authoritative_selected_position(self):
         environment = {
             "CUEVION_OAUTH_STATE_SECRET": "state-secret",
             "GOOGLE_CLIENT_ID": "client-id",
             "GOOGLE_CLIENT_SECRET": "client-secret",
+            "CUEVION_APP_URL": "https://app.cuevion.com",
+            "VERCEL_ENV": "production",
             "GOOGLE_OAUTH_REDIRECT_URI": (
                 "https://app.example.com/api/inboxes/oauth-callback"
             ),
@@ -2227,6 +2702,8 @@ class OAuthAndConfigTests(unittest.TestCase):
         environment = {
             "GOOGLE_CLIENT_ID": "client",
             "GOOGLE_CLIENT_SECRET": "secret",
+            "CUEVION_APP_URL": "https://app.cuevion.com",
+            "VERCEL_ENV": "production",
             "GOOGLE_OAUTH_REDIRECT_URI": "https://example.test/callback",
             "CUEVION_OAUTH_STATE_SECRET": "state-secret",
         }
@@ -2345,6 +2822,8 @@ class OAuthAndConfigTests(unittest.TestCase):
         environment = {
             "GOOGLE_CLIENT_ID": "client",
             "GOOGLE_CLIENT_SECRET": "secret",
+            "CUEVION_APP_URL": "https://app.cuevion.com",
+            "VERCEL_ENV": "production",
             "GOOGLE_OAUTH_REDIRECT_URI": "https://example.test/callback",
             "CUEVION_OAUTH_STATE_SECRET": "state-secret",
         }
@@ -2609,6 +3088,8 @@ class OAuthAndConfigTests(unittest.TestCase):
         environment = {
             "GOOGLE_CLIENT_ID": "client",
             "GOOGLE_CLIENT_SECRET": "secret",
+            "CUEVION_APP_URL": "https://app.cuevion.com",
+            "VERCEL_ENV": "production",
             "GOOGLE_OAUTH_REDIRECT_URI": "https://example.test/callback",
             "CUEVION_OAUTH_STATE_SECRET": "state-secret",
         }
@@ -2672,6 +3153,8 @@ class OAuthAndConfigTests(unittest.TestCase):
         environment = {
             "GOOGLE_CLIENT_ID": "client",
             "GOOGLE_CLIENT_SECRET": "secret",
+            "CUEVION_APP_URL": "https://app.cuevion.com",
+            "VERCEL_ENV": "production",
             "GOOGLE_OAUTH_REDIRECT_URI": "https://example.test/callback",
             "CUEVION_OAUTH_STATE_SECRET": "state-secret",
         }
@@ -2861,6 +3344,8 @@ class OAuthAndConfigTests(unittest.TestCase):
             "CUEVION_OAUTH_STATE_SECRET": "state-secret",
             "GOOGLE_CLIENT_ID": "client-id",
             "GOOGLE_CLIENT_SECRET": "client-secret",
+            "CUEVION_APP_URL": "https://app.cuevion.com",
+            "VERCEL_ENV": "production",
             "GOOGLE_OAUTH_REDIRECT_URI": "https://app.example.com/api/inboxes/oauth-callback",
             "KV_REST_API_URL": "https://kv.example",
             "KV_REST_API_TOKEN": "kv-secret",

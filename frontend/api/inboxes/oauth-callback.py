@@ -12,11 +12,15 @@ from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qs, quote, urlencode, urlparse
+from urllib.parse import parse_qs, quote, urlencode, urlparse, urlsplit
 from urllib.request import Request, urlopen
 
 GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
 GOOGLE_USERINFO_ENDPOINT = "https://openidconnect.googleapis.com/v1/userinfo"
+OAUTH_CALLBACK_PATH = "/api/inboxes/oauth-callback"
+PUBLIC_APP_ORIGIN_ENV = "CUEVION_APP_URL"
+PRODUCTION_APP_ORIGIN = "https://app.cuevion.com"
+LOCAL_APP_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 MICROSOFT_TOKEN_ENDPOINT_TEMPLATE = (
     "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
 )
@@ -44,6 +48,132 @@ ONBOARDING_PRESET_INBOX_IDS = {
 ONBOARDING_CUSTOM_INBOX_ID_PATTERN = re.compile(
     r"^custom:[a-z0-9]+(?:-[a-z0-9]+)*$"
 )
+
+
+def _deployment_environment() -> str:
+    return os.getenv("VERCEL_ENV", "").strip().lower()
+
+
+def _is_production_environment() -> bool:
+    return _deployment_environment() == "production"
+
+
+def _normalize_public_app_origin(
+    value: str,
+    *,
+    production: bool,
+) -> str | None:
+    candidate = value.strip()
+    if (
+        not candidate
+        or "?" in candidate
+        or "#" in candidate
+        or "\\" in candidate
+        or any(character.isspace() for character in candidate)
+    ):
+        return None
+
+    if candidate.endswith("/"):
+        candidate = candidate[:-1]
+
+    try:
+        parsed = urlsplit(candidate)
+        port = parsed.port
+    except ValueError:
+        return None
+
+    hostname = parsed.hostname.lower() if isinstance(parsed.hostname, str) else ""
+    if (
+        not hostname
+        or "*" in hostname
+        or not parsed.netloc
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        return None
+
+    scheme = parsed.scheme.lower()
+    is_local = hostname in LOCAL_APP_HOSTS
+    if production:
+        if scheme != "https" or hostname != "app.cuevion.com" or port is not None:
+            return None
+    elif scheme != "https" and not (scheme == "http" and is_local):
+        return None
+
+    normalized_host = f"[{hostname}]" if ":" in hostname else hostname
+    normalized_netloc = (
+        f"{normalized_host}:{port}" if port is not None else normalized_host
+    )
+    if parsed.netloc.lower() != normalized_netloc.lower():
+        return None
+
+    normalized_origin = f"{scheme}://{normalized_netloc}"
+    if production and normalized_origin != PRODUCTION_APP_ORIGIN:
+        return None
+    return normalized_origin
+
+
+def resolve_public_app_origin(headers=None) -> str | None:
+    deployment_environment = _deployment_environment()
+    production = _is_production_environment()
+    configured_origin = os.getenv(PUBLIC_APP_ORIGIN_ENV, "")
+    if configured_origin.strip():
+        normalized_origin = _normalize_public_app_origin(
+            configured_origin,
+            production=production,
+        )
+        if not normalized_origin:
+            return None
+        if normalized_origin == PRODUCTION_APP_ORIGIN:
+            return normalized_origin
+
+        parsed_origin = urlsplit(normalized_origin)
+        if (
+            deployment_environment == "preview"
+            and parsed_origin.scheme == "https"
+            and parsed_origin.hostname not in LOCAL_APP_HOSTS
+        ):
+            return normalized_origin
+        if (
+            deployment_environment in {"", "development"}
+            and parsed_origin.hostname in LOCAL_APP_HOSTS
+        ):
+            return normalized_origin
+        return None
+
+    if deployment_environment not in {"", "development"} or headers is None:
+        return None
+
+    request_host = headers.get("host")
+    if not isinstance(request_host, str) or not request_host.strip():
+        return None
+
+    forwarded_protocol = headers.get("x-forwarded-proto")
+    protocol = (
+        forwarded_protocol.strip().lower()
+        if isinstance(forwarded_protocol, str) and forwarded_protocol.strip()
+        else "http"
+    )
+    local_origin = _normalize_public_app_origin(
+        f"{protocol}://{request_host.strip()}",
+        production=False,
+    )
+    if not local_origin:
+        return None
+    parsed_local_origin = urlsplit(local_origin)
+    if parsed_local_origin.hostname not in LOCAL_APP_HOSTS:
+        return None
+    return local_origin
+
+
+def resolve_google_redirect_uri(headers=None) -> str | None:
+    public_origin = resolve_public_app_origin(headers)
+    if not public_origin:
+        return None
+    return f"{public_origin}{OAUTH_CALLBACK_PATH}"
 
 CURRENT_DIR = Path(__file__).resolve().parent
 API_DIR = CURRENT_DIR.parent
@@ -1118,21 +1248,11 @@ def _upsert_gmail_managed_inbox_in_user_config(
 OAUTH_CALLBACK_RESULT_STORAGE_KEY = "cuevion-oauth-callback-result"
 
 
-def _build_app_redirect_url(headers) -> str:
-    configured_app_url = os.getenv("CUEVION_APP_URL", "").strip()
-    if configured_app_url:
-        return configured_app_url
-
-    host = (
-        headers.get("x-forwarded-host")
-        or headers.get("host")
-        or "localhost:3000"
-    )
-    protocol = headers.get("x-forwarded-proto")
-    if not protocol:
-        protocol = "http" if host.startswith(("localhost", "127.0.0.1")) else "https"
-
-    return f"{protocol}://{host}/"
+def _build_app_redirect_url(headers) -> str | None:
+    public_origin = resolve_public_app_origin(headers)
+    if not public_origin:
+        return None
+    return f"{public_origin}/"
 
 
 def _build_callback_payload(
@@ -1189,12 +1309,14 @@ def _build_callback_payload(
 
 def _render_callback_bridge_page(app_redirect_url: str, payload: dict) -> bytes:
     payload_json = json.dumps(payload).replace("</", "<\\/")
-    redirect_json = json.dumps(app_redirect_url)
+    redirect_json = json.dumps(app_redirect_url).replace("</", "<\\/")
     storage_key_json = json.dumps(OAUTH_CALLBACK_RESULT_STORAGE_KEY)
+    callback_path_json = json.dumps(OAUTH_CALLBACK_PATH)
     html = f"""<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
+    <meta name="referrer" content="no-referrer" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Cuevion Gmail Connection</title>
   </head>
@@ -1202,6 +1324,7 @@ def _render_callback_bridge_page(app_redirect_url: str, payload: dict) -> bytes:
     <script>
       const payload = {payload_json};
       const redirectUrl = {redirect_json};
+      window.history.replaceState(null, "", {callback_path_json});
       window.localStorage.setItem({storage_key_json}, JSON.stringify(payload));
       window.location.replace(redirectUrl);
     </script>
@@ -1210,6 +1333,25 @@ def _render_callback_bridge_page(app_redirect_url: str, payload: dict) -> bytes:
 </html>
 """
     return html.encode("utf-8")
+
+
+def _render_callback_configuration_error_page() -> bytes:
+    return b"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="referrer" content="no-referrer" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Cuevion Gmail Connection</title>
+  </head>
+  <body>
+    <script>
+      window.history.replaceState(null, "", "/api/inboxes/oauth-callback");
+    </script>
+    <p>Mailbox authentication could not be completed because the application is not configured safely.</p>
+  </body>
+</html>
+"""
 
 
 def _exchange_google_code(
@@ -1407,13 +1549,21 @@ class handler(BaseHTTPRequestHandler):
         *,
         set_cookies: tuple[str, ...] = (),
     ):
-        page = _render_callback_bridge_page(
-            _build_app_redirect_url(self.headers),
-            payload,
-        )
-        self.send_response(200)
+        app_redirect_url = getattr(self, "_callback_app_redirect_url", None)
+        if not isinstance(app_redirect_url, str) or not app_redirect_url:
+            app_redirect_url = _build_app_redirect_url(self.headers)
+
+        if app_redirect_url:
+            page = _render_callback_bridge_page(app_redirect_url, payload)
+            status_code = 200
+        else:
+            page = _render_callback_configuration_error_page()
+            status_code = 503
+
+        self.send_response(status_code)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
+        self.send_header("Referrer-Policy", "no-referrer")
         for cookie in set_cookies:
             self.send_header("Set-Cookie", cookie)
         self.send_header("Content-Length", str(len(page)))
@@ -1490,6 +1640,20 @@ class handler(BaseHTTPRequestHandler):
         state_owner_email = normalize_auth_email(member.email)
         inbox_position = state_payload.get("inboxPosition")
 
+        public_app_origin = resolve_public_app_origin(self.headers)
+        if not public_app_origin:
+            self._send_callback_page(
+                _build_callback_payload(
+                    provider=provider,
+                    email="",
+                    connection_status="connection_failed",
+                    message="Mailbox authentication could not be completed because the application is not configured safely.",
+                    connected=False,
+                )
+            )
+            return
+        self._callback_app_redirect_url = f"{public_app_origin}/"
+
         if oauth_error:
             self._send_callback_page(
                 _build_callback_payload(
@@ -1518,15 +1682,15 @@ class handler(BaseHTTPRequestHandler):
         if provider == "google":
             google_client_id = os.getenv("GOOGLE_CLIENT_ID", "").strip()
             google_client_secret = os.getenv("GOOGLE_CLIENT_SECRET", "").strip()
-            google_redirect_uri = os.getenv("GOOGLE_OAUTH_REDIRECT_URI", "").strip()
+            google_redirect_uri = f"{public_app_origin}{OAUTH_CALLBACK_PATH}"
 
-            if not google_client_id or not google_client_secret or not google_redirect_uri:
+            if not google_client_id or not google_client_secret:
                 self._send_callback_page(
                     _build_callback_payload(
                         provider=provider,
                         email=email,
                         connection_status="connection_failed",
-                        message="Google OAuth callback is not fully configured.",
+                        message="Google OAuth callback is not configured safely.",
                         connected=False,
                     )
                 )
