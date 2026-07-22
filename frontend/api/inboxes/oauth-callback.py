@@ -90,6 +90,9 @@ _MEMBER_AUTHORITY_UNAVAILABLE = object()
 GOOGLE_TOKEN_RECORD_ABSENT = "ABSENT"
 GOOGLE_TOKEN_RECORD_EXACT_OWNER_MATCH = "EXACT_OWNER_MATCH"
 GOOGLE_TOKEN_RECORD_LEGACY_OWNERLESS_MATCH = "LEGACY_OWNERLESS_MATCH"
+GOOGLE_TOKEN_RECORD_LEGACY_OWNER_EQUALS_MAILBOX_MATCH = (
+    "LEGACY_OWNER_EQUALS_MAILBOX_MATCH"
+)
 GOOGLE_TOKEN_RECORD_OWNER_MISMATCH = "OWNER_MISMATCH"
 GOOGLE_TOKEN_RECORD_PROVIDER_OR_EMAIL_MISMATCH = "PROVIDER_OR_EMAIL_MISMATCH"
 GOOGLE_TOKEN_RECORD_MALFORMED_OR_AMBIGUOUS = "MALFORMED_OR_AMBIGUOUS"
@@ -109,6 +112,12 @@ LEGACY_GOOGLE_TOKEN_RECORD_FIELDS = frozenset(
 )
 CURRENT_GOOGLE_TOKEN_RECORD_FIELDS = frozenset(
     {*LEGACY_GOOGLE_TOKEN_RECORD_FIELDS, "owner_email"}
+)
+ADOPTABLE_LEGACY_GOOGLE_TOKEN_RECORD_MATCHES = frozenset(
+    {
+        GOOGLE_TOKEN_RECORD_LEGACY_OWNERLESS_MATCH,
+        GOOGLE_TOKEN_RECORD_LEGACY_OWNER_EQUALS_MAILBOX_MATCH,
+    }
 )
 GOOGLE_TOKEN_OWNER_IDENTITY_FIELDS = frozenset(
     {"provider", "email", "owner_email"}
@@ -674,6 +683,31 @@ def _has_supported_current_google_token_record_shape(record: dict) -> bool:
     return True
 
 
+def _is_legacy_owner_equals_mailbox_google_token_record(
+    record: dict,
+    *,
+    normalized_email: str,
+    normalized_owner_email: str,
+) -> bool:
+    existing_owner = record.get("owner_email")
+    if not isinstance(existing_owner, str):
+        return False
+
+    normalized_existing_owner = normalize_auth_email(existing_owner)
+    return (
+        _is_canonical_token_email(normalized_email)
+        and _is_canonical_token_email(normalized_owner_email)
+        and normalized_email != normalized_owner_email
+        and normalized_existing_owner == normalized_email
+        and _is_canonical_token_email(normalized_existing_owner)
+        and record.get("email") == normalized_email
+        and _has_supported_google_token_record_shape(
+            record,
+            CURRENT_GOOGLE_TOKEN_RECORD_FIELDS,
+        )
+    )
+
+
 def _classify_existing_google_token_record(
     existing_record,
     *,
@@ -698,13 +732,25 @@ def _classify_existing_google_token_record(
 
     if "owner_email" in existing_record:
         existing_owner = existing_record["owner_email"]
-        if not _is_canonical_token_email(existing_owner):
+        owner_is_canonical = _is_canonical_token_email(existing_owner)
+        current_shape_is_supported = (
+            _has_supported_current_google_token_record_shape(existing_record)
+        )
+        if (
+            owner_is_canonical
+            and current_shape_is_supported
+            and existing_owner == normalized_owner_email
+        ):
+            return GOOGLE_TOKEN_RECORD_EXACT_OWNER_MATCH
+        if _is_legacy_owner_equals_mailbox_google_token_record(
+            existing_record,
+            normalized_email=normalized_email,
+            normalized_owner_email=normalized_owner_email,
+        ):
+            return GOOGLE_TOKEN_RECORD_LEGACY_OWNER_EQUALS_MAILBOX_MATCH
+        if not owner_is_canonical or not current_shape_is_supported:
             return GOOGLE_TOKEN_RECORD_MALFORMED_OR_AMBIGUOUS
-        if not _has_supported_current_google_token_record_shape(existing_record):
-            return GOOGLE_TOKEN_RECORD_MALFORMED_OR_AMBIGUOUS
-        if existing_owner != normalized_owner_email:
-            return GOOGLE_TOKEN_RECORD_OWNER_MISMATCH
-        return GOOGLE_TOKEN_RECORD_EXACT_OWNER_MATCH
+        return GOOGLE_TOKEN_RECORD_OWNER_MISMATCH
 
     if _has_supported_google_token_record_shape(
         existing_record,
@@ -1117,16 +1163,21 @@ def persist_google_token_record(
         }
 
     if (
-        record_classification == GOOGLE_TOKEN_RECORD_LEGACY_OWNERLESS_MATCH
+        record_classification in ADOPTABLE_LEGACY_GOOGLE_TOKEN_RECORD_MATCHES
         and durable_config is None
     ):
         return None, {
             "code": "token_owner_conflict",
             "message": "This Google mailbox is already linked to another account owner.",
-            GMAIL_CALLBACK_FAILURE_CODE_FIELD: "token_owner_conflict",
+            GMAIL_CALLBACK_FAILURE_CODE_FIELD: (
+                "token_legacy_owner_equals_mailbox"
+                if record_classification
+                == GOOGLE_TOKEN_RECORD_LEGACY_OWNER_EQUALS_MAILBOX_MATCH
+                else "token_owner_conflict"
+            ),
         }
 
-    if record_classification == GOOGLE_TOKEN_RECORD_LEGACY_OWNERLESS_MATCH:
+    if record_classification in ADOPTABLE_LEGACY_GOOGLE_TOKEN_RECORD_MATCHES:
         refresh_token = token_payload.get("refresh_token")
         if not isinstance(refresh_token, str) or not refresh_token.strip():
             return None, {
@@ -1147,7 +1198,7 @@ def persist_google_token_record(
     )
 
     if durable_config:
-        if record_classification == GOOGLE_TOKEN_RECORD_LEGACY_OWNERLESS_MATCH:
+        if record_classification in ADOPTABLE_LEGACY_GOOGLE_TOKEN_RECORD_MATCHES:
             persisted_record, error = _adopt_legacy_durable_record(
                 durable_config,
                 store_key,
@@ -1191,7 +1242,8 @@ def persist_google_token_record(
         or not isinstance(persisted_record.get("access_token"), str)
         or not persisted_record.get("access_token")
         or (
-            record_classification == GOOGLE_TOKEN_RECORD_LEGACY_OWNERLESS_MATCH
+            record_classification
+            in ADOPTABLE_LEGACY_GOOGLE_TOKEN_RECORD_MATCHES
             and persisted_record != next_record
         )
     ):
