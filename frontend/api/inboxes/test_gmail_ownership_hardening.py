@@ -103,6 +103,23 @@ def token(**overrides):
     }
 
 
+def durable_google_token(**overrides):
+    return {
+        "provider": "google",
+        "email": "verified@gmail.com",
+        "owner_email": "owner@example.com",
+        "access_token": "old-access-token",
+        "refresh_token": "old-refresh-token",
+        "token_type": "Bearer",
+        "scope": "legacy-scope",
+        "expires_at": "2025-01-01T01:00:00+00:00",
+        "expires_in": 3600,
+        "updated_at": "2025-01-01T00:00:00+00:00",
+        "created_at": "2025-01-01T00:00:00+00:00",
+        **overrides,
+    }
+
+
 class HeaderMap(dict):
     def raw_items(self):
         return iter(list(self.items()))
@@ -2438,6 +2455,9 @@ class OAuthAndConfigTests(unittest.TestCase):
         authorization_code = "CANARY_AUTHORIZATION_CODE"
         access_token = "CANARY_ACCESS_TOKEN"
         refresh_token = "CANARY_REFRESH_TOKEN"
+        legacy_access_token = "CANARY_LEGACY_ACCESS_TOKEN_IN_RECORD"
+        legacy_refresh_token = "CANARY_LEGACY_REFRESH_TOKEN_IN_RECORD"
+        token_record_key = "CANARY_DURABLE_TOKEN_RECORD_KEY"
         client_secret = "CANARY_GOOGLE_CLIENT_SECRET"
         request_cookie = "CANARY_REQUEST_COOKIE"
         provider_body = "CANARY_PROVIDER_RESPONSE_BODY"
@@ -2532,7 +2552,16 @@ class OAuthAndConfigTests(unittest.TestCase):
         ), patch.object(
             oauth_callback,
             "persist_google_token_record",
-            return_value=({"_storage_durable": True}, None),
+            return_value=(
+                {
+                    "_storage_durable": True,
+                    "access_token": legacy_access_token,
+                    "refresh_token": legacy_refresh_token,
+                    "owner_email": owner_email,
+                    "_store_key": token_record_key,
+                },
+                None,
+            ),
         ), patch.object(
             oauth_callback,
             "_register_gmail_managed_inbox_in_user_config",
@@ -2566,6 +2595,9 @@ class OAuthAndConfigTests(unittest.TestCase):
             verifier,
             access_token,
             refresh_token,
+            legacy_access_token,
+            legacy_refresh_token,
+            token_record_key,
             request_cookie,
             client_secret,
             state_secret,
@@ -3711,12 +3743,168 @@ class OAuthAndConfigTests(unittest.TestCase):
         self.assertNotIn("connectionStatus", payload)
         self.assertNotIn("displayName", payload)
 
-    def test_existing_durable_google_token_requires_exact_owner_binding_before_write(self):
+    def test_existing_google_token_record_classification_is_exact_and_fail_closed(self):
+        current_record = durable_google_token()
+        legacy_record = {
+            key: value
+            for key, value in current_record.items()
+            if key != "owner_email"
+        }
+        cases = (
+            ("absent", None, oauth_callback.GOOGLE_TOKEN_RECORD_ABSENT),
+            (
+                "exact_owner",
+                current_record,
+                oauth_callback.GOOGLE_TOKEN_RECORD_EXACT_OWNER_MATCH,
+            ),
+            (
+                "exact_owner_existing_minimal_shape",
+                {
+                    "provider": "google",
+                    "email": "verified@gmail.com",
+                    "owner_email": "owner@example.com",
+                    "access_token": "old-access-token",
+                    "refresh_token": "old-refresh-token",
+                    "created_at": "2025-01-01T00:00:00+00:00",
+                },
+                oauth_callback.GOOGLE_TOKEN_RECORD_EXACT_OWNER_MATCH,
+            ),
+            (
+                "legacy_ownerless",
+                legacy_record,
+                oauth_callback.GOOGLE_TOKEN_RECORD_LEGACY_OWNERLESS_MATCH,
+            ),
+            (
+                "wrong_owner",
+                {**current_record, "owner_email": "other@example.com"},
+                oauth_callback.GOOGLE_TOKEN_RECORD_OWNER_MISMATCH,
+            ),
+            (
+                "wrong_provider",
+                {**legacy_record, "provider": "microsoft"},
+                oauth_callback.GOOGLE_TOKEN_RECORD_PROVIDER_OR_EMAIL_MISMATCH,
+            ),
+            (
+                "wrong_email",
+                {**legacy_record, "email": "other@gmail.com"},
+                oauth_callback.GOOGLE_TOKEN_RECORD_PROVIDER_OR_EMAIL_MISMATCH,
+            ),
+        )
+
+        for label, record, expected in cases:
+            with self.subTest(label=label):
+                classification = (
+                    oauth_callback._classify_existing_google_token_record(
+                        record,
+                        normalized_email="verified@gmail.com",
+                        normalized_owner_email="owner@example.com",
+                    )
+                )
+            self.assertEqual(classification, expected)
+
+        ambiguous_records = (
+            ("non_dict", [legacy_record]),
+            ("owner_null", {**current_record, "owner_email": None}),
+            ("owner_empty", {**current_record, "owner_email": ""}),
+            ("owner_whitespace", {**current_record, "owner_email": "   "}),
+            ("owner_wrong_type", {**current_record, "owner_email": []}),
+            (
+                "owner_noncanonical",
+                {**current_record, "owner_email": "Owner@Example.com"},
+            ),
+            ("partial_owner", {**legacy_record, "owner": "owner@example.com"}),
+            (
+                "ambiguous_owner_binding",
+                {**legacy_record, "owner_binding": "CANARY_OWNER_BINDING"},
+            ),
+            (
+                "matching_owner_with_conflicting_owner_identity",
+                {**current_record, "ownerEmail": "other@example.com"},
+            ),
+            (
+                "matching_owner_with_malformed_refresh",
+                {**current_record, "refresh_token": []},
+            ),
+            ("missing_access", {key: value for key, value in legacy_record.items() if key != "access_token"}),
+            ("empty_access", {**legacy_record, "access_token": ""}),
+            ("invalid_expiry", {**legacy_record, "expires_in": True}),
+            (
+                "expiry_missing_timestamp",
+                {**legacy_record, "expires_at": None, "expires_in": 3600},
+            ),
+            (
+                "expiry_missing_duration",
+                {
+                    **legacy_record,
+                    "expires_at": "2025-01-01T01:00:00+00:00",
+                    "expires_in": None,
+                },
+            ),
+            (
+                "invalid_expires_at",
+                {**legacy_record, "expires_at": "not-a-timestamp"},
+            ),
+            (
+                "invalid_created_at",
+                {**legacy_record, "created_at": "not-a-timestamp"},
+            ),
+            (
+                "invalid_updated_at",
+                {**legacy_record, "updated_at": "not-a-timestamp"},
+            ),
+            ("noncanonical_email", {**legacy_record, "email": "Verified@gmail.com"}),
+        )
+        for label, record in ambiguous_records:
+            with self.subTest(label=label):
+                classification = (
+                    oauth_callback._classify_existing_google_token_record(
+                        record,
+                        normalized_email="verified@gmail.com",
+                        normalized_owner_email="owner@example.com",
+                    )
+                )
+            self.assertEqual(
+                classification,
+                oauth_callback.GOOGLE_TOKEN_RECORD_MALFORMED_OR_AMBIGUOUS,
+            )
+
+    def test_absent_and_exact_owner_google_tokens_keep_existing_paths(self):
         durable_config = {
             "backend": "vercel_kv_rest",
             "rest_url": "https://kv.example",
             "rest_token": "secret",
         }
+
+        def successful_write(_config, _store_key, record):
+            return dict(record), None
+
+        with patch.object(
+            oauth_callback,
+            "_resolve_durable_store_config",
+            return_value=durable_config,
+        ), patch.object(
+            oauth_callback,
+            "_read_durable_record",
+            return_value=(None, None),
+        ), patch.object(
+            oauth_callback,
+            "_write_durable_record",
+            side_effect=successful_write,
+        ) as absent_write:
+            absent_persisted, absent_error = (
+                oauth_callback.persist_google_token_record(
+                    email="VERIFIED@gmail.com",
+                    owner_email="OWNER@example.com",
+                    token_payload={"access_token": "first-access-token"},
+                )
+            )
+
+        self.assertIsNone(absent_error)
+        absent_write.assert_called_once()
+        self.assertEqual(absent_persisted["access_token"], "first-access-token")
+        self.assertIsNone(absent_persisted["refresh_token"])
+        self.assertEqual(absent_persisted["owner_email"], "owner@example.com")
+
         valid_existing = {
             "provider": "google",
             "email": "verified@gmail.com",
@@ -3725,39 +3913,6 @@ class OAuthAndConfigTests(unittest.TestCase):
             "refresh_token": "old-refresh-token",
             "created_at": "2025-01-01T00:00:00+00:00",
         }
-        invalid_existing_records = (
-            ("missing_owner", {key: value for key, value in valid_existing.items() if key != "owner_email"}),
-            ("wrong_owner", {**valid_existing, "owner_email": "other@example.com"}),
-            ("wrong_provider", {**valid_existing, "provider": "microsoft"}),
-            ("wrong_email", {**valid_existing, "email": "other@gmail.com"}),
-        )
-
-        for label, existing_record in invalid_existing_records:
-            with self.subTest(label=label), patch.object(
-                oauth_callback,
-                "_resolve_durable_store_config",
-                return_value=durable_config,
-            ), patch.object(
-                oauth_callback,
-                "_read_durable_record",
-                return_value=(existing_record, None),
-            ), patch.object(
-                oauth_callback,
-                "_write_durable_record",
-            ) as durable_write:
-                persisted, error = oauth_callback.persist_google_token_record(
-                    email="VERIFIED@gmail.com",
-                    owner_email="OWNER@example.com",
-                    token_payload={"access_token": "new-access-token"},
-                )
-
-            self.assertIsNone(persisted)
-            self.assertEqual(error["code"], "token_owner_conflict")
-            durable_write.assert_not_called()
-
-        def successful_write(_config, _store_key, record):
-            return dict(record), None
-
         with patch.object(
             oauth_callback,
             "_resolve_durable_store_config",
@@ -3770,21 +3925,693 @@ class OAuthAndConfigTests(unittest.TestCase):
             oauth_callback,
             "_write_durable_record",
             side_effect=successful_write,
-        ) as durable_write:
-            persisted, error = oauth_callback.persist_google_token_record(
-                email="VERIFIED@gmail.com",
-                owner_email="OWNER@example.com",
-                token_payload={"access_token": "new-access-token"},
+        ) as owner_write:
+            owner_persisted, owner_error = (
+                oauth_callback.persist_google_token_record(
+                    email="VERIFIED@gmail.com",
+                    owner_email="OWNER@example.com",
+                    token_payload={"access_token": "new-access-token"},
+                )
             )
 
-        self.assertIsNone(error)
-        durable_write.assert_called_once()
-        self.assertEqual(persisted["provider"], "google")
-        self.assertEqual(persisted["email"], "verified@gmail.com")
-        self.assertEqual(persisted["owner_email"], "owner@example.com")
-        self.assertEqual(persisted["access_token"], "new-access-token")
-        self.assertEqual(persisted["refresh_token"], "old-refresh-token")
-        self.assertTrue(persisted["_storage_durable"])
+        self.assertIsNone(owner_error)
+        owner_write.assert_called_once()
+        self.assertEqual(owner_persisted["provider"], "google")
+        self.assertEqual(owner_persisted["email"], "verified@gmail.com")
+        self.assertEqual(owner_persisted["owner_email"], "owner@example.com")
+        self.assertEqual(owner_persisted["access_token"], "new-access-token")
+        self.assertEqual(owner_persisted["refresh_token"], "old-refresh-token")
+        self.assertTrue(owner_persisted["_storage_durable"])
+
+    def test_ambiguous_or_mismatched_google_tokens_never_reach_write(self):
+        durable_config = {
+            "backend": "vercel_kv_rest",
+            "rest_url": "https://kv.example",
+            "rest_token": "secret",
+        }
+        current_record = durable_google_token(
+            access_token="CANARY_OLD_ACCESS_TOKEN",
+            refresh_token="CANARY_OLD_REFRESH_TOKEN",
+        )
+        legacy_record = {
+            key: value
+            for key, value in current_record.items()
+            if key != "owner_email"
+        }
+        invalid_existing_records = (
+            ("wrong_owner", {**current_record, "owner_email": "other@example.com"}),
+            ("owner_null", {**current_record, "owner_email": None}),
+            ("owner_empty", {**current_record, "owner_email": ""}),
+            ("owner_whitespace", {**current_record, "owner_email": "   "}),
+            ("owner_wrong_type", {**current_record, "owner_email": []}),
+            ("partial_owner", {**legacy_record, "ownerEmail": "owner@example.com"}),
+            (
+                "matching_owner_with_conflicting_owner_identity",
+                {**current_record, "ownerEmail": "other@example.com"},
+            ),
+            (
+                "matching_owner_with_malformed_refresh",
+                {**current_record, "refresh_token": []},
+            ),
+            ("wrong_provider", {**legacy_record, "provider": "microsoft"}),
+            ("wrong_email", {**legacy_record, "email": "other@gmail.com"}),
+            ("malformed_record", {**legacy_record, "access_token": None}),
+            ("non_dict_record", [legacy_record]),
+        )
+
+        for label, existing_record in invalid_existing_records:
+            snapshot = json.dumps(existing_record, sort_keys=True)
+            with self.subTest(label=label), patch.object(
+                oauth_callback,
+                "_resolve_durable_store_config",
+                return_value=durable_config,
+            ), patch.object(
+                oauth_callback,
+                "_read_durable_record",
+                return_value=(existing_record, None),
+            ), patch.object(
+                oauth_callback,
+                "_write_durable_record",
+            ) as durable_write, patch.object(
+                oauth_callback,
+                "_adopt_legacy_durable_record",
+            ) as legacy_write:
+                persisted, error = oauth_callback.persist_google_token_record(
+                    email="VERIFIED@gmail.com",
+                    owner_email="OWNER@example.com",
+                    token_payload={
+                        "access_token": "CANARY_NEW_ACCESS_TOKEN",
+                        "refresh_token": "CANARY_NEW_REFRESH_TOKEN",
+                    },
+                )
+
+            self.assertIsNone(persisted)
+            self.assertEqual(error["code"], "token_owner_conflict")
+            self.assertEqual(
+                error[oauth_callback.GMAIL_CALLBACK_FAILURE_CODE_FIELD],
+                "token_owner_conflict",
+            )
+            durable_write.assert_not_called()
+            legacy_write.assert_not_called()
+            self.assertEqual(json.dumps(existing_record, sort_keys=True), snapshot)
+
+    def test_legacy_ownerless_token_adoption_uses_only_fresh_credentials_and_is_one_shot(self):
+        durable_config = {
+            "backend": "vercel_kv_rest",
+            "rest_url": "https://kv.example",
+            "rest_token": "secret",
+        }
+        old_values = {
+            "access_token": "CANARY_LEGACY_ACCESS_TOKEN",
+            "refresh_token": "CANARY_LEGACY_REFRESH_TOKEN",
+            "token_type": "CANARY_LEGACY_TOKEN_TYPE",
+            "scope": "CANARY_LEGACY_SCOPE",
+            "expires_at": "2001-01-01T00:00:00+00:00",
+            "expires_in": 111,
+            "updated_at": "2000-01-01T00:00:00+00:00",
+            "created_at": "2000-01-01T00:00:00+00:00",
+        }
+        legacy_record = durable_google_token(**old_values)
+        legacy_record.pop("owner_email")
+        store_key = oauth_callback._build_store_key("verified@gmail.com")
+        legacy_raw_value = json.dumps(legacy_record, indent=2, sort_keys=False)
+        stored_values = {store_key: legacy_raw_value}
+        requests = []
+        writes = []
+
+        encoded_store_key = oauth_callback.quote(store_key, safe="")
+        get_path = f"/get/{encoded_store_key}"
+        set_path = (
+            f"/set/{encoded_store_key}?EX="
+            f"{oauth_callback.GMAIL_OAUTH_TOKEN_TTL_SECONDS}"
+        )
+
+        def durable_transport(_config, method, path, body=None):
+            requests.append((method, path))
+            if method == "GET":
+                self.assertEqual(path, get_path)
+                return {"result": stored_values.get(store_key)}, None
+            self.assertEqual(method, "POST")
+            if path == "":
+                command = json.loads(body)
+                self.assertEqual(command[0], "EVAL")
+                self.assertEqual(
+                    command[1],
+                    oauth_callback.LEGACY_GOOGLE_TOKEN_ADOPTION_SCRIPT,
+                )
+                self.assertEqual(command[2:4], [1, store_key])
+                self.assertEqual(command[6], oauth_callback.GMAIL_OAUTH_TOKEN_TTL_SECONDS)
+                current_value = stored_values.get(store_key)
+                if current_value != command[4]:
+                    return {"result": 0}, None
+                record = json.loads(command[5])
+                writes.append(record)
+                stored_values[store_key] = command[5]
+                return {"result": 1}, None
+            self.assertEqual(path, set_path)
+            record = json.loads(body)
+            writes.append(record)
+            stored_values[store_key] = body.decode("utf-8")
+            return {"result": "OK"}, None
+
+        first_payload = {
+            "access_token": "CANARY_FRESH_ACCESS_TOKEN_ONE",
+            "refresh_token": "CANARY_FRESH_REFRESH_TOKEN_ONE",
+            "token_type": "FreshBearer",
+            "scope": "fresh-scope",
+            "expires_in": 7200,
+        }
+        second_payload = {"access_token": "CANARY_FRESH_ACCESS_TOKEN_TWO"}
+        with patch.object(
+            oauth_callback,
+            "_resolve_durable_store_config",
+            return_value=durable_config,
+        ), patch.object(
+            oauth_callback,
+            "_perform_rest_request",
+            side_effect=durable_transport,
+        ), patch.object(oauth_callback, "urlopen") as external_call:
+            first_persisted, first_error = (
+                oauth_callback.persist_google_token_record(
+                    email="VERIFIED@gmail.com",
+                    owner_email="OWNER@example.com",
+                    token_payload=first_payload,
+                )
+            )
+            second_persisted, second_error = (
+                oauth_callback.persist_google_token_record(
+                    email="VERIFIED@gmail.com",
+                    owner_email="OWNER@example.com",
+                    token_payload=second_payload,
+                )
+            )
+
+        self.assertIsNone(first_error)
+        self.assertIsNone(second_error)
+        external_call.assert_not_called()
+        self.assertEqual(
+            requests,
+            [
+                ("GET", get_path),
+                ("GET", get_path),
+                ("POST", ""),
+                ("GET", get_path),
+                ("GET", get_path),
+                ("POST", set_path),
+                ("GET", get_path),
+            ],
+        )
+        self.assertEqual(len(stored_values), 1)
+        self.assertEqual(len(writes), 2)
+
+        adopted = writes[0]
+        self.assertEqual(adopted["provider"], "google")
+        self.assertEqual(adopted["email"], "verified@gmail.com")
+        self.assertEqual(adopted["owner_email"], "owner@example.com")
+        self.assertEqual(adopted["access_token"], first_payload["access_token"])
+        self.assertEqual(adopted["refresh_token"], first_payload["refresh_token"])
+        self.assertEqual(adopted["token_type"], first_payload["token_type"])
+        self.assertEqual(adopted["scope"], first_payload["scope"])
+        self.assertEqual(adopted["expires_in"], first_payload["expires_in"])
+        self.assertNotEqual(adopted["expires_at"], old_values["expires_at"])
+        self.assertNotEqual(adopted["created_at"], old_values["created_at"])
+        self.assertNotEqual(adopted["updated_at"], old_values["updated_at"])
+        self.assertEqual(
+            {key for key in adopted if key != "owner_email"},
+            set(oauth_callback.LEGACY_GOOGLE_TOKEN_RECORD_FIELDS),
+        )
+        serialized_adopted = json.dumps(adopted, sort_keys=True)
+        for old_canary in (
+            old_values["access_token"],
+            old_values["refresh_token"],
+            old_values["token_type"],
+            old_values["scope"],
+            old_values["expires_at"],
+            old_values["created_at"],
+            old_values["updated_at"],
+        ):
+            self.assertNotIn(str(old_canary), serialized_adopted)
+
+        self.assertEqual(first_persisted["owner_email"], "owner@example.com")
+        self.assertTrue(first_persisted["_storage_durable"])
+        self.assertEqual(writes[1]["access_token"], second_payload["access_token"])
+        self.assertEqual(writes[1]["refresh_token"], first_payload["refresh_token"])
+        self.assertNotEqual(writes[1]["refresh_token"], old_values["refresh_token"])
+        self.assertEqual(second_persisted["owner_email"], "owner@example.com")
+
+    def test_legacy_adoption_atomically_refuses_a_concurrent_owner_change(self):
+        legacy_record = durable_google_token(
+            access_token="CANARY_RACE_LEGACY_ACCESS",
+            refresh_token="CANARY_RACE_LEGACY_REFRESH",
+        )
+        legacy_record.pop("owner_email")
+        competing_record = durable_google_token(
+            owner_email="other-owner@example.com",
+            access_token="CANARY_RACE_COMPETING_ACCESS",
+            refresh_token="CANARY_RACE_COMPETING_REFRESH",
+        )
+        store_key = oauth_callback._build_store_key("verified@gmail.com")
+        stored_value = json.dumps(legacy_record, indent=2, sort_keys=False)
+        requests = []
+        set_count = 0
+        get_count = 0
+
+        def durable_transport(_config, method, path, body=None):
+            nonlocal stored_value, set_count, get_count
+            requests.append((method, path))
+            if method == "GET":
+                get_count += 1
+                result = stored_value
+                if get_count == 2:
+                    stored_value = json.dumps(
+                        competing_record,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    )
+                return {"result": result}, None
+
+            self.assertEqual((method, path), ("POST", ""))
+            command = json.loads(body)
+            self.assertEqual(command[0], "EVAL")
+            self.assertEqual(command[3], store_key)
+            if stored_value != command[4]:
+                return {"result": 0}, None
+            set_count += 1
+            stored_value = command[5]
+            return {"result": 1}, None
+
+        with patch.object(
+            oauth_callback,
+            "_resolve_durable_store_config",
+            return_value={
+                "backend": "vercel_kv_rest",
+                "rest_url": "https://kv.example",
+                "rest_token": "secret",
+            },
+        ), patch.object(
+            oauth_callback,
+            "_perform_rest_request",
+            side_effect=durable_transport,
+        ), patch.object(oauth_callback, "urlopen") as external_call:
+            persisted, error = oauth_callback.persist_google_token_record(
+                email="verified@gmail.com",
+                owner_email="owner@example.com",
+                token_payload={
+                    "access_token": "CANARY_RACE_FRESH_ACCESS",
+                    "refresh_token": "CANARY_RACE_FRESH_REFRESH",
+                },
+            )
+
+        self.assertIsNone(persisted)
+        self.assertEqual(error["code"], "token_owner_conflict")
+        self.assertEqual(
+            error[oauth_callback.GMAIL_CALLBACK_FAILURE_CODE_FIELD],
+            "token_owner_conflict",
+        )
+        self.assertEqual(set_count, 0)
+        self.assertEqual(json.loads(stored_value), competing_record)
+        self.assertEqual(
+            [method for method, _path in requests],
+            ["GET", "GET", "POST"],
+        )
+        external_call.assert_not_called()
+
+    def test_legacy_ownerless_adoption_requires_fresh_refresh_token(self):
+        legacy_record = durable_google_token()
+        legacy_record.pop("owner_email")
+        with patch.object(
+            oauth_callback,
+            "_resolve_durable_store_config",
+            return_value={
+                "backend": "vercel_kv_rest",
+                "rest_url": "https://kv.example",
+                "rest_token": "secret",
+            },
+        ), patch.object(
+            oauth_callback,
+            "_read_durable_record",
+            return_value=(legacy_record, None),
+        ), patch.object(
+            oauth_callback,
+            "_write_durable_record",
+        ) as durable_write, patch.object(
+            oauth_callback,
+            "_adopt_legacy_durable_record",
+        ) as legacy_write:
+            persisted, error = oauth_callback.persist_google_token_record(
+                email="verified@gmail.com",
+                owner_email="owner@example.com",
+                token_payload={"access_token": "CANARY_FRESH_ACCESS_ONLY"},
+            )
+
+        self.assertIsNone(persisted)
+        self.assertEqual(error["code"], "invalid_token_payload")
+        self.assertEqual(
+            error[oauth_callback.GMAIL_CALLBACK_FAILURE_CODE_FIELD],
+            "token_payload_invalid",
+        )
+        durable_write.assert_not_called()
+        legacy_write.assert_not_called()
+
+        store_key = oauth_callback._build_store_key("verified@gmail.com")
+        with patch.object(
+            oauth_callback,
+            "_resolve_durable_store_config",
+            return_value=None,
+        ), patch.object(
+            oauth_callback,
+            "_read_runtime_store",
+            return_value={store_key: legacy_record},
+        ), patch.object(
+            oauth_callback,
+            "_persist_runtime_record",
+        ) as runtime_write:
+            runtime_persisted, runtime_error = (
+                oauth_callback.persist_google_token_record(
+                    email="verified@gmail.com",
+                    owner_email="owner@example.com",
+                    token_payload={
+                        "access_token": "CANARY_RUNTIME_ACCESS",
+                        "refresh_token": "CANARY_RUNTIME_REFRESH",
+                    },
+                )
+            )
+
+        self.assertIsNone(runtime_persisted)
+        self.assertEqual(runtime_error["code"], "token_owner_conflict")
+        runtime_write.assert_not_called()
+
+    def test_callback_adopts_legacy_token_before_mailbox_registration(self):
+        owner_email = "owner@example.com"
+        fresh_access = "CANARY_CALLBACK_FRESH_ACCESS"
+        fresh_refresh = "CANARY_CALLBACK_FRESH_REFRESH"
+        legacy_record = durable_google_token(
+            access_token="CANARY_CALLBACK_LEGACY_ACCESS",
+            refresh_token="CANARY_CALLBACK_LEGACY_REFRESH",
+        )
+        legacy_record.pop("owner_email")
+        stored_record = json.loads(json.dumps(legacy_record))
+        events = []
+        state, _ = connect_oauth.build_signed_state(
+            "google",
+            "hint@gmail.com",
+            owner_email,
+            "state-secret",
+            "main",
+        )
+        callback = self._google_callback(state)
+        logger = Mock()
+
+        def preflight(*_args, **_kwargs):
+            events.append("preflight")
+            return {"prepared": True}, None
+
+        def write_token(_config, _store_key, existing_record, record):
+            nonlocal stored_record
+            events.append("token_write_and_readback")
+            self.assertEqual(existing_record, legacy_record)
+            stored_record = json.loads(json.dumps(record))
+            return json.loads(json.dumps(stored_record)), None
+
+        def register_mailbox(*_args, **_kwargs):
+            events.append("mailbox_registration")
+            self.assertEqual(stored_record["provider"], "google")
+            self.assertEqual(stored_record["email"], "verified@gmail.com")
+            self.assertEqual(stored_record["owner_email"], owner_email)
+            self.assertEqual(stored_record["access_token"], fresh_access)
+            self.assertEqual(stored_record["refresh_token"], fresh_refresh)
+            return {"id": "gmail-verified"}, None
+
+        with patch.dict(
+            oauth_callback.os.environ,
+            self._production_oauth_environment(),
+            clear=True,
+        ), patch.object(
+            oauth_callback,
+            "_GMAIL_CALLBACK_LOGGER",
+            logger,
+        ), patch.object(
+            oauth_callback,
+            "_resolve_authenticated_member_request",
+            return_value=(authenticated_member(owner_email), ()),
+        ), patch.object(
+            oauth_callback,
+            "_exchange_google_code",
+            return_value=(
+                {
+                    "access_token": fresh_access,
+                    "refresh_token": fresh_refresh,
+                    "expires_in": 3600,
+                },
+                None,
+            ),
+        ), patch.object(
+            oauth_callback,
+            "_fetch_verified_google_identity",
+            return_value=(
+                {"email": "verified@gmail.com", "display_name": "Verified"},
+                None,
+            ),
+        ), patch.object(
+            oauth_callback,
+            "_prepare_gmail_managed_inbox_registration",
+            side_effect=preflight,
+        ), patch.object(
+            oauth_callback,
+            "_resolve_durable_store_config",
+            return_value={
+                "backend": "vercel_kv_rest",
+                "rest_url": "https://kv.example",
+                "rest_token": "secret",
+            },
+        ), patch.object(
+            oauth_callback,
+            "_read_durable_record",
+            return_value=(legacy_record, None),
+        ), patch.object(
+            oauth_callback,
+            "_adopt_legacy_durable_record",
+            side_effect=write_token,
+        ), patch.object(
+            oauth_callback,
+            "_register_gmail_managed_inbox_in_user_config",
+            side_effect=register_mailbox,
+        ) as register:
+            oauth_callback.handler.do_GET(callback)
+
+        self.assertEqual(
+            events,
+            ["preflight", "token_write_and_readback", "mailbox_registration"],
+        )
+        register.assert_called_once()
+        logger.warning.assert_not_called()
+        payload = callback._send_callback_page.call_args.args[0]
+        self.assertEqual(
+            payload,
+            {
+                "status": "success",
+                "provider": "google",
+                "inboxPosition": "main",
+                "email": "verified@gmail.com",
+                "mailboxId": "gmail-verified",
+                "message": (
+                    "Google account connected. Durable mailbox token storage is active."
+                ),
+            },
+        )
+        serialized_payload = json.dumps(payload, sort_keys=True)
+        for canary in (
+            fresh_access,
+            fresh_refresh,
+            legacy_record["access_token"],
+            legacy_record["refresh_token"],
+            owner_email,
+            oauth_callback._build_store_key("verified@gmail.com"),
+        ):
+            self.assertNotIn(canary, serialized_payload)
+
+    def test_legacy_write_readback_and_wrong_owner_fail_before_config(self):
+        owner_email = "owner-canary@example.invalid"
+        old_access = "CANARY_FAILURE_LEGACY_ACCESS"
+        old_refresh = "CANARY_FAILURE_LEGACY_REFRESH"
+        fresh_access = "CANARY_FAILURE_FRESH_ACCESS"
+        fresh_refresh = "CANARY_FAILURE_FRESH_REFRESH"
+        legacy_record = durable_google_token(
+            access_token=old_access,
+            refresh_token=old_refresh,
+        )
+        legacy_record.pop("owner_email")
+        wrong_owner_record = durable_google_token(
+            owner_email="other-owner@example.com",
+            access_token=old_access,
+            refresh_token=old_refresh,
+        )
+        cases = (
+            (
+                "wrong_owner",
+                wrong_owner_record,
+                "token_owner_conflict",
+                None,
+            ),
+            (
+                "write_failure",
+                legacy_record,
+                "token_persistence_failed",
+                "write_failure",
+            ),
+            (
+                "missing_fresh_refresh",
+                legacy_record,
+                "token_payload_invalid",
+                "missing_fresh_refresh",
+            ),
+            (
+                "readback_provider",
+                legacy_record,
+                "mailbox_readback_verification_failed",
+                ("provider", "microsoft"),
+            ),
+            (
+                "readback_email",
+                legacy_record,
+                "mailbox_readback_verification_failed",
+                ("email", "other@gmail.com"),
+            ),
+            (
+                "readback_owner",
+                legacy_record,
+                "mailbox_readback_verification_failed",
+                ("owner_email", "other-owner@example.com"),
+            ),
+            (
+                "readback_stale_access",
+                legacy_record,
+                "mailbox_readback_verification_failed",
+                ("access_token", old_access),
+            ),
+            (
+                "readback_stale_refresh",
+                legacy_record,
+                "mailbox_readback_verification_failed",
+                ("refresh_token", old_refresh),
+            ),
+        )
+
+        for label, existing_record, expected_failure, write_outcome in cases:
+            state, _ = connect_oauth.build_signed_state(
+                "google",
+                "hint@gmail.com",
+                owner_email,
+                "state-secret",
+                "main",
+            )
+            callback = self._google_callback(state)
+            logger = Mock()
+            original_record = json.dumps(existing_record, sort_keys=True)
+
+            callback_token_payload = {"access_token": fresh_access}
+            if write_outcome != "missing_fresh_refresh":
+                callback_token_payload["refresh_token"] = fresh_refresh
+
+            def write_token(_config, _store_key, old_record, record):
+                self.assertEqual(old_record, legacy_record)
+                if write_outcome == "write_failure":
+                    return None, {
+                        "code": "token_persistence_failed",
+                        "message": "CANARY_PRIVATE_STORAGE_DETAIL",
+                    }
+                readback = json.loads(json.dumps(record))
+                if isinstance(write_outcome, tuple):
+                    field, value = write_outcome
+                    readback[field] = value
+                return readback, None
+
+            with self.subTest(label=label), patch.dict(
+                oauth_callback.os.environ,
+                self._production_oauth_environment(),
+                clear=True,
+            ), patch.object(
+                oauth_callback,
+                "_GMAIL_CALLBACK_LOGGER",
+                logger,
+            ), patch.object(
+                oauth_callback,
+                "_resolve_authenticated_member_request",
+                return_value=(authenticated_member(owner_email), ()),
+            ), patch.object(
+                oauth_callback,
+                "_exchange_google_code",
+                return_value=(
+                    callback_token_payload,
+                    None,
+                ),
+            ), patch.object(
+                oauth_callback,
+                "_fetch_verified_google_identity",
+                return_value=(
+                    {"email": "verified@gmail.com", "display_name": "Verified"},
+                    None,
+                ),
+            ), patch.object(
+                oauth_callback,
+                "_prepare_gmail_managed_inbox_registration",
+                return_value=({"prepared": True}, None),
+            ), patch.object(
+                oauth_callback,
+                "_resolve_durable_store_config",
+                return_value={
+                    "backend": "vercel_kv_rest",
+                    "rest_url": "https://kv.example",
+                    "rest_token": "secret",
+                },
+            ), patch.object(
+                oauth_callback,
+                "_read_durable_record",
+                return_value=(existing_record, None),
+            ), patch.object(
+                oauth_callback,
+                "_adopt_legacy_durable_record",
+                side_effect=write_token,
+            ) as durable_write, patch.object(
+                oauth_callback,
+                "_write_durable_record",
+            ) as regular_write, patch.object(
+                oauth_callback,
+                "_register_gmail_managed_inbox_in_user_config",
+            ) as config_store:
+                oauth_callback.handler.do_GET(callback)
+
+            config_store.assert_not_called()
+            regular_write.assert_not_called()
+            if label in {"wrong_owner", "missing_fresh_refresh"}:
+                durable_write.assert_not_called()
+            else:
+                durable_write.assert_called_once()
+            self.assertEqual(json.dumps(existing_record, sort_keys=True), original_record)
+            logger.warning.assert_called_once_with(
+                "event=gmail_oauth_callback_failure "
+                f"failure_code={expected_failure} provider=google "
+                "inbox_position=main"
+            )
+            payload = callback._send_callback_page.call_args.args[0]
+            self.assertEqual(payload["status"], "error")
+            self.assertNotIn("mailboxId", payload)
+            combined = "\n".join(
+                (
+                    logger.warning.call_args.args[0],
+                    json.dumps(payload, sort_keys=True),
+                )
+            )
+            for canary in (
+                old_access,
+                old_refresh,
+                fresh_access,
+                fresh_refresh,
+                owner_email,
+                oauth_callback._build_store_key("verified@gmail.com"),
+                "CANARY_PRIVATE_STORAGE_DETAIL",
+            ):
+                self.assertNotIn(canary, combined)
 
     def test_server_registration_persists_position_and_is_idempotent(self):
         stored_record = self._incomplete_onboarding_config()

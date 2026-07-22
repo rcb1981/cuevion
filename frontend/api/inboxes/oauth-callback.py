@@ -80,6 +80,35 @@ GMAIL_CALLBACK_FAILURE_CODES = frozenset(
 GMAIL_CALLBACK_FAILURE_CODE_FIELD = "_gmail_callback_failure_code"
 _GMAIL_CALLBACK_LOGGER = logging.getLogger(__name__)
 _MEMBER_AUTHORITY_UNAVAILABLE = object()
+GOOGLE_TOKEN_RECORD_ABSENT = "ABSENT"
+GOOGLE_TOKEN_RECORD_EXACT_OWNER_MATCH = "EXACT_OWNER_MATCH"
+GOOGLE_TOKEN_RECORD_LEGACY_OWNERLESS_MATCH = "LEGACY_OWNERLESS_MATCH"
+GOOGLE_TOKEN_RECORD_OWNER_MISMATCH = "OWNER_MISMATCH"
+GOOGLE_TOKEN_RECORD_PROVIDER_OR_EMAIL_MISMATCH = "PROVIDER_OR_EMAIL_MISMATCH"
+GOOGLE_TOKEN_RECORD_MALFORMED_OR_AMBIGUOUS = "MALFORMED_OR_AMBIGUOUS"
+LEGACY_GOOGLE_TOKEN_RECORD_FIELDS = frozenset(
+    {
+        "provider",
+        "email",
+        "access_token",
+        "refresh_token",
+        "token_type",
+        "scope",
+        "expires_at",
+        "expires_in",
+        "updated_at",
+        "created_at",
+    }
+)
+CURRENT_GOOGLE_TOKEN_RECORD_FIELDS = frozenset(
+    {*LEGACY_GOOGLE_TOKEN_RECORD_FIELDS, "owner_email"}
+)
+LEGACY_GOOGLE_TOKEN_ADOPTION_SCRIPT = (
+    "local current=redis.call('GET',KEYS[1]);"
+    "if current~=ARGV[1] then return 0 end;"
+    "redis.call('SET',KEYS[1],ARGV[2],'EX',ARGV[3]);"
+    "return 1"
+)
 
 
 def _log_gmail_callback_failure(
@@ -524,6 +553,157 @@ def _build_store_key(state_or_mailbox_id: str) -> str:
     return f"cuevion:gmail:oauthtoken:{state_or_mailbox_id.strip().lower()}"
 
 
+def _is_canonical_token_email(value) -> bool:
+    return (
+        isinstance(value, str)
+        and value == value.strip().lower()
+        and EMAIL_PATTERN.fullmatch(value) is not None
+    )
+
+
+def _is_supported_token_timestamp(value) -> bool:
+    if value is None:
+        return False
+    if not isinstance(value, str) or not value.strip():
+        return False
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None and parsed.utcoffset() == timedelta(0)
+
+
+def _has_supported_google_token_record_shape(
+    record: dict,
+    expected_fields: frozenset[str],
+) -> bool:
+    if frozenset(record) != expected_fields:
+        return False
+
+    access_token = record.get("access_token")
+    refresh_token = record.get("refresh_token")
+    token_type = record.get("token_type")
+    scope = record.get("scope")
+    expires_at = record.get("expires_at")
+    expires_in = record.get("expires_in")
+    created_at = record.get("created_at")
+    updated_at = record.get("updated_at")
+    expiry_is_supported = (
+        expires_at is None
+        and expires_in is None
+        or _is_supported_token_timestamp(expires_at)
+        and isinstance(expires_in, int)
+        and not isinstance(expires_in, bool)
+        and expires_in > 0
+    )
+
+    return (
+        record.get("provider") == "google"
+        and _is_canonical_token_email(record.get("email"))
+        and isinstance(access_token, str)
+        and bool(access_token.strip())
+        and (
+            refresh_token is None
+            or isinstance(refresh_token, str)
+            and bool(refresh_token.strip())
+        )
+        and (token_type is None or isinstance(token_type, str))
+        and (scope is None or isinstance(scope, str))
+        and expiry_is_supported
+        and _is_supported_token_timestamp(created_at)
+        and _is_supported_token_timestamp(updated_at)
+    )
+
+
+def _has_supported_current_google_token_record_shape(record: dict) -> bool:
+    fields = frozenset(record)
+    if not fields.issubset(CURRENT_GOOGLE_TOKEN_RECORD_FIELDS):
+        return False
+
+    access_token = record.get("access_token")
+    if "access_token" in record and (
+        not isinstance(access_token, str) or not access_token.strip()
+    ):
+        return False
+
+    refresh_token = record.get("refresh_token")
+    if "refresh_token" in record and not (
+        refresh_token is None
+        or isinstance(refresh_token, str)
+        and bool(refresh_token.strip())
+    ):
+        return False
+
+    for field in ("token_type", "scope"):
+        if field in record and record[field] is not None and not isinstance(
+            record[field],
+            str,
+        ):
+            return False
+
+    has_expires_at = "expires_at" in record
+    has_expires_in = "expires_in" in record
+    if has_expires_at != has_expires_in:
+        return False
+    if has_expires_at:
+        expires_at = record["expires_at"]
+        expires_in = record["expires_in"]
+        if not (
+            expires_at is None
+            and expires_in is None
+            or _is_supported_token_timestamp(expires_at)
+            and isinstance(expires_in, int)
+            and not isinstance(expires_in, bool)
+            and expires_in > 0
+        ):
+            return False
+
+    for field in ("created_at", "updated_at"):
+        if field in record and not _is_supported_token_timestamp(record[field]):
+            return False
+    return True
+
+
+def _classify_existing_google_token_record(
+    existing_record,
+    *,
+    normalized_email: str,
+    normalized_owner_email: str,
+) -> str:
+    if existing_record is None:
+        return GOOGLE_TOKEN_RECORD_ABSENT
+    if not isinstance(existing_record, dict):
+        return GOOGLE_TOKEN_RECORD_MALFORMED_OR_AMBIGUOUS
+
+    existing_provider = existing_record.get("provider")
+    existing_email = existing_record.get("email")
+    if not isinstance(existing_provider, str) or not isinstance(existing_email, str):
+        return GOOGLE_TOKEN_RECORD_MALFORMED_OR_AMBIGUOUS
+    if existing_provider != "google":
+        return GOOGLE_TOKEN_RECORD_PROVIDER_OR_EMAIL_MISMATCH
+    if not _is_canonical_token_email(existing_email):
+        return GOOGLE_TOKEN_RECORD_MALFORMED_OR_AMBIGUOUS
+    if existing_email != normalized_email:
+        return GOOGLE_TOKEN_RECORD_PROVIDER_OR_EMAIL_MISMATCH
+
+    if "owner_email" in existing_record:
+        existing_owner = existing_record["owner_email"]
+        if not _is_canonical_token_email(existing_owner):
+            return GOOGLE_TOKEN_RECORD_MALFORMED_OR_AMBIGUOUS
+        if not _has_supported_current_google_token_record_shape(existing_record):
+            return GOOGLE_TOKEN_RECORD_MALFORMED_OR_AMBIGUOUS
+        if existing_owner != normalized_owner_email:
+            return GOOGLE_TOKEN_RECORD_OWNER_MISMATCH
+        return GOOGLE_TOKEN_RECORD_EXACT_OWNER_MATCH
+
+    if _has_supported_google_token_record_shape(
+        existing_record,
+        LEGACY_GOOGLE_TOKEN_RECORD_FIELDS,
+    ):
+        return GOOGLE_TOKEN_RECORD_LEGACY_OWNERLESS_MATCH
+    return GOOGLE_TOKEN_RECORD_MALFORMED_OR_AMBIGUOUS
+
+
 def build_google_token_record(
     *,
     email: str,
@@ -617,45 +797,53 @@ def _perform_rest_request(
         }
 
 
-def _read_durable_record(config: dict, store_key: str) -> tuple[dict | None, dict | None]:
+def _decode_durable_record_payload(
+    payload: dict | None,
+) -> tuple[dict | None, str | None, dict | None]:
+    unreadable_error = {
+        "code": "token_persistence_failed",
+        "message": "Durable mailbox token storage returned an unreadable token record.",
+    }
+    if not isinstance(payload, dict) or "result" not in payload:
+        return None, None, unreadable_error
+
+    result = payload.get("result")
+    if result is None:
+        return None, None, None
+    if isinstance(result, str):
+        try:
+            parsed = json.loads(result)
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+            return None, None, unreadable_error
+        if not isinstance(parsed, dict):
+            return None, None, unreadable_error
+        return parsed, result, None
+    if not isinstance(result, dict):
+        return None, None, unreadable_error
+    return (
+        result,
+        json.dumps(result, separators=(",", ":"), sort_keys=True),
+        None,
+    )
+
+
+def _read_durable_record_snapshot(
+    config: dict,
+    store_key: str,
+) -> tuple[dict | None, str | None, dict | None]:
     payload, error = _perform_rest_request(
         config,
         "GET",
         f"/get/{quote(store_key, safe='')}",
     )
     if error:
-        return None, error
+        return None, None, error
+    return _decode_durable_record_payload(payload)
 
-    if not isinstance(payload, dict) or "result" not in payload:
-        return None, {
-            "code": "token_persistence_failed",
-            "message": "Durable mailbox token storage returned an unreadable token record.",
-        }
-    result = payload.get("result")
-    if result is None:
-        return None, None
 
-    if isinstance(result, str):
-        try:
-            parsed = json.loads(result)
-        except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
-            return None, {
-                "code": "token_persistence_failed",
-                "message": "Durable mailbox token storage returned an unreadable token record.",
-            }
-        if not isinstance(parsed, dict):
-            return None, {
-                "code": "token_persistence_failed",
-                "message": "Durable mailbox token storage returned an unreadable token record.",
-            }
-        return parsed, None
-
-    if not isinstance(result, dict):
-        return None, {
-            "code": "token_persistence_failed",
-            "message": "Durable mailbox token storage returned an unreadable token record.",
-        }
-    return result, None
+def _read_durable_record(config: dict, store_key: str) -> tuple[dict | None, dict | None]:
+    record, _raw_value, error = _read_durable_record_snapshot(config, store_key)
+    return record, error
 
 
 def _write_durable_record(
@@ -685,6 +873,74 @@ def _write_durable_record(
             GMAIL_CALLBACK_FAILURE_CODE_FIELD: "mailbox_readback_verification_failed",
         }
 
+    return verified_record, None
+
+
+def _adopt_legacy_durable_record(
+    config: dict,
+    store_key: str,
+    legacy_record: dict,
+    next_record: dict,
+) -> tuple[dict | None, dict | None]:
+    snapshot, expected_value, snapshot_error = _read_durable_record_snapshot(
+        config,
+        store_key,
+    )
+    if snapshot_error:
+        return None, snapshot_error
+    if snapshot != legacy_record or not isinstance(expected_value, str):
+        return None, {
+            "code": "token_owner_conflict",
+            "message": "This Google mailbox is already linked to another account owner.",
+            GMAIL_CALLBACK_FAILURE_CODE_FIELD: "token_owner_conflict",
+        }
+
+    next_value = json.dumps(
+        next_record,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    payload, error = _perform_rest_request(
+        config,
+        "POST",
+        "",
+        json.dumps(
+            [
+                "EVAL",
+                LEGACY_GOOGLE_TOKEN_ADOPTION_SCRIPT,
+                1,
+                store_key,
+                expected_value,
+                next_value,
+                GMAIL_OAUTH_TOKEN_TTL_SECONDS,
+            ],
+            separators=(",", ":"),
+        ).encode("utf-8"),
+    )
+    if error:
+        return None, error
+
+    result = payload.get("result") if isinstance(payload, dict) else None
+    if isinstance(result, int) and not isinstance(result, bool) and result == 0:
+        return None, {
+            "code": "token_owner_conflict",
+            "message": "This Google mailbox is already linked to another account owner.",
+            GMAIL_CALLBACK_FAILURE_CODE_FIELD: "token_owner_conflict",
+        }
+    if not isinstance(result, int) or isinstance(result, bool) or result != 1:
+        return None, {
+            "code": "token_persistence_failed",
+            "message": "Durable mailbox token storage did not confirm the write.",
+        }
+
+    verified_record, verify_error = _read_durable_record(config, store_key)
+    if verify_error:
+        return None, {
+            **verify_error,
+            GMAIL_CALLBACK_FAILURE_CODE_FIELD: (
+                "mailbox_readback_verification_failed"
+            ),
+        }
     return verified_record, None
 
 
@@ -743,34 +999,66 @@ def persist_google_token_record(
         existing_store = _read_runtime_store(_resolve_runtime_store_path())
         existing_record = existing_store.get(store_key)
 
-    if isinstance(existing_record, dict):
-        existing_owner = existing_record.get("owner_email")
-        if (
-            existing_record.get("provider") != "google"
-            or existing_record.get("email") != normalized_email
-            or not isinstance(existing_owner, str)
-            or not EMAIL_PATTERN.match(normalize_auth_email(existing_owner))
-            or normalize_auth_email(existing_owner) != normalized_owner_email
-        ):
+    record_classification = _classify_existing_google_token_record(
+        existing_record,
+        normalized_email=normalized_email,
+        normalized_owner_email=normalized_owner_email,
+    )
+    if record_classification in {
+        GOOGLE_TOKEN_RECORD_OWNER_MISMATCH,
+        GOOGLE_TOKEN_RECORD_PROVIDER_OR_EMAIL_MISMATCH,
+        GOOGLE_TOKEN_RECORD_MALFORMED_OR_AMBIGUOUS,
+    }:
+        return None, {
+            "code": "token_owner_conflict",
+            "message": "This Google mailbox is already linked to another account owner.",
+            GMAIL_CALLBACK_FAILURE_CODE_FIELD: "token_owner_conflict",
+        }
+
+    if (
+        record_classification == GOOGLE_TOKEN_RECORD_LEGACY_OWNERLESS_MATCH
+        and durable_config is None
+    ):
+        return None, {
+            "code": "token_owner_conflict",
+            "message": "This Google mailbox is already linked to another account owner.",
+            GMAIL_CALLBACK_FAILURE_CODE_FIELD: "token_owner_conflict",
+        }
+
+    if record_classification == GOOGLE_TOKEN_RECORD_LEGACY_OWNERLESS_MATCH:
+        refresh_token = token_payload.get("refresh_token")
+        if not isinstance(refresh_token, str) or not refresh_token.strip():
             return None, {
-                "code": "token_owner_conflict",
-                "message": "This Google mailbox is already linked to another account owner.",
-                GMAIL_CALLBACK_FAILURE_CODE_FIELD: "token_owner_conflict",
+                "code": "invalid_token_payload",
+                "message": "Google returned an incomplete token response.",
+                GMAIL_CALLBACK_FAILURE_CODE_FIELD: "token_payload_invalid",
             }
 
     next_record = build_google_token_record(
         email=normalized_email,
         owner_email=normalized_owner_email,
         token_payload=token_payload,
-        existing_record=existing_record if isinstance(existing_record, dict) else None,
+        existing_record=(
+            existing_record
+            if record_classification == GOOGLE_TOKEN_RECORD_EXACT_OWNER_MATCH
+            else None
+        ),
     )
 
     if durable_config:
-        persisted_record, error = _write_durable_record(
-            durable_config,
-            store_key,
-            next_record,
-        )
+        if record_classification == GOOGLE_TOKEN_RECORD_LEGACY_OWNERLESS_MATCH:
+            persisted_record, error = _adopt_legacy_durable_record(
+                durable_config,
+                store_key,
+                existing_record,
+                next_record,
+            )
+        else:
+            persisted_record, error = _write_durable_record(
+                durable_config,
+                store_key,
+                next_record,
+            )
         storage_backend = durable_config["backend"]
         storage_durable = True
     else:
@@ -801,6 +1089,10 @@ def persist_google_token_record(
         or persisted_record.get("owner_email") != normalized_owner_email
         or not isinstance(persisted_record.get("access_token"), str)
         or not persisted_record.get("access_token")
+        or (
+            record_classification == GOOGLE_TOKEN_RECORD_LEGACY_OWNERLESS_MATCH
+            and persisted_record != next_record
+        )
     ):
         return None, {
             "code": "token_persistence_failed",
