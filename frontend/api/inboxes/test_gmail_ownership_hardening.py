@@ -10,7 +10,7 @@ from email.errors import MessageError
 from email.message import EmailMessage
 from email import message_from_bytes
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 from urllib.error import HTTPError, URLError
 
 CURRENT_DIR = Path(__file__).resolve().parent
@@ -1767,6 +1767,825 @@ class OAuthAndConfigTests(unittest.TestCase):
             "GOOGLE_CLIENT_SECRET": "client-secret",
             **overrides,
         }
+
+    def _run_logged_google_callback(
+        self,
+        *,
+        state=None,
+        member_result=None,
+        environment=None,
+        authorization_code="provider-code",
+        provider_error=None,
+        exchange_result=({"access_token": "provider-access-token"}, None),
+        exchange_side_effect=None,
+        identity_result=(
+            {"email": "verified@gmail.com", "display_name": "Verified"},
+            None,
+        ),
+        preflight_result=({"prepared": True}, None),
+        persistence_result=({"_storage_durable": True}, None),
+        registration_result=({"id": "gmail-verified"}, None),
+        callback_time=None,
+        logger_side_effect=None,
+        response_side_effect=None,
+        capture_exception=False,
+    ):
+        from urllib.parse import urlencode
+
+        if state is None:
+            state, verifier = connect_oauth.build_signed_state(
+                "google",
+                "hint@gmail.com",
+                "owner@example.com",
+                "state-secret",
+                "main",
+            )
+        else:
+            verifier = None
+
+        query = {"state": state}
+        if authorization_code is not None:
+            query["code"] = authorization_code
+        if provider_error is not None:
+            query["error"] = provider_error
+        callback = Mock()
+        callback.path = f"/api/inboxes/oauth-callback?{urlencode(query)}"
+        callback.headers = HeaderMap()
+        callback._send_callback_page = Mock(side_effect=response_side_effect)
+
+        resolved_member = (
+            (authenticated_member(), ())
+            if member_result is None
+            else member_result
+        )
+        logger = Mock()
+        logger.warning.side_effect = logger_side_effect
+        exchange = Mock(
+            return_value=exchange_result,
+            side_effect=exchange_side_effect,
+        )
+        identity = Mock(return_value=identity_result)
+        preflight = Mock(return_value=preflight_result)
+        token_store = Mock(return_value=persistence_result)
+        config_store = Mock(return_value=registration_result)
+        caught_exception = None
+
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch.dict(
+                    oauth_callback.os.environ,
+                    environment or self._production_oauth_environment(),
+                    clear=True,
+                )
+            )
+            stack.enter_context(
+                patch.object(oauth_callback, "_GMAIL_CALLBACK_LOGGER", logger)
+            )
+            stack.enter_context(
+                patch.object(
+                    oauth_callback,
+                    "_resolve_authenticated_member_request",
+                    return_value=resolved_member,
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    oauth_callback,
+                    "_exchange_google_code",
+                    new=exchange,
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    oauth_callback,
+                    "_fetch_verified_google_identity",
+                    new=identity,
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    oauth_callback,
+                    "_prepare_gmail_managed_inbox_registration",
+                    new=preflight,
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    oauth_callback,
+                    "persist_google_token_record",
+                    new=token_store,
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    oauth_callback,
+                    "_register_gmail_managed_inbox_in_user_config",
+                    new=config_store,
+                )
+            )
+            if callback_time is not None:
+                stack.enter_context(
+                    patch.object(
+                        oauth_callback.time,
+                        "time",
+                        return_value=callback_time,
+                    )
+                )
+
+            if capture_exception:
+                try:
+                    oauth_callback.handler.do_GET(callback)
+                except Exception as error:
+                    caught_exception = error
+            else:
+                oauth_callback.handler.do_GET(callback)
+
+        return {
+            "callback": callback,
+            "config_store": config_store,
+            "exception": caught_exception,
+            "exchange": exchange,
+            "identity": identity,
+            "logger": logger,
+            "preflight": preflight,
+            "state": state,
+            "token_store": token_store,
+            "verifier": verifier,
+        }
+
+    def _assert_single_callback_failure_log(
+        self,
+        result,
+        expected_code,
+        *,
+        inbox_position=None,
+        expect_response=True,
+    ):
+        logger = result["logger"]
+        logger.warning.assert_called_once()
+        log_call = logger.warning.call_args
+        self.assertEqual(log_call.kwargs, {})
+        expected_log = (
+            "event=gmail_oauth_callback_failure "
+            f"failure_code={expected_code} provider=google"
+        )
+        if inbox_position is not None:
+            expected_log += f" inbox_position={inbox_position}"
+        self.assertEqual(log_call.args, (expected_log,))
+        self.assertIn(expected_code, oauth_callback.GMAIL_CALLBACK_FAILURE_CODES)
+        self.assertEqual(logger.mock_calls, [call.warning(expected_log)])
+
+        callback = result["callback"]
+        if not expect_response:
+            callback._send_callback_page.assert_not_called()
+            return None
+
+        callback._send_callback_page.assert_called_once()
+        payload = callback._send_callback_page.call_args.args[0]
+        serialized_payload = json.dumps(payload, sort_keys=True)
+        self.assertNotIn("failure_code", serialized_payload)
+        for failure_code in oauth_callback.GMAIL_CALLBACK_FAILURE_CODES:
+            self.assertNotIn(failure_code, serialized_payload)
+        return payload
+
+    def test_gmail_callback_early_failure_logging_matrix(self):
+        with patch.object(connect_oauth.time, "time", return_value=1_000):
+            expired_state, _ = connect_oauth.build_signed_state(
+                "google",
+                "hint@gmail.com",
+                "owner@example.com",
+                "state-secret",
+                "main",
+            )
+
+        cases = (
+            {
+                "name": "member_unauthenticated",
+                "expected_code": "member_unauthenticated",
+                "expected_message": (
+                    "Mailbox authentication session could not be verified. "
+                    "Please try again."
+                ),
+                "kwargs": {"member_result": (None, ())},
+                "inbox_position": None,
+            },
+            {
+                "name": "state_invalid",
+                "expected_code": "state_invalid",
+                "expected_message": (
+                    "Google authentication could not be verified. Please try again."
+                ),
+                "kwargs": {"state": "CANARY_INVALID_SIGNED_STATE"},
+                "inbox_position": None,
+            },
+            {
+                "name": "state_expired",
+                "expected_code": "state_expired",
+                "expected_message": (
+                    "Google authentication could not be verified. Please try again."
+                ),
+                "kwargs": {
+                    "state": expired_state,
+                    "callback_time": 1_901,
+                },
+                "inbox_position": None,
+            },
+            {
+                "name": "owner_binding_invalid",
+                "expected_code": "owner_binding_invalid",
+                "expected_message": (
+                    "Google authentication session could not be verified. "
+                    "Please try again."
+                ),
+                "kwargs": {
+                    "member_result": (
+                        authenticated_member("other@example.com"),
+                        (),
+                    )
+                },
+                "inbox_position": "main",
+            },
+            {
+                "name": "canonical_origin_invalid",
+                "expected_code": "canonical_origin_invalid",
+                "expected_message": (
+                    "Mailbox authentication could not be completed because the "
+                    "application is not configured safely."
+                ),
+                "kwargs": {
+                    "environment": self._production_oauth_environment(
+                        CUEVION_APP_URL="https://attacker.example"
+                    )
+                },
+                "inbox_position": "main",
+            },
+            {
+                "name": "provider_denied",
+                "expected_code": "provider_denied",
+                "expected_message": (
+                    "Google authentication was cancelled or denied."
+                ),
+                "kwargs": {"provider_error": "CANARY_PROVIDER_DENIAL_BODY"},
+                "inbox_position": "main",
+            },
+            {
+                "name": "authorization_code_missing",
+                "expected_code": "authorization_code_missing",
+                "expected_message": (
+                    "Google did not return an authorization code."
+                ),
+                "kwargs": {"authorization_code": None},
+                "inbox_position": "main",
+            },
+        )
+
+        for case in cases:
+            with self.subTest(case=case["name"]):
+                result = self._run_logged_google_callback(**case["kwargs"])
+                payload = self._assert_single_callback_failure_log(
+                    result,
+                    case["expected_code"],
+                    inbox_position=case["inbox_position"],
+                )
+                self.assertEqual(payload["status"], "error")
+                self.assertEqual(payload["provider"], "google")
+                self.assertEqual(payload["message"], case["expected_message"])
+                result["exchange"].assert_not_called()
+
+    def test_member_authority_unavailable_logs_one_distinct_safe_code(self):
+        callback = self._google_callback("CANARY_UNUSED_STATE")
+        callback.headers = HeaderMap(
+            {"cookie": "CANARY_MEMBER_AUTHORITY_COOKIE"}
+        )
+        logger = Mock()
+        exception_detail = "CANARY_MEMBER_AUTHORITY_EXCEPTION_DETAIL"
+
+        with patch.dict(
+            oauth_callback.os.environ,
+            self._production_oauth_environment(),
+            clear=True,
+        ), patch.object(
+            oauth_callback,
+            "_GMAIL_CALLBACK_LOGGER",
+            logger,
+        ), patch.object(
+            oauth_callback.http,
+            "snapshot_request_headers",
+            return_value={"cookie": "CANARY_MEMBER_AUTHORITY_COOKIE"},
+        ), patch.object(
+            oauth_callback.runtime,
+            "resolve_authenticated_member",
+            side_effect=RuntimeError(exception_detail),
+        ):
+            oauth_callback.handler.do_GET(callback)
+
+        result = {"callback": callback, "logger": logger}
+        payload = self._assert_single_callback_failure_log(
+            result,
+            "member_authority_unavailable",
+        )
+        self.assertEqual(
+            payload["message"],
+            "Mailbox authentication session could not be verified. Please try again.",
+        )
+        logged = logger.warning.call_args.args[0]
+        self.assertNotIn(exception_detail, logged)
+        self.assertNotIn("CANARY_MEMBER_AUTHORITY_COOKIE", logged)
+
+    def test_gmail_callback_provider_and_storage_failure_logging_matrix(self):
+        diagnostic_field = oauth_callback.GMAIL_CALLBACK_FAILURE_CODE_FIELD
+        link_message = (
+            "This Gmail inbox could not be linked to the selected onboarding inbox."
+        )
+        token_storage_message = (
+            "Google authentication completed, but secure authorization storage "
+            "is unavailable."
+        )
+        config_storage_message = (
+            "Google authentication completed, but the Gmail inbox could not be "
+            "saved securely."
+        )
+        cases = (
+            {
+                "name": "token_exchange_failed",
+                "expected_code": "token_exchange_failed",
+                "expected_message": (
+                    "Google authentication could not be completed. Please try again."
+                ),
+                "kwargs": {
+                    "exchange_result": (
+                        None,
+                        {
+                            "code": "token_exchange_failed",
+                            "message": "CANARY_TOKEN_EXCHANGE_PROVIDER_BODY",
+                        },
+                    )
+                },
+            },
+            {
+                "name": "token_exchange_unavailable",
+                "expected_code": "token_exchange_unavailable",
+                "expected_message": (
+                    "Google authentication could not be completed. Please try again."
+                ),
+                "kwargs": {
+                    "exchange_result": (
+                        None,
+                        {
+                            "code": "token_exchange_unavailable",
+                            "message": "CANARY_TOKEN_EXCHANGE_NETWORK_DETAIL",
+                        },
+                    )
+                },
+            },
+            {
+                "name": "token_payload_invalid",
+                "expected_code": "token_payload_invalid",
+                "expected_message": (
+                    "Google returned an incomplete token response."
+                ),
+                "kwargs": {"exchange_result": ({"expires_in": 3600}, None)},
+            },
+            {
+                "name": "google_identity_invalid",
+                "expected_code": "google_identity_invalid",
+                "expected_message": (
+                    "Google account identity could not be verified. Please try again."
+                ),
+                "kwargs": {
+                    "identity_result": (
+                        None,
+                        {"code": "google_identity_invalid"},
+                    )
+                },
+            },
+            {
+                "name": "google_identity_unavailable",
+                "expected_code": "google_identity_unavailable",
+                "expected_message": (
+                    "Google account identity could not be verified. Please try again."
+                ),
+                "kwargs": {
+                    "identity_result": (
+                        None,
+                        {"code": "google_identity_unavailable"},
+                    )
+                },
+            },
+            {
+                "name": "gmail_link_conflict",
+                "expected_code": "gmail_link_conflict",
+                "expected_message": link_message,
+                "kwargs": {
+                    "preflight_result": (
+                        None,
+                        {
+                            "code": "gmail_link_conflict",
+                            "message": "CANARY_GMAIL_LINK_CONFLICT_DETAIL",
+                        },
+                    )
+                },
+            },
+            {
+                "name": "user_config_store_unavailable",
+                "expected_code": "user_config_store_unavailable",
+                "expected_message": link_message,
+                "kwargs": {
+                    "preflight_result": (
+                        None,
+                        {
+                            "code": "user_config_store_unavailable",
+                            "message": "CANARY_CONFIG_STORE_DETAIL",
+                        },
+                    )
+                },
+            },
+            {
+                "name": "user_config_invalid",
+                "expected_code": "user_config_invalid",
+                "expected_message": link_message,
+                "kwargs": {
+                    "preflight_result": (
+                        None,
+                        {
+                            "code": "user_config_persistence_failed",
+                            "message": "CANARY_INVALID_CONFIG_DETAIL",
+                            diagnostic_field: "user_config_invalid",
+                        },
+                    )
+                },
+            },
+            {
+                "name": "user_config_preflight_failed",
+                "expected_code": "user_config_preflight_failed",
+                "expected_message": link_message,
+                "kwargs": {
+                    "preflight_result": (
+                        None,
+                        {
+                            "code": "user_config_persistence_failed",
+                            "message": "CANARY_CONFIG_PREFLIGHT_DETAIL",
+                        },
+                    )
+                },
+            },
+            {
+                "name": "token_owner_conflict",
+                "expected_code": "token_owner_conflict",
+                "expected_message": token_storage_message,
+                "kwargs": {
+                    "persistence_result": (
+                        None,
+                        {
+                            "code": "token_owner_conflict",
+                            "message": "CANARY_TOKEN_OWNER_DETAIL",
+                        },
+                    )
+                },
+            },
+            {
+                "name": "token_persistence_failed",
+                "expected_code": "token_persistence_failed",
+                "expected_message": token_storage_message,
+                "kwargs": {
+                    "persistence_result": (
+                        None,
+                        {
+                            "code": "token_persistence_failed",
+                            "message": "CANARY_TOKEN_WRITE_DETAIL",
+                        },
+                    )
+                },
+            },
+            {
+                "name": "mailbox_readback_verification_failed",
+                "expected_code": "mailbox_readback_verification_failed",
+                "expected_message": (
+                    "Google authentication completed. Tokens are stored only in "
+                    "the current server runtime. Final mailbox activation requires "
+                    "durable secure mailbox token storage."
+                ),
+                "kwargs": {"persistence_result": (None, None)},
+            },
+            {
+                "name": "token_store_unavailable",
+                "expected_code": "token_store_unavailable",
+                "expected_message": (
+                    "Google authentication completed. Tokens are stored only in "
+                    "the current server runtime bridge. Final mailbox activation "
+                    "requires durable secure mailbox token storage."
+                ),
+                "kwargs": {
+                    "persistence_result": (
+                        {"_storage_durable": False},
+                        None,
+                    )
+                },
+            },
+            {
+                "name": "user_config_write_failed",
+                "expected_code": "user_config_write_failed",
+                "expected_message": config_storage_message,
+                "kwargs": {
+                    "registration_result": (
+                        None,
+                        {
+                            "code": "user_config_persistence_failed",
+                            "message": "CANARY_CONFIG_WRITE_DETAIL",
+                            diagnostic_field: "user_config_write_failed",
+                        },
+                    )
+                },
+            },
+            {
+                "name": "user_config_readback_failed",
+                "expected_code": "user_config_readback_failed",
+                "expected_message": config_storage_message,
+                "kwargs": {
+                    "registration_result": (
+                        None,
+                        {
+                            "code": "user_config_persistence_failed",
+                            "message": "CANARY_CONFIG_READBACK_DETAIL",
+                            diagnostic_field: "user_config_readback_failed",
+                        },
+                    )
+                },
+            },
+        )
+
+        for case in cases:
+            with self.subTest(case=case["name"]):
+                result = self._run_logged_google_callback(**case["kwargs"])
+                payload = self._assert_single_callback_failure_log(
+                    result,
+                    case["expected_code"],
+                    inbox_position="main",
+                )
+                self.assertEqual(payload["status"], "error")
+                self.assertEqual(payload["provider"], "google")
+                self.assertEqual(payload["message"], case["expected_message"])
+
+    def test_unexpected_callback_exception_logs_only_safe_fallback_and_reraises(self):
+        exception_detail = "CANARY_UNEXPECTED_EXCEPTION_DETAIL"
+        result = self._run_logged_google_callback(
+            exchange_side_effect=RuntimeError(exception_detail),
+            capture_exception=True,
+        )
+
+        self.assertIsInstance(result["exception"], RuntimeError)
+        self.assertEqual(str(result["exception"]), exception_detail)
+        self._assert_single_callback_failure_log(
+            result,
+            "unexpected_callback_failure",
+            inbox_position="main",
+            expect_response=False,
+        )
+        logged = result["logger"].warning.call_args.args[0]
+        self.assertNotIn(exception_detail, logged)
+        self.assertNotIn("RuntimeError", logged)
+
+    def test_response_exception_does_not_duplicate_controlled_failure_log(self):
+        exception_detail = "CANARY_RESPONSE_EXCEPTION_DETAIL"
+        result = self._run_logged_google_callback(
+            member_result=(None, ()),
+            response_side_effect=RuntimeError(exception_detail),
+            capture_exception=True,
+        )
+
+        self.assertIsInstance(result["exception"], RuntimeError)
+        payload = self._assert_single_callback_failure_log(
+            result,
+            "member_unauthenticated",
+        )
+        self.assertEqual(payload["status"], "error")
+        logged = result["logger"].warning.call_args.args[0]
+        self.assertNotIn(exception_detail, logged)
+        self.assertNotIn("unexpected_callback_failure", logged)
+
+    def test_logger_exception_does_not_change_callback_failure_response(self):
+        exception_detail = "CANARY_LOGGER_EXCEPTION_DETAIL"
+        result = self._run_logged_google_callback(
+            member_result=(None, ()),
+            logger_side_effect=RuntimeError(exception_detail),
+        )
+
+        payload = self._assert_single_callback_failure_log(
+            result,
+            "member_unauthenticated",
+        )
+        self.assertIsNone(result["exception"])
+        self.assertEqual(
+            payload,
+            {
+                "status": "error",
+                "provider": "google",
+                "message": (
+                    "Mailbox authentication session could not be verified. "
+                    "Please try again."
+                ),
+            },
+        )
+
+    def test_successful_gmail_callback_logs_no_failure_event(self):
+        result = self._run_logged_google_callback()
+
+        self.assertIsNone(result["exception"])
+        self.assertEqual(result["logger"].mock_calls, [])
+        result["callback"]._send_callback_page.assert_called_once()
+        payload = result["callback"]._send_callback_page.call_args.args[0]
+        self.assertEqual(
+            payload,
+            {
+                "status": "success",
+                "provider": "google",
+                "inboxPosition": "main",
+                "email": "verified@gmail.com",
+                "mailboxId": "gmail-verified",
+                "message": (
+                    "Google account connected. Durable mailbox token storage is active."
+                ),
+            },
+        )
+        for failure_code in oauth_callback.GMAIL_CALLBACK_FAILURE_CODES:
+            self.assertNotIn(failure_code, json.dumps(payload, sort_keys=True))
+
+    def test_log_helper_maps_non_allowlisted_values_to_safe_fallback(self):
+        logger = Mock()
+        dynamic_value = "CANARY_DYNAMIC_FAILURE_VALUE"
+        unsafe_position = "CANARY_UNSAFE_INBOX_POSITION"
+
+        with patch.object(oauth_callback, "_GMAIL_CALLBACK_LOGGER", logger):
+            oauth_callback._log_gmail_callback_failure(
+                dynamic_value,
+                unsafe_position,
+            )
+
+        logger.warning.assert_called_once_with(
+            "event=gmail_oauth_callback_failure "
+            "failure_code=unexpected_callback_failure provider=google"
+        )
+        rendered = logger.warning.call_args.args[0]
+        self.assertNotIn(dynamic_value, rendered)
+        self.assertNotIn(unsafe_position, rendered)
+
+    def test_callback_failure_logs_and_browser_response_exclude_canaries(self):
+        from urllib.parse import urlencode
+
+        owner_email = "owner-log-canary@example.invalid"
+        mailbox_email = "verified@gmail.com"
+        state_secret = "CANARY_STATE_SIGNING_SECRET"
+        authorization_code = "CANARY_AUTHORIZATION_CODE"
+        access_token = "CANARY_ACCESS_TOKEN"
+        refresh_token = "CANARY_REFRESH_TOKEN"
+        client_secret = "CANARY_GOOGLE_CLIENT_SECRET"
+        request_cookie = "CANARY_REQUEST_COOKIE"
+        provider_body = "CANARY_PROVIDER_RESPONSE_BODY"
+        token_reference = "CANARY_TOKEN_REFERENCE"
+        config_payload = "CANARY_FULL_CONFIG_PAYLOAD"
+        mailbox_id = "CANARY_MAILBOX_ID"
+
+        state, verifier = connect_oauth.build_signed_state(
+            "google",
+            "hint@gmail.com",
+            owner_email,
+            state_secret,
+            "main",
+        )
+        query = urlencode(
+            {
+                "code": authorization_code,
+                "state": state,
+                "providerBody": provider_body,
+            }
+        )
+        request_path = f"/api/inboxes/oauth-callback?{query}"
+        full_request_url = f"https://app.cuevion.com{request_path}"
+
+        class CapturingCallback(FakeHandler):
+            def __init__(self):
+                super().__init__(
+                    raw_body=b"",
+                    headers={"cookie": request_cookie},
+                )
+                self.path = request_path
+                self.callback_payload = None
+
+            def _send_callback_page(self, payload, *, set_cookies=()):
+                self.callback_payload = payload
+                oauth_callback.handler._send_callback_page(
+                    self,
+                    payload,
+                    set_cookies=set_cookies,
+                )
+
+        callback = CapturingCallback()
+        logger = Mock()
+        registration_error = {
+            "code": "user_config_persistence_failed",
+            "message": provider_body,
+            oauth_callback.GMAIL_CALLBACK_FAILURE_CODE_FIELD: (
+                "user_config_write_failed"
+            ),
+            "config": {"private": config_payload},
+            "mailboxId": mailbox_id,
+        }
+        environment = self._production_oauth_environment(
+            CUEVION_OAUTH_STATE_SECRET=state_secret,
+            GOOGLE_CLIENT_SECRET=client_secret,
+        )
+
+        with patch.dict(
+            oauth_callback.os.environ,
+            environment,
+            clear=True,
+        ), patch.object(
+            oauth_callback,
+            "_GMAIL_CALLBACK_LOGGER",
+            logger,
+        ), patch.object(
+            oauth_callback,
+            "_resolve_authenticated_member_request",
+            return_value=(authenticated_member(owner_email), ()),
+        ), patch.object(
+            oauth_callback,
+            "_exchange_google_code",
+            return_value=(
+                {
+                    "access_token": access_token,
+                    "refresh_token": refresh_token,
+                    "token_reference": token_reference,
+                },
+                None,
+            ),
+        ), patch.object(
+            oauth_callback,
+            "_fetch_verified_google_identity",
+            return_value=(
+                {"email": mailbox_email, "display_name": "Verified"},
+                None,
+            ),
+        ), patch.object(
+            oauth_callback,
+            "_prepare_gmail_managed_inbox_registration",
+            return_value=({"prepared": True}, None),
+        ), patch.object(
+            oauth_callback,
+            "persist_google_token_record",
+            return_value=({"_storage_durable": True}, None),
+        ), patch.object(
+            oauth_callback,
+            "_register_gmail_managed_inbox_in_user_config",
+            return_value=(None, registration_error),
+        ):
+            oauth_callback.handler.do_GET(callback)
+
+        result = {"callback": callback, "logger": logger}
+        logger.warning.assert_called_once_with(
+            "event=gmail_oauth_callback_failure "
+            "failure_code=user_config_write_failed provider=google "
+            "inbox_position=main"
+        )
+        self.assertEqual(callback.status, 200)
+        self.assertEqual(callback.callback_payload["status"], "error")
+        self.assertEqual(
+            callback.callback_payload["message"],
+            "Google authentication completed, but the Gmail inbox could not be saved securely.",
+        )
+        response_body = callback.wfile.getvalue().decode("utf-8")
+        response_headers = json.dumps(callback.response_headers)
+        serialized_payload = json.dumps(callback.callback_payload, sort_keys=True)
+        log_output = logger.warning.call_args.args[0]
+        combined_artifacts = "\n".join(
+            (log_output, response_body, response_headers, serialized_payload)
+        )
+
+        canaries = (
+            authorization_code,
+            state,
+            verifier,
+            access_token,
+            refresh_token,
+            request_cookie,
+            client_secret,
+            state_secret,
+            provider_body,
+            token_reference,
+            config_payload,
+            mailbox_id,
+            owner_email,
+            full_request_url,
+        )
+        for canary in canaries:
+            with self.subTest(canary=canary):
+                self.assertNotIn(canary, combined_artifacts)
+
+        self.assertNotIn(mailbox_email, log_output)
+        self.assertNotIn("failure_code", serialized_payload)
+        self.assertNotIn("failure_code", response_body)
+        for failure_code in oauth_callback.GMAIL_CALLBACK_FAILURE_CODES:
+            self.assertNotIn(failure_code, serialized_payload)
+            self.assertNotIn(failure_code, response_body)
 
     def test_connect_oauth_requires_session_and_signed_state_has_owner(self):
         handler = FakeHandler({"provider": "google", "email": "hint@gmail.com"})

@@ -2,6 +2,7 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import os
 import re
 import sys
@@ -48,6 +49,119 @@ ONBOARDING_PRESET_INBOX_IDS = {
 ONBOARDING_CUSTOM_INBOX_ID_PATTERN = re.compile(
     r"^custom:[a-z0-9]+(?:-[a-z0-9]+)*$"
 )
+GMAIL_CALLBACK_FAILURE_CODES = frozenset(
+    {
+        "authorization_code_missing",
+        "canonical_origin_invalid",
+        "gmail_link_conflict",
+        "google_identity_invalid",
+        "google_identity_unavailable",
+        "mailbox_readback_verification_failed",
+        "member_authority_unavailable",
+        "member_unauthenticated",
+        "owner_binding_invalid",
+        "provider_denied",
+        "state_expired",
+        "state_invalid",
+        "token_exchange_failed",
+        "token_exchange_unavailable",
+        "token_owner_conflict",
+        "token_payload_invalid",
+        "token_persistence_failed",
+        "token_store_unavailable",
+        "unexpected_callback_failure",
+        "user_config_invalid",
+        "user_config_preflight_failed",
+        "user_config_readback_failed",
+        "user_config_store_unavailable",
+        "user_config_write_failed",
+    }
+)
+GMAIL_CALLBACK_FAILURE_CODE_FIELD = "_gmail_callback_failure_code"
+_GMAIL_CALLBACK_LOGGER = logging.getLogger(__name__)
+_MEMBER_AUTHORITY_UNAVAILABLE = object()
+
+
+def _log_gmail_callback_failure(
+    failure_code: str,
+    inbox_position: str | None = None,
+) -> None:
+    safe_failure_code = (
+        failure_code
+        if isinstance(failure_code, str)
+        and failure_code in GMAIL_CALLBACK_FAILURE_CODES
+        else "unexpected_callback_failure"
+    )
+    safe_inbox_position = (
+        inbox_position
+        if isinstance(inbox_position, str)
+        and (
+            inbox_position in ONBOARDING_PRESET_INBOX_IDS
+            or ONBOARDING_CUSTOM_INBOX_ID_PATTERN.fullmatch(inbox_position)
+            is not None
+        )
+        else None
+    )
+    fields = [
+        "event=gmail_oauth_callback_failure",
+        f"failure_code={safe_failure_code}",
+        "provider=google",
+    ]
+    if safe_inbox_position is not None:
+        fields.append(f"inbox_position={safe_inbox_position}")
+    try:
+        _GMAIL_CALLBACK_LOGGER.warning(" ".join(fields))
+    except Exception:
+        return
+
+
+def _resolve_gmail_callback_failure_code(
+    error: dict | None,
+    *,
+    default: str,
+    code_mapping: dict[str, str] | None = None,
+) -> str:
+    diagnostic_code = (
+        error.get(GMAIL_CALLBACK_FAILURE_CODE_FIELD)
+        if isinstance(error, dict)
+        else None
+    )
+    if (
+        isinstance(diagnostic_code, str)
+        and diagnostic_code in GMAIL_CALLBACK_FAILURE_CODES
+    ):
+        return diagnostic_code
+
+    public_code = error.get("code") if isinstance(error, dict) else None
+    mapped_code = (
+        (code_mapping or {}).get(public_code)
+        if isinstance(public_code, str)
+        else None
+    )
+    if mapped_code in GMAIL_CALLBACK_FAILURE_CODES:
+        return mapped_code
+    return default
+
+
+def _send_gmail_callback_failure(
+    request,
+    payload: dict,
+    *,
+    failure_code: str,
+    set_cookies: tuple[str, ...] | None = None,
+    inbox_position: str | None = None,
+) -> None:
+    if payload.get("provider") == "google" and not getattr(
+        request,
+        "_gmail_callback_failure_logged",
+        False,
+    ):
+        request._gmail_callback_failure_logged = True
+        _log_gmail_callback_failure(failure_code, inbox_position)
+    if set_cookies is None:
+        request._send_callback_page(payload)
+    else:
+        request._send_callback_page(payload, set_cookies=set_cookies)
 
 
 def _deployment_environment() -> str:
@@ -566,7 +680,10 @@ def _write_durable_record(
 
     verified_record, verify_error = _read_durable_record(config, store_key)
     if verify_error:
-        return None, verify_error
+        return None, {
+            **verify_error,
+            GMAIL_CALLBACK_FAILURE_CODE_FIELD: "mailbox_readback_verification_failed",
+        }
 
     return verified_record, None
 
@@ -600,6 +717,7 @@ def persist_google_token_record(
         return None, {
             "code": "invalid_token_payload",
             "message": "Google returned an incomplete token response.",
+            GMAIL_CALLBACK_FAILURE_CODE_FIELD: "token_payload_invalid",
         }
 
     normalized_email = email.strip().lower()
@@ -608,6 +726,7 @@ def persist_google_token_record(
         return None, {
             "code": "invalid_token_owner",
             "message": "Authenticated Gmail token ownership is required.",
+            GMAIL_CALLBACK_FAILURE_CODE_FIELD: "token_payload_invalid",
         }
     store_key = _build_store_key(normalized_email)
     durable_config = _resolve_durable_store_config()
@@ -616,7 +735,10 @@ def persist_google_token_record(
     if durable_config:
         existing_record, existing_error = _read_durable_record(durable_config, store_key)
         if existing_error:
-            return None, existing_error
+            return None, {
+                **existing_error,
+                GMAIL_CALLBACK_FAILURE_CODE_FIELD: "token_store_unavailable",
+            }
     else:
         existing_store = _read_runtime_store(_resolve_runtime_store_path())
         existing_record = existing_store.get(store_key)
@@ -633,6 +755,7 @@ def persist_google_token_record(
             return None, {
                 "code": "token_owner_conflict",
                 "message": "This Google mailbox is already linked to another account owner.",
+                GMAIL_CALLBACK_FAILURE_CODE_FIELD: "token_owner_conflict",
             }
 
     next_record = build_google_token_record(
@@ -656,12 +779,20 @@ def persist_google_token_record(
         storage_durable = False
 
     if error:
-        return None, error
+        diagnostic_code = _resolve_gmail_callback_failure_code(
+            error,
+            default="token_persistence_failed",
+        )
+        return None, {
+            **error,
+            GMAIL_CALLBACK_FAILURE_CODE_FIELD: diagnostic_code,
+        }
 
     if not isinstance(persisted_record, dict):
         return None, {
             "code": "token_persistence_failed",
             "message": "Google authentication succeeded, but mailbox token storage could not be verified.",
+            GMAIL_CALLBACK_FAILURE_CODE_FIELD: "mailbox_readback_verification_failed",
         }
 
     if (
@@ -674,6 +805,7 @@ def persist_google_token_record(
         return None, {
             "code": "token_persistence_failed",
             "message": "Google authentication succeeded, but the stored mailbox token record is incomplete.",
+            GMAIL_CALLBACK_FAILURE_CODE_FIELD: "mailbox_readback_verification_failed",
         }
 
     return {
@@ -694,7 +826,7 @@ def _resolve_authenticated_member_request(request: BaseHTTPRequestHandler):
             return resolution.member, resolution.set_cookies
         return None, resolution.set_cookies
     except Exception:
-        return None, ()
+        return None, _MEMBER_AUTHORITY_UNAVAILABLE
 
 
 def _build_user_config_key(email: str) -> str:
@@ -1066,12 +1198,14 @@ def _prepare_gmail_managed_inbox_registration(
         return None, {
             "code": "unauthorized",
             "message": "OAuth session ownership could not be verified.",
+            GMAIL_CALLBACK_FAILURE_CODE_FIELD: "owner_binding_invalid",
         }
     durable_config = _resolve_durable_store_config()
     if not durable_config:
         return None, {
             "code": "user_config_store_unavailable",
             "message": "User config storage is unavailable.",
+            GMAIL_CALLBACK_FAILURE_CODE_FIELD: "user_config_store_unavailable",
         }
 
     store_key = _build_user_config_key(member.email)
@@ -1081,7 +1215,10 @@ def _prepare_gmail_managed_inbox_registration(
         allow_missing=True,
     )
     if existing_error:
-        return None, existing_error
+        return None, {
+            **existing_error,
+            GMAIL_CALLBACK_FAILURE_CODE_FIELD: "user_config_preflight_failed",
+        }
 
     existing_config = existing_record if isinstance(existing_record, dict) else {}
     stored_owner = existing_config.get("email")
@@ -1092,6 +1229,7 @@ def _prepare_gmail_managed_inbox_registration(
         return None, {
             "code": "user_config_persistence_failed",
             "message": "User config ownership could not be verified.",
+            GMAIL_CALLBACK_FAILURE_CODE_FIELD: "user_config_invalid",
         }
 
     existing_managed_inboxes = existing_config.get("managedInboxes")
@@ -1101,6 +1239,7 @@ def _prepare_gmail_managed_inbox_registration(
         return None, {
             "code": "user_config_persistence_failed",
             "message": "Existing managed inbox configuration is malformed.",
+            GMAIL_CALLBACK_FAILURE_CODE_FIELD: "user_config_invalid",
         }
 
     _, conflict_error = _resolve_gmail_managed_inbox_target(
@@ -1109,7 +1248,10 @@ def _prepare_gmail_managed_inbox_registration(
         inbox_position=inbox_position,
     )
     if conflict_error:
-        return None, conflict_error
+        return None, {
+            **conflict_error,
+            GMAIL_CALLBACK_FAILURE_CODE_FIELD: "gmail_link_conflict",
+        }
 
     return {
         "durable_config": durable_config,
@@ -1185,6 +1327,7 @@ def _register_gmail_managed_inbox_in_user_config(
         return None, {
             "code": "user_config_persistence_failed",
             "message": "User config storage could not prepare the verified Gmail mailbox.",
+            GMAIL_CALLBACK_FAILURE_CODE_FIELD: "user_config_invalid",
         }
     intended_mailbox = intended_mailboxes[0]
 
@@ -1194,14 +1337,20 @@ def _register_gmail_managed_inbox_in_user_config(
         next_record,
     )
     if write_error:
-        return None, write_error
+        return None, {
+            **write_error,
+            GMAIL_CALLBACK_FAILURE_CODE_FIELD: "user_config_write_failed",
+        }
 
     verified_record, verify_error = _read_user_config_durable_record(
         durable_config,
         store_key,
     )
     if verify_error:
-        return None, verify_error
+        return None, {
+            **verify_error,
+            GMAIL_CALLBACK_FAILURE_CODE_FIELD: "user_config_readback_failed",
+        }
     if not _verify_saved_gmail_mailbox(
         verified_record,
         intended_mailbox,
@@ -1211,6 +1360,7 @@ def _register_gmail_managed_inbox_in_user_config(
         return None, {
             "code": "user_config_persistence_failed",
             "message": "User config storage could not verify the saved Gmail mailbox.",
+            GMAIL_CALLBACK_FAILURE_CODE_FIELD: "mailbox_readback_verification_failed",
         }
     verified_inboxes = verified_record.get("managedInboxes")
     saved_mailboxes = [
@@ -1222,6 +1372,7 @@ def _register_gmail_managed_inbox_in_user_config(
         return None, {
             "code": "user_config_persistence_failed",
             "message": "User config storage could not verify the saved Gmail mailbox.",
+            GMAIL_CALLBACK_FAILURE_CODE_FIELD: "mailbox_readback_verification_failed",
         }
     return dict(saved_mailboxes[0]), None
 
@@ -1571,13 +1722,39 @@ class handler(BaseHTTPRequestHandler):
         self.wfile.write(page)
 
     def do_GET(self):
+        self._gmail_callback_failure_logged = False
+        self._gmail_callback_provider = "google"
+        self._gmail_callback_inbox_position = None
+        try:
+            handler._handle_get(self)
+        except Exception:
+            if (
+                self._gmail_callback_provider == "google"
+                and not self._gmail_callback_failure_logged
+            ):
+                self._gmail_callback_failure_logged = True
+                _log_gmail_callback_failure(
+                    "unexpected_callback_failure",
+                    self._gmail_callback_inbox_position,
+                )
+            raise
+
+    def _handle_get(self):
         parsed_url = urlparse(self.path)
         params = parse_qs(parsed_url.query)
         oauth_error = params.get("error", [None])[0]
         state = params.get("state", [None])[0]
         member, auth_set_cookies = _resolve_authenticated_member_request(self)
         if member is None:
-            self._send_callback_page(
+            member_failure_code = (
+                "member_authority_unavailable"
+                if auth_set_cookies is _MEMBER_AUTHORITY_UNAVAILABLE
+                else "member_unauthenticated"
+            )
+            if auth_set_cookies is _MEMBER_AUTHORITY_UNAVAILABLE:
+                auth_set_cookies = ()
+            _send_gmail_callback_failure(
+                self,
                 _build_callback_payload(
                     provider="google",
                     email="",
@@ -1585,6 +1762,7 @@ class handler(BaseHTTPRequestHandler):
                     message="Mailbox authentication session could not be verified. Please try again.",
                     connected=False,
                 ),
+                failure_code=member_failure_code,
                 set_cookies=auth_set_cookies,
             )
             return
@@ -1600,6 +1778,7 @@ class handler(BaseHTTPRequestHandler):
             else "google"
         )
         provider_name = "Microsoft" if provider == "microsoft" else "Google"
+        self._gmail_callback_provider = provider
         email_hint = (
             state_payload.get("email_hint", state_payload.get("email", ""))
             if state_payload is not None
@@ -1608,17 +1787,25 @@ class handler(BaseHTTPRequestHandler):
         email = email_hint if provider == "microsoft" else ""
 
         if state_error:
-            self._send_callback_page(
+            _send_gmail_callback_failure(
+                self,
                 _build_callback_payload(
                     provider=provider,
                     email=email,
                     connection_status="connection_failed",
                     message=f"{provider_name} authentication could not be verified. Please try again.",
                     connected=False,
-                )
+                ),
+                failure_code=(
+                    "state_expired"
+                    if state_error == "expired_state"
+                    else "state_invalid"
+                ),
             )
             return
 
+        inbox_position = state_payload.get("inboxPosition")
+        self._gmail_callback_inbox_position = inbox_position
         if (
             not state_signing_secret
             or not verify_owner_binding(
@@ -1627,55 +1814,66 @@ class handler(BaseHTTPRequestHandler):
                 state_signing_secret,
             )
         ):
-            self._send_callback_page(
+            _send_gmail_callback_failure(
+                self,
                 _build_callback_payload(
                     provider=provider,
                     email="",
                     connection_status="connection_failed",
                     message=f"{provider_name} authentication session could not be verified. Please try again.",
                     connected=False,
-                )
+                ),
+                failure_code="owner_binding_invalid",
+                inbox_position=inbox_position,
             )
             return
         state_owner_email = normalize_auth_email(member.email)
-        inbox_position = state_payload.get("inboxPosition")
 
         public_app_origin = resolve_public_app_origin(self.headers)
         if not public_app_origin:
-            self._send_callback_page(
+            _send_gmail_callback_failure(
+                self,
                 _build_callback_payload(
                     provider=provider,
                     email="",
                     connection_status="connection_failed",
                     message="Mailbox authentication could not be completed because the application is not configured safely.",
                     connected=False,
-                )
+                ),
+                failure_code="canonical_origin_invalid",
+                inbox_position=inbox_position,
             )
             return
         self._callback_app_redirect_url = f"{public_app_origin}/"
 
         if oauth_error:
-            self._send_callback_page(
+            _send_gmail_callback_failure(
+                self,
                 _build_callback_payload(
                     provider=provider,
                     email=email,
                     connection_status="connection_failed",
                     message=f"{provider_name} authentication was cancelled or denied.",
                     connected=False,
-                )
+                ),
+                failure_code="provider_denied",
+                inbox_position=inbox_position,
             )
             return
 
         authorization_code = params.get("code", [None])[0]
         if not authorization_code:
-            self._send_callback_page(
+            _send_gmail_callback_failure(
+                self,
                 _build_callback_payload(
                     provider=provider,
                     email=email,
                     connection_status="connection_failed",
                     message=f"{provider_name} did not return an authorization code.",
                     connected=False,
-                )
+                ),
+                failure_code="authorization_code_missing",
+                inbox_position=inbox_position,
             )
             return
 
@@ -1685,14 +1883,17 @@ class handler(BaseHTTPRequestHandler):
             google_redirect_uri = f"{public_app_origin}{OAUTH_CALLBACK_PATH}"
 
             if not google_client_id or not google_client_secret:
-                self._send_callback_page(
+                _send_gmail_callback_failure(
+                    self,
                     _build_callback_payload(
                         provider=provider,
                         email=email,
                         connection_status="connection_failed",
                         message="Google OAuth callback is not configured safely.",
                         connected=False,
-                    )
+                    ),
+                    failure_code="token_exchange_unavailable",
+                    inbox_position=inbox_position,
                 )
                 return
 
@@ -1714,14 +1915,17 @@ class handler(BaseHTTPRequestHandler):
                 or not microsoft_client_secret
                 or not microsoft_redirect_uri
             ):
-                self._send_callback_page(
+                _send_gmail_callback_failure(
+                    self,
                     _build_callback_payload(
                         provider=provider,
                         email=email,
                         connection_status="connection_failed",
                         message="Microsoft OAuth callback is not fully configured.",
                         connected=False,
-                    )
+                    ),
+                    failure_code="token_exchange_unavailable",
+                    inbox_position=inbox_position,
                 )
                 return
 
@@ -1735,26 +1939,40 @@ class handler(BaseHTTPRequestHandler):
             )
 
         if token_error:
-            self._send_callback_page(
+            token_failure_code = _resolve_gmail_callback_failure_code(
+                token_error,
+                default="token_exchange_failed",
+                code_mapping={
+                    "token_exchange_failed": "token_exchange_failed",
+                    "token_exchange_unavailable": "token_exchange_unavailable",
+                },
+            )
+            _send_gmail_callback_failure(
+                self,
                 _build_callback_payload(
                     provider=provider,
                     email=email,
                     connection_status="connection_failed",
                     message=f"{provider_name} authentication could not be completed. Please try again.",
                     connected=False,
-                )
+                ),
+                failure_code=token_failure_code,
+                inbox_position=inbox_position,
             )
             return
 
         if not token_payload or not token_payload.get("access_token"):
-            self._send_callback_page(
+            _send_gmail_callback_failure(
+                self,
                 _build_callback_payload(
                     provider=provider,
                     email=email,
                     connection_status="connection_failed",
                     message=f"{provider_name} returned an incomplete token response.",
                     connected=False,
-                )
+                ),
+                failure_code="token_payload_invalid",
+                inbox_position=inbox_position,
             )
             return
 
@@ -1763,14 +1981,25 @@ class handler(BaseHTTPRequestHandler):
                 str(token_payload["access_token"]),
             )
             if identity_error or not oauth_identity:
-                self._send_callback_page(
+                identity_failure_code = _resolve_gmail_callback_failure_code(
+                    identity_error,
+                    default="google_identity_invalid",
+                    code_mapping={
+                        "google_identity_invalid": "google_identity_invalid",
+                        "google_identity_unavailable": "google_identity_unavailable",
+                    },
+                )
+                _send_gmail_callback_failure(
+                    self,
                     _build_callback_payload(
                         provider=provider,
                         email="",
                         connection_status="connection_failed",
                         message="Google account identity could not be verified. Please try again.",
                         connected=False,
-                    )
+                    ),
+                    failure_code=identity_failure_code,
+                    inbox_position=inbox_position,
                 )
                 return
         else:
@@ -1786,7 +2015,19 @@ class handler(BaseHTTPRequestHandler):
                 inbox_position=inbox_position,
             )
             if registration_preflight_error:
-                self._send_callback_page(
+                preflight_failure_code = _resolve_gmail_callback_failure_code(
+                    registration_preflight_error,
+                    default="user_config_preflight_failed",
+                    code_mapping={
+                        "gmail_link_conflict": "gmail_link_conflict",
+                        "unauthorized": "owner_binding_invalid",
+                        "user_config_store_unavailable": (
+                            "user_config_store_unavailable"
+                        ),
+                    },
+                )
+                _send_gmail_callback_failure(
+                    self,
                     _build_callback_payload(
                         provider=provider,
                         email=mailbox_email,
@@ -1794,7 +2035,9 @@ class handler(BaseHTTPRequestHandler):
                         message="This Gmail inbox could not be linked to the selected onboarding inbox.",
                         connected=False,
                         inbox_position=inbox_position,
-                    )
+                    ),
+                    failure_code=preflight_failure_code,
+                    inbox_position=inbox_position,
                 )
                 return
 
@@ -1810,7 +2053,18 @@ class handler(BaseHTTPRequestHandler):
             )
 
         if persistence_error:
-            self._send_callback_page(
+            persistence_failure_code = _resolve_gmail_callback_failure_code(
+                persistence_error,
+                default="token_persistence_failed",
+                code_mapping={
+                    "invalid_token_owner": "token_payload_invalid",
+                    "invalid_token_payload": "token_payload_invalid",
+                    "token_owner_conflict": "token_owner_conflict",
+                    "token_persistence_failed": "token_persistence_failed",
+                },
+            )
+            _send_gmail_callback_failure(
+                self,
                 _build_callback_payload(
                     provider=provider,
                     email=mailbox_email,
@@ -1818,12 +2072,15 @@ class handler(BaseHTTPRequestHandler):
                     message=f"{provider_name} authentication completed, but secure authorization storage is unavailable.",
                     connected=False,
                     display_name=display_name,
-                )
+                ),
+                failure_code=persistence_failure_code,
+                inbox_position=inbox_position,
             )
             return
 
         if not persisted_record:
-            self._send_callback_page(
+            _send_gmail_callback_failure(
+                self,
                 _build_callback_payload(
                     provider=provider,
                     email=mailbox_email,
@@ -1831,12 +2088,15 @@ class handler(BaseHTTPRequestHandler):
                     message=f"{provider_name} authentication completed. Tokens are stored only in the current server runtime. Final mailbox activation requires durable secure mailbox token storage.",
                     connected=False,
                     display_name=display_name,
-                )
+                ),
+                failure_code="mailbox_readback_verification_failed",
+                inbox_position=inbox_position,
             )
             return
 
         if persisted_record.get("_storage_durable") is not True:
-            self._send_callback_page(
+            _send_gmail_callback_failure(
+                self,
                 _build_callback_payload(
                     provider=provider,
                     email=mailbox_email,
@@ -1847,7 +2107,9 @@ class handler(BaseHTTPRequestHandler):
                     ),
                     connected=False,
                     display_name=display_name,
-                )
+                ),
+                failure_code="token_store_unavailable",
+                inbox_position=inbox_position,
             )
             return
 
@@ -1865,7 +2127,19 @@ class handler(BaseHTTPRequestHandler):
                 inbox_position=inbox_position,
             )
             if user_config_error:
-                self._send_callback_page(
+                user_config_failure_code = _resolve_gmail_callback_failure_code(
+                    user_config_error,
+                    default="user_config_write_failed",
+                    code_mapping={
+                        "gmail_link_conflict": "gmail_link_conflict",
+                        "unauthorized": "owner_binding_invalid",
+                        "user_config_store_unavailable": (
+                            "user_config_store_unavailable"
+                        ),
+                    },
+                )
+                _send_gmail_callback_failure(
+                    self,
                     _build_callback_payload(
                         provider=provider,
                         email=mailbox_email,
@@ -1873,26 +2147,35 @@ class handler(BaseHTTPRequestHandler):
                         message="Google authentication completed, but the Gmail inbox could not be saved securely.",
                         connected=False,
                         inbox_position=inbox_position,
-                    )
+                    ),
+                    failure_code=user_config_failure_code,
+                    inbox_position=inbox_position,
                 )
                 return
 
-        self._send_callback_page(
-            _build_callback_payload(
-                provider=provider,
-                email=mailbox_email,
-                connection_status="connected",
-                message=connected_message,
-                connected=True,
-                display_name=display_name,
-                inbox_position=inbox_position,
-                mailbox_id=(
-                    saved_mailbox.get("id")
-                    if isinstance(saved_mailbox, dict)
-                    else None
-                ),
-            )
+        callback_payload = _build_callback_payload(
+            provider=provider,
+            email=mailbox_email,
+            connection_status="connected",
+            message=connected_message,
+            connected=True,
+            display_name=display_name,
+            inbox_position=inbox_position,
+            mailbox_id=(
+                saved_mailbox.get("id")
+                if isinstance(saved_mailbox, dict)
+                else None
+            ),
         )
+        if provider == "google" and callback_payload.get("status") != "success":
+            _send_gmail_callback_failure(
+                self,
+                callback_payload,
+                failure_code="mailbox_readback_verification_failed",
+                inbox_position=inbox_position,
+            )
+            return
+        self._send_callback_page(callback_payload)
 
     def do_POST(self):
         self._send_method_not_allowed()
