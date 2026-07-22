@@ -109,11 +109,9 @@ export type ConnectInboxResponse = {
 };
 
 export type OAuthInboxRequest = {
-  provider: ProviderId;
-  email: string;
-  internalRole?: string | null;
-  focusPreferences?: OnboardingState["focusPreferences"] | null;
-  selectedInboxes?: string[] | null;
+  provider: Extract<ProviderId, "google" | "microsoft">;
+  email?: string;
+  inboxPosition?: string;
 };
 
 export type OAuthInboxResponse = {
@@ -270,18 +268,17 @@ export function buildRefreshInboxRequest(options: {
 }
 
 export function buildOAuthInboxRequest(options: {
-  provider: ProviderId;
+  provider: Extract<ProviderId, "google" | "microsoft">;
   email: string;
-  internalRole?: string | null;
-  focusPreferences?: OnboardingState["focusPreferences"] | null;
-  selectedInboxes?: string[] | null;
+  inboxPosition?: string | null;
 }): OAuthInboxRequest {
+  const email = options.email.trim();
+  const inboxPosition = options.inboxPosition?.trim();
+
   return {
     provider: options.provider,
-    email: options.email.trim(),
-    internalRole: options.internalRole,
-    focusPreferences: options.focusPreferences,
-    selectedInboxes: options.selectedInboxes,
+    ...(email ? { email } : {}),
+    ...(inboxPosition ? { inboxPosition } : {}),
   };
 }
 
@@ -561,6 +558,7 @@ export async function beginInboxConnection(options: {
   email: string;
   customImap: CustomImapSettings;
   customSmtp: CustomSmtpSettings;
+  inboxPosition?: string | null;
   internalRole?: string | null;
   focusPreferences?: OnboardingState["focusPreferences"] | null;
   selectedInboxes?: string[] | null;
@@ -570,11 +568,9 @@ export async function beginInboxConnection(options: {
   if (isOAuthConnectionProvider(options.provider)) {
     const response = await connectInboxWithOAuth(
       buildOAuthInboxRequest({
-        provider: options.provider,
+        provider: options.provider as Extract<ProviderId, "google" | "microsoft">,
         email: options.email,
-        internalRole: options.internalRole,
-        focusPreferences: options.focusPreferences,
-        selectedInboxes: options.selectedInboxes,
+        inboxPosition: options.inboxPosition,
       }),
     );
 
@@ -590,13 +586,32 @@ export async function beginInboxConnection(options: {
       };
     }
 
+    const authorizationUrl = response.authorizationUrl?.trim() ?? "";
+    if (
+      response.connectionStatus !== "waiting_for_authentication" ||
+      !authorizationUrl
+    ) {
+      return {
+        ok: false,
+        connected: false,
+        connectionMethod,
+        connectionStatus: "connection_failed",
+        connectionMessage: "OAuth did not return a valid authorization step.",
+        oauthAuthorizationUrl: null,
+        error: {
+          code: "oauth_invalid_start_response",
+          message: "OAuth did not return a valid authorization step.",
+        },
+      };
+    }
+
     return {
       ok: true,
-      connected: response.connectionStatus === "connected",
+      connected: false,
       connectionMethod,
       connectionStatus: response.connectionStatus,
       connectionMessage: response.message ?? null,
-      oauthAuthorizationUrl: response.authorizationUrl ?? null,
+      oauthAuthorizationUrl: authorizationUrl,
       messages: [],
     };
   }

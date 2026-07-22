@@ -17,8 +17,13 @@ API_DIR = CURRENT_DIR.parent
 if str(API_DIR) not in sys.path:
     sys.path.insert(0, str(API_DIR))
 
-from user_config_store import resolve_authenticated_user  # noqa: E402
+from user_config_store import (  # noqa: E402
+    read_user_config_record,
+    resolve_authenticated_user,
+    resolve_user_config_store,
+)
 from api.auth.email_address import normalize_auth_email  # noqa: E402
+from api.user.config import _classify_stored_onboarding_session  # noqa: E402
 
 GOOGLE_AUTHORIZATION_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth"
 MICROSOFT_AUTHORIZATION_ENDPOINT_TEMPLATE = (
@@ -45,6 +50,13 @@ OAUTH_STATE_TTL_SECONDS = 15 * 60
 STATE_SIGNATURE_DOMAIN = "cuevion-oauth-state-signature:v1"
 OWNER_BINDING_DOMAIN = "cuevion-oauth-owner-binding:v1"
 PKCE_DERIVATION_DOMAIN = "cuevion-oauth-pkce:v1"
+ONBOARDING_CONFLICT_ERROR = {
+    "ok": False,
+    "error": {
+        "code": "onboarding_state_conflict",
+        "message": "The selected onboarding inbox is no longer available. Reload and try again.",
+    },
+}
 
 
 def base64url_encode(value: bytes) -> str:
@@ -60,20 +72,20 @@ def build_owner_binding(
     issued_at: int,
     expires_at: int,
     signing_secret: str,
+    inbox_position: str | None = None,
 ) -> str:
     normalized_owner = normalize_auth_email(owner_email)
-    binding_message = "\n".join(
-        (
-            OWNER_BINDING_DOMAIN,
-            str(OAUTH_STATE_VERSION),
-            normalized_owner,
-            provider,
-            email_hint,
-            nonce,
-            str(issued_at),
-            str(expires_at),
-        )
-    )
+    binding_fields = [
+        OWNER_BINDING_DOMAIN,
+        str(OAUTH_STATE_VERSION),
+        normalized_owner,
+        provider,
+        email_hint,
+    ]
+    if inbox_position is not None:
+        binding_fields.append(inbox_position)
+    binding_fields.extend((nonce, str(issued_at), str(expires_at)))
+    binding_message = "\n".join(binding_fields)
     return base64url_encode(
         hmac.new(
             signing_secret.encode("utf-8"),
@@ -88,6 +100,7 @@ def build_signed_state(
     email_hint: str,
     owner_email: str,
     signing_secret: str,
+    inbox_position: str | None = None,
 ) -> tuple[str, str]:
     issued_at = int(time.time())
     expires_at = issued_at + OAUTH_STATE_TTL_SECONDS
@@ -107,8 +120,11 @@ def build_signed_state(
             issued_at=issued_at,
             expires_at=expires_at,
             signing_secret=signing_secret,
+            inbox_position=inbox_position,
         ),
     }
+    if inbox_position is not None:
+        state_payload["inboxPosition"] = inbox_position
     encoded_payload = base64url_encode(
         json.dumps(state_payload, separators=(",", ":"), sort_keys=True).encode("utf-8"),
     )
@@ -149,6 +165,60 @@ def resolve_microsoft_scopes() -> list[str]:
         return DEFAULT_MICROSOFT_SCOPES
 
     return [scope for scope in configured_scopes.split() if scope]
+
+
+def resolve_authoritative_onboarding_position(
+    session_user: dict,
+    inbox_position: str,
+) -> tuple[str | None, int | None, dict | None]:
+    store, store_error = resolve_user_config_store()
+    if store_error or not store:
+        return None, 503, {
+            "ok": False,
+            "error": {
+                "code": "user_config_store_unavailable",
+                "message": "User config storage is temporarily unavailable.",
+            },
+        }
+
+    read_result = read_user_config_record(store, session_user["email"])
+    if read_result["status"] == "unavailable":
+        return None, 503, {
+            "ok": False,
+            "error": {
+                "code": "user_config_store_unavailable",
+                "message": "User config storage is temporarily unavailable.",
+            },
+        }
+    if read_result["status"] != "ok" or not isinstance(read_result["config"], dict):
+        return None, 409, ONBOARDING_CONFLICT_ERROR
+
+    config = read_result["config"]
+    stored_owner = config.get("email")
+    if stored_owner is not None and (
+        not isinstance(stored_owner, str)
+        or normalize_auth_email(stored_owner)
+        != normalize_auth_email(session_user["email"])
+    ):
+        return None, 409, ONBOARDING_CONFLICT_ERROR
+
+    session_state, normalized_session = _classify_stored_onboarding_session(
+        config.get("onboardingSession")
+    )
+    if (
+        getattr(session_state, "value", None) != "valid"
+        or not isinstance(normalized_session, dict)
+        or normalized_session.get("schemaVersion") != 1
+        or normalized_session.get("completed") is not False
+    ):
+        return None, 409, ONBOARDING_CONFLICT_ERROR
+
+    choices = normalized_session.get("choices")
+    selected_inboxes = choices.get("selectedInboxes") if isinstance(choices, dict) else None
+    if not isinstance(selected_inboxes, list) or inbox_position not in selected_inboxes:
+        return None, 409, ONBOARDING_CONFLICT_ERROR
+
+    return inbox_position, None, None
 
 
 class handler(BaseHTTPRequestHandler):
@@ -217,15 +287,22 @@ class handler(BaseHTTPRequestHandler):
                     },
                 )
                 return
-            if not isinstance(payload, dict) or set(payload) - {"provider", "email"}:
+            if not isinstance(payload, dict) or set(payload) - {
+                "provider",
+                "email",
+                "inboxPosition",
+            }:
                 self._send_json(400, {"ok": False, "error": {"code": "invalid_request", "message": "Request body contains unsupported fields."}})
                 return
 
             provider = payload.get("provider")
-            email = str(payload.get("email", "")).strip().lower()
+            raw_email = payload.get("email", "")
+            email = raw_email.strip().lower() if isinstance(raw_email, str) else ""
+            inbox_position = payload.get("inboxPosition")
+            has_inbox_position = "inboxPosition" in payload
             email_pattern = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
-            if provider not in {"google", "microsoft"}:
+            if not isinstance(provider, str) or provider not in ("google", "microsoft"):
                 self._send_json(
                     400,
                     {
@@ -238,11 +315,24 @@ class handler(BaseHTTPRequestHandler):
                 )
                 return
 
-            if not email_pattern.match(email):
+            if "email" in payload and not isinstance(raw_email, str):
+                self._send_json(
+                    400,
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "invalid_request",
+                            "message": "Email hint must be a string.",
+                        },
+                    },
+                )
+                return
+
+            if email and not email_pattern.match(email):
                 email_message = (
-                    "A valid Gmail or Google Workspace email is required."
+                    "Email hint must be a valid Gmail or Google Workspace address."
                     if provider == "google"
-                    else "A valid Microsoft 365 or Outlook email is required."
+                    else "Email hint must be a valid Microsoft 365 or Outlook address."
                 )
                 self._send_json(
                     400,
@@ -255,6 +345,34 @@ class handler(BaseHTTPRequestHandler):
                     },
                 )
                 return
+
+            if has_inbox_position:
+                if provider != "google" or not isinstance(inbox_position, str):
+                    self._send_json(
+                        400,
+                        {
+                            "ok": False,
+                            "error": {
+                                "code": "invalid_request",
+                                "message": "Onboarding inbox position is invalid.",
+                            },
+                        },
+                    )
+                    return
+                (
+                    inbox_position,
+                    onboarding_error_status,
+                    onboarding_error_payload,
+                ) = resolve_authoritative_onboarding_position(
+                    session_user,
+                    inbox_position,
+                )
+                if onboarding_error_status is not None and onboarding_error_payload:
+                    self._send_json(
+                        onboarding_error_status,
+                        onboarding_error_payload,
+                    )
+                    return
 
             if provider == "google":
                 client_id = os.getenv("GOOGLE_CLIENT_ID", "").strip()
@@ -314,6 +432,7 @@ class handler(BaseHTTPRequestHandler):
                 email,
                 session_user["email"],
                 oauth_state_secret,
+                inbox_position,
             )
             if provider == "google":
                 authorization_params = {
@@ -324,11 +443,12 @@ class handler(BaseHTTPRequestHandler):
                     "access_type": "offline",
                     "include_granted_scopes": "true",
                     "prompt": "consent",
-                    "login_hint": email,
                     "state": authorization_state,
                     "code_challenge": build_code_challenge(code_verifier),
                     "code_challenge_method": "S256",
                 }
+                if email:
+                    authorization_params["login_hint"] = email
                 authorization_url = (
                     f"{GOOGLE_AUTHORIZATION_ENDPOINT}?{urlencode(authorization_params)}"
                 )
@@ -342,11 +462,12 @@ class handler(BaseHTTPRequestHandler):
                     "response_mode": "query",
                     "scope": " ".join(resolve_microsoft_scopes()),
                     "prompt": "select_account",
-                    "login_hint": email,
                     "state": authorization_state,
                     "code_challenge": build_code_challenge(code_verifier),
                     "code_challenge_method": "S256",
                 }
+                if email:
+                    authorization_params["login_hint"] = email
                 authorization_url = (
                     f"{MICROSOFT_AUTHORIZATION_ENDPOINT_TEMPLATE.format(tenant=microsoft_tenant)}"
                     f"?{urlencode(authorization_params)}"

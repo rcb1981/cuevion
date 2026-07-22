@@ -17,6 +17,17 @@ const { accountConfigOrchestration } = require("./App.tsx") as typeof import("./
 const { onboardingFlowProgression } = require(
   "./components/onboarding/OnboardingFlow.tsx"
 ) as typeof import("./components/onboarding/OnboardingFlow");
+const inboxConnectionApi = require(
+  "./lib/inboxConnectionApi.ts"
+) as typeof import("./lib/inboxConnectionApi");
+const {
+  buildOnboardingInboxConnectionOptions,
+  buildSuccessfulOnboardingConnectionUpdate,
+  getConnectionFeedback,
+  isConnectionReady,
+} = require(
+  "./components/onboarding/StepConnectInboxes.tsx"
+) as typeof import("./components/onboarding/StepConnectInboxes");
 
 const ACCOUNT_KEY = "member@example.com";
 const SECOND_ACCOUNT_KEY = "second@example.com";
@@ -25,6 +36,7 @@ const ONBOARDING_DRAFT_KEY = "label-inbox-ai-onboarding-draft-state";
 const APP_VIEW_KEY = "cuevion-app-view";
 const MANAGED_INBOXES_KEY = "cuevion-managed-inboxes";
 const MAILBOX_TITLES_KEY = "cuevion-mailbox-title-overrides";
+const OAUTH_CALLBACK_RESULT_KEY = "cuevion-oauth-callback-result";
 const GLOBAL_ONBOARDING_KEYS = new Set([
   ONBOARDING_SESSION_KEY,
   ONBOARDING_DRAFT_KEY,
@@ -182,6 +194,28 @@ function completedLegacyConfig(
     smartFolders: [],
     uiPreferences: {},
     displayNameOverrides: { [ACCOUNT_KEY]: "Server Member" },
+  };
+}
+
+type ManagedProjectionInput = Parameters<
+  typeof accountConfigOrchestration.projectConnectedManagedInboxes
+>[1][number];
+
+function connectedGoogleManagedInbox(
+  overrides: Partial<ManagedProjectionInput> = {},
+): ManagedProjectionInput {
+  return {
+    id: "managed-google-1",
+    onboardingInboxId: "main",
+    title: "Verified Gmail",
+    email: "verified.account@gmail.com",
+    provider: "google",
+    connected: true,
+    connectionMethod: "oauth",
+    connectionStatus: "connected",
+    connectionMessage: "Connected through Google.",
+    oauthAuthorizationUrl: null,
+    ...overrides,
   };
 }
 
@@ -459,6 +493,424 @@ async function run() {
       JSON.stringify(hydratedSession).includes("stale-local-secret"),
       false,
     );
+  });
+
+  await test("production Gmail hint validation is optional and has no synthetic failures", () => {
+    const gmailConnection = {
+      ...cleanState.inboxConnections.main,
+      provider: "google" as const,
+      email: "",
+      connected: false,
+      connectionMethod: "oauth" as const,
+      connectionStatus: "oauth_required" as const,
+      connectionMessage: null,
+      oauthAuthorizationUrl: null,
+    };
+
+    assert.equal(isConnectionReady(gmailConnection), true);
+    assert.equal(getConnectionFeedback(gmailConnection), null);
+
+    const legitimateServerAddress = {
+      ...gmailConnection,
+      email: "server@gmail.com",
+    };
+    assert.equal(isConnectionReady(legitimateServerAddress), true);
+    assert.equal(getConnectionFeedback(legitimateServerAddress), null);
+
+    const malformedHint = {
+      ...gmailConnection,
+      email: "not-an-email",
+    };
+    assert.equal(isConnectionReady(malformedHint), true);
+    const malformedFeedback = getConnectionFeedback(malformedHint);
+    assert.equal(typeof malformedFeedback?.email, "string");
+    assert.equal(malformedFeedback?.general, undefined);
+  });
+
+  await test("production Step Gmail start sends only the safe OAuth correlation payload", async () => {
+    const previousFetch = globalThis.fetch;
+    let capturedRequest: { url: string; init?: RequestInit } | null = null;
+    globalThis.fetch = (async (url: string, init?: RequestInit) => {
+      capturedRequest = { url, init };
+      return {
+        ok: true,
+        text: async () =>
+          JSON.stringify({
+            ok: true,
+            connectionStatus: "waiting_for_authentication",
+            authorizationUrl: "  https://accounts.google.test/authorize  ",
+            message: "Continue with Google.",
+          }),
+      } as Response;
+    }) as typeof fetch;
+
+    try {
+      assert.deepEqual(
+        inboxConnectionApi.buildOAuthInboxRequest({
+          provider: "google",
+          email: "   ",
+          inboxPosition: "main",
+        }),
+        { provider: "google", inboxPosition: "main" },
+      );
+
+      const productionStepOptions = buildOnboardingInboxConnectionOptions({
+        inboxId: "main",
+        connection: {
+          ...cleanState.inboxConnections.main,
+          provider: "google",
+          email: "  hinted.account@gmail.com  ",
+          connected: false,
+          connectionMethod: "oauth",
+          connectionStatus: "oauth_required",
+          connectionMessage: null,
+          oauthAuthorizationUrl: null,
+        },
+        internalRole: "label_manager",
+        focusPreferences: {
+          demos: "low",
+          promo: "medium",
+          finance: "medium",
+          legal: "medium",
+          business: "medium",
+          updates: "medium",
+          distribution: "medium",
+          royalties: "medium",
+          promoReminders: "medium",
+          paymentReminders: "medium",
+        },
+        selectedInboxes: ["main", "demo"],
+      });
+      assert.equal(productionStepOptions.inboxPosition, "main");
+
+      const startResult = await inboxConnectionApi.beginInboxConnection(
+        productionStepOptions,
+      );
+      assert.notEqual(capturedRequest, null);
+      assert.equal(capturedRequest!.url, "/api/inboxes/connect-oauth");
+      assert.equal(capturedRequest!.init?.method, "POST");
+      assert.equal(capturedRequest!.init?.credentials, "include");
+      assert.deepEqual(JSON.parse(String(capturedRequest!.init?.body)), {
+        provider: "google",
+        email: "hinted.account@gmail.com",
+        inboxPosition: "main",
+      });
+      assert.deepEqual(
+        Object.keys(JSON.parse(String(capturedRequest!.init?.body))).sort(),
+        ["email", "inboxPosition", "provider"],
+      );
+      assert.equal(startResult.ok, true);
+      assert.equal(startResult.connected, false);
+      assert.equal(startResult.connectionStatus, "waiting_for_authentication");
+      assert.equal(
+        startResult.oauthAuthorizationUrl,
+        "https://accounts.google.test/authorize",
+      );
+      assert.deepEqual(buildSuccessfulOnboardingConnectionUpdate(startResult), {
+        connected: false,
+        connectionMethod: "oauth",
+        connectionStatus: "waiting_for_authentication",
+        connectionMessage: "Continue with Google.",
+        oauthAuthorizationUrl: null,
+      });
+
+      globalThis.fetch = (async () => ({
+        ok: true,
+        text: async () =>
+          JSON.stringify({
+            ok: true,
+            connectionStatus: "connected",
+            authorizationUrl: "https://accounts.google.test/authorize",
+          }),
+      })) as typeof fetch;
+      const unsafeConnectedStart = await inboxConnectionApi.beginInboxConnection(
+        productionStepOptions,
+      );
+      assert.equal(unsafeConnectedStart.ok, false);
+      assert.equal(unsafeConnectedStart.connected, false);
+      assert.equal(unsafeConnectedStart.connectionStatus, "connection_failed");
+      assert.equal(unsafeConnectedStart.oauthAuthorizationUrl, null);
+      assert.equal(
+        unsafeConnectedStart.error?.code,
+        "oauth_invalid_start_response",
+      );
+    } finally {
+      globalThis.fetch = previousFetch;
+    }
+  });
+
+  await test("Google OAuth callback metadata is consumed only as a one-shot reload signal", () => {
+    const callbackSignal = {
+      status: "success",
+      provider: "google",
+      inboxPosition: "main",
+      email: "verified.account@gmail.com",
+      mailboxId: "managed-google-1",
+      message: "Gmail connected.",
+    };
+    const localManagedMirror = JSON.stringify([
+      { id: "local-only", email: "hinted.account@gmail.com", connected: false },
+    ]);
+    const storage = new MemoryStorage({
+      [OAUTH_CALLBACK_RESULT_KEY]: JSON.stringify(callbackSignal),
+      [MANAGED_INBOXES_KEY]: localManagedMirror,
+    });
+    const onboardingBefore = JSON.stringify(selectedChoiceState);
+    let reloadRequests = 0;
+
+    assert.equal(
+      accountConfigOrchestration.processGoogleOAuthCallbackSignal(storage, () => {
+        reloadRequests += 1;
+      }),
+      true,
+    );
+    assert.equal(reloadRequests, 1);
+    assert.equal(storage.getItem(OAUTH_CALLBACK_RESULT_KEY), null);
+    assert.equal(storage.getItem(MANAGED_INBOXES_KEY), localManagedMirror);
+    assert.equal(JSON.stringify(selectedChoiceState), onboardingBefore);
+    assert.deepEqual(storage.mutations, [
+      { type: "remove", key: OAUTH_CALLBACK_RESULT_KEY },
+    ]);
+
+    const rejectedSignals = [
+      {
+        status: "error",
+        provider: "google",
+        inboxPosition: "main",
+        email: "verified.account@gmail.com",
+        mailboxId: "managed-google-1",
+        message: "Registration failed.",
+      },
+      {
+        ...callbackSignal,
+        accessToken: "must-never-be-accepted",
+      },
+      {
+        ...callbackSignal,
+        state: "must-never-be-accepted",
+      },
+    ];
+
+    for (const rejectedSignal of rejectedSignals) {
+      const rejectedStorage = new MemoryStorage({
+        [OAUTH_CALLBACK_RESULT_KEY]: JSON.stringify(rejectedSignal),
+      });
+      let rejectedReloadRequests = 0;
+      assert.equal(
+        accountConfigOrchestration.processGoogleOAuthCallbackSignal(
+          rejectedStorage,
+          () => {
+            rejectedReloadRequests += 1;
+          },
+        ),
+        false,
+      );
+      assert.equal(rejectedReloadRequests, 0);
+      assert.equal(rejectedStorage.getItem(OAUTH_CALLBACK_RESULT_KEY), null);
+      assert.deepEqual(rejectedStorage.mutations, [
+        { type: "remove", key: OAUTH_CALLBACK_RESULT_KEY },
+      ]);
+    }
+
+    const malformedStorage = new MemoryStorage({
+      [OAUTH_CALLBACK_RESULT_KEY]: "{not-json",
+    });
+    let malformedReloadRequests = 0;
+    assert.equal(
+      accountConfigOrchestration.processGoogleOAuthCallbackSignal(
+        malformedStorage,
+        () => {
+          malformedReloadRequests += 1;
+        },
+      ),
+      false,
+    );
+    assert.equal(malformedReloadRequests, 0);
+    assert.equal(malformedStorage.getItem(OAUTH_CALLBACK_RESULT_KEY), null);
+  });
+
+  await test("only one matching authoritative Google mailbox projects connected", () => {
+    const hintedState: OnboardingState = {
+      ...selectedChoiceState,
+      inboxConnections: {
+        ...selectedChoiceState.inboxConnections,
+        main: {
+          ...selectedChoiceState.inboxConnections.main,
+          provider: "google",
+          email: "hinted.account@gmail.com",
+          connected: false,
+          connectionMethod: "oauth",
+          connectionStatus: "waiting_for_authentication",
+          connectionMessage: "Waiting for Google.",
+          oauthAuthorizationUrl: null,
+        },
+      },
+    };
+    const verifiedMailbox = connectedGoogleManagedInbox();
+    const projected = accountConfigOrchestration.projectConnectedManagedInboxes(
+      hintedState,
+      [verifiedMailbox],
+    );
+
+    assert.equal(hintedState.inboxConnections.main.connected, false);
+    assert.equal(hintedState.inboxConnections.main.email, "hinted.account@gmail.com");
+    assert.equal(projected.inboxConnections.main.connected, true);
+    assert.equal(projected.inboxConnections.main.connectionStatus, "connected");
+    assert.equal(projected.inboxConnections.main.connectionMethod, "oauth");
+    assert.equal(projected.inboxConnections.main.provider, "google");
+    assert.equal(
+      projected.inboxConnections.main.email,
+      "verified.account@gmail.com",
+      "the Google-verified server identity must replace the browser hint",
+    );
+    assert.equal(projected.inboxConnections.main.oauthAuthorizationUrl, null);
+
+    const empty = accountConfigOrchestration.projectConnectedManagedInboxes(
+      hintedState,
+      [],
+    );
+    assert.equal(empty.inboxConnections.main.connected, false);
+
+    const unmatched = accountConfigOrchestration.projectConnectedManagedInboxes(
+      hintedState,
+      [connectedGoogleManagedInbox({ onboardingInboxId: "demo" })],
+    );
+    assert.equal(unmatched.inboxConnections.main.connected, false);
+    assert.equal(unmatched.inboxConnections.main.email, "hinted.account@gmail.com");
+
+    const ambiguous = accountConfigOrchestration.projectConnectedManagedInboxes(
+      hintedState,
+      [
+        connectedGoogleManagedInbox(),
+        connectedGoogleManagedInbox({
+          id: "managed-google-2",
+          email: "second.verified@gmail.com",
+        }),
+      ],
+    );
+    assert.equal(ambiguous.inboxConnections.main.connected, false);
+
+    const unsafeShapes: ManagedProjectionInput[] = [
+      connectedGoogleManagedInbox({ connected: false }),
+      connectedGoogleManagedInbox({ connectionStatus: "connection_failed" }),
+      connectedGoogleManagedInbox({ connectionMethod: "imap" }),
+      connectedGoogleManagedInbox({ provider: "microsoft" }),
+      connectedGoogleManagedInbox({ id: "" }),
+      connectedGoogleManagedInbox({ email: "not-an-email" }),
+    ];
+    for (const mailbox of unsafeShapes) {
+      const unsafeProjection =
+        accountConfigOrchestration.projectConnectedManagedInboxes(
+          hintedState,
+          [mailbox],
+        );
+      assert.equal(unsafeProjection.inboxConnections.main.connected, false);
+    }
+
+    const safeSession = accountConfigOrchestration.createIncompleteSession(projected, 2);
+    assert.equal(safeSession.completed, false);
+    const serializedSession = JSON.stringify(safeSession);
+    assert.equal(serializedSession.includes("verified.account@gmail.com"), false);
+    assert.equal(serializedSession.includes("managed-google-1"), false);
+    assert.equal(serializedSession.includes("connected"), false);
+  });
+
+  await test("server Gmail projection survives refresh and a second clean profile", async () => {
+    const serverSession = incompleteSession(2, selectedChoiceState);
+    const serverConfig: UserAccountConfig = {
+      onboardingSession: serverSession,
+      managedInboxes: [connectedGoogleManagedInbox()],
+    };
+    const browserAStorage = new MemoryStorage();
+    const firstHydration = await hydrateResult(
+      { status: "found", config: serverConfig },
+      browserAStorage,
+    );
+    const refreshedHydration = await hydrateResult(
+      { status: "found", config: serverConfig },
+      browserAStorage,
+    );
+    const browserBStorage = new MemoryStorage();
+    const browserBHydration = await hydrateResult(
+      { status: "found", config: serverConfig },
+      browserBStorage,
+      false,
+      () => undefined,
+      SECOND_ACCOUNT_KEY,
+    );
+
+    for (const outcome of [
+      firstHydration,
+      refreshedHydration,
+      browserBHydration,
+    ]) {
+      assert.equal(outcome.status, "found");
+      if (outcome.status !== "found") {
+        throw new Error("Expected authoritative Gmail config hydration");
+      }
+      assert.equal(outcome.accountState.view, "onboarding");
+      assert.equal(outcome.accountState.userConfig, null);
+      assert.equal(outcome.accountState.persistedOnboardingSession?.completed, false);
+      assert.equal(outcome.accountState.onboardingStep, 2);
+      assert.equal(outcome.accountState.onboardingState.inboxConnections.main.connected, true);
+      assert.equal(
+        outcome.accountState.onboardingState.inboxConnections.main.email,
+        "verified.account@gmail.com",
+      );
+      assert.deepEqual(
+        accountConfigOrchestration.projectChoices(
+          outcome.accountState.onboardingState,
+        ),
+        serverSession.choices,
+      );
+    }
+
+    assert.equal(
+      JSON.parse(browserBStorage.getItem(MANAGED_INBOXES_KEY) ?? "[]")[0]
+        .onboardingInboxId,
+      "main",
+    );
+    assert.equal(
+      accountConfigOrchestration.canOpenWorkspaceWithoutServerCompletion("member"),
+      false,
+    );
+
+    const failureStorage = new MemoryStorage({
+      [OAUTH_CALLBACK_RESULT_KEY]: JSON.stringify({
+        status: "success",
+        provider: "google",
+        inboxPosition: "main",
+        email: "verified.account@gmail.com",
+        mailboxId: "managed-google-1",
+        message: "Gmail connected.",
+      }),
+    });
+    let failureReloadRequests = 0;
+    assert.equal(
+      accountConfigOrchestration.processGoogleOAuthCallbackSignal(
+        failureStorage,
+        () => {
+          failureReloadRequests += 1;
+        },
+      ),
+      true,
+    );
+    assert.equal(failureReloadRequests, 1);
+    const failedReload = await hydrateResult(
+      {
+        status: "network_error",
+        error: { code: "network_error", message: "offline" },
+      },
+      failureStorage,
+    );
+    assert.deepEqual(failedReload, {
+      status: "error",
+      errorStatus: "network_error",
+    });
+    assert.deepEqual(failureStorage.mutations, [
+      { type: "remove", key: OAUTH_CALLBACK_RESULT_KEY },
+    ]);
+    assert.equal(failureStorage.getItem(MANAGED_INBOXES_KEY), null);
   });
 
   await test("the same server session hydrates identically in a second clean profile", async () => {

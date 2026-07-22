@@ -31,6 +31,19 @@ MAX_STATE_CLOCK_SKEW_SECONDS = 60
 STATE_SIGNATURE_DOMAIN = "cuevion-oauth-state-signature:v1"
 OWNER_BINDING_DOMAIN = "cuevion-oauth-owner-binding:v1"
 PKCE_DERIVATION_DOMAIN = "cuevion-oauth-pkce:v1"
+ONBOARDING_PRESET_INBOX_IDS = {
+    "main",
+    "demo",
+    "business",
+    "promo",
+    "legal",
+    "finance",
+    "royalty",
+    "sync",
+}
+ONBOARDING_CUSTOM_INBOX_ID_PATTERN = re.compile(
+    r"^custom:[a-z0-9]+(?:-[a-z0-9]+)*$"
+)
 
 CURRENT_DIR = Path(__file__).resolve().parent
 API_DIR = CURRENT_DIR.parent
@@ -62,19 +75,19 @@ def build_owner_binding(
     issued_at: int,
     expires_at: int,
     signing_secret: str,
+    inbox_position: str | None = None,
 ) -> str:
-    binding_message = "\n".join(
-        (
-            OWNER_BINDING_DOMAIN,
-            str(OAUTH_STATE_VERSION),
-            normalize_auth_email(owner_email),
-            provider,
-            email_hint,
-            nonce,
-            str(issued_at),
-            str(expires_at),
-        )
-    )
+    binding_fields = [
+        OWNER_BINDING_DOMAIN,
+        str(OAUTH_STATE_VERSION),
+        normalize_auth_email(owner_email),
+        provider,
+        email_hint,
+    ]
+    if inbox_position is not None:
+        binding_fields.append(inbox_position)
+    binding_fields.extend((nonce, str(issued_at), str(expires_at)))
+    binding_message = "\n".join(binding_fields)
     return base64url_encode(
         hmac.new(
             signing_secret.encode("utf-8"),
@@ -93,6 +106,7 @@ def verify_owner_binding(payload: dict, owner_email: str, signing_secret: str) -
         issued_at=payload["issued_at"],
         expires_at=payload["expires_at"],
         signing_secret=signing_secret,
+        inbox_position=payload.get("inboxPosition"),
     )
     return hmac.compare_digest(payload["owner_binding"], expected_binding)
 
@@ -124,6 +138,19 @@ def verify_signed_state(
 
     if not isinstance(payload, dict):
         return None, "invalid_state"
+    allowed_state_fields = {
+        "v",
+        "provider",
+        "email_hint",
+        "issued_at",
+        "expires_at",
+        "nonce",
+        "owner_binding",
+        "inboxPosition",
+    }
+    required_state_fields = allowed_state_fields - {"inboxPosition"}
+    if set(payload) - allowed_state_fields or not required_state_fields.issubset(payload):
+        return None, "invalid_state"
     if expected_provider is not None and payload.get("provider") != expected_provider:
         return None, "invalid_state"
     if payload.get("provider") not in {"google", "microsoft"}:
@@ -148,11 +175,24 @@ def verify_signed_state(
         return None, "expired_state"
 
     email_hint = payload.get("email_hint")
+    inbox_position = payload.get("inboxPosition")
     nonce = payload.get("nonce")
     owner_binding = payload.get("owner_binding")
     if (
         not isinstance(email_hint, str)
-        or not EMAIL_PATTERN.match(email_hint.strip().lower())
+        or email_hint != email_hint.strip().lower()
+        or (email_hint and not EMAIL_PATTERN.match(email_hint))
+        or (
+            inbox_position is not None
+            and (
+                not isinstance(inbox_position, str)
+                or (
+                    inbox_position not in ONBOARDING_PRESET_INBOX_IDS
+                    and ONBOARDING_CUSTOM_INBOX_ID_PATTERN.fullmatch(inbox_position)
+                    is None
+                )
+            )
+        )
         or not isinstance(nonce, str)
         or not 16 <= len(nonce) <= 128
         or not isinstance(owner_binding, str)
@@ -451,6 +491,20 @@ def persist_google_token_record(
         existing_store = _read_runtime_store(_resolve_runtime_store_path())
         existing_record = existing_store.get(store_key)
 
+    if isinstance(existing_record, dict):
+        existing_owner = existing_record.get("owner_email")
+        if (
+            existing_record.get("provider") != "google"
+            or existing_record.get("email") != normalized_email
+            or not isinstance(existing_owner, str)
+            or not EMAIL_PATTERN.match(normalize_auth_email(existing_owner))
+            or normalize_auth_email(existing_owner) != normalized_owner_email
+        ):
+            return None, {
+                "code": "token_owner_conflict",
+                "message": "This Google mailbox is already linked to another account owner.",
+            }
+
     next_record = build_google_token_record(
         email=normalized_email,
         owner_email=normalized_owner_email,
@@ -526,16 +580,21 @@ def _format_name_from_email(email: str) -> str:
 
 
 def _build_gmail_managed_inbox_id(email: str, existing_ids: set[str]) -> str:
+    normalized_existing_ids = {
+        existing_id.casefold()
+        for existing_id in existing_ids
+        if isinstance(existing_id, str)
+    }
     local_part = email.split("@", 1)[0].lower()
     slug = re.sub(r"[^a-z0-9]+", "-", local_part).strip("-") or "gmail"
     candidate = f"gmail-{slug}"
-    if candidate not in existing_ids:
+    if candidate.casefold() not in normalized_existing_ids:
         return candidate
 
     domain_slug = re.sub(r"[^a-z0-9]+", "-", email.lower()).strip("-") or "gmail"
     candidate = f"gmail-{domain_slug}"
     suffix = 2
-    while candidate in existing_ids:
+    while candidate.casefold() in normalized_existing_ids:
         candidate = f"gmail-{domain_slug}-{suffix}"
         suffix += 1
 
@@ -563,6 +622,122 @@ def _create_empty_managed_smtp_settings() -> dict:
     }
 
 
+def _gmail_link_conflict(message: str) -> dict:
+    return {"code": "gmail_link_conflict", "message": message}
+
+
+def _resolve_gmail_managed_inbox_target(
+    managed_inboxes: list,
+    *,
+    email: str,
+    inbox_position: str | None,
+) -> tuple[int | None, dict | None]:
+    normalized_email = email.strip().lower()
+    if not EMAIL_PATTERN.match(normalized_email):
+        return None, _gmail_link_conflict("Verified Google mailbox identity is invalid.")
+    if inbox_position is not None and (
+        inbox_position not in ONBOARDING_PRESET_INBOX_IDS
+        and ONBOARDING_CUSTOM_INBOX_ID_PATTERN.fullmatch(inbox_position) is None
+    ):
+        return None, _gmail_link_conflict("Onboarding inbox position is invalid.")
+
+    normalized_ids: set[str] = set()
+    email_matches: list[int] = []
+    position_matches: list[int] = []
+    for index, mailbox in enumerate(managed_inboxes):
+        if not isinstance(mailbox, dict):
+            return None, _gmail_link_conflict(
+                "Existing managed inbox configuration is ambiguous."
+            )
+
+        mailbox_id = mailbox.get("id")
+        if (
+            not isinstance(mailbox_id, str)
+            or not mailbox_id.strip()
+            or mailbox_id != mailbox_id.strip()
+        ):
+            return None, _gmail_link_conflict(
+                "Existing managed inbox configuration is ambiguous."
+            )
+        normalized_id = mailbox_id.casefold()
+        if normalized_id in normalized_ids:
+            return None, _gmail_link_conflict(
+                "Existing managed inbox configuration is ambiguous."
+            )
+        normalized_ids.add(normalized_id)
+
+        stored_position = mailbox.get("onboardingInboxId")
+        if stored_position is not None and (
+            not isinstance(stored_position, str)
+            or (
+                stored_position not in ONBOARDING_PRESET_INBOX_IDS
+                and ONBOARDING_CUSTOM_INBOX_ID_PATTERN.fullmatch(stored_position)
+                is None
+            )
+        ):
+            return None, _gmail_link_conflict(
+                "Existing managed inbox configuration is ambiguous."
+            )
+
+        mailbox_email = mailbox.get("email")
+        if (
+            isinstance(mailbox_email, str)
+            and mailbox_email.strip().lower() == normalized_email
+        ):
+            email_matches.append(index)
+        if inbox_position is not None and mailbox.get("onboardingInboxId") == inbox_position:
+            position_matches.append(index)
+
+    if len(email_matches) > 1 or len(position_matches) > 1:
+        return None, _gmail_link_conflict(
+            "Existing Gmail mailbox registration is ambiguous."
+        )
+
+    email_match = email_matches[0] if email_matches else None
+    position_match = position_matches[0] if position_matches else None
+    if email_match is not None:
+        matched_mailbox = managed_inboxes[email_match]
+        if matched_mailbox.get("provider") not in ("google", "gmail", None):
+            return None, _gmail_link_conflict(
+                "This mailbox already uses a different connection provider."
+            )
+        existing_position = matched_mailbox.get("onboardingInboxId")
+        if (
+            inbox_position is not None
+            and existing_position is not None
+            and existing_position != inbox_position
+        ):
+            return None, _gmail_link_conflict(
+                "This Google mailbox is already linked to another onboarding inbox."
+            )
+
+    if position_match is not None:
+        matched_mailbox = managed_inboxes[position_match]
+        mailbox_email = matched_mailbox.get("email")
+        if (
+            not isinstance(mailbox_email, str)
+            or mailbox_email.strip().lower() != normalized_email
+        ):
+            return None, _gmail_link_conflict(
+                "This onboarding inbox is already linked to another mailbox."
+            )
+        if matched_mailbox.get("provider") not in ("google", "gmail", None):
+            return None, _gmail_link_conflict(
+                "This onboarding inbox already uses a different connection provider."
+            )
+
+    if (
+        email_match is not None
+        and position_match is not None
+        and email_match != position_match
+    ):
+        return None, _gmail_link_conflict(
+            "Existing Gmail mailbox registration is ambiguous."
+        )
+
+    return email_match if email_match is not None else position_match, None
+
+
 def _upsert_gmail_managed_inbox_record(
     managed_inboxes: list,
     *,
@@ -570,6 +745,7 @@ def _upsert_gmail_managed_inbox_record(
     display_name: str | None,
     owner_email: str,
     message: str,
+    inbox_position: str | None = None,
 ) -> list:
     normalized_email = email.strip().lower()
     if not EMAIL_PATTERN.match(normalized_email):
@@ -594,12 +770,19 @@ def _upsert_gmail_managed_inbox_record(
         if (
             isinstance(mailbox_email, str)
             and mailbox_email.strip().lower() == normalized_email
-            and mailbox_provider in {"google", "gmail", None}
+            and mailbox_provider in ("google", "gmail", None)
         ):
             matched_index = index
             break
 
-    title = (display_name or "").strip() or _format_name_from_email(normalized_email)
+    requested_title = (display_name or "").strip()
+    title = (
+        requested_title
+        if requested_title
+        and len(requested_title) <= 160
+        and not any(ord(character) < 32 or ord(character) == 127 for character in requested_title)
+        else _format_name_from_email(normalized_email)
+    )
     safe_defaults = {
         "title": title,
         "email": normalized_email,
@@ -614,6 +797,8 @@ def _upsert_gmail_managed_inbox_record(
         "customImap": _create_empty_managed_imap_settings(),
         "customSmtp": _create_empty_managed_smtp_settings(),
     }
+    if inbox_position is not None:
+        safe_defaults["onboardingInboxId"] = inbox_position
 
     if matched_index is None:
         next_inboxes.append(
@@ -730,27 +915,34 @@ def _verify_saved_gmail_mailbox(
         and saved.get("connected") is True
         and saved.get("connectionStatus") == "connected"
         and saved.get("oauthOwnerEmail") == normalize_auth_email(owner_email)
+        and saved.get("onboardingInboxId")
+        == intended_mailbox.get("onboardingInboxId")
         and normalize_auth_email(str(record.get("email") or ""))
         == normalize_auth_email(owner_email)
         and record.get("updatedAt") == expected_updated_at
     )
 
 
-def _upsert_gmail_managed_inbox_in_user_config(
+def _prepare_gmail_managed_inbox_registration(
     member: runtime.AuthenticatedMemberContext,
     *,
     email: str,
-    display_name: str | None,
     owner_email: str,
-    message: str,
-) -> dict | None:
+    inbox_position: str | None,
+) -> tuple[dict | None, dict | None]:
     if (
         normalize_auth_email(member.email) != normalize_auth_email(owner_email)
     ):
-        return {"code": "unauthorized", "message": "OAuth session ownership could not be verified."}
+        return None, {
+            "code": "unauthorized",
+            "message": "OAuth session ownership could not be verified.",
+        }
     durable_config = _resolve_durable_store_config()
     if not durable_config:
-        return {"code": "user_config_store_unavailable", "message": "User config storage is unavailable."}
+        return None, {
+            "code": "user_config_store_unavailable",
+            "message": "User config storage is unavailable.",
+        }
 
     store_key = _build_user_config_key(member.email)
     existing_record, existing_error = _read_user_config_durable_record(
@@ -759,12 +951,66 @@ def _upsert_gmail_managed_inbox_in_user_config(
         allow_missing=True,
     )
     if existing_error:
-        return existing_error
+        return None, existing_error
 
     existing_config = existing_record if isinstance(existing_record, dict) else {}
+    stored_owner = existing_config.get("email")
+    if stored_owner is not None and (
+        not isinstance(stored_owner, str)
+        or normalize_auth_email(stored_owner) != normalize_auth_email(member.email)
+    ):
+        return None, {
+            "code": "user_config_persistence_failed",
+            "message": "User config ownership could not be verified.",
+        }
+
     existing_managed_inboxes = existing_config.get("managedInboxes")
-    if not isinstance(existing_managed_inboxes, list):
+    if "managedInboxes" not in existing_config:
         existing_managed_inboxes = []
+    elif not isinstance(existing_managed_inboxes, list):
+        return None, {
+            "code": "user_config_persistence_failed",
+            "message": "Existing managed inbox configuration is malformed.",
+        }
+
+    _, conflict_error = _resolve_gmail_managed_inbox_target(
+        existing_managed_inboxes,
+        email=email,
+        inbox_position=inbox_position,
+    )
+    if conflict_error:
+        return None, conflict_error
+
+    return {
+        "durable_config": durable_config,
+        "store_key": store_key,
+        "existing_config": existing_config,
+        "existing_managed_inboxes": existing_managed_inboxes,
+    }, None
+
+
+def _register_gmail_managed_inbox_in_user_config(
+    member: runtime.AuthenticatedMemberContext,
+    *,
+    email: str,
+    display_name: str | None,
+    owner_email: str,
+    message: str,
+    inbox_position: str | None,
+) -> tuple[dict | None, dict | None]:
+    preparation, preparation_error = _prepare_gmail_managed_inbox_registration(
+        member,
+        email=email,
+        owner_email=owner_email,
+        inbox_position=inbox_position,
+    )
+    if preparation_error or not preparation:
+        return None, preparation_error
+
+    durable_config = preparation["durable_config"]
+    store_key = preparation["store_key"]
+    existing_config = preparation["existing_config"]
+    existing_managed_inboxes = preparation["existing_managed_inboxes"]
 
     next_record = {
         "v": USER_CONFIG_SCHEMA_VERSION,
@@ -790,6 +1036,7 @@ def _upsert_gmail_managed_inbox_in_user_config(
         display_name=display_name,
         owner_email=owner_email,
         message=message,
+        inbox_position=inbox_position,
     )
 
     intended_mailboxes = [
@@ -799,9 +1046,13 @@ def _upsert_gmail_managed_inbox_in_user_config(
         and mailbox.get("provider") == "google"
         and mailbox.get("email") == email.strip().lower()
         and mailbox.get("oauthOwnerEmail") == normalize_auth_email(owner_email)
+        and (
+            inbox_position is None
+            or mailbox.get("onboardingInboxId") == inbox_position
+        )
     ]
     if len(intended_mailboxes) != 1:
-        return {
+        return None, {
             "code": "user_config_persistence_failed",
             "message": "User config storage could not prepare the verified Gmail mailbox.",
         }
@@ -813,25 +1064,56 @@ def _upsert_gmail_managed_inbox_in_user_config(
         next_record,
     )
     if write_error:
-        return write_error
+        return None, write_error
 
     verified_record, verify_error = _read_user_config_durable_record(
         durable_config,
         store_key,
     )
     if verify_error:
-        return verify_error
+        return None, verify_error
     if not _verify_saved_gmail_mailbox(
         verified_record,
         intended_mailbox,
         owner_email,
         next_record["updatedAt"],
     ):
-        return {
+        return None, {
             "code": "user_config_persistence_failed",
             "message": "User config storage could not verify the saved Gmail mailbox.",
         }
-    return None
+    verified_inboxes = verified_record.get("managedInboxes")
+    saved_mailboxes = [
+        mailbox
+        for mailbox in verified_inboxes
+        if isinstance(mailbox, dict) and mailbox.get("id") == intended_mailbox.get("id")
+    ] if isinstance(verified_inboxes, list) else []
+    if len(saved_mailboxes) != 1:
+        return None, {
+            "code": "user_config_persistence_failed",
+            "message": "User config storage could not verify the saved Gmail mailbox.",
+        }
+    return dict(saved_mailboxes[0]), None
+
+
+def _upsert_gmail_managed_inbox_in_user_config(
+    member: runtime.AuthenticatedMemberContext,
+    *,
+    email: str,
+    display_name: str | None,
+    owner_email: str,
+    message: str,
+    inbox_position: str | None = None,
+) -> dict | None:
+    _, error = _register_gmail_managed_inbox_in_user_config(
+        member,
+        email=email,
+        display_name=display_name,
+        owner_email=owner_email,
+        message=message,
+        inbox_position=inbox_position,
+    )
+    return error
 
 OAUTH_CALLBACK_RESULT_STORAGE_KEY = "cuevion-oauth-callback-result"
 
@@ -861,7 +1143,36 @@ def _build_callback_payload(
     message: str,
     connected: bool,
     display_name: str | None = None,
+    inbox_position: str | None = None,
+    mailbox_id: str | None = None,
 ) -> dict:
+    if provider == "google":
+        is_success = (
+            connected is True
+            and connection_status == "connected"
+            and isinstance(mailbox_id, str)
+            and bool(mailbox_id.strip())
+            and isinstance(email, str)
+            and EMAIL_PATTERN.match(email.strip().lower()) is not None
+        )
+        payload = {
+            "status": "success" if is_success else "error",
+            "provider": "google",
+            "message": message,
+        }
+        normalized_email = email.strip().lower() if isinstance(email, str) else ""
+        if EMAIL_PATTERN.match(normalized_email):
+            payload["email"] = normalized_email
+        if isinstance(inbox_position, str) and (
+            inbox_position in ONBOARDING_PRESET_INBOX_IDS
+            or ONBOARDING_CUSTOM_INBOX_ID_PATTERN.fullmatch(inbox_position)
+            is not None
+        ):
+            payload["inboxPosition"] = inbox_position
+        if is_success:
+            payload["mailboxId"] = mailbox_id.strip()
+        return payload
+
     payload = {
         "provider": provider,
         "email": email,
@@ -1177,6 +1488,7 @@ class handler(BaseHTTPRequestHandler):
             )
             return
         state_owner_email = normalize_auth_email(member.email)
+        inbox_position = state_payload.get("inboxPosition")
 
         if oauth_error:
             self._send_callback_page(
@@ -1303,6 +1615,25 @@ class handler(BaseHTTPRequestHandler):
         display_name = oauth_identity.get("display_name")
 
         if provider == "google":
+            _, registration_preflight_error = _prepare_gmail_managed_inbox_registration(
+                member,
+                email=mailbox_email,
+                owner_email=state_owner_email,
+                inbox_position=inbox_position,
+            )
+            if registration_preflight_error:
+                self._send_callback_page(
+                    _build_callback_payload(
+                        provider=provider,
+                        email=mailbox_email,
+                        connection_status="connection_failed",
+                        message="This Gmail inbox could not be linked to the selected onboarding inbox.",
+                        connected=False,
+                        inbox_position=inbox_position,
+                    )
+                )
+                return
+
             persisted_record, persistence_error = persist_google_token_record(
                 email=mailbox_email,
                 owner_email=state_owner_email,
@@ -1359,13 +1690,15 @@ class handler(BaseHTTPRequestHandler):
         connected_message = (
             f"{provider_name} account connected. Durable mailbox token storage is active."
         )
+        saved_mailbox = None
         if provider == "google":
-            user_config_error = _upsert_gmail_managed_inbox_in_user_config(
+            saved_mailbox, user_config_error = _register_gmail_managed_inbox_in_user_config(
                 member,
                 email=mailbox_email,
                 display_name=display_name,
                 owner_email=state_owner_email,
                 message=connected_message,
+                inbox_position=inbox_position,
             )
             if user_config_error:
                 self._send_callback_page(
@@ -1375,7 +1708,7 @@ class handler(BaseHTTPRequestHandler):
                         connection_status="authenticated_pending_activation",
                         message="Google authentication completed, but the Gmail inbox could not be saved securely.",
                         connected=False,
-                        display_name=display_name,
+                        inbox_position=inbox_position,
                     )
                 )
                 return
@@ -1388,6 +1721,12 @@ class handler(BaseHTTPRequestHandler):
                 message=connected_message,
                 connected=True,
                 display_name=display_name,
+                inbox_position=inbox_position,
+                mailbox_id=(
+                    saved_mailbox.get("id")
+                    if isinstance(saved_mailbox, dict)
+                    else None
+                ),
             )
         )
 

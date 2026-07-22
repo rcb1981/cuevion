@@ -74,13 +74,17 @@ function hasReusableSettings(settings: CustomImapSettings) {
   return Boolean(settings.host && settings.port && settings.username);
 }
 
-function isConnectionReady(connection: InboxConnection) {
-  if (!connection.provider || !connection.email.trim()) {
+export function isConnectionReady(connection: InboxConnection) {
+  if (!connection.provider) {
     return false;
   }
 
   if (isOAuthConnectionProvider(connection.provider)) {
     return true;
+  }
+
+  if (!connection.email.trim()) {
+    return false;
   }
 
   if (!isImapCredentialsProvider(connection.provider)) {
@@ -91,9 +95,15 @@ function isConnectionReady(connection: InboxConnection) {
   return Boolean(host.trim() && port.trim() && username.trim() && password.trim());
 }
 
-function getConnectionFeedback(connection: InboxConnection): ConnectionFeedback | null {
+export function getConnectionFeedback(connection: InboxConnection): ConnectionFeedback | null {
   const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   const normalizedEmail = connection.email.trim().toLowerCase();
+
+  if (isOAuthConnectionProvider(connection.provider)) {
+    return normalizedEmail && !emailPattern.test(normalizedEmail)
+      ? { email: onboardingText.connect.invalidEmail }
+      : null;
+  }
 
   if (!emailPattern.test(connection.email.trim())) {
     return { email: onboardingText.connect.invalidEmail };
@@ -168,6 +178,46 @@ function buildConnectionError(
       result.error?.message ||
       result.connectionMessage ||
       onboardingText.connect.couldNotConnect,
+  };
+}
+
+export function buildOnboardingInboxConnectionOptions({
+  inboxId,
+  connection,
+  internalRole,
+  focusPreferences,
+  selectedInboxes,
+}: {
+  inboxId: InboxId;
+  connection: InboxConnection;
+  internalRole?: string | null;
+  focusPreferences?: OnboardingState["focusPreferences"] | null;
+  selectedInboxes: InboxId[];
+}): Parameters<typeof beginInboxConnection>[0] {
+  return {
+    imapMode: "initial",
+    mailboxId: inboxId,
+    inboxPosition: inboxId,
+    provider: connection.provider as ProviderId,
+    email: connection.email,
+    customImap: connection.customImap,
+    customSmtp: connection.customSmtp,
+    internalRole,
+    focusPreferences,
+    selectedInboxes,
+  };
+}
+
+export function buildSuccessfulOnboardingConnectionUpdate(
+  result: InboxConnectionAttemptResult,
+) {
+  const isOAuthStart = result.connectionMethod === "oauth";
+  return {
+    connected: isOAuthStart ? false : result.connected,
+    connectionMethod: result.connectionMethod,
+    connectionStatus: result.connectionStatus,
+    connectionMessage: result.connectionMessage ?? null,
+    oauthAuthorizationUrl: null,
   };
 }
 
@@ -253,17 +303,15 @@ export function StepConnectInboxes({
       return;
     }
 
-    const result = await beginInboxConnection({
-      imapMode: "initial",
-      mailboxId: inboxId,
-      provider: connection.provider as ProviderId,
-      email: connection.email,
-      customImap: connection.customImap,
-      customSmtp: connection.customSmtp,
-      internalRole,
-      focusPreferences,
-      selectedInboxes,
-    });
+    const result = await beginInboxConnection(
+      buildOnboardingInboxConnectionOptions({
+        inboxId,
+        connection,
+        internalRole,
+        focusPreferences,
+        selectedInboxes,
+      }),
+    );
 
     const authorizationUrl =
       result.connectionStatus === "waiting_for_authentication"
@@ -273,13 +321,7 @@ export function StepConnectInboxes({
     if (result.ok) {
       onConnectInbox(
         inboxId,
-        {
-          connected: result.connected,
-          connectionMethod: result.connectionMethod,
-          connectionStatus: result.connectionStatus,
-          connectionMessage: result.connectionMessage ?? null,
-          oauthAuthorizationUrl: result.oauthAuthorizationUrl ?? null,
-        },
+        buildSuccessfulOnboardingConnectionUpdate(result),
         result.messages ?? [],
       );
       clearConnectionFeedback(inboxId);

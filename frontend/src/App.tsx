@@ -101,6 +101,7 @@ type MemberSessionStatus =
   | "unavailable";
 type StoredManagedWorkspaceInbox = {
   id?: string;
+  onboardingInboxId?: string;
   title?: string;
   email?: string;
   provider?: string | null;
@@ -116,14 +117,23 @@ type StoredTeamMemberEntry = {
   email?: string;
   name?: string;
 };
-type OAuthCallbackStorageResult = {
-  provider?: string;
+type MicrosoftOAuthCallbackStorageResult = {
+  provider: "microsoft";
   email?: string;
   displayName?: string;
   connectionMethod?: string;
   connectionStatus?: string;
   connected?: boolean;
   message?: string | null;
+};
+
+type GoogleOAuthCallbackSignal = {
+  status: "success";
+  provider: "google";
+  inboxPosition?: string;
+  email: string;
+  mailboxId: string;
+  message: string;
 };
 
 type PendingOAuthManagedInbox = {
@@ -1353,104 +1363,6 @@ function sanitizeManagedInboxesForAccountConfig(
   return sanitizeManagedInboxCredentials(managedInboxes) as StoredManagedWorkspaceInbox[];
 }
 
-function formatStoredInboxTitleFromEmail(email: string) {
-  const localPart = email.split("@", 1)[0]?.replace(/[._-]+/g, " ").trim();
-
-  if (!localPart) {
-    return email;
-  }
-
-  return localPart
-    .split(/\s+/)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(" ");
-}
-
-function buildStoredGmailManagedInboxId(
-  email: string,
-  managedInboxes: StoredManagedWorkspaceInbox[],
-) {
-  const existingIds = new Set(
-    managedInboxes
-      .map((mailbox) => (typeof mailbox.id === "string" ? mailbox.id.trim() : ""))
-      .filter(Boolean),
-  );
-  const localSlug =
-    email
-      .split("@", 1)[0]
-      ?.toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-+|-+$/g, "") || "gmail";
-  const localCandidate = `gmail-${localSlug}`;
-
-  if (!existingIds.has(localCandidate)) {
-    return localCandidate;
-  }
-
-  const emailSlug =
-    email
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-+|-+$/g, "") || "gmail";
-  let candidate = `gmail-${emailSlug}`;
-  let suffix = 2;
-
-  while (existingIds.has(candidate)) {
-    candidate = `gmail-${emailSlug}-${suffix}`;
-    suffix += 1;
-  }
-
-  return candidate;
-}
-
-function createStoredGmailManagedInbox(
-  callbackResult: OAuthCallbackStorageResult,
-  managedInboxes: StoredManagedWorkspaceInbox[],
-  pendingMailbox?: PendingOAuthManagedInbox | null,
-): StoredManagedWorkspaceInbox {
-  const normalizedEmail = callbackResult.email?.trim().toLowerCase() ?? "";
-  const pendingTitle =
-    pendingMailbox?.provider === "google" &&
-    pendingMailbox.email?.trim().toLowerCase() === normalizedEmail
-      ? pendingMailbox.title?.trim()
-      : "";
-  const displayName = callbackResult.displayName?.trim();
-
-  return {
-    id: buildStoredGmailManagedInboxId(normalizedEmail, managedInboxes),
-    title: pendingTitle || displayName || formatStoredInboxTitleFromEmail(normalizedEmail),
-    email: normalizedEmail,
-    provider: "google",
-    connected:
-      callbackResult.connected === true &&
-      callbackResult.connectionStatus === "connected",
-    connectionMethod: "oauth",
-    connectionStatus:
-      callbackResult.connectionStatus === "connected"
-        ? "connected"
-        : callbackResult.connectionStatus === "authenticated_pending_activation"
-          ? "authenticated_pending_activation"
-          : "connection_failed",
-    connectionMessage: callbackResult.message ?? null,
-    oauthAuthorizationUrl: null,
-    customImap: {
-      host: "",
-      port: "",
-      ssl: true,
-      username: "",
-      password: "",
-    },
-    customSmtp: {
-      host: "",
-      port: "",
-      security: "starttls",
-      username: "",
-      password: "",
-      useSameCredentials: true,
-    },
-  };
-}
-
 function normalizeStoredWorkspaceThemeMode(value: unknown): "Light" | "Dark" | "System" | null {
   if (value === "Light" || value === "Dark" || value === "System") {
     return value;
@@ -1564,6 +1476,74 @@ function getServerManagedInboxesForHydration(
   return Array.isArray(config.managedInboxes)
     ? (config.managedInboxes as StoredManagedWorkspaceInbox[])
     : [];
+}
+
+function projectConnectedManagedInboxesOntoOnboardingState(
+  state: OnboardingState,
+  managedInboxes: StoredManagedWorkspaceInbox[],
+): OnboardingState {
+  const selectedPositions = new Set(state.selectedInboxes);
+  const nextConnections = { ...state.inboxConnections };
+  let didProject = false;
+
+  for (const inboxPosition of selectedPositions) {
+    const positionMatches = managedInboxes.filter(
+      (mailbox) => mailbox?.onboardingInboxId === inboxPosition,
+    );
+    if (positionMatches.length !== 1) {
+      continue;
+    }
+
+    const mailbox = positionMatches[0];
+    const mailboxId = typeof mailbox.id === "string" ? mailbox.id.trim() : "";
+    const email = typeof mailbox.email === "string" ? mailbox.email.trim().toLowerCase() : "";
+    const currentConnection = nextConnections[inboxPosition];
+    if (
+      !currentConnection ||
+      !mailboxId ||
+      mailbox.id !== mailboxId ||
+      !email ||
+      mailbox.email !== email ||
+      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ||
+      mailbox.provider !== "google" ||
+      mailbox.connectionMethod !== "oauth" ||
+      mailbox.connected !== true ||
+      mailbox.connectionStatus !== "connected"
+    ) {
+      continue;
+    }
+
+    const sameIdCount = managedInboxes.filter(
+      (candidate) =>
+        typeof candidate?.id === "string" &&
+        candidate.id.trim().toLowerCase() === mailboxId.toLowerCase(),
+    ).length;
+    const sameEmailCount = managedInboxes.filter(
+      (candidate) =>
+        typeof candidate?.email === "string" &&
+        candidate.email.trim().toLowerCase() === email,
+    ).length;
+    if (sameIdCount !== 1 || sameEmailCount !== 1) {
+      continue;
+    }
+
+    nextConnections[inboxPosition] = {
+      ...currentConnection,
+      provider: "google",
+      email,
+      connected: true,
+      connectionMethod: "oauth",
+      connectionStatus: "connected",
+      connectionMessage:
+        typeof mailbox.connectionMessage === "string"
+          ? mailbox.connectionMessage
+          : null,
+      oauthAuthorizationUrl: null,
+    };
+    didProject = true;
+  }
+
+  return didProject ? { ...state, inboxConnections: nextConnections } : state;
 }
 
 function createCleanAccountConfigStartupState(): AccountConfigStartupAccountState {
@@ -1748,11 +1728,15 @@ function applyLoadedUserAccountConfig(
     const persistedOnboardingSession = didResetOnboarding
       ? null
       : parsedSession.session;
-    const onboardingState =
+    const onboardingChoicesState =
       persistedOnboardingSession
         ? buildOnboardingStateFromChoices(persistedOnboardingSession.choices)
         :
       normalizeOnboardingState(initialOnboardingState);
+    const onboardingState = projectConnectedManagedInboxesOntoOnboardingState(
+      onboardingChoicesState,
+      getServerManagedInboxesForHydration(result.config),
+    );
     const isCompleted = persistedOnboardingSession?.completed === true;
     let accountState: AccountConfigStartupAccountState = {
       displayNameOverrides:
@@ -1904,35 +1888,116 @@ export const accountConfigOrchestration = {
   createHydrator: createAccountConfigHydrator,
   createOnboardingHandlers: createOnboardingAppHandlers,
   createSaveQueue: createAccountConfigSaveQueue,
+  consumeGoogleOAuthCallbackSignal,
+  processGoogleOAuthCallbackSignal,
   hydrateLocalOnboardingScope: hydrateLocalOnboardingIdentityScope,
   hydrateChoices: buildOnboardingStateFromChoices,
   parseOnboardingSession: parseAccountOnboardingSession,
   projectChoices: projectOnboardingChoices,
+  projectConnectedManagedInboxes: projectConnectedManagedInboxesOntoOnboardingState,
   resolveLocalOnboardingIdentityScope,
   resolveSessionDisposition: resolveAccountConfigSessionDisposition,
   writeOnboardingSessionMirror,
 };
 
-function normalizeOAuthCallbackStorageResult(
+function normalizeGoogleOAuthCallbackSignal(
   value: unknown,
-): OAuthCallbackStorageResult | null {
+): GoogleOAuthCallbackSignal | null {
+  if (
+    !isPlainRecord(value) ||
+    !hasOnlyKeys(value, [
+      "status",
+      "provider",
+      "inboxPosition",
+      "email",
+      "mailboxId",
+      "message",
+    ]) ||
+    value.status !== "success" ||
+    value.provider !== "google" ||
+    typeof value.email !== "string" ||
+    typeof value.mailboxId !== "string" ||
+    typeof value.message !== "string" ||
+    (value.inboxPosition !== undefined && !isInboxId(value.inboxPosition))
+  ) {
+    return null;
+  }
+
+  const email = value.email.trim().toLowerCase();
+  const mailboxId = value.mailboxId.trim();
+  if (
+    value.email !== email ||
+    value.mailboxId !== mailboxId ||
+    !email ||
+    !mailboxId ||
+    !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
+  ) {
+    return null;
+  }
+
+  return {
+    status: "success",
+    provider: "google",
+    ...(value.inboxPosition !== undefined
+      ? { inboxPosition: value.inboxPosition }
+      : {}),
+    email,
+    mailboxId,
+    message: value.message,
+  };
+}
+
+function consumeGoogleOAuthCallbackSignal(storage: AccountConfigStorage) {
+  const storedValue = storage.getItem(OAUTH_CALLBACK_RESULT_STORAGE_KEY);
+  if (!storedValue) {
+    return false;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(storedValue);
+  } catch {
+    storage.removeItem(OAUTH_CALLBACK_RESULT_STORAGE_KEY);
+    return false;
+  }
+
+  if (isPlainRecord(parsed) && parsed.provider === "microsoft") {
+    return false;
+  }
+
+  storage.removeItem(OAUTH_CALLBACK_RESULT_STORAGE_KEY);
+  return normalizeGoogleOAuthCallbackSignal(parsed) !== null;
+}
+
+function processGoogleOAuthCallbackSignal(
+  storage: AccountConfigStorage,
+  requestServerConfigReload: () => void,
+) {
+  const shouldReload = consumeGoogleOAuthCallbackSignal(storage);
+  if (shouldReload) {
+    requestServerConfigReload();
+  }
+  return shouldReload;
+}
+
+function normalizeMicrosoftOAuthCallbackStorageResult(
+  value: unknown,
+): MicrosoftOAuthCallbackStorageResult | null {
   if (!value || typeof value !== "object") {
     return null;
   }
 
-  const result = value as OAuthCallbackStorageResult;
+  const result = value as Partial<MicrosoftOAuthCallbackStorageResult>;
 
   if (
-    (result.provider !== "google" && result.provider !== "microsoft") ||
+    result.provider !== "microsoft" ||
     typeof result.email !== "string"
   ) {
     return null;
   }
 
-  const provider = result.provider;
-
   return {
-    provider,
+    provider: "microsoft",
     email: result.email.trim().toLowerCase(),
     displayName:
       typeof result.displayName === "string" ? result.displayName.trim() : undefined,
@@ -1965,9 +2030,9 @@ function parsePendingOAuthManagedInbox(): PendingOAuthManagedInbox | null {
   }
 }
 
-function applyOAuthCallbackResultToOnboardingState(
+function applyMicrosoftOAuthCallbackResultToOnboardingState(
   state: OnboardingState,
-  callbackResult: OAuthCallbackStorageResult,
+  callbackResult: MicrosoftOAuthCallbackStorageResult,
 ): OnboardingState {
   const normalizedEmail = callbackResult.email?.trim().toLowerCase() ?? "";
 
@@ -2026,9 +2091,9 @@ function applyOAuthCallbackResultToOnboardingState(
     : state;
 }
 
-function applyOAuthCallbackResultToManagedInboxes(
+function applyMicrosoftOAuthCallbackResultToManagedInboxes(
   inboxes: StoredManagedWorkspaceInbox[],
-  callbackResult: OAuthCallbackStorageResult,
+  callbackResult: MicrosoftOAuthCallbackStorageResult,
   pendingMailbox?: PendingOAuthManagedInbox | null,
 ) {
   const normalizedEmail = callbackResult.email?.trim().toLowerCase() ?? "";
@@ -2044,7 +2109,6 @@ function applyOAuthCallbackResultToManagedInboxes(
     pendingMailbox?.email?.trim().toLowerCase() === normalizedEmail
       ? pendingMailbox.title?.trim()
       : "";
-  let didUpdate = false;
   const nextInboxes = inboxes.map((mailbox) => {
     if (
       mailbox.provider !== callbackResult.provider ||
@@ -2067,7 +2131,6 @@ function applyOAuthCallbackResultToManagedInboxes(
           ? `${providerName} authentication completed. Tokens are stored only in the current server runtime. Final mailbox activation requires durable secure mailbox token storage.`
           : `${providerName} authentication failed.`);
 
-    didUpdate = true;
     return {
       ...mailbox,
       title: pendingTitle || mailbox.title,
@@ -2081,14 +2144,7 @@ function applyOAuthCallbackResultToManagedInboxes(
     };
   });
 
-  if (didUpdate || callbackResult.provider !== "google") {
-    return nextInboxes;
-  }
-
-  return [
-    ...nextInboxes,
-    createStoredGmailManagedInbox(callbackResult, nextInboxes, pendingMailbox),
-  ];
+  return nextInboxes;
 }
 
 function resolveWorkspaceInviteUsers(
@@ -2968,6 +3024,12 @@ function CuevionApp() {
   ]);
 
   useEffect(() => {
+    processGoogleOAuthCallbackSignal(window.localStorage, () => {
+      setAccountConfigRetryVersion((current) => current + 1);
+    });
+  }, []);
+
+  useEffect(() => {
     if (!canProcessLocalOAuthCallback) {
       return;
     }
@@ -2982,9 +3044,9 @@ function CuevionApp() {
 
     window.localStorage.removeItem(OAUTH_CALLBACK_RESULT_STORAGE_KEY);
 
-    let parsedCallbackResult: OAuthCallbackStorageResult | null = null;
+    let parsedCallbackResult: MicrosoftOAuthCallbackStorageResult | null = null;
     try {
-      parsedCallbackResult = normalizeOAuthCallbackStorageResult(
+      parsedCallbackResult = normalizeMicrosoftOAuthCallbackStorageResult(
         JSON.parse(storedCallbackResult),
       );
     } catch {
@@ -2998,7 +3060,7 @@ function CuevionApp() {
     const callbackResult = parsedCallbackResult;
     applyAccountConfigMutation((canPersistLocally) => {
       setOnboardingState((current) => {
-        const nextState = applyOAuthCallbackResultToOnboardingState(
+        const nextState = applyMicrosoftOAuthCallbackResultToOnboardingState(
           current,
           callbackResult,
         );
@@ -3011,7 +3073,7 @@ function CuevionApp() {
       }
 
       const pendingOAuthManagedInbox = parsePendingOAuthManagedInbox();
-      const nextManagedInboxes = applyOAuthCallbackResultToManagedInboxes(
+      const nextManagedInboxes = applyMicrosoftOAuthCallbackResultToManagedInboxes(
         parseStoredManagedWorkspaceInboxes(),
         callbackResult,
         pendingOAuthManagedInbox,
