@@ -49,11 +49,11 @@ DEFAULT_MICROSOFT_SCOPES = [
     "https://graph.microsoft.com/Mail.Read",
 ]
 MAX_REQUEST_BODY_BYTES = 16 * 1024
-OAUTH_STATE_VERSION = 1
+OAUTH_STATE_VERSION = 2
 OAUTH_STATE_TTL_SECONDS = 15 * 60
-STATE_SIGNATURE_DOMAIN = "cuevion-oauth-state-signature:v1"
-OWNER_BINDING_DOMAIN = "cuevion-oauth-owner-binding:v1"
-PKCE_DERIVATION_DOMAIN = "cuevion-oauth-pkce:v1"
+STATE_SIGNATURE_DOMAIN = "cuevion-oauth-state-signature:v2"
+OWNER_BINDING_DOMAIN = "cuevion-oauth-owner-binding:v2"
+PKCE_DERIVATION_DOMAIN = "cuevion-oauth-pkce:v2"
 ONBOARDING_CONFLICT_ERROR = {
     "ok": False,
     "error": {
@@ -203,6 +203,8 @@ def base64url_encode(value: bytes) -> str:
 def build_owner_binding(
     *,
     owner_email: str,
+    member_user_id: str,
+    member_workspace_id: str,
     provider: str,
     email_hint: str,
     nonce: str,
@@ -212,17 +214,33 @@ def build_owner_binding(
     inbox_position: str | None = None,
 ) -> str:
     normalized_owner = normalize_auth_email(owner_email)
+    normalized_user_id = (
+        member_user_id.strip() if isinstance(member_user_id, str) else ""
+    )
+    normalized_workspace_id = (
+        member_workspace_id.strip()
+        if isinstance(member_workspace_id, str)
+        else ""
+    )
+    if not normalized_user_id or not normalized_workspace_id:
+        raise ValueError("Authenticated member context is required.")
     binding_fields = [
         OWNER_BINDING_DOMAIN,
         str(OAUTH_STATE_VERSION),
         normalized_owner,
+        normalized_user_id,
+        normalized_workspace_id,
         provider,
         email_hint,
     ]
     if inbox_position is not None:
         binding_fields.append(inbox_position)
     binding_fields.extend((nonce, str(issued_at), str(expires_at)))
-    binding_message = "\n".join(binding_fields)
+    binding_message = json.dumps(
+        binding_fields,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
     return base64url_encode(
         hmac.new(
             signing_secret.encode("utf-8"),
@@ -238,6 +256,9 @@ def build_signed_state(
     owner_email: str,
     signing_secret: str,
     inbox_position: str | None = None,
+    *,
+    member_user_id: str,
+    member_workspace_id: str,
 ) -> tuple[str, str]:
     issued_at = int(time.time())
     expires_at = issued_at + OAUTH_STATE_TTL_SECONDS
@@ -251,6 +272,8 @@ def build_signed_state(
         "nonce": nonce,
         "owner_binding": build_owner_binding(
             owner_email=owner_email,
+            member_user_id=member_user_id,
+            member_workspace_id=member_workspace_id,
             provider=provider,
             email_hint=email_hint,
             nonce=nonce,
@@ -575,6 +598,8 @@ class handler(BaseHTTPRequestHandler):
                 session_user["email"],
                 oauth_state_secret,
                 inbox_position,
+                member_user_id=session_user["userId"],
+                member_workspace_id=session_user["workspaceId"],
             )
             if provider == "google":
                 authorization_params = {

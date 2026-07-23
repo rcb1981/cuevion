@@ -8,6 +8,7 @@ import imaplib
 import logging
 import base64
 import re
+import ssl
 import time
 import unicodedata
 from dataclasses import replace
@@ -19,6 +20,10 @@ from email.utils import parseaddr, parsedate_to_datetime
 from typing import Any
 from urllib.parse import quote
 
+from api.inboxes.imap_network_policy import (
+    ImapNetworkPolicyError,
+    open_public_imap_connection,
+)
 from api.inboxes.imap_uid_validity import (
     is_canonical_uid_validity,
     read_selected_mailbox_uid_validity,
@@ -463,6 +468,115 @@ def html_to_text(value: str | None) -> str:
     return clean_text(normalized)
 
 
+def _build_verified_imap_ssl_context() -> ssl.SSLContext:
+    context = ssl.create_default_context()
+    context.check_hostname = True
+    context.verify_mode = ssl.CERT_REQUIRED
+    return context
+
+
+def _secure_imap_authentication_error(
+    code: str,
+    message: str,
+    *,
+    status_code: int = 502,
+) -> tuple[int, dict[str, Any]]:
+    return status_code, {
+        "ok": False,
+        "error": {
+            "code": code,
+            "message": message,
+        },
+    }
+
+
+def build_secure_imap_authentication_response(
+    payload: dict[str, Any],
+) -> tuple[int, dict[str, Any]]:
+    tls_error = _secure_imap_authentication_error(
+        "tls_connection_failed",
+        "Could not establish a secure IMAP connection.",
+    )
+    authentication_error = _secure_imap_authentication_error(
+        "authentication_failed",
+        "Could not authenticate with the IMAP server.",
+    )
+
+    if not isinstance(payload, dict) or payload.get("ssl", True) is not True:
+        return tls_error
+
+    host = payload.get("host")
+    raw_port = payload.get("port")
+    username = payload.get("username")
+    password = payload.get("password")
+    if (
+        not isinstance(host, str)
+        or isinstance(raw_port, bool)
+    ):
+        return tls_error
+    try:
+        port = int(str(raw_port))
+    except (TypeError, ValueError):
+        return tls_error
+    if port < 1 or port > 65535:
+        return tls_error
+    if (
+        not isinstance(username, str)
+        or not username
+        or not isinstance(password, str)
+        or not password
+    ):
+        return authentication_error
+
+    mailbox = None
+    try:
+        try:
+            mailbox = open_public_imap_connection(
+                host,
+                port,
+                ssl_enabled=True,
+                ssl_context=_build_verified_imap_ssl_context(),
+                timeout=30,
+            )
+        except ImapNetworkPolicyError as exc:
+            return _secure_imap_authentication_error(
+                exc.code,
+                "The IMAP destination could not be used.",
+                status_code=(
+                    400
+                    if exc.code
+                    in {"imap_host_invalid", "imap_destination_not_allowed"}
+                    else 502
+                ),
+            )
+        except Exception:
+            return _secure_imap_authentication_error(
+                "imap_connection_failed",
+                "Could not establish a secure IMAP connection.",
+            )
+
+        try:
+            mailbox.login(username, password)
+        except (ssl.SSLError, TimeoutError, OSError):
+            return _secure_imap_authentication_error(
+                "imap_connection_failed",
+                "Could not establish a secure IMAP connection.",
+            )
+        except Exception:
+            return authentication_error
+
+        return 200, {"ok": True}
+    finally:
+        if mailbox is not None:
+            try:
+                mailbox.logout()
+            except Exception:
+                try:
+                    mailbox.shutdown()
+                except Exception:
+                    pass
+
+
 def connect_mailbox_with_settings(
     host: str,
     port: int,
@@ -470,18 +584,55 @@ def connect_mailbox_with_settings(
     password: str,
     ssl_enabled: bool,
 ):
-    if ssl_enabled:
-        mailbox = imaplib.IMAP4_SSL(host, port)
-    else:
-        mailbox = imaplib.IMAP4(host, port)
+    mailbox = open_public_imap_connection(
+        host,
+        port,
+        ssl_enabled=ssl_enabled,
+        ssl_context=(
+            _build_verified_imap_ssl_context()
+            if ssl_enabled
+            else None
+        ),
+        timeout=30,
+    )
 
-    mailbox.login(username, password)
+    try:
+        mailbox.login(username, password)
+    except Exception:
+        try:
+            mailbox.shutdown()
+        except Exception:
+            pass
+        raise
     return mailbox
 
 
-def open_mailbox_connection(host: str, port: int, ssl_enabled: bool):
+def open_mailbox_connection(
+    host: str,
+    port: int,
+    ssl_enabled: bool,
+    *,
+    enforce_public_destination: bool = False,
+):
+    if enforce_public_destination:
+        return open_public_imap_connection(
+            host,
+            port,
+            ssl_enabled=ssl_enabled,
+            ssl_context=(
+                _build_verified_imap_ssl_context()
+                if ssl_enabled
+                else None
+            ),
+            timeout=30,
+        )
+
     if ssl_enabled:
-        return imaplib.IMAP4_SSL(host, port)
+        return imaplib.IMAP4_SSL(
+            host,
+            port,
+            ssl_context=_build_verified_imap_ssl_context(),
+        )
 
     return imaplib.IMAP4(host, port)
 
@@ -1367,7 +1518,11 @@ def build_connect_preview_response(payload: dict[str, Any]) -> tuple[int, dict[s
     )
     email_address = str(payload.get("email") or "").strip()
     password = str(payload.get("password") or "")
-    host = str(payload.get("host") or "").strip()
+    host = (
+        payload.get("host")
+        if provider == "custom_imap"
+        else str(payload.get("host") or "").strip()
+    )
     port = int(payload.get("port") or 0)
     ssl_enabled = bool(payload.get("ssl", True))
     username = str(payload.get("username") or "").strip() or email_address
@@ -1410,7 +1565,34 @@ def build_connect_preview_response(payload: dict[str, Any]) -> tuple[int, dict[s
     try:
         connect_start = time.perf_counter()
         try:
-            mailbox = open_mailbox_connection(host=host, port=port, ssl_enabled=ssl_enabled)
+            mailbox = open_mailbox_connection(
+                host=host,
+                port=port,
+                ssl_enabled=ssl_enabled,
+                enforce_public_destination=provider == "custom_imap",
+            )
+        except ImapNetworkPolicyError as exc:
+            connect_duration_ms = (time.perf_counter() - connect_start) * 1000
+            logger.warning(
+                "IMAP preview failed stage=connect code=%s provider=%s connect_ms=%.1f",
+                exc.code,
+                log_provider,
+                connect_duration_ms,
+            )
+            return (
+                400
+                if exc.code
+                in {"imap_host_invalid", "imap_destination_not_allowed"}
+                else 502
+            ), {
+                "ok": False,
+                "error": build_imap_issue(
+                    exc.code,
+                    "connect",
+                    "The IMAP destination could not be used.",
+                    0,
+                ),
+            }
         except imaplib.IMAP4.error as exc:
             connect_duration_ms = (time.perf_counter() - connect_start) * 1000
             logger.warning(
@@ -1625,4 +1807,7 @@ def build_connect_preview_response(payload: dict[str, Any]) -> tuple[int, dict[s
             try:
                 mailbox.logout()
             except Exception:
-                pass
+                try:
+                    mailbox.shutdown()
+                except Exception:
+                    pass

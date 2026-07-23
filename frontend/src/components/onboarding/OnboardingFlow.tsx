@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { useMemo, useRef, useState, type ReactNode } from "react";
 import { onboardingText } from "../../copy/onboardingCopy";
 import {
   createCustomInboxId,
@@ -13,10 +13,17 @@ import {
   usesEmailAsImapUsername,
 } from "../../lib/inboxProviderDefaults";
 import { saveLiveInboxSnapshot } from "../../lib/liveInboxSnapshots";
+import {
+  doesCustomImapOnboardingSnapshotMatchState,
+  isCustomImapOnboardingInteractionLocked,
+  type CustomImapOnboardingAttemptGuard,
+  type CustomImapOnboardingAttemptSnapshot,
+  type CustomImapOnboardingReconciliationResult,
+} from "../../lib/customImapOnboardingAttempt";
 import type {
   CustomInboxDefinition,
   CustomImapSettings,
-  CustomSmtpSettings,
+  InboxConnection,
   InboxId,
   OnboardingState,
   ProviderId,
@@ -41,6 +48,72 @@ import { StepWelcome } from "./StepWelcome";
 
 const totalProgressSteps = 3;
 
+export function shouldBlockOnboardingMutation(
+  guard: CustomImapOnboardingAttemptGuard | null,
+) {
+  return isCustomImapOnboardingInteractionLocked(guard);
+}
+
+export function invokeCustomImapServerReload(
+  reload: () => void,
+) {
+  reload();
+}
+
+export function CustomImapServerReloadRecovery({
+  visible,
+  onReload,
+}: {
+  visible: boolean;
+  onReload: () => void;
+}) {
+  if (!visible) {
+    return null;
+  }
+  return (
+    <div
+      role="status"
+      className="mb-5 flex flex-col gap-3 rounded-[22px] border border-amber-900/15 bg-white/75 px-5 py-4 text-sm text-ink/68 shadow-panel sm:flex-row sm:items-center sm:justify-between"
+    >
+      <span>
+        Setup changed while the connection was pending. Reload from the
+        server before continuing.
+      </span>
+      <button
+        type="button"
+        data-attempt-control="reload-custom-imap-recovery"
+        onClick={() => invokeCustomImapServerReload(onReload)}
+        className="shrink-0 rounded-full border border-moss/20 bg-white px-4 py-2 font-medium text-moss transition hover:border-moss/35 hover:bg-sand"
+      >
+        Reload setup from server
+      </button>
+    </div>
+  );
+}
+
+export function applyAuthoritativeCustomImapConnection(
+  state: OnboardingState,
+  snapshot: CustomImapOnboardingAttemptSnapshot,
+  result: Extract<
+    CustomImapOnboardingReconciliationResult,
+    { status: "matched" }
+  >,
+) {
+  if (!doesCustomImapOnboardingSnapshotMatchState(snapshot, state)) {
+    return state;
+  }
+  return {
+    ...state,
+    inboxConnections: {
+      ...state.inboxConnections,
+      [snapshot.onboardingInboxId]: {
+        ...result.connection,
+        serverMailboxId: result.serverMailboxId,
+      },
+    },
+  };
+}
+
 export function attemptWorkspaceOpen(
   canOpenWorkspace: boolean,
   openWorkspace: () => void,
@@ -62,6 +135,47 @@ export const onboardingFlowProgression = {
   attemptWorkspaceOpen,
 } as const;
 
+type OnboardingInboxConnectionResult = {
+  connected: boolean;
+  connectionMethod: InboxConnection["connectionMethod"];
+  connectionStatus: InboxConnection["connectionStatus"];
+  connectionMessage?: string | null;
+  oauthAuthorizationUrl?: string | null;
+};
+
+export function buildOnboardingInboxConnectionUpdate(
+  connection: InboxConnection,
+  result: OnboardingInboxConnectionResult,
+): InboxConnection {
+  const isCustomImap = connection.provider === "custom_imap";
+  const customImapFailure =
+    isCustomImap && result.connectionStatus === "connection_failed";
+
+  return {
+    ...connection,
+    serverMailboxId: isCustomImap
+      ? null
+      : connection.serverMailboxId,
+    connected: isCustomImap ? false : result.connected,
+    connectionMethod: result.connectionMethod,
+    connectionStatus: isCustomImap
+      ? customImapFailure
+        ? "connection_failed"
+        : "not_connected"
+      : result.connectionStatus,
+    connectionMessage: result.connectionMessage ?? null,
+    oauthAuthorizationUrl: result.oauthAuthorizationUrl ?? null,
+    customImap: {
+      ...connection.customImap,
+      password: "",
+    },
+    customSmtp: {
+      ...connection.customSmtp,
+      password: "",
+    },
+  };
+}
+
 function dedupeInboxes(inboxes: Array<InboxId | null | undefined>) {
   return [...new Set(inboxes.filter((inboxId): inboxId is InboxId => Boolean(inboxId)))];
 }
@@ -77,6 +191,10 @@ interface OnboardingFlowProps {
     value: OnboardingState | ((current: OnboardingState) => OnboardingState),
   ) => void;
   onOpenWorkspace: (userConfig: UserConfig) => void;
+  onReloadAccountConfig?: (
+    snapshot: CustomImapOnboardingAttemptSnapshot,
+    signal: AbortSignal,
+  ) => Promise<CustomImapOnboardingReconciliationResult>;
   canOpenWorkspace?: boolean;
   isPreviewMode?: boolean;
   previewControls?: ReactNode;
@@ -89,12 +207,31 @@ export function OnboardingFlow({
   onStateChange,
   onSafeStateChange,
   onOpenWorkspace,
+  onReloadAccountConfig = async () => ({ status: "required" }),
   canOpenWorkspace = false,
   isPreviewMode = false,
   previewControls,
 }: OnboardingFlowProps) {
   const [showWorkspaceBlockedMessage, setShowWorkspaceBlockedMessage] =
     useState(false);
+  const [
+    customImapAttemptGuard,
+    setCustomImapAttemptGuard,
+  ] = useState<CustomImapOnboardingAttemptGuard | null>(null);
+  const customImapAttemptGuardRef =
+    useRef<CustomImapOnboardingAttemptGuard | null>(null);
+  const customImapInteractionLocked =
+    isCustomImapOnboardingInteractionLocked(customImapAttemptGuard);
+
+  const updateCustomImapAttemptGuard = (
+    guard: CustomImapOnboardingAttemptGuard | null,
+  ) => {
+    customImapAttemptGuardRef.current = guard;
+    setCustomImapAttemptGuard(guard);
+  };
+
+  const mutationIsLocked = () =>
+    shouldBlockOnboardingMutation(customImapAttemptGuardRef.current);
   const step = onboardingFlowProgression.clamp(currentStep);
   const showSetupProgress = step > 0;
   const isFinalScreen = step === 3;
@@ -166,6 +303,9 @@ export function OnboardingFlow({
   };
 
   const addSourceInbox = () => {
+    if (mutationIsLocked()) {
+      return;
+    }
     onSafeStateChange((current) => {
       const id = createCustomInboxId(`Inbox ${current.selectedInboxes.length + 1}`);
       const customInbox: CustomInboxDefinition = {
@@ -187,9 +327,14 @@ export function OnboardingFlow({
   };
 
   const canRemoveSelectedInbox = (inboxId: InboxId) =>
-    state.selectedInboxes.length > 1 && state.selectedInboxes.includes(inboxId);
+    !mutationIsLocked() &&
+    state.selectedInboxes.length > 1 &&
+    state.selectedInboxes.includes(inboxId);
 
   const removeSelectedInbox = (inboxId: InboxId) => {
+    if (mutationIsLocked()) {
+      return;
+    }
     onSafeStateChange((current) => {
       if (!current.selectedInboxes.includes(inboxId)) {
         return current;
@@ -215,35 +360,51 @@ export function OnboardingFlow({
   };
 
   const setProvider = (inboxId: InboxId, provider: ProviderId) => {
+    if (mutationIsLocked()) {
+      return;
+    }
     onStateChange((current) => ({
       ...current,
       inboxConnections: {
         ...current.inboxConnections,
         [inboxId]: {
           ...getInboxConnection(current, inboxId),
+          serverMailboxId: null,
           connected: false,
           connectionMethod: getProviderConnectionMethod(provider),
           connectionStatus: getDefaultConnectionStatus(provider),
           connectionMessage: null,
           oauthAuthorizationUrl: null,
           provider,
-          customImap: applyProviderDefaults(
-            provider,
-            getInboxConnection(current, inboxId).customImap,
-            getInboxConnection(current, inboxId).email,
-          ),
+          customImap: {
+            ...applyProviderDefaults(
+              provider,
+              getInboxConnection(current, inboxId).customImap,
+              getInboxConnection(current, inboxId).email,
+            ),
+            ssl: true,
+            password: "",
+          },
+          customSmtp: {
+            ...getInboxConnection(current, inboxId).customSmtp,
+            password: "",
+          },
         },
       },
     }));
   };
 
   const setEmail = (inboxId: InboxId, email: string) => {
+    if (mutationIsLocked()) {
+      return;
+    }
     onStateChange((current) => ({
       ...current,
       inboxConnections: {
         ...current.inboxConnections,
         [inboxId]: {
           ...getInboxConnection(current, inboxId),
+          serverMailboxId: null,
           connected: false,
           connectionStatus: getDefaultConnectionStatus(
             getInboxConnection(current, inboxId).provider,
@@ -251,13 +412,17 @@ export function OnboardingFlow({
           connectionMessage: null,
           oauthAuthorizationUrl: null,
           email,
-          customImap:
-            usesEmailAsImapUsername(getInboxConnection(current, inboxId).provider)
-              ? {
-                  ...getInboxConnection(current, inboxId).customImap,
-                  username: email.trim(),
-                }
-              : getInboxConnection(current, inboxId).customImap,
+          customImap: {
+            ...getInboxConnection(current, inboxId).customImap,
+            ...(usesEmailAsImapUsername(getInboxConnection(current, inboxId).provider)
+              ? { username: email.trim() }
+              : {}),
+            password: "",
+          },
+          customSmtp: {
+            ...getInboxConnection(current, inboxId).customSmtp,
+            password: "",
+          },
         },
       },
     }));
@@ -268,12 +433,21 @@ export function OnboardingFlow({
     field: keyof CustomImapSettings,
     value: string | boolean,
   ) => {
+    if (
+      mutationIsLocked() ||
+      field === "password" ||
+      (field === "ssl" && value !== true)
+    ) {
+      return;
+    }
+
     onStateChange((current) => ({
       ...current,
       inboxConnections: {
         ...current.inboxConnections,
         [inboxId]: {
           ...getInboxConnection(current, inboxId),
+          serverMailboxId: null,
           connected: false,
           connectionStatus: getDefaultConnectionStatus(
             getInboxConnection(current, inboxId).provider,
@@ -283,26 +457,11 @@ export function OnboardingFlow({
           customImap: {
             ...getInboxConnection(current, inboxId).customImap,
             [field]: value,
+            password: "",
           },
-        },
-      },
-    }));
-  };
-
-  const setCustomSmtp = (
-    inboxId: InboxId,
-    field: keyof CustomSmtpSettings,
-    value: string | boolean,
-  ) => {
-    onStateChange((current) => ({
-      ...current,
-      inboxConnections: {
-        ...current.inboxConnections,
-        [inboxId]: {
-          ...getInboxConnection(current, inboxId),
           customSmtp: {
             ...getInboxConnection(current, inboxId).customSmtp,
-            [field]: value,
+            password: "",
           },
         },
       },
@@ -310,12 +469,16 @@ export function OnboardingFlow({
   };
 
   const reuseCustomImap = (inboxId: InboxId, settings: CustomImapSettings) => {
+    if (mutationIsLocked()) {
+      return;
+    }
     onStateChange((current) => ({
       ...current,
       inboxConnections: {
         ...current.inboxConnections,
         [inboxId]: {
           ...getInboxConnection(current, inboxId),
+          serverMailboxId: null,
           connected: false,
           connectionStatus: getDefaultConnectionStatus(
             getInboxConnection(current, inboxId).provider,
@@ -324,6 +487,8 @@ export function OnboardingFlow({
           oauthAuthorizationUrl: null,
           customImap: {
             ...settings,
+            ssl: true,
+            password: "",
           },
         },
       },
@@ -332,51 +497,28 @@ export function OnboardingFlow({
 
   const connectInbox = (
     inboxId: InboxId,
-    result: {
-      connected: boolean;
-      connectionMethod: ReturnType<typeof getProviderConnectionMethod>;
-      connectionStatus:
-        | "not_connected"
-        | "oauth_required"
-        | "waiting_for_authentication"
-        | "authenticated_pending_activation"
-        | "connected"
-        | "connection_failed";
-      connectionMessage?: string | null;
-      oauthAuthorizationUrl?: string | null;
-    },
+    result: OnboardingInboxConnectionResult,
     messages: LiveInboxMessageSnapshot[] = [],
   ) => {
     onStateChange((current) => ({
       ...current,
       inboxConnections: {
         ...current.inboxConnections,
-        [inboxId]: {
-          ...getInboxConnection(current, inboxId),
-          connected: result.connected,
-          connectionMethod: result.connectionMethod,
-          connectionStatus: result.connectionStatus,
-          connectionMessage: result.connectionMessage ?? null,
-          oauthAuthorizationUrl: result.oauthAuthorizationUrl ?? null,
-          customImap: {
-            ...getInboxConnection(current, inboxId).customImap,
-            password: result.connected
-              ? ""
-              : getInboxConnection(current, inboxId).customImap.password,
-          },
-          customSmtp: {
-            ...getInboxConnection(current, inboxId).customSmtp,
-            password: result.connected
-              ? ""
-              : getInboxConnection(current, inboxId).customSmtp.password,
-          },
-        },
+        [inboxId]: buildOnboardingInboxConnectionUpdate(
+          getInboxConnection(current, inboxId),
+          result,
+        ),
       },
     }));
 
     const connection = state.inboxConnections[inboxId];
 
-    if (!isPreviewMode && result.connected && connection?.email.trim()) {
+    if (
+      !isPreviewMode &&
+      connection?.provider !== "custom_imap" &&
+      result.connected &&
+      connection?.email.trim()
+    ) {
       saveLiveInboxSnapshot({
         inboxId,
         email: connection.email.trim().toLowerCase(),
@@ -386,8 +528,32 @@ export function OnboardingFlow({
     }
   };
 
+  const applyAuthoritativeCustomImapConnectionForAttempt = (
+    snapshot: CustomImapOnboardingAttemptSnapshot,
+    result: Extract<
+      CustomImapOnboardingReconciliationResult,
+      { status: "matched" }
+    >,
+  ) => {
+    if (
+      customImapAttemptGuardRef.current?.attemptToken !==
+        snapshot.attemptToken ||
+      customImapAttemptGuardRef.current.onboardingInboxId !==
+        snapshot.onboardingInboxId
+    ) {
+      return;
+    }
+    onStateChange((current) => {
+      return applyAuthoritativeCustomImapConnection(
+        current,
+        snapshot,
+        result,
+      );
+    });
+  };
+
   const next = () => {
-    if (!canGoNext) return;
+    if (mutationIsLocked() || !canGoNext) return;
     const nextStep = onboardingFlowProgression.next(step);
 
     if (nextStep !== step) {
@@ -396,6 +562,9 @@ export function OnboardingFlow({
   };
 
   const back = () => {
+    if (mutationIsLocked()) {
+      return;
+    }
     setShowWorkspaceBlockedMessage(false);
     const previousStep = onboardingFlowProgression.back(step);
 
@@ -405,6 +574,9 @@ export function OnboardingFlow({
   };
 
   const openWorkspace = () => {
+    if (mutationIsLocked()) {
+      return;
+    }
     const didOpenWorkspace = onboardingFlowProgression.attemptWorkspaceOpen(
       canOpenWorkspace,
       () => onOpenWorkspace(userConfig),
@@ -435,9 +607,16 @@ export function OnboardingFlow({
             onProviderChange={setProvider}
             onEmailChange={setEmail}
             onCustomImapChange={setCustomImap}
-            onCustomSmtpChange={setCustomSmtp}
             onReuseCustomImap={reuseCustomImap}
             onConnectInbox={connectInbox}
+            onReloadAccountConfig={onReloadAccountConfig}
+            onApplyAuthoritativeCustomImapConnection={
+              applyAuthoritativeCustomImapConnectionForAttempt
+            }
+            customImapAttemptGuard={customImapAttemptGuard}
+            onCustomImapAttemptGuardChange={
+              updateCustomImapAttemptGuard
+            }
             canRemoveInbox={canRemoveSelectedInbox}
             onRemoveInbox={removeSelectedInbox}
             onAddInbox={addSourceInbox}
@@ -469,6 +648,12 @@ export function OnboardingFlow({
     <main className="min-h-screen px-4 py-8 md:px-8 md:py-10">
       <div className="mx-auto max-w-6xl">
         {previewControls}
+        <CustomImapServerReloadRecovery
+          visible={
+            customImapAttemptGuard?.recovery === "reload"
+          }
+          onReload={() => window.location.reload()}
+        />
         <div className="overflow-hidden rounded-[36px] border border-white/50 bg-white/55 shadow-panel backdrop-blur-xl">
           <div className="grid min-h-[860px] lg:grid-cols-[320px_1fr]">
             <aside className="relative hidden border-r border-ink/8 bg-pine px-8 py-10 text-white lg:block">
@@ -548,7 +733,11 @@ export function OnboardingFlow({
                 onBack={back}
                 onNext={step === 3 ? openWorkspace : next}
                 nextLabel={nextLabel}
-                isNextDisabled={step === 3 ? false : !canGoNext}
+                isBackDisabled={customImapInteractionLocked}
+                isNextDisabled={
+                  customImapInteractionLocked ||
+                  (step === 3 ? false : !canGoNext)
+                }
               />
             </section>
           </div>

@@ -25,7 +25,8 @@ from user_config_store import (  # noqa: E402
     read_user_config_record,
     resolve_authenticated_user,
     resolve_user_config_store,
-    write_user_config_record,
+    write_user_config_record_if_missing,
+    write_user_config_record_if_unchanged,
 )
 
 SENSITIVE_FIELD_NAMES = {
@@ -35,13 +36,41 @@ SENSITIVE_FIELD_NAMES = {
     "authorization_header",
     "auth_token",
     "authtoken",
+    "ciphertext",
+    "credential_id",
+    "credential_record",
+    "credential_ref",
+    "credential_reference",
+    "credential_references",
+    "credentialid",
+    "credentialrecord",
+    "credentialref",
+    "credentialreference",
+    "credentialreferences",
+    "encrypted_blob",
+    "encryptedblob",
+    "encryption_key",
+    "encryption_keys",
+    "encryptionkey",
+    "encryptionkeys",
     "id_token",
     "idtoken",
+    "key_material",
+    "keymaterial",
+    "nonce",
     "password",
+    "private_key",
+    "privatekey",
+    "raw_credential_record",
+    "raw_store_record",
+    "rawcredentialrecord",
+    "rawstorerecord",
     "refresh_token",
     "refreshtoken",
     "secret",
     "session",
+    "store_record",
+    "storerecord",
     "token",
 }
 MESSAGE_CACHE_FIELD_NAMES = {
@@ -117,6 +146,14 @@ SAFE_MANAGED_INBOX_PRESENTATION_FIELDS = {
     "title",
     "internalRole",
     "focusPreferences",
+}
+SERVER_ONLY_CREDENTIAL_MARKERS = {
+    "credentialversion",
+    "secretversion",
+    "credentialgeneration",
+    "secretgeneration",
+    "credentialrevision",
+    "secretrevision",
 }
 MAX_MANAGED_INBOX_TITLE_LENGTH = 160
 SUPPORTED_INTERNAL_ROLES = {
@@ -227,6 +264,7 @@ MAX_ONBOARDING_INBOX_NAME_LENGTH = 160
 MAX_USER_CONFIG_BODY_BYTES = 512 * 1024
 MAX_USER_CONFIG_JSON_DEPTH = 32
 MAX_USER_CONFIG_JSON_NODES = 8192
+MAX_USER_CONFIG_CAS_ATTEMPTS = 3
 ONBOARDING_CUSTOM_INBOX_ID_PATTERN = re.compile(
     r"^custom:[a-z0-9]+(?:-[a-z0-9]+)*$"
 )
@@ -283,6 +321,48 @@ def _is_blocked_field_name(key: str) -> bool:
         return True
 
     return any(pattern in compact_key for pattern in BLOCKED_FIELD_NAME_PATTERNS)
+
+
+def _is_server_only_credential_field_name(key: str) -> bool:
+    compact_key = "".join(
+        character for character in key.strip().lower() if character.isalnum()
+    )
+    return compact_key in SERVER_ONLY_CREDENTIAL_MARKERS or (
+        ("credential" in compact_key or "secret" in compact_key)
+        and (
+            "version" in compact_key
+            or "generation" in compact_key
+            or "revision" in compact_key
+        )
+    )
+
+
+def _contains_server_only_credential_field(value) -> bool:
+    if isinstance(value, dict):
+        return any(
+            (
+                isinstance(key, str)
+                and _is_server_only_credential_field_name(key)
+            )
+            or _contains_server_only_credential_field(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, list):
+        return any(_contains_server_only_credential_field(item) for item in value)
+    return False
+
+
+def _strip_server_only_credential_fields(value):
+    if isinstance(value, list):
+        return [_strip_server_only_credential_fields(item) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: _strip_server_only_credential_fields(item)
+            for key, item in value.items()
+            if isinstance(key, str)
+            and not _is_server_only_credential_field_name(key)
+        }
+    return copy.deepcopy(value)
 
 
 def _strip_sensitive_fields(value):
@@ -645,7 +725,9 @@ def _sanitize_user_config(payload: dict, owner_email: str) -> dict:
 
 
 def _sanitize_stored_user_config(record: dict) -> dict:
-    sanitized = _strip_sensitive_fields(record)
+    sanitized = _strip_server_only_credential_fields(
+        _strip_sensitive_fields(record)
+    )
     if not isinstance(sanitized, dict):
         return {}
     if "onboardingSession" in sanitized:
@@ -745,11 +827,44 @@ def _has_valid_known_stored_config_shapes(record: dict) -> bool:
     return True
 
 
+def _stored_config_owner_matches(record: dict, session_email: str) -> bool:
+    if "email" not in record:
+        return True
+
+    stored_email = record.get("email")
+    if not isinstance(stored_email, str) or not stored_email.strip():
+        return False
+    try:
+        normalized_stored_email = normalize_auth_email(stored_email)
+        normalized_session_email = normalize_auth_email(session_email)
+    except Exception:
+        return False
+    return (
+        isinstance(normalized_stored_email, str)
+        and bool(normalized_stored_email)
+        and normalized_stored_email == normalized_session_email
+    )
+
+
+def _json_values_are_type_exact(left, right) -> bool:
+    try:
+        return json.dumps(
+            left,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ) == json.dumps(
+            right,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    except (TypeError, ValueError, OverflowError, RecursionError):
+        return False
+
+
 def _merge_user_config(existing_record: dict | None, sanitized_update: dict) -> dict:
-    merged = {
-        "v": USER_CONFIG_SCHEMA_VERSION,
-        "email": sanitized_update["email"],
-        "updatedAt": sanitized_update["updatedAt"],
+    defaults = {
         "onboardingSession": {},
         "managedInboxes": [],
         "mailboxTitleOverrides": {},
@@ -760,6 +875,9 @@ def _merge_user_config(existing_record: dict | None, sanitized_update: dict) -> 
         "uiPreferences": {},
         "displayNameOverrides": {},
     }
+    merged = copy.deepcopy(existing_record) if isinstance(existing_record, dict) else {}
+    for key, value in defaults.items():
+        merged.setdefault(key, copy.deepcopy(value))
 
     existing_session_is_completed = False
     if isinstance(existing_record, dict):
@@ -779,6 +897,10 @@ def _merge_user_config(existing_record: dict | None, sanitized_update: dict) -> 
                     )
                 else:
                     merged[key] = _strip_sensitive_fields(existing_record[key])
+
+    merged["v"] = USER_CONFIG_SCHEMA_VERSION
+    merged["email"] = sanitized_update["email"]
+    merged["updatedAt"] = sanitized_update["updatedAt"]
 
     if (
         "onboardingSession" in sanitized_update
@@ -1076,6 +1198,13 @@ class handler(BaseHTTPRequestHandler):
                 _build_error("config_invalid", "User configuration is invalid."),
             )
             return
+        if not _stored_config_owner_matches(stored_config, session_user["email"]):
+            _send_json(
+                self,
+                503,
+                _build_error("config_invalid", "User configuration is invalid."),
+            )
+            return
 
         try:
             sanitized_config = _sanitize_stored_user_config(stored_config)
@@ -1141,6 +1270,16 @@ class handler(BaseHTTPRequestHandler):
         if error:
             _send_json(self, error_status or 400, error)
             return
+        if _contains_server_only_credential_field(payload):
+            _send_json(
+                self,
+                400,
+                _build_error(
+                    "forbidden_server_field",
+                    "Server-owned credential generation must not be supplied.",
+                ),
+            )
+            return
 
         try:
             sanitized_config = _sanitize_user_config(
@@ -1167,11 +1306,57 @@ class handler(BaseHTTPRequestHandler):
             )
             return
 
-        read_result = read_user_config_record(store, session_user["email"])
-        read_status = read_result.get("status") if isinstance(read_result, dict) else None
-        stored_config = read_result.get("config") if isinstance(read_result, dict) else None
-        if read_status == "ok":
-            if not isinstance(stored_config, dict):
+        for _attempt in range(MAX_USER_CONFIG_CAS_ATTEMPTS):
+            try:
+                read_result = read_user_config_record(store, session_user["email"])
+            except Exception:
+                _send_json(
+                    self,
+                    503,
+                    _build_error(
+                        "user_config_store_unavailable",
+                        "User config storage is temporarily unavailable.",
+                    ),
+                )
+                return
+
+            read_status = (
+                read_result.get("status") if isinstance(read_result, dict) else None
+            )
+            stored_config = (
+                read_result.get("config") if isinstance(read_result, dict) else None
+            )
+            if read_status == "ok":
+                if not isinstance(stored_config, dict):
+                    _send_json(
+                        self,
+                        503,
+                        _build_error(
+                            "config_invalid",
+                            "User configuration is invalid.",
+                        ),
+                    )
+                    return
+                existing_record = stored_config
+                if (
+                    not _has_valid_known_stored_config_shapes(existing_record)
+                    or not _stored_config_owner_matches(
+                        existing_record,
+                        session_user["email"],
+                    )
+                ):
+                    _send_json(
+                        self,
+                        503,
+                        _build_error(
+                            "config_invalid",
+                            "User configuration is invalid.",
+                        ),
+                    )
+                    return
+            elif read_status == "missing" and stored_config is None:
+                existing_record = None
+            elif read_status == "missing":
                 _send_json(
                     self,
                     503,
@@ -1181,8 +1366,17 @@ class handler(BaseHTTPRequestHandler):
                     ),
                 )
                 return
-            existing_record = stored_config
-            if not _has_valid_known_stored_config_shapes(existing_record):
+            elif read_status == "unavailable":
+                _send_json(
+                    self,
+                    503,
+                    _build_error(
+                        "user_config_store_unavailable",
+                        "User config storage is temporarily unavailable.",
+                    ),
+                )
+                return
+            else:
                 _send_json(
                     self,
                     503,
@@ -1192,29 +1386,139 @@ class handler(BaseHTTPRequestHandler):
                     ),
                 )
                 return
-        elif read_status == "missing" and stored_config is None:
-            existing_record = None
-        elif read_status == "missing":
-            _send_json(
-                self,
-                503,
-                _build_error(
-                    "config_invalid",
-                    "User configuration is invalid.",
-                ),
+
+            try:
+                merged_config = _merge_user_config(
+                    existing_record,
+                    sanitized_config,
+                )
+            except _StoredUserConfigValidationError:
+                _send_json(
+                    self,
+                    503,
+                    _build_error(
+                        "config_invalid",
+                        "User configuration is invalid.",
+                    ),
+                )
+                return
+            except _OnboardingSessionValidationError:
+                _send_json(
+                    self,
+                    400,
+                    _build_error(
+                        "invalid_onboarding_session",
+                        "Onboarding session is invalid.",
+                    ),
+                )
+                return
+
+            try:
+                write_result = (
+                    write_user_config_record_if_unchanged(
+                        store,
+                        session_user["email"],
+                        existing_record,
+                        merged_config,
+                    )
+                    if existing_record is not None
+                    else write_user_config_record_if_missing(
+                        store,
+                        session_user["email"],
+                        merged_config,
+                    )
+                )
+            except Exception:
+                write_result = None
+
+            write_status = (
+                write_result.get("status")
+                if isinstance(write_result, dict)
+                else None
             )
-            return
-        elif read_status == "unavailable":
-            _send_json(
-                self,
-                503,
-                _build_error(
-                    "user_config_store_unavailable",
-                    "User config storage is temporarily unavailable.",
-                ),
+            if write_status in {"conflict", "missing"}:
+                continue
+
+            try:
+                readback_result = read_user_config_record(
+                    store,
+                    session_user["email"],
+                )
+            except Exception:
+                readback_result = None
+            readback_status = (
+                readback_result.get("status")
+                if isinstance(readback_result, dict)
+                else None
             )
-            return
-        else:
+            readback_config = (
+                readback_result.get("config")
+                if isinstance(readback_result, dict)
+                else None
+            )
+
+            if (
+                readback_status == "ok"
+                and isinstance(readback_config, dict)
+                and _json_values_are_type_exact(readback_config, merged_config)
+            ):
+                try:
+                    response_config = _sanitize_stored_user_config(readback_config)
+                except Exception:
+                    _send_json(
+                        self,
+                        503,
+                        _build_error(
+                            "config_invalid",
+                            "User configuration is invalid.",
+                        ),
+                    )
+                    return
+                _send_json(self, 200, {"ok": True, "config": response_config})
+                return
+
+            if write_status != "ok":
+                _send_json(
+                    self,
+                    503,
+                    _build_error(
+                        "user_config_store_unavailable",
+                        "User config storage is temporarily unavailable.",
+                    ),
+                )
+                return
+
+            if readback_status == "unavailable":
+                _send_json(
+                    self,
+                    503,
+                    _build_error(
+                        "user_config_store_unavailable",
+                        "User config storage is temporarily unavailable.",
+                    ),
+                )
+                return
+            if readback_status == "ok" and isinstance(readback_config, dict):
+                if (
+                    not _has_valid_known_stored_config_shapes(readback_config)
+                    or not _stored_config_owner_matches(
+                        readback_config,
+                        session_user["email"],
+                    )
+                ):
+                    _send_json(
+                        self,
+                        503,
+                        _build_error(
+                            "config_invalid",
+                            "User configuration is invalid.",
+                        ),
+                    )
+                    return
+                continue
+            if readback_status == "missing" and readback_config is None:
+                continue
+
             _send_json(
                 self,
                 503,
@@ -1225,46 +1529,14 @@ class handler(BaseHTTPRequestHandler):
             )
             return
 
-        try:
-            merged_config = _merge_user_config(existing_record, sanitized_config)
-        except _StoredUserConfigValidationError:
-            _send_json(
-                self,
-                503,
-                _build_error(
-                    "config_invalid",
-                    "User configuration is invalid.",
-                ),
-            )
-            return
-        except _OnboardingSessionValidationError:
-            _send_json(
-                self,
-                400,
-                _build_error(
-                    "invalid_onboarding_session",
-                    "Onboarding session is invalid.",
-                ),
-            )
-            return
-
-        write_result = write_user_config_record(
-            store,
-            session_user["email"],
-            merged_config,
+        _send_json(
+            self,
+            409,
+            _build_error(
+                "user_config_write_conflict",
+                "User configuration changed concurrently. Please retry.",
+            ),
         )
-        if write_result["status"] != "ok":
-            _send_json(self, 503, {"ok": False, "error": write_result["error"]})
-            return
-
-        response_config = copy.deepcopy(merged_config)
-        if "onboardingSession" in response_config:
-            response_config["onboardingSession"] = (
-                _normalize_stored_onboarding_session(
-                    response_config["onboardingSession"]
-                )
-            )
-        _send_json(self, 200, {"ok": True, "config": response_config})
 
     def do_OPTIONS(self):
         _send_json(self, 200, {"ok": True})

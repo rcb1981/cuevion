@@ -31,7 +31,10 @@ else:
     import re
     from typing import Literal, TypedDict
 
-    from .mailbox_secret_store import read_mailbox_secret
+    from .mailbox_secret_store import (
+        is_valid_mailbox_credential_version,
+        read_mailbox_secret,
+    )
     from ..user_config_store import resolve_owned_managed_inbox_record
 
     FORBIDDEN_CUSTOM_REQUEST_FIELDS = {
@@ -54,6 +57,10 @@ else:
         "customImap",
         "customSmtp",
         "connection",
+        "credentialVersion",
+        "secretVersion",
+        "credentialGeneration",
+        "secretGeneration",
     }
 
 
@@ -95,8 +102,22 @@ else:
         def visit(value):
             if isinstance(value, dict):
                 for key, item in value.items():
-                    if isinstance(key, str) and key in FORBIDDEN_CUSTOM_REQUEST_FIELDS:
-                        found.add(key)
+                    if isinstance(key, str):
+                        compact = "".join(
+                            character
+                            for character in key.strip().lower()
+                            if character.isalnum()
+                        )
+                        is_generation = (
+                            ("credential" in compact or "secret" in compact)
+                            and (
+                                "version" in compact
+                                or "generation" in compact
+                                or "revision" in compact
+                            )
+                        )
+                        if key in FORBIDDEN_CUSTOM_REQUEST_FIELDS or is_generation:
+                            found.add(key)
                     visit(item)
             elif isinstance(value, list):
                 for item in value:
@@ -191,6 +212,14 @@ else:
                 "Reconnect this mailbox to continue.",
                 409,
             )
+        config_credential_version = inbox.get("credentialVersion")
+        if not is_valid_mailbox_credential_version(config_credential_version):
+            return _failure(
+                "reconnect_required",
+                "reconnect_required",
+                "Reconnect this mailbox to continue.",
+                409,
+            )
 
         email = _valid_email(inbox.get("email"))
         custom_imap = inbox.get("customImap")
@@ -222,7 +251,7 @@ else:
             or not imap_host
             or not imap_port
             or not imap_username
-            or not isinstance(imap_ssl, bool)
+            or imap_ssl is not True
         ):
             return _failure(
                 "malformed",
@@ -267,6 +296,17 @@ else:
             )
 
         secrets = secret_result["record"]
+        secret_credential_version = secrets.get("credentialVersion")
+        if (
+            not is_valid_mailbox_credential_version(secret_credential_version)
+            or secret_credential_version != config_credential_version
+        ):
+            return _failure(
+                "reconnect_required",
+                "reconnect_required",
+                "Reconnect this mailbox to continue.",
+                409,
+            )
         imap_password = secrets.get("imapPassword")
         smtp_password = (
             imap_password if use_same_credentials else secrets.get("smtpPassword")

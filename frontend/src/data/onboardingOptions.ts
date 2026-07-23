@@ -63,6 +63,7 @@ export const providerOptions: Array<{ id: ProviderId; label: string }> =
   onboardingText.connect.providers.map((provider) => ({ ...provider }));
 
 export const createInboxConnection = () => ({
+  serverMailboxId: null,
   provider: null,
   email: "",
   connected: false,

@@ -1,9 +1,12 @@
+import base64
 import importlib
 import io
 import json
 import os
 import sys
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import Mock, patch
 from urllib.error import HTTPError, URLError
@@ -19,6 +22,16 @@ import user_config_store
 from api.auth import http as auth_http
 from api.auth import runtime as auth_runtime
 
+VALID_CREDENTIAL_VERSION_A = (
+    base64.urlsafe_b64encode(b"a" * 32).decode("ascii").rstrip("=")
+)
+VALID_CREDENTIAL_VERSION_B = (
+    base64.urlsafe_b64encode(b"b" * 32).decode("ascii").rstrip("=")
+)
+VALID_CREDENTIAL_VERSION_C = (
+    base64.urlsafe_b64encode(b"c" * 32).decode("ascii").rstrip("=")
+)
+
 
 class FakeResponse:
     def __init__(self, payload):
@@ -32,6 +45,64 @@ class FakeResponse:
 
     def __exit__(self, exc_type, exc, traceback):
         return False
+
+
+class InMemoryMailboxMutationLeaseStore:
+    def __init__(self):
+        self.now_ms = 0
+        self.records = {}
+        self.lock = threading.Lock()
+        self.lose_next_release_ack = False
+        self.acquire_ttls = []
+
+    def advance(self, milliseconds):
+        with self.lock:
+            self.now_ms += milliseconds
+
+    def request(self, _store, method, path, body=None):
+        with self.lock:
+            expired = [
+                key
+                for key, (_token, expires_at) in self.records.items()
+                if expires_at <= self.now_ms
+            ]
+            for key in expired:
+                del self.records[key]
+
+            if method == "GET":
+                for key, (token, _expires_at) in self.records.items():
+                    if path == f"/get/{user_config_store.quote(key, safe='')}":
+                        return {"result": token}, None
+                return {"result": None}, None
+
+            command = json.loads(body)
+            script = command[1]
+            key = command[3]
+            token = command[4]
+            if script == user_config_store._ACQUIRE_MAILBOX_MUTATION_LEASE_LUA:
+                ttl = int(command[5])
+                self.acquire_ttls.append(ttl)
+                if key in self.records:
+                    return {"result": "held"}, None
+                self.records[key] = (token, self.now_ms + ttl)
+                return {"result": "acquired"}, None
+            if script == user_config_store._RELEASE_MAILBOX_MUTATION_LEASE_LUA:
+                current = self.records.get(key)
+                if current is None:
+                    result = "missing"
+                elif current[0] != token:
+                    result = "not_owner"
+                else:
+                    del self.records[key]
+                    result = "released"
+                if self.lose_next_release_ack:
+                    self.lose_next_release_ack = False
+                    return None, {
+                        "code": "user_config_store_unavailable",
+                        "message": "release acknowledgement lost",
+                    }
+                return {"result": result}, None
+            raise AssertionError("unexpected lease command")
 
 
 def managed_inbox(mailbox_id="mailbox-a", **overrides):
@@ -133,6 +204,20 @@ class AuthenticationTests(unittest.TestCase):
 class StoreTests(unittest.TestCase):
     store = {"rest_url": "https://kv.example", "rest_token": "kv-secret"}
 
+    def _lease_store_patches(self, memory):
+        return (
+            patch.object(
+                user_config_store,
+                "resolve_user_config_store",
+                return_value=(self.store, None),
+            ),
+            patch.object(
+                user_config_store,
+                "_perform_rest_request",
+                side_effect=memory.request,
+            ),
+        )
+
     def test_store_resolution_requires_both_variables(self):
         with patch.dict(
             os.environ,
@@ -156,6 +241,195 @@ class StoreTests(unittest.TestCase):
                 store, error = user_config_store.resolve_user_config_store()
                 self.assertIsNone(store)
                 self.assertEqual(error["code"], "user_config_store_unavailable")
+
+    def test_same_mailbox_lease_race_has_exactly_one_winner(self):
+        memory = InMemoryMailboxMutationLeaseStore()
+        store_patch, request_patch = self._lease_store_patches(memory)
+        barrier = threading.Barrier(2)
+
+        def acquire():
+            barrier.wait()
+            return user_config_store.acquire_mailbox_mutation_lease(
+                "owner@example.com",
+                "mailbox-a",
+            )
+
+        with store_patch, request_patch, ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(lambda _index: acquire(), range(2)))
+
+        self.assertEqual(
+            sorted(result["status"] for result in results),
+            ["acquired", "held"],
+        )
+        winner = next(result for result in results if result["status"] == "acquired")
+        loser = next(result for result in results if result["status"] == "held")
+        self.assertIsNotNone(winner["token"])
+        self.assertIsNone(loser["token"])
+        self.assertEqual(
+            loser["error"]["code"],
+            "mailbox_mutation_lease_conflict",
+        )
+        self.assertEqual(len(memory.records), 1)
+
+    def test_lost_acquire_ack_is_classified_only_from_exact_token_readback(self):
+        token = "a" * 43
+        with patch.object(
+            user_config_store,
+            "resolve_user_config_store",
+            return_value=(self.store, None),
+        ), patch.object(
+            user_config_store.secrets,
+            "token_urlsafe",
+            return_value=token,
+        ), patch.object(
+            user_config_store,
+            "_perform_mailbox_mutation_lease_command",
+            return_value=(
+                None,
+                {
+                    "code": "user_config_store_unavailable",
+                    "message": "acquire acknowledgement lost",
+                },
+            ),
+        ), patch.object(
+            user_config_store,
+            "_read_mailbox_mutation_lease",
+            return_value=("present", token),
+        ):
+            acquired = user_config_store.acquire_mailbox_mutation_lease(
+                "owner@example.com",
+                "mailbox-a",
+            )
+        self.assertEqual(acquired["status"], "acquired")
+        self.assertEqual(acquired["token"], token)
+
+        with patch.object(
+            user_config_store,
+            "resolve_user_config_store",
+            return_value=(self.store, None),
+        ), patch.object(
+            user_config_store.secrets,
+            "token_urlsafe",
+            return_value=token,
+        ), patch.object(
+            user_config_store,
+            "_perform_mailbox_mutation_lease_command",
+            return_value=(
+                None,
+                {
+                    "code": "user_config_store_unavailable",
+                    "message": "acquire acknowledgement lost",
+                },
+            ),
+        ), patch.object(
+            user_config_store,
+            "_read_mailbox_mutation_lease",
+            return_value=("missing", None),
+        ):
+            ambiguous = user_config_store.acquire_mailbox_mutation_lease(
+                "owner@example.com",
+                "mailbox-a",
+            )
+        self.assertEqual(ambiguous["status"], "ambiguous")
+        self.assertIsNone(ambiguous["token"])
+
+    def test_crashed_lease_expires_after_one_bounded_ttl(self):
+        memory = InMemoryMailboxMutationLeaseStore()
+        store_patch, request_patch = self._lease_store_patches(memory)
+        with store_patch, request_patch:
+            crashed = user_config_store.acquire_mailbox_mutation_lease(
+                "owner@example.com",
+                "mailbox-a",
+            )
+            memory.advance(
+                user_config_store.MAILBOX_MUTATION_LEASE_TTL_MILLISECONDS + 1
+            )
+            recovered = user_config_store.acquire_mailbox_mutation_lease(
+                "owner@example.com",
+                "mailbox-a",
+            )
+
+        self.assertEqual(crashed["status"], "acquired")
+        self.assertEqual(recovered["status"], "acquired")
+        self.assertNotEqual(crashed["token"], recovered["token"])
+        self.assertEqual(
+            memory.acquire_ttls,
+            [
+                user_config_store.MAILBOX_MUTATION_LEASE_TTL_MILLISECONDS,
+                user_config_store.MAILBOX_MUTATION_LEASE_TTL_MILLISECONDS,
+            ],
+        )
+        self.assertGreater(user_config_store.MAILBOX_MUTATION_LEASE_TTL_MILLISECONDS, 0)
+        self.assertLessEqual(
+            user_config_store.MAILBOX_MUTATION_LEASE_TTL_MILLISECONDS,
+            30 * 60 * 1000,
+        )
+
+    def test_lost_release_ack_is_resolved_by_exact_lease_readback(self):
+        memory = InMemoryMailboxMutationLeaseStore()
+        store_patch, request_patch = self._lease_store_patches(memory)
+        with store_patch, request_patch:
+            acquired = user_config_store.acquire_mailbox_mutation_lease(
+                "owner@example.com",
+                "mailbox-a",
+            )
+            memory.lose_next_release_ack = True
+            released = user_config_store.release_mailbox_mutation_lease(
+                "owner@example.com",
+                "mailbox-a",
+                acquired["token"],
+            )
+
+        self.assertEqual(released["status"], "released")
+        self.assertEqual(memory.records, {})
+
+        with patch.object(
+            user_config_store,
+            "resolve_user_config_store",
+            return_value=(self.store, None),
+        ), patch.object(
+            user_config_store,
+            "_perform_mailbox_mutation_lease_command",
+            return_value=(
+                None,
+                {
+                    "code": "user_config_store_unavailable",
+                    "message": "release acknowledgement lost",
+                },
+            ),
+        ), patch.object(
+            user_config_store,
+            "_read_mailbox_mutation_lease",
+            return_value=("present", acquired["token"]),
+        ):
+            ambiguous = user_config_store.release_mailbox_mutation_lease(
+                "owner@example.com",
+                "mailbox-a",
+                acquired["token"],
+            )
+        self.assertEqual(ambiguous["status"], "ambiguous")
+        self.assertEqual(
+            ambiguous["error"]["code"],
+            "user_config_store_unavailable",
+        )
+
+    def test_independent_mailboxes_have_independent_leases(self):
+        memory = InMemoryMailboxMutationLeaseStore()
+        store_patch, request_patch = self._lease_store_patches(memory)
+        with store_patch, request_patch:
+            mailbox_a = user_config_store.acquire_mailbox_mutation_lease(
+                "owner@example.com",
+                "mailbox-a",
+            )
+            mailbox_b = user_config_store.acquire_mailbox_mutation_lease(
+                "owner@example.com",
+                "mailbox-b",
+            )
+
+        self.assertEqual(mailbox_a["status"], "acquired")
+        self.assertEqual(mailbox_b["status"], "acquired")
+        self.assertNotEqual(mailbox_a["token"], mailbox_b["token"])
+        self.assertEqual(len(memory.records), 2)
 
     def test_exact_key_and_object_or_string_record_reads(self):
         self.assertEqual(
@@ -551,7 +825,7 @@ class ManagedInboxTests(unittest.TestCase):
             return_value={"status": "ok", "config": existing, "error": None},
         ), patch.object(
             user_config_store,
-            "write_user_config_record",
+            "write_user_config_record_if_unchanged",
             return_value={"status": "ok", "record": {}, "error": None},
         ) as write:
             result = user_config_store.upsert_owned_custom_imap_mailbox(
@@ -563,17 +837,374 @@ class ManagedInboxTests(unittest.TestCase):
                     "customImap": {"host": "imap.new", "port": "993", "ssl": True, "username": "u"},
                     "customSmtp": {"host": "smtp.new", "port": "587", "security": "starttls", "username": "u", "useSameCredentials": True},
                 },
+                credential_version=VALID_CREDENTIAL_VERSION_A,
+                expected_inbox=existing["managedInboxes"][0],
             )
 
         self.assertEqual(result["status"], "ok")
-        written = write.call_args.args[2]
+        self.assertEqual(write.call_args.args[2], existing)
+        written = write.call_args.args[3]
         self.assertEqual(written["smartFolders"], [{"id": "keep"}])
         inbox = written["managedInboxes"][0]
         self.assertEqual(inbox["id"], "mailbox-a")
         self.assertEqual(inbox["internalRole"], "artist_manager")
         self.assertEqual(inbox["classificationSettings"], {"keep": True})
+        self.assertEqual(
+            inbox["credentialVersion"],
+            VALID_CREDENTIAL_VERSION_A,
+        )
         self.assertNotIn("password", inbox["customImap"])
         self.assertNotIn("password", inbox["customSmtp"])
+
+    def test_imap_upsert_remerges_gmail_config_conflict_with_same_generation(self):
+        user = {"email": "owner@example.com", "name": "Owner", "userType": "member"}
+        store = {"rest_url": "https://kv.example", "rest_token": "token"}
+        previous_imap = managed_inbox(
+            provider="custom_imap",
+            credentialVersion=VALID_CREDENTIAL_VERSION_A,
+            customImap={
+                "host": "old.example.com",
+                "port": "993",
+                "ssl": True,
+                "username": "old@example.com",
+            },
+            customSmtp={},
+        )
+        config_a = {
+            "v": 1,
+            "email": "owner@example.com",
+            "smartFolders": [{"id": "before"}],
+            "managedInboxes": [previous_imap],
+        }
+        gmail = managed_inbox(
+            "gmail-concurrent",
+            email="gmail@example.com",
+            provider="google",
+            connectionMethod="oauth",
+        )
+        config_b = {
+            **json.loads(json.dumps(config_a)),
+            "smartFolders": [{"id": "gmail-winner"}],
+            "managedInboxes": [json.loads(json.dumps(previous_imap)), gmail],
+            "gmailConcurrentRevision": "B",
+        }
+        state = {"config": json.loads(json.dumps(config_a)), "writes": 0}
+
+        def read(_store, _owner):
+            return {
+                "status": "ok",
+                "config": json.loads(json.dumps(state["config"])),
+                "error": None,
+            }
+
+        def compare_and_set(_store, _owner, expected, replacement):
+            state["writes"] += 1
+            if state["writes"] == 1:
+                self.assertEqual(expected, config_a)
+                state["config"] = json.loads(json.dumps(config_b))
+                return {
+                    "status": "conflict",
+                    "record": None,
+                    "error": {
+                        "code": "user_config_write_conflict",
+                        "message": "Gmail callback committed config B",
+                    },
+                }
+            self.assertEqual(expected, config_b)
+            state["config"] = json.loads(json.dumps(replacement))
+            return {"status": "ok", "record": replacement, "error": None}
+
+        with patch.object(
+            user_config_store,
+            "resolve_authenticated_user",
+            return_value=(user, None),
+        ), patch.object(
+            user_config_store,
+            "resolve_user_config_store",
+            return_value=(store, None),
+        ), patch.object(
+            user_config_store,
+            "read_user_config_record",
+            side_effect=read,
+        ), patch.object(
+            user_config_store,
+            "write_user_config_record_if_unchanged",
+            side_effect=compare_and_set,
+        ):
+            result = user_config_store.upsert_owned_custom_imap_mailbox(
+                {},
+                "mailbox-a",
+                "reconnect",
+                {
+                    "email": "new@example.com",
+                    "customImap": {
+                        "host": "new.example.com",
+                        "port": "993",
+                        "ssl": True,
+                        "username": "new@example.com",
+                    },
+                    "customSmtp": {},
+                },
+                credential_version=VALID_CREDENTIAL_VERSION_B,
+                expected_inbox=previous_imap,
+            )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(state["writes"], 2)
+        self.assertEqual(
+            state["config"]["managedInboxes"][0]["credentialVersion"],
+            VALID_CREDENTIAL_VERSION_B,
+        )
+        self.assertEqual(
+            state["config"]["managedInboxes"][1]["id"],
+            "gmail-concurrent",
+        )
+        self.assertEqual(
+            state["config"]["managedInboxes"][1]["provider"],
+            "google",
+        )
+        self.assertNotIn(
+            "password",
+            state["config"]["managedInboxes"][1]["customImap"],
+        )
+        self.assertEqual(
+            state["config"]["smartFolders"],
+            [{"id": "gmail-winner"}],
+        )
+        self.assertEqual(state["config"]["gmailConcurrentRevision"], "B")
+
+    def test_generation_bound_config_rollback_preserves_a_newer_winner(self):
+        user = {"email": "owner@example.com", "name": "Owner", "userType": "member"}
+        store = {"rest_url": "https://kv.example", "rest_token": "token"}
+        previous = managed_inbox(
+            provider="custom_imap",
+            credentialVersion=VALID_CREDENTIAL_VERSION_A,
+            customImap={"host": "old.example.com"},
+        )
+        written_by_request = {
+            **previous,
+            "credentialVersion": VALID_CREDENTIAL_VERSION_B,
+            "customImap": {"host": "request.example.com"},
+        }
+        newer_winner = {
+            **written_by_request,
+            "credentialVersion": VALID_CREDENTIAL_VERSION_C,
+            "customImap": {"host": "winner.example.com"},
+        }
+        state = {
+            "config": {
+                "v": 1,
+                "email": "owner@example.com",
+                "managedInboxes": [newer_winner],
+            }
+        }
+
+        def read(_store, _owner):
+            return {
+                "status": "ok",
+                "config": json.loads(json.dumps(state["config"])),
+                "error": None,
+            }
+
+        def compare_and_set(_store, _owner, expected, replacement):
+            if state["config"] != expected:
+                return {
+                    "status": "conflict",
+                    "record": None,
+                    "error": {"code": "user_config_write_conflict", "message": "stale"},
+                }
+            state["config"] = json.loads(json.dumps(replacement))
+            return {"status": "ok", "record": replacement, "error": None}
+
+        with patch.object(
+            user_config_store,
+            "resolve_authenticated_user",
+            return_value=(user, None),
+        ), patch.object(
+            user_config_store,
+            "resolve_user_config_store",
+            return_value=(store, None),
+        ), patch.object(
+            user_config_store,
+            "read_user_config_record",
+            side_effect=read,
+        ), patch.object(
+            user_config_store,
+            "write_user_config_record_if_unchanged",
+            side_effect=compare_and_set,
+        ) as write:
+            conflict = user_config_store.rollback_owned_custom_imap_mailbox_update(
+                {},
+                "mailbox-a",
+                written_by_request,
+                previous,
+            )
+
+            self.assertEqual(
+                conflict["code"],
+                "user_config_newer_mailbox_preserved",
+            )
+            write.assert_not_called()
+            self.assertEqual(
+                state["config"]["managedInboxes"][0]["credentialVersion"],
+                VALID_CREDENTIAL_VERSION_C,
+            )
+
+            state["config"]["managedInboxes"][0] = json.loads(
+                json.dumps(written_by_request)
+            )
+            restored = user_config_store.rollback_owned_custom_imap_mailbox_update(
+                {},
+                "mailbox-a",
+                written_by_request,
+                previous,
+            )
+
+        self.assertIsNone(restored)
+        self.assertEqual(state["config"]["managedInboxes"][0], previous)
+
+    def test_lost_rollback_ack_is_classified_from_the_mailbox_target(self):
+        user = {"email": "owner@example.com", "name": "Owner", "userType": "member"}
+        store = {"rest_url": "https://kv.example", "rest_token": "token"}
+        previous = managed_inbox(
+            provider="custom_imap",
+            credentialVersion=VALID_CREDENTIAL_VERSION_A,
+            customImap={"host": "old.example.com"},
+        )
+        expected = {
+            **previous,
+            "credentialVersion": VALID_CREDENTIAL_VERSION_B,
+            "customImap": {"host": "request.example.com"},
+        }
+        newer = {
+            **expected,
+            "credentialVersion": VALID_CREDENTIAL_VERSION_C,
+            "customImap": {"host": "winner.example.com"},
+        }
+        initial_config = {
+            "v": 1,
+            "email": "owner@example.com",
+            "smartFolders": [{"id": "before"}],
+            "managedInboxes": [expected],
+        }
+        cases = (
+            (
+                "previous_with_unrelated_change",
+                {
+                    "status": "ok",
+                    "config": {
+                        **initial_config,
+                        "smartFolders": [{"id": "concurrent"}],
+                        "managedInboxes": [previous],
+                    },
+                    "error": None,
+                },
+                None,
+            ),
+            (
+                "target_absent",
+                {
+                    "status": "ok",
+                    "config": {
+                        **initial_config,
+                        "smartFolders": [{"id": "concurrent"}],
+                        "managedInboxes": [],
+                    },
+                    "error": None,
+                },
+                "user_config_newer_mailbox_preserved",
+            ),
+            (
+                "exact_expected_generation",
+                {
+                    "status": "ok",
+                    "config": initial_config,
+                    "error": None,
+                },
+                "user_config_rollback_ambiguous",
+            ),
+            (
+                "newer_generation",
+                {
+                    "status": "ok",
+                    "config": {
+                        **initial_config,
+                        "managedInboxes": [newer],
+                    },
+                    "error": None,
+                },
+                "user_config_newer_mailbox_preserved",
+            ),
+            (
+                "malformed_target",
+                {
+                    "status": "ok",
+                    "config": {
+                        **initial_config,
+                        "managedInboxes": "malformed",
+                    },
+                    "error": None,
+                },
+                "user_config_rollback_ambiguous",
+            ),
+            (
+                "unavailable_readback",
+                {
+                    "status": "unavailable",
+                    "config": None,
+                    "error": {
+                        "code": "user_config_store_unavailable",
+                        "message": "offline",
+                    },
+                },
+                "user_config_rollback_ambiguous",
+            ),
+        )
+
+        for name, verification, expected_error_code in cases:
+            with self.subTest(name=name), patch.object(
+                user_config_store,
+                "resolve_authenticated_user",
+                return_value=(user, None),
+            ), patch.object(
+                user_config_store,
+                "resolve_user_config_store",
+                return_value=(store, None),
+            ), patch.object(
+                user_config_store,
+                "read_user_config_record",
+                side_effect=[
+                    {
+                        "status": "ok",
+                        "config": json.loads(json.dumps(initial_config)),
+                        "error": None,
+                    },
+                    json.loads(json.dumps(verification)),
+                ],
+            ), patch.object(
+                user_config_store,
+                "write_user_config_record_if_unchanged",
+                return_value={
+                    "status": "unavailable",
+                    "record": None,
+                    "error": {
+                        "code": "user_config_store_unavailable",
+                        "message": "acknowledgement lost",
+                    },
+                },
+            ) as write:
+                result = user_config_store.rollback_owned_custom_imap_mailbox_update(
+                    {},
+                    "mailbox-a",
+                    expected,
+                    previous,
+                )
+
+            write.assert_called_once()
+            if expected_error_code is None:
+                self.assertIsNone(result)
+            else:
+                self.assertEqual(result["code"], expected_error_code)
 
     def test_upsert_initial_rejects_any_existing_id_and_reconnect_requires_custom_imap(self):
         user = {"email": "owner@example.com", "name": "Owner", "userType": "member"}
@@ -606,13 +1237,19 @@ class ManagedInboxTests(unittest.TestCase):
                 },
             ), patch.object(
                 user_config_store,
-                "write_user_config_record",
+                "write_user_config_record_if_unchanged",
             ) as write:
                 result = user_config_store.upsert_owned_custom_imap_mailbox(
                     {},
                     "mailbox-a",
                     mode,
                     metadata,
+                    credential_version=VALID_CREDENTIAL_VERSION_A,
+                    expected_inbox=(
+                        managed_inboxes[0]
+                        if mode == "reconnect" and managed_inboxes
+                        else {} if mode == "reconnect" else None
+                    ),
                 )
             return result, write
 

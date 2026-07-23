@@ -29,13 +29,13 @@ STATE_MAX_AGE_SECONDS = 15 * 60
 MAX_OAUTH_RESPONSE_BYTES = 256 * 1024
 GMAIL_OAUTH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60
 USER_CONFIG_SCHEMA_VERSION = 1
-USER_CONFIG_KEY_PREFIX = "cuevion:user:v1"
+MAX_GMAIL_USER_CONFIG_WRITE_ATTEMPTS = 3
 EMAIL_PATTERN = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
-OAUTH_STATE_VERSION = 1
+OAUTH_STATE_VERSION = 2
 MAX_STATE_CLOCK_SKEW_SECONDS = 60
-STATE_SIGNATURE_DOMAIN = "cuevion-oauth-state-signature:v1"
-OWNER_BINDING_DOMAIN = "cuevion-oauth-owner-binding:v1"
-PKCE_DERIVATION_DOMAIN = "cuevion-oauth-pkce:v1"
+STATE_SIGNATURE_DOMAIN = "cuevion-oauth-state-signature:v2"
+OWNER_BINDING_DOMAIN = "cuevion-oauth-owner-binding:v2"
+PKCE_DERIVATION_DOMAIN = "cuevion-oauth-pkce:v2"
 ONBOARDING_PRESET_INBOX_IDS = {
     "main",
     "demo",
@@ -115,7 +115,6 @@ CURRENT_GOOGLE_TOKEN_RECORD_FIELDS = frozenset(
 )
 ADOPTABLE_LEGACY_GOOGLE_TOKEN_RECORD_MATCHES = frozenset(
     {
-        GOOGLE_TOKEN_RECORD_LEGACY_OWNERLESS_MATCH,
         GOOGLE_TOKEN_RECORD_LEGACY_OWNER_EQUALS_MAILBOX_MATCH,
     }
 )
@@ -123,6 +122,17 @@ GOOGLE_TOKEN_OWNER_IDENTITY_FIELDS = frozenset(
     {"provider", "email", "owner_email"}
 )
 LEGACY_GOOGLE_TOKEN_ADOPTION_SCRIPT = (
+    "local current=redis.call('GET',KEYS[1]);"
+    "if current~=ARGV[1] then return 0 end;"
+    "redis.call('SET',KEYS[1],ARGV[2],'EX',ARGV[3]);"
+    "return 1"
+)
+GOOGLE_TOKEN_CREATE_IF_MISSING_SCRIPT = (
+    "if redis.call('EXISTS',KEYS[1])~=0 then return 0 end;"
+    "redis.call('SET',KEYS[1],ARGV[1],'EX',ARGV[2]);"
+    "return 1"
+)
+GOOGLE_TOKEN_REPLACE_IF_UNCHANGED_SCRIPT = (
     "local current=redis.call('GET',KEYS[1]);"
     "if current~=ARGV[1] then return 0 end;"
     "redis.call('SET',KEYS[1],ARGV[2],'EX',ARGV[3]);"
@@ -345,6 +355,7 @@ if str(API_DIR) not in sys.path:
     sys.path.insert(0, str(API_DIR))
 
 from oauth_token_store import persist_microsoft_token_record
+from api import user_config_store
 from api.auth import http, runtime
 from api.auth.email_address import normalize_auth_email
 
@@ -361,6 +372,8 @@ def base64url_decode(value: str) -> bytes:
 def build_owner_binding(
     *,
     owner_email: str,
+    member_user_id: str,
+    member_workspace_id: str,
     provider: str,
     email_hint: str,
     nonce: str,
@@ -369,17 +382,33 @@ def build_owner_binding(
     signing_secret: str,
     inbox_position: str | None = None,
 ) -> str:
+    normalized_user_id = (
+        member_user_id.strip() if isinstance(member_user_id, str) else ""
+    )
+    normalized_workspace_id = (
+        member_workspace_id.strip()
+        if isinstance(member_workspace_id, str)
+        else ""
+    )
+    if not normalized_user_id or not normalized_workspace_id:
+        raise ValueError("Authenticated member context is required.")
     binding_fields = [
         OWNER_BINDING_DOMAIN,
         str(OAUTH_STATE_VERSION),
         normalize_auth_email(owner_email),
+        normalized_user_id,
+        normalized_workspace_id,
         provider,
         email_hint,
     ]
     if inbox_position is not None:
         binding_fields.append(inbox_position)
     binding_fields.extend((nonce, str(issued_at), str(expires_at)))
-    binding_message = "\n".join(binding_fields)
+    binding_message = json.dumps(
+        binding_fields,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
     return base64url_encode(
         hmac.new(
             signing_secret.encode("utf-8"),
@@ -389,17 +418,29 @@ def build_owner_binding(
     )
 
 
-def verify_owner_binding(payload: dict, owner_email: str, signing_secret: str) -> bool:
-    expected_binding = build_owner_binding(
-        owner_email=owner_email,
-        provider=payload["provider"],
-        email_hint=payload["email_hint"],
-        nonce=payload["nonce"],
-        issued_at=payload["issued_at"],
-        expires_at=payload["expires_at"],
-        signing_secret=signing_secret,
-        inbox_position=payload.get("inboxPosition"),
-    )
+def verify_owner_binding(
+    payload: dict,
+    owner_email: str,
+    signing_secret: str,
+    *,
+    member_user_id: str,
+    member_workspace_id: str,
+) -> bool:
+    try:
+        expected_binding = build_owner_binding(
+            owner_email=owner_email,
+            member_user_id=member_user_id,
+            member_workspace_id=member_workspace_id,
+            provider=payload["provider"],
+            email_hint=payload["email_hint"],
+            nonce=payload["nonce"],
+            issued_at=payload["issued_at"],
+            expires_at=payload["expires_at"],
+            signing_secret=signing_secret,
+            inbox_position=payload.get("inboxPosition"),
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
     return hmac.compare_digest(payload["owner_binding"], expected_binding)
 
 
@@ -988,34 +1029,133 @@ def _read_durable_record(config: dict, store_key: str) -> tuple[dict | None, dic
     return record, error
 
 
+def _google_token_records_are_type_exact(left, right) -> bool:
+    try:
+        return json.dumps(
+            left,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ) == json.dumps(
+            right,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+def _google_token_owner_conflict_error() -> dict:
+    return {
+        "code": "token_owner_conflict",
+        "message": "This Google mailbox is already linked to another account owner.",
+        GMAIL_CALLBACK_FAILURE_CODE_FIELD: "token_owner_conflict",
+    }
+
+
+def _google_token_write_verification_error() -> dict:
+    return {
+        "code": "token_persistence_failed",
+        "message": "Durable mailbox token storage did not confirm the write.",
+        GMAIL_CALLBACK_FAILURE_CODE_FIELD: "mailbox_readback_verification_failed",
+    }
+
+
+def _write_conditional_durable_record(
+    config: dict,
+    store_key: str,
+    expected_record: dict | None,
+    next_record: dict,
+    *,
+    mutation_script: str,
+) -> tuple[dict | None, dict | None]:
+    snapshot, expected_value, snapshot_error = _read_durable_record_snapshot(
+        config,
+        store_key,
+    )
+    if snapshot_error:
+        return None, snapshot_error
+
+    if expected_record is None:
+        if snapshot is not None or expected_value is not None:
+            return None, _google_token_owner_conflict_error()
+    elif (
+        not _google_token_records_are_type_exact(snapshot, expected_record)
+        or not isinstance(expected_value, str)
+    ):
+        return None, _google_token_owner_conflict_error()
+
+    next_value = json.dumps(
+        next_record,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    command = [
+        "EVAL",
+        mutation_script,
+        1,
+        store_key,
+    ]
+    if expected_record is not None:
+        command.append(expected_value)
+    command.extend((next_value, GMAIL_OAUTH_TOKEN_TTL_SECONDS))
+
+    payload, write_error = _perform_rest_request(
+        config,
+        "POST",
+        "",
+        json.dumps(command, separators=(",", ":")).encode("utf-8"),
+    )
+    result = payload.get("result") if isinstance(payload, dict) else None
+    if isinstance(result, int) and not isinstance(result, bool) and result == 0:
+        return None, _google_token_owner_conflict_error()
+    acknowledged = (
+        isinstance(result, int)
+        and not isinstance(result, bool)
+        and result == 1
+        and write_error is None
+    )
+
+    # A transport failure or malformed acknowledgement can mean the atomic
+    # mutation committed before the response was lost. Exact readback is the
+    # sole authority in that case, and also verifies every acknowledged write.
+    verified_record, verify_error = _read_durable_record(config, store_key)
+    if verify_error:
+        return None, _google_token_write_verification_error()
+    if _google_token_records_are_type_exact(verified_record, next_record):
+        return verified_record, None
+    if (
+        verified_record is not None
+        and not _google_token_records_are_type_exact(
+            verified_record,
+            expected_record,
+        )
+    ):
+        return None, _google_token_owner_conflict_error()
+    if acknowledged or write_error is not None or result is not None:
+        return None, _google_token_write_verification_error()
+    return None, _google_token_write_verification_error()
+
+
 def _write_durable_record(
     config: dict,
     store_key: str,
-    record: dict,
+    expected_record: dict | None,
+    next_record: dict,
 ) -> tuple[dict | None, dict | None]:
-    payload, error = _perform_rest_request(
+    return _write_conditional_durable_record(
         config,
-        "POST",
-        f"/set/{quote(store_key, safe='')}?EX={GMAIL_OAUTH_TOKEN_TTL_SECONDS}",
-        json.dumps(record, separators=(",", ":"), sort_keys=True).encode("utf-8"),
+        store_key,
+        expected_record,
+        next_record,
+        mutation_script=(
+            GOOGLE_TOKEN_CREATE_IF_MISSING_SCRIPT
+            if expected_record is None
+            else GOOGLE_TOKEN_REPLACE_IF_UNCHANGED_SCRIPT
+        ),
     )
-    if error:
-        return None, error
-
-    if not isinstance(payload, dict) or payload.get("result") != "OK":
-        return None, {
-            "code": "token_persistence_failed",
-            "message": "Durable mailbox token storage did not confirm the write.",
-        }
-
-    verified_record, verify_error = _read_durable_record(config, store_key)
-    if verify_error:
-        return None, {
-            **verify_error,
-            GMAIL_CALLBACK_FAILURE_CODE_FIELD: "mailbox_readback_verification_failed",
-        }
-
-    return verified_record, None
 
 
 def _adopt_legacy_durable_record(
@@ -1024,66 +1164,13 @@ def _adopt_legacy_durable_record(
     legacy_record: dict,
     next_record: dict,
 ) -> tuple[dict | None, dict | None]:
-    snapshot, expected_value, snapshot_error = _read_durable_record_snapshot(
+    return _write_conditional_durable_record(
         config,
         store_key,
-    )
-    if snapshot_error:
-        return None, snapshot_error
-    if snapshot != legacy_record or not isinstance(expected_value, str):
-        return None, {
-            "code": "token_owner_conflict",
-            "message": "This Google mailbox is already linked to another account owner.",
-            GMAIL_CALLBACK_FAILURE_CODE_FIELD: "token_owner_conflict",
-        }
-
-    next_value = json.dumps(
+        legacy_record,
         next_record,
-        separators=(",", ":"),
-        sort_keys=True,
+        mutation_script=LEGACY_GOOGLE_TOKEN_ADOPTION_SCRIPT,
     )
-    payload, error = _perform_rest_request(
-        config,
-        "POST",
-        "",
-        json.dumps(
-            [
-                "EVAL",
-                LEGACY_GOOGLE_TOKEN_ADOPTION_SCRIPT,
-                1,
-                store_key,
-                expected_value,
-                next_value,
-                GMAIL_OAUTH_TOKEN_TTL_SECONDS,
-            ],
-            separators=(",", ":"),
-        ).encode("utf-8"),
-    )
-    if error:
-        return None, error
-
-    result = payload.get("result") if isinstance(payload, dict) else None
-    if isinstance(result, int) and not isinstance(result, bool) and result == 0:
-        return None, {
-            "code": "token_owner_conflict",
-            "message": "This Google mailbox is already linked to another account owner.",
-            GMAIL_CALLBACK_FAILURE_CODE_FIELD: "token_owner_conflict",
-        }
-    if not isinstance(result, int) or isinstance(result, bool) or result != 1:
-        return None, {
-            "code": "token_persistence_failed",
-            "message": "Durable mailbox token storage did not confirm the write.",
-        }
-
-    verified_record, verify_error = _read_durable_record(config, store_key)
-    if verify_error:
-        return None, {
-            **verify_error,
-            GMAIL_CALLBACK_FAILURE_CODE_FIELD: (
-                "mailbox_readback_verification_failed"
-            ),
-        }
-    return verified_record, None
 
 
 def _persist_runtime_record(store_key: str, record: dict) -> tuple[dict | None, dict | None]:
@@ -1147,6 +1234,7 @@ def persist_google_token_record(
         normalized_owner_email=normalized_owner_email,
     )
     if record_classification in {
+        GOOGLE_TOKEN_RECORD_LEGACY_OWNERLESS_MATCH,
         GOOGLE_TOKEN_RECORD_OWNER_MISMATCH,
         GOOGLE_TOKEN_RECORD_PROVIDER_OR_EMAIL_MISMATCH,
         GOOGLE_TOKEN_RECORD_MALFORMED_OR_AMBIGUOUS,
@@ -1209,6 +1297,7 @@ def persist_google_token_record(
             persisted_record, error = _write_durable_record(
                 durable_config,
                 store_key,
+                existing_record,
                 next_record,
             )
         storage_backend = durable_config["backend"]
@@ -1236,16 +1325,10 @@ def persist_google_token_record(
         }
 
     if (
-        persisted_record.get("provider") != "google"
+        not _google_token_records_are_type_exact(persisted_record, next_record)
+        or persisted_record.get("provider") != "google"
         or persisted_record.get("email") != normalized_email
         or persisted_record.get("owner_email") != normalized_owner_email
-        or not isinstance(persisted_record.get("access_token"), str)
-        or not persisted_record.get("access_token")
-        or (
-            record_classification
-            in ADOPTABLE_LEGACY_GOOGLE_TOKEN_RECORD_MATCHES
-            and persisted_record != next_record
-        )
     ):
         return None, {
             "code": "token_persistence_failed",
@@ -1274,8 +1357,28 @@ def _resolve_authenticated_member_request(request: BaseHTTPRequestHandler):
         return None, _MEMBER_AUTHORITY_UNAVAILABLE
 
 
-def _build_user_config_key(email: str) -> str:
-    return f"{USER_CONFIG_KEY_PREFIX}:{normalize_auth_email(email)}"
+def _resolve_current_gmail_callback_member(
+    request: BaseHTTPRequestHandler,
+    *,
+    state_payload: dict,
+    state_signing_secret: str,
+) -> tuple[runtime.AuthenticatedMemberContext | None, str | None]:
+    member, auth_set_cookies = _resolve_authenticated_member_request(request)
+    if member is None:
+        return None, (
+            "member_authority_unavailable"
+            if auth_set_cookies is _MEMBER_AUTHORITY_UNAVAILABLE
+            else "member_unauthenticated"
+        )
+    if not verify_owner_binding(
+        state_payload,
+        member.email,
+        state_signing_secret,
+        member_user_id=member.user_id,
+        member_workspace_id=member.workspace_id,
+    ):
+        return None, "owner_binding_invalid"
+    return member, None
 
 
 def _format_name_from_email(email: str) -> str:
@@ -1337,10 +1440,15 @@ def _resolve_gmail_managed_inbox_target(
     managed_inboxes: list,
     *,
     email: str,
+    owner_email: str,
     inbox_position: str | None,
 ) -> tuple[int | None, dict | None]:
     normalized_email = email.strip().lower()
-    if not EMAIL_PATTERN.match(normalized_email):
+    normalized_owner_email = normalize_auth_email(owner_email)
+    if (
+        not EMAIL_PATTERN.match(normalized_email)
+        or not EMAIL_PATTERN.match(normalized_owner_email)
+    ):
         return None, _gmail_link_conflict("Verified Google mailbox identity is invalid.")
     if inbox_position is not None and (
         inbox_position not in ONBOARDING_PRESET_INBOX_IDS
@@ -1442,7 +1550,19 @@ def _resolve_gmail_managed_inbox_target(
             "Existing Gmail mailbox registration is ambiguous."
         )
 
-    return email_match if email_match is not None else position_match, None
+    matched_index = email_match if email_match is not None else position_match
+    if matched_index is not None:
+        matched_mailbox = managed_inboxes[matched_index]
+        stored_owner = matched_mailbox.get("oauthOwnerEmail")
+        if stored_owner is not None and (
+            not isinstance(stored_owner, str)
+            or normalize_auth_email(stored_owner) != normalized_owner_email
+        ):
+            return None, _gmail_link_conflict(
+                "This Google mailbox belongs to another authenticated owner."
+            )
+
+    return matched_index, None
 
 
 def _upsert_gmail_managed_inbox_record(
@@ -1536,67 +1656,6 @@ def _upsert_gmail_managed_inbox_record(
     return next_inboxes
 
 
-def _write_user_config_durable_record(
-    config: dict,
-    store_key: str,
-    record: dict,
-) -> tuple[dict | None, dict | None]:
-    payload, error = _perform_rest_request(
-        config,
-        "POST",
-        f"/set/{quote(store_key, safe='')}",
-        json.dumps(record, separators=(",", ":"), sort_keys=True).encode("utf-8"),
-    )
-    if error:
-        return None, {
-            "code": "user_config_persistence_failed",
-            "message": "User config storage is temporarily unavailable.",
-        }
-    if not isinstance(payload, dict) or payload.get("result") != "OK":
-        return None, {
-            "code": "user_config_persistence_failed",
-            "message": "User config storage did not confirm the write.",
-        }
-    return payload, None
-
-
-def _read_user_config_durable_record(
-    config: dict,
-    store_key: str,
-    *,
-    allow_missing: bool = False,
-) -> tuple[dict | None, dict | None]:
-    payload, error = _perform_rest_request(
-        config,
-        "GET",
-        f"/get/{quote(store_key, safe='')}",
-    )
-    if error:
-        return None, {
-            "code": "user_config_persistence_failed",
-            "message": "User config storage is temporarily unavailable.",
-        }
-    if not isinstance(payload, dict) or "result" not in payload:
-        return None, {
-            "code": "user_config_persistence_failed",
-            "message": "User config storage could not verify the saved mailbox.",
-        }
-    result = payload.get("result")
-    if result is None and allow_missing:
-        return None, None
-    if isinstance(result, str):
-        try:
-            result = json.loads(result)
-        except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
-            result = None
-    if not isinstance(result, dict):
-        return None, {
-            "code": "user_config_persistence_failed",
-            "message": "User config storage could not verify the saved mailbox.",
-        }
-    return result, None
-
-
 def _verify_saved_gmail_mailbox(
     record: dict,
     intended_mailbox: dict,
@@ -1630,6 +1689,61 @@ def _verify_saved_gmail_mailbox(
     )
 
 
+def _user_config_records_are_type_exact(left, right) -> bool:
+    try:
+        return json.dumps(
+            left,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ) == json.dumps(
+            right,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+def _validate_current_gmail_onboarding_authority(
+    existing_config: dict,
+    *,
+    inbox_position: str | None,
+) -> dict | None:
+    if inbox_position is None:
+        return None
+
+    normalized_session = existing_config.get("onboardingSession")
+    if (
+        not isinstance(normalized_session, dict)
+        or normalized_session.get("schemaVersion") != 1
+        or normalized_session.get("completed") is not False
+    ):
+        return {
+            **_gmail_link_conflict(
+                "The selected onboarding flow is no longer active."
+            ),
+            GMAIL_CALLBACK_FAILURE_CODE_FIELD: "gmail_link_conflict",
+        }
+
+    choices = normalized_session.get("choices")
+    selected_inboxes = (
+        choices.get("selectedInboxes") if isinstance(choices, dict) else None
+    )
+    if (
+        not isinstance(selected_inboxes, list)
+        or selected_inboxes.count(inbox_position) != 1
+    ):
+        return {
+            **_gmail_link_conflict(
+                "The selected onboarding inbox is no longer available."
+            ),
+            GMAIL_CALLBACK_FAILURE_CODE_FIELD: "gmail_link_conflict",
+        }
+    return None
+
+
 def _prepare_gmail_managed_inbox_registration(
     member: runtime.AuthenticatedMemberContext,
     *,
@@ -1653,19 +1767,36 @@ def _prepare_gmail_managed_inbox_registration(
             GMAIL_CALLBACK_FAILURE_CODE_FIELD: "user_config_store_unavailable",
         }
 
-    store_key = _build_user_config_key(member.email)
-    existing_record, existing_error = _read_user_config_durable_record(
+    read_result = user_config_store.read_user_config_record(
         durable_config,
-        store_key,
-        allow_missing=True,
+        member.email,
     )
-    if existing_error:
+    if not isinstance(read_result, dict):
         return None, {
-            **existing_error,
+            "code": "user_config_persistence_failed",
+            "message": "User config storage is temporarily unavailable.",
             GMAIL_CALLBACK_FAILURE_CODE_FIELD: "user_config_preflight_failed",
         }
 
-    existing_config = existing_record if isinstance(existing_record, dict) else {}
+    read_status = read_result.get("status")
+    read_config = read_result.get("config")
+    if read_status == "missing" and read_config is None:
+        existing_config = {}
+    elif read_status == "ok" and isinstance(read_config, dict):
+        existing_config = read_config
+    elif read_status == "unavailable":
+        return None, {
+            "code": "user_config_persistence_failed",
+            "message": "User config storage is temporarily unavailable.",
+            GMAIL_CALLBACK_FAILURE_CODE_FIELD: "user_config_preflight_failed",
+        }
+    else:
+        return None, {
+            "code": "user_config_persistence_failed",
+            "message": "User config storage returned an invalid record.",
+            GMAIL_CALLBACK_FAILURE_CODE_FIELD: "user_config_invalid",
+        }
+
     stored_owner = existing_config.get("email")
     if stored_owner is not None and (
         not isinstance(stored_owner, str)
@@ -1676,6 +1807,13 @@ def _prepare_gmail_managed_inbox_registration(
             "message": "User config ownership could not be verified.",
             GMAIL_CALLBACK_FAILURE_CODE_FIELD: "user_config_invalid",
         }
+
+    onboarding_authority_error = _validate_current_gmail_onboarding_authority(
+        existing_config,
+        inbox_position=inbox_position,
+    )
+    if onboarding_authority_error:
+        return None, onboarding_authority_error
 
     existing_managed_inboxes = existing_config.get("managedInboxes")
     if "managedInboxes" not in existing_config:
@@ -1690,6 +1828,7 @@ def _prepare_gmail_managed_inbox_registration(
     _, conflict_error = _resolve_gmail_managed_inbox_target(
         existing_managed_inboxes,
         email=email,
+        owner_email=owner_email,
         inbox_position=inbox_position,
     )
     if conflict_error:
@@ -1700,38 +1839,28 @@ def _prepare_gmail_managed_inbox_registration(
 
     return {
         "durable_config": durable_config,
-        "store_key": store_key,
+        "read_status": read_status,
         "existing_config": existing_config,
         "existing_managed_inboxes": existing_managed_inboxes,
     }, None
 
 
-def _register_gmail_managed_inbox_in_user_config(
-    member: runtime.AuthenticatedMemberContext,
+def _build_gmail_user_config_mutation(
+    preparation: dict,
     *,
+    member_email: str,
     email: str,
     display_name: str | None,
     owner_email: str,
     message: str,
     inbox_position: str | None,
 ) -> tuple[dict | None, dict | None]:
-    preparation, preparation_error = _prepare_gmail_managed_inbox_registration(
-        member,
-        email=email,
-        owner_email=owner_email,
-        inbox_position=inbox_position,
-    )
-    if preparation_error or not preparation:
-        return None, preparation_error
-
-    durable_config = preparation["durable_config"]
-    store_key = preparation["store_key"]
     existing_config = preparation["existing_config"]
     existing_managed_inboxes = preparation["existing_managed_inboxes"]
 
     next_record = {
         "v": USER_CONFIG_SCHEMA_VERSION,
-        "email": normalize_auth_email(member.email),
+        "email": normalize_auth_email(member_email),
         "updatedAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "onboardingSession": {},
         "managedInboxes": [],
@@ -1745,8 +1874,10 @@ def _register_gmail_managed_inbox_in_user_config(
         **existing_config,
     }
     next_record["v"] = USER_CONFIG_SCHEMA_VERSION
-    next_record["email"] = normalize_auth_email(member.email)
-    next_record["updatedAt"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    next_record["email"] = normalize_auth_email(member_email)
+    next_record["updatedAt"] = (
+        datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    )
     next_record["managedInboxes"] = _upsert_gmail_managed_inbox_record(
         existing_managed_inboxes,
         email=email,
@@ -1771,55 +1902,167 @@ def _register_gmail_managed_inbox_in_user_config(
     if len(intended_mailboxes) != 1:
         return None, {
             "code": "user_config_persistence_failed",
-            "message": "User config storage could not prepare the verified Gmail mailbox.",
+            "message": (
+                "User config storage could not prepare the verified Gmail mailbox."
+            ),
             GMAIL_CALLBACK_FAILURE_CODE_FIELD: "user_config_invalid",
         }
-    intended_mailbox = intended_mailboxes[0]
+    return {
+        "next_record": next_record,
+        "intended_mailbox": intended_mailboxes[0],
+    }, None
 
-    _, write_error = _write_user_config_durable_record(
-        durable_config,
-        store_key,
-        next_record,
-    )
-    if write_error:
-        return None, {
-            **write_error,
-            GMAIL_CALLBACK_FAILURE_CODE_FIELD: "user_config_write_failed",
-        }
 
-    verified_record, verify_error = _read_user_config_durable_record(
-        durable_config,
-        store_key,
-    )
-    if verify_error:
-        return None, {
-            **verify_error,
-            GMAIL_CALLBACK_FAILURE_CODE_FIELD: "user_config_readback_failed",
-        }
-    if not _verify_saved_gmail_mailbox(
-        verified_record,
-        intended_mailbox,
-        owner_email,
-        next_record["updatedAt"],
-    ):
-        return None, {
-            "code": "user_config_persistence_failed",
-            "message": "User config storage could not verify the saved Gmail mailbox.",
-            GMAIL_CALLBACK_FAILURE_CODE_FIELD: "mailbox_readback_verification_failed",
-        }
-    verified_inboxes = verified_record.get("managedInboxes")
-    saved_mailboxes = [
-        mailbox
-        for mailbox in verified_inboxes
-        if isinstance(mailbox, dict) and mailbox.get("id") == intended_mailbox.get("id")
-    ] if isinstance(verified_inboxes, list) else []
-    if len(saved_mailboxes) != 1:
-        return None, {
-            "code": "user_config_persistence_failed",
-            "message": "User config storage could not verify the saved Gmail mailbox.",
-            GMAIL_CALLBACK_FAILURE_CODE_FIELD: "mailbox_readback_verification_failed",
-        }
-    return dict(saved_mailboxes[0]), None
+def _register_gmail_managed_inbox_in_user_config(
+    member: runtime.AuthenticatedMemberContext,
+    *,
+    email: str,
+    display_name: str | None,
+    owner_email: str,
+    message: str,
+    inbox_position: str | None,
+) -> tuple[dict | None, dict | None]:
+    for _attempt in range(MAX_GMAIL_USER_CONFIG_WRITE_ATTEMPTS):
+        preparation, preparation_error = (
+            _prepare_gmail_managed_inbox_registration(
+                member,
+                email=email,
+                owner_email=owner_email,
+                inbox_position=inbox_position,
+            )
+        )
+        if preparation_error or not preparation:
+            return None, preparation_error
+
+        mutation, mutation_error = _build_gmail_user_config_mutation(
+            preparation,
+            member_email=member.email,
+            email=email,
+            display_name=display_name,
+            owner_email=owner_email,
+            message=message,
+            inbox_position=inbox_position,
+        )
+        if mutation_error or not mutation:
+            return None, mutation_error
+
+        durable_config = preparation["durable_config"]
+        existing_config = preparation["existing_config"]
+        next_record = mutation["next_record"]
+        intended_mailbox = mutation["intended_mailbox"]
+        if preparation["read_status"] == "missing":
+            write_result = user_config_store.write_user_config_record_if_missing(
+                durable_config,
+                member.email,
+                next_record,
+            )
+        else:
+            write_result = (
+                user_config_store.write_user_config_record_if_unchanged(
+                    durable_config,
+                    member.email,
+                    existing_config,
+                    next_record,
+                )
+            )
+
+        if not isinstance(write_result, dict):
+            return None, {
+                "code": "user_config_persistence_failed",
+                "message": "User config storage did not confirm the write.",
+                GMAIL_CALLBACK_FAILURE_CODE_FIELD: "user_config_write_failed",
+            }
+        write_status = write_result.get("status")
+        if write_status in {"conflict", "missing"}:
+            continue
+        if write_status != "ok":
+            return None, {
+                "code": "user_config_persistence_failed",
+                "message": "User config storage did not confirm the write.",
+                GMAIL_CALLBACK_FAILURE_CODE_FIELD: "user_config_write_failed",
+            }
+        expected_readback = write_result.get("record")
+        if not isinstance(expected_readback, dict):
+            return None, {
+                "code": "user_config_persistence_failed",
+                "message": "User config storage did not confirm the write.",
+                GMAIL_CALLBACK_FAILURE_CODE_FIELD: "user_config_write_failed",
+            }
+
+        readback_result = user_config_store.read_user_config_record(
+            durable_config,
+            member.email,
+        )
+        verified_record = (
+            readback_result.get("config")
+            if isinstance(readback_result, dict)
+            and readback_result.get("status") == "ok"
+            else None
+        )
+        if not isinstance(verified_record, dict):
+            return None, {
+                "code": "user_config_persistence_failed",
+                "message": (
+                    "User config storage could not verify the saved mailbox."
+                ),
+                GMAIL_CALLBACK_FAILURE_CODE_FIELD: "user_config_readback_failed",
+            }
+        if not _user_config_records_are_type_exact(
+            verified_record,
+            expected_readback,
+        ):
+            return None, {
+                "code": "user_config_persistence_failed",
+                "message": (
+                    "User config storage could not verify the saved config record."
+                ),
+                GMAIL_CALLBACK_FAILURE_CODE_FIELD: (
+                    "mailbox_readback_verification_failed"
+                ),
+            }
+        if not _verify_saved_gmail_mailbox(
+            verified_record,
+            intended_mailbox,
+            owner_email,
+            next_record["updatedAt"],
+        ):
+            return None, {
+                "code": "user_config_persistence_failed",
+                "message": (
+                    "User config storage could not verify the saved Gmail mailbox."
+                ),
+                GMAIL_CALLBACK_FAILURE_CODE_FIELD: (
+                    "mailbox_readback_verification_failed"
+                ),
+            }
+        verified_inboxes = verified_record.get("managedInboxes")
+        saved_mailboxes = (
+            [
+                mailbox
+                for mailbox in verified_inboxes
+                if isinstance(mailbox, dict)
+                and mailbox.get("id") == intended_mailbox.get("id")
+            ]
+            if isinstance(verified_inboxes, list)
+            else []
+        )
+        if len(saved_mailboxes) != 1:
+            return None, {
+                "code": "user_config_persistence_failed",
+                "message": (
+                    "User config storage could not verify the saved Gmail mailbox."
+                ),
+                GMAIL_CALLBACK_FAILURE_CODE_FIELD: (
+                    "mailbox_readback_verification_failed"
+                ),
+            }
+        return dict(saved_mailboxes[0]), None
+
+    return None, {
+        "code": "user_config_persistence_failed",
+        "message": "User config changed before the Gmail mailbox could be saved.",
+        GMAIL_CALLBACK_FAILURE_CODE_FIELD: "user_config_write_failed",
+    }
 
 
 def _upsert_gmail_managed_inbox_in_user_config(
@@ -2257,6 +2500,8 @@ class handler(BaseHTTPRequestHandler):
                 state_payload,
                 member.email,
                 state_signing_secret,
+                member_user_id=member.user_id,
+                member_workspace_id=member.workspace_id,
             )
         ):
             _send_gmail_callback_failure(
@@ -2453,6 +2698,34 @@ class handler(BaseHTTPRequestHandler):
         display_name = oauth_identity.get("display_name")
 
         if provider == "google":
+            current_member, current_member_error = (
+                _resolve_current_gmail_callback_member(
+                    self,
+                    state_payload=state_payload,
+                    state_signing_secret=state_signing_secret,
+                )
+            )
+            if current_member_error or current_member is None:
+                _send_gmail_callback_failure(
+                    self,
+                    _build_callback_payload(
+                        provider=provider,
+                        email=mailbox_email,
+                        connection_status="connection_failed",
+                        message=(
+                            "This Gmail inbox could not be linked because the "
+                            "member or onboarding session changed."
+                        ),
+                        connected=False,
+                        inbox_position=inbox_position,
+                    ),
+                    failure_code=(
+                        current_member_error or "owner_binding_invalid"
+                    ),
+                    inbox_position=inbox_position,
+                )
+                return
+            member = current_member
             _, registration_preflight_error = _prepare_gmail_managed_inbox_registration(
                 member,
                 email=mailbox_email,
@@ -2563,6 +2836,34 @@ class handler(BaseHTTPRequestHandler):
         )
         saved_mailbox = None
         if provider == "google":
+            current_member, current_member_error = (
+                _resolve_current_gmail_callback_member(
+                    self,
+                    state_payload=state_payload,
+                    state_signing_secret=state_signing_secret,
+                )
+            )
+            if current_member_error or current_member is None:
+                _send_gmail_callback_failure(
+                    self,
+                    _build_callback_payload(
+                        provider=provider,
+                        email=mailbox_email,
+                        connection_status="authenticated_pending_activation",
+                        message=(
+                            "Google authentication completed, but the current "
+                            "member or onboarding session could not be verified."
+                        ),
+                        connected=False,
+                        inbox_position=inbox_position,
+                    ),
+                    failure_code=(
+                        current_member_error or "owner_binding_invalid"
+                    ),
+                    inbox_position=inbox_position,
+                )
+                return
+            member = current_member
             saved_mailbox, user_config_error = _register_gmail_managed_inbox_in_user_config(
                 member,
                 email=mailbox_email,

@@ -1,4 +1,5 @@
 import json
+import re
 import sys
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
@@ -12,12 +13,18 @@ if str(API_DIR) not in sys.path:
     sys.path.insert(0, str(API_DIR))
 
 from mailbox_secret_store import (  # noqa: E402
+    is_valid_mailbox_credential_version,
     read_mailbox_secret,
 )
 from user_config_store import (  # noqa: E402
     resolve_authenticated_user,
-    resolve_owned_managed_inbox,
+    resolve_owned_managed_inbox_record,
 )
+
+# Keep the route-local patch seam used by existing auth tests while resolving
+# the full server-side record (including credentialVersion), not the public
+# generation-free projection.
+resolve_owned_managed_inbox = resolve_owned_managed_inbox_record
 
 
 def _send_json(handler: BaseHTTPRequestHandler, status_code: int, payload: dict):
@@ -70,6 +77,60 @@ def _parse_mailbox_ids_from_query(path: str) -> list[str]:
     return mailbox_ids
 
 
+def _valid_port(value) -> bool:
+    if isinstance(value, bool):
+        return False
+    try:
+        port = int(str(value))
+    except (TypeError, ValueError):
+        return False
+    return 1 <= port <= 65535
+
+
+def _stored_password_is_usable(value) -> bool:
+    if not isinstance(value, str) or not value.strip():
+        return False
+    normalized = value.strip().casefold()
+    return (
+        normalized
+        not in {
+            "stored securely",
+            "stored securely — leave blank to reuse",
+        }
+        and re.fullmatch(r"[*•●]{6,}", normalized) is None
+    )
+
+
+def _smtp_credential_source(inbox: dict) -> str | None:
+    custom_smtp = inbox.get("customSmtp")
+    if not isinstance(custom_smtp, dict) or not custom_smtp:
+        return None
+    if set(custom_smtp) != {
+        "host",
+        "port",
+        "security",
+        "username",
+        "useSameCredentials",
+    }:
+        return None
+    host = custom_smtp.get("host")
+    username = custom_smtp.get("username")
+    use_same_credentials = custom_smtp.get("useSameCredentials")
+    if (
+        not isinstance(host, str)
+        or not host
+        or host != host.strip()
+        or not _valid_port(custom_smtp.get("port"))
+        or custom_smtp.get("security") not in {"ssl", "starttls"}
+        or not isinstance(username, str)
+        or not username
+        or username != username.strip()
+        or not isinstance(use_same_credentials, bool)
+    ):
+        return None
+    return "imap" if use_same_credentials else "smtp"
+
+
 class handler(BaseHTTPRequestHandler):
     def do_GET(self):
         session_user, auth_error = resolve_authenticated_user(self.headers)
@@ -114,8 +175,43 @@ class handler(BaseHTTPRequestHandler):
                 )
                 return
 
-            secret_result = read_mailbox_secret(session_user["email"], mailbox_id)
-            if secret_result["status"] in {"unavailable", "malformed"}:
+            inbox = owned_result.get("inbox")
+            config_generation = (
+                inbox.get("credentialVersion") if isinstance(inbox, dict) else None
+            )
+            config_can_reference_credentials = (
+                isinstance(inbox, dict)
+                and inbox.get("provider") == "custom_imap"
+                and inbox.get("connected") is True
+                and inbox.get("connectionStatus") == "connected"
+                and is_valid_mailbox_credential_version(config_generation)
+            )
+            # Preserve the route's established canonical-owner lookup seam for a
+            # minimal legacy status projection. It can never report credentials
+            # as present because it has no valid config generation.
+            is_minimal_legacy_projection = (
+                isinstance(inbox, dict)
+                and set(inbox).issubset({"id"})
+                and isinstance(inbox.get("id"), str)
+            )
+            if (
+                not config_can_reference_credentials
+                and not is_minimal_legacy_projection
+            ):
+                credentials[mailbox_id] = {
+                    "imapPasswordSet": False,
+                    "smtpPasswordSet": False,
+                }
+                continue
+
+            try:
+                secret_result = read_mailbox_secret(
+                    session_user["email"],
+                    mailbox_id,
+                )
+            except Exception:
+                secret_result = None
+            if not isinstance(secret_result, dict):
                 _send_json(
                     self,
                     503,
@@ -125,10 +221,71 @@ class handler(BaseHTTPRequestHandler):
                     ),
                 )
                 return
-            secret_record = secret_result["record"]
+
+            secret_status = secret_result.get("status")
+            secret_record = secret_result.get("record")
+            secret_error = secret_result.get("error")
+            if secret_status == "missing":
+                if (
+                    "record" not in secret_result
+                    or secret_record is not None
+                    or secret_error is not None
+                ):
+                    _send_json(
+                        self,
+                        503,
+                        _build_error(
+                            "mailbox_secret_store_unavailable",
+                            "Mailbox credential status is temporarily unavailable.",
+                        ),
+                    )
+                    return
+                credentials[mailbox_id] = {
+                    "imapPasswordSet": False,
+                    "smtpPasswordSet": False,
+                }
+                continue
+            if (
+                secret_status != "present"
+                or not isinstance(secret_record, dict)
+                or secret_error is not None
+            ):
+                _send_json(
+                    self,
+                    503,
+                    _build_error(
+                        "mailbox_secret_store_unavailable",
+                        "Mailbox credential status is temporarily unavailable.",
+                    ),
+                )
+                return
+
+            secret_generation = secret_record.get("credentialVersion")
+            generation_matches = (
+                is_valid_mailbox_credential_version(secret_generation)
+                and config_generation == secret_generation
+            )
+            imap_password = secret_record.get("imapPassword")
+            smtp_password = secret_record.get("smtpPassword")
+            smtp_credential_source = (
+                _smtp_credential_source(inbox)
+                if isinstance(inbox, dict)
+                else None
+            )
             credentials[mailbox_id] = {
-                "imapPasswordSet": bool(secret_record and secret_record.get("imapPassword")),
-                "smtpPasswordSet": bool(secret_record and secret_record.get("smtpPassword")),
+                "imapPasswordSet": (
+                    generation_matches
+                    and _stored_password_is_usable(imap_password)
+                ),
+                "smtpPasswordSet": (
+                    generation_matches
+                    and smtp_credential_source is not None
+                    and _stored_password_is_usable(
+                        imap_password
+                        if smtp_credential_source == "imap"
+                        else smtp_password
+                    )
+                ),
             }
 
         _send_json(

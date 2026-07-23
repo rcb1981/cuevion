@@ -364,7 +364,10 @@ class MailboxMemberAuthTests(unittest.TestCase):
             provider.assert_not_called()
             token_store.assert_not_called()
             config_store.assert_not_called()
-            self.assertFalse(callback._send_callback_page.call_args.args[0]["connected"])
+            payload = callback._send_callback_page.call_args.args[0]
+            self.assertEqual(payload["status"], "error")
+            self.assertNotIn("connected", payload)
+            self.assertNotIn("mailboxId", payload)
 
 
 if __name__ == "__main__":

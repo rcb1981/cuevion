@@ -1816,6 +1816,8 @@ class OAuthAndConfigTests(unittest.TestCase):
                 "owner@example.com",
                 "state-secret",
                 "main",
+                member_user_id="user-1",
+                member_workspace_id="workspace-1",
             )
         else:
             verifier = None
@@ -1973,6 +1975,8 @@ class OAuthAndConfigTests(unittest.TestCase):
                 "owner@example.com",
                 "state-secret",
                 "main",
+                member_user_id="user-1",
+                member_workspace_id="workspace-1",
             )
 
         cases = (
@@ -2471,6 +2475,8 @@ class OAuthAndConfigTests(unittest.TestCase):
             owner_email,
             state_secret,
             "main",
+            member_user_id="user-1",
+            member_workspace_id="workspace-1",
         )
         query = urlencode(
             {
@@ -2627,7 +2633,12 @@ class OAuthAndConfigTests(unittest.TestCase):
         self.assertEqual(handler.payload()["error"]["code"], "unauthorized")
 
         state, verifier = connect_oauth.build_signed_state(
-            "google", "hint@gmail.com", "Owner@Example.com", "state-secret"
+            "google",
+            "hint@gmail.com",
+            "Owner@Example.com",
+            "state-secret",
+            member_user_id="user-1",
+            member_workspace_id="workspace-1",
         )
         encoded = state.split(".", 1)[0]
         padded = encoded + "=" * (-len(encoded) % 4)
@@ -2635,6 +2646,8 @@ class OAuthAndConfigTests(unittest.TestCase):
         payload = json.loads(base64.urlsafe_b64decode(padded))
         self.assertNotIn("owner_email", payload)
         self.assertNotIn("owner@example.com", json.dumps(payload))
+        self.assertNotIn("user-1", json.dumps(payload))
+        self.assertNotIn("workspace-1", json.dumps(payload))
         self.assertIsInstance(payload["owner_binding"], str)
         self.assertEqual(payload["email_hint"], "hint@gmail.com")
         self.assertNotIn("code_verifier", payload)
@@ -2646,6 +2659,8 @@ class OAuthAndConfigTests(unittest.TestCase):
                 verified,
                 " OWNER@EXAMPLE.COM ",
                 "state-secret",
+                member_user_id="user-1",
+                member_workspace_id="workspace-1",
             )
         )
         self.assertFalse(
@@ -2653,6 +2668,8 @@ class OAuthAndConfigTests(unittest.TestCase):
                 verified,
                 "other@example.com",
                 "state-secret",
+                member_user_id="user-1",
+                member_workspace_id="workspace-1",
             )
         )
 
@@ -2661,8 +2678,8 @@ class OAuthAndConfigTests(unittest.TestCase):
             oauth_callback,
             "_resolve_durable_store_config",
         ) as store_config, patch.object(
-            oauth_callback,
-            "_read_user_config_durable_record",
+            oauth_callback.user_config_store,
+            "read_user_config_record",
         ) as storage_read:
             error = oauth_callback._upsert_gmail_managed_inbox_in_user_config(
                 authenticated_member("canonical@example.com"),
@@ -3028,6 +3045,8 @@ class OAuthAndConfigTests(unittest.TestCase):
             "owner@example.com",
             "state-secret",
             "main",
+            member_user_id="user-1",
+            member_workspace_id="workspace-1",
         )
         invalid_origins = (
             ("missing", None),
@@ -3227,6 +3246,8 @@ class OAuthAndConfigTests(unittest.TestCase):
                 verified,
                 "owner@example.com",
                 "state-secret",
+                member_user_id="user-1",
+                member_workspace_id="workspace-1",
             )
         )
 
@@ -3376,7 +3397,12 @@ class OAuthAndConfigTests(unittest.TestCase):
             return_value="fixed-state-nonce-value",
         ):
             state, verifier = connect_oauth.build_signed_state(
-                "google", "hint@gmail.com", "owner@example.com", "stable-secret"
+                "google",
+                "hint@gmail.com",
+                "owner@example.com",
+                "stable-secret",
+                member_user_id="user-1",
+                member_workspace_id="workspace-1",
             )
         with patch.object(oauth_callback.time, "time", return_value=1_001):
             payload, error = oauth_callback.verify_signed_state(state, "stable-secret")
@@ -3384,7 +3410,11 @@ class OAuthAndConfigTests(unittest.TestCase):
         self.assertEqual(payload["code_verifier"], verifier)
         self.assertTrue(
             oauth_callback.verify_owner_binding(
-                payload, " OWNER@EXAMPLE.COM ", "stable-secret"
+                payload,
+                " OWNER@EXAMPLE.COM ",
+                "stable-secret",
+                member_user_id="user-1",
+                member_workspace_id="workspace-1",
             )
         )
 
@@ -3422,7 +3452,12 @@ class OAuthAndConfigTests(unittest.TestCase):
             return_value="fixed-state-nonce-value",
         ):
             separate_state, separate_verifier = reloaded_connect.build_signed_state(
-                "google", "hint@gmail.com", "owner@example.com", "stable-secret"
+                "google",
+                "hint@gmail.com",
+                "owner@example.com",
+                "stable-secret",
+                member_user_id="user-1",
+                member_workspace_id="workspace-1",
             )
         self.assertEqual(separate_state, state)
         self.assertEqual(separate_verifier, verifier)
@@ -3439,6 +3474,8 @@ class OAuthAndConfigTests(unittest.TestCase):
                 "owner@example.com",
                 "state-secret",
                 "main",
+                member_user_id="user-1",
+                member_workspace_id="workspace-1",
             )
 
         with patch.object(oauth_callback.time, "time", return_value=1_001):
@@ -3454,6 +3491,8 @@ class OAuthAndConfigTests(unittest.TestCase):
                 verified,
                 " OWNER@EXAMPLE.COM ",
                 "state-secret",
+                member_user_id="user-1",
+                member_workspace_id="workspace-1",
             )
         )
         self.assertFalse(
@@ -3461,6 +3500,8 @@ class OAuthAndConfigTests(unittest.TestCase):
                 verified,
                 "other@example.com",
                 "state-secret",
+                member_user_id="user-1",
+                member_workspace_id="workspace-1",
             )
         )
 
@@ -3490,7 +3531,12 @@ class OAuthAndConfigTests(unittest.TestCase):
 
     def test_historical_beta_cookie_cannot_authorize_oauth_callback(self):
         state, _ = connect_oauth.build_signed_state(
-            "google", "hint@gmail.com", "owner@example.com", "state-secret"
+            "google",
+            "hint@gmail.com",
+            "owner@example.com",
+            "state-secret",
+            member_user_id="user-1",
+            member_workspace_id="workspace-1",
         )
         callback = Mock()
         callback.path = f"/api/inboxes/oauth-callback?code=code&state={state}"
@@ -3516,7 +3562,12 @@ class OAuthAndConfigTests(unittest.TestCase):
     def test_callback_rejects_owner_mismatch_before_token_exchange(self):
         callback = Mock()
         state_value, _ = connect_oauth.build_signed_state(
-            "google", "attacker@gmail.com", "owner@example.com", "state-secret"
+            "google",
+            "attacker@gmail.com",
+            "owner@example.com",
+            "state-secret",
+            member_user_id="user-1",
+            member_workspace_id="workspace-1",
         )
         callback.path = f"/api/inboxes/oauth-callback?code=code&state={state_value}"
         callback.headers = HeaderMap()
@@ -3546,6 +3597,8 @@ class OAuthAndConfigTests(unittest.TestCase):
             "owner@example.com",
             "state-secret",
             "main",
+            member_user_id="user-1",
+            member_workspace_id="workspace-1",
         )
         callback.path = f"/api/inboxes/oauth-callback?code=code&state={state_value}"
         callback.headers = HeaderMap()
@@ -3668,6 +3721,8 @@ class OAuthAndConfigTests(unittest.TestCase):
             "owner@example.com",
             "state-secret",
             "main",
+            member_user_id="user-1",
+            member_workspace_id="workspace-1",
         )
         callback = self._google_callback(state)
         environment = {
@@ -4038,7 +4093,7 @@ class OAuthAndConfigTests(unittest.TestCase):
             "rest_token": "secret",
         }
 
-        def successful_write(_config, _store_key, record):
+        def successful_write(_config, _store_key, _expected_record, record):
             return dict(record), None
 
         with patch.object(
@@ -4105,6 +4160,316 @@ class OAuthAndConfigTests(unittest.TestCase):
         self.assertEqual(owner_persisted["access_token"], "new-access-token")
         self.assertEqual(owner_persisted["refresh_token"], "old-refresh-token")
         self.assertTrue(owner_persisted["_storage_durable"])
+
+    def test_atomic_token_create_and_same_owner_replace_have_one_winner(self):
+        durable_config = {
+            "backend": "vercel_kv_rest",
+            "rest_url": "https://kv.example",
+            "rest_token": "secret",
+        }
+        store_key = oauth_callback._build_store_key("verified@gmail.com")
+
+        def run_interleaving(expected_record, first_record, second_record):
+            stored_value = (
+                json.dumps(
+                    expected_record,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+                if expected_record is not None
+                else None
+            )
+            nested_result = None
+            entered_first_mutation = False
+            scripts = []
+
+            def transport(_config, method, path, body=None):
+                nonlocal stored_value, nested_result, entered_first_mutation
+                if method == "GET":
+                    return {"result": stored_value}, None
+
+                self.assertEqual((method, path), ("POST", ""))
+                command = json.loads(body)
+                scripts.append(command[1])
+                if not entered_first_mutation:
+                    entered_first_mutation = True
+                    nested_result = oauth_callback._write_durable_record(
+                        durable_config,
+                        store_key,
+                        expected_record,
+                        second_record,
+                    )
+
+                if (
+                    command[1]
+                    == oauth_callback.GOOGLE_TOKEN_CREATE_IF_MISSING_SCRIPT
+                ):
+                    if stored_value is not None:
+                        return {"result": 0}, None
+                    stored_value = command[4]
+                    return {"result": 1}, None
+
+                self.assertEqual(
+                    command[1],
+                    oauth_callback.GOOGLE_TOKEN_REPLACE_IF_UNCHANGED_SCRIPT,
+                )
+                if stored_value != command[4]:
+                    return {"result": 0}, None
+                stored_value = command[5]
+                return {"result": 1}, None
+
+            with patch.object(
+                oauth_callback,
+                "_perform_rest_request",
+                side_effect=transport,
+            ):
+                first_result = oauth_callback._write_durable_record(
+                    durable_config,
+                    store_key,
+                    expected_record,
+                    first_record,
+                )
+
+            return first_result, nested_result, json.loads(stored_value), scripts
+
+        missing_first = durable_google_token(
+            owner_email="first-owner@example.com",
+            access_token="first-create-access",
+            refresh_token="first-create-refresh",
+        )
+        missing_second = durable_google_token(
+            owner_email="second-owner@example.com",
+            access_token="second-create-access",
+            refresh_token="second-create-refresh",
+        )
+        first_result, second_result, stored, scripts = run_interleaving(
+            None,
+            missing_first,
+            missing_second,
+        )
+        self.assertIsNone(first_result[0])
+        self.assertEqual(first_result[1]["code"], "token_owner_conflict")
+        self.assertEqual(second_result, (missing_second, None))
+        self.assertEqual(stored, missing_second)
+        self.assertEqual(
+            scripts,
+            [
+                oauth_callback.GOOGLE_TOKEN_CREATE_IF_MISSING_SCRIPT,
+                oauth_callback.GOOGLE_TOKEN_CREATE_IF_MISSING_SCRIPT,
+            ],
+        )
+
+        old_record = durable_google_token(
+            access_token="old-access",
+            refresh_token="old-refresh",
+        )
+        replacement_first = {
+            **old_record,
+            "access_token": "first-replacement-access",
+        }
+        replacement_second = {
+            **old_record,
+            "access_token": "second-replacement-access",
+        }
+        first_result, second_result, stored, scripts = run_interleaving(
+            old_record,
+            replacement_first,
+            replacement_second,
+        )
+        self.assertIsNone(first_result[0])
+        self.assertEqual(first_result[1]["code"], "token_owner_conflict")
+        self.assertEqual(second_result, (replacement_second, None))
+        self.assertEqual(stored, replacement_second)
+        self.assertEqual(
+            scripts,
+            [
+                oauth_callback.GOOGLE_TOKEN_REPLACE_IF_UNCHANGED_SCRIPT,
+                oauth_callback.GOOGLE_TOKEN_REPLACE_IF_UNCHANGED_SCRIPT,
+            ],
+        )
+
+    def test_stale_missing_read_cannot_overwrite_other_owner_create(self):
+        durable_config = {
+            "backend": "vercel_kv_rest",
+            "rest_url": "https://kv.example",
+            "rest_token": "secret",
+        }
+        store_key = oauth_callback._build_store_key("verified@gmail.com")
+        stored_value = None
+        stale_next_read = False
+        successful_mutations = 0
+
+        def transport(_config, method, path, body=None):
+            nonlocal stored_value, stale_next_read, successful_mutations
+            if method == "GET":
+                if stale_next_read:
+                    stale_next_read = False
+                    return {"result": None}, None
+                return {"result": stored_value}, None
+
+            self.assertEqual((method, path), ("POST", ""))
+            command = json.loads(body)
+            self.assertEqual(
+                command[1],
+                oauth_callback.GOOGLE_TOKEN_CREATE_IF_MISSING_SCRIPT,
+            )
+            if stored_value is not None:
+                return {"result": 0}, None
+            successful_mutations += 1
+            stored_value = command[4]
+            return {"result": 1}, None
+
+        with patch.object(
+            oauth_callback,
+            "_resolve_durable_store_config",
+            return_value=durable_config,
+        ), patch.object(
+            oauth_callback,
+            "_perform_rest_request",
+            side_effect=transport,
+        ):
+            first_persisted, first_error = (
+                oauth_callback.persist_google_token_record(
+                    email="verified@gmail.com",
+                    owner_email="first-owner@example.com",
+                    token_payload={
+                        "access_token": "first-owner-access",
+                        "refresh_token": "first-owner-refresh",
+                    },
+                )
+            )
+            stale_next_read = True
+            second_persisted, second_error = (
+                oauth_callback.persist_google_token_record(
+                    email="verified@gmail.com",
+                    owner_email="second-owner@example.com",
+                    token_payload={
+                        "access_token": "second-owner-access",
+                        "refresh_token": "second-owner-refresh",
+                    },
+                )
+            )
+
+        self.assertIsNone(first_error)
+        self.assertEqual(first_persisted["owner_email"], "first-owner@example.com")
+        self.assertIsNone(second_persisted)
+        self.assertEqual(second_error["code"], "token_owner_conflict")
+        self.assertEqual(successful_mutations, 1)
+        self.assertEqual(
+            json.loads(stored_value)["owner_email"],
+            "first-owner@example.com",
+        )
+
+    def test_lost_or_malformed_create_ack_uses_exact_readback(self):
+        durable_config = {
+            "backend": "vercel_kv_rest",
+            "rest_url": "https://kv.example",
+            "rest_token": "secret",
+        }
+        store_key = oauth_callback._build_store_key("verified@gmail.com")
+        next_record = durable_google_token(
+            access_token="fresh-create-access",
+            refresh_token="fresh-create-refresh",
+        )
+        other_record = durable_google_token(
+            owner_email="other-owner@example.com",
+            access_token="other-owner-access",
+            refresh_token="other-owner-refresh",
+        )
+        same_owner_other_attempt = durable_google_token(
+            access_token="same-owner-other-attempt-access",
+            refresh_token="same-owner-other-attempt-refresh",
+        )
+        cases = (
+            ("own_record_present", "lost", next_record, None),
+            ("malformed_ack_own_record", "malformed", next_record, None),
+            (
+                "record_still_missing",
+                "lost",
+                None,
+                "token_persistence_failed",
+            ),
+            (
+                "other_owner_won",
+                "lost",
+                other_record,
+                "token_owner_conflict",
+            ),
+            (
+                "same_owner_other_attempt_won",
+                "lost",
+                same_owner_other_attempt,
+                "token_owner_conflict",
+            ),
+            (
+                "readback_unavailable",
+                "lost",
+                next_record,
+                "token_persistence_failed",
+            ),
+        )
+
+        for label, ack_mode, committed_record, expected_error in cases:
+            stored_value = None
+            read_count = 0
+
+            def transport(_config, method, path, body=None):
+                nonlocal stored_value, read_count
+                if method == "GET":
+                    read_count += 1
+                    if label == "readback_unavailable" and read_count == 2:
+                        return None, {
+                            "code": "token_persistence_failed",
+                            "message": "private readback outage",
+                        }
+                    return {"result": stored_value}, None
+
+                self.assertEqual((method, path), ("POST", ""))
+                command = json.loads(body)
+                self.assertEqual(
+                    command[1],
+                    oauth_callback.GOOGLE_TOKEN_CREATE_IF_MISSING_SCRIPT,
+                )
+                stored_value = (
+                    json.dumps(
+                        committed_record,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    )
+                    if committed_record is not None
+                    else None
+                )
+                if ack_mode == "malformed":
+                    return {"result": "OK"}, None
+                return None, {
+                    "code": "token_persistence_failed",
+                    "message": "private lost acknowledgement",
+                }
+
+            with self.subTest(case=label), patch.object(
+                oauth_callback,
+                "_perform_rest_request",
+                side_effect=transport,
+            ):
+                persisted, error = oauth_callback._write_durable_record(
+                    durable_config,
+                    store_key,
+                    None,
+                    next_record,
+                )
+
+            if expected_error is None:
+                self.assertEqual(persisted, next_record)
+                self.assertIsNone(error)
+            else:
+                self.assertIsNone(persisted)
+                self.assertEqual(error["code"], expected_error)
+                self.assertNotIn("private", json.dumps(error))
+                if label == "readback_unavailable":
+                    self.assertEqual(
+                        error[oauth_callback.GMAIL_CALLBACK_FAILURE_CODE_FIELD],
+                        "mailbox_readback_verification_failed",
+                    )
 
     def test_ambiguous_or_mismatched_google_tokens_never_reach_write(self):
         durable_config = {
@@ -4407,6 +4772,12 @@ class OAuthAndConfigTests(unittest.TestCase):
                 True,
             ),
             (
+                "ownerless_durable",
+                legacy_record,
+                "token_owner_conflict",
+                True,
+            ),
+            (
                 "safe_runtime_fallback",
                 legacy_record,
                 "token_owner_conflict",
@@ -4456,6 +4827,8 @@ class OAuthAndConfigTests(unittest.TestCase):
                 current_owner,
                 state_secret,
                 "main",
+                member_user_id=user_id,
+                member_workspace_id=workspace_id,
             )
             request_path = (
                 "/api/inboxes/oauth-callback?"
@@ -4613,7 +4986,7 @@ class OAuthAndConfigTests(unittest.TestCase):
 
             self.assertNotIn(verified_email, logger.warning.call_args.args[0])
 
-    def test_legacy_ownerless_token_adoption_uses_only_fresh_credentials_and_is_one_shot(self):
+    def test_legacy_mailbox_owner_adoption_uses_only_fresh_credentials_and_is_one_shot(self):
         durable_config = {
             "backend": "vercel_kv_rest",
             "rest_url": "https://kv.example",
@@ -4630,7 +5003,7 @@ class OAuthAndConfigTests(unittest.TestCase):
             "created_at": "2000-01-01T00:00:00+00:00",
         }
         legacy_record = durable_google_token(**old_values)
-        legacy_record.pop("owner_email")
+        legacy_record["owner_email"] = "verified@gmail.com"
         store_key = oauth_callback._build_store_key("verified@gmail.com")
         legacy_raw_value = json.dumps(legacy_record, indent=2, sort_keys=False)
         stored_values = {store_key: legacy_raw_value}
@@ -4639,10 +5012,6 @@ class OAuthAndConfigTests(unittest.TestCase):
 
         encoded_store_key = oauth_callback.quote(store_key, safe="")
         get_path = f"/get/{encoded_store_key}"
-        set_path = (
-            f"/set/{encoded_store_key}?EX="
-            f"{oauth_callback.GMAIL_OAUTH_TOKEN_TTL_SECONDS}"
-        )
 
         def durable_transport(_config, method, path, body=None):
             requests.append((method, path))
@@ -4653,9 +5022,12 @@ class OAuthAndConfigTests(unittest.TestCase):
             if path == "":
                 command = json.loads(body)
                 self.assertEqual(command[0], "EVAL")
-                self.assertEqual(
+                self.assertIn(
                     command[1],
-                    oauth_callback.LEGACY_GOOGLE_TOKEN_ADOPTION_SCRIPT,
+                    {
+                        oauth_callback.LEGACY_GOOGLE_TOKEN_ADOPTION_SCRIPT,
+                        oauth_callback.GOOGLE_TOKEN_REPLACE_IF_UNCHANGED_SCRIPT,
+                    },
                 )
                 self.assertEqual(command[2:4], [1, store_key])
                 self.assertEqual(command[6], oauth_callback.GMAIL_OAUTH_TOKEN_TTL_SECONDS)
@@ -4666,11 +5038,7 @@ class OAuthAndConfigTests(unittest.TestCase):
                 writes.append(record)
                 stored_values[store_key] = command[5]
                 return {"result": 1}, None
-            self.assertEqual(path, set_path)
-            record = json.loads(body)
-            writes.append(record)
-            stored_values[store_key] = body.decode("utf-8")
-            return {"result": "OK"}, None
+            self.fail(f"Unexpected durable token request path: {path}")
 
         first_payload = {
             "access_token": "CANARY_FRESH_ACCESS_TOKEN_ONE",
@@ -4715,7 +5083,8 @@ class OAuthAndConfigTests(unittest.TestCase):
                 ("POST", ""),
                 ("GET", get_path),
                 ("GET", get_path),
-                ("POST", set_path),
+                ("GET", get_path),
+                ("POST", ""),
                 ("GET", get_path),
             ],
         )
@@ -4759,10 +5128,10 @@ class OAuthAndConfigTests(unittest.TestCase):
 
     def test_legacy_adoption_atomically_refuses_a_concurrent_owner_change(self):
         legacy_record = durable_google_token(
+            owner_email="verified@gmail.com",
             access_token="CANARY_RACE_LEGACY_ACCESS",
             refresh_token="CANARY_RACE_LEGACY_REFRESH",
         )
-        legacy_record.pop("owner_email")
         competing_record = durable_google_token(
             owner_email="other-owner@example.com",
             access_token="CANARY_RACE_COMPETING_ACCESS",
@@ -4843,10 +5212,6 @@ class OAuthAndConfigTests(unittest.TestCase):
         store_key = oauth_callback._build_store_key("verified@gmail.com")
         encoded_store_key = oauth_callback.quote(store_key, safe="")
         get_path = f"/get/{encoded_store_key}"
-        set_path = (
-            f"/set/{encoded_store_key}?EX="
-            f"{oauth_callback.GMAIL_OAUTH_TOKEN_TTL_SECONDS}"
-        )
         old_values = {
             "access_token": "CANARY_MAILBOX_OWNER_OLD_ACCESS",
             "refresh_token": "CANARY_MAILBOX_OWNER_OLD_REFRESH",
@@ -4895,12 +5260,18 @@ class OAuthAndConfigTests(unittest.TestCase):
                 if path == "":
                     command = json.loads(body)
                     self.assertEqual(command[0], "EVAL")
-                    self.assertEqual(
+                    self.assertIn(
                         command[1],
-                        oauth_callback.LEGACY_GOOGLE_TOKEN_ADOPTION_SCRIPT,
+                        {
+                            oauth_callback.LEGACY_GOOGLE_TOKEN_ADOPTION_SCRIPT,
+                            oauth_callback.GOOGLE_TOKEN_REPLACE_IF_UNCHANGED_SCRIPT,
+                        },
                     )
                     self.assertEqual(command[2:4], [1, store_key])
-                    self.assertEqual(command[4], legacy_raw_value)
+                    self.assertEqual(
+                        command[4],
+                        stored_values.get(store_key),
+                    )
                     self.assertEqual(
                         command[6],
                         oauth_callback.GMAIL_OAUTH_TOKEN_TTL_SECONDS,
@@ -4912,11 +5283,7 @@ class OAuthAndConfigTests(unittest.TestCase):
                     stored_values[store_key] = command[5]
                     return {"result": 1}, None
 
-                self.assertEqual(path, set_path)
-                record = json.loads(body)
-                writes.append(("set", record))
-                stored_values[store_key] = body.decode("utf-8")
-                return {"result": "OK"}, None
+                self.fail(f"Unexpected durable token request path: {path}")
 
             with self.subTest(historical_owner=historical_owner), patch.object(
                 oauth_callback,
@@ -4956,14 +5323,15 @@ class OAuthAndConfigTests(unittest.TestCase):
                     ("POST", ""),
                     ("GET", get_path),
                     ("GET", get_path),
-                    ("POST", set_path),
+                    ("GET", get_path),
+                    ("POST", ""),
                     ("GET", get_path),
                 ],
             )
             self.assertEqual(len(stored_values), 1)
             self.assertEqual(
                 [write_type for write_type, _ in writes],
-                ["cas", "set"],
+                ["cas", "cas"],
             )
 
             adopted = writes[0][1]
@@ -5091,7 +5459,7 @@ class OAuthAndConfigTests(unittest.TestCase):
         )
         external_call.assert_not_called()
 
-    def test_legacy_ownerless_adoption_requires_fresh_refresh_token(self):
+    def test_legacy_ownerless_record_is_never_adopted(self):
         legacy_record = durable_google_token()
         legacy_record.pop("owner_email")
         with patch.object(
@@ -5116,14 +5484,17 @@ class OAuthAndConfigTests(unittest.TestCase):
             persisted, error = oauth_callback.persist_google_token_record(
                 email="verified@gmail.com",
                 owner_email="owner@example.com",
-                token_payload={"access_token": "CANARY_FRESH_ACCESS_ONLY"},
+                token_payload={
+                    "access_token": "CANARY_FRESH_ACCESS_ONLY",
+                    "refresh_token": "CANARY_FRESH_REFRESH",
+                },
             )
 
         self.assertIsNone(persisted)
-        self.assertEqual(error["code"], "invalid_token_payload")
+        self.assertEqual(error["code"], "token_owner_conflict")
         self.assertEqual(
             error[oauth_callback.GMAIL_CALLBACK_FAILURE_CODE_FIELD],
-            "token_payload_invalid",
+            "token_owner_conflict",
         )
         durable_write.assert_not_called()
         legacy_write.assert_not_called()
@@ -5234,10 +5605,10 @@ class OAuthAndConfigTests(unittest.TestCase):
         fresh_access = "CANARY_CALLBACK_FRESH_ACCESS"
         fresh_refresh = "CANARY_CALLBACK_FRESH_REFRESH"
         legacy_record = durable_google_token(
+            owner_email="verified@gmail.com",
             access_token="CANARY_CALLBACK_LEGACY_ACCESS",
             refresh_token="CANARY_CALLBACK_LEGACY_REFRESH",
         )
-        legacy_record.pop("owner_email")
         stored_record = json.loads(json.dumps(legacy_record))
         events = []
         state, _ = connect_oauth.build_signed_state(
@@ -5246,6 +5617,8 @@ class OAuthAndConfigTests(unittest.TestCase):
             owner_email,
             "state-secret",
             "main",
+            member_user_id="user-1",
+            member_workspace_id="workspace-1",
         )
         callback = self._google_callback(state)
         logger = Mock()
@@ -5385,6 +5758,8 @@ class OAuthAndConfigTests(unittest.TestCase):
             owner_email,
             "state-secret",
             "main",
+            member_user_id="user-1",
+            member_workspace_id="workspace-1",
         )
         request_path = (
             "/api/inboxes/oauth-callback?"
@@ -5396,6 +5771,8 @@ class OAuthAndConfigTests(unittest.TestCase):
             owner_email,
             "state-secret",
             "main",
+            member_user_id="user-1",
+            member_workspace_id="workspace-1",
         )
         second_request_path = (
             "/api/inboxes/oauth-callback?"
@@ -5439,7 +5816,7 @@ class OAuthAndConfigTests(unittest.TestCase):
         def read_token(_config, _store_key):
             return json.loads(json.dumps(stored_record)), None
 
-        def update_and_readback(_config, _store_key, record):
+        def update_and_readback(_config, _store_key, _expected_record, record):
             nonlocal stored_record
             events.append("current_token_write_and_readback")
             self.assertEqual(stored_record["owner_email"], owner_email)
@@ -5448,19 +5825,28 @@ class OAuthAndConfigTests(unittest.TestCase):
             stored_record = json.loads(json.dumps(record))
             return json.loads(json.dumps(stored_record)), None
 
-        def read_config(_config, _store_key, *, allow_missing=False):
+        def read_config(_config, _owner_email):
             events.append(
-                "config_preflight_read"
-                if allow_missing
-                else "config_readback"
+                "config_readback"
+                if events and events[-1] == "mailbox_registration"
+                else "config_preflight_read"
             )
-            return json.loads(json.dumps(stored_config)), None
+            return {
+                "status": "ok",
+                "config": json.loads(json.dumps(stored_config)),
+                "error": None,
+            }
 
-        def write_config(_config, _store_key, record):
+        def write_config(_config, _owner_email, expected_record, record):
             nonlocal stored_config
             events.append("mailbox_registration")
+            self.assertEqual(expected_record, stored_config)
             stored_config = json.loads(json.dumps(record))
-            return {"result": "OK"}, None
+            return {
+                "status": "ok",
+                "record": json.loads(json.dumps(stored_config)),
+                "error": None,
+            }
 
         with patch.dict(
             oauth_callback.os.environ,
@@ -5514,14 +5900,20 @@ class OAuthAndConfigTests(unittest.TestCase):
             "_read_durable_record",
             side_effect=read_token,
         ), patch.object(
-            oauth_callback,
-            "_read_user_config_durable_record",
+            oauth_callback.user_config_store,
+            "read_user_config_record",
             side_effect=read_config,
         ), patch.object(
-            oauth_callback,
-            "_write_user_config_durable_record",
+            oauth_callback.user_config_store,
+            "write_user_config_record_if_unchanged",
             side_effect=write_config,
         ) as config_write, patch.object(
+            oauth_callback.user_config_store,
+            "write_user_config_record_if_missing",
+        ) as create_config, patch.object(
+            oauth_callback.user_config_store,
+            "write_user_config_record",
+        ) as blind_config_write, patch.object(
             oauth_callback,
             "_build_gmail_managed_inbox_id",
             return_value="gmail-verified",
@@ -5558,6 +5950,8 @@ class OAuthAndConfigTests(unittest.TestCase):
         adoption_write.assert_called_once()
         regular_write.assert_called_once()
         self.assertEqual(config_write.call_count, 2)
+        create_config.assert_not_called()
+        blind_config_write.assert_not_called()
         self.assertEqual(len(stored_config["managedInboxes"]), 1)
         self.assertEqual(
             stored_config["managedInboxes"][0]["id"],
@@ -5621,10 +6015,10 @@ class OAuthAndConfigTests(unittest.TestCase):
         fresh_access = "CANARY_FAILURE_FRESH_ACCESS"
         fresh_refresh = "CANARY_FAILURE_FRESH_REFRESH"
         legacy_record = durable_google_token(
+            owner_email="verified@gmail.com",
             access_token=old_access,
             refresh_token=old_refresh,
         )
-        legacy_record.pop("owner_email")
         legacy_mailbox_owner_record = durable_google_token(
             owner_email="verified@gmail.com",
             access_token=old_access,
@@ -5747,6 +6141,8 @@ class OAuthAndConfigTests(unittest.TestCase):
                 owner_email,
                 "state-secret",
                 "main",
+                member_user_id="user-1",
+                member_workspace_id="workspace-1",
             )
             callback = self._google_callback(state)
             logger = Mock()
@@ -5861,14 +6257,22 @@ class OAuthAndConfigTests(unittest.TestCase):
     def test_server_registration_persists_position_and_is_idempotent(self):
         stored_record = self._incomplete_onboarding_config()
 
-        def read_record(_config, _store_key, *, allow_missing=False):
-            self.assertIsInstance(allow_missing, bool)
-            return json.loads(json.dumps(stored_record)), None
+        def read_record(_config, _owner_email):
+            return {
+                "status": "ok",
+                "config": json.loads(json.dumps(stored_record)),
+                "error": None,
+            }
 
-        def write_record(_config, _store_key, record):
+        def write_record(_config, _owner_email, expected_record, record):
             nonlocal stored_record
+            self.assertEqual(expected_record, stored_record)
             stored_record = json.loads(json.dumps(record))
-            return {"result": "OK"}, None
+            return {
+                "status": "ok",
+                "record": json.loads(json.dumps(stored_record)),
+                "error": None,
+            }
 
         with patch.object(
             oauth_callback,
@@ -5879,14 +6283,20 @@ class OAuthAndConfigTests(unittest.TestCase):
                 "rest_token": "secret",
             },
         ), patch.object(
-            oauth_callback,
-            "_read_user_config_durable_record",
+            oauth_callback.user_config_store,
+            "read_user_config_record",
             side_effect=read_record,
         ), patch.object(
-            oauth_callback,
-            "_write_user_config_durable_record",
+            oauth_callback.user_config_store,
+            "write_user_config_record_if_unchanged",
             side_effect=write_record,
-        ) as config_write:
+        ) as config_write, patch.object(
+            oauth_callback.user_config_store,
+            "write_user_config_record_if_missing",
+        ) as create_config, patch.object(
+            oauth_callback.user_config_store,
+            "write_user_config_record",
+        ) as blind_config_write:
             first_mailbox, first_error = (
                 oauth_callback._register_gmail_managed_inbox_in_user_config(
                     authenticated_member(),
@@ -5911,9 +6321,13 @@ class OAuthAndConfigTests(unittest.TestCase):
         self.assertIsNone(first_error)
         self.assertIsNone(second_error)
         self.assertEqual(config_write.call_count, 2)
+        create_config.assert_not_called()
+        blind_config_write.assert_not_called()
         self.assertEqual(first_mailbox["id"], second_mailbox["id"])
         self.assertEqual(first_mailbox["onboardingInboxId"], "main")
         self.assertEqual(second_mailbox["onboardingInboxId"], "main")
+        self.assertEqual(first_mailbox["title"], "Verified")
+        self.assertEqual(second_mailbox["title"], "Verified")
         self.assertEqual(len(stored_record["managedInboxes"]), 1)
         saved_mailbox = stored_record["managedInboxes"][0]
         self.assertEqual(saved_mailbox["id"], first_mailbox["id"])
@@ -5930,6 +6344,761 @@ class OAuthAndConfigTests(unittest.TestCase):
             "oauthauthorizationurl\": \"http",
         ):
             self.assertNotIn(forbidden, serialized_record)
+
+    def test_server_registration_uses_shared_cas_and_preserves_config(self):
+        config_a = {
+            "v": 1,
+            "email": "owner@example.com",
+            "updatedAt": "2025-01-01T00:00:00Z",
+            "onboardingSession": {
+                "schemaVersion": 1,
+                "completed": False,
+                "currentStep": 3,
+                "choices": {
+                    "selectedInboxes": ["main", "promo"],
+                    "inboxCount": "2",
+                    "customInboxes": [],
+                    "focusPreferences": {"promo": "high"},
+                },
+            },
+            "managedInboxes": [
+                {
+                    "id": "gmail-other-server-owned",
+                    "email": "other@gmail.com",
+                    "provider": "google",
+                    "onboardingInboxId": "promo",
+                    "connected": True,
+                    "connectionStatus": "connected",
+                }
+            ],
+            "mailboxTitleOverrides": {"gmail-other-server-owned": "Pinned"},
+            "primaryManagedInboxId": "gmail-other-server-owned",
+            "mailboxFocusPreferenceOverrides": {
+                "gmail-other-server-owned": "high"
+            },
+            "inboxSignatures": {
+                "gmail-other-server-owned": {"text": "Regards"}
+            },
+            "smartFolders": [{"id": "important"}],
+            "uiPreferences": {"themeMode": "dark"},
+            "displayNameOverrides": {"owner@example.com": "Owner"},
+            "unrelatedFutureField": {"nested": [1, 2, 3]},
+        }
+        stored_record = json.loads(json.dumps(config_a))
+        events = []
+
+        def read_record(_store, owner_email):
+            self.assertEqual(owner_email, "owner@example.com")
+            events.append("read")
+            return {
+                "status": "ok",
+                "config": json.loads(json.dumps(stored_record)),
+                "error": None,
+            }
+
+        def compare_and_set(_store, owner_email, expected, replacement):
+            nonlocal stored_record
+            self.assertEqual(owner_email, "owner@example.com")
+            events.append("cas")
+            self.assertEqual(expected, config_a)
+            stored_record = json.loads(json.dumps(replacement))
+            return {
+                "status": "ok",
+                "record": json.loads(json.dumps(stored_record)),
+                "error": None,
+            }
+
+        with patch.object(
+            oauth_callback,
+            "_resolve_durable_store_config",
+            return_value={
+                "backend": "vercel_kv_rest",
+                "rest_url": "https://kv.example",
+                "rest_token": "secret",
+            },
+        ), patch.object(
+            oauth_callback.user_config_store,
+            "read_user_config_record",
+            side_effect=read_record,
+        ) as config_read, patch.object(
+            oauth_callback.user_config_store,
+            "write_user_config_record_if_unchanged",
+            side_effect=compare_and_set,
+        ) as config_cas, patch.object(
+            oauth_callback.user_config_store,
+            "write_user_config_record_if_missing",
+        ) as config_create, patch.object(
+            oauth_callback.user_config_store,
+            "write_user_config_record",
+        ) as blind_config_write:
+            mailbox, error = (
+                oauth_callback._register_gmail_managed_inbox_in_user_config(
+                    authenticated_member(),
+                    email="verified@gmail.com",
+                    display_name="Verified",
+                    owner_email="owner@example.com",
+                    message="Connected",
+                    inbox_position="main",
+                )
+            )
+
+        self.assertIsNone(error)
+        self.assertEqual(events, ["read", "cas", "read"])
+        self.assertEqual(config_read.call_count, 2)
+        config_cas.assert_called_once()
+        config_create.assert_not_called()
+        blind_config_write.assert_not_called()
+        self.assertEqual(mailbox["email"], "verified@gmail.com")
+        self.assertEqual(mailbox["onboardingInboxId"], "main")
+        for field in (
+            "onboardingSession",
+            "mailboxTitleOverrides",
+            "primaryManagedInboxId",
+            "mailboxFocusPreferenceOverrides",
+            "inboxSignatures",
+            "smartFolders",
+            "uiPreferences",
+            "displayNameOverrides",
+            "unrelatedFutureField",
+        ):
+            self.assertEqual(stored_record[field], config_a[field])
+        self.assertEqual(
+            stored_record["managedInboxes"][0],
+            config_a["managedInboxes"][0],
+        )
+        self.assertEqual(
+            [item["id"] for item in stored_record["managedInboxes"]],
+            ["gmail-other-server-owned", mailbox["id"]],
+        )
+
+    def test_cas_retry_remerges_concurrent_imap_onboarding_and_preferences(self):
+        config_a = {
+            "v": 1,
+            "email": "owner@example.com",
+            "updatedAt": "2025-01-01T00:00:00Z",
+            "onboardingSession": {
+                "schemaVersion": 1,
+                "completed": False,
+                "currentStep": 2,
+                "choices": {
+                    "selectedInboxes": ["main"],
+                    "inboxCount": "1",
+                    "customInboxes": [],
+                    "focusPreferences": {"main": "medium"},
+                },
+            },
+            "managedInboxes": [],
+            "mailboxTitleOverrides": {},
+            "mailboxFocusPreferenceOverrides": {},
+            "inboxSignatures": {},
+            "uiPreferences": {"themeMode": "light"},
+            "unrelatedFutureField": {"revision": "A"},
+        }
+        config_b = json.loads(json.dumps(config_a))
+        config_b["onboardingSession"] = {
+            "schemaVersion": 1,
+            "completed": False,
+            "currentStep": 4,
+            "choices": {
+                "selectedInboxes": ["main", "custom:tour"],
+                "inboxCount": "2",
+                "customInboxes": [
+                    {"id": "custom:tour", "title": "Tour mailbox"}
+                ],
+                "focusPreferences": {
+                    "main": "low",
+                    "custom:tour": "high",
+                },
+            },
+        }
+        custom_imap = {
+            "id": "imap-server-owned",
+            "email": "tour@example.com",
+            "provider": "custom_imap",
+            "onboardingInboxId": "custom:tour",
+            "connected": True,
+            "connectionStatus": "connected",
+            "customImap": {
+                "host": "imap.example.com",
+                "port": "993",
+                "ssl": True,
+                "username": "tour@example.com",
+            },
+        }
+        config_b["managedInboxes"] = [custom_imap]
+        config_b["mailboxTitleOverrides"] = {
+            "imap-server-owned": "Tour archive"
+        }
+        config_b["mailboxFocusPreferenceOverrides"] = {
+            "imap-server-owned": "high"
+        }
+        config_b["inboxSignatures"] = {
+            "imap-server-owned": {"text": "On tour"}
+        }
+        config_b["uiPreferences"] = {"themeMode": "dark", "density": "compact"}
+        config_b["unrelatedFutureField"] = {"revision": "B", "keep": True}
+
+        stored_record = json.loads(json.dumps(config_a))
+        replacements = []
+        events = []
+
+        def read_record(_store, _owner_email):
+            events.append("read")
+            return {
+                "status": "ok",
+                "config": json.loads(json.dumps(stored_record)),
+                "error": None,
+            }
+
+        def compare_and_set(_store, _owner_email, expected, replacement):
+            nonlocal stored_record
+            replacements.append(json.loads(json.dumps(replacement)))
+            if len(replacements) == 1:
+                events.append("cas_conflict")
+                self.assertEqual(expected, config_a)
+                stored_record = json.loads(json.dumps(config_b))
+                return {
+                    "status": "conflict",
+                    "record": None,
+                    "error": {
+                        "code": "user_config_write_conflict",
+                        "message": "concurrent registration",
+                    },
+                }
+
+            events.append("cas_success")
+            self.assertEqual(expected, config_b)
+            stored_record = json.loads(json.dumps(replacement))
+            return {
+                "status": "ok",
+                "record": json.loads(json.dumps(stored_record)),
+                "error": None,
+            }
+
+        with patch.object(
+            oauth_callback,
+            "_resolve_durable_store_config",
+            return_value={
+                "backend": "vercel_kv_rest",
+                "rest_url": "https://kv.example",
+                "rest_token": "secret",
+            },
+        ), patch.object(
+            oauth_callback.user_config_store,
+            "read_user_config_record",
+            side_effect=read_record,
+        ), patch.object(
+            oauth_callback.user_config_store,
+            "write_user_config_record_if_unchanged",
+            side_effect=compare_and_set,
+        ) as config_cas, patch.object(
+            oauth_callback.user_config_store,
+            "write_user_config_record_if_missing",
+        ) as config_create, patch.object(
+            oauth_callback.user_config_store,
+            "write_user_config_record",
+        ) as blind_config_write:
+            mailbox, error = (
+                oauth_callback._register_gmail_managed_inbox_in_user_config(
+                    authenticated_member(),
+                    email="verified@gmail.com",
+                    display_name="Verified",
+                    owner_email="owner@example.com",
+                    message="Connected",
+                    inbox_position="main",
+                )
+            )
+
+        self.assertIsNone(error)
+        self.assertEqual(
+            events,
+            ["read", "cas_conflict", "read", "cas_success", "read"],
+        )
+        self.assertEqual(config_cas.call_count, 2)
+        config_create.assert_not_called()
+        blind_config_write.assert_not_called()
+        self.assertEqual(len(replacements), 2)
+        self.assertNotIn(
+            "imap-server-owned",
+            [item["id"] for item in replacements[0]["managedInboxes"]],
+        )
+        self.assertEqual(
+            [item["id"] for item in replacements[1]["managedInboxes"]],
+            ["imap-server-owned", mailbox["id"]],
+        )
+        by_id = {
+            item["id"]: item for item in stored_record["managedInboxes"]
+        }
+        self.assertEqual(by_id["imap-server-owned"], custom_imap)
+        self.assertEqual(
+            by_id[mailbox["id"]]["onboardingInboxId"],
+            "main",
+        )
+        for field in (
+            "onboardingSession",
+            "mailboxTitleOverrides",
+            "mailboxFocusPreferenceOverrides",
+            "inboxSignatures",
+            "uiPreferences",
+            "unrelatedFutureField",
+        ):
+            self.assertEqual(stored_record[field], config_b[field])
+
+    def test_cas_retry_rejects_concurrent_gmail_owner_change(self):
+        config_a = {
+            "v": 1,
+            "email": "owner@example.com",
+            "onboardingSession": self._incomplete_onboarding_config()[
+                "onboardingSession"
+            ],
+            "managedInboxes": [],
+        }
+        conflicting_mailbox = {
+            "id": "gmail-other-owner-server-owned",
+            "email": "verified@gmail.com",
+            "provider": "google",
+            "oauthOwnerEmail": "other-owner@example.com",
+            "onboardingInboxId": "main",
+            "connected": True,
+            "connectionStatus": "connected",
+        }
+        config_b = {
+            **config_a,
+            "managedInboxes": [conflicting_mailbox],
+            "concurrentRevision": "other owner",
+        }
+        stored_record = json.loads(json.dumps(config_a))
+        read_count = 0
+
+        def read_record(_store, _owner_email):
+            nonlocal read_count
+            read_count += 1
+            return {
+                "status": "ok",
+                "config": json.loads(json.dumps(stored_record)),
+                "error": None,
+            }
+
+        def first_write_conflicts(_store, _owner_email, expected, _replacement):
+            nonlocal stored_record
+            self.assertEqual(expected, config_a)
+            stored_record = json.loads(json.dumps(config_b))
+            return {
+                "status": "conflict",
+                "record": None,
+                "error": {
+                    "code": "user_config_write_conflict",
+                    "message": "other owner won",
+                },
+            }
+
+        with patch.object(
+            oauth_callback,
+            "_resolve_durable_store_config",
+            return_value={
+                "backend": "vercel_kv_rest",
+                "rest_url": "https://kv.example",
+                "rest_token": "secret",
+            },
+        ), patch.object(
+            oauth_callback.user_config_store,
+            "read_user_config_record",
+            side_effect=read_record,
+        ), patch.object(
+            oauth_callback.user_config_store,
+            "write_user_config_record_if_unchanged",
+            side_effect=first_write_conflicts,
+        ) as config_cas, patch.object(
+            oauth_callback.user_config_store,
+            "write_user_config_record_if_missing",
+        ) as config_create, patch.object(
+            oauth_callback.user_config_store,
+            "write_user_config_record",
+        ) as blind_config_write:
+            mailbox, error = (
+                oauth_callback._register_gmail_managed_inbox_in_user_config(
+                    authenticated_member(),
+                    email="verified@gmail.com",
+                    display_name="Verified",
+                    owner_email="owner@example.com",
+                    message="Connected",
+                    inbox_position="main",
+                )
+            )
+
+        self.assertIsNone(mailbox)
+        self.assertEqual(error["code"], "gmail_link_conflict")
+        self.assertEqual(
+            error[oauth_callback.GMAIL_CALLBACK_FAILURE_CODE_FIELD],
+            "gmail_link_conflict",
+        )
+        self.assertEqual(read_count, 2)
+        config_cas.assert_called_once()
+        config_create.assert_not_called()
+        blind_config_write.assert_not_called()
+        self.assertEqual(stored_record, config_b)
+        self.assertEqual(
+            stored_record["managedInboxes"][0]["oauthOwnerEmail"],
+            "other-owner@example.com",
+        )
+
+    def test_missing_config_create_race_reloads_and_uses_cas(self):
+        concurrent_config = {
+            "v": 1,
+            "email": "owner@example.com",
+            "updatedAt": "2025-01-01T00:00:00Z",
+            "onboardingSession": {
+                "schemaVersion": 1,
+                "completed": False,
+                "currentStep": 3,
+                "choices": {
+                    "selectedInboxes": ["main", "custom:legal"],
+                    "inboxCount": "2",
+                    "customInboxes": [
+                        {"id": "custom:legal", "title": "Legal"}
+                    ],
+                },
+            },
+            "managedInboxes": [
+                {
+                    "id": "imap-server-owned",
+                    "email": "legal@example.com",
+                    "provider": "custom_imap",
+                    "onboardingInboxId": "custom:legal",
+                    "connected": True,
+                    "connectionStatus": "connected",
+                }
+            ],
+            "mailboxFocusPreferenceOverrides": {
+                "imap-server-owned": "medium"
+            },
+        }
+        stored_record = None
+        read_count = 0
+        events = []
+
+        def read_record(_store, _owner_email):
+            nonlocal read_count
+            read_count += 1
+            events.append("read_missing" if stored_record is None else "read")
+            if stored_record is None:
+                return {
+                    "status": "missing",
+                    "config": None,
+                    "error": {
+                        "code": "user_config_not_found",
+                        "message": "missing",
+                    },
+                }
+            return {
+                "status": "ok",
+                "config": json.loads(json.dumps(stored_record)),
+                "error": None,
+            }
+
+        def create_if_missing(_store, _owner_email, _replacement):
+            nonlocal stored_record
+            events.append("create_conflict")
+            stored_record = json.loads(json.dumps(concurrent_config))
+            return {
+                "status": "conflict",
+                "record": None,
+                "error": {
+                    "code": "user_config_write_conflict",
+                    "message": "concurrent create",
+                },
+            }
+
+        def compare_and_set(_store, _owner_email, expected, replacement):
+            nonlocal stored_record
+            events.append("cas_success")
+            self.assertEqual(expected, concurrent_config)
+            stored_record = json.loads(json.dumps(replacement))
+            return {
+                "status": "ok",
+                "record": json.loads(json.dumps(stored_record)),
+                "error": None,
+            }
+
+        with patch.object(
+            oauth_callback,
+            "_resolve_durable_store_config",
+            return_value={
+                "backend": "vercel_kv_rest",
+                "rest_url": "https://kv.example",
+                "rest_token": "secret",
+            },
+        ), patch.object(
+            oauth_callback.user_config_store,
+            "read_user_config_record",
+            side_effect=read_record,
+        ), patch.object(
+            oauth_callback.user_config_store,
+            "write_user_config_record_if_missing",
+            side_effect=create_if_missing,
+        ) as config_create, patch.object(
+            oauth_callback.user_config_store,
+            "write_user_config_record_if_unchanged",
+            side_effect=compare_and_set,
+        ) as config_cas, patch.object(
+            oauth_callback.user_config_store,
+            "write_user_config_record",
+        ) as blind_config_write:
+            mailbox, error = (
+                oauth_callback._register_gmail_managed_inbox_in_user_config(
+                    authenticated_member(),
+                    email="verified@gmail.com",
+                    display_name="Verified",
+                    owner_email="owner@example.com",
+                    message="Connected",
+                    inbox_position=None,
+                )
+            )
+
+        self.assertIsNone(error)
+        self.assertEqual(
+            events,
+            [
+                "read_missing",
+                "create_conflict",
+                "read",
+                "cas_success",
+                "read",
+            ],
+        )
+        self.assertEqual(read_count, 3)
+        config_create.assert_called_once()
+        config_cas.assert_called_once()
+        blind_config_write.assert_not_called()
+        by_id = {
+            item["id"]: item for item in stored_record["managedInboxes"]
+        }
+        self.assertEqual(
+            by_id["imap-server-owned"],
+            concurrent_config["managedInboxes"][0],
+        )
+        self.assertEqual(by_id[mailbox["id"]]["email"], "verified@gmail.com")
+        self.assertEqual(
+            stored_record["onboardingSession"],
+            concurrent_config["onboardingSession"],
+        )
+        self.assertEqual(
+            stored_record["mailboxFocusPreferenceOverrides"],
+            concurrent_config["mailboxFocusPreferenceOverrides"],
+        )
+
+    def test_persistent_cas_conflict_stops_after_three_fresh_merges(self):
+        revisions = [
+            {
+                "v": 1,
+                "email": "owner@example.com",
+                "onboardingSession": self._incomplete_onboarding_config()[
+                    "onboardingSession"
+                ],
+                "managedInboxes": [],
+                "concurrentRevision": revision,
+            }
+            for revision in (1, 2, 3)
+        ]
+        read_index = 0
+        expected_records = []
+        replacements = []
+
+        def read_record(_store, _owner_email):
+            nonlocal read_index
+            record = revisions[read_index]
+            read_index += 1
+            return {
+                "status": "ok",
+                "config": json.loads(json.dumps(record)),
+                "error": None,
+            }
+
+        def always_conflict(_store, _owner_email, expected, replacement):
+            expected_records.append(json.loads(json.dumps(expected)))
+            replacements.append(json.loads(json.dumps(replacement)))
+            return {
+                "status": "conflict",
+                "record": None,
+                "error": {
+                    "code": "user_config_write_conflict",
+                    "message": "still changing",
+                },
+            }
+
+        with patch.object(
+            oauth_callback,
+            "_resolve_durable_store_config",
+            return_value={
+                "backend": "vercel_kv_rest",
+                "rest_url": "https://kv.example",
+                "rest_token": "secret",
+            },
+        ), patch.object(
+            oauth_callback.user_config_store,
+            "read_user_config_record",
+            side_effect=read_record,
+        ) as config_read, patch.object(
+            oauth_callback.user_config_store,
+            "write_user_config_record_if_unchanged",
+            side_effect=always_conflict,
+        ) as config_cas, patch.object(
+            oauth_callback.user_config_store,
+            "write_user_config_record_if_missing",
+        ) as config_create, patch.object(
+            oauth_callback.user_config_store,
+            "write_user_config_record",
+        ) as blind_config_write:
+            mailbox, error = (
+                oauth_callback._register_gmail_managed_inbox_in_user_config(
+                    authenticated_member(),
+                    email="verified@gmail.com",
+                    display_name="Verified",
+                    owner_email="owner@example.com",
+                    message="Connected",
+                    inbox_position="main",
+                )
+            )
+
+        self.assertIsNone(mailbox)
+        self.assertEqual(error["code"], "user_config_persistence_failed")
+        self.assertEqual(
+            error[oauth_callback.GMAIL_CALLBACK_FAILURE_CODE_FIELD],
+            "user_config_write_failed",
+        )
+        self.assertEqual(
+            config_read.call_count,
+            oauth_callback.MAX_GMAIL_USER_CONFIG_WRITE_ATTEMPTS,
+        )
+        self.assertEqual(
+            config_cas.call_count,
+            oauth_callback.MAX_GMAIL_USER_CONFIG_WRITE_ATTEMPTS,
+        )
+        config_create.assert_not_called()
+        blind_config_write.assert_not_called()
+        self.assertEqual(expected_records, revisions)
+        self.assertEqual(
+            [record["concurrentRevision"] for record in replacements],
+            [1, 2, 3],
+        )
+        self.assertTrue(
+            all(
+                len(record["managedInboxes"]) == 1
+                and record["managedInboxes"][0]["email"]
+                == "verified@gmail.com"
+                for record in replacements
+            )
+        )
+        self.assertTrue(
+            all(record["managedInboxes"] == [] for record in revisions)
+        )
+
+    def test_invalid_or_unavailable_config_fails_before_any_write(self):
+        cases = (
+            (
+                "unavailable",
+                {
+                    "status": "unavailable",
+                    "config": None,
+                    "error": {
+                        "code": "user_config_store_unavailable",
+                        "message": "private outage",
+                    },
+                },
+                "user_config_preflight_failed",
+            ),
+            (
+                "malformed",
+                {
+                    "status": "malformed",
+                    "config": None,
+                    "error": {
+                        "code": "user_config_malformed",
+                        "message": "private malformed detail",
+                    },
+                },
+                "user_config_invalid",
+            ),
+            (
+                "ok_with_non_dict",
+                {"status": "ok", "config": [], "error": None},
+                "user_config_invalid",
+            ),
+            (
+                "wrong_owner",
+                {
+                    "status": "ok",
+                    "config": {
+                        "email": "other@example.com",
+                        "managedInboxes": [],
+                    },
+                    "error": None,
+                },
+                "user_config_invalid",
+            ),
+            (
+                "malformed_managed_inboxes",
+                {
+                    "status": "ok",
+                    "config": {
+                        "email": "owner@example.com",
+                        "onboardingSession": (
+                            self._incomplete_onboarding_config()[
+                                "onboardingSession"
+                            ]
+                        ),
+                        "managedInboxes": {},
+                    },
+                    "error": None,
+                },
+                "user_config_invalid",
+            ),
+        )
+
+        for name, read_result, diagnostic_code in cases:
+            with self.subTest(case=name), patch.object(
+                oauth_callback,
+                "_resolve_durable_store_config",
+                return_value={
+                    "backend": "vercel_kv_rest",
+                    "rest_url": "https://kv.example",
+                    "rest_token": "secret",
+                },
+            ), patch.object(
+                oauth_callback.user_config_store,
+                "read_user_config_record",
+                return_value=read_result,
+            ), patch.object(
+                oauth_callback.user_config_store,
+                "write_user_config_record_if_unchanged",
+            ) as config_cas, patch.object(
+                oauth_callback.user_config_store,
+                "write_user_config_record_if_missing",
+            ) as config_create, patch.object(
+                oauth_callback.user_config_store,
+                "write_user_config_record",
+            ) as blind_config_write:
+                mailbox, error = (
+                    oauth_callback._register_gmail_managed_inbox_in_user_config(
+                        authenticated_member(),
+                        email="verified@gmail.com",
+                        display_name="Verified",
+                        owner_email="owner@example.com",
+                        message="Connected",
+                        inbox_position="main",
+                    )
+                )
+
+            self.assertIsNone(mailbox)
+            self.assertEqual(error["code"], "user_config_persistence_failed")
+            self.assertEqual(
+                error[oauth_callback.GMAIL_CALLBACK_FAILURE_CODE_FIELD],
+                diagnostic_code,
+            )
+            config_cas.assert_not_called()
+            config_create.assert_not_called()
+            blind_config_write.assert_not_called()
+            self.assertNotIn("private", json.dumps(error))
 
     def test_server_mailbox_id_avoids_case_insensitive_collision(self):
         mailbox_id = oauth_callback._build_gmail_managed_inbox_id(
@@ -5961,7 +7130,38 @@ class OAuthAndConfigTests(unittest.TestCase):
                     oauth_callback._resolve_gmail_managed_inbox_target(
                         existing,
                         email=email,
+                        owner_email="owner@example.com",
                         inbox_position=inbox_position,
+                    )
+                )
+            self.assertIsNone(matched_index)
+            self.assertEqual(error["code"], "gmail_link_conflict")
+
+    def test_server_registration_rejects_conflicting_or_malformed_mailbox_owner(self):
+        for stored_owner in (
+            "other-owner@example.com",
+            "",
+            True,
+            ["owner@example.com"],
+        ):
+            existing = [
+                {
+                    "id": "gmail-verified-server-owned",
+                    "email": "verified@gmail.com",
+                    "provider": "google",
+                    "oauthOwnerEmail": stored_owner,
+                    "onboardingInboxId": "main",
+                    "connected": True,
+                    "connectionStatus": "connected",
+                }
+            ]
+            with self.subTest(stored_owner=stored_owner):
+                matched_index, error = (
+                    oauth_callback._resolve_gmail_managed_inbox_target(
+                        existing,
+                        email="verified@gmail.com",
+                        owner_email="owner@example.com",
+                        inbox_position="main",
                     )
                 )
             self.assertIsNone(matched_index)
@@ -5974,6 +7174,8 @@ class OAuthAndConfigTests(unittest.TestCase):
             "owner@example.com",
             "state-secret",
             "main",
+            member_user_id="user-1",
+            member_workspace_id="workspace-1",
         )
         callback = self._google_callback(state)
         environment = {
@@ -6032,6 +7234,176 @@ class OAuthAndConfigTests(unittest.TestCase):
         self.assertNotIn("mailboxId", response)
         self.assertNotIn("provider-token", json.dumps(response))
 
+    def test_callback_revalidates_current_onboarding_and_member_authority(self):
+        environment = self._production_oauth_environment()
+        active_config = self._incomplete_onboarding_config()
+        occupied_config = self._incomplete_onboarding_config()
+        occupied_config["managedInboxes"] = [
+            {
+                "id": "gmail-other-server-owned",
+                "email": "other@gmail.com",
+                "provider": "google",
+                "oauthOwnerEmail": "owner@example.com",
+                "onboardingInboxId": "main",
+                "connected": True,
+                "connectionStatus": "connected",
+            }
+        ]
+        original_member = authenticated_member()
+        changed_user_member = auth_runtime.AuthenticatedMemberContext(
+            user_id="different-user",
+            email=original_member.email,
+            name=original_member.name,
+            workspace_id=original_member.workspace_id,
+            membership_role=original_member.membership_role,
+        )
+        changed_workspace_member = auth_runtime.AuthenticatedMemberContext(
+            user_id=original_member.user_id,
+            email=original_member.email,
+            name=original_member.name,
+            workspace_id="different-workspace",
+            membership_role=original_member.membership_role,
+        )
+        cases = (
+            (
+                "position_removed",
+                self._incomplete_onboarding_config(
+                    selected_inboxes=("demo",)
+                ),
+                original_member,
+                "gmail_link_conflict",
+            ),
+            (
+                "onboarding_completed",
+                self._incomplete_onboarding_config(completed=True),
+                original_member,
+                "gmail_link_conflict",
+            ),
+            (
+                "position_occupied",
+                occupied_config,
+                original_member,
+                "gmail_link_conflict",
+            ),
+            (
+                "account_binding_changed",
+                active_config,
+                changed_user_member,
+                "owner_binding_invalid",
+            ),
+            (
+                "workspace_binding_changed",
+                active_config,
+                changed_workspace_member,
+                "owner_binding_invalid",
+            ),
+        )
+
+        for label, current_config, current_member, expected_failure in cases:
+            state, _ = connect_oauth.build_signed_state(
+                "google",
+                "hint@gmail.com",
+                original_member.email,
+                "state-secret",
+                "main",
+                member_user_id=original_member.user_id,
+                member_workspace_id=original_member.workspace_id,
+            )
+            callback = self._google_callback(state)
+            logger = Mock()
+            with self.subTest(case=label), patch.dict(
+                oauth_callback.os.environ,
+                environment,
+                clear=True,
+            ), patch.object(
+                oauth_callback,
+                "_GMAIL_CALLBACK_LOGGER",
+                logger,
+            ), patch.object(
+                oauth_callback,
+                "_resolve_authenticated_member_request",
+                side_effect=(
+                    (original_member, ()),
+                    (current_member, ()),
+                ),
+            ), patch.object(
+                oauth_callback,
+                "_exchange_google_code",
+                return_value=(
+                    {
+                        "access_token": "private-provider-access",
+                        "refresh_token": "private-provider-refresh",
+                    },
+                    None,
+                ),
+            ), patch.object(
+                oauth_callback,
+                "_fetch_verified_google_identity",
+                return_value=(
+                    {
+                        "email": "verified@gmail.com",
+                        "display_name": "Verified",
+                    },
+                    None,
+                ),
+            ), patch.object(
+                oauth_callback,
+                "_resolve_durable_store_config",
+                return_value={
+                    "backend": "vercel_kv_rest",
+                    "rest_url": "https://kv.example",
+                    "rest_token": "secret",
+                },
+            ), patch.object(
+                oauth_callback.user_config_store,
+                "read_user_config_record",
+                return_value={
+                    "status": "ok",
+                    "config": current_config,
+                    "error": None,
+                },
+            ) as config_read, patch.object(
+                oauth_callback,
+                "persist_google_token_record",
+            ) as token_store, patch.object(
+                oauth_callback,
+                "_register_gmail_managed_inbox_in_user_config",
+            ) as config_store, patch.object(
+                oauth_callback.user_config_store,
+                "write_user_config_record_if_unchanged",
+            ) as config_cas, patch.object(
+                oauth_callback.user_config_store,
+                "write_user_config_record_if_missing",
+            ) as config_create:
+                oauth_callback.handler.do_GET(callback)
+
+            token_store.assert_not_called()
+            config_store.assert_not_called()
+            config_cas.assert_not_called()
+            config_create.assert_not_called()
+            if expected_failure == "owner_binding_invalid":
+                config_read.assert_not_called()
+            else:
+                config_read.assert_called_once()
+            logger.warning.assert_called_once_with(
+                "event=gmail_oauth_callback_failure "
+                f"failure_code={expected_failure} provider=google "
+                "inbox_position=main"
+            )
+            response = callback._send_callback_page.call_args.args[0]
+            self.assertEqual(response["status"], "error")
+            self.assertNotIn("mailboxId", response)
+            self.assertNotIn("connected", response)
+            serialized_response = json.dumps(response, sort_keys=True)
+            for forbidden in (
+                "private-provider-access",
+                "private-provider-refresh",
+                "owner_binding",
+                "userId",
+                "workspaceId",
+            ):
+                self.assertNotIn(forbidden, serialized_response)
+
     def test_config_registration_failure_never_emits_callback_success(self):
         state, _ = connect_oauth.build_signed_state(
             "google",
@@ -6039,6 +7411,8 @@ class OAuthAndConfigTests(unittest.TestCase):
             "owner@example.com",
             "state-secret",
             "main",
+            member_user_id="user-1",
+            member_workspace_id="workspace-1",
         )
         callback = self._google_callback(state)
         environment = {
@@ -6100,126 +7474,182 @@ class OAuthAndConfigTests(unittest.TestCase):
         self.assertNotIn("raw storage detail", json.dumps(response))
         self.assertNotIn("provider-token", json.dumps(response))
 
-    def test_config_write_requires_ok_and_exact_readback(self):
+    def test_persistent_cas_conflict_keeps_token_pending_and_callback_failed(self):
+        state, _ = connect_oauth.build_signed_state(
+            "google",
+            "hint@gmail.com",
+            "owner@example.com",
+            "state-secret",
+            "main",
+            member_user_id="user-1",
+            member_workspace_id="workspace-1",
+        )
+        callback = self._google_callback(state)
         environment = {
-            "KV_REST_API_URL": "https://kv.example",
-            "KV_REST_API_TOKEN": "kv-secret",
+            "GOOGLE_CLIENT_ID": "client",
+            "GOOGLE_CLIENT_SECRET": "secret",
+            "CUEVION_APP_URL": "https://app.cuevion.com",
+            "VERCEL_ENV": "production",
+            "GOOGLE_OAUTH_REDIRECT_URI": "https://example.test/callback",
+            "CUEVION_OAUTH_STATE_SECRET": "state-secret",
         }
-        saved_record = None
-        calls = []
+        config = {
+            "v": 1,
+            "email": "owner@example.com",
+            "onboardingSession": self._incomplete_onboarding_config()[
+                "onboardingSession"
+            ],
+            "managedInboxes": [],
+        }
+        logger = Mock()
 
-        def successful_transport(request, timeout):
-            nonlocal saved_record
-            calls.append(request.get_method())
-            if request.get_method() == "POST":
-                saved_record = json.loads(request.data)
-                return BoundaryResponse('{"result":"OK"}')
-            if saved_record is None:
-                return BoundaryResponse('{"result":null}')
-            return BoundaryResponse(json.dumps({"result": json.dumps(saved_record)}))
-
-        with patch.dict(oauth_callback.os.environ, environment, clear=False), patch.object(
+        with patch.dict(
+            oauth_callback.os.environ,
+            environment,
+            clear=False,
+        ), patch.object(
             oauth_callback,
-            "urlopen",
-            side_effect=successful_transport,
-        ):
-            error = oauth_callback._upsert_gmail_managed_inbox_in_user_config(
-                authenticated_member(),
-                email="verified@gmail.com",
-                display_name="Verified",
-                owner_email="owner@example.com",
-                message="Connected",
-            )
-        self.assertIsNone(error)
-        self.assertEqual(calls, ["GET", "POST", "GET"])
-
-        failed_acknowledgements = [b"", b"{", b'{"result":null}', b'{"result":"STALE"}']
-        for acknowledgement in failed_acknowledgements:
-            def failed_ack_transport(request, timeout, ack=acknowledgement):
-                if request.get_method() == "GET":
-                    return BoundaryResponse('{"result":null}')
-                return BoundaryResponse(ack)
-
-            with self.subTest(acknowledgement=acknowledgement), patch.dict(
-                oauth_callback.os.environ, environment, clear=False
-            ), patch.object(
-                oauth_callback,
-                "urlopen",
-                side_effect=failed_ack_transport,
-            ):
-                error = oauth_callback._upsert_gmail_managed_inbox_in_user_config(
-                    authenticated_member(),
-                    email="verified@gmail.com",
-                    display_name="Verified",
-                    owner_email="owner@example.com",
-                    message="Connected",
-                )
-            self.assertEqual(error["code"], "user_config_persistence_failed")
-
-    def test_config_readback_rejects_missing_stale_email_owner_and_oversize(self):
-        environment = {
-            "KV_REST_API_URL": "https://kv.example",
-            "KV_REST_API_TOKEN": "kv-secret",
-        }
-
-        def run_with_mutation(mutation):
-            saved_record = None
-
-            def transport(request, timeout):
-                nonlocal saved_record
-                if request.get_method() == "POST":
-                    saved_record = json.loads(request.data)
-                    return BoundaryResponse('{"result":"OK"}')
-                if saved_record is None:
-                    return BoundaryResponse('{"result":null}')
-                return mutation(saved_record)
-
-            with patch.dict(oauth_callback.os.environ, environment, clear=False), patch.object(
-                oauth_callback,
-                "urlopen",
-                side_effect=transport,
-            ):
-                return oauth_callback._upsert_gmail_managed_inbox_in_user_config(
-                    authenticated_member(),
-                    email="verified@gmail.com",
-                    display_name="Verified",
-                    owner_email="owner@example.com",
-                    message="Connected",
-                )
-
-        def altered(field, value):
-            def mutate(record):
-                copy = json.loads(json.dumps(record))
-                copy["managedInboxes"][0][field] = value
-                return BoundaryResponse(json.dumps({"result": json.dumps(copy)}))
-            return mutate
-
-        mutations = [
-            lambda record: BoundaryResponse('{"result":null}'),
-            lambda record: BoundaryResponse(json.dumps({"result": json.dumps({**record, "managedInboxes": []})})),
-            lambda record: BoundaryResponse(
-                json.dumps(
-                    {
-                        "result": json.dumps(
-                            {**record, "updatedAt": "2000-01-01T00:00:00Z"}
-                        )
-                    }
-                )
+            "_GMAIL_CALLBACK_LOGGER",
+            logger,
+        ), patch.object(
+            oauth_callback,
+            "_resolve_authenticated_member_request",
+            return_value=(authenticated_member(), ()),
+        ), patch.object(
+            oauth_callback,
+            "_exchange_google_code",
+            return_value=({"access_token": "provider-token"}, None),
+        ), patch.object(
+            oauth_callback,
+            "_fetch_verified_google_identity",
+            return_value=(
+                {"email": "verified@gmail.com", "display_name": "Verified"},
+                None,
             ),
-            altered("email", "other@gmail.com"),
-            altered("oauthOwnerEmail", "other@example.com"),
-            lambda record: BoundaryResponse(b"x" * (oauth_callback.MAX_OAUTH_RESPONSE_BYTES + 1)),
-        ]
-        for mutation in mutations:
-            with self.subTest(mutation=mutation):
-                error = run_with_mutation(mutation)
-            self.assertEqual(error["code"], "user_config_persistence_failed")
-
-        with patch.dict(oauth_callback.os.environ, environment, clear=False), patch.object(
+        ), patch.object(
             oauth_callback,
+            "_resolve_durable_store_config",
+            return_value={
+                "backend": "vercel_kv_rest",
+                "rest_url": "https://kv.example",
+                "rest_token": "secret",
+            },
+        ), patch.object(
+            oauth_callback,
+            "persist_google_token_record",
+            return_value=(
+                {
+                    "_storage_durable": True,
+                    "provider": "google",
+                    "email": "verified@gmail.com",
+                    "owner_email": "owner@example.com",
+                },
+                None,
+            ),
+        ) as token_store, patch.object(
+            oauth_callback.user_config_store,
+            "read_user_config_record",
+            return_value={
+                "status": "ok",
+                "config": config,
+                "error": None,
+            },
+        ) as config_read, patch.object(
+            oauth_callback.user_config_store,
+            "write_user_config_record_if_unchanged",
+            return_value={
+                "status": "conflict",
+                "record": None,
+                "error": {
+                    "code": "user_config_write_conflict",
+                    "message": "still changing",
+                },
+            },
+        ) as config_cas, patch.object(
+            oauth_callback.user_config_store,
+            "write_user_config_record_if_missing",
+        ) as config_create, patch.object(
+            oauth_callback.user_config_store,
+            "write_user_config_record",
+        ) as blind_config_write:
+            oauth_callback.handler.do_GET(callback)
+
+        token_store.assert_called_once()
+        self.assertEqual(
+            config_read.call_count,
+            1 + oauth_callback.MAX_GMAIL_USER_CONFIG_WRITE_ATTEMPTS,
+        )
+        self.assertEqual(
+            config_cas.call_count,
+            oauth_callback.MAX_GMAIL_USER_CONFIG_WRITE_ATTEMPTS,
+        )
+        config_create.assert_not_called()
+        blind_config_write.assert_not_called()
+        self.assertEqual(config["managedInboxes"], [])
+        response = callback._send_callback_page.call_args.args[0]
+        self.assertEqual(response["status"], "error")
+        self.assertEqual(response["inboxPosition"], "main")
+        self.assertEqual(response["email"], "verified@gmail.com")
+        self.assertNotIn("mailboxId", response)
+        self.assertNotIn("provider-token", json.dumps(response))
+        self.assertNotIn("connected", response)
+        self.assertEqual(
+            logger.warning.call_args.args[0],
+            "event=gmail_oauth_callback_failure "
+            "failure_code=user_config_write_failed provider=google "
+            "inbox_position=main",
+        )
+
+    def test_config_write_uses_real_shared_eval_cas_and_exact_readback(self):
+        environment = {
+            "KV_REST_API_URL": "https://kv.example",
+            "KV_REST_API_TOKEN": "kv-secret",
+        }
+        stored_record = {
+            "v": 1,
+            "email": "owner@example.com",
+            "managedInboxes": [],
+            "preserved": {"value": True},
+        }
+        calls = []
+        commands = []
+
+        def transport(request, timeout):
+            nonlocal stored_record
+            self.assertEqual(timeout, 20)
+            calls.append((request.get_method(), request.full_url))
+            if request.get_method() == "GET":
+                return BoundaryResponse(
+                    json.dumps({"result": json.dumps(stored_record)})
+                )
+
+            command = json.loads(request.data)
+            commands.append(command)
+            self.assertEqual(request.full_url, "https://kv.example")
+            self.assertEqual(command[0], "EVAL")
+            self.assertEqual(command[2], 1)
+            self.assertEqual(
+                command[3],
+                oauth_callback.user_config_store.build_user_config_key(
+                    "owner@example.com"
+                ),
+            )
+            self.assertEqual(json.loads(command[4]), stored_record)
+            stored_record = json.loads(command[5])
+            return BoundaryResponse('{"result":"saved"}')
+
+        with patch.dict(
+            oauth_callback.os.environ,
+            environment,
+            clear=False,
+        ), patch.object(
+            oauth_callback.user_config_store,
             "urlopen",
-            side_effect=TimeoutError("raw timeout detail"),
-        ):
+            side_effect=transport,
+        ), patch.object(
+            oauth_callback.user_config_store,
+            "write_user_config_record",
+        ) as blind_config_write:
             error = oauth_callback._upsert_gmail_managed_inbox_in_user_config(
                 authenticated_member(),
                 email="verified@gmail.com",
@@ -6227,8 +7657,176 @@ class OAuthAndConfigTests(unittest.TestCase):
                 owner_email="owner@example.com",
                 message="Connected",
             )
-        self.assertEqual(error["code"], "user_config_persistence_failed")
-        self.assertNotIn("raw timeout", json.dumps(error))
+
+        self.assertIsNone(error)
+        self.assertEqual(
+            [method for method, _url in calls],
+            ["GET", "POST", "GET"],
+        )
+        self.assertEqual(len(commands), 1)
+        blind_config_write.assert_not_called()
+        self.assertEqual(stored_record["preserved"], {"value": True})
+        self.assertEqual(
+            stored_record["managedInboxes"][0]["email"],
+            "verified@gmail.com",
+        )
+
+    def test_config_readback_rejects_missing_stale_email_and_owner(self):
+        base_config = {
+            "v": 1,
+            "email": "owner@example.com",
+            "managedInboxes": [],
+            "preservedAfterCas": {
+                "customImapMailboxId": "imap-server-owned",
+                "preferences": {"focus": "high"},
+            },
+        }
+
+        def run_with_readback(readback_builder):
+            replacement = None
+            read_count = 0
+
+            def read_record(_store, _owner_email):
+                nonlocal read_count
+                read_count += 1
+                if read_count == 1:
+                    return {
+                        "status": "ok",
+                        "config": json.loads(json.dumps(base_config)),
+                        "error": None,
+                    }
+                return readback_builder(
+                    json.loads(json.dumps(replacement))
+                )
+
+            def compare_and_set(
+                _store,
+                _owner_email,
+                expected,
+                next_record,
+            ):
+                nonlocal replacement
+                self.assertEqual(expected, base_config)
+                replacement = json.loads(json.dumps(next_record))
+                return {
+                    "status": "ok",
+                    "record": replacement,
+                    "error": None,
+                }
+
+            with patch.object(
+                oauth_callback,
+                "_resolve_durable_store_config",
+                return_value={
+                    "backend": "vercel_kv_rest",
+                    "rest_url": "https://kv.example",
+                    "rest_token": "secret",
+                },
+            ), patch.object(
+                oauth_callback.user_config_store,
+                "read_user_config_record",
+                side_effect=read_record,
+            ), patch.object(
+                oauth_callback.user_config_store,
+                "write_user_config_record_if_unchanged",
+                side_effect=compare_and_set,
+            ), patch.object(
+                oauth_callback.user_config_store,
+                "write_user_config_record_if_missing",
+            ) as config_create, patch.object(
+                oauth_callback.user_config_store,
+                "write_user_config_record",
+            ) as blind_config_write:
+                result = (
+                    oauth_callback._upsert_gmail_managed_inbox_in_user_config(
+                        authenticated_member(),
+                        email="verified@gmail.com",
+                        display_name="Verified",
+                        owner_email="owner@example.com",
+                        message="Connected",
+                    )
+                )
+
+            config_create.assert_not_called()
+            blind_config_write.assert_not_called()
+            return result
+
+        def without_mailbox(record):
+            record["managedInboxes"] = []
+            return {"status": "ok", "config": record, "error": None}
+
+        def stale_timestamp(record):
+            record["updatedAt"] = "2000-01-01T00:00:00Z"
+            return {"status": "ok", "config": record, "error": None}
+
+        def altered_mailbox(field, value):
+            def build(record):
+                record["managedInboxes"][0][field] = value
+                return {"status": "ok", "config": record, "error": None}
+
+            return build
+
+        def drops_unrelated_field(record):
+            record.pop("preservedAfterCas")
+            return {"status": "ok", "config": record, "error": None}
+
+        cases = (
+            (
+                "missing",
+                lambda _record: {
+                    "status": "missing",
+                    "config": None,
+                    "error": None,
+                },
+                "user_config_readback_failed",
+            ),
+            (
+                "unavailable",
+                lambda _record: {
+                    "status": "unavailable",
+                    "config": None,
+                    "error": {
+                        "code": "user_config_store_unavailable",
+                        "message": "private outage",
+                    },
+                },
+                "user_config_readback_failed",
+            ),
+            (
+                "missing_mailbox",
+                without_mailbox,
+                "mailbox_readback_verification_failed",
+            ),
+            (
+                "stale_timestamp",
+                stale_timestamp,
+                "mailbox_readback_verification_failed",
+            ),
+            (
+                "dropped_unrelated_field",
+                drops_unrelated_field,
+                "mailbox_readback_verification_failed",
+            ),
+            (
+                "wrong_email",
+                altered_mailbox("email", "other@gmail.com"),
+                "mailbox_readback_verification_failed",
+            ),
+            (
+                "wrong_owner",
+                altered_mailbox("oauthOwnerEmail", "other@example.com"),
+                "mailbox_readback_verification_failed",
+            ),
+        )
+        for name, builder, diagnostic_code in cases:
+            with self.subTest(case=name):
+                error = run_with_readback(builder)
+            self.assertEqual(error["code"], "user_config_persistence_failed")
+            self.assertEqual(
+                error[oauth_callback.GMAIL_CALLBACK_FAILURE_CODE_FIELD],
+                diagnostic_code,
+            )
+            self.assertNotIn("private", json.dumps(error))
 
     def test_real_callback_transport_chain_requires_config_persistence_before_success(self):
         environment = {
@@ -6242,9 +7840,14 @@ class OAuthAndConfigTests(unittest.TestCase):
             "KV_REST_API_TOKEN": "kv-secret",
         }
 
-        def run_callback(*, config_ack="OK"):
+        def run_callback(*, config_ack="saved"):
             state, _ = connect_oauth.build_signed_state(
-                "google", "hint@gmail.com", "owner@example.com", "state-secret"
+                "google",
+                "hint@gmail.com",
+                "owner@example.com",
+                "state-secret",
+                member_user_id="user-1",
+                member_workspace_id="workspace-1",
             )
             callback = Mock()
             callback.path = f"/api/inboxes/oauth-callback?code=provider-code&state={state}"
@@ -6277,18 +7880,43 @@ class OAuthAndConfigTests(unittest.TestCase):
                         )
                     )
                 if "cuevion%3Agmail%3Aoauthtoken" in url:
-                    if request.get_method() == "POST":
-                        token_record = json.loads(request.data)
-                        return BoundaryResponse('{"result":"OK"}')
+                    self.assertEqual(request.get_method(), "GET")
                     return BoundaryResponse(
                         json.dumps(
                             {"result": json.dumps(token_record) if token_record else None}
                         )
                     )
+                if (
+                    url == "https://kv.example"
+                    and request.get_method() == "POST"
+                ):
+                    command = json.loads(request.data)
+                    self.assertEqual(command[0], "EVAL")
+                    self.assertEqual(command[2], 1)
+                    if command[3].startswith(
+                        "cuevion:gmail:oauthtoken:"
+                    ):
+                        self.assertEqual(
+                            command[1],
+                            oauth_callback.GOOGLE_TOKEN_CREATE_IF_MISSING_SCRIPT,
+                        )
+                        if token_record is not None:
+                            return BoundaryResponse('{"result":0}')
+                        token_record = json.loads(command[4])
+                        return BoundaryResponse('{"result":1}')
+                    self.assertEqual(
+                        command[3],
+                        oauth_callback.user_config_store.build_user_config_key(
+                            "owner@example.com"
+                        ),
+                    )
+                    if config_ack == "saved":
+                        config_record = json.loads(command[4])
+                    return BoundaryResponse(
+                        json.dumps({"result": config_ack})
+                    )
                 if "cuevion%3Auser%3Av1" in url:
-                    if request.get_method() == "POST":
-                        config_record = json.loads(request.data)
-                        return BoundaryResponse(json.dumps({"result": config_ack}))
+                    self.assertEqual(request.get_method(), "GET")
                     return BoundaryResponse(
                         json.dumps(
                             {"result": json.dumps(config_record) if config_record else None}
@@ -6302,6 +7930,10 @@ class OAuthAndConfigTests(unittest.TestCase):
                 return_value=(authenticated_member(), ()),
             ), patch.object(
                 oauth_callback,
+                "urlopen",
+                side_effect=transport,
+            ), patch.object(
+                oauth_callback.user_config_store,
                 "urlopen",
                 side_effect=transport,
             ):
@@ -6320,10 +7952,10 @@ class OAuthAndConfigTests(unittest.TestCase):
             "owner@example.com",
         )
 
-        failure, _, _ = run_callback(config_ack="STALE")
+        failure, _, _ = run_callback(config_ack="exists")
         self.assertEqual(failure["status"], "error")
         self.assertNotIn("mailboxId", failure)
-        self.assertNotIn("STALE", json.dumps(failure))
+        self.assertNotIn("exists", json.dumps(failure))
         self.assertNotIn("access-secret", json.dumps(failure))
 
     def test_public_config_cannot_claim_or_replace_google_identity(self):

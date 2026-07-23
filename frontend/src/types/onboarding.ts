@@ -69,6 +69,7 @@ export interface CustomSmtpSettings {
 }
 
 export interface InboxConnection {
+  serverMailboxId?: string | null;
   provider: ProviderId | null;
   email: string;
   connected: boolean;

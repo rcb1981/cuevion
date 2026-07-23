@@ -1,11 +1,23 @@
 import { onboardingText } from "../../copy/onboardingCopy";
 
+export function invokeNavigationAction(
+  disabled: boolean,
+  action: () => void,
+) {
+  if (disabled) {
+    return false;
+  }
+  action();
+  return true;
+}
+
 interface NavigationBarProps {
   canGoBack: boolean;
   backLabel?: string;
   nextLabel: string;
   onBack: () => void;
   onNext: () => void;
+  isBackDisabled?: boolean;
   isNextDisabled?: boolean;
 }
 
@@ -15,6 +27,7 @@ export function NavigationBar({
   nextLabel,
   onBack,
   onNext,
+  isBackDisabled = false,
   isNextDisabled = false,
 }: NavigationBarProps) {
   const primaryActionClass =
@@ -25,8 +38,12 @@ export function NavigationBar({
       {canGoBack ? (
         <button
           type="button"
-          onClick={onBack}
-          className={primaryActionClass}
+          data-attempt-control="back"
+          onClick={() =>
+            invokeNavigationAction(isBackDisabled, onBack)
+          }
+          disabled={isBackDisabled}
+          className={`${primaryActionClass} disabled:cursor-not-allowed disabled:bg-ink/30 disabled:hover:bg-ink/30`}
         >
           {backLabel}
         </button>
@@ -35,6 +52,7 @@ export function NavigationBar({
       )}
       <button
         type="button"
+        data-attempt-control="next"
         onClick={onNext}
         disabled={isNextDisabled}
         className={`${primaryActionClass} disabled:cursor-not-allowed disabled:bg-ink/30 disabled:hover:bg-ink/30`}

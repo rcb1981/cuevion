@@ -25,6 +25,7 @@ type UserAccountConfigError = {
 
 type UserAccountConfigErrorStatus =
   | "unavailable"
+  | "conflict"
   | "invalid"
   | "unauthorized"
   | "authentication_unavailable"
@@ -129,6 +130,19 @@ function serializeUserAccountConfig(config: UserAccountConfig): {
   } catch {
     return null;
   }
+}
+
+export function projectWorkspaceUserAccountConfigForSave(
+  config: UserAccountConfig,
+): UserAccountConfig {
+  const {
+    v: _schemaVersion,
+    email: _ownerEmail,
+    updatedAt: _updatedAt,
+    onboardingSession: _onboardingSession,
+    ...clientWritableConfig
+  } = config;
+  return clientWritableConfig;
 }
 
 export function setUserAccountConfigHydrationEchoExpectation(
@@ -252,6 +266,10 @@ function classifyHttpError(
     return { status: "unavailable", error };
   }
 
+  if (status === 409 && error.code === "user_config_write_conflict") {
+    return { status: "conflict", error };
+  }
+
   if (
     error.code === "config_invalid" ||
     status === 400 ||
@@ -288,20 +306,25 @@ function parseSaveSuccess(payload: unknown): UserAccountConfigSaveResult {
 
 async function requestUserAccountConfig(
   method: "GET",
+  serializedBody?: undefined,
+  signal?: AbortSignal,
 ): Promise<UserAccountConfigReadResult>;
 async function requestUserAccountConfig(
   method: "POST",
   serializedBody: string,
+  signal?: undefined,
 ): Promise<UserAccountConfigSaveResult>;
 async function requestUserAccountConfig(
   method: "GET" | "POST",
   serializedBody?: string,
+  signal?: AbortSignal,
 ): Promise<UserAccountConfigReadResult> {
   const operation: UserConfigOperation = method === "GET" ? "loaded" : "saved";
   const request: RequestInit = {
     method,
     credentials: "include",
     ...(method === "GET" ? { cache: "no-store" as const } : {}),
+    ...(signal ? { signal } : {}),
   };
 
   if (method === "POST") {
@@ -333,8 +356,104 @@ async function requestUserAccountConfig(
   return method === "GET" ? parseLoadSuccess(payload) : parseSaveSuccess(payload);
 }
 
-export function loadUserAccountConfig(): Promise<UserAccountConfigReadResult> {
-  return requestUserAccountConfig("GET");
+export function loadUserAccountConfig(
+  signal?: AbortSignal,
+): Promise<UserAccountConfigReadResult> {
+  return requestUserAccountConfig("GET", undefined, signal);
+}
+
+export function createUserAccountConfigConflictRetryQueue({
+  save = saveUserAccountConfig,
+  scheduleRetry = (callback, delayMs) => window.setTimeout(callback, delayMs),
+  cancelRetry = (handle) => window.clearTimeout(handle),
+}: {
+  save?: (config: UserAccountConfig) => Promise<UserAccountConfigSaveResult>;
+  scheduleRetry?: (callback: () => void, delayMs: number) => number;
+  cancelRetry?: (handle: number) => void;
+} = {}) {
+  const conflictRetryDelaysMs = [120, 320] as const;
+  let generation = 0;
+  let operationTail: Promise<void> = Promise.resolve();
+  let retryHandle: number | null = null;
+  let dirty = false;
+
+  const clearRetry = () => {
+    if (retryHandle === null) {
+      return;
+    }
+    cancelRetry(retryHandle);
+    retryHandle = null;
+  };
+
+  const queueAttempt = (
+    config: UserAccountConfig,
+    requestGeneration: number,
+    conflictRetryCount: number,
+  ) => {
+    operationTail = operationTail.then(async () => {
+      if (requestGeneration !== generation) {
+        return;
+      }
+
+      let result: UserAccountConfigSaveResult;
+      try {
+        result = await save(config);
+      } catch {
+        return;
+      }
+      if (requestGeneration !== generation) {
+        return;
+      }
+      if (result.status === "found") {
+        dirty = false;
+        return;
+      }
+
+      dirty = true;
+      const delayMs = conflictRetryDelaysMs[conflictRetryCount];
+      if (
+        result.status !== "conflict" ||
+        result.error.code !== "user_config_write_conflict" ||
+        delayMs === undefined
+      ) {
+        return;
+      }
+
+      clearRetry();
+      const handle = scheduleRetry(() => {
+        if (
+          retryHandle !== handle ||
+          requestGeneration !== generation
+        ) {
+          return;
+        }
+        retryHandle = null;
+        queueAttempt(config, requestGeneration, conflictRetryCount + 1);
+      }, delayMs);
+      retryHandle = handle;
+    });
+  };
+
+  return {
+    enqueue(config: UserAccountConfig) {
+      generation += 1;
+      clearRetry();
+      dirty = true;
+      queueAttempt(config, generation, 0);
+    },
+    supersede() {
+      generation += 1;
+      clearRetry();
+    },
+    cancel() {
+      generation += 1;
+      clearRetry();
+      dirty = false;
+    },
+    isDirty() {
+      return dirty;
+    },
+  };
 }
 
 export function saveUserAccountConfig(

@@ -21,10 +21,18 @@ import {
   sanitizeStoredMailboxCredentialJson,
 } from "./lib/mailboxCredentialPersistence";
 import {
+  doesCustomImapOnboardingSnapshotMatchState,
+  type CustomImapOnboardingAttemptSnapshot,
+  type CustomImapOnboardingReconciliationResult,
+} from "./lib/customImapOnboardingAttempt";
+import {
   ONBOARDING_STEP_MAX,
   ONBOARDING_STEP_MIN,
   clampOnboardingStep,
   normalizeFocusPreferences,
+  type CustomImapSettings,
+  type CustomSmtpSettings,
+  type InboxId,
   type OnboardingChoices,
   type OnboardingSessionV1,
   type OnboardingState,
@@ -244,11 +252,14 @@ type AccountConfigSaveQueueRequest = {
   accountKey: string;
   revision: number;
   config: UserAccountConfig;
+  conflictRetryCount: number;
 };
 
 function createAccountConfigSaveQueue({
   save = saveUserAccountConfig,
   onClean,
+  scheduleRetry = (callback, delayMs) => window.setTimeout(callback, delayMs),
+  cancelRetry = (handle) => window.clearTimeout(handle),
 }: {
   save?: (config: UserAccountConfig) => Promise<UserAccountConfigSaveResult>;
   onClean?: (saved: {
@@ -256,13 +267,73 @@ function createAccountConfigSaveQueue({
     revision: number;
     config: UserAccountConfig;
   }) => void;
+  scheduleRetry?: (callback: () => void, delayMs: number) => number;
+  cancelRetry?: (handle: number) => void;
 } = {}) {
+  const conflictRetryDelaysMs = [120, 320] as const;
   let activeAccountKey = "";
   let generation = 0;
   let isSaving = false;
   let dirty = false;
   let latestRevision = 0;
   let pendingRequest: AccountConfigSaveQueueRequest | null = null;
+  let scheduledRetry:
+    | {
+        handle: number;
+        request: AccountConfigSaveQueueRequest;
+        generation: number;
+      }
+    | null = null;
+
+  const clearScheduledRetry = () => {
+    if (!scheduledRetry) {
+      return;
+    }
+    cancelRetry(scheduledRetry.handle);
+    scheduledRetry = null;
+  };
+
+  const scheduleConflictRetry = (
+    request: AccountConfigSaveQueueRequest,
+    requestGeneration: number,
+  ) => {
+    const delayMs = conflictRetryDelaysMs[request.conflictRetryCount];
+    if (delayMs === undefined) {
+      return false;
+    }
+
+    clearScheduledRetry();
+    const retryRequest = {
+      ...request,
+      conflictRetryCount: request.conflictRetryCount + 1,
+    };
+    const handle = scheduleRetry(() => {
+      const currentRetry = scheduledRetry;
+      if (
+        !currentRetry ||
+        currentRetry.handle !== handle ||
+        currentRetry.generation !== generation ||
+        currentRetry.request.accountKey !== activeAccountKey
+      ) {
+        return;
+      }
+
+      scheduledRetry = null;
+      if (
+        !pendingRequest ||
+        pendingRequest.revision <= currentRetry.request.revision
+      ) {
+        pendingRequest = currentRetry.request;
+      }
+      void drain();
+    }, delayMs);
+    scheduledRetry = {
+      handle,
+      request: retryRequest,
+      generation: requestGeneration,
+    };
+    return true;
+  };
 
   const drain = async () => {
     if (isSaving || !pendingRequest) {
@@ -276,9 +347,13 @@ function createAccountConfigSaveQueue({
 
     let success = false;
     let savedConfig: UserAccountConfig | null = null;
+    let retryableConflict = false;
     try {
       const result = await save(request.config);
       success = result.status === "found";
+      retryableConflict =
+        result.status === "conflict" &&
+        result.error.code === "user_config_write_conflict";
       if (result.status === "found") {
         savedConfig = result.config;
       }
@@ -303,6 +378,14 @@ function createAccountConfigSaveQueue({
       pendingRequest !== null ||
       request.revision < latestRevision;
 
+    if (
+      retryableConflict &&
+      pendingRequest === null &&
+      request.revision === latestRevision
+    ) {
+      scheduleConflictRetry(request, requestGeneration);
+    }
+
     if (success && !dirty) {
       try {
         onClean?.({
@@ -321,8 +404,17 @@ function createAccountConfigSaveQueue({
   };
 
   return {
+    cancel() {
+      generation += 1;
+      clearScheduledRetry();
+      activeAccountKey = "";
+      dirty = false;
+      latestRevision = 0;
+      pendingRequest = null;
+    },
     reset(accountKey: string) {
       generation += 1;
+      clearScheduledRetry();
       activeAccountKey = accountKey;
       dirty = false;
       latestRevision = 0;
@@ -333,6 +425,7 @@ function createAccountConfigSaveQueue({
         return null;
       }
 
+      clearScheduledRetry();
       latestRevision += 1;
       dirty = true;
       return latestRevision;
@@ -343,7 +436,7 @@ function createAccountConfigSaveQueue({
     enqueue({
       accountKey,
       config,
-    }: Omit<AccountConfigSaveQueueRequest, "revision">) {
+    }: Omit<AccountConfigSaveQueueRequest, "revision" | "conflictRetryCount">) {
       if (
         !accountKey ||
         accountKey !== activeAccountKey ||
@@ -353,10 +446,12 @@ function createAccountConfigSaveQueue({
         return false;
       }
 
+      clearScheduledRetry();
       pendingRequest = {
         accountKey,
         revision: latestRevision,
         config,
+        conflictRetryCount: 0,
       };
       void drain();
       return true;
@@ -1264,13 +1359,17 @@ function readStoredManagedWorkspaceInboxes(
 
   try {
     const migrated = sanitizeStoredMailboxCredentialJson(storedValue);
-    if (persistSanitizedValue && migrated.rewriteRequired && migrated.serialized) {
-      storage.setItem(MANAGED_INBOXES_STORAGE_KEY, migrated.serialized);
+    if (!Array.isArray(migrated.value)) {
+      return { status: "invalid", value: [] };
     }
-    const parsed = migrated.value as StoredManagedWorkspaceInbox[];
-    return Array.isArray(parsed)
-      ? { status: "valid", value: parsed }
-      : { status: "invalid", value: [] };
+    const sanitized = sanitizeManagedInboxesForBrowserStorage(
+      migrated.value as StoredManagedWorkspaceInbox[],
+    );
+    const serialized = JSON.stringify(sanitized);
+    if (persistSanitizedValue && serialized !== storedValue) {
+      storage.setItem(MANAGED_INBOXES_STORAGE_KEY, serialized);
+    }
+    return { status: "valid", value: sanitized };
   } catch {
     return { status: "invalid", value: [] };
   }
@@ -1281,6 +1380,19 @@ function parseStoredManagedWorkspaceInboxes(
   storage: AccountConfigStorage = window.localStorage,
 ): StoredManagedWorkspaceInbox[] {
   return readStoredManagedWorkspaceInboxes(persistSanitizedValue, storage).value;
+}
+
+function scrubManagedInboxBrowserStorage(
+  storage: AccountConfigStorage = window.localStorage,
+) {
+  try {
+    const result = readStoredManagedWorkspaceInboxes(true, storage);
+    if (result.status === "invalid") {
+      storage.removeItem(MANAGED_INBOXES_STORAGE_KEY);
+    }
+  } catch {
+    // Storage availability must not block startup.
+  }
 }
 
 function parseDisplayNameOverrides(): DisplayNameOverrideStore {
@@ -1360,7 +1472,7 @@ function sanitizeOnboardingSessionForAccountConfig(
 function sanitizeManagedInboxesForAccountConfig(
   managedInboxes: StoredManagedWorkspaceInbox[],
 ): StoredManagedWorkspaceInbox[] {
-  return sanitizeManagedInboxCredentials(managedInboxes) as StoredManagedWorkspaceInbox[];
+  return sanitizeManagedInboxesForBrowserStorage(managedInboxes);
 }
 
 function normalizeStoredWorkspaceThemeMode(value: unknown): "Light" | "Dark" | "System" | null {
@@ -1478,12 +1590,533 @@ function getServerManagedInboxesForHydration(
     : [];
 }
 
+function isValidServerManagedInboxId(value: string) {
+  return (
+    !value.toLowerCase().startsWith("draft-") &&
+    /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value)
+  );
+}
+
+const unsafeMailboxMetadataFields = new Set([
+  "password",
+  "imappassword",
+  "smtppassword",
+  "encryptedpassword",
+  "ciphertext",
+  "nonce",
+  "salt",
+  "keymaterial",
+  "credentialid",
+  "credentialreference",
+  "credentialrecord",
+  "rawcredentialrecord",
+  "secret",
+  "encryptedsecret",
+  "secretkey",
+  "secretstorekey",
+  "encryptionkey",
+  "token",
+  "authorization",
+  "authorizationheader",
+  "authtoken",
+  "accesstoken",
+  "refreshtoken",
+  "idtoken",
+  "session",
+  "sessionid",
+  "cookie",
+  "credentialversion",
+  "secretversion",
+  "credentialgeneration",
+  "secretgeneration",
+  "credentialrevision",
+  "secretrevision",
+  "archive",
+  "archived",
+  "attachment",
+  "attachments",
+  "body",
+  "bodyhtml",
+  "content",
+  "contentbase64",
+  "draft",
+  "drafts",
+  "file",
+  "filebytes",
+  "filecontent",
+  "filedata",
+  "files",
+  "inbox",
+  "inboxes",
+  "invite",
+  "invites",
+  "liveinboxsnapshots",
+  "mailboxstore",
+  "messages",
+  "oauthcallback",
+  "oauthcallbackstate",
+  "readstate",
+  "sent",
+  "snapshot",
+  "snapshots",
+  "spam",
+  "trash",
+  "unread",
+]);
+const safeManagedMailboxFields = new Set([
+  "id",
+  "onboardingInboxId",
+  "title",
+  "email",
+  "provider",
+  "connected",
+  "connectionMethod",
+  "connectionStatus",
+  "connectionMessage",
+  "oauthAuthorizationUrl",
+  "customImap",
+  "customSmtp",
+  "internalRole",
+  "focusPreferences",
+]);
+const safeManagedCustomImapFields = new Set([
+  "host",
+  "port",
+  "ssl",
+  "username",
+  "password",
+]);
+const safeManagedCustomSmtpFields = new Set([
+  "host",
+  "port",
+  "security",
+  "username",
+  "password",
+  "useSameCredentials",
+]);
+
+function containsUnsafeMailboxMetadata(
+  value: unknown,
+  parentField = "",
+): boolean {
+  if (Array.isArray(value)) {
+    return value.some((item) => containsUnsafeMailboxMetadata(item));
+  }
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  return Object.entries(value as Record<string, unknown>).some(([key, item]) => {
+    return (
+      isUnsafeMailboxMetadataEntry(key, item, parentField) ||
+      containsUnsafeMailboxMetadata(item, key)
+    );
+  });
+}
+
+function isUnsafeMailboxMetadataEntry(
+  key: string,
+  item: unknown,
+  parentField: string,
+) {
+  const compactKey = key.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const isAllowedEmptyPassword =
+    key === "password" &&
+    item === "" &&
+    (parentField === "customImap" || parentField === "customSmtp");
+  const isAllowedSameCredentialsFlag =
+    key === "useSameCredentials" &&
+    parentField === "customSmtp" &&
+    typeof item === "boolean";
+  const isAllowedNullOauthAuthorizationUrl =
+    key === "oauthAuthorizationUrl" &&
+    (item === null || item === undefined);
+  const isCredentialLifecycleMetadata =
+    (compactKey.includes("credential") ||
+      compactKey.includes("secret")) &&
+    (compactKey.includes("version") ||
+      compactKey.includes("generation") ||
+      compactKey.includes("revision"));
+  const containsSensitiveKeyMarker =
+    compactKey.includes("password") ||
+    compactKey.includes("secret") ||
+    compactKey.includes("token") ||
+    compactKey.includes("authorization") ||
+    compactKey.includes("authheader") ||
+    compactKey.includes("credential") ||
+    compactKey.includes("ciphertext") ||
+    compactKey.includes("keymaterial") ||
+    compactKey.includes("session") ||
+    compactKey.includes("cookie");
+  return (
+    !isAllowedEmptyPassword &&
+    !isAllowedSameCredentialsFlag &&
+    !isAllowedNullOauthAuthorizationUrl &&
+    (unsafeMailboxMetadataFields.has(compactKey) ||
+      containsSensitiveKeyMarker ||
+      isCredentialLifecycleMetadata)
+  );
+}
+
+function projectCustomImapForBrowserStorage(
+  value: unknown,
+): Record<string, unknown> | undefined {
+  if (!isPlainRecord(value)) {
+    return undefined;
+  }
+  const projected: Record<string, unknown> = {};
+  for (const field of ["host", "port", "username"] as const) {
+    if (typeof value[field] === "string") {
+      projected[field] = value[field];
+    }
+  }
+  if (typeof value.ssl === "boolean") {
+    projected.ssl = value.ssl;
+  }
+  if (hasOwn(value, "password")) {
+    projected.password = "";
+  }
+  return projected;
+}
+
+function projectCustomSmtpForBrowserStorage(
+  value: unknown,
+): Record<string, unknown> | undefined {
+  if (!isPlainRecord(value)) {
+    return undefined;
+  }
+  const projected: Record<string, unknown> = {};
+  for (const field of ["host", "port", "username"] as const) {
+    if (typeof value[field] === "string") {
+      projected[field] = value[field];
+    }
+  }
+  if (value.security === "ssl" || value.security === "starttls") {
+    projected.security = value.security;
+  }
+  if (typeof value.useSameCredentials === "boolean") {
+    projected.useSameCredentials = value.useSameCredentials;
+  }
+  if (hasOwn(value, "password")) {
+    projected.password = "";
+  }
+  return projected;
+}
+
+function projectFocusPreferencesForBrowserStorage(
+  value: unknown,
+): Record<string, string> | undefined {
+  if (!isPlainRecord(value)) {
+    return undefined;
+  }
+  return Object.fromEntries(
+    ONBOARDING_FOCUS_KEYS.flatMap((field) => {
+      const level = value[field];
+      return typeof level === "string" &&
+        LEGACY_ONBOARDING_FOCUS_LEVELS.has(level)
+        ? [[field, level]]
+        : [];
+    }),
+  );
+}
+
+function projectManagedInboxForBrowserStorage(
+  mailbox: unknown,
+): StoredManagedWorkspaceInbox | null {
+  if (!isPlainRecord(mailbox)) {
+    return null;
+  }
+  const id = typeof mailbox.id === "string" ? mailbox.id : "";
+  if (!id.trim()) {
+    return null;
+  }
+
+  const projected: Record<string, unknown> = { id };
+  for (const field of ["title", "email"] as const) {
+    if (typeof mailbox[field] === "string") {
+      projected[field] = mailbox[field];
+    }
+  }
+  if (
+    typeof mailbox.onboardingInboxId === "string" &&
+    isInboxId(mailbox.onboardingInboxId)
+  ) {
+    projected.onboardingInboxId = mailbox.onboardingInboxId;
+  }
+  if (
+    mailbox.provider === null ||
+    mailbox.provider === "google" ||
+    mailbox.provider === "microsoft" ||
+    mailbox.provider === "icloud" ||
+    mailbox.provider === "yahoo" ||
+    mailbox.provider === "custom_imap"
+  ) {
+    projected.provider = mailbox.provider;
+  }
+  if (typeof mailbox.connected === "boolean") {
+    projected.connected = mailbox.connected;
+  }
+  if (
+    mailbox.connectionMethod === null ||
+    mailbox.connectionMethod === "imap" ||
+    mailbox.connectionMethod === "oauth"
+  ) {
+    projected.connectionMethod = mailbox.connectionMethod;
+  }
+  if (
+    mailbox.connectionStatus === "not_connected" ||
+    mailbox.connectionStatus === "oauth_required" ||
+    mailbox.connectionStatus === "waiting_for_authentication" ||
+    mailbox.connectionStatus ===
+      "authenticated_pending_activation" ||
+    mailbox.connectionStatus === "connected" ||
+    mailbox.connectionStatus === "connection_failed"
+  ) {
+    projected.connectionStatus = mailbox.connectionStatus;
+  }
+  if (
+    mailbox.connectionMessage === null ||
+    typeof mailbox.connectionMessage === "string"
+  ) {
+    projected.connectionMessage = mailbox.connectionMessage;
+  }
+  if (mailbox.oauthAuthorizationUrl === null) {
+    projected.oauthAuthorizationUrl = null;
+  }
+
+  const customImap = projectCustomImapForBrowserStorage(
+    mailbox.customImap,
+  );
+  if (customImap) {
+    projected.customImap = customImap;
+  }
+  const customSmtp = projectCustomSmtpForBrowserStorage(
+    mailbox.customSmtp,
+  );
+  if (customSmtp) {
+    projected.customSmtp = customSmtp;
+  }
+  if (
+    mailbox.internalRole === null ||
+    (typeof mailbox.internalRole === "string" &&
+      ONBOARDING_INTERNAL_ROLES.has(mailbox.internalRole))
+  ) {
+    projected.internalRole = mailbox.internalRole;
+  }
+  const focusPreferences =
+    projectFocusPreferencesForBrowserStorage(
+      mailbox.focusPreferences,
+    );
+  if (focusPreferences) {
+    projected.focusPreferences = focusPreferences;
+  }
+  return projected as StoredManagedWorkspaceInbox;
+}
+
+function sanitizeManagedInboxesForBrowserStorage(
+  managedInboxes: StoredManagedWorkspaceInbox[],
+): StoredManagedWorkspaceInbox[] {
+  return managedInboxes.flatMap((mailbox) => {
+    const projected =
+      projectManagedInboxForBrowserStorage(mailbox);
+    return projected ? [projected] : [];
+  });
+}
+
+function hasOnlySafeManagedMailboxFields(
+  mailbox: StoredManagedWorkspaceInbox,
+) {
+  return Object.keys(mailbox).every((field) =>
+    safeManagedMailboxFields.has(field),
+  );
+}
+
+function hasSafeManagedMailboxSettings(
+  mailbox: StoredManagedWorkspaceInbox,
+) {
+  const customImap = mailbox.customImap;
+  if (
+    customImap !== undefined &&
+    (!isPlainRecord(customImap) ||
+      Object.keys(customImap).some(
+        (field) => !safeManagedCustomImapFields.has(field),
+      ) ||
+      (customImap.host !== undefined &&
+        typeof customImap.host !== "string") ||
+      (customImap.port !== undefined &&
+        typeof customImap.port !== "string") ||
+      (customImap.ssl !== undefined &&
+        typeof customImap.ssl !== "boolean") ||
+      (customImap.username !== undefined &&
+        typeof customImap.username !== "string") ||
+      (customImap.password !== undefined &&
+        customImap.password !== ""))
+  ) {
+    return false;
+  }
+
+  const customSmtp = mailbox.customSmtp;
+  return (
+    customSmtp === undefined ||
+    (isPlainRecord(customSmtp) &&
+      Object.keys(customSmtp).every((field) =>
+        safeManagedCustomSmtpFields.has(field),
+      ) &&
+      (customSmtp.host === undefined ||
+        typeof customSmtp.host === "string") &&
+      (customSmtp.port === undefined ||
+        typeof customSmtp.port === "string") &&
+      (customSmtp.security === undefined ||
+        customSmtp.security === "ssl" ||
+        customSmtp.security === "starttls") &&
+      (customSmtp.username === undefined ||
+        typeof customSmtp.username === "string") &&
+      (customSmtp.password === undefined ||
+        customSmtp.password === "") &&
+      (customSmtp.useSameCredentials === undefined ||
+        typeof customSmtp.useSameCredentials === "boolean"))
+  );
+}
+
+function isSafeEmptyServerCustomSmtp(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  const settings = value as Record<string, unknown>;
+  const fields = Object.keys(settings);
+  return (
+    fields.length === 0 ||
+    (fields.length === 1 && fields[0] === "password" && settings.password === "")
+  );
+}
+
+function isSafeServerCustomSmtpSettings(value: unknown) {
+  if (isSafeEmptyServerCustomSmtp(value)) {
+    return true;
+  }
+  if (
+    !isPlainRecord(value) ||
+    Object.keys(value).some(
+      (field) => !safeManagedCustomSmtpFields.has(field),
+    ) ||
+    !["host", "port", "security", "username", "useSameCredentials"].every(
+      (field) => hasOwn(value, field),
+    )
+  ) {
+    return false;
+  }
+
+  const host = typeof value.host === "string" ? value.host : "";
+  const port = typeof value.port === "string" ? value.port : "";
+  const username =
+    typeof value.username === "string" ? value.username : "";
+  const useSameCredentials = value.useSameCredentials;
+  const parsedPort = Number(port);
+  return (
+    Boolean(host) &&
+    host === host.trim() &&
+    !/\s/.test(host) &&
+    /^\d+$/.test(port) &&
+    port === port.trim() &&
+    Number.isInteger(parsedPort) &&
+    parsedPort >= 1 &&
+    parsedPort <= 65_535 &&
+    (value.security === "ssl" ||
+      value.security === "starttls") &&
+    typeof useSameCredentials === "boolean" &&
+    username === username.trim() &&
+    (useSameCredentials || Boolean(username)) &&
+    (value.password === undefined || value.password === "")
+  );
+}
+
+function projectServerCustomSmtpSettings(
+  value: unknown,
+  incomingOnlyFallback: CustomSmtpSettings,
+): CustomSmtpSettings | null {
+  if (isSafeEmptyServerCustomSmtp(value)) {
+    return {
+      ...incomingOnlyFallback,
+      password: "",
+    };
+  }
+  if (!isSafeServerCustomSmtpSettings(value) || !isPlainRecord(value)) {
+    return null;
+  }
+
+  return {
+    host: value.host as string,
+    port: value.port as string,
+    security: value.security as CustomSmtpSettings["security"],
+    username: value.username as string,
+    password: "",
+    useSameCredentials: value.useSameCredentials as boolean,
+  };
+}
+
+function parseServerCustomImapSettings(
+  value: unknown,
+): CustomImapSettings | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+
+  const settings = value as Record<string, unknown>;
+  const allowedFields = new Set(["host", "port", "ssl", "username", "password"]);
+  if (
+    Object.keys(settings).some((field) => !allowedFields.has(field)) ||
+    !["host", "port", "ssl", "username"].every((field) => hasOwn(settings, field))
+  ) {
+    return null;
+  }
+  const host = typeof settings.host === "string" ? settings.host : "";
+  const port = typeof settings.port === "string" ? settings.port : "";
+  const username =
+    typeof settings.username === "string" ? settings.username : "";
+  if (
+    !host ||
+    host !== host.trim() ||
+    /\s/.test(host) ||
+    !port ||
+    port !== port.trim() ||
+    !username ||
+    username !== username.trim() ||
+    settings.ssl !== true ||
+    ("password" in settings && settings.password !== "")
+  ) {
+    return null;
+  }
+
+  const parsedPort = Number(port);
+  if (
+    !/^\d+$/.test(port) ||
+    !Number.isInteger(parsedPort) ||
+    parsedPort < 1 ||
+    parsedPort > 65_535
+  ) {
+    return null;
+  }
+
+  return {
+    host,
+    port,
+    ssl: true,
+    username,
+    password: "",
+  };
+}
+
 function projectConnectedManagedInboxesOntoOnboardingState(
   state: OnboardingState,
   managedInboxes: StoredManagedWorkspaceInbox[],
 ): OnboardingState {
   const selectedPositions = new Set(state.selectedInboxes);
   const nextConnections = { ...state.inboxConnections };
+  const customImapCollectionIsSafe = managedInboxes.every(
+    (mailbox) =>
+      isWellFormedManagedMailboxEnvelope(mailbox) &&
+      !containsUnsafeMailboxMetadata(mailbox),
+  );
   let didProject = false;
 
   for (const inboxPosition of selectedPositions) {
@@ -1504,12 +2137,41 @@ function projectConnectedManagedInboxesOntoOnboardingState(
       mailbox.id !== mailboxId ||
       !email ||
       mailbox.email !== email ||
-      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ||
-      mailbox.provider !== "google" ||
-      mailbox.connectionMethod !== "oauth" ||
-      mailbox.connected !== true ||
-      mailbox.connectionStatus !== "connected"
+      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
     ) {
+      continue;
+    }
+
+    const isConnectedGoogleMailbox =
+      mailbox.provider === "google" &&
+      mailbox.connectionMethod === "oauth" &&
+      mailbox.connected === true &&
+      mailbox.connectionStatus === "connected";
+    const parsedCustomImap =
+      mailbox.provider === "custom_imap"
+        ? parseServerCustomImapSettings(mailbox.customImap)
+        : null;
+    const projectedCustomSmtp =
+      mailbox.provider === "custom_imap"
+        ? projectServerCustomSmtpSettings(
+            mailbox.customSmtp,
+            currentConnection.customSmtp,
+          )
+        : null;
+    const isConnectedCustomImapMailbox =
+      customImapCollectionIsSafe &&
+      isValidServerManagedInboxId(mailboxId) &&
+      isWellFormedManagedMailboxEnvelope(mailbox) &&
+      hasOnlySafeManagedMailboxFields(mailbox) &&
+      mailbox.provider === "custom_imap" &&
+      mailbox.connectionMethod === "imap" &&
+      mailbox.connected === true &&
+      mailbox.connectionStatus === "connected" &&
+      parsedCustomImap !== null &&
+      projectedCustomSmtp !== null &&
+      hasValidManagedMailboxOptionalMetadata(mailbox) &&
+      !containsUnsafeMailboxMetadata(mailbox);
+    if (!isConnectedGoogleMailbox && !isConnectedCustomImapMailbox) {
       continue;
     }
 
@@ -1527,23 +2189,267 @@ function projectConnectedManagedInboxesOntoOnboardingState(
       continue;
     }
 
-    nextConnections[inboxPosition] = {
+    nextConnections[inboxPosition] = isConnectedGoogleMailbox
+      ? {
+          ...currentConnection,
+          serverMailboxId: mailboxId,
+          provider: "google",
+          email,
+          connected: true,
+          connectionMethod: "oauth",
+          connectionStatus: "connected",
+          connectionMessage:
+            typeof mailbox.connectionMessage === "string"
+              ? mailbox.connectionMessage
+              : null,
+          oauthAuthorizationUrl: null,
+        }
+      : {
+          ...currentConnection,
+          serverMailboxId: mailboxId,
+          provider: "custom_imap",
+          email,
+          connected: true,
+          connectionMethod: "imap",
+          connectionStatus: "connected",
+          connectionMessage:
+            typeof mailbox.connectionMessage === "string"
+              ? mailbox.connectionMessage
+              : null,
+          oauthAuthorizationUrl: null,
+          customImap: parsedCustomImap!,
+          customSmtp: projectedCustomSmtp!,
+        };
+    didProject = true;
+  }
+
+  return didProject ? { ...state, inboxConnections: nextConnections } : state;
+}
+
+function isWellFormedManagedMailboxEnvelope(
+  mailbox: StoredManagedWorkspaceInbox,
+) {
+  if (!mailbox || typeof mailbox !== "object" || Array.isArray(mailbox)) {
+    return false;
+  }
+  const mailboxId =
+    typeof mailbox.id === "string" ? mailbox.id.trim() : "";
+  const email =
+    typeof mailbox.email === "string"
+      ? mailbox.email.trim().toLowerCase()
+      : "";
+  return (
+    Boolean(mailboxId) &&
+    mailbox.id === mailboxId &&
+    isValidServerManagedInboxId(mailboxId) &&
+    Boolean(email) &&
+    mailbox.email === email &&
+    /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) &&
+    (mailbox.provider === "google" ||
+      mailbox.provider === "microsoft" ||
+      mailbox.provider === "icloud" ||
+      mailbox.provider === "yahoo" ||
+      mailbox.provider === "custom_imap") &&
+    typeof mailbox.connected === "boolean" &&
+    ((mailbox.connectionMethod === "oauth" &&
+      (mailbox.provider === "google" ||
+        mailbox.provider === "microsoft")) ||
+      (mailbox.connectionMethod === "imap" &&
+        (mailbox.provider === "icloud" ||
+          mailbox.provider === "yahoo" ||
+          mailbox.provider === "custom_imap"))) &&
+    (mailbox.connectionStatus === "not_connected" ||
+      mailbox.connectionStatus === "oauth_required" ||
+      mailbox.connectionStatus === "waiting_for_authentication" ||
+      mailbox.connectionStatus ===
+        "authenticated_pending_activation" ||
+      mailbox.connectionStatus === "connected" ||
+      mailbox.connectionStatus === "connection_failed") &&
+    (mailbox.connected
+      ? mailbox.connectionStatus === "connected"
+      : mailbox.connectionStatus !== "connected") &&
+    hasOnlySafeManagedMailboxFields(mailbox) &&
+    hasSafeManagedMailboxSettings(mailbox) &&
+    hasValidManagedMailboxOptionalMetadata(mailbox) &&
+    (mailbox.provider !== "custom_imap" ||
+      mailbox.connected !== true ||
+      (parseServerCustomImapSettings(mailbox.customImap) !== null &&
+        isSafeServerCustomSmtpSettings(mailbox.customSmtp))) &&
+    (mailbox.onboardingInboxId === undefined ||
+      (typeof mailbox.onboardingInboxId === "string" &&
+        isInboxId(mailbox.onboardingInboxId)))
+  );
+}
+
+function hasValidManagedMailboxOptionalMetadata(
+  mailbox: StoredManagedWorkspaceInbox,
+) {
+  const metadata = mailbox as StoredManagedWorkspaceInbox &
+    Record<string, unknown>;
+  const focusPreferences = metadata.focusPreferences;
+  return (
+    (mailbox.title === undefined || typeof mailbox.title === "string") &&
+    (mailbox.connectionMessage === undefined ||
+      mailbox.connectionMessage === null ||
+      typeof mailbox.connectionMessage === "string") &&
+    (mailbox.oauthAuthorizationUrl === undefined ||
+      mailbox.oauthAuthorizationUrl === null) &&
+    (metadata.internalRole === undefined ||
+      metadata.internalRole === null ||
+      (typeof metadata.internalRole === "string" &&
+        ONBOARDING_INTERNAL_ROLES.has(metadata.internalRole))) &&
+    (focusPreferences === undefined ||
+      focusPreferences === null ||
+      (isPlainRecord(focusPreferences) &&
+        hasOnlyKeys(focusPreferences, ONBOARDING_FOCUS_KEYS) &&
+        Object.values(focusPreferences).every(
+          (value) =>
+            typeof value === "string" &&
+            LEGACY_ONBOARDING_FOCUS_LEVELS.has(value),
+        )))
+  );
+}
+
+function resolveCustomImapAccountConfigReadback(
+  state: OnboardingState,
+  snapshot: CustomImapOnboardingAttemptSnapshot,
+  result: UserAccountConfigReadResult,
+): CustomImapOnboardingReconciliationResult {
+  const snapshotMatchesCurrentState =
+    doesCustomImapOnboardingSnapshotMatchState(snapshot, state);
+  if (result.status === "missing") {
+    return { status: "absent" };
+  }
+  if (
+    result.status !== "found" ||
+    !hasOwn(result.config as Record<string, unknown>, "onboardingSession") ||
+    !hasOwn(result.config as Record<string, unknown>, "managedInboxes") ||
+    !Array.isArray(result.config.managedInboxes)
+  ) {
+    return { status: "required" };
+  }
+
+  const parsedSession = parseAccountOnboardingSession(
+    result.config.onboardingSession,
+  );
+  if (
+    parsedSession.status !== "valid" ||
+    parsedSession.session.completed !== false ||
+    !parsedSession.session.choices.selectedInboxes.includes(
+      snapshot.onboardingInboxId,
+    ) ||
+    parsedSession.session.choices.selectedInboxes.length !==
+      snapshot.selectedInboxes.length ||
+    !parsedSession.session.choices.selectedInboxes.every(
+      (inboxId, index) => inboxId === snapshot.selectedInboxes[index],
+    )
+  ) {
+    return { status: "required" };
+  }
+
+  const managedInboxes = getServerManagedInboxesForHydration(result.config);
+  if (
+    managedInboxes.some(
+      (mailbox) =>
+        !isWellFormedManagedMailboxEnvelope(mailbox) ||
+        containsUnsafeMailboxMetadata(mailbox),
+    )
+  ) {
+    return { status: "required" };
+  }
+
+  const positionMatches = managedInboxes.filter(
+    (mailbox) =>
+      mailbox?.onboardingInboxId === snapshot.onboardingInboxId,
+  );
+  const emailMatches = managedInboxes.filter(
+    (mailbox) =>
+      typeof mailbox?.email === "string" &&
+      mailbox.email.trim().toLowerCase() === snapshot.normalizedEmail,
+  );
+  if (
+    positionMatches.length === 0 &&
+    emailMatches.length === 0
+  ) {
+    return { status: "absent" };
+  }
+  if (
+    positionMatches.length !== 1 ||
+    emailMatches.length !== 1 ||
+    positionMatches[0] !== emailMatches[0]
+  ) {
+    return { status: "required" };
+  }
+
+  const mailbox = positionMatches[0];
+  const mailboxId =
+    typeof mailbox.id === "string" ? mailbox.id.trim() : "";
+  const email =
+    typeof mailbox.email === "string"
+      ? mailbox.email.trim().toLowerCase()
+      : "";
+  const parsedCustomImap = parseServerCustomImapSettings(
+    mailbox.customImap,
+  );
+  const sameIdCount = managedInboxes.filter(
+    (candidate) =>
+      typeof candidate?.id === "string" &&
+      candidate.id.trim().toLowerCase() === mailboxId.toLowerCase(),
+  ).length;
+  if (
+    !mailboxId ||
+    mailbox.id !== mailboxId ||
+    !isValidServerManagedInboxId(mailboxId) ||
+    sameIdCount !== 1 ||
+    email !== snapshot.normalizedEmail ||
+    mailbox.email !== email ||
+    mailbox.provider !== snapshot.provider ||
+    mailbox.connectionMethod !== "imap" ||
+    mailbox.connected !== true ||
+    mailbox.connectionStatus !== "connected" ||
+    !hasOnlySafeManagedMailboxFields(mailbox) ||
+    !hasValidManagedMailboxOptionalMetadata(mailbox) ||
+    parsedCustomImap === null ||
+    parsedCustomImap.host.toLowerCase() !== snapshot.normalizedHost ||
+    parsedCustomImap.port !== snapshot.port ||
+    parsedCustomImap.username !== snapshot.normalizedUsername ||
+    parsedCustomImap.ssl !== snapshot.ssl ||
+    !isSafeEmptyServerCustomSmtp(mailbox.customSmtp)
+  ) {
+    return { status: "required" };
+  }
+
+  if (!snapshotMatchesCurrentState) {
+    return { status: "conflict" };
+  }
+  const currentConnection =
+    state.inboxConnections[snapshot.onboardingInboxId];
+  if (!currentConnection) {
+    return { status: "required" };
+  }
+  return {
+    status: "matched",
+    serverMailboxId: mailboxId,
+    connection: {
       ...currentConnection,
-      provider: "google",
+      serverMailboxId: mailboxId,
+      provider: "custom_imap",
       email,
       connected: true,
-      connectionMethod: "oauth",
+      connectionMethod: "imap",
       connectionStatus: "connected",
       connectionMessage:
         typeof mailbox.connectionMessage === "string"
           ? mailbox.connectionMessage
           : null,
       oauthAuthorizationUrl: null,
-    };
-    didProject = true;
-  }
-
-  return didProject ? { ...state, inboxConnections: nextConnections } : state;
+      customImap: parsedCustomImap,
+      customSmtp: {
+        ...currentConnection.customSmtp,
+        password: "",
+      },
+    },
+  };
 }
 
 function createCleanAccountConfigStartupState(): AccountConfigStartupAccountState {
@@ -1606,9 +2512,9 @@ function writeFoundAccountConfigToLocalStorage(
     storage,
   );
   const managedInboxes = getServerManagedInboxesForHydration(config);
-  const sanitizedManagedInboxes = sanitizeManagedInboxCredentials(
+  const sanitizedManagedInboxes = sanitizeManagedInboxesForBrowserStorage(
     managedInboxes,
-  ) as StoredManagedWorkspaceInbox[];
+  );
   const workspaceUserId = normalizeAccountStorageKey(accountStorageOwnerKey);
   storage.removeItem(
     buildPrimaryManagedInboxStorageKey(workspaceUserId, previousManagedInboxes),
@@ -1895,8 +2801,10 @@ export const accountConfigOrchestration = {
   parseOnboardingSession: parseAccountOnboardingSession,
   projectChoices: projectOnboardingChoices,
   projectConnectedManagedInboxes: projectConnectedManagedInboxesOntoOnboardingState,
+  resolveCustomImapReadback: resolveCustomImapAccountConfigReadback,
   resolveLocalOnboardingIdentityScope,
   resolveSessionDisposition: resolveAccountConfigSessionDisposition,
+  scrubManagedInboxBrowserStorage,
   writeOnboardingSessionMirror,
 };
 
@@ -2558,6 +3466,10 @@ function CuevionApp() {
       },
     });
   }
+  useEffect(
+    () => () => accountConfigSaveQueueRef.current?.cancel(),
+    [],
+  );
   const [collaborationUser, setCollaborationUser] = useState<AuthenticatedCuevionUser | null>(
     () => {
       const storedAuthUser = window.localStorage.getItem(CUEVION_AUTH_STORAGE_KEY);
@@ -2589,6 +3501,7 @@ function CuevionApp() {
   );
   const onboardingStateRef = useRef(onboardingState);
   const onboardingStepRef = useRef(onboardingStep);
+  const activeHydratedMemberAccountKeyRef = useRef("");
   const localOnboardingEphemeralIdentityCounterRef = useRef(0);
   const localOnboardingEphemeralIdentityRef = useRef<{
     user: AuthenticatedCuevionUser | null;
@@ -2636,6 +3549,9 @@ function CuevionApp() {
       sessionStatus,
       accountConfigHydrationStatus,
     );
+  activeHydratedMemberAccountKeyRef.current = hasHydratedCurrentMemberAccount
+    ? sessionAccountStorageKey
+    : "";
   const canProcessLocalOAuthCallback =
     Boolean(collaborationInviteRoute || teamInviteRoute) ||
     hasHydratedCurrentMemberAccount;
@@ -2700,6 +3616,29 @@ function CuevionApp() {
     registerAccountConfigMutation,
     teamInviteRoute,
   ]);
+  const reloadCustomImapAccountConfig = useCallback(
+    async (
+      snapshot: CustomImapOnboardingAttemptSnapshot,
+      signal: AbortSignal,
+    ): Promise<CustomImapOnboardingReconciliationResult> => {
+      const accountKey = activeHydratedMemberAccountKeyRef.current;
+      if (!accountKey) {
+        return { status: "required" };
+      }
+
+      const result = await loadUserAccountConfig(signal);
+      if (activeHydratedMemberAccountKeyRef.current !== accountKey) {
+        return { status: "required" };
+      }
+
+      return resolveCustomImapAccountConfigReadback(
+        onboardingStateRef.current,
+        snapshot,
+        result,
+      );
+    },
+    [],
+  );
 
   useEffect(() => {
     if (collaborationUser) {
@@ -3300,6 +4239,7 @@ function CuevionApp() {
       onStateChange={onboardingHandlers.onStateChange}
       onSafeStateChange={onboardingHandlers.onSafeStateChange}
       onOpenWorkspace={onboardingHandlers.onOpenWorkspace}
+      onReloadAccountConfig={reloadCustomImapAccountConfig}
       canOpenWorkspace={canOpenWorkspaceInMemory}
     />
   );
@@ -3307,6 +4247,10 @@ function CuevionApp() {
 
 export default function App() {
   const [appRoute, setAppRoute] = useState<RootAppRoute>(() => resolveRootAppRoute());
+
+  useEffect(() => {
+    scrubManagedInboxBrowserStorage();
+  }, []);
 
   useEffect(() => {
     const handlePopState = () => {

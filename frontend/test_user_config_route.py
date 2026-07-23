@@ -1,3 +1,5 @@
+import base64
+import copy
 import importlib.util
 import io
 import json
@@ -52,6 +54,9 @@ class FakeHandler:
 
 SESSION_USER = {"email": "owner@example.com", "name": "Owner", "userType": "member"}
 STORE = {"rest_url": "https://kv.example", "rest_token": "token"}
+CREDENTIAL_VERSION_CANARY = (
+    base64.urlsafe_b64encode(b"g" * 32).decode("ascii").rstrip("=")
+)
 VALID_ONBOARDING_SESSION = {
     "schemaVersion": 1,
     "completed": False,
@@ -117,7 +122,7 @@ class GetRouteTests(unittest.TestCase):
             side_effect=read_side_effect,
         ) as read_mock, patch.object(
             config_route,
-            "write_user_config_record",
+            "write_user_config_record_if_missing",
             return_value={"status": "ok", "record": {"result": "OK"}, "error": None},
         ) as write_mock:
             config_route.handler.do_GET(handler)
@@ -331,6 +336,68 @@ class GetRouteTests(unittest.TestCase):
         self.assertEqual(handler.payload()["config"], stored_config)
         write_mock.assert_not_called()
 
+    def test_conflicting_stored_owner_email_is_fail_closed(self):
+        stored_config = {
+            "v": 1,
+            "email": "other@example.com",
+            "onboardingSession": {},
+            "managedInboxes": [{"id": "mailbox-a"}],
+        }
+        handler, read_mock, write_mock = self.invoke(
+            read_result={"status": "ok", "config": stored_config, "error": None},
+        )
+
+        self.assertEqual(handler.status_code, 503)
+        self.assertEqual(handler.payload()["error"]["code"], "config_invalid")
+        self.assertNotIn("mailbox-a", json.dumps(handler.payload()))
+        read_mock.assert_called_once_with(STORE, "owner@example.com")
+        write_mock.assert_not_called()
+
+    def test_public_get_strips_evident_credential_artifact_aliases(self):
+        stored_config = {
+            "v": 1,
+            "email": "owner@example.com",
+            "onboardingSession": {},
+            "futureTopLevelField": {
+                "safe": "preserved",
+                "ciphertext": "cipher-canary",
+                "nonce": "nonce-canary",
+                "credentialRef": "ref-canary",
+                "credentialId": "id-canary",
+                "credentialReference": "reference-canary",
+                "credentialRecord": "record-canary",
+                "keyMaterial": "key-canary",
+                "encryptionKey": "encryption-key-canary",
+                "privateKey": "private-canary",
+                "encryptedBlob": "blob-canary",
+                "rawCredentialRecord": "raw-credential-canary",
+                "rawStoreRecord": "raw-store-canary",
+            },
+        }
+        handler, _, write_mock = self.invoke(
+            read_result={"status": "ok", "config": stored_config, "error": None},
+        )
+
+        self.assertEqual(handler.status_code, 200)
+        response_text = json.dumps(handler.payload())
+        self.assertIn("preserved", response_text)
+        for canary in (
+            "cipher-canary",
+            "nonce-canary",
+            "ref-canary",
+            "id-canary",
+            "reference-canary",
+            "record-canary",
+            "key-canary",
+            "encryption-key-canary",
+            "private-canary",
+            "blob-canary",
+            "raw-credential-canary",
+            "raw-store-canary",
+        ):
+            self.assertNotIn(canary, response_text)
+        write_mock.assert_not_called()
+
     def test_unauthorized_shape_is_exact(self):
         auth_error = {"code": "missing_session", "message": "missing"}
         handler, _, write_mock = self.invoke(auth=(None, auth_error))
@@ -410,6 +477,31 @@ class GetRouteTests(unittest.TestCase):
         returned = handler.payload()["config"]
         self.assertNotIn("imap-secret", json.dumps(returned))
         self.assertNotIn("smtp-secret", json.dumps(returned))
+        write_mock.assert_not_called()
+
+    def test_server_credential_generation_is_stripped_from_public_get(self):
+        stored = {
+            "v": 1,
+            "email": "owner@example.com",
+            "onboardingSession": {},
+            "managedInboxes": [
+                {
+                    "id": "demo",
+                    "provider": "custom_imap",
+                    "credentialVersion": CREDENTIAL_VERSION_CANARY,
+                    "customImap": {"host": "imap.example.com"},
+                    "customSmtp": {},
+                }
+            ],
+        }
+        handler, _, write_mock = self.invoke(
+            read_result={"status": "ok", "config": stored, "error": None},
+        )
+
+        self.assertEqual(handler.status_code, 200)
+        serialized = json.dumps(handler.payload())
+        self.assertNotIn("credentialVersion", serialized)
+        self.assertNotIn(CREDENTIAL_VERSION_CANARY, serialized)
         write_mock.assert_not_called()
 
     def test_configuration_that_cannot_be_safely_normalized_is_config_invalid(self):
@@ -565,6 +657,39 @@ class PostRouteTests(unittest.TestCase):
             "record": {"result": "OK"},
             "error": None,
         }
+        durable_state = {"read_result": copy.deepcopy(read_result)}
+
+        def read_current_config(_store, _owner):
+            return copy.deepcopy(durable_state["read_result"])
+
+        def perform_write(write_store, owner, replacement):
+            result = copy.deepcopy(write_result)
+            if isinstance(result, dict) and result.get("status") == "ok":
+                durable_state["read_result"] = {
+                    "status": "ok",
+                    "config": copy.deepcopy(replacement),
+                    "error": None,
+                }
+                result["record"] = copy.deepcopy(replacement)
+            return result
+
+        write_mock = Mock(side_effect=perform_write)
+        conditional_write_mock = Mock(
+            side_effect=lambda write_store, owner, _expected, replacement: write_mock(
+                write_store,
+                owner,
+                replacement,
+            )
+        )
+        missing_write_mock = Mock(
+            side_effect=lambda write_store, owner, replacement: write_mock(
+                write_store,
+                owner,
+                replacement,
+            )
+        )
+        write_mock.conditional_write = conditional_write_mock
+        write_mock.missing_write = missing_write_mock
         with patch.object(config_route, "resolve_authenticated_user", return_value=auth), patch.object(
             config_route,
             "resolve_user_config_store",
@@ -572,12 +697,16 @@ class PostRouteTests(unittest.TestCase):
         ), patch.object(
             config_route,
             "read_user_config_record",
-            return_value=read_result,
+            side_effect=read_current_config,
         ) as read_mock, patch.object(
             config_route,
-            "write_user_config_record",
-            return_value=write_result,
-        ) as write_mock:
+            "write_user_config_record_if_unchanged",
+            new=conditional_write_mock,
+        ), patch.object(
+            config_route,
+            "write_user_config_record_if_missing",
+            new=missing_write_mock,
+        ):
             config_route.handler.do_POST(handler)
         return handler, read_mock, write_mock
 
@@ -590,6 +719,110 @@ class PostRouteTests(unittest.TestCase):
                 read_mock.assert_not_called()
                 write_mock.assert_not_called()
 
+    def test_client_credential_generation_fields_are_rejected_before_storage(self):
+        for field in (
+            "credentialVersion",
+            "secretVersion",
+            "credentialGeneration",
+            "secret_generation",
+            "credential-revision",
+        ):
+            with self.subTest(field=field):
+                handler, read_mock, write_mock = self.invoke(
+                    {
+                        "config": {
+                            "managedInboxes": [
+                                {
+                                    "id": "demo",
+                                    field: "attacker-controlled",
+                                }
+                            ]
+                        }
+                    }
+                )
+                self.assertEqual(handler.status_code, 400)
+                self.assertEqual(
+                    handler.payload()["error"]["code"],
+                    "forbidden_server_field",
+                )
+                read_mock.assert_not_called()
+                write_mock.assert_not_called()
+
+    def test_unrelated_post_preserves_internal_generation_but_strips_response(self):
+        existing = {
+            "v": 1,
+            "email": "owner@example.com",
+            "onboardingSession": {},
+            "managedInboxes": [
+                {
+                    "id": "demo",
+                    "title": "Demo",
+                    "provider": "custom_imap",
+                    "connected": True,
+                    "connectionStatus": "connected",
+                    "credentialVersion": CREDENTIAL_VERSION_CANARY,
+                    "customImap": {"host": "imap.example.com"},
+                    "customSmtp": {},
+                }
+            ],
+            "uiPreferences": {"themeMode": "Light"},
+        }
+        handler, _, write_mock = self.invoke(
+            {"config": {"uiPreferences": {"themeMode": "Dark"}}},
+            read_result={"status": "ok", "config": existing, "error": None},
+        )
+
+        self.assertEqual(handler.status_code, 200)
+        written = write_mock.call_args.args[2]
+        self.assertEqual(
+            written["managedInboxes"][0]["credentialVersion"],
+            CREDENTIAL_VERSION_CANARY,
+        )
+        self.assertNotIn("credentialVersion", json.dumps(handler.payload()))
+
+    def test_managed_inbox_post_preserves_generation_but_strips_response(self):
+        existing = {
+            "v": 1,
+            "email": "owner@example.com",
+            "onboardingSession": {},
+            "managedInboxes": [
+                {
+                    "id": "demo",
+                    "title": "Old title",
+                    "provider": "custom_imap",
+                    "connected": True,
+                    "connectionStatus": "connected",
+                    "credentialVersion": CREDENTIAL_VERSION_CANARY,
+                    "customImap": {"host": "imap.example.com"},
+                    "customSmtp": {},
+                }
+            ],
+        }
+        handler, _, write_mock = self.invoke(
+            {
+                "config": {
+                    "managedInboxes": [
+                        {
+                            "id": "demo",
+                            "title": "New title",
+                        }
+                    ]
+                }
+            },
+            read_result={"status": "ok", "config": existing, "error": None},
+        )
+
+        self.assertEqual(handler.status_code, 200)
+        written_inbox = write_mock.call_args.args[2]["managedInboxes"][0]
+        self.assertEqual(
+            written_inbox["credentialVersion"],
+            CREDENTIAL_VERSION_CANARY,
+        )
+        self.assertEqual(written_inbox["title"], "New title")
+        response_text = json.dumps(handler.payload())
+        self.assertNotIn("credentialVersion", response_text)
+        self.assertNotIn(CREDENTIAL_VERSION_CANARY, response_text)
+
     def test_body_at_limit_is_accepted_and_declared_oversize_is_413_before_read(self):
         exact_limit_body = b"{}" + b" " * (
             config_route.MAX_USER_CONFIG_BODY_BYTES - 2
@@ -599,7 +832,7 @@ class PostRouteTests(unittest.TestCase):
             raw_body=exact_limit_body,
         )
         self.assertEqual(accepted.status_code, 200)
-        read_mock.assert_called_once()
+        self.assertEqual(read_mock.call_count, 2)
         write_mock.assert_called_once()
 
         rejected, read_mock, write_mock = self.invoke(
@@ -1186,14 +1419,37 @@ class PostRouteTests(unittest.TestCase):
         self.assertEqual(handler.status_code, 200)
         self.assertEqual(written["managedInboxes"], [existing_inbox])
 
-    def test_write_failure_shape_and_success_headers_are_unchanged(self):
-        error = {"code": "user_config_store_unavailable", "message": "write failed"}
+    def test_write_failure_is_fixed_public_error_and_success_headers_are_unchanged(self):
+        private_error = {
+            "code": "private_write_failure",
+            "message": f"write failed for {CREDENTIAL_VERSION_CANARY}",
+            "credentialVersion": CREDENTIAL_VERSION_CANARY,
+        }
         handler, _, write_mock = self.invoke(
             {},
-            write_result={"status": "unavailable", "record": None, "error": error},
+            write_result={
+                "status": "unavailable",
+                "record": {
+                    "credentialVersion": CREDENTIAL_VERSION_CANARY,
+                },
+                "error": private_error,
+            },
         )
         self.assertEqual(handler.status_code, 503)
-        self.assertEqual(handler.payload(), {"ok": False, "error": error})
+        self.assertEqual(
+            handler.payload(),
+            {
+                "ok": False,
+                "error": {
+                    "code": "user_config_store_unavailable",
+                    "message": "User config storage is temporarily unavailable.",
+                },
+            },
+        )
+        response_text = json.dumps(handler.payload())
+        self.assertNotIn("private_write_failure", response_text)
+        self.assertNotIn("credentialVersion", response_text)
+        self.assertNotIn(CREDENTIAL_VERSION_CANARY, response_text)
         write_mock.assert_called_once()
 
         success_handler, _, success_write = self.invoke({})
@@ -1201,13 +1457,167 @@ class PostRouteTests(unittest.TestCase):
         self.assertIn(("Cache-Control", "no-store"), success_handler.response_headers)
         success_write.assert_called_once()
 
+    def test_existing_config_write_uses_compare_and_set(self):
+        existing = {
+            "v": 1,
+            "email": "owner@example.com",
+            "onboardingSession": {},
+            "managedInboxes": [],
+            "uiPreferences": {"themeMode": "Light"},
+        }
+        handler, _, write_mock = self.invoke(
+            {"config": {"uiPreferences": {"themeMode": "Dark"}}},
+            read_result={"status": "ok", "config": existing, "error": None},
+        )
 
-class PostReadStatusHandlerTests(unittest.TestCase):
-    def invoke(self, payload, read_result):
-        body = json.dumps(payload).encode("utf-8")
+        self.assertEqual(handler.status_code, 200)
+        write_mock.conditional_write.assert_called_once()
+        self.assertEqual(write_mock.conditional_write.call_args.args[2], existing)
+        self.assertEqual(
+            write_mock.call_args.args[2]["uiPreferences"],
+            {"themeMode": "Dark"},
+        )
+
+    def test_existing_config_with_conflicting_owner_is_not_rebound(self):
+        existing = {
+            "v": 1,
+            "email": "other@example.com",
+            "onboardingSession": {},
+            "managedInboxes": [{"id": "other-mailbox"}],
+        }
+        handler, _, write_mock = self.invoke(
+            {"config": {"uiPreferences": {"themeMode": "Dark"}}},
+            read_result={"status": "ok", "config": existing, "error": None},
+        )
+
+        self.assertEqual(handler.status_code, 503)
+        self.assertEqual(handler.payload()["error"]["code"], "config_invalid")
+        self.assertNotIn("other-mailbox", json.dumps(handler.payload()))
+        write_mock.assert_not_called()
+
+    def test_unrelated_post_preserves_unknown_top_level_fields(self):
+        existing = {
+            "v": 1,
+            "email": "owner@example.com",
+            "onboardingSession": {},
+            "managedInboxes": [],
+            "futureTopLevelField": {
+                "opaque": True,
+                "futureRevision": 7,
+            },
+        }
+        handler, _, write_mock = self.invoke(
+            {"config": {"uiPreferences": {"themeMode": "Dark"}}},
+            read_result={"status": "ok", "config": existing, "error": None},
+        )
+
+        self.assertEqual(handler.status_code, 200)
+        written = write_mock.call_args.args[2]
+        self.assertEqual(
+            written["futureTopLevelField"],
+            {"opaque": True, "futureRevision": 7},
+        )
+        self.assertEqual(
+            handler.payload()["config"]["futureTopLevelField"],
+            {"opaque": True, "futureRevision": 7},
+        )
+
+    def test_post_preserves_unknown_raw_metadata_but_strips_credential_artifacts(self):
+        existing = {
+            "v": 1,
+            "email": "owner@example.com",
+            "onboardingSession": {},
+            "managedInboxes": [],
+            "futureServerMetadata": {
+                "safe": "visible",
+                "ciphertext": "cipher-canary",
+                "nonce": "nonce-canary",
+                "credentialRef": "ref-canary",
+                "credentialId": "id-canary",
+                "credentialReference": "reference-canary",
+                "credentialRecord": "record-canary",
+                "keyMaterial": "key-canary",
+                "encryptionKey": "encryption-key-canary",
+                "privateKey": "private-canary",
+                "encryptedBlob": "blob-canary",
+                "rawCredentialRecord": "raw-credential-canary",
+                "rawStoreRecord": "raw-store-canary",
+            },
+        }
+        handler, _, write_mock = self.invoke(
+            {"config": {"uiPreferences": {"themeMode": "Dark"}}},
+            read_result={"status": "ok", "config": existing, "error": None},
+        )
+
+        self.assertEqual(handler.status_code, 200)
+        written = write_mock.call_args.args[2]
+        self.assertEqual(written["futureServerMetadata"], existing["futureServerMetadata"])
+        response_text = json.dumps(handler.payload())
+        self.assertIn("visible", response_text)
+        for canary in (
+            "cipher-canary",
+            "nonce-canary",
+            "ref-canary",
+            "id-canary",
+            "reference-canary",
+            "record-canary",
+            "key-canary",
+            "encryption-key-canary",
+            "private-canary",
+            "blob-canary",
+            "raw-credential-canary",
+            "raw-store-canary",
+        ):
+            self.assertNotIn(canary, response_text)
+
+    def test_cas_conflict_rereads_remerges_and_preserves_concurrent_fields(self):
+        initial = {
+            "v": 1,
+            "email": "owner@example.com",
+            "onboardingSession": {},
+            "managedInboxes": [],
+            "uiPreferences": {"themeMode": "Light"},
+            "initialFutureField": {"preserve": True},
+        }
+        concurrent = {
+            **copy.deepcopy(initial),
+            "managedInboxes": [
+                {
+                    "id": "imap-server-id",
+                    "provider": "custom_imap",
+                    "connected": True,
+                    "credentialVersion": CREDENTIAL_VERSION_CANARY,
+                }
+            ],
+            "gmailConcurrentField": {"mailboxId": "gmail-1"},
+        }
+        durable_state = {"config": copy.deepcopy(initial)}
+        write_attempts = []
+
+        def read_current(_store, _owner):
+            return {
+                "status": "ok",
+                "config": copy.deepcopy(durable_state["config"]),
+                "error": None,
+            }
+
+        def conditional_write(_store, _owner, expected, replacement):
+            write_attempts.append((copy.deepcopy(expected), copy.deepcopy(replacement)))
+            if len(write_attempts) == 1:
+                durable_state["config"] = copy.deepcopy(concurrent)
+                return {"status": "conflict", "record": None, "error": None}
+            self.assertEqual(expected, concurrent)
+            durable_state["config"] = copy.deepcopy(replacement)
+            return {
+                "status": "ok",
+                "record": copy.deepcopy(replacement),
+                "error": None,
+            }
+
         request = FakeHandler(
-            body,
-            headers={"cookie": "__Host-cuevion_session=opaque"},
+            json.dumps(
+                {"config": {"uiPreferences": {"themeMode": "Dark"}}}
+            ).encode("utf-8")
         )
         with patch.object(
             config_route,
@@ -1220,12 +1630,148 @@ class PostReadStatusHandlerTests(unittest.TestCase):
         ), patch.object(
             config_route,
             "read_user_config_record",
-            return_value=read_result,
+            side_effect=read_current,
         ) as read_mock, patch.object(
             config_route,
-            "write_user_config_record",
-            return_value={"status": "ok", "record": {"result": "OK"}, "error": None},
-        ) as write_mock:
+            "write_user_config_record_if_unchanged",
+            side_effect=conditional_write,
+        ) as write_mock, patch.object(
+            config_route,
+            "write_user_config_record_if_missing",
+        ) as missing_write_mock:
+            config_route.handler.do_POST(request)
+
+        self.assertEqual(request.status_code, 200)
+        self.assertEqual(len(write_attempts), 2)
+        self.assertEqual(read_mock.call_count, 3)
+        write_mock.assert_called()
+        missing_write_mock.assert_not_called()
+        final_config = durable_state["config"]
+        self.assertEqual(final_config["uiPreferences"], {"themeMode": "Dark"})
+        self.assertEqual(
+            final_config["managedInboxes"][0]["credentialVersion"],
+            CREDENTIAL_VERSION_CANARY,
+        )
+        self.assertEqual(
+            final_config["gmailConcurrentField"],
+            {"mailboxId": "gmail-1"},
+        )
+        self.assertEqual(
+            final_config["initialFutureField"],
+            {"preserve": True},
+        )
+        self.assertNotIn("credentialVersion", json.dumps(request.payload()))
+
+    def test_persistent_cas_conflict_is_bounded_and_retryable(self):
+        existing = {
+            "v": 1,
+            "email": "owner@example.com",
+            "onboardingSession": {},
+            "managedInboxes": [],
+        }
+        request = FakeHandler(
+            json.dumps(
+                {"config": {"uiPreferences": {"themeMode": "Dark"}}}
+            ).encode("utf-8")
+        )
+        with patch.object(
+            config_route,
+            "resolve_authenticated_user",
+            return_value=(SESSION_USER, None),
+        ), patch.object(
+            config_route,
+            "resolve_user_config_store",
+            return_value=(STORE, None),
+        ), patch.object(
+            config_route,
+            "read_user_config_record",
+            return_value={"status": "ok", "config": existing, "error": None},
+        ) as read_mock, patch.object(
+            config_route,
+            "write_user_config_record_if_unchanged",
+            return_value={"status": "conflict", "record": None, "error": None},
+        ) as write_mock, patch.object(
+            config_route,
+            "write_user_config_record_if_missing",
+        ) as missing_write_mock:
+            config_route.handler.do_POST(request)
+
+        self.assertEqual(request.status_code, 409)
+        self.assertEqual(
+            request.payload()["error"]["code"],
+            "user_config_write_conflict",
+        )
+        self.assertEqual(read_mock.call_count, config_route.MAX_USER_CONFIG_CAS_ATTEMPTS)
+        self.assertEqual(write_mock.call_count, config_route.MAX_USER_CONFIG_CAS_ATTEMPTS)
+        missing_write_mock.assert_not_called()
+
+
+class PostReadStatusHandlerTests(unittest.TestCase):
+    def invoke(self, payload, read_result):
+        body = json.dumps(payload).encode("utf-8")
+        request = FakeHandler(
+            body,
+            headers={"cookie": "__Host-cuevion_session=opaque"},
+        )
+        write_mock = Mock(
+            return_value={"status": "ok", "record": {"result": "OK"}, "error": None}
+        )
+        durable_state = {"read_result": copy.deepcopy(read_result)}
+
+        def read_current_config(_store, _owner):
+            return copy.deepcopy(durable_state["read_result"])
+
+        def perform_write(write_store, owner, replacement):
+            result = {
+                "status": "ok",
+                "record": copy.deepcopy(replacement),
+                "error": None,
+            }
+            durable_state["read_result"] = {
+                "status": "ok",
+                "config": copy.deepcopy(replacement),
+                "error": None,
+            }
+            return result
+
+        write_mock.side_effect = perform_write
+        conditional_write_mock = Mock(
+            side_effect=lambda write_store, owner, _expected, replacement: write_mock(
+                write_store,
+                owner,
+                replacement,
+            )
+        )
+        missing_write_mock = Mock(
+            side_effect=lambda write_store, owner, replacement: write_mock(
+                write_store,
+                owner,
+                replacement,
+            )
+        )
+        write_mock.conditional_write = conditional_write_mock
+        write_mock.missing_write = missing_write_mock
+        with patch.object(
+            config_route,
+            "resolve_authenticated_user",
+            return_value=(SESSION_USER, None),
+        ), patch.object(
+            config_route,
+            "resolve_user_config_store",
+            return_value=(STORE, None),
+        ), patch.object(
+            config_route,
+            "read_user_config_record",
+            side_effect=read_current_config,
+        ) as read_mock, patch.object(
+            config_route,
+            "write_user_config_record_if_unchanged",
+            new=conditional_write_mock,
+        ), patch.object(
+            config_route,
+            "write_user_config_record_if_missing",
+            new=missing_write_mock,
+        ):
             config_route.handler.do_POST(request)
         return request, read_mock, write_mock
 
@@ -1255,11 +1801,16 @@ class PostReadStatusHandlerTests(unittest.TestCase):
             },
         )
         self.assertEqual(request.status_code, 200)
-        read_mock.assert_called_once_with(
-            STORE,
-            "owner@example.com",
+        self.assertEqual(read_mock.call_count, 2)
+        self.assertTrue(
+            all(
+                item.args == (STORE, "owner@example.com")
+                for item in read_mock.call_args_list
+            )
         )
         write_mock.assert_called_once()
+        write_mock.missing_write.assert_called_once()
+        write_mock.conditional_write.assert_not_called()
         written = write_mock.call_args.args[2]
         self.assertEqual(written["email"], "owner@example.com")
         self.assertEqual(written["managedInboxes"], [])
@@ -1721,12 +2272,20 @@ class ModuleCompatibilityTests(unittest.TestCase):
         ) as read_mock, patch.object(
             user_config_store,
             "write_user_config_record",
-        ) as write_mock:
+        ) as write_mock, patch.object(
+            user_config_store,
+            "write_user_config_record_if_unchanged",
+        ) as conditional_write_mock, patch.object(
+            user_config_store,
+            "write_user_config_record_if_missing",
+        ) as missing_write_mock:
             load_config_route("user_config_route_import_activity_test")
         auth_mock.assert_not_called()
         store_mock.assert_not_called()
         read_mock.assert_not_called()
         write_mock.assert_not_called()
+        conditional_write_mock.assert_not_called()
+        missing_write_mock.assert_not_called()
 
     def test_config_route_uses_shared_primitives_without_duplicate_store_code(self):
         source = CONFIG_PATH.read_text(encoding="utf-8")

@@ -3,10 +3,19 @@ declare const process: { exitCode?: number };
 
 const assert = require("node:assert/strict");
 const {
+  createUserAccountConfigConflictRetryQueue,
   loadUserAccountConfig,
+  projectWorkspaceUserAccountConfigForSave,
   saveUserAccountConfig,
   setUserAccountConfigHydrationEchoExpectation,
 } = require("./userConfigApi") as typeof import("./userConfigApi");
+type UserAccountConfig = import("./userConfigApi").UserAccountConfig;
+
+async function flushAsyncWork(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+}
 
 function response(status: number, payload: unknown): Response {
   return { status, json: async () => payload } as Response;
@@ -58,14 +67,30 @@ async function run(): Promise<void> {
         uiPreferences: { themeMode: "System" as const },
       };
       let request: { url?: RequestInfo | URL; init?: RequestInit } = {};
+      const controller = new AbortController();
       useFetch(async (url, init) => {
         request = { url, init };
         return response(200, { ok: true, configState: "found", config });
       });
-      assert.deepEqual(await loadUserAccountConfig(), { status: "found", config });
+      assert.deepEqual(await loadUserAccountConfig(controller.signal), {
+        status: "found",
+        config,
+      });
       assert.deepEqual(
-        [request.url, request.init?.method, request.init?.credentials, request.init?.cache],
-        ["/api/user/config", "GET", "include", "no-store"],
+        [
+          request.url,
+          request.init?.method,
+          request.init?.credentials,
+          request.init?.cache,
+          request.init?.signal,
+        ],
+        [
+          "/api/user/config",
+          "GET",
+          "include",
+          "no-store",
+          controller.signal,
+        ],
       );
     });
 
@@ -133,6 +158,44 @@ async function run(): Promise<void> {
         requests.map(({ body }) => JSON.parse(String(body))),
         [{ config: {} }, { config: { managedInboxes: [] } }],
       );
+    });
+
+    await test("workspace POST omits server-owned onboarding and owner fields", async () => {
+      let postedBody: unknown = null;
+      useFetch(async (_url, init) => {
+        postedBody = JSON.parse(String(init?.body));
+        return savedResponse(init);
+      });
+      const projected = projectWorkspaceUserAccountConfigForSave({
+        v: 1,
+        email: "owner@example.com",
+        updatedAt: "2026-07-23T12:00:00Z",
+        onboardingSession: {
+          completed: true,
+          state: { selectedInboxes: ["demo"] },
+        },
+        managedInboxes: [
+          {
+            id: "imap-server-1",
+            onboardingInboxId: "demo",
+          },
+        ],
+        uiPreferences: { themeMode: "Dark" },
+      });
+
+      assert.deepEqual(projected, {
+        managedInboxes: [
+          {
+            id: "imap-server-1",
+            onboardingInboxId: "demo",
+          },
+        ],
+        uiPreferences: { themeMode: "Dark" },
+      });
+      assert.equal((await saveUserAccountConfig(projected)).status, "found");
+      assert.deepEqual(postedBody, { config: projected });
+      assert.equal(JSON.stringify(postedBody).includes("onboardingSession"), false);
+      assert.equal(JSON.stringify(postedBody).includes("owner@example.com"), false);
     });
 
     await test("one-shot exact hydration echo", async () => {
@@ -213,7 +276,118 @@ async function run(): Promise<void> {
       assert.equal(maximumActiveFetches, 1);
     });
 
+    await test("workspace save queue retries conflicts boundedly and supersedes stale retry state", async () => {
+      const conflictResult = {
+        status: "conflict" as const,
+        error: {
+          code: "user_config_write_conflict",
+          message: "retry",
+        },
+      };
+      const scheduled: Array<{
+        handle: number;
+        callback: () => void;
+        delayMs: number;
+        cancelled: boolean;
+      }> = [];
+      let nextHandle = 1;
+      const scheduleRetry = (callback: () => void, delayMs: number) => {
+        const handle = nextHandle;
+        nextHandle += 1;
+        scheduled.push({ handle, callback, delayMs, cancelled: false });
+        return handle;
+      };
+      const cancelRetry = (handle: number) => {
+        const pending = scheduled.find((entry) => entry.handle === handle);
+        if (pending) pending.cancelled = true;
+      };
+      let conflictCalls = 0;
+      const boundedQueue = createUserAccountConfigConflictRetryQueue({
+        save: async () => {
+          conflictCalls += 1;
+          return conflictResult;
+        },
+        scheduleRetry,
+        cancelRetry,
+      });
+      boundedQueue.enqueue({ onboardingSession: {} });
+      await flushAsyncWork();
+      assert.equal(conflictCalls, 1);
+      assert.equal(scheduled[0].delayMs, 120);
+      scheduled[0].callback();
+      await flushAsyncWork();
+      assert.equal(conflictCalls, 2);
+      assert.equal(scheduled[1].delayMs, 320);
+      scheduled[1].callback();
+      await flushAsyncWork();
+      assert.equal(conflictCalls, 3);
+      assert.equal(scheduled.length, 2);
+      assert.equal(boundedQueue.isDirty(), true);
+
+      const supersedingScheduled: typeof scheduled = [];
+      const savedConfigs: UserAccountConfig[] = [];
+      const supersedingQueue = createUserAccountConfigConflictRetryQueue({
+        save: async (config) => {
+          savedConfigs.push(config);
+          return savedConfigs.length === 1
+            ? conflictResult
+            : { status: "found" as const, config };
+        },
+        scheduleRetry: (callback, delayMs) => {
+          const handle = nextHandle;
+          nextHandle += 1;
+          supersedingScheduled.push({
+            handle,
+            callback,
+            delayMs,
+            cancelled: false,
+          });
+          return handle;
+        },
+        cancelRetry: (handle) => {
+          const pending = supersedingScheduled.find(
+            (entry) => entry.handle === handle,
+          );
+          if (pending) pending.cancelled = true;
+        },
+      });
+      supersedingQueue.enqueue({
+        onboardingSession: { currentStep: 1 },
+      });
+      await flushAsyncWork();
+      assert.equal(supersedingScheduled.length, 1);
+      supersedingQueue.supersede();
+      assert.equal(supersedingScheduled[0].cancelled, true);
+      supersedingQueue.enqueue({
+        onboardingSession: { currentStep: 3 },
+        managedInboxes: [{ id: "imap-server-1" }],
+      });
+      supersedingScheduled[0].callback();
+      await flushAsyncWork();
+      assert.equal(savedConfigs.length, 2);
+      assert.deepEqual(savedConfigs[1], {
+        onboardingSession: { currentStep: 3 },
+        managedInboxes: [{ id: "imap-server-1" }],
+      });
+      assert.equal(JSON.stringify(savedConfigs).includes("password"), false);
+      assert.equal(supersedingQueue.isDirty(), false);
+    });
+
     await test("failed POST responses", async () => {
+      useFetch(async () => response(409, {
+        ok: false,
+        error: {
+          code: "user_config_write_conflict",
+          message: "retry",
+        },
+      }));
+      assert.deepEqual(await saveUserAccountConfig({}), {
+        status: "conflict",
+        error: {
+          code: "user_config_write_conflict",
+          message: "retry",
+        },
+      });
       useFetch(async () => response(503, {
         ok: false,
         error: { code: "config_invalid", message: "invalid" },
