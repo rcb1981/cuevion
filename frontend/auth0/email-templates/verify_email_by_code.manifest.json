@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "template_version": "1.0.0",
+  "auth0_template_id": "verify_email_by_code",
+  "subject": "Your Cuevion verification code",
+  "syntax": "liquid",
+  "enabled": true,
+  "expected_from_display_name": "Cuevion",
+  "from_address_policy": {
+    "operator_supplied": true,
+    "dedicated_sender_required": true,
+    "must_be_externally_verified": true,
+    "value": null
+  },
+  "canonical_template": "frontend/auth0/email-templates/verify_email_by_code.html",
+  "preview": {
+    "file": "frontend/auth0/email-templates/verify_email_by_code.preview.html",
+    "sample_code": "547293",
+    "derivation": "replace_exact_liquid_placeholder",
+    "deployable": false,
+    "generation_command": "python3 frontend/auth0/email-templates/generate_verify_email_by_code_preview.py"
+  }
+}
