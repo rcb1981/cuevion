@@ -217,11 +217,19 @@ interface OnboardingFlowProps {
     value: OnboardingState | ((current: OnboardingState) => OnboardingState),
   ) => void;
   onOpenWorkspace: (userConfig: UserConfig) => void;
+  onCompleteWorkspaceSetup?: () => void;
   onReloadAccountConfig?: (
     snapshot: CustomImapOnboardingAttemptSnapshot,
     signal: AbortSignal,
   ) => Promise<CustomImapOnboardingReconciliationResult>;
   canOpenWorkspace?: boolean;
+  workspaceCompletionStatus?:
+    | "idle"
+    | "completing"
+    | "error"
+    | "inboxes_incomplete"
+    | "verification_required";
+  workspaceCompletionError?: string | null;
   isPreviewMode?: boolean;
   previewControls?: ReactNode;
 }
@@ -233,8 +241,11 @@ export function OnboardingFlow({
   onStateChange,
   onSafeStateChange,
   onOpenWorkspace,
+  onCompleteWorkspaceSetup,
   onReloadAccountConfig = async () => ({ status: "required" }),
   canOpenWorkspace = false,
+  workspaceCompletionStatus = "idle",
+  workspaceCompletionError = null,
   isPreviewMode = false,
   previewControls,
 }: OnboardingFlowProps) {
@@ -248,6 +259,8 @@ export function OnboardingFlow({
     useRef<CustomImapOnboardingAttemptGuard | null>(null);
   const customImapInteractionLocked =
     isCustomImapOnboardingInteractionLocked(customImapAttemptGuard);
+  const workspaceCompletionPending =
+    workspaceCompletionStatus === "completing";
 
   const updateCustomImapAttemptGuard = (
     guard: CustomImapOnboardingAttemptGuard | null,
@@ -637,7 +650,7 @@ export function OnboardingFlow({
   };
 
   const back = () => {
-    if (mutationIsLocked()) {
+    if (mutationIsLocked() || workspaceCompletionPending) {
       return;
     }
     setShowWorkspaceBlockedMessage(false);
@@ -649,7 +662,12 @@ export function OnboardingFlow({
   };
 
   const openWorkspace = () => {
-    if (mutationIsLocked()) {
+    if (mutationIsLocked() || workspaceCompletionPending) {
+      return;
+    }
+    if (!canOpenWorkspace && onCompleteWorkspaceSetup) {
+      setShowWorkspaceBlockedMessage(false);
+      onCompleteWorkspaceSetup();
       return;
     }
     const didOpenWorkspace = onboardingFlowProgression.attemptWorkspaceOpen(
@@ -712,7 +730,9 @@ export function OnboardingFlow({
   };
 
   const nextLabel =
-    step === 0
+    step === 3 && workspaceCompletionPending
+      ? "Finishing setup…"
+      : step === 0
       ? onboardingText.navigation.startSetup
       : step === 2
         ? onboardingText.navigation.completeSetup
@@ -803,15 +823,26 @@ export function OnboardingFlow({
                   workspace.
                 </p>
               ) : null}
+              {isFinalScreen && workspaceCompletionError ? (
+                <p
+                  role="alert"
+                  className="mb-4 text-center text-sm leading-6 text-ink/60"
+                >
+                  {workspaceCompletionError}
+                </p>
+              ) : null}
               <NavigationBar
                 canGoBack={step > 0}
                 backLabel={step === 3 ? "Edit setup" : undefined}
                 onBack={back}
                 onNext={step === 3 ? openWorkspace : next}
                 nextLabel={nextLabel}
-                isBackDisabled={customImapInteractionLocked}
+                isBackDisabled={
+                  customImapInteractionLocked || workspaceCompletionPending
+                }
                 isNextDisabled={
                   customImapInteractionLocked ||
+                  workspaceCompletionPending ||
                   (step === 3 ? false : !canGoNext)
                 }
               />

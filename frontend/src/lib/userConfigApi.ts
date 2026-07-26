@@ -362,6 +362,39 @@ export function loadUserAccountConfig(
   return requestUserAccountConfig("GET", undefined, signal);
 }
 
+export async function loadUserAccountConfigAfterPendingWrites(
+  signal?: AbortSignal,
+): Promise<UserAccountConfigReadResult> {
+  const accountKey = activeUserAccountConfigAccountKey;
+  await userAccountConfigPostTail;
+  if (
+    signal?.aborted ||
+    !accountKey ||
+    accountKey !== activeUserAccountConfigAccountKey
+  ) {
+    return {
+      status: "unavailable",
+      error: {
+        code: signal?.aborted ? "request_cancelled" : "account_changed",
+        message: signal?.aborted
+          ? "User config verification was cancelled."
+          : "User config was not loaded because the active account changed.",
+      },
+    };
+  }
+  return requestUserAccountConfig("GET", undefined, signal);
+}
+
+export function completeUserOnboarding(): Promise<UserAccountConfigSaveResult> {
+  const accountKey = activeUserAccountConfigAccountKey;
+  return enqueueUserAccountConfigPost(accountKey, () =>
+    requestUserAccountConfig(
+      "POST",
+      JSON.stringify({ operation: "complete_onboarding" }),
+    ),
+  );
+}
+
 export function createUserAccountConfigConflictRetryQueue({
   save = saveUserAccountConfig,
   scheduleRetry = (callback, delayMs) => window.setTimeout(callback, delayMs),

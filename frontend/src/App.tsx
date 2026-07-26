@@ -15,7 +15,9 @@ import {
   type TeamInvite,
 } from "./lib/teamInviteApi";
 import {
+  completeUserOnboarding,
   loadUserAccountConfig,
+  loadUserAccountConfigAfterPendingWrites,
   saveUserAccountConfig,
   setUserAccountConfigHydrationEchoExpectation,
   type UserAccountConfig,
@@ -105,6 +107,12 @@ type PersistedOnboardingSession = OnboardingSessionV1;
 type AppView = "onboarding" | "transition" | "workspace";
 type WorkspaceDataMode = "demo" | "live";
 type AccountConfigHydrationStatus = "idle" | "loading" | "ready" | "error";
+type WorkspaceCompletionStatus =
+  | "idle"
+  | "completing"
+  | "error"
+  | "inboxes_incomplete"
+  | "verification_required";
 type RetryableAccountConfigStatus = Exclude<
   UserAccountConfigReadResult["status"],
   "found" | "missing" | "unauthorized"
@@ -444,6 +452,17 @@ function createAccountConfigSaveQueue({
     },
     isDirty(accountKey: string) {
       return accountKey === activeAccountKey && dirty;
+    },
+    prepareForCompletion(accountKey: string) {
+      if (!accountKey || accountKey !== activeAccountKey) {
+        return false;
+      }
+      generation += 1;
+      clearScheduledRetry();
+      dirty = false;
+      latestRevision = 0;
+      pendingRequest = null;
+      return true;
     },
     enqueue({
       accountKey,
@@ -2336,6 +2355,193 @@ function projectConnectedManagedInboxesOntoOnboardingState(
   return didProject ? { ...state, inboxConnections: nextConnections } : state;
 }
 
+type AuthoritativeOnboardingCompletionSnapshot =
+  | {
+      status: "ready";
+      config: UserAccountConfig;
+      session: OnboardingSessionV1;
+      onboardingState: OnboardingState;
+    }
+  | { status: "invalid" | "inboxes_incomplete" };
+
+function onboardingChoicesAreTypeExact(
+  left: OnboardingChoices,
+  right: OnboardingChoices,
+) {
+  try {
+    return JSON.stringify(left) === JSON.stringify(right);
+  } catch {
+    return false;
+  }
+}
+
+function resolveAuthoritativeOnboardingCompletionSnapshot({
+  result,
+  ownerEmail,
+  requireCompleted,
+  expectedChoices,
+}: {
+  result: UserAccountConfigReadResult;
+  ownerEmail: string;
+  requireCompleted: boolean;
+  expectedChoices?: OnboardingChoices;
+}): AuthoritativeOnboardingCompletionSnapshot {
+  if (result.status !== "found") {
+    return { status: "invalid" };
+  }
+  const storedOwner =
+    typeof result.config.email === "string"
+      ? result.config.email.trim().toLowerCase()
+      : "";
+  if (!storedOwner || storedOwner !== ownerEmail.trim().toLowerCase()) {
+    return { status: "invalid" };
+  }
+
+  const parsedSession = parseAccountOnboardingSession(
+    result.config.onboardingSession,
+  );
+  if (
+    parsedSession.status !== "valid" ||
+    (requireCompleted &&
+      (parsedSession.session.completed !== true ||
+        parsedSession.session.currentStep !== ONBOARDING_STEP_MAX)) ||
+    (expectedChoices &&
+      !onboardingChoicesAreTypeExact(
+        parsedSession.session.choices,
+        expectedChoices,
+      ))
+  ) {
+    return { status: "invalid" };
+  }
+
+  const onboardingState = projectConnectedManagedInboxesOntoOnboardingState(
+    buildOnboardingStateFromChoices(parsedSession.session.choices),
+    getServerManagedInboxesForHydration(result.config),
+  );
+  if (!areSelectedOnboardingInboxesFullyConnected(onboardingState)) {
+    return { status: "inboxes_incomplete" };
+  }
+
+  return {
+    status: "ready",
+    config: result.config,
+    session: parsedSession.session,
+    onboardingState,
+  };
+}
+
+type MemberOnboardingCompletionResult =
+  | Extract<AuthoritativeOnboardingCompletionSnapshot, { status: "ready" }>
+  | {
+      status:
+        | "error"
+        | "inboxes_incomplete"
+        | "session_changed"
+        | "unauthorized"
+        | "verification_required";
+    };
+
+async function completeMemberOnboardingAuthoritatively({
+  accountKey,
+  ownerEmail,
+  signal,
+  prepareForCompletion,
+  isActive,
+  load = loadUserAccountConfigAfterPendingWrites,
+  complete = completeUserOnboarding,
+}: {
+  accountKey: string;
+  ownerEmail: string;
+  signal?: AbortSignal;
+  prepareForCompletion: (accountKey: string) => boolean;
+  isActive: () => boolean;
+  load?: (signal?: AbortSignal) => Promise<UserAccountConfigReadResult>;
+  complete?: () => Promise<UserAccountConfigSaveResult>;
+}): Promise<MemberOnboardingCompletionResult> {
+  if (!prepareForCompletion(accountKey) || !isActive()) {
+    return { status: "session_changed" };
+  }
+
+  let initialResult: UserAccountConfigReadResult;
+  try {
+    initialResult = await load(signal);
+  } catch {
+    return { status: "error" };
+  }
+  if (!isActive() || signal?.aborted) {
+    return { status: "session_changed" };
+  }
+  if (initialResult.status === "unauthorized") {
+    return { status: "unauthorized" };
+  }
+  const initialSnapshot = resolveAuthoritativeOnboardingCompletionSnapshot({
+    result: initialResult,
+    ownerEmail,
+    requireCompleted: false,
+  });
+  if (initialSnapshot.status !== "ready") {
+    return {
+      status:
+        initialSnapshot.status === "inboxes_incomplete"
+          ? "inboxes_incomplete"
+          : "error",
+    };
+  }
+
+  let mutationResult: UserAccountConfigSaveResult;
+  try {
+    mutationResult = await complete();
+  } catch {
+    return { status: "error" };
+  }
+  if (!isActive() || signal?.aborted) {
+    return { status: "session_changed" };
+  }
+  if (mutationResult.status === "unauthorized") {
+    return { status: "unauthorized" };
+  }
+  if (mutationResult.status !== "found") {
+    return {
+      status:
+        mutationResult.error.code === "onboarding_mailboxes_incomplete"
+          ? "inboxes_incomplete"
+          : "error",
+    };
+  }
+
+  let readbackResult: UserAccountConfigReadResult;
+  try {
+    readbackResult = await load(signal);
+  } catch {
+    return { status: "verification_required" };
+  }
+  if (!isActive() || signal?.aborted) {
+    return { status: "session_changed" };
+  }
+  if (readbackResult.status === "unauthorized") {
+    return { status: "unauthorized" };
+  }
+  if (readbackResult.status !== "found") {
+    return { status: "verification_required" };
+  }
+
+  const readbackSnapshot = resolveAuthoritativeOnboardingCompletionSnapshot({
+    result: readbackResult,
+    ownerEmail,
+    requireCompleted: true,
+    expectedChoices: initialSnapshot.session.choices,
+  });
+  if (readbackSnapshot.status !== "ready") {
+    return {
+      status:
+        readbackSnapshot.status === "inboxes_incomplete"
+          ? "inboxes_incomplete"
+          : "verification_required",
+    };
+  }
+  return readbackSnapshot;
+}
+
 function isWellFormedManagedMailboxEnvelope(
   mailbox: StoredManagedWorkspaceInbox,
 ) {
@@ -2936,6 +3142,7 @@ export const accountConfigOrchestration = {
   createHydrator: createAccountConfigHydrator,
   createOnboardingHandlers: createOnboardingAppHandlers,
   createSaveQueue: createAccountConfigSaveQueue,
+  completeMemberOnboarding: completeMemberOnboardingAuthoritatively,
   consumeGoogleOAuthCallbackSignal,
   processGoogleOAuthCallbackSignal,
   hydrateLocalOnboardingScope: hydrateLocalOnboardingIdentityScope,
@@ -3586,6 +3793,8 @@ function CuevionApp() {
   const [hydratedMemberAccountKey, setHydratedMemberAccountKey] = useState("");
   const [accountConfigRetryVersion, setAccountConfigRetryVersion] = useState(0);
   const [accountConfigMutationVersion, setAccountConfigMutationVersion] = useState(0);
+  const [workspaceCompletionStatus, setWorkspaceCompletionStatus] =
+    useState<WorkspaceCompletionStatus>("idle");
   const missingAccountConfigNeedsCleanMirrorRef = useRef(false);
   const pendingResetSaveAccountKeyRef = useRef<string | null>(null);
   const localOnboardingHydratedScopeRef = useRef<string | null>(null);
@@ -3598,6 +3807,11 @@ function CuevionApp() {
   const accountConfigSaveQueueRef = useRef<
     ReturnType<typeof accountConfigOrchestration.createSaveQueue> | null
   >(null);
+  const workspaceCompletionAttemptRef = useRef<{
+    identity: string;
+    controller: AbortController;
+  } | null>(null);
+  const activeMemberCompletionIdentityRef = useRef("");
   if (!accountConfigSaveQueueRef.current) {
     accountConfigSaveQueueRef.current = accountConfigOrchestration.createSaveQueue({
       onClean: ({ accountKey }) => {
@@ -3609,7 +3823,11 @@ function CuevionApp() {
     });
   }
   useEffect(
-    () => () => accountConfigSaveQueueRef.current?.cancel(),
+    () => () => {
+      accountConfigSaveQueueRef.current?.cancel();
+      workspaceCompletionAttemptRef.current?.controller.abort();
+      workspaceCompletionAttemptRef.current = null;
+    },
     [],
   );
   const [collaborationUser, setCollaborationUser] = useState<AuthenticatedCuevionUser | null>(
@@ -3693,6 +3911,9 @@ function CuevionApp() {
     );
   activeHydratedMemberAccountKeyRef.current = hasHydratedCurrentMemberAccount
     ? sessionAccountStorageKey
+    : "";
+  activeMemberCompletionIdentityRef.current = hasHydratedCurrentMemberAccount
+    ? `${sessionAccountStorageKey}:${sessionUser.email.trim().toLowerCase()}`
     : "";
   const canProcessLocalOAuthCallback =
     Boolean(collaborationInviteRoute || teamInviteRoute) ||
@@ -3781,6 +4002,95 @@ function CuevionApp() {
     },
     [],
   );
+  const completeMemberOnboarding = useCallback(async () => {
+    if (workspaceCompletionAttemptRef.current) {
+      return;
+    }
+    const accountKey = activeHydratedMemberAccountKeyRef.current;
+    const ownerEmail = sessionUser?.email.trim().toLowerCase() ?? "";
+    const identity = activeMemberCompletionIdentityRef.current;
+    if (
+      sessionUser?.userType !== "member" ||
+      !accountKey ||
+      !ownerEmail ||
+      !identity
+    ) {
+      return;
+    }
+
+    const controller = new AbortController();
+    workspaceCompletionAttemptRef.current = { identity, controller };
+    setWorkspaceCompletionStatus("completing");
+    const isActive = () =>
+      workspaceCompletionAttemptRef.current?.identity === identity &&
+      activeMemberCompletionIdentityRef.current === identity;
+    const outcome =
+      await accountConfigOrchestration.completeMemberOnboarding({
+        accountKey,
+        ownerEmail,
+        signal: controller.signal,
+        prepareForCompletion: (currentAccountKey) =>
+          accountConfigSaveQueueRef.current?.prepareForCompletion(
+            currentAccountKey,
+          ) === true,
+        isActive,
+      });
+
+    if (!isActive()) {
+      return;
+    }
+    workspaceCompletionAttemptRef.current = null;
+    if (outcome.status === "session_changed") {
+      setWorkspaceCompletionStatus("idle");
+      return;
+    }
+    if (outcome.status === "unauthorized") {
+      setWorkspaceCompletionStatus("idle");
+      setSessionUser(null);
+      setSessionStatus("unauthenticated");
+      return;
+    }
+    if (outcome.status !== "ready") {
+      setWorkspaceCompletionStatus(outcome.status);
+      return;
+    }
+
+    try {
+      writeFoundAccountConfigToLocalStorage(
+        outcome.config,
+        accountKey,
+        window.localStorage,
+      );
+    } catch {
+      // The server readback remains authoritative; refresh can rehydrate storage.
+    }
+    setDisplayNameOverrides(
+      outcome.config.displayNameOverrides &&
+        typeof outcome.config.displayNameOverrides === "object"
+        ? outcome.config.displayNameOverrides
+        : {},
+    );
+    setPersistedOnboardingSession(outcome.session);
+    onboardingStateRef.current = outcome.onboardingState;
+    setOnboardingState(outcome.onboardingState);
+    onboardingStepRef.current = ONBOARDING_STEP_MAX;
+    setOnboardingStep(ONBOARDING_STEP_MAX);
+    setUserConfig(buildUserConfig(outcome.onboardingState));
+    setWorkspaceCompletionStatus("idle");
+    setView("transition");
+  }, [sessionUser]);
+
+  useEffect(() => {
+    const activeAttempt = workspaceCompletionAttemptRef.current;
+    if (
+      activeAttempt &&
+      activeAttempt.identity !== activeMemberCompletionIdentityRef.current
+    ) {
+      activeAttempt.controller.abort();
+      workspaceCompletionAttemptRef.current = null;
+      setWorkspaceCompletionStatus("idle");
+    }
+  }, [sessionAccountStorageKey, sessionStatus, sessionUser]);
 
   useEffect(() => {
     if (collaborationUser) {
@@ -4324,6 +4634,18 @@ function CuevionApp() {
   const canOpenWorkspaceInMemory = canOpenWorkspaceWithoutServerCompletion(
     sessionUser.userType,
   );
+  const hasAuthoritativeMemberCompletion =
+    sessionUser.userType === "member" &&
+    persistedOnboardingSession?.completed === true &&
+    persistedOnboardingSession.currentStep === ONBOARDING_STEP_MAX;
+  const workspaceCompletionError =
+    workspaceCompletionStatus === "inboxes_incomplete"
+      ? "One or more inboxes are no longer fully connected. Edit setup to continue."
+      : workspaceCompletionStatus === "verification_required"
+        ? "Setup may have finished, but we could not verify it. Check status and try again."
+        : workspaceCompletionStatus === "error"
+          ? "We could not safely finish setup. Your inbox connections were not changed. Try again."
+          : null;
   const onboardingHandlers =
     accountConfigOrchestration.createOnboardingHandlers({
       getOnboardingState: () => onboardingStateRef.current,
@@ -4361,7 +4683,10 @@ function CuevionApp() {
     );
   }
 
-  if (view === "transition" && canOpenWorkspaceInMemory) {
+  if (
+    view === "transition" &&
+    (canOpenWorkspaceInMemory || hasAuthoritativeMemberCompletion)
+  ) {
     return (
       <WorkspaceTransition
         connectedInboxIds={
@@ -4382,8 +4707,15 @@ function CuevionApp() {
       onStateChange={onboardingHandlers.onStateChange}
       onSafeStateChange={onboardingHandlers.onSafeStateChange}
       onOpenWorkspace={onboardingHandlers.onOpenWorkspace}
+      onCompleteWorkspaceSetup={
+        sessionUser.userType === "member"
+          ? completeMemberOnboarding
+          : undefined
+      }
       onReloadAccountConfig={reloadCustomImapAccountConfig}
       canOpenWorkspace={canOpenWorkspaceInMemory}
+      workspaceCompletionStatus={workspaceCompletionStatus}
+      workspaceCompletionError={workspaceCompletionError}
     />
   );
 }

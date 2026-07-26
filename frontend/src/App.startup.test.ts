@@ -20,7 +20,10 @@ import {
 } from "./types/onboarding";
 import type { InboxConnectionAttemptResult } from "./lib/inboxConnectionApi";
 import {
+  completeUserOnboarding,
+  loadUserAccountConfigAfterPendingWrites,
   loadUserAccountConfig,
+  saveUserAccountConfig,
   setUserAccountConfigHydrationEchoExpectation,
   type UserAccountConfig,
   type UserAccountConfigReadResult,
@@ -320,6 +323,44 @@ function connectedCustomImapManagedInbox(
     },
     customSmtp: { password: "" },
     ...overrides,
+  };
+}
+
+function completionConfig({
+  completed = false,
+  includeCustom = false,
+}: {
+  completed?: boolean;
+  includeCustom?: boolean;
+} = {}): UserAccountConfig {
+  const state = includeCustom ? customImapSelectedState : selectedChoiceState;
+  const session = incompleteSession(3, state);
+  return {
+    v: 1,
+    email: ACCOUNT_KEY,
+    onboardingSession: completed
+      ? { ...session, completed: true }
+      : session,
+    managedInboxes: [
+      connectedGoogleManagedInbox(),
+      ...(includeCustom
+        ? [
+            connectedCustomImapManagedInbox({
+              smtpConnectionStatus: "connected",
+              smtpPasswordSet: true,
+              fullyConnected: true,
+              customSmtp: {
+                host: "smtp.example.com",
+                port: "587",
+                security: "starttls",
+                username: "verified.imap@example.com",
+                useSameCredentials: false,
+              },
+            }),
+          ]
+        : []),
+    ],
+    smartFolders: [{ id: "preserved" }],
   };
 }
 
@@ -4853,6 +4894,472 @@ async function run() {
       assert.deepEqual(storage.mutations, []);
       assert.deepEqual(storage.snapshot(), before);
     }
+  });
+
+  await test("member completion is ordered GET, mutation, GET and returns authoritative combined state", async () => {
+    const calls: string[] = [];
+    const initialConfig = completionConfig({ includeCustom: true });
+    const completedConfig = completionConfig({
+      completed: true,
+      includeCustom: true,
+    });
+    const loads: UserAccountConfigReadResult[] = [
+      { status: "found", config: initialConfig },
+      { status: "found", config: completedConfig },
+    ];
+    const outcome =
+      await accountConfigOrchestration.completeMemberOnboarding({
+        accountKey: ACCOUNT_KEY,
+        ownerEmail: ACCOUNT_KEY,
+        prepareForCompletion: (accountKey) => {
+          calls.push(`prepare:${accountKey}`);
+          return true;
+        },
+        isActive: () => true,
+        load: async () => {
+          calls.push(`load:${calls.filter((call) => call.startsWith("load")).length + 1}`);
+          return loads.shift()!;
+        },
+        complete: async () => {
+          calls.push("complete");
+          return { status: "found", config: completedConfig };
+        },
+      });
+
+    assert.deepEqual(calls, [
+      `prepare:${ACCOUNT_KEY}`,
+      "load:1",
+      "complete",
+      "load:2",
+    ]);
+    assert.equal(outcome.status, "ready");
+    if (outcome.status !== "ready") {
+      throw new Error("Expected authoritative completion");
+    }
+    assert.equal(outcome.session.completed, true);
+    assert.equal(outcome.session.currentStep, ONBOARDING_STEP_MAX);
+    assert.deepEqual(
+      outcome.session.choices,
+      (initialConfig.onboardingSession as OnboardingSessionV1).choices,
+    );
+    assert.equal(
+      outcome.onboardingState.inboxConnections.main.connected,
+      true,
+    );
+    assert.equal(
+      outcome.onboardingState.inboxConnections.demo.fullyConnected,
+      true,
+    );
+    assert.deepEqual(outcome.config.smartFolders, [{ id: "preserved" }]);
+  });
+
+  await test("member completion failures remain fail closed at every authority boundary", async () => {
+    const initialConfig = completionConfig();
+    const completedConfig = completionConfig({ completed: true });
+    const incompleteConfig = completionConfig();
+    incompleteConfig.managedInboxes = [
+      connectedGoogleManagedInbox({ connected: false }),
+    ];
+    const changedChoicesConfig = completionConfig({ completed: true });
+    (changedChoicesConfig.onboardingSession as OnboardingSessionV1).choices
+      .selectedInboxes = ["demo"];
+
+    const cases: Array<{
+      name: string;
+      loads: UserAccountConfigReadResult[];
+      mutation: UserAccountConfigSaveResult;
+      expected:
+        | "error"
+        | "inboxes_incomplete"
+        | "unauthorized"
+        | "verification_required";
+      expectedMutationCalls: number;
+    }> = [
+      {
+        name: "initial load failure",
+        loads: [
+          {
+            status: "network_error",
+            error: { code: "network_error", message: "offline" },
+          },
+        ],
+        mutation: { status: "found", config: completedConfig },
+        expected: "error",
+        expectedMutationCalls: 0,
+      },
+      {
+        name: "initial mailbox incomplete",
+        loads: [{ status: "found", config: incompleteConfig }],
+        mutation: { status: "found", config: completedConfig },
+        expected: "inboxes_incomplete",
+        expectedMutationCalls: 0,
+      },
+      {
+        name: "save failure",
+        loads: [{ status: "found", config: initialConfig }],
+        mutation: {
+          status: "conflict",
+          error: { code: "user_config_write_conflict", message: "conflict" },
+        },
+        expected: "error",
+        expectedMutationCalls: 1,
+      },
+      {
+        name: "server mailbox gate",
+        loads: [{ status: "found", config: initialConfig }],
+        mutation: {
+          status: "invalid",
+          error: {
+            code: "onboarding_mailboxes_incomplete",
+            message: "incomplete",
+          },
+        },
+        expected: "inboxes_incomplete",
+        expectedMutationCalls: 1,
+      },
+      {
+        name: "readback failure",
+        loads: [
+          { status: "found", config: initialConfig },
+          {
+            status: "network_error",
+            error: { code: "network_error", message: "offline" },
+          },
+        ],
+        mutation: { status: "found", config: completedConfig },
+        expected: "verification_required",
+        expectedMutationCalls: 1,
+      },
+      {
+        name: "readback still incomplete",
+        loads: [
+          { status: "found", config: initialConfig },
+          { status: "found", config: initialConfig },
+        ],
+        mutation: { status: "found", config: completedConfig },
+        expected: "verification_required",
+        expectedMutationCalls: 1,
+      },
+      {
+        name: "readback mailbox disconnected",
+        loads: [
+          { status: "found", config: initialConfig },
+          {
+            status: "found",
+            config: {
+              ...completedConfig,
+              managedInboxes: incompleteConfig.managedInboxes,
+            },
+          },
+        ],
+        mutation: { status: "found", config: completedConfig },
+        expected: "inboxes_incomplete",
+        expectedMutationCalls: 1,
+      },
+      {
+        name: "readback choices changed",
+        loads: [
+          { status: "found", config: initialConfig },
+          { status: "found", config: changedChoicesConfig },
+        ],
+        mutation: { status: "found", config: changedChoicesConfig },
+        expected: "verification_required",
+        expectedMutationCalls: 1,
+      },
+      {
+        name: "session expired before mutation",
+        loads: [
+          {
+            status: "unauthorized",
+            error: { code: "unauthorized", message: "expired" },
+          },
+        ],
+        mutation: { status: "found", config: completedConfig },
+        expected: "unauthorized",
+        expectedMutationCalls: 0,
+      },
+      {
+        name: "session expired during readback",
+        loads: [
+          { status: "found", config: initialConfig },
+          {
+            status: "unauthorized",
+            error: { code: "unauthorized", message: "expired" },
+          },
+        ],
+        mutation: { status: "found", config: completedConfig },
+        expected: "unauthorized",
+        expectedMutationCalls: 1,
+      },
+    ];
+
+    for (const scenario of cases) {
+      let mutationCalls = 0;
+      const loads = [...scenario.loads];
+      const outcome =
+        await accountConfigOrchestration.completeMemberOnboarding({
+          accountKey: ACCOUNT_KEY,
+          ownerEmail: ACCOUNT_KEY,
+          prepareForCompletion: () => true,
+          isActive: () => true,
+          load: async () => loads.shift()!,
+          complete: async () => {
+            mutationCalls += 1;
+            return scenario.mutation;
+          },
+        });
+      assert.equal(outcome.status, scenario.expected, scenario.name);
+      assert.equal(
+        mutationCalls,
+        scenario.expectedMutationCalls,
+        scenario.name,
+      );
+    }
+  });
+
+  await test("unverified completion retries from server state and idempotently succeeds", async () => {
+    let serverCompleted = false;
+    let completionCalls = 0;
+    let readCalls = 0;
+    const load = async (): Promise<UserAccountConfigReadResult> => {
+      readCalls += 1;
+      if (completionCalls === 1 && readCalls === 2) {
+        return {
+          status: "network_error",
+          error: { code: "network_error", message: "readback unavailable" },
+        };
+      }
+      return {
+        status: "found",
+        config: completionConfig({ completed: serverCompleted }),
+      };
+    };
+    const complete = async (): Promise<UserAccountConfigSaveResult> => {
+      completionCalls += 1;
+      serverCompleted = true;
+      return {
+        status: "found",
+        config: completionConfig({ completed: true }),
+      };
+    };
+
+    const first =
+      await accountConfigOrchestration.completeMemberOnboarding({
+        accountKey: ACCOUNT_KEY,
+        ownerEmail: ACCOUNT_KEY,
+        prepareForCompletion: () => true,
+        isActive: () => true,
+        load,
+        complete,
+      });
+    assert.equal(first.status, "verification_required");
+
+    const second =
+      await accountConfigOrchestration.completeMemberOnboarding({
+        accountKey: ACCOUNT_KEY,
+        ownerEmail: ACCOUNT_KEY,
+        prepareForCompletion: () => true,
+        isActive: () => true,
+        load,
+        complete,
+      });
+    assert.equal(second.status, "ready");
+    if (second.status !== "ready") {
+      throw new Error("Expected successful verification retry");
+    }
+    assert.equal(second.session.completed, true);
+    assert.equal(completionCalls, 2);
+    assert.equal(readCalls, 4);
+  });
+
+  await test("account changes invalidate an old completion before mutation", async () => {
+    const pendingLoad = deferred<UserAccountConfigReadResult>();
+    let active = true;
+    let completionCalls = 0;
+    const completion =
+      accountConfigOrchestration.completeMemberOnboarding({
+        accountKey: ACCOUNT_KEY,
+        ownerEmail: ACCOUNT_KEY,
+        prepareForCompletion: () => true,
+        isActive: () => active,
+        load: async () => pendingLoad.promise,
+        complete: async () => {
+          completionCalls += 1;
+          return {
+            status: "found",
+            config: completionConfig({ completed: true }),
+          };
+        },
+      });
+    active = false;
+    pendingLoad.resolve({
+      status: "found",
+      config: completionConfig(),
+    });
+
+    assert.equal((await completion).status, "session_changed");
+    assert.equal(completionCalls, 0);
+  });
+
+  await test("completion preparation cancels queued stale drafts behind an in-flight save", async () => {
+    const pendingSave = deferred<UserAccountConfigSaveResult>();
+    const saved: UserAccountConfig[] = [];
+    const queue = accountConfigOrchestration.createSaveQueue({
+      save: async (config) => {
+        saved.push(config);
+        return pendingSave.promise;
+      },
+    });
+    queue.reset(ACCOUNT_KEY);
+    queue.markDirty(ACCOUNT_KEY);
+    queue.enqueue({
+      accountKey: ACCOUNT_KEY,
+      config: { onboardingSession: incompleteSession(2) },
+    });
+    queue.markDirty(ACCOUNT_KEY);
+    queue.enqueue({
+      accountKey: ACCOUNT_KEY,
+      config: { onboardingSession: incompleteSession(3) },
+    });
+    assert.equal(saved.length, 1);
+    assert.equal(queue.prepareForCompletion(ACCOUNT_KEY), true);
+    assert.equal(queue.isDirty(ACCOUNT_KEY), false);
+
+    pendingSave.resolve({ status: "found", config: saved[0] });
+    await flushAsyncWork();
+    assert.equal(
+      saved.length,
+      1,
+      "the queued completed-false draft must not run after preparation",
+    );
+    assert.equal(queue.isDirty(ACCOUNT_KEY), false);
+    assert.equal(queue.prepareForCompletion(SECOND_ACCOUNT_KEY), false);
+  });
+
+  await test("config API barrier waits for older POSTs and completion sends no mailbox authority", async () => {
+    const previousFetch = globalThis.fetch;
+    const firstPost = deferred<Response>();
+    const calls: Array<{ method: string; url: string; body?: unknown }> = [];
+    let ordinaryPostPending = true;
+    globalThis.fetch = (async (input, init) => {
+      const method = init?.method ?? "GET";
+      const url = String(input);
+      const body =
+        typeof init?.body === "string"
+          ? JSON.parse(init.body)
+          : undefined;
+      calls.push({ method, url, body });
+      if (method === "POST" && ordinaryPostPending) {
+        ordinaryPostPending = false;
+        return firstPost.promise;
+      }
+      if (method === "POST") {
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            config: completionConfig({ completed: true }),
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          ok: true,
+          configState: "found",
+          config: completionConfig(),
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    }) as typeof fetch;
+
+    try {
+      setUserAccountConfigHydrationEchoExpectation(ACCOUNT_KEY, null);
+      const ordinarySave = saveUserAccountConfig({
+        uiPreferences: { themeMode: "Dark" },
+      });
+      const readAfterSave = loadUserAccountConfigAfterPendingWrites();
+      await flushAsyncWork();
+      assert.deepEqual(
+        calls.map((call) => call.method),
+        ["POST"],
+        "the GET must wait behind the older config POST",
+      );
+      firstPost.resolve(
+        new Response(
+          JSON.stringify({
+            ok: true,
+            config: { uiPreferences: { themeMode: "Dark" } },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      );
+      assert.equal((await ordinarySave).status, "found");
+      assert.equal((await readAfterSave).status, "found");
+      assert.deepEqual(calls.map((call) => call.method), ["POST", "GET"]);
+
+      const completionResult = await completeUserOnboarding();
+      assert.equal(completionResult.status, "found");
+      const completionCall = calls.at(-1)!;
+      assert.equal(completionCall.url, "/api/user/config");
+      assert.deepEqual(completionCall.body, {
+        operation: "complete_onboarding",
+      });
+      assert.equal(
+        JSON.stringify(completionCall.body).includes("managedInboxes"),
+        false,
+      );
+      assert.equal(
+        calls.some((call) =>
+          /gmail|imap|smtp|oauth/i.test(call.url),
+        ),
+        false,
+      );
+    } finally {
+      setUserAccountConfigHydrationEchoExpectation(null, null);
+      globalThis.fetch = previousFetch;
+    }
+  });
+
+  await test("final-step completion UI disables both actions and shows retry-safe copy", () => {
+    const baseProps = {
+      state: selectedState,
+      currentStep: ONBOARDING_STEP_MAX,
+      onStepChange: () => undefined,
+      onStateChange: () => undefined,
+      onSafeStateChange: () => undefined,
+      onOpenWorkspace: () => undefined,
+      onCompleteWorkspaceSetup: () => undefined,
+      canOpenWorkspace: false,
+    };
+    const pendingMarkup = renderToStaticMarkup(
+      createElement(OnboardingFlow, {
+        ...baseProps,
+        workspaceCompletionStatus: "completing",
+      }),
+    );
+    assertMarkupControlDisabled(pendingMarkup, "back");
+    assertMarkupControlDisabled(pendingMarkup, "next");
+    assert.equal(pendingMarkup.includes("Finishing setup…"), true);
+
+    const errorCopy =
+      "We could not safely finish setup. Your inbox connections were not changed. Try again.";
+    const errorMarkup = renderToStaticMarkup(
+      createElement(OnboardingFlow, {
+        ...baseProps,
+        workspaceCompletionStatus: "error",
+        workspaceCompletionError: errorCopy,
+      }),
+    );
+    assert.equal(errorMarkup.includes(errorCopy), true);
+    assert.equal(errorMarkup.includes('role="alert"'), true);
+    const retryMarkup = renderToStaticMarkup(
+      createElement(OnboardingFlow, {
+        ...baseProps,
+        workspaceCompletionStatus: "idle",
+        workspaceCompletionError: null,
+      }),
+    );
+    assert.equal(retryMarkup.includes(errorCopy), false);
   });
 
   await test("client progress helpers can never create completed true", () => {

@@ -57,6 +57,7 @@ STORE = {"rest_url": "https://kv.example", "rest_token": "token"}
 CREDENTIAL_VERSION_CANARY = (
     base64.urlsafe_b64encode(b"g" * 32).decode("ascii").rstrip("=")
 )
+DEFAULT_COMPLETION_DEPENDENCY = object()
 VALID_ONBOARDING_SESSION = {
     "schemaVersion": 1,
     "completed": False,
@@ -90,6 +91,96 @@ def onboarding_session(**updates):
     session = json.loads(json.dumps(VALID_ONBOARDING_SESSION))
     session.update(updates)
     return session
+
+
+def connected_google_mailbox(
+    *,
+    mailbox_id="gmail-server-owned",
+    onboarding_inbox_id="main",
+    connected=True,
+):
+    return {
+        "id": mailbox_id,
+        "email": "verified@gmail.com",
+        "onboardingInboxId": onboarding_inbox_id,
+        "provider": "google",
+        "connectionMethod": "oauth",
+        "connectionType": "oauth",
+        "connected": connected,
+        "connectionStatus": "connected" if connected else "not_connected",
+        "oauthOwnerEmail": "owner@example.com",
+    }
+
+
+def connected_custom_mailbox(
+    *,
+    mailbox_id="imap-server-owned",
+    onboarding_inbox_id="custom:vip-mabc123",
+):
+    return {
+        "id": mailbox_id,
+        "email": "artist@example.com",
+        "onboardingInboxId": onboarding_inbox_id,
+        "provider": "custom_imap",
+        "connectionMethod": "imap",
+        "connected": True,
+        "connectionStatus": "connected",
+        "imapConnectionStatus": "connected",
+        "smtpConnectionStatus": "connected",
+        "fullyConnected": True,
+        "credentialVersion": CREDENTIAL_VERSION_CANARY,
+        "customImap": {
+            "host": "imap.example.com",
+            "port": "993",
+            "ssl": True,
+            "username": "artist@example.com",
+        },
+        "customSmtp": {
+            "host": "smtp.example.com",
+            "port": "587",
+            "security": "starttls",
+            "username": "artist@example.com",
+            "useSameCredentials": False,
+        },
+    }
+
+
+def authoritative_google_token():
+    return {
+        "provider": "google",
+        "email": "verified@gmail.com",
+        "owner_email": "owner@example.com",
+        "access_token": "server-access-token",
+        "refresh_token": "server-refresh-token",
+        "expires_at": None,
+        "_storage_durable": True,
+    }
+
+
+def authoritative_custom_secret(**updates):
+    record = {
+        "credentialVersion": CREDENTIAL_VERSION_CANARY,
+        "imapPassword": "server-imap-secret",
+        "smtpPassword": "server-smtp-secret",
+    }
+    record.update(updates)
+    return {"status": "present", "record": record, "error": None}
+
+
+def completion_record(managed_inboxes, selected_inboxes):
+    return {
+        "v": 1,
+        "email": "owner@example.com",
+        "updatedAt": "2026-07-01T12:00:00Z",
+        "onboardingSession": onboarding_session(
+            currentStep=3,
+            choices={"selectedInboxes": selected_inboxes},
+        ),
+        "managedInboxes": copy.deepcopy(managed_inboxes),
+        "uiPreferences": {"themeMode": "Dark"},
+        "smartFolders": [{"id": "preserved"}],
+        "secretGenerationCanary": "must-remain-server-only",
+    }
 
 
 def assert_no_password_secret_keys(test_case, value):
@@ -1519,6 +1610,369 @@ class PostRouteTests(unittest.TestCase):
         self.assert_invalid_onboarding_session(
             onboarding_session(completed=True),
         )
+
+    def invoke_completion(
+        self,
+        existing,
+        *,
+        payload=None,
+        google_token=DEFAULT_COMPLETION_DEPENDENCY,
+        custom_secret=DEFAULT_COMPLETION_DEPENDENCY,
+        auth=(SESSION_USER, None),
+        write_result=None,
+    ):
+        token_result = (
+            authoritative_google_token()
+            if google_token is DEFAULT_COMPLETION_DEPENDENCY
+            else google_token
+        )
+        secret_result = (
+            authoritative_custom_secret()
+            if custom_secret is DEFAULT_COMPLETION_DEPENDENCY
+            else custom_secret
+        )
+        with patch.object(
+            config_route,
+            "load_google_token_record_with_metadata",
+            return_value=(token_result, None),
+        ) as token_read, patch.object(
+            config_route,
+            "read_mailbox_secret",
+            return_value=secret_result,
+        ) as secret_read:
+            handler, read_mock, write_mock = self.invoke(
+                payload or {"operation": "complete_onboarding"},
+                auth=auth,
+                read_result={
+                    "status": "ok",
+                    "config": copy.deepcopy(existing),
+                    "error": None,
+                },
+                write_result=write_result,
+            )
+        return handler, read_mock, write_mock, token_read, secret_read
+
+    def test_completion_allows_fully_connected_gmail(self):
+        existing = completion_record(
+            [connected_google_mailbox()],
+            ["main"],
+        )
+        existing["onboardingSession"]["currentStep"] = 2
+        handler, _, write_mock, token_read, secret_read = self.invoke_completion(
+            existing
+        )
+
+        self.assertEqual(handler.status_code, 200)
+        written = write_mock.call_args.args[2]
+        self.assertIs(written["onboardingSession"]["completed"], True)
+        self.assertEqual(written["onboardingSession"]["currentStep"], 3)
+        token_read.assert_called_once_with("verified@gmail.com")
+        secret_read.assert_not_called()
+
+    def test_completion_allows_fully_connected_custom_imap_and_smtp(self):
+        existing = completion_record(
+            [connected_custom_mailbox()],
+            ["custom:vip-mabc123"],
+        )
+        handler, _, write_mock, token_read, secret_read = self.invoke_completion(
+            existing
+        )
+
+        self.assertEqual(handler.status_code, 200)
+        self.assertIs(
+            write_mock.call_args.args[2]["onboardingSession"]["completed"],
+            True,
+        )
+        token_read.assert_not_called()
+        secret_read.assert_called_once_with(
+            "owner@example.com",
+            "imap-server-owned",
+        )
+
+    def test_combined_completion_changes_only_the_authoritative_session(self):
+        existing = completion_record(
+            [connected_google_mailbox(), connected_custom_mailbox()],
+            ["main", "custom:vip-mabc123"],
+        )
+        original = copy.deepcopy(existing)
+        handler, _, write_mock, _, _ = self.invoke_completion(existing)
+
+        self.assertEqual(handler.status_code, 200)
+        written = write_mock.call_args.args[2]
+        expected_session = copy.deepcopy(original["onboardingSession"])
+        expected_session["completed"] = True
+        expected_session["currentStep"] = 3
+        expected = copy.deepcopy(original)
+        expected["onboardingSession"] = expected_session
+        self.assertEqual(written, expected)
+        self.assertEqual(
+            written["onboardingSession"]["choices"],
+            original["onboardingSession"]["choices"],
+        )
+        self.assertEqual(written["managedInboxes"], original["managedInboxes"])
+        self.assertEqual(
+            written["managedInboxes"][1]["credentialVersion"],
+            CREDENTIAL_VERSION_CANARY,
+        )
+        response_text = json.dumps(handler.payload())
+        self.assertNotIn("credentialVersion", response_text)
+        self.assertNotIn("secretGenerationCanary", response_text)
+        self.assertNotIn("server-access-token", response_text)
+        self.assertNotIn("server-imap-secret", response_text)
+        assert_no_password_secret_keys(self, handler.payload())
+
+    def test_non_selected_incomplete_mailbox_does_not_block_completion(self):
+        selected = connected_google_mailbox()
+        non_selected = {
+            **connected_google_mailbox(
+                mailbox_id="non-selected",
+                onboarding_inbox_id="demo",
+                connected=False,
+            ),
+            "provider": "unsupported",
+        }
+        existing = completion_record([selected, non_selected], ["main"])
+        handler, _, write_mock, _, _ = self.invoke_completion(existing)
+
+        self.assertEqual(handler.status_code, 200)
+        self.assertIs(
+            write_mock.call_args.args[2]["onboardingSession"]["completed"],
+            True,
+        )
+        self.assertEqual(
+            write_mock.call_args.args[2]["managedInboxes"],
+            existing["managedInboxes"],
+        )
+
+    def test_forged_completion_mailboxes_are_rejected_before_storage(self):
+        forged = {
+            "operation": "complete_onboarding",
+            "config": {
+                "onboardingSession": {"completed": True},
+                "managedInboxes": [
+                    {
+                        "connected": True,
+                        "fullyConnected": True,
+                    }
+                ],
+            },
+        }
+        handler, read_mock, write_mock = self.invoke(forged)
+
+        self.assertEqual(handler.status_code, 400)
+        self.assertEqual(handler.payload()["error"]["code"], "invalid_request")
+        read_mock.assert_not_called()
+        write_mock.assert_not_called()
+
+    def test_completion_rejects_incomplete_or_ambiguous_authority(self):
+        base_google = connected_google_mailbox()
+        base_custom = connected_custom_mailbox()
+        cases = {
+            "custom smtp not configured": (
+                [
+                    {
+                        **base_custom,
+                        "smtpConnectionStatus": "not_configured",
+                    }
+                ],
+                ["custom:vip-mabc123"],
+                authoritative_custom_secret(),
+            ),
+            "custom fully connected false": (
+                [{**base_custom, "fullyConnected": False}],
+                ["custom:vip-mabc123"],
+                authoritative_custom_secret(),
+            ),
+            "custom missing imap secret": (
+                [base_custom],
+                ["custom:vip-mabc123"],
+                authoritative_custom_secret(imapPassword=""),
+            ),
+            "custom missing smtp secret": (
+                [base_custom],
+                ["custom:vip-mabc123"],
+                authoritative_custom_secret(smtpPassword=""),
+            ),
+            "gmail disconnected": (
+                [connected_google_mailbox(connected=False)],
+                ["main"],
+                authoritative_custom_secret(),
+            ),
+            "missing selected position": (
+                [base_google],
+                ["demo"],
+                authoritative_custom_secret(),
+            ),
+            "duplicate position match": (
+                [
+                    base_google,
+                    connected_google_mailbox(mailbox_id="gmail-second"),
+                ],
+                ["main"],
+                authoritative_custom_secret(),
+            ),
+            "duplicate selected mailbox id": (
+                [
+                    base_google,
+                    connected_google_mailbox(
+                        mailbox_id="gmail-server-owned",
+                        onboarding_inbox_id="demo",
+                    ),
+                ],
+                ["main", "demo"],
+                authoritative_custom_secret(),
+            ),
+            "unsupported selected provider": (
+                [{**base_google, "provider": "microsoft"}],
+                ["main"],
+                authoritative_custom_secret(),
+            ),
+        }
+        for label, (mailboxes, selected, secret) in cases.items():
+            with self.subTest(label=label):
+                existing = completion_record(mailboxes, selected)
+                handler, _, write_mock, _, _ = self.invoke_completion(
+                    existing,
+                    custom_secret=secret,
+                )
+                self.assertEqual(handler.status_code, 409)
+                self.assertEqual(
+                    handler.payload()["error"]["code"],
+                    "onboarding_mailboxes_incomplete",
+                )
+                write_mock.assert_not_called()
+
+    def test_completion_rejects_empty_or_invalid_selected_choices(self):
+        empty = completion_record([connected_google_mailbox()], [])
+        handler, _, write_mock, _, _ = self.invoke_completion(empty)
+        self.assertEqual(handler.status_code, 409)
+        write_mock.assert_not_called()
+
+        invalid = completion_record([connected_google_mailbox()], ["main"])
+        invalid["onboardingSession"]["choices"]["selectedInboxes"] = "main"
+        handler, _, write_mock, _, _ = self.invoke_completion(invalid)
+        self.assertEqual(handler.status_code, 503)
+        self.assertEqual(handler.payload()["error"]["code"], "config_invalid")
+        write_mock.assert_not_called()
+
+    def test_completion_rejects_missing_gmail_token_or_wrong_owner(self):
+        existing = completion_record([connected_google_mailbox()], ["main"])
+        for token in (
+            None,
+            {
+                **authoritative_google_token(),
+                "owner_email": "other@example.com",
+            },
+        ):
+            with self.subTest(token=token):
+                handler, _, write_mock, _, _ = self.invoke_completion(
+                    existing,
+                    google_token=token,
+                )
+                self.assertEqual(handler.status_code, 409)
+                self.assertEqual(
+                    handler.payload()["error"]["code"],
+                    "onboarding_mailboxes_incomplete",
+                )
+                write_mock.assert_not_called()
+
+    def test_completion_dependency_outage_is_not_reported_as_disconnection(self):
+        existing = completion_record(
+            [connected_custom_mailbox()],
+            ["custom:vip-mabc123"],
+        )
+        handler, _, write_mock, _, _ = self.invoke_completion(
+            existing,
+            custom_secret={
+                "status": "unavailable",
+                "record": None,
+                "error": {
+                    "code": "mailbox_secret_store_unavailable",
+                    "message": "private outage detail",
+                },
+            },
+        )
+
+        self.assertEqual(handler.status_code, 503)
+        self.assertEqual(
+            handler.payload()["error"]["code"],
+            "onboarding_completion_unavailable",
+        )
+        self.assertNotIn("private outage detail", json.dumps(handler.payload()))
+        write_mock.assert_not_called()
+
+    def test_completion_is_idempotent_and_does_not_rewrite(self):
+        existing = completion_record([connected_google_mailbox()], ["main"])
+        existing["onboardingSession"]["completed"] = True
+        handler, read_mock, write_mock, _, _ = self.invoke_completion(existing)
+
+        self.assertEqual(handler.status_code, 200)
+        self.assertIs(
+            handler.payload()["config"]["onboardingSession"]["completed"],
+            True,
+        )
+        read_mock.assert_called_once_with(STORE, "owner@example.com")
+        write_mock.assert_not_called()
+
+    def test_completion_conflict_is_bounded_and_cannot_overwrite(self):
+        existing = completion_record([connected_google_mailbox()], ["main"])
+        handler, read_mock, write_mock, _, _ = self.invoke_completion(
+            existing,
+            write_result={"status": "conflict", "record": None, "error": None},
+        )
+
+        self.assertEqual(handler.status_code, 409)
+        self.assertEqual(
+            handler.payload()["error"]["code"],
+            "user_config_write_conflict",
+        )
+        self.assertEqual(read_mock.call_count, config_route.MAX_USER_CONFIG_CAS_ATTEMPTS)
+        self.assertEqual(write_mock.call_count, config_route.MAX_USER_CONFIG_CAS_ATTEMPTS)
+        self.assertIs(existing["onboardingSession"]["completed"], False)
+
+    def test_completed_session_rejects_stale_false_write(self):
+        existing = completion_record([connected_google_mailbox()], ["main"])
+        existing["onboardingSession"]["completed"] = True
+        handler, _, write_mock = self.invoke(
+            {
+                "config": {
+                    "onboardingSession": onboarding_session(
+                        currentStep=3,
+                        choices={"selectedInboxes": ["main"]},
+                    )
+                }
+            },
+            read_result={"status": "ok", "config": existing, "error": None},
+        )
+
+        self.assertEqual(handler.status_code, 400)
+        self.assertEqual(
+            handler.payload()["error"]["code"],
+            "invalid_onboarding_session",
+        )
+        write_mock.assert_not_called()
+
+    def test_completion_rejects_unauthorized_guest_and_other_owner(self):
+        existing = completion_record([connected_google_mailbox()], ["main"])
+        guest = {
+            "email": "guest@example.com",
+            "name": "Guest",
+            "userType": "guest",
+        }
+        handler, read_mock, write_mock, _, _ = self.invoke_completion(
+            existing,
+            auth=(guest, None),
+        )
+        self.assertEqual(handler.status_code, 401)
+        read_mock.assert_not_called()
+        write_mock.assert_not_called()
+
+        other_owner = copy.deepcopy(existing)
+        other_owner["email"] = "other@example.com"
+        handler, _, write_mock, _, _ = self.invoke_completion(other_owner)
+        self.assertEqual(handler.status_code, 503)
+        self.assertEqual(handler.payload()["error"]["code"], "config_invalid")
+        write_mock.assert_not_called()
 
     def test_existing_completed_true_cannot_be_reset_or_cleared(self):
         existing = {

@@ -24,6 +24,7 @@ from mailbox_secret_store import (  # noqa: E402
     is_valid_mailbox_credential_version,
     read_mailbox_secret,
 )
+from oauth_token_store import load_google_token_record_with_metadata  # noqa: E402
 from user_config_store import (  # noqa: E402
     USER_CONFIG_SCHEMA_VERSION,
     read_user_config_record,
@@ -280,6 +281,14 @@ class _OnboardingSessionValidationError(ValueError):
 
 class _StoredUserConfigValidationError(ValueError):
     pass
+
+
+class _OnboardingCompletionError(ValueError):
+    def __init__(self, status_code: int, code: str, message: str):
+        super().__init__(message)
+        self.status_code = status_code
+        self.code = code
+        self.message = message
 
 
 class _JsonStructureLimitError(ValueError):
@@ -1052,6 +1061,258 @@ def _json_values_are_type_exact(left, right) -> bool:
         return False
 
 
+def _valid_server_managed_inbox_id(value) -> bool:
+    return bool(
+        isinstance(value, str)
+        and value
+        and value == value.strip()
+        and not value.startswith("draft-")
+        and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", value)
+    )
+
+
+def _completion_inboxes_incomplete() -> _OnboardingCompletionError:
+    return _OnboardingCompletionError(
+        409,
+        "onboarding_mailboxes_incomplete",
+        "One or more selected inboxes are not fully connected.",
+    )
+
+
+def _completion_dependency_unavailable() -> _OnboardingCompletionError:
+    return _OnboardingCompletionError(
+        503,
+        "onboarding_completion_unavailable",
+        "Onboarding completion could not be safely verified.",
+    )
+
+
+def _gmail_mailbox_is_authoritatively_ready(mailbox: dict, owner_email: str) -> bool:
+    mailbox_email = mailbox.get("email")
+    if (
+        mailbox.get("provider") != "google"
+        or mailbox.get("connectionMethod") != "oauth"
+        or mailbox.get("connected") is not True
+        or mailbox.get("connectionStatus") != "connected"
+        or not isinstance(mailbox_email, str)
+        or not mailbox_email
+        or mailbox_email != mailbox_email.strip().lower()
+    ):
+        return False
+
+    stored_oauth_owner = mailbox.get("oauthOwnerEmail")
+    if stored_oauth_owner is not None:
+        try:
+            if normalize_auth_email(stored_oauth_owner) != normalize_auth_email(
+                owner_email
+            ):
+                return False
+        except Exception:
+            return False
+
+    try:
+        token_record, token_error = load_google_token_record_with_metadata(
+            mailbox_email
+        )
+    except Exception as error:
+        raise _completion_dependency_unavailable() from error
+    if token_error:
+        raise _completion_dependency_unavailable()
+    if not isinstance(token_record, dict):
+        return False
+
+    try:
+        token_email = normalize_auth_email(str(token_record.get("email") or ""))
+        token_owner = normalize_auth_email(
+            str(token_record.get("owner_email") or "")
+        )
+        expected_owner = normalize_auth_email(owner_email)
+    except Exception:
+        return False
+    if (
+        token_record.get("provider") != "google"
+        or token_email != mailbox_email
+        or token_owner != expected_owner
+        or token_record.get("_storage_durable") is not True
+        or not _stored_mailbox_password_is_usable(
+            token_record.get("access_token")
+        )
+    ):
+        return False
+
+    expires_at = token_record.get("expires_at")
+    if expires_at is None:
+        return True
+    if not isinstance(expires_at, str) or not expires_at.strip():
+        return False
+    try:
+        parsed_expiry = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+        if parsed_expiry.tzinfo is None:
+            return False
+    except ValueError:
+        return False
+    return (
+        parsed_expiry > datetime.now(timezone.utc)
+        or _stored_mailbox_password_is_usable(token_record.get("refresh_token"))
+    )
+
+
+def _custom_imap_mailbox_is_authoritatively_ready(
+    mailbox: dict,
+    owner_email: str,
+) -> bool:
+    if (
+        mailbox.get("provider") != "custom_imap"
+        or mailbox.get("connectionMethod") != "imap"
+        or mailbox.get("connected") is not True
+        or mailbox.get("connectionStatus") != "connected"
+        or mailbox.get("imapConnectionStatus") != "connected"
+        or mailbox.get("smtpConnectionStatus") != "connected"
+        or mailbox.get("fullyConnected") is not True
+        or not _safe_imap_connection_config(
+            _without_empty_password_placeholders(mailbox.get("customImap"))
+        )
+    ):
+        return False
+
+    smtp_configured, smtp_credential_source = _safe_smtp_submission_config(
+        _without_empty_password_placeholders(mailbox.get("customSmtp"))
+    )
+    credential_version = mailbox.get("credentialVersion")
+    mailbox_id = mailbox.get("id")
+    if (
+        not smtp_configured
+        or smtp_credential_source is None
+        or not _valid_server_managed_inbox_id(mailbox_id)
+        or not is_valid_mailbox_credential_version(credential_version)
+    ):
+        return False
+
+    try:
+        secret_result = read_mailbox_secret(owner_email, mailbox_id)
+    except Exception as error:
+        raise _completion_dependency_unavailable() from error
+    if (
+        isinstance(secret_result, dict)
+        and secret_result.get("status") == "unavailable"
+    ):
+        raise _completion_dependency_unavailable()
+    if (
+        not isinstance(secret_result, dict)
+        or secret_result.get("status") != "present"
+        or secret_result.get("error") is not None
+        or not isinstance(secret_result.get("record"), dict)
+    ):
+        return False
+
+    secret_record = secret_result["record"]
+    return bool(
+        secret_record.get("credentialVersion") == credential_version
+        and is_valid_mailbox_credential_version(
+            secret_record.get("credentialVersion")
+        )
+        and _stored_mailbox_password_is_usable(secret_record.get("imapPassword"))
+        and _stored_mailbox_password_is_usable(
+            secret_record.get(
+                "imapPassword"
+                if smtp_credential_source == "imap"
+                else "smtpPassword"
+            )
+        )
+    )
+
+
+def _build_authoritative_onboarding_completion(
+    existing_record: dict,
+    owner_email: str,
+) -> dict:
+    session_state, normalized_session = _classify_stored_onboarding_session(
+        existing_record.get("onboardingSession")
+    )
+    if (
+        session_state is not _StoredOnboardingSessionState.VALID
+        or not isinstance(normalized_session, dict)
+    ):
+        raise _completion_inboxes_incomplete()
+
+    choices = normalized_session.get("choices")
+    selected_inboxes = (
+        choices.get("selectedInboxes") if isinstance(choices, dict) else None
+    )
+    if (
+        not isinstance(selected_inboxes, list)
+        or not selected_inboxes
+        or any(not isinstance(position, str) for position in selected_inboxes)
+        or len(set(selected_inboxes)) != len(selected_inboxes)
+    ):
+        raise _completion_inboxes_incomplete()
+
+    managed_inboxes = existing_record.get("managedInboxes")
+    if not isinstance(managed_inboxes, list):
+        raise _completion_inboxes_incomplete()
+
+    selected_mailboxes = []
+    for position in selected_inboxes:
+        matches = [
+            mailbox
+            for mailbox in managed_inboxes
+            if isinstance(mailbox, dict)
+            and mailbox.get("onboardingInboxId") == position
+        ]
+        if len(matches) != 1:
+            raise _completion_inboxes_incomplete()
+        selected_mailboxes.append(matches[0])
+
+    selected_ids = []
+    for mailbox in selected_mailboxes:
+        mailbox_id = mailbox.get("id")
+        if not _valid_server_managed_inbox_id(mailbox_id):
+            raise _completion_inboxes_incomplete()
+        selected_ids.append(mailbox_id.casefold())
+        if sum(
+            1
+            for candidate in managed_inboxes
+            if isinstance(candidate, dict)
+            and isinstance(candidate.get("id"), str)
+            and candidate["id"].casefold() == mailbox_id.casefold()
+        ) != 1:
+            raise _completion_inboxes_incomplete()
+
+        provider = mailbox.get("provider")
+        if provider == "google":
+            ready = _gmail_mailbox_is_authoritatively_ready(
+                mailbox,
+                owner_email,
+            )
+        elif provider == "custom_imap":
+            ready = _custom_imap_mailbox_is_authoritatively_ready(
+                mailbox,
+                owner_email,
+            )
+        else:
+            ready = False
+        if not ready:
+            raise _completion_inboxes_incomplete()
+
+    if len(set(selected_ids)) != len(selected_ids):
+        raise _completion_inboxes_incomplete()
+
+    if (
+        normalized_session.get("completed") is True
+        and normalized_session.get("currentStep") == ONBOARDING_MAX_CURRENT_STEP
+    ):
+        return copy.deepcopy(existing_record)
+
+    completed_record = copy.deepcopy(existing_record)
+    completed_record["onboardingSession"] = {
+        "schemaVersion": ONBOARDING_SESSION_SCHEMA_VERSION,
+        "completed": True,
+        "currentStep": ONBOARDING_MAX_CURRENT_STEP,
+        "choices": copy.deepcopy(choices),
+    }
+    return completed_record
+
+
 def _merge_user_config(existing_record: dict | None, sanitized_update: dict) -> dict:
     defaults = {
         "onboardingSession": {},
@@ -1464,6 +1725,21 @@ class handler(BaseHTTPRequestHandler):
         if error:
             _send_json(self, error_status or 400, error)
             return
+        is_completion_request = payload == {"operation": "complete_onboarding"}
+        if (
+            isinstance(payload, dict)
+            and "operation" in payload
+            and not is_completion_request
+        ):
+            _send_json(
+                self,
+                400,
+                _build_error(
+                    "invalid_request",
+                    "Onboarding completion request is invalid.",
+                ),
+            )
+            return
         if _contains_server_only_credential_field(payload):
             _send_json(
                 self,
@@ -1475,21 +1751,23 @@ class handler(BaseHTTPRequestHandler):
             )
             return
 
-        try:
-            sanitized_config = _sanitize_user_config(
-                payload or {},
-                session_user["email"],
-            )
-        except _OnboardingSessionValidationError:
-            _send_json(
-                self,
-                400,
-                _build_error(
-                    "invalid_onboarding_session",
-                    "Onboarding session is invalid.",
-                ),
-            )
-            return
+        sanitized_config = None
+        if not is_completion_request:
+            try:
+                sanitized_config = _sanitize_user_config(
+                    payload or {},
+                    session_user["email"],
+                )
+            except _OnboardingSessionValidationError:
+                _send_json(
+                    self,
+                    400,
+                    _build_error(
+                        "invalid_onboarding_session",
+                        "Onboarding session is invalid.",
+                    ),
+                )
+                return
 
         store, _ = resolve_user_config_store()
         if not store:
@@ -1581,11 +1859,39 @@ class handler(BaseHTTPRequestHandler):
                 )
                 return
 
-            try:
-                merged_config = _merge_user_config(
-                    existing_record,
-                    sanitized_config,
+            if is_completion_request and existing_record is None:
+                _send_json(
+                    self,
+                    409,
+                    _build_error(
+                        "onboarding_mailboxes_incomplete",
+                        "One or more selected inboxes are not fully connected.",
+                    ),
                 )
+                return
+
+            try:
+                merged_config = (
+                    _build_authoritative_onboarding_completion(
+                        existing_record,
+                        session_user["email"],
+                    )
+                    if is_completion_request
+                    else _merge_user_config(
+                        existing_record,
+                        sanitized_config,
+                    )
+                )
+            except _OnboardingCompletionError as completion_error:
+                _send_json(
+                    self,
+                    completion_error.status_code,
+                    _build_error(
+                        completion_error.code,
+                        completion_error.message,
+                    ),
+                )
+                return
             except _StoredUserConfigValidationError:
                 _send_json(
                     self,
@@ -1605,6 +1911,25 @@ class handler(BaseHTTPRequestHandler):
                         "Onboarding session is invalid.",
                     ),
                 )
+                return
+
+            if is_completion_request and _json_values_are_type_exact(
+                merged_config,
+                existing_record,
+            ):
+                try:
+                    response_config = _sanitize_stored_user_config(existing_record)
+                except Exception:
+                    _send_json(
+                        self,
+                        503,
+                        _build_error(
+                            "config_invalid",
+                            "User configuration is invalid.",
+                        ),
+                    )
+                    return
+                _send_json(self, 200, {"ok": True, "config": response_config})
                 return
 
             try:
