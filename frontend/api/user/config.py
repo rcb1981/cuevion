@@ -392,20 +392,6 @@ def _sanitize_connection(value):
     if not isinstance(sanitized, dict):
         return sanitized
 
-    custom_imap = sanitized.get("customImap")
-    if isinstance(custom_imap, dict):
-        sanitized["customImap"] = {
-            **custom_imap,
-            "password": "",
-        }
-
-    custom_smtp = sanitized.get("customSmtp")
-    if isinstance(custom_smtp, dict):
-        sanitized["customSmtp"] = {
-            **custom_smtp,
-            "password": "",
-        }
-
     if "oauthAuthorizationUrl" in sanitized:
         sanitized["oauthAuthorizationUrl"] = None
 
@@ -759,6 +745,20 @@ def _stored_mailbox_password_is_usable(value) -> bool:
     )
 
 
+def _without_empty_password_placeholders(value):
+    if not isinstance(value, dict):
+        return value
+    return {
+        key: item
+        for key, item in value.items()
+        if not (
+            isinstance(key, str)
+            and "password" in _compact_field_name(key)
+            and item == ""
+        )
+    }
+
+
 def _safe_imap_connection_config(value) -> bool:
     if not isinstance(value, dict) or set(value) != {
         "host",
@@ -879,13 +879,19 @@ def _enrich_public_custom_mailbox_capabilities(
             stored_inbox.get("connected") is True
             and stored_inbox.get("connectionStatus") == "connected"
             and incoming_status in {None, "connected"}
-            and _safe_imap_connection_config(stored_inbox.get("customImap"))
+            and _safe_imap_connection_config(
+                _without_empty_password_placeholders(
+                    stored_inbox.get("customImap")
+                )
+            )
             and imap_password_set
         )
 
         smtp_configured, smtp_credential_source = _safe_smtp_submission_config(
-            stored_inbox.get("customSmtp")
+            _without_empty_password_placeholders(stored_inbox.get("customSmtp"))
         )
+        if "customSmtp" not in stored_inbox:
+            public_inbox["customSmtp"] = {}
         smtp_password_set = bool(
             incoming_connected
             and generation_matches

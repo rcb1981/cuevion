@@ -30,6 +30,7 @@ import {
 const { accountConfigOrchestration } = require("./App.tsx") as typeof import("./App");
 const {
   CustomImapServerReloadRecovery,
+  OnboardingFlow,
   applyAuthoritativeCustomImapConnection,
   areSelectedOnboardingInboxesFullyConnected,
   buildOnboardingInboxConnectionUpdate,
@@ -320,6 +321,93 @@ function connectedCustomImapManagedInbox(
     customSmtp: { password: "" },
     ...overrides,
   };
+}
+
+const PRODUCTION_CUSTOM_INBOX_ID = "custom:inbox-2";
+const PRODUCTION_SERVER_MAILBOX_ID = "imap-server-generated";
+
+function createProductionIncomingOnlyState(): OnboardingState {
+  return {
+    ...cleanState,
+    primaryInbox: PRODUCTION_CUSTOM_INBOX_ID,
+    inboxCount: "2",
+    selectedInboxes: ["main", PRODUCTION_CUSTOM_INBOX_ID],
+    customInboxes: [
+      {
+        id: PRODUCTION_CUSTOM_INBOX_ID,
+        name: "Promo inbox",
+      },
+    ],
+    inboxConnections: {
+      ...cleanState.inboxConnections,
+      [PRODUCTION_CUSTOM_INBOX_ID]: {
+        ...cleanState.inboxConnections.demo,
+        provider: "custom_imap",
+        email: "promo@example.com",
+        connected: false,
+        connectionMethod: "imap",
+        connectionStatus: "not_connected",
+        imapConnectionStatus: "not_connected",
+        smtpConnectionStatus: "not_configured",
+        fullyConnected: false,
+        customImap: {
+          host: "mail.example.com",
+          port: "993",
+          ssl: true,
+          username: "promo@example.com",
+          password: "",
+        },
+        customSmtp: {
+          host: "smtp.example.com",
+          port: "587",
+          security: "starttls",
+          username: "",
+          password: "",
+          useSameCredentials: true,
+        },
+      },
+    },
+  };
+}
+
+function productionIncomingOnlyManagedInbox(
+  overrides: Partial<ManagedProjectionInput> = {},
+): ManagedProjectionInput {
+  return {
+    id: PRODUCTION_SERVER_MAILBOX_ID,
+    onboardingInboxId: PRODUCTION_CUSTOM_INBOX_ID,
+    email: "promo@example.com",
+    provider: "custom_imap",
+    connected: true,
+    connectionMethod: "imap",
+    connectionStatus: "connected",
+    customImap: {
+      host: "mail.example.com",
+      port: "993",
+      ssl: true,
+      username: "promo@example.com",
+      password: "",
+    },
+    customSmtp: {
+      password: "",
+    },
+    imapConnectionStatus: "connected",
+    smtpConnectionStatus: "not_configured",
+    imapPasswordSet: true,
+    smtpPasswordSet: false,
+    fullyConnected: false,
+    ...overrides,
+  };
+}
+
+function productionGmailWithServerMetadata(): ManagedProjectionInput {
+  return connectedGoogleManagedInbox({
+    id: "managed-google-production",
+    onboardingInboxId: "main",
+    email: "owner@gmail.com",
+    connectionType: "gmail",
+    oauthOwnerEmail: "owner@gmail.com",
+  } as any);
 }
 
 function deferred<T>() {
@@ -2219,20 +2307,6 @@ async function run() {
         status: "found",
         config: {
           onboardingSession: serverSession,
-          managedInboxes: [{}],
-        },
-      },
-      {
-        status: "found",
-        config: {
-          onboardingSession: serverSession,
-          managedInboxes: [null as any],
-        },
-      },
-      {
-        status: "found",
-        config: {
-          onboardingSession: serverSession,
           managedInboxes: [
             connectedCustomImapManagedInbox({
               onboardingInboxId: "main",
@@ -2389,32 +2463,6 @@ async function run() {
         },
       },
       ...[
-        { provider: "evil" },
-        { connectionStatus: "bogus" },
-        { connectionMethod: "oauth" },
-        { connectionMessage: {} },
-        { internalRole: "not-a-role" },
-        { focusPreferences: { demos: "urgent" } },
-        {
-          oauthAuthorizationUrl:
-            "https://oauth.example.test/stale",
-        },
-      ].map((malformedMetadata) => ({
-        status: "found" as const,
-        config: {
-          onboardingSession: serverSession,
-          managedInboxes: [
-            connectedCustomImapManagedInbox(),
-            connectedCustomImapManagedInbox({
-              id: "imap-server-2",
-              onboardingInboxId: undefined,
-              email: "other@example.com",
-              ...malformedMetadata,
-            } as any),
-          ],
-        },
-      })),
-      ...[
         undefined,
         null,
         {},
@@ -2522,6 +2570,561 @@ async function run() {
       );
       assert.equal(rejection.status, "required");
     }
+    for (const unrelatedMalformedMailbox of [
+      {},
+      null,
+    ]) {
+      assert.equal(
+        accountConfigOrchestration.resolveCustomImapReadback(
+          customImapSelectedState,
+          customImapAttemptSnapshot,
+          {
+            status: "found",
+            config: {
+              onboardingSession: serverSession,
+              managedInboxes: [unrelatedMalformedMailbox as any],
+            },
+          },
+        ).status,
+        "absent",
+      );
+    }
+    for (const unrelatedMetadata of [
+      { connectionType: "gmail" },
+      { oauthOwnerEmail: "owner@gmail.com" },
+      { provider: "evil" },
+      { connectionStatus: "bogus" },
+      { connectionMethod: "oauth" },
+      { connectionMessage: {} },
+      { internalRole: "not-a-role" },
+      { focusPreferences: { demos: "urgent" } },
+    ]) {
+      assert.equal(
+        accountConfigOrchestration.resolveCustomImapReadback(
+          customImapSelectedState,
+          customImapAttemptSnapshot,
+          {
+            status: "found",
+            config: {
+              onboardingSession: serverSession,
+              managedInboxes: [
+                connectedCustomImapManagedInbox(),
+                connectedGoogleManagedInbox({
+                  id: "managed-google-unrelated",
+                  onboardingInboxId: "main",
+                  email: "owner@gmail.com",
+                  ...unrelatedMetadata,
+                } as any),
+              ],
+            },
+          },
+        ).status,
+        "matched",
+      );
+    }
+  });
+
+  await test("production incoming-only fixture hydrates target-scoped across safe SMTP absence forms", async () => {
+    const productionState = createProductionIncomingOnlyState();
+    const serverSession = incompleteSession(2, productionState);
+    const gmailMailbox = productionGmailWithServerMetadata();
+    const smtpAbsenceForms: Array<{
+      name: string;
+      value: unknown;
+      omit?: boolean;
+    }> = [
+      { name: "missing", value: undefined, omit: true },
+      { name: "empty object", value: {} },
+      { name: "legacy empty password", value: { password: "" } },
+      {
+        name: "legacy empty password aliases",
+        value: {
+          password: "",
+          smtpPassword: "",
+          encryptedPassword: "",
+        },
+      },
+    ];
+
+    let partialConnection: InboxConnection | null = null;
+    for (const smtpAbsenceForm of smtpAbsenceForms) {
+      const customMailbox = productionIncomingOnlyManagedInbox({
+        customSmtp: smtpAbsenceForm.value,
+      });
+      if (smtpAbsenceForm.omit) {
+        delete (customMailbox as Record<string, unknown>).customSmtp;
+      }
+      const config: UserAccountConfig = {
+        onboardingSession: serverSession,
+        managedInboxes: [
+          gmailMailbox,
+          customMailbox,
+        ],
+      };
+      const storage = new MemoryStorage();
+      const firstHydration = await hydrateResult(
+        { status: "found", config },
+        storage,
+      );
+      const refreshedHydration = await hydrateResult(
+        { status: "found", config },
+        storage,
+      );
+
+      for (const outcome of [firstHydration, refreshedHydration]) {
+        assert.equal(
+          outcome.status,
+          "found",
+          smtpAbsenceForm.name,
+        );
+        if (outcome.status !== "found") {
+          throw new Error(`Expected ${smtpAbsenceForm.name} hydration`);
+        }
+        const hydratedState = outcome.accountState.onboardingState;
+        const hydratedCustom =
+          hydratedState.inboxConnections[PRODUCTION_CUSTOM_INBOX_ID];
+        assert.equal(outcome.accountState.view, "onboarding");
+        assert.equal(outcome.accountState.onboardingStep, 2);
+        assert.equal(
+          outcome.accountState.persistedOnboardingSession?.completed,
+          false,
+        );
+        assert.equal(hydratedCustom.connected, true);
+        assert.equal(
+          hydratedCustom.serverMailboxId,
+          PRODUCTION_SERVER_MAILBOX_ID,
+        );
+        assert.equal(hydratedCustom.connectionStatus, "connected");
+        assert.equal(hydratedCustom.imapConnectionStatus, "connected");
+        assert.equal(
+          hydratedCustom.smtpConnectionStatus,
+          "not_configured",
+        );
+        assert.equal(hydratedCustom.fullyConnected, false);
+        assert.deepEqual(hydratedCustom.customImap, {
+          host: "mail.example.com",
+          port: "993",
+          ssl: true,
+          username: "promo@example.com",
+          password: "",
+        });
+        assert.equal(
+          hydratedState.inboxConnections.main.connected,
+          true,
+        );
+        assert.equal(
+          hydratedState.inboxConnections.main.serverMailboxId,
+          "managed-google-production",
+        );
+        assert.deepEqual(
+          hydratedState.customInboxes,
+          productionState.customInboxes,
+        );
+        assert.equal(
+          areSelectedOnboardingInboxesFullyConnected(hydratedState),
+          false,
+        );
+        assert.equal(
+          Object.values(hydratedState.inboxConnections).filter(
+            (connection) =>
+              connection.serverMailboxId ===
+              PRODUCTION_SERVER_MAILBOX_ID,
+          ).length,
+          1,
+        );
+        partialConnection = hydratedCustom;
+      }
+
+      if (!partialConnection) {
+        throw new Error("Expected an incoming-only connection");
+      }
+      const reconciliationState: OnboardingState = {
+        ...productionState,
+        inboxConnections: {
+          ...productionState.inboxConnections,
+          [PRODUCTION_CUSTOM_INBOX_ID]: {
+            ...partialConnection,
+            customSmtp: {
+              ...productionState.inboxConnections[
+                PRODUCTION_CUSTOM_INBOX_ID
+              ].customSmtp,
+              password: "",
+            },
+          },
+        },
+      };
+      const snapshot = createCustomImapOnboardingAttemptSnapshot({
+        onboardingInboxId: PRODUCTION_CUSTOM_INBOX_ID,
+        selectedInboxes: reconciliationState.selectedInboxes,
+        connection:
+          reconciliationState.inboxConnections[
+            PRODUCTION_CUSTOM_INBOX_ID
+          ],
+        passwordRevision: 0,
+        smtpPasswordRevision: 0,
+      });
+      const resolved =
+        accountConfigOrchestration.resolveCustomImapReadback(
+          reconciliationState,
+          snapshot,
+          {
+            status: "found",
+            config,
+          },
+        );
+      assert.equal(resolved.status, "matched", smtpAbsenceForm.name);
+      if (resolved.status !== "matched") {
+        throw new Error(`Expected ${smtpAbsenceForm.name} reconciliation`);
+      }
+      assert.equal(
+        resolved.serverMailboxId,
+        PRODUCTION_SERVER_MAILBOX_ID,
+      );
+      assert.equal(resolved.connection.imapConnectionStatus, "connected");
+      assert.equal(
+        resolved.connection.smtpConnectionStatus,
+        "not_configured",
+      );
+      assert.equal(
+        resolved.connection.customSmtp.host,
+        "smtp.example.com",
+      );
+    }
+
+    if (!partialConnection) {
+      throw new Error("Expected a rendered incoming-only connection");
+    }
+    const partialMarkup = renderToStaticMarkup(
+      createElement(StepConnectInboxes, {
+        selectedInboxes: [PRODUCTION_CUSTOM_INBOX_ID],
+        customInboxes: productionState.customInboxes,
+        inboxConnections: {
+          [PRODUCTION_CUSTOM_INBOX_ID]: {
+            ...partialConnection,
+            customSmtp: {
+              ...productionState.inboxConnections[
+                PRODUCTION_CUSTOM_INBOX_ID
+              ].customSmtp,
+              password: "",
+            },
+          },
+        },
+        onProviderChange: () => undefined,
+        onEmailChange: () => undefined,
+        onCustomImapChange: () => undefined,
+        onCustomSmtpChange: () => undefined,
+        onReuseCustomImap: () => undefined,
+        onConnectInbox: () => undefined,
+        onReloadAccountConfig: async () => ({ status: "required" }),
+        onApplyAuthoritativeCustomImapConnection: () => undefined,
+        customImapAttemptGuard: null,
+        onCustomImapAttemptGuardChange: () => undefined,
+        onAddInbox: () => undefined,
+      }),
+    );
+    assert.equal(partialMarkup.includes("Incoming connected"), true);
+    assert.equal(
+      partialMarkup.includes("Outgoing mail not configured"),
+      true,
+    );
+    assert.equal(
+      partialMarkup.includes("Connection status could not be confirmed"),
+      false,
+    );
+    assert.equal(
+      partialMarkup.includes(
+        `data-attempt-control="password-${PRODUCTION_CUSTOM_INBOX_ID}"`,
+      ),
+      false,
+    );
+    assert.equal(partialMarkup.includes("mail.example.com"), true);
+    assert.equal(partialMarkup.includes("promo@example.com"), true);
+    assertMarkupControlEnabled(
+      partialMarkup,
+      `smtp-host-${PRODUCTION_CUSTOM_INBOX_ID}`,
+    );
+    assertMarkupControlEnabled(
+      partialMarkup,
+      `connect-${PRODUCTION_CUSTOM_INBOX_ID}`,
+    );
+    assert.equal(partialMarkup.includes("Connect outgoing mail"), true);
+    assert.equal(partialMarkup.includes(">Connected</button>"), false);
+    const partialFlowMarkup = renderToStaticMarkup(
+      createElement(OnboardingFlow, {
+        state: {
+          ...productionState,
+          selectedInboxes: [PRODUCTION_CUSTOM_INBOX_ID],
+          inboxConnections: {
+            ...productionState.inboxConnections,
+            [PRODUCTION_CUSTOM_INBOX_ID]: partialConnection,
+          },
+        },
+        currentStep: 2,
+        onStepChange: () => undefined,
+        onStateChange: () => undefined,
+        onSafeStateChange: () => undefined,
+        onOpenWorkspace: () => undefined,
+      }),
+    );
+    assert.equal(partialFlowMarkup.includes("Complete setup"), true);
+    assertMarkupControlDisabled(partialFlowMarkup, "next");
+
+    const otherDraft = {
+      ...productionState.inboxConnections.business,
+      provider: "custom_imap" as const,
+      email: "draft@example.com",
+      customImap: {
+        ...productionState.inboxConnections.business.customImap,
+        host: "draft.example.com",
+        username: "draft@example.com",
+      },
+    };
+    const stateWithOtherDraft: OnboardingState = {
+      ...productionState,
+      selectedInboxes: [
+        ...productionState.selectedInboxes,
+        "business",
+      ],
+      inboxConnections: {
+        ...productionState.inboxConnections,
+        business: otherDraft,
+      },
+    };
+    const projectedWithOtherDraft =
+      accountConfigOrchestration.projectConnectedManagedInboxes(
+        stateWithOtherDraft,
+        [
+          gmailMailbox,
+          productionIncomingOnlyManagedInbox(),
+          {
+            id: "draft-client-only",
+            onboardingInboxId: "business",
+            email: "draft@example.com",
+            provider: "custom_imap",
+            connected: false,
+            connectionMethod: "imap",
+            connectionStatus: "not_connected",
+            connectionType: "draft",
+          } as any,
+        ],
+      );
+    assert.equal(
+      projectedWithOtherDraft.inboxConnections.business,
+      otherDraft,
+    );
+    assert.equal(
+      projectedWithOtherDraft.inboxConnections[
+        PRODUCTION_CUSTOM_INBOX_ID
+      ].serverMailboxId,
+      PRODUCTION_SERVER_MAILBOX_ID,
+    );
+  });
+
+  await test("custom SMTP capability semantics preserve incoming after auth failure and reject invalid partial metadata", async () => {
+    const productionState = createProductionIncomingOnlyState();
+    const serverSession = incompleteSession(2, productionState);
+    const gmailMailbox = productionGmailWithServerMetadata();
+    const partialConnection: InboxConnection = {
+      ...productionState.inboxConnections[PRODUCTION_CUSTOM_INBOX_ID],
+      serverMailboxId: PRODUCTION_SERVER_MAILBOX_ID,
+      connected: true,
+      connectionStatus: "connected",
+      imapConnectionStatus: "connected",
+      smtpConnectionStatus: "not_configured",
+      fullyConnected: false,
+    };
+    const reconciliationState: OnboardingState = {
+      ...productionState,
+      inboxConnections: {
+        ...productionState.inboxConnections,
+        [PRODUCTION_CUSTOM_INBOX_ID]: partialConnection,
+      },
+    };
+    const snapshot = createCustomImapOnboardingAttemptSnapshot({
+      onboardingInboxId: PRODUCTION_CUSTOM_INBOX_ID,
+      selectedInboxes: reconciliationState.selectedInboxes,
+      connection: partialConnection,
+      passwordRevision: 0,
+      smtpPasswordRevision: 1,
+    });
+    const completeSmtp = {
+      host: "smtp.example.com",
+      port: "587",
+      security: "starttls",
+      username: "",
+      password: "",
+      useSameCredentials: true,
+    };
+    const resolveMailbox = (mailbox: ManagedProjectionInput) =>
+      accountConfigOrchestration.resolveCustomImapReadback(
+        reconciliationState,
+        snapshot,
+        {
+          status: "found",
+          config: {
+            onboardingSession: serverSession,
+            managedInboxes: [gmailMailbox, mailbox],
+          },
+        },
+      );
+
+    const failedSmtpMailbox = productionIncomingOnlyManagedInbox({
+      smtpConnectionStatus: "connection_failed",
+      smtpPasswordSet: false,
+      fullyConnected: false,
+      customSmtp: completeSmtp,
+    });
+    const failedReadback = resolveMailbox(failedSmtpMailbox);
+    assert.equal(failedReadback.status, "matched");
+    if (failedReadback.status !== "matched") {
+      throw new Error("Expected failed SMTP readback to preserve incoming");
+    }
+    assert.equal(failedReadback.connection.connected, true);
+    assert.equal(
+      failedReadback.connection.imapConnectionStatus,
+      "connected",
+    );
+    assert.equal(
+      failedReadback.connection.smtpConnectionStatus,
+      "connection_failed",
+    );
+    assert.equal(failedReadback.connection.fullyConnected, false);
+    assert.equal(
+      areSelectedOnboardingInboxesFullyConnected({
+        ...reconciliationState,
+        selectedInboxes: [PRODUCTION_CUSTOM_INBOX_ID],
+        inboxConnections: {
+          ...reconciliationState.inboxConnections,
+          [PRODUCTION_CUSTOM_INBOX_ID]:
+            failedReadback.connection,
+        },
+      }),
+      false,
+    );
+
+    const failedHydration = await hydrateResult(
+      {
+        status: "found",
+        config: {
+          onboardingSession: serverSession,
+          managedInboxes: [gmailMailbox, failedSmtpMailbox],
+        },
+      },
+      new MemoryStorage(),
+    );
+    assert.equal(failedHydration.status, "found");
+    if (failedHydration.status !== "found") {
+      throw new Error("Expected SMTP failure hydration");
+    }
+    assert.equal(
+      failedHydration.accountState.onboardingState.inboxConnections[
+        PRODUCTION_CUSTOM_INBOX_ID
+      ].imapConnectionStatus,
+      "connected",
+    );
+    assert.equal(
+      failedHydration.accountState.onboardingState.inboxConnections[
+        PRODUCTION_CUSTOM_INBOX_ID
+      ].smtpConnectionStatus,
+      "connection_failed",
+    );
+
+    const fullMailbox = productionIncomingOnlyManagedInbox({
+      smtpConnectionStatus: "connected",
+      smtpPasswordSet: true,
+      fullyConnected: true,
+      customSmtp: completeSmtp,
+    });
+    const fullReadback = resolveMailbox(fullMailbox);
+    assert.equal(fullReadback.status, "matched");
+    if (fullReadback.status !== "matched") {
+      throw new Error("Expected complete SMTP readback");
+    }
+    assert.equal(fullReadback.connection.fullyConnected, true);
+    const fullyProjected =
+      accountConfigOrchestration.projectConnectedManagedInboxes(
+        productionState,
+        [gmailMailbox, fullMailbox],
+      );
+    assert.equal(
+      areSelectedOnboardingInboxesFullyConnected(fullyProjected),
+      true,
+    );
+    assert.equal(
+      fullyProjected.inboxConnections.main.connected,
+      true,
+    );
+    const fullFlowMarkup = renderToStaticMarkup(
+      createElement(OnboardingFlow, {
+        state: fullyProjected,
+        currentStep: 2,
+        onStepChange: () => undefined,
+        onStateChange: () => undefined,
+        onSafeStateChange: () => undefined,
+        onOpenWorkspace: () => undefined,
+      }),
+    );
+    assertMarkupControlEnabled(fullFlowMarkup, "next");
+
+    const notConfiguredWithSafeMetadata =
+      productionIncomingOnlyManagedInbox({
+        smtpConnectionStatus: "not_configured",
+        smtpPasswordSet: false,
+        fullyConnected: false,
+        customSmtp: completeSmtp,
+      });
+    assert.equal(
+      resolveMailbox(notConfiguredWithSafeMetadata).status,
+      "matched",
+    );
+
+    const invalidMailbox = productionIncomingOnlyManagedInbox({
+      smtpConnectionStatus: "not_configured",
+      smtpPasswordSet: false,
+      fullyConnected: false,
+      customSmtp: { host: "smtp.example.com" },
+    });
+    assert.equal(resolveMailbox(invalidMailbox).status, "required");
+    const invalidProjection =
+      accountConfigOrchestration.projectConnectedManagedInboxes(
+        productionState,
+        [gmailMailbox, invalidMailbox],
+      );
+    assert.equal(
+      invalidProjection.inboxConnections[
+        PRODUCTION_CUSTOM_INBOX_ID
+      ].connected,
+      false,
+    );
+    assert.equal(
+      invalidProjection.inboxConnections.main.connected,
+      true,
+    );
+
+    const mismatchedFailure = productionIncomingOnlyManagedInbox({
+      smtpConnectionStatus: "connection_failed",
+      smtpPasswordSet: false,
+      fullyConnected: false,
+      customSmtp: {
+        ...completeSmtp,
+        host: "smtp.other.example.com",
+      },
+    });
+    assert.equal(resolveMailbox(mismatchedFailure).status, "required");
+    assert.equal(
+      resolveMailbox(
+        productionIncomingOnlyManagedInbox({
+          smtpConnectionStatus: "not_configured",
+          smtpPasswordSet: false,
+          fullyConnected: false,
+          customSmtp: {
+            ...completeSmtp,
+            host: "smtp.other.example.com",
+          },
+        }),
+      ).status,
+      "required",
+    );
   });
 
   await test("production config GET and resolver compose with the same bounded signal", async () => {
@@ -2741,15 +3344,21 @@ async function run() {
       },
     );
 
-    for (const malformedMailbox of [
-      connectedCustomImapManagedInbox({ connectionMessage: {} } as any),
-      connectedCustomImapManagedInbox({
-        id: "imap-server-2",
-        onboardingInboxId: undefined,
-        email: "other@example.com",
-        provider: "evil",
-      } as any),
-    ]) {
+    for (const [malformedMailbox, expectedConnected] of [
+      [
+        connectedCustomImapManagedInbox({ connectionMessage: {} } as any),
+        false,
+      ],
+      [
+        connectedCustomImapManagedInbox({
+          id: "imap-server-2",
+          onboardingInboxId: undefined,
+          email: "other@example.com",
+          provider: "evil",
+        } as any),
+        true,
+      ],
+    ] as const) {
       const malformedHydration = await hydrateResult(
         {
           status: "found",
@@ -2770,7 +3379,7 @@ async function run() {
       assert.equal(
         malformedHydration.accountState.onboardingState.inboxConnections.demo
           .connected,
-        false,
+        expectedConnected,
       );
     }
 

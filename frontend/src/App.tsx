@@ -1738,8 +1738,8 @@ function isUnsafeMailboxMetadataEntry(
 ) {
   const compactKey = key.toLowerCase().replace(/[^a-z0-9]/g, "");
   const isAllowedEmptyPassword =
-    key === "password" &&
     item === "" &&
+    compactKey.includes("password") &&
     (parentField === "customImap" || parentField === "customSmtp");
   const isAllowedSameCredentialsFlag =
     key === "useSameCredentials" &&
@@ -2004,6 +2004,7 @@ function hasSafeManagedMailboxSettings(
   const customSmtp = mailbox.customSmtp;
   return (
     customSmtp === undefined ||
+    isSafeEmptyServerCustomSmtp(customSmtp) ||
     (isPlainRecord(customSmtp) &&
       Object.keys(customSmtp).every((field) =>
         safeManagedCustomSmtpFields.has(field),
@@ -2025,14 +2026,17 @@ function hasSafeManagedMailboxSettings(
 }
 
 function isSafeEmptyServerCustomSmtp(value: unknown) {
+  if (value === undefined) {
+    return true;
+  }
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return false;
   }
   const settings = value as Record<string, unknown>;
-  const fields = Object.keys(settings);
-  return (
-    fields.length === 0 ||
-    (fields.length === 1 && fields[0] === "password" && settings.password === "")
+  return Object.entries(settings).every(
+    ([field, fieldValue]) =>
+      fieldValue === "" &&
+      field.toLowerCase().replace(/[^a-z0-9]/g, "").includes("password"),
   );
 }
 
@@ -2045,6 +2049,7 @@ function getAuthoritativeCustomImapCapabilityState(
     mailbox.imapPasswordSet !== true ||
     typeof mailbox.smtpPasswordSet !== "boolean" ||
     (mailbox.smtpConnectionStatus !== "not_configured" &&
+      mailbox.smtpConnectionStatus !== "connection_failed" &&
       mailbox.smtpConnectionStatus !== "connected") ||
     typeof mailbox.fullyConnected !== "boolean"
   ) {
@@ -2059,7 +2064,8 @@ function getAuthoritativeCustomImapCapabilityState(
     return "full";
   }
   if (
-    mailbox.smtpConnectionStatus === "not_configured" &&
+    (mailbox.smtpConnectionStatus === "not_configured" ||
+      mailbox.smtpConnectionStatus === "connection_failed") &&
     mailbox.smtpPasswordSet === false &&
     mailbox.fullyConnected === false
   ) {
@@ -2139,11 +2145,19 @@ function hasAuthoritativeCustomImapCapabilityShape(
 ) {
   const capabilityState =
     getAuthoritativeCustomImapCapabilityState(mailbox);
-  return capabilityState === "partial"
-    ? isSafeEmptyServerCustomSmtp(mailbox.customSmtp)
-    : capabilityState === "full" &&
-        isSafeServerCustomSmtpSettings(mailbox.customSmtp) &&
-        !isSafeEmptyServerCustomSmtp(mailbox.customSmtp);
+  if (capabilityState === "full") {
+    return (
+      isSafeServerCustomSmtpSettings(mailbox.customSmtp) &&
+      !isSafeEmptyServerCustomSmtp(mailbox.customSmtp)
+    );
+  }
+  if (capabilityState !== "partial") {
+    return false;
+  }
+  if (isSafeEmptyServerCustomSmtp(mailbox.customSmtp)) {
+    return true;
+  }
+  return isSafeServerCustomSmtpSettings(mailbox.customSmtp);
 }
 
 function parseServerCustomImapSettings(
@@ -2204,11 +2218,6 @@ function projectConnectedManagedInboxesOntoOnboardingState(
 ): OnboardingState {
   const selectedPositions = new Set(state.selectedInboxes);
   const nextConnections = { ...state.inboxConnections };
-  const customImapCollectionIsSafe = managedInboxes.every(
-    (mailbox) =>
-      isWellFormedManagedMailboxEnvelope(mailbox) &&
-      !containsUnsafeMailboxMetadata(mailbox),
-  );
   let didProject = false;
 
   for (const inboxPosition of selectedPositions) {
@@ -2253,7 +2262,6 @@ function projectConnectedManagedInboxesOntoOnboardingState(
     const customImapCapabilityState =
       getAuthoritativeCustomImapCapabilityState(mailbox);
     const isAuthoritativeCustomImapMailbox =
-      customImapCollectionIsSafe &&
       isValidServerManagedInboxId(mailboxId) &&
       isWellFormedManagedMailboxEnvelope(mailbox) &&
       hasOnlySafeManagedMailboxFields(mailbox) &&
@@ -2312,7 +2320,7 @@ function projectConnectedManagedInboxesOntoOnboardingState(
           smtpConnectionStatus:
             customImapCapabilityState === "full"
               ? "connected"
-              : "not_configured",
+              : mailbox.smtpConnectionStatus,
           fullyConnected: customImapCapabilityState === "full",
           connectionMessage:
             typeof mailbox.connectionMessage === "string"
@@ -2467,16 +2475,6 @@ function resolveCustomImapAccountConfigReadback(
   }
 
   const managedInboxes = getServerManagedInboxesForHydration(result.config);
-  if (
-    managedInboxes.some(
-      (mailbox) =>
-        !isWellFormedManagedMailboxEnvelope(mailbox) ||
-        containsUnsafeMailboxMetadata(mailbox),
-    )
-  ) {
-    return { status: "required" };
-  }
-
   const positionMatches = managedInboxes.filter(
     (mailbox) =>
       mailbox?.onboardingInboxId === snapshot.onboardingInboxId,
@@ -2519,8 +2517,7 @@ function resolveCustomImapAccountConfigReadback(
     mailbox.customSmtp,
     currentConnection.customSmtp,
   );
-  const fullSmtpMatchesSnapshot =
-    capabilityState === "full" &&
+  const projectedSmtpMatchesSnapshot =
     projectedCustomSmtp !== null &&
     projectedCustomSmtp.host.toLowerCase() === snapshot.normalizedSmtpHost &&
     projectedCustomSmtp.port === snapshot.smtpPort &&
@@ -2528,9 +2525,12 @@ function resolveCustomImapAccountConfigReadback(
     projectedCustomSmtp.useSameCredentials === snapshot.useSameCredentials &&
     projectedCustomSmtp.username ===
       (snapshot.useSameCredentials ? "" : snapshot.normalizedSmtpUsername);
+  const fullSmtpMatchesSnapshot =
+    capabilityState === "full" && projectedSmtpMatchesSnapshot;
   const partialSmtpIsAuthoritative =
     capabilityState === "partial" &&
-    isSafeEmptyServerCustomSmtp(mailbox.customSmtp);
+    (isSafeEmptyServerCustomSmtp(mailbox.customSmtp) ||
+      projectedSmtpMatchesSnapshot);
   const sameIdCount = managedInboxes.filter(
     (candidate) =>
       typeof candidate?.id === "string" &&
@@ -2549,8 +2549,10 @@ function resolveCustomImapAccountConfigReadback(
     mailbox.connectionMethod !== "imap" ||
     mailbox.connected !== true ||
     mailbox.connectionStatus !== "connected" ||
+    !isWellFormedManagedMailboxEnvelope(mailbox) ||
     !hasOnlySafeManagedMailboxFields(mailbox) ||
     !hasValidManagedMailboxOptionalMetadata(mailbox) ||
+    containsUnsafeMailboxMetadata(mailbox) ||
     parsedCustomImap === null ||
     parsedCustomImap.host.toLowerCase() !== snapshot.normalizedHost ||
     parsedCustomImap.port !== snapshot.port ||
@@ -2577,7 +2579,9 @@ function resolveCustomImapAccountConfigReadback(
       connectionStatus: "connected",
       imapConnectionStatus: "connected",
       smtpConnectionStatus:
-        capabilityState === "full" ? "connected" : "not_configured",
+        capabilityState === "full"
+          ? "connected"
+          : mailbox.smtpConnectionStatus,
       fullyConnected: capabilityState === "full",
       connectionMessage:
         typeof mailbox.connectionMessage === "string"

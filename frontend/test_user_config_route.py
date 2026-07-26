@@ -92,6 +92,24 @@ def onboarding_session(**updates):
     return session
 
 
+def assert_no_password_secret_keys(test_case, value):
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if isinstance(key, str):
+                compact_key = "".join(
+                    character for character in key.casefold() if character.isalnum()
+                )
+                if "password" in compact_key:
+                    test_case.assertIn(
+                        compact_key,
+                        {"imappasswordset", "smtppasswordset"},
+                    )
+            assert_no_password_secret_keys(test_case, item)
+    elif isinstance(value, list):
+        for item in value:
+            assert_no_password_secret_keys(test_case, item)
+
+
 class GetRouteTests(unittest.TestCase):
     def invoke(
         self,
@@ -372,6 +390,13 @@ class GetRouteTests(unittest.TestCase):
                 "encryptedBlob": "blob-canary",
                 "rawCredentialRecord": "raw-credential-canary",
                 "rawStoreRecord": "raw-store-canary",
+                "sensitiveAliases": {
+                    "password": "password-canary",
+                    "imapPassword": "imap-password-canary",
+                    "smtp_password": "smtp-password-canary",
+                    "encryptedPassword": "encrypted-password-canary",
+                    "nested": [{"PASSWORD": "uppercase-password-canary"}],
+                },
             },
         }
         handler, _, write_mock = self.invoke(
@@ -394,8 +419,14 @@ class GetRouteTests(unittest.TestCase):
             "blob-canary",
             "raw-credential-canary",
             "raw-store-canary",
+            "password-canary",
+            "imap-password-canary",
+            "smtp-password-canary",
+            "encrypted-password-canary",
+            "uppercase-password-canary",
         ):
             self.assertNotIn(canary, response_text)
+        assert_no_password_secret_keys(self, handler.payload())
         write_mock.assert_not_called()
 
     def test_unauthorized_shape_is_exact(self):
@@ -477,6 +508,15 @@ class GetRouteTests(unittest.TestCase):
         returned = handler.payload()["config"]
         self.assertNotIn("imap-secret", json.dumps(returned))
         self.assertNotIn("smtp-secret", json.dumps(returned))
+        self.assertEqual(
+            returned["managedInboxes"][0]["customImap"],
+            {"host": "imap.example.com"},
+        )
+        self.assertEqual(
+            returned["managedInboxes"][0]["customSmtp"],
+            {"host": "smtp.example.com"},
+        )
+        assert_no_password_secret_keys(self, handler.payload())
         write_mock.assert_not_called()
 
     def test_server_credential_generation_is_stripped_from_public_get(self):
@@ -523,8 +563,13 @@ class GetRouteTests(unittest.TestCase):
                         "port": "993",
                         "ssl": True,
                         "username": "artist@example.com",
+                        "password": "",
+                        "encryptedPassword": "",
                     },
-                    "customSmtp": {"password": ""},
+                    "customSmtp": {
+                        "password": "",
+                        "smtp_password": "",
+                    },
                 }
             ],
         }
@@ -555,12 +600,99 @@ class GetRouteTests(unittest.TestCase):
         self.assertIs(mailbox["imapPasswordSet"], True)
         self.assertIs(mailbox["smtpPasswordSet"], False)
         self.assertIs(mailbox["fullyConnected"], False)
+        self.assertEqual(
+            mailbox["customImap"],
+            {
+                "host": "imap.example.com",
+                "port": "993",
+                "ssl": True,
+                "username": "artist@example.com",
+            },
+        )
+        self.assertEqual(mailbox["customSmtp"], {})
+        assert_no_password_secret_keys(self, handler.payload())
         serialized = json.dumps(handler.payload())
         self.assertNotIn("credentialVersion", serialized)
         self.assertNotIn(CREDENTIAL_VERSION_CANARY, serialized)
         self.assertNotIn("imap-secret-canary", serialized)
         secret_read.assert_called_once_with("owner@example.com", "imap-server-owned")
         write_mock.assert_not_called()
+
+    def test_missing_custom_smtp_projects_as_empty_without_hiding_invalid_metadata(self):
+        stored = {
+            "v": 1,
+            "email": "owner@example.com",
+            "onboardingSession": onboarding_session(),
+            "managedInboxes": [
+                {
+                    "id": "imap-server-owned",
+                    "email": "artist@example.com",
+                    "onboardingInboxId": "custom:vip-mabc123",
+                    "provider": "custom_imap",
+                    "connected": True,
+                    "connectionStatus": "connected",
+                    "credentialVersion": CREDENTIAL_VERSION_CANARY,
+                    "customImap": {
+                        "host": "imap.example.com",
+                        "port": "993",
+                        "ssl": True,
+                        "username": "artist@example.com",
+                    },
+                }
+            ],
+        }
+        secret = {
+            "status": "present",
+            "record": {
+                "credentialVersion": CREDENTIAL_VERSION_CANARY,
+                "imapPassword": "imap-secret-canary",
+                "smtpPassword": "",
+            },
+            "error": None,
+        }
+
+        with patch.object(
+            config_route,
+            "read_mailbox_secret",
+            return_value=secret,
+        ):
+            missing_handler, _, missing_write = self.invoke(
+                read_result={"status": "ok", "config": stored, "error": None}
+            )
+
+        self.assertEqual(missing_handler.status_code, 200)
+        missing_mailbox = missing_handler.payload()["config"]["managedInboxes"][0]
+        self.assertEqual(missing_mailbox["customSmtp"], {})
+        self.assertEqual(missing_mailbox["imapConnectionStatus"], "connected")
+        self.assertEqual(missing_mailbox["smtpConnectionStatus"], "not_configured")
+        assert_no_password_secret_keys(self, missing_handler.payload())
+        missing_write.assert_not_called()
+
+        invalid_stored = copy.deepcopy(stored)
+        invalid_stored["managedInboxes"][0]["customSmtp"] = {
+            "host": "smtp.example.com"
+        }
+        with patch.object(
+            config_route,
+            "read_mailbox_secret",
+            return_value=secret,
+        ):
+            invalid_handler, _, invalid_write = self.invoke(
+                read_result={
+                    "status": "ok",
+                    "config": invalid_stored,
+                    "error": None,
+                }
+            )
+
+        self.assertEqual(invalid_handler.status_code, 200)
+        invalid_mailbox = invalid_handler.payload()["config"]["managedInboxes"][0]
+        self.assertEqual(
+            invalid_mailbox["customSmtp"],
+            {"host": "smtp.example.com"},
+        )
+        self.assertEqual(invalid_mailbox["smtpConnectionStatus"], "not_configured")
+        invalid_write.assert_not_called()
 
     def test_full_generation_bound_mailbox_projects_both_capabilities_without_secrets(self):
         stored = {
@@ -584,6 +716,7 @@ class GetRouteTests(unittest.TestCase):
                         "port": "993",
                         "ssl": True,
                         "username": "artist@example.com",
+                        "password": "",
                     },
                     "customSmtp": {
                         "host": "smtp.example.com",
@@ -591,6 +724,7 @@ class GetRouteTests(unittest.TestCase):
                         "security": "starttls",
                         "username": "",
                         "useSameCredentials": True,
+                        "smtp_password": "",
                     },
                 }
             ],
@@ -622,6 +756,7 @@ class GetRouteTests(unittest.TestCase):
         self.assertIs(mailbox["smtpPasswordSet"], True)
         self.assertIs(mailbox["fullyConnected"], True)
         self.assertEqual(mailbox["customSmtp"]["username"], "")
+        assert_no_password_secret_keys(self, handler.payload())
         serialized = json.dumps(handler.payload())
         self.assertNotIn("credentialVersion", serialized)
         self.assertNotIn(CREDENTIAL_VERSION_CANARY, serialized)
@@ -1729,6 +1864,13 @@ class PostRouteTests(unittest.TestCase):
                 "encryptedBlob": "blob-canary",
                 "rawCredentialRecord": "raw-credential-canary",
                 "rawStoreRecord": "raw-store-canary",
+                "sensitiveAliases": {
+                    "password": "password-canary",
+                    "imapPassword": "imap-password-canary",
+                    "smtp_password": "smtp-password-canary",
+                    "encryptedPassword": "encrypted-password-canary",
+                    "nested": [{"PASSWORD": "uppercase-password-canary"}],
+                },
             },
         }
         handler, _, write_mock = self.invoke(
@@ -1754,8 +1896,14 @@ class PostRouteTests(unittest.TestCase):
             "blob-canary",
             "raw-credential-canary",
             "raw-store-canary",
+            "password-canary",
+            "imap-password-canary",
+            "smtp-password-canary",
+            "encrypted-password-canary",
+            "uppercase-password-canary",
         ):
             self.assertNotIn(canary, response_text)
+        assert_no_password_secret_keys(self, handler.payload())
 
     def test_cas_conflict_rereads_remerges_and_preserves_concurrent_fields(self):
         initial = {
@@ -2177,10 +2325,11 @@ class PostReadStatusHandlerTests(unittest.TestCase):
         self.assertEqual(saved["provider"], "custom_imap")
         self.assertEqual(saved["customImap"]["host"], "imap.example.com")
         self.assertEqual(saved["customImap"]["username"], "artist")
-        self.assertEqual(saved["customImap"]["password"], "")
+        self.assertNotIn("password", saved["customImap"])
         self.assertEqual(saved["customSmtp"]["host"], "smtp.example.com")
         self.assertEqual(saved["customSmtp"]["username"], "artist")
-        self.assertEqual(saved["customSmtp"]["password"], "")
+        self.assertNotIn("password", saved["customSmtp"])
+        assert_no_password_secret_keys(self, request.payload())
 
     def test_new_connected_mailboxes_are_ignored_and_existing_records_cannot_be_omitted(self):
         existing = {
@@ -2321,15 +2470,29 @@ class PostReadStatusHandlerTests(unittest.TestCase):
             "connectionMethod",
             "connectionStatus",
             "connectionMessage",
-            "customImap",
-            "customSmtp",
         ):
             self.assertEqual(saved[authoritative_field], existing[authoritative_field])
+        self.assertEqual(
+            saved["customImap"],
+            {
+                key: value
+                for key, value in existing["customImap"].items()
+                if key != "password"
+            },
+        )
+        self.assertEqual(
+            saved["customSmtp"],
+            {
+                key: value
+                for key, value in existing["customSmtp"].items()
+                if key != "password"
+            },
+        )
         self.assertEqual(saved["title"], "New title")
         self.assertEqual(saved["internalRole"], "producer")
         self.assertEqual(saved["focusPreferences"], {"promo": "low"})
 
-    def test_identity_only_attack_preserves_the_complete_existing_record(self):
+    def test_identity_only_attack_preserves_existing_record_without_password_placeholders(self):
         existing = {
             "id": "imap-1",
             "title": "Server title",
@@ -2399,7 +2562,11 @@ class PostReadStatusHandlerTests(unittest.TestCase):
         )
         self.assertEqual(request.status_code, 200)
         write_mock.assert_called_once()
-        self.assertEqual(write_mock.call_args.args[2]["managedInboxes"], [existing])
+        expected = copy.deepcopy(existing)
+        expected["customImap"].pop("password")
+        expected["customSmtp"].pop("password")
+        self.assertEqual(write_mock.call_args.args[2]["managedInboxes"], [expected])
+        assert_no_password_secret_keys(self, request.payload())
 
     def test_duplicate_requested_or_existing_ids_fail_closed_without_reordering(self):
         existing = [
