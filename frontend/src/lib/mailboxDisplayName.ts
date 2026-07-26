@@ -56,6 +56,40 @@ function isConnectedCustomImapMailbox(
   );
 }
 
+export function isGeneratedMailboxPlaceholderTitle({
+  title,
+  onboardingName,
+  provider,
+  authoritativeEmail,
+}: {
+  title?: string | null;
+  onboardingName?: string | null;
+  provider?: string | null;
+  authoritativeEmail?: string | null;
+}): boolean {
+  if (provider !== "custom_imap") {
+    return false;
+  }
+
+  const normalizedTitle = trimmedNonEmpty(title);
+  if (!normalizedTitle) {
+    return false;
+  }
+
+  const normalizedOnboardingName = trimmedNonEmpty(onboardingName);
+  if (
+    normalizedOnboardingName &&
+    normalizedTitle.toLowerCase() === normalizedOnboardingName.toLowerCase()
+  ) {
+    return true;
+  }
+
+  return (
+    Boolean(normalizeMailboxEmail(authoritativeEmail)) &&
+    /^inbox\s+\d+$/i.test(normalizedTitle)
+  );
+}
+
 export function findExactAuthoritativeCustomMailbox(
   mailbox: WorkspaceMailboxDisplayRecord,
   authoritativeManagedInboxes: readonly WorkspaceMailboxDisplayRecord[],
@@ -140,7 +174,15 @@ export function resolveWorkspaceMailboxDisplayName({
     authoritativeManagedInboxes,
   );
   const authoritativeTitle = trimmedNonEmpty(authoritativeMailbox?.title);
-  if (authoritativeTitle) {
+  if (
+    authoritativeTitle &&
+    !isGeneratedMailboxPlaceholderTitle({
+      title: authoritativeTitle,
+      onboardingName,
+      provider: authoritativeMailbox?.provider,
+      authoritativeEmail: authoritativeMailbox?.email,
+    })
+  ) {
     return authoritativeTitle;
   }
 
@@ -220,7 +262,30 @@ export function buildWorkspaceMailboxPresentationLabels(
 
   return {
     navigationName,
+    settingsName: navigationName,
+    inboxTitleFieldValue: navigationName,
     mailboxHeader: inboxHeading,
     messageListHeading: inboxHeading,
   };
+}
+
+export function updateMailboxTitleOverrideRecord(
+  currentOverrides: Readonly<Record<string, string | undefined>>,
+  mailboxId: string,
+  nextTitle: string,
+): Record<string, string> {
+  const nextOverrides = { ...currentOverrides };
+  const normalizedTitle = trimmedNonEmpty(nextTitle);
+
+  if (normalizedTitle) {
+    nextOverrides[mailboxId] = normalizedTitle;
+  } else {
+    delete nextOverrides[mailboxId];
+  }
+
+  return Object.fromEntries(
+    Object.entries(nextOverrides).filter(
+      (entry): entry is [string, string] => typeof entry[1] === "string",
+    ),
+  );
 }

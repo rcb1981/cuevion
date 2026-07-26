@@ -128,6 +128,7 @@ import {
 import {
   buildCanonicalWorkspaceMailboxPresentations,
   buildWorkspaceMailboxPresentationLabels,
+  updateMailboxTitleOverrideRecord,
   type WorkspaceMailboxDisplayRecord,
 } from "../../lib/mailboxDisplayName";
 import { sendContactSupportRequest } from "../../lib/contactSupportApi";
@@ -27010,6 +27011,7 @@ const managedInboxEditorTabs: ManagedInboxEditorTab[] = [
 
 function ManagedInboxEditor({
   mailbox: rawMailbox,
+  displayTitle,
   editable,
   isExisting,
   activeTab,
@@ -27035,6 +27037,7 @@ function ManagedInboxEditor({
   onSmtpChange,
 }: {
   mailbox: ManagedWorkspaceInbox;
+  displayTitle?: string;
   editable: boolean;
   isExisting: boolean;
   activeTab: ManagedInboxEditorTab;
@@ -27068,6 +27071,8 @@ function ManagedInboxEditor({
   ) => void;
 }) {
   const mailbox = cloneManagedWorkspaceInbox(rawMailbox);
+  const resolvedDisplayTitle =
+    displayTitle === undefined ? mailbox.title : displayTitle;
   const emailInputRef = useRef<HTMLInputElement | null>(null);
   const hostInputRef = useRef<HTMLInputElement | null>(null);
   const portInputRef = useRef<HTMLInputElement | null>(null);
@@ -27157,7 +27162,9 @@ function ManagedInboxEditor({
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             <h3 className="truncate text-xl font-semibold text-[var(--workspace-text)]">
-              {mailbox.title.trim().length > 0 ? mailbox.title : "New inbox"}
+              {resolvedDisplayTitle.trim().length > 0
+                ? resolvedDisplayTitle
+                : "New inbox"}
             </h3>
             {isPrimary ? (
               <span className="rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-2.5 py-1 text-[0.62rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)]">
@@ -27204,14 +27211,14 @@ function ManagedInboxEditor({
             {editable ? (
               <input
                 type="text"
-                value={mailbox.title}
+                value={resolvedDisplayTitle}
                 onChange={(event) => onChange(mailbox.id, "title", event.target.value)}
                 placeholder="Primary inbox"
                 className={inputFieldClass}
               />
             ) : (
               <div className={readOnlyValueClass}>
-                {mailbox.title.trim() || "Not set"}
+                {resolvedDisplayTitle.trim() || "Not set"}
               </div>
             )}
           </div>
@@ -27777,6 +27784,7 @@ const ManageInboxesView = memo(function ManageInboxesView({
   themeMode,
   credentialStatuses,
   onReloadAuthoritativeMailbox,
+  onRenameMailbox,
 }: {
   savedManagedInboxes: ManagedWorkspaceInbox[];
   mailboxDisplayTitles: Readonly<Record<string, string | undefined>>;
@@ -27788,10 +27796,14 @@ const ManageInboxesView = memo(function ManageInboxesView({
   themeMode: "light" | "dark";
   credentialStatuses: MailboxCredentialStatusStore;
   onReloadAuthoritativeMailbox: (mailboxId: string) => Promise<boolean>;
+  onRenameMailbox: (mailboxId: InboxId, nextTitle: string) => void;
 }) {
   const [draftManagedInboxes, setDraftManagedInboxes] = useState<ManagedWorkspaceInbox[]>(
     savedManagedInboxes.map(cloneManagedWorkspaceInbox),
   );
+  const [draftMailboxDisplayTitles, setDraftMailboxDisplayTitles] = useState<
+    Record<string, string>
+  >({});
   const [connectionErrors, setConnectionErrors] = useState<
     Partial<Record<string, string>>
   >({});
@@ -27812,6 +27824,7 @@ const ManageInboxesView = memo(function ManageInboxesView({
 
   useEffect(() => {
     setDraftManagedInboxes(savedManagedInboxes.map(cloneManagedWorkspaceInbox));
+    setDraftMailboxDisplayTitles({});
     setConnectionErrors({});
     setEditingInboxId(null);
     setPendingInboxApplyId(null);
@@ -27857,8 +27870,20 @@ const ManageInboxesView = memo(function ManageInboxesView({
     return () => window.clearTimeout(timeoutId);
   }, [successToastMessage]);
 
+  const hasMailboxTitleDraftChanges = savedManagedInboxes.some((mailbox) => {
+    const canonicalTitle =
+      mailboxDisplayTitles[mailbox.id]?.trim() ||
+      mailbox.title.trim() ||
+      mailbox.email.trim() ||
+      "New inbox";
+
+    return (
+      (draftMailboxDisplayTitles[mailbox.id] ?? canonicalTitle) !== canonicalTitle
+    );
+  });
   const hasUnsavedChanges =
-    JSON.stringify(draftManagedInboxes) !== JSON.stringify(savedManagedInboxes);
+    JSON.stringify(draftManagedInboxes) !== JSON.stringify(savedManagedInboxes) ||
+    hasMailboxTitleDraftChanges;
   const connectedInboxCount = draftManagedInboxes.filter((mailbox) =>
     isCredentialAwareSelectablePrimaryManagedInbox(
       mailbox,
@@ -27868,6 +27893,9 @@ const ManageInboxesView = memo(function ManageInboxesView({
     ? draftManagedInboxes.find((mailbox) => mailbox.id === pendingInboxApplyId) ?? null
     : null;
   const pendingInboxApplyTitle =
+    (pendingInboxApplyMailbox
+      ? draftMailboxDisplayTitles[pendingInboxApplyMailbox.id]?.trim()
+      : "") ||
     pendingInboxApplyMailbox?.title.trim() ||
     pendingInboxApplyMailbox?.email.trim() ||
     "this inbox";
@@ -27876,6 +27904,40 @@ const ManageInboxesView = memo(function ManageInboxesView({
     : -1;
   const selectedInbox =
     selectedInboxIndex >= 0 ? draftManagedInboxes[selectedInboxIndex] : null;
+  const hasMailboxTitleDraftChange = (mailboxId: string) => {
+    const savedMailbox = savedManagedInboxes.find(
+      (mailbox) => mailbox.id === mailboxId,
+    );
+    if (!savedMailbox) {
+      return false;
+    }
+
+    const canonicalTitle =
+      mailboxDisplayTitles[mailboxId]?.trim() ||
+      savedMailbox.title.trim() ||
+      savedMailbox.email.trim() ||
+      "New inbox";
+
+    return (
+      (draftMailboxDisplayTitles[mailboxId] ?? canonicalTitle) !== canonicalTitle
+    );
+  };
+  const commitMailboxTitleOverride = (mailboxId: string) => {
+    if (!hasMailboxTitleDraftChange(mailboxId)) {
+      return false;
+    }
+
+    onRenameMailbox(
+      mailboxId as InboxId,
+      draftMailboxDisplayTitles[mailboxId] ?? "",
+    );
+    setDraftMailboxDisplayTitles((current) => {
+      const next = { ...current };
+      delete next[mailboxId];
+      return next;
+    });
+    return true;
+  };
 
   useEffect(() => {
     onDirtyChange(hasUnsavedChanges);
@@ -28034,8 +28096,20 @@ const ManageInboxesView = memo(function ManageInboxesView({
     const draftMailbox = draftManagedInboxes.find(
       (candidate) => candidate.id === inboxId,
     );
-    const mailboxForStorage = buildMailboxForApply(inboxId);
+    const isTitleOnlyChange =
+      draftMailbox !== undefined &&
+      !inboxId.startsWith("draft-") &&
+      isMailboxPersistedWithoutChanges(draftMailbox) &&
+      hasMailboxTitleDraftChange(inboxId);
 
+    if (isTitleOnlyChange) {
+      commitMailboxTitleOverride(inboxId);
+      setEditingInboxId(null);
+      setSuccessToastMessage("Inbox name applied");
+      return true;
+    }
+
+    const mailboxForStorage = buildMailboxForApply(inboxId);
     if (
       !mailboxForStorage ||
       !isManagedInboxConfigurationComplete(mailboxForStorage, credentialStatuses)
@@ -28069,8 +28143,10 @@ const ManageInboxesView = memo(function ManageInboxesView({
       return false;
     }
 
+    const managedMailboxIsUnchanged =
+      isMailboxPersistedWithoutChanges(mailboxForStorage);
     const needsValidation =
-      !isMailboxPersistedWithoutChanges(mailboxForStorage) &&
+      !managedMailboxIsUnchanged &&
       !isConnectedOAuthMailboxWithUnchangedConnection(mailboxForStorage, savedMailbox);
 
     if (needsValidation) {
@@ -28151,6 +28227,7 @@ const ManageInboxesView = memo(function ManageInboxesView({
             folder: "INBOX",
             uidValidity: response.uidValidity ?? null,
           });
+          commitMailboxTitleOverride(inboxId);
           setSelectedInboxId(mailboxForStorage.id);
           setEditingInboxId(null);
           setSuccessToastMessage(
@@ -28188,6 +28265,7 @@ const ManageInboxesView = memo(function ManageInboxesView({
       return false;
     }
 
+    commitMailboxTitleOverride(inboxId);
     setDraftManagedInboxes((current) =>
       current.map((candidate) =>
         candidate.id === inboxId ? cloneManagedWorkspaceInbox(mailboxForStorage) : candidate,
@@ -28453,6 +28531,20 @@ const ManageInboxesView = memo(function ManageInboxesView({
       );
   };
 
+  const updateDraftMailboxDisplayTitle = (
+    inboxId: string,
+    nextTitle: string,
+  ) => {
+    clearConnectionError(inboxId);
+    setValidationErrorInboxId((current) =>
+      current === inboxId ? null : current,
+    );
+    setDraftMailboxDisplayTitles((current) => ({
+      ...current,
+      [inboxId]: nextTitle,
+    }));
+  };
+
   const updateDraftSmtp = (
     inboxId: string,
     field: keyof CustomSmtpSettings,
@@ -28565,6 +28657,17 @@ const ManageInboxesView = memo(function ManageInboxesView({
     }
 
     const mailbox = draftManagedInboxes.find((candidate) => candidate.id === inboxId);
+    if (
+      mailbox &&
+      !inboxId.startsWith("draft-") &&
+      isMailboxPersistedWithoutChanges(mailbox) &&
+      hasMailboxTitleDraftChange(inboxId)
+    ) {
+      setValidationErrorInboxId(null);
+      setPendingInboxApplyId(inboxId);
+      return;
+    }
+
     const mailboxForValidation = mailbox
       ? normalizeManagedInboxForStorage(
           mailbox,
@@ -28585,7 +28688,11 @@ const ManageInboxesView = memo(function ManageInboxesView({
 
     setValidationErrorInboxId(null);
 
-    if (!inboxId.startsWith("draft-") && isMailboxPersistedWithoutChanges(mailboxForValidation)) {
+    if (
+      !inboxId.startsWith("draft-") &&
+      isMailboxPersistedWithoutChanges(mailboxForValidation) &&
+      !hasMailboxTitleDraftChange(inboxId)
+    ) {
       setEditingInboxId(null);
       return;
     }
@@ -28617,6 +28724,11 @@ const ManageInboxesView = memo(function ManageInboxesView({
           mailbox.id === inboxId ? cloneManagedWorkspaceInbox(savedMailbox) : mailbox,
         ),
       );
+      setDraftMailboxDisplayTitles((current) => {
+        const next = { ...current };
+        delete next[inboxId];
+        return next;
+      });
     }
 
     setValidationErrorInboxId((current) => (current === inboxId ? null : current));
@@ -28692,6 +28804,7 @@ const ManageInboxesView = memo(function ManageInboxesView({
                   {draftManagedInboxes.map((mailbox) => {
                     const isSelected = mailbox.id === selectedInbox?.id;
                     const mailboxTitle =
+                      draftMailboxDisplayTitles[mailbox.id]?.trim() ||
                       mailboxDisplayTitles[mailbox.id]?.trim() ||
                       mailbox.title.trim() ||
                       mailbox.email.trim() ||
@@ -28747,6 +28860,14 @@ const ManageInboxesView = memo(function ManageInboxesView({
                 <ManagedInboxEditor
                   key={selectedInbox.id}
                   mailbox={selectedInbox}
+                  displayTitle={
+                    selectedInbox.provider !== "custom_imap" ||
+                    selectedInbox.id.startsWith("draft-")
+                      ? undefined
+                      : draftMailboxDisplayTitles[selectedInbox.id] ??
+                        mailboxDisplayTitles[selectedInbox.id] ??
+                        selectedInbox.title
+                  }
                   editable={editingInboxId === selectedInbox.id}
                   isExisting={!selectedInbox.id.startsWith("draft-")}
                   activeTab={activeInboxEditorTab}
@@ -28788,7 +28909,18 @@ const ManageInboxesView = memo(function ManageInboxesView({
                   onCancelAction={() => handleCancelInbox(selectedInbox.id)}
                   onReconnectAction={() => handleReconnectInbox(selectedInbox.id)}
                   onTabChange={setActiveInboxEditorTab}
-                  onChange={updateDraftInbox}
+                  onChange={(inboxId, field, value) => {
+                    if (
+                      field === "title" &&
+                      selectedInbox.provider === "custom_imap" &&
+                      !inboxId.startsWith("draft-")
+                    ) {
+                      updateDraftMailboxDisplayTitle(inboxId, String(value));
+                      return;
+                    }
+
+                    updateDraftInbox(inboxId, field, value);
+                  }}
                   onSmtpChange={updateDraftSmtp}
                 />
               ) : null}
@@ -28819,6 +28951,7 @@ const ManageInboxesView = memo(function ManageInboxesView({
         onCancel={() => setIsDiscardConfirmationOpen(false)}
         onConfirm={() => {
           setDraftManagedInboxes(savedManagedInboxes.map(cloneManagedWorkspaceInbox));
+          setDraftMailboxDisplayTitles({});
           setEditingInboxId(null);
           setPendingInboxApplyId(null);
           setPendingInboxRemovalId(null);
@@ -30848,6 +30981,7 @@ function SettingsView({
   isApplyingFocusPreferences,
   onApplyManagedInboxes,
   onReloadAuthoritativeMailbox,
+  onRenameMailbox,
   onSetPrimaryManagedInbox,
   onManagedInboxesDirtyChange,
   onSaveInboxSignature,
@@ -30882,6 +31016,7 @@ function SettingsView({
   isApplyingFocusPreferences: boolean;
   onApplyManagedInboxes: (nextMailboxes: ManagedWorkspaceInbox[]) => boolean;
   onReloadAuthoritativeMailbox: (mailboxId: string) => Promise<boolean>;
+  onRenameMailbox: (mailboxId: InboxId, nextTitle: string) => void;
   onSetPrimaryManagedInbox: (inboxId: string) => void;
   onManagedInboxesDirtyChange: (hasUnsavedChanges: boolean) => void;
   onSaveInboxSignature: (inboxId: InboxId, signature: InboxSignatureSettings) => void;
@@ -30993,6 +31128,7 @@ function SettingsView({
             primaryManagedInboxId={primaryManagedInboxId}
             onApply={onApplyManagedInboxes}
             onReloadAuthoritativeMailbox={onReloadAuthoritativeMailbox}
+            onRenameMailbox={onRenameMailbox}
             onSetPrimaryInbox={onSetPrimaryManagedInbox}
             onDirtyChange={handleManagedInboxesDirtyChange}
             themeMode={themeMode}
@@ -38020,10 +38156,9 @@ export function WorkspaceShell({
   };
 
   const handleRenameMailbox = (mailboxId: InboxId, nextTitle: string) => {
-    setMailboxTitleOverrides((current) => ({
-      ...current,
-      [mailboxId]: nextTitle.trim(),
-    }));
+    setMailboxTitleOverrides((current) =>
+      updateMailboxTitleOverrideRecord(current, mailboxId, nextTitle),
+    );
   };
 
   const handleLearnCategoryDecision = (
@@ -41391,6 +41526,7 @@ export function WorkspaceShell({
                   onReloadAuthoritativeMailbox={
                     reloadAuthoritativeManagedMailbox
                   }
+                  onRenameMailbox={handleRenameMailbox}
                   onSetPrimaryManagedInbox={handleSetPrimaryManagedInbox}
                   onManagedInboxesDirtyChange={setHasUnsavedManagedInboxSettings}
                   onSaveInboxSignature={(inboxId, signature) => {
