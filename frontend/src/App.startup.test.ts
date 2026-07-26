@@ -31,6 +31,7 @@ const { accountConfigOrchestration } = require("./App.tsx") as typeof import("./
 const {
   CustomImapServerReloadRecovery,
   applyAuthoritativeCustomImapConnection,
+  areSelectedOnboardingInboxesFullyConnected,
   buildOnboardingInboxConnectionUpdate,
   invokeCustomImapServerReload,
   onboardingFlowProgression,
@@ -203,6 +204,9 @@ const customImapSelectedState: OnboardingState = {
       connected: false,
       connectionMethod: "imap",
       connectionStatus: "not_connected",
+      imapConnectionStatus: "not_connected",
+      smtpConnectionStatus: "not_configured",
+      fullyConnected: false,
       connectionMessage: null,
       oauthAuthorizationUrl: null,
       customImap: {
@@ -211,6 +215,14 @@ const customImapSelectedState: OnboardingState = {
         ssl: true,
         username: "verified.imap@example.com",
         password: "must-remain-ephemeral",
+      },
+      customSmtp: {
+        host: "smtp.example.com",
+        port: "587",
+        security: "starttls",
+        username: "smtp-user@example.com",
+        password: "must-remain-ephemeral-smtp",
+        useSameCredentials: false,
       },
     },
   },
@@ -280,6 +292,9 @@ function connectedGoogleManagedInbox(
 function connectedCustomImapManagedInbox(
   overrides: Partial<ManagedProjectionInput> = {},
 ): ManagedProjectionInput {
+  const hasFullSmtpCapability =
+    overrides.smtpConnectionStatus === "connected" &&
+    overrides.fullyConnected === true;
   return {
     id: "imap-server-1",
     onboardingInboxId: "demo",
@@ -289,6 +304,11 @@ function connectedCustomImapManagedInbox(
     connected: true,
     connectionMethod: "imap",
     connectionStatus: "connected",
+    imapConnectionStatus: "connected",
+    smtpConnectionStatus: "not_configured",
+    imapPasswordSet: true,
+    smtpPasswordSet: hasFullSmtpCapability,
+    fullyConnected: false,
     connectionMessage: null,
     oauthAuthorizationUrl: null,
     customImap: {
@@ -406,11 +426,18 @@ function createCustomImapAttemptHarness() {
       ...customImapSelectedState.inboxConnections.demo.customImap,
       password: "",
     },
+    customSmtp: {
+      ...customImapSelectedState.inboxConnections.demo.customSmtp,
+      password: "",
+    },
   };
   let password = "ephemeral-test-value";
   let passwordRevision = 1;
+  let smtpPassword = "ephemeral-smtp-test-value";
+  let smtpPasswordRevision = 1;
   let guard: CustomImapOnboardingAttemptGuard | null = null;
   let passwordClearCalls = 0;
+  let smtpPasswordClearCalls = 0;
   let matchedCalls = 0;
   const matchedServerMailboxIds: string[] = [];
   let absentCalls = 0;
@@ -418,6 +445,7 @@ function createCustomImapAttemptHarness() {
   const postCalls: Array<{
     signal: AbortSignal;
     passwordWasPresent: boolean;
+    smtpPasswordWasPresent: boolean;
     pending: ReturnType<
       typeof deferred<InboxConnectionAttemptResult>
     >;
@@ -434,9 +462,10 @@ function createCustomImapAttemptHarness() {
     selectedInboxes,
     connection,
     passwordRevision,
+    smtpPasswordRevision,
   });
 
-  const coordinator =
+  const rawCoordinator =
     createCustomImapOnboardingAttemptCoordinator({
       getCurrentContext: (attempt) => ({
         mounted,
@@ -457,13 +486,20 @@ function createCustomImapAttemptHarness() {
           connection,
         }),
         passwordRevision,
+        smtpPasswordRevision,
       }),
-      post: async (_attempt, postedPassword, signal) => {
+      post: async (
+        _attempt,
+        postedPassword,
+        signal,
+        postedSmtpPassword,
+      ) => {
         const pending =
           deferred<InboxConnectionAttemptResult>();
         postCalls.push({
           signal,
           passwordWasPresent: postedPassword.length > 0,
+          smtpPasswordWasPresent: postedSmtpPassword.length > 0,
           pending,
         });
         return pending.promise;
@@ -482,6 +518,15 @@ function createCustomImapAttemptHarness() {
         passwordRevision += 1;
         passwordClearCalls += 1;
         return passwordRevision;
+      },
+      consumeSmtpPassword: (_attempt, expectedRevision) => {
+        if (smtpPasswordRevision !== expectedRevision) {
+          return null;
+        }
+        smtpPassword = "";
+        smtpPasswordRevision += 1;
+        smtpPasswordClearCalls += 1;
+        return smtpPasswordRevision;
       },
       applyMatched: (_attempt, result) => {
         matchedCalls += 1;
@@ -503,6 +548,15 @@ function createCustomImapAttemptHarness() {
       setTimer: timers.setTimer,
       clearTimer: timers.clearTimer,
     });
+  const coordinator: typeof rawCoordinator = {
+    ...rawCoordinator,
+    start: (attempt, postedPassword, postedSmtpPassword = smtpPassword) =>
+      rawCoordinator.start(
+        attempt,
+        postedPassword,
+        postedSmtpPassword,
+      ),
+  };
 
   return {
     coordinator,
@@ -521,8 +575,17 @@ function createCustomImapAttemptHarness() {
     get passwordRevision() {
       return passwordRevision;
     },
+    get smtpPassword() {
+      return smtpPassword;
+    },
+    get smtpPasswordRevision() {
+      return smtpPasswordRevision;
+    },
     get passwordClearCalls() {
       return passwordClearCalls;
+    },
+    get smtpPasswordClearCalls() {
+      return smtpPasswordClearCalls;
     },
     get matchedCalls() {
       return matchedCalls;
@@ -543,6 +606,10 @@ function createCustomImapAttemptHarness() {
       password = value;
       passwordRevision += 1;
     },
+    replaceSmtpPassword(value: string) {
+      smtpPassword = value;
+      smtpPasswordRevision += 1;
+    },
     replaceEmail(value: string) {
       connection = { ...connection, email: value };
     },
@@ -562,6 +629,9 @@ function matchedReadback(
       connected: true,
       connectionMethod: "imap",
       connectionStatus: "connected",
+      imapConnectionStatus: "connected",
+      smtpConnectionStatus: "connected",
+      fullyConnected: true,
       customImap: {
         ...connection.customImap,
         password: "",
@@ -883,18 +953,30 @@ async function run() {
     const options = buildCustomImapOnboardingConnectionOptions({
       inboxId: "demo",
       connection,
-      password: "one-use-password",
+      imapPassword: "one-use-password",
+      smtpPassword: "one-use-smtp-password",
     });
     assert.deepEqual(options, {
       onboardingInboxId: "demo",
+      serverMailboxId: null,
       email: "verified.imap@example.com",
       customImap: {
         host: "imap.example.com",
         port: "993",
         ssl: true,
         username: "verified.imap@example.com",
-        password: "one-use-password",
+        password: "",
       },
+      customSmtp: {
+        host: "smtp.example.com",
+        port: "587",
+        security: "starttls",
+        username: "smtp-user@example.com",
+        password: "",
+        useSameCredentials: false,
+      },
+      imapPassword: "one-use-password",
+      smtpPassword: "one-use-smtp-password",
     });
 
     const safeSession = accountConfigOrchestration.createIncompleteSession(
@@ -903,7 +985,12 @@ async function run() {
     );
     const serializedSession = JSON.stringify(safeSession);
     assert.equal(serializedSession.includes("one-use-password"), false);
+    assert.equal(serializedSession.includes("one-use-smtp-password"), false);
     assert.equal(serializedSession.includes("must-remain-ephemeral"), false);
+    assert.equal(
+      serializedSession.includes("must-remain-ephemeral-smtp"),
+      false,
+    );
     assert.equal(serializedSession.includes("imap.example.com"), false);
     assert.equal(serializedSession.includes("verified.imap@example.com"), false);
 
@@ -911,11 +998,47 @@ async function run() {
     assert.equal(serializedAttempt.includes("one-use-password"), false);
     assert.equal(serializedAttempt.includes("must-remain-ephemeral"), false);
     assert.equal("password" in customImapAttemptSnapshot, false);
+    assert.equal("smtpPassword" in customImapAttemptSnapshot, false);
     assert.equal(
       customImapAttemptSnapshot.fingerprint.includes(
         "must-remain-ephemeral",
       ),
       false,
+    );
+
+    const incomingOnlyState: OnboardingState = {
+      ...customImapSelectedState,
+      selectedInboxes: ["demo"],
+      inboxConnections: {
+        ...customImapSelectedState.inboxConnections,
+        demo: {
+          ...connection,
+          serverMailboxId: "imap-server-1",
+          connected: true,
+          connectionStatus: "connected",
+          imapConnectionStatus: "connected",
+          smtpConnectionStatus: "not_configured",
+          fullyConnected: false,
+        },
+      },
+    };
+    assert.equal(
+      areSelectedOnboardingInboxesFullyConnected(incomingOnlyState),
+      false,
+    );
+    assert.equal(
+      areSelectedOnboardingInboxesFullyConnected({
+        ...incomingOnlyState,
+        inboxConnections: {
+          ...incomingOnlyState.inboxConnections,
+          demo: {
+            ...incomingOnlyState.inboxConnections.demo,
+            smtpConnectionStatus: "connected",
+            fullyConnected: true,
+          },
+        },
+      }),
+      true,
     );
   });
 
@@ -965,9 +1088,16 @@ async function run() {
       harness.postCalls[0].passwordWasPresent,
       true,
     );
+    assert.equal(
+      harness.postCalls[0].smtpPasswordWasPresent,
+      true,
+    );
     assert.equal(harness.password, "");
     assert.equal(harness.passwordRevision, 2);
     assert.equal(harness.passwordClearCalls, 1);
+    assert.equal(harness.smtpPassword, "");
+    assert.equal(harness.smtpPasswordRevision, 2);
+    assert.equal(harness.smtpPasswordClearCalls, 1);
     assert.equal(harness.timers.pendingCount(), 1);
 
     harness.postCalls[0].pending.resolve(
@@ -1612,6 +1742,7 @@ async function run() {
         onProviderChange: () => undefined,
         onEmailChange: () => undefined,
         onCustomImapChange: () => undefined,
+        onCustomSmtpChange: () => undefined,
         onReuseCustomImap: () => undefined,
         onConnectInbox: () => undefined,
         onReloadAccountConfig: async () => ({
@@ -1636,6 +1767,10 @@ async function run() {
       "port-demo",
       "username-demo",
       "password-demo",
+      "smtp-host-demo",
+      "smtp-port-demo",
+      "smtp-same-credentials-demo",
+      "smtp-password-demo",
       "reuse-demo",
       "ssl-demo",
       "add-inbox",
@@ -1688,6 +1823,7 @@ async function run() {
         onProviderChange: () => undefined,
         onEmailChange: () => undefined,
         onCustomImapChange: () => undefined,
+        onCustomSmtpChange: () => undefined,
         onReuseCustomImap: () => undefined,
         onConnectInbox: () => undefined,
         onReloadAccountConfig: async () => ({
@@ -1781,6 +1917,12 @@ async function run() {
     );
     assert.equal(resolved.connection.connectionMethod, "imap");
     assert.equal(resolved.connection.provider, "custom_imap");
+    assert.equal(resolved.connection.imapConnectionStatus, "connected");
+    assert.equal(
+      resolved.connection.smtpConnectionStatus,
+      "not_configured",
+    );
+    assert.equal(resolved.connection.fullyConnected, false);
     assert.deepEqual(resolved.connection.customImap, {
       host: "imap.example.com",
       port: "993",
@@ -1790,6 +1932,86 @@ async function run() {
     });
     assert.equal(resolved.connection.customImap.password, "");
     assert.equal(resolved.connection.customSmtp.password, "");
+    assert.equal(isConnectionReady(resolved.connection, "", ""), false);
+    assert.equal(
+      isConnectionReady(
+        resolved.connection,
+        "",
+        "one-use-smtp-password",
+      ),
+      true,
+    );
+    const partialSameCredentialsConnection: InboxConnection = {
+      ...resolved.connection,
+      customSmtp: {
+        ...resolved.connection.customSmtp,
+        username: "",
+        useSameCredentials: true,
+      },
+    };
+    const partialMarkup = renderToStaticMarkup(
+      createElement(StepConnectInboxes, {
+        selectedInboxes: ["demo"],
+        customInboxes: [],
+        inboxConnections: {
+          demo: partialSameCredentialsConnection,
+        },
+        onProviderChange: () => undefined,
+        onEmailChange: () => undefined,
+        onCustomImapChange: () => undefined,
+        onCustomSmtpChange: () => undefined,
+        onReuseCustomImap: () => undefined,
+        onConnectInbox: () => undefined,
+        onReloadAccountConfig: async () => ({ status: "required" }),
+        onApplyAuthoritativeCustomImapConnection: () => undefined,
+        customImapAttemptGuard: null,
+        onCustomImapAttemptGuardChange: () => undefined,
+        onAddInbox: () => undefined,
+      }),
+    );
+    assert.equal(partialMarkup.includes("Incoming connected"), true);
+    assert.equal(
+      partialMarkup.includes("Outgoing mail not configured"),
+      true,
+    );
+    assert.equal(
+      partialMarkup.includes('data-attempt-control="password-demo"'),
+      false,
+    );
+    assertMarkupControlEnabled(partialMarkup, "smtp-host-demo");
+    assertMarkupControlEnabled(partialMarkup, "connect-demo");
+    assert.equal(partialMarkup.includes("Connect outgoing mail"), true);
+    const fullReadback = accountConfigOrchestration.resolveCustomImapReadback(
+      customImapSelectedState,
+      customImapAttemptSnapshot,
+      {
+        status: "found",
+        config: {
+          onboardingSession: serverSession,
+          managedInboxes: [
+            connectedCustomImapManagedInbox({
+              smtpConnectionStatus: "connected",
+              fullyConnected: true,
+              customSmtp: {
+                host: "smtp.example.com",
+                port: "587",
+                security: "starttls",
+                username: "smtp-user@example.com",
+                password: "",
+                useSameCredentials: false,
+              },
+            }),
+          ],
+        },
+      },
+    );
+    assert.equal(fullReadback.status, "matched");
+    if (fullReadback.status !== "matched") {
+      throw new Error("Expected authoritative SMTP match");
+    }
+    assert.equal(fullReadback.connection.smtpConnectionStatus, "connected");
+    assert.equal(fullReadback.connection.fullyConnected, true);
+    assert.equal(fullReadback.connection.customSmtp.password, "");
     const readbackWithUnrelatedFullSmtp: UserAccountConfigReadResult = {
       status: "found",
       config: {
@@ -1800,6 +2022,8 @@ async function run() {
             id: "imap-server-2",
             onboardingInboxId: undefined,
             email: "other@example.com",
+            smtpConnectionStatus: "connected",
+            fullyConnected: true,
             customImap: {
               host: "imap.other.example.com",
               port: "993",
@@ -2033,6 +2257,28 @@ async function run() {
           onboardingSession: serverSession,
           managedInboxes: [
             connectedCustomImapManagedInbox({
+              imapPasswordSet: false,
+            }),
+          ],
+        },
+      },
+      {
+        status: "found",
+        config: {
+          onboardingSession: serverSession,
+          managedInboxes: [
+            connectedCustomImapManagedInbox({
+              smtpPasswordSet: true,
+            }),
+          ],
+        },
+      },
+      {
+        status: "found",
+        config: {
+          onboardingSession: serverSession,
+          managedInboxes: [
+            connectedCustomImapManagedInbox({
               provider: "google",
             }),
           ],
@@ -2121,6 +2367,8 @@ async function run() {
           onboardingSession: serverSession,
           managedInboxes: [
             connectedCustomImapManagedInbox({
+              smtpConnectionStatus: "connected",
+              fullyConnected: true,
               customSmtp: {
                 host: "smtp.must-not-be-authoritative.example",
                 password: "",
@@ -2377,6 +2625,72 @@ async function run() {
       );
     }
 
+    const dynamicInboxId = "custom:partner-inbox";
+    const dynamicState: OnboardingState = {
+      ...customImapSelectedState,
+      primaryInbox: dynamicInboxId,
+      inboxCount: "1",
+      selectedInboxes: [dynamicInboxId],
+      customInboxes: [
+        { id: dynamicInboxId, name: "Partner inbox" },
+      ],
+      inboxConnections: {
+        ...customImapSelectedState.inboxConnections,
+        [dynamicInboxId]: {
+          ...customImapSelectedState.inboxConnections.demo,
+          email: "partner@example.com",
+          customImap: {
+            ...customImapSelectedState.inboxConnections.demo.customImap,
+            username: "partner@example.com",
+          },
+        },
+      },
+    };
+    const dynamicHydration = await hydrateResult(
+      {
+        status: "found",
+        config: {
+          onboardingSession: incompleteSession(2, dynamicState),
+          managedInboxes: [
+            connectedCustomImapManagedInbox({
+              id: "imap-server-dynamic",
+              onboardingInboxId: dynamicInboxId,
+              email: "partner@example.com",
+              customImap: {
+                host: "imap.example.com",
+                port: "993",
+                ssl: true,
+                username: "partner@example.com",
+                password: "",
+              },
+            }),
+          ],
+        },
+      },
+      new MemoryStorage(),
+    );
+    assert.equal(dynamicHydration.status, "found");
+    if (dynamicHydration.status !== "found") {
+      throw new Error("Expected dynamic inbox hydration");
+    }
+    const dynamicConnection =
+      dynamicHydration.accountState.onboardingState.inboxConnections[
+        dynamicInboxId
+      ];
+    assert.equal(dynamicConnection.serverMailboxId, "imap-server-dynamic");
+    assert.equal(dynamicConnection.imapConnectionStatus, "connected");
+    assert.equal(
+      dynamicConnection.smtpConnectionStatus,
+      "not_configured",
+    );
+    assert.equal(dynamicConnection.fullyConnected, false);
+    assert.equal(
+      areSelectedOnboardingInboxesFullyConnected(
+        dynamicHydration.accountState.onboardingState,
+      ),
+      false,
+    );
+
     const fullSmtpHydration = await hydrateResult(
       {
         status: "found",
@@ -2384,6 +2698,8 @@ async function run() {
           ...serverConfig,
           managedInboxes: [
             connectedCustomImapManagedInbox({
+              smtpConnectionStatus: "connected",
+              fullyConnected: true,
               customSmtp: {
                 host: "smtp.example.com",
                 port: "587",

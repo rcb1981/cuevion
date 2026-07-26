@@ -455,3 +455,35 @@ def open_public_imap_connection(
     except Exception:
         _close_socket_quietly(protocol_socket)
         raise ImapNetworkPolicyError("imap_connection_failed") from None
+
+
+def resolve_public_destination(host, port) -> ResolvedImapDestination:
+    """Expose the existing single-snapshot resolver to sibling protocols."""
+    return resolve_public_imap_destination(host, port)
+
+
+def connect_to_resolved_destination(
+    destination: ResolvedImapDestination,
+    timeout: float | None,
+) -> socket.socket:
+    """Dial the selected numeric destination through the existing safe path."""
+    return _connect_to_resolved_destination(destination, timeout)
+
+
+def validate_resolved_destination_peer(
+    connected_socket: socket.socket,
+    destination: ResolvedImapDestination,
+    *,
+    expected_ip: str,
+) -> str:
+    """Apply the existing pre/post-TLS peer binding check."""
+    return _validated_peer_ip(
+        connected_socket,
+        destination,
+        expected_ip=expected_ip,
+    )
+
+
+def close_socket_quietly(socket_to_close) -> None:
+    """Use the existing exception-complete cleanup primitive."""
+    _close_socket_quietly(socket_to_close)

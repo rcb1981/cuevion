@@ -69,6 +69,9 @@ export const createInboxConnection = () => ({
   connected: false,
   connectionMethod: null,
   connectionStatus: "not_connected" as const,
+  imapConnectionStatus: "not_connected" as const,
+  smtpConnectionStatus: "not_configured" as const,
+  fullyConnected: false,
   connectionMessage: null,
   oauthAuthorizationUrl: null,
   customImap: {

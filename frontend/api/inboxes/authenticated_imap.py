@@ -212,6 +212,13 @@ else:
                 "Reconnect this mailbox to continue.",
                 409,
             )
+        if inbox.get("imapConnectionStatus") not in {None, "connected"}:
+            return _failure(
+                "reconnect_required",
+                "reconnect_required",
+                "Reconnect this mailbox to continue.",
+                409,
+            )
         config_credential_version = inbox.get("credentialVersion")
         if not is_valid_mailbox_credential_version(config_credential_version):
             return _failure(
@@ -260,8 +267,13 @@ else:
                 500,
             )
         if require_smtp and (
-            not smtp_host
+            inbox.get("imapConnectionStatus") != "connected"
+            or inbox.get("smtpConnectionStatus") != "connected"
+            or inbox.get("fullyConnected") is not True
+            or not smtp_host
             or not smtp_port
+            or (smtp_security == "ssl" and smtp_port != 465)
+            or (smtp_security == "starttls" and smtp_port != 587)
             or smtp_security not in {"ssl", "starttls"}
             or not smtp_username
         ):

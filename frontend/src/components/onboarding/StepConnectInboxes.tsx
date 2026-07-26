@@ -33,6 +33,7 @@ import { onboardingText } from "../../copy/onboardingCopy";
 import type {
   CustomInboxDefinition,
   CustomImapSettings,
+  CustomSmtpSettings,
   InboxConnection,
   InboxConnectionStatus,
   InboxId,
@@ -44,6 +45,8 @@ interface ConnectionFeedback {
   email?: string;
   host?: string;
   password?: string;
+  smtpHost?: string;
+  smtpPassword?: string;
   general?: string;
 }
 
@@ -58,6 +61,11 @@ interface StepConnectInboxesProps {
   onCustomImapChange: (
     inboxId: InboxId,
     field: keyof CustomImapSettings,
+    value: string | boolean,
+  ) => void;
+  onCustomSmtpChange: (
+    inboxId: InboxId,
+    field: keyof CustomSmtpSettings,
     value: string | boolean,
   ) => void;
   onReuseCustomImap: (inboxId: InboxId, settings: CustomImapSettings) => void;
@@ -100,6 +108,7 @@ function hasReusableSettings(settings: CustomImapSettings) {
 export function isConnectionReady(
   connection: InboxConnection,
   imapPassword = connection.customImap.password,
+  smtpPassword = connection.customSmtp.password,
 ) {
   if (!connection.provider) {
     return false;
@@ -117,6 +126,22 @@ export function isConnectionReady(
     return true;
   }
 
+  const smtp = connection.customSmtp;
+  const smtpIsComplete = Boolean(
+    smtp.host.trim() &&
+      ((smtp.security === "ssl" && smtp.port.trim() === "465") ||
+        (smtp.security === "starttls" && smtp.port.trim() === "587")) &&
+      (smtp.useSameCredentials ||
+        (smtp.username.trim() && smtpPassword.trim())),
+  );
+  if (!smtpIsComplete) {
+    return false;
+  }
+
+  if (isAuthoritativeIncomingConnected(connection)) {
+    return true;
+  }
+
   const { host, port, ssl, username } = connection.customImap;
   return Boolean(
     host.trim() &&
@@ -124,6 +149,37 @@ export function isConnectionReady(
       ssl === true &&
       username.trim() &&
       imapPassword.trim(),
+  );
+}
+
+export function isAuthoritativeIncomingConnected(
+  connection: InboxConnection,
+) {
+  return Boolean(
+    connection.provider === "custom_imap" &&
+      connection.serverMailboxId?.trim() &&
+      connection.connected === true &&
+      connection.connectionStatus === "connected" &&
+      connection.imapConnectionStatus === "connected",
+  );
+}
+
+export function isOnboardingInboxFullyConnected(
+  connection: InboxConnection | null | undefined,
+) {
+  if (!connection) {
+    return false;
+  }
+  if (isOAuthConnectionProvider(connection.provider)) {
+    return (
+      connection.connected === true &&
+      connection.connectionStatus === "connected"
+    );
+  }
+  return Boolean(
+    isAuthoritativeIncomingConnected(connection) &&
+      connection.smtpConnectionStatus === "connected" &&
+      connection.fullyConnected === true,
   );
 }
 
@@ -173,6 +229,22 @@ export function getConnectionFeedback(
 
   if (ssl !== true) {
     return { general: onboardingText.connect.couldNotConnect };
+  }
+
+  const smtp = connection.customSmtp;
+  if (!smtp.host.trim() || /\s/.test(smtp.host.trim())) {
+    return { smtpHost: "Enter a valid SMTP host." };
+  }
+  if (
+    !(
+      (smtp.security === "ssl" && smtp.port.trim() === "465") ||
+      (smtp.security === "starttls" && smtp.port.trim() === "587")
+    )
+  ) {
+    return {
+      general:
+        "Use port 465 with SSL/TLS or port 587 with STARTTLS.",
+    };
   }
 
   return null;
@@ -236,19 +308,28 @@ export function buildOnboardingInboxConnectionOptions({
 export function buildCustomImapOnboardingConnectionOptions({
   inboxId,
   connection,
-  password,
+  imapPassword,
+  smtpPassword,
 }: {
   inboxId: InboxId;
   connection: InboxConnection;
-  password: string;
+  imapPassword: string;
+  smtpPassword: string;
 }): Parameters<typeof beginOnboardingInboxConnection>[0] {
   return {
     onboardingInboxId: inboxId,
+    serverMailboxId: connection.serverMailboxId,
     email: connection.email,
     customImap: {
       ...connection.customImap,
-      password,
+      password: "",
     },
+    customSmtp: {
+      ...connection.customSmtp,
+      password: "",
+    },
+    imapPassword,
+    smtpPassword,
   };
 }
 
@@ -274,6 +355,7 @@ export function StepConnectInboxes({
   onProviderChange,
   onEmailChange,
   onCustomImapChange,
+  onCustomSmtpChange,
   onReuseCustomImap,
   onConnectInbox,
   onReloadAccountConfig,
@@ -289,6 +371,9 @@ export function StepConnectInboxes({
   const [imapPasswords, setImapPasswords] = useState<
     Partial<Record<InboxId, string>>
   >({});
+  const [smtpPasswords, setSmtpPasswords] = useState<
+    Partial<Record<InboxId, string>>
+  >({});
   const [connectionErrors, setConnectionErrors] = useState<
     Partial<Record<InboxId, ConnectionFeedback>>
   >({});
@@ -296,7 +381,10 @@ export function StepConnectInboxes({
   const selectedInboxesRef = useRef(selectedInboxes);
   const inboxConnectionsRef = useRef(inboxConnections);
   const imapPasswordsRef = useRef<Partial<Record<InboxId, string>>>({});
+  const smtpPasswordsRef = useRef<Partial<Record<InboxId, string>>>({});
   const passwordRevisionsRef = useRef<Partial<Record<InboxId, number>>>({});
+  const smtpPasswordRevisionsRef =
+    useRef<Partial<Record<InboxId, number>>>({});
   const attemptCoordinatorRef =
     useRef<CustomImapOnboardingAttemptCoordinator | null>(null);
   const attemptCallbacksRef = useRef({
@@ -336,6 +424,15 @@ export function StepConnectInboxes({
       imapPasswordsRef.current = next;
       return next;
     });
+    setSmtpPasswords((current) => {
+      const next = Object.fromEntries(
+        Object.entries(current).filter(([inboxId]) =>
+          selectedInboxes.includes(inboxId as InboxId),
+        ),
+      );
+      smtpPasswordsRef.current = next;
+      return next;
+    });
   }, [selectedInboxes]);
 
   const clearImapPassword = (
@@ -369,6 +466,40 @@ export function StepConnectInboxes({
     };
     imapPasswordsRef.current = nextPasswords;
     setImapPasswords(nextPasswords);
+  };
+
+  const clearSmtpPassword = (
+    inboxId: InboxId,
+    expectedRevision?: number,
+  ) => {
+    const currentRevision =
+      smtpPasswordRevisionsRef.current[inboxId] ?? 0;
+    if (
+      expectedRevision !== undefined &&
+      currentRevision !== expectedRevision
+    ) {
+      return null;
+    }
+    const nextRevision = currentRevision + 1;
+    smtpPasswordRevisionsRef.current[inboxId] = nextRevision;
+    const nextPasswords = { ...smtpPasswordsRef.current };
+    delete nextPasswords[inboxId];
+    smtpPasswordsRef.current = nextPasswords;
+    if (mountedRef.current) {
+      setSmtpPasswords(nextPasswords);
+    }
+    return nextRevision;
+  };
+
+  const setSmtpPassword = (inboxId: InboxId, password: string) => {
+    smtpPasswordRevisionsRef.current[inboxId] =
+      (smtpPasswordRevisionsRef.current[inboxId] ?? 0) + 1;
+    const nextPasswords = {
+      ...smtpPasswordsRef.current,
+      [inboxId]: password,
+    };
+    smtpPasswordsRef.current = nextPasswords;
+    setSmtpPasswords(nextPasswords);
   };
 
   const clearConnectionFeedback = (inboxId: InboxId) => {
@@ -423,20 +554,35 @@ export function StepConnectInboxes({
               passwordRevisionsRef.current[
                 snapshot.onboardingInboxId
               ] ?? 0,
+            smtpPasswordRevision:
+              smtpPasswordRevisionsRef.current[
+                snapshot.onboardingInboxId
+              ] ?? 0,
           };
         },
-        post: (snapshot, password, signal) =>
+        post: (snapshot, imapPassword, signal, smtpPassword) =>
           beginOnboardingInboxConnection(
             {
               onboardingInboxId: snapshot.onboardingInboxId,
+              serverMailboxId: snapshot.serverMailboxId,
               email: snapshot.normalizedEmail,
               customImap: {
                 host: snapshot.normalizedHost,
                 port: snapshot.port,
                 ssl: true,
                 username: snapshot.normalizedUsername,
-                password,
+                password: "",
               },
+              customSmtp: {
+                host: snapshot.normalizedSmtpHost,
+                port: snapshot.smtpPort,
+                security: snapshot.smtpSecurity,
+                username: snapshot.normalizedSmtpUsername,
+                password: "",
+                useSameCredentials: snapshot.useSameCredentials,
+              },
+              imapPassword,
+              smtpPassword,
             },
             signal,
           ),
@@ -450,8 +596,26 @@ export function StepConnectInboxes({
             snapshot.onboardingInboxId,
             expectedRevision,
           ),
-        applyMatched: (snapshot, result) => {
-          clearConnectionFeedback(snapshot.onboardingInboxId);
+        consumeSmtpPassword: (snapshot, expectedRevision) =>
+          clearSmtpPassword(
+            snapshot.onboardingInboxId,
+            expectedRevision,
+          ),
+        applyMatched: (snapshot, result, postResult) => {
+          if (
+            result.connection.fullyConnected === true ||
+            !postResult ||
+            postResult.ok
+          ) {
+            clearConnectionFeedback(snapshot.onboardingInboxId);
+          } else {
+            setConnectionErrors((current) => ({
+              ...current,
+              [snapshot.onboardingInboxId]: {
+                general: onboardingText.connect.couldNotConnect,
+              },
+            }));
+          }
           attemptCallbacksRef.current
             .onApplyAuthoritativeCustomImapConnection(snapshot, result);
         },
@@ -524,6 +688,7 @@ export function StepConnectInboxes({
 
     clearConnectionFeedback(inboxId);
     clearImapPassword(inboxId);
+    clearSmtpPassword(inboxId);
     onRemoveInbox(inboxId);
   };
 
@@ -532,8 +697,9 @@ export function StepConnectInboxes({
     connection: InboxConnection,
   ) => {
     const imapPassword = imapPasswordsRef.current[inboxId] ?? "";
+    const smtpPassword = smtpPasswordsRef.current[inboxId] ?? "";
     if (
-      !isConnectionReady(connection, imapPassword) ||
+      !isConnectionReady(connection, imapPassword, smtpPassword) ||
       loadingInboxId !== null ||
       customImapMutationIsLocked()
     ) {
@@ -555,6 +721,7 @@ export function StepConnectInboxes({
       clearConnectionFeedback(inboxId);
       if (isImapCredentialsProvider(connection.provider)) {
         clearImapPassword(inboxId);
+        clearSmtpPassword(inboxId);
         setConnectionErrors((current) => ({
           ...current,
           [inboxId]: { general: onboardingText.connect.couldNotConnect },
@@ -582,8 +749,16 @@ export function StepConnectInboxes({
         connection,
         passwordRevision:
           passwordRevisionsRef.current[inboxId] ?? 0,
+        smtpPasswordRevision:
+          smtpPasswordRevisionsRef.current[inboxId] ?? 0,
       });
-      if (getAttemptCoordinator().start(snapshot, imapPassword)) {
+      if (
+        getAttemptCoordinator().start(
+          snapshot,
+          imapPassword,
+          smtpPassword,
+        )
+      ) {
         clearConnectionFeedback(inboxId);
       }
       return;
@@ -652,8 +827,8 @@ export function StepConnectInboxes({
           {onboardingText.connect.description}
         </p>
         <p className="max-w-2xl text-sm leading-6 text-ink/54">
-          Connect at least one Gmail / Google Workspace or Custom IMAP account.
-          You can add more inboxes later in Settings &gt; Inboxes.
+          Connect every selected Gmail / Google Workspace or Custom IMAP
+          account. You can add more inboxes later in Settings &gt; Inboxes.
         </p>
       </div>
 
@@ -668,7 +843,12 @@ export function StepConnectInboxes({
             },
           };
           const imapPassword = imapPasswords[inboxId] ?? "";
-          const readyToConnect = isConnectionReady(connection, imapPassword);
+          const smtpPassword = smtpPasswords[inboxId] ?? "";
+          const readyToConnect = isConnectionReady(
+            connection,
+            imapPassword,
+            smtpPassword,
+          );
           const isCustomImapAttemptTarget =
             effectiveCustomImapAttemptGuard?.onboardingInboxId ===
             inboxId;
@@ -687,8 +867,16 @@ export function StepConnectInboxes({
             loadingInboxId === inboxId ||
             (isCustomImapAttemptTarget &&
               !isReconciliationRequired);
+          const incomingIsConnected =
+            isAuthoritativeIncomingConnected(connection);
           const connectionIsConnected =
-            connection.connected || connection.connectionStatus === "connected";
+            isOnboardingInboxFullyConnected(connection);
+          const outgoingIsConnected =
+            connection.provider === "custom_imap" &&
+            connection.smtpConnectionStatus === "connected" &&
+            connection.fullyConnected === true;
+          const identityIsLocked =
+            incomingIsConnected || connectionIsConnected;
           const canRemoveThisInbox =
             Boolean(onRemoveInbox && canRemoveInbox?.(inboxId)) &&
             !isLoading &&
@@ -741,7 +929,9 @@ export function StepConnectInboxes({
                       type="button"
                       data-attempt-control={`provider-${inboxId}-${provider.id}`}
                       disabled={
-                        isLoading || customImapInteractionLocked
+                        isLoading ||
+                        customImapInteractionLocked ||
+                        identityIsLocked
                       }
                       onClick={() => {
                         if (customImapMutationIsLocked()) {
@@ -749,6 +939,7 @@ export function StepConnectInboxes({
                         }
                         clearConnectionFeedback(inboxId);
                         clearImapPassword(inboxId);
+                        clearSmtpPassword(inboxId);
                         onProviderChange(inboxId, provider.id);
                       }}
                       className={`rounded-3xl border px-4 py-3 text-left transition ${
@@ -773,13 +964,16 @@ export function StepConnectInboxes({
                   type="email"
                   data-attempt-control={`email-${inboxId}`}
                   value={connection.email}
-                  disabled={customImapInteractionLocked}
+                  disabled={
+                    customImapInteractionLocked || identityIsLocked
+                  }
                   onChange={(event) => {
                     if (customImapMutationIsLocked()) {
                       return;
                     }
                     clearConnectionFeedback(inboxId);
                     clearImapPassword(inboxId);
+                    clearSmtpPassword(inboxId);
                     onEmailChange(inboxId, event.target.value);
                   }}
                   placeholder="name@company.com"
@@ -791,8 +985,33 @@ export function StepConnectInboxes({
               </div>
 
               {isImapCredentialsProvider(connection.provider) ? (
+                <>
                 <div className="mt-6 space-y-4 rounded-[24px] border border-ink/8 bg-sand/20 p-5">
-                  {connection.provider === "custom_imap" && reusableSettings ? (
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-semibold text-ink">
+                        Incoming mail
+                      </p>
+                      <p className="mt-1 text-sm text-ink/58">
+                        Secure IMAP receiving
+                      </p>
+                    </div>
+                    <span
+                      className={`inline-flex rounded-full border px-3 py-1 text-xs font-medium ${
+                        incomingIsConnected
+                          ? "border-[var(--workspace-status-success-border)] bg-[var(--workspace-status-success-bg)] text-[var(--workspace-status-success-text)]"
+                          : "border-ink/10 bg-white/72 text-ink/52"
+                      }`}
+                    >
+                      {incomingIsConnected
+                        ? "Incoming connected"
+                        : "Incoming not connected"}
+                    </span>
+                  </div>
+
+                  {connection.provider === "custom_imap" &&
+                  reusableSettings &&
+                  !incomingIsConnected ? (
                     <div className="flex items-center justify-between gap-4 rounded-2xl border border-moss/10 bg-white/72 px-4 py-3">
                       <p className="text-sm text-ink/70">
                         {onboardingText.connect.reusePreviousServerSettings}
@@ -807,6 +1026,7 @@ export function StepConnectInboxes({
                           }
                           clearConnectionFeedback(inboxId);
                           clearImapPassword(inboxId);
+                          clearSmtpPassword(inboxId);
                           onReuseCustomImap(inboxId, {
                             ...reusableSettings,
                             password: "",
@@ -828,13 +1048,17 @@ export function StepConnectInboxes({
                         type="text"
                         data-attempt-control={`host-${inboxId}`}
                         value={connection.customImap.host}
-                        disabled={customImapInteractionLocked}
+                        disabled={
+                          customImapInteractionLocked ||
+                          incomingIsConnected
+                        }
                         onChange={(event) => {
                           if (customImapMutationIsLocked()) {
                             return;
                           }
                           clearConnectionFeedback(inboxId);
                           clearImapPassword(inboxId);
+                          clearSmtpPassword(inboxId);
                           onCustomImapChange(inboxId, "host", event.target.value);
                         }}
                         className="w-full rounded-2xl border border-ink/10 bg-white px-4 py-3 outline-none transition focus:border-moss"
@@ -851,13 +1075,17 @@ export function StepConnectInboxes({
                         type="text"
                         data-attempt-control={`port-${inboxId}`}
                         value={connection.customImap.port}
-                        disabled={customImapInteractionLocked}
+                        disabled={
+                          customImapInteractionLocked ||
+                          incomingIsConnected
+                        }
                         onChange={(event) => {
                           if (customImapMutationIsLocked()) {
                             return;
                           }
                           clearConnectionFeedback(inboxId);
                           clearImapPassword(inboxId);
+                          clearSmtpPassword(inboxId);
                           onCustomImapChange(inboxId, "port", event.target.value);
                         }}
                         className="w-full rounded-2xl border border-ink/10 bg-white px-4 py-3 outline-none transition focus:border-moss"
@@ -872,13 +1100,17 @@ export function StepConnectInboxes({
                           type="text"
                           data-attempt-control={`username-${inboxId}`}
                           value={connection.customImap.username}
-                          disabled={customImapInteractionLocked}
+                          disabled={
+                            customImapInteractionLocked ||
+                            incomingIsConnected
+                          }
                           onChange={(event) => {
                             if (customImapMutationIsLocked()) {
                               return;
                             }
                             clearConnectionFeedback(inboxId);
                             clearImapPassword(inboxId);
+                            clearSmtpPassword(inboxId);
                             onCustomImapChange(
                               inboxId,
                               "username",
@@ -898,31 +1130,40 @@ export function StepConnectInboxes({
                         </div>
                       </div>
                     )}
-                    <div>
-                      <label className="mb-2 block text-sm font-medium text-ink/75">
-                        {getPasswordLabel(connection.provider)}
-                      </label>
-                      <input
-                        type="password"
-                        data-attempt-control={`password-${inboxId}`}
-                        value={imapPassword}
-                        disabled={customImapInteractionLocked}
-                        onChange={(event) => {
-                          if (customImapMutationIsLocked()) {
-                            return;
-                          }
-                          clearConnectionFeedback(inboxId);
-                          setImapPassword(
-                            inboxId,
-                            event.target.value,
-                          );
-                        }}
-                        className="w-full rounded-2xl border border-ink/10 bg-white px-4 py-3 outline-none transition focus:border-moss"
-                      />
-                      <div className="mt-2 min-h-[18px] text-sm text-amber-900/60">
-                        {errorMessage?.password ?? ""}
+                    {!incomingIsConnected ? (
+                      <div>
+                        <label className="mb-2 block text-sm font-medium text-ink/75">
+                          {getPasswordLabel(connection.provider)}
+                        </label>
+                        <input
+                          type="password"
+                          data-attempt-control={`password-${inboxId}`}
+                          value={imapPassword}
+                          disabled={customImapInteractionLocked}
+                          onChange={(event) => {
+                            if (customImapMutationIsLocked()) {
+                              return;
+                            }
+                            clearConnectionFeedback(inboxId);
+                            setImapPassword(
+                              inboxId,
+                              event.target.value,
+                            );
+                          }}
+                          autoComplete="new-password"
+                          className="w-full rounded-2xl border border-ink/10 bg-white px-4 py-3 outline-none transition focus:border-moss"
+                        />
+                        <div className="mt-2 min-h-[18px] text-sm text-amber-900/60">
+                          {errorMessage?.password ?? ""}
+                        </div>
                       </div>
-                    </div>
+                    ) : (
+                      <div className="flex items-end">
+                        <p className="w-full rounded-2xl border border-moss/12 bg-white/72 px-4 py-3 text-sm text-ink/58">
+                          Incoming credentials stored securely
+                        </p>
+                      </div>
+                    )}
                   </div>
 
                   <label className="flex items-center gap-3 text-sm font-medium text-ink/75">
@@ -941,6 +1182,203 @@ export function StepConnectInboxes({
                     {onboardingText.connect.ssl} required
                   </label>
                 </div>
+                <div className="mt-4 space-y-4 rounded-[24px] border border-ink/8 bg-sand/20 p-5">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-semibold text-ink">
+                        Outgoing mail
+                      </p>
+                      <p className="mt-1 text-sm text-ink/58">
+                        Secure SMTP submission
+                      </p>
+                    </div>
+                    <span
+                      className={`inline-flex rounded-full border px-3 py-1 text-xs font-medium ${
+                        outgoingIsConnected
+                          ? "border-[var(--workspace-status-success-border)] bg-[var(--workspace-status-success-bg)] text-[var(--workspace-status-success-text)]"
+                          : "border-ink/10 bg-white/72 text-ink/52"
+                      }`}
+                    >
+                      {outgoingIsConnected
+                        ? "Outgoing connected"
+                        : "Outgoing mail not configured"}
+                    </span>
+                  </div>
+
+                  {!outgoingIsConnected ? (
+                    <div className="grid gap-4 md:grid-cols-2">
+                      <div>
+                        <label className="mb-2 block text-sm font-medium text-ink/75">
+                          SMTP host
+                        </label>
+                        <input
+                          type="text"
+                          data-attempt-control={`smtp-host-${inboxId}`}
+                          value={connection.customSmtp.host}
+                          disabled={customImapInteractionLocked}
+                          onChange={(event) => {
+                            if (customImapMutationIsLocked()) return;
+                            clearConnectionFeedback(inboxId);
+                            clearSmtpPassword(inboxId);
+                            onCustomSmtpChange(
+                              inboxId,
+                              "host",
+                              event.target.value,
+                            );
+                          }}
+                          className="w-full rounded-2xl border border-ink/10 bg-white px-4 py-3 outline-none transition focus:border-moss"
+                        />
+                        <div className="mt-2 min-h-[18px] text-sm text-amber-900/60">
+                          {errorMessage?.smtpHost ?? ""}
+                        </div>
+                      </div>
+                      <div>
+                        <label className="mb-2 block text-sm font-medium text-ink/75">
+                          SMTP port
+                        </label>
+                        <input
+                          type="text"
+                          data-attempt-control={`smtp-port-${inboxId}`}
+                          value={connection.customSmtp.port}
+                          disabled={customImapInteractionLocked}
+                          onChange={(event) => {
+                            if (customImapMutationIsLocked()) return;
+                            clearConnectionFeedback(inboxId);
+                            clearSmtpPassword(inboxId);
+                            onCustomSmtpChange(
+                              inboxId,
+                              "port",
+                              event.target.value,
+                            );
+                          }}
+                          className="w-full rounded-2xl border border-ink/10 bg-white px-4 py-3 outline-none transition focus:border-moss"
+                        />
+                      </div>
+                      <div>
+                        <label className="mb-2 block text-sm font-medium text-ink/75">
+                          Security
+                        </label>
+                        <select
+                          data-attempt-control={`smtp-security-${inboxId}`}
+                          value={connection.customSmtp.security}
+                          disabled={customImapInteractionLocked}
+                          onChange={(event) => {
+                            if (customImapMutationIsLocked()) return;
+                            clearConnectionFeedback(inboxId);
+                            clearSmtpPassword(inboxId);
+                            const security =
+                              event.target.value === "ssl"
+                                ? "ssl"
+                                : "starttls";
+                            onCustomSmtpChange(
+                              inboxId,
+                              "security",
+                              security,
+                            );
+                            onCustomSmtpChange(
+                              inboxId,
+                              "port",
+                              security === "ssl" ? "465" : "587",
+                            );
+                          }}
+                          className="w-full rounded-2xl border border-ink/10 bg-white px-4 py-3 outline-none transition focus:border-moss"
+                        >
+                          <option value="starttls">STARTTLS</option>
+                          <option value="ssl">SSL/TLS</option>
+                        </select>
+                      </div>
+                      <label className="flex items-center gap-3 pt-8 text-sm font-medium text-ink/75">
+                        <span className="relative flex h-4 w-4 items-center justify-center">
+                          <input
+                            type="checkbox"
+                            data-attempt-control={`smtp-same-credentials-${inboxId}`}
+                            checked={
+                              connection.customSmtp.useSameCredentials
+                            }
+                            disabled={customImapInteractionLocked}
+                            onChange={(event) => {
+                              if (customImapMutationIsLocked()) return;
+                              clearConnectionFeedback(inboxId);
+                              clearSmtpPassword(inboxId);
+                              onCustomSmtpChange(
+                                inboxId,
+                                "useSameCredentials",
+                                event.target.checked,
+                              );
+                              if (event.target.checked) {
+                                onCustomSmtpChange(
+                                  inboxId,
+                                  "username",
+                                  "",
+                                );
+                              }
+                            }}
+                            className="peer absolute inset-0 m-0 h-full w-full appearance-none rounded-[5px] border border-ink/18 bg-white/80 outline-none transition checked:border-moss/55 checked:bg-[linear-gradient(180deg,rgba(226,236,229,0.92),rgba(246,249,246,0.98))]"
+                          />
+                          <span className="pointer-events-none absolute inset-0 flex items-center justify-center text-[10px] font-semibold leading-none text-moss opacity-0 transition peer-checked:opacity-100">
+                            ✓
+                          </span>
+                        </span>
+                        Use same credentials
+                      </label>
+                      {!connection.customSmtp.useSameCredentials ? (
+                        <>
+                          <div>
+                            <label className="mb-2 block text-sm font-medium text-ink/75">
+                              SMTP username
+                            </label>
+                            <input
+                              type="text"
+                              data-attempt-control={`smtp-username-${inboxId}`}
+                              value={connection.customSmtp.username}
+                              disabled={customImapInteractionLocked}
+                              onChange={(event) => {
+                                if (customImapMutationIsLocked()) return;
+                                clearConnectionFeedback(inboxId);
+                                clearSmtpPassword(inboxId);
+                                onCustomSmtpChange(
+                                  inboxId,
+                                  "username",
+                                  event.target.value,
+                                );
+                              }}
+                              className="w-full rounded-2xl border border-ink/10 bg-white px-4 py-3 outline-none transition focus:border-moss"
+                            />
+                          </div>
+                          <div>
+                            <label className="mb-2 block text-sm font-medium text-ink/75">
+                              SMTP password
+                            </label>
+                            <input
+                              type="password"
+                              data-attempt-control={`smtp-password-${inboxId}`}
+                              value={smtpPassword}
+                              disabled={customImapInteractionLocked}
+                              onChange={(event) => {
+                                if (customImapMutationIsLocked()) return;
+                                clearConnectionFeedback(inboxId);
+                                setSmtpPassword(
+                                  inboxId,
+                                  event.target.value,
+                                );
+                              }}
+                              autoComplete="new-password"
+                              className="w-full rounded-2xl border border-ink/10 bg-white px-4 py-3 outline-none transition focus:border-moss"
+                            />
+                            <div className="mt-2 min-h-[18px] text-sm text-amber-900/60">
+                              {errorMessage?.smtpPassword ?? ""}
+                            </div>
+                          </div>
+                        </>
+                      ) : null}
+                    </div>
+                  ) : (
+                    <p className="rounded-2xl border border-moss/12 bg-white/72 px-4 py-3 text-sm text-ink/58">
+                      Outgoing credentials stored securely
+                    </p>
+                  )}
+                </div>
+                </>
               ) : isOAuthConnectionProvider(connection.provider) ? (
                 <div className="mt-6 space-y-3 rounded-[24px] border border-moss/10 bg-[linear-gradient(180deg,rgba(246,248,241,0.88),rgba(255,252,247,0.96))] p-5">
                   <div className="space-y-1">
@@ -996,13 +1434,15 @@ export function StepConnectInboxes({
                       ? requiresServerReload
                         ? "Reload setup from server"
                         : "Check connection status"
-                    : isLoading
+                      : isLoading
                       ? isCheckingConnectionStatus
                         ? "Checking connection status..."
                         : onboardingText.connect.testingConnection
                       : isOAuthConnectionProvider(connection.provider)
                         ? onboardingText.connect.continueWithGoogle
-                        : onboardingText.connect.connectInbox}
+                        : incomingIsConnected
+                          ? "Connect outgoing mail"
+                          : onboardingText.connect.connectInbox}
                 </button>
               </div>
 

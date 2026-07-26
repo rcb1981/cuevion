@@ -1,7 +1,6 @@
 import base64
 import binascii
 import json
-import smtplib
 import sys
 from email.message import EmailMessage
 from email.utils import getaddresses
@@ -22,6 +21,7 @@ from authenticated_imap import (
     find_forbidden_custom_request_fields,
     resolve_authenticated_imap_mailbox,
 )
+from smtp_connection import SmtpConnectionError, send_public_smtp_message
 from authenticated_gmail import (
     MAX_GMAIL_RESPONSE_BYTES,
     MAX_SEND_REQUEST_BODY_BYTES,
@@ -241,6 +241,8 @@ def _build_custom_smtp_config(payload: dict):
 
     if port < 1 or port > 65535:
         raise ValueError("SMTP port is invalid.")
+    if (security, port) not in {("ssl", 465), ("starttls", 587)}:
+        raise ValueError("SMTP security and port combination is invalid.")
 
     return host, port, security
 
@@ -366,23 +368,23 @@ class handler(BaseHTTPRequestHandler):
             return
 
         try:
-            if smtp_security == "ssl":
-                with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=30) as smtp:
-                    smtp.login(username, password)
-                    smtp.send_message(message, to_addrs=recipients)
+            send_public_smtp_message(
+                smtp_host,
+                smtp_port,
+                smtp_security,
+                username,
+                password,
+                message,
+                recipients,
+                timeout=30,
+            )
+        except SmtpConnectionError as error:
+            if error.code == "smtp_authentication_failed":
+                send_json(self, 401, error_payload("invalid_credentials", "Stored SMTP credentials were rejected."))
+            elif error.code == "smtp_send_failed":
+                send_json(self, 502, error_payload("send_failed", "SMTP could not send this message."))
             else:
-                with smtplib.SMTP(smtp_host, smtp_port, timeout=30) as smtp:
-                    smtp.starttls()
-                    smtp.login(username, password)
-                    smtp.send_message(message, to_addrs=recipients)
-        except smtplib.SMTPAuthenticationError:
-            send_json(self, 401, error_payload("invalid_credentials", "Stored SMTP credentials were rejected."))
-            return
-        except smtplib.SMTPException:
-            send_json(self, 502, error_payload("send_failed", "SMTP could not send this message."))
-            return
-        except Exception:
-            send_json(self, 500, error_payload("internal_error", "Could not send email."))
+                send_json(self, 502, error_payload("send_failed", "SMTP connection could not send this message."))
             return
         send_json(self, 200, {"ok": True})
 

@@ -26,13 +26,20 @@ export type CustomImapOnboardingAttemptGuard = Readonly<{
 export type CustomImapOnboardingAttemptSnapshot = Readonly<{
   attemptToken: symbol;
   onboardingInboxId: InboxId;
+  serverMailboxId: string | null;
   provider: "custom_imap";
   normalizedEmail: string;
   normalizedHost: string;
   port: string;
   normalizedUsername: string;
   ssl: true;
+  normalizedSmtpHost: string;
+  smtpPort: string;
+  smtpSecurity: InboxConnection["customSmtp"]["security"];
+  normalizedSmtpUsername: string;
+  useSameCredentials: boolean;
   passwordRevision: number;
+  smtpPasswordRevision: number;
   selectedInboxes: readonly InboxId[];
   selectedPositionIdentity: string;
   fingerprint: string;
@@ -55,6 +62,7 @@ export type CustomImapOnboardingCurrentContext = Readonly<{
   selectedPositionIdentity: string | null;
   fingerprint: string | null;
   passwordRevision: number;
+  smtpPasswordRevision: number;
 }>;
 
 type TimerHandle = ReturnType<typeof setTimeout>;
@@ -62,6 +70,7 @@ type TimerHandle = ReturnType<typeof setTimeout>;
 type AttemptRuntime = {
   readonly snapshot: CustomImapOnboardingAttemptSnapshot;
   expectedPasswordRevision: number;
+  expectedSmtpPasswordRevision: number;
   phase: CustomImapOnboardingAttemptPhase;
   recovery: "check" | "reload";
   controller: AbortController | null;
@@ -76,7 +85,8 @@ type BoundedResult<T> =
 export type CustomImapOnboardingAttemptCoordinator = {
   start: (
     snapshot: CustomImapOnboardingAttemptSnapshot,
-    password: string,
+    imapPassword?: string,
+    smtpPassword?: string,
   ) => boolean;
   adoptReconciliationGuard: (
     guard: CustomImapOnboardingAttemptGuard,
@@ -92,8 +102,9 @@ type CustomImapOnboardingAttemptCoordinatorOptions = {
   ) => CustomImapOnboardingCurrentContext;
   post: (
     snapshot: CustomImapOnboardingAttemptSnapshot,
-    password: string,
+    imapPassword: string,
     signal: AbortSignal,
+    smtpPassword: string,
   ) => Promise<InboxConnectionAttemptResult>;
   reconcile: (
     snapshot: CustomImapOnboardingAttemptSnapshot,
@@ -103,12 +114,17 @@ type CustomImapOnboardingAttemptCoordinatorOptions = {
     snapshot: CustomImapOnboardingAttemptSnapshot,
     expectedRevision: number,
   ) => number | null;
+  consumeSmtpPassword?: (
+    snapshot: CustomImapOnboardingAttemptSnapshot,
+    expectedRevision: number,
+  ) => number | null;
   applyMatched: (
     snapshot: CustomImapOnboardingAttemptSnapshot,
     result: Extract<
       CustomImapOnboardingReconciliationResult,
       { status: "matched" }
     >,
+    postResult: InboxConnectionAttemptResult | null,
   ) => void;
   applyAbsent: (
     snapshot: CustomImapOnboardingAttemptSnapshot,
@@ -161,6 +177,7 @@ export function createCustomImapOnboardingFingerprint({
   return JSON.stringify({
     onboardingInboxId,
     selectedPositionIdentity,
+    serverMailboxId: connection.serverMailboxId?.trim() || null,
     provider: connection.provider,
     normalizedEmail: normalizeAttemptValue(connection.email),
     normalizedHost: normalizeAttemptValue(connection.customImap.host),
@@ -169,6 +186,13 @@ export function createCustomImapOnboardingFingerprint({
       connection.customImap.username,
     ),
     ssl: connection.customImap.ssl,
+    normalizedSmtpHost: normalizeAttemptValue(connection.customSmtp.host),
+    smtpPort: connection.customSmtp.port.trim(),
+    smtpSecurity: connection.customSmtp.security,
+    normalizedSmtpUsername: normalizeUsername(
+      connection.customSmtp.username,
+    ),
+    useSameCredentials: connection.customSmtp.useSameCredentials,
   });
 }
 
@@ -177,18 +201,21 @@ export function createCustomImapOnboardingAttemptSnapshot({
   selectedInboxes,
   connection,
   passwordRevision,
+  smtpPasswordRevision = 0,
   attemptToken = Symbol("custom-imap-onboarding-attempt"),
 }: {
   onboardingInboxId: InboxId;
   selectedInboxes: readonly InboxId[];
   connection: InboxConnection;
   passwordRevision: number;
+  smtpPasswordRevision?: number;
   attemptToken?: symbol;
 }): CustomImapOnboardingAttemptSnapshot {
   const selectedSnapshot = Object.freeze([...selectedInboxes]);
   return Object.freeze({
     attemptToken,
     onboardingInboxId,
+    serverMailboxId: connection.serverMailboxId?.trim() || null,
     provider: "custom_imap",
     normalizedEmail: normalizeAttemptValue(connection.email),
     normalizedHost: normalizeAttemptValue(connection.customImap.host),
@@ -197,7 +224,15 @@ export function createCustomImapOnboardingAttemptSnapshot({
       connection.customImap.username,
     ),
     ssl: true,
+    normalizedSmtpHost: normalizeAttemptValue(connection.customSmtp.host),
+    smtpPort: connection.customSmtp.port.trim(),
+    smtpSecurity: connection.customSmtp.security,
+    normalizedSmtpUsername: normalizeUsername(
+      connection.customSmtp.username,
+    ),
+    useSameCredentials: connection.customSmtp.useSameCredentials,
     passwordRevision,
+    smtpPasswordRevision,
     selectedInboxes: selectedSnapshot,
     selectedPositionIdentity:
       createCustomImapSelectedPositionIdentity(
@@ -215,6 +250,7 @@ export function createCustomImapOnboardingAttemptSnapshot({
 export function isCustomImapOnboardingAttemptCurrent(
   snapshot: CustomImapOnboardingAttemptSnapshot,
   expectedPasswordRevision: number,
+  expectedSmtpPasswordRevision: number,
   context: CustomImapOnboardingCurrentContext,
 ) {
   return (
@@ -224,7 +260,8 @@ export function isCustomImapOnboardingAttemptCurrent(
     context.selectedPositionIdentity ===
       snapshot.selectedPositionIdentity &&
     context.fingerprint === snapshot.fingerprint &&
-    context.passwordRevision === expectedPasswordRevision
+    context.passwordRevision === expectedPasswordRevision &&
+    context.smtpPasswordRevision === expectedSmtpPasswordRevision
   );
 }
 
@@ -283,6 +320,7 @@ export function createCustomImapOnboardingAttemptCoordinator(
     isCustomImapOnboardingAttemptCurrent(
       runtime.snapshot,
       runtime.expectedPasswordRevision,
+      runtime.expectedSmtpPasswordRevision,
       options.getCurrentContext(runtime.snapshot),
     );
 
@@ -361,7 +399,10 @@ export function createCustomImapOnboardingAttemptCoordinator(
   };
 
   const finish = (runtime: AttemptRuntime) => {
-    if (isCurrent(runtime)) {
+    if (
+      isOwned(runtime) &&
+      options.getCurrentContext(runtime.snapshot).mounted
+    ) {
       retireOwnedRuntime(runtime);
     }
   };
@@ -390,7 +431,7 @@ export function createCustomImapOnboardingAttemptCoordinator(
     }
 
     if (result.status === "matched") {
-      options.applyMatched(runtime.snapshot, result);
+      options.applyMatched(runtime.snapshot, result, postResult);
       finish(runtime);
       return;
     }
@@ -446,14 +487,22 @@ export function createCustomImapOnboardingAttemptCoordinator(
 
   const executePost = async (
     runtime: AttemptRuntime,
-    password: string,
+    imapPassword: string,
+    smtpPassword: string,
   ) => {
     const postPromise = runBounded(
       runtime,
       postTimeoutMs,
-      (signal) => options.post(runtime.snapshot, password, signal),
+      (signal) =>
+        options.post(
+          runtime.snapshot,
+          imapPassword,
+          signal,
+          smtpPassword,
+        ),
     );
-    password = "";
+    imapPassword = "";
+    smtpPassword = "";
     if (isCurrent(runtime)) {
       const nextRevision = options.consumePassword(
         runtime.snapshot,
@@ -461,6 +510,13 @@ export function createCustomImapOnboardingAttemptCoordinator(
       );
       if (nextRevision !== null) {
         runtime.expectedPasswordRevision = nextRevision;
+      }
+      const nextSmtpRevision = options.consumeSmtpPassword?.(
+        runtime.snapshot,
+        runtime.expectedSmtpPasswordRevision,
+      );
+      if (nextSmtpRevision !== undefined && nextSmtpRevision !== null) {
+        runtime.expectedSmtpPasswordRevision = nextSmtpRevision;
       }
     }
     const post = await postPromise;
@@ -473,14 +529,20 @@ export function createCustomImapOnboardingAttemptCoordinator(
   };
 
   return {
-    start(snapshot, password) {
+    start(snapshot, imapPassword = "", smtpPassword = "") {
+      const hasRequiredImapPassword =
+        Boolean(snapshot.serverMailboxId) || Boolean(imapPassword);
+      const hasRequiredSmtpPassword =
+        snapshot.useSameCredentials || Boolean(smtpPassword);
       if (
         disposed ||
         current !== null ||
-        !password ||
+        !hasRequiredImapPassword ||
+        !hasRequiredSmtpPassword ||
         !isCustomImapOnboardingAttemptCurrent(
           snapshot,
           snapshot.passwordRevision,
+          snapshot.smtpPasswordRevision,
           options.getCurrentContext(snapshot),
         )
       ) {
@@ -490,6 +552,7 @@ export function createCustomImapOnboardingAttemptCoordinator(
       const runtime: AttemptRuntime = {
         snapshot,
         expectedPasswordRevision: snapshot.passwordRevision,
+        expectedSmtpPasswordRevision: snapshot.smtpPasswordRevision,
         phase: "posting",
         recovery: "check",
         controller: null,
@@ -497,7 +560,7 @@ export function createCustomImapOnboardingAttemptCoordinator(
       };
       current = runtime;
       emitGuard(runtime);
-      void executePost(runtime, password);
+      void executePost(runtime, imapPassword, smtpPassword);
       return true;
     },
 
@@ -515,6 +578,7 @@ export function createCustomImapOnboardingAttemptCoordinator(
       const runtime: AttemptRuntime = {
         snapshot: guard.snapshot,
         expectedPasswordRevision: context.passwordRevision,
+        expectedSmtpPasswordRevision: context.smtpPasswordRevision,
         phase: "reconciliation_required",
         recovery: guard.recovery,
         controller: null,

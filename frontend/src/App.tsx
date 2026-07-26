@@ -1,8 +1,14 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { Auth0LoginView } from "./components/auth/Auth0LoginView";
-import { OnboardingFlow } from "./components/onboarding/OnboardingFlow";
+import {
+  OnboardingFlow,
+  areSelectedOnboardingInboxesFullyConnected,
+} from "./components/onboarding/OnboardingFlow";
 import { WorkspaceTransition } from "./components/workspace/WorkspaceTransition";
-import { initialOnboardingState } from "./data/onboardingOptions";
+import {
+  createInboxConnection,
+  initialOnboardingState,
+} from "./data/onboardingOptions";
 import {
   fetchTeamInvite,
   mutateTeamInvite,
@@ -33,6 +39,7 @@ import {
   type CustomImapSettings,
   type CustomSmtpSettings,
   type InboxId,
+  type MailboxCapabilityConnectionStatus,
   type OnboardingChoices,
   type OnboardingSessionV1,
   type OnboardingState,
@@ -120,6 +127,11 @@ type StoredManagedWorkspaceInbox = {
   oauthAuthorizationUrl?: string | null;
   customImap?: unknown;
   customSmtp?: unknown;
+  imapConnectionStatus?: MailboxCapabilityConnectionStatus;
+  smtpConnectionStatus?: MailboxCapabilityConnectionStatus;
+  imapPasswordSet?: boolean;
+  smtpPasswordSet?: boolean;
+  fullyConnected?: boolean;
 };
 type StoredTeamMemberEntry = {
   email?: string;
@@ -1676,6 +1688,11 @@ const safeManagedMailboxFields = new Set([
   "oauthAuthorizationUrl",
   "customImap",
   "customSmtp",
+  "imapConnectionStatus",
+  "smtpConnectionStatus",
+  "imapPasswordSet",
+  "smtpPasswordSet",
+  "fullyConnected",
   "internalRole",
   "focusPreferences",
 ]);
@@ -1728,6 +1745,9 @@ function isUnsafeMailboxMetadataEntry(
     key === "useSameCredentials" &&
     parentField === "customSmtp" &&
     typeof item === "boolean";
+  const isAllowedPasswordCapability =
+    (key === "imapPasswordSet" || key === "smtpPasswordSet") &&
+    typeof item === "boolean";
   const isAllowedNullOauthAuthorizationUrl =
     key === "oauthAuthorizationUrl" &&
     (item === null || item === undefined);
@@ -1751,6 +1771,7 @@ function isUnsafeMailboxMetadataEntry(
   return (
     !isAllowedEmptyPassword &&
     !isAllowedSameCredentialsFlag &&
+    !isAllowedPasswordCapability &&
     !isAllowedNullOauthAuthorizationUrl &&
     (unsafeMailboxMetadataFields.has(compactKey) ||
       containsSensitiveKeyMarker ||
@@ -1897,6 +1918,31 @@ function projectManagedInboxForBrowserStorage(
     projected.customSmtp = customSmtp;
   }
   if (
+    mailbox.imapConnectionStatus === "not_configured" ||
+    mailbox.imapConnectionStatus === "not_connected" ||
+    mailbox.imapConnectionStatus === "connected" ||
+    mailbox.imapConnectionStatus === "connection_failed"
+  ) {
+    projected.imapConnectionStatus = mailbox.imapConnectionStatus;
+  }
+  if (
+    mailbox.smtpConnectionStatus === "not_configured" ||
+    mailbox.smtpConnectionStatus === "not_connected" ||
+    mailbox.smtpConnectionStatus === "connected" ||
+    mailbox.smtpConnectionStatus === "connection_failed"
+  ) {
+    projected.smtpConnectionStatus = mailbox.smtpConnectionStatus;
+  }
+  if (typeof mailbox.imapPasswordSet === "boolean") {
+    projected.imapPasswordSet = mailbox.imapPasswordSet;
+  }
+  if (typeof mailbox.smtpPasswordSet === "boolean") {
+    projected.smtpPasswordSet = mailbox.smtpPasswordSet;
+  }
+  if (typeof mailbox.fullyConnected === "boolean") {
+    projected.fullyConnected = mailbox.fullyConnected;
+  }
+  if (
     mailbox.internalRole === null ||
     (typeof mailbox.internalRole === "string" &&
       ONBOARDING_INTERNAL_ROLES.has(mailbox.internalRole))
@@ -1990,6 +2036,38 @@ function isSafeEmptyServerCustomSmtp(value: unknown) {
   );
 }
 
+function getAuthoritativeCustomImapCapabilityState(
+  mailbox: StoredManagedWorkspaceInbox,
+): "partial" | "full" | null {
+  if (
+    mailbox.provider !== "custom_imap" ||
+    mailbox.imapConnectionStatus !== "connected" ||
+    mailbox.imapPasswordSet !== true ||
+    typeof mailbox.smtpPasswordSet !== "boolean" ||
+    (mailbox.smtpConnectionStatus !== "not_configured" &&
+      mailbox.smtpConnectionStatus !== "connected") ||
+    typeof mailbox.fullyConnected !== "boolean"
+  ) {
+    return null;
+  }
+
+  if (
+    mailbox.smtpConnectionStatus === "connected" &&
+    mailbox.smtpPasswordSet === true &&
+    mailbox.fullyConnected === true
+  ) {
+    return "full";
+  }
+  if (
+    mailbox.smtpConnectionStatus === "not_configured" &&
+    mailbox.smtpPasswordSet === false &&
+    mailbox.fullyConnected === false
+  ) {
+    return "partial";
+  }
+  return null;
+}
+
 function isSafeServerCustomSmtpSettings(value: unknown) {
   if (isSafeEmptyServerCustomSmtp(value)) {
     return true;
@@ -2023,6 +2101,8 @@ function isSafeServerCustomSmtpSettings(value: unknown) {
     parsedPort <= 65_535 &&
     (value.security === "ssl" ||
       value.security === "starttls") &&
+    ((value.security === "ssl" && port === "465") ||
+      (value.security === "starttls" && port === "587")) &&
     typeof useSameCredentials === "boolean" &&
     username === username.trim() &&
     (useSameCredentials || Boolean(username)) &&
@@ -2052,6 +2132,18 @@ function projectServerCustomSmtpSettings(
     password: "",
     useSameCredentials: value.useSameCredentials as boolean,
   };
+}
+
+function hasAuthoritativeCustomImapCapabilityShape(
+  mailbox: StoredManagedWorkspaceInbox,
+) {
+  const capabilityState =
+    getAuthoritativeCustomImapCapabilityState(mailbox);
+  return capabilityState === "partial"
+    ? isSafeEmptyServerCustomSmtp(mailbox.customSmtp)
+    : capabilityState === "full" &&
+        isSafeServerCustomSmtpSettings(mailbox.customSmtp) &&
+        !isSafeEmptyServerCustomSmtp(mailbox.customSmtp);
 }
 
 function parseServerCustomImapSettings(
@@ -2130,9 +2222,9 @@ function projectConnectedManagedInboxesOntoOnboardingState(
     const mailbox = positionMatches[0];
     const mailboxId = typeof mailbox.id === "string" ? mailbox.id.trim() : "";
     const email = typeof mailbox.email === "string" ? mailbox.email.trim().toLowerCase() : "";
-    const currentConnection = nextConnections[inboxPosition];
+    const currentConnection =
+      nextConnections[inboxPosition] ?? createInboxConnection();
     if (
-      !currentConnection ||
       !mailboxId ||
       mailbox.id !== mailboxId ||
       !email ||
@@ -2158,7 +2250,9 @@ function projectConnectedManagedInboxesOntoOnboardingState(
             currentConnection.customSmtp,
           )
         : null;
-    const isConnectedCustomImapMailbox =
+    const customImapCapabilityState =
+      getAuthoritativeCustomImapCapabilityState(mailbox);
+    const isAuthoritativeCustomImapMailbox =
       customImapCollectionIsSafe &&
       isValidServerManagedInboxId(mailboxId) &&
       isWellFormedManagedMailboxEnvelope(mailbox) &&
@@ -2167,11 +2261,13 @@ function projectConnectedManagedInboxesOntoOnboardingState(
       mailbox.connectionMethod === "imap" &&
       mailbox.connected === true &&
       mailbox.connectionStatus === "connected" &&
+      customImapCapabilityState !== null &&
       parsedCustomImap !== null &&
       projectedCustomSmtp !== null &&
+      hasAuthoritativeCustomImapCapabilityShape(mailbox) &&
       hasValidManagedMailboxOptionalMetadata(mailbox) &&
       !containsUnsafeMailboxMetadata(mailbox);
-    if (!isConnectedGoogleMailbox && !isConnectedCustomImapMailbox) {
+    if (!isConnectedGoogleMailbox && !isAuthoritativeCustomImapMailbox) {
       continue;
     }
 
@@ -2212,6 +2308,12 @@ function projectConnectedManagedInboxesOntoOnboardingState(
           connected: true,
           connectionMethod: "imap",
           connectionStatus: "connected",
+          imapConnectionStatus: "connected",
+          smtpConnectionStatus:
+            customImapCapabilityState === "full"
+              ? "connected"
+              : "not_configured",
+          fullyConnected: customImapCapabilityState === "full",
           connectionMessage:
             typeof mailbox.connectionMessage === "string"
               ? mailbox.connectionMessage
@@ -2274,7 +2376,8 @@ function isWellFormedManagedMailboxEnvelope(
     (mailbox.provider !== "custom_imap" ||
       mailbox.connected !== true ||
       (parseServerCustomImapSettings(mailbox.customImap) !== null &&
-        isSafeServerCustomSmtpSettings(mailbox.customSmtp))) &&
+        isSafeServerCustomSmtpSettings(mailbox.customSmtp) &&
+        hasAuthoritativeCustomImapCapabilityShape(mailbox))) &&
     (mailbox.onboardingInboxId === undefined ||
       (typeof mailbox.onboardingInboxId === "string" &&
         isInboxId(mailbox.onboardingInboxId)))
@@ -2294,6 +2397,22 @@ function hasValidManagedMailboxOptionalMetadata(
       typeof mailbox.connectionMessage === "string") &&
     (mailbox.oauthAuthorizationUrl === undefined ||
       mailbox.oauthAuthorizationUrl === null) &&
+    (mailbox.imapConnectionStatus === undefined ||
+      mailbox.imapConnectionStatus === "not_configured" ||
+      mailbox.imapConnectionStatus === "not_connected" ||
+      mailbox.imapConnectionStatus === "connected" ||
+      mailbox.imapConnectionStatus === "connection_failed") &&
+    (mailbox.smtpConnectionStatus === undefined ||
+      mailbox.smtpConnectionStatus === "not_configured" ||
+      mailbox.smtpConnectionStatus === "not_connected" ||
+      mailbox.smtpConnectionStatus === "connected" ||
+      mailbox.smtpConnectionStatus === "connection_failed") &&
+    (mailbox.imapPasswordSet === undefined ||
+      typeof mailbox.imapPasswordSet === "boolean") &&
+    (mailbox.smtpPasswordSet === undefined ||
+      typeof mailbox.smtpPasswordSet === "boolean") &&
+    (mailbox.fullyConnected === undefined ||
+      typeof mailbox.fullyConnected === "boolean") &&
     (metadata.internalRole === undefined ||
       metadata.internalRole === null ||
       (typeof metadata.internalRole === "string" &&
@@ -2391,6 +2510,27 @@ function resolveCustomImapAccountConfigReadback(
   const parsedCustomImap = parseServerCustomImapSettings(
     mailbox.customImap,
   );
+  const capabilityState =
+    getAuthoritativeCustomImapCapabilityState(mailbox);
+  const currentConnection =
+    state.inboxConnections[snapshot.onboardingInboxId] ??
+    createInboxConnection();
+  const projectedCustomSmtp = projectServerCustomSmtpSettings(
+    mailbox.customSmtp,
+    currentConnection.customSmtp,
+  );
+  const fullSmtpMatchesSnapshot =
+    capabilityState === "full" &&
+    projectedCustomSmtp !== null &&
+    projectedCustomSmtp.host.toLowerCase() === snapshot.normalizedSmtpHost &&
+    projectedCustomSmtp.port === snapshot.smtpPort &&
+    projectedCustomSmtp.security === snapshot.smtpSecurity &&
+    projectedCustomSmtp.useSameCredentials === snapshot.useSameCredentials &&
+    projectedCustomSmtp.username ===
+      (snapshot.useSameCredentials ? "" : snapshot.normalizedSmtpUsername);
+  const partialSmtpIsAuthoritative =
+    capabilityState === "partial" &&
+    isSafeEmptyServerCustomSmtp(mailbox.customSmtp);
   const sameIdCount = managedInboxes.filter(
     (candidate) =>
       typeof candidate?.id === "string" &&
@@ -2401,6 +2541,8 @@ function resolveCustomImapAccountConfigReadback(
     mailbox.id !== mailboxId ||
     !isValidServerManagedInboxId(mailboxId) ||
     sameIdCount !== 1 ||
+    (snapshot.serverMailboxId !== null &&
+      mailboxId !== snapshot.serverMailboxId) ||
     email !== snapshot.normalizedEmail ||
     mailbox.email !== email ||
     mailbox.provider !== snapshot.provider ||
@@ -2414,18 +2556,13 @@ function resolveCustomImapAccountConfigReadback(
     parsedCustomImap.port !== snapshot.port ||
     parsedCustomImap.username !== snapshot.normalizedUsername ||
     parsedCustomImap.ssl !== snapshot.ssl ||
-    !isSafeEmptyServerCustomSmtp(mailbox.customSmtp)
+    (!partialSmtpIsAuthoritative && !fullSmtpMatchesSnapshot)
   ) {
     return { status: "required" };
   }
 
   if (!snapshotMatchesCurrentState) {
     return { status: "conflict" };
-  }
-  const currentConnection =
-    state.inboxConnections[snapshot.onboardingInboxId];
-  if (!currentConnection) {
-    return { status: "required" };
   }
   return {
     status: "matched",
@@ -2438,16 +2575,17 @@ function resolveCustomImapAccountConfigReadback(
       connected: true,
       connectionMethod: "imap",
       connectionStatus: "connected",
+      imapConnectionStatus: "connected",
+      smtpConnectionStatus:
+        capabilityState === "full" ? "connected" : "not_configured",
+      fullyConnected: capabilityState === "full",
       connectionMessage:
         typeof mailbox.connectionMessage === "string"
           ? mailbox.connectionMessage
           : null,
       oauthAuthorizationUrl: null,
       customImap: parsedCustomImap,
-      customSmtp: {
-        ...currentConnection.customSmtp,
-        password: "",
-      },
+      customSmtp: projectedCustomSmtp!,
     },
   };
 }
@@ -4222,10 +4360,11 @@ function CuevionApp() {
   if (view === "transition" && canOpenWorkspaceInMemory) {
     return (
       <WorkspaceTransition
-        connectedInboxIds={onboardingState.selectedInboxes.filter((inboxId) => {
-          const connection = onboardingState.inboxConnections[inboxId];
-          return connection?.connected || connection?.connectionStatus === "connected";
-        })}
+        connectedInboxIds={
+          areSelectedOnboardingInboxesFullyConnected(onboardingState)
+            ? [...onboardingState.selectedInboxes]
+            : []
+        }
         onComplete={() => setView("workspace")}
       />
     );

@@ -46,6 +46,11 @@ export type InboxConnectionStatus =
   | "authenticated_pending_activation"
   | "connected"
   | "connection_failed";
+export type MailboxCapabilityConnectionStatus =
+  | "not_configured"
+  | "not_connected"
+  | "connected"
+  | "connection_failed";
 export type FocusPreferenceLevel = "high" | "medium" | "low";
 export type SelectableFocusPreferenceLevel = "medium" | "low";
 
@@ -79,6 +84,9 @@ export interface InboxConnection {
   oauthAuthorizationUrl?: string | null;
   customImap: CustomImapSettings;
   customSmtp: CustomSmtpSettings;
+  imapConnectionStatus?: MailboxCapabilityConnectionStatus;
+  smtpConnectionStatus?: MailboxCapabilityConnectionStatus;
+  fullyConnected?: boolean;
 }
 
 export interface CustomInboxDefinition {

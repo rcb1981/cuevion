@@ -526,6 +526,7 @@ async function run() {
       onboardingInboxId: " custom:inbox-2 ",
       email: " owner@example.com ",
       customImap: connection.customImap,
+      customSmtp: connection.customSmtp,
     });
     assert.deepEqual(onboardingRequest, {
       mode: "onboarding",
@@ -540,6 +541,14 @@ async function run() {
           username: "owner@example.com",
           password: "one-time-imap",
         },
+        smtp: {
+          host: "smtp.example.com",
+          port: "587",
+          security: "starttls",
+          username: "owner@example.com",
+          password: "one-time-smtp",
+          useSameCredentials: false,
+        },
       },
     });
 
@@ -549,6 +558,7 @@ async function run() {
         onboardingInboxId: "custom:inbox-2",
         email: connection.email,
         customImap: connection.customImap,
+        customSmtp: connection.customSmtp,
       },
       onboardingAbortController.signal,
     );
@@ -568,7 +578,7 @@ async function run() {
     ]);
     assert.deepEqual(
       Object.keys(onboardingBody.connection as Record<string, unknown>).sort(),
-      ["email", "imap", "provider"],
+      ["email", "imap", "provider", "smtp"],
     );
     for (const forbiddenField of [
       "id",
@@ -581,7 +591,6 @@ async function run() {
       "ownerId",
       "ownerEmail",
       "oauthOwnerEmail",
-      "smtp",
       "internalRole",
       "focusPreferences",
       "selectedInboxes",
@@ -596,11 +605,146 @@ async function run() {
     assert.equal(onboardingResult.connected, false);
     assert.equal(onboardingResult.connectionStatus, "not_connected");
 
+    const smtpUpgradeRequest = buildOnboardingConnectInboxRequest({
+      onboardingInboxId: "custom:inbox-2",
+      serverMailboxId: "imap-server-a",
+      email: connection.email,
+      customImap: connection.customImap,
+      customSmtp: {
+        ...connection.customSmtp,
+        username: "must-be-canonicalized-away",
+        password: "must-not-send-as-smtp-password",
+        useSameCredentials: true,
+      },
+      imapPassword: "must-not-send-as-imap-password",
+      smtpPassword: "must-not-send-as-smtp-password",
+    });
+    assert.deepEqual(smtpUpgradeRequest, {
+      mode: "onboarding",
+      onboardingInboxId: "custom:inbox-2",
+      serverMailboxId: "imap-server-a",
+      connection: {
+        provider: "custom_imap",
+        email: "owner@example.com",
+        smtp: {
+          host: "smtp.example.com",
+          port: "587",
+          security: "starttls",
+          username: "",
+          useSameCredentials: true,
+        },
+      },
+    });
+    assert.equal("imap" in smtpUpgradeRequest.connection, false);
+    assert.equal(
+      JSON.stringify(smtpUpgradeRequest).includes(
+        "must-not-send-as-imap-password",
+      ),
+      false,
+    );
+    assert.equal(
+      JSON.stringify(smtpUpgradeRequest).includes(
+        "must-not-send-as-smtp-password",
+      ),
+      false,
+    );
+    const separateCredentialUpgrade =
+      buildOnboardingConnectInboxRequest({
+        onboardingInboxId: "custom:inbox-2",
+        serverMailboxId: "imap-server-a",
+        email: connection.email,
+        customImap: connection.customImap,
+        customSmtp: {
+          ...connection.customSmtp,
+          password: "",
+        },
+        imapPassword: "must-not-send-as-imap-password",
+        smtpPassword: "one-use-upgrade-smtp-password",
+      });
+    assert.equal("imap" in separateCredentialUpgrade.connection, false);
+    assert.equal(
+      separateCredentialUpgrade.connection.smtp.password,
+      "one-use-upgrade-smtp-password",
+    );
+    assert.equal(
+      JSON.stringify(separateCredentialUpgrade).includes(
+        "must-not-send-as-imap-password",
+      ),
+      false,
+    );
+    const smtpUpgradeAbortController = new AbortController();
+    const smtpUpgradeResult = await beginOnboardingInboxConnection(
+      {
+        onboardingInboxId: "custom:inbox-2",
+        serverMailboxId: "imap-server-a",
+        email: connection.email,
+        customImap: {
+          ...connection.customImap,
+          password: "",
+        },
+        customSmtp: {
+          ...connection.customSmtp,
+          username: "",
+          password: "",
+          useSameCredentials: true,
+        },
+      },
+      smtpUpgradeAbortController.signal,
+    );
+    assert.equal(smtpUpgradeResult.ok, true);
+    assert.deepEqual(requestBody(lastCaptured(captured)), smtpUpgradeRequest);
+    assert.equal(
+      lastCaptured(captured).init.signal,
+      smtpUpgradeAbortController.signal,
+    );
+    assert.throws(() =>
+      buildOnboardingConnectInboxRequest({
+        onboardingInboxId: "custom:inbox-2",
+        serverMailboxId: " imap-server-a ",
+        email: connection.email,
+        customImap: connection.customImap,
+        customSmtp: connection.customSmtp,
+      }),
+    );
+    const capturedBeforeInvalidSmtp = captured.length;
+    const invalidSmtpResult = await beginOnboardingInboxConnection({
+      onboardingInboxId: "custom:inbox-2",
+      email: connection.email,
+      customImap: connection.customImap,
+      customSmtp: {
+        ...connection.customSmtp,
+        port: "465",
+        security: "starttls",
+      },
+    });
+    assert.equal(invalidSmtpResult.ok, false);
+    assert.equal(
+      invalidSmtpResult.error?.code,
+      "smtp_configuration_incomplete",
+    );
+    const missingSmtpPasswordResult =
+      await beginOnboardingInboxConnection({
+        onboardingInboxId: "custom:inbox-2",
+        email: connection.email,
+        customImap: connection.customImap,
+        customSmtp: {
+          ...connection.customSmtp,
+          password: "",
+        },
+      });
+    assert.equal(missingSmtpPasswordResult.ok, false);
+    assert.equal(
+      missingSmtpPasswordResult.error?.code,
+      "smtp_password_required",
+    );
+    assert.equal(captured.length, capturedBeforeInvalidSmtp);
+
     const capturedBeforePlaintextAttempt = captured.length;
     const plaintextResult = await beginOnboardingInboxConnection({
       onboardingInboxId: "custom:inbox-2",
       email: connection.email,
       customImap: { ...connection.customImap, ssl: false },
+      customSmtp: connection.customSmtp,
     });
     assert.equal(plaintextResult.ok, false);
     assert.equal(plaintextResult.error?.code, "tls_required");
@@ -623,6 +767,7 @@ async function run() {
       onboardingInboxId: "custom:inbox-2",
       email: connection.email,
       customImap: connection.customImap,
+      customSmtp: connection.customSmtp,
     });
     assert.equal(rejectedOnboardingResult.ok, false);
     assert.equal(rejectedOnboardingResult.error?.code, "invalid_credentials");
@@ -714,7 +859,7 @@ async function run() {
     );
     assert.equal(onboardingStepSource.includes("localStorage"), false);
     assert.equal(onboardingStepSource.includes("sessionStorage"), false);
-    assert.equal(onboardingStepSource.includes("SMTP password"), false);
+    assert.equal(onboardingStepSource.includes("SMTP password"), true);
     assert.doesNotMatch(
       onboardingStepSource,
       /onCustomImapChange\([\s\S]{0,160}["']password["']/,
@@ -723,7 +868,7 @@ async function run() {
       assert.match(
         onboardingStepSource,
         new RegExp(
-          `clearImapPassword\\(inboxId\\);\\s*onCustomImapChange\\(\\s*inboxId,\\s*["']${field}["']`,
+          `clearImapPassword\\(inboxId\\);[\\s\\S]{0,120}?onCustomImapChange\\(\\s*inboxId,\\s*["']${field}["']`,
         ),
       );
     }

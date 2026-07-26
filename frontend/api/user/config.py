@@ -20,6 +20,10 @@ if str(INBOXES_DIR) not in sys.path:
 
 from api.auth.email_address import normalize_auth_email  # noqa: E402
 from authenticated_gmail import validate_focus_preferences  # noqa: E402
+from mailbox_secret_store import (  # noqa: E402
+    is_valid_mailbox_credential_version,
+    read_mailbox_secret,
+)
 from user_config_store import (  # noqa: E402
     USER_CONFIG_SCHEMA_VERSION,
     read_user_config_record,
@@ -741,6 +745,185 @@ def _sanitize_stored_user_config(record: dict) -> dict:
     return sanitized
 
 
+def _stored_mailbox_password_is_usable(value) -> bool:
+    if not isinstance(value, str) or not value.strip():
+        return False
+    normalized = value.strip().casefold()
+    return (
+        normalized
+        not in {
+            "stored securely",
+            "stored securely — leave blank to reuse",
+        }
+        and re.fullmatch(r"[*•●]{6,}", normalized) is None
+    )
+
+
+def _safe_imap_connection_config(value) -> bool:
+    if not isinstance(value, dict) or set(value) != {
+        "host",
+        "port",
+        "ssl",
+        "username",
+    }:
+        return False
+    host = value.get("host")
+    port = value.get("port")
+    username = value.get("username")
+    return bool(
+        isinstance(host, str)
+        and host
+        and host == host.strip()
+        and isinstance(port, str)
+        and port == "993"
+        and value.get("ssl") is True
+        and isinstance(username, str)
+        and username
+        and username == username.strip()
+    )
+
+
+def _safe_smtp_submission_config(value) -> tuple[bool, str | None]:
+    if not isinstance(value, dict) or not value:
+        return False, None
+    if set(value) != {
+        "host",
+        "port",
+        "security",
+        "username",
+        "useSameCredentials",
+    }:
+        return False, None
+
+    host = value.get("host")
+    port = value.get("port")
+    security = value.get("security")
+    username = value.get("username")
+    use_same_credentials = value.get("useSameCredentials")
+    if (
+        not isinstance(host, str)
+        or not host
+        or host != host.strip()
+        or not isinstance(port, str)
+        or port != port.strip()
+        or not isinstance(username, str)
+        or username != username.strip()
+        or not isinstance(use_same_credentials, bool)
+        or (not use_same_credentials and not username)
+        or (security == "ssl" and port != "465")
+        or (security == "starttls" and port != "587")
+        or security not in {"ssl", "starttls"}
+    ):
+        return False, None
+    return True, "imap" if use_same_credentials else "smtp"
+
+
+def _enrich_public_custom_mailbox_capabilities(
+    stored_config: dict,
+    sanitized_config: dict,
+    owner_email: str,
+) -> dict:
+    """Add generation-bound capability evidence without exposing generations."""
+    stored_inboxes = stored_config.get("managedInboxes")
+    public_inboxes = sanitized_config.get("managedInboxes")
+    if not isinstance(stored_inboxes, list) or not isinstance(public_inboxes, list):
+        return sanitized_config
+    if len(stored_inboxes) != len(public_inboxes):
+        return sanitized_config
+
+    for stored_inbox, public_inbox in zip(stored_inboxes, public_inboxes):
+        if (
+            not isinstance(stored_inbox, dict)
+            or not isinstance(public_inbox, dict)
+            or stored_inbox.get("provider") != "custom_imap"
+        ):
+            continue
+
+        mailbox_id = stored_inbox.get("id")
+        config_generation = stored_inbox.get("credentialVersion")
+        secret_result = None
+        if (
+            isinstance(mailbox_id, str)
+            and mailbox_id
+            and mailbox_id == mailbox_id.strip()
+            and is_valid_mailbox_credential_version(config_generation)
+        ):
+            try:
+                secret_result = read_mailbox_secret(owner_email, mailbox_id)
+            except Exception:
+                secret_result = None
+
+        secret_record = (
+            secret_result.get("record")
+            if isinstance(secret_result, dict)
+            and secret_result.get("status") == "present"
+            and isinstance(secret_result.get("record"), dict)
+            and secret_result.get("error") is None
+            else None
+        )
+        generation_matches = (
+            isinstance(secret_record, dict)
+            and secret_record.get("credentialVersion") == config_generation
+            and is_valid_mailbox_credential_version(
+                secret_record.get("credentialVersion")
+            )
+        )
+        imap_password_set = bool(
+            generation_matches
+            and _stored_mailbox_password_is_usable(
+                secret_record.get("imapPassword") if secret_record else None
+            )
+        )
+        incoming_status = stored_inbox.get("imapConnectionStatus")
+        incoming_connected = bool(
+            stored_inbox.get("connected") is True
+            and stored_inbox.get("connectionStatus") == "connected"
+            and incoming_status in {None, "connected"}
+            and _safe_imap_connection_config(stored_inbox.get("customImap"))
+            and imap_password_set
+        )
+
+        smtp_configured, smtp_credential_source = _safe_smtp_submission_config(
+            stored_inbox.get("customSmtp")
+        )
+        smtp_password_set = bool(
+            incoming_connected
+            and generation_matches
+            and smtp_configured
+            and smtp_credential_source is not None
+            and _stored_mailbox_password_is_usable(
+                secret_record.get(
+                    "imapPassword"
+                    if smtp_credential_source == "imap"
+                    else "smtpPassword"
+                )
+                if secret_record
+                else None
+            )
+        )
+        outgoing_connected = bool(
+            smtp_password_set
+            and stored_inbox.get("smtpConnectionStatus") == "connected"
+            and stored_inbox.get("fullyConnected") is True
+        )
+
+        public_inbox["imapConnectionStatus"] = (
+            "connected" if incoming_connected else "not_connected"
+        )
+        public_inbox["smtpConnectionStatus"] = (
+            "connected"
+            if outgoing_connected
+            else "not_configured"
+            if not smtp_configured
+            else "not_connected"
+        )
+        public_inbox["imapPasswordSet"] = imap_password_set
+        public_inbox["smtpPasswordSet"] = smtp_password_set
+        public_inbox["fullyConnected"] = incoming_connected and outgoing_connected
+
+    return sanitized_config
+
+
 def _has_valid_known_stored_config_shapes(record: dict) -> bool:
     try:
         _validate_json_structure(record)
@@ -1208,6 +1391,11 @@ class handler(BaseHTTPRequestHandler):
 
         try:
             sanitized_config = _sanitize_stored_user_config(stored_config)
+            sanitized_config = _enrich_public_custom_mailbox_capabilities(
+                stored_config,
+                sanitized_config,
+                session_user["email"],
+            )
         except Exception:
             _send_json(
                 self,

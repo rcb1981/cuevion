@@ -651,6 +651,165 @@ class AuthenticatedReadTests(unittest.TestCase):
         self.assertEqual(result["status"], "unavailable")
 
 
+class OnboardingCustomImapTargetResolverTests(unittest.TestCase):
+    POSITION_ID = "custom:vip-mabc123"
+    MAILBOX_ID = "imap-server-owned"
+    MAILBOX_EMAIL = "artist@example.com"
+    USER = {
+        "email": "owner@example.com",
+        "name": "Owner",
+        "userType": "member",
+    }
+
+    def _config(self, managed_inboxes):
+        return {
+            "v": 1,
+            "email": self.USER["email"],
+            "onboardingSession": {
+                "schemaVersion": 1,
+                "completed": False,
+                "currentStep": 2,
+                "choices": {
+                    "selectedInboxes": ["main", self.POSITION_ID],
+                    "customInboxes": [
+                        {"id": self.POSITION_ID, "name": "VIP requests"}
+                    ],
+                },
+            },
+            "managedInboxes": managed_inboxes,
+        }
+
+    def _partial_inbox(self, **updates):
+        inbox = {
+            "id": self.MAILBOX_ID,
+            "email": self.MAILBOX_EMAIL,
+            "onboardingInboxId": self.POSITION_ID,
+            "provider": "custom_imap",
+            "connected": True,
+            "connectionStatus": "connected",
+            "credentialVersion": VALID_CREDENTIAL_VERSION_A,
+            "customImap": {
+                "host": "imap.example.com",
+                "port": "993",
+                "ssl": True,
+                "username": self.MAILBOX_EMAIL,
+            },
+            "customSmtp": {},
+        }
+        inbox.update(updates)
+        return inbox
+
+    def _resolve(self, config, *, selector=None):
+        read_result = {"status": "ok", "config": config, "error": None}
+        with patch.object(
+            user_config_store,
+            "read_user_config_for_authenticated_user",
+            return_value=(self.USER, read_result),
+        ):
+            return user_config_store.resolve_owned_onboarding_custom_imap_target(
+                {"untrusted": "ignored"},
+                self.POSITION_ID,
+                self.MAILBOX_EMAIL.upper(),
+                selector,
+            )
+
+    def test_exact_partial_target_is_resolved_authoritatively_and_copied(self):
+        source = self._partial_inbox()
+        config = self._config([source])
+
+        without_selector = self._resolve(config)
+        with_selector = self._resolve(config, selector=self.MAILBOX_ID)
+
+        for result in (without_selector, with_selector):
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(result["inbox"], source)
+            self.assertEqual(result["inbox"]["id"], self.MAILBOX_ID)
+            self.assertEqual(
+                result["inbox"]["credentialVersion"],
+                VALID_CREDENTIAL_VERSION_A,
+            )
+        without_selector["inbox"]["customImap"]["host"] = "changed.example.com"
+        self.assertEqual(source["customImap"]["host"], "imap.example.com")
+
+    def test_selector_mismatch_and_duplicate_ids_fail_closed(self):
+        selector_mismatch = self._resolve(
+            self._config([self._partial_inbox()]),
+            selector="imap-different-server-id",
+        )
+        self.assertEqual(selector_mismatch["status"], "conflict")
+        self.assertIsNone(selector_mismatch["inbox"])
+        self.assertEqual(
+            selector_mismatch["error"]["code"],
+            "inbox_position_conflict",
+        )
+
+        duplicate = self._partial_inbox(
+            id=self.MAILBOX_ID.upper(),
+            onboardingInboxId="main",
+            email="other@example.com",
+        )
+        duplicate_result = self._resolve(
+            self._config([self._partial_inbox(), duplicate]),
+            selector=self.MAILBOX_ID,
+        )
+        self.assertEqual(duplicate_result["status"], "malformed")
+        self.assertIsNone(duplicate_result["inbox"])
+        self.assertEqual(duplicate_result["error"]["code"], "onboarding_malformed")
+
+    def test_partial_upgrade_rejects_changed_authoritative_onboarding_session(self):
+        existing = self._partial_inbox()
+        baseline = self._config([existing])
+        current = json.loads(json.dumps(baseline))
+        current["onboardingSession"]["completed"] = True
+        current["onboardingSession"]["choices"]["selectedInboxes"] = ["main"]
+        metadata = {
+            "email": self.MAILBOX_EMAIL,
+            "customImap": existing["customImap"],
+            "customSmtp": {
+                "host": "smtp.example.com",
+                "port": "587",
+                "security": "starttls",
+                "username": "",
+                "useSameCredentials": True,
+            },
+            "imapConnectionStatus": "connected",
+            "smtpConnectionStatus": "connected",
+            "fullyConnected": True,
+        }
+        with patch.object(
+            user_config_store,
+            "resolve_authenticated_user",
+            return_value=(self.USER, None),
+        ), patch.object(
+            user_config_store,
+            "resolve_user_config_store",
+            return_value=(
+                {"rest_url": "https://store.invalid", "rest_token": "token"},
+                None,
+            ),
+        ), patch.object(
+            user_config_store,
+            "read_user_config_record",
+            return_value={"status": "ok", "config": current, "error": None},
+        ), patch.object(
+            user_config_store,
+            "write_user_config_record_if_unchanged",
+        ) as write:
+            result = user_config_store.upsert_owned_custom_imap_mailbox(
+                {},
+                self.MAILBOX_ID,
+                "reconnect",
+                metadata,
+                credential_version=VALID_CREDENTIAL_VERSION_B,
+                expected_inbox=existing,
+                expected_onboarding_session=baseline["onboardingSession"],
+            )
+
+        self.assertEqual(result["status"], "conflict")
+        self.assertEqual(result["error"]["code"], "user_config_write_conflict")
+        write.assert_not_called()
+
+
 class ManagedInboxTests(unittest.TestCase):
     def test_exact_provider_agnostic_disconnected_inbox_returns_minimal_copy(self):
         source = managed_inbox(

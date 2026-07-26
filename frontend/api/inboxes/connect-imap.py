@@ -31,6 +31,7 @@ from user_config_store import (  # noqa: E402
     acquire_mailbox_mutation_lease,
     release_mailbox_mutation_lease,
     resolve_owned_initial_imap_registration,
+    resolve_owned_onboarding_custom_imap_target,
     resolve_owned_onboarding_imap_registration,
     resolve_authenticated_user,
     resolve_owned_managed_inbox_record,
@@ -49,6 +50,7 @@ INITIAL_FIELDS = {
 REFRESH_FIELDS = {"mode", "mailboxId", "limit", "focusPreferences"}
 CONNECTION_FIELDS = {"provider", "email", "imap", "smtp"}
 IMAP_FIELDS = {"host", "port", "ssl", "username", "password"}
+IMAP_CONFIG_FIELDS = {"host", "port", "ssl", "username"}
 SMTP_FIELDS = {
     "host",
     "port",
@@ -70,8 +72,13 @@ PASSWORD_PLACEHOLDERS = {
     "stored securely",
     "stored securely — leave blank to reuse",
 }
-ONBOARDING_FIELDS = {"mode", "onboardingInboxId", "connection"}
-ONBOARDING_CONNECTION_FIELDS = {"provider", "email", "imap"}
+ONBOARDING_FIELDS = {
+    "mode",
+    "onboardingInboxId",
+    "serverMailboxId",
+    "connection",
+}
+ONBOARDING_CONNECTION_FIELDS = {"provider", "email", "imap", "smtp"}
 ONBOARDING_IMAP_FIELDS = {"host", "port", "ssl", "username", "password"}
 FORBIDDEN_CLIENT_AUTHORITY_FIELDS = {
     "id",
@@ -272,6 +279,98 @@ def _resolved_config_contains_mailbox_id(result: dict, mailbox_id: str) -> bool:
     )
 
 
+def _parse_smtp_connection(
+    value,
+    *,
+    imap_username: str,
+) -> tuple[dict | None, dict | None]:
+    if not _has_only_fields(value, SMTP_FIELDS):
+        return None, _error(
+            "invalid_request",
+            "Mailbox SMTP settings must be complete or absent.",
+        )
+    if not {
+        "host",
+        "port",
+        "security",
+        "useSameCredentials",
+    }.issubset(value):
+        return None, _error(
+            "invalid_request",
+            "Mailbox SMTP settings must be complete or absent.",
+        )
+
+    smtp_host = _exact_string(value.get("host"))
+    smtp_port = _port(value.get("port"))
+    smtp_security = value.get("security")
+    use_same_credentials = value.get("useSameCredentials")
+    if not isinstance(use_same_credentials, bool):
+        return None, _error(
+            "invalid_request",
+            "Mailbox SMTP settings must be complete or absent.",
+        )
+    if not smtp_host or not smtp_port or smtp_security not in {"ssl", "starttls"}:
+        return None, _error(
+            "invalid_request",
+            "Mailbox SMTP settings must be complete or absent.",
+        )
+    if (
+        (smtp_security == "ssl" and smtp_port != 465)
+        or (smtp_security == "starttls" and smtp_port != 587)
+    ):
+        return None, _error(
+            "smtp_transport_not_allowed",
+            "SMTP requires port 465 with SSL/TLS or port 587 with STARTTLS.",
+        )
+
+    supplied_password = value.get("password")
+    if _is_password_placeholder(supplied_password):
+        return None, _error(
+            "invalid_request",
+            "Mailbox SMTP settings must not contain a password placeholder.",
+        )
+    if use_same_credentials:
+        if supplied_password not in {None, ""}:
+            return None, _error(
+                "invalid_request",
+                "SMTP must omit a separate password when credentials are shared.",
+            )
+        supplied_username = value.get("username")
+        if supplied_username is not None and _exact_string(
+            supplied_username,
+            allow_empty=True,
+        ) is None:
+            return None, _error(
+                "invalid_request",
+                "Mailbox SMTP settings must be complete or absent.",
+            )
+        smtp_username = ""
+        smtp_password = None
+        authentication_username = imap_username
+    else:
+        smtp_username = _exact_string(value.get("username"))
+        smtp_password = _parse_request_password(
+            supplied_password,
+            allow_missing=False,
+        )
+        authentication_username = smtp_username
+        if not smtp_username or not smtp_password:
+            return None, _error(
+                "invalid_request",
+                "Explicit SMTP username and password are required.",
+            )
+
+    return {
+        "host": smtp_host,
+        "port": smtp_port,
+        "security": smtp_security,
+        "username": smtp_username,
+        "authenticationUsername": authentication_username,
+        "password": smtp_password,
+        "useSameCredentials": use_same_credentials,
+    }, None
+
+
 def _parse_credential_connection(payload: dict) -> tuple[dict | None, dict | None]:
     if not _has_only_fields(payload, INITIAL_FIELDS):
         return None, _error("invalid_request", "Mailbox connection request is invalid.")
@@ -318,68 +417,12 @@ def _parse_credential_connection(payload: dict) -> tuple[dict | None, dict | Non
 
     parsed_smtp = None
     if "smtp" in connection:
-        smtp = connection.get("smtp")
-        if not _has_only_fields(smtp, SMTP_FIELDS):
-            return None, _error(
-                "invalid_request",
-                "Mailbox SMTP settings must be complete or absent.",
-            )
-        required_smtp_fields = {
-            "host",
-            "port",
-            "security",
-            "useSameCredentials",
-        }
-        if not required_smtp_fields.issubset(smtp):
-            return None, _error(
-                "invalid_request",
-                "Mailbox SMTP settings must be complete or absent.",
-            )
-        smtp_host = _exact_string(smtp.get("host"))
-        smtp_port = _port(smtp.get("port"))
-        smtp_security = smtp.get("security")
-        use_same_credentials_value = smtp.get("useSameCredentials")
-        if not isinstance(use_same_credentials_value, bool):
-            return None, _error(
-                "invalid_request",
-                "Mailbox SMTP settings must be complete or absent.",
-            )
-        use_same_credentials = use_same_credentials_value is True
-        supplied_smtp_password = smtp.get("password")
-        if _is_password_placeholder(supplied_smtp_password):
-            return None, _error(
-                "invalid_request",
-                "Mailbox SMTP settings must be complete or absent.",
-            )
-        smtp_password = _parse_request_password(
-            supplied_smtp_password,
-            allow_missing=use_same_credentials,
+        parsed_smtp, smtp_error = _parse_smtp_connection(
+            connection.get("smtp"),
+            imap_username=imap_username,
         )
-        smtp_username = (
-            imap_username
-            if use_same_credentials
-            else _exact_string(smtp.get("username"))
-        )
-        if (
-            not smtp_host
-            or not smtp_port
-            or smtp_security not in {"ssl", "starttls"}
-            or not smtp_username
-            or smtp_password == ""
-            or (not use_same_credentials and not smtp_password)
-        ):
-            return None, _error(
-                "invalid_request",
-                "Mailbox SMTP settings must be complete or absent.",
-            )
-        parsed_smtp = {
-            "host": smtp_host,
-            "port": smtp_port,
-            "security": smtp_security,
-            "username": smtp_username,
-            "password": smtp_password,
-            "useSameCredentials": use_same_credentials,
-        }
+        if smtp_error:
+            return None, smtp_error
 
     limit = payload.get("limit", 20)
     if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1 or limit > 100:
@@ -404,58 +447,120 @@ def _parse_credential_connection(payload: dict) -> tuple[dict | None, dict | Non
 
 
 def _parse_onboarding_connection(payload: dict) -> tuple[dict | None, dict | None]:
-    if _contains_forbidden_client_authority(payload):
+    authority_checked_payload = (
+        {key: value for key, value in payload.items() if key != "serverMailboxId"}
+        if isinstance(payload, dict)
+        else payload
+    )
+    if _contains_forbidden_client_authority(authority_checked_payload):
         return None, _error(
             "forbidden_client_authority",
             "Server-owned mailbox authority must not be supplied.",
         )
-    if not isinstance(payload, dict) or set(payload) != ONBOARDING_FIELDS:
+    if (
+        not isinstance(payload, dict)
+        or not {"mode", "onboardingInboxId", "connection"}.issubset(payload)
+        or not set(payload).issubset(ONBOARDING_FIELDS)
+    ):
         return None, _error("invalid_request", "Onboarding connection request is invalid.")
 
     onboarding_inbox_id = _exact_string(payload.get("onboardingInboxId"))
+    server_mailbox_id = (
+        _valid_mailbox_id(payload.get("serverMailboxId"))
+        if "serverMailboxId" in payload
+        else None
+    )
     connection = payload.get("connection")
     if (
         payload.get("mode") != "onboarding"
         or not onboarding_inbox_id
+        or (
+            "serverMailboxId" in payload
+            and server_mailbox_id is None
+        )
         or not isinstance(connection, dict)
-        or set(connection) != ONBOARDING_CONNECTION_FIELDS
+        or not {"provider", "email"}.issubset(connection)
+        or not set(connection).issubset(ONBOARDING_CONNECTION_FIELDS)
     ):
         return None, _error("invalid_request", "Onboarding connection request is invalid.")
 
     imap = connection.get("imap")
-    if not isinstance(imap, dict) or set(imap) != ONBOARDING_IMAP_FIELDS:
-        return None, _error("invalid_request", "Onboarding connection request is invalid.")
-
     email = _normalized_email(connection.get("email"))
-    host = imap.get("host") if isinstance(imap.get("host"), str) else None
-    port = _port(imap.get("port"))
-    username = _exact_string(imap.get("username"))
-    password = _credential_string(imap.get("password"))
-    if imap.get("ssl") is not True:
-        return None, _error(
-            "tls_required",
-            "Custom IMAP onboarding requires verified TLS.",
-        )
     if (
         connection.get("provider") != "custom_imap"
         or not email
-        or host is None
-        or not port
-        or not username
-        or not password
     ):
         return None, _error("invalid_request", "Complete IMAP connection details are required.")
 
-    return {
-        "onboardingInboxId": onboarding_inbox_id,
-        "email": email,
-        "imap": {
+    parsed_imap = None
+    imap_username = ""
+    if imap is None:
+        if server_mailbox_id is None:
+            return None, _error(
+                "invalid_request",
+                "A new mailbox requires complete IMAP connection details.",
+            )
+    else:
+        if (
+            not isinstance(imap, dict)
+            or not {"host", "port", "ssl", "username"}.issubset(imap)
+            or not set(imap).issubset(ONBOARDING_IMAP_FIELDS)
+        ):
+            return None, _error(
+                "invalid_request",
+                "Onboarding connection request is invalid.",
+            )
+        host = imap.get("host") if isinstance(imap.get("host"), str) else None
+        port = _port(imap.get("port"))
+        imap_username = _exact_string(imap.get("username"))
+        supplied_imap_password = imap.get("password")
+        if _is_password_placeholder(supplied_imap_password):
+            return None, _error(
+                "invalid_request",
+                "Mailbox passwords must not contain placeholders.",
+            )
+        password = _parse_request_password(
+            supplied_imap_password,
+            allow_missing=True,
+        )
+        if imap.get("ssl") is not True:
+            return None, _error(
+                "tls_required",
+                "Custom IMAP onboarding requires verified TLS.",
+            )
+        if (
+            host is None
+            or not port
+            or not imap_username
+            or password == ""
+        ):
+            return None, _error(
+                "invalid_request",
+                "Complete IMAP connection details are required.",
+            )
+        parsed_imap = {
             "host": host,
             "port": port,
             "ssl": True,
-            "username": username,
+            "username": imap_username,
             "password": password,
-        },
+        }
+
+    parsed_smtp = None
+    if "smtp" in connection:
+        parsed_smtp, smtp_error = _parse_smtp_connection(
+            connection.get("smtp"),
+            imap_username=imap_username,
+        )
+        if smtp_error:
+            return None, smtp_error
+
+    return {
+        "onboardingInboxId": onboarding_inbox_id,
+        "serverMailboxId": server_mailbox_id,
+        "email": email,
+        "imap": parsed_imap,
+        "smtp": parsed_smtp,
     }, None
 
 
@@ -541,7 +646,7 @@ def _build_expected_onboarding_mailbox(
     mailbox_id: str,
     credential_version: str,
 ) -> dict:
-    return {
+    expected = {
         "email": parsed["email"],
         "onboardingInboxId": parsed["onboardingInboxId"],
         "credentialVersion": credential_version,
@@ -561,6 +666,19 @@ def _build_expected_onboarding_mailbox(
         "connectionMessage": None,
         "oauthAuthorizationUrl": None,
     }
+    parsed_smtp = parsed.get("smtp")
+    if isinstance(parsed_smtp, dict):
+        expected["customSmtp"] = {
+            "host": parsed_smtp["host"],
+            "port": str(parsed_smtp["port"]),
+            "security": parsed_smtp["security"],
+            "username": parsed_smtp["username"],
+            "useSameCredentials": parsed_smtp["useSameCredentials"],
+        }
+        expected["imapConnectionStatus"] = "connected"
+        expected["smtpConnectionStatus"] = "connected"
+        expected["fullyConnected"] = True
+    return expected
 
 
 def _json_values_are_type_exact(left, right) -> bool:
@@ -637,7 +755,11 @@ def _onboarding_readback_is_exact(
     )
 
 
-def _mailbox_readback_is_exact(result: dict, expected_inbox: dict) -> bool:
+def _mailbox_readback_is_exact(
+    result: dict,
+    expected_inbox: dict,
+    expected_onboarding_session: dict | None = None,
+) -> bool:
     if (
         result.get("status") != "ok"
         or not isinstance(result.get("inbox"), dict)
@@ -646,7 +768,16 @@ def _mailbox_readback_is_exact(result: dict, expected_inbox: dict) -> bool:
         return False
     config = result.get("config")
     managed_inboxes = config.get("managedInboxes") if isinstance(config, dict) else None
-    if not isinstance(managed_inboxes, list):
+    if (
+        not isinstance(managed_inboxes, list)
+        or (
+            expected_onboarding_session is not None
+            and not _json_values_are_type_exact(
+                config.get("onboardingSession"),
+                expected_onboarding_session,
+            )
+        )
+    ):
         return False
     matches = [
         inbox
@@ -732,8 +863,10 @@ def _resolve_preserved_smtp_state(
     if (
         not host
         or not port
+        or (security == "ssl" and port != 465)
+        or (security == "starttls" and port != 587)
         or security not in {"ssl", "starttls"}
-        or not username
+        or (not use_same_credentials and not username)
         or not isinstance(use_same_credentials, bool)
         or (
             use_same_credentials
@@ -791,6 +924,10 @@ def _build_expected_credential_mailbox(
         "connectionMessage": None,
         "oauthAuthorizationUrl": None,
     }
+    if isinstance(parsed_smtp, dict):
+        next_inbox["imapConnectionStatus"] = "connected"
+        next_inbox["smtpConnectionStatus"] = "connected"
+        next_inbox["fullyConnected"] = True
     for field in ("internalRole", "focusPreferences"):
         if field in payload:
             next_inbox[field] = deepcopy(payload[field])
@@ -1060,6 +1197,12 @@ class handler(BaseHTTPRequestHandler):
         parsed: dict,
         session_user: dict,
     ):
+        self._handle_onboarding_capability_connection_with_position_lease(
+            parsed,
+            session_user,
+        )
+        return
+
         try:
             target = resolve_owned_onboarding_imap_registration(
                 self.headers,
@@ -1081,15 +1224,21 @@ class handler(BaseHTTPRequestHandler):
             self._send_onboarding_registration_error(target)
             return
 
-        try:
-            parsed["imap"]["host"] = normalize_imap_host(parsed["imap"]["host"])
-        except ImapNetworkPolicyError:
-            self._send_json(
-                400,
-                _error("imap_host_invalid", "The IMAP host is invalid."),
-            )
-            return
-        if parsed["imap"]["port"] != 993:
+        if isinstance(parsed.get("imap"), dict):
+            try:
+                parsed["imap"]["host"] = normalize_imap_host(
+                    parsed["imap"]["host"]
+                )
+            except ImapNetworkPolicyError:
+                self._send_json(
+                    400,
+                    _error("imap_host_invalid", "The IMAP host is invalid."),
+                )
+                return
+        if (
+            isinstance(parsed.get("imap"), dict)
+            and parsed["imap"]["port"] != 993
+        ):
             self._send_json(
                 400,
                 _error(
@@ -1326,6 +1475,669 @@ class handler(BaseHTTPRequestHandler):
             ),
         )
         return
+
+    def _handle_onboarding_capability_connection_with_position_lease(
+        self,
+        parsed: dict,
+        session_user: dict,
+    ):
+        if not isinstance(parsed.get("smtp"), dict):
+            self._send_json(
+                400,
+                _error(
+                    "invalid_request",
+                    "Complete SMTP connection details are required during onboarding.",
+                ),
+            )
+            return
+
+        if isinstance(parsed.get("imap"), dict):
+            try:
+                parsed["imap"]["host"] = normalize_imap_host(
+                    parsed["imap"]["host"]
+                )
+            except ImapNetworkPolicyError:
+                self._send_json(
+                    400,
+                    _error("imap_host_invalid", "The IMAP host is invalid."),
+                )
+                return
+        try:
+            parsed["smtp"]["host"] = normalize_imap_host(parsed["smtp"]["host"])
+        except ImapNetworkPolicyError:
+            self._send_json(
+                400,
+                _error("smtp_host_invalid", "The SMTP host is invalid."),
+            )
+            return
+        if (
+            isinstance(parsed.get("imap"), dict)
+            and parsed["imap"]["port"] != 993
+        ):
+            self._send_json(
+                400,
+                _error(
+                    "imap_port_not_allowed",
+                    "Custom IMAP onboarding requires port 993.",
+                ),
+            )
+            return
+
+        try:
+            target = resolve_owned_onboarding_custom_imap_target(
+                self.headers,
+                parsed["onboardingInboxId"],
+                parsed["email"],
+                parsed.get("serverMailboxId"),
+            )
+        except Exception:
+            target = {
+                "status": "unavailable",
+                "user": None,
+                "inbox": None,
+                "config": None,
+                "error": None,
+            }
+        if (
+            target.get("status") != "ok"
+            or not isinstance(target.get("config"), dict)
+            or not isinstance(target.get("user"), dict)
+            or target["user"].get("email") != session_user.get("email")
+        ):
+            self._send_onboarding_registration_error(target)
+            return
+
+        existing_inbox = target.get("inbox")
+        if existing_inbox is None:
+            if (
+                not isinstance(parsed.get("imap"), dict)
+                or not _stored_password_is_usable(
+                    parsed["imap"].get("password")
+                )
+            ):
+                self._send_json(
+                    400,
+                    _error(
+                        "invalid_request",
+                        "A new mailbox requires an IMAP password.",
+                    ),
+                )
+                return
+            (
+                mailbox_id,
+                previous_secret,
+                mailbox_mutation_lease_token,
+                mailbox_id_error,
+            ) = _prepare_server_mailbox_id(
+                target["config"],
+                session_user["email"],
+            )
+            if (
+                mailbox_id_error
+                or not mailbox_id
+                or not previous_secret
+                or not mailbox_mutation_lease_token
+            ):
+                self._send_json(
+                    503,
+                    mailbox_id_error
+                    or _error(
+                        "mailbox_id_generation_failed",
+                        "Mailbox registration could not be prepared.",
+                    ),
+                )
+                return
+            try:
+                self._handle_onboarding_capability_connection_under_lease(
+                    parsed,
+                    session_user,
+                    target,
+                    mailbox_id,
+                    previous_secret,
+                    None,
+                )
+            finally:
+                try:
+                    release_mailbox_mutation_lease(
+                        session_user["email"],
+                        mailbox_id,
+                        mailbox_mutation_lease_token,
+                    )
+                except Exception:
+                    pass
+            return
+
+        if not isinstance(existing_inbox, dict):
+            self._send_json(
+                500,
+                _error(
+                    "mailbox_configuration_malformed",
+                    "Mailbox configuration is invalid.",
+                ),
+            )
+            return
+        if parsed.get("imap") is None:
+            custom_imap = existing_inbox.get("customImap")
+            if (
+                not isinstance(custom_imap, dict)
+                or set(custom_imap) != IMAP_CONFIG_FIELDS
+                or custom_imap.get("ssl") is not True
+                or _port(custom_imap.get("port")) != 993
+                or not _exact_string(custom_imap.get("username"))
+            ):
+                self._send_json(
+                    409,
+                    _error(
+                        "reconnect_required",
+                        "The existing incoming connection could not be verified safely.",
+                    ),
+                )
+                return
+            try:
+                authoritative_imap_host = normalize_imap_host(
+                    custom_imap.get("host")
+                )
+            except ImapNetworkPolicyError:
+                self._send_json(
+                    409,
+                    _error(
+                        "reconnect_required",
+                        "The existing incoming connection could not be verified safely.",
+                    ),
+                )
+                return
+            parsed["imap"] = {
+                "host": authoritative_imap_host,
+                "port": 993,
+                "ssl": True,
+                "username": custom_imap["username"],
+                "password": None,
+            }
+            if parsed["smtp"].get("useSameCredentials") is True:
+                parsed["smtp"]["authenticationUsername"] = custom_imap[
+                    "username"
+                ]
+        mailbox_id = _valid_mailbox_id(existing_inbox.get("id"))
+        if not mailbox_id:
+            self._send_json(
+                500,
+                _error(
+                    "mailbox_configuration_malformed",
+                    "Mailbox configuration is invalid.",
+                ),
+            )
+            return
+        if parsed["imap"].get("password") is not None:
+            self._send_json(
+                400,
+                _error(
+                    "invalid_request",
+                    "An existing incoming connection must reuse its stored IMAP credential.",
+                ),
+            )
+            return
+
+        try:
+            mailbox_lease = acquire_mailbox_mutation_lease(
+                session_user["email"],
+                mailbox_id,
+            )
+        except Exception:
+            mailbox_lease = {"status": "unavailable", "token": None, "error": None}
+        mailbox_lease_token = mailbox_lease.get("token")
+        if mailbox_lease.get("status") != "acquired" or not isinstance(
+            mailbox_lease_token,
+            str,
+        ):
+            lease_held = mailbox_lease.get("status") == "held"
+            self._send_json(
+                409 if lease_held else 503,
+                _error(
+                    "mailbox_connection_in_progress"
+                    if lease_held
+                    else "mailbox_mutation_lease_unavailable",
+                    "Another connection update is already in progress."
+                    if lease_held
+                    else "Mailbox connection state could not be reserved safely.",
+                ),
+            )
+            return
+        try:
+            try:
+                current_target = resolve_owned_onboarding_custom_imap_target(
+                    self.headers,
+                    parsed["onboardingInboxId"],
+                    parsed["email"],
+                    mailbox_id,
+                )
+            except Exception:
+                current_target = {
+                    "status": "unavailable",
+                    "user": None,
+                    "inbox": None,
+                    "config": None,
+                    "error": None,
+                }
+            if (
+                current_target.get("status") != "ok"
+                or not isinstance(current_target.get("inbox"), dict)
+                or not _json_values_are_type_exact(
+                    current_target["inbox"],
+                    existing_inbox,
+                )
+            ):
+                self._send_onboarding_registration_error(current_target)
+                return
+            try:
+                previous_secret = snapshot_encrypted_mailbox_secret(
+                    session_user["email"],
+                    mailbox_id,
+                )
+            except Exception:
+                previous_secret = {
+                    "status": "unavailable",
+                    "record": None,
+                    "error": None,
+                }
+            self._handle_onboarding_capability_connection_under_lease(
+                parsed,
+                session_user,
+                current_target,
+                mailbox_id,
+                previous_secret,
+                current_target["inbox"],
+            )
+        finally:
+            try:
+                release_mailbox_mutation_lease(
+                    session_user["email"],
+                    mailbox_id,
+                    mailbox_lease_token,
+                )
+            except Exception:
+                pass
+
+    def _handle_onboarding_capability_connection_under_lease(
+        self,
+        parsed: dict,
+        session_user: dict,
+        target: dict,
+        mailbox_id: str,
+        previous_secret: dict,
+        existing_inbox: dict | None,
+    ):
+        is_existing = isinstance(existing_inbox, dict)
+        expected_onboarding_session = (
+            target.get("config", {}).get("onboardingSession")
+            if isinstance(target.get("config"), dict)
+            else None
+        )
+        if not isinstance(expected_onboarding_session, dict):
+            self._send_json(
+                409,
+                _error(
+                    "reconnect_required",
+                    "The authoritative onboarding state could not be verified safely.",
+                ),
+            )
+            return
+        expected_onboarding_session = deepcopy(expected_onboarding_session)
+        if is_existing:
+            try:
+                previous_secret_read = read_mailbox_secret(
+                    session_user["email"],
+                    mailbox_id,
+                )
+            except Exception:
+                previous_secret_read = {
+                    "status": "unavailable",
+                    "record": None,
+                    "error": None,
+                }
+            previous_secret_record = (
+                previous_secret_read.get("record")
+                if previous_secret_read.get("status") == "present"
+                and isinstance(previous_secret_read.get("record"), dict)
+                else None
+            )
+            custom_imap = existing_inbox.get("customImap")
+            custom_smtp = existing_inbox.get("customSmtp")
+            smtp_is_unconfigured = (
+                isinstance(custom_smtp, dict)
+                and (
+                    not custom_smtp
+                    or _json_values_are_type_exact(
+                        custom_smtp,
+                        {"password": ""},
+                    )
+                )
+            )
+            config_generation = existing_inbox.get("credentialVersion")
+            existing_imap_password = (
+                previous_secret_record.get("imapPassword")
+                if isinstance(previous_secret_record, dict)
+                else None
+            )
+            expected_imap = {
+                "host": parsed["imap"]["host"],
+                "port": str(parsed["imap"]["port"]),
+                "ssl": True,
+                "username": parsed["imap"]["username"],
+            }
+            if (
+                previous_secret.get("status") != "present"
+                or not _reconnect_generation_state_is_valid(
+                    existing_inbox,
+                    previous_secret_read,
+                )
+                or not is_valid_mailbox_credential_version(config_generation)
+                or not _stored_password_is_usable(existing_imap_password)
+                or existing_inbox.get("provider") != "custom_imap"
+                or existing_inbox.get("onboardingInboxId")
+                != parsed["onboardingInboxId"]
+                or _normalized_email(existing_inbox.get("email")) != parsed["email"]
+                or existing_inbox.get("connected") is not True
+                or existing_inbox.get("connectionStatus") != "connected"
+                or existing_inbox.get("imapConnectionStatus")
+                not in {None, "connected"}
+                or existing_inbox.get("smtpConnectionStatus")
+                not in {None, "not_configured", "not_connected"}
+                or existing_inbox.get("fullyConnected") not in {None, False}
+                or not _json_values_are_type_exact(custom_imap, expected_imap)
+                or not smtp_is_unconfigured
+            ):
+                self._send_json(
+                    409,
+                    _error(
+                        "reconnect_required",
+                        "The existing incoming connection could not be verified safely.",
+                    ),
+                )
+                return
+            effective_imap_password = existing_imap_password
+        else:
+            previous_secret_record = None
+            effective_imap_password = parsed["imap"]["password"]
+            secure_request = {
+                "host": parsed["imap"]["host"],
+                "port": parsed["imap"]["port"],
+                "ssl": True,
+                "username": parsed["imap"]["username"],
+                "password": effective_imap_password,
+            }
+            try:
+                from imap_connect_preview import (
+                    build_secure_imap_authentication_response,
+                )
+
+                status_code, response_payload = (
+                    build_secure_imap_authentication_response(secure_request)
+                )
+            except Exception:
+                status_code, response_payload = 502, {
+                    "ok": False,
+                    "error": {"code": "tls_connection_failed"},
+                }
+            if status_code >= 400 or response_payload.get("ok") is not True:
+                error_code = (response_payload.get("error") or {}).get("code")
+                if error_code == "authentication_failed":
+                    self._send_json(
+                        502,
+                        _error(
+                            "authentication_failed",
+                            "Mailbox authentication failed.",
+                        ),
+                    )
+                elif safe_error := _safe_imap_network_error(error_code):
+                    self._send_json(*safe_error)
+                else:
+                    self._send_json(
+                        502,
+                        _error(
+                            "tls_connection_failed",
+                            "A verified TLS connection could not be established.",
+                        ),
+                    )
+                return
+
+        parsed_smtp = parsed["smtp"]
+        smtp_authentication_password = (
+            effective_imap_password
+            if parsed_smtp["useSameCredentials"]
+            else parsed_smtp["password"]
+        )
+        stored_smtp_password = (
+            "" if parsed_smtp["useSameCredentials"] else parsed_smtp["password"]
+        )
+        try:
+            from smtp_connection import test_smtp_authentication
+
+            smtp_status, smtp_payload = test_smtp_authentication(
+                {
+                    "host": parsed_smtp["host"],
+                    "port": parsed_smtp["port"],
+                    "security": parsed_smtp["security"],
+                    "username": parsed_smtp["authenticationUsername"],
+                    "password": smtp_authentication_password,
+                }
+            )
+        except Exception:
+            smtp_status, smtp_payload = 502, {
+                "ok": False,
+                "error": {"code": "smtp_connection_failed"},
+            }
+        if smtp_status >= 400 or smtp_payload.get("ok") is not True:
+            error_code = (smtp_payload.get("error") or {}).get("code")
+            public_code = (
+                error_code
+                if error_code
+                in {
+                    "smtp_authentication_failed",
+                    "smtp_connection_failed",
+                    "smtp_destination_not_allowed",
+                    "smtp_dns_failed",
+                    "smtp_peer_mismatch",
+                    "smtp_tls_failed",
+                }
+                else "smtp_connection_failed"
+            )
+            self._send_json(
+                400
+                if public_code == "smtp_destination_not_allowed"
+                else 502,
+                _error(
+                    public_code,
+                    "SMTP authentication failed."
+                    if public_code == "smtp_authentication_failed"
+                    else "A secure SMTP connection could not be established.",
+                ),
+            )
+            return
+
+        credential_version = generate_mailbox_credential_version()
+        if not is_valid_mailbox_credential_version(credential_version):
+            self._send_json(
+                503,
+                _error(
+                    "mailbox_secret_store_unavailable",
+                    "Mailbox credential state could not be prepared.",
+                ),
+            )
+            return
+
+        parsed_for_mailbox = {
+            **parsed,
+            "mailboxId": mailbox_id,
+        }
+        expected_mailbox = (
+            _build_expected_credential_mailbox(
+                parsed_for_mailbox,
+                {},
+                existing_inbox,
+                credential_version,
+            )
+            if is_existing
+            else _build_expected_onboarding_mailbox(
+                parsed,
+                mailbox_id,
+                credential_version,
+            )
+        )
+        try:
+            saved_secret, save_error = save_mailbox_secret(
+                session_user["email"],
+                mailbox_id,
+                imap_password=effective_imap_password,
+                smtp_password=stored_smtp_password,
+                credential_version=credential_version,
+                expected_snapshot=previous_secret,
+                require_namespace_missing=not is_existing,
+            )
+        except Exception:
+            saved_secret, save_error = None, {
+                "code": "mailbox_secret_store_unavailable"
+            }
+        if save_error or not isinstance(saved_secret, dict):
+            self._send_secret_write_error(save_error)
+            return
+
+        connection_metadata = {
+            "email": parsed["email"],
+            "customImap": {
+                "host": parsed["imap"]["host"],
+                "port": str(parsed["imap"]["port"]),
+                "ssl": True,
+                "username": parsed["imap"]["username"],
+            },
+            "customSmtp": deepcopy(expected_mailbox["customSmtp"]),
+            "imapConnectionStatus": "connected",
+            "smtpConnectionStatus": "connected",
+            "fullyConnected": True,
+        }
+        if not is_existing:
+            connection_metadata["onboardingInboxId"] = parsed[
+                "onboardingInboxId"
+            ]
+        try:
+            upsert_result = upsert_owned_custom_imap_mailbox(
+                self.headers,
+                mailbox_id,
+                "reconnect" if is_existing else "initial",
+                connection_metadata,
+                credential_version=credential_version,
+                expected_inbox=existing_inbox,
+                onboarding_inbox_id=(
+                    None if is_existing else parsed["onboardingInboxId"]
+                ),
+                expected_onboarding_session=expected_onboarding_session,
+            )
+        except Exception:
+            upsert_result = {"status": "unavailable", "error": None}
+
+        try:
+            config_readback = resolve_owned_managed_inbox_record(
+                self.headers,
+                mailbox_id,
+            )
+        except Exception:
+            config_readback = {
+                "status": "unavailable",
+                "inbox": None,
+                "config": None,
+            }
+        try:
+            secret_readback = read_mailbox_secret(
+                session_user["email"],
+                mailbox_id,
+            )
+        except Exception:
+            secret_readback = {
+                "status": "unavailable",
+                "record": None,
+                "error": None,
+            }
+        committed_exactly = _mailbox_readback_is_exact(
+            config_readback,
+            expected_mailbox,
+            expected_onboarding_session,
+        ) and _secret_readback_is_exact(
+            secret_readback,
+            credential_version,
+            effective_imap_password,
+            stored_smtp_password,
+        )
+        if committed_exactly:
+            self._send_json(200, {"ok": True})
+            return
+
+        try:
+            config_rollback_error = rollback_owned_custom_imap_mailbox_update(
+                self.headers,
+                mailbox_id,
+                expected_mailbox,
+                existing_inbox,
+            )
+        except Exception:
+            config_rollback_error = {
+                "code": "user_config_store_unavailable",
+                "message": "Mailbox configuration could not be restored safely.",
+            }
+        if config_rollback_error:
+            if (
+                isinstance(config_rollback_error, dict)
+                and config_rollback_error.get("code")
+                == "user_config_newer_mailbox_preserved"
+            ):
+                try:
+                    secret_rollback_error = (
+                        restore_encrypted_mailbox_secret_snapshot(
+                            session_user["email"],
+                            mailbox_id,
+                            previous_secret,
+                            expected_credential_version=credential_version,
+                        )
+                    )
+                except Exception:
+                    secret_rollback_error = {
+                        "code": "mailbox_secret_store_unavailable"
+                    }
+                if (
+                    secret_rollback_error
+                    and (
+                        not isinstance(secret_rollback_error, dict)
+                        or secret_rollback_error.get("code")
+                        != "mailbox_secret_write_conflict"
+                    )
+                ):
+                    self._send_rollback_error(secret_rollback_error)
+                    return
+            self._send_rollback_error(config_rollback_error)
+            return
+        try:
+            secret_rollback_error = restore_encrypted_mailbox_secret_snapshot(
+                session_user["email"],
+                mailbox_id,
+                previous_secret,
+                expected_credential_version=credential_version,
+            )
+        except Exception:
+            secret_rollback_error = {
+                "code": "mailbox_secret_store_unavailable"
+            }
+        if secret_rollback_error:
+            self._send_rollback_error(secret_rollback_error)
+            return
+
+        if upsert_result.get("status") != "ok":
+            self._send_onboarding_registration_error(upsert_result)
+            return
+        self._send_json(
+            503,
+            _error(
+                "configuration_persistence_failed",
+                "Mailbox configuration could not be verified.",
+            ),
+        )
 
     def _handle_credential_connection(
         self,
@@ -1620,6 +2432,7 @@ class handler(BaseHTTPRequestHandler):
                 return
             effective_imap_password = existing_imap_password
 
+        preserved_smtp = None
         if mode == "reconnect" and parsed["smtp"] is None:
             preserved_smtp, _preserved_smtp_password = (
                 _resolve_preserved_smtp_state(
@@ -1636,6 +2449,13 @@ class handler(BaseHTTPRequestHandler):
                     ),
                 )
                 return
+        retest_preserved_same_credentials = bool(
+            mode == "reconnect"
+            and parsed["smtp"] is None
+            and parsed["imap"]["password"] is not None
+            and isinstance(preserved_smtp, dict)
+            and preserved_smtp.get("useSameCredentials") is True
+        )
 
         if not isinstance(effective_imap_password, str) or not effective_imap_password:
             self._send_json(
@@ -1657,6 +2477,31 @@ class handler(BaseHTTPRequestHandler):
                 _error("imap_host_invalid", "The IMAP host is invalid."),
             )
             return
+        if isinstance(parsed.get("smtp"), dict):
+            try:
+                parsed["smtp"]["host"] = normalize_imap_host(
+                    parsed["smtp"]["host"]
+                )
+            except ImapNetworkPolicyError:
+                self._send_json(
+                    400,
+                    _error("smtp_host_invalid", "The SMTP host is invalid."),
+                )
+                return
+        if retest_preserved_same_credentials:
+            try:
+                preserved_smtp["host"] = normalize_imap_host(
+                    preserved_smtp["host"]
+                )
+            except ImapNetworkPolicyError:
+                self._send_json(
+                    409,
+                    _error(
+                        "reconnect_required",
+                        "Stored SMTP connection metadata cannot be reused safely.",
+                    ),
+                )
+                return
 
         preview_request = {
             "mailboxId": parsed["mailboxId"],
@@ -1686,6 +2531,70 @@ class handler(BaseHTTPRequestHandler):
             else:
                 self._send_json(502, _error("connection_failed", "Could not connect to inbox."))
             return
+
+        smtp_authentication_request = None
+        if isinstance(parsed.get("smtp"), dict):
+            parsed_smtp = parsed["smtp"]
+            smtp_password = (
+                effective_imap_password
+                if parsed_smtp["useSameCredentials"]
+                else parsed_smtp["password"]
+            )
+            smtp_authentication_request = {
+                "host": parsed_smtp["host"],
+                "port": parsed_smtp["port"],
+                "security": parsed_smtp["security"],
+                "username": parsed_smtp["authenticationUsername"],
+                "password": smtp_password,
+            }
+        elif retest_preserved_same_credentials:
+            smtp_authentication_request = {
+                "host": preserved_smtp["host"],
+                "port": _port(preserved_smtp["port"]),
+                "security": preserved_smtp["security"],
+                "username": parsed["imap"]["username"],
+                "password": effective_imap_password,
+            }
+
+        if isinstance(smtp_authentication_request, dict):
+            try:
+                from smtp_connection import test_smtp_authentication
+
+                smtp_status, smtp_payload = test_smtp_authentication(
+                    smtp_authentication_request
+                )
+            except Exception:
+                smtp_status, smtp_payload = 502, {
+                    "ok": False,
+                    "error": {"code": "smtp_connection_failed"},
+                }
+            if smtp_status >= 400 or smtp_payload.get("ok") is not True:
+                error_code = (smtp_payload.get("error") or {}).get("code")
+                public_code = (
+                    error_code
+                    if error_code
+                    in {
+                        "smtp_authentication_failed",
+                        "smtp_connection_failed",
+                        "smtp_destination_not_allowed",
+                        "smtp_dns_failed",
+                        "smtp_peer_mismatch",
+                        "smtp_tls_failed",
+                    }
+                    else "smtp_connection_failed"
+                )
+                self._send_json(
+                    400
+                    if public_code == "smtp_destination_not_allowed"
+                    else 502,
+                    _error(
+                        public_code,
+                        "SMTP authentication failed."
+                        if public_code == "smtp_authentication_failed"
+                        else "A secure SMTP connection could not be established.",
+                    ),
+                )
+                return
 
         rotate_credentials = (
             mode == "initial"
@@ -1742,10 +2651,12 @@ class handler(BaseHTTPRequestHandler):
         smtp_password_update = None
         if parsed["smtp"] is not None:
             smtp_password_update = (
-                effective_imap_password
+                ""
                 if parsed["smtp"]["useSameCredentials"]
                 else parsed["smtp"]["password"]
             )
+        elif retest_preserved_same_credentials:
+            smtp_password_update = ""
         expected_mailbox = _build_expected_credential_mailbox(
             parsed,
             payload,
@@ -1774,21 +2685,30 @@ class handler(BaseHTTPRequestHandler):
         else:
             expected_secret_record = previous_secret_record
 
+        connection_metadata = {
+            "email": parsed["email"],
+            "customImap": {
+                "host": parsed["imap"]["host"],
+                "port": str(parsed["imap"]["port"]),
+                "ssl": parsed["imap"]["ssl"],
+                "username": parsed["imap"]["username"],
+            },
+            "customSmtp": deepcopy(expected_mailbox["customSmtp"]),
+        }
+        if isinstance(parsed.get("smtp"), dict):
+            connection_metadata.update(
+                {
+                    "imapConnectionStatus": "connected",
+                    "smtpConnectionStatus": "connected",
+                    "fullyConnected": True,
+                }
+            )
         try:
             upsert_result = upsert_owned_custom_imap_mailbox(
                 self.headers,
                 parsed["mailboxId"],
                 mode,
-                {
-                    "email": parsed["email"],
-                    "customImap": {
-                        "host": parsed["imap"]["host"],
-                        "port": str(parsed["imap"]["port"]),
-                        "ssl": parsed["imap"]["ssl"],
-                        "username": parsed["imap"]["username"],
-                    },
-                    "customSmtp": deepcopy(expected_mailbox["customSmtp"]),
-                },
+                connection_metadata,
                 {
                     key: payload[key]
                     for key in ("internalRole", "focusPreferences")

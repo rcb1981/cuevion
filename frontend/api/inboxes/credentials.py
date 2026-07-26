@@ -121,10 +121,18 @@ def _smtp_credential_source(inbox: dict) -> str | None:
         or not host
         or host != host.strip()
         or not _valid_port(custom_smtp.get("port"))
+        or (
+            custom_smtp.get("security") == "ssl"
+            and str(custom_smtp.get("port")) != "465"
+        )
+        or (
+            custom_smtp.get("security") == "starttls"
+            and str(custom_smtp.get("port")) != "587"
+        )
         or custom_smtp.get("security") not in {"ssl", "starttls"}
         or not isinstance(username, str)
-        or not username
         or username != username.strip()
+        or (not use_same_credentials and not username)
         or not isinstance(use_same_credentials, bool)
     ):
         return None
@@ -184,6 +192,7 @@ class handler(BaseHTTPRequestHandler):
                 and inbox.get("provider") == "custom_imap"
                 and inbox.get("connected") is True
                 and inbox.get("connectionStatus") == "connected"
+                and inbox.get("imapConnectionStatus") in {None, "connected"}
                 and is_valid_mailbox_credential_version(config_generation)
             )
             # Preserve the route's established canonical-owner lookup seam for a
@@ -279,6 +288,8 @@ class handler(BaseHTTPRequestHandler):
                 ),
                 "smtpPasswordSet": (
                     generation_matches
+                    and inbox.get("smtpConnectionStatus") == "connected"
+                    and inbox.get("fullyConnected") is True
                     and smtp_credential_source is not None
                     and _stored_password_is_usable(
                         imap_password

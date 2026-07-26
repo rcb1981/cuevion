@@ -1371,6 +1371,325 @@ else:
         }
 
 
+    def resolve_owned_onboarding_custom_imap_target(
+        headers,
+        onboarding_inbox_id: str,
+        mailbox_email: str,
+        server_mailbox_id: str | None = None,
+    ) -> OwnedManagedInboxRecordResult:
+        """Resolve a new or existing onboarding mailbox without client-owned identity.
+
+        An existing record is accepted only when the ordinary member session,
+        onboarding position, provider, normalized email and optional exact
+        server-owned id all identify the same authoritative record.
+        """
+        user, read_result = read_user_config_for_authenticated_user(headers)
+        if not user:
+            return {
+                "status": "unavailable"
+                if read_result["status"] == "unavailable"
+                else "unauthorized",
+                "user": None,
+                "inbox": None,
+                "config": None,
+                "error": read_result["error"],
+            }
+        if read_result["status"] == "missing":
+            return {
+                "status": "not_found",
+                "user": user,
+                "inbox": None,
+                "config": None,
+                "error": _error("onboarding_unavailable", "Onboarding is unavailable."),
+            }
+        if read_result["status"] != "ok" or not read_result["config"]:
+            return {
+                "status": "unavailable"
+                if read_result["status"] == "unavailable"
+                else "malformed",
+                "user": user,
+                "inbox": None,
+                "config": None,
+                "error": read_result["error"],
+            }
+
+        config = read_result["config"]
+        stored_owner = config.get("email")
+        if stored_owner is not None and (
+            not isinstance(stored_owner, str)
+            or normalize_auth_email(stored_owner) != user["email"]
+        ):
+            return {
+                "status": "malformed",
+                "user": user,
+                "inbox": None,
+                "config": None,
+                "error": _error(
+                    "user_config_malformed",
+                    "User config ownership could not be verified.",
+                ),
+            }
+
+        onboarding, onboarding_error = _resolve_authoritative_onboarding_session(config)
+        if onboarding_error or not onboarding:
+            error = onboarding_error or _error(
+                "onboarding_malformed",
+                "Onboarding state is invalid.",
+            )
+            return {
+                "status": _onboarding_registration_status(error),
+                "user": user,
+                "inbox": None,
+                "config": deepcopy(config),
+                "error": error,
+            }
+        if onboarding.get("completed") is True:
+            error = _error("onboarding_completed", "Onboarding is already completed.")
+            return {
+                "status": "conflict",
+                "user": user,
+                "inbox": None,
+                "config": deepcopy(config),
+                "error": error,
+            }
+        if onboarding.get("completed") is not False:
+            error = _error("onboarding_malformed", "Onboarding state is invalid.")
+            return {
+                "status": "malformed",
+                "user": user,
+                "inbox": None,
+                "config": deepcopy(config),
+                "error": error,
+            }
+
+        choices = onboarding.get("choices")
+        selected_inboxes = (
+            choices.get("selectedInboxes") if isinstance(choices, dict) else None
+        )
+        custom_inboxes = (
+            choices.get("customInboxes", []) if isinstance(choices, dict) else None
+        )
+        custom_ids = (
+            {
+                item["id"]
+                for item in custom_inboxes
+                if isinstance(item, dict) and isinstance(item.get("id"), str)
+            }
+            if isinstance(custom_inboxes, list)
+            else set()
+        )
+        if (
+            not _valid_onboarding_inbox_id(onboarding_inbox_id)
+            or not isinstance(selected_inboxes, list)
+            or not isinstance(custom_inboxes, list)
+            or (
+                onboarding_inbox_id.startswith("custom:")
+                and onboarding_inbox_id not in custom_ids
+            )
+        ):
+            error = _error("unknown_inbox_position", "Inbox position is invalid.")
+            return {
+                "status": "malformed",
+                "user": user,
+                "inbox": None,
+                "config": deepcopy(config),
+                "error": error,
+            }
+        if onboarding_inbox_id not in selected_inboxes:
+            error = _error(
+                "inbox_position_not_selected",
+                "Inbox position is not selected in onboarding.",
+            )
+            return {
+                "status": "conflict",
+                "user": user,
+                "inbox": None,
+                "config": deepcopy(config),
+                "error": error,
+            }
+
+        normalized_email = normalize_auth_email(mailbox_email)
+        if not normalized_email or not is_valid_auth_email(normalized_email):
+            error = _error("onboarding_malformed", "Mailbox identity is invalid.")
+            return {
+                "status": "malformed",
+                "user": user,
+                "inbox": None,
+                "config": deepcopy(config),
+                "error": error,
+            }
+        if server_mailbox_id is not None and (
+            not isinstance(server_mailbox_id, str)
+            or not server_mailbox_id
+            or server_mailbox_id != server_mailbox_id.strip()
+        ):
+            error = _error("mailbox_id_conflict", "Mailbox selector is invalid.")
+            return {
+                "status": "conflict",
+                "user": user,
+                "inbox": None,
+                "config": deepcopy(config),
+                "error": error,
+            }
+
+        managed_inboxes = config.get("managedInboxes")
+        if not isinstance(managed_inboxes, list):
+            error = _error("onboarding_malformed", "Mailbox configuration is invalid.")
+            return {
+                "status": "malformed",
+                "user": user,
+                "inbox": None,
+                "config": deepcopy(config),
+                "error": error,
+            }
+
+        seen_ids: set[str] = set()
+        position_matches: list[dict] = []
+        email_matches: list[dict] = []
+        selector_matches: list[dict] = []
+        for inbox in managed_inboxes:
+            if not isinstance(inbox, dict):
+                error = _error(
+                    "onboarding_malformed",
+                    "Mailbox configuration is invalid.",
+                )
+                return {
+                    "status": "malformed",
+                    "user": user,
+                    "inbox": None,
+                    "config": deepcopy(config),
+                    "error": error,
+                }
+            stored_id = inbox.get("id")
+            stored_email = inbox.get("email")
+            if (
+                not isinstance(stored_id, str)
+                or not stored_id
+                or stored_id != stored_id.strip()
+                or stored_id.casefold() in seen_ids
+                or not isinstance(stored_email, str)
+                or not is_valid_auth_email(stored_email)
+            ):
+                error = _error(
+                    "onboarding_malformed",
+                    "Mailbox configuration is invalid.",
+                )
+                return {
+                    "status": "malformed",
+                    "user": user,
+                    "inbox": None,
+                    "config": deepcopy(config),
+                    "error": error,
+                }
+            seen_ids.add(stored_id.casefold())
+
+            stored_position = inbox.get("onboardingInboxId")
+            if stored_position is not None and (
+                not isinstance(stored_position, str)
+                or stored_position != stored_position.strip()
+                or not _valid_onboarding_inbox_id(stored_position)
+                or (
+                    stored_position.startswith("custom:")
+                    and stored_position not in custom_ids
+                )
+            ):
+                error = _error(
+                    "onboarding_malformed",
+                    "Mailbox configuration is invalid.",
+                )
+                return {
+                    "status": "malformed",
+                    "user": user,
+                    "inbox": None,
+                    "config": deepcopy(config),
+                    "error": error,
+                }
+            if stored_position == onboarding_inbox_id:
+                position_matches.append(inbox)
+            if normalize_auth_email(stored_email) == normalized_email:
+                email_matches.append(inbox)
+            if server_mailbox_id is not None and stored_id == server_mailbox_id:
+                selector_matches.append(inbox)
+
+        if not position_matches:
+            if server_mailbox_id is not None:
+                error = _error(
+                    "mailbox_id_conflict",
+                    "Mailbox selector does not match the onboarding position.",
+                )
+                return {
+                    "status": "conflict",
+                    "user": user,
+                    "inbox": None,
+                    "config": deepcopy(config),
+                    "error": error,
+                }
+            if email_matches:
+                error = _error(
+                    "mailbox_email_conflict",
+                    "Mailbox is already registered.",
+                )
+                return {
+                    "status": "conflict",
+                    "user": user,
+                    "inbox": None,
+                    "config": deepcopy(config),
+                    "error": error,
+                }
+            return {
+                "status": "ok",
+                "user": user,
+                "inbox": None,
+                "config": deepcopy(config),
+                "error": None,
+            }
+
+        if (
+            len(position_matches) != 1
+            or len(email_matches) != 1
+            or position_matches[0] is not email_matches[0]
+            or (
+                server_mailbox_id is not None
+                and (
+                    len(selector_matches) != 1
+                    or selector_matches[0] is not position_matches[0]
+                )
+            )
+        ):
+            error = _error(
+                "inbox_position_conflict",
+                "Onboarding mailbox identity is ambiguous.",
+            )
+            return {
+                "status": "conflict",
+                "user": user,
+                "inbox": None,
+                "config": deepcopy(config),
+                "error": error,
+            }
+
+        existing = position_matches[0]
+        if existing.get("provider") != "custom_imap":
+            error = _error(
+                "managed_inbox_provider_mismatch",
+                "Only an existing Custom IMAP mailbox can be completed.",
+            )
+            return {
+                "status": "conflict",
+                "user": user,
+                "inbox": None,
+                "config": deepcopy(config),
+                "error": error,
+            }
+        return {
+            "status": "ok",
+            "user": user,
+            "inbox": deepcopy(existing),
+            "config": deepcopy(config),
+            "error": None,
+        }
+
+
     def resolve_owned_initial_imap_registration(headers) -> OwnedManagedInboxRecordResult:
         """Allow the legacy settings flow only after authoritative onboarding completion."""
         user, read_result = read_user_config_for_authenticated_user(headers)
@@ -1463,6 +1782,7 @@ else:
         credential_version: str,
         expected_inbox: dict | None = None,
         onboarding_inbox_id: str | None = None,
+        expected_onboarding_session: dict | None = None,
         require_completed_onboarding: bool = False,
         _write_attempts_remaining: int = MAX_CUSTOM_IMAP_CONFIG_WRITE_ATTEMPTS,
     ) -> OwnedManagedInboxRecordResult:
@@ -1490,6 +1810,10 @@ else:
             or _contains_mailbox_credential_generation(approved_updates)
             or (mode == "initial" and expected_inbox is not None)
             or (mode == "reconnect" and not isinstance(expected_inbox, dict))
+            or (
+                expected_onboarding_session is not None
+                and not isinstance(expected_onboarding_session, dict)
+            )
         ):
             return {
                 "status": "malformed",
@@ -1597,6 +1921,23 @@ else:
                 }
 
         expected_config = deepcopy(config)
+        if (
+            expected_onboarding_session is not None
+            and not _json_values_are_type_exact(
+                config.get("onboardingSession"),
+                expected_onboarding_session,
+            )
+        ):
+            return {
+                "status": "conflict",
+                "user": user,
+                "inbox": None,
+                "config": deepcopy(config),
+                "error": _error(
+                    "user_config_write_conflict",
+                    "Onboarding state changed before the mailbox update could be committed.",
+                ),
+            }
         if require_completed_onboarding:
             onboarding, onboarding_error = _resolve_authoritative_onboarding_session(config)
             if onboarding_error or not onboarding:
@@ -1806,6 +2147,7 @@ else:
                     credential_version=credential_version,
                     expected_inbox=expected_inbox,
                     onboarding_inbox_id=onboarding_inbox_id,
+                    expected_onboarding_session=expected_onboarding_session,
                     require_completed_onboarding=require_completed_onboarding,
                     _write_attempts_remaining=_write_attempts_remaining - 1,
                 )

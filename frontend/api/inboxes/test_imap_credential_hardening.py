@@ -25,6 +25,7 @@ import authenticated_imap
 import imap_connect_preview
 import imap_network_policy
 import mailbox_secret_store
+import smtp_connection
 import user_config_store
 
 
@@ -71,7 +72,12 @@ class FakeHandler:
         return json.loads(self.wfile.getvalue())
 
 
-def invoke_connect(fake_handler, *, use_real_lease=False):
+def invoke_connect(
+    fake_handler,
+    *,
+    use_real_lease=False,
+    smtp_result=(200, {"ok": True}),
+):
     for method_name in (
         "_send_json",
         "_send_onboarding_registration_error",
@@ -81,6 +87,8 @@ def invoke_connect(fake_handler, *, use_real_lease=False):
         "_handle_onboarding_connection",
         "_handle_onboarding_connection_with_position_lease",
         "_handle_onboarding_connection_under_lease",
+        "_handle_onboarding_capability_connection_with_position_lease",
+        "_handle_onboarding_capability_connection_under_lease",
         "_handle_credential_connection",
         "_handle_credential_connection_under_lease",
         "_handle_refresh",
@@ -93,19 +101,25 @@ def invoke_connect(fake_handler, *, use_real_lease=False):
                 connect_route.handler,
             ),
         )
-    if use_real_lease:
-        connect_route.handler.do_POST(fake_handler)
-        return
     with patch.object(
-        connect_route,
-        "acquire_mailbox_mutation_lease",
-        return_value={"status": "acquired", "token": "l" * 43, "error": None},
-    ), patch.object(
-        connect_route,
-        "release_mailbox_mutation_lease",
-        return_value={"status": "released", "token": "l" * 43, "error": None},
-    ):
-        connect_route.handler.do_POST(fake_handler)
+        smtp_connection,
+        "test_smtp_authentication",
+        return_value=smtp_result,
+    ) as smtp_test:
+        if use_real_lease:
+            connect_route.handler.do_POST(fake_handler)
+        else:
+            with patch.object(
+                connect_route,
+                "acquire_mailbox_mutation_lease",
+                return_value={"status": "acquired", "token": "l" * 43, "error": None},
+            ), patch.object(
+                connect_route,
+                "release_mailbox_mutation_lease",
+                return_value={"status": "released", "token": "l" * 43, "error": None},
+            ):
+                connect_route.handler.do_POST(fake_handler)
+    return smtp_test
 
 
 def initial_payload(mailbox_id="demo", mode="initial"):
@@ -153,6 +167,13 @@ def onboarding_payload(
                 "ssl": ssl_enabled,
                 "username": "promo@example.com",
                 "password": "one-time-onboarding-imap",
+            },
+            "smtp": {
+                "host": "smtp.example.com",
+                "port": "587",
+                "security": "starttls",
+                "username": "",
+                "useSameCredentials": True,
             },
         },
     }
@@ -209,6 +230,51 @@ def onboarding_target(config):
     }
 
 
+def partial_onboarding_mailbox(
+    *,
+    mailbox_id="imap-existing",
+    credential_version=CREDENTIAL_VERSION_A,
+    legacy_smtp_placeholder=False,
+):
+    return {
+        "id": mailbox_id,
+        "credentialVersion": credential_version,
+        "title": "promo@example.com",
+        "email": "promo@example.com",
+        "provider": "custom_imap",
+        "connected": True,
+        "connectionMethod": "imap",
+        "connectionStatus": "connected",
+        "connectionMessage": None,
+        "oauthAuthorizationUrl": None,
+        "onboardingInboxId": "promo",
+        "customImap": {
+            "host": "imap.example.com",
+            "port": "993",
+            "ssl": True,
+            "username": "promo@example.com",
+        },
+        "customSmtp": {"password": ""} if legacy_smtp_placeholder else {},
+        "imapConnectionStatus": "connected",
+        "smtpConnectionStatus": "not_configured",
+        "fullyConnected": False,
+    }
+
+
+def partial_onboarding_target(config, **mailbox_kwargs):
+    mailbox = partial_onboarding_mailbox(**mailbox_kwargs)
+    return {
+        "status": "ok",
+        "user": {"email": "owner@example.com"},
+        "inbox": mailbox,
+        "config": {
+            **config,
+            "managedInboxes": [*config["managedInboxes"], mailbox],
+        },
+        "error": None,
+    }
+
+
 def onboarding_readback(
     config,
     mailbox_id="imap-server-owned",
@@ -232,7 +298,16 @@ def onboarding_readback(
             "ssl": True,
             "username": "promo@example.com",
         },
-        "customSmtp": {},
+        "customSmtp": {
+            "host": "smtp.example.com",
+            "port": "587",
+            "security": "starttls",
+            "username": "",
+            "useSameCredentials": True,
+        },
+        "imapConnectionStatus": "connected",
+        "smtpConnectionStatus": "connected",
+        "fullyConnected": True,
     }
     return {
         "status": "ok",
@@ -472,7 +547,7 @@ class ImapNetworkPolicyTests(unittest.TestCase):
             return_value=({"email": "owner@example.com"}, None),
         ), patch.object(
             connect_route,
-            "resolve_owned_onboarding_imap_registration",
+            "resolve_owned_onboarding_custom_imap_target",
             return_value=onboarding_target(config),
         ), patch.object(
             connect_route,
@@ -617,7 +692,7 @@ class ImapNetworkPolicyTests(unittest.TestCase):
                     return_value=({"email": "owner@example.com"}, None),
                 ), patch.object(
                     connect_route,
-                    "resolve_owned_onboarding_imap_registration",
+                    "resolve_owned_onboarding_custom_imap_target",
                     return_value=onboarding_target(config),
                 ), patch.object(
                     connect_route,
@@ -662,7 +737,7 @@ class ImapNetworkPolicyTests(unittest.TestCase):
             return_value=({"email": "owner@example.com"}, None),
         ), patch.object(
             connect_route,
-            "resolve_owned_onboarding_imap_registration",
+            "resolve_owned_onboarding_custom_imap_target",
             return_value=onboarding_target(valid_config),
         ), patch.object(
             connect_route,
@@ -721,7 +796,7 @@ class ImapNetworkPolicyTests(unittest.TestCase):
                     return_value=({"email": "owner@example.com"}, None),
                 ), patch.object(
                     connect_route,
-                    "resolve_owned_onboarding_imap_registration",
+                    "resolve_owned_onboarding_custom_imap_target",
                     return_value=onboarding_target(config),
                 ), patch.object(
                     connect_route,
@@ -2091,7 +2166,7 @@ class ImapNetworkPolicyTests(unittest.TestCase):
                 return_value=(user, None),
             ), patch.object(
                 connect_route,
-                "resolve_owned_onboarding_imap_registration",
+                "resolve_owned_onboarding_custom_imap_target",
                 return_value=onboarding_target(onboarding_config()),
             ), patch.object(
                 connect_route,
@@ -2281,6 +2356,9 @@ class ResolverTests(unittest.TestCase):
                 "provider": "custom_imap",
                 "connected": True,
                 "connectionStatus": "connected",
+                "imapConnectionStatus": "connected",
+                "smtpConnectionStatus": "connected",
+                "fullyConnected": True,
                 "customImap": {
                     "host": "imap.example.com",
                     "port": "993",
@@ -3191,6 +3269,104 @@ class InitialAndRefreshTests(unittest.TestCase):
         config_rollback.assert_not_called()
         secret_rollback.assert_not_called()
 
+    def test_reconnect_new_shared_imap_password_retests_preserved_smtp_before_rotation(self):
+        user = {"email": "owner@example.com"}
+        payload = initial_payload(mode="reconnect")
+        payload["connection"].pop("smtp")
+        target = complete_connection_target()
+        target["inbox"].update(
+            {
+                "imapConnectionStatus": "connected",
+                "smtpConnectionStatus": "connected",
+                "fullyConnected": True,
+                "customSmtp": {
+                    "host": "smtp.old.example.com",
+                    "port": "465",
+                    "security": "ssl",
+                    "username": "",
+                    "useSameCredentials": True,
+                },
+            }
+        )
+        prior_snapshot = {
+            "status": "present",
+            "record": {"raw": "exact-prior-secret"},
+            "error": None,
+        }
+        prior_secret = {
+            "status": "present",
+            "record": {
+                "credentialVersion": CREDENTIAL_VERSION_A,
+                "imapPassword": "old-imap-secret",
+                "smtpPassword": "",
+            },
+            "error": None,
+        }
+        handler = FakeHandler(payload)
+
+        with patch.object(
+            connect_route,
+            "resolve_authenticated_user",
+            return_value=(user, None),
+        ), patch.object(
+            connect_route,
+            "resolve_owned_managed_inbox_record",
+            return_value=target,
+        ), patch.object(
+            connect_route,
+            "snapshot_encrypted_mailbox_secret",
+            return_value=prior_snapshot,
+        ), patch.object(
+            connect_route,
+            "read_mailbox_secret",
+            return_value=prior_secret,
+        ), patch.object(
+            imap_connect_preview,
+            "build_connect_preview_response",
+            return_value=(200, {"ok": True, "messages": []}),
+        ) as imap_preview, patch.object(
+            connect_route,
+            "generate_mailbox_credential_version",
+        ) as generate, patch.object(
+            connect_route,
+            "save_mailbox_secret",
+        ) as save, patch.object(
+            connect_route,
+            "upsert_owned_custom_imap_mailbox",
+        ) as upsert:
+            smtp_test = invoke_connect(
+                handler,
+                smtp_result=(
+                    401,
+                    {
+                        "ok": False,
+                        "error": {"code": "smtp_authentication_failed"},
+                    },
+                ),
+            )
+
+        self.assertEqual(handler.status, 502)
+        self.assertEqual(
+            handler.response()["error"]["code"],
+            "smtp_authentication_failed",
+        )
+        self.assertEqual(
+            imap_preview.call_args.args[0]["password"],
+            "one-time-imap",
+        )
+        smtp_test.assert_called_once_with(
+            {
+                "host": "smtp.old.example.com",
+                "port": 465,
+                "security": "ssl",
+                "username": "demo@example.com",
+                "password": "one-time-imap",
+            }
+        )
+        generate.assert_not_called()
+        save.assert_not_called()
+        upsert.assert_not_called()
+
     def test_credential_payload_validation_stops_before_target_network_or_secrets(self):
         cases = []
 
@@ -4078,7 +4254,7 @@ class OnboardingImapRegistrationTests(unittest.TestCase):
             "release_mailbox_mutation_lease",
         ) as release, patch.object(
             connect_route,
-            "resolve_owned_onboarding_imap_registration",
+            "resolve_owned_onboarding_custom_imap_target",
         ) as resolve_target, patch.object(
             connect_route,
             "_prepare_server_mailbox_id",
@@ -4166,7 +4342,7 @@ class OnboardingImapRegistrationTests(unittest.TestCase):
             side_effect=release,
         ), patch.object(
             connect_route,
-            "resolve_owned_onboarding_imap_registration",
+            "resolve_owned_onboarding_custom_imap_target",
             return_value=onboarding_target(config),
         ), patch.object(
             connect_route.uuid,
@@ -4250,7 +4426,7 @@ class OnboardingImapRegistrationTests(unittest.TestCase):
             return_value=(user, None),
         ) as session_resolver, patch.object(
             connect_route,
-            "resolve_owned_onboarding_imap_registration",
+            "resolve_owned_onboarding_custom_imap_target",
             return_value=onboarding_target(config),
         ) as target_resolver, patch.object(
             connect_route.uuid,
@@ -4307,7 +4483,12 @@ class OnboardingImapRegistrationTests(unittest.TestCase):
         self.assertNotIn(expected_id, json.dumps(handler.response()))
         self.assertNotIn(CREDENTIAL_VERSION_B, json.dumps(handler.response()))
         session_resolver.assert_called_once_with(handler.headers)
-        target_resolver.assert_called_once_with(handler.headers, "promo", "promo@example.com")
+        target_resolver.assert_called_once_with(
+            handler.headers,
+            "promo",
+            "promo@example.com",
+            None,
+        )
         secure_connect.assert_called_once_with(
             {
                 "host": "imap.example.com",
@@ -4322,7 +4503,7 @@ class OnboardingImapRegistrationTests(unittest.TestCase):
             "owner@example.com",
             expected_id,
             imap_password="one-time-onboarding-imap",
-            smtp_password=None,
+            smtp_password="",
             credential_version=CREDENTIAL_VERSION_B,
             expected_snapshot={"status": "missing", "record": None, "error": None},
             require_namespace_missing=True,
@@ -4340,11 +4521,21 @@ class OnboardingImapRegistrationTests(unittest.TestCase):
                     "ssl": True,
                     "username": "promo@example.com",
                 },
-                "customSmtp": {},
+                "customSmtp": {
+                    "host": "smtp.example.com",
+                    "port": "587",
+                    "security": "starttls",
+                    "username": "",
+                    "useSameCredentials": True,
+                },
+                "imapConnectionStatus": "connected",
+                "smtpConnectionStatus": "connected",
+                "fullyConnected": True,
             },
             credential_version=CREDENTIAL_VERSION_B,
             expected_inbox=None,
             onboarding_inbox_id="promo",
+            expected_onboarding_session=config["onboardingSession"],
         )
         resolve_readback.assert_called_once_with(handler.headers, expected_id)
         restore_secret.assert_not_called()
@@ -4395,7 +4586,6 @@ class OnboardingImapRegistrationTests(unittest.TestCase):
             "id",
             "mailboxId",
             "managedInboxId",
-            "serverMailboxId",
             "credentialId",
             "userId",
             "workspaceId",
@@ -4414,7 +4604,7 @@ class OnboardingImapRegistrationTests(unittest.TestCase):
                     return_value=({"email": "owner@example.com"}, None),
                 ), patch.object(
                     connect_route,
-                    "resolve_owned_onboarding_imap_registration",
+                    "resolve_owned_onboarding_custom_imap_target",
                 ) as target, patch.object(
                     imap_connect_preview,
                     "build_secure_imap_authentication_response",
@@ -4463,7 +4653,7 @@ class OnboardingImapRegistrationTests(unittest.TestCase):
                         "resolve_owned_managed_inbox_record",
                     ) as target, patch.object(
                         connect_route,
-                        "resolve_owned_onboarding_imap_registration",
+                        "resolve_owned_onboarding_custom_imap_target",
                     ) as onboarding_target_resolver, patch.object(
                         imap_connect_preview,
                         "build_connect_preview_response",
@@ -4581,7 +4771,7 @@ class OnboardingImapRegistrationTests(unittest.TestCase):
                     return_value=({"email": "owner@example.com"}, None),
                 ), patch.object(
                     connect_route,
-                    "resolve_owned_onboarding_imap_registration",
+                    "resolve_owned_onboarding_custom_imap_target",
                 ) as target, patch.object(
                     imap_connect_preview.imaplib,
                     "IMAP4",
@@ -4951,7 +5141,7 @@ class OnboardingImapRegistrationTests(unittest.TestCase):
                     return_value=({"email": "owner@example.com"}, None),
                 ), patch.object(
                     connect_route,
-                    "resolve_owned_onboarding_imap_registration",
+                    "resolve_owned_onboarding_custom_imap_target",
                     return_value=onboarding_target(config),
                 ), patch.object(
                     imap_connect_preview,
@@ -4991,7 +5181,7 @@ class OnboardingImapRegistrationTests(unittest.TestCase):
             return_value=({"email": "owner@example.com"}, None),
         ), patch.object(
             connect_route,
-            "resolve_owned_onboarding_imap_registration",
+            "resolve_owned_onboarding_custom_imap_target",
             return_value=onboarding_target(config),
         ), patch.object(
             connect_route,
@@ -5037,7 +5227,7 @@ class OnboardingImapRegistrationTests(unittest.TestCase):
             "owner@example.com",
             "imap-server-owned",
             imap_password="one-time-onboarding-imap",
-            smtp_password=None,
+            smtp_password="",
             credential_version=CREDENTIAL_VERSION_B,
             expected_snapshot=snapshot,
             require_namespace_missing=True,
@@ -5069,7 +5259,7 @@ class OnboardingImapRegistrationTests(unittest.TestCase):
             return_value=({"email": "owner@example.com"}, None),
         ), patch.object(
             connect_route,
-            "resolve_owned_onboarding_imap_registration",
+            "resolve_owned_onboarding_custom_imap_target",
             return_value=onboarding_target(config),
         ), patch.object(
             connect_route,
@@ -5126,7 +5316,7 @@ class OnboardingImapRegistrationTests(unittest.TestCase):
             return_value=({"email": "owner@example.com"}, None),
         ), patch.object(
             connect_route,
-            "resolve_owned_onboarding_imap_registration",
+            "resolve_owned_onboarding_custom_imap_target",
             return_value=onboarding_target(config),
         ), patch.object(
             connect_route,
@@ -5330,7 +5520,7 @@ class OnboardingImapRegistrationTests(unittest.TestCase):
             return_value=({"email": "owner@example.com"}, None),
         ), patch.object(
             connect_route,
-            "resolve_owned_onboarding_imap_registration",
+            "resolve_owned_onboarding_custom_imap_target",
             return_value=onboarding_target(config),
         ), patch.object(
             connect_route.uuid,
@@ -5545,6 +5735,408 @@ class OnboardingImapRegistrationTests(unittest.TestCase):
         self.assertEqual(current["managedInboxes"][-1], mutated_mailbox)
 
 
+class OnboardingCapabilityUpgradeTests(unittest.TestCase):
+    def _run_partial_upgrade(
+        self,
+        *,
+        use_same_credentials,
+        legacy_smtp_placeholder=False,
+        smtp_result=(200, {"ok": True}),
+    ):
+        base_config = onboarding_config()
+        target = partial_onboarding_target(
+            base_config,
+            legacy_smtp_placeholder=legacy_smtp_placeholder,
+        )
+        existing = target["inbox"]
+        payload = onboarding_payload()
+        payload["serverMailboxId"] = existing["id"]
+        payload["connection"].pop("imap")
+        if use_same_credentials:
+            smtp_username = ""
+            explicit_smtp_password = None
+            stored_smtp_password = ""
+        else:
+            smtp_username = "outgoing@example.com"
+            explicit_smtp_password = "one-time-outgoing-secret"
+            stored_smtp_password = explicit_smtp_password
+            payload["connection"]["smtp"].update(
+                {
+                    "username": smtp_username,
+                    "password": explicit_smtp_password,
+                    "useSameCredentials": False,
+                }
+            )
+
+        full_mailbox = {
+            **existing,
+            "credentialVersion": CREDENTIAL_VERSION_B,
+            "customSmtp": {
+                "host": "smtp.example.com",
+                "port": "587",
+                "security": "starttls",
+                "username": smtp_username,
+                "useSameCredentials": use_same_credentials,
+            },
+            "imapConnectionStatus": "connected",
+            "smtpConnectionStatus": "connected",
+            "fullyConnected": True,
+        }
+        full_config = {
+            **target["config"],
+            "managedInboxes": [
+                full_mailbox if inbox.get("id") == existing["id"] else inbox
+                for inbox in target["config"]["managedInboxes"]
+            ],
+        }
+        encrypted_snapshot = {
+            "status": "present",
+            "record": {"ciphertext": "opaque-existing-secret"},
+            "error": None,
+        }
+        existing_secret = {
+            "status": "present",
+            "record": {
+                "credentialVersion": CREDENTIAL_VERSION_A,
+                "imapPassword": "stored-imap-secret",
+                "smtpPassword": "",
+            },
+            "error": None,
+        }
+        updated_secret = {
+            "status": "present",
+            "record": {
+                "credentialVersion": CREDENTIAL_VERSION_B,
+                "imapPassword": "stored-imap-secret",
+                "smtpPassword": stored_smtp_password,
+            },
+            "error": None,
+        }
+        handler = FakeHandler(payload)
+        with patch.object(
+            connect_route,
+            "resolve_authenticated_user",
+            return_value=({"email": "owner@example.com"}, None),
+        ), patch.object(
+            connect_route,
+            "resolve_owned_onboarding_custom_imap_target",
+            side_effect=[target, target],
+        ) as resolve_target, patch.object(
+            connect_route,
+            "snapshot_encrypted_mailbox_secret",
+            return_value=encrypted_snapshot,
+        ) as encrypted_read, patch.object(
+            connect_route,
+            "read_mailbox_secret",
+            side_effect=[existing_secret, updated_secret],
+        ) as secret_read, patch.object(
+            connect_route,
+            "generate_mailbox_credential_version",
+            return_value=CREDENTIAL_VERSION_B,
+        ), patch.object(
+            imap_connect_preview,
+            "build_secure_imap_authentication_response",
+        ) as imap_auth, patch.object(
+            connect_route,
+            "save_mailbox_secret",
+            return_value=(updated_secret["record"], None),
+        ) as save_secret, patch.object(
+            connect_route,
+            "upsert_owned_custom_imap_mailbox",
+            return_value={"status": "ok", "error": None},
+        ) as upsert, patch.object(
+            connect_route,
+            "resolve_owned_managed_inbox_record",
+            return_value={
+                "status": "ok",
+                "user": {"email": "owner@example.com"},
+                "inbox": full_mailbox,
+                "config": full_config,
+                "error": None,
+            },
+        ) as config_readback, patch.object(
+            connect_route,
+            "rollback_owned_custom_imap_mailbox_update",
+        ) as config_rollback, patch.object(
+            connect_route,
+            "restore_encrypted_mailbox_secret_snapshot",
+        ) as secret_rollback:
+            smtp_test = invoke_connect(handler, smtp_result=smtp_result)
+
+        return {
+            "handler": handler,
+            "payload": payload,
+            "target": target,
+            "existing": existing,
+            "full": full_mailbox,
+            "encrypted_snapshot": encrypted_snapshot,
+            "stored_smtp_password": stored_smtp_password,
+            "resolve_target": resolve_target,
+            "encrypted_read": encrypted_read,
+            "secret_read": secret_read,
+            "imap_auth": imap_auth,
+            "smtp_test": smtp_test,
+            "save_secret": save_secret,
+            "upsert": upsert,
+            "config_readback": config_readback,
+            "config_rollback": config_rollback,
+            "secret_rollback": secret_rollback,
+            "explicit_smtp_password": explicit_smtp_password,
+        }
+
+    def test_existing_legacy_partial_reuses_imap_secret_and_same_mailbox_id(self):
+        result = self._run_partial_upgrade(
+            use_same_credentials=True,
+            legacy_smtp_placeholder=True,
+        )
+
+        self.assertEqual(result["handler"].status, 200)
+        self.assertEqual(result["handler"].response(), {"ok": True})
+        self.assertNotIn(
+            "password",
+            json.dumps(result["handler"].response()).casefold(),
+        )
+        self.assertNotIn("imap", result["payload"]["connection"])
+        self.assertEqual(result["full"]["id"], result["existing"]["id"])
+        self.assertEqual(
+            [
+                inbox["id"]
+                for inbox in result["target"]["config"]["managedInboxes"]
+                if inbox["id"] == result["existing"]["id"]
+            ],
+            [result["existing"]["id"]],
+        )
+        result["resolve_target"].assert_has_calls(
+            [
+                unittest.mock.call(
+                    result["handler"].headers,
+                    "promo",
+                    "promo@example.com",
+                    result["existing"]["id"],
+                ),
+                unittest.mock.call(
+                    result["handler"].headers,
+                    "promo",
+                    "promo@example.com",
+                    result["existing"]["id"],
+                ),
+            ]
+        )
+        result["imap_auth"].assert_not_called()
+        result["smtp_test"].assert_called_once_with(
+            {
+                "host": "smtp.example.com",
+                "port": 587,
+                "security": "starttls",
+                "username": "promo@example.com",
+                "password": "stored-imap-secret",
+            }
+        )
+        result["save_secret"].assert_called_once_with(
+            "owner@example.com",
+            result["existing"]["id"],
+            imap_password="stored-imap-secret",
+            smtp_password="",
+            credential_version=CREDENTIAL_VERSION_B,
+            expected_snapshot=result["encrypted_snapshot"],
+            require_namespace_missing=False,
+        )
+        result["upsert"].assert_called_once()
+        self.assertEqual(result["upsert"].call_args.args[1], result["existing"]["id"])
+        self.assertEqual(result["upsert"].call_args.args[2], "reconnect")
+        self.assertEqual(
+            result["upsert"].call_args.kwargs["expected_inbox"],
+            result["existing"],
+        )
+        result["config_rollback"].assert_not_called()
+        result["secret_rollback"].assert_not_called()
+
+    def test_new_onboarding_mailbox_requires_smtp_in_the_same_request(self):
+        payload = onboarding_payload()
+        payload["connection"].pop("smtp")
+        handler = FakeHandler(payload)
+        with patch.object(
+            connect_route,
+            "resolve_authenticated_user",
+            return_value=({"email": "owner@example.com"}, None),
+        ), patch.object(
+            connect_route,
+            "resolve_owned_onboarding_custom_imap_target",
+        ) as resolve_target, patch.object(
+            imap_connect_preview,
+            "build_secure_imap_authentication_response",
+        ) as imap_auth, patch.object(
+            connect_route,
+            "save_mailbox_secret",
+        ) as save_secret:
+            smtp_test = invoke_connect(handler)
+
+        self.assertEqual(handler.status, 400)
+        self.assertEqual(handler.response()["error"]["code"], "invalid_request")
+        resolve_target.assert_not_called()
+        imap_auth.assert_not_called()
+        smtp_test.assert_not_called()
+        save_secret.assert_not_called()
+
+    def test_existing_partial_supports_explicit_separate_smtp_credentials(self):
+        result = self._run_partial_upgrade(use_same_credentials=False)
+
+        self.assertEqual(result["handler"].status, 200)
+        result["imap_auth"].assert_not_called()
+        result["smtp_test"].assert_called_once_with(
+            {
+                "host": "smtp.example.com",
+                "port": 587,
+                "security": "starttls",
+                "username": "outgoing@example.com",
+                "password": "one-time-outgoing-secret",
+            }
+        )
+        result["save_secret"].assert_called_once_with(
+            "owner@example.com",
+            result["existing"]["id"],
+            imap_password="stored-imap-secret",
+            smtp_password="one-time-outgoing-secret",
+            credential_version=CREDENTIAL_VERSION_B,
+            expected_snapshot=result["encrypted_snapshot"],
+            require_namespace_missing=False,
+        )
+
+    def test_partial_smtp_auth_failure_preserves_incoming_state_without_writes(self):
+        result = self._run_partial_upgrade(
+            use_same_credentials=True,
+            smtp_result=(
+                401,
+                {
+                    "ok": False,
+                    "error": {"code": "smtp_authentication_failed"},
+                },
+            ),
+        )
+
+        self.assertEqual(result["handler"].status, 502)
+        self.assertEqual(
+            result["handler"].response()["error"]["code"],
+            "smtp_authentication_failed",
+        )
+        self.assertIs(result["existing"]["connected"], True)
+        self.assertEqual(
+            result["existing"]["imapConnectionStatus"],
+            "connected",
+        )
+        self.assertIs(result["existing"]["fullyConnected"], False)
+        result["save_secret"].assert_not_called()
+        result["upsert"].assert_not_called()
+        result["config_readback"].assert_not_called()
+        result["config_rollback"].assert_not_called()
+        result["secret_rollback"].assert_not_called()
+
+    def test_selector_mismatch_stops_before_imap_smtp_or_secret_access(self):
+        payload = onboarding_payload()
+        payload["serverMailboxId"] = "imap-client-selector"
+        payload["connection"].pop("imap")
+        handler = FakeHandler(payload)
+        target = {
+            "status": "conflict",
+            "user": {"email": "owner@example.com"},
+            "inbox": None,
+            "config": onboarding_config(),
+            "error": {
+                "code": "mailbox_id_conflict",
+                "message": "selector mismatch",
+            },
+        }
+        with patch.object(
+            connect_route,
+            "resolve_authenticated_user",
+            return_value=({"email": "owner@example.com"}, None),
+        ), patch.object(
+            connect_route,
+            "resolve_owned_onboarding_custom_imap_target",
+            return_value=target,
+        ) as resolve_target, patch.object(
+            imap_connect_preview,
+            "build_secure_imap_authentication_response",
+        ) as imap_auth, patch.object(
+            connect_route,
+            "snapshot_encrypted_mailbox_secret",
+        ) as secret_snapshot, patch.object(
+            connect_route,
+            "save_mailbox_secret",
+        ) as save_secret, patch.object(
+            connect_route,
+            "upsert_owned_custom_imap_mailbox",
+        ) as upsert:
+            smtp_test = invoke_connect(handler)
+
+        self.assertEqual(handler.status, 409)
+        self.assertEqual(
+            handler.response()["error"]["code"],
+            "mailbox_registration_conflict",
+        )
+        resolve_target.assert_called_once_with(
+            handler.headers,
+            "promo",
+            "promo@example.com",
+            "imap-client-selector",
+        )
+        imap_auth.assert_not_called()
+        smtp_test.assert_not_called()
+        secret_snapshot.assert_not_called()
+        save_secret.assert_not_called()
+        upsert.assert_not_called()
+
+    def test_new_mailbox_smtp_failure_creates_no_record_or_secret(self):
+        config = onboarding_config()
+        handler = FakeHandler(onboarding_payload())
+        with patch.object(
+            connect_route,
+            "resolve_authenticated_user",
+            return_value=({"email": "owner@example.com"}, None),
+        ), patch.object(
+            connect_route,
+            "resolve_owned_onboarding_custom_imap_target",
+            return_value=onboarding_target(config),
+        ), patch.object(
+            connect_route,
+            "_prepare_server_mailbox_id",
+            return_value=(
+                "imap-server-owned",
+                {"status": "missing", "record": None, "error": None},
+                "m" * 43,
+                None,
+            ),
+        ), patch.object(
+            imap_connect_preview,
+            "build_secure_imap_authentication_response",
+            return_value=(200, {"ok": True}),
+        ) as imap_auth, patch.object(
+            connect_route,
+            "save_mailbox_secret",
+        ) as save_secret, patch.object(
+            connect_route,
+            "upsert_owned_custom_imap_mailbox",
+        ) as upsert:
+            smtp_test = invoke_connect(
+                handler,
+                smtp_result=(
+                    502,
+                    {"ok": False, "error": {"code": "smtp_tls_failed"}},
+                ),
+            )
+
+        self.assertEqual(handler.status, 502)
+        self.assertEqual(
+            handler.response()["error"]["code"],
+            "smtp_tls_failed",
+        )
+        imap_auth.assert_called_once()
+        smtp_test.assert_called_once()
+        save_secret.assert_not_called()
+        upsert.assert_not_called()
+        self.assertEqual(config["managedInboxes"], onboarding_config()["managedInboxes"])
+
+
 class ExistingMailboxOperationTests(unittest.TestCase):
     def test_action_and_attachment_reject_browser_connection_fields(self):
         for route, payload in (
@@ -5635,26 +6227,75 @@ class ExistingMailboxOperationTests(unittest.TestCase):
                 "attachments": [],
             }
         )
-        smtp_instance = Mock()
-        smtp_context = Mock()
-        smtp_context.__enter__ = Mock(return_value=smtp_instance)
-        smtp_context.__exit__ = Mock(return_value=False)
         with patch.object(send_route, "resolve_authenticated_imap_mailbox", return_value=resolved_mailbox()), patch.object(
             send_route,
             "resolve_owned_mailbox",
             return_value={"status": "ok", "inbox": {"provider": "custom_imap"}},
         ), patch.object(
-            send_route.smtplib,
-            "SMTP",
-            return_value=smtp_context,
-        ) as smtp_constructor:
+            send_route,
+            "send_public_smtp_message",
+        ) as safe_smtp_send:
             send_route.handler.do_POST(handler)
 
         self.assertEqual(handler.status, 200)
-        smtp_constructor.assert_called_once_with("smtp.example.com", 587, timeout=30)
-        smtp_instance.login.assert_called_once_with("smtp-user", "smtp-secret")
-        sent_message = smtp_instance.send_message.call_args.args[0]
+        safe_smtp_send.assert_called_once()
+        send_arguments = safe_smtp_send.call_args
+        self.assertEqual(
+            send_arguments.args[:5],
+            (
+                "smtp.example.com",
+                587,
+                "starttls",
+                "smtp-user",
+                "smtp-secret",
+            ),
+        )
+        self.assertEqual(send_arguments.args[6], ["recipient@example.com"])
+        self.assertEqual(send_arguments.kwargs, {"timeout": 30})
+        sent_message = send_arguments.args[5]
         self.assertEqual(sent_message["From"], "demo@example.com")
+
+    def test_gmail_send_dispatch_does_not_use_custom_smtp_transport(self):
+        handler = FakeHandler(
+            {
+                "mailboxId": "gmail-1",
+                "to": "recipient@example.com",
+                "subject": "Subject",
+                "bodyHtml": "<p>Body</p>",
+                "bodyText": "Body",
+                "attachments": [],
+            }
+        )
+        gmail_context = {
+            "mailbox_email": "owner@example.com",
+            "access_token": "google-token",
+        }
+        with patch.object(
+            send_route,
+            "resolve_owned_mailbox",
+            return_value={"status": "ok", "inbox": {"provider": "google"}},
+        ), patch.object(
+            send_route,
+            "resolve_gmail_context",
+            return_value={"status": "ok", "context": gmail_context},
+        ), patch.object(
+            send_route,
+            "_send_with_gmail_oauth",
+            return_value=(True, None, None),
+        ) as gmail_send, patch.object(
+            send_route,
+            "send_public_smtp_message",
+        ) as custom_smtp_send:
+            send_route.handler.do_POST(handler)
+
+        self.assertEqual(handler.status, 200)
+        gmail_send.assert_called_once()
+        self.assertIs(gmail_send.call_args.args[0], gmail_context)
+        self.assertEqual(
+            gmail_send.call_args.args[1]["From"],
+            "owner@example.com",
+        )
+        custom_smtp_send.assert_not_called()
 
     def test_custom_smtp_rejects_from_and_password_overrides(self):
         for forbidden in ({"from": "attacker@example.com"}, {"password": "evil"}):
@@ -6324,6 +6965,9 @@ class CredentialsRouteTests(unittest.TestCase):
                     "provider": "custom_imap",
                     "connected": True,
                     "connectionStatus": "connected",
+                    "imapConnectionStatus": "connected",
+                    "smtpConnectionStatus": "connected",
+                    "fullyConnected": True,
                     "credentialVersion": CREDENTIAL_VERSION_A,
                     "customSmtp": {
                         "host": "smtp.example.com",

@@ -131,16 +131,14 @@ export type InitialConnectInboxRequest = {
 export type OnboardingConnectInboxRequest = {
   mode: "onboarding";
   onboardingInboxId: string;
+  serverMailboxId?: string;
   connection: {
     provider: "custom_imap";
     email: string;
-    imap: {
-      host: string;
-      port: string;
-      ssl: true;
-      username: string;
-      password: string;
+    imap?: ImapConnectWireSettings & {
+      password?: string;
     };
+    smtp: SmtpConnectWireSettings;
   };
 };
 
@@ -364,6 +362,16 @@ function trimmedString(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
 }
 
+function isSecureSmtpSubmissionPair(
+  port: string,
+  security: SmtpConnectWireSettings["security"],
+) {
+  return (
+    (security === "ssl" && port === "465") ||
+    (security === "starttls" && port === "587")
+  );
+}
+
 function normalizeSmtpWireSettings(
   value: CustomSmtpSettings | null | undefined,
 ): SmtpConnectWireSettings | undefined {
@@ -396,6 +404,7 @@ function normalizeSmtpWireSettings(
     !port ||
     !security ||
     useSameCredentials === undefined ||
+    !isSecureSmtpSubmissionPair(port, security) ||
     (!useSameCredentials && !username)
   ) {
     throw new ConnectRequestValidationError(
@@ -506,22 +515,79 @@ export function buildConnectInboxRequest(
 
 export function buildOnboardingConnectInboxRequest(options: {
   onboardingInboxId: string;
+  serverMailboxId?: string | null;
   email: string;
   customImap: CustomImapSettings;
+  customSmtp: CustomSmtpSettings;
+  imapPassword?: string;
+  smtpPassword?: string;
 }): OnboardingConnectInboxRequest {
+  if (containsClientCredentialGeneration(options)) {
+    throw new ConnectRequestValidationError(
+      "forbidden_client_authority",
+      "Credential generation is server-owned.",
+    );
+  }
+
+  const onboardingInboxId = options.onboardingInboxId.trim();
+  const rawServerMailboxId = options.serverMailboxId;
+  const serverMailboxId = rawServerMailboxId?.trim() ?? "";
+  if (
+    !onboardingInboxId ||
+    (rawServerMailboxId !== null &&
+      rawServerMailboxId !== undefined &&
+      (!serverMailboxId || serverMailboxId !== rawServerMailboxId))
+  ) {
+    throw new ConnectRequestValidationError(
+      "forbidden_client_authority",
+      "The mailbox identity is invalid.",
+    );
+  }
+
+  const imapPassword = normalizeOneTimePassword(
+    options.imapPassword ?? options.customImap.password,
+  );
+  if (!serverMailboxId && !imapPassword) {
+    throw new ConnectRequestValidationError(
+      "imap_password_required",
+      "An IMAP password is required.",
+    );
+  }
+  const smtp = normalizeSmtpWireSettings(
+    options.customSmtp
+      ? {
+          ...options.customSmtp,
+          password:
+            options.smtpPassword ?? options.customSmtp.password,
+        }
+      : options.customSmtp,
+  );
+  if (!smtp) {
+    throw new ConnectRequestValidationError(
+      "smtp_configuration_incomplete",
+      "SMTP settings are incomplete.",
+    );
+  }
+
   return {
     mode: "onboarding",
-    onboardingInboxId: options.onboardingInboxId.trim(),
+    onboardingInboxId,
+    ...(serverMailboxId ? { serverMailboxId } : {}),
     connection: {
       provider: "custom_imap",
       email: options.email.trim(),
-      imap: {
-        host: options.customImap.host.trim(),
-        port: options.customImap.port.trim(),
-        ssl: true,
-        username: options.customImap.username.trim(),
-        password: options.customImap.password,
-      },
+      ...(!serverMailboxId
+        ? {
+            imap: {
+              host: options.customImap.host.trim(),
+              port: options.customImap.port.trim(),
+              ssl: true as const,
+              username: options.customImap.username.trim(),
+              password: imapPassword as string,
+            },
+          }
+        : {}),
+      smtp,
     },
   };
 }
@@ -968,8 +1034,12 @@ export async function beginInboxConnection(options: {
 export async function beginOnboardingInboxConnection(
   options: {
     onboardingInboxId: string;
+    serverMailboxId?: string | null;
     email: string;
     customImap: CustomImapSettings;
+    customSmtp: CustomSmtpSettings;
+    imapPassword?: string;
+    smtpPassword?: string;
   },
   signal?: AbortSignal,
 ): Promise<InboxConnectionAttemptResult> {
@@ -988,10 +1058,29 @@ export async function beginOnboardingInboxConnection(
     };
   }
 
-  const response = await connectInboxWithImap(
-    buildOnboardingConnectInboxRequest(options),
-    signal,
-  );
+  let request: OnboardingConnectInboxRequest;
+  try {
+    request = buildOnboardingConnectInboxRequest(options);
+  } catch (error) {
+    const validationError =
+      error instanceof ConnectRequestValidationError ? error : null;
+    const message =
+      validationError?.message ?? "Connection settings are invalid.";
+    return {
+      ok: false,
+      connected: false,
+      connectionMethod: "imap",
+      connectionStatus: "connection_failed",
+      connectionMessage: message,
+      oauthAuthorizationUrl: null,
+      error: {
+        code: validationError?.code ?? "invalid_request",
+        message,
+      },
+    };
+  }
+
+  const response = await connectInboxWithImap(request, signal);
 
   if (!response.ok) {
     const safeError = response.error

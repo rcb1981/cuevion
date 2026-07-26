@@ -23,6 +23,7 @@ import {
 import type {
   CustomInboxDefinition,
   CustomImapSettings,
+  CustomSmtpSettings,
   InboxConnection,
   InboxId,
   OnboardingState,
@@ -39,7 +40,10 @@ import type { UserConfig } from "../../types/userConfig";
 import { NavigationBar } from "./NavigationBar";
 import { ProgressIndicator } from "./ProgressIndicator";
 import { StepComplete } from "./StepComplete";
-import { StepConnectInboxes } from "./StepConnectInboxes";
+import {
+  StepConnectInboxes,
+  isOnboardingInboxFullyConnected,
+} from "./StepConnectInboxes";
 import {
   onboardingFocusItems,
   StepFocusPreferences,
@@ -173,11 +177,33 @@ export function buildOnboardingInboxConnectionUpdate(
       ...connection.customSmtp,
       password: "",
     },
+    ...(isCustomImap
+      ? {
+          imapConnectionStatus: customImapFailure
+            ? ("connection_failed" as const)
+            : ("not_connected" as const),
+          smtpConnectionStatus: "not_configured" as const,
+          fullyConnected: false,
+        }
+      : {}),
   };
 }
 
 function dedupeInboxes(inboxes: Array<InboxId | null | undefined>) {
   return [...new Set(inboxes.filter((inboxId): inboxId is InboxId => Boolean(inboxId)))];
+}
+
+export function areSelectedOnboardingInboxesFullyConnected(
+  state: Pick<OnboardingState, "selectedInboxes" | "inboxConnections">,
+) {
+  return (
+    state.selectedInboxes.length > 0 &&
+    state.selectedInboxes.every((inboxId) =>
+      isOnboardingInboxFullyConnected(
+        state.inboxConnections[inboxId],
+      ),
+    )
+  );
 }
 
 interface OnboardingFlowProps {
@@ -239,7 +265,7 @@ export function OnboardingFlow({
     (
       {
         1: "Choose which mail types stay Normal and which should be Low.",
-        2: "Connect at least one source account. More inboxes can be added later.",
+        2: "Connect each selected source account. More inboxes can be added later.",
       } as const
     )[step as 1 | 2] ?? null;
 
@@ -263,8 +289,10 @@ export function OnboardingFlow({
 
   const connectedInboxIds = state.selectedInboxes.filter((inboxId) => {
     const connection = getInboxConnection(state, inboxId);
-    return connection.connected || connection.connectionStatus === "connected";
+    return isOnboardingInboxFullyConnected(connection);
   });
+  const everySelectedInboxIsFullyConnected =
+    areSelectedOnboardingInboxesFullyConnected(state);
   const normalizedFocusPreferences = normalizeFocusPreferences(state.focusPreferences);
   const lowFocusLabels = onboardingFocusItems
     .filter((item) =>
@@ -274,11 +302,11 @@ export function OnboardingFlow({
 
   const canGoNext = useMemo(() => {
     if (step === 2) {
-      return connectedInboxIds.length > 0;
+      return everySelectedInboxIsFullyConnected;
     }
 
     return true;
-  }, [connectedInboxIds.length, step]);
+  }, [everySelectedInboxIsFullyConnected, step]);
 
   const setFocusPreference = (
     fields: Array<keyof OnboardingState["focusPreferences"]>,
@@ -373,6 +401,9 @@ export function OnboardingFlow({
           connected: false,
           connectionMethod: getProviderConnectionMethod(provider),
           connectionStatus: getDefaultConnectionStatus(provider),
+          imapConnectionStatus: "not_connected",
+          smtpConnectionStatus: "not_configured",
+          fullyConnected: false,
           connectionMessage: null,
           oauthAuthorizationUrl: null,
           provider,
@@ -409,6 +440,9 @@ export function OnboardingFlow({
           connectionStatus: getDefaultConnectionStatus(
             getInboxConnection(current, inboxId).provider,
           ),
+          imapConnectionStatus: "not_connected",
+          smtpConnectionStatus: "not_configured",
+          fullyConnected: false,
           connectionMessage: null,
           oauthAuthorizationUrl: null,
           email,
@@ -452,6 +486,9 @@ export function OnboardingFlow({
           connectionStatus: getDefaultConnectionStatus(
             getInboxConnection(current, inboxId).provider,
           ),
+          imapConnectionStatus: "not_connected",
+          smtpConnectionStatus: "not_configured",
+          fullyConnected: false,
           connectionMessage: null,
           oauthAuthorizationUrl: null,
           customImap: {
@@ -466,6 +503,37 @@ export function OnboardingFlow({
         },
       },
     }));
+  };
+
+  const setCustomSmtp = (
+    inboxId: InboxId,
+    field: keyof CustomSmtpSettings,
+    value: string | boolean,
+  ) => {
+    if (mutationIsLocked() || field === "password") {
+      return;
+    }
+
+    onStateChange((current) => {
+      const currentConnection = getInboxConnection(current, inboxId);
+      return {
+        ...current,
+        inboxConnections: {
+          ...current.inboxConnections,
+          [inboxId]: {
+            ...currentConnection,
+            smtpConnectionStatus: "not_configured",
+            fullyConnected: false,
+            connectionMessage: null,
+            customSmtp: {
+              ...currentConnection.customSmtp,
+              [field]: value,
+              password: "",
+            },
+          },
+        },
+      };
+    });
   };
 
   const reuseCustomImap = (inboxId: InboxId, settings: CustomImapSettings) => {
@@ -483,11 +551,18 @@ export function OnboardingFlow({
           connectionStatus: getDefaultConnectionStatus(
             getInboxConnection(current, inboxId).provider,
           ),
+          imapConnectionStatus: "not_connected",
+          smtpConnectionStatus: "not_configured",
+          fullyConnected: false,
           connectionMessage: null,
           oauthAuthorizationUrl: null,
           customImap: {
             ...settings,
             ssl: true,
+            password: "",
+          },
+          customSmtp: {
+            ...getInboxConnection(current, inboxId).customSmtp,
             password: "",
           },
         },
@@ -607,6 +682,7 @@ export function OnboardingFlow({
             onProviderChange={setProvider}
             onEmailChange={setEmail}
             onCustomImapChange={setCustomImap}
+            onCustomSmtpChange={setCustomSmtp}
             onReuseCustomImap={reuseCustomImap}
             onConnectInbox={connectInbox}
             onReloadAccountConfig={onReloadAccountConfig}

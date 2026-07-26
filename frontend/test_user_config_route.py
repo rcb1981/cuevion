@@ -504,6 +504,193 @@ class GetRouteTests(unittest.TestCase):
         self.assertNotIn(CREDENTIAL_VERSION_CANARY, serialized)
         write_mock.assert_not_called()
 
+    def test_legacy_generation_bound_partial_projects_incoming_only_capability(self):
+        stored = {
+            "v": 1,
+            "email": "owner@example.com",
+            "onboardingSession": onboarding_session(),
+            "managedInboxes": [
+                {
+                    "id": "imap-server-owned",
+                    "email": "artist@example.com",
+                    "onboardingInboxId": "custom:vip-mabc123",
+                    "provider": "custom_imap",
+                    "connected": True,
+                    "connectionStatus": "connected",
+                    "credentialVersion": CREDENTIAL_VERSION_CANARY,
+                    "customImap": {
+                        "host": "imap.example.com",
+                        "port": "993",
+                        "ssl": True,
+                        "username": "artist@example.com",
+                    },
+                    "customSmtp": {"password": ""},
+                }
+            ],
+        }
+        secret = {
+            "status": "present",
+            "record": {
+                "credentialVersion": CREDENTIAL_VERSION_CANARY,
+                "imapPassword": "imap-secret-canary",
+                "smtpPassword": "",
+            },
+            "error": None,
+        }
+
+        with patch.object(
+            config_route,
+            "read_mailbox_secret",
+            return_value=secret,
+        ) as secret_read:
+            handler, _, write_mock = self.invoke(
+                read_result={"status": "ok", "config": stored, "error": None}
+            )
+
+        self.assertEqual(handler.status_code, 200)
+        mailbox = handler.payload()["config"]["managedInboxes"][0]
+        self.assertEqual(mailbox["id"], "imap-server-owned")
+        self.assertEqual(mailbox["imapConnectionStatus"], "connected")
+        self.assertEqual(mailbox["smtpConnectionStatus"], "not_configured")
+        self.assertIs(mailbox["imapPasswordSet"], True)
+        self.assertIs(mailbox["smtpPasswordSet"], False)
+        self.assertIs(mailbox["fullyConnected"], False)
+        serialized = json.dumps(handler.payload())
+        self.assertNotIn("credentialVersion", serialized)
+        self.assertNotIn(CREDENTIAL_VERSION_CANARY, serialized)
+        self.assertNotIn("imap-secret-canary", serialized)
+        secret_read.assert_called_once_with("owner@example.com", "imap-server-owned")
+        write_mock.assert_not_called()
+
+    def test_full_generation_bound_mailbox_projects_both_capabilities_without_secrets(self):
+        stored = {
+            "v": 1,
+            "email": "owner@example.com",
+            "onboardingSession": onboarding_session(),
+            "managedInboxes": [
+                {
+                    "id": "imap-server-owned",
+                    "email": "artist@example.com",
+                    "onboardingInboxId": "custom:vip-mabc123",
+                    "provider": "custom_imap",
+                    "connected": True,
+                    "connectionStatus": "connected",
+                    "imapConnectionStatus": "connected",
+                    "smtpConnectionStatus": "connected",
+                    "fullyConnected": True,
+                    "credentialVersion": CREDENTIAL_VERSION_CANARY,
+                    "customImap": {
+                        "host": "imap.example.com",
+                        "port": "993",
+                        "ssl": True,
+                        "username": "artist@example.com",
+                    },
+                    "customSmtp": {
+                        "host": "smtp.example.com",
+                        "port": "587",
+                        "security": "starttls",
+                        "username": "",
+                        "useSameCredentials": True,
+                    },
+                }
+            ],
+        }
+        secret = {
+            "status": "present",
+            "record": {
+                "credentialVersion": CREDENTIAL_VERSION_CANARY,
+                "imapPassword": "shared-secret-canary",
+                "smtpPassword": "",
+            },
+            "error": None,
+        }
+
+        with patch.object(
+            config_route,
+            "read_mailbox_secret",
+            return_value=secret,
+        ):
+            handler, _, write_mock = self.invoke(
+                read_result={"status": "ok", "config": stored, "error": None}
+            )
+
+        self.assertEqual(handler.status_code, 200)
+        mailbox = handler.payload()["config"]["managedInboxes"][0]
+        self.assertEqual(mailbox["imapConnectionStatus"], "connected")
+        self.assertEqual(mailbox["smtpConnectionStatus"], "connected")
+        self.assertIs(mailbox["imapPasswordSet"], True)
+        self.assertIs(mailbox["smtpPasswordSet"], True)
+        self.assertIs(mailbox["fullyConnected"], True)
+        self.assertEqual(mailbox["customSmtp"]["username"], "")
+        serialized = json.dumps(handler.payload())
+        self.assertNotIn("credentialVersion", serialized)
+        self.assertNotIn(CREDENTIAL_VERSION_CANARY, serialized)
+        self.assertNotIn("shared-secret-canary", serialized)
+        write_mock.assert_not_called()
+
+    def test_malformed_custom_imap_cannot_project_connected_capability(self):
+        stored = {
+            "v": 1,
+            "email": "owner@example.com",
+            "onboardingSession": onboarding_session(),
+            "managedInboxes": [
+                {
+                    "id": "imap-server-owned",
+                    "email": "artist@example.com",
+                    "provider": "custom_imap",
+                    "connected": True,
+                    "connectionStatus": "connected",
+                    "imapConnectionStatus": "connected",
+                    "smtpConnectionStatus": "connected",
+                    "fullyConnected": True,
+                    "credentialVersion": CREDENTIAL_VERSION_CANARY,
+                    "customImap": {
+                        "host": "imap.example.com",
+                        "port": "143",
+                        "ssl": False,
+                        "username": "artist@example.com",
+                    },
+                    "customSmtp": {
+                        "host": "smtp.example.com",
+                        "port": "465",
+                        "security": "ssl",
+                        "username": "artist@example.com",
+                        "useSameCredentials": True,
+                    },
+                }
+            ],
+        }
+        secret = {
+            "status": "present",
+            "record": {
+                "credentialVersion": CREDENTIAL_VERSION_CANARY,
+                "imapPassword": "imap-secret-canary",
+                "smtpPassword": "",
+            },
+            "error": None,
+        }
+
+        with patch.object(
+            config_route,
+            "read_mailbox_secret",
+            return_value=secret,
+        ):
+            handler, _, write_mock = self.invoke(
+                read_result={"status": "ok", "config": stored, "error": None}
+            )
+
+        self.assertEqual(handler.status_code, 200)
+        mailbox = handler.payload()["config"]["managedInboxes"][0]
+        self.assertEqual(mailbox["imapConnectionStatus"], "not_connected")
+        self.assertEqual(mailbox["smtpConnectionStatus"], "not_connected")
+        self.assertIs(mailbox["imapPasswordSet"], True)
+        self.assertIs(mailbox["smtpPasswordSet"], False)
+        self.assertIs(mailbox["fullyConnected"], False)
+        serialized = json.dumps(handler.payload())
+        self.assertNotIn(CREDENTIAL_VERSION_CANARY, serialized)
+        self.assertNotIn("imap-secret-canary", serialized)
+        write_mock.assert_not_called()
+
     def test_configuration_that_cannot_be_safely_normalized_is_config_invalid(self):
         normalization_behaviors = (
             {"side_effect": ValueError("private normalization detail")},
