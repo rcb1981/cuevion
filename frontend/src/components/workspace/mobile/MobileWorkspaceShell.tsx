@@ -321,7 +321,7 @@ export function MobileWorkspaceShell({
               Back
             </button>
           )}
-          <div className="min-w-0 flex-1 text-center text-[1rem] font-semibold tracking-normal text-[color:#fff8ec]">
+          <div className="min-w-0 flex-1 truncate text-center text-[1rem] font-semibold tracking-normal text-[color:#fff8ec]">
             {headerTitle}
           </div>
           {mobileComposeMailbox ? (

@@ -125,6 +125,11 @@ import {
   projectWorkspaceUserAccountConfigForSave,
   type UserAccountConfig,
 } from "../../lib/userConfigApi";
+import {
+  buildCanonicalWorkspaceMailboxPresentations,
+  buildWorkspaceMailboxPresentationLabels,
+  type WorkspaceMailboxDisplayRecord,
+} from "../../lib/mailboxDisplayName";
 import { sendContactSupportRequest } from "../../lib/contactSupportApi";
 import {
   getSessionAccountStorageKey,
@@ -12763,9 +12768,9 @@ function InboxesView({
               onClick={() => onOpenMailbox(inbox)}
               className="grid w-full cursor-pointer grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)_auto] items-center gap-4 rounded-[20px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-4 text-left transition-[background-color,background-image,border-color,transform] duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)] focus-visible:border-[var(--workspace-border-hover)] focus-visible:bg-[linear-gradient(180deg,var(--workspace-card-featured-start),var(--workspace-card-featured-end))] focus-visible:outline-none"
             >
-              <div className="space-y-1">
-                <div className="flex items-center gap-2">
-                  <div className="text-[1rem] font-medium tracking-[-0.014em] text-[var(--workspace-text)]">
+              <div className="min-w-0 space-y-1">
+                <div className="flex min-w-0 items-center gap-2">
+                  <div className="min-w-0 truncate text-[1rem] font-medium tracking-[-0.014em] text-[var(--workspace-text)]">
                     {inbox.title}
                   </div>
                   {index === 0 ? (
@@ -19749,21 +19754,17 @@ function MailboxView({
           };
         })()
       : null;
+  const mailboxPresentationLabels = buildWorkspaceMailboxPresentationLabels(
+    mailbox.title,
+    Boolean(activeMailboxTitleOverride),
+  );
   const activeDestinationTitle = isSharedView
-    ? activeMailboxTitleOverride
-      ? activeMailboxTitleOverride
-      : mailbox.title.endsWith("Inbox")
-        ? mailbox.title
-        : `${mailbox.title} Inbox`
+    ? mailboxPresentationLabels.mailboxHeader
     : activeFolder === "Filtered"
       ? "Filtered"
     : activeSmartFolder
       ? activeSmartFolder.name
-      : activeMailboxTitleOverride
-        ? activeMailboxTitleOverride
-        : mailbox.title.endsWith("Inbox")
-          ? mailbox.title
-          : `${mailbox.title} Inbox`;
+      : mailboxPresentationLabels.mailboxHeader;
   const isReadOnlySmartFolderView = Boolean(activeSmartFolder);
   const shouldBlockSmartFolderMutation = () => {
     if (!activeSmartFolder) {
@@ -20397,13 +20398,13 @@ function MailboxView({
                     }}
                     aria-label="Edit mailbox name"
                     disabled={activeFolder !== "Inbox" || isSharedView || Boolean(activeSmartFolder)}
-                    className={`inline-flex items-center gap-1.5 rounded-full text-[0.98rem] font-semibold tracking-[-0.01em] text-[var(--workspace-text)] transition-colors duration-200 focus-visible:outline-none md:text-[1.04rem] ${
+                    className={`inline-flex min-w-0 max-w-[min(70vw,32rem)] items-center gap-1.5 rounded-full text-[0.98rem] font-semibold tracking-[-0.01em] text-[var(--workspace-text)] transition-colors duration-200 focus-visible:outline-none md:text-[1.04rem] ${
                       activeFolder === "Inbox" && !isSharedView && !activeSmartFolder
                         ? "cursor-pointer"
                         : "cursor-default"
                     }`}
                   >
-                    <span>{activeDestinationTitle}</span>
+                    <span className="block min-w-0 truncate">{activeDestinationTitle}</span>
                     {activeFolder === "Inbox" && !isSharedView && !activeSmartFolder ? (
                       <span className="text-[var(--workspace-text-faint)] opacity-45 transition-opacity duration-200 group-hover:opacity-100">
                         <svg
@@ -21203,11 +21204,7 @@ function MailboxView({
                       const isDragTargetActive = dragTargetKey === dragTargetId;
                       const folderLabel =
                         folder === "Inbox"
-                          ? activeMailboxTitleOverride
-                            ? activeMailboxTitleOverride
-                            : mailbox.title.endsWith("Inbox")
-                              ? mailbox.title
-                              : `${mailbox.title} Inbox`
+                          ? mailboxPresentationLabels.messageListHeading
                           : folder;
 
                       return (
@@ -21239,7 +21236,7 @@ function MailboxView({
                                   : "text-[var(--workspace-text-soft)] hover:bg-[var(--workspace-card-subtle)]"
                             } focus-visible:outline-none`}
                           >
-                            <span className="text-[0.8rem] font-medium uppercase tracking-[0.14em]">
+                            <span className="block min-w-0 truncate text-[0.8rem] font-medium uppercase tracking-[0.14em]">
                               {folderLabel}
                             </span>
                             {shouldShowFolderCount ? (
@@ -26111,6 +26108,56 @@ function normalizeStoredManagedInboxList(value: unknown) {
     .filter((mailbox) => getManagedInboxIdentityKey(mailbox).length > 0);
 }
 
+function readHydratedAuthoritativeManagedInboxPresentations():
+  WorkspaceMailboxDisplayRecord[] {
+  if (typeof window === "undefined") {
+    return [];
+  }
+
+  const storedValue = window.localStorage.getItem(MANAGED_INBOXES_STORAGE_KEY);
+  if (!storedValue) {
+    return [];
+  }
+
+  try {
+    const parsedValue = JSON.parse(storedValue) as unknown;
+    if (!Array.isArray(parsedValue)) {
+      return [];
+    }
+
+    return parsedValue.flatMap((value) => {
+      if (!value || typeof value !== "object" || Array.isArray(value)) {
+        return [];
+      }
+
+      const mailbox = value as Record<string, unknown>;
+      return [
+        {
+          id: typeof mailbox.id === "string" ? mailbox.id : "",
+          ...(typeof mailbox.onboardingInboxId === "string"
+            ? { onboardingInboxId: mailbox.onboardingInboxId }
+            : {}),
+          title: typeof mailbox.title === "string" ? mailbox.title : "",
+          email: typeof mailbox.email === "string" ? mailbox.email : "",
+          provider:
+            typeof mailbox.provider === "string" ? mailbox.provider : null,
+          connected: mailbox.connected === true,
+          connectionMethod:
+            typeof mailbox.connectionMethod === "string"
+              ? mailbox.connectionMethod
+              : null,
+          connectionStatus:
+            typeof mailbox.connectionStatus === "string"
+              ? mailbox.connectionStatus
+              : "",
+        },
+      ];
+    });
+  } catch {
+    return [];
+  }
+}
+
 function isManagedInboxRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
@@ -27721,6 +27768,7 @@ function ManagedInboxEditor({
 
 const ManageInboxesView = memo(function ManageInboxesView({
   savedManagedInboxes,
+  mailboxDisplayTitles,
   primaryManagedInboxId,
   onBack,
   onApply,
@@ -27731,6 +27779,7 @@ const ManageInboxesView = memo(function ManageInboxesView({
   onReloadAuthoritativeMailbox,
 }: {
   savedManagedInboxes: ManagedWorkspaceInbox[];
+  mailboxDisplayTitles: Readonly<Record<string, string | undefined>>;
   primaryManagedInboxId: string | null;
   onBack?: () => void;
   onApply: (nextMailboxes: ManagedWorkspaceInbox[]) => boolean;
@@ -28642,7 +28691,11 @@ const ManageInboxesView = memo(function ManageInboxesView({
                 <div className="space-y-2">
                   {draftManagedInboxes.map((mailbox) => {
                     const isSelected = mailbox.id === selectedInbox?.id;
-                    const mailboxTitle = mailbox.title.trim() || mailbox.email.trim() || "New inbox";
+                    const mailboxTitle =
+                      mailboxDisplayTitles[mailbox.id]?.trim() ||
+                      mailbox.title.trim() ||
+                      mailbox.email.trim() ||
+                      "New inbox";
                     const mailboxEmail = mailbox.email.trim() || "Not configured";
                     const mailboxStatus =
                       getCredentialAwareManagedInboxStatus(
@@ -29868,6 +29921,7 @@ const InboxBehaviorSettingsCard = memo(function InboxBehaviorSettingsCard({
 const FocusPreferencesSettingsCard = memo(function FocusPreferencesSettingsCard({
   themeMode,
   managedInboxes,
+  mailboxDisplayTitles,
   primaryManagedInboxId,
   baseFocusPreferences,
   focusPreferenceOverrides,
@@ -29876,6 +29930,7 @@ const FocusPreferencesSettingsCard = memo(function FocusPreferencesSettingsCard(
 }: {
   themeMode: "light" | "dark";
   managedInboxes: ManagedWorkspaceInbox[];
+  mailboxDisplayTitles: Readonly<Record<string, string | undefined>>;
   primaryManagedInboxId: string | null;
   baseFocusPreferences: FocusPreferences;
   focusPreferenceOverrides: MailboxFocusPreferenceOverridesStore;
@@ -29963,9 +30018,9 @@ const FocusPreferencesSettingsCard = memo(function FocusPreferencesSettingsCard(
                         : "border-[var(--workspace-border)] bg-[var(--workspace-card)] hover:border-[var(--workspace-border-hover)] hover:bg-[var(--workspace-hover-surface)]"
                     }`}
                   >
-                    <div className="flex items-center gap-2">
-                      <div className="text-[0.86rem] font-medium text-[var(--workspace-text)]">
-                        {mailbox.title}
+                    <div className="flex min-w-0 items-center gap-2">
+                      <div className="min-w-0 truncate text-[0.86rem] font-medium text-[var(--workspace-text)]">
+                        {mailboxDisplayTitles[mailbox.id]?.trim() || mailbox.title}
                       </div>
                       {mailbox.id === primaryManagedInboxId ? (
                         <span className={primaryBadgeClass}>Primary</span>
@@ -30771,6 +30826,7 @@ function SettingsView({
   accountEmail,
   productAccess,
   savedManagedInboxes,
+  mailboxDisplayTitles,
   primaryManagedInboxId,
   credentialStatuses,
   baseFocusPreferences,
@@ -30804,6 +30860,7 @@ function SettingsView({
   accountEmail: string;
   productAccess: ProductAccess;
   savedManagedInboxes: ManagedWorkspaceInbox[];
+  mailboxDisplayTitles: Readonly<Record<string, string | undefined>>;
   primaryManagedInboxId: string | null;
   credentialStatuses: MailboxCredentialStatusStore;
   baseFocusPreferences: FocusPreferences;
@@ -30932,6 +30989,7 @@ function SettingsView({
         return (
           <ManageInboxesView
             savedManagedInboxes={savedManagedInboxes}
+            mailboxDisplayTitles={mailboxDisplayTitles}
             primaryManagedInboxId={primaryManagedInboxId}
             onApply={onApplyManagedInboxes}
             onReloadAuthoritativeMailbox={onReloadAuthoritativeMailbox}
@@ -30957,6 +31015,7 @@ function SettingsView({
           <FocusPreferencesSettingsCard
             themeMode={themeMode}
             managedInboxes={savedManagedInboxes}
+            mailboxDisplayTitles={mailboxDisplayTitles}
             primaryManagedInboxId={primaryManagedInboxId}
             baseFocusPreferences={baseFocusPreferences}
             focusPreferenceOverrides={focusPreferenceOverrides}
@@ -33734,6 +33793,14 @@ export function WorkspaceShell({
   });
   const hasAuthenticatedMemberAuthority =
     authenticationContext === "auth0" && authenticatedUser?.userType === "member";
+  const [
+    hydratedAuthoritativeManagedInboxPresentations,
+    setHydratedAuthoritativeManagedInboxPresentations,
+  ] = useState<WorkspaceMailboxDisplayRecord[]>(() =>
+    hasAuthenticatedMemberAuthority
+      ? readHydratedAuthoritativeManagedInboxPresentations()
+      : [],
+  );
   const workspaceAccountConfigSaveQueueRef = useRef<
     ReturnType<typeof createUserAccountConfigConflictRetryQueue> | null
   >(null);
@@ -33913,6 +33980,9 @@ export function WorkspaceShell({
         setSavedManagedInboxes(
           authoritativeMailboxes.map(cloneManagedWorkspaceInbox),
         );
+        setHydratedAuthoritativeManagedInboxPresentations(
+          authoritativeMailboxes.map(cloneManagedWorkspaceInbox),
+        );
         setMailboxCredentialStatuses(authoritativeCredentialStatuses);
         return true;
       } catch {
@@ -33927,27 +33997,48 @@ export function WorkspaceShell({
   );
   const orderedMailboxes = useMemo(
     () =>
-      orderedManagedInboxes
-        .map((mailbox) => ({
-          ...toOrderedMailboxFromManagedInbox(mailbox),
-        }))
-        .map((mailbox) => ({
-          ...mailbox,
-          title: mailboxTitleOverrides[mailbox.id]?.trim() || mailbox.title,
-        })),
-    [mailboxTitleOverrides, orderedManagedInboxes],
+      buildCanonicalWorkspaceMailboxPresentations({
+        mailboxes: orderedManagedInboxes.map(toOrderedMailboxFromManagedInbox),
+        managedInboxes: orderedManagedInboxes,
+        authoritativeManagedInboxes: hasAuthenticatedMemberAuthority
+          ? hydratedAuthoritativeManagedInboxPresentations
+          : orderedManagedInboxes,
+        customInboxes: onboardingState.customInboxes,
+        mailboxTitleOverrides,
+      }),
+    [
+      hasAuthenticatedMemberAuthority,
+      hydratedAuthoritativeManagedInboxPresentations,
+      mailboxTitleOverrides,
+      onboardingState.customInboxes,
+      orderedManagedInboxes,
+    ],
   );
   const sidebarMailboxes = useMemo(
     () =>
-      savedManagedInboxes
-        .map((mailbox) => ({
-          ...toOrderedMailboxFromManagedInbox(mailbox),
-        }))
-        .map((mailbox) => ({
-          ...mailbox,
-          title: mailboxTitleOverrides[mailbox.id]?.trim() || mailbox.title,
-        })),
-    [mailboxTitleOverrides, savedManagedInboxes],
+      buildCanonicalWorkspaceMailboxPresentations({
+        mailboxes: savedManagedInboxes.map(toOrderedMailboxFromManagedInbox),
+        managedInboxes: savedManagedInboxes,
+        authoritativeManagedInboxes: hasAuthenticatedMemberAuthority
+          ? hydratedAuthoritativeManagedInboxPresentations
+          : savedManagedInboxes,
+        customInboxes: onboardingState.customInboxes,
+        mailboxTitleOverrides,
+      }),
+    [
+      hasAuthenticatedMemberAuthority,
+      hydratedAuthoritativeManagedInboxPresentations,
+      mailboxTitleOverrides,
+      onboardingState.customInboxes,
+      savedManagedInboxes,
+    ],
+  );
+  const mailboxDisplayTitles = useMemo(
+    () =>
+      Object.fromEntries(
+        orderedMailboxes.map((mailbox) => [mailbox.id, mailbox.title]),
+      ),
+    [orderedMailboxes],
   );
   const startupSyncMailboxIds = orderedMailboxes
     .map((mailbox) =>
@@ -41270,6 +41361,7 @@ export function WorkspaceShell({
                   accountEmail={accountDisplayEmail}
                   productAccess={productAccess}
                   savedManagedInboxes={savedManagedInboxes}
+                  mailboxDisplayTitles={mailboxDisplayTitles}
                   primaryManagedInboxId={primaryManagedInboxId}
                   credentialStatuses={mailboxCredentialStatuses}
                   baseFocusPreferences={userConfig.focusPreferences}
