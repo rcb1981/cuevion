@@ -418,6 +418,7 @@ def read_imap_folder_snapshot(
     mailbox_key: str,
     email_address: str,
     limit: int = _MAX_SNAPSHOT_LIMIT,
+    readonly: bool = False,
 ) -> ImapFolderSnapshotResult:
     """Read a complete, UID-scoped custom-IMAP preview snapshot."""
     if not _valid_folder(folder):
@@ -438,7 +439,11 @@ def read_imap_folder_snapshot(
 
     provider_folder_argument = _quote_mailbox_argument(folder)
     try:
-        select_response = mailbox.select(provider_folder_argument)
+        select_response = (
+            mailbox.select(provider_folder_argument, readonly=True)
+            if readonly
+            else mailbox.select(provider_folder_argument)
+        )
     except Exception:
         return _snapshot_failure("folder_unavailable", "folder_selection")
     select_parts = _response_parts(select_response)
@@ -453,10 +458,19 @@ def read_imap_folder_snapshot(
         )
 
     try:
-        fetch_result = fetch_recent_messages(
-            mailbox,
-            folder=provider_folder_argument,
-            limit=limit,
+        fetch_result = (
+            fetch_recent_messages(
+                mailbox,
+                folder=provider_folder_argument,
+                limit=limit,
+                readonly=True,
+            )
+            if readonly
+            else fetch_recent_messages(
+                mailbox,
+                folder=provider_folder_argument,
+                limit=limit,
+            )
         )
     except Exception:
         return _snapshot_failure("snapshot_fetch_failed", "message_fetch")

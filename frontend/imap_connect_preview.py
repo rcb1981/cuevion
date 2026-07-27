@@ -677,11 +677,21 @@ def build_quota_issue(stage: str, fetched_count: int = 0) -> dict[str, Any]:
     )
 
 
-def fetch_recent_messages(mailbox, folder: str = "INBOX", limit: int = DEFAULT_FETCH_LIMIT):
+def fetch_recent_messages(
+    mailbox,
+    folder: str = "INBOX",
+    limit: int = DEFAULT_FETCH_LIMIT,
+    *,
+    readonly: bool = False,
+):
     fetch_start = time.perf_counter()
     select_start = time.perf_counter()
     try:
-        select_status, select_data = mailbox.select(folder)
+        select_status, select_data = (
+            mailbox.select(folder, readonly=True)
+            if readonly
+            else mailbox.select(folder)
+        )
     except imaplib.IMAP4.error as exc:
         select_duration_ms = (time.perf_counter() - select_start) * 1000
         logger.warning(

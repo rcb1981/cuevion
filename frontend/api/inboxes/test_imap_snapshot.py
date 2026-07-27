@@ -14,6 +14,7 @@ FRONTEND_DIR = CURRENT_DIR.parent.parent
 if str(FRONTEND_DIR) not in sys.path:
     sys.path.insert(0, str(FRONTEND_DIR))
 
+import imap_connect_preview
 from api.inboxes import imap_snapshot
 
 
@@ -49,6 +50,7 @@ class RecordingMailbox:
         self.select_response = select_response
         self.fetch_response = fetch_response
         self.select_calls: list[str] = []
+        self.select_readonly_calls: list[tuple[str, bool]] = []
         self.response_calls: list[str] = []
         self.uid_calls: list[tuple] = []
         self.unsafe_calls: list[tuple] = []
@@ -60,8 +62,9 @@ class RecordingMailbox:
             raise value
         return value
 
-    def select(self, folder):
+    def select(self, folder, readonly=False):
         self.select_calls.append(folder)
+        self.select_readonly_calls.append((folder, readonly))
         self.operations.append(("select", folder))
         return self._resolve(self.select_response)
 
@@ -392,6 +395,80 @@ class ImapFolderSnapshotTests(unittest.TestCase):
         self.assertEqual(identity["rfcMessageId"], "Local-Part@example.com")
         self.assertRegex(identity["fingerprint"], r"\A[0-9a-f]{64}\Z")
         self.assertNotIn("fingerprint", json.dumps(snapshot))
+
+    def test_readonly_snapshot_keeps_both_folder_selections_readonly(self):
+        mailbox = RecordingMailbox(
+            uid_validity_responses=["456", "456"],
+        )
+        with patch.object(
+            imap_snapshot,
+            "fetch_recent_messages",
+            return_value={
+                "messages": [fetched_message("123")],
+                "warnings": [],
+                "error": None,
+            },
+        ) as fetch_mock, patch.object(
+            imap_snapshot,
+            "to_message_preview",
+            side_effect=preview_for,
+        ):
+            result = imap_snapshot.read_imap_folder_snapshot(
+                mailbox,
+                folder="Stored Mail",
+                mailbox_key="mailbox-1",
+                email_address="owner@example.com",
+                readonly=True,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            mailbox.select_readonly_calls,
+            [('"Stored Mail"', True)],
+        )
+        fetch_mock.assert_called_once_with(
+            mailbox,
+            folder='"Stored Mail"',
+            limit=100,
+            readonly=True,
+        )
+
+    def test_preview_fetch_readonly_flag_controls_select_mode(self):
+        class PreviewMailbox:
+            def __init__(self):
+                self.select_calls = []
+
+            def select(self, *arguments, **kwargs):
+                self.select_calls.append((arguments, kwargs))
+                return "OK", [b"0"]
+
+            def search(self, *arguments):
+                return "OK", [b""]
+
+        readonly_mailbox = PreviewMailbox()
+        readonly_result = imap_connect_preview.fetch_recent_messages(
+            readonly_mailbox,
+            folder='"Stored Mail"',
+            limit=100,
+            readonly=True,
+        )
+        self.assertIsNone(readonly_result["error"])
+        self.assertEqual(
+            readonly_mailbox.select_calls,
+            [(('"Stored Mail"',), {"readonly": True})],
+        )
+
+        default_mailbox = PreviewMailbox()
+        default_result = imap_connect_preview.fetch_recent_messages(
+            default_mailbox,
+            folder='"Stored Mail"',
+            limit=100,
+        )
+        self.assertIsNone(default_result["error"])
+        self.assertEqual(
+            default_mailbox.select_calls,
+            [(('"Stored Mail"',), {})],
+        )
 
     def test_snapshot_requires_exact_recent_uid_scope_and_order(self):
         cases = (

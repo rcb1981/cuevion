@@ -342,6 +342,11 @@ def _discover_archive_folder(mailbox: object) -> tuple[str | None, str | None]:
     return candidate.mailbox, None
 
 
+def discover_archive_folder(mailbox: object) -> tuple[str | None, str | None]:
+    """Return the single selectable SPECIAL-USE Archive mailbox, if any."""
+    return _discover_archive_folder(mailbox)
+
+
 def _decode_ascii(value: object) -> str | None:
     if type(value) is bytes:
         try:
