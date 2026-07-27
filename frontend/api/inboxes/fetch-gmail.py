@@ -26,15 +26,11 @@ if _loaded_module_name == _LEGACY_MODULE_NAME:
 _identity_sys.modules[_CANONICAL_MODULE_NAME] = _current_module
 _identity_sys.modules[_LEGACY_MODULE_NAME] = _current_module
 
-import base64
-import binascii
 import json
 from email import message_from_bytes
-from email.errors import MessageError
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
 from .authenticated_gmail import (
@@ -51,6 +47,7 @@ from .authenticated_gmail import (
     validate_focus_preferences,
     valid_identifier,
 )
+from .gmail_snapshot import read_gmail_folder_snapshot
 
 GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1/users/me"
 DEFAULT_FETCH_LIMIT = 50
@@ -59,15 +56,6 @@ MAX_FETCH_LIMIT = 100
 
 def _validate_focus_preferences(value: object) -> tuple[dict | None, dict | None]:
     return validate_focus_preferences(value)
-
-
-def _base64url_decode(value: str) -> bytes:
-    padding = "=" * (-len(value) % 4)
-    return base64.b64decode(
-        f"{value}{padding}".encode("ascii"),
-        altchars=b"-_",
-        validate=True,
-    )
 
 
 def _gmail_request(access_token: str, path: str) -> tuple[dict | None, dict | None]:
@@ -177,79 +165,48 @@ class handler(BaseHTTPRequestHandler):
             return
         context = resolution["context"]
 
-        list_path = f"/messages?{urlencode({'labelIds': 'INBOX', 'maxResults': limit})}"
-        list_payload, list_error, context, refresh_failure = _request_with_one_refresh(context, list_path)
+        snapshot_result = read_gmail_folder_snapshot(
+            context,
+            provider_folder="Inbox",
+            request_with_one_refresh=_request_with_one_refresh,
+            limit=limit,
+            focus_preferences=focus_preferences,
+            strict=False,
+            message_parser=message_from_bytes,
+        )
+        refresh_failure = snapshot_result.get("refresh_failure")
         if refresh_failure:
             send_json(self, refresh_failure["status_code"], refresh_failure["error"])
             return
-        if list_error:
-            _send_gmail_error(self, list_error)
+        snapshot_error = snapshot_result.get("error")
+        if snapshot_error:
+            _send_gmail_error(self, snapshot_error)
+            return
+        snapshot = snapshot_result.get("snapshot")
+        if not isinstance(snapshot, dict) or not isinstance(
+            snapshot.get("messages"),
+            list,
+        ):
+            _send_gmail_error(self, {"code": "gmail_response_invalid"})
             return
 
-        message_refs = list_payload.get("messages") if isinstance(list_payload, dict) else None
-        if not isinstance(message_refs, list):
-            message_refs = []
-        message_refs = message_refs[:MAX_FETCH_LIMIT]
-
-        from imap_connect_preview import to_message_preview
-
-        previews = []
-        inbox_uid_set: list[str] = []
-        result_bytes = 0
-        for index, message_ref in enumerate(message_refs):
-            message_id = (message_ref or {}).get("id") if isinstance(message_ref, dict) else None
-            if not valid_identifier(message_id):
-                continue
-            message_payload, message_error, context, refresh_failure = _request_with_one_refresh(
-                context,
-                f"/messages/{quote(message_id, safe='')}?format=raw",
-            )
-            if refresh_failure:
-                send_json(self, refresh_failure["status_code"], refresh_failure["error"])
-                return
-            if message_error:
-                _send_gmail_error(self, message_error)
-                return
-            raw_message = message_payload.get("raw") if isinstance(message_payload, dict) else None
-            if not isinstance(raw_message, str) or not raw_message:
-                continue
-            try:
-                decoded_message = _base64url_decode(raw_message)
-            except (binascii.Error, UnicodeEncodeError):
-                continue
-            try:
-                parsed_message = message_from_bytes(decoded_message)
-            except MessageError:
-                continue
-            label_ids = message_payload.get("labelIds") if isinstance(message_payload, dict) else None
-            unread = isinstance(label_ids, list) and "UNREAD" in label_ids
-            flagged = isinstance(label_ids, list) and "STARRED" in label_ids
-            gmail_internal_id = str(message_payload.get("id") or "").strip() or None
-            preview = to_message_preview(
-                parsed_message,
-                index,
-                context["mailbox_email"],
-                unread,
-                gmail_internal_id,
-                flagged,
-                internal_role=None,
-                focus_preferences=focus_preferences,
-            )
-            gmail_thread_id = message_payload.get("threadId")
-            if valid_identifier(gmail_thread_id):
-                preview["providerThreadId"] = gmail_thread_id
-            preview_size = len(json.dumps(preview).encode("utf-8"))
-            if result_bytes + preview_size > MAX_GMAIL_RESPONSE_BYTES:
-                break
-            result_bytes += preview_size
-            previews.append(preview)
-            if gmail_internal_id:
-                inbox_uid_set.append(gmail_internal_id)
+        previews = snapshot["messages"]
+        inbox_uid_set = [
+            message["providerMessageId"]
+            for message in previews
+            if isinstance(message, dict)
+            and valid_identifier(message.get("providerMessageId"))
+        ]
 
         send_json(
             self,
             200,
-            {"ok": True, "messages": previews, "inboxUidSet": inbox_uid_set, "uidValidity": "gmail-api"},
+            {
+                "ok": True,
+                "messages": previews,
+                "inboxUidSet": inbox_uid_set,
+                "uidValidity": snapshot.get("uidValidity", "gmail-api"),
+            },
         )
 
     def do_GET(self):

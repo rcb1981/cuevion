@@ -133,6 +133,12 @@ else:
             )
 
         scope = token_payload.get("scope")
+        if (
+            "scope" not in token_payload
+            and isinstance(existing_record, dict)
+            and isinstance(existing_record.get("scope"), str)
+        ):
+            scope = existing_record["scope"]
         token_type = token_payload.get("token_type")
         now = datetime.now(timezone.utc).isoformat()
 

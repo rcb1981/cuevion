@@ -93,6 +93,7 @@ else:
         mailbox_email: str
         owner_email: str
         access_token: str
+        scope: str | None
         refresh_attempted: bool
 
 
@@ -338,12 +339,14 @@ else:
         access_token = token_record.get("access_token")
         if not isinstance(access_token, str) or not access_token.strip():
             return _token_failure()
+        scope = token_record.get("scope")
 
         context: GmailContext = {
             "mailbox_id": inbox["id"],
             "mailbox_email": mailbox_email,
             "owner_email": owner_email,
             "access_token": access_token.strip(),
+            "scope": scope if isinstance(scope, str) else None,
             "refresh_attempted": False,
         }
         if expiry_status == "expired":
@@ -375,11 +378,15 @@ else:
         access_token = refreshed_record.get("access_token")
         if not isinstance(access_token, str) or not access_token.strip():
             return _token_failure()
+        refreshed_scope = refreshed_record.get("scope")
+        if not isinstance(refreshed_scope, str):
+            refreshed_scope = context.get("scope")
         return {
             "status": "ok",
             "context": {
                 **context,
                 "access_token": access_token.strip(),
+                "scope": refreshed_scope,
                 "refresh_attempted": True,
             },
         }
