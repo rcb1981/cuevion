@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import importlib.util
 import io
 import json
@@ -220,6 +221,18 @@ def gmail_snapshot_result(snapshot: object | None = None) -> dict:
         "error": None,
         "refresh_failure": None,
     }
+
+
+def gmail_raw_message() -> str:
+    raw = (
+        b"Message-Id: <archive-message@example.test>\r\n"
+        b"From: sender@example.test\r\n"
+        b"To: artist@example.com\r\n"
+        b"Subject: Archived provider message\r\n"
+        b"\r\n"
+        b"Archived body"
+    )
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
 
 
 def resolved_imap_mailbox() -> dict:
@@ -505,6 +518,75 @@ class FetchArchiveGmailTests(unittest.TestCase):
         self.assertNotIn(ACCESS_TOKEN, serialized)
         self.assertNotIn(REFRESH_TOKEN, serialized)
         self.assertNotIn(OWNER_EMAIL, serialized)
+
+    def test_missing_label_ids_returns_public_empty_labels(self):
+        provider_message_id = "provider-message-without-labels"
+        provider_thread_id = "provider-thread-without-labels"
+        encoded_raw = gmail_raw_message()
+        responses = [
+            (
+                {"messages": [{"id": provider_message_id}]},
+                None,
+            ),
+            (
+                {
+                    "id": provider_message_id,
+                    "threadId": provider_thread_id,
+                    "raw": encoded_raw,
+                },
+                None,
+            ),
+        ]
+
+        with patch.object(
+            fetch_archive,
+            "resolve_owned_mailbox",
+            return_value=google_owned(),
+        ), patch.object(
+            fetch_archive,
+            "resolve_gmail_context",
+            return_value={
+                "status": "ok",
+                "context": gmail_context(),
+            },
+        ), patch.object(
+            fetch_archive,
+            "_gmail_request",
+            side_effect=responses,
+        ) as gmail_request, patch.object(
+            fetch_archive,
+            "refresh_gmail_context",
+        ) as refresh, patch.object(
+            fetch_archive,
+            "resolve_authenticated_imap_mailbox",
+        ) as imap_resolution:
+            target = invoke({"mailboxId": MAILBOX_ID})
+
+        self.assertEqual(target.status, 200)
+        payload = target.response()
+        message = payload["folder"]["messages"][0]
+        self.assertEqual(message["labelIds"], [])
+        self.assertEqual(
+            message["providerMessageId"],
+            provider_message_id,
+        )
+        self.assertEqual(
+            message["providerThreadId"],
+            provider_thread_id,
+        )
+        self.assertNotIn("raw", message)
+        serialized = json.dumps(payload)
+        self.assertNotIn(encoded_raw, serialized)
+        self.assertNotIn(ACCESS_TOKEN, serialized)
+        self.assertNotIn(REFRESH_TOKEN, serialized)
+        self.assertNotIn(IMAP_USERNAME, serialized)
+        self.assertNotIn(IMAP_PASSWORD, serialized)
+        self.assertFalse(
+            fetch_archive._contains_forbidden_public_fields(payload)
+        )
+        self.assertEqual(gmail_request.call_count, 2)
+        refresh.assert_not_called()
+        imap_resolution.assert_not_called()
 
     def test_empty_archive_snapshot_is_valid_but_empty_http_body_is_not(self):
         empty_snapshot = gmail_snapshot(message_count=0)

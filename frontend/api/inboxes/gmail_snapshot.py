@@ -221,7 +221,7 @@ def read_gmail_folder_snapshot(
                 return _invalid_response(context)
             continue
 
-        raw_label_ids = detail_payload.get("labelIds")
+        raw_label_ids = detail_payload.get("labelIds", [])
         labels_are_valid = (
             isinstance(raw_label_ids, list)
             and all(valid_identifier(label_id) for label_id in raw_label_ids)
