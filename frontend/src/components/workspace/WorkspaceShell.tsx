@@ -117,6 +117,7 @@ import {
   replaceProviderArchiveReadback,
   type ProviderArchiveCandidate,
 } from "../../lib/providerArchiveAction";
+import { buildProviderMessageActionTarget } from "../../lib/providerMessageAction";
 import {
   createCollaborationThread,
   fetchCollaborationInvite,
@@ -18544,40 +18545,35 @@ function MailboxView({
       return null;
     }
 
-    const providerMessageId = message.imapUid?.trim();
-    if (!providerMessageId) {
+    const snapshot = isImapCredentialsProvider(sourceMailbox.provider)
+      ? readLiveInboxSnapshots(
+          buildTrustedLiveInboxSnapshotContexts(managedInboxes),
+        )[sourceMailbox.id]
+      : null;
+    const target = buildProviderMessageActionTarget({
+      provider: sourceMailbox.provider,
+      mailboxId: sourceMailbox.id,
+      localFolder: activeFolder,
+      isSharedView,
+      providerMessageId: message.providerMessageId,
+      imapUid: message.imapUid,
+      imapFolder: exactImapSource?.providerFolder ?? "INBOX",
+      imapUidValidity:
+        exactImapSource?.uidValidity ?? snapshot?.uidValidity ?? null,
+      action,
+    });
+
+    if (target.ok) {
+      return target.request;
+    }
+
+    if (target.reason === "unsupported_context") {
+      setMailboxActionToastMessage("Mailbox actions are only available for inbox messages right now.");
+    } else if (target.reason === "unsupported_provider") {
+      setMailboxActionToastMessage("Mailbox actions are not available for this provider.");
+    } else {
       setMailboxActionToastMessage("This message is missing provider message metadata.");
-      return null;
     }
-
-    if (sourceMailbox.provider === "google") {
-      return {
-        mailboxId: sourceMailbox.id,
-        messageId: providerMessageId,
-        action,
-      };
-    }
-
-    if (isImapCredentialsProvider(sourceMailbox.provider)) {
-      if (activeFolder !== "Inbox" && activeFolder !== "Filtered") {
-        setMailboxActionToastMessage("Mailbox actions are only available for inbox messages right now.");
-        return null;
-      }
-
-      const snapshot = readLiveInboxSnapshots(
-        buildTrustedLiveInboxSnapshotContexts(managedInboxes),
-      )[sourceMailbox.id];
-
-      return {
-        mailboxId: sourceMailbox.id,
-        folder: exactImapSource?.providerFolder ?? "INBOX",
-        uid: providerMessageId,
-        uidValidity: exactImapSource?.uidValidity ?? snapshot?.uidValidity ?? null,
-        action,
-      };
-    }
-
-    setMailboxActionToastMessage("Mailbox actions are not available for this provider.");
     return null;
   };
 

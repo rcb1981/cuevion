@@ -1463,7 +1463,7 @@ test("thread migration leaves Gmail provider snapshots unchanged", () => {
           folder: "INBOX",
           messages: [{
             id: "gmail-message",
-            imapUid: "provider-message",
+            providerMessageId: "provider-message",
             threadId: "same subject",
             providerThreadId: "gmail-thread-123",
             sender: "Sender",
@@ -1491,6 +1491,7 @@ test("thread migration leaves Gmail provider snapshots unchanged", () => {
     const gmailSnapshot = readLiveInboxSnapshots().gmail;
     assert.ok(gmailSnapshot);
     const gmailMessage = hydrateLiveInboxSnapshot(gmailSnapshot).messages[0];
+    assert.equal(gmailMessage?.providerMessageId, "provider-message");
     assert.equal(gmailMessage?.providerThreadId, "gmail-thread-123");
     assert.equal(gmailMessage?.threadId, "same subject");
     assert.equal(gmailMessage?.unread, true);
