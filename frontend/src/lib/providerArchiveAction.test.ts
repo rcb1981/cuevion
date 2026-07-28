@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import {
+  applyGmailProviderArchiveDelta,
   applyProviderArchiveFolderReadback,
   buildProviderArchiveStateIdentity,
   buildProviderArchiveMutationTarget,
@@ -89,28 +90,20 @@ function successResponse(
         providerFolder: "Archive",
         rfcMessageId: "rfc-message@example.test",
       },
-      folders: {
+      delta: {
         Inbox: {
-          serverMailboxId: request.mailboxId,
-          providerFolder: "Inbox",
-          uidValidity: "gmail-api",
-          messages: [],
+          removeProviderMessageId: request.messageId,
         },
         Archive: {
-          serverMailboxId: request.mailboxId,
-          providerFolder: "Archive",
-          uidValidity: "gmail-api",
-          messages: [
-            {
-              ...preview,
-              serverMailboxId: request.mailboxId,
-              providerFolder: "Archive",
-              providerMessageId: request.messageId,
-              providerThreadId: "gmail-thread-1",
-              rfcMessageId: "rfc-message@example.test",
-              labelIds: ["STARRED"],
-            },
-          ],
+          upsertMessage: {
+            ...preview,
+            serverMailboxId: request.mailboxId,
+            providerFolder: "Archive",
+            providerMessageId: request.messageId,
+            providerThreadId: "gmail-thread-1",
+            rfcMessageId: "rfc-message@example.test",
+            labelIds: ["STARRED"],
+          },
         },
       },
     };
@@ -412,6 +405,189 @@ test("pending Archive mutations are discoverable by exact mailbox scope", () => 
   );
 });
 
+type GmailArchiveStateTestMessage = {
+  id: string;
+  serverMailboxId?: string;
+  providerFolder?: string;
+  providerMessageId?: string;
+};
+
+test("Gmail delta removes one exact Inbox identity and replaces only its stale Archive version", () => {
+  const sourceMessage: GmailArchiveStateTestMessage = {
+    id: "source",
+    serverMailboxId: "mailbox-1",
+    providerFolder: "Inbox",
+    providerMessageId: "gmail-message-1",
+  };
+  const otherInboxMessage: GmailArchiveStateTestMessage = {
+    id: "other-inbox",
+    serverMailboxId: "mailbox-1",
+    providerFolder: "Inbox",
+    providerMessageId: "gmail-message-2",
+  };
+  const sameProviderIdOtherMailbox: GmailArchiveStateTestMessage = {
+    id: "other-mailbox",
+    serverMailboxId: "mailbox-2",
+    providerFolder: "Inbox",
+    providerMessageId: "gmail-message-1",
+  };
+  const staleArchiveMessage: GmailArchiveStateTestMessage = {
+    id: "stale-archive",
+    serverMailboxId: "mailbox-1",
+    providerFolder: "Archive",
+    providerMessageId: "gmail-message-1",
+  };
+  const otherArchiveMessage: GmailArchiveStateTestMessage = {
+    id: "other-archive",
+    serverMailboxId: "mailbox-1",
+    providerFolder: "Archive",
+    providerMessageId: "gmail-message-3",
+  };
+  const upsertMessage: GmailArchiveStateTestMessage = {
+    id: "server-upsert",
+    serverMailboxId: "mailbox-1",
+    providerFolder: "Archive",
+    providerMessageId: "gmail-message-1",
+  };
+  const current = {
+    Inbox: [
+      sourceMessage,
+      otherInboxMessage,
+      sameProviderIdOtherMailbox,
+    ],
+    Archive: [staleArchiveMessage, otherArchiveMessage],
+    Trash: [{ id: "trash-unchanged" }],
+    Spam: [{ id: "spam-unchanged" }],
+  };
+
+  const result = applyGmailProviderArchiveDelta(current, {
+    mailboxId: "mailbox-1",
+    removeProviderMessageId: "gmail-message-1",
+    upsertMessage,
+  });
+
+  assert.equal(result.applied, true);
+  assert.notEqual(result.state, current);
+  assert.deepEqual(result.state.Inbox, [
+    otherInboxMessage,
+    sameProviderIdOtherMailbox,
+  ]);
+  assert.deepEqual(result.state.Archive, [
+    otherArchiveMessage,
+    upsertMessage,
+  ]);
+  assert.equal(result.state.Archive.at(-1), upsertMessage);
+  assert.equal(result.state.Inbox[0], otherInboxMessage);
+  assert.equal(result.state.Archive[0], otherArchiveMessage);
+  assert.equal(result.state.Trash, current.Trash);
+  assert.equal(result.state.Spam, current.Spam);
+  assert.deepEqual(current.Inbox, [
+    sourceMessage,
+    otherInboxMessage,
+    sameProviderIdOtherMailbox,
+  ]);
+  assert.deepEqual(current.Archive, [
+    staleArchiveMessage,
+    otherArchiveMessage,
+  ]);
+});
+
+test("Gmail delta preserves the exact state for zero or duplicate Inbox matches", () => {
+  const upsertMessage: GmailArchiveStateTestMessage = {
+    id: "server-upsert",
+    serverMailboxId: "mailbox-1",
+    providerFolder: "Archive",
+    providerMessageId: "gmail-message-1",
+  };
+  const zeroMatches = {
+    Inbox: [
+      {
+        id: "other",
+        serverMailboxId: "mailbox-1",
+        providerFolder: "Inbox",
+        providerMessageId: "gmail-message-2",
+      },
+    ],
+    Archive: [{ ...upsertMessage, id: "stale" }],
+    Trash: [{ id: "trash-unchanged" }],
+  };
+  const duplicateMatches = {
+    Inbox: [
+      {
+        id: "duplicate-1",
+        serverMailboxId: "mailbox-1",
+        providerFolder: "Inbox",
+        providerMessageId: "gmail-message-1",
+      },
+      {
+        id: "duplicate-2",
+        serverMailboxId: "mailbox-1",
+        providerFolder: "Inbox",
+        providerMessageId: "gmail-message-1",
+      },
+    ],
+    Archive: [{ ...upsertMessage, id: "stale" }],
+    Trash: [{ id: "trash-unchanged" }],
+  };
+
+  for (const current of [zeroMatches, duplicateMatches]) {
+    const result = applyGmailProviderArchiveDelta(current, {
+      mailboxId: "mailbox-1",
+      removeProviderMessageId: "gmail-message-1",
+      upsertMessage,
+    });
+    assert.equal(result.applied, false);
+    assert.equal(result.state, current);
+    assert.equal(result.state.Inbox, current.Inbox);
+    assert.equal(result.state.Archive, current.Archive);
+    assert.equal(result.state.Trash, current.Trash);
+  }
+});
+
+test("Gmail delta rejects an upsert whose exact provider identity or folder differs", () => {
+  const current = {
+    Inbox: [
+      {
+        id: "source",
+        serverMailboxId: "mailbox-1",
+        providerFolder: "Inbox",
+        providerMessageId: "gmail-message-1",
+      },
+    ],
+    Archive: [{ id: "archive-unchanged" }],
+  };
+  const invalidUpserts: GmailArchiveStateTestMessage[] = [
+    {
+      id: "wrong-mailbox",
+      serverMailboxId: "mailbox-2",
+      providerFolder: "Archive",
+      providerMessageId: "gmail-message-1",
+    },
+    {
+      id: "wrong-message",
+      serverMailboxId: "mailbox-1",
+      providerFolder: "Archive",
+      providerMessageId: "gmail-message-2",
+    },
+    {
+      id: "wrong-folder",
+      serverMailboxId: "mailbox-1",
+      providerFolder: "Inbox",
+      providerMessageId: "gmail-message-1",
+    },
+  ];
+
+  invalidUpserts.forEach((upsertMessage) => {
+    const result = applyGmailProviderArchiveDelta(current, {
+      mailboxId: "mailbox-1",
+      removeProviderMessageId: "gmail-message-1",
+      upsertMessage,
+    });
+    assert.equal(result.applied, false);
+    assert.equal(result.state, current);
+  });
+});
+
 test("coordinator classifies a provider-confirmed mutation as success", async () => {
   const calls: ProviderArchiveMutationRequest[] = [];
   const pendingKeys = new Set<string>();
@@ -431,6 +607,10 @@ test("coordinator classifies a provider-confirmed mutation as success", async ()
     messageId: "gmail-provider-message-1",
     action: "archive",
   });
+  if (result.classification === "success") {
+    assert.equal("delta" in result.response, true);
+    assert.equal("folders" in result.response, false);
+  }
   assert.equal(pendingKeys.size, 0);
 });
 
@@ -469,16 +649,63 @@ test("an ok-shaped mutation without the strict success status is not success", a
   );
 });
 
-test("deeply malformed server snapshots never classify as success", async () => {
+test("the retired Gmail full-folders response never classifies as success", async () => {
   let applyCalls = 0;
   const requestTarget = buildProviderArchiveMutationTarget(gmailCandidate());
   assert.equal(requestTarget.ok, true);
   if (!requestTarget.ok) return;
+  const {
+    delta: _delta,
+    ...successMetadata
+  } = successResponse(requestTarget.request);
   const malformed = {
-    ...successResponse(requestTarget.request),
+    ...successMetadata,
     folders: {
-      Inbox: {},
-      Archive: {},
+      Inbox: {
+        serverMailboxId: requestTarget.request.mailboxId,
+        providerFolder: "Inbox",
+        uidValidity: "gmail-api",
+        messages: [],
+      },
+      Archive: {
+        serverMailboxId: requestTarget.request.mailboxId,
+        providerFolder: "Archive",
+        uidValidity: "gmail-api",
+        messages: [],
+      },
+    },
+  };
+  const result = await executeProviderArchiveAction({
+    coordinator: createProviderArchiveCoordinator({
+      mutate: async () => malformed,
+    }),
+    candidate: gmailCandidate(),
+    applySuccess: () => {
+      applyCalls += 1;
+      return true;
+    },
+  });
+
+  assert.equal(result.classification, "ordinary_failure");
+  assert.equal(result.applied, false);
+  assert.equal(applyCalls, 0);
+});
+
+test("a malformed Gmail delta never reaches state application", async () => {
+  let applyCalls = 0;
+  const requestTarget = buildProviderArchiveMutationTarget(gmailCandidate());
+  assert.equal(requestTarget.ok, true);
+  if (!requestTarget.ok) return;
+  const valid = successResponse(requestTarget.request);
+  const malformed = {
+    ...valid,
+    delta: {
+      Inbox: {
+        removeProviderMessageId: "different-provider-message",
+      },
+      Archive: {
+        upsertMessage: {},
+      },
     },
   };
   const result = await executeProviderArchiveAction({
@@ -615,14 +842,40 @@ test("same-key duplicate is blocked while the first request is pending", async (
   assert.equal(pendingKeys.size, 0);
 });
 
-test("execution applies one validated readback only after the provider resolves", async () => {
+test("execution applies one validated Gmail delta only after the provider resolves", async () => {
   const pendingResponse = deferred<ProviderArchiveMutationResponse>();
   const pendingKeys = new Set<string>();
   let calls = 0;
   let applyCalls = 0;
   const initialState = {
-    Inbox: [{ id: "stale-inbox" }],
-    Archive: [{ id: "stale-archive" }],
+    Inbox: [
+      {
+        id: "source-inbox",
+        serverMailboxId: "mailbox-1",
+        providerFolder: "Inbox",
+        providerMessageId: "gmail-provider-message-1",
+      },
+      {
+        id: "other-inbox",
+        serverMailboxId: "mailbox-1",
+        providerFolder: "Inbox",
+        providerMessageId: "gmail-provider-message-2",
+      },
+    ],
+    Archive: [
+      {
+        id: "stale-archive",
+        serverMailboxId: "mailbox-1",
+        providerFolder: "Archive",
+        providerMessageId: "gmail-provider-message-1",
+      },
+      {
+        id: "other-archive",
+        serverMailboxId: "mailbox-1",
+        providerFolder: "Archive",
+        providerMessageId: "gmail-provider-message-3",
+      },
+    ],
     Trash: [{ id: "trash-unchanged" }],
   };
   let state = initialState;
@@ -644,15 +897,24 @@ test("execution applies one validated readback only after the provider resolves"
         true,
         "mailbox lock must remain held while server state is applied",
       );
-      const folders = response.folders as {
-        Inbox: { messages: Array<{ id: string }> };
-        Archive: { messages: Array<{ id: string }> };
+      const delta = response.delta as {
+        Inbox: { removeProviderMessageId: string };
+        Archive: {
+          upsertMessage: {
+            id: string;
+            serverMailboxId: string;
+            providerFolder: string;
+            providerMessageId: string;
+          };
+        };
       };
-      state = replaceProviderArchiveReadback(state, {
-        Inbox: folders.Inbox.messages,
-        Archive: folders.Archive.messages,
+      const deltaResult = applyGmailProviderArchiveDelta(state, {
+        mailboxId: "mailbox-1",
+        removeProviderMessageId: delta.Inbox.removeProviderMessageId,
+        upsertMessage: delta.Archive.upsertMessage,
       });
-      return true;
+      state = deltaResult.state;
+      return deltaResult.applied;
     },
   });
 
@@ -669,8 +931,9 @@ test("execution applies one validated readback only after the provider resolves"
   assert.equal(result.classification, "success");
   assert.equal(result.applied, true);
   assert.equal(applyCalls, 1);
-  assert.deepEqual(state.Inbox, []);
+  assert.deepEqual(state.Inbox.map((message) => message.id), ["other-inbox"]);
   assert.deepEqual(state.Archive.map((message) => message.id), [
+    "other-archive",
     "rfc-message@example.test",
   ]);
   assert.deepEqual(state.Trash, [{ id: "trash-unchanged" }]);
@@ -804,7 +1067,7 @@ test("a mutation exception is ordinary, is not retried, and releases its key", a
   assert.equal(JSON.stringify(result).includes("provider detail must not escape"), false);
 });
 
-test("server readback replaces both provider folders and preserves unrelated collections", () => {
+test("custom IMAP server readback replaces both provider folders and preserves unrelated collections", () => {
   const current = {
     Inbox: [{ id: "stale-inbox" }],
     Archive: [{ id: "stale-archive" }],

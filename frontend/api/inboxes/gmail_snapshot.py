@@ -57,12 +57,39 @@ def _invalid_response(context: dict) -> dict:
 
 
 def _base64url_decode(value: str) -> bytes:
-    padding = "=" * (-len(value) % 4)
-    return base64.b64decode(
-        f"{value}{padding}".encode("ascii"),
+    unpadded = value.rstrip("=")
+    padding_count = len(value) - len(unpadded)
+    if (
+        not unpadded
+        or padding_count > 2
+        or padding_count not in {0, -len(unpadded) % 4}
+        or "=" in unpadded
+        or any(
+            not (
+                character.isascii()
+                and (
+                    character.isalnum()
+                    or character in {"-", "_"}
+                )
+            )
+            for character in unpadded
+        )
+        or len(unpadded) % 4 == 1
+    ):
+        raise ValueError("invalid base64url value")
+
+    padding = "=" * (-len(unpadded) % 4)
+    decoded = base64.b64decode(
+        f"{unpadded}{padding}".encode("ascii"),
         altchars=b"-_",
         validate=True,
     )
+    if (
+        base64.urlsafe_b64encode(decoded).decode("ascii").rstrip("=")
+        != unpadded
+    ):
+        raise ValueError("non-canonical base64url value")
+    return decoded
 
 
 def _list_path(provider_folder: str, limit: int) -> str:
@@ -107,6 +134,108 @@ def _message_ids_from_list(
         seen.add(message_id)
         message_ids.append(message_id)
     return message_ids, True
+
+
+def parse_gmail_message_detail(
+    detail_payload: object,
+    *,
+    context: dict,
+    provider_folder: str,
+    requested_message_id: str,
+    index: int,
+    focus_preferences: dict | None = None,
+    strict: bool = False,
+    message_parser=message_from_bytes,
+) -> dict | None:
+    """Validate and normalize one Gmail ``format=raw`` detail response.
+
+    This helper is transport-free. Documented provider-data failures return
+    ``None``; unexpected parser or preview-building failures remain fatal so
+    callers cannot accidentally publish a partial result.
+    """
+
+    if (
+        provider_folder not in {"Inbox", "Archive"}
+        or not valid_identifier(requested_message_id)
+        or not isinstance(index, int)
+        or isinstance(index, bool)
+        or index < 0
+        or not callable(message_parser)
+        or not isinstance(detail_payload, dict)
+    ):
+        return None
+
+    provider_message_id = detail_payload.get("id")
+    if (
+        not valid_identifier(provider_message_id)
+        or provider_message_id != requested_message_id
+    ):
+        return None
+
+    raw_label_ids = detail_payload.get("labelIds", [])
+    labels_are_valid = (
+        isinstance(raw_label_ids, list)
+        and all(valid_identifier(label_id) for label_id in raw_label_ids)
+        and len(set(raw_label_ids)) == len(raw_label_ids)
+    )
+    if strict and (
+        not labels_are_valid
+        or not _strict_labels_match_folder(
+            raw_label_ids,
+            provider_folder,
+        )
+    ):
+        return None
+    label_ids = list(raw_label_ids) if labels_are_valid else []
+
+    raw_message = detail_payload.get("raw")
+    if not isinstance(raw_message, str) or not raw_message:
+        return None
+    try:
+        decoded_message = _base64url_decode(raw_message)
+    except (binascii.Error, UnicodeEncodeError, ValueError):
+        return None
+    try:
+        parsed_message = message_parser(decoded_message)
+    except MessageError:
+        return None
+
+    import imap_connect_preview
+
+    unread = "UNREAD" in label_ids
+    flagged = "STARRED" in label_ids
+    preview = imap_connect_preview.to_message_preview(
+        parsed_message,
+        index,
+        context["mailbox_email"],
+        unread,
+        None,
+        flagged,
+        internal_role=None,
+        focus_preferences=focus_preferences,
+    )
+    preview.pop("imapUid", None)
+    preview["providerMessageId"] = provider_message_id
+
+    provider_thread_id = detail_payload.get("threadId")
+    if valid_identifier(provider_thread_id):
+        preview["providerThreadId"] = provider_thread_id
+    elif strict:
+        return None
+
+    preview["labelIds"] = label_ids
+    preview["providerFolder"] = provider_folder
+    preview["serverMailboxId"] = context["mailbox_id"]
+
+    rfc_message_id = parsed_message.get("Message-Id")
+    if isinstance(rfc_message_id, str):
+        normalized_rfc_message_id = (
+            rfc_message_id.strip().strip("<>").strip()
+        )
+        if valid_identifier(normalized_rfc_message_id):
+            preview["rfcMessageId"] = normalized_rfc_message_id
+
+    return preview
 
 
 def read_gmail_folder_snapshot(
@@ -187,8 +316,6 @@ def read_gmail_folder_snapshot(
         "messages": messages,
         "uidValidity": GMAIL_API_UID_VALIDITY,
     }
-    import imap_connect_preview
-
     for index, requested_message_id in enumerate(message_ids):
         detail_payload, detail_error, context, refresh_failure = (
             request_with_one_refresh(
@@ -207,86 +334,20 @@ def read_gmail_folder_snapshot(
             )
         if detail_error is not None:
             return _result(context, error=detail_error)
-        if not isinstance(detail_payload, dict):
-            if strict:
-                return _invalid_response(context)
-            continue
-
-        provider_message_id = detail_payload.get("id")
-        if (
-            not valid_identifier(provider_message_id)
-            or provider_message_id != requested_message_id
-        ):
-            if strict:
-                return _invalid_response(context)
-            continue
-
-        raw_label_ids = detail_payload.get("labelIds", [])
-        labels_are_valid = (
-            isinstance(raw_label_ids, list)
-            and all(valid_identifier(label_id) for label_id in raw_label_ids)
-            and len(set(raw_label_ids)) == len(raw_label_ids)
-        )
-        if strict and (
-            not labels_are_valid
-            or not _strict_labels_match_folder(
-                raw_label_ids,
-                provider_folder,
-            )
-        ):
-            return _invalid_response(context)
-        label_ids = list(raw_label_ids) if labels_are_valid else []
-
-        raw_message = detail_payload.get("raw")
-        if not isinstance(raw_message, str) or not raw_message:
-            if strict:
-                return _invalid_response(context)
-            continue
-        try:
-            decoded_message = _base64url_decode(raw_message)
-        except (binascii.Error, UnicodeEncodeError, ValueError):
-            if strict:
-                return _invalid_response(context)
-            continue
-        try:
-            parsed_message = message_parser(decoded_message)
-        except MessageError:
-            if strict:
-                return _invalid_response(context)
-            continue
-
-        unread = "UNREAD" in label_ids
-        flagged = "STARRED" in label_ids
-        preview = imap_connect_preview.to_message_preview(
-            parsed_message,
-            index,
-            context["mailbox_email"],
-            unread,
-            None,
-            flagged,
-            internal_role=None,
+        preview = parse_gmail_message_detail(
+            detail_payload,
+            context=context,
+            provider_folder=provider_folder,
+            requested_message_id=requested_message_id,
+            index=index,
             focus_preferences=focus_preferences,
+            strict=strict,
+            message_parser=message_parser,
         )
-        preview.pop("imapUid", None)
-        preview["providerMessageId"] = provider_message_id
-
-        provider_thread_id = detail_payload.get("threadId")
-        if valid_identifier(provider_thread_id):
-            preview["providerThreadId"] = provider_thread_id
-        elif strict:
-            return _invalid_response(context)
-
-        preview["labelIds"] = label_ids
-        preview["providerFolder"] = provider_folder
-        preview["serverMailboxId"] = context["mailbox_id"]
-
-        rfc_message_id = parsed_message.get("Message-Id")
-        if isinstance(rfc_message_id, str):
-            normalized_rfc_message_id = (
-                rfc_message_id.strip().strip("<>").strip()
-            )
-            if normalized_rfc_message_id:
-                preview["rfcMessageId"] = normalized_rfc_message_id
+        if preview is None:
+            if strict:
+                return _invalid_response(context)
+            continue
 
         candidate_snapshot = {
             **snapshot,

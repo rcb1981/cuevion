@@ -23,7 +23,7 @@ from authenticated_imap import (  # noqa: E402
     find_forbidden_custom_request_fields,
     resolve_authenticated_imap_mailbox,
 )
-from api.inboxes.gmail_snapshot import read_gmail_folder_snapshot  # noqa: E402
+from api.inboxes.gmail_snapshot import parse_gmail_message_detail  # noqa: E402
 from api.inboxes.imap_archive import archive_imap_message  # noqa: E402
 from api.inboxes.imap_snapshot import (  # noqa: E402
     read_imap_folder_snapshot,
@@ -52,7 +52,6 @@ from authenticated_gmail import (  # noqa: E402
 GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1/users/me"
 GMAIL_MODIFY_SCOPE = "https://www.googleapis.com/auth/gmail.modify"
 GMAIL_FULL_MAIL_SCOPE = "https://mail.google.com/"
-GMAIL_ARCHIVE_READBACK_LIMIT = 100
 IMAP_ARCHIVE_READBACK_LIMIT = 100
 SUPPORTED_ACTIONS = {"mark_read", "mark_unread", "star", "unstar", "archive"}
 GMAIL_ACTION_LABELS = {
@@ -70,6 +69,40 @@ IMAP_ACTION_FLAGS = {
 }
 _IMAP_UID_PATTERN = re.compile(r"[1-9][0-9]*", re.ASCII)
 _MAX_IMAP_UID = 4_294_967_295
+_GMAIL_ARCHIVE_FORBIDDEN_PUBLIC_KEYS = {
+    "accesstoken",
+    "authorization",
+    "cookie",
+    "connection",
+    "credentialgeneration",
+    "credentialversion",
+    "fingerprint",
+    "host",
+    "identities",
+    "identity",
+    "mailboxconfig",
+    "owneremail",
+    "password",
+    "port",
+    "providerdetails",
+    "providererror",
+    "raw",
+    "rawproviderresponse",
+    "refreshtoken",
+    "session",
+    "secretgeneration",
+    "secretversion",
+    "ssl",
+    "userid",
+    "username",
+}
+_GMAIL_ARCHIVE_FORBIDDEN_PUBLIC_KEY_FRAGMENTS = {
+    "credential",
+    "fingerprint",
+    "password",
+    "secret",
+    "token",
+}
 
 
 def _json_response(handler: BaseHTTPRequestHandler, status_code: int, payload: dict):
@@ -118,6 +151,87 @@ def _valid_archive_imap_uid(value: object) -> bool:
     return len(value) < len(maximum) or (
         len(value) == len(maximum) and value <= maximum
     )
+
+
+def _contains_forbidden_gmail_archive_public_fields(
+    value: object,
+) -> bool:
+    if type(value) is dict:
+        for key, item in value.items():
+            if type(key) is not str:
+                return True
+            compact_key = "".join(
+                character
+                for character in key.casefold()
+                if character.isalnum()
+            )
+            if (
+                compact_key in _GMAIL_ARCHIVE_FORBIDDEN_PUBLIC_KEYS
+                or any(
+                    fragment in compact_key
+                    for fragment in (
+                        _GMAIL_ARCHIVE_FORBIDDEN_PUBLIC_KEY_FRAGMENTS
+                    )
+                )
+                or _contains_forbidden_gmail_archive_public_fields(item)
+            ):
+                return True
+        return False
+    if type(value) is list:
+        return any(
+            _contains_forbidden_gmail_archive_public_fields(item)
+            for item in value
+        )
+    return False
+
+
+def _gmail_archive_success_payload(
+    *,
+    mailbox_id: str,
+    message_id: str,
+    archived_message: dict,
+) -> dict:
+    archived_identity = {
+        "serverMailboxId": mailbox_id,
+        "providerMessageId": message_id,
+        "providerThreadId": archived_message["providerThreadId"],
+        "providerFolder": "Archive",
+        **(
+            {"rfcMessageId": archived_message["rfcMessageId"]}
+            if isinstance(archived_message.get("rfcMessageId"), str)
+            else {}
+        ),
+    }
+    return {
+        "ok": True,
+        "status": "ok",
+        "action": "archive",
+        "mailboxId": mailbox_id,
+        "archivedMessageIdentity": archived_identity,
+        "delta": {
+            "Inbox": {
+                "removeProviderMessageId": message_id,
+            },
+            "Archive": {
+                "upsertMessage": archived_message,
+            },
+        },
+    }
+
+
+def _gmail_archive_success_payload_is_safe(payload: object) -> bool:
+    if (
+        type(payload) is not dict
+        or _contains_forbidden_gmail_archive_public_fields(payload)
+    ):
+        return False
+    try:
+        return (
+            len(json.dumps(payload).encode("utf-8"))
+            <= MAX_GMAIL_RESPONSE_BYTES
+        )
+    except (TypeError, UnicodeEncodeError, ValueError):
+        return False
 
 
 def _gmail_modify_request(
@@ -352,6 +466,7 @@ def _perform_gmail_archive(
     context: dict,
 ):
     message_id = payload.get("messageId")
+    mailbox_id = context["mailbox_id"]
     if not _valid_gmail_archive_message_id(message_id):
         send_json(
             handler,
@@ -379,35 +494,6 @@ def _perform_gmail_archive(
         message_id,
         "archive",
     )
-    if (
-        modify_error
-        and modify_error.get("code") == "gmail_token_invalid"
-        and not context["refresh_attempted"]
-    ):
-        refreshed = refresh_gmail_context(context)
-        if refreshed["status"] != "ok":
-            send_json(
-                handler,
-                refreshed["status_code"],
-                refreshed["error"],
-            )
-            return
-        context = refreshed["context"]
-        if _token_record_has_known_modify_scope(context) is not True:
-            send_json(
-                handler,
-                403,
-                error_payload(
-                    "gmail_modify_scope_required",
-                    "Reconnect Gmail with permission to modify messages.",
-                ),
-            )
-            return
-        modify_payload, modify_error = _gmail_modify_request(
-            context["access_token"],
-            message_id,
-            "archive",
-        )
 
     if modify_error:
         _send_gmail_archive_transport_error(handler, modify_error)
@@ -424,116 +510,70 @@ def _perform_gmail_archive(
         return
 
     mutation_identity = {
-        "serverMailboxId": context["mailbox_id"],
+        "serverMailboxId": mailbox_id,
         "providerMessageId": message_id,
         "providerFolder": "Archive",
     }
 
     try:
-        inbox_result = read_gmail_folder_snapshot(
+        (
+            detail_payload,
+            detail_error,
             context,
-            provider_folder="Inbox",
-            limit=GMAIL_ARCHIVE_READBACK_LIMIT,
-            focus_preferences=None,
-            strict=True,
-            request_with_one_refresh=_gmail_get_with_one_refresh,
+            refresh_failure,
+        ) = _gmail_get_with_one_refresh(
+            context,
+            (
+                f"/messages/{quote(message_id, safe='')}"
+                "?format=raw"
+            ),
         )
-        context = inbox_result.get("context", context)
-        if inbox_result.get("status") != "ok":
+        if refresh_failure is not None or detail_error is not None:
             _send_archive_readback_failed(
                 handler,
-                mailbox_id=context["mailbox_id"],
+                mailbox_id=mailbox_id,
                 archived_message_identity=mutation_identity,
             )
             return
 
-        archive_result = read_gmail_folder_snapshot(
-            context,
+        archived_message = parse_gmail_message_detail(
+            detail_payload,
+            context=context,
             provider_folder="Archive",
-            limit=GMAIL_ARCHIVE_READBACK_LIMIT,
+            requested_message_id=message_id,
+            index=0,
             focus_preferences=None,
             strict=True,
-            required_message_id=message_id,
-            request_with_one_refresh=_gmail_get_with_one_refresh,
         )
-        context = archive_result.get("context", context)
-        if archive_result.get("status") != "ok":
+        if archived_message is None:
             _send_archive_readback_failed(
                 handler,
-                mailbox_id=context["mailbox_id"],
+                mailbox_id=mailbox_id,
                 archived_message_identity=mutation_identity,
             )
             return
 
-        inbox_snapshot = inbox_result.get("snapshot")
-        archive_snapshot = archive_result.get("snapshot")
-        if (
-            not isinstance(inbox_snapshot, dict)
-            or not isinstance(archive_snapshot, dict)
-            or inbox_snapshot.get("serverMailboxId") != context["mailbox_id"]
-            or archive_snapshot.get("serverMailboxId") != context["mailbox_id"]
-            or inbox_snapshot.get("providerFolder") != "Inbox"
-            or archive_snapshot.get("providerFolder") != "Archive"
-            or inbox_snapshot.get("uidValidity") != "gmail-api"
-            or archive_snapshot.get("uidValidity") != "gmail-api"
-            or not isinstance(inbox_snapshot.get("messages"), list)
-            or not isinstance(archive_snapshot.get("messages"), list)
-        ):
-            raise ValueError("missing Gmail snapshot")
-
-        inbox_matches = [
-            message
-            for message in inbox_snapshot.get("messages", [])
-            if isinstance(message, dict)
-            and message.get("providerMessageId") == message_id
-        ]
-        archive_matches = [
-            message
-            for message in archive_snapshot.get("messages", [])
-            if isinstance(message, dict)
-            and message.get("providerMessageId") == message_id
-        ]
-        if inbox_matches or len(archive_matches) != 1:
+        success_payload = _gmail_archive_success_payload(
+            mailbox_id=mailbox_id,
+            message_id=message_id,
+            archived_message=archived_message,
+        )
+        if not _gmail_archive_success_payload_is_safe(success_payload):
             _send_archive_readback_failed(
                 handler,
-                mailbox_id=context["mailbox_id"],
+                mailbox_id=mailbox_id,
                 archived_message_identity=mutation_identity,
             )
             return
-
-        archived_message = archive_matches[0]
-        archived_identity = {
-            **mutation_identity,
-            **(
-                {"providerThreadId": archived_message["providerThreadId"]}
-                if isinstance(archived_message.get("providerThreadId"), str)
-                else {}
-            ),
-            **(
-                {"rfcMessageId": archived_message["rfcMessageId"]}
-                if isinstance(archived_message.get("rfcMessageId"), str)
-                else {}
-            ),
-        }
         send_json(
             handler,
             200,
-            {
-                "ok": True,
-                "status": "ok",
-                "action": "archive",
-                "mailboxId": context["mailbox_id"],
-                "archivedMessageIdentity": archived_identity,
-                "folders": {
-                    "Inbox": inbox_snapshot,
-                    "Archive": archive_snapshot,
-                },
-            },
+            success_payload,
         )
     except Exception:
         _send_archive_readback_failed(
             handler,
-            mailbox_id=context["mailbox_id"],
+            mailbox_id=mailbox_id,
             archived_message_identity=mutation_identity,
         )
 

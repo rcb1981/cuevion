@@ -37,6 +37,7 @@ export type ProviderArchiveMutationResponse = {
   action?: string;
   mailboxId?: string;
   archivedMessageIdentity?: unknown;
+  delta?: unknown;
   folders?: unknown;
   error?: {
     code?: string;
@@ -353,6 +354,95 @@ export function replaceProviderArchiveReadback<
     ...current,
     Inbox: [...readback.Inbox],
     Archive: [...readback.Archive],
+  };
+}
+
+type GmailProviderArchiveStateMessage = {
+  serverMailboxId?: string | null;
+  providerFolder?: string | null;
+  providerMessageId?: string | null;
+};
+
+function isExactGmailProviderArchiveStateIdentity(
+  message: GmailProviderArchiveStateMessage,
+  mailboxId: string,
+  providerMessageId: string,
+) {
+  return (
+    message.serverMailboxId === mailboxId &&
+    message.providerMessageId === providerMessageId
+  );
+}
+
+export function applyGmailProviderArchiveDelta<
+  Message extends GmailProviderArchiveStateMessage,
+  Collections extends {
+    Inbox: Message[];
+    Archive: Message[];
+  },
+>(
+  current: Collections,
+  delta: {
+    mailboxId: string;
+    removeProviderMessageId: string;
+    upsertMessage: Message;
+  },
+): {
+  applied: boolean;
+  state: Collections;
+} {
+  if (
+    !isExactProviderIdentifier(delta.mailboxId) ||
+    !isConcreteGmailProviderMessageId(delta.removeProviderMessageId) ||
+    delta.upsertMessage.providerFolder !== "Archive" ||
+    !isExactGmailProviderArchiveStateIdentity(
+      delta.upsertMessage,
+      delta.mailboxId,
+      delta.removeProviderMessageId,
+    )
+  ) {
+    return {
+      applied: false,
+      state: current,
+    };
+  }
+
+  let inboxMatchCount = 0;
+  const nextInbox = current.Inbox.filter((message) => {
+    const matches = isExactGmailProviderArchiveStateIdentity(
+      message,
+      delta.mailboxId,
+      delta.removeProviderMessageId,
+    );
+    if (matches) {
+      inboxMatchCount += 1;
+    }
+    return !matches;
+  });
+  if (inboxMatchCount !== 1) {
+    return {
+      applied: false,
+      state: current,
+    };
+  }
+
+  const nextArchive = current.Archive.filter(
+    (message) =>
+      !isExactGmailProviderArchiveStateIdentity(
+        message,
+        delta.mailboxId,
+        delta.removeProviderMessageId,
+      ),
+  );
+  nextArchive.push(delta.upsertMessage);
+
+  return {
+    applied: true,
+    state: {
+      ...current,
+      Inbox: nextInbox,
+      Archive: nextArchive,
+    },
   };
 }
 

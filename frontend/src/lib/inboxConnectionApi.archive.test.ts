@@ -69,6 +69,30 @@ function gmailMutationSuccess() {
       providerFolder: "Archive",
       rfcMessageId: "rfc-message@example.test",
     },
+    delta: {
+      Inbox: {
+        removeProviderMessageId: GMAIL_MESSAGE_ID,
+      },
+      Archive: {
+        upsertMessage: gmailMessage("Archive"),
+      },
+    },
+  };
+}
+
+function oldGmailFullSnapshotMutationSuccess() {
+  return {
+    ok: true,
+    status: "ok",
+    action: "archive",
+    mailboxId: MAILBOX_ID,
+    archivedMessageIdentity: {
+      serverMailboxId: MAILBOX_ID,
+      providerMessageId: GMAIL_MESSAGE_ID,
+      providerThreadId: GMAIL_THREAD_ID,
+      providerFolder: "Archive",
+      rfcMessageId: "rfc-message@example.test",
+    },
     folders: {
       Inbox: gmailSnapshot("Inbox"),
       Archive: gmailSnapshot("Archive", [gmailMessage("Archive")]),
@@ -205,6 +229,13 @@ async function run() {
     assertArchiveTransport("/api/inboxes/message-action");
     assert.deepEqual(lastBody(), gmailRequest);
 
+    nextResponse = response(200, oldGmailFullSnapshotMutationSuccess());
+    assert.equal(
+      (await mutateProviderArchiveMessage(gmailRequest)).error.code,
+      "archive_response_invalid",
+      "the former full folders response is no longer a valid Gmail success",
+    );
+
     const imapRequest: ImapArchiveMutationRequest = {
       mailboxId: MAILBOX_ID,
       folder: "INBOX",
@@ -307,21 +338,158 @@ async function run() {
     );
 
     const unsafeSuccess = gmailMutationSuccess();
-    (unsafeSuccess.folders.Archive.messages[0] as Record<string, unknown>)
-      .fingerprint = "internal-provider-fingerprint";
+    (
+      unsafeSuccess.delta.Archive.upsertMessage as Record<string, unknown>
+    ).fingerprint = "internal-provider-fingerprint";
     nextResponse = response(200, unsafeSuccess);
     assert.equal(
       (await mutateProviderArchiveMessage(gmailRequest)).error.code,
       "archive_response_invalid",
     );
 
-    const staleInboxSuccess = gmailMutationSuccess();
-    staleInboxSuccess.folders.Inbox.messages.push(gmailMessage("Inbox"));
-    nextResponse = response(200, staleInboxSuccess);
+    const clientStateSuccess = gmailMutationSuccess();
+    (
+      clientStateSuccess.delta.Archive.upsertMessage as Record<string, unknown>
+    ).clientState = "client-selected-preview";
+    nextResponse = response(200, clientStateSuccess);
     assert.equal(
       (await mutateProviderArchiveMessage(gmailRequest)).error.code,
       "archive_response_invalid",
-      "the archived Gmail provider id must be absent from fresh Inbox",
+      "the server preview may not carry client-selected state",
+    );
+
+    const extraTopLevelSuccess = gmailMutationSuccess();
+    (extraTopLevelSuccess as Record<string, unknown>).metadata = {};
+    nextResponse = response(200, extraTopLevelSuccess);
+    assert.equal(
+      (await mutateProviderArchiveMessage(gmailRequest)).error.code,
+      "archive_response_invalid",
+      "the Gmail delta success envelope must have exact keys",
+    );
+
+    const extraDeltaSuccess = gmailMutationSuccess();
+    (extraDeltaSuccess.delta as Record<string, unknown>).Trash = {};
+    nextResponse = response(200, extraDeltaSuccess);
+    assert.equal(
+      (await mutateProviderArchiveMessage(gmailRequest)).error.code,
+      "archive_response_invalid",
+      "the Gmail delta may contain only Inbox and Archive",
+    );
+
+    const extraInboxDeltaSuccess = gmailMutationSuccess();
+    (
+      extraInboxDeltaSuccess.delta.Inbox as Record<string, unknown>
+    ).clientState = "keep";
+    nextResponse = response(200, extraInboxDeltaSuccess);
+    assert.equal(
+      (await mutateProviderArchiveMessage(gmailRequest)).error.code,
+      "archive_response_invalid",
+      "the Gmail Inbox delta branch must have exact keys",
+    );
+
+    const extraArchiveDeltaSuccess = gmailMutationSuccess();
+    (
+      extraArchiveDeltaSuccess.delta.Archive as Record<string, unknown>
+    ).clientState = "replace";
+    nextResponse = response(200, extraArchiveDeltaSuccess);
+    assert.equal(
+      (await mutateProviderArchiveMessage(gmailRequest)).error.code,
+      "archive_response_invalid",
+      "the Gmail Archive delta branch must have exact keys",
+    );
+
+    const missingArchiveDeltaSuccess = gmailMutationSuccess();
+    delete (
+      missingArchiveDeltaSuccess.delta as Partial<
+        ReturnType<typeof gmailMutationSuccess>["delta"]
+      >
+    ).Archive;
+    nextResponse = response(200, missingArchiveDeltaSuccess);
+    assert.equal(
+      (await mutateProviderArchiveMessage(gmailRequest)).error.code,
+      "archive_response_invalid",
+      "both exact Gmail delta branches are required",
+    );
+
+    const mismatchedRemovalSuccess = gmailMutationSuccess();
+    mismatchedRemovalSuccess.delta.Inbox.removeProviderMessageId =
+      "other-provider-message";
+    nextResponse = response(200, mismatchedRemovalSuccess);
+    assert.equal(
+      (await mutateProviderArchiveMessage(gmailRequest)).error.code,
+      "archive_response_invalid",
+      "the Inbox removal identity must match the request",
+    );
+
+    const mismatchedIdentitySuccess = gmailMutationSuccess();
+    mismatchedIdentitySuccess.archivedMessageIdentity.providerMessageId =
+      "other-provider-message";
+    nextResponse = response(200, mismatchedIdentitySuccess);
+    assert.equal(
+      (await mutateProviderArchiveMessage(gmailRequest)).error.code,
+      "archive_response_invalid",
+      "the archived identity must match the requested provider message",
+    );
+
+    const mismatchedUpsertMailboxSuccess = gmailMutationSuccess();
+    mismatchedUpsertMailboxSuccess.delta.Archive.upsertMessage.serverMailboxId =
+      "other-mailbox";
+    nextResponse = response(200, mismatchedUpsertMailboxSuccess);
+    assert.equal(
+      (await mutateProviderArchiveMessage(gmailRequest)).error.code,
+      "archive_response_invalid",
+      "the Archive upsert mailbox must match the request",
+    );
+
+    const mismatchedUpsertProviderIdSuccess = gmailMutationSuccess();
+    mismatchedUpsertProviderIdSuccess.delta.Archive.upsertMessage.providerMessageId =
+      "other-provider-message";
+    nextResponse = response(200, mismatchedUpsertProviderIdSuccess);
+    assert.equal(
+      (await mutateProviderArchiveMessage(gmailRequest)).error.code,
+      "archive_response_invalid",
+      "the Archive upsert provider id must match the request",
+    );
+
+    const mismatchedUpsertThreadSuccess = gmailMutationSuccess();
+    mismatchedUpsertThreadSuccess.delta.Archive.upsertMessage.providerThreadId =
+      "other-provider-thread";
+    nextResponse = response(200, mismatchedUpsertThreadSuccess);
+    assert.equal(
+      (await mutateProviderArchiveMessage(gmailRequest)).error.code,
+      "archive_response_invalid",
+      "the Archive upsert thread must match the archived identity",
+    );
+
+    for (const excludedLabel of [
+      "INBOX",
+      "TRASH",
+      "SPAM",
+      "DRAFT",
+      "SENT",
+    ]) {
+      const excludedLabelSuccess = gmailMutationSuccess();
+      excludedLabelSuccess.delta.Archive.upsertMessage.labelIds = [
+        excludedLabel,
+      ];
+      nextResponse = response(200, excludedLabelSuccess);
+      assert.equal(
+        (await mutateProviderArchiveMessage(gmailRequest)).error.code,
+        "archive_response_invalid",
+        `${excludedLabel} is not valid on a Gmail Archive upsert`,
+      );
+    }
+
+    const duplicateLabelsSuccess = gmailMutationSuccess();
+    duplicateLabelsSuccess.delta.Archive.upsertMessage.labelIds = [
+      "STARRED",
+      "STARRED",
+    ];
+    nextResponse = response(200, duplicateLabelsSuccess);
+    assert.equal(
+      (await mutateProviderArchiveMessage(gmailRequest)).error.code,
+      "archive_response_invalid",
+      "Gmail Archive labels must be unique",
     );
 
     const mismatchedImapSuccess = imapMutationSuccess();
@@ -373,7 +541,8 @@ async function run() {
     );
 
     const mismatchedFolderSuccess = gmailMutationSuccess();
-    mismatchedFolderSuccess.folders.Archive.providerFolder = "Inbox";
+    mismatchedFolderSuccess.delta.Archive.upsertMessage.providerFolder =
+      "Inbox";
     nextResponse = response(200, mismatchedFolderSuccess);
     assert.equal(
       (await mutateProviderArchiveMessage(gmailRequest)).error.code,
@@ -383,7 +552,7 @@ async function run() {
 
     const malformedMessageSuccess = gmailMutationSuccess();
     delete (
-      malformedMessageSuccess.folders.Archive.messages[0] as Partial<
+      malformedMessageSuccess.delta.Archive.upsertMessage as Partial<
         ReturnType<typeof gmailMessage>
       >
     ).subject;

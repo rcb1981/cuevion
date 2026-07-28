@@ -96,6 +96,7 @@ import {
   sendGmailMessage,
   type ArchiveFolderSnapshot,
   type ArchiveMutationResponse,
+  type GmailArchiveMessageSnapshot,
   type GmailProviderFolderSnapshot,
   type ImapProviderFolderSnapshot,
   type InboxMessageAction,
@@ -106,6 +107,7 @@ import {
   type LiveInboxMessageSnapshot,
 } from "../../lib/inboxConnectionApi";
 import {
+  applyGmailProviderArchiveDelta,
   buildProviderArchiveStateIdentity,
   buildProviderArchiveMutationTarget,
   applyProviderArchiveFolderReadback,
@@ -1280,6 +1282,7 @@ type MailMessage = {
   providerThreadId?: string;
   uidValidity?: string;
   rfcMessageId?: string;
+  labelIds?: string[];
   threadIdentityContext?: LiveThreadIdentityContext;
   sender: string;
   subject: string;
@@ -35004,6 +35007,7 @@ export function WorkspaceShell({
           providerThreadId: mergedMessageState.providerThreadId,
           uidValidity: mergedMessageState.uidValidity,
           rfcMessageId: mergedMessageState.rfcMessageId,
+          labelIds: mergedMessageState.labelIds,
           threadIdentityContext: mergedMessageState.threadIdentityContext,
           sender: mergedMessageState.sender,
           subject: mergedMessageState.subject,
@@ -35116,6 +35120,36 @@ export function WorkspaceShell({
       },
     );
   };
+  const normalizeGmailArchiveDeltaMessage = (
+    mailboxId: InboxId,
+    message: GmailArchiveMessageSnapshot & {
+      providerFolder: "Archive";
+    },
+    currentStore: MailboxStore,
+  ): MailMessage | null => {
+    const liveMessage = message as LiveInboxMessageSnapshot;
+    const normalizedMessages = mergeLiveInboxMessages(
+      mailboxId,
+      [liveMessage],
+      [],
+      currentStore,
+      {
+        threadIdentityContext: buildLiveThreadIdentityContext(
+          mailboxId,
+          "google",
+          "gmail-api",
+          "Archive",
+        ),
+        freshProviderStateKeys: new Set(
+          getCanonicalMessageIdentityKeys(liveMessage),
+        ),
+        authoritativeFolderSnapshot: true,
+      },
+    );
+    return normalizedMessages.length === 1
+      ? normalizedMessages[0]
+      : null;
+  };
   const applyProviderArchiveMutationSuccess = (
     response: ProviderArchiveMutationSuccess,
   ) => {
@@ -35131,6 +35165,58 @@ export function WorkspaceShell({
       return false;
     }
 
+    if (provider === "google") {
+      if (!("delta" in response)) {
+        return false;
+      }
+      const upsertMessage = response.delta.Archive.upsertMessage;
+      let applied = false;
+      flushSync(() => {
+        setMailboxStore((currentStore) => {
+          const currentCollections =
+            currentStore[response.mailboxId as InboxId];
+          if (!currentCollections) {
+            return currentStore;
+          }
+          const normalizedUpsertMessage = normalizeGmailArchiveDeltaMessage(
+            response.mailboxId as InboxId,
+            upsertMessage,
+            currentStore,
+          );
+          if (!normalizedUpsertMessage) {
+            return currentStore;
+          }
+          const deltaResult = applyGmailProviderArchiveDelta(
+            currentCollections,
+            {
+              mailboxId: response.mailboxId,
+              removeProviderMessageId:
+                response.delta.Inbox.removeProviderMessageId,
+              upsertMessage: normalizedUpsertMessage,
+            },
+          );
+          if (!deltaResult.applied) {
+            return currentStore;
+          }
+          applied = true;
+          return {
+            ...currentStore,
+            [response.mailboxId]: deltaResult.state,
+          };
+        });
+      });
+      if (!applied) {
+        return false;
+      }
+      clearUnreadOverridesForProviderMessages([
+        upsertMessage as LiveInboxMessageSnapshot,
+      ]);
+      return true;
+    }
+
+    if (!("folders" in response)) {
+      return false;
+    }
     const inboxMessages = readRenderableProviderSnapshotMessages(
       response.folders.Inbox,
     );

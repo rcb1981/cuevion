@@ -15,6 +15,14 @@ function section(start: string, end: string) {
   return source.slice(startIndex, endIndex);
 }
 
+function nestedSection(content: string, start: string, end: string) {
+  const startIndex = content.indexOf(start);
+  const endIndex = content.indexOf(end, startIndex + start.length);
+  assert.notEqual(startIndex, -1, `missing nested marker: ${start}`);
+  assert.notEqual(endIndex, -1, `missing nested marker: ${end}`);
+  return content.slice(startIndex, endIndex);
+}
+
 const archiveHandler = section(
   "async function archiveMessagesFromEntryPoint",
   "const archiveSelectedMessages",
@@ -39,12 +47,35 @@ assert.match(
   archiveHandler,
   /sourceMessage\.serverMailboxId !== sourceManagedMailbox\.id/,
 );
+const executeIndex = archiveHandler.indexOf(
+  "const archivePromise = executeProviderArchiveAction",
+);
+const pendingVisibleIndex = archiveHandler.indexOf(
+  "setPendingProviderArchiveKeys",
+  executeIndex,
+);
+const awaitIndex = archiveHandler.indexOf(
+  "const result = await archivePromise",
+  pendingVisibleIndex,
+);
+const pendingReleasedIndex = archiveHandler.indexOf(
+  "setPendingProviderArchiveKeys",
+  awaitIndex,
+);
+assert.ok(executeIndex >= 0);
+assert.ok(executeIndex < pendingVisibleIndex);
+assert.ok(pendingVisibleIndex < awaitIndex);
+assert.ok(awaitIndex < pendingReleasedIndex);
 
 const detailMenu = section(
   'openShareCollaboration(message.id);',
   'deleteMessages([message.id]);',
 );
 assert.match(detailMenu, /archiveMessagesFromEntryPoint\(\[message\.id\]\)/);
+assert.match(
+  detailMenu,
+  /disabled=\{pendingProviderArchiveKeys\.length > 0\}/,
+);
 
 const selectionHandler = section(
   "const archiveSelectedMessages",
@@ -70,6 +101,7 @@ const toolbar = section(
 );
 assert.match(toolbar, /onClick=\{archiveSelectedMessages\}/);
 assert.match(toolbar, /pendingProviderArchiveKeys\.length > 0/);
+assert.match(toolbar, /"Archiving\.\.\."/);
 
 const manualMove = section(
   "const moveMessagesToManualTarget",
@@ -94,6 +126,45 @@ assert.equal(
     .length,
   1,
 );
+assert.match(
+  source,
+  /archiveMessagesFromEntryPoint\(contextMenuSelectionIds\);[\s\S]{0,180}disabled=\{pendingProviderArchiveKeys\.length > 0\}/,
+);
+assert.ok(
+  (
+    source.match(
+      /target\.folder === "Archive" &&\s+pendingProviderArchiveKeys\.length > 0/g,
+    ) ?? []
+  ).length >= 2,
+);
+
+const mutationApply = section(
+  "const applyProviderArchiveMutationSuccess",
+  "const applyProviderArchiveFetchSnapshot",
+);
+const gmailApply = nestedSection(
+  mutationApply,
+  'if (provider === "google")',
+  'if (!("folders" in response))',
+);
+assert.match(gmailApply, /response\.delta\.Archive\.upsertMessage/);
+assert.match(gmailApply, /response\.delta\.Inbox\.removeProviderMessageId/);
+assert.match(gmailApply, /normalizeGmailArchiveDeltaMessage/);
+assert.match(gmailApply, /applyGmailProviderArchiveDelta/);
+assert.match(gmailApply, /flushSync\(\(\) => \{/);
+assert.equal((gmailApply.match(/setMailboxStore\(/g) ?? []).length, 1);
+assert.equal((gmailApply.match(/flushSync\(/g) ?? []).length, 1);
+assert.doesNotMatch(gmailApply, /replaceProviderArchiveReadback/);
+assert.doesNotMatch(gmailApply, /fetchProviderArchive/);
+
+const imapApply = mutationApply.slice(
+  mutationApply.indexOf('if (!("folders" in response))'),
+);
+assert.match(imapApply, /response\.folders\.Inbox/);
+assert.match(imapApply, /response\.folders\.Archive/);
+assert.match(imapApply, /replaceProviderArchiveReadback/);
+assert.doesNotMatch(imapApply, /applyGmailProviderArchiveDelta/);
+assert.match(source, /labelIds: mergedMessageState\.labelIds/);
 
 const refresh = section(
   "const refreshMailboxById = async",
@@ -114,6 +185,6 @@ assert.match(
 );
 assert.match(source, /replaceProviderArchiveReadback/);
 assert.match(source, /applyProviderArchiveFolderReadback/);
-assert.match(source, /flushSync/);
+assert.match(source, /const applyProviderArchiveFetchSnapshot[\s\S]*applyProviderArchiveFolderReadback/);
 
 console.log("providerArchive Workspace wiring tests passed");

@@ -6,6 +6,7 @@ import io
 import json
 import sys
 import unittest
+from email.errors import MessageError
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlsplit
 from unittest.mock import Mock, call, patch
@@ -221,47 +222,31 @@ class RecordingGmailReadback:
     def __init__(
         self,
         *,
-        inbox_messages: list[dict] | None = None,
-        archive_messages: list[dict] | None = None,
-        fail_folder: str | None = None,
+        detail: dict | None = None,
+        error: dict | None = None,
+        results: list[tuple[dict | None, dict | None]] | None = None,
     ):
-        self.inbox_messages = list(inbox_messages or [])
-        self.archive_messages = list(
-            [_gmail_message()]
-            if archive_messages is None
-            else archive_messages
-        )
-        self.fail_folder = fail_folder
-        self.calls: list[tuple[dict, dict]] = []
-
-    def __call__(self, context: dict, **kwargs):
-        self.calls.append((dict(context), dict(kwargs)))
-        provider_folder = kwargs["provider_folder"]
-        if provider_folder == self.fail_folder:
-            return {
-                "status": "error",
-                "context": context,
-                "snapshot": None,
-                "error": {
-                    "code": "provider-read-failed",
-                    "detail": GMAIL_ACCESS_TOKEN,
-                },
+        self.detail = (
+            {
+                "id": GMAIL_MESSAGE_ID,
+                "threadId": GMAIL_THREAD_ID,
+                "labelIds": ["STARRED"],
+                "raw": _gmail_raw_message(),
             }
-        messages = (
-            self.inbox_messages
-            if provider_folder == "Inbox"
-            else self.archive_messages
+            if detail is None
+            else detail
         )
-        return {
-            "status": "ok",
-            "context": context,
-            "snapshot": {
-                "serverMailboxId": MAILBOX_ID,
-                "messages": list(messages),
-                "uidValidity": "gmail-api",
-                "providerFolder": provider_folder,
-            },
-        }
+        self.error = error
+        self.results = list(results) if results is not None else None
+        self.calls: list[tuple[str, str]] = []
+
+    def __call__(self, access_token: str, path: str):
+        self.calls.append((access_token, path))
+        if self.results is not None:
+            return self.results.pop(0)
+        if self.error is not None:
+            return None, self.error
+        return self.detail, None
 
 
 def _source_imap_identity(
@@ -427,9 +412,9 @@ def _run_gmail_archive(
         refresh,
     ), patch.object(
         message_action,
-        "read_gmail_folder_snapshot",
+        "_gmail_get_request",
         side_effect=readback,
-    ) as snapshot:
+    ) as get_request:
         message_action.handler.do_POST(request)
 
     return {
@@ -438,7 +423,7 @@ def _run_gmail_archive(
         "gmail_context": gmail_context,
         "modify": modify,
         "refresh": refresh,
-        "snapshot": snapshot,
+        "get_request": get_request,
         "readback": readback,
     }
 
@@ -781,7 +766,7 @@ class GmailArchiveTransportTests(unittest.TestCase):
                     return_value=response_factory(),
                 ) as transport, patch.object(
                     message_action,
-                    "read_gmail_folder_snapshot",
+                    "_gmail_get_request",
                 ) as readback:
                     message_action.handler.do_POST(request)
 
@@ -821,7 +806,7 @@ class GmailArchiveTransportTests(unittest.TestCase):
                     result["handler"].response()["error"]["code"],
                     "gmail_archive_unconfirmed",
                 )
-                result["snapshot"].assert_not_called()
+                result["get_request"].assert_not_called()
 
 
 class GmailArchiveScopeAndFailureTests(unittest.TestCase):
@@ -843,7 +828,7 @@ class GmailArchiveScopeAndFailureTests(unittest.TestCase):
                     "gmail_modify_scope_required",
                 )
                 result["modify"].assert_not_called()
-                result["snapshot"].assert_not_called()
+                result["get_request"].assert_not_called()
 
     def test_modify_and_full_mail_scopes_are_accepted(self):
         scopes = (
@@ -862,54 +847,74 @@ class GmailArchiveScopeAndFailureTests(unittest.TestCase):
                     "archive",
                 )
 
-    def test_existing_single_refresh_path_is_used_at_most_once(self):
+    def test_modify_is_never_retried_and_detail_get_refreshes_at_most_once(self):
         fresh_context = _gmail_context(
             access_token="fresh-test-token",
             refresh_attempted=True,
         )
-        result = _run_gmail_archive(
+        modify_rejected = _run_gmail_archive(
             modify_results=[
                 (None, {"code": "gmail_token_invalid"}),
-                (
-                    {
-                        "id": GMAIL_MESSAGE_ID,
-                        "labelIds": ["STARRED"],
-                    },
-                    None,
-                ),
             ],
             refresh_result={
                 "status": "ok",
                 "context": fresh_context,
             },
         )
-        self.assertEqual(result["handler"].status, 200)
-        self.assertEqual(
-            result["modify"].call_args_list,
-            [
-                call(
-                    GMAIL_ACCESS_TOKEN,
-                    GMAIL_MESSAGE_ID,
-                    "archive",
-                ),
-                call(
-                    "fresh-test-token",
-                    GMAIL_MESSAGE_ID,
-                    "archive",
-                ),
-            ],
+        self.assertEqual(modify_rejected["handler"].status, 401)
+        modify_rejected["modify"].assert_called_once_with(
+            GMAIL_ACCESS_TOKEN,
+            GMAIL_MESSAGE_ID,
+            "archive",
         )
-        result["refresh"].assert_called_once()
+        modify_rejected["refresh"].assert_not_called()
+        modify_rejected["get_request"].assert_not_called()
 
-        already_refreshed = _run_gmail_archive(
-            context=_gmail_context(refresh_attempted=True),
-            modify_results=[
+        detail = {
+            "id": GMAIL_MESSAGE_ID,
+            "threadId": GMAIL_THREAD_ID,
+            "labelIds": ["STARRED"],
+            "raw": _gmail_raw_message(),
+        }
+        readback = RecordingGmailReadback(
+            results=[
                 (None, {"code": "gmail_token_invalid"}),
+                (detail, None),
             ],
         )
-        self.assertEqual(already_refreshed["handler"].status, 401)
-        already_refreshed["modify"].assert_called_once()
-        already_refreshed["refresh"].assert_not_called()
+        result = _run_gmail_archive(
+            readback=readback,
+            refresh_result={
+                "status": "ok",
+                "context": fresh_context,
+            },
+        )
+        self.assertEqual(result["handler"].status, 200)
+        result["modify"].assert_called_once_with(
+            GMAIL_ACCESS_TOKEN,
+            GMAIL_MESSAGE_ID,
+            "archive",
+        )
+        result["refresh"].assert_called_once_with(_gmail_context())
+        self.assertEqual(
+            readback.calls,
+            [
+                (
+                    GMAIL_ACCESS_TOKEN,
+                    (
+                        f"/messages/{quote(GMAIL_MESSAGE_ID, safe='')}"
+                        "?format=raw"
+                    ),
+                ),
+                (
+                    "fresh-test-token",
+                    (
+                        f"/messages/{quote(GMAIL_MESSAGE_ID, safe='')}"
+                        "?format=raw"
+                    ),
+                ),
+            ],
+        )
 
     def test_permission_timeout_and_rate_limit_never_report_success(self):
         cases = (
@@ -933,7 +938,7 @@ class GmailArchiveScopeAndFailureTests(unittest.TestCase):
                     result["handler"].response()["error"]["code"],
                     expected_code,
                 )
-                result["snapshot"].assert_not_called()
+                result["get_request"].assert_not_called()
 
 
 class GmailArchiveScopePersistenceTests(unittest.TestCase):
@@ -1193,9 +1198,45 @@ class GmailProviderSnapshotTests(unittest.TestCase):
                     "gmail_response_invalid",
                 )
 
+    def test_pure_detail_parser_rejects_non_base64url_and_mime_errors(self):
+        from api.inboxes.gmail_snapshot import parse_gmail_message_detail
+
+        base_detail = {
+            "id": GMAIL_MESSAGE_ID,
+            "threadId": GMAIL_THREAD_ID,
+            "labelIds": ["STARRED"],
+        }
+        for raw_message in ("++++", "AA=A", "A", "YQ=", "YQ==="):
+            with self.subTest(raw_message=raw_message):
+                self.assertIsNone(
+                    parse_gmail_message_detail(
+                        {**base_detail, "raw": raw_message},
+                        context=_gmail_context(),
+                        provider_folder="Archive",
+                        requested_message_id=GMAIL_MESSAGE_ID,
+                        index=0,
+                        strict=True,
+                    )
+                )
+
+        def malformed_mime(_raw_message):
+            raise MessageError("documented malformed MIME")
+
+        self.assertIsNone(
+            parse_gmail_message_detail(
+                {**base_detail, "raw": _gmail_raw_message()},
+                context=_gmail_context(),
+                provider_folder="Archive",
+                requested_message_id=GMAIL_MESSAGE_ID,
+                index=0,
+                strict=True,
+                message_parser=malformed_mime,
+            )
+        )
+
 
 class GmailArchiveReadbackTests(unittest.TestCase):
-    def test_missing_archive_label_ids_returns_fresh_snapshots_without_retrying_mutation(self):
+    def test_missing_archive_label_ids_returns_one_delta_without_retrying_mutation(self):
         request = FakeHandler(
             {
                 "mailboxId": MAILBOX_ID,
@@ -1206,10 +1247,6 @@ class GmailArchiveReadbackTests(unittest.TestCase):
         context = _gmail_context()
 
         def gmail_get(_access_token, path):
-            if "labelIds=INBOX" in path:
-                return {"messages": []}, None
-            if path.startswith("/messages?q="):
-                return {"messages": []}, None
             if path == (
                 f"/messages/{quote(GMAIL_MESSAGE_ID, safe='')}"
                 "?format=raw"
@@ -1255,8 +1292,12 @@ class GmailArchiveReadbackTests(unittest.TestCase):
 
         self.assertEqual(request.status, 200)
         response = request.response()
-        self.assertEqual(response["folders"]["Inbox"]["messages"], [])
-        archived_message = response["folders"]["Archive"]["messages"][0]
+        self.assertNotIn("folders", response)
+        self.assertEqual(
+            response["delta"]["Inbox"],
+            {"removeProviderMessageId": GMAIL_MESSAGE_ID},
+        )
+        archived_message = response["delta"]["Archive"]["upsertMessage"]
         self.assertEqual(archived_message["labelIds"], [])
         self.assertEqual(
             archived_message["providerMessageId"],
@@ -1271,15 +1312,36 @@ class GmailArchiveReadbackTests(unittest.TestCase):
             GMAIL_MESSAGE_ID,
             "archive",
         )
-        self.assertEqual(get_request.call_count, 3)
+        get_request.assert_called_once_with(
+            GMAIL_ACCESS_TOKEN,
+            (
+                f"/messages/{quote(GMAIL_MESSAGE_ID, safe='')}"
+                "?format=raw"
+            ),
+        )
         refresh.assert_not_called()
 
-    def test_success_returns_two_fresh_snapshots_and_explicit_identities(self):
+    def test_success_returns_exact_delta_and_explicit_identities(self):
         readback = RecordingGmailReadback()
         result = _run_gmail_archive(readback=readback)
 
         self.assertEqual(result["handler"].status, 200)
         response = result["handler"].response()
+        self.assertEqual(
+            set(response),
+            {
+                "ok",
+                "status",
+                "action",
+                "mailboxId",
+                "archivedMessageIdentity",
+                "delta",
+            },
+        )
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["status"], "ok")
+        self.assertEqual(response["action"], "archive")
+        self.assertEqual(response["mailboxId"], MAILBOX_ID)
         self.assertEqual(
             response["archivedMessageIdentity"],
             {
@@ -1291,56 +1353,180 @@ class GmailArchiveReadbackTests(unittest.TestCase):
             },
         )
         self.assertEqual(
-            set(response["folders"]),
+            set(response["delta"]),
             {"Inbox", "Archive"},
         )
         self.assertEqual(
-            response["folders"]["Inbox"]["messages"],
-            [],
+            response["delta"]["Inbox"],
+            {"removeProviderMessageId": GMAIL_MESSAGE_ID},
         )
         self.assertEqual(
-            response["folders"]["Archive"]["messages"][0][
-                "providerMessageId"
-            ],
+            set(response["delta"]["Archive"]),
+            {"upsertMessage"},
+        )
+        archived_message = response["delta"]["Archive"]["upsertMessage"]
+        self.assertEqual(
+            archived_message["providerMessageId"],
             GMAIL_MESSAGE_ID,
         )
-        self.assertNotIn(
-            "imapUid",
-            response["folders"]["Archive"]["messages"][0],
-        )
-        self.assertEqual(len(readback.calls), 2)
-        inbox_context, inbox_arguments = readback.calls[0]
-        archive_context, archive_arguments = readback.calls[1]
         self.assertEqual(
-            inbox_arguments,
-            {
-                "provider_folder": "Inbox",
-                "limit": message_action.GMAIL_ARCHIVE_READBACK_LIMIT,
-                "focus_preferences": None,
-                "strict": True,
-                "request_with_one_refresh": (
-                    message_action._gmail_get_with_one_refresh
-                ),
-            },
+            archived_message["providerThreadId"],
+            GMAIL_THREAD_ID,
         )
+        self.assertEqual(archived_message["providerFolder"], "Archive")
+        self.assertEqual(archived_message["serverMailboxId"], MAILBOX_ID)
+        self.assertEqual(archived_message["labelIds"], ["STARRED"])
+        self.assertIsInstance(archived_message["subject"], str)
+        self.assertIsInstance(archived_message["snippet"], str)
+        self.assertIsInstance(archived_message["body"], list)
+        self.assertIsInstance(archived_message["attachments"], list)
+        self.assertNotIn("imapUid", archived_message)
+        self.assertNotIn("folders", response)
         self.assertEqual(
-            archive_arguments,
-            {
-                "provider_folder": "Archive",
-                "limit": message_action.GMAIL_ARCHIVE_READBACK_LIMIT,
-                "focus_preferences": None,
-                "strict": True,
-                "required_message_id": GMAIL_MESSAGE_ID,
-                "request_with_one_refresh": (
-                    message_action._gmail_get_with_one_refresh
-                ),
-            },
+            readback.calls,
+            [
+                (
+                    GMAIL_ACCESS_TOKEN,
+                    (
+                        f"/messages/{quote(GMAIL_MESSAGE_ID, safe='')}"
+                        "?format=raw"
+                    ),
+                )
+            ],
         )
-        self.assertEqual(inbox_context["mailbox_id"], MAILBOX_ID)
-        self.assertEqual(archive_context["mailbox_id"], MAILBOX_ID)
+        result["modify"].assert_called_once_with(
+            GMAIL_ACCESS_TOKEN,
+            GMAIL_MESSAGE_ID,
+            "archive",
+        )
+        result["refresh"].assert_not_called()
         serialized = json.dumps(response)
         self.assertNotIn(GMAIL_ACCESS_TOKEN, serialized)
         self.assertNotIn("refresh_token", serialized)
+        self.assertNotIn(_gmail_raw_message(), serialized)
+
+    def test_failed_or_invalid_detail_is_uncertain_and_never_retries_mutation(self):
+        invalid_details = (
+            (
+                "provider_failure",
+                RecordingGmailReadback(
+                    error={
+                        "code": "gmail_unavailable",
+                        "detail": GMAIL_ACCESS_TOKEN,
+                    },
+                ),
+            ),
+            (
+                "provider_id_mismatch",
+                RecordingGmailReadback(
+                    detail={
+                        "id": "different-provider-message",
+                        "threadId": GMAIL_THREAD_ID,
+                        "labelIds": ["STARRED"],
+                        "raw": _gmail_raw_message(),
+                    },
+                ),
+            ),
+            (
+                "thread_id_missing",
+                RecordingGmailReadback(
+                    detail={
+                        "id": GMAIL_MESSAGE_ID,
+                        "labelIds": ["STARRED"],
+                        "raw": _gmail_raw_message(),
+                    },
+                ),
+            ),
+            (
+                "excluded_label",
+                RecordingGmailReadback(
+                    detail={
+                        "id": GMAIL_MESSAGE_ID,
+                        "threadId": GMAIL_THREAD_ID,
+                        "labelIds": ["SPAM"],
+                        "raw": _gmail_raw_message(),
+                    },
+                ),
+            ),
+            (
+                "malformed_base64",
+                RecordingGmailReadback(
+                    detail={
+                        "id": GMAIL_MESSAGE_ID,
+                        "threadId": GMAIL_THREAD_ID,
+                        "labelIds": ["STARRED"],
+                        "raw": "%%%not-base64url%%%",
+                    },
+                ),
+            ),
+        )
+        for name, readback in invalid_details:
+            with self.subTest(name=name):
+                result = _run_gmail_archive(readback=readback)
+                self.assertEqual(result["handler"].status, 502)
+                response = result["handler"].response()
+                self.assertEqual(
+                    set(response),
+                    {
+                        "ok",
+                        "status",
+                        "action",
+                        "mailboxId",
+                        "archivedMessageIdentity",
+                        "error",
+                    },
+                )
+                self.assertFalse(response["ok"])
+                self.assertEqual(
+                    response["status"],
+                    "mutation_confirmed_readback_failed",
+                )
+                self.assertEqual(
+                    response["error"]["code"],
+                    "archive_readback_failed",
+                )
+                self.assertNotIn("delta", response)
+                result["modify"].assert_called_once_with(
+                    GMAIL_ACCESS_TOKEN,
+                    GMAIL_MESSAGE_ID,
+                    "archive",
+                )
+                self.assertEqual(len(readback.calls), 1)
+                self.assertNotIn(GMAIL_ACCESS_TOKEN, json.dumps(response))
+
+    def test_provider_details_raw_and_oversized_preview_never_leak(self):
+        raw_message = _gmail_raw_message()
+        provider_secret = "provider-secret-never-return"
+        readback = RecordingGmailReadback(
+            detail={
+                "id": GMAIL_MESSAGE_ID,
+                "threadId": GMAIL_THREAD_ID,
+                "labelIds": ["STARRED"],
+                "raw": raw_message,
+                "access_token": provider_secret,
+                "providerError": {"secret": provider_secret},
+            },
+        )
+        result = _run_gmail_archive(readback=readback)
+        self.assertEqual(result["handler"].status, 200)
+        serialized = json.dumps(result["handler"].response())
+        self.assertNotIn(raw_message, serialized)
+        self.assertNotIn(provider_secret, serialized)
+        self.assertNotIn("raw", result["handler"].response())
+
+        with patch.object(
+            message_action,
+            "MAX_GMAIL_RESPONSE_BYTES",
+            64,
+        ):
+            oversized = _run_gmail_archive()
+        self.assertEqual(oversized["handler"].status, 502)
+        self.assertEqual(
+            oversized["handler"].response()["status"],
+            "mutation_confirmed_readback_failed",
+        )
+        self.assertNotIn("delta", oversized["handler"].response())
+        oversized["modify"].assert_called_once()
 
     def test_archive_query_excludes_non_archive_product_folders(self):
         from api.inboxes.gmail_snapshot import read_gmail_folder_snapshot
@@ -1375,112 +1561,32 @@ class GmailArchiveReadbackTests(unittest.TestCase):
                 archive_query,
             )
 
-    def test_failed_or_inconsistent_readback_is_uncertain_and_never_retries_mutation(self):
-        cases = (
-            (
-                "provider_failure",
-                RecordingGmailReadback(fail_folder="Archive"),
-            ),
-            (
-                "still_in_inbox",
-                RecordingGmailReadback(
-                    inbox_messages=[
-                        _gmail_message(provider_folder="Inbox")
-                    ]
-                ),
-            ),
-            (
-                "missing_from_archive",
-                RecordingGmailReadback(archive_messages=[]),
-            ),
-        )
-        for name, readback in cases:
-            with self.subTest(name=name):
-                result = _run_gmail_archive(readback=readback)
-                self.assertEqual(result["handler"].status, 502)
-                response = result["handler"].response()
-                self.assertFalse(response["ok"])
-                self.assertEqual(
-                    response["status"],
-                    "mutation_confirmed_readback_failed",
-                )
-                self.assertEqual(
-                    response["error"]["code"],
-                    "archive_readback_failed",
-                )
-                result["modify"].assert_called_once_with(
-                    GMAIL_ACCESS_TOKEN,
-                    GMAIL_MESSAGE_ID,
-                    "archive",
-                )
-                self.assertNotIn(GMAIL_ACCESS_TOKEN, json.dumps(response))
+    def test_targeted_readback_path_has_no_list_or_snapshot_read(self):
+        readback = RecordingGmailReadback()
+        result = _run_gmail_archive(readback=readback)
 
-    def test_duplicate_archive_provider_id_is_uncertain_without_mutation_retry(self):
-        refresh_token = "test-only-gmail-refresh-token-never-return"
-        context = {
-            **_gmail_context(),
-            "refresh_token": refresh_token,
-        }
-        readback = RecordingGmailReadback(
-            inbox_messages=[],
-            archive_messages=[
-                _gmail_message(),
-                _gmail_message(),
-            ],
-        )
-        result = _run_gmail_archive(
-            context=context,
-            readback=readback,
-        )
-
-        self.assertEqual(result["handler"].status, 502)
-        response = result["handler"].response()
-        self.assertFalse(response["ok"])
+        self.assertEqual(result["handler"].status, 200)
         self.assertEqual(
-            response["status"],
-            "mutation_confirmed_readback_failed",
-        )
-        self.assertEqual(
-            response["error"]["code"],
-            "archive_readback_failed",
-        )
-        result["modify"].assert_called_once_with(
-            GMAIL_ACCESS_TOKEN,
-            GMAIL_MESSAGE_ID,
-            "archive",
-        )
-        result["refresh"].assert_not_called()
-        self.assertEqual(
-            result["snapshot"].call_args_list,
+            readback.calls,
             [
-                call(
-                    context,
-                    provider_folder="Inbox",
-                    limit=message_action.GMAIL_ARCHIVE_READBACK_LIMIT,
-                    focus_preferences=None,
-                    strict=True,
-                    request_with_one_refresh=(
-                        message_action._gmail_get_with_one_refresh
+                (
+                    GMAIL_ACCESS_TOKEN,
+                    (
+                        f"/messages/{quote(GMAIL_MESSAGE_ID, safe='')}"
+                        "?format=raw"
                     ),
-                ),
-                call(
-                    context,
-                    provider_folder="Archive",
-                    limit=message_action.GMAIL_ARCHIVE_READBACK_LIMIT,
-                    focus_preferences=None,
-                    strict=True,
-                    required_message_id=GMAIL_MESSAGE_ID,
-                    request_with_one_refresh=(
-                        message_action._gmail_get_with_one_refresh
-                    ),
-                ),
+                )
             ],
         )
-        serialized = json.dumps(response)
-        self.assertNotIn(GMAIL_ACCESS_TOKEN, serialized)
-        self.assertNotIn(refresh_token, serialized)
-        self.assertNotIn("access_token", serialized)
-        self.assertNotIn("refresh_token", serialized)
+        self.assertTrue(
+            all(
+                not path.startswith("/messages?")
+                for _token, path in readback.calls
+            )
+        )
+        self.assertFalse(
+            hasattr(message_action, "read_gmail_folder_snapshot")
+        )
 
     def test_synthetic_rfc_imap_and_thread_ids_are_not_mutated(self):
         invalid_ids = (

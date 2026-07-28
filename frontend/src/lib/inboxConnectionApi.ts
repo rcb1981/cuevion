@@ -919,16 +919,24 @@ export type ArchiveFailureResponse = {
   error: ArchiveClientError;
 };
 
+export type GmailArchiveMutationDelta = {
+  Inbox: {
+    removeProviderMessageId: string;
+  };
+  Archive: {
+    upsertMessage: GmailArchiveMessageSnapshot & {
+      providerFolder: "Archive";
+    };
+  };
+};
+
 export type GmailArchiveMutationSuccess = {
   ok: true;
   status: "ok";
   action: "archive";
   mailboxId: string;
   archivedMessageIdentity: GmailArchivedMessageIdentity;
-  folders: {
-    Inbox: GmailInboxSnapshot;
-    Archive: GmailArchiveSnapshot;
-  };
+  delta: GmailArchiveMutationDelta;
   error?: never;
 };
 
@@ -1637,15 +1645,15 @@ function gmailArchiveMutationSuccess(
 ): GmailArchiveMutationSuccess | null {
   if (
     !gmailArchivedIdentityIsValid(value.archivedMessageIdentity, request) ||
-    !isArchiveRecord(value.folders) ||
-    !hasExactArchiveKeys(value.folders, ["Inbox", "Archive"]) ||
-    !gmailFolderSnapshotIsValid(
-      value.folders.Inbox,
-      request.mailboxId,
-      "Inbox",
-    ) ||
-    !gmailFolderSnapshotIsValid(
-      value.folders.Archive,
+    !isArchiveRecord(value.delta) ||
+    !hasExactArchiveKeys(value.delta, ["Inbox", "Archive"]) ||
+    !isArchiveRecord(value.delta.Inbox) ||
+    !hasExactArchiveKeys(value.delta.Inbox, ["removeProviderMessageId"]) ||
+    value.delta.Inbox.removeProviderMessageId !== request.messageId ||
+    !isArchiveRecord(value.delta.Archive) ||
+    !hasExactArchiveKeys(value.delta.Archive, ["upsertMessage"]) ||
+    !gmailArchiveMessageIsValid(
+      value.delta.Archive.upsertMessage,
       request.mailboxId,
       "Archive",
     )
@@ -1653,20 +1661,14 @@ function gmailArchiveMutationSuccess(
     return null;
   }
   const archivedMessageIdentity = value.archivedMessageIdentity;
-  const inboxMatches = value.folders.Inbox.messages.filter(
-    (message) => message.providerMessageId === request.messageId,
-  );
-  const archiveMatches = value.folders.Archive.messages.filter(
-    (message) => message.providerMessageId === request.messageId,
-  );
+  const upsertMessage = value.delta.Archive.upsertMessage;
   if (
-    inboxMatches.length !== 0 ||
-    archiveMatches.length !== 1 ||
-    archiveMatches[0].providerThreadId !==
+    upsertMessage.providerMessageId !== request.messageId ||
+    upsertMessage.providerThreadId !==
       archivedMessageIdentity.providerThreadId ||
     (
       archivedMessageIdentity.rfcMessageId !== undefined &&
-      archiveMatches[0].rfcMessageId !== archivedMessageIdentity.rfcMessageId
+      upsertMessage.rfcMessageId !== archivedMessageIdentity.rfcMessageId
     )
   ) {
     return null;
@@ -1725,6 +1727,7 @@ function archiveMutationSuccess(
   value: unknown,
   request: ArchiveMutationRequest,
 ): GmailArchiveMutationSuccess | ImapArchiveMutationSuccess | null {
+  const resultField = "messageId" in request ? "delta" : "folders";
   if (
     containsForbiddenArchiveResponseField(value) ||
     !isArchiveRecord(value) ||
@@ -1736,7 +1739,7 @@ function archiveMutationSuccess(
         "action",
         "mailboxId",
         "archivedMessageIdentity",
-        "folders",
+        resultField,
       ],
     ) ||
     value.ok !== true ||
