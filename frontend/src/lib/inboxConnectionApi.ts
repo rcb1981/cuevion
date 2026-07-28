@@ -25,8 +25,14 @@ export type LiveInboxAttachmentSnapshot = {
 
 export type LiveInboxMessageSnapshot = {
   id: string;
+  serverMailboxId?: string;
+  providerFolder?: string;
   imapUid?: string;
+  uidValidity?: string;
+  providerMessageId?: string;
   providerThreadId?: string;
+  rfcMessageId?: string;
+  labelIds?: string[];
   sender: string;
   subject: string;
   snippet: string;
@@ -766,6 +772,1135 @@ export async function mutateInboxMessageAction(
             : "Could not update this message in the connected mailbox.",
       },
     };
+  }
+}
+
+export type GmailArchiveMutationRequest = {
+  mailboxId: string;
+  messageId: string;
+  action: "archive";
+};
+
+export type ImapArchiveMutationRequest = {
+  mailboxId: string;
+  folder: "INBOX";
+  uid: string;
+  uidValidity: string;
+  action: "archive";
+};
+
+export type ArchiveMutationRequest =
+  | GmailArchiveMutationRequest
+  | ImapArchiveMutationRequest;
+
+export type ArchiveMessagePreviewSnapshot = {
+  id: string;
+  sender: string;
+  subject: string;
+  snippet: string;
+  from: string;
+  to: string;
+  cc?: string;
+  timestamp: string;
+  createdAt: string;
+  body: string[];
+  bodyHtml?: string;
+  attachments?: LiveInboxAttachmentSnapshot[];
+  unread?: boolean;
+  flagged?: boolean;
+  category?: string | null;
+  categorySource?: string | null;
+  categoryConfidence?: string | null;
+  signal?: string | null;
+  ui_signal?: string | null;
+  internalClassification?: string | null;
+  final_visibility?: string | null;
+  action?: string | null;
+  v7_final_priority?: string | null;
+  classifierVersion?: string | null;
+};
+
+export type GmailArchiveMessageSnapshot = ArchiveMessagePreviewSnapshot & {
+  serverMailboxId: string;
+  providerFolder: "Inbox" | "Archive";
+  providerMessageId: string;
+  providerThreadId: string;
+  rfcMessageId?: string;
+  labelIds: string[];
+};
+
+export type ImapArchiveMessageSnapshot = ArchiveMessagePreviewSnapshot & {
+  serverMailboxId: string;
+  providerFolder: string;
+  imapUid: string;
+  uidValidity: string;
+  threadId: string;
+  rfcMessageId?: string;
+};
+
+export type GmailProviderFolderSnapshot<
+  Folder extends "Inbox" | "Archive" = "Inbox" | "Archive",
+> = {
+  serverMailboxId: string;
+  providerFolder: Folder;
+  uidValidity: "gmail-api";
+  messages: Array<GmailArchiveMessageSnapshot & { providerFolder: Folder }>;
+};
+
+export type ImapProviderFolderSnapshot<Folder extends string = string> = {
+  serverMailboxId: string;
+  providerFolder: Folder;
+  uidValidity: string;
+  imapUidSet: string[];
+  messages: Array<ImapArchiveMessageSnapshot & { providerFolder: Folder }>;
+};
+
+export type GmailInboxSnapshot = GmailProviderFolderSnapshot<"Inbox">;
+export type GmailArchiveSnapshot = GmailProviderFolderSnapshot<"Archive">;
+export type ImapInboxSnapshot = ImapProviderFolderSnapshot<"INBOX">;
+export type ImapArchiveSnapshot = ImapProviderFolderSnapshot;
+export type ArchiveFolderSnapshot =
+  | GmailArchiveSnapshot
+  | ImapArchiveSnapshot;
+
+export type GmailArchivedMessageIdentity = {
+  serverMailboxId: string;
+  providerMessageId: string;
+  providerThreadId: string;
+  providerFolder: "Archive";
+  rfcMessageId?: string;
+};
+
+export type ImapArchivedMessageIdentity = {
+  serverMailboxId: string;
+  sourceProviderFolder: "INBOX";
+  sourceImapUid: string;
+  sourceUidValidity: string;
+  providerFolder: string;
+  imapUid: string;
+  uidValidity: string;
+  rfcMessageId?: string;
+};
+
+export type ArchivedMessageIdentity =
+  | GmailArchivedMessageIdentity
+  | ImapArchivedMessageIdentity;
+
+export type GmailArchiveMutationIdentity = {
+  serverMailboxId: string;
+  providerMessageId: string;
+  providerFolder: "Archive";
+};
+
+export type ImapArchiveMutationIdentity = {
+  serverMailboxId: string;
+  sourceProviderFolder: "INBOX";
+  sourceImapUid: string;
+  sourceUidValidity: string;
+};
+
+export type ArchiveMutationIdentity =
+  | GmailArchiveMutationIdentity
+  | ImapArchiveMutationIdentity;
+
+export type ArchiveClientError = {
+  code: string;
+  message: string;
+};
+
+export type ArchiveFailureResponse = {
+  ok: false;
+  status?: never;
+  action?: never;
+  mailboxId?: never;
+  archivedMessageIdentity?: never;
+  folders?: never;
+  folder?: never;
+  error: ArchiveClientError;
+};
+
+export type GmailArchiveMutationSuccess = {
+  ok: true;
+  status: "ok";
+  action: "archive";
+  mailboxId: string;
+  archivedMessageIdentity: GmailArchivedMessageIdentity;
+  folders: {
+    Inbox: GmailInboxSnapshot;
+    Archive: GmailArchiveSnapshot;
+  };
+  error?: never;
+};
+
+export type ImapArchiveMutationSuccess = {
+  ok: true;
+  status: "ok";
+  action: "archive";
+  mailboxId: string;
+  archivedMessageIdentity: ImapArchivedMessageIdentity;
+  folders: {
+    Inbox: ImapInboxSnapshot;
+    Archive: ImapArchiveSnapshot;
+  };
+  error?: never;
+};
+
+export type ArchiveMutationUncertainResponse = {
+  ok: false;
+  status: "mutation_confirmed_readback_failed";
+  action: "archive";
+  mailboxId: string;
+  archivedMessageIdentity: ArchiveMutationIdentity;
+  error: ArchiveClientError & {
+    code: "archive_readback_failed";
+  };
+  folders?: never;
+  folder?: never;
+};
+
+export type ArchiveMutationResponse =
+  | GmailArchiveMutationSuccess
+  | ImapArchiveMutationSuccess
+  | ArchiveMutationUncertainResponse
+  | ArchiveFailureResponse;
+
+export type GmailArchiveFetchSuccess = {
+  ok: true;
+  status: "ok";
+  mailboxId: string;
+  folder: GmailArchiveSnapshot;
+  error?: never;
+};
+
+export type ImapArchiveFetchSuccess = {
+  ok: true;
+  status: "ok";
+  mailboxId: string;
+  folder: ImapArchiveSnapshot;
+  error?: never;
+};
+
+export type ArchiveFetchResponse =
+  | GmailArchiveFetchSuccess
+  | ImapArchiveFetchSuccess
+  | ArchiveFailureResponse;
+
+const MAX_ARCHIVE_RESPONSE_BYTES = 10 * 1024 * 1024;
+const MAX_ARCHIVE_SNAPSHOT_MESSAGES = 100;
+const MAX_IMAP_UID_SET_SIZE = 100_000;
+const MAX_IMAP_UID = "4294967295";
+const MAX_ARCHIVE_IDENTIFIER_LENGTH = 512;
+const GMAIL_ARCHIVE_EXCLUDED_LABELS = new Set([
+  "INBOX",
+  "TRASH",
+  "SPAM",
+  "DRAFT",
+  "SENT",
+]);
+const PUBLIC_ARCHIVE_ERROR_CODES = new Set([
+  "archive_folder_ambiguous",
+  "archive_folder_unavailable",
+  "archive_message_not_found",
+  "archive_move_failed",
+  "archive_move_unconfirmed",
+  "archive_move_unsupported",
+  "archive_snapshot_failed",
+  "forbidden_connection_fields",
+  "gmail_archive_failed",
+  "gmail_archive_unconfirmed",
+  "gmail_fetch_failed",
+  "gmail_modify_scope_required",
+  "gmail_permission_denied",
+  "gmail_rate_limited",
+  "gmail_response_invalid",
+  "gmail_response_too_large",
+  "gmail_unavailable",
+  "imap_archive_failed",
+  "invalid_credentials",
+  "invalid_imap_uid",
+  "invalid_request",
+  "invalid_source_folder",
+  "invalid_uid_validity",
+  "mailbox_configuration_malformed",
+  "mailbox_not_found",
+  "reconnect_required",
+  "source_folder_unavailable",
+  "uid_validity_changed",
+  "uid_validity_unavailable",
+  "unsupported_provider",
+]);
+const SAFE_ARCHIVE_ERROR_MESSAGE =
+  "Could not complete this Archive request safely.";
+const SAFE_ARCHIVE_UNCERTAIN_MESSAGE =
+  "Archive was confirmed, but the latest mailbox state could not be verified.";
+const ARCHIVE_PREVIEW_FIELDS = new Set([
+  "id",
+  "sender",
+  "subject",
+  "snippet",
+  "from",
+  "to",
+  "cc",
+  "timestamp",
+  "createdAt",
+  "body",
+  "bodyHtml",
+  "attachments",
+  "unread",
+  "flagged",
+  "category",
+  "categorySource",
+  "categoryConfidence",
+  "signal",
+  "ui_signal",
+  "internalClassification",
+  "final_visibility",
+  "action",
+  "v7_final_priority",
+  "classifierVersion",
+]);
+const ARCHIVE_NULLABLE_PREVIEW_FIELDS = new Set([
+  "category",
+  "categorySource",
+  "categoryConfidence",
+  "signal",
+  "ui_signal",
+  "internalClassification",
+  "final_visibility",
+  "action",
+  "v7_final_priority",
+  "classifierVersion",
+]);
+const ARCHIVE_ATTACHMENT_FIELDS = new Set([
+  "id",
+  "name",
+  "mimeType",
+  "size",
+  "contentId",
+  "disposition",
+  "inlineSrc",
+]);
+const GMAIL_ARCHIVE_MESSAGE_FIELDS = new Set([
+  ...ARCHIVE_PREVIEW_FIELDS,
+  "serverMailboxId",
+  "providerFolder",
+  "providerMessageId",
+  "providerThreadId",
+  "rfcMessageId",
+  "labelIds",
+]);
+const IMAP_ARCHIVE_MESSAGE_FIELDS = new Set([
+  ...ARCHIVE_PREVIEW_FIELDS,
+  "serverMailboxId",
+  "providerFolder",
+  "imapUid",
+  "uidValidity",
+  "threadId",
+  "rfcMessageId",
+]);
+const FORBIDDEN_ARCHIVE_RESPONSE_KEYS = new Set([
+  "authorization",
+  "connection",
+  "cookie",
+  "fingerprint",
+  "headers",
+  "host",
+  "identities",
+  "identity",
+  "mailboxconfig",
+  "mailboxemail",
+  "owneremail",
+  "password",
+  "payload",
+  "port",
+  "providererror",
+  "providerpayload",
+  "raw",
+  "rawproviderresponse",
+  "rawresponse",
+  "session",
+  "ssl",
+  "userid",
+  "username",
+]);
+const FORBIDDEN_ARCHIVE_RESPONSE_KEY_FRAGMENTS = [
+  "credential",
+  "password",
+  "secret",
+  "token",
+];
+
+function archiveFailure(code: string, message: string): ArchiveFailureResponse {
+  return {
+    ok: false,
+    error: {
+      code,
+      message,
+    },
+  };
+}
+
+function isArchiveRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function hasExactArchiveKeys(
+  value: Record<string, unknown>,
+  required: readonly string[],
+  optional: readonly string[] = [],
+) {
+  const keys = Object.keys(value);
+  const allowed = new Set([...required, ...optional]);
+  return (
+    required.every((key) => Object.prototype.hasOwnProperty.call(value, key)) &&
+    keys.every((key) => allowed.has(key))
+  );
+}
+
+function hasOnlyArchiveKeys(
+  value: Record<string, unknown>,
+  allowed: ReadonlySet<string>,
+) {
+  return Object.keys(value).every((key) => allowed.has(key));
+}
+
+function compactArchiveKey(value: string) {
+  return value.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function containsForbiddenArchiveResponseField(
+  value: unknown,
+  visited = new Set<object>(),
+): boolean {
+  if (!value || typeof value !== "object") return false;
+  if (visited.has(value)) return false;
+  visited.add(value);
+  if (Array.isArray(value)) {
+    return value.some((item) =>
+      containsForbiddenArchiveResponseField(item, visited));
+  }
+  return Object.entries(value).some(([key, item]) => {
+    const compactKey = compactArchiveKey(key);
+    return (
+      FORBIDDEN_ARCHIVE_RESPONSE_KEYS.has(compactKey) ||
+      FORBIDDEN_ARCHIVE_RESPONSE_KEY_FRAGMENTS.some((fragment) =>
+        compactKey.includes(fragment)) ||
+      containsForbiddenArchiveResponseField(item, visited)
+    );
+  });
+}
+
+function isArchiveIdentifier(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length >= 1 &&
+    value.length <= MAX_ARCHIVE_IDENTIFIER_LENGTH &&
+    value === value.trim() &&
+    ![...value].some((character) => {
+      const code = character.charCodeAt(0);
+      return code < 32 || code === 127;
+    })
+  );
+}
+
+function isGmailArchiveMessageId(value: unknown): value is string {
+  if (!isArchiveIdentifier(value) || !/^[\x20-\x7e]+$/.test(value)) return false;
+  const lowered = value.toLowerCase();
+  return (
+    !value.includes("@") &&
+    !value.includes("<") &&
+    !value.includes(">") &&
+    !["imap-uid-", "rfc-", "thread-"].some((prefix) =>
+      lowered.startsWith(prefix))
+  );
+}
+
+function isArchiveFolder(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length >= 1 &&
+    value.length <= 16_384 &&
+    value === value.trim() &&
+    !value.includes("\r") &&
+    !value.includes("\n") &&
+    !value.includes("\0")
+  );
+}
+
+function isCanonicalUidValidity(value: unknown): value is string {
+  return typeof value === "string" && /^[1-9][0-9]{0,19}$/.test(value);
+}
+
+function isCanonicalImapUid(value: unknown): value is string {
+  if (typeof value !== "string" || !/^[1-9][0-9]*$/.test(value)) return false;
+  return (
+    value.length < MAX_IMAP_UID.length ||
+    (value.length === MAX_IMAP_UID.length && value <= MAX_IMAP_UID)
+  );
+}
+
+function isArchiveAttachment(value: unknown): value is LiveInboxAttachmentSnapshot {
+  if (
+    !isArchiveRecord(value) ||
+    !hasOnlyArchiveKeys(value, ARCHIVE_ATTACHMENT_FIELDS) ||
+    typeof value.id !== "string" ||
+    typeof value.name !== "string"
+  ) {
+    return false;
+  }
+  for (const key of ["mimeType", "contentId", "disposition", "inlineSrc"]) {
+    if (value[key] !== undefined && typeof value[key] !== "string") return false;
+  }
+  return (
+    value.size === undefined ||
+    (
+      typeof value.size === "number" &&
+      Number.isFinite(value.size) &&
+      value.size >= 0
+    )
+  );
+}
+
+function archivePreviewFieldsAreValid(value: Record<string, unknown>) {
+  for (const key of [
+    "id",
+    "sender",
+    "subject",
+    "snippet",
+    "from",
+    "to",
+    "timestamp",
+    "createdAt",
+  ]) {
+    if (typeof value[key] !== "string") {
+      return false;
+    }
+  }
+  if (
+    !Array.isArray(value.body) ||
+    value.body.some((part) => typeof part !== "string")
+  ) {
+    return false;
+  }
+
+  for (const [key, item] of Object.entries(value)) {
+    if (!ARCHIVE_PREVIEW_FIELDS.has(key)) continue;
+    if (key === "body") {
+      if (!Array.isArray(item) || item.some((part) => typeof part !== "string")) {
+        return false;
+      }
+      continue;
+    }
+    if (key === "attachments") {
+      if (
+        !Array.isArray(item) ||
+        item.length > 1_000 ||
+        item.some((attachment) => !isArchiveAttachment(attachment))
+      ) {
+        return false;
+      }
+      continue;
+    }
+    if (key === "unread" || key === "flagged") {
+      if (typeof item !== "boolean") return false;
+      continue;
+    }
+    if (
+      typeof item !== "string" &&
+      !(item === null && ARCHIVE_NULLABLE_PREVIEW_FIELDS.has(key))
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function gmailArchiveMessageIsValid(
+  value: unknown,
+  mailboxId: string,
+  providerFolder: "Inbox" | "Archive",
+): value is GmailArchiveMessageSnapshot {
+  if (
+    !isArchiveRecord(value) ||
+    !hasOnlyArchiveKeys(value, GMAIL_ARCHIVE_MESSAGE_FIELDS) ||
+    !archivePreviewFieldsAreValid(value) ||
+    value.serverMailboxId !== mailboxId ||
+    value.providerFolder !== providerFolder ||
+    !isArchiveIdentifier(value.providerMessageId) ||
+    !isArchiveIdentifier(value.providerThreadId) ||
+    !Array.isArray(value.labelIds) ||
+    value.labelIds.length > 1_000 ||
+    value.labelIds.some((labelId) => !isArchiveIdentifier(labelId)) ||
+    new Set(value.labelIds).size !== value.labelIds.length ||
+    (
+      value.rfcMessageId !== undefined &&
+      !isArchiveIdentifier(value.rfcMessageId)
+    )
+  ) {
+    return false;
+  }
+  const labels = new Set(value.labelIds.map((labelId) => labelId.toUpperCase()));
+  return providerFolder === "Inbox"
+    ? labels.has("INBOX")
+    : ![...GMAIL_ARCHIVE_EXCLUDED_LABELS].some((label) => labels.has(label));
+}
+
+function gmailFolderSnapshotIsValid<Folder extends "Inbox" | "Archive">(
+  value: unknown,
+  mailboxId: string,
+  providerFolder: Folder,
+): value is GmailProviderFolderSnapshot<Folder> {
+  if (
+    !isArchiveRecord(value) ||
+    !hasExactArchiveKeys(
+      value,
+      ["serverMailboxId", "providerFolder", "uidValidity", "messages"],
+    ) ||
+    value.serverMailboxId !== mailboxId ||
+    value.providerFolder !== providerFolder ||
+    value.uidValidity !== "gmail-api" ||
+    !Array.isArray(value.messages) ||
+    value.messages.length > MAX_ARCHIVE_SNAPSHOT_MESSAGES
+  ) {
+    return false;
+  }
+  const providerMessageIds = new Set<string>();
+  for (const message of value.messages) {
+    if (
+      !gmailArchiveMessageIsValid(message, mailboxId, providerFolder) ||
+      providerMessageIds.has(message.providerMessageId)
+    ) {
+      return false;
+    }
+    providerMessageIds.add(message.providerMessageId);
+  }
+  return true;
+}
+
+function imapArchiveMessageIsValid(
+  value: unknown,
+  mailboxId: string,
+  providerFolder: string,
+  uidValidity: string,
+  knownUids: ReadonlySet<string>,
+): value is ImapArchiveMessageSnapshot {
+  return (
+    isArchiveRecord(value) &&
+    hasOnlyArchiveKeys(value, IMAP_ARCHIVE_MESSAGE_FIELDS) &&
+    archivePreviewFieldsAreValid(value) &&
+    value.serverMailboxId === mailboxId &&
+    value.providerFolder === providerFolder &&
+    value.uidValidity === uidValidity &&
+    isCanonicalImapUid(value.imapUid) &&
+    knownUids.has(value.imapUid) &&
+    isArchiveIdentifier(value.threadId) &&
+    (
+      value.rfcMessageId === undefined ||
+      isArchiveIdentifier(value.rfcMessageId)
+    )
+  );
+}
+
+function imapFolderSnapshotIsValid<Folder extends string>(
+  value: unknown,
+  mailboxId: string,
+  providerFolder: Folder,
+): value is ImapProviderFolderSnapshot<Folder> {
+  if (
+    !isArchiveRecord(value) ||
+    !hasExactArchiveKeys(
+      value,
+      [
+        "serverMailboxId",
+        "providerFolder",
+        "uidValidity",
+        "imapUidSet",
+        "messages",
+      ],
+    ) ||
+    value.serverMailboxId !== mailboxId ||
+    value.providerFolder !== providerFolder ||
+    !isCanonicalUidValidity(value.uidValidity) ||
+    !Array.isArray(value.imapUidSet) ||
+    !Array.isArray(value.messages) ||
+    value.messages.length > MAX_ARCHIVE_SNAPSHOT_MESSAGES
+  ) {
+    return false;
+  }
+  const imapUidSet = value.imapUidSet;
+  if (
+    imapUidSet.length > MAX_IMAP_UID_SET_SIZE ||
+    imapUidSet.some((uid) => !isCanonicalImapUid(uid)) ||
+    new Set(imapUidSet).size !== imapUidSet.length ||
+    !imapUidSet.every(
+      (uid, index) =>
+        index === 0 || Number(imapUidSet[index - 1]) < Number(uid),
+    )
+  ) {
+    return false;
+  }
+  const knownUids = new Set(imapUidSet);
+  const messageUids = new Set<string>();
+  for (const message of value.messages) {
+    if (
+      !imapArchiveMessageIsValid(
+        message,
+        mailboxId,
+        providerFolder,
+        value.uidValidity,
+        knownUids,
+      ) ||
+      messageUids.has(message.imapUid)
+    ) {
+      return false;
+    }
+    messageUids.add(message.imapUid);
+  }
+  return true;
+}
+
+function gmailArchivedIdentityIsValid(
+  value: unknown,
+  request: GmailArchiveMutationRequest,
+): value is GmailArchivedMessageIdentity {
+  return (
+    isArchiveRecord(value) &&
+    hasExactArchiveKeys(
+      value,
+      [
+        "serverMailboxId",
+        "providerMessageId",
+        "providerThreadId",
+        "providerFolder",
+      ],
+      ["rfcMessageId"],
+    ) &&
+    value.serverMailboxId === request.mailboxId &&
+    value.providerMessageId === request.messageId &&
+    isArchiveIdentifier(value.providerThreadId) &&
+    value.providerFolder === "Archive" &&
+    (
+      value.rfcMessageId === undefined ||
+      isArchiveIdentifier(value.rfcMessageId)
+    )
+  );
+}
+
+function imapArchivedIdentityIsValid(
+  value: unknown,
+  request: ImapArchiveMutationRequest,
+): value is ImapArchivedMessageIdentity {
+  return (
+    isArchiveRecord(value) &&
+    hasExactArchiveKeys(
+      value,
+      [
+        "serverMailboxId",
+        "sourceProviderFolder",
+        "sourceImapUid",
+        "sourceUidValidity",
+        "providerFolder",
+        "imapUid",
+        "uidValidity",
+      ],
+      ["rfcMessageId"],
+    ) &&
+    value.serverMailboxId === request.mailboxId &&
+    value.sourceProviderFolder === request.folder &&
+    value.sourceImapUid === request.uid &&
+    value.sourceUidValidity === request.uidValidity &&
+    isArchiveFolder(value.providerFolder) &&
+    value.providerFolder !== request.folder &&
+    isCanonicalImapUid(value.imapUid) &&
+    isCanonicalUidValidity(value.uidValidity) &&
+    (
+      value.rfcMessageId === undefined ||
+      isArchiveIdentifier(value.rfcMessageId)
+    )
+  );
+}
+
+function archiveMutationRequestBody(
+  request: ArchiveMutationRequest,
+): GmailArchiveMutationRequest | ImapArchiveMutationRequest | null {
+  if (!isArchiveRecord(request) || request.action !== "archive") return null;
+  if ("messageId" in request) {
+    if (
+      !hasExactArchiveKeys(request, ["mailboxId", "messageId", "action"]) ||
+      !isArchiveIdentifier(request.mailboxId) ||
+      !isGmailArchiveMessageId(request.messageId)
+    ) {
+      return null;
+    }
+    return {
+      mailboxId: request.mailboxId,
+      messageId: request.messageId,
+      action: "archive",
+    };
+  }
+  if (
+    !hasExactArchiveKeys(
+      request,
+      ["mailboxId", "folder", "uid", "uidValidity", "action"],
+    ) ||
+    !isArchiveIdentifier(request.mailboxId) ||
+    request.folder !== "INBOX" ||
+    !isCanonicalImapUid(request.uid) ||
+    !isCanonicalUidValidity(request.uidValidity)
+  ) {
+    return null;
+  }
+  return {
+    mailboxId: request.mailboxId,
+    folder: "INBOX",
+    uid: request.uid,
+    uidValidity: request.uidValidity,
+    action: "archive",
+  };
+}
+
+function archiveErrorFromPayload(
+  value: unknown,
+): ArchiveFailureResponse | null {
+  if (
+    containsForbiddenArchiveResponseField(value) ||
+    !isArchiveRecord(value) ||
+    !hasExactArchiveKeys(value, ["ok", "error"]) ||
+    value.ok !== false ||
+    !isArchiveRecord(value.error) ||
+    !hasExactArchiveKeys(value.error, ["code", "message"]) ||
+    typeof value.error.code !== "string" ||
+    !PUBLIC_ARCHIVE_ERROR_CODES.has(value.error.code) ||
+    typeof value.error.message !== "string" ||
+    value.error.message.length < 1 ||
+    value.error.message.length > 2_048
+  ) {
+    return null;
+  }
+  return archiveFailure(
+    value.error.code,
+    value.error.code === "reconnect_required"
+      ? "Reconnect this mailbox to continue."
+      : SAFE_ARCHIVE_ERROR_MESSAGE,
+  );
+}
+
+function trustedUncertainIdentity(
+  request: ArchiveMutationRequest,
+): ArchiveMutationIdentity {
+  if ("messageId" in request) {
+    return {
+      serverMailboxId: request.mailboxId,
+      providerMessageId: request.messageId,
+      providerFolder: "Archive",
+    };
+  }
+  return {
+    serverMailboxId: request.mailboxId,
+    sourceProviderFolder: request.folder,
+    sourceImapUid: request.uid,
+    sourceUidValidity: request.uidValidity,
+  };
+}
+
+function archiveUncertainResponse(
+  value: unknown,
+  request: ArchiveMutationRequest,
+): ArchiveMutationUncertainResponse | null {
+  if (
+    !isArchiveRecord(value) ||
+    value.ok !== false ||
+    value.status !== "mutation_confirmed_readback_failed" ||
+    value.action !== "archive" ||
+    value.mailboxId !== request.mailboxId ||
+    !isArchiveRecord(value.error) ||
+      value.error.code !== "archive_readback_failed"
+  ) {
+    return null;
+  }
+  return {
+    ok: false,
+    status: "mutation_confirmed_readback_failed",
+    action: "archive",
+    mailboxId: request.mailboxId,
+    archivedMessageIdentity: trustedUncertainIdentity(request),
+    error: {
+      code: "archive_readback_failed",
+      message: SAFE_ARCHIVE_UNCERTAIN_MESSAGE,
+    },
+  };
+}
+
+function gmailArchiveMutationSuccess(
+  value: Record<string, unknown>,
+  request: GmailArchiveMutationRequest,
+): GmailArchiveMutationSuccess | null {
+  if (
+    !gmailArchivedIdentityIsValid(value.archivedMessageIdentity, request) ||
+    !isArchiveRecord(value.folders) ||
+    !hasExactArchiveKeys(value.folders, ["Inbox", "Archive"]) ||
+    !gmailFolderSnapshotIsValid(
+      value.folders.Inbox,
+      request.mailboxId,
+      "Inbox",
+    ) ||
+    !gmailFolderSnapshotIsValid(
+      value.folders.Archive,
+      request.mailboxId,
+      "Archive",
+    )
+  ) {
+    return null;
+  }
+  const archivedMessageIdentity = value.archivedMessageIdentity;
+  const inboxMatches = value.folders.Inbox.messages.filter(
+    (message) => message.providerMessageId === request.messageId,
+  );
+  const archiveMatches = value.folders.Archive.messages.filter(
+    (message) => message.providerMessageId === request.messageId,
+  );
+  if (
+    inboxMatches.length !== 0 ||
+    archiveMatches.length !== 1 ||
+    archiveMatches[0].providerThreadId !==
+      archivedMessageIdentity.providerThreadId ||
+    (
+      archivedMessageIdentity.rfcMessageId !== undefined &&
+      archiveMatches[0].rfcMessageId !== archivedMessageIdentity.rfcMessageId
+    )
+  ) {
+    return null;
+  }
+  return value as GmailArchiveMutationSuccess;
+}
+
+function imapArchiveMutationSuccess(
+  value: Record<string, unknown>,
+  request: ImapArchiveMutationRequest,
+): ImapArchiveMutationSuccess | null {
+  if (
+    !imapArchivedIdentityIsValid(value.archivedMessageIdentity, request) ||
+    !isArchiveRecord(value.folders) ||
+    !hasExactArchiveKeys(value.folders, ["Inbox", "Archive"])
+  ) {
+    return null;
+  }
+  const archivedMessageIdentity = value.archivedMessageIdentity;
+  if (
+    !imapFolderSnapshotIsValid(
+      value.folders.Inbox,
+      request.mailboxId,
+      "INBOX",
+    ) ||
+    !imapFolderSnapshotIsValid(
+      value.folders.Archive,
+      request.mailboxId,
+      archivedMessageIdentity.providerFolder,
+    ) ||
+    value.folders.Inbox.uidValidity !== request.uidValidity ||
+    value.folders.Inbox.imapUidSet.includes(request.uid) ||
+    value.folders.Archive.uidValidity !== archivedMessageIdentity.uidValidity ||
+    !value.folders.Archive.imapUidSet.includes(
+      archivedMessageIdentity.imapUid,
+    )
+  ) {
+    return null;
+  }
+  const archiveMatches = value.folders.Archive.messages.filter(
+    (message) => message.imapUid === archivedMessageIdentity.imapUid,
+  );
+  if (
+    archiveMatches.length !== 1 ||
+    (
+      archivedMessageIdentity.rfcMessageId !== undefined &&
+      archiveMatches[0].rfcMessageId !== archivedMessageIdentity.rfcMessageId
+    )
+  ) {
+    return null;
+  }
+  return value as ImapArchiveMutationSuccess;
+}
+
+function archiveMutationSuccess(
+  value: unknown,
+  request: ArchiveMutationRequest,
+): GmailArchiveMutationSuccess | ImapArchiveMutationSuccess | null {
+  if (
+    containsForbiddenArchiveResponseField(value) ||
+    !isArchiveRecord(value) ||
+    !hasExactArchiveKeys(
+      value,
+      [
+        "ok",
+        "status",
+        "action",
+        "mailboxId",
+        "archivedMessageIdentity",
+        "folders",
+      ],
+    ) ||
+    value.ok !== true ||
+    value.status !== "ok" ||
+    value.action !== "archive" ||
+    value.mailboxId !== request.mailboxId
+  ) {
+    return null;
+  }
+  return "messageId" in request
+    ? gmailArchiveMutationSuccess(value, request)
+    : imapArchiveMutationSuccess(value, request);
+}
+
+export function isProviderArchiveMutationSuccessResponse(
+  value: unknown,
+  request: ArchiveMutationRequest,
+): value is GmailArchiveMutationSuccess | ImapArchiveMutationSuccess {
+  const wireRequest = archiveMutationRequestBody(request);
+  return Boolean(
+    wireRequest &&
+      archiveMutationSuccess(value, wireRequest),
+  );
+}
+
+export function sanitizeProviderArchiveMutationUncertainResponse(
+  value: unknown,
+  request: ArchiveMutationRequest,
+): ArchiveMutationUncertainResponse | null {
+  const wireRequest = archiveMutationRequestBody(request);
+  return wireRequest
+    ? archiveUncertainResponse(value, wireRequest)
+    : null;
+}
+
+async function readArchiveResponsePayload(response: Response): Promise<unknown> {
+  const rawPayload = await response.text();
+  if (
+    !rawPayload.trim() ||
+    new TextEncoder().encode(rawPayload).byteLength > MAX_ARCHIVE_RESPONSE_BYTES
+  ) {
+    return null;
+  }
+  try {
+    return JSON.parse(rawPayload) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+export async function mutateProviderArchiveMessage(
+  request: ArchiveMutationRequest,
+): Promise<ArchiveMutationResponse> {
+  const wireRequest = archiveMutationRequestBody(request);
+  if (!wireRequest) {
+    return archiveFailure(
+      "invalid_archive_request",
+      "Archive requires one valid provider message identity.",
+    );
+  }
+  try {
+    const response = await fetch("/api/inboxes/message-action", {
+      method: "POST",
+      credentials: "include",
+      cache: "no-store",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(wireRequest),
+    });
+    const payload = await readArchiveResponsePayload(response);
+    if (response.status === 502) {
+      const uncertain = archiveUncertainResponse(payload, wireRequest);
+      if (uncertain) return uncertain;
+    }
+    if (response.status !== 200) {
+      return archiveErrorFromPayload(payload) ?? archiveFailure(
+        "archive_mutation_failed",
+        "Could not archive this message in the connected mailbox.",
+      );
+    }
+    const success = archiveMutationSuccess(payload, wireRequest);
+    if (success) return success;
+    return archiveErrorFromPayload(payload) ?? archiveFailure(
+      "archive_response_invalid",
+      "Archive did not return a valid provider-confirmed mailbox state.",
+    );
+  } catch {
+    return archiveFailure(
+      "archive_mutation_failed",
+      "Could not archive this message in the connected mailbox.",
+    );
+  }
+}
+
+function archiveFetchSuccess(
+  value: unknown,
+  mailboxId: string,
+): GmailArchiveFetchSuccess | ImapArchiveFetchSuccess | null {
+  if (
+    containsForbiddenArchiveResponseField(value) ||
+    !isArchiveRecord(value) ||
+    !hasExactArchiveKeys(value, ["ok", "status", "mailboxId", "folder"]) ||
+    value.ok !== true ||
+    value.status !== "ok" ||
+    value.mailboxId !== mailboxId
+  ) {
+    return null;
+  }
+  if (gmailFolderSnapshotIsValid(value.folder, mailboxId, "Archive")) {
+    return value as GmailArchiveFetchSuccess;
+  }
+  if (
+    isArchiveRecord(value.folder) &&
+    isArchiveFolder(value.folder.providerFolder) &&
+    value.folder.providerFolder !== "INBOX" &&
+    imapFolderSnapshotIsValid(
+      value.folder,
+      mailboxId,
+      value.folder.providerFolder,
+    )
+  ) {
+    return value as ImapArchiveFetchSuccess;
+  }
+  return null;
+}
+
+export async function fetchProviderArchive(
+  mailboxId: string,
+): Promise<ArchiveFetchResponse> {
+  if (!isArchiveIdentifier(mailboxId)) {
+    return archiveFailure(
+      "invalid_archive_request",
+      "A valid mailbox identity is required.",
+    );
+  }
+  try {
+    const response = await fetch("/api/inboxes/fetch-archive", {
+      method: "POST",
+      credentials: "include",
+      cache: "no-store",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ mailboxId }),
+    });
+    const payload = await readArchiveResponsePayload(response);
+    if (response.status !== 200) {
+      return archiveErrorFromPayload(payload) ?? archiveFailure(
+        "archive_fetch_failed",
+        "Could not load Archive from the connected mailbox.",
+      );
+    }
+    const success = archiveFetchSuccess(payload, mailboxId);
+    if (success) return success;
+    return archiveErrorFromPayload(payload) ?? archiveFailure(
+      "archive_response_invalid",
+      "Archive did not return a valid provider mailbox snapshot.",
+    );
+  } catch {
+    return archiveFailure(
+      "archive_fetch_failed",
+      "Could not load Archive from the connected mailbox.",
+    );
   }
 }
 

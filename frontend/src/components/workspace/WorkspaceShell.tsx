@@ -17,7 +17,7 @@ import {
   type ReactNode,
   type SetStateAction,
 } from "react";
-import { createPortal } from "react-dom";
+import { createPortal, flushSync } from "react-dom";
 import { onboardingText } from "../../copy/onboardingCopy";
 import {
   ReviewDetailView as ReviewModuleDetailView,
@@ -86,12 +86,18 @@ import {
   buildRefreshInboxRequest,
   connectInboxWithImap,
   downloadAttachment,
+  fetchProviderArchive,
   fetchGmailInbox,
   getMailboxCredentialStatuses,
   mutateInboxMessageAction,
+  mutateProviderArchiveMessage,
   projectManagedMailboxAccountConfigIdentity,
   resolveManagedMailboxIdentity,
   sendGmailMessage,
+  type ArchiveFolderSnapshot,
+  type ArchiveMutationResponse,
+  type GmailProviderFolderSnapshot,
+  type ImapProviderFolderSnapshot,
   type InboxMessageAction,
   type InboxMessageActionRequest,
   type ImapInboxMessageActionRequest,
@@ -99,6 +105,18 @@ import {
   type SendInboxAttachmentRequest,
   type LiveInboxMessageSnapshot,
 } from "../../lib/inboxConnectionApi";
+import {
+  buildProviderArchiveStateIdentity,
+  buildProviderArchiveMutationTarget,
+  applyProviderArchiveFolderReadback,
+  createProviderArchiveCoordinator,
+  executeProviderArchiveAction,
+  filterLegacyArchiveHydration,
+  hasPendingProviderArchiveForMailbox,
+  mergeLegacyArchiveStorage,
+  replaceProviderArchiveReadback,
+  type ProviderArchiveCandidate,
+} from "../../lib/providerArchiveAction";
 import {
   createCollaborationThread,
   fetchCollaborationInvite,
@@ -1254,8 +1272,13 @@ type ComposeRecipientField = "to" | "cc" | "bcc";
 
 type MailMessage = {
   id: string;
+  serverMailboxId?: string;
+  providerFolder?: string;
+  providerMessageId?: string;
   threadId?: string;
   providerThreadId?: string;
+  uidValidity?: string;
+  rfcMessageId?: string;
   threadIdentityContext?: LiveThreadIdentityContext;
   sender: string;
   subject: string;
@@ -1299,6 +1322,17 @@ type MailMessage = {
   behaviorSuggestion?: MailMessageBehaviorSuggestion;
   aiSuggestionBanner?: MessageSuggestionBanner;
 };
+
+type ProviderArchiveMutationSuccess = Extract<
+  ArchiveMutationResponse,
+  { ok: true }
+>;
+
+const providerArchivePendingKeys = new Set<string>();
+const providerArchiveCoordinator = createProviderArchiveCoordinator({
+  mutate: mutateProviderArchiveMessage,
+  pendingKeys: providerArchivePendingKeys,
+});
 
 type ExactImapProviderMessageIdentity = {
   mailboxId: string;
@@ -9651,8 +9685,13 @@ function createInitialMailboxStore(
           normalizeMailMessage(
             {
               id: message.id,
+              serverMailboxId: message.serverMailboxId,
+              providerFolder: message.providerFolder,
+              providerMessageId: message.providerMessageId,
               threadId: message.threadId ?? undefined,
               providerThreadId: message.providerThreadId,
+              uidValidity: message.uidValidity,
+              rfcMessageId: message.rfcMessageId,
               threadIdentityContext: threadIdentityContext ?? undefined,
               sender: message.sender,
               subject: message.subject,
@@ -9661,6 +9700,7 @@ function createInitialMailboxStore(
               createdAt: message.createdAt,
               imapUid: message.imapUid,
               unread: message.unread,
+              flagged: message.flagged,
               signal: message.signal,
               ui_signal: message.ui_signal,
               internalClassification:
@@ -9887,10 +9927,12 @@ function normalizeMailboxStore(
       const seenInFolder = new Set<string>();
 
       for (const message of mailboxCollections[folder]) {
-        const signature = message.id || getMessageSignature(message);
+        const providerIdentity = buildProviderArchiveStateIdentity(message);
+        const signature =
+          providerIdentity ?? message.id ?? getMessageSignature(message);
         const fallbackSignature = getMessageSignature(message);
         const uniquenessKey = `${signature}::${fallbackSignature}`;
-        const hasStableId = Boolean(message.id);
+        const hasStableId = Boolean(providerIdentity || message.id);
 
         if (
           seenInFolder.has(uniquenessKey) ||
@@ -12850,6 +12892,7 @@ function MailboxView({
   getLinkedReviewForMessage,
   getLinkedReviewBadgeLabel,
   onOpenLinkedReview,
+  onApplyProviderArchiveMutationSuccess,
   onSyncMailbox,
   isSyncingMailbox,
   onSyncUnreadOverrides,
@@ -12936,6 +12979,9 @@ function MailboxView({
   getLinkedReviewForMessage: (messageId: string) => ReviewItem | null;
   getLinkedReviewBadgeLabel: (messageId: string) => string | null;
   onOpenLinkedReview: (target: ReviewWorkspaceTarget) => void;
+  onApplyProviderArchiveMutationSuccess: (
+    response: ProviderArchiveMutationSuccess,
+  ) => boolean;
   onSyncMailbox: () => void;
   isSyncingMailbox: boolean;
   onSyncUnreadOverrides: (messages: MessageIdentitySource[], unread: boolean) => void;
@@ -13130,6 +13176,7 @@ function MailboxView({
   const [isEmptyTrashConfirmationOpen, setIsEmptyTrashConfirmationOpen] = useState(false);
   const [trashEmptiedToastMessage, setTrashEmptiedToastMessage] = useState<string | null>(null);
   const [mailboxActionToastMessage, setMailboxActionToastMessage] = useState<string | null>(null);
+  const [pendingProviderArchiveKeys, setPendingProviderArchiveKeys] = useState<string[]>([]);
   const dragPreviewCleanupRef = useRef<(() => void) | null>(null);
   const [composeTo, setComposeTo] = useState("");
   const [composeCc, setComposeCc] = useState("");
@@ -14489,13 +14536,22 @@ function MailboxView({
       mailboxId === mailbox.id
         ? messageCollections.Archive
         : mailboxStore[mailboxId]?.Archive ?? [];
+    const providerIdentity = buildProviderArchiveStateIdentity(message);
 
-    return archiveMessages.some((archivedMessage) =>
-      doesMessageMatchCanonicalIdentitySet(
+    return archiveMessages.some((archivedMessage) => {
+      const archivedProviderIdentity =
+        buildProviderArchiveStateIdentity(archivedMessage);
+      if (providerIdentity) {
+        return archivedProviderIdentity === providerIdentity;
+      }
+      if (archivedProviderIdentity) {
+        return false;
+      }
+      return doesMessageMatchCanonicalIdentitySet(
         archivedMessage,
         new Set(getCanonicalMessageIdentityKeys(message)),
-      ),
-    );
+      );
+    });
   };
   const getSmartFolderOrganizerVisibleMessages = (
     messages: MailMessage[],
@@ -16134,22 +16190,9 @@ function MailboxView({
           <button
             type="button"
             onClick={() => {
-              if (isSharedView) {
-                moveMessagesAcrossWorkspace(mailbox.id, "Archive", [message.id]);
-                return;
-              }
-
-              // In smart folder context the message may belong to a non-active
-              // mailbox or a different source folder. Use the cross-workspace
-              // mover which resolves the actual source via currentMessageLocationById,
-              // preventing a silent no-op when the source differs from mailbox.id/activeFolder.
-              if (activeSmartFolder || activeFolder === "Spam") {
-                moveMessagesToFolderAcrossWorkspace("Archive", [message.id]);
-                return;
-              }
-
-              moveMessages(mailbox.id, activeFolder, mailbox.id, "Archive", [message.id]);
+              void archiveMessagesFromEntryPoint([message.id]);
             }}
+            disabled={pendingProviderArchiveKeys.length > 0}
             className={menuItemClass}
           >
             Archive
@@ -19642,6 +19685,11 @@ function MailboxView({
     { label: "Trash", folder: "Trash" as MailFolder },
   ].filter((target) => target.folder !== activeFolder);
   const moveMessagesToManualTarget = (targetFolder: MailFolder, messageIds: string[]) => {
+    if (targetFolder === "Archive") {
+      void archiveMessagesFromEntryPoint(messageIds);
+      return;
+    }
+
     const targetMessages = getMessagesByIds(messageIds);
 
     if (targetFolder === "Spam") {
@@ -19849,30 +19897,238 @@ function MailboxView({
     selectedMessageId,
   ]);
 
-  const archiveSelectedMessages = () => {
-    if (actionableSelectionIds.length === 0) {
-      return;
-    }
+  const isProviderAuthoritativeArchiveMailbox = (
+    managedMailbox: ManagedWorkspaceInbox | null | undefined,
+  ) =>
+    Boolean(
+      managedMailbox?.connected &&
+        managedMailbox.connectionStatus === "connected" &&
+        (
+          managedMailbox.provider === "google" ||
+          managedMailbox.provider === "custom_imap"
+        ),
+    );
 
-    if (shouldBlockSmartFolderMutation()) {
-      return;
-    }
-
+  const archiveMessagesLocally = (
+    messageIds: string[],
+    explicitSource?: {
+      mailboxId: InboxId;
+      folder: MailFolder;
+    },
+  ) => {
     if (isSharedView) {
-      moveMessagesAcrossWorkspace(mailbox.id, "Archive", actionableSelectionIds);
+      moveMessagesAcrossWorkspace(mailbox.id, "Archive", messageIds);
       return;
     }
 
-    // In smart folder context messages can come from multiple mailboxes or
-    // different source folders. Use the cross-workspace mover which resolves
-    // each message to its actual source via currentMessageLocationById,
-    // preventing a silent no-op for messages not in mailbox.id/activeFolder.
-    if (activeSmartFolder || activeFolder === "Spam") {
-      moveMessagesToFolderAcrossWorkspace("Archive", actionableSelectionIds);
+    if (activeSmartFolder || (!explicitSource && activeFolder === "Spam")) {
+      moveMessagesToFolderAcrossWorkspace("Archive", messageIds);
       return;
     }
 
-    moveMessages(mailbox.id, activeFolder, mailbox.id, "Archive", actionableSelectionIds);
+    const sourceMailboxId = explicitSource?.mailboxId ?? mailbox.id;
+    const sourceFolder = explicitSource?.folder ?? activeFolder;
+    moveMessages(
+      sourceMailboxId,
+      sourceFolder,
+      sourceMailboxId,
+      "Archive",
+      messageIds,
+    );
+  };
+
+  const showProviderArchiveBlockedMessage = () => {
+    setMailboxActionToastMessage(
+      "Archive needs one exact connected Inbox message with provider identity.",
+    );
+  };
+
+  async function archiveMessagesFromEntryPoint(
+    messageIds: string[],
+    explicitSource?: {
+      mailboxId: InboxId;
+      folder: MailFolder;
+    },
+  ) {
+    if (messageIds.length === 0) {
+      return;
+    }
+
+    const sourceLocations = messageIds.map((messageId) => {
+      if (explicitSource) {
+        return explicitSource;
+      }
+      if (!isSharedView && !activeSmartFolder) {
+        return {
+          mailboxId: mailbox.id,
+          folder: activeFolder,
+        };
+      }
+      return currentMessageLocationById[messageId] ?? null;
+    });
+    const sourceManagedMailboxes = sourceLocations.map((location) =>
+      location
+        ? managedInboxes.find((candidate) => candidate.id === location.mailboxId)
+        : null,
+    );
+    const includesProviderAuthoritativeMailbox = sourceManagedMailboxes.some(
+      isProviderAuthoritativeArchiveMailbox,
+    );
+
+    if (!includesProviderAuthoritativeMailbox) {
+      if (shouldBlockSmartFolderMutation()) {
+        return;
+      }
+      archiveMessagesLocally(messageIds, explicitSource);
+      return;
+    }
+
+    if (
+      messageIds.length !== 1 ||
+      isSharedView ||
+      activeSmartFolder ||
+      isSyncingMailbox ||
+      sourceLocations.some((location) => location?.folder !== "Inbox")
+    ) {
+      closeMenus();
+      showProviderArchiveBlockedMessage();
+      return;
+    }
+
+    const messageId = messageIds[0];
+    const sourceLocation = sourceLocations[0];
+    const sourceManagedMailbox = sourceManagedMailboxes[0];
+    if (
+      !sourceLocation ||
+      !sourceManagedMailbox ||
+      !isProviderAuthoritativeArchiveMailbox(sourceManagedMailbox)
+    ) {
+      closeMenus();
+      showProviderArchiveBlockedMessage();
+      return;
+    }
+
+    const exactSourceMessageMatches = (
+      mailboxStore[sourceLocation.mailboxId]?.[sourceLocation.folder] ?? []
+    ).filter((candidate) => candidate.id === messageId);
+    const sourceMessage =
+      exactSourceMessageMatches.length === 1
+        ? exactSourceMessageMatches[0]
+        : null;
+    if (
+      !sourceMessage ||
+      sourceMessage.serverMailboxId !== sourceManagedMailbox.id
+    ) {
+      closeMenus();
+      showProviderArchiveBlockedMessage();
+      return;
+    }
+
+    if (sourceManagedMailbox.provider === "google") {
+      const sourceInboxMessages =
+        mailboxStore[sourceLocation.mailboxId]?.Inbox ?? [];
+      const sourceThreadKey = resolveSafeThreadGroupingKey(
+        sourceMessage,
+        sourceLocation.mailboxId,
+      );
+      const groupedMessages = sourceInboxMessages.filter(
+        (candidate) =>
+          resolveSafeThreadGroupingKey(
+            candidate,
+            sourceLocation.mailboxId,
+          ) === sourceThreadKey,
+      );
+      const groupedProviderMessageIds = groupedMessages.flatMap((candidate) =>
+        typeof candidate.providerMessageId === "string"
+          ? [candidate.providerMessageId]
+          : [],
+      );
+      if (
+        sourceMessage.providerFolder !== "Inbox" ||
+        groupedMessages.length !== 1 ||
+        groupedProviderMessageIds.length !== 1 ||
+        groupedProviderMessageIds[0] !== sourceMessage.providerMessageId
+      ) {
+        closeMenus();
+        showProviderArchiveBlockedMessage();
+        return;
+      }
+    } else if (sourceMessage.providerFolder !== "INBOX") {
+      closeMenus();
+      showProviderArchiveBlockedMessage();
+      return;
+    }
+
+    const candidate: ProviderArchiveCandidate = {
+      provider: sourceManagedMailbox.provider ?? "",
+      mailboxId: sourceMessage.serverMailboxId,
+      folder: sourceMessage.providerFolder,
+      providerMessageId: sourceMessage.providerMessageId,
+      imapUid: sourceMessage.imapUid,
+      uidValidity: sourceMessage.uidValidity,
+    };
+    const target = buildProviderArchiveMutationTarget(candidate);
+    if (!target.ok) {
+      closeMenus();
+      showProviderArchiveBlockedMessage();
+      return;
+    }
+    if (
+      hasPendingProviderArchiveForMailbox(
+        providerArchivePendingKeys,
+        sourceManagedMailbox.id,
+      )
+    ) {
+      setMailboxActionToastMessage("Archive is already in progress for this mailbox.");
+      closeMenus();
+      return;
+    }
+
+    closeMenus();
+    const archivePromise = executeProviderArchiveAction({
+      coordinator: providerArchiveCoordinator,
+      candidate,
+      applySuccess: (response) =>
+        onApplyProviderArchiveMutationSuccess(
+          response as ProviderArchiveMutationSuccess,
+        ),
+    });
+    setPendingProviderArchiveKeys([...providerArchivePendingKeys]);
+    const result = await archivePromise;
+    setPendingProviderArchiveKeys([...providerArchivePendingKeys]);
+
+    if (result.classification === "uncertain") {
+      setMailboxActionToastMessage(
+        "Archive may have completed at the provider, but the mailbox could not be refreshed safely. Reload the mailbox before trying again.",
+      );
+      return;
+    }
+    if (result.classification === "ordinary_failure") {
+      setMailboxActionToastMessage(
+        "Could not archive this message safely. Reload the mailbox and try again.",
+      );
+      return;
+    }
+    if (result.classification === "blocked") {
+      if (result.reason === "already_pending") {
+        setMailboxActionToastMessage("Archive is already in progress for this message.");
+      } else {
+        showProviderArchiveBlockedMessage();
+      }
+      return;
+    }
+
+    if (!result.applied) {
+      setMailboxActionToastMessage(
+        "Archive completed, but the mailbox response could not be applied safely. Reload the mailbox.",
+      );
+      return;
+    }
+    advanceSelectionAfterAction([messageId]);
+  }
+
+  const archiveSelectedMessages = () => {
+    void archiveMessagesFromEntryPoint(actionableSelectionIds);
   };
 
   const deleteSelectedMessages = () => {
@@ -20000,13 +20256,20 @@ function MailboxView({
     }
 
     if (target.type === "folder") {
-      moveMessages(
-        dragPayload.sourceMailboxId,
-        dragPayload.sourceFolder,
-        dragPayload.sourceMailboxId,
-        target.folder,
-        dragPayload.messageIds,
-      );
+      if (target.folder === "Archive") {
+        void archiveMessagesFromEntryPoint(dragPayload.messageIds, {
+          mailboxId: dragPayload.sourceMailboxId,
+          folder: dragPayload.sourceFolder,
+        });
+      } else {
+        moveMessages(
+          dragPayload.sourceMailboxId,
+          dragPayload.sourceFolder,
+          dragPayload.sourceMailboxId,
+          target.folder,
+          dragPayload.messageIds,
+        );
+      }
     } else {
       moveMessages(
         dragPayload.sourceMailboxId,
@@ -20552,8 +20815,16 @@ function MailboxView({
             </svg>
           </MailToolbarIconButton>
           <MailToolbarIconButton
-            label="Archive"
-            disabled={!hasSelection || isReadOnlySmartFolderView}
+            label={
+              pendingProviderArchiveKeys.length > 0
+                ? "Archiving..."
+                : "Archive"
+            }
+            disabled={
+              !hasSelection ||
+              isReadOnlySmartFolderView ||
+              pendingProviderArchiveKeys.length > 0
+            }
             onClick={archiveSelectedMessages}
           >
             <svg
@@ -20761,6 +21032,10 @@ function MailboxView({
                   <button
                     key={`toolbar-folder-${target.folder}`}
                     type="button"
+                    disabled={
+                      target.folder === "Archive" &&
+                      pendingProviderArchiveKeys.length > 0
+                    }
                     onClick={() => {
                       moveMessagesToManualTarget(target.folder, visibleSelectedMessageIds);
                     }}
@@ -22245,31 +22520,9 @@ function MailboxView({
                       <button
                         type="button"
                         onClick={() => {
-                          if (isSharedView) {
-                            moveMessagesAcrossWorkspace(
-                              mailbox.id,
-                              "Archive",
-                              contextMenuSelectionIds,
-                            );
-                            return;
-                          }
-
-                          // In smart folder context messages can come from multiple
-                          // mailboxes or different source folders. Use the cross-workspace
-                          // mover so the archive lands in the message's actual mailbox.
-                          if (activeSmartFolder || activeFolder === "Spam") {
-                            moveMessagesToFolderAcrossWorkspace("Archive", contextMenuSelectionIds);
-                            return;
-                          }
-
-                          moveMessages(
-                            mailbox.id,
-                            activeFolder,
-                            mailbox.id,
-                            "Archive",
-                            contextMenuSelectionIds,
-                          );
+                          void archiveMessagesFromEntryPoint(contextMenuSelectionIds);
                         }}
+                        disabled={pendingProviderArchiveKeys.length > 0}
                         className={contextMenuMainItemClass}
                       >
                         Archive
@@ -22397,6 +22650,10 @@ function MailboxView({
                     <button
                       key={`context-folder-${target.folder}`}
                       type="button"
+                      disabled={
+                        target.folder === "Archive" &&
+                        pendingProviderArchiveKeys.length > 0
+                      }
                       onClick={() => {
                         moveMessagesToManualTarget(target.folder, contextMenuSelectionIds);
                       }}
@@ -25586,6 +25843,66 @@ function buildLiveThreadIdentityContext(
     folder: folder.trim() || "INBOX",
     uidValidity: uidValidity ?? null,
   };
+}
+
+type ProviderFolderSnapshotForWorkspace =
+  | GmailProviderFolderSnapshot
+  | ImapProviderFolderSnapshot;
+
+function readRenderableProviderSnapshotMessages(
+  snapshot: ProviderFolderSnapshotForWorkspace | ArchiveFolderSnapshot,
+): LiveInboxMessageSnapshot[] | null {
+  const messages = snapshot.messages;
+  const isRenderable = messages.every(
+    (message) =>
+      typeof message.id === "string" &&
+      message.id.length > 0 &&
+      typeof message.sender === "string" &&
+      typeof message.subject === "string" &&
+      typeof message.snippet === "string" &&
+      typeof message.from === "string" &&
+      typeof message.to === "string" &&
+      typeof message.timestamp === "string" &&
+      typeof message.createdAt === "string" &&
+      Array.isArray(message.body) &&
+      message.body.every((line) => typeof line === "string"),
+  );
+
+  return isRenderable
+    ? (messages as LiveInboxMessageSnapshot[])
+    : null;
+}
+
+function isExpectedProviderFolderSnapshot(
+  snapshot: ProviderFolderSnapshotForWorkspace | ArchiveFolderSnapshot,
+  mailboxId: string,
+  provider: LiveInboxProvider,
+  expectedFolder: "Inbox" | "Archive",
+) {
+  if (snapshot.serverMailboxId !== mailboxId) {
+    return false;
+  }
+
+  return provider === "google"
+    ? snapshot.providerFolder === expectedFolder &&
+        snapshot.uidValidity === "gmail-api" &&
+        snapshot.messages.every(
+          (message) =>
+            "providerMessageId" in message &&
+            typeof message.providerMessageId === "string",
+        )
+    : (
+        expectedFolder === "Inbox"
+          ? snapshot.providerFolder === "INBOX"
+          : snapshot.providerFolder !== "INBOX"
+      ) &&
+        "imapUidSet" in snapshot &&
+        snapshot.messages.every(
+          (message) =>
+            "imapUid" in message &&
+            typeof message.imapUid === "string" &&
+            message.uidValidity === snapshot.uidValidity,
+        );
 }
 
 type MailboxRefreshResult = "synced" | "skipped" | "failed" | "partial";
@@ -34232,6 +34549,31 @@ export function WorkspaceShell({
     workspacePersistenceScope,
     mailboxOrderKey,
   );
+  const providerAuthoritativeArchiveMailboxIds = useMemo(
+    () =>
+      new Set(
+        savedManagedInboxes
+          .filter(
+            (mailbox) =>
+              mailbox.connected &&
+              mailbox.connectionStatus === "connected" &&
+              (
+                mailbox.provider === "google" ||
+                mailbox.provider === "custom_imap"
+              ),
+          )
+          .map((mailbox) => mailbox.id),
+      ),
+    [savedManagedInboxes],
+  );
+  const providerAuthoritativeArchiveMailboxKey = [
+    ...providerAuthoritativeArchiveMailboxIds,
+  ]
+    .sort()
+    .join("|");
+  const previousProviderAuthoritativeArchiveMailboxIdsRef = useRef(
+    new Set(providerAuthoritativeArchiveMailboxIds),
+  );
   const manualPriorityOverridesStorageKey = buildManualPriorityOverridesStorageKey(
     workspacePersistenceScope,
     mailboxOrderKey,
@@ -34313,6 +34655,38 @@ export function WorkspaceShell({
       currentWorkspaceUserId,
     ),
   );
+  useEffect(() => {
+    const previousMailboxIds =
+      previousProviderAuthoritativeArchiveMailboxIdsRef.current;
+    const newlyAuthoritativeMailboxIds = [
+      ...providerAuthoritativeArchiveMailboxIds,
+    ].filter((mailboxId) => !previousMailboxIds.has(mailboxId));
+    previousProviderAuthoritativeArchiveMailboxIdsRef.current =
+      new Set(providerAuthoritativeArchiveMailboxIds);
+    if (newlyAuthoritativeMailboxIds.length === 0) {
+      return;
+    }
+
+    setMailboxStore((currentStore) => {
+      let nextStore = currentStore;
+      newlyAuthoritativeMailboxIds.forEach((mailboxId) => {
+        const collections = nextStore[mailboxId as InboxId];
+        if (!collections || collections.Archive.length === 0) {
+          return;
+        }
+        nextStore = {
+          ...nextStore,
+          [mailboxId]: {
+            ...collections,
+            Archive: [],
+          },
+        };
+      });
+      return nextStore;
+    });
+  }, [providerAuthoritativeArchiveMailboxKey]);
+  const [hydratedArchiveMessagesStorageKey, setHydratedArchiveMessagesStorageKey] =
+    useState<string | null>(null);
   const [messageUnreadOverrides, setMessageUnreadOverrides] =
     useState<MessageUnreadOverrideStore>(() => {
       if (typeof window === "undefined") {
@@ -34573,6 +34947,7 @@ export function WorkspaceShell({
     options: {
       threadIdentityContext: LiveThreadIdentityContext;
       freshProviderStateKeys?: Set<string>;
+      authoritativeFolderSnapshot?: boolean;
     },
   ) => {
     const shouldIgnoreUnreadOverrides = savedManagedInboxes.some(
@@ -34588,7 +34963,10 @@ export function WorkspaceShell({
     // Identity priority: imapUid > id > preview (subject|from|timestamp). First occurrence wins.
     const seenIncomingKeys = new Set<string>();
     const uniqueIncomingMessages = incomingMessages.filter((message) => {
-      const keys = getCanonicalMessageIdentityKeys(message);
+      const providerIdentity = buildProviderArchiveStateIdentity(message);
+      const keys = providerIdentity
+        ? [`provider:${providerIdentity}`]
+        : getCanonicalMessageIdentityKeys(message);
       if (keys.some((key) => seenIncomingKeys.has(key))) {
         return false;
       }
@@ -34623,8 +35001,13 @@ export function WorkspaceShell({
       return normalizeMailMessage(
         {
           id: mergedMessageState.id,
+          serverMailboxId: mergedMessageState.serverMailboxId,
+          providerFolder: mergedMessageState.providerFolder,
+          providerMessageId: mergedMessageState.providerMessageId,
           threadId: mergedMessageState.threadId ?? undefined,
           providerThreadId: mergedMessageState.providerThreadId,
+          uidValidity: mergedMessageState.uidValidity,
+          rfcMessageId: mergedMessageState.rfcMessageId,
           threadIdentityContext: mergedMessageState.threadIdentityContext,
           sender: mergedMessageState.sender,
           subject: mergedMessageState.subject,
@@ -34685,9 +35068,188 @@ export function WorkspaceShell({
         ),
     );
 
-    return [...updatedCurrentMessages, ...genuinelyNewMessages].filter(
-      (message) => !isWorkspaceMessageSpamSuppressed(message),
+    const mergedMessages = [
+      ...updatedCurrentMessages,
+      ...genuinelyNewMessages,
+    ];
+    return options.authoritativeFolderSnapshot
+      ? mergedMessages
+      : mergedMessages.filter(
+          (message) => !isWorkspaceMessageSpamSuppressed(message),
+        );
+  };
+  const normalizeProviderFolderSnapshotMessages = (
+    mailboxId: InboxId,
+    provider: LiveInboxProvider,
+    snapshot: ProviderFolderSnapshotForWorkspace | ArchiveFolderSnapshot,
+    expectedFolder: "Inbox" | "Archive",
+    currentStore: MailboxStore,
+  ): MailMessage[] | null => {
+    if (
+      !isExpectedProviderFolderSnapshot(
+        snapshot,
+        mailboxId,
+        provider,
+        expectedFolder,
+      )
+    ) {
+      return null;
+    }
+
+    const messages = readRenderableProviderSnapshotMessages(snapshot);
+    if (!messages) {
+      return null;
+    }
+
+    return mergeLiveInboxMessages(
+      mailboxId,
+      messages,
+      [],
+      currentStore,
+      {
+        threadIdentityContext: buildLiveThreadIdentityContext(
+          mailboxId,
+          provider,
+          snapshot.uidValidity,
+          snapshot.providerFolder,
+        ),
+        freshProviderStateKeys: new Set(
+          messages.flatMap((message) => getCanonicalMessageIdentityKeys(message)),
+        ),
+        authoritativeFolderSnapshot: true,
+      },
     );
+  };
+  const applyProviderArchiveMutationSuccess = (
+    response: ProviderArchiveMutationSuccess,
+  ) => {
+    const managedMailbox = savedManagedInboxes.find(
+      (candidate) => candidate.id === response.mailboxId,
+    );
+    const provider = resolveLiveInboxProvider(managedMailbox?.provider ?? null);
+    if (
+      !managedMailbox?.connected ||
+      managedMailbox.connectionStatus !== "connected" ||
+      !provider
+    ) {
+      return false;
+    }
+
+    const inboxMessages = readRenderableProviderSnapshotMessages(
+      response.folders.Inbox,
+    );
+    const archiveMessages = readRenderableProviderSnapshotMessages(
+      response.folders.Archive,
+    );
+    if (
+      !inboxMessages ||
+      !archiveMessages ||
+      !isExpectedProviderFolderSnapshot(
+        response.folders.Inbox,
+        response.mailboxId,
+        provider,
+        "Inbox",
+      ) ||
+      !isExpectedProviderFolderSnapshot(
+        response.folders.Archive,
+        response.mailboxId,
+        provider,
+        "Archive",
+      )
+    ) {
+      return false;
+    }
+
+    let applied = false;
+    flushSync(() => {
+      setMailboxStore((currentStore) => {
+        const normalizedInbox = normalizeProviderFolderSnapshotMessages(
+          response.mailboxId as InboxId,
+          provider,
+          response.folders.Inbox,
+          "Inbox",
+          currentStore,
+        );
+        const normalizedArchive = normalizeProviderFolderSnapshotMessages(
+          response.mailboxId as InboxId,
+          provider,
+          response.folders.Archive,
+          "Archive",
+          currentStore,
+        );
+        if (!normalizedInbox || !normalizedArchive) {
+          return currentStore;
+        }
+
+        const currentCollections =
+          currentStore[response.mailboxId as InboxId] ??
+          createEmptyMailboxCollections();
+        applied = true;
+        return {
+          ...currentStore,
+          [response.mailboxId]: replaceProviderArchiveReadback(
+            currentCollections,
+            {
+              Inbox: normalizedInbox,
+              Archive: normalizedArchive,
+            },
+          ),
+        };
+      });
+    });
+    if (!applied) {
+      return false;
+    }
+    clearUnreadOverridesForProviderMessages([
+      ...inboxMessages,
+      ...archiveMessages,
+    ]);
+    return true;
+  };
+  const applyProviderArchiveFetchSnapshot = (
+    mailboxId: InboxId,
+    provider: LiveInboxProvider,
+    snapshot: ArchiveFolderSnapshot,
+  ) => {
+    if (
+      !readRenderableProviderSnapshotMessages(snapshot) ||
+      !isExpectedProviderFolderSnapshot(
+        snapshot,
+        mailboxId,
+        provider,
+        "Archive",
+      )
+    ) {
+      return false;
+    }
+
+    let applied = false;
+    flushSync(() => {
+      setMailboxStore((currentStore) => {
+        const normalizedArchive = normalizeProviderFolderSnapshotMessages(
+          mailboxId,
+          provider,
+          snapshot,
+          "Archive",
+          currentStore,
+        );
+        const currentCollections =
+          currentStore[mailboxId] ?? createEmptyMailboxCollections();
+        const readback = applyProviderArchiveFolderReadback(
+          currentCollections,
+          normalizedArchive,
+        );
+        if (!readback.applied) {
+          return currentStore;
+        }
+        applied = true;
+        return {
+          ...currentStore,
+          [mailboxId]: readback.state,
+        };
+      });
+    });
+    return applied;
   };
   const connectedInboxCount = savedManagedInboxes.filter(
     (mailbox) => mailbox.connected,
@@ -38480,6 +39042,15 @@ export function WorkspaceShell({
       return "skipped";
     }
 
+    if (
+      hasPendingProviderArchiveForMailbox(
+        providerArchivePendingKeys,
+        mailboxId,
+      )
+    ) {
+      return "skipped";
+    }
+
     if (syncingMailboxIdsRef.current.has(mailboxId) || syncingMailboxId === mailboxId) {
       return "skipped";
     }
@@ -38523,14 +39094,39 @@ export function WorkspaceShell({
         });
       // Requested limit for diagnostic purposes (startup uses 20, normal uses default).
       const diagnosticRequestedLimit: number | "default" = options?.startup ? 20 : "default";
-      let response = canUseGmailOAuthFetch
-        ? await fetchGmailInbox({
+      const inboxFetchPromise = canUseGmailOAuthFetch
+        ? fetchGmailInbox({
             mailboxId: managedMailbox.id,
             focusPreferences: effectiveFocusPreferencesByMailbox[mailboxId],
           })
-        : await connectInboxWithImap(
+        : connectInboxWithImap(
             buildCustomImapRefreshRequest(options?.startup ? 20 : undefined),
           );
+      const archiveFetchPromise =
+        managedMailbox.connectionStatus === "connected"
+          ? fetchProviderArchive(managedMailbox.id)
+          : Promise.resolve(null);
+      const [initialInboxResponse, archiveResponse] = await Promise.all([
+        inboxFetchPromise,
+        archiveFetchPromise,
+      ]);
+      let response = initialInboxResponse;
+      const liveProvider = resolveLiveInboxProvider(managedMailbox.provider);
+      const archiveSnapshotApplied =
+        archiveResponse === null ||
+        (
+          archiveResponse.ok === true &&
+          liveProvider !== null &&
+          applyProviderArchiveFetchSnapshot(
+            managedMailbox.id as InboxId,
+            liveProvider,
+            archiveResponse.folder,
+          )
+        );
+      const archiveRefreshErrorMessage =
+        archiveSnapshotApplied
+          ? null
+          : "Archive could not be refreshed safely. Existing Archive messages were kept.";
       // Snapshot of the first response before any quota retry overwrites it.
       const firstResponseOk = response.ok;
       const firstResponseCode = response.error?.code;
@@ -38705,8 +39301,10 @@ export function WorkspaceShell({
       );
       clearUnreadOverridesForProviderMessages(messages);
       const refreshWarningMessage = resolveMailboxRefreshWarningMessage(response.warning);
-      if (refreshWarningMessage) {
-        setMailboxSyncError(mailboxId, refreshWarningMessage);
+      const providerRefreshMessage =
+        refreshWarningMessage ?? archiveRefreshErrorMessage;
+      if (providerRefreshMessage) {
+        setMailboxSyncError(mailboxId, providerRefreshMessage);
       } else {
         clearMailboxSyncError(mailboxId);
       }
@@ -38728,7 +39326,7 @@ export function WorkspaceShell({
         cacheRestored: 0,
         mergedCount: messagesForReactState.length,
       };
-	      return refreshWarningMessage ? "partial" : "synced";
+	      return providerRefreshMessage ? "partial" : "synced";
     } finally {
       syncingMailboxIdsRef.current.delete(mailboxId);
       setSyncingMailboxId((current) => (current === mailboxId ? null : current));
@@ -39525,17 +40123,23 @@ export function WorkspaceShell({
     const storedValue = window.localStorage.getItem(archiveMessagesStorageKey);
 
     if (!storedValue) {
+      setHydratedArchiveMessagesStorageKey(archiveMessagesStorageKey);
       return;
     }
 
     try {
       const parsed = JSON.parse(storedValue) as Partial<Record<string, MailMessage[]>>;
+      const localArchiveMessages = filterLegacyArchiveHydration<MailMessage>(
+        parsed,
+        orderedMailboxes.map((mailbox) => mailbox.id),
+        providerAuthoritativeArchiveMailboxIds,
+      );
 
       setMailboxStore((currentStore) => {
         const nextStore = { ...currentStore };
 
         orderedMailboxes.forEach((mailbox) => {
-          const storedMessages = Array.isArray(parsed[mailbox.id]) ? parsed[mailbox.id] ?? [] : [];
+          const storedMessages = localArchiveMessages[mailbox.id] ?? [];
 
           if (storedMessages.length === 0) {
             return;
@@ -39558,11 +40162,14 @@ export function WorkspaceShell({
         );
       });
     } catch {
-      return;
+      // Legacy Archive persistence is best-effort for local-only mailboxes.
+    } finally {
+      setHydratedArchiveMessagesStorageKey(archiveMessagesStorageKey);
     }
   }, [
     archiveMessagesStorageKey,
     mailboxOrderKey,
+    providerAuthoritativeArchiveMailboxKey,
     senderCategoryLearning,
     messageOwnershipInteractions,
     currentWorkspaceUserId,
@@ -39889,22 +40496,46 @@ export function WorkspaceShell({
   }, [mailboxStore, orderedMailboxes, spamMessagesStorageKey]);
 
   useEffect(() => {
-    if (typeof window === "undefined") {
+    if (
+      typeof window === "undefined" ||
+      hydratedArchiveMessagesStorageKey !== archiveMessagesStorageKey
+    ) {
       return;
     }
 
-    const archiveMessagesByMailbox = Object.fromEntries(
+    let storedArchiveMessages: unknown = {};
+    const storedValue = window.localStorage.getItem(archiveMessagesStorageKey);
+    if (storedValue) {
+      try {
+        storedArchiveMessages = JSON.parse(storedValue);
+      } catch {
+        storedArchiveMessages = {};
+      }
+    }
+
+    const localArchiveMessages = Object.fromEntries(
       orderedMailboxes.map((mailbox) => [
         mailbox.id,
         (mailboxStore[mailbox.id]?.Archive ?? []).slice(0, 100),
       ]),
+    );
+    const archiveMessagesByMailbox = mergeLegacyArchiveStorage(
+      storedArchiveMessages,
+      localArchiveMessages,
+      providerAuthoritativeArchiveMailboxIds,
     );
 
     window.localStorage.setItem(
       archiveMessagesStorageKey,
       JSON.stringify(archiveMessagesByMailbox),
     );
-  }, [mailboxStore, orderedMailboxes, archiveMessagesStorageKey]);
+  }, [
+    archiveMessagesStorageKey,
+    hydratedArchiveMessagesStorageKey,
+    mailboxStore,
+    orderedMailboxes,
+    providerAuthoritativeArchiveMailboxKey,
+  ]);
 
   useEffect(() => {
     window.localStorage.setItem(
@@ -41375,6 +42006,9 @@ export function WorkspaceShell({
                     isDemoWorkspace ? getLinkedReviewBadgeLabel : () => null
                   }
                   onOpenLinkedReview={openWorkspaceTarget}
+                  onApplyProviderArchiveMutationSuccess={
+                    applyProviderArchiveMutationSuccess
+                  }
                   onSyncMailbox={handleSyncActiveMailbox}
                   isSyncingMailbox={syncingMailboxId === activeMailbox.id}
                   onSyncUnreadOverrides={syncUnreadOverrides}
