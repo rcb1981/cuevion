@@ -200,6 +200,71 @@ class AuthenticationTests(unittest.TestCase):
         )
         self.assertNotIn("opaque", repr(user))
 
+    def test_server_authority_returns_canonical_typed_member(self):
+        authenticated = auth_runtime.AuthenticatedMemberResolution(
+            auth_runtime.MemberResolutionOutcome.AUTHENTICATED,
+            self.member,
+        )
+        with patch.object(
+            user_config_store.auth_runtime,
+            "resolve_authenticated_member",
+            return_value=authenticated,
+        ) as resolver:
+            member, error = (
+                user_config_store.resolve_authenticated_member_authority(
+                    {"cookie": "__Host-cuevion_session=opaque"}
+                )
+            )
+
+        self.assertIsNone(error)
+        self.assertIs(member, self.member)
+        self.assertEqual(member.user_id, "usr_test")
+        self.assertEqual(member.workspace_id, "wsp_test")
+        self.assertEqual(member.membership_role, "member")
+        self.assertEqual(member.email, "user@example.com")
+        resolver.assert_called_once_with(
+            (("cookie", "__Host-cuevion_session=opaque"),)
+        )
+
+    def test_server_authority_preserves_fail_closed_runtime_outcomes(self):
+        cases = (
+            (
+                auth_runtime.AuthenticatedMemberResolution(
+                    auth_runtime.MemberResolutionOutcome.UNAUTHENTICATED,
+                    None,
+                ),
+                "missing_session",
+            ),
+            (
+                auth_runtime.AuthenticatedMemberResolution(
+                    auth_runtime.MemberResolutionOutcome.UNAUTHENTICATED,
+                    None,
+                    ("clear-session",),
+                ),
+                "invalid_session",
+            ),
+            (
+                auth_runtime.AuthenticatedMemberResolution(
+                    auth_runtime.MemberResolutionOutcome.UNAVAILABLE,
+                    None,
+                ),
+                "session_auth_unavailable",
+            ),
+        )
+
+        for resolution, expected_code in cases:
+            with self.subTest(expected_code=expected_code), patch.object(
+                user_config_store.auth_runtime,
+                "resolve_authenticated_member",
+                return_value=resolution,
+            ):
+                member, error = (
+                    user_config_store.resolve_authenticated_member_authority({})
+                )
+
+            self.assertIsNone(member)
+            self.assertEqual(error["code"], expected_code)
+
 
 class StoreTests(unittest.TestCase):
     store = {"rest_url": "https://kv.example", "rest_token": "kv-secret"}

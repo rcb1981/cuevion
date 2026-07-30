@@ -180,9 +180,13 @@ else:
         return {"code": code, "message": message}
 
 
-    def resolve_authenticated_user(
+    def resolve_authenticated_member_authority(
         headers,
-    ) -> tuple[AuthenticatedUserContext | None, UserConfigAccessError | None]:
+    ) -> tuple[
+        auth_runtime.AuthenticatedMemberContext | None,
+        UserConfigAccessError | None,
+    ]:
+        """Resolve the canonical server-only member and workspace authority."""
         try:
             if type(headers) in (list, tuple):
                 raw_headers = tuple(headers)
@@ -222,7 +226,7 @@ else:
             return None, _error(error_code, message)
 
         member = resolution.member
-        if member is None:
+        if type(member) is not auth_runtime.AuthenticatedMemberContext:
             return None, _error(
                 "session_auth_unavailable",
                 "Authenticated session validation is unavailable.",
@@ -230,6 +234,16 @@ else:
 
         if member.auth_source != "auth0" or member.user_type != "member":
             return None, _error("missing_session", "An authenticated session is required.")
+
+        return member, None
+
+
+    def resolve_authenticated_user(
+        headers,
+    ) -> tuple[AuthenticatedUserContext | None, UserConfigAccessError | None]:
+        member, auth_error = resolve_authenticated_member_authority(headers)
+        if member is None:
+            return None, auth_error
 
         return {
             "email": member.email,

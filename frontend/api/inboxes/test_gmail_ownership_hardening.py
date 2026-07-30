@@ -25,6 +25,7 @@ if str(FRONTEND_DIR) not in sys.path:
 import authenticated_gmail
 import imap_connect_preview
 import oauth_token_store
+import user_config_store
 from api.auth import runtime as auth_runtime
 
 
@@ -154,14 +155,17 @@ def resolve_test_user(headers):
             "message": "The authenticated session is invalid.",
         }
     return {
-        "userId": "user-1",
         "email": email,
         "name": "Owner",
-        "workspaceId": "workspace-1",
-        "membershipRole": "owner",
         "userType": "member",
-        "authSource": "auth0",
     }, None
+
+
+def resolve_test_member_authority(headers):
+    user, error = resolve_test_user(headers)
+    if user is None:
+        return None, error
+    return authenticated_member(user["email"]), None
 
 
 class FakeHandler:
@@ -2627,10 +2631,24 @@ class OAuthAndConfigTests(unittest.TestCase):
 
     def test_connect_oauth_requires_session_and_signed_state_has_owner(self):
         handler = FakeHandler({"provider": "google", "email": "hint@gmail.com"})
-        with patch.object(connect_oauth, "resolve_authenticated_user", return_value=(None, None)):
+        with patch.object(
+            connect_oauth,
+            "resolve_authenticated_member_authority",
+            return_value=(
+                None,
+                {
+                    "code": "invalid_session",
+                    "message": "The authenticated session is invalid.",
+                },
+            ),
+        ), patch.object(
+            connect_oauth,
+            "build_signed_state",
+        ) as state_builder:
             connect_oauth.handler.do_POST(handler)
         self.assertEqual(handler.status, 401)
         self.assertEqual(handler.payload()["error"]["code"], "unauthorized")
+        state_builder.assert_not_called()
 
         state, verifier = connect_oauth.build_signed_state(
             "google",
@@ -2673,6 +2691,34 @@ class OAuthAndConfigTests(unittest.TestCase):
             )
         )
 
+    def test_connect_oauth_maps_authority_unavailability_before_state(self):
+        handler = FakeHandler(
+            {"provider": "google", "email": "hint@gmail.com"},
+            headers=self._authenticated_headers(),
+        )
+        with patch.object(
+            connect_oauth,
+            "resolve_authenticated_member_authority",
+            return_value=(
+                None,
+                {
+                    "code": "session_auth_unavailable",
+                    "message": "Authenticated session validation is unavailable.",
+                },
+            ),
+        ), patch.object(
+            connect_oauth,
+            "build_signed_state",
+        ) as state_builder:
+            connect_oauth.handler.do_POST(handler)
+
+        self.assertEqual(handler.status, 503)
+        self.assertEqual(
+            handler.payload()["error"]["code"],
+            "session_auth_unavailable",
+        )
+        state_builder.assert_not_called()
+
     def test_config_upsert_rejects_noncanonical_owner_before_storage_resolution(self):
         with patch.object(
             oauth_callback,
@@ -2692,11 +2738,16 @@ class OAuthAndConfigTests(unittest.TestCase):
         store_config.assert_not_called()
         storage_read.assert_not_called()
 
-    def test_authenticated_oauth_start_uses_real_session_and_opaque_state(self):
+    def test_authenticated_oauth_start_uses_real_server_authority_and_opaque_state(self):
         headers = self._authenticated_headers()
         request = FakeHandler(
             {"provider": "google", "email": "hint@gmail.com"},
             headers=headers,
+        )
+        member = authenticated_member()
+        authenticated = auth_runtime.AuthenticatedMemberResolution(
+            auth_runtime.MemberResolutionOutcome.AUTHENTICATED,
+            member,
         )
         environment = {
             "CUEVION_OAUTH_STATE_SECRET": "state-secret",
@@ -2707,19 +2758,146 @@ class OAuthAndConfigTests(unittest.TestCase):
             "GOOGLE_OAUTH_REDIRECT_URI": "https://app.example.com/api/inboxes/oauth-callback",
         }
         with patch.dict(connect_oauth.os.environ, environment, clear=False), patch.object(
-            connect_oauth,
-            "resolve_authenticated_user",
-            side_effect=resolve_test_user,
-        ):
+            user_config_store.auth_runtime,
+            "resolve_authenticated_member",
+            return_value=authenticated,
+        ) as resolver:
+            public_user, public_error = user_config_store.resolve_authenticated_user(
+                headers
+            )
+            resolver.reset_mock()
             connect_oauth.handler.do_POST(request)
+
+        self.assertIsNone(public_error)
+        self.assertEqual(
+            public_user,
+            {
+                "email": "owner@example.com",
+                "name": "Owner",
+                "userType": "member",
+            },
+        )
+        resolver.assert_called_once()
         self.assertEqual(request.status, 200)
-        authorization_url = request.payload()["authorizationUrl"]
+        response_payload = request.payload()
+        self.assertTrue(response_payload["ok"])
+        self.assertEqual(
+            response_payload["connectionStatus"],
+            "waiting_for_authentication",
+        )
+        authorization_url = response_payload["authorizationUrl"]
         from urllib.parse import parse_qs, urlparse
-        state = parse_qs(urlparse(authorization_url).query)["state"][0]
+
+        authorization_params = parse_qs(urlparse(authorization_url).query)
+        self.assertEqual(authorization_params["code_challenge_method"], ["S256"])
+        self.assertEqual(len(authorization_params["code_challenge"][0]), 43)
+        state = authorization_params["state"][0]
+        verified_state, state_error = oauth_callback.verify_signed_state(
+            state,
+            "state-secret",
+        )
+        self.assertIsNone(state_error)
+        self.assertTrue(
+            oauth_callback.verify_owner_binding(
+                verified_state,
+                member.email,
+                "state-secret",
+                member_user_id=member.user_id,
+                member_workspace_id=member.workspace_id,
+            )
+        )
         encoded = state.split(".", 1)[0]
         decoded = json.loads(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)))
         self.assertNotIn("owner_email", decoded)
         self.assertNotIn("owner@example.com", json.dumps(decoded))
+        self.assertNotIn(member.user_id, json.dumps(decoded))
+        self.assertNotIn(member.workspace_id, json.dumps(decoded))
+        self.assertNotIn("code_verifier", decoded)
+
+    def test_failed_existing_gmail_reconnect_builds_fresh_urls_without_old_token(self):
+        from urllib.parse import parse_qs, urlparse
+
+        existing_mailbox = inbox(
+            connected=False,
+            connectionStatus="connection_failed",
+        )
+        request_payload = {
+            "provider": existing_mailbox["provider"],
+            "email": existing_mailbox["email"],
+        }
+        requests = [
+            FakeHandler(request_payload, headers=self._authenticated_headers()),
+            FakeHandler(request_payload, headers=self._authenticated_headers()),
+        ]
+        member = authenticated_member()
+
+        with patch.dict(
+            os.environ,
+            self._production_oauth_environment(),
+            clear=True,
+        ), patch.object(
+            connect_oauth,
+            "resolve_authenticated_member_authority",
+            return_value=(member, None),
+        ), patch.object(
+            connect_oauth,
+            "resolve_user_config_store",
+        ) as config_store, patch.object(
+            connect_oauth,
+            "read_user_config_record",
+        ) as config_read, patch.object(
+            oauth_token_store,
+            "load_google_token_record_with_metadata",
+        ) as token_read, patch(
+            "urllib.request.urlopen",
+        ) as network_request, patch.object(
+            connect_oauth.secrets,
+            "token_urlsafe",
+            side_effect=("fresh-reconnect-nonce-one", "fresh-reconnect-nonce-two"),
+        ):
+            for request in requests:
+                connect_oauth.handler.do_POST(request)
+
+        authorization_urls = [
+            request.payload()["authorizationUrl"] for request in requests
+        ]
+        states = [
+            parse_qs(urlparse(authorization_url).query)["state"][0]
+            for authorization_url in authorization_urls
+        ]
+        self.assertEqual([request.status for request in requests], [200, 200])
+        self.assertEqual(
+            [
+                request.payload()["connectionStatus"]
+                for request in requests
+            ],
+            ["waiting_for_authentication", "waiting_for_authentication"],
+        )
+        self.assertNotEqual(authorization_urls[0], authorization_urls[1])
+        self.assertNotEqual(states[0], states[1])
+        for state in states:
+            verified_state, state_error = oauth_callback.verify_signed_state(
+                state,
+                "state-secret",
+            )
+            self.assertIsNone(state_error)
+            self.assertTrue(
+                oauth_callback.verify_owner_binding(
+                    verified_state,
+                    member.email,
+                    "state-secret",
+                    member_user_id=member.user_id,
+                    member_workspace_id=member.workspace_id,
+                )
+            )
+        self.assertEqual(
+            existing_mailbox["connectionStatus"],
+            "connection_failed",
+        )
+        config_store.assert_not_called()
+        config_read.assert_not_called()
+        token_read.assert_not_called()
+        network_request.assert_not_called()
 
     def test_google_start_and_exchange_share_canonical_production_redirect_uri(self):
         from urllib.parse import parse_qs, urlencode, urlparse
@@ -2749,8 +2927,8 @@ class OAuthAndConfigTests(unittest.TestCase):
 
         with patch.dict(os.environ, environment, clear=True), patch.object(
             connect_oauth,
-            "resolve_authenticated_user",
-            side_effect=resolve_test_user,
+            "resolve_authenticated_member_authority",
+            side_effect=resolve_test_member_authority,
         ):
             connect_oauth.handler.do_POST(request)
 
@@ -2856,8 +3034,8 @@ class OAuthAndConfigTests(unittest.TestCase):
                     clear=True,
                 ), patch.object(
                     connect_oauth,
-                    "resolve_authenticated_user",
-                    side_effect=resolve_test_user,
+                    "resolve_authenticated_member_authority",
+                    side_effect=resolve_test_member_authority,
                 ), patch.object(
                     connect_oauth,
                     "build_signed_state",
@@ -2911,8 +3089,8 @@ class OAuthAndConfigTests(unittest.TestCase):
                 )
                 with patch.dict(os.environ, environment, clear=True), patch.object(
                     connect_oauth,
-                    "resolve_authenticated_user",
-                    side_effect=resolve_test_user,
+                    "resolve_authenticated_member_authority",
+                    side_effect=resolve_test_member_authority,
                 ), patch.object(
                     connect_oauth,
                     "build_signed_state",
@@ -3198,6 +3376,17 @@ class OAuthAndConfigTests(unittest.TestCase):
         valid_config = self._incomplete_onboarding_config(
             selected_inboxes=("main", "demo")
         )
+        valid_config["managedInboxes"] = [
+            inbox(
+                id="gmail-existing",
+                connected=False,
+                connectionStatus="connection_failed",
+                connectionMethod="oauth",
+                connectionType="oauth",
+                oauthOwnerEmail="owner@example.com",
+                onboardingInboxId="main",
+            )
+        ]
         request = FakeHandler(
             {
                 "provider": "google",
@@ -3213,8 +3402,8 @@ class OAuthAndConfigTests(unittest.TestCase):
             clear=False,
         ), patch.object(
             connect_oauth,
-            "resolve_authenticated_user",
-            side_effect=resolve_test_user,
+            "resolve_authenticated_member_authority",
+            side_effect=resolve_test_member_authority,
         ), patch.object(
             connect_oauth,
             "resolve_user_config_store",
@@ -3290,8 +3479,8 @@ class OAuthAndConfigTests(unittest.TestCase):
             )
             with self.subTest(label=label), patch.object(
                 connect_oauth,
-                "resolve_authenticated_user",
-                side_effect=resolve_test_user,
+                "resolve_authenticated_member_authority",
+                side_effect=resolve_test_member_authority,
             ), patch.object(
                 connect_oauth,
                 "resolve_user_config_store",
@@ -3326,9 +3515,18 @@ class OAuthAndConfigTests(unittest.TestCase):
             ],
             "userId": "attacker-user",
             "workspaceId": "attacker-workspace",
+            "membershipRole": "attacker-owner",
             "ownerEmail": "attacker@example.com",
             "connected": True,
+            "state": "client-state",
             "oauthState": "browser-state",
+            "nonce": "client-nonce",
+            "pkce": "client-pkce",
+            "codeVerifier": "client-verifier",
+            "redirectUri": "https://attacker.example/callback",
+            "redirect_uri": "https://attacker.example/callback",
+            "accessToken": "client-access-token",
+            "refreshToken": "client-refresh-token",
         }
 
         for field, value in forbidden_fields.items():
@@ -3343,8 +3541,8 @@ class OAuthAndConfigTests(unittest.TestCase):
             )
             with self.subTest(field=field), patch.object(
                 connect_oauth,
-                "resolve_authenticated_user",
-                side_effect=resolve_test_user,
+                "resolve_authenticated_member_authority",
+                side_effect=resolve_test_member_authority,
             ), patch.object(
                 connect_oauth,
                 "resolve_user_config_store",
@@ -3370,8 +3568,8 @@ class OAuthAndConfigTests(unittest.TestCase):
         )
         with patch.object(
             connect_oauth,
-            "resolve_authenticated_user",
-            side_effect=resolve_test_user,
+            "resolve_authenticated_member_authority",
+            side_effect=resolve_test_member_authority,
         ), patch.object(
             connect_oauth,
             "resolve_user_config_store",

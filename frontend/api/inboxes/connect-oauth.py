@@ -19,7 +19,7 @@ if str(API_DIR) not in sys.path:
 
 from user_config_store import (  # noqa: E402
     read_user_config_record,
-    resolve_authenticated_user,
+    resolve_authenticated_member_authority,
     resolve_user_config_store,
 )
 from api.auth.email_address import normalize_auth_email  # noqa: E402
@@ -328,7 +328,7 @@ def resolve_microsoft_scopes() -> list[str]:
 
 
 def resolve_authoritative_onboarding_position(
-    session_user: dict,
+    owner_email: str,
     inbox_position: str,
 ) -> tuple[str | None, int | None, dict | None]:
     store, store_error = resolve_user_config_store()
@@ -341,7 +341,7 @@ def resolve_authoritative_onboarding_position(
             },
         }
 
-    read_result = read_user_config_record(store, session_user["email"])
+    read_result = read_user_config_record(store, owner_email)
     if read_result["status"] == "unavailable":
         return None, 503, {
             "ok": False,
@@ -358,7 +358,7 @@ def resolve_authoritative_onboarding_position(
     if stored_owner is not None and (
         not isinstance(stored_owner, str)
         or normalize_auth_email(stored_owner)
-        != normalize_auth_email(session_user["email"])
+        != normalize_auth_email(owner_email)
     ):
         return None, 409, ONBOARDING_CONFLICT_ERROR
 
@@ -405,8 +405,10 @@ class handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         try:
-            session_user, auth_error = resolve_authenticated_user(self.headers)
-            if not session_user:
+            session_member, auth_error = resolve_authenticated_member_authority(
+                self.headers
+            )
+            if not session_member:
                 if auth_error and auth_error.get("code") == "session_auth_unavailable":
                     self._send_json(
                         503,
@@ -524,7 +526,7 @@ class handler(BaseHTTPRequestHandler):
                     onboarding_error_status,
                     onboarding_error_payload,
                 ) = resolve_authoritative_onboarding_position(
-                    session_user,
+                    session_member.email,
                     inbox_position,
                 )
                 if onboarding_error_status is not None and onboarding_error_payload:
@@ -595,11 +597,11 @@ class handler(BaseHTTPRequestHandler):
             authorization_state, code_verifier = build_signed_state(
                 provider,
                 email,
-                session_user["email"],
+                session_member.email,
                 oauth_state_secret,
                 inbox_position,
-                member_user_id=session_user["userId"],
-                member_workspace_id=session_user["workspaceId"],
+                member_user_id=session_member.user_id,
+                member_workspace_id=session_member.workspace_id,
             )
             if provider == "google":
                 authorization_params = {
