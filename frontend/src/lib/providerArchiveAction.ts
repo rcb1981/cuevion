@@ -17,6 +17,13 @@ export type ProviderArchiveCandidate = {
   uidValidity?: unknown;
 };
 
+export type ExactGmailArchiveSourceMessage = {
+  id: string;
+  serverMailboxId?: string | null;
+  providerFolder?: string | null;
+  providerMessageId?: string | null;
+};
+
 export type ProviderArchiveMutationRequest =
   | {
       mailboxId: string;
@@ -300,6 +307,53 @@ export function buildProviderArchiveMutationTarget(
     request,
     inFlightKey: buildInFlightKey("custom_imap", request),
   };
+}
+
+export function resolveExactGmailArchiveMutationTarget<
+  Message extends ExactGmailArchiveSourceMessage,
+>({
+  selectedMessageIds,
+  sourceFolder,
+  sourceMailboxId,
+  sourceMessages,
+}: {
+  selectedMessageIds: readonly string[];
+  sourceFolder: unknown;
+  sourceMailboxId: string;
+  sourceMessages: readonly Message[];
+}): {
+  sourceMessage: Message;
+  candidate: ProviderArchiveCandidate;
+  target: ProviderArchiveMutationTarget;
+} | null {
+  if (selectedMessageIds.length !== 1 || sourceFolder !== "Inbox") {
+    return null;
+  }
+
+  const exactSourceMessageMatches = sourceMessages.filter(
+    (message) => message.id === selectedMessageIds[0],
+  );
+  if (exactSourceMessageMatches.length !== 1) {
+    return null;
+  }
+
+  const sourceMessage = exactSourceMessageMatches[0];
+  if (sourceMessage.serverMailboxId !== sourceMailboxId) {
+    return null;
+  }
+
+  const candidate: ProviderArchiveCandidate = {
+    provider: "google",
+    mailboxId: sourceMessage.serverMailboxId,
+    folder: sourceMessage.providerFolder,
+    providerMessageId: sourceMessage.providerMessageId,
+  };
+  const target = buildProviderArchiveMutationTarget(candidate);
+  if (!target.ok) {
+    return null;
+  }
+
+  return { sourceMessage, candidate, target };
 }
 
 function validateMutationResponse(

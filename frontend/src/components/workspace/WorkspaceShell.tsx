@@ -117,6 +117,7 @@ import {
   hasPendingProviderArchiveForMailbox,
   mergeLegacyArchiveStorage,
   replaceProviderArchiveReadback,
+  resolveExactGmailArchiveMutationTarget,
   type ProviderArchiveCandidate,
 } from "../../lib/providerArchiveAction";
 import { buildProviderMessageActionTarget } from "../../lib/providerMessageAction";
@@ -20057,31 +20058,20 @@ function MailboxView({
       return;
     }
 
+    const gmailArchiveResolution =
+      sourceManagedMailbox.provider === "google"
+        ? resolveExactGmailArchiveMutationTarget({
+            selectedMessageIds: messageIds,
+            sourceFolder: sourceLocation.folder,
+            sourceMailboxId: sourceManagedMailbox.id,
+            sourceMessages:
+              mailboxStore[sourceLocation.mailboxId]?.[
+                sourceLocation.folder
+              ] ?? [],
+          })
+        : null;
     if (sourceManagedMailbox.provider === "google") {
-      const sourceInboxMessages =
-        mailboxStore[sourceLocation.mailboxId]?.Inbox ?? [];
-      const sourceThreadKey = resolveSafeThreadGroupingKey(
-        sourceMessage,
-        sourceLocation.mailboxId,
-      );
-      const groupedMessages = sourceInboxMessages.filter(
-        (candidate) =>
-          resolveSafeThreadGroupingKey(
-            candidate,
-            sourceLocation.mailboxId,
-          ) === sourceThreadKey,
-      );
-      const groupedProviderMessageIds = groupedMessages.flatMap((candidate) =>
-        typeof candidate.providerMessageId === "string"
-          ? [candidate.providerMessageId]
-          : [],
-      );
-      if (
-        sourceMessage.providerFolder !== "Inbox" ||
-        groupedMessages.length !== 1 ||
-        groupedProviderMessageIds.length !== 1 ||
-        groupedProviderMessageIds[0] !== sourceMessage.providerMessageId
-      ) {
+      if (!gmailArchiveResolution) {
         closeMenus();
         showProviderArchiveBlockedMessage();
         return;
@@ -20092,15 +20082,18 @@ function MailboxView({
       return;
     }
 
-    const candidate: ProviderArchiveCandidate = {
-      provider: sourceManagedMailbox.provider ?? "",
-      mailboxId: sourceMessage.serverMailboxId,
-      folder: sourceMessage.providerFolder,
-      providerMessageId: sourceMessage.providerMessageId,
-      imapUid: sourceMessage.imapUid,
-      uidValidity: sourceMessage.uidValidity,
-    };
-    const target = buildProviderArchiveMutationTarget(candidate);
+    const candidate: ProviderArchiveCandidate =
+      gmailArchiveResolution?.candidate ?? {
+        provider: sourceManagedMailbox.provider ?? "",
+        mailboxId: sourceMessage.serverMailboxId,
+        folder: sourceMessage.providerFolder,
+        providerMessageId: sourceMessage.providerMessageId,
+        imapUid: sourceMessage.imapUid,
+        uidValidity: sourceMessage.uidValidity,
+      };
+    const target =
+      gmailArchiveResolution?.target ??
+      buildProviderArchiveMutationTarget(candidate);
     if (!target.ok) {
       closeMenus();
       showProviderArchiveBlockedMessage();

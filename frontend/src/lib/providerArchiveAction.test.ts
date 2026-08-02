@@ -12,6 +12,7 @@ import {
   hasPendingProviderArchiveForMailbox,
   mergeLegacyArchiveStorage,
   replaceProviderArchiveReadback,
+  resolveExactGmailArchiveMutationTarget,
   type ProviderArchiveCandidate,
   type ProviderArchiveMutationRequest,
   type ProviderArchiveMutationResponse,
@@ -410,7 +411,192 @@ type GmailArchiveStateTestMessage = {
   serverMailboxId?: string;
   providerFolder?: string;
   providerMessageId?: string;
+  providerThreadId?: string;
 };
+
+function resolveGmailSource(
+  sourceMessages: readonly GmailArchiveStateTestMessage[],
+  selectedMessageIds: readonly string[] = ["selected-ui-message"],
+  sourceFolder: unknown = "Inbox",
+  sourceMailboxId = "mailbox-1",
+) {
+  return resolveExactGmailArchiveMutationTarget({
+    selectedMessageIds,
+    sourceFolder,
+    sourceMailboxId,
+    sourceMessages,
+  });
+}
+
+test("Gmail resolves one selected Inbox message to its exact provider target", () => {
+  const resolution = resolveGmailSource([
+    {
+      id: "selected-ui-message",
+      serverMailboxId: "mailbox-1",
+      providerFolder: "Inbox",
+      providerMessageId: "gmail-selected-message",
+    },
+  ]);
+
+  assert.ok(resolution);
+  assert.deepEqual(resolution.target.request, {
+    mailboxId: "mailbox-1",
+    messageId: "gmail-selected-message",
+    action: "archive",
+  });
+});
+
+test("Gmail resolves the exact selected message inside a multi-message thread", () => {
+  const sibling: GmailArchiveStateTestMessage = {
+    id: "sibling-ui-message",
+    serverMailboxId: "mailbox-1",
+    providerFolder: "Inbox",
+    providerMessageId: "gmail-sibling-message",
+    providerThreadId: "shared-provider-thread",
+  };
+  const selected: GmailArchiveStateTestMessage = {
+    id: "selected-ui-message",
+    serverMailboxId: "mailbox-1",
+    providerFolder: "Inbox",
+    providerMessageId: "gmail-selected-message",
+    providerThreadId: "shared-provider-thread",
+  };
+
+  const resolution = resolveGmailSource([sibling, selected]);
+  assert.ok(resolution);
+  assert.equal(resolution.sourceMessage, selected);
+  assert.deepEqual(resolution.target.request, {
+    mailboxId: "mailbox-1",
+    messageId: "gmail-selected-message",
+    action: "archive",
+  });
+  assert.equal(
+    JSON.stringify(resolution.target.request).includes("gmail-sibling-message"),
+    false,
+  );
+  assert.equal(
+    JSON.stringify(resolution.target.request).includes("shared-provider-thread"),
+    false,
+  );
+
+  const archived = applyGmailProviderArchiveDelta(
+    { Inbox: [sibling, selected], Archive: [] },
+    {
+      mailboxId: "mailbox-1",
+      removeProviderMessageId: "gmail-selected-message",
+      upsertMessage: {
+        ...selected,
+        id: "selected-archive-message",
+        providerFolder: "Archive",
+      },
+    },
+  );
+  assert.equal(archived.applied, true);
+  assert.deepEqual(archived.state.Inbox, [sibling]);
+  assert.deepEqual(
+    archived.state.Archive.map((message) => message.providerMessageId),
+    ["gmail-selected-message"],
+  );
+});
+
+test("Gmail allows the last remaining selected Inbox message", () => {
+  const lastInboxMessage: GmailArchiveStateTestMessage = {
+    id: "selected-ui-message",
+    serverMailboxId: "mailbox-1",
+    providerFolder: "Inbox",
+    providerMessageId: "gmail-last-inbox-message",
+    providerThreadId: "thread-whose-siblings-are-no-longer-in-inbox",
+  };
+  const resolution = resolveGmailSource([lastInboxMessage]);
+
+  assert.ok(resolution);
+  assert.equal(
+    "messageId" in resolution.target.request
+      ? resolution.target.request.messageId
+      : null,
+    "gmail-last-inbox-message",
+  );
+
+  const archived = applyGmailProviderArchiveDelta(
+    { Inbox: [lastInboxMessage], Archive: [] },
+    {
+      mailboxId: "mailbox-1",
+      removeProviderMessageId: "gmail-last-inbox-message",
+      upsertMessage: {
+        ...lastInboxMessage,
+        id: "last-archive-message",
+        providerFolder: "Archive",
+      },
+    },
+  );
+  assert.equal(archived.applied, true);
+  assert.deepEqual(archived.state.Inbox, []);
+  assert.deepEqual(
+    archived.state.Archive.map((message) => message.providerMessageId),
+    ["gmail-last-inbox-message"],
+  );
+});
+
+test("Gmail source resolution fails closed without one exact UI message", () => {
+  const selected = {
+    id: "selected-ui-message",
+    serverMailboxId: "mailbox-1",
+    providerFolder: "Inbox",
+    providerMessageId: "gmail-selected-message",
+  };
+
+  assert.equal(resolveGmailSource([], [selected.id]), null);
+  assert.equal(resolveGmailSource([selected], []), null);
+  assert.equal(
+    resolveGmailSource([selected], [selected.id, "another-id"]),
+    null,
+  );
+  assert.equal(resolveGmailSource([selected, { ...selected }]), null);
+});
+
+test("Gmail source resolution fails closed for wrong mailbox or folder", () => {
+  const selected = {
+    id: "selected-ui-message",
+    serverMailboxId: "mailbox-1",
+    providerFolder: "Inbox",
+    providerMessageId: "gmail-selected-message",
+  };
+
+  assert.equal(resolveGmailSource([selected], [selected.id], "Archive"), null);
+  assert.equal(
+    resolveGmailSource([selected], [selected.id], "Inbox", "mailbox-2"),
+    null,
+  );
+  assert.equal(
+    resolveGmailSource([{ ...selected, providerFolder: "Archive" }]),
+    null,
+  );
+});
+
+test("Gmail source resolution fails closed without a concrete provider id", () => {
+  for (const providerMessageId of [
+    undefined,
+    "",
+    " message",
+    "rfc@example.test",
+    "<rfc-message>",
+    "imap-uid-42",
+    "thread-42",
+  ]) {
+    assert.equal(
+      resolveGmailSource([
+        {
+          id: "selected-ui-message",
+          serverMailboxId: "mailbox-1",
+          providerFolder: "Inbox",
+          providerMessageId,
+        },
+      ]),
+      null,
+      `expected provider id ${JSON.stringify(providerMessageId)} to fail`,
+    );
+  }
+});
 
 test("Gmail delta removes one exact Inbox identity and replaces only its stale Archive version", () => {
   const sourceMessage: GmailArchiveStateTestMessage = {

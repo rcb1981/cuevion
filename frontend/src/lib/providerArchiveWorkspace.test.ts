@@ -319,7 +319,14 @@ assert.match(archiveHandler, /isSharedView/);
 assert.match(archiveHandler, /activeSmartFolder/);
 assert.match(archiveHandler, /isSyncingMailbox/);
 assert.match(archiveHandler, /location\?\.folder !== "Inbox"/);
-assert.match(archiveHandler, /groupedMessages\.length !== 1/);
+assert.match(
+  archiveHandler,
+  /resolveExactGmailArchiveMutationTarget\(\{/,
+);
+assert.doesNotMatch(
+  archiveHandler,
+  /sourceThreadKey|groupedMessages|groupedProviderMessageIds/,
+);
 assert.match(archiveHandler, /exactSourceMessageMatches\.length === 1/);
 assert.match(
   archiveHandler,
