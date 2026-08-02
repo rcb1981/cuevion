@@ -22,6 +22,221 @@ export type GmailArchiveReconciliationCoordinator<MailboxId extends string> = {
   drain: (mailboxId: MailboxId) => void;
 };
 
+export type GmailInboxAuthorityMessage = {
+  serverMailboxId?: unknown;
+  providerFolder?: unknown;
+  providerMessageId?: unknown;
+  labelIds?: unknown;
+};
+
+export type GmailInboxAuthority = {
+  captureGeneration: (mailboxId: string) => number;
+  confirmArchive: (mailboxId: string, providerMessageId: string) => number;
+  resetMailbox: (mailboxId: string) => void;
+  isCurrentGeneration: (mailboxId: string, generation: number) => boolean;
+  isRecentlyArchived: (mailboxId: string, providerMessageId: string) => boolean;
+  filterSnapshotMessages: <Message extends GmailInboxAuthorityMessage>(
+    mailboxId: string,
+    messages: readonly Message[],
+  ) => Message[];
+  resolveFetchResponse: <Message extends GmailInboxAuthorityMessage>(args: {
+    mailboxId: string;
+    generationAtFetchStart: number;
+    messages: readonly Message[];
+  }) =>
+    | {
+        stale: true;
+        messages: [];
+        provenReentryProviderMessageIds: [];
+      }
+    | {
+        stale: false;
+        messages: Message[];
+        provenReentryProviderMessageIds: string[];
+      };
+};
+
+function isExactAuthorityIdentifier(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value === value.trim()
+  );
+}
+
+function isExactMailboxProviderMessage(
+  message: GmailInboxAuthorityMessage,
+  mailboxId: string,
+  providerMessageId: string,
+) {
+  return (
+    message.serverMailboxId === mailboxId &&
+    message.providerMessageId === providerMessageId
+  );
+}
+
+function hasExplicitGmailInboxMembership(message: GmailInboxAuthorityMessage) {
+  if (message.providerFolder !== "Inbox" || !Array.isArray(message.labelIds)) {
+    return false;
+  }
+
+  const labelIds = message.labelIds;
+  return (
+    labelIds.length > 0 &&
+    labelIds.every(isExactAuthorityIdentifier) &&
+    new Set(labelIds).size === labelIds.length &&
+    labelIds.includes("INBOX")
+  );
+}
+
+export function removeProvenGmailInboxReentriesFromArchive<
+  Message extends GmailInboxAuthorityMessage,
+>(
+  mailboxId: string,
+  providerMessageIds: ReadonlySet<string>,
+  archiveMessages: Message[],
+): Message[] {
+  if (providerMessageIds.size === 0) {
+    return archiveMessages;
+  }
+
+  return archiveMessages.filter((message) => {
+    const providerMessageId = message.providerMessageId;
+    return !(
+      isExactAuthorityIdentifier(providerMessageId) &&
+      providerMessageIds.has(providerMessageId) &&
+      isExactMailboxProviderMessage(message, mailboxId, providerMessageId)
+    );
+  });
+}
+
+export function createGmailInboxAuthority(): GmailInboxAuthority {
+  const generationByMailbox = new Map<string, number>();
+  const recentlyArchivedByMailbox = new Map<string, Set<string>>();
+  const readGeneration = (mailboxId: string) =>
+    generationByMailbox.get(mailboxId) ?? 0;
+
+  const readFence = (mailboxId: string) =>
+    recentlyArchivedByMailbox.get(mailboxId);
+
+  const filterSnapshotMessages = <Message extends GmailInboxAuthorityMessage>(
+    mailboxId: string,
+    messages: readonly Message[],
+  ) => {
+    const fence = readFence(mailboxId);
+    if (!fence?.size) {
+      return [...messages];
+    }
+
+    return messages.filter((message) => {
+      const providerMessageId = message.providerMessageId;
+      return !(
+        isExactAuthorityIdentifier(providerMessageId) &&
+        fence.has(providerMessageId)
+      );
+    });
+  };
+
+  return {
+    captureGeneration: readGeneration,
+    confirmArchive: (mailboxId, providerMessageId) => {
+      const nextGeneration = readGeneration(mailboxId) + 1;
+      generationByMailbox.set(mailboxId, nextGeneration);
+
+      const currentFence = readFence(mailboxId) ?? new Set<string>();
+      currentFence.add(providerMessageId);
+      recentlyArchivedByMailbox.set(mailboxId, currentFence);
+
+      return nextGeneration;
+    },
+    resetMailbox: (mailboxId) => {
+      generationByMailbox.delete(mailboxId);
+      recentlyArchivedByMailbox.delete(mailboxId);
+    },
+    isCurrentGeneration: (mailboxId, generation) =>
+      readGeneration(mailboxId) === generation,
+    isRecentlyArchived: (mailboxId, providerMessageId) =>
+      readFence(mailboxId)?.has(providerMessageId) ?? false,
+    filterSnapshotMessages,
+    resolveFetchResponse: ({
+      mailboxId,
+      generationAtFetchStart,
+      messages,
+    }) => {
+      if (readGeneration(mailboxId) !== generationAtFetchStart) {
+        return {
+          stale: true,
+          messages: [],
+          provenReentryProviderMessageIds: [],
+        };
+      }
+
+      const fence = readFence(mailboxId);
+      if (!fence?.size) {
+        return {
+          stale: false,
+          messages: [...messages],
+          provenReentryProviderMessageIds: [],
+        };
+      }
+
+      const fencedProviderMessageIds = new Set(fence);
+      const candidatesByProviderMessageId = new Map<
+        string,
+        Array<(typeof messages)[number]>
+      >();
+      messages.forEach((message) => {
+        const providerMessageId = message.providerMessageId;
+        if (
+          isExactAuthorityIdentifier(providerMessageId) &&
+          fencedProviderMessageIds.has(providerMessageId)
+        ) {
+          const candidates =
+            candidatesByProviderMessageId.get(providerMessageId) ?? [];
+          candidates.push(message);
+          candidatesByProviderMessageId.set(providerMessageId, candidates);
+        }
+      });
+
+      const provenReentries = new Map<string, (typeof messages)[number]>();
+      candidatesByProviderMessageId.forEach((candidates, providerMessageId) => {
+        if (
+          candidates.length === 1 &&
+          isExactMailboxProviderMessage(
+            candidates[0],
+            mailboxId,
+            providerMessageId,
+          ) &&
+          hasExplicitGmailInboxMembership(candidates[0])
+        ) {
+          provenReentries.set(providerMessageId, candidates[0]);
+          fence.delete(providerMessageId);
+        }
+      });
+
+      if (fence.size === 0) {
+        recentlyArchivedByMailbox.delete(mailboxId);
+      }
+
+      return {
+        stale: false,
+        messages: messages.filter((message) => {
+          const providerMessageId = message.providerMessageId;
+          if (
+            !isExactAuthorityIdentifier(providerMessageId) ||
+            !fencedProviderMessageIds.has(providerMessageId)
+          ) {
+            return true;
+          }
+
+          return provenReentries.get(providerMessageId) === message;
+        }),
+        provenReentryProviderMessageIds: [...provenReentries.keys()],
+      };
+    },
+  };
+}
+
 type ArchiveFetchOutcome =
   | null
   | { ok: true }

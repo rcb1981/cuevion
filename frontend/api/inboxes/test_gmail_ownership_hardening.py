@@ -831,7 +831,7 @@ class RealHandlerOwnershipMatrixTests(unittest.TestCase):
             side_effect=(
                 BoundaryResponse(json.dumps({"messages": [{"id": "bad"}, {"id": "good"}]})),
                 BoundaryResponse(json.dumps({"id": "bad", "raw": "%%%not-base64%%%"})),
-                BoundaryResponse(json.dumps({"id": "good", "raw": valid_raw, "labelIds": []})),
+                BoundaryResponse(json.dumps({"id": "good", "raw": valid_raw, "labelIds": ["INBOX"]})),
             )
         )
         request, _, _, _ = self._invoke(
@@ -845,6 +845,119 @@ class RealHandlerOwnershipMatrixTests(unittest.TestCase):
         self.assertEqual(request.payload()["messages"][0]["subject"], "Valid")
         self.assertEqual(provider_transport.call_count, 3)
 
+    def test_fetch_does_not_publish_list_id_when_detail_omits_label_ids(self):
+        omitted_labels_raw = base64.urlsafe_b64encode(
+            b"From: stale@example.com\r\nTo: owner@example.com\r\nSubject: Omitted labels\r\n\r\nBody"
+        ).rstrip(b"=").decode()
+        valid_raw = base64.urlsafe_b64encode(
+            b"From: current@example.com\r\nTo: owner@example.com\r\nSubject: Current Inbox\r\n\r\nBody"
+        ).rstrip(b"=").decode()
+        provider_transport = Mock(
+            side_effect=(
+                BoundaryResponse(
+                    json.dumps(
+                        {
+                            "messages": [
+                                {"id": "missing-labels"},
+                                {"id": "current-inbox"},
+                            ]
+                        }
+                    )
+                ),
+                BoundaryResponse(
+                    json.dumps(
+                        {
+                            "id": "missing-labels",
+                            "raw": omitted_labels_raw,
+                        }
+                    )
+                ),
+                BoundaryResponse(
+                    json.dumps(
+                        {
+                            "id": "current-inbox",
+                            "raw": valid_raw,
+                            "labelIds": ["INBOX"],
+                        }
+                    )
+                ),
+            )
+        )
+
+        request, _, _, _ = self._invoke(
+            fetch_gmail,
+            {"mailboxId": "gmail-1"},
+            {},
+            provider_transport_override=provider_transport,
+        )
+
+        self.assertEqual(request.status, 200)
+        payload = request.payload()
+        self.assertEqual(
+            [message["providerMessageId"] for message in payload["messages"]],
+            ["current-inbox"],
+        )
+        self.assertEqual(payload["inboxUidSet"], ["current-inbox"])
+        self.assertNotIn("missing-labels", json.dumps(payload))
+        self.assertEqual(provider_transport.call_count, 3)
+
+    def test_fetch_does_not_publish_list_id_when_detail_lacks_inbox_label(self):
+        stale_membership_raw = base64.urlsafe_b64encode(
+            b"From: stale@example.com\r\nTo: owner@example.com\r\nSubject: Stale membership\r\n\r\nBody"
+        ).rstrip(b"=").decode()
+        valid_raw = base64.urlsafe_b64encode(
+            b"From: current@example.com\r\nTo: owner@example.com\r\nSubject: Current Inbox\r\n\r\nBody"
+        ).rstrip(b"=").decode()
+        provider_transport = Mock(
+            side_effect=(
+                BoundaryResponse(
+                    json.dumps(
+                        {
+                            "messages": [
+                                {"id": "stale-membership"},
+                                {"id": "current-inbox"},
+                            ]
+                        }
+                    )
+                ),
+                BoundaryResponse(
+                    json.dumps(
+                        {
+                            "id": "stale-membership",
+                            "raw": stale_membership_raw,
+                            "labelIds": ["UNREAD", "STARRED"],
+                        }
+                    )
+                ),
+                BoundaryResponse(
+                    json.dumps(
+                        {
+                            "id": "current-inbox",
+                            "raw": valid_raw,
+                            "labelIds": ["INBOX", "STARRED"],
+                        }
+                    )
+                ),
+            )
+        )
+
+        request, _, _, _ = self._invoke(
+            fetch_gmail,
+            {"mailboxId": "gmail-1"},
+            {},
+            provider_transport_override=provider_transport,
+        )
+
+        self.assertEqual(request.status, 200)
+        payload = request.payload()
+        self.assertEqual(
+            [message["providerMessageId"] for message in payload["messages"]],
+            ["current-inbox"],
+        )
+        self.assertEqual(payload["inboxUidSet"], ["current-inbox"])
+        self.assertNotIn("stale-membership", json.dumps(payload))
+        self.assertEqual(provider_transport.call_count, 3)
+
     def test_fetch_skips_only_documented_message_parse_errors(self):
         malformed_raw = base64.urlsafe_b64encode(b"malformed provider message").rstrip(b"=").decode()
         valid_raw = base64.urlsafe_b64encode(
@@ -854,7 +967,7 @@ class RealHandlerOwnershipMatrixTests(unittest.TestCase):
             side_effect=(
                 BoundaryResponse(json.dumps({"messages": [{"id": "bad"}, {"id": "good"}]})),
                 BoundaryResponse(json.dumps({"id": "bad", "raw": malformed_raw, "labelIds": []})),
-                BoundaryResponse(json.dumps({"id": "good", "raw": valid_raw, "labelIds": []})),
+                BoundaryResponse(json.dumps({"id": "good", "raw": valid_raw, "labelIds": ["INBOX"]})),
             )
         )
         real_parser = fetch_gmail.message_from_bytes
@@ -885,8 +998,8 @@ class RealHandlerOwnershipMatrixTests(unittest.TestCase):
         provider_transport = Mock(
             side_effect=(
                 BoundaryResponse(json.dumps({"messages": [{"id": "first"}, {"id": "second"}]})),
-                BoundaryResponse(json.dumps({"id": "first", "raw": first_raw, "labelIds": []})),
-                BoundaryResponse(json.dumps({"id": "second", "raw": second_raw, "labelIds": []})),
+                BoundaryResponse(json.dumps({"id": "first", "raw": first_raw, "labelIds": ["INBOX"]})),
+                BoundaryResponse(json.dumps({"id": "second", "raw": second_raw, "labelIds": ["INBOX"]})),
             )
         )
         real_parser = fetch_gmail.message_from_bytes
@@ -930,8 +1043,8 @@ class RealHandlerOwnershipMatrixTests(unittest.TestCase):
             provider_transport = Mock(
                 side_effect=(
                     BoundaryResponse(json.dumps({"messages": [{"id": "first"}, {"id": "second"}]})),
-                    BoundaryResponse(json.dumps({"id": "first", "raw": first_raw, "labelIds": []})),
-                    BoundaryResponse(json.dumps({"id": "second", "raw": second_raw, "labelIds": []})),
+                    BoundaryResponse(json.dumps({"id": "first", "raw": first_raw, "labelIds": ["INBOX"]})),
+                    BoundaryResponse(json.dumps({"id": "second", "raw": second_raw, "labelIds": ["INBOX"]})),
                 )
             )
             preview_calls = 0

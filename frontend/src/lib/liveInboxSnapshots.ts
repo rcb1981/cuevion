@@ -35,6 +35,65 @@ export type TrustedLiveInboxSnapshotContexts = Record<
   TrustedLiveInboxSnapshotContext
 >;
 
+export function removeGmailInboxProviderMessageFromSnapshot(
+  snapshot: LiveInboxSnapshot | undefined,
+  mailboxId: string,
+  providerMessageId: string,
+): LiveInboxSnapshot | undefined {
+  if (
+    !snapshot ||
+    snapshot.provider !== "google" ||
+    snapshot.folder?.trim().toUpperCase() !== "INBOX" ||
+    snapshot.inboxId !== mailboxId
+  ) {
+    return snapshot;
+  }
+
+  const messages = snapshot.messages.filter(
+    (message) =>
+      message.serverMailboxId !== mailboxId ||
+      message.providerMessageId !== providerMessageId,
+  );
+
+  return messages.length === snapshot.messages.length
+    ? snapshot
+    : {
+        ...snapshot,
+        messages,
+      };
+}
+
+export function removeAndPersistGmailInboxProviderMessageFromSnapshot(
+  snapshot: LiveInboxSnapshot | undefined,
+  mailboxId: string,
+  providerMessageId: string,
+  persistSnapshot: (snapshot: LiveInboxSnapshot) => void,
+): { snapshot: LiveInboxSnapshot | undefined; changed: boolean } {
+  let nextSnapshot: LiveInboxSnapshot | undefined;
+
+  try {
+    nextSnapshot = removeGmailInboxProviderMessageFromSnapshot(
+      snapshot,
+      mailboxId,
+      providerMessageId,
+    );
+  } catch {
+    return { snapshot, changed: false };
+  }
+
+  if (!nextSnapshot || nextSnapshot === snapshot) {
+    return { snapshot, changed: false };
+  }
+
+  try {
+    persistSnapshot(nextSnapshot);
+  } catch {
+    // A provider-confirmed Archive must not fail on local snapshot persistence.
+  }
+
+  return { snapshot: nextSnapshot, changed: true };
+}
+
 export function buildLiveInboxSnapshotThreadIdentityContext(
   snapshot: LiveInboxSnapshot,
 ): LiveThreadIdentityContext | null {

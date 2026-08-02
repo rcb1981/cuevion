@@ -32,8 +32,11 @@ import {
   LIVE_INBOX_THREAD_IDENTITY_VERSION,
   MUSIC_CLASSIFIER_VERSION,
   readLiveInboxSnapshots,
+  removeAndPersistGmailInboxProviderMessageFromSnapshot,
+  removeGmailInboxProviderMessageFromSnapshot,
   saveLiveInboxSnapshot,
 } from "./liveInboxSnapshots";
+import { createGmailInboxAuthority } from "./mailboxRefreshSemantics";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -1504,6 +1507,329 @@ test("thread migration leaves Gmail provider snapshots unchanged", () => {
       updatedAt: 5,
       messages: [{ id: "gmail-note" }],
     });
+  } finally {
+    (globalThis as { window?: unknown }).window = previousWindow;
+  }
+});
+
+test("removes only the exact mailbox-scoped provider message from a Gmail Inbox snapshot", () => {
+  const exactMessage = {
+    id: "gmail-ui-1",
+    serverMailboxId: "mailbox-a",
+    providerFolder: "Inbox",
+    providerMessageId: "provider-message-1",
+    sender: "Sender",
+    subject: "Exact message",
+    snippet: "Exact body",
+    from: "sender@example.com",
+    to: "owner@example.com",
+    timestamp: "August 2 at 10:00",
+    createdAt: "2026-08-02T08:00:00.000Z",
+    body: ["Exact body"],
+    unread: true,
+    ui_signal: "NEW",
+  };
+  const sameProviderIdOtherMailbox = {
+    ...exactMessage,
+    id: "gmail-ui-other-mailbox",
+    serverMailboxId: "mailbox-b",
+  };
+  const otherMessage = {
+    ...exactMessage,
+    id: "gmail-ui-2",
+    providerMessageId: "provider-message-2",
+    subject: "Other message",
+  };
+  const snapshot = {
+    schemaVersion: 5,
+    threadIdentityVersion: LIVE_INBOX_THREAD_IDENTITY_VERSION,
+    classifierVersion: MUSIC_CLASSIFIER_VERSION,
+    provider: "google" as const,
+    inboxId: "mailbox-a",
+    email: "owner@example.com",
+    fetchedAt: "2026-08-02T08:01:00.000Z",
+    folder: "INBOX",
+    uidValidity: "gmail-api",
+    messages: [exactMessage, sameProviderIdOtherMailbox, otherMessage],
+  };
+
+  const result = removeGmailInboxProviderMessageFromSnapshot(
+    snapshot,
+    "mailbox-a",
+    "provider-message-1",
+  );
+
+  assert.ok(result);
+  assert.notStrictEqual(result, snapshot);
+  assert.deepEqual(result.messages, [sameProviderIdOtherMailbox, otherMessage]);
+  assert.strictEqual(result.messages[0], sameProviderIdOtherMailbox);
+  assert.strictEqual(result.messages[1], otherMessage);
+  assert.equal(result.email, snapshot.email);
+  assert.equal(result.fetchedAt, snapshot.fetchedAt);
+  assert.equal(result.uidValidity, snapshot.uidValidity);
+  assert.equal(result.threadIdentityVersion, snapshot.threadIdentityVersion);
+  assert.deepEqual(snapshot.messages, [
+    exactMessage,
+    sameProviderIdOtherMailbox,
+    otherMessage,
+  ]);
+
+  let persistedSnapshot;
+  const persistenceResult =
+    removeAndPersistGmailInboxProviderMessageFromSnapshot(
+      snapshot,
+      "mailbox-a",
+      "provider-message-1",
+      (nextSnapshot) => {
+        persistedSnapshot = nextSnapshot;
+      },
+    );
+
+  assert.equal(persistenceResult.changed, true);
+  assert.strictEqual(persistenceResult.snapshot, persistedSnapshot);
+  assert.deepEqual(persistedSnapshot?.messages, [
+    sameProviderIdOtherMailbox,
+    otherMessage,
+  ]);
+  assert.strictEqual(persistedSnapshot?.messages[0], sameProviderIdOtherMailbox);
+  assert.strictEqual(persistedSnapshot?.messages[1], otherMessage);
+});
+
+test("Gmail Inbox snapshot removal is a reference-preserving no-op without an exact target", () => {
+  const message = {
+    id: "gmail-ui-1",
+    serverMailboxId: "mailbox-a",
+    providerFolder: "Inbox",
+    providerMessageId: "provider-message-1",
+    sender: "Sender",
+    subject: "Message",
+    snippet: "Body",
+    from: "sender@example.com",
+    to: "owner@example.com",
+    timestamp: "August 2 at 10:00",
+    createdAt: "2026-08-02T08:00:00.000Z",
+    body: ["Body"],
+    ui_signal: "NEW",
+  };
+  const gmailInboxSnapshot = {
+    provider: "google" as const,
+    inboxId: "mailbox-a",
+    email: "owner@example.com",
+    fetchedAt: "2026-08-02T08:01:00.000Z",
+    folder: "INBOX",
+    messages: [message],
+  };
+  const customImapSnapshot = {
+    ...gmailInboxSnapshot,
+    provider: "custom_imap" as const,
+  };
+  const gmailArchiveSnapshot = {
+    ...gmailInboxSnapshot,
+    folder: "Archive",
+  };
+  let persistCalls = 0;
+  const persistSnapshot = () => {
+    persistCalls += 1;
+  };
+
+  assert.equal(
+    removeGmailInboxProviderMessageFromSnapshot(
+      undefined,
+      "mailbox-a",
+      "provider-message-1",
+    ),
+    undefined,
+  );
+  assert.strictEqual(
+    removeGmailInboxProviderMessageFromSnapshot(
+      gmailInboxSnapshot,
+      "mailbox-b",
+      "provider-message-1",
+    ),
+    gmailInboxSnapshot,
+  );
+  assert.strictEqual(
+    removeGmailInboxProviderMessageFromSnapshot(
+      gmailInboxSnapshot,
+      "mailbox-a",
+      "provider-message-missing",
+    ),
+    gmailInboxSnapshot,
+  );
+  assert.strictEqual(
+    removeGmailInboxProviderMessageFromSnapshot(
+      customImapSnapshot,
+      "mailbox-a",
+      "provider-message-1",
+    ),
+    customImapSnapshot,
+  );
+  assert.strictEqual(
+    removeGmailInboxProviderMessageFromSnapshot(
+      gmailArchiveSnapshot,
+      "mailbox-a",
+      "provider-message-1",
+    ),
+    gmailArchiveSnapshot,
+  );
+  for (const [snapshot, mailboxId] of [
+    [gmailInboxSnapshot, "mailbox-b"],
+    [customImapSnapshot, "mailbox-a"],
+    [gmailArchiveSnapshot, "mailbox-a"],
+  ] as const) {
+    const result = removeAndPersistGmailInboxProviderMessageFromSnapshot(
+      snapshot,
+      mailboxId,
+      "provider-message-1",
+      persistSnapshot,
+    );
+    assert.equal(result.changed, false);
+    assert.strictEqual(result.snapshot, snapshot);
+  }
+  assert.equal(persistCalls, 0);
+});
+
+test("snapshot persistence failure cannot interrupt confirmed Gmail Archive success", () => {
+  const archivedMessage = {
+    id: "gmail-ui-1",
+    serverMailboxId: "mailbox-a",
+    providerFolder: "Inbox",
+    providerMessageId: "provider-message-1",
+    sender: "Sender",
+    subject: "Archive me",
+    snippet: "Body",
+    from: "sender@example.com",
+    to: "owner@example.com",
+    timestamp: "August 2 at 10:00",
+    createdAt: "2026-08-02T08:00:00.000Z",
+    body: ["Body"],
+    unread: true,
+    ui_signal: "NEW",
+  };
+  const snapshot = {
+    provider: "google" as const,
+    inboxId: "mailbox-a",
+    email: "owner@example.com",
+    fetchedAt: "2026-08-02T08:01:00.000Z",
+    folder: "INBOX",
+    messages: [archivedMessage],
+  };
+  const authority = createGmailInboxAuthority();
+  const unreadOverrides = new Set(["provider-message-1"]);
+  const steps: string[] = [];
+  const generationAtFetchStart = authority.captureGeneration("mailbox-a");
+  let snapshotChanged = false;
+
+  authority.confirmArchive("mailbox-a", "provider-message-1");
+  steps.push("authority");
+  assert.doesNotThrow(() => {
+    const result = removeAndPersistGmailInboxProviderMessageFromSnapshot(
+      snapshot,
+      "mailbox-a",
+      "provider-message-1",
+      (nextSnapshot) => {
+        steps.push("snapshot-cleanup");
+        assert.deepEqual(nextSnapshot.messages, []);
+        throw new Error("local snapshot persistence failed");
+      },
+    );
+    snapshotChanged = result.changed;
+    steps.push("delta");
+    unreadOverrides.delete("provider-message-1");
+    steps.push("unread-clear");
+  });
+
+  assert.equal(snapshotChanged, true);
+  assert.deepEqual(steps, [
+    "authority",
+    "snapshot-cleanup",
+    "delta",
+    "unread-clear",
+  ]);
+  assert.equal(authority.captureGeneration("mailbox-a"), generationAtFetchStart + 1);
+  assert.equal(
+    authority.isRecentlyArchived("mailbox-a", "provider-message-1"),
+    true,
+  );
+  assert.equal(unreadOverrides.has("provider-message-1"), false);
+});
+
+test("confirmed Gmail Archive blocks unread-clear rehydration of the last stale unread snapshot", () => {
+  const store = new Map<string, string>();
+  const previousWindow = (globalThis as { window?: unknown }).window;
+  (globalThis as { window?: unknown }).window = {
+    localStorage: {
+      getItem: (key: string) => store.get(key) ?? null,
+      setItem: (key: string, value: string) => store.set(key, value),
+    },
+  };
+
+  try {
+    saveLiveInboxSnapshot({
+      provider: "google",
+      inboxId: "mailbox-a",
+      email: "owner@example.com",
+      fetchedAt: "2026-08-02T08:01:00.000Z",
+      folder: "INBOX",
+      uidValidity: "gmail-api",
+      messages: [
+        {
+          id: "gmail-ui-1",
+          serverMailboxId: "mailbox-a",
+          providerFolder: "Inbox",
+          providerMessageId: "provider-message-1",
+          sender: "Sender",
+          subject: "Unread before Archive",
+          snippet: "Body",
+          from: "sender@example.com",
+          to: "owner@example.com",
+          timestamp: "August 2 at 10:00",
+          createdAt: "2026-08-02T08:00:00.000Z",
+          body: ["Body"],
+          unread: true,
+          ui_signal: "NEW",
+        },
+      ],
+    });
+
+    const snapshot = readLiveInboxSnapshots({
+      "mailbox-a": {
+        mailboxId: "mailbox-a",
+        provider: "google",
+        folder: "INBOX",
+      },
+    })["mailbox-a"];
+    assert.ok(snapshot);
+    const unreadOverrides = new Map([["provider-message-1", false]]);
+    assert.equal(unreadOverrides.get("provider-message-1"), false);
+    const authority = createGmailInboxAuthority();
+    authority.confirmArchive("mailbox-a", "provider-message-1");
+    unreadOverrides.delete("provider-message-1");
+    assert.equal(unreadOverrides.has("provider-message-1"), false);
+    assert.deepEqual(
+      authority.filterSnapshotMessages("mailbox-a", snapshot.messages),
+      [],
+    );
+    const nextSnapshot = removeGmailInboxProviderMessageFromSnapshot(
+      snapshot,
+      "mailbox-a",
+      "provider-message-1",
+    );
+    assert.ok(nextSnapshot);
+    assert.deepEqual(nextSnapshot.messages, []);
+
+    saveLiveInboxSnapshot(nextSnapshot);
+
+    assert.equal(
+      readLiveInboxSnapshots({
+        "mailbox-a": {
+          mailboxId: "mailbox-a",
+          provider: "google",
+          folder: "INBOX",
+        },
+      })["mailbox-a"],
+      undefined,
+    );
   } finally {
     (globalThis as { window?: unknown }).window = previousWindow;
   }

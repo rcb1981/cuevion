@@ -4,9 +4,11 @@ import path from "node:path";
 import {
   ARCHIVE_CAPABILITY_UNAVAILABLE_MESSAGE,
   ARCHIVE_REFRESH_ERROR_MESSAGE,
+  createGmailInboxAuthority,
   createGmailArchiveReconciliationCoordinator,
   resolveMailboxRefreshPlan,
   resolveProviderArchiveRefreshSemantics,
+  removeProvenGmailInboxReentriesFromArchive,
   resolveSuccessfulInboxRefreshPresentation,
   shouldApplyProviderArchiveResponse,
   startIndependentMailboxFetches,
@@ -91,6 +93,256 @@ assert.deepEqual(plan("manual", { archiveFetchInFlight: true }), {
   shouldFetchArchive: false,
   archiveErrorScope: null,
 });
+
+const gmailInboxAuthority = createGmailInboxAuthority();
+const archivedProviderMessageId = "gmail-message-1";
+const otherGmailInboxMessage = {
+  serverMailboxId: "mailbox-a",
+  providerFolder: "Inbox",
+  providerMessageId: "gmail-message-2",
+  labelIds: ["INBOX"],
+};
+const archivedGmailInboxMessage = {
+  serverMailboxId: "mailbox-a",
+  providerFolder: "Inbox",
+  providerMessageId: archivedProviderMessageId,
+  labelIds: ["INBOX"],
+};
+const preArchiveGeneration =
+  gmailInboxAuthority.captureGeneration("mailbox-a");
+
+assert.equal(preArchiveGeneration, 0);
+assert.equal(
+  gmailInboxAuthority.confirmArchive(
+    "mailbox-a",
+    archivedProviderMessageId,
+  ),
+  1,
+);
+assert.equal(
+  gmailInboxAuthority.isRecentlyArchived(
+    "mailbox-a",
+    archivedProviderMessageId,
+  ),
+  true,
+);
+assert.deepEqual(
+  gmailInboxAuthority.resolveFetchResponse({
+    mailboxId: "mailbox-a",
+    generationAtFetchStart: preArchiveGeneration,
+    messages: [archivedGmailInboxMessage, otherGmailInboxMessage],
+  }),
+  {
+    stale: true,
+    messages: [],
+    provenReentryProviderMessageIds: [],
+  },
+);
+assert.deepEqual(
+  gmailInboxAuthority.filterSnapshotMessages("mailbox-a", [
+    archivedGmailInboxMessage,
+    otherGmailInboxMessage,
+  ]),
+  [otherGmailInboxMessage],
+);
+assert.deepEqual(
+  gmailInboxAuthority.filterSnapshotMessages("mailbox-b", [
+    {
+      ...archivedGmailInboxMessage,
+      serverMailboxId: "mailbox-b",
+    },
+  ]),
+  [
+    {
+      ...archivedGmailInboxMessage,
+      serverMailboxId: "mailbox-b",
+    },
+  ],
+);
+
+const postArchiveGeneration =
+  gmailInboxAuthority.captureGeneration("mailbox-a");
+const missingLabels = gmailInboxAuthority.resolveFetchResponse({
+  mailboxId: "mailbox-a",
+  generationAtFetchStart: postArchiveGeneration,
+  messages: [
+    {
+      serverMailboxId: "mailbox-a",
+      providerMessageId: archivedProviderMessageId,
+    },
+    otherGmailInboxMessage,
+  ],
+});
+assert.equal(missingLabels.stale, false);
+assert.deepEqual(missingLabels.messages, [otherGmailInboxMessage]);
+assert.equal(
+  gmailInboxAuthority.isRecentlyArchived(
+    "mailbox-a",
+    archivedProviderMessageId,
+  ),
+  true,
+);
+
+const noInboxLabel = gmailInboxAuthority.resolveFetchResponse({
+  mailboxId: "mailbox-a",
+  generationAtFetchStart: postArchiveGeneration,
+  messages: [
+    {
+      ...archivedGmailInboxMessage,
+      labelIds: ["UNREAD", "STARRED"],
+    },
+  ],
+});
+assert.equal(noInboxLabel.stale, false);
+assert.deepEqual(noInboxLabel.messages, []);
+assert.equal(
+  gmailInboxAuthority.isRecentlyArchived(
+    "mailbox-a",
+    archivedProviderMessageId,
+  ),
+  true,
+);
+
+const duplicateInboxLabels = gmailInboxAuthority.resolveFetchResponse({
+  mailboxId: "mailbox-a",
+  generationAtFetchStart: postArchiveGeneration,
+  messages: [
+    {
+      ...archivedGmailInboxMessage,
+      labelIds: ["INBOX", "INBOX"],
+    },
+  ],
+});
+assert.equal(duplicateInboxLabels.stale, false);
+assert.deepEqual(duplicateInboxLabels.messages, []);
+assert.equal(
+  gmailInboxAuthority.isRecentlyArchived(
+    "mailbox-a",
+    archivedProviderMessageId,
+  ),
+  true,
+);
+
+const wrongMailboxProof = gmailInboxAuthority.resolveFetchResponse({
+  mailboxId: "mailbox-a",
+  generationAtFetchStart: postArchiveGeneration,
+  messages: [
+    {
+      ...archivedGmailInboxMessage,
+      serverMailboxId: "mailbox-b",
+    },
+  ],
+});
+assert.equal(wrongMailboxProof.stale, false);
+assert.deepEqual(wrongMailboxProof.messages, []);
+assert.equal(
+  gmailInboxAuthority.isRecentlyArchived(
+    "mailbox-a",
+    archivedProviderMessageId,
+  ),
+  true,
+);
+
+const duplicateProviderProof = gmailInboxAuthority.resolveFetchResponse({
+  mailboxId: "mailbox-a",
+  generationAtFetchStart: postArchiveGeneration,
+  messages: [
+    archivedGmailInboxMessage,
+    {
+      ...archivedGmailInboxMessage,
+      labelIds: ["STARRED"],
+    },
+  ],
+});
+assert.equal(duplicateProviderProof.stale, false);
+assert.deepEqual(duplicateProviderProof.messages, []);
+assert.deepEqual(
+  duplicateProviderProof.provenReentryProviderMessageIds,
+  [],
+);
+assert.equal(
+  gmailInboxAuthority.isRecentlyArchived(
+    "mailbox-a",
+    archivedProviderMessageId,
+  ),
+  true,
+);
+
+const provenReentry = gmailInboxAuthority.resolveFetchResponse({
+  mailboxId: "mailbox-a",
+  generationAtFetchStart: postArchiveGeneration,
+  messages: [archivedGmailInboxMessage, otherGmailInboxMessage],
+});
+assert.equal(provenReentry.stale, false);
+assert.deepEqual(provenReentry.messages, [
+  archivedGmailInboxMessage,
+  otherGmailInboxMessage,
+]);
+assert.deepEqual(provenReentry.provenReentryProviderMessageIds, [
+  archivedProviderMessageId,
+]);
+assert.equal(
+  gmailInboxAuthority.isRecentlyArchived(
+    "mailbox-a",
+    archivedProviderMessageId,
+  ),
+  false,
+);
+const existingArchiveMessages = [
+  {
+    serverMailboxId: "mailbox-a",
+    providerFolder: "Archive",
+    providerMessageId: archivedProviderMessageId,
+  },
+  {
+    serverMailboxId: "mailbox-b",
+    providerFolder: "Archive",
+    providerMessageId: archivedProviderMessageId,
+  },
+  {
+    serverMailboxId: "mailbox-a",
+    providerFolder: "Archive",
+    providerMessageId: "gmail-message-2",
+  },
+];
+const archiveAfterProvenReentry =
+  removeProvenGmailInboxReentriesFromArchive(
+    "mailbox-a",
+    new Set(provenReentry.provenReentryProviderMessageIds),
+    existingArchiveMessages,
+  );
+assert.deepEqual(
+  archiveAfterProvenReentry,
+  existingArchiveMessages.slice(1),
+);
+assert.equal(
+  provenReentry.messages.filter(
+    (message) => message.providerMessageId === archivedProviderMessageId,
+  ).length,
+  1,
+);
+assert.equal(
+  archiveAfterProvenReentry.filter(
+    (message) =>
+      message.serverMailboxId === "mailbox-a" &&
+      message.providerMessageId === archivedProviderMessageId,
+  ).length,
+  0,
+);
+const resetGmailInboxAuthority = createGmailInboxAuthority();
+resetGmailInboxAuthority.confirmArchive("mailbox-reset", "provider-reset");
+resetGmailInboxAuthority.resetMailbox("mailbox-reset");
+assert.equal(
+  resetGmailInboxAuthority.captureGeneration("mailbox-reset"),
+  0,
+);
+assert.equal(
+  resetGmailInboxAuthority.isRecentlyArchived(
+    "mailbox-reset",
+    "provider-reset",
+  ),
+  false,
+);
 
 assert.equal(
   shouldApplyProviderArchiveResponse({
@@ -480,6 +732,19 @@ const gmailApply = nestedSection(
   'if (provider === "google")',
   'if (!("folders" in response))',
 );
+const gmailSnapshotCleanup = section(
+  "const removeConfirmedArchivedGmailMessageFromPersistedInboxSnapshot",
+  "const applyProviderArchiveMutationSuccess",
+);
+assert.match(
+  gmailSnapshotCleanup,
+  /removeAndPersistGmailInboxProviderMessageFromSnapshot\([\s\S]*saveLiveInboxSnapshot/,
+);
+assert.match(gmailSnapshotCleanup, /try \{[\s\S]*\} catch \{/);
+assert.doesNotMatch(
+  gmailSnapshotCleanup,
+  /fetchProviderArchive|fetchGmailInbox|mutateProviderArchiveMessage|retry|reconcil/i,
+);
 assert.match(gmailApply, /response\.delta\.Archive\.upsertMessage/);
 assert.match(gmailApply, /response\.delta\.Inbox\.removeProviderMessageId/);
 assert.match(gmailApply, /normalizeGmailArchiveDeltaMessage/);
@@ -489,6 +754,49 @@ assert.equal((gmailApply.match(/setMailboxStore\(/g) ?? []).length, 1);
 assert.equal((gmailApply.match(/flushSync\(/g) ?? []).length, 1);
 assert.doesNotMatch(gmailApply, /replaceProviderArchiveReadback/);
 assert.doesNotMatch(gmailApply, /fetchProviderArchive/);
+const archiveAuthorityIndex = gmailApply.indexOf(
+  "gmailInboxAuthorityRef.current.confirmArchive(",
+);
+const archiveSnapshotRemovalIndex = gmailApply.indexOf(
+  "removeConfirmedArchivedGmailMessageFromPersistedInboxSnapshot(",
+);
+const archiveDeltaApplyIndex = gmailApply.indexOf(
+  "applyGmailProviderArchiveDelta(",
+);
+const archiveUnreadClearIndex = gmailApply.indexOf(
+  "clearUnreadOverridesForProviderMessages(",
+);
+assert.ok(archiveAuthorityIndex >= 0);
+assert.ok(archiveAuthorityIndex < archiveSnapshotRemovalIndex);
+assert.ok(archiveSnapshotRemovalIndex < archiveDeltaApplyIndex);
+assert.ok(archiveDeltaApplyIndex < archiveUnreadClearIndex);
+
+const liveInboxMerge = section(
+  "const mergeLiveInboxMessages = (",
+  "const normalizeProviderFolderSnapshotMessages = (",
+);
+assert.match(
+  liveInboxMerge,
+  /threadIdentityContext\.provider === "google"[\s\S]*threadIdentityContext\.folder\.trim\(\)\.toUpperCase\(\) === "INBOX"/,
+);
+assert.match(
+  liveInboxMerge,
+  /gmailInboxAuthorityRef\.current\.filterSnapshotMessages\(/,
+);
+assert.ok(
+  liveInboxMerge.indexOf("filterSnapshotMessages(") <
+    liveInboxMerge.indexOf("uniqueIncomingMessages"),
+);
+const liveInboxApply = section(
+  "const applyLiveInboxMessagesToMailboxStore = (",
+  "const applyCachedLiveInboxSnapshotToMailboxStore = (",
+);
+assert.match(
+  liveInboxApply,
+  /Archive: options\.provenGmailInboxReentryProviderMessageIds[\s\S]*removeProvenGmailInboxReentriesFromArchive\(/,
+);
+assert.match(liveInboxApply, /Inbox: mergeLiveInboxMessages\(/);
+assert.equal((liveInboxApply.match(/setMailboxStore\(/g) ?? []).length, 1);
 
 const imapApply = mutationApply.slice(
   mutationApply.indexOf('if (!("folders" in response))'),
@@ -540,6 +848,38 @@ assert.equal((refresh.match(/fetchGmailInbox\(/g) ?? []).length, 1);
 assert.match(refresh, /startArchive: refreshPlan\.shouldFetchArchive/);
 assert.match(refresh, /void archivePromise;/);
 assert.match(refresh, /let response = await inboxPromise;/);
+const inboxAuthorityCaptureIndex = refresh.indexOf(
+  "gmailInboxAuthorityRef.current.captureGeneration(mailboxId)",
+);
+const inboxFetchStartIndex = refresh.indexOf(
+  "startIndependentMailboxFetches({",
+);
+const inboxResponseIndex = refresh.indexOf("let response = await inboxPromise;");
+const inboxGenerationGuardIndex = refresh.indexOf(
+  "gmailInboxAuthorityRef.current.isCurrentGeneration(",
+);
+const inboxAuthorityResolutionIndex = refresh.indexOf(
+  "gmailInboxAuthorityRef.current.resolveFetchResponse({",
+);
+const inboxSnapshotSaveIndex = refresh.indexOf("saveLiveInboxSnapshot({");
+assert.ok(inboxAuthorityCaptureIndex >= 0);
+assert.ok(inboxAuthorityCaptureIndex < inboxFetchStartIndex);
+assert.ok(inboxFetchStartIndex < inboxResponseIndex);
+assert.ok(inboxResponseIndex < inboxGenerationGuardIndex);
+assert.ok(inboxGenerationGuardIndex < inboxAuthorityResolutionIndex);
+assert.ok(inboxAuthorityResolutionIndex < inboxSnapshotSaveIndex);
+assert.match(
+  refresh,
+  /gmailInboxConnectionKeyAtFetchStart[\s\S]*providerArchiveCurrentConnectionKeysRef\.current\[mailboxId\]/,
+);
+assert.match(
+  refresh,
+  /gmailInboxConnectionEpochAtFetchStart[\s\S]*providerArchiveConnectionEpochsRef\.current\[mailboxId\]/,
+);
+assert.match(
+  refresh,
+  /provenGmailInboxReentryProviderMessageIds[\s\S]*applyLiveInboxMessagesToMailboxStore\([\s\S]*provenGmailInboxReentryProviderMessageIds/,
+);
 assert.match(refresh, /const isProviderReconciliation = refreshReason === "reconcile"/);
 assert.match(
   refresh,
@@ -695,6 +1035,10 @@ assert.match(
 );
 assert.match(
   source,
+  /changedMailboxIds[\s\S]*gmailInboxAuthorityRef\.current\.resetMailbox\(mailboxId\)/,
+);
+assert.match(
+  source,
   /changedMailboxIds[\s\S]*providerArchiveCapabilitiesRef\.current[\s\S]*Archive: \[\]/,
 );
 assert.match(source, /replaceProviderArchiveReadback/);
@@ -715,6 +1059,57 @@ async function flushReconciliationCleanup() {
   await Promise.resolve();
   await Promise.resolve();
   await Promise.resolve();
+}
+
+async function verifyPreArchiveGmailInboxResponseIsRejected() {
+  const authority = createGmailInboxAuthority();
+  const generationAtFetchStart = authority.captureGeneration("mailbox-race");
+  const pendingInbox = deferred<
+    Array<{
+      serverMailboxId: string;
+      providerFolder: string;
+      providerMessageId: string;
+      labelIds: string[];
+    }>
+  >();
+  const appliedResponses: string[][] = [];
+  const savedSnapshots: string[][] = [];
+  const clearedUnreadOverrides: string[][] = [];
+  const responseCommit = pendingInbox.promise.then((messages) => {
+    const resolution = authority.resolveFetchResponse({
+      mailboxId: "mailbox-race",
+      generationAtFetchStart,
+      messages,
+    });
+    if (resolution.stale) {
+      return "skipped" as const;
+    }
+
+    const providerMessageIds = resolution.messages.flatMap((message) =>
+      typeof message.providerMessageId === "string"
+        ? [message.providerMessageId]
+        : [],
+    );
+    savedSnapshots.push(providerMessageIds);
+    appliedResponses.push(providerMessageIds);
+    clearedUnreadOverrides.push(providerMessageIds);
+    return "applied" as const;
+  });
+
+  authority.confirmArchive("mailbox-race", "provider-race");
+  pendingInbox.resolve([
+    {
+      serverMailboxId: "mailbox-race",
+      providerFolder: "Inbox",
+      providerMessageId: "provider-race",
+      labelIds: ["INBOX", "UNREAD"],
+    },
+  ]);
+
+  assert.equal(await responseCommit, "skipped");
+  assert.deepEqual(savedSnapshots, []);
+  assert.deepEqual(appliedResponses, []);
+  assert.deepEqual(clearedUnreadOverrides, []);
 }
 
 async function verifyGmailArchiveReconciliationCoordinator() {
@@ -905,6 +1300,7 @@ async function verifyIndependentInboxCommit() {
 }
 
 void Promise.all([
+  verifyPreArchiveGmailInboxResponseIsRejected(),
   verifyGmailArchiveReconciliationCoordinator(),
   verifyIndependentInboxCommit(),
 ])

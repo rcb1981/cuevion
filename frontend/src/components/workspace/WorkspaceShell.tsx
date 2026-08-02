@@ -68,6 +68,7 @@ import {
 import {
   hydrateLiveInboxSnapshot,
   readLiveInboxSnapshots,
+  removeAndPersistGmailInboxProviderMessageFromSnapshot,
   saveLiveInboxSnapshot,
   type TrustedLiveInboxSnapshotContexts,
 } from "../../lib/liveInboxSnapshots";
@@ -124,9 +125,11 @@ import { buildProviderMessageActionTarget } from "../../lib/providerMessageActio
 import {
   ARCHIVE_CAPABILITY_UNAVAILABLE_MESSAGE,
   ARCHIVE_REFRESH_ERROR_MESSAGE,
+  createGmailInboxAuthority,
   createGmailArchiveReconciliationCoordinator,
   resolveMailboxRefreshPlan,
   resolveProviderArchiveRefreshSemantics,
+  removeProvenGmailInboxReentriesFromArchive,
   resolveSuccessfulInboxRefreshPresentation,
   shouldApplyProviderArchiveResponse,
   startIndependentMailboxFetches,
@@ -34693,6 +34696,7 @@ export function WorkspaceShell({
   const providerArchiveConnectionEpochsRef = useRef<
     Partial<Record<InboxId, number>>
   >({});
+  const gmailInboxAuthorityRef = useRef(createGmailInboxAuthority());
   const providerArchiveRenderedMailboxIds = new Set<InboxId>([
     ...(Object.keys(providerArchiveLastRenderedConnectionKeysRef.current) as InboxId[]),
     ...(Object.keys(providerArchiveConnectionKeys) as InboxId[]),
@@ -34835,6 +34839,7 @@ export function WorkspaceShell({
 
     changedMailboxIds.forEach((mailboxId) => {
       providerArchiveSnapshotMailboxIdsRef.current.delete(mailboxId);
+      gmailInboxAuthorityRef.current.resetMailbox(mailboxId);
     });
     providerArchiveCapabilitiesRef.current = Object.fromEntries(
       Object.entries(providerArchiveCapabilitiesRef.current).filter(
@@ -35167,6 +35172,14 @@ export function WorkspaceShell({
       (mailbox) =>
         mailbox.id === mailboxId && isImapCredentialsProvider(mailbox.provider),
     );
+    const authorityFilteredIncomingMessages =
+      options.threadIdentityContext.provider === "google" &&
+      options.threadIdentityContext.folder.trim().toUpperCase() === "INBOX"
+        ? gmailInboxAuthorityRef.current.filterSnapshotMessages(
+            mailboxId,
+            incomingMessages,
+          )
+        : incomingMessages;
     const bodyfulCurrentInboxMessages =
       currentInboxMessages.filter(hasRenderableMessagePayload);
     const currentInboxIndexes = buildMessageIdentityIndexes(bodyfulCurrentInboxMessages);
@@ -35175,7 +35188,7 @@ export function WorkspaceShell({
     // email twice in one snapshot (e.g. old "Other" + new "Reply" after reclassification).
     // Identity priority: imapUid > id > preview (subject|from|timestamp). First occurrence wins.
     const seenIncomingKeys = new Set<string>();
-    const uniqueIncomingMessages = incomingMessages.filter((message) => {
+    const uniqueIncomingMessages = authorityFilteredIncomingMessages.filter((message) => {
       const providerIdentity = buildProviderArchiveStateIdentity(message);
       const keys = providerIdentity
         ? [`provider:${providerIdentity}`]
@@ -35364,6 +35377,24 @@ export function WorkspaceShell({
       ? normalizedMessages[0]
       : null;
   };
+  const removeConfirmedArchivedGmailMessageFromPersistedInboxSnapshot = (
+    mailboxId: InboxId,
+    providerMessageId: string,
+  ) => {
+    try {
+      const snapshot = readLiveInboxSnapshots(
+        buildTrustedLiveInboxSnapshotContexts(savedManagedInboxes),
+      )[mailboxId];
+      removeAndPersistGmailInboxProviderMessageFromSnapshot(
+        snapshot,
+        mailboxId,
+        providerMessageId,
+        saveLiveInboxSnapshot,
+      );
+    } catch {
+      // Confirmed provider state stays authoritative if local storage is unavailable.
+    }
+  };
   const applyProviderArchiveMutationSuccess = (
     response: ProviderArchiveMutationSuccess,
   ) => {
@@ -35384,6 +35415,26 @@ export function WorkspaceShell({
         return false;
       }
       const upsertMessage = response.delta.Archive.upsertMessage;
+      const archivedProviderMessageId =
+        response.delta.Inbox.removeProviderMessageId;
+      if (
+        !archivedProviderMessageId ||
+        archivedProviderMessageId !== archivedProviderMessageId.trim() ||
+        upsertMessage.serverMailboxId !== response.mailboxId ||
+        upsertMessage.providerMessageId !== archivedProviderMessageId
+      ) {
+        return false;
+      }
+
+      gmailInboxAuthorityRef.current.confirmArchive(
+        response.mailboxId,
+        archivedProviderMessageId,
+      );
+      removeConfirmedArchivedGmailMessageFromPersistedInboxSnapshot(
+        response.mailboxId as InboxId,
+        archivedProviderMessageId,
+      );
+
       let applied = false;
       flushSync(() => {
         setMailboxStore((currentStore) => {
@@ -39264,6 +39315,7 @@ export function WorkspaceShell({
     options: {
       replaceInbox?: boolean;
       freshProviderStateKeys?: Set<string>;
+      provenGmailInboxReentryProviderMessageIds?: ReadonlySet<string>;
       threadIdentityContext: LiveThreadIdentityContext;
     },
   ) => {
@@ -39292,6 +39344,13 @@ export function WorkspaceShell({
         ...currentStore,
         [targetMailbox.id]: {
           ...currentCollections,
+          Archive: options.provenGmailInboxReentryProviderMessageIds
+            ? removeProvenGmailInboxReentriesFromArchive(
+                targetMailbox.id,
+                options.provenGmailInboxReentryProviderMessageIds,
+                currentCollections.Archive,
+              )
+            : currentCollections.Archive,
           Inbox: mergeLiveInboxMessages(
             targetMailbox.id,
             messages,
@@ -39636,6 +39695,16 @@ export function WorkspaceShell({
       const diagnosticRequestedLimit: number | "default" = isStartupRefresh
         ? 20
         : "default";
+      const gmailInboxAuthorityGenerationAtFetchStart =
+        canUseGmailOAuthFetch
+          ? gmailInboxAuthorityRef.current.captureGeneration(mailboxId)
+          : null;
+      const gmailInboxConnectionKeyAtFetchStart = canUseGmailOAuthFetch
+        ? providerArchiveCurrentConnectionKeysRef.current[mailboxId] ?? null
+        : null;
+      const gmailInboxConnectionEpochAtFetchStart = canUseGmailOAuthFetch
+        ? providerArchiveConnectionEpochsRef.current[mailboxId] ?? 0
+        : null;
       const { inboxPromise, archivePromise } = startIndependentMailboxFetches({
         startInbox: () =>
           canUseGmailOAuthFetch
@@ -39659,6 +39728,23 @@ export function WorkspaceShell({
         void archivePromise;
       }
       let response = await inboxPromise;
+      if (
+        canUseGmailOAuthFetch &&
+        (
+          gmailInboxAuthorityGenerationAtFetchStart === null ||
+          gmailInboxConnectionKeyAtFetchStart === null ||
+          gmailInboxConnectionKeyAtFetchStart !==
+            (providerArchiveCurrentConnectionKeysRef.current[mailboxId] ?? null) ||
+          gmailInboxConnectionEpochAtFetchStart !==
+            (providerArchiveConnectionEpochsRef.current[mailboxId] ?? 0) ||
+          !gmailInboxAuthorityRef.current.isCurrentGeneration(
+            mailboxId,
+            gmailInboxAuthorityGenerationAtFetchStart,
+          )
+        )
+      ) {
+        return "skipped";
+      }
       // Snapshot of the first response before any quota retry overwrites it.
       const firstResponseOk = response.ok;
       const firstResponseCode = response.error?.code;
@@ -39753,7 +39839,25 @@ export function WorkspaceShell({
         return "failed";
       }
 
-      const messages = response.messages ?? [];
+      const gmailInboxResolution =
+        canUseGmailOAuthFetch &&
+        gmailInboxAuthorityGenerationAtFetchStart !== null
+          ? gmailInboxAuthorityRef.current.resolveFetchResponse({
+              mailboxId,
+              generationAtFetchStart:
+                gmailInboxAuthorityGenerationAtFetchStart,
+              messages: response.messages ?? [],
+            })
+          : null;
+      if (gmailInboxResolution?.stale) {
+        return "skipped";
+      }
+      const messages = gmailInboxResolution?.messages ?? response.messages ?? [];
+      const provenGmailInboxReentryProviderMessageIds = new Set(
+        gmailInboxResolution && !gmailInboxResolution.stale
+          ? gmailInboxResolution.provenReentryProviderMessageIds
+          : [],
+      );
       const freshProviderStateKeys = new Set(
         messages.flatMap((message) => getCanonicalMessageIdentityKeys(message)),
       );
@@ -39831,6 +39935,11 @@ export function WorkspaceShell({
         {
           replaceInbox: canUseGmailOAuthFetch,
           freshProviderStateKeys,
+          provenGmailInboxReentryProviderMessageIds:
+            canUseGmailOAuthFetch &&
+            provenGmailInboxReentryProviderMessageIds.size > 0
+              ? provenGmailInboxReentryProviderMessageIds
+              : undefined,
           threadIdentityContext,
         },
       );

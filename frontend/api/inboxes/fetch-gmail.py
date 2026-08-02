@@ -58,6 +58,19 @@ def _validate_focus_preferences(value: object) -> tuple[dict | None, dict | None
     return validate_focus_preferences(value)
 
 
+def _has_explicit_inbox_membership(message: object) -> bool:
+    if not isinstance(message, dict):
+        return False
+
+    label_ids = message.get("labelIds")
+    return (
+        isinstance(label_ids, list)
+        and all(valid_identifier(label_id) for label_id in label_ids)
+        and len(set(label_ids)) == len(label_ids)
+        and "INBOX" in label_ids
+    )
+
+
 def _gmail_request(access_token: str, path: str) -> tuple[dict | None, dict | None]:
     request = Request(
         f"{GMAIL_API_BASE_URL}{path}",
@@ -190,7 +203,11 @@ class handler(BaseHTTPRequestHandler):
             _send_gmail_error(self, {"code": "gmail_response_invalid"})
             return
 
-        previews = snapshot["messages"]
+        previews = [
+            message
+            for message in snapshot["messages"]
+            if _has_explicit_inbox_membership(message)
+        ]
         inbox_uid_set = [
             message["providerMessageId"]
             for message in previews
