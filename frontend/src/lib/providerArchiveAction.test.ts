@@ -971,6 +971,72 @@ test("confirmed readback failure stays uncertain while incomplete markers do not
   assert.equal(calls, 2);
 });
 
+test("canonical Gmail mutation uncertainty is trusted, sanitized, and never retried", async () => {
+  let calls = 0;
+  const pendingKeys = new Set<string>();
+  const coordinator = createProviderArchiveCoordinator({
+    pendingKeys,
+    mutate: async () => {
+      calls += 1;
+      return {
+        ok: false,
+        status: "mutation_unconfirmed",
+        action: "archive",
+        mailboxId: "mailbox-1",
+        archivedMessageIdentity: {
+          serverMailboxId: "payload-mailbox",
+          providerMessageId: "payload-message",
+          providerFolder: "Inbox",
+        },
+        error: {
+          code: "gmail_archive_unconfirmed",
+          message: "raw provider message must not escape",
+        },
+      };
+    },
+  });
+
+  const result = await coordinator.archive(gmailCandidate());
+  assert.equal(result.classification, "uncertain");
+  assert.equal(calls, 1);
+  assert.equal(
+    pendingKeys.size,
+    0,
+    "the caller must observe uncertainty only after the mutation lock is released",
+  );
+  if (result.classification !== "uncertain") return;
+  assert.equal(result.response.status, "mutation_unconfirmed");
+  assert.deepEqual(result.response.archivedMessageIdentity, {
+    serverMailboxId: "mailbox-1",
+    providerMessageId: "gmail-provider-message-1",
+    providerFolder: "Archive",
+  });
+  assert.deepEqual(result.response.error, {
+    code: "gmail_archive_unconfirmed",
+    message: "Archive may have completed; mailbox status is being refreshed.",
+  });
+  assert.doesNotMatch(JSON.stringify(result), /payload-message|raw provider message/);
+});
+
+test("loose Gmail unconfirmed errors stay ordinary failures", async () => {
+  let calls = 0;
+  const result = await createProviderArchiveCoordinator({
+    mutate: async () => {
+      calls += 1;
+      return {
+        ok: false,
+        error: {
+          code: "gmail_archive_unconfirmed",
+          message: "Gmail did not confirm the Archive action.",
+        },
+      };
+    },
+  }).archive(gmailCandidate());
+
+  assert.equal(result.classification, "ordinary_failure");
+  assert.equal(calls, 1);
+});
+
 test("validation blocks before mutation and never touches the pending set", async () => {
   let calls = 0;
   const pendingKeys = new Set<string>();
@@ -1156,6 +1222,19 @@ test("ordinary and uncertain execution failures preserve exact state without ret
         error: {
           code: "archive_readback_failed",
           message: "Archive readback failed.",
+        },
+      },
+    },
+    {
+      expected: "uncertain",
+      response: {
+        ok: false,
+        status: "mutation_unconfirmed",
+        action: "archive",
+        mailboxId: "mailbox-1",
+        error: {
+          code: "gmail_archive_unconfirmed",
+          message: "Archive confirmation is pending.",
         },
       },
     },

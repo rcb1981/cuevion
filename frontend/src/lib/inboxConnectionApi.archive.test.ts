@@ -337,6 +337,126 @@ async function run() {
       /must-never-escape|providerError|raw-provider-error/,
     );
 
+    const mutationUnconfirmedPayload = {
+      ok: false,
+      status: "mutation_unconfirmed",
+      action: "archive",
+      mailboxId: MAILBOX_ID,
+      error: {
+        code: "gmail_archive_unconfirmed",
+        message: "raw provider status must not escape",
+      },
+    };
+    const callsBeforeCanonicalUnconfirmed = captured.length;
+    nextResponse = response(502, mutationUnconfirmedPayload);
+    assert.deepEqual(await mutateProviderArchiveMessage(gmailRequest), {
+      ...mutationUnconfirmedPayload,
+      archivedMessageIdentity: {
+        serverMailboxId: MAILBOX_ID,
+        providerMessageId: GMAIL_MESSAGE_ID,
+        providerFolder: "Archive",
+      },
+      error: {
+        code: "gmail_archive_unconfirmed",
+        message: "Archive may have completed; mailbox status is being refreshed.",
+      },
+    });
+    assert.equal(
+      captured.length,
+      callsBeforeCanonicalUnconfirmed + 1,
+      "the client must not retry an uncertain mutation response",
+    );
+
+    nextResponse = response(502, {
+      ...mutationUnconfirmedPayload,
+      archivedMessageIdentity: {
+        serverMailboxId: "payload-controlled-mailbox",
+        providerMessageId: "payload-controlled-id",
+        providerFolder: "Inbox",
+      },
+    });
+    assert.deepEqual(await mutateProviderArchiveMessage(gmailRequest), {
+      ...mutationUnconfirmedPayload,
+      archivedMessageIdentity: {
+        serverMailboxId: MAILBOX_ID,
+        providerMessageId: GMAIL_MESSAGE_ID,
+        providerFolder: "Archive",
+      },
+      error: {
+        code: "gmail_archive_unconfirmed",
+        message: "Archive may have completed; mailbox status is being refreshed.",
+      },
+    });
+
+    nextResponse = response(502, mutationUnconfirmedPayload);
+    const imapUnconfirmed = await mutateProviderArchiveMessage(imapRequest);
+    assert.equal(
+      "status" in imapUnconfirmed ? imapUnconfirmed.status : undefined,
+      undefined,
+      "Gmail mutation uncertainty must not classify an IMAP request",
+    );
+
+    for (const malformedUnconfirmed of [
+      {
+        ok: false,
+        error: {
+          code: "gmail_archive_unconfirmed",
+          message: "loose legacy response",
+        },
+      },
+      {
+        ...mutationUnconfirmedPayload,
+        mailboxId: "other-mailbox",
+      },
+      {
+        ...mutationUnconfirmedPayload,
+        action: "delete",
+      },
+      {
+        ...mutationUnconfirmedPayload,
+        status: "failed",
+      },
+      {
+        ...mutationUnconfirmedPayload,
+        error: {
+          code: "gmail_archive_failed",
+          message: mutationUnconfirmedPayload.error.message,
+        },
+      },
+      {
+        ...mutationUnconfirmedPayload,
+        error: {
+          code: "gmail_archive_unconfirmed",
+        },
+      },
+      {
+        ...mutationUnconfirmedPayload,
+        error: {
+          code: "gmail_archive_unconfirmed",
+          message: "   ",
+        },
+      },
+      {
+        ...mutationUnconfirmedPayload,
+        delta: {},
+      },
+      {
+        ...mutationUnconfirmedPayload,
+        error: {
+          ...mutationUnconfirmedPayload.error,
+          providerError: "unsafe",
+        },
+      },
+    ]) {
+      nextResponse = response(502, malformedUnconfirmed);
+      const result = await mutateProviderArchiveMessage(gmailRequest);
+      assert.equal(
+        "status" in result ? result.status : undefined,
+        undefined,
+        "only the exact mutation_unconfirmed envelope is uncertainty",
+      );
+    }
+
     const unsafeSuccess = gmailMutationSuccess();
     (
       unsafeSuccess.delta.Archive.upsertMessage as Record<string, unknown>
@@ -461,22 +581,25 @@ async function run() {
       "the Archive upsert thread must match the archived identity",
     );
 
-    for (const excludedLabel of [
-      "INBOX",
-      "TRASH",
-      "SPAM",
-      "DRAFT",
-      "SENT",
-    ]) {
-      const excludedLabelSuccess = gmailMutationSuccess();
-      excludedLabelSuccess.delta.Archive.upsertMessage.labelIds = [
-        excludedLabel,
+    const stillInInboxSuccess = gmailMutationSuccess();
+    stillInInboxSuccess.delta.Archive.upsertMessage.labelIds = ["INBOX"];
+    nextResponse = response(200, stillInInboxSuccess);
+    assert.equal(
+      (await mutateProviderArchiveMessage(gmailRequest)).error.code,
+      "archive_response_invalid",
+      "INBOX must be absent from a confirmed Gmail Archive upsert",
+    );
+
+    for (const retainedLabel of ["TRASH", "SPAM", "DRAFT", "SENT"]) {
+      const retainedLabelSuccess = gmailMutationSuccess();
+      retainedLabelSuccess.delta.Archive.upsertMessage.labelIds = [
+        retainedLabel,
       ];
-      nextResponse = response(200, excludedLabelSuccess);
-      assert.equal(
-        (await mutateProviderArchiveMessage(gmailRequest)).error.code,
-        "archive_response_invalid",
-        `${excludedLabel} is not valid on a Gmail Archive upsert`,
+      nextResponse = response(200, retainedLabelSuccess);
+      assert.deepEqual(
+        await mutateProviderArchiveMessage(gmailRequest),
+        retainedLabelSuccess,
+        `${retainedLabel} does not negate confirmed INBOX removal`,
       );
     }
 
@@ -585,6 +708,21 @@ async function run() {
     );
     assertArchiveTransport("/api/inboxes/fetch-archive");
     assert.deepEqual(lastBody(), { mailboxId: MAILBOX_ID });
+
+    const excludedArchiveListingMessage = gmailMessage("Archive");
+    excludedArchiveListingMessage.labelIds = ["TRASH"];
+    nextResponse = response(200, {
+      ...gmailFetchPayload,
+      folder: {
+        ...gmailFetchPayload.folder,
+        messages: [excludedArchiveListingMessage],
+      },
+    });
+    assert.equal(
+      (await fetchProviderArchive(MAILBOX_ID)).error.code,
+      "archive_response_invalid",
+      "action confirmation must not broaden global Archive folder eligibility",
+    );
 
     const imapFetchPayload = {
       ok: true,

@@ -124,6 +124,7 @@ import { buildProviderMessageActionTarget } from "../../lib/providerMessageActio
 import {
   ARCHIVE_CAPABILITY_UNAVAILABLE_MESSAGE,
   ARCHIVE_REFRESH_ERROR_MESSAGE,
+  createGmailArchiveReconciliationCoordinator,
   resolveMailboxRefreshPlan,
   resolveProviderArchiveRefreshSemantics,
   resolveSuccessfulInboxRefreshPresentation,
@@ -132,6 +133,7 @@ import {
   summarizeStartupMailboxRefreshResults,
   type MailboxRefreshReason,
   type MailboxRefreshResult,
+  type GmailArchiveReconciliationCoordinator,
   type ProviderArchiveCapability,
   type StartupSyncStatus,
 } from "../../lib/mailboxRefreshSemantics";
@@ -12916,6 +12918,9 @@ function MailboxView({
   getLinkedReviewBadgeLabel,
   onOpenLinkedReview,
   onApplyProviderArchiveMutationSuccess,
+  onProviderArchiveMutationSettled,
+  onReconcileGmailArchive,
+  isGmailArchiveReconciliationRunning,
   onArchiveFolderOpen,
   archiveFolderStatusMessage,
   onSyncMailbox,
@@ -13007,6 +13012,9 @@ function MailboxView({
   onApplyProviderArchiveMutationSuccess: (
     response: ProviderArchiveMutationSuccess,
   ) => boolean;
+  onProviderArchiveMutationSettled: (mailboxId: InboxId) => void;
+  onReconcileGmailArchive: (mailboxId: InboxId) => void;
+  isGmailArchiveReconciliationRunning: (mailboxId: InboxId) => boolean;
   onArchiveFolderOpen: () => void;
   archiveFolderStatusMessage: string | null;
   onSyncMailbox: () => void;
@@ -20022,6 +20030,11 @@ function MailboxView({
       isSharedView ||
       activeSmartFolder ||
       isSyncingMailbox ||
+      sourceLocations.some(
+        (location) =>
+          location !== null &&
+          isGmailArchiveReconciliationRunning(location.mailboxId),
+      ) ||
       sourceLocations.some((location) => location?.folder !== "Inbox")
     ) {
       closeMenus();
@@ -20122,7 +20135,19 @@ function MailboxView({
     setPendingProviderArchiveKeys([...providerArchivePendingKeys]);
     const result = await archivePromise;
     setPendingProviderArchiveKeys([...providerArchivePendingKeys]);
+    onProviderArchiveMutationSettled(sourceManagedMailbox.id as InboxId);
 
+    if (
+      result.classification === "uncertain" &&
+      result.response.status === "mutation_unconfirmed" &&
+      sourceManagedMailbox.provider === "google"
+    ) {
+      setMailboxActionToastMessage(
+        "Archive may have completed; mailbox status is being refreshed.",
+      );
+      onReconcileGmailArchive(sourceManagedMailbox.id as InboxId);
+      return;
+    }
     if (result.classification === "uncertain") {
       setMailboxActionToastMessage(
         "Archive may have completed at the provider, but the mailbox could not be refreshed safely. Reload the mailbox before trying again.",
@@ -35580,6 +35605,42 @@ export function WorkspaceShell({
     useState<LearningLaunchRequest>(null);
   const [syncingMailboxId, setSyncingMailboxId] = useState<InboxId | null>(null);
   const syncingMailboxIdsRef = useRef<Set<InboxId>>(new Set());
+  const pendingGmailArchiveReconciliationMailboxIdsRef = useRef<Set<InboxId>>(
+    new Set(),
+  );
+  const runningGmailArchiveReconciliationMailboxIdsRef = useRef<Set<InboxId>>(
+    new Set(),
+  );
+  const gmailArchiveReconciliationRefreshRef = useRef<
+    (mailboxId: InboxId) => Promise<unknown>
+  >(async () => undefined);
+  const gmailArchiveReconciliationCoordinatorRef = useRef<
+    GmailArchiveReconciliationCoordinator<InboxId> | null
+  >(null);
+  if (!gmailArchiveReconciliationCoordinatorRef.current) {
+    gmailArchiveReconciliationCoordinatorRef.current =
+      createGmailArchiveReconciliationCoordinator({
+        pendingMailboxIds:
+          pendingGmailArchiveReconciliationMailboxIdsRef.current,
+        runningMailboxIds:
+          runningGmailArchiveReconciliationMailboxIdsRef.current,
+        isInboxFetchInFlight: (mailboxId) =>
+          syncingMailboxIdsRef.current.has(mailboxId),
+        isArchiveFetchInFlight: (mailboxId) =>
+          providerArchiveFetchMailboxIdsRef.current.has(mailboxId),
+        isProviderArchiveMutationInFlight: (mailboxId) =>
+          hasPendingProviderArchiveForMailbox(
+            providerArchivePendingKeys,
+            mailboxId,
+          ),
+        reconcile: (mailboxId) =>
+          gmailArchiveReconciliationRefreshRef.current(mailboxId),
+      });
+  }
+  const requestGmailArchiveReconciliation =
+    gmailArchiveReconciliationCoordinatorRef.current.request;
+  const drainGmailArchiveReconciliation =
+    gmailArchiveReconciliationCoordinatorRef.current.drain;
   const startupSyncHasRunRef = useRef(false);
   const [startupSyncStatus, setStartupSyncStatus] =
     useState<StartupSyncStatus>("idle");
@@ -39485,6 +39546,7 @@ export function WorkspaceShell({
       return "failed";
     } finally {
       providerArchiveFetchMailboxIdsRef.current.delete(mailboxId);
+      drainGmailArchiveReconciliation(mailboxId);
     }
   };
 
@@ -39526,11 +39588,13 @@ export function WorkspaceShell({
     }
 
     const refreshReason = options?.reason ?? "mailbox_open";
+    const isProviderReconciliation = refreshReason === "reconcile";
     const archiveKnowledge = readCurrentProviderArchiveKnowledge(mailboxId);
     const refreshPlan = resolveMailboxRefreshPlan({
       reason: refreshReason,
       inboxFetchInFlight:
-        syncingMailboxIdsRef.current.has(mailboxId) || syncingMailboxId === mailboxId,
+        syncingMailboxIdsRef.current.has(mailboxId) ||
+        (!isProviderReconciliation && syncingMailboxId === mailboxId),
       archiveFetchInFlight:
         providerArchiveFetchMailboxIdsRef.current.has(mailboxId),
       hasArchiveSnapshot: archiveKnowledge.hasSnapshot,
@@ -39548,9 +39612,13 @@ export function WorkspaceShell({
 
     syncingMailboxIdsRef.current.add(mailboxId);
     setSyncingMailboxId(mailboxId);
-	    clearMailboxSyncError(mailboxId);
+    if (!isProviderReconciliation) {
+      clearMailboxSyncError(mailboxId);
+    }
 
-	    try {
+    let reconciliationArchivePromise: Promise<unknown> | null = null;
+
+    try {
 	      const buildCustomImapRefreshRequest = (limit?: number) =>
 	        buildRefreshInboxRequest({
           mailboxId: managedMailbox.id,
@@ -39582,9 +39650,14 @@ export function WorkspaceShell({
           ? startArchiveRefresh
           : undefined,
       });
-      // Archive owns its validation, state commit, error scope, and lock. It is
-      // deliberately not awaited by the Inbox path.
-      void archivePromise;
+      // Normal refreshes keep Archive independent. Reconciliation keeps the
+      // existing Inbox lock until its paired Archive readback has settled so
+      // quick uncertainty events coalesce through the existing fetch locks.
+      if (isProviderReconciliation) {
+        reconciliationArchivePromise = archivePromise;
+      } else {
+        void archivePromise;
+      }
       let response = await inboxPromise;
       // Snapshot of the first response before any quota retry overwrites it.
       const firstResponseOk = response.ok;
@@ -39618,6 +39691,9 @@ export function WorkspaceShell({
         }
       }
 	      if (!response.ok) {
+        if (isProviderReconciliation) {
+          return "failed";
+        }
         if (
           (canUseImapFetch || canUseGmailOAuthFetch) &&
           response.error?.code === "reconnect_required"
@@ -39763,10 +39839,12 @@ export function WorkspaceShell({
       const refreshPresentation = resolveSuccessfulInboxRefreshPresentation({
         inboxWarningMessage: refreshWarningMessage,
       });
-      if (refreshPresentation.mailboxSyncError) {
-        setMailboxSyncError(mailboxId, refreshPresentation.mailboxSyncError);
-      } else {
-        clearMailboxSyncError(mailboxId);
+      if (!isProviderReconciliation) {
+        if (refreshPresentation.mailboxSyncError) {
+          setMailboxSyncError(mailboxId, refreshPresentation.mailboxSyncError);
+        } else {
+          clearMailboxSyncError(mailboxId);
+        }
       }
       // Write diagnostic so onSyncMailbox can surface it on mobile.
       lastRefreshDiagnosticRef.current[mailboxId] = {
@@ -39788,10 +39866,17 @@ export function WorkspaceShell({
       };
 	      return refreshPresentation.result;
     } finally {
+      if (reconciliationArchivePromise) {
+        await reconciliationArchivePromise.catch(() => undefined);
+      }
       syncingMailboxIdsRef.current.delete(mailboxId);
       setSyncingMailboxId((current) => (current === mailboxId ? null : current));
+      drainGmailArchiveReconciliation(mailboxId);
     }
   };
+
+  gmailArchiveReconciliationRefreshRef.current = (mailboxId) =>
+    refreshMailboxById(mailboxId, { reason: "reconcile" });
 
   const handleSyncActiveMailbox = async () => {
     if (!activeMailbox) {
@@ -42551,6 +42636,15 @@ export function WorkspaceShell({
                   onOpenLinkedReview={openWorkspaceTarget}
                   onApplyProviderArchiveMutationSuccess={
                     applyProviderArchiveMutationSuccess
+                  }
+                  onProviderArchiveMutationSettled={
+                    drainGmailArchiveReconciliation
+                  }
+                  onReconcileGmailArchive={requestGmailArchiveReconciliation}
+                  isGmailArchiveReconciliationRunning={(mailboxId) =>
+                    runningGmailArchiveReconciliationMailboxIdsRef.current.has(
+                      mailboxId,
+                    )
                   }
                   onArchiveFolderOpen={handleOpenActiveMailboxArchive}
                   archiveFolderStatusMessage={

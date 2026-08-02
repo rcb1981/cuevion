@@ -361,6 +361,7 @@ def _run_gmail_archive(
     modify_results: list[tuple[dict | None, dict | None]] | None = None,
     readback: RecordingGmailReadback | None = None,
     refresh_result: object = _DEFAULT,
+    sleeper: Mock | None = None,
 ):
     request = FakeHandler(
         payload
@@ -393,6 +394,7 @@ def _run_gmail_archive(
         )
     else:
         refresh = Mock(return_value=refresh_result)
+    sleeper = sleeper or Mock()
 
     with patch.object(
         message_action,
@@ -414,7 +416,11 @@ def _run_gmail_archive(
         message_action,
         "_gmail_get_request",
         side_effect=readback,
-    ) as get_request:
+    ) as get_request, patch.object(
+        message_action,
+        "_gmail_archive_readback_sleep",
+        sleeper,
+    ):
         message_action.handler.do_POST(request)
 
     return {
@@ -425,6 +431,7 @@ def _run_gmail_archive(
         "refresh": refresh,
         "get_request": get_request,
         "readback": readback,
+        "sleeper": sleeper,
     }
 
 
@@ -771,21 +778,40 @@ class GmailArchiveTransportTests(unittest.TestCase):
                     message_action.handler.do_POST(request)
 
                 self.assertEqual(request.status, 502)
+                response = request.response()
                 self.assertEqual(
-                    request.response()["error"]["code"],
+                    set(response),
+                    {
+                        "ok",
+                        "status",
+                        "action",
+                        "mailboxId",
+                        "error",
+                    },
+                )
+                self.assertEqual(
+                    response["status"],
+                    "mutation_unconfirmed",
+                )
+                self.assertEqual(
+                    response["action"],
+                    "archive",
+                )
+                self.assertEqual(response["mailboxId"], MAILBOX_ID)
+                self.assertEqual(
+                    response["error"]["code"],
                     "gmail_archive_unconfirmed",
                 )
+                self.assertNotIn("delta", response)
                 transport.assert_called_once()
                 readback.assert_not_called()
                 self.assertNotIn(
                     GMAIL_ACCESS_TOKEN,
-                    json.dumps(request.response()),
+                    json.dumps(response),
                 )
 
-    def test_semantically_invalid_provider_confirmation_is_unconfirmed(self):
-        invalid_responses = (
-            {"id": "different", "labelIds": []},
-            {"labelIds": []},
+    def test_modify_response_labels_never_replace_targeted_readback(self):
+        provider_responses = (
             {"id": GMAIL_MESSAGE_ID},
             {"id": GMAIL_MESSAGE_ID, "labelIds": "STARRED"},
             {"id": GMAIL_MESSAGE_ID, "labelIds": ["INBOX"]},
@@ -796,15 +822,50 @@ class GmailArchiveTransportTests(unittest.TestCase):
                 "labelIds": ["STARRED", "STARRED"],
             },
         )
-        for provider_response in invalid_responses:
+        for provider_response in provider_responses:
+            with self.subTest(provider_response=provider_response):
+                result = _run_gmail_archive(
+                    modify_results=[(provider_response, None)]
+                )
+                self.assertEqual(result["handler"].status, 200)
+                result["modify"].assert_called_once_with(
+                    GMAIL_ACCESS_TOKEN,
+                    GMAIL_MESSAGE_ID,
+                    "archive",
+                )
+                result["get_request"].assert_called_once_with(
+                    GMAIL_ACCESS_TOKEN,
+                    (
+                        f"/messages/{quote(GMAIL_MESSAGE_ID, safe='')}"
+                        "?format=raw"
+                    ),
+                )
+
+    def test_modify_response_identity_mismatch_is_unconfirmed(self):
+        unsafe_responses = (
+            {"id": "different", "labelIds": []},
+            {"labelIds": []},
+        )
+        for provider_response in unsafe_responses:
             with self.subTest(provider_response=provider_response):
                 result = _run_gmail_archive(
                     modify_results=[(provider_response, None)]
                 )
                 self.assertEqual(result["handler"].status, 502)
+                response = result["handler"].response()
                 self.assertEqual(
-                    result["handler"].response()["error"]["code"],
+                    response["status"],
+                    "mutation_unconfirmed",
+                )
+                self.assertEqual(
+                    response["error"]["code"],
                     "gmail_archive_unconfirmed",
+                )
+                self.assertNotIn("delta", response)
+                result["modify"].assert_called_once_with(
+                    GMAIL_ACCESS_TOKEN,
+                    GMAIL_MESSAGE_ID,
+                    "archive",
                 )
                 result["get_request"].assert_not_called()
 
@@ -1321,6 +1382,120 @@ class GmailArchiveReadbackTests(unittest.TestCase):
         )
         refresh.assert_not_called()
 
+    def test_stale_inbox_readback_retries_only_targeted_get(self):
+        stale_detail = {
+            "id": GMAIL_MESSAGE_ID,
+            "threadId": GMAIL_THREAD_ID,
+            "labelIds": ["INBOX", "STARRED"],
+            "raw": _gmail_raw_message(),
+        }
+        confirmed_detail = {
+            "id": GMAIL_MESSAGE_ID,
+            "threadId": GMAIL_THREAD_ID,
+            "labelIds": ["STARRED", "IMPORTANT"],
+            "raw": _gmail_raw_message(),
+        }
+        cases = (
+            (0, []),
+            (1, [0.25]),
+            (2, [0.25, 0.75]),
+        )
+        expected_path = (
+            f"/messages/{quote(GMAIL_MESSAGE_ID, safe='')}"
+            "?format=raw"
+        )
+
+        for stale_count, expected_delays in cases:
+            with self.subTest(stale_count=stale_count):
+                readback = RecordingGmailReadback(
+                    results=(
+                        [(stale_detail, None)] * stale_count
+                        + [(confirmed_detail, None)]
+                    ),
+                )
+                result = _run_gmail_archive(readback=readback)
+
+                self.assertEqual(result["handler"].status, 200)
+                result["modify"].assert_called_once_with(
+                    GMAIL_ACCESS_TOKEN,
+                    GMAIL_MESSAGE_ID,
+                    "archive",
+                )
+                self.assertEqual(
+                    readback.calls,
+                    [
+                        (GMAIL_ACCESS_TOKEN, expected_path)
+                        for _ in range(stale_count + 1)
+                    ],
+                )
+                self.assertTrue(
+                    all(
+                        "/threads/" not in path
+                        and not path.startswith("/messages?")
+                        for _token, path in readback.calls
+                    )
+                )
+                self.assertEqual(
+                    result["sleeper"].call_args_list,
+                    [call(delay) for delay in expected_delays],
+                )
+                archived_message = result["handler"].response()["delta"][
+                    "Archive"
+                ]["upsertMessage"]
+                self.assertEqual(
+                    archived_message["providerMessageId"],
+                    GMAIL_MESSAGE_ID,
+                )
+
+    def test_stale_inbox_readback_exhaustion_is_structured_uncertainty(self):
+        stale_detail = {
+            "id": GMAIL_MESSAGE_ID,
+            "threadId": GMAIL_THREAD_ID,
+            "labelIds": ["INBOX", "STARRED"],
+            "raw": _gmail_raw_message(),
+        }
+        readback = RecordingGmailReadback(
+            results=[(stale_detail, None)] * 3,
+        )
+        result = _run_gmail_archive(readback=readback)
+
+        self.assertEqual(result["handler"].status, 502)
+        response = result["handler"].response()
+        self.assertEqual(
+            response,
+            {
+                "ok": False,
+                "status": "mutation_unconfirmed",
+                "action": "archive",
+                "mailboxId": MAILBOX_ID,
+                "error": {
+                    "code": "gmail_archive_unconfirmed",
+                    "message": (
+                        "Archive may have completed; mailbox status is being "
+                        "refreshed."
+                    ),
+                },
+            },
+        )
+        self.assertNotIn("delta", response)
+        result["modify"].assert_called_once_with(
+            GMAIL_ACCESS_TOKEN,
+            GMAIL_MESSAGE_ID,
+            "archive",
+        )
+        expected_path = (
+            f"/messages/{quote(GMAIL_MESSAGE_ID, safe='')}"
+            "?format=raw"
+        )
+        self.assertEqual(
+            readback.calls,
+            [(GMAIL_ACCESS_TOKEN, expected_path)] * 3,
+        )
+        self.assertEqual(
+            result["sleeper"].call_args_list,
+            [call(0.25), call(0.75)],
+        )
+
     def test_success_returns_exact_delta_and_explicit_identities(self):
         readback = RecordingGmailReadback()
         result = _run_gmail_archive(readback=readback)
@@ -1405,8 +1580,8 @@ class GmailArchiveReadbackTests(unittest.TestCase):
         self.assertNotIn("refresh_token", serialized)
         self.assertNotIn(_gmail_raw_message(), serialized)
 
-    def test_failed_or_invalid_detail_is_uncertain_and_never_retries_mutation(self):
-        invalid_details = (
+    def test_unconfirmed_or_invalid_detail_is_fail_closed_without_delta(self):
+        unconfirmed_details = (
             (
                 "provider_failure",
                 RecordingGmailReadback(
@@ -1428,6 +1603,94 @@ class GmailArchiveReadbackTests(unittest.TestCase):
                 ),
             ),
             (
+                "malformed_labels",
+                RecordingGmailReadback(
+                    detail={
+                        "id": GMAIL_MESSAGE_ID,
+                        "threadId": GMAIL_THREAD_ID,
+                        "labelIds": "STARRED",
+                        "raw": _gmail_raw_message(),
+                    },
+                ),
+            ),
+            (
+                "duplicate_labels",
+                RecordingGmailReadback(
+                    detail={
+                        "id": GMAIL_MESSAGE_ID,
+                        "threadId": GMAIL_THREAD_ID,
+                        "labelIds": ["STARRED", "STARRED"],
+                        "raw": _gmail_raw_message(),
+                    },
+                ),
+            ),
+        )
+        for name, readback in unconfirmed_details:
+            with self.subTest(name=name):
+                result = _run_gmail_archive(readback=readback)
+                self.assertEqual(result["handler"].status, 502)
+                response = result["handler"].response()
+                self.assertEqual(
+                    set(response),
+                    {
+                        "ok",
+                        "status",
+                        "action",
+                        "mailboxId",
+                        "error",
+                    },
+                )
+                self.assertFalse(response["ok"])
+                self.assertEqual(
+                    response["status"],
+                    "mutation_unconfirmed",
+                )
+                self.assertEqual(
+                    response["error"]["code"],
+                    "gmail_archive_unconfirmed",
+                )
+                self.assertNotIn("delta", response)
+                result["modify"].assert_called_once_with(
+                    GMAIL_ACCESS_TOKEN,
+                    GMAIL_MESSAGE_ID,
+                    "archive",
+                )
+                self.assertEqual(len(readback.calls), 1)
+                result["sleeper"].assert_not_called()
+                self.assertNotIn(GMAIL_ACCESS_TOKEN, json.dumps(response))
+
+    def test_readback_exception_before_confirmation_is_unconfirmed(self):
+        readback = Mock(side_effect=RuntimeError("provider read failed"))
+        result = _run_gmail_archive(readback=readback)
+
+        self.assertEqual(result["handler"].status, 502)
+        response = result["handler"].response()
+        self.assertEqual(
+            response["status"],
+            "mutation_unconfirmed",
+        )
+        self.assertEqual(
+            response["error"]["code"],
+            "gmail_archive_unconfirmed",
+        )
+        self.assertNotIn("delta", response)
+        result["modify"].assert_called_once_with(
+            GMAIL_ACCESS_TOKEN,
+            GMAIL_MESSAGE_ID,
+            "archive",
+        )
+        readback.assert_called_once_with(
+            GMAIL_ACCESS_TOKEN,
+            (
+                f"/messages/{quote(GMAIL_MESSAGE_ID, safe='')}"
+                "?format=raw"
+            ),
+        )
+        result["sleeper"].assert_not_called()
+
+    def test_confirmed_but_unrenderable_detail_uses_readback_uncertainty(self):
+        unrenderable_details = (
+            (
                 "thread_id_missing",
                 RecordingGmailReadback(
                     detail={
@@ -1438,12 +1701,45 @@ class GmailArchiveReadbackTests(unittest.TestCase):
                 ),
             ),
             (
-                "excluded_label",
+                "spam_label",
                 RecordingGmailReadback(
                     detail={
                         "id": GMAIL_MESSAGE_ID,
                         "threadId": GMAIL_THREAD_ID,
                         "labelIds": ["SPAM"],
+                        "raw": _gmail_raw_message(),
+                    },
+                ),
+            ),
+            (
+                "trash_label",
+                RecordingGmailReadback(
+                    detail={
+                        "id": GMAIL_MESSAGE_ID,
+                        "threadId": GMAIL_THREAD_ID,
+                        "labelIds": ["TRASH"],
+                        "raw": _gmail_raw_message(),
+                    },
+                ),
+            ),
+            (
+                "draft_label",
+                RecordingGmailReadback(
+                    detail={
+                        "id": GMAIL_MESSAGE_ID,
+                        "threadId": GMAIL_THREAD_ID,
+                        "labelIds": ["DRAFT"],
+                        "raw": _gmail_raw_message(),
+                    },
+                ),
+            ),
+            (
+                "sent_label",
+                RecordingGmailReadback(
+                    detail={
+                        "id": GMAIL_MESSAGE_ID,
+                        "threadId": GMAIL_THREAD_ID,
+                        "labelIds": ["SENT"],
                         "raw": _gmail_raw_message(),
                     },
                 ),
@@ -1460,7 +1756,7 @@ class GmailArchiveReadbackTests(unittest.TestCase):
                 ),
             ),
         )
-        for name, readback in invalid_details:
+        for name, readback in unrenderable_details:
             with self.subTest(name=name):
                 result = _run_gmail_archive(readback=readback)
                 self.assertEqual(result["handler"].status, 502)
@@ -1492,6 +1788,7 @@ class GmailArchiveReadbackTests(unittest.TestCase):
                     "archive",
                 )
                 self.assertEqual(len(readback.calls), 1)
+                result["sleeper"].assert_not_called()
                 self.assertNotIn(GMAIL_ACCESS_TOKEN, json.dumps(response))
 
     def test_provider_details_raw_and_oversized_preview_never_leak(self):

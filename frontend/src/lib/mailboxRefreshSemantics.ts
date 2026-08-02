@@ -8,12 +8,18 @@ export type MailboxRefreshReason =
   | "mailbox_open"
   | "interval"
   | "manual"
-  | "archive_open";
+  | "archive_open"
+  | "reconcile";
 
 export type MailboxRefreshPlan = {
   shouldFetchInbox: boolean;
   shouldFetchArchive: boolean;
   archiveErrorScope: "background" | "folder" | null;
+};
+
+export type GmailArchiveReconciliationCoordinator<MailboxId extends string> = {
+  request: (mailboxId: MailboxId) => void;
+  drain: (mailboxId: MailboxId) => void;
 };
 
 type ArchiveFetchOutcome =
@@ -58,6 +64,7 @@ export function resolveMailboxRefreshPlan({
   const archiveRequested =
     reason === "startup" ||
     reason === "manual" ||
+    reason === "reconcile" ||
     (reason === "archive_open" && !hasArchiveSnapshot);
   const shouldFetchArchive =
     archiveRequested &&
@@ -90,6 +97,64 @@ export function startIndependentMailboxFetches<TInbox, TArchive>({
   const archivePromise = startArchive?.() ?? null;
 
   return { inboxPromise, archivePromise };
+}
+
+export function createGmailArchiveReconciliationCoordinator<
+  MailboxId extends string,
+>({
+  pendingMailboxIds,
+  runningMailboxIds,
+  isInboxFetchInFlight,
+  isArchiveFetchInFlight,
+  isProviderArchiveMutationInFlight,
+  reconcile,
+}: {
+  pendingMailboxIds: Set<MailboxId>;
+  runningMailboxIds: Set<MailboxId>;
+  isInboxFetchInFlight: (mailboxId: MailboxId) => boolean;
+  isArchiveFetchInFlight: (mailboxId: MailboxId) => boolean;
+  isProviderArchiveMutationInFlight: (mailboxId: MailboxId) => boolean;
+  reconcile: (mailboxId: MailboxId) => Promise<unknown>;
+}): GmailArchiveReconciliationCoordinator<MailboxId> {
+  const drain = (mailboxId: MailboxId) => {
+    if (
+      !pendingMailboxIds.has(mailboxId) ||
+      runningMailboxIds.has(mailboxId) ||
+      isInboxFetchInFlight(mailboxId) ||
+      isArchiveFetchInFlight(mailboxId) ||
+      isProviderArchiveMutationInFlight(mailboxId)
+    ) {
+      return;
+    }
+
+    pendingMailboxIds.delete(mailboxId);
+    runningMailboxIds.add(mailboxId);
+
+    let reconciliation: Promise<unknown>;
+    try {
+      reconciliation = Promise.resolve(reconcile(mailboxId));
+    } catch (error) {
+      reconciliation = Promise.reject(error);
+    }
+
+    void reconciliation
+      .catch(() => undefined)
+      .finally(() => {
+        runningMailboxIds.delete(mailboxId);
+        drain(mailboxId);
+      });
+  };
+
+  const request = (mailboxId: MailboxId) => {
+    if (runningMailboxIds.has(mailboxId)) {
+      return;
+    }
+
+    pendingMailboxIds.add(mailboxId);
+    drain(mailboxId);
+  };
+
+  return { request, drain };
 }
 
 export function shouldApplyProviderArchiveResponse({

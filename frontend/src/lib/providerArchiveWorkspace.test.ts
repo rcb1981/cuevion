@@ -4,6 +4,7 @@ import path from "node:path";
 import {
   ARCHIVE_CAPABILITY_UNAVAILABLE_MESSAGE,
   ARCHIVE_REFRESH_ERROR_MESSAGE,
+  createGmailArchiveReconciliationCoordinator,
   resolveMailboxRefreshPlan,
   resolveProviderArchiveRefreshSemantics,
   resolveSuccessfulInboxRefreshPresentation,
@@ -46,6 +47,11 @@ assert.deepEqual(plan("startup"), {
   archiveErrorScope: "background",
 });
 assert.deepEqual(plan("manual", { hasArchiveSnapshot: true }), {
+  shouldFetchInbox: true,
+  shouldFetchArchive: true,
+  archiveErrorScope: "background",
+});
+assert.deepEqual(plan("reconcile", { hasArchiveSnapshot: true }), {
   shouldFetchInbox: true,
   shouldFetchArchive: true,
   archiveErrorScope: "background",
@@ -335,6 +341,9 @@ assert.match(
 const executeIndex = archiveHandler.indexOf(
   "const archivePromise = executeProviderArchiveAction",
 );
+const runningReconciliationGuardIndex = archiveHandler.indexOf(
+  "isGmailArchiveReconciliationRunning(location.mailboxId)",
+);
 const pendingVisibleIndex = archiveHandler.indexOf(
   "setPendingProviderArchiveKeys",
   executeIndex,
@@ -348,9 +357,48 @@ const pendingReleasedIndex = archiveHandler.indexOf(
   awaitIndex,
 );
 assert.ok(executeIndex >= 0);
+assert.ok(runningReconciliationGuardIndex >= 0);
+assert.ok(runningReconciliationGuardIndex < executeIndex);
 assert.ok(executeIndex < pendingVisibleIndex);
 assert.ok(pendingVisibleIndex < awaitIndex);
 assert.ok(awaitIndex < pendingReleasedIndex);
+const reconciliationIndex = archiveHandler.indexOf(
+  "onReconcileGmailArchive(sourceManagedMailbox.id as InboxId)",
+);
+const mutationSettledIndex = archiveHandler.indexOf(
+  "onProviderArchiveMutationSettled(sourceManagedMailbox.id as InboxId)",
+);
+assert.ok(pendingReleasedIndex < reconciliationIndex);
+assert.ok(pendingReleasedIndex < mutationSettledIndex);
+assert.ok(mutationSettledIndex < reconciliationIndex);
+assert.match(
+  archiveHandler,
+  /result\.response\.status === "mutation_unconfirmed"/,
+);
+assert.match(
+  archiveHandler,
+  /sourceManagedMailbox\.provider === "google"/,
+);
+assert.match(
+  archiveHandler,
+  /Archive may have completed; mailbox status is being refreshed\./,
+);
+assert.equal(
+  (
+    archiveHandler.match(
+      /onReconcileGmailArchive\(sourceManagedMailbox\.id as InboxId\)/g,
+    ) ?? []
+  ).length,
+  1,
+);
+assert.equal(
+  (
+    archiveHandler.match(
+      /onProviderArchiveMutationSettled\(sourceManagedMailbox\.id as InboxId\)/g,
+    ) ?? []
+  ).length,
+  1,
+);
 
 const detailMenu = section(
   'openShareCollaboration(message.id);',
@@ -458,6 +506,10 @@ const archiveRefresh = section(
 assert.match(archiveRefresh, /providerArchiveFetchMailboxIdsRef\.current\.has/);
 assert.match(archiveRefresh, /providerArchiveFetchMailboxIdsRef\.current\.add/);
 assert.match(archiveRefresh, /providerArchiveFetchMailboxIdsRef\.current\.delete/);
+assert.match(
+  archiveRefresh,
+  /providerArchiveFetchMailboxIdsRef\.current\.delete\(mailboxId\);\s+drainGmailArchiveReconciliation\(mailboxId\)/,
+);
 assert.match(archiveRefresh, /fetchProviderArchive\(managedMailbox\.id\)/);
 assert.match(archiveRefresh, /applyProviderArchiveFetchSnapshot/);
 assert.match(archiveRefresh, /resolveProviderArchiveRefreshSemantics\(\{/);
@@ -484,10 +536,39 @@ assert.match(refresh, /resolveMailboxRefreshPlan\(\{/);
 assert.match(refresh, /startIndependentMailboxFetches\(\{/);
 assert.match(refresh, /startInbox:[\s\S]*fetchGmailInbox\(\{/);
 assert.match(refresh, /startInbox:[\s\S]*connectInboxWithImap\(/);
+assert.equal((refresh.match(/fetchGmailInbox\(/g) ?? []).length, 1);
 assert.match(refresh, /startArchive: refreshPlan\.shouldFetchArchive/);
 assert.match(refresh, /void archivePromise;/);
 assert.match(refresh, /let response = await inboxPromise;/);
+assert.match(refresh, /const isProviderReconciliation = refreshReason === "reconcile"/);
+assert.match(
+  refresh,
+  /if \(!isProviderReconciliation\) \{\s+clearMailboxSyncError\(mailboxId\)/,
+);
+assert.match(
+  refresh,
+  /if \(!response\.ok\) \{\s+if \(isProviderReconciliation\) \{\s+return "failed";/,
+);
+assert.match(
+  refresh,
+  /if \(!isProviderReconciliation\) \{\s+if \(refreshPresentation\.mailboxSyncError\)/,
+);
+assert.match(refresh, /reconciliationArchivePromise = archivePromise/);
+assert.match(refresh, /await reconciliationArchivePromise/);
+assert.match(
+  refresh,
+  /\(!isProviderReconciliation && syncingMailboxId === mailboxId\)/,
+);
+assert.match(
+  refresh,
+  /syncingMailboxIdsRef\.current\.delete\(mailboxId\);[\s\S]*drainGmailArchiveReconciliation\(mailboxId\)/,
+);
+assert.match(
+  refresh,
+  /gmailArchiveReconciliationRefreshRef\.current = \(mailboxId\) =>\s+refreshMailboxById\(mailboxId, \{ reason: "reconcile" \}\)/,
+);
 assert.doesNotMatch(refresh, /Promise\.all|fetchProviderArchive\(/);
+assert.doesNotMatch(refresh, /mutateProviderArchiveMessage|executeProviderArchiveAction/);
 assert.doesNotMatch(
   refresh,
   /applyProviderArchiveFetchSnapshot|resolveProviderArchiveRefreshSemantics/,
@@ -543,6 +624,52 @@ assert.match(
 );
 assert.match(source, /refreshProviderArchiveById\(activeMailbox\.id, "archive_open"\)/);
 
+const reconciliationCoordinator = section(
+  "const pendingGmailArchiveReconciliationMailboxIdsRef",
+  "const startupSyncHasRunRef",
+);
+assert.match(
+  reconciliationCoordinator,
+  /runningGmailArchiveReconciliationMailboxIdsRef/,
+);
+assert.match(
+  reconciliationCoordinator,
+  /createGmailArchiveReconciliationCoordinator\(\{/,
+);
+assert.match(
+  reconciliationCoordinator,
+  /isInboxFetchInFlight:[\s\S]*syncingMailboxIdsRef\.current\.has\(mailboxId\)/,
+);
+assert.match(
+  reconciliationCoordinator,
+  /isArchiveFetchInFlight:[\s\S]*providerArchiveFetchMailboxIdsRef\.current\.has\(mailboxId\)/,
+);
+assert.match(
+  reconciliationCoordinator,
+  /isProviderArchiveMutationInFlight:[\s\S]*hasPendingProviderArchiveForMailbox\([\s\S]*providerArchivePendingKeys/,
+);
+
+const archiveReconciliation = section(
+  "onProviderArchiveMutationSettled={",
+  "onArchiveFolderOpen=",
+);
+assert.match(
+  archiveReconciliation,
+  /onProviderArchiveMutationSettled=\{\s+drainGmailArchiveReconciliation\s+\}/,
+);
+assert.match(
+  archiveReconciliation,
+  /onReconcileGmailArchive=\{requestGmailArchiveReconciliation\}/,
+);
+assert.match(
+  archiveReconciliation,
+  /isGmailArchiveReconciliationRunning=\{\(mailboxId\) =>[\s\S]*runningGmailArchiveReconciliationMailboxIdsRef\.current\.has\([\s\S]*mailboxId/,
+);
+assert.doesNotMatch(
+  archiveReconciliation,
+  /refreshMailboxById|mutateProviderArchiveMessage|executeProviderArchiveAction/,
+);
+
 const mobileRefresh = section(
   "onSyncMailbox={async (mailboxId) =>",
   "onComposeMessage=",
@@ -582,6 +709,155 @@ function deferred<T>() {
     reject = rejectPromise;
   });
   return { promise, resolve, reject };
+}
+
+async function flushReconciliationCleanup() {
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
+async function verifyGmailArchiveReconciliationCoordinator() {
+  const inboxFetchMailboxIds = new Set<string>();
+  const archiveFetchMailboxIds = new Set<string>();
+  const mutationMailboxIds = new Set<string>();
+  const pendingMailboxIds = new Set<string>();
+  const runningMailboxIds = new Set<string>();
+  const starts: string[] = [];
+  const runs = new Map<
+    string,
+    { promise: Promise<void>; resolve: () => void }
+  >();
+
+  const coordinator = createGmailArchiveReconciliationCoordinator({
+    pendingMailboxIds,
+    runningMailboxIds,
+    isInboxFetchInFlight: (mailboxId) =>
+      inboxFetchMailboxIds.has(mailboxId),
+    isArchiveFetchInFlight: (mailboxId) =>
+      archiveFetchMailboxIds.has(mailboxId),
+    isProviderArchiveMutationInFlight: (mailboxId) =>
+      mutationMailboxIds.has(mailboxId),
+    reconcile: (mailboxId) => {
+      starts.push(`${mailboxId}:Inbox`, `${mailboxId}:Archive`);
+      let resolve!: () => void;
+      const promise = new Promise<void>((resolvePromise) => {
+        resolve = resolvePromise;
+      });
+      runs.set(mailboxId, { promise, resolve });
+      return promise;
+    },
+  });
+
+  const startsFor = (mailboxId: string) =>
+    starts.filter((entry) => entry.startsWith(`${mailboxId}:`));
+  const finish = async (mailboxId: string) => {
+    const run = runs.get(mailboxId);
+    assert.ok(run, `missing reconciliation run for ${mailboxId}`);
+    run.resolve();
+    await run.promise;
+    await flushReconciliationCleanup();
+  };
+
+  coordinator.request("free");
+  coordinator.request("free");
+  assert.deepEqual(startsFor("free"), ["free:Inbox", "free:Archive"]);
+  assert.equal(pendingMailboxIds.has("free"), false);
+  assert.equal(runningMailboxIds.has("free"), true);
+  assert.equal(pendingMailboxIds.size, 0);
+  await finish("free");
+  assert.equal(runningMailboxIds.has("free"), false);
+
+  inboxFetchMailboxIds.add("inbox-locked");
+  coordinator.request("inbox-locked");
+  coordinator.request("inbox-locked");
+  assert.deepEqual(startsFor("inbox-locked"), []);
+  assert.equal(pendingMailboxIds.has("inbox-locked"), true);
+  assert.equal(pendingMailboxIds.size, 1);
+  coordinator.drain("inbox-locked");
+  assert.deepEqual(startsFor("inbox-locked"), []);
+  inboxFetchMailboxIds.delete("inbox-locked");
+  coordinator.drain("inbox-locked");
+  assert.deepEqual(startsFor("inbox-locked"), [
+    "inbox-locked:Inbox",
+    "inbox-locked:Archive",
+  ]);
+  assert.equal(pendingMailboxIds.has("inbox-locked"), false);
+  await finish("inbox-locked");
+
+  archiveFetchMailboxIds.add("archive-locked");
+  coordinator.request("archive-locked");
+  assert.deepEqual(startsFor("archive-locked"), []);
+  assert.equal(pendingMailboxIds.has("archive-locked"), true);
+  coordinator.drain("archive-locked");
+  assert.deepEqual(startsFor("archive-locked"), []);
+  archiveFetchMailboxIds.delete("archive-locked");
+  coordinator.drain("archive-locked");
+  assert.deepEqual(startsFor("archive-locked"), [
+    "archive-locked:Inbox",
+    "archive-locked:Archive",
+  ]);
+  assert.equal(pendingMailboxIds.has("archive-locked"), false);
+  await finish("archive-locked");
+
+  mutationMailboxIds.add("mutation-locked");
+  coordinator.request("mutation-locked");
+  assert.deepEqual(startsFor("mutation-locked"), []);
+  assert.equal(pendingMailboxIds.has("mutation-locked"), true);
+  coordinator.drain("mutation-locked");
+  assert.deepEqual(startsFor("mutation-locked"), []);
+  mutationMailboxIds.delete("mutation-locked");
+  coordinator.drain("mutation-locked");
+  assert.deepEqual(startsFor("mutation-locked"), [
+    "mutation-locked:Inbox",
+    "mutation-locked:Archive",
+  ]);
+  assert.equal(pendingMailboxIds.has("mutation-locked"), false);
+  await finish("mutation-locked");
+
+  inboxFetchMailboxIds.add("mailbox-a");
+  coordinator.request("mailbox-a");
+  coordinator.request("mailbox-b");
+  assert.deepEqual(startsFor("mailbox-a"), []);
+  assert.deepEqual(startsFor("mailbox-b"), [
+    "mailbox-b:Inbox",
+    "mailbox-b:Archive",
+  ]);
+  assert.equal(pendingMailboxIds.has("mailbox-a"), true);
+  assert.equal(runningMailboxIds.has("mailbox-b"), true);
+  await finish("mailbox-b");
+  inboxFetchMailboxIds.delete("mailbox-a");
+  coordinator.drain("mailbox-a");
+  assert.deepEqual(startsFor("mailbox-a"), [
+    "mailbox-a:Inbox",
+    "mailbox-a:Archive",
+  ]);
+  await finish("mailbox-a");
+  assert.equal(pendingMailboxIds.size, 0);
+  assert.equal(runningMailboxIds.size, 0);
+
+  let failedReconciliationStarts = 0;
+  const failedPendingMailboxIds = new Set<string>();
+  const failedRunningMailboxIds = new Set<string>();
+  const failedCoordinator = createGmailArchiveReconciliationCoordinator({
+    pendingMailboxIds: failedPendingMailboxIds,
+    runningMailboxIds: failedRunningMailboxIds,
+    isInboxFetchInFlight: () => false,
+    isArchiveFetchInFlight: () => false,
+    isProviderArchiveMutationInFlight: () => false,
+    reconcile: async () => {
+      failedReconciliationStarts += 1;
+      throw new Error("background reconciliation failed");
+    },
+  });
+  failedCoordinator.request("failure");
+  failedCoordinator.request("failure");
+  await flushReconciliationCleanup();
+  failedCoordinator.drain("failure");
+  await flushReconciliationCleanup();
+  assert.equal(failedReconciliationStarts, 1);
+  assert.equal(failedPendingMailboxIds.size, 0);
+  assert.equal(failedRunningMailboxIds.size, 0);
 }
 
 async function verifyIndependentInboxCommit() {
@@ -628,7 +904,10 @@ async function verifyIndependentInboxCommit() {
   assert.equal(archiveSettled, true);
 }
 
-void verifyIndependentInboxCommit()
+void Promise.all([
+  verifyGmailArchiveReconciliationCoordinator(),
+  verifyIndependentInboxCommit(),
+])
   .then(() => {
     console.log("providerArchive Workspace wiring tests passed");
   })

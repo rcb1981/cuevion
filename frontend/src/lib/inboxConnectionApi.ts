@@ -953,7 +953,7 @@ export type ImapArchiveMutationSuccess = {
   error?: never;
 };
 
-export type ArchiveMutationUncertainResponse = {
+export type ArchiveMutationConfirmedReadbackUncertainResponse = {
   ok: false;
   status: "mutation_confirmed_readback_failed";
   action: "archive";
@@ -965,6 +965,24 @@ export type ArchiveMutationUncertainResponse = {
   folders?: never;
   folder?: never;
 };
+
+export type GmailArchiveMutationUnconfirmedResponse = {
+  ok: false;
+  status: "mutation_unconfirmed";
+  action: "archive";
+  mailboxId: string;
+  archivedMessageIdentity: GmailArchiveMutationIdentity;
+  error: ArchiveClientError & {
+    code: "gmail_archive_unconfirmed";
+  };
+  delta?: never;
+  folders?: never;
+  folder?: never;
+};
+
+export type ArchiveMutationUncertainResponse =
+  | ArchiveMutationConfirmedReadbackUncertainResponse
+  | GmailArchiveMutationUnconfirmedResponse;
 
 export type ArchiveMutationResponse =
   | GmailArchiveMutationSuccess
@@ -1041,6 +1059,8 @@ const SAFE_ARCHIVE_ERROR_MESSAGE =
   "Could not complete this Archive request safely.";
 const SAFE_ARCHIVE_UNCERTAIN_MESSAGE =
   "Archive was confirmed, but the latest mailbox state could not be verified.";
+const SAFE_GMAIL_ARCHIVE_UNCONFIRMED_MESSAGE =
+  "Archive may have completed; mailbox status is being refreshed.";
 const ARCHIVE_PREVIEW_FIELDS = new Set([
   "id",
   "sender",
@@ -1327,6 +1347,8 @@ function gmailArchiveMessageIsValid(
   value: unknown,
   mailboxId: string,
   providerFolder: "Inbox" | "Archive",
+  archiveLabelPolicy: "folder_membership" | "inbox_removal" =
+    "folder_membership",
 ): value is GmailArchiveMessageSnapshot {
   if (
     !isArchiveRecord(value) ||
@@ -1350,7 +1372,9 @@ function gmailArchiveMessageIsValid(
   const labels = new Set(value.labelIds.map((labelId) => labelId.toUpperCase()));
   return providerFolder === "Inbox"
     ? labels.has("INBOX")
-    : ![...GMAIL_ARCHIVE_EXCLUDED_LABELS].some((label) => labels.has(label));
+    : archiveLabelPolicy === "inbox_removal"
+      ? !labels.has("INBOX")
+      : ![...GMAIL_ARCHIVE_EXCLUDED_LABELS].some((label) => labels.has(label));
 }
 
 function gmailFolderSnapshotIsValid<Folder extends "Inbox" | "Archive">(
@@ -1615,26 +1639,66 @@ function archiveUncertainResponse(
   value: unknown,
   request: ArchiveMutationRequest,
 ): ArchiveMutationUncertainResponse | null {
+  if (!isArchiveRecord(value)) {
+    return null;
+  }
+
   if (
-    !isArchiveRecord(value) ||
+    value.ok === false &&
+    value.status === "mutation_confirmed_readback_failed" &&
+    value.action === "archive" &&
+    value.mailboxId === request.mailboxId &&
+    isArchiveRecord(value.error) &&
+    value.error.code === "archive_readback_failed"
+  ) {
+    return {
+      ok: false,
+      status: "mutation_confirmed_readback_failed",
+      action: "archive",
+      mailboxId: request.mailboxId,
+      archivedMessageIdentity: trustedUncertainIdentity(request),
+      error: {
+        code: "archive_readback_failed",
+        message: SAFE_ARCHIVE_UNCERTAIN_MESSAGE,
+      },
+    };
+  }
+
+  if (
+    !("messageId" in request) ||
+    containsForbiddenArchiveResponseField(value) ||
+    !hasExactArchiveKeys(
+      value,
+      ["ok", "status", "action", "mailboxId", "error"],
+      ["archivedMessageIdentity"],
+    ) ||
     value.ok !== false ||
-    value.status !== "mutation_confirmed_readback_failed" ||
+    value.status !== "mutation_unconfirmed" ||
     value.action !== "archive" ||
     value.mailboxId !== request.mailboxId ||
     !isArchiveRecord(value.error) ||
-      value.error.code !== "archive_readback_failed"
+    !hasExactArchiveKeys(value.error, ["code", "message"]) ||
+    value.error.code !== "gmail_archive_unconfirmed" ||
+    typeof value.error.message !== "string" ||
+    value.error.message.trim().length < 1 ||
+    value.error.message.length > 2_048
   ) {
     return null;
   }
+
   return {
     ok: false,
-    status: "mutation_confirmed_readback_failed",
+    status: "mutation_unconfirmed",
     action: "archive",
     mailboxId: request.mailboxId,
-    archivedMessageIdentity: trustedUncertainIdentity(request),
+    archivedMessageIdentity: {
+      serverMailboxId: request.mailboxId,
+      providerMessageId: request.messageId,
+      providerFolder: "Archive",
+    },
     error: {
-      code: "archive_readback_failed",
-      message: SAFE_ARCHIVE_UNCERTAIN_MESSAGE,
+      code: "gmail_archive_unconfirmed",
+      message: SAFE_GMAIL_ARCHIVE_UNCONFIRMED_MESSAGE,
     },
   };
 }
@@ -1656,6 +1720,7 @@ function gmailArchiveMutationSuccess(
       value.delta.Archive.upsertMessage,
       request.mailboxId,
       "Archive",
+      "inbox_removal",
     )
   ) {
     return null;

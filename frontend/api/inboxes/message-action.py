@@ -2,6 +2,7 @@ import imaplib
 import json
 import re
 import sys
+import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
@@ -53,6 +54,7 @@ GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1/users/me"
 GMAIL_MODIFY_SCOPE = "https://www.googleapis.com/auth/gmail.modify"
 GMAIL_FULL_MAIL_SCOPE = "https://mail.google.com/"
 IMAP_ARCHIVE_READBACK_LIMIT = 100
+GMAIL_ARCHIVE_READBACK_DELAYS_SECONDS = (0.25, 0.75)
 SUPPORTED_ACTIONS = {"mark_read", "mark_unread", "star", "unstar", "archive"}
 GMAIL_ACTION_LABELS = {
     "mark_read": {"removeLabelIds": ["UNREAD"]},
@@ -355,27 +357,68 @@ def _perform_gmail_action(handler: BaseHTTPRequestHandler, payload: dict, action
     send_json(handler, 200, {"ok": True, "action": action})
 
 
-def _gmail_archive_response_is_confirmed(
+def _gmail_archive_modify_response_has_expected_identity(
     response_payload: object,
     message_id: str,
 ) -> bool:
-    if not isinstance(response_payload, dict):
-        return False
-    if response_payload.get("id") != message_id:
-        return False
-    label_ids = response_payload.get("labelIds")
+    return (
+        isinstance(response_payload, dict)
+        and response_payload.get("id") == message_id
+    )
+
+
+def _gmail_archive_readback_confirmation_state(
+    response_payload: object,
+    message_id: str,
+) -> str:
+    if (
+        not isinstance(response_payload, dict)
+        or response_payload.get("id") != message_id
+    ):
+        return "invalid"
+    label_ids = response_payload.get("labelIds", [])
     if (
         not isinstance(label_ids, list)
         or any(not valid_identifier(label_id) for label_id in label_ids)
         or len(set(label_ids)) != len(label_ids)
     ):
-        return False
-    return "INBOX" not in label_ids and "TRASH" not in label_ids
+        return "invalid"
+    return "pending" if "INBOX" in label_ids else "confirmed"
+
+
+def _gmail_archive_readback_sleep(delay_seconds: float):
+    time.sleep(delay_seconds)
+
+
+def _send_gmail_archive_unconfirmed(
+    handler: BaseHTTPRequestHandler,
+    *,
+    mailbox_id: str,
+):
+    send_json(
+        handler,
+        502,
+        {
+            "ok": False,
+            "status": "mutation_unconfirmed",
+            "action": "archive",
+            "mailboxId": mailbox_id,
+            "error": {
+                "code": "gmail_archive_unconfirmed",
+                "message": (
+                    "Archive may have completed; mailbox status is being "
+                    "refreshed."
+                ),
+            },
+        },
+    )
 
 
 def _send_gmail_archive_transport_error(
     handler: BaseHTTPRequestHandler,
     error: dict,
+    *,
+    mailbox_id: str,
 ):
     code = error.get("code")
     if code == "gmail_token_invalid":
@@ -406,22 +449,14 @@ def _send_gmail_archive_transport_error(
             ),
         )
     elif code == "gmail_unavailable":
-        send_json(
+        _send_gmail_archive_unconfirmed(
             handler,
-            502,
-            error_payload(
-                "gmail_archive_unconfirmed",
-                "Gmail could not confirm whether the message was archived.",
-            ),
+            mailbox_id=mailbox_id,
         )
     elif code in {"gmail_response_invalid", "gmail_response_too_large"}:
-        send_json(
+        _send_gmail_archive_unconfirmed(
             handler,
-            502,
-            error_payload(
-                "gmail_archive_unconfirmed",
-                "Gmail returned an invalid Archive confirmation.",
-            ),
+            mailbox_id=mailbox_id,
         )
     else:
         send_json(
@@ -496,16 +531,19 @@ def _perform_gmail_archive(
     )
 
     if modify_error:
-        _send_gmail_archive_transport_error(handler, modify_error)
-        return
-    if not _gmail_archive_response_is_confirmed(modify_payload, message_id):
-        send_json(
+        _send_gmail_archive_transport_error(
             handler,
-            502,
-            error_payload(
-                "gmail_archive_unconfirmed",
-                "Gmail did not confirm the Archive action.",
-            ),
+            modify_error,
+            mailbox_id=mailbox_id,
+        )
+        return
+    if not _gmail_archive_modify_response_has_expected_identity(
+        modify_payload,
+        message_id,
+    ):
+        _send_gmail_archive_unconfirmed(
+            handler,
+            mailbox_id=mailbox_id,
         )
         return
 
@@ -514,25 +552,56 @@ def _perform_gmail_archive(
         "providerMessageId": message_id,
         "providerFolder": "Archive",
     }
+    mutation_confirmed = False
 
     try:
-        (
-            detail_payload,
-            detail_error,
-            context,
-            refresh_failure,
-        ) = _gmail_get_with_one_refresh(
-            context,
-            (
-                f"/messages/{quote(message_id, safe='')}"
-                "?format=raw"
-            ),
+        detail_path = (
+            f"/messages/{quote(message_id, safe='')}"
+            "?format=raw"
         )
-        if refresh_failure is not None or detail_error is not None:
-            _send_archive_readback_failed(
+        detail_payload = None
+        for attempt in range(
+            len(GMAIL_ARCHIVE_READBACK_DELAYS_SECONDS) + 1
+        ):
+            if attempt > 0:
+                _gmail_archive_readback_sleep(
+                    GMAIL_ARCHIVE_READBACK_DELAYS_SECONDS[attempt - 1]
+                )
+            (
+                detail_payload,
+                detail_error,
+                context,
+                refresh_failure,
+            ) = _gmail_get_with_one_refresh(
+                context,
+                detail_path,
+            )
+            if refresh_failure is not None or detail_error is not None:
+                _send_gmail_archive_unconfirmed(
+                    handler,
+                    mailbox_id=mailbox_id,
+                )
+                return
+
+            confirmation_state = (
+                _gmail_archive_readback_confirmation_state(
+                    detail_payload,
+                    message_id,
+                )
+            )
+            if confirmation_state == "confirmed":
+                mutation_confirmed = True
+                break
+            if confirmation_state == "invalid":
+                _send_gmail_archive_unconfirmed(
+                    handler,
+                    mailbox_id=mailbox_id,
+                )
+                return
+        else:
+            _send_gmail_archive_unconfirmed(
                 handler,
                 mailbox_id=mailbox_id,
-                archived_message_identity=mutation_identity,
             )
             return
 
@@ -571,11 +640,17 @@ def _perform_gmail_archive(
             success_payload,
         )
     except Exception:
-        _send_archive_readback_failed(
-            handler,
-            mailbox_id=mailbox_id,
-            archived_message_identity=mutation_identity,
-        )
+        if mutation_confirmed:
+            _send_archive_readback_failed(
+                handler,
+                mailbox_id=mailbox_id,
+                archived_message_identity=mutation_identity,
+            )
+        else:
+            _send_gmail_archive_unconfirmed(
+                handler,
+                mailbox_id=mailbox_id,
+            )
 
 
 def _read_uid_validity(mailbox, folder: str) -> str | None:
