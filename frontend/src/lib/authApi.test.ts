@@ -243,6 +243,11 @@ const mailboxRefreshRegion = sourceBetween(
   "const refreshMailboxById = async",
   "const handleSyncActiveMailbox = async",
 );
+const archiveRefreshRegion = sourceBetween(
+  workspaceSource,
+  "const refreshProviderArchiveById = async",
+  "const refreshMailboxById = async",
+);
 assert.ok(
   mailboxRefreshRegion.indexOf("if (!hasAuthenticatedMemberAuthority)") <
     mailboxRefreshRegion.indexOf("fetchGmailInbox("),
@@ -253,6 +258,18 @@ assert.ok(
     mailboxRefreshRegion.indexOf("connectInboxWithImap("),
   "IMAP provider I/O must be behind explicit Auth0 member authority",
 );
+const archiveAuthorityGuardIndex = archiveRefreshRegion.indexOf(
+  "if (!hasAuthenticatedMemberAuthority)",
+);
+const archiveProviderFetchIndex = archiveRefreshRegion.indexOf(
+  "fetchProviderArchive(",
+);
+assert.notEqual(archiveAuthorityGuardIndex, -1);
+assert.notEqual(archiveProviderFetchIndex, -1);
+assert.ok(
+  archiveAuthorityGuardIndex < archiveProviderFetchIndex,
+  "Archive provider I/O must be behind explicit Auth0 member authority",
+);
 assert.ok(
   (workspaceSource.match(/!hasAuthenticatedMemberAuthority \|\| !activeMailbox/g) ?? [])
     .length >= 2,
@@ -260,7 +277,7 @@ assert.ok(
 );
 const startupSyncRegion = enclosingEffect(
   workspaceSource,
-  "refreshMailboxById(mailboxId, { startup: true })",
+  'reason: "startup"',
 );
 assert.equal(startupSyncRegion.includes("!hasAuthenticatedMemberAuthority"), true);
 assert.equal(

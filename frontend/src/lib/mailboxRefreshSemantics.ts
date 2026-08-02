@@ -3,6 +3,18 @@ import type { ProviderId } from "../types/onboarding";
 export type MailboxRefreshResult = "synced" | "skipped" | "failed" | "partial";
 export type StartupSyncStatus = "idle" | "running" | "done" | "partial_error";
 export type ProviderArchiveCapability = "available" | "unavailable" | "unknown";
+export type MailboxRefreshReason =
+  | "startup"
+  | "mailbox_open"
+  | "interval"
+  | "manual"
+  | "archive_open";
+
+export type MailboxRefreshPlan = {
+  shouldFetchInbox: boolean;
+  shouldFetchArchive: boolean;
+  archiveErrorScope: "background" | "folder" | null;
+};
 
 type ArchiveFetchOutcome =
   | null
@@ -29,14 +41,86 @@ export const ARCHIVE_REFRESH_ERROR_MESSAGE =
 export const ARCHIVE_CAPABILITY_UNAVAILABLE_MESSAGE =
   "Archive is not available for this connected mailbox.";
 
+export function resolveMailboxRefreshPlan({
+  reason,
+  inboxFetchInFlight,
+  archiveFetchInFlight,
+  hasArchiveSnapshot,
+  archiveCapability,
+}: {
+  reason: MailboxRefreshReason;
+  inboxFetchInFlight: boolean;
+  archiveFetchInFlight: boolean;
+  hasArchiveSnapshot: boolean;
+  archiveCapability: ProviderArchiveCapability;
+}): MailboxRefreshPlan {
+  const shouldFetchInbox = reason !== "archive_open" && !inboxFetchInFlight;
+  const archiveRequested =
+    reason === "startup" ||
+    reason === "manual" ||
+    (reason === "archive_open" && !hasArchiveSnapshot);
+  const shouldFetchArchive =
+    archiveRequested &&
+    !archiveFetchInFlight &&
+    !(reason === "archive_open" && archiveCapability === "unavailable");
+
+  return {
+    shouldFetchInbox,
+    shouldFetchArchive,
+    archiveErrorScope:
+      shouldFetchArchive && reason === "archive_open"
+        ? "folder"
+        : shouldFetchArchive
+          ? "background"
+          : null,
+  };
+}
+
+export function startIndependentMailboxFetches<TInbox, TArchive>({
+  startInbox,
+  startArchive,
+}: {
+  startInbox: () => Promise<TInbox>;
+  startArchive?: () => Promise<TArchive>;
+}): {
+  inboxPromise: Promise<TInbox>;
+  archivePromise: Promise<TArchive> | null;
+} {
+  const inboxPromise = startInbox();
+  const archivePromise = startArchive?.() ?? null;
+
+  return { inboxPromise, archivePromise };
+}
+
+export function shouldApplyProviderArchiveResponse({
+  requestConnectionKey,
+  currentConnectionKey,
+  requestConnectionEpoch,
+  currentConnectionEpoch,
+  archiveStateVersionAtRequest,
+  currentArchiveStateVersion,
+}: {
+  requestConnectionKey: string | null;
+  currentConnectionKey: string | null;
+  requestConnectionEpoch: number;
+  currentConnectionEpoch: number;
+  archiveStateVersionAtRequest: string;
+  currentArchiveStateVersion: string;
+}): boolean {
+  return (
+    requestConnectionKey !== null &&
+    requestConnectionKey === currentConnectionKey &&
+    requestConnectionEpoch === currentConnectionEpoch &&
+    archiveStateVersionAtRequest === currentArchiveStateVersion
+  );
+}
+
 export function resolveProviderArchiveRefreshSemantics({
   provider,
-  inboxFetchFullySucceeded,
   archiveResponse,
   archiveSnapshotApplied,
 }: {
   provider: ProviderId | null;
-  inboxFetchFullySucceeded: boolean;
   archiveResponse: ArchiveFetchOutcome;
   archiveSnapshotApplied: boolean;
 }): ProviderArchiveRefreshSemantics {
@@ -66,7 +150,6 @@ export function resolveProviderArchiveRefreshSemantics({
 
   const isExpectedMissingCustomImapArchiveCapability =
     provider === "custom_imap" &&
-    inboxFetchFullySucceeded &&
     archiveResponse.ok === false &&
     archiveResponse.error?.code === "archive_folder_unavailable";
 
@@ -98,14 +181,14 @@ export function resolveSuccessfulInboxRefreshPresentation({
   archiveSemantics,
 }: {
   inboxWarningMessage: string | null;
-  archiveSemantics: ProviderArchiveRefreshSemantics;
+  archiveSemantics?: ProviderArchiveRefreshSemantics;
 }): {
   result: Extract<MailboxRefreshResult, "synced" | "partial">;
   mailboxSyncError: string | null;
 } {
   const normalizedInboxWarning = inboxWarningMessage?.trim() || null;
   const mailboxSyncError =
-    normalizedInboxWarning ?? archiveSemantics.mailboxSyncError;
+    normalizedInboxWarning ?? archiveSemantics?.mailboxSyncError ?? null;
 
   return {
     result: mailboxSyncError ? "partial" : "synced",

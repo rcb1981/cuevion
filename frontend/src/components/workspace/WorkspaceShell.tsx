@@ -121,9 +121,15 @@ import {
 } from "../../lib/providerArchiveAction";
 import { buildProviderMessageActionTarget } from "../../lib/providerMessageAction";
 import {
+  ARCHIVE_CAPABILITY_UNAVAILABLE_MESSAGE,
+  ARCHIVE_REFRESH_ERROR_MESSAGE,
+  resolveMailboxRefreshPlan,
   resolveProviderArchiveRefreshSemantics,
   resolveSuccessfulInboxRefreshPresentation,
+  shouldApplyProviderArchiveResponse,
+  startIndependentMailboxFetches,
   summarizeStartupMailboxRefreshResults,
+  type MailboxRefreshReason,
   type MailboxRefreshResult,
   type ProviderArchiveCapability,
   type StartupSyncStatus,
@@ -12905,6 +12911,8 @@ function MailboxView({
   getLinkedReviewBadgeLabel,
   onOpenLinkedReview,
   onApplyProviderArchiveMutationSuccess,
+  onArchiveFolderOpen,
+  archiveFolderStatusMessage,
   onSyncMailbox,
   isSyncingMailbox,
   onSyncUnreadOverrides,
@@ -12994,6 +13002,8 @@ function MailboxView({
   onApplyProviderArchiveMutationSuccess: (
     response: ProviderArchiveMutationSuccess,
   ) => boolean;
+  onArchiveFolderOpen: () => void;
+  archiveFolderStatusMessage: string | null;
   onSyncMailbox: () => void;
   isSyncingMailbox: boolean;
   onSyncUnreadOverrides: (messages: MessageIdentitySource[], unread: boolean) => void;
@@ -15598,6 +15608,9 @@ function MailboxView({
 
     setActiveSmartFolderId(null);
     setActiveFolder(targetFolder);
+    if (targetFolder === "Archive") {
+      onArchiveFolderOpen();
+    }
     setIsSharedView(targetMailboxId === sharedCollaborationMailboxId);
     setIsFullMessageOpen(Boolean(notificationNavigationRequest.openFullMessage));
     setLastNavigationSource(notificationNavigationRequest.source ?? null);
@@ -20366,6 +20379,9 @@ function MailboxView({
       nextMessageId,
       nextMessageId,
     );
+    if (folder === "Archive") {
+      onArchiveFolderOpen();
+    }
     closeMenus();
   };
 
@@ -21055,6 +21071,15 @@ function MailboxView({
             ) : null}
           </div>
         </div>
+
+        {activeFolder === "Archive" && archiveFolderStatusMessage ? (
+          <div
+            role="status"
+            className="mb-4 flex-none rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-3 text-[0.8rem] leading-5 text-[var(--workspace-text-soft)]"
+          >
+            {archiveFolderStatusMessage}
+          </div>
+        ) : null}
 
         {isComposeOpen && !isMobileViewport ? (
           <div
@@ -34578,6 +34603,71 @@ export function WorkspaceShell({
   const previousProviderAuthoritativeArchiveMailboxIdsRef = useRef(
     new Set(providerAuthoritativeArchiveMailboxIds),
   );
+  const providerArchiveConnectionKeys = savedManagedInboxes.reduce(
+    (keys, mailbox) => {
+      if (
+        !mailbox.connected ||
+        mailbox.connectionStatus !== "connected" ||
+        (mailbox.provider !== "google" && mailbox.provider !== "custom_imap")
+      ) {
+        return keys;
+      }
+
+      keys[mailbox.id as InboxId] = JSON.stringify([
+        workspacePersistenceScope,
+        mailbox.id,
+        mailbox.provider,
+        mailbox.email.trim().toLowerCase(),
+        mailbox.connectionStatus,
+        mailbox.provider === "custom_imap"
+          ? [
+              mailbox.customImap.host.trim().toLowerCase(),
+              mailbox.customImap.port.trim(),
+              mailbox.customImap.ssl,
+              mailbox.customImap.username.trim().toLowerCase(),
+            ]
+          : null,
+      ]);
+      return keys;
+    },
+    {} as Partial<Record<InboxId, string>>,
+  );
+  const providerArchiveConnectionKey = JSON.stringify(
+    Object.entries(providerArchiveConnectionKeys).sort(([left], [right]) =>
+      left.localeCompare(right),
+    ),
+  );
+  const providerArchiveCurrentConnectionKeysRef = useRef(
+    providerArchiveConnectionKeys,
+  );
+  const providerArchiveLastRenderedConnectionKeysRef = useRef(
+    providerArchiveConnectionKeys,
+  );
+  const providerArchiveConnectionEpochsRef = useRef<
+    Partial<Record<InboxId, number>>
+  >({});
+  const providerArchiveRenderedMailboxIds = new Set<InboxId>([
+    ...(Object.keys(providerArchiveLastRenderedConnectionKeysRef.current) as InboxId[]),
+    ...(Object.keys(providerArchiveConnectionKeys) as InboxId[]),
+  ]);
+  providerArchiveRenderedMailboxIds.forEach((mailboxId) => {
+    if (
+      providerArchiveLastRenderedConnectionKeysRef.current[mailboxId] !==
+      providerArchiveConnectionKeys[mailboxId]
+    ) {
+      providerArchiveConnectionEpochsRef.current[mailboxId] =
+        (providerArchiveConnectionEpochsRef.current[mailboxId] ?? 0) + 1;
+    }
+  });
+  providerArchiveLastRenderedConnectionKeysRef.current =
+    providerArchiveConnectionKeys;
+  providerArchiveCurrentConnectionKeysRef.current = providerArchiveConnectionKeys;
+  const providerArchiveKnowledgeConnectionKeysRef = useRef(
+    providerArchiveConnectionKeys,
+  );
+  const providerArchiveKnowledgeConnectionEpochsRef = useRef<
+    Partial<Record<InboxId, number>>
+  >({ ...providerArchiveConnectionEpochsRef.current });
   const manualPriorityOverridesStorageKey = buildManualPriorityOverridesStorageKey(
     workspacePersistenceScope,
     mailboxOrderKey,
@@ -34659,6 +34749,76 @@ export function WorkspaceShell({
       currentWorkspaceUserId,
     ),
   );
+  const mailboxStoreRef = useRef(mailboxStore);
+  mailboxStoreRef.current = mailboxStore;
+  const providerArchiveFetchMailboxIdsRef = useRef<Set<InboxId>>(new Set());
+  const providerArchiveSnapshotMailboxIdsRef = useRef<Set<InboxId>>(new Set());
+  // Provider Archive capability is runtime product state, not a sync error.
+  // "unavailable" means discovery found no single safe provider Archive folder.
+  const providerArchiveCapabilitiesRef = useRef<
+    Partial<Record<InboxId, ProviderArchiveCapability>>
+  >({});
+  const [providerArchiveFolderStatusMessages, setProviderArchiveFolderStatusMessages] =
+    useState<Partial<Record<InboxId, string>>>({});
+  useEffect(() => {
+    const previousConnectionKeys =
+      providerArchiveKnowledgeConnectionKeysRef.current;
+    const previousConnectionEpochs =
+      providerArchiveKnowledgeConnectionEpochsRef.current;
+    const mailboxIds = new Set<InboxId>([
+      ...(Object.keys(previousConnectionKeys) as InboxId[]),
+      ...(Object.keys(providerArchiveConnectionKeys) as InboxId[]),
+    ]);
+    const changedMailboxIds = [...mailboxIds].filter(
+      (mailboxId) =>
+        previousConnectionKeys[mailboxId] !==
+          providerArchiveConnectionKeys[mailboxId] ||
+        (previousConnectionEpochs[mailboxId] ?? 0) !==
+          (providerArchiveConnectionEpochsRef.current[mailboxId] ?? 0),
+    );
+    providerArchiveKnowledgeConnectionKeysRef.current =
+      providerArchiveConnectionKeys;
+    providerArchiveKnowledgeConnectionEpochsRef.current = {
+      ...providerArchiveConnectionEpochsRef.current,
+    };
+
+    if (changedMailboxIds.length === 0) {
+      return;
+    }
+
+    changedMailboxIds.forEach((mailboxId) => {
+      providerArchiveSnapshotMailboxIdsRef.current.delete(mailboxId);
+    });
+    providerArchiveCapabilitiesRef.current = Object.fromEntries(
+      Object.entries(providerArchiveCapabilitiesRef.current).filter(
+        ([mailboxId]) => !changedMailboxIds.includes(mailboxId as InboxId),
+      ),
+    ) as Partial<Record<InboxId, ProviderArchiveCapability>>;
+    setProviderArchiveFolderStatusMessages((current) =>
+      Object.fromEntries(
+        Object.entries(current).filter(
+          ([mailboxId]) => !changedMailboxIds.includes(mailboxId as InboxId),
+        ),
+      ) as Partial<Record<InboxId, string>>,
+    );
+    setMailboxStore((currentStore) => {
+      let nextStore = currentStore;
+      changedMailboxIds.forEach((mailboxId) => {
+        const collections = nextStore[mailboxId];
+        if (!collections || collections.Archive.length === 0) {
+          return;
+        }
+        nextStore = {
+          ...nextStore,
+          [mailboxId]: {
+            ...collections,
+            Archive: [],
+          },
+        };
+      });
+      return nextStore;
+    });
+  }, [providerArchiveConnectionKey]);
   useEffect(() => {
     const previousMailboxIds =
       previousProviderAuthoritativeArchiveMailboxIdsRef.current;
@@ -35396,11 +35556,6 @@ export function WorkspaceShell({
     useState<LearningLaunchRequest>(null);
   const [syncingMailboxId, setSyncingMailboxId] = useState<InboxId | null>(null);
   const syncingMailboxIdsRef = useRef<Set<InboxId>>(new Set());
-  // Provider Archive capability is runtime product state, not a sync error.
-  // "unavailable" means discovery found no single safe provider Archive folder.
-  const providerArchiveCapabilitiesRef = useRef<
-    Partial<Record<InboxId, ProviderArchiveCapability>>
-  >({});
   const startupSyncHasRunRef = useRef(false);
   const [startupSyncStatus, setStartupSyncStatus] =
     useState<StartupSyncStatus>("idle");
@@ -36146,7 +36301,7 @@ export function WorkspaceShell({
       return;
     }
 
-    void refreshMailboxById(activeMailbox.id);
+    void refreshMailboxById(activeMailbox.id, { reason: "mailbox_open" });
   }, [
     activeMailbox,
     hasAuthenticatedMemberAuthority,
@@ -36180,7 +36335,7 @@ export function WorkspaceShell({
     }
 
     const intervalId = window.setInterval(() => {
-      void refreshMailboxById(activeMailbox.id);
+      void refreshMailboxById(activeMailbox.id, { reason: "interval" });
     }, ACTIVE_MAILBOX_AUTO_REFRESH_INTERVAL_MS);
 
     return () => window.clearInterval(intervalId);
@@ -39126,11 +39281,113 @@ export function WorkspaceShell({
     return hydratedSnapshot.messages.length;
   };
 
-  const refreshMailboxById = async (
+  const readProviderArchiveStateVersion = (mailboxId: InboxId) =>
+    JSON.stringify(
+      (mailboxStoreRef.current[mailboxId]?.Archive ?? []).map((message) => ({
+        identity: buildProviderArchiveStateIdentity(message),
+        id: message.id,
+        providerFolder: message.providerFolder,
+        providerMessageId: message.providerMessageId,
+        imapUid: message.imapUid,
+        uidValidity: message.uidValidity,
+        labelIds: message.labelIds,
+        unread: message.unread,
+        flagged: message.flagged,
+      })),
+    );
+
+  const readCurrentProviderArchiveKnowledge = (mailboxId: InboxId) => {
+    const currentConnectionKey =
+      providerArchiveCurrentConnectionKeysRef.current[mailboxId] ?? null;
+    const knowledgeConnectionKey =
+      providerArchiveKnowledgeConnectionKeysRef.current[mailboxId] ?? null;
+    const currentConnectionEpoch =
+      providerArchiveConnectionEpochsRef.current[mailboxId] ?? 0;
+    const knowledgeConnectionEpoch =
+      providerArchiveKnowledgeConnectionEpochsRef.current[mailboxId] ?? 0;
+    const knowledgeIsCurrent =
+      currentConnectionKey !== null &&
+      currentConnectionKey === knowledgeConnectionKey &&
+      currentConnectionEpoch === knowledgeConnectionEpoch;
+
+    return {
+      capability: knowledgeIsCurrent
+        ? providerArchiveCapabilitiesRef.current[mailboxId] ?? "unknown"
+        : "unknown",
+      hasSnapshot:
+        knowledgeIsCurrent &&
+        providerArchiveSnapshotMailboxIdsRef.current.has(mailboxId),
+    } satisfies {
+      capability: ProviderArchiveCapability;
+      hasSnapshot: boolean;
+    };
+  };
+
+  const setProviderArchiveFolderStatusMessage = (
     mailboxId: InboxId,
-    options?: { startup?: boolean },
-  ): Promise<MailboxRefreshResult> => {
+    message: string,
+  ) => {
+    setProviderArchiveFolderStatusMessages((current) => ({
+      ...current,
+      [mailboxId]: message,
+    }));
+  };
+
+  const clearProviderArchiveFolderStatusMessage = (mailboxId: InboxId) => {
+    setProviderArchiveFolderStatusMessages((current) => {
+      if (!current[mailboxId]) {
+        return current;
+      }
+
+      const next = { ...current };
+      delete next[mailboxId];
+      return next;
+    });
+  };
+
+  const refreshProviderArchiveById = async (
+    mailboxId: InboxId,
+    reason: MailboxRefreshReason,
+  ): Promise<"applied" | "skipped" | "unavailable" | "failed"> => {
     if (!hasAuthenticatedMemberAuthority) {
+      return "skipped";
+    }
+
+    const rawManagedMailbox = savedManagedInboxes.find(
+      (mailbox) => mailbox.id === mailboxId,
+    );
+    const managedMailbox = rawManagedMailbox
+      ? cloneManagedWorkspaceInbox(rawManagedMailbox)
+      : null;
+    const liveProvider = resolveLiveInboxProvider(managedMailbox?.provider ?? null);
+
+    if (
+      !managedMailbox?.connected ||
+      managedMailbox.connectionStatus !== "connected" ||
+      !liveProvider
+    ) {
+      return "skipped";
+    }
+
+    const archiveKnowledge = readCurrentProviderArchiveKnowledge(mailboxId);
+    const archiveCapability = archiveKnowledge.capability;
+    const refreshPlan = resolveMailboxRefreshPlan({
+      reason,
+      inboxFetchInFlight:
+        syncingMailboxIdsRef.current.has(mailboxId) || syncingMailboxId === mailboxId,
+      archiveFetchInFlight:
+        providerArchiveFetchMailboxIdsRef.current.has(mailboxId),
+      hasArchiveSnapshot: archiveKnowledge.hasSnapshot,
+      archiveCapability,
+    });
+
+    if (!refreshPlan.shouldFetchArchive) {
+      if (reason === "archive_open" && archiveCapability === "unavailable") {
+        setProviderArchiveFolderStatusMessage(
+          mailboxId,
+          ARCHIVE_CAPABILITY_UNAVAILABLE_MESSAGE,
+        );
+      }
       return "skipped";
     }
 
@@ -39143,7 +39400,95 @@ export function WorkspaceShell({
       return "skipped";
     }
 
-    if (syncingMailboxIdsRef.current.has(mailboxId) || syncingMailboxId === mailboxId) {
+    const requestConnectionKey =
+      providerArchiveCurrentConnectionKeysRef.current[mailboxId] ?? null;
+    const requestConnectionEpoch =
+      providerArchiveConnectionEpochsRef.current[mailboxId] ?? 0;
+    const archiveStateVersionAtRequest =
+      readProviderArchiveStateVersion(mailboxId);
+    if (!requestConnectionKey) {
+      return "skipped";
+    }
+
+    providerArchiveFetchMailboxIdsRef.current.add(mailboxId);
+
+    try {
+      const archiveResponse = await fetchProviderArchive(managedMailbox.id);
+      if (
+        !shouldApplyProviderArchiveResponse({
+          requestConnectionKey,
+          currentConnectionKey:
+            providerArchiveCurrentConnectionKeysRef.current[mailboxId] ?? null,
+          requestConnectionEpoch,
+          currentConnectionEpoch:
+            providerArchiveConnectionEpochsRef.current[mailboxId] ?? 0,
+          archiveStateVersionAtRequest,
+          currentArchiveStateVersion:
+            readProviderArchiveStateVersion(mailboxId),
+        })
+      ) {
+        return "skipped";
+      }
+      const archiveSnapshotApplied =
+        archiveResponse.ok === true &&
+        applyProviderArchiveFetchSnapshot(
+          managedMailbox.id as InboxId,
+          liveProvider,
+          archiveResponse.folder,
+        );
+      const archiveSemantics = resolveProviderArchiveRefreshSemantics({
+        provider: managedMailbox.provider,
+        archiveResponse,
+        archiveSnapshotApplied,
+      });
+
+      if (archiveSemantics.capability !== "unknown") {
+        providerArchiveCapabilitiesRef.current = {
+          ...providerArchiveCapabilitiesRef.current,
+          [mailboxId]: archiveSemantics.capability,
+        };
+      }
+
+      if (archiveSnapshotApplied) {
+        providerArchiveSnapshotMailboxIdsRef.current.add(mailboxId);
+        clearProviderArchiveFolderStatusMessage(mailboxId);
+        return "applied";
+      }
+
+      setProviderArchiveFolderStatusMessage(
+        mailboxId,
+        archiveSemantics.capabilityMessage ??
+          archiveSemantics.mailboxSyncError ??
+          ARCHIVE_REFRESH_ERROR_MESSAGE,
+      );
+      return archiveSemantics.capability === "unavailable"
+        ? "unavailable"
+        : "failed";
+    } catch {
+      setProviderArchiveFolderStatusMessage(
+        mailboxId,
+        ARCHIVE_REFRESH_ERROR_MESSAGE,
+      );
+      return "failed";
+    } finally {
+      providerArchiveFetchMailboxIdsRef.current.delete(mailboxId);
+    }
+  };
+
+  const refreshMailboxById = async (
+    mailboxId: InboxId,
+    options?: { reason?: MailboxRefreshReason },
+  ): Promise<MailboxRefreshResult> => {
+    if (!hasAuthenticatedMemberAuthority) {
+      return "skipped";
+    }
+
+    if (
+      hasPendingProviderArchiveForMailbox(
+        providerArchivePendingKeys,
+        mailboxId,
+      )
+    ) {
       return "skipped";
     }
 
@@ -39167,6 +39512,27 @@ export function WorkspaceShell({
       return "skipped";
     }
 
+    const refreshReason = options?.reason ?? "mailbox_open";
+    const archiveKnowledge = readCurrentProviderArchiveKnowledge(mailboxId);
+    const refreshPlan = resolveMailboxRefreshPlan({
+      reason: refreshReason,
+      inboxFetchInFlight:
+        syncingMailboxIdsRef.current.has(mailboxId) || syncingMailboxId === mailboxId,
+      archiveFetchInFlight:
+        providerArchiveFetchMailboxIdsRef.current.has(mailboxId),
+      hasArchiveSnapshot: archiveKnowledge.hasSnapshot,
+      archiveCapability: archiveKnowledge.capability,
+    });
+    const startArchiveRefresh = () =>
+      refreshProviderArchiveById(mailboxId, refreshReason);
+
+    if (!refreshPlan.shouldFetchInbox) {
+      if (refreshPlan.shouldFetchArchive) {
+        void startArchiveRefresh();
+      }
+      return "skipped";
+    }
+
     syncingMailboxIdsRef.current.add(mailboxId);
     setSyncingMailboxId(mailboxId);
 	    clearMailboxSyncError(mailboxId);
@@ -39185,36 +39551,28 @@ export function WorkspaceShell({
           limit,
         });
       // Requested limit for diagnostic purposes (startup uses 20, normal uses default).
-      const diagnosticRequestedLimit: number | "default" = options?.startup ? 20 : "default";
-      const inboxFetchPromise = canUseGmailOAuthFetch
-        ? fetchGmailInbox({
-            mailboxId: managedMailbox.id,
-            focusPreferences: effectiveFocusPreferencesByMailbox[mailboxId],
-          })
-        : connectInboxWithImap(
-            buildCustomImapRefreshRequest(options?.startup ? 20 : undefined),
-          );
-      const archiveFetchPromise =
-        managedMailbox.connectionStatus === "connected"
-          ? fetchProviderArchive(managedMailbox.id)
-          : Promise.resolve(null);
-      const [initialInboxResponse, archiveResponse] = await Promise.all([
-        inboxFetchPromise,
-        archiveFetchPromise,
-      ]);
-      let response = initialInboxResponse;
-      const liveProvider = resolveLiveInboxProvider(managedMailbox.provider);
-      const archiveSnapshotApplied =
-        archiveResponse === null ||
-        (
-          archiveResponse.ok === true &&
-          liveProvider !== null &&
-          applyProviderArchiveFetchSnapshot(
-            managedMailbox.id as InboxId,
-            liveProvider,
-            archiveResponse.folder,
-          )
-        );
+      const isStartupRefresh = refreshReason === "startup";
+      const diagnosticRequestedLimit: number | "default" = isStartupRefresh
+        ? 20
+        : "default";
+      const { inboxPromise, archivePromise } = startIndependentMailboxFetches({
+        startInbox: () =>
+          canUseGmailOAuthFetch
+            ? fetchGmailInbox({
+                mailboxId: managedMailbox.id,
+                focusPreferences: effectiveFocusPreferencesByMailbox[mailboxId],
+              })
+            : connectInboxWithImap(
+                buildCustomImapRefreshRequest(isStartupRefresh ? 20 : undefined),
+              ),
+        startArchive: refreshPlan.shouldFetchArchive
+          ? startArchiveRefresh
+          : undefined,
+      });
+      // Archive owns its validation, state commit, error scope, and lock. It is
+      // deliberately not awaited by the Inbox path.
+      void archivePromise;
+      let response = await inboxPromise;
       // Snapshot of the first response before any quota retry overwrites it.
       const firstResponseOk = response.ok;
       const firstResponseCode = response.error?.code;
@@ -39388,22 +39746,9 @@ export function WorkspaceShell({
         },
       );
       clearUnreadOverridesForProviderMessages(messages);
-      const archiveRefreshSemantics = resolveProviderArchiveRefreshSemantics({
-        provider: managedMailbox.provider,
-        inboxFetchFullySucceeded: response.ok === true && !response.warning,
-        archiveResponse,
-        archiveSnapshotApplied,
-      });
-      if (archiveRefreshSemantics.capability !== "unknown") {
-        providerArchiveCapabilitiesRef.current = {
-          ...providerArchiveCapabilitiesRef.current,
-          [mailboxId]: archiveRefreshSemantics.capability,
-        };
-      }
       const refreshWarningMessage = resolveMailboxRefreshWarningMessage(response.warning);
       const refreshPresentation = resolveSuccessfulInboxRefreshPresentation({
         inboxWarningMessage: refreshWarningMessage,
-        archiveSemantics: archiveRefreshSemantics,
       });
       if (refreshPresentation.mailboxSyncError) {
         setMailboxSyncError(mailboxId, refreshPresentation.mailboxSyncError);
@@ -39449,7 +39794,15 @@ export function WorkspaceShell({
       return;
     }
 
-    await refreshMailboxById(activeMailbox.id);
+    await refreshMailboxById(activeMailbox.id, { reason: "manual" });
+  };
+
+  const handleOpenActiveMailboxArchive = () => {
+    if (!activeMailbox) {
+      return;
+    }
+
+    void refreshProviderArchiveById(activeMailbox.id, "archive_open");
   };
 
   useEffect(() => {
@@ -39483,7 +39836,9 @@ export function WorkspaceShell({
         try {
 	          setMailboxSyncFeedbackMessage(`Syncing ${mailboxTitle}`);
 
-          const refreshResult = await refreshMailboxById(mailboxId, { startup: true });
+          const refreshResult = await refreshMailboxById(mailboxId, {
+            reason: "startup",
+          });
           refreshResults.push(refreshResult);
           if (refreshResult === "failed") {
             setMailboxSyncError(
@@ -39545,7 +39900,7 @@ export function WorkspaceShell({
         ...prev,
         [mailboxId]: "↻ Retrying after startup…",
       }));
-      void refreshMailboxById(mailboxId as InboxId);
+      void refreshMailboxById(mailboxId as InboxId, { reason: "manual" });
     }
     // refreshMailboxById intentionally omitted from deps — it is a fresh closure on every
     // render; including it would cause infinite loops. The effect only fires on the
@@ -41875,7 +42230,9 @@ export function WorkspaceShell({
             }, 13000);
 
             try {
-              const result = await refreshMailboxById(mailboxId as InboxId);
+              const result = await refreshMailboxById(mailboxId as InboxId, {
+                reason: "manual",
+              });
 
               if (result === "skipped") {
                 // skipped = syncingMailboxIdsRef already has this id (startup sync
@@ -42106,6 +42463,10 @@ export function WorkspaceShell({
                   onOpenLinkedReview={openWorkspaceTarget}
                   onApplyProviderArchiveMutationSuccess={
                     applyProviderArchiveMutationSuccess
+                  }
+                  onArchiveFolderOpen={handleOpenActiveMailboxArchive}
+                  archiveFolderStatusMessage={
+                    providerArchiveFolderStatusMessages[activeMailbox.id] ?? null
                   }
                   onSyncMailbox={handleSyncActiveMailbox}
                   isSyncingMailbox={syncingMailboxId === activeMailbox.id}
