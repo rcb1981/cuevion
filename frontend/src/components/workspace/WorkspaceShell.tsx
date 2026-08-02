@@ -121,6 +121,14 @@ import {
 } from "../../lib/providerArchiveAction";
 import { buildProviderMessageActionTarget } from "../../lib/providerMessageAction";
 import {
+  resolveProviderArchiveRefreshSemantics,
+  resolveSuccessfulInboxRefreshPresentation,
+  summarizeStartupMailboxRefreshResults,
+  type MailboxRefreshResult,
+  type ProviderArchiveCapability,
+  type StartupSyncStatus,
+} from "../../lib/mailboxRefreshSemantics";
+import {
   createCollaborationThread,
   fetchCollaborationInvite,
   fetchParticipantCollaborationThreads,
@@ -25904,15 +25912,12 @@ function isExpectedProviderFolderSnapshot(
         );
 }
 
-type MailboxRefreshResult = "synced" | "skipped" | "failed" | "partial";
 type InboxRefreshIssue = {
   code?: string;
   stage?: string;
   message?: string;
   fetched_count?: number;
 };
-type StartupSyncStatus = "idle" | "running" | "done" | "partial_error";
-
 function savePendingOAuthManagedInbox(mailbox: ManagedWorkspaceInbox) {
   if (mailbox.provider !== "google") {
     return;
@@ -35391,6 +35396,11 @@ export function WorkspaceShell({
     useState<LearningLaunchRequest>(null);
   const [syncingMailboxId, setSyncingMailboxId] = useState<InboxId | null>(null);
   const syncingMailboxIdsRef = useRef<Set<InboxId>>(new Set());
+  // Provider Archive capability is runtime product state, not a sync error.
+  // "unavailable" means discovery found no single safe provider Archive folder.
+  const providerArchiveCapabilitiesRef = useRef<
+    Partial<Record<InboxId, ProviderArchiveCapability>>
+  >({});
   const startupSyncHasRunRef = useRef(false);
   const [startupSyncStatus, setStartupSyncStatus] =
     useState<StartupSyncStatus>("idle");
@@ -39205,10 +39215,6 @@ export function WorkspaceShell({
             archiveResponse.folder,
           )
         );
-      const archiveRefreshErrorMessage =
-        archiveSnapshotApplied
-          ? null
-          : "Archive could not be refreshed safely. Existing Archive messages were kept.";
       // Snapshot of the first response before any quota retry overwrites it.
       const firstResponseOk = response.ok;
       const firstResponseCode = response.error?.code;
@@ -39382,11 +39388,25 @@ export function WorkspaceShell({
         },
       );
       clearUnreadOverridesForProviderMessages(messages);
+      const archiveRefreshSemantics = resolveProviderArchiveRefreshSemantics({
+        provider: managedMailbox.provider,
+        inboxFetchFullySucceeded: response.ok === true && !response.warning,
+        archiveResponse,
+        archiveSnapshotApplied,
+      });
+      if (archiveRefreshSemantics.capability !== "unknown") {
+        providerArchiveCapabilitiesRef.current = {
+          ...providerArchiveCapabilitiesRef.current,
+          [mailboxId]: archiveRefreshSemantics.capability,
+        };
+      }
       const refreshWarningMessage = resolveMailboxRefreshWarningMessage(response.warning);
-      const providerRefreshMessage =
-        refreshWarningMessage ?? archiveRefreshErrorMessage;
-      if (providerRefreshMessage) {
-        setMailboxSyncError(mailboxId, providerRefreshMessage);
+      const refreshPresentation = resolveSuccessfulInboxRefreshPresentation({
+        inboxWarningMessage: refreshWarningMessage,
+        archiveSemantics: archiveRefreshSemantics,
+      });
+      if (refreshPresentation.mailboxSyncError) {
+        setMailboxSyncError(mailboxId, refreshPresentation.mailboxSyncError);
       } else {
         clearMailboxSyncError(mailboxId);
       }
@@ -39408,7 +39428,7 @@ export function WorkspaceShell({
         cacheRestored: 0,
         mergedCount: messagesForReactState.length,
       };
-	      return providerRefreshMessage ? "partial" : "synced";
+	      return refreshPresentation.result;
     } finally {
       syncingMailboxIdsRef.current.delete(mailboxId);
       setSyncingMailboxId((current) => (current === mailboxId ? null : current));
@@ -39445,7 +39465,7 @@ export function WorkspaceShell({
     let cancelled = false;
 
     const runStartupSync = async () => {
-      let didFailMailbox = false;
+      const refreshResults: MailboxRefreshResult[] = [];
 
 	      setStartupSyncStatus("running");
       setMailboxSyncFeedbackMessage("Refreshing connected inboxes...");
@@ -39464,15 +39484,14 @@ export function WorkspaceShell({
 	          setMailboxSyncFeedbackMessage(`Syncing ${mailboxTitle}`);
 
           const refreshResult = await refreshMailboxById(mailboxId, { startup: true });
+          refreshResults.push(refreshResult);
           if (refreshResult === "failed") {
-            didFailMailbox = true;
             setMailboxSyncError(
               mailboxId,
               "Refresh failed — reconnect this inbox in Settings.",
               { preserveExisting: true },
             );
 	          } else if (refreshResult === "partial") {
-            didFailMailbox = true;
             setMailboxSyncError(
               mailboxId,
               "Some older messages could not be refreshed.",
@@ -39480,7 +39499,7 @@ export function WorkspaceShell({
             );
 	          }
         } catch (error) {
-          didFailMailbox = true;
+          refreshResults.push("failed");
           setMailboxSyncError(
             mailboxId,
             error instanceof Error && error.message
@@ -39495,12 +39514,9 @@ export function WorkspaceShell({
         return;
       }
 
-	      setStartupSyncStatus(didFailMailbox ? "partial_error" : "done");
-      setMailboxSyncFeedbackMessage(
-        didFailMailbox
-          ? "Some inboxes could not be refreshed"
-          : "Inbox refresh complete",
-      );
+      const startupSummary = summarizeStartupMailboxRefreshResults(refreshResults);
+	      setStartupSyncStatus(startupSummary.status);
+      setMailboxSyncFeedbackMessage(startupSummary.feedbackMessage);
     };
 
     void runStartupSync();

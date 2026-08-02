@@ -667,6 +667,28 @@ async function run() {
       },
     });
 
+    nextResponse = response(409, {
+      ok: false,
+      error: {
+        code: "archive_folder_unavailable",
+        message: "raw provider folder discovery detail",
+      },
+    });
+    const attemptsBeforeUnavailableArchive = captured.length;
+    assert.deepEqual(await fetchProviderArchive(MAILBOX_ID), {
+      ok: false,
+      error: {
+        code: "archive_folder_unavailable",
+        message: "Could not complete this Archive request safely.",
+      },
+    });
+    assert.equal(
+      captured.length,
+      attemptsBeforeUnavailableArchive + 1,
+      "an unavailable Archive capability is returned without a client retry",
+    );
+    assertArchiveTransport("/api/inboxes/fetch-archive");
+
     nextResponse = response(403, {
       ok: false,
       error: {

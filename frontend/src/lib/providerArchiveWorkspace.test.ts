@@ -1,6 +1,152 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
+import {
+  ARCHIVE_CAPABILITY_UNAVAILABLE_MESSAGE,
+  ARCHIVE_REFRESH_ERROR_MESSAGE,
+  resolveProviderArchiveRefreshSemantics,
+  resolveSuccessfulInboxRefreshPresentation,
+  summarizeStartupMailboxRefreshResults,
+} from "./mailboxRefreshSemantics";
+
+const archiveFailure = (code: string) => ({
+  ok: false as const,
+  error: { code },
+});
+
+const unsupportedArchive = resolveProviderArchiveRefreshSemantics({
+  provider: "custom_imap",
+  inboxFetchFullySucceeded: true,
+  archiveResponse: archiveFailure("archive_folder_unavailable"),
+  archiveSnapshotApplied: false,
+});
+const unsupportedArchivePresentation =
+  resolveSuccessfulInboxRefreshPresentation({
+    inboxWarningMessage: null,
+    archiveSemantics: unsupportedArchive,
+  });
+
+assert.deepEqual(unsupportedArchive, {
+  capability: "unavailable",
+  capabilityMessage: ARCHIVE_CAPABILITY_UNAVAILABLE_MESSAGE,
+  preserveExistingArchive: true,
+  mailboxSyncError: null,
+  contributesPartial: false,
+  shouldRetryArchive: false,
+  fallbackFolderName: null,
+});
+assert.deepEqual(unsupportedArchivePresentation, {
+  result: "synced",
+  mailboxSyncError: null,
+});
+
+const existingArchive = Object.freeze([
+  Object.freeze({ id: "existing-archive-message", subject: "Keep exactly" }),
+]);
+const freshInbox = Object.freeze([
+  Object.freeze({ id: "fresh-inbox-message", subject: "Fresh Inbox" }),
+]);
+const refreshedCollections = {
+  Inbox: freshInbox,
+  Archive: unsupportedArchive.preserveExistingArchive
+    ? existingArchive
+    : Object.freeze([]),
+};
+assert.strictEqual(refreshedCollections.Inbox, freshInbox);
+assert.strictEqual(refreshedCollections.Archive, existingArchive);
+assert.deepEqual(refreshedCollections.Archive, existingArchive);
+
+for (const code of [
+  "archive_folder_ambiguous",
+  "archive_snapshot_failed",
+  "invalid_credentials",
+  "reconnect_required",
+  "archive_response_invalid",
+  "archive_fetch_failed",
+  "unknown_archive_failure",
+]) {
+  const semantics = resolveProviderArchiveRefreshSemantics({
+    provider: "custom_imap",
+    inboxFetchFullySucceeded: true,
+    archiveResponse: archiveFailure(code),
+    archiveSnapshotApplied: false,
+  });
+  assert.equal(semantics.capability, "unknown", `${code} is not a capability absence`);
+  assert.equal(semantics.mailboxSyncError, ARCHIVE_REFRESH_ERROR_MESSAGE);
+  assert.equal(semantics.contributesPartial, true);
+  assert.equal(
+    resolveSuccessfulInboxRefreshPresentation({
+      inboxWarningMessage: null,
+      archiveSemantics: semantics,
+    }).result,
+    "partial",
+  );
+}
+
+for (const code of ["archive_folder_unavailable", "gmail_fetch_failed"]) {
+  const gmailFailure = resolveProviderArchiveRefreshSemantics({
+    provider: "google",
+    inboxFetchFullySucceeded: true,
+    archiveResponse: archiveFailure(code),
+    archiveSnapshotApplied: false,
+  });
+  assert.equal(gmailFailure.capability, "unknown");
+  assert.equal(gmailFailure.contributesPartial, true);
+  assert.equal(gmailFailure.mailboxSyncError, ARCHIVE_REFRESH_ERROR_MESSAGE);
+}
+
+const malformedSuccessfulArchive = resolveProviderArchiveRefreshSemantics({
+  provider: "custom_imap",
+  inboxFetchFullySucceeded: true,
+  archiveResponse: { ok: true },
+  archiveSnapshotApplied: false,
+});
+assert.equal(malformedSuccessfulArchive.contributesPartial, true);
+assert.equal(malformedSuccessfulArchive.mailboxSyncError, ARCHIVE_REFRESH_ERROR_MESSAGE);
+
+const incompleteInboxWithUnavailableArchive =
+  resolveProviderArchiveRefreshSemantics({
+    provider: "custom_imap",
+    inboxFetchFullySucceeded: false,
+    archiveResponse: archiveFailure("archive_folder_unavailable"),
+    archiveSnapshotApplied: false,
+  });
+assert.equal(incompleteInboxWithUnavailableArchive.capability, "unknown");
+assert.equal(incompleteInboxWithUnavailableArchive.contributesPartial, true);
+assert.equal(
+  resolveSuccessfulInboxRefreshPresentation({
+    inboxWarningMessage: "Some older messages could not be refreshed.",
+    archiveSemantics: incompleteInboxWithUnavailableArchive,
+  }).result,
+  "partial",
+);
+
+const successfulGmailArchive = resolveProviderArchiveRefreshSemantics({
+  provider: "google",
+  inboxFetchFullySucceeded: true,
+  archiveResponse: { ok: true },
+  archiveSnapshotApplied: true,
+});
+const successfulGmailPresentation = resolveSuccessfulInboxRefreshPresentation({
+  inboxWarningMessage: null,
+  archiveSemantics: successfulGmailArchive,
+});
+const mixedMailboxStartup = summarizeStartupMailboxRefreshResults([
+  unsupportedArchivePresentation.result,
+  successfulGmailPresentation.result,
+]);
+assert.deepEqual(mixedMailboxStartup, {
+  status: "done",
+  feedbackMessage: "Inbox refresh complete",
+});
+assert.doesNotMatch(
+  `${unsupportedArchivePresentation.mailboxSyncError ?? ""} ${mixedMailboxStartup.feedbackMessage}`,
+  /quota|Some inboxes could not be refreshed/i,
+);
+assert.deepEqual(summarizeStartupMailboxRefreshResults(["failed"]), {
+  status: "partial_error",
+  feedbackMessage: "Some inboxes could not be refreshed",
+});
 
 const source = fs.readFileSync(
   path.resolve(__dirname, "../components/workspace/WorkspaceShell.tsx"),
@@ -176,6 +322,52 @@ assert.match(
 );
 assert.match(refresh, /applyProviderArchiveFetchSnapshot/);
 assert.match(refresh, /hasPendingProviderArchiveForMailbox/);
+assert.equal((refresh.match(/fetchProviderArchive\(/g) ?? []).length, 1);
+assert.match(
+  refresh,
+  /archiveResponse\.ok === true[\s\S]*applyProviderArchiveFetchSnapshot/,
+);
+assert.match(refresh, /resolveProviderArchiveRefreshSemantics\(\{/);
+assert.match(
+  refresh,
+  /inboxFetchFullySucceeded: response\.ok === true && !response\.warning/,
+);
+assert.match(refresh, /providerArchiveCapabilitiesRef\.current/);
+assert.match(refresh, /clearMailboxSyncError\(mailboxId\)/);
+assert.doesNotMatch(refresh, /All Mail|All Messages|archiveFolderName|fallbackFolder/);
+const failedInboxBranchIndex = refresh.indexOf("if (!response.ok)");
+const inboxApplyIndex = refresh.indexOf("applyLiveInboxMessagesToMailboxStore(");
+const archiveSemanticsIndex = refresh.indexOf(
+  "resolveProviderArchiveRefreshSemantics({",
+);
+assert.ok(failedInboxBranchIndex >= 0);
+assert.ok(failedInboxBranchIndex < inboxApplyIndex);
+assert.ok(inboxApplyIndex < archiveSemanticsIndex);
+assert.match(
+  refresh.slice(failedInboxBranchIndex, inboxApplyIndex),
+  /return "failed";/,
+);
+
+const startupRefresh = section(
+  "const runStartupSync = async",
+  "void runStartupSync();",
+);
+assert.match(startupRefresh, /refreshResults\.push\(refreshResult\)/);
+assert.match(startupRefresh, /refreshResults\.push\("failed"\)/);
+assert.match(startupRefresh, /summarizeStartupMailboxRefreshResults\(refreshResults\)/);
+
+const mobileRefresh = section(
+  "onSyncMailbox={async (mailboxId) =>",
+  "onComposeMessage=",
+);
+assert.match(
+  mobileRefresh,
+  /result === "synced" \|\| result === "partial"/,
+);
+assert.match(
+  mobileRefresh,
+  /result === "synced"[\s\S]*`✓ Refresh complete/,
+);
 
 assert.match(source, /filterLegacyArchiveHydration<MailMessage>/);
 assert.match(source, /mergeLegacyArchiveStorage/);
