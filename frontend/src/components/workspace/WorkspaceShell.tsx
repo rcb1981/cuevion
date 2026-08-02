@@ -196,6 +196,23 @@ import {
   type LiveInboxProvider,
   type LiveThreadIdentityContext,
 } from "../../lib/inboxEngine";
+import {
+  addPersistedMessageIdentityKeys,
+  getPersistedMessageIdentityKeys,
+  isPersistedMessageIdentityImap,
+  migrateLegacyImapOwnershipStateRecord,
+  migrateLegacyImapStateRecord,
+  migrateLegacyImapStateKeys,
+  migrateLegacyMailboxPrefixedImapStateKeys,
+  removePersistedMessageIdentityKeys,
+  removePersistedMessageStateValue,
+  resolvePersistedMessageOwnershipStateValue,
+  resolvePersistedMessageStateValue,
+  writePersistedMessageOwnershipStateValue,
+  writePersistedMessageStateValue,
+  type PersistedMessageIdentityCandidate,
+  type PersistedMessageIdentitySource,
+} from "../../lib/mailboxMessageIdentity";
 import { buildPriorityRuntimeSignalsForCandidates } from "../../lib/priorityRuntimeSignals";
 import { shouldAllowNormalPriority } from "../../lib/normalPriorityGate";
 import { buildNormalPriorityGateInput } from "../../lib/normalPriorityGateAdapter";
@@ -801,13 +818,7 @@ const contactRequestTopicOptions: ContactRequestTopic[] = [
 const getUnreadPreviewIds = (messages: Array<{ id: string; unread?: boolean }>) =>
   messages.filter((message) => message.unread).map((message) => message.id).slice(0, 8);
 
-type MessageIdentitySource = {
-  id?: string | null;
-  imapUid?: string | null;
-  subject?: string | null;
-  from?: string | null;
-  timestamp?: string | null;
-};
+type MessageIdentitySource = PersistedMessageIdentitySource;
 
 type MessageUnreadOverrideStore = Record<string, boolean>;
 type ManualLabelOverride =
@@ -818,9 +829,9 @@ type ManualLabelOverride =
   | "Business"
   | "Demo"
   | "Other";
-type ManualLabelOverrideStore = Partial<Record<string, ManualLabelOverride>>;
+type ManualLabelOverrideStore = Record<string, ManualLabelOverride>;
 type ManualOrganizerInclusionTarget = "demo" | "promo";
-type ManualOrganizerInclusionStore = Partial<Record<string, ManualOrganizerInclusionTarget>>;
+type ManualOrganizerInclusionStore = Record<string, ManualOrganizerInclusionTarget>;
 
 const manualLabelOverrideOptions: ManualLabelOverride[] = [
   "Promo",
@@ -872,18 +883,9 @@ function parseImapUidFromMessageId(messageId?: string | null) {
   return imapUid || null;
 }
 
-function getCanonicalMessageIdentityKey(message: MessageIdentitySource) {
-  if (message.imapUid) {
-    return `imap:${message.imapUid}`;
-  }
-
-  if (message.id) {
-    return `id:${message.id}`;
-  }
-
-  return `preview:${buildStablePreviewIdentity(message)}`;
-}
-
+// Transient matching keeps the established render/merge contract. Persisted
+// message state must use mailboxMessageIdentity.ts instead; it never treats a
+// bare IMAP UID or weak preview signature as state authority.
 function getCanonicalMessageIdentityKeys(message: MessageIdentitySource) {
   const keys: string[] = [];
 
@@ -904,20 +906,15 @@ function resolveManualLabelOverrideFromStore(
   overrides: ManualLabelOverrideStore,
   message: MessageIdentitySource,
 ) {
-  return getCanonicalMessageIdentityKeys(message)
-    .map((key) => overrides[key])
-    .find((override): override is ManualLabelOverride => Boolean(override));
+  return resolvePersistedMessageStateValue(overrides, message);
 }
 
 function resolveManualOrganizerInclusionFromStore(
   inclusions: ManualOrganizerInclusionStore,
   message: MessageIdentitySource,
 ) {
-  return getCanonicalMessageIdentityKeys(message)
-    .map((key) => inclusions[key])
-    .find((target): target is ManualOrganizerInclusionTarget =>
-      target === "demo" || target === "promo",
-    );
+  const target = resolvePersistedMessageStateValue(inclusions, message);
+  return target === "demo" || target === "promo" ? target : undefined;
 }
 
 function findMatchingMessageByIdentity<T>(
@@ -1013,33 +1010,7 @@ function resolveUnreadOverride(
   overrides: MessageUnreadOverrideStore,
   message: MessageIdentitySource,
 ) {
-  for (const key of getCanonicalMessageIdentityKeys(message)) {
-    if (Object.prototype.hasOwnProperty.call(overrides, key)) {
-      return overrides[key];
-    }
-  }
-
-  return undefined;
-}
-
-function isImapUnreadOverrideKey(key: string) {
-  return key.startsWith("imap:") || key.startsWith("imap-scoped:");
-}
-
-function removeImapUnreadOverrideEntries(overrides: MessageUnreadOverrideStore) {
-  const nextOverrides: MessageUnreadOverrideStore = {};
-  let changed = false;
-
-  Object.entries(overrides).forEach(([key, value]) => {
-    if (isImapUnreadOverrideKey(key)) {
-      changed = true;
-      return;
-    }
-
-    nextOverrides[key] = value;
-  });
-
-  return changed ? nextOverrides : overrides;
+  return resolvePersistedMessageStateValue(overrides, message);
 }
 
 type LearningLaunchRequest =
@@ -1125,19 +1096,23 @@ type MailMessageOwner = {
 type MailMessagePriorityScore = "low" | "medium" | "high";
 type MailMessageFocusSignal = "attention" | null;
 type ManualPriorityOverride = "priority" | "removed";
+type ManualPriorityOverrideStore = Record<string, ManualPriorityOverride>;
 type ManualPriorityUpdateOptions = { showConfirmation?: boolean };
 
 function resolveManualPriorityOverride(
-  overrides: Partial<Record<string, ManualPriorityOverride>>,
+  overrides: ManualPriorityOverrideStore,
   message: MessageIdentitySource,
 ) {
-  for (const key of getCanonicalMessageIdentityKeys(message)) {
-    if (Object.prototype.hasOwnProperty.call(overrides, key)) {
-      return overrides[key];
-    }
+  const persistedOverride = resolvePersistedMessageStateValue(overrides, message);
+  if (persistedOverride) {
+    return persistedOverride;
   }
 
-  if (message.id && Object.prototype.hasOwnProperty.call(overrides, message.id)) {
+  if (
+    !isPersistedMessageIdentityImap(message) &&
+    message.id &&
+    Object.prototype.hasOwnProperty.call(overrides, message.id)
+  ) {
     return overrides[message.id];
   }
 
@@ -6649,10 +6624,15 @@ function resolveMailboxTitleForCategory(
 }
 
 function resolveImplicitOwner(
-  messageId: string,
+  message: MessageIdentitySource,
   messageOwnershipInteractions: MessageOwnershipInteractionStore,
+  mailboxId?: InboxId,
 ): MailMessageOwner | undefined {
-  const ownershipEntry = messageOwnershipInteractions[messageId];
+  const ownershipEntry = resolvePersistedMessageOwnershipStateValue(
+    messageOwnershipInteractions,
+    message,
+    mailboxId ? { mailboxId } : undefined,
+  );
 
   if (!ownershipEntry || ownershipEntry.count <= 0) {
     return undefined;
@@ -7452,7 +7432,7 @@ function shouldDisplayMessageInFilteredFolderForWorkspaceMessage(
 
 function getMailboxReadyInboxMessagesForWorkspaceMailbox(
   mailboxCollections: MailboxCollections,
-  manualPriorityOverrides: Partial<Record<string, ManualPriorityOverride>>,
+  manualPriorityOverrides: ManualPriorityOverrideStore,
   manualLabelOverrides: ManualLabelOverrideStore,
   focusPreferences: UserConfig["focusPreferences"],
   options?: PriorityVisibilityOptions,
@@ -8608,7 +8588,7 @@ function normalizeMailMessage(
     mailboxStore,
   );
   const resolvedSignal = inferHeuristicSignal(message);
-  const owner = resolveImplicitOwner(message.id, messageOwnershipInteractions);
+  const owner = resolveImplicitOwner(message, messageOwnershipInteractions, mailboxId);
   const priorityScore = resolveMessagePriorityScore(
     categorization.category,
     owner,
@@ -9889,6 +9869,30 @@ function createEmptyMailboxCollections(): MailboxCollections {
     Spam: [],
     Trash: [],
   };
+}
+
+function buildPersistedMessageIdentityCandidates(
+  store: MailboxStore,
+): PersistedMessageIdentityCandidate[] {
+  return Object.entries(store).flatMap(([mailboxId, collections]) =>
+    canonicalFolderOrder.flatMap((folder) =>
+      collections[folder].map((message) => ({
+        message,
+        context: {
+          mailboxId,
+          provider:
+            message.threadIdentityContext?.provider ??
+            (message.imapUid ? "custom_imap" : null),
+          // Only provider folder context is safe here. Cuevion's local Inbox /
+          // Filtered placement is not an IMAP server locator.
+          folder:
+            message.providerFolder ?? message.threadIdentityContext?.folder ?? null,
+          uidValidity:
+            message.uidValidity ?? message.threadIdentityContext?.uidValidity ?? null,
+        },
+      })),
+    ),
+  );
 }
 
 function getMessageSignature(message: MailMessage) {
@@ -12956,7 +12960,7 @@ function MailboxView({
   ) => void;
   onLearnCategoryDecision: (senderAddress: string, category: CuevionMessageCategory) => void;
   onEnableAutoCategoryForSender: (senderAddress: string) => void;
-  onRecordMessageOwnershipInteraction: (messageId: string) => void;
+  onRecordMessageOwnershipInteraction: (message: MessageIdentitySource) => void;
   senderCategoryLearning: SenderCategoryLearningStore;
   messageOwnershipInteractions: MessageOwnershipInteractionStore;
   hasRealInternalCollaborationTeammates: boolean;
@@ -12978,7 +12982,7 @@ function MailboxView({
   aiSuggestionsEnabled: boolean;
   notificationNavigationRequest?: NotificationNavigationRequest | null;
   onConsumeNotificationNavigation?: (requestKey: number) => void;
-  manualPriorityOverrides: Partial<Record<string, ManualPriorityOverride>>;
+  manualPriorityOverrides: ManualPriorityOverrideStore;
   strictNormalPriorityAllowedMessageKeys: ReadonlySet<string>;
   priorityReasonCopyByMessageKey: Record<string, PriorityReasonCopy>;
   manualLabelOverrides: ManualLabelOverrideStore;
@@ -14050,7 +14054,7 @@ function MailboxView({
   const resolveManualLabelOverride = (message: MessageIdentitySource) =>
     resolveManualLabelOverrideFromStore(manualLabelOverrides, message);
   const isMessageSpamSuppressed = (message: MessageIdentitySource) =>
-    getCanonicalMessageIdentityKeys(message).some((key) => spamSuppressionKeySet.has(key));
+    getPersistedMessageIdentityKeys(message).some((key) => spamSuppressionKeySet.has(key));
   const getSpamSuppressionFilteredMailboxCollections = (
     collections: MailboxCollections,
   ): MailboxCollections => ({
@@ -18929,7 +18933,10 @@ function MailboxView({
         suggestion: undefined,
       }));
       onLearnCategoryDecision(senderAddress, proposedCategory);
-      onRecordMessageOwnershipInteraction(messageId);
+      const ownershipMessage = getMessageById(messageId);
+      if (ownershipMessage) {
+        onRecordMessageOwnershipInteraction(ownershipMessage);
+      }
       setResolvingSuggestionIds((current) =>
         current.filter((currentMessageId) => currentMessageId !== messageId),
       );
@@ -18966,7 +18973,10 @@ function MailboxView({
         behaviorSuggestionDismissed: true,
       }));
       onEnableAutoCategoryForSender(senderAddress);
-      onRecordMessageOwnershipInteraction(messageId);
+      const ownershipMessage = getMessageById(messageId);
+      if (ownershipMessage) {
+        onRecordMessageOwnershipInteraction(ownershipMessage);
+      }
       setResolvingBehaviorSuggestionIds((current) =>
         current.filter((currentMessageId) => currentMessageId !== messageId),
       );
@@ -19061,7 +19071,10 @@ function MailboxView({
     // range anchor to the clicked message.
     setSelectionState([messageId], messageId, messageId);
     setIsFullMessageOpen(Boolean(options?.openFull));
-    onRecordMessageOwnershipInteraction(messageId);
+    const ownershipMessage = getMessageById(messageId);
+    if (ownershipMessage) {
+      onRecordMessageOwnershipInteraction(ownershipMessage);
+    }
   };
 
   const moveMessagesAcrossWorkspace = (
@@ -34323,6 +34336,22 @@ export function WorkspaceShell({
 	      return onboardingSeed;
 	    }
   });
+  const knownLegacyImapMailboxIds = savedManagedInboxes
+    .filter((mailbox) => isImapCredentialsProvider(mailbox.provider))
+    .map((mailbox) => mailbox.id)
+    .sort();
+  const knownLegacyNonImapMailboxIds = savedManagedInboxes
+    .filter((mailbox) => !isImapCredentialsProvider(mailbox.provider))
+    .map((mailbox) => mailbox.id)
+    .sort();
+  const knownLegacyMailboxKey = [
+    `imap:${knownLegacyImapMailboxIds.join("\u0000")}`,
+    `other:${knownLegacyNonImapMailboxIds.join("\u0000")}`,
+  ].join("\u0001");
+  const legacyImapMigrationOptions = {
+    knownImapMailboxIds: knownLegacyImapMailboxIds,
+    knownNonImapMailboxIds: knownLegacyNonImapMailboxIds,
+  } as const;
   const [mailboxCredentialStatuses, setMailboxCredentialStatuses] =
     useState<MailboxCredentialStatusStore>({});
   const auth0WorkspaceStorageScope =
@@ -34864,9 +34893,7 @@ export function WorkspaceShell({
       }
 
       try {
-        return removeImapUnreadOverrideEntries(
-          JSON.parse(storedValue) as MessageUnreadOverrideStore,
-        );
+        return JSON.parse(storedValue) as MessageUnreadOverrideStore;
       } catch {
         return {};
       }
@@ -34916,15 +34943,11 @@ export function WorkspaceShell({
     }
 
     setMessageUnreadOverrides((current: MessageUnreadOverrideStore) => {
-      const nextOverrides = { ...current };
-
-      messages.forEach((message) => {
-        getCanonicalMessageIdentityKeys(message).forEach((key) => {
-          nextOverrides[key] = unread;
-        });
-      });
-
-      return nextOverrides;
+      return messages.reduce<MessageUnreadOverrideStore>(
+        (nextOverrides, message) =>
+          writePersistedMessageStateValue(nextOverrides, message, unread),
+        current,
+      );
     });
   };
   const clearUnreadOverridesForProviderMessages = (
@@ -34933,7 +34956,7 @@ export function WorkspaceShell({
     const providerStateKeys = new Set(
       messages
         .filter((message) => typeof message.unread === "boolean")
-        .flatMap((message) => getCanonicalMessageIdentityKeys(message)),
+        .flatMap((message) => getPersistedMessageIdentityKeys(message)),
     );
 
     if (providerStateKeys.size === 0) {
@@ -34942,16 +34965,24 @@ export function WorkspaceShell({
 
     setMessageUnreadOverrides((current: MessageUnreadOverrideStore) => {
       let changed = false;
-      const nextOverrides = { ...current };
+      const migratedOverrides = migrateLegacyImapStateRecord(
+        current,
+        buildPersistedMessageIdentityCandidates(mailboxStoreRef.current),
+        legacyImapMigrationOptions,
+      );
+      let nextOverrides = migratedOverrides;
 
       providerStateKeys.forEach((key) => {
         if (Object.prototype.hasOwnProperty.call(nextOverrides, key)) {
+          if (nextOverrides === migratedOverrides) {
+            nextOverrides = { ...migratedOverrides };
+          }
           delete nextOverrides[key];
           changed = true;
         }
       });
 
-      return changed ? nextOverrides : current;
+      return changed || migratedOverrides !== current ? nextOverrides : current;
     });
   };
   const buildMessageIdentityIndexes = <T extends MessageIdentitySource>(messages: T[]) => ({
@@ -36465,25 +36496,24 @@ export function WorkspaceShell({
       }
     });
   const [isApplyingFocusPreferences, setIsApplyingFocusPreferences] = useState(false);
-  const [manualPriorityOverrides, setManualPriorityOverrides] = useState<
-    Partial<Record<string, ManualPriorityOverride>>
-  >(() => {
-    if (typeof window === "undefined") {
-      return {};
-    }
+  const [manualPriorityOverrides, setManualPriorityOverrides] =
+    useState<ManualPriorityOverrideStore>(() => {
+      if (typeof window === "undefined") {
+        return {};
+      }
 
-    const storedValue = window.localStorage.getItem(manualPriorityOverridesStorageKey);
+      const storedValue = window.localStorage.getItem(manualPriorityOverridesStorageKey);
 
-    if (!storedValue) {
-      return {};
-    }
+      if (!storedValue) {
+        return {};
+      }
 
-    try {
-      return JSON.parse(storedValue) as Partial<Record<string, ManualPriorityOverride>>;
-    } catch {
-      return {};
-    }
-  });
+      try {
+        return JSON.parse(storedValue) as ManualPriorityOverrideStore;
+      } catch {
+        return {};
+      }
+    });
   const [priorityClearedKeys, setPriorityClearedKeys] = useState<string[]>(() => {
     if (typeof window === "undefined") {
       return [];
@@ -36575,7 +36605,9 @@ export function WorkspaceShell({
   );
   const isWorkspaceMessageSpamSuppressed = useCallback(
     (message: MessageIdentitySource) =>
-      getCanonicalMessageIdentityKeys(message).some((key) => spamSuppressionKeySet.has(key)),
+      getPersistedMessageIdentityKeys(message).some((key) =>
+        spamSuppressionKeySet.has(key),
+      ),
     [spamSuppressionKeySet],
   );
   const isGuestInviteUser = authenticatedUser?.userType === "guest";
@@ -36977,7 +37009,9 @@ export function WorkspaceShell({
   };
   const priorityClearedKeySet = new Set(priorityClearedKeys);
   const getPriorityClearedIdentityKeys = (mailboxId: InboxId, message: MessageIdentitySource) =>
-    getCanonicalMessageIdentityKeys(message).map((key) => `mailbox:${mailboxId}:${key}`);
+    getPersistedMessageIdentityKeys(message, { mailboxId }).map(
+      (key) => `mailbox:${mailboxId}:${key}`,
+    );
   const isPriorityMessageCleared = (mailboxId: InboxId, message: MessageIdentitySource) =>
     getPriorityClearedIdentityKeys(mailboxId, message).some((key) =>
       priorityClearedKeySet.has(key),
@@ -38538,15 +38572,14 @@ export function WorkspaceShell({
     // Now: always write the override unconditionally based on intent.
     const override: ManualPriorityOverride = shouldBePriority ? "priority" : "removed";
 
-    setManualPriorityOverrides((current) => {
-      const next = { ...current };
-
-      getCanonicalMessageIdentityKeys(sourceMessage).forEach((key) => {
-        next[key] = override;
-      });
-
-      return next;
-    });
+    setManualPriorityOverrides((current) =>
+      writePersistedMessageStateValue(
+        current,
+        sourceMessage,
+        override,
+        sourceLocation ? { mailboxId: sourceLocation.mailboxId } : undefined,
+      ),
+    );
 
     if (shouldBePriority) {
       if (sourceLocation) {
@@ -38555,7 +38588,11 @@ export function WorkspaceShell({
         );
 
         setPriorityClearedKeys((current) =>
-          current.filter((key) => !restoredKeys.has(key)),
+          migrateLegacyMailboxPrefixedImapStateKeys(
+            current,
+            buildPersistedMessageIdentityCandidates(mailboxStoreRef.current),
+            legacyImapMigrationOptions,
+          ).filter((key) => !restoredKeys.has(key)),
         );
       }
 
@@ -38588,9 +38625,14 @@ export function WorkspaceShell({
 
     const clearedKeys = getPriorityClearedIdentityKeys(mailboxId, sourceMessage);
 
-    setPriorityClearedKeys((current) =>
-      Array.from(new Set([...current, ...clearedKeys])),
-    );
+    setPriorityClearedKeys((current) => {
+      const migratedCurrent = migrateLegacyMailboxPrefixedImapStateKeys(
+        current,
+        buildPersistedMessageIdentityCandidates(mailboxStoreRef.current),
+        legacyImapMigrationOptions,
+      );
+      return Array.from(new Set([...migratedCurrent, ...clearedKeys]));
+    });
   };
 
   const handlePriorityListAction = (
@@ -38609,15 +38651,9 @@ export function WorkspaceShell({
     message: MessageIdentitySource,
     label: ManualLabelOverride,
   ) => {
-    setManualLabelOverrides((current) => {
-      const next = { ...current };
-
-      getCanonicalMessageIdentityKeys(message).forEach((key) => {
-        next[key] = label;
-      });
-
-      return next;
-    });
+    setManualLabelOverrides((current) =>
+      writePersistedMessageStateValue(current, message, label),
+    );
     setManualChangeConfirmationMessage(`Label set to ${label}`);
   };
 
@@ -38625,19 +38661,11 @@ export function WorkspaceShell({
     message: MessageIdentitySource,
     target: ManualOrganizerInclusionTarget | null,
   ) => {
-    setManualOrganizerInclusions((current) => {
-      const next = { ...current };
-
-      getCanonicalMessageIdentityKeys(message).forEach((key) => {
-        if (target) {
-          next[key] = target;
-        } else {
-          delete next[key];
-        }
-      });
-
-      return next;
-    });
+    setManualOrganizerInclusions((current) =>
+      target
+        ? writePersistedMessageStateValue(current, message, target)
+        : removePersistedMessageStateValue(current, message),
+    );
     setManualChangeConfirmationMessage(
       target
         ? `Shown in Organizer ${target === "demo" ? "Demo Inbox" : "Promo Inbox"}`
@@ -38650,13 +38678,9 @@ export function WorkspaceShell({
       return;
     }
 
-    setSpamSuppressionKeys((current) => {
-      const next = new Set(current);
-      messages.forEach((message) => {
-        getCanonicalMessageIdentityKeys(message).forEach((key) => next.add(key));
-      });
-      return Array.from(next);
-    });
+    setSpamSuppressionKeys((current) =>
+      addPersistedMessageIdentityKeys(current, messages),
+    );
   };
 
   const handleRemoveSpamSuppression = (messages: MessageIdentitySource[]) => {
@@ -38664,12 +38688,8 @@ export function WorkspaceShell({
       return;
     }
 
-    const identityKeysToRemove = new Set(
-      messages.flatMap((message) => getCanonicalMessageIdentityKeys(message)),
-    );
-
     setSpamSuppressionKeys((current) =>
-      current.filter((key) => !identityKeysToRemove.has(key)),
+      removePersistedMessageIdentityKeys(current, messages),
     );
   };
 
@@ -39155,31 +39175,31 @@ export function WorkspaceShell({
     }, 260);
   };
 
-  const handleRecordMessageOwnershipInteraction = (messageId: string) => {
-    if (!messageId || !currentWorkspaceUserId) {
+  const handleRecordMessageOwnershipInteraction = (
+    message: MessageIdentitySource,
+  ) => {
+    if (!currentWorkspaceUserId) {
       return;
     }
 
     setMessageOwnershipInteractions((current) => {
-      const existingEntry = current[messageId];
-
-      if (existingEntry?.userId === currentWorkspaceUserId) {
-        return {
-          ...current,
-          [messageId]: {
-            userId: currentWorkspaceUserId,
-            count: existingEntry.count + 1,
-          },
-        };
-      }
-
-      return {
-        ...current,
-        [messageId]: {
-          userId: currentWorkspaceUserId,
-          count: 1,
-        },
-      };
+      const existingEntry = resolvePersistedMessageOwnershipStateValue(
+        current,
+        message,
+      );
+      return writePersistedMessageOwnershipStateValue(
+        current,
+        message,
+        existingEntry?.userId === currentWorkspaceUserId
+          ? {
+              userId: currentWorkspaceUserId,
+              count: existingEntry.count + 1,
+            }
+          : {
+              userId: currentWorkspaceUserId,
+              count: 1,
+            },
+      );
     });
   };
 
@@ -40642,9 +40662,7 @@ export function WorkspaceShell({
 
     try {
       setMessageUnreadOverrides(
-        removeImapUnreadOverrideEntries(
-          JSON.parse(storedValue) as MessageUnreadOverrideStore,
-        ),
+        JSON.parse(storedValue) as MessageUnreadOverrideStore,
       );
     } catch {
       setMessageUnreadOverrides({});
@@ -40665,7 +40683,7 @@ export function WorkspaceShell({
 
     try {
       setManualPriorityOverrides(
-        JSON.parse(storedValue) as Partial<Record<string, ManualPriorityOverride>>,
+        JSON.parse(storedValue) as ManualPriorityOverrideStore,
       );
     } catch {
       setManualPriorityOverrides({});
@@ -40765,6 +40783,83 @@ export function WorkspaceShell({
       setSpamSuppressionKeys([]);
     }
   }, [spamSuppressionStorageKey]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    // The folder-persistence effects immediately above hydrate synchronously from
+    // localStorage but commit React state asynchronously. Defer one task, then
+    // rerun when the workspace store changes. Zero-candidate legacy values remain
+    // inactive pending hydration; ambiguity is discarded and never fan-outs.
+    const migrationTimer = window.setTimeout(() => {
+      const candidates = buildPersistedMessageIdentityCandidates(
+        mailboxStoreRef.current,
+      );
+      setMessageUnreadOverrides((current) =>
+        migrateLegacyImapStateRecord(
+          current,
+          candidates,
+          legacyImapMigrationOptions,
+        ),
+      );
+      setManualPriorityOverrides((current) =>
+        migrateLegacyImapStateRecord(
+          current,
+          candidates,
+          legacyImapMigrationOptions,
+        ),
+      );
+      setPriorityClearedKeys((current) =>
+        migrateLegacyMailboxPrefixedImapStateKeys(
+          current,
+          candidates,
+          legacyImapMigrationOptions,
+        ),
+      );
+      setManualLabelOverrides((current) =>
+        migrateLegacyImapStateRecord(
+          current,
+          candidates,
+          legacyImapMigrationOptions,
+        ),
+      );
+      setManualOrganizerInclusions((current) =>
+        migrateLegacyImapStateRecord(
+          current,
+          candidates,
+          legacyImapMigrationOptions,
+        ),
+      );
+      setSpamSuppressionKeys((current) =>
+        migrateLegacyImapStateKeys(
+          current,
+          candidates,
+          legacyImapMigrationOptions,
+        ),
+      );
+      setMessageOwnershipInteractions((current) =>
+        migrateLegacyImapOwnershipStateRecord(
+          current,
+          candidates,
+          legacyImapMigrationOptions,
+        ),
+      );
+    }, 0);
+
+    return () => window.clearTimeout(migrationTimer);
+  }, [
+    mailboxOrderKey,
+    mailboxStore,
+    manualLabelOverridesStorageKey,
+    manualOrganizerInclusionsStorageKey,
+    manualPriorityOverridesStorageKey,
+    messageUnreadOverridesStorageKey,
+    knownLegacyMailboxKey,
+    priorityClearedStorageKey,
+    spamSuppressionStorageKey,
+  ]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
