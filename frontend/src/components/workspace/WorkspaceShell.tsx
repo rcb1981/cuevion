@@ -121,6 +121,11 @@ import {
   resolveExactGmailArchiveMutationTarget,
   type ProviderArchiveCandidate,
 } from "../../lib/providerArchiveAction";
+import {
+  PROVIDER_ARCHIVE_INVALID_SOURCE_MESSAGE,
+  resolveProviderArchivePreflightBlock,
+  type ProviderArchiveInvalidSourceReason,
+} from "../../lib/providerArchivePreflight";
 import { buildProviderMessageActionTarget } from "../../lib/providerMessageAction";
 import {
   ARCHIVE_CAPABILITY_UNAVAILABLE_MESSAGE,
@@ -19982,9 +19987,16 @@ function MailboxView({
     );
   };
 
-  const showProviderArchiveBlockedMessage = () => {
+  const showProviderArchiveBlockedMessage = (
+    invalidSourceReason: ProviderArchiveInvalidSourceReason,
+  ) => {
+    const block = resolveProviderArchivePreflightBlock({
+      invalidSourceReason,
+      isGmailArchiveReconciliationRunning: false,
+      hasPendingArchiveMutation: false,
+    });
     setMailboxActionToastMessage(
-      "Archive needs one exact connected Inbox message with provider identity.",
+      block?.message ?? PROVIDER_ARCHIVE_INVALID_SOURCE_MESSAGE,
     );
   };
 
@@ -20028,20 +20040,32 @@ function MailboxView({
       return;
     }
 
-    if (
-      messageIds.length !== 1 ||
-      isSharedView ||
-      activeSmartFolder ||
-      isSyncingMailbox ||
-      sourceLocations.some(
+    const invalidEntryPointReason: ProviderArchiveInvalidSourceReason | null =
+      messageIds.length !== 1
+        ? "selection"
+        : isSharedView || activeSmartFolder
+          ? "mailbox"
+          : sourceLocations.some((location) => location?.folder !== "Inbox")
+            ? "folder"
+            : null;
+    if (invalidEntryPointReason) {
+      closeMenus();
+      showProviderArchiveBlockedMessage(invalidEntryPointReason);
+      return;
+    }
+
+    const reconciliationPreflightBlock = resolveProviderArchivePreflightBlock({
+      invalidSourceReason: null,
+      isGmailArchiveReconciliationRunning: sourceLocations.some(
         (location) =>
           location !== null &&
           isGmailArchiveReconciliationRunning(location.mailboxId),
-      ) ||
-      sourceLocations.some((location) => location?.folder !== "Inbox")
-    ) {
+      ),
+      hasPendingArchiveMutation: false,
+    });
+    if (reconciliationPreflightBlock) {
       closeMenus();
-      showProviderArchiveBlockedMessage();
+      setMailboxActionToastMessage(reconciliationPreflightBlock.message);
       return;
     }
 
@@ -20054,7 +20078,7 @@ function MailboxView({
       !isProviderAuthoritativeArchiveMailbox(sourceManagedMailbox)
     ) {
       closeMenus();
-      showProviderArchiveBlockedMessage();
+      showProviderArchiveBlockedMessage("mailbox");
       return;
     }
 
@@ -20070,7 +20094,7 @@ function MailboxView({
       sourceMessage.serverMailboxId !== sourceManagedMailbox.id
     ) {
       closeMenus();
-      showProviderArchiveBlockedMessage();
+      showProviderArchiveBlockedMessage("mailbox");
       return;
     }
 
@@ -20089,12 +20113,12 @@ function MailboxView({
     if (sourceManagedMailbox.provider === "google") {
       if (!gmailArchiveResolution) {
         closeMenus();
-        showProviderArchiveBlockedMessage();
+        showProviderArchiveBlockedMessage("provider_identity");
         return;
       }
     } else if (sourceMessage.providerFolder !== "INBOX") {
       closeMenus();
-      showProviderArchiveBlockedMessage();
+      showProviderArchiveBlockedMessage("folder");
       return;
     }
 
@@ -20112,16 +20136,19 @@ function MailboxView({
       buildProviderArchiveMutationTarget(candidate);
     if (!target.ok) {
       closeMenus();
-      showProviderArchiveBlockedMessage();
+      showProviderArchiveBlockedMessage("provider_identity");
       return;
     }
-    if (
-      hasPendingProviderArchiveForMailbox(
+    const pendingPreflightBlock = resolveProviderArchivePreflightBlock({
+      invalidSourceReason: null,
+      isGmailArchiveReconciliationRunning: false,
+      hasPendingArchiveMutation: hasPendingProviderArchiveForMailbox(
         providerArchivePendingKeys,
         sourceManagedMailbox.id,
-      )
-    ) {
-      setMailboxActionToastMessage("Archive is already in progress for this mailbox.");
+      ),
+    });
+    if (pendingPreflightBlock) {
+      setMailboxActionToastMessage(pendingPreflightBlock.message);
       closeMenus();
       return;
     }
@@ -20167,7 +20194,7 @@ function MailboxView({
       if (result.reason === "already_pending") {
         setMailboxActionToastMessage("Archive is already in progress for this message.");
       } else {
-        showProviderArchiveBlockedMessage();
+        showProviderArchiveBlockedMessage("provider_identity");
       }
       return;
     }

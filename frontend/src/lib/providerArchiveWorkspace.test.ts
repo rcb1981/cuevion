@@ -2,6 +2,22 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import {
+  buildProviderArchiveMutationTarget,
+  createProviderArchiveCoordinator,
+  executeProviderArchiveAction,
+  hasPendingProviderArchiveForMailbox,
+  type ProviderArchiveCandidate,
+  type ProviderArchiveMutationRequest,
+  type ProviderArchiveMutationResponse,
+} from "./providerArchiveAction";
+import {
+  PROVIDER_ARCHIVE_INVALID_SOURCE_MESSAGE,
+  PROVIDER_ARCHIVE_PENDING_MAILBOX_MESSAGE,
+  PROVIDER_ARCHIVE_RECONCILIATION_MESSAGE,
+  resolveProviderArchivePreflightBlock,
+  type ProviderArchiveInvalidSourceReason,
+} from "./providerArchivePreflight";
+import {
   ARCHIVE_CAPABILITY_UNAVAILABLE_MESSAGE,
   ARCHIVE_REFRESH_ERROR_MESSAGE,
   createGmailInboxAuthority,
@@ -19,6 +35,122 @@ const archiveFailure = (code: string) => ({
   ok: false as const,
   error: { code },
 });
+
+const exactGmailArchiveCandidate: ProviderArchiveCandidate = {
+  provider: "google",
+  mailboxId: "gmail-sync-mailbox",
+  folder: "Inbox",
+  providerMessageId: "gmail-sync-provider-message",
+};
+const exactImapArchiveCandidate: ProviderArchiveCandidate = {
+  provider: "custom_imap",
+  mailboxId: "imap-sync-mailbox",
+  folder: "INBOX",
+  imapUid: "42",
+  uidValidity: "900",
+};
+
+function resolveCandidatePreflight(
+  candidate: ProviderArchiveCandidate,
+  overrides: {
+    invalidSourceReason?: ProviderArchiveInvalidSourceReason;
+    isGmailArchiveReconciliationRunning?: boolean;
+    hasPendingArchiveMutation?: boolean;
+  } = {},
+) {
+  const target = buildProviderArchiveMutationTarget(candidate);
+  const targetInvalidSourceReason: ProviderArchiveInvalidSourceReason | null =
+    target.ok
+      ? null
+      : target.reason === "invalid_mailbox_id"
+        ? "mailbox"
+        : target.reason === "invalid_gmail_source_folder" ||
+            target.reason === "invalid_imap_source_folder"
+          ? "folder"
+          : "provider_identity";
+  return resolveProviderArchivePreflightBlock({
+    invalidSourceReason:
+      overrides.invalidSourceReason ?? targetInvalidSourceReason,
+    isGmailArchiveReconciliationRunning:
+      overrides.isGmailArchiveReconciliationRunning ?? false,
+    hasPendingArchiveMutation:
+      overrides.hasPendingArchiveMutation ?? false,
+  });
+}
+
+const gmailSyncPresentation = {
+  isSyncingMailbox: true,
+  candidate: exactGmailArchiveCandidate,
+};
+const imapSyncPresentation = {
+  isSyncingMailbox: true,
+  candidate: exactImapArchiveCandidate,
+};
+assert.equal(gmailSyncPresentation.isSyncingMailbox, true);
+assert.equal(imapSyncPresentation.isSyncingMailbox, true);
+assert.equal(resolveCandidatePreflight(gmailSyncPresentation.candidate), null);
+assert.equal(resolveCandidatePreflight(imapSyncPresentation.candidate), null);
+
+assert.deepEqual(
+  resolveCandidatePreflight(exactGmailArchiveCandidate, {
+    isGmailArchiveReconciliationRunning: true,
+  }),
+  {
+    reason: "reconciliation_running",
+    message: PROVIDER_ARCHIVE_RECONCILIATION_MESSAGE,
+  },
+);
+assert.deepEqual(
+  resolveCandidatePreflight(exactGmailArchiveCandidate, {
+    hasPendingArchiveMutation: true,
+  }),
+  {
+    reason: "mutation_pending",
+    message: PROVIDER_ARCHIVE_PENDING_MAILBOX_MESSAGE,
+  },
+);
+
+for (const [candidate, invalidSourceReason] of [
+  [
+    { ...exactGmailArchiveCandidate, providerMessageId: null },
+    "provider_identity",
+  ],
+  [{ ...exactGmailArchiveCandidate, folder: "Archive" }, "folder"],
+  [{ ...exactGmailArchiveCandidate, mailboxId: "" }, "mailbox"],
+] as const) {
+  assert.deepEqual(resolveCandidatePreflight(candidate), {
+    reason: "invalid_source",
+    invalidSourceReason,
+    message: PROVIDER_ARCHIVE_INVALID_SOURCE_MESSAGE,
+  });
+}
+for (const invalidSourceReason of [
+  "selection",
+  "folder",
+  "mailbox",
+] as const) {
+  assert.deepEqual(
+    resolveCandidatePreflight(exactGmailArchiveCandidate, {
+      invalidSourceReason,
+    }),
+    {
+      reason: "invalid_source",
+      invalidSourceReason,
+      message: PROVIDER_ARCHIVE_INVALID_SOURCE_MESSAGE,
+    },
+    invalidSourceReason,
+  );
+}
+assert.deepEqual(
+  resolveCandidatePreflight(
+    { ...exactGmailArchiveCandidate, providerMessageId: null },
+    { isGmailArchiveReconciliationRunning: true },
+  ),
+  {
+    reason: "reconciliation_running",
+    message: PROVIDER_ARCHIVE_RECONCILIATION_MESSAGE,
+  },
+);
 
 const plan = (
   reason: Parameters<typeof resolveMailboxRefreshPlan>[0]["reason"],
@@ -563,7 +695,28 @@ const archiveHandler = section(
   "async function archiveMessagesFromEntryPoint",
   "const archiveSelectedMessages",
 );
+const providerAuthoritativeMailbox = section(
+  "const isProviderAuthoritativeArchiveMailbox",
+  "const archiveMessagesLocally",
+);
+assert.match(providerAuthoritativeMailbox, /managedMailbox\?\.connected/);
+assert.match(
+  providerAuthoritativeMailbox,
+  /managedMailbox\.connectionStatus === "connected"/,
+);
+assert.match(
+  providerAuthoritativeMailbox,
+  /managedMailbox\.provider === "google"/,
+);
+assert.match(
+  providerAuthoritativeMailbox,
+  /managedMailbox\.provider === "custom_imap"/,
+);
 assert.match(archiveHandler, /executeProviderArchiveAction\(\{/);
+assert.equal(
+  (archiveHandler.match(/executeProviderArchiveAction\(\{/g) ?? []).length,
+  1,
+);
 assert.match(archiveHandler, /coordinator: providerArchiveCoordinator/);
 assert.match(
   archiveHandler,
@@ -575,8 +728,20 @@ assert.match(archiveHandler, /hasPendingProviderArchiveForMailbox/);
 assert.match(archiveHandler, /messageIds\.length !== 1/);
 assert.match(archiveHandler, /isSharedView/);
 assert.match(archiveHandler, /activeSmartFolder/);
-assert.match(archiveHandler, /isSyncingMailbox/);
+assert.doesNotMatch(
+  archiveHandler,
+  /isSyncingMailbox/,
+  "ordinary Gmail and custom-IMAP sync must not block an exact Archive action",
+);
 assert.match(archiveHandler, /location\?\.folder !== "Inbox"/);
+assert.match(
+  archiveHandler,
+  /const reconciliationPreflightBlock = resolveProviderArchivePreflightBlock\(\{[\s\S]*isGmailArchiveReconciliationRunning\(location\.mailboxId\)[\s\S]*setMailboxActionToastMessage\(reconciliationPreflightBlock\.message\)/,
+);
+assert.match(
+  archiveHandler,
+  /const pendingPreflightBlock = resolveProviderArchivePreflightBlock\(\{[\s\S]*hasPendingProviderArchiveForMailbox[\s\S]*setMailboxActionToastMessage\(pendingPreflightBlock\.message\)/,
+);
 assert.match(
   archiveHandler,
   /resolveExactGmailArchiveMutationTarget\(\{/,
@@ -594,7 +759,36 @@ const executeIndex = archiveHandler.indexOf(
   "const archivePromise = executeProviderArchiveAction",
 );
 const runningReconciliationGuardIndex = archiveHandler.indexOf(
-  "isGmailArchiveReconciliationRunning(location.mailboxId)",
+  "isGmailArchiveReconciliationRunning(",
+);
+const genericGuardIndex = archiveHandler.indexOf("messageIds.length !== 1");
+const sourceFolderGuardIndex = archiveHandler.indexOf(
+  'location?.folder !== "Inbox"',
+);
+const exactMailboxIndex = archiveHandler.indexOf(
+  "sourceMessage.serverMailboxId !== sourceManagedMailbox.id",
+);
+const exactTargetIndex = archiveHandler.indexOf(
+  "resolveExactGmailArchiveMutationTarget({",
+);
+const targetValidationIndex = archiveHandler.indexOf("if (!target.ok)");
+const reconciliationResolverIndex = archiveHandler.indexOf(
+  "const reconciliationPreflightBlock",
+);
+const pendingResolverIndex = archiveHandler.indexOf(
+  "const pendingPreflightBlock",
+);
+const pendingMailboxIndex = archiveHandler.indexOf(
+  "hasPendingProviderArchiveForMailbox",
+);
+const messageResolutionIndex = archiveHandler.indexOf("const messageId");
+const genericPreflightGuard = archiveHandler.slice(
+  genericGuardIndex,
+  reconciliationResolverIndex,
+);
+const reconciliationPreflightGuard = archiveHandler.slice(
+  reconciliationResolverIndex,
+  messageResolutionIndex,
 );
 const pendingVisibleIndex = archiveHandler.indexOf(
   "setPendingProviderArchiveKeys",
@@ -609,11 +803,45 @@ const pendingReleasedIndex = archiveHandler.indexOf(
   awaitIndex,
 );
 assert.ok(executeIndex >= 0);
+assert.ok(genericGuardIndex >= 0);
+assert.ok(genericGuardIndex < sourceFolderGuardIndex);
+assert.ok(sourceFolderGuardIndex < reconciliationResolverIndex);
 assert.ok(runningReconciliationGuardIndex >= 0);
-assert.ok(runningReconciliationGuardIndex < executeIndex);
+assert.match(
+  genericPreflightGuard,
+  /showProviderArchiveBlockedMessage\(invalidEntryPointReason\)/,
+);
+assert.doesNotMatch(genericPreflightGuard, /isGmailArchiveReconciliationRunning/);
+assert.ok(reconciliationResolverIndex < runningReconciliationGuardIndex);
+assert.ok(runningReconciliationGuardIndex < exactMailboxIndex);
+assert.match(
+  reconciliationPreflightGuard,
+  /setMailboxActionToastMessage\(reconciliationPreflightBlock\.message\)/,
+);
+assert.doesNotMatch(
+  reconciliationPreflightGuard,
+  /showProviderArchiveBlockedMessage/,
+);
+assert.ok(exactMailboxIndex < exactTargetIndex);
+assert.ok(exactTargetIndex < targetValidationIndex);
+assert.ok(targetValidationIndex < pendingResolverIndex);
+assert.ok(pendingResolverIndex < pendingMailboxIndex);
+assert.ok(pendingMailboxIndex < executeIndex);
+assert.match(
+  archiveHandler,
+  /if \(pendingPreflightBlock\) \{\s+setMailboxActionToastMessage\(pendingPreflightBlock\.message\);\s+closeMenus\(\);\s+return;/,
+);
 assert.ok(executeIndex < pendingVisibleIndex);
 assert.ok(pendingVisibleIndex < awaitIndex);
 assert.ok(awaitIndex < pendingReleasedIndex);
+assert.match(
+  archiveHandler,
+  /sourceMessage\.serverMailboxId !== sourceManagedMailbox\.id\s+\) \{\s+closeMenus\(\);\s+showProviderArchiveBlockedMessage\("mailbox"\);/,
+);
+assert.match(
+  archiveHandler,
+  /if \(sourceManagedMailbox\.provider === "google"\) \{\s+if \(!gmailArchiveResolution\) \{\s+closeMenus\(\);\s+showProviderArchiveBlockedMessage\("provider_identity"\);/,
+);
 const reconciliationIndex = archiveHandler.indexOf(
   "onReconcileGmailArchive(sourceManagedMailbox.id as InboxId)",
 );
@@ -1061,6 +1289,54 @@ async function flushReconciliationCleanup() {
   await Promise.resolve();
 }
 
+function gmailArchiveSuccessResponse(
+  request: ProviderArchiveMutationRequest,
+): ProviderArchiveMutationResponse {
+  if (!("messageId" in request)) {
+    throw new Error("Expected an exact Gmail Archive request");
+  }
+  const preview = {
+    id: "provider-race@example.test",
+    sender: "Sender",
+    subject: "Provider race",
+    snippet: "Provider body",
+    from: "sender@example.test",
+    to: "owner@example.test",
+    timestamp: "August 3 at 10:00",
+    createdAt: "2026-08-03T08:00:00.000Z",
+    body: ["Provider body"],
+  };
+  return {
+    ok: true,
+    status: "ok",
+    action: "archive",
+    mailboxId: request.mailboxId,
+    archivedMessageIdentity: {
+      serverMailboxId: request.mailboxId,
+      providerMessageId: request.messageId,
+      providerThreadId: "gmail-thread-race",
+      providerFolder: "Archive",
+      rfcMessageId: "provider-race@example.test",
+    },
+    delta: {
+      Inbox: {
+        removeProviderMessageId: request.messageId,
+      },
+      Archive: {
+        upsertMessage: {
+          ...preview,
+          serverMailboxId: request.mailboxId,
+          providerFolder: "Archive",
+          providerMessageId: request.messageId,
+          providerThreadId: "gmail-thread-race",
+          rfcMessageId: "provider-race@example.test",
+          labelIds: ["STARRED"],
+        },
+      },
+    },
+  };
+}
+
 async function verifyPreArchiveGmailInboxResponseIsRejected() {
   const authority = createGmailInboxAuthority();
   const generationAtFetchStart = authority.captureGeneration("mailbox-race");
@@ -1096,7 +1372,66 @@ async function verifyPreArchiveGmailInboxResponseIsRejected() {
     return "applied" as const;
   });
 
-  authority.confirmArchive("mailbox-race", "provider-race");
+  assert.equal(
+    authority.isCurrentGeneration("mailbox-race", generationAtFetchStart),
+    true,
+  );
+  const candidate: ProviderArchiveCandidate = {
+    provider: "google",
+    mailboxId: "mailbox-race",
+    folder: "Inbox",
+    providerMessageId: "provider-race",
+  };
+  const pendingMutation = deferred<ProviderArchiveMutationResponse>();
+  const pendingKeys = new Set<string>();
+  let mutationCalls = 0;
+  let mutationRequest: ProviderArchiveMutationRequest | null = null;
+  const coordinator = createProviderArchiveCoordinator({
+    pendingKeys,
+    mutate: (request) => {
+      mutationCalls += 1;
+      mutationRequest = request;
+      return pendingMutation.promise;
+    },
+  });
+  assert.equal(resolveCandidatePreflight(candidate), null);
+  const archiveExecution = executeProviderArchiveAction({
+    coordinator,
+    candidate,
+    applySuccess: () => {
+      authority.confirmArchive("mailbox-race", "provider-race");
+      return true;
+    },
+  });
+  assert.equal(mutationCalls, 1);
+  assert.equal(
+    hasPendingProviderArchiveForMailbox(pendingKeys, "mailbox-race"),
+    true,
+  );
+  assert.deepEqual(
+    resolveCandidatePreflight(candidate, {
+      hasPendingArchiveMutation: hasPendingProviderArchiveForMailbox(
+        pendingKeys,
+        "mailbox-race",
+      ),
+    }),
+    {
+      reason: "mutation_pending",
+      message: PROVIDER_ARCHIVE_PENDING_MAILBOX_MESSAGE,
+    },
+  );
+  assert.equal(mutationCalls, 1);
+  assert.ok(mutationRequest);
+  pendingMutation.resolve(gmailArchiveSuccessResponse(mutationRequest));
+  const archiveResult = await archiveExecution;
+  assert.equal(archiveResult.classification, "success");
+  assert.equal(archiveResult.applied, true);
+  assert.equal(mutationCalls, 1);
+  assert.equal(pendingKeys.size, 0);
+  assert.equal(
+    authority.isCurrentGeneration("mailbox-race", generationAtFetchStart),
+    false,
+  );
   pendingInbox.resolve([
     {
       serverMailboxId: "mailbox-race",
