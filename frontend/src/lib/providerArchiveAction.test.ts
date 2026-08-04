@@ -17,6 +17,9 @@ import {
   type ProviderArchiveMutationRequest,
   type ProviderArchiveMutationResponse,
 } from "./providerArchiveAction";
+import {
+  PROVIDER_ARCHIVE_CAPABILITY_UNAVAILABLE_MESSAGE,
+} from "./providerArchivePreflight";
 
 type Test = {
   name: string;
@@ -822,6 +825,121 @@ test("ordinary provider failures are classified without retry", async () => {
     JSON.stringify(result),
     /access_token_canary|refresh-token-canary/,
   );
+});
+
+test("custom IMAP Archive capability absence is explicit, sanitized, and never applied or retried", async () => {
+  const initialState = {
+    Inbox: [{ id: "inbox-must-remain" }],
+    Archive: [{ id: "archive-must-remain" }],
+  };
+  let state = initialState;
+  let calls = 0;
+  let applyCalls = 0;
+  const result = await executeProviderArchiveAction({
+    coordinator: createProviderArchiveCoordinator({
+      mutate: async () => {
+        calls += 1;
+        return {
+          ok: false,
+          error: {
+            code: "archive_folder_unavailable",
+            message: "raw provider capability detail must not escape",
+          },
+        };
+      },
+    }),
+    candidate: imapCandidate(),
+    applySuccess: () => {
+      applyCalls += 1;
+      state = { Inbox: [], Archive: [] };
+      return true;
+    },
+  });
+
+  assert.equal(result.classification, "capability_unavailable");
+  assert.equal(result.applied, false);
+  assert.equal(calls, 1);
+  assert.equal(applyCalls, 0);
+  assert.equal(state, initialState);
+  if (result.classification !== "capability_unavailable") return;
+  assert.deepEqual(result.response, {
+    ok: false,
+    error: {
+      code: "archive_folder_unavailable",
+      message: PROVIDER_ARCHIVE_CAPABILITY_UNAVAILABLE_MESSAGE,
+    },
+  });
+  assert.doesNotMatch(JSON.stringify(result), /raw provider capability detail/);
+});
+
+test("Gmail never accepts Archive folder absence as a capability outcome", async () => {
+  let calls = 0;
+  const result = await createProviderArchiveCoordinator({
+    mutate: async () => {
+      calls += 1;
+      return {
+        ok: false,
+        error: {
+          code: "archive_folder_unavailable",
+          message: "No safe Archive mailbox is available.",
+        },
+      };
+    },
+  }).archive(gmailCandidate());
+
+  assert.equal(result.classification, "ordinary_failure");
+  assert.equal(calls, 1);
+  assert.doesNotMatch(JSON.stringify(result), /archive_folder_unavailable/);
+});
+
+test("malformed Archive capability payloads remain ordinary failures", async () => {
+  const malformedResponses: unknown[] = [
+    { ok: true, error: { code: "archive_folder_unavailable", message: "x" } },
+    { ok: false, error: "archive_folder_unavailable" },
+    { ok: false, error: { code: "ARCHIVE_FOLDER_UNAVAILABLE", message: "x" } },
+    { ok: false, error: { message: "missing exact code" } },
+    { error: { code: "archive_folder_unavailable", message: "missing ok" } },
+    null,
+  ];
+
+  for (const response of malformedResponses) {
+    const result = await createProviderArchiveCoordinator({
+      mutate: async () => response as ProviderArchiveMutationResponse,
+    }).archive(imapCandidate());
+    assert.equal(result.classification, "ordinary_failure");
+  }
+});
+
+test("custom IMAP capability classification uses only the trusted request context and exact outcome fields", async () => {
+  const capabilityResponses: unknown[] = [
+    { ok: false, error: { code: "archive_folder_unavailable" } },
+    {
+      ok: false,
+      provider: "google",
+      status: "payload metadata is not provider authority",
+      error: {
+        code: "archive_folder_unavailable",
+        message: "raw detail",
+        provider: "google",
+      },
+    },
+  ];
+
+  for (const response of capabilityResponses) {
+    const result = await createProviderArchiveCoordinator({
+      mutate: async () => response as ProviderArchiveMutationResponse,
+    }).archive(imapCandidate());
+    assert.equal(result.classification, "capability_unavailable");
+    if (result.classification !== "capability_unavailable") continue;
+    assert.deepEqual(result.response, {
+      ok: false,
+      error: {
+        code: "archive_folder_unavailable",
+        message: PROVIDER_ARCHIVE_CAPABILITY_UNAVAILABLE_MESSAGE,
+      },
+    });
+    assert.doesNotMatch(JSON.stringify(result), /payload metadata|raw detail/);
+  }
 });
 
 test("an ok-shaped mutation without the strict success status is not success", async () => {

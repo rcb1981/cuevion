@@ -11,6 +11,7 @@ import {
   type ProviderArchiveMutationResponse,
 } from "./providerArchiveAction";
 import {
+  PROVIDER_ARCHIVE_CAPABILITY_UNAVAILABLE_MESSAGE,
   PROVIDER_ARCHIVE_INVALID_SOURCE_MESSAGE,
   PROVIDER_ARCHIVE_PENDING_MAILBOX_MESSAGE,
   PROVIDER_ARCHIVE_RECONCILIATION_MESSAGE,
@@ -55,6 +56,7 @@ function resolveCandidatePreflight(
   overrides: {
     invalidSourceReason?: ProviderArchiveInvalidSourceReason;
     isGmailArchiveReconciliationRunning?: boolean;
+    isProviderArchiveCapabilityUnavailable?: boolean;
     hasPendingArchiveMutation?: boolean;
   } = {},
 ) {
@@ -73,6 +75,8 @@ function resolveCandidatePreflight(
       overrides.invalidSourceReason ?? targetInvalidSourceReason,
     isGmailArchiveReconciliationRunning:
       overrides.isGmailArchiveReconciliationRunning ?? false,
+    isProviderArchiveCapabilityUnavailable:
+      overrides.isProviderArchiveCapabilityUnavailable ?? false,
     hasPendingArchiveMutation:
       overrides.hasPendingArchiveMutation ?? false,
   });
@@ -95,6 +99,53 @@ assert.deepEqual(
   resolveCandidatePreflight(exactGmailArchiveCandidate, {
     isGmailArchiveReconciliationRunning: true,
   }),
+  {
+    reason: "reconciliation_running",
+    message: PROVIDER_ARCHIVE_RECONCILIATION_MESSAGE,
+  },
+);
+assert.deepEqual(
+  resolveCandidatePreflight(exactImapArchiveCandidate, {
+    isProviderArchiveCapabilityUnavailable: true,
+  }),
+  {
+    reason: "capability_unavailable",
+    message: PROVIDER_ARCHIVE_CAPABILITY_UNAVAILABLE_MESSAGE,
+  },
+);
+assert.deepEqual(
+  resolveCandidatePreflight(exactImapArchiveCandidate, {
+    isProviderArchiveCapabilityUnavailable: true,
+    hasPendingArchiveMutation: true,
+  }),
+  {
+    reason: "capability_unavailable",
+    message: PROVIDER_ARCHIVE_CAPABILITY_UNAVAILABLE_MESSAGE,
+  },
+);
+assert.deepEqual(
+  resolveCandidatePreflight(
+    { ...exactImapArchiveCandidate, imapUid: null },
+    {
+      isProviderArchiveCapabilityUnavailable: true,
+      hasPendingArchiveMutation: true,
+    },
+  ),
+  {
+    reason: "invalid_source",
+    invalidSourceReason: "provider_identity",
+    message: PROVIDER_ARCHIVE_INVALID_SOURCE_MESSAGE,
+  },
+);
+assert.deepEqual(
+  resolveCandidatePreflight(
+    { ...exactImapArchiveCandidate, imapUid: null },
+    {
+      isGmailArchiveReconciliationRunning: true,
+      isProviderArchiveCapabilityUnavailable: true,
+      hasPendingArchiveMutation: true,
+    },
+  ),
   {
     reason: "reconciliation_running",
     message: PROVIDER_ARCHIVE_RECONCILIATION_MESSAGE,
@@ -649,6 +700,15 @@ const successfulGmailArchive = resolveProviderArchiveRefreshSemantics({
   archiveResponse: { ok: true },
   archiveSnapshotApplied: true,
 });
+const successfulCustomImapArchive = resolveProviderArchiveRefreshSemantics({
+  provider: "custom_imap",
+  archiveResponse: { ok: true },
+  archiveSnapshotApplied: true,
+});
+assert.equal(successfulCustomImapArchive.capability, "available");
+assert.equal(successfulCustomImapArchive.capabilityMessage, null);
+assert.equal(successfulCustomImapArchive.mailboxSyncError, null);
+assert.equal(successfulCustomImapArchive.contributesPartial, false);
 const successfulGmailPresentation = resolveSuccessfulInboxRefreshPresentation({
   inboxWarningMessage: null,
   archiveSemantics: successfulGmailArchive,
@@ -744,6 +804,10 @@ assert.match(
 );
 assert.match(
   archiveHandler,
+  /sourceManagedMailbox\.provider === "custom_imap" &&\s+isProviderArchiveCapabilityUnavailable\(sourceLocation\.mailboxId\)/,
+);
+assert.match(
+  archiveHandler,
   /resolveExactGmailArchiveMutationTarget\(\{/,
 );
 assert.doesNotMatch(
@@ -780,6 +844,9 @@ const pendingResolverIndex = archiveHandler.indexOf(
 );
 const pendingMailboxIndex = archiveHandler.indexOf(
   "hasPendingProviderArchiveForMailbox",
+);
+const capabilityUnavailableIndex = archiveHandler.indexOf(
+  "isProviderArchiveCapabilityUnavailable(sourceLocation.mailboxId)",
 );
 const messageResolutionIndex = archiveHandler.indexOf("const messageId");
 const genericPreflightGuard = archiveHandler.slice(
@@ -824,6 +891,8 @@ assert.doesNotMatch(
 );
 assert.ok(exactMailboxIndex < exactTargetIndex);
 assert.ok(exactTargetIndex < targetValidationIndex);
+assert.ok(targetValidationIndex < capabilityUnavailableIndex);
+assert.ok(capabilityUnavailableIndex < pendingMailboxIndex);
 assert.ok(targetValidationIndex < pendingResolverIndex);
 assert.ok(pendingResolverIndex < pendingMailboxIndex);
 assert.ok(pendingMailboxIndex < executeIndex);
@@ -848,9 +917,33 @@ const reconciliationIndex = archiveHandler.indexOf(
 const mutationSettledIndex = archiveHandler.indexOf(
   "onProviderArchiveMutationSettled(sourceManagedMailbox.id as InboxId)",
 );
+const capabilityResultIndex = archiveHandler.indexOf(
+  'result.classification === "capability_unavailable"',
+);
+const uncertainResultIndex = archiveHandler.indexOf(
+  'result.classification === "uncertain"',
+);
 assert.ok(pendingReleasedIndex < reconciliationIndex);
 assert.ok(pendingReleasedIndex < mutationSettledIndex);
 assert.ok(mutationSettledIndex < reconciliationIndex);
+assert.ok(mutationSettledIndex < capabilityResultIndex);
+assert.ok(capabilityResultIndex < uncertainResultIndex);
+const capabilityResultBranch = archiveHandler.slice(
+  capabilityResultIndex,
+  uncertainResultIndex,
+);
+assert.match(
+  capabilityResultBranch,
+  /onProviderArchiveCapabilityUnavailable\([\s\S]*sourceManagedMailbox\.id/,
+);
+assert.match(
+  capabilityResultBranch,
+  /PROVIDER_ARCHIVE_CAPABILITY_UNAVAILABLE_MESSAGE/,
+);
+assert.doesNotMatch(
+  capabilityResultBranch,
+  /onReconcileGmailArchive|executeProviderArchiveAction|Could not archive|provider identity/,
+);
 assert.match(
   archiveHandler,
   /result\.response\.status === "mutation_unconfirmed"/,
@@ -1053,6 +1146,14 @@ assert.match(archiveRefresh, /providerArchiveSnapshotMailboxIdsRef\.current\.add
 assert.match(archiveRefresh, /hasPendingProviderArchiveForMailbox/);
 assert.match(archiveRefresh, /shouldApplyProviderArchiveResponse\(\{/);
 assert.doesNotMatch(archiveRefresh, /setMailboxSyncError|clearMailboxSyncError/);
+assert.match(
+  archiveRefresh,
+  /archiveCapability === "unavailable" &&\s+archiveSemantics\.capability === "unknown"[\s\S]*ARCHIVE_CAPABILITY_UNAVAILABLE_MESSAGE/,
+);
+assert.match(
+  archiveRefresh,
+  /catch \{[\s\S]*archiveCapability === "unavailable"[\s\S]*ARCHIVE_CAPABILITY_UNAVAILABLE_MESSAGE/,
+);
 assert.doesNotMatch(
   archiveRefresh,
   /setMailboxSyncFeedbackMessage|localStorage|sessionStorage|Promise\.all|retry/i,
@@ -1191,6 +1292,22 @@ assert.match(
   /folder === "Archive"[\s\S]*onArchiveFolderOpen\(\)/,
 );
 assert.match(source, /refreshProviderArchiveById\(activeMailbox\.id, "archive_open"\)/);
+assert.match(
+  source,
+  /const isActiveArchiveCapabilityUnavailable =[\s\S]*activeFolder === "Archive"[\s\S]*isProviderArchiveCapabilityUnavailable\(mailbox\.id\)/,
+);
+assert.match(
+  source,
+  /visibleMessages\.length === 0 &&\s+!isActiveArchiveCapabilityUnavailable/,
+);
+assert.match(
+  source,
+  /selectedMessage\.id === "main-1"[\s\S]*: isActiveArchiveCapabilityUnavailable \? null/,
+);
+assert.match(
+  source,
+  /activeFolder === "Archive" && archiveFolderStatusMessage[\s\S]*role="status"[\s\S]*archiveFolderStatusMessage/,
+);
 
 const reconciliationCoordinator = section(
   "const pendingGmailArchiveReconciliationMailboxIdsRef",
@@ -1268,6 +1385,26 @@ assert.match(
 assert.match(
   source,
   /changedMailboxIds[\s\S]*providerArchiveCapabilitiesRef\.current[\s\S]*Archive: \[\]/,
+);
+assert.match(
+  source,
+  /changedMailboxIds[\s\S]*setProviderArchiveFolderStatusMessages[\s\S]*!changedMailboxIds\.includes/,
+);
+const capabilityMutationState = section(
+  "const markProviderArchiveCapabilityUnavailable",
+  "const refreshProviderArchiveById",
+);
+assert.match(
+  capabilityMutationState,
+  /providerArchiveCapabilitiesRef\.current =[\s\S]*\[mailboxId\]: "unavailable"/,
+);
+assert.match(
+  capabilityMutationState,
+  /setProviderArchiveFolderStatusMessage\([\s\S]*PROVIDER_ARCHIVE_CAPABILITY_UNAVAILABLE_MESSAGE/,
+);
+assert.doesNotMatch(
+  capabilityMutationState,
+  /mailboxStore|localStorage|fetchProviderArchive|reconcil/i,
 );
 assert.match(source, /replaceProviderArchiveReadback/);
 assert.match(source, /applyProviderArchiveFolderReadback/);
@@ -1445,6 +1582,92 @@ async function verifyPreArchiveGmailInboxResponseIsRejected() {
   assert.deepEqual(savedSnapshots, []);
   assert.deepEqual(appliedResponses, []);
   assert.deepEqual(clearedUnreadOverrides, []);
+}
+
+async function verifyCustomImapCapabilityUnavailableRuntime() {
+  const initialState = {
+    Inbox: [{ id: "imap-inbox-must-remain" }],
+    Archive: [{ id: "imap-archive-must-remain" }],
+  };
+  let state = initialState;
+  let runtimeCapability: "unknown" | "unavailable" = "unknown";
+  let folderStatusMessage: string | null = null;
+  let mutationCalls = 0;
+  let applyCalls = 0;
+  let reconciliationStarts = 0;
+  const coordinator = createProviderArchiveCoordinator({
+    mutate: async () => {
+      mutationCalls += 1;
+      return {
+        ok: false,
+        error: {
+          code: "archive_folder_unavailable",
+          message: "No safe Archive mailbox is available.",
+        },
+      };
+    },
+  });
+
+  const archive = async () => {
+    const preflight = resolveCandidatePreflight(exactImapArchiveCandidate, {
+      isProviderArchiveCapabilityUnavailable:
+        runtimeCapability === "unavailable",
+    });
+    if (preflight) {
+      folderStatusMessage = preflight.message;
+      return { preflight, result: null };
+    }
+
+    const result = await executeProviderArchiveAction({
+      coordinator,
+      candidate: exactImapArchiveCandidate,
+      applySuccess: () => {
+        applyCalls += 1;
+        state = { Inbox: [], Archive: [] };
+        return true;
+      },
+    });
+    if (result.classification === "capability_unavailable") {
+      runtimeCapability = "unavailable";
+      folderStatusMessage = PROVIDER_ARCHIVE_CAPABILITY_UNAVAILABLE_MESSAGE;
+    } else if (result.classification === "uncertain") {
+      reconciliationStarts += 1;
+    }
+    return { preflight: null, result };
+  };
+
+  const first = await archive();
+  assert.equal(first.result?.classification, "capability_unavailable");
+  assert.equal(runtimeCapability, "unavailable");
+  assert.equal(
+    folderStatusMessage,
+    PROVIDER_ARCHIVE_CAPABILITY_UNAVAILABLE_MESSAGE,
+  );
+  assert.equal(mutationCalls, 1);
+  assert.equal(applyCalls, 0);
+  assert.equal(reconciliationStarts, 0);
+  assert.equal(state, initialState);
+
+  const second = await archive();
+  assert.deepEqual(second.preflight, {
+    reason: "capability_unavailable",
+    message: PROVIDER_ARCHIVE_CAPABILITY_UNAVAILABLE_MESSAGE,
+  });
+  assert.equal(second.result, null);
+  assert.equal(mutationCalls, 1);
+  assert.equal(applyCalls, 0);
+  assert.equal(reconciliationStarts, 0);
+  assert.equal(state, initialState);
+  assert.equal(
+    `${folderStatusMessage}`.includes(PROVIDER_ARCHIVE_INVALID_SOURCE_MESSAGE),
+    false,
+  );
+  assert.equal(
+    `${folderStatusMessage}`.includes(
+      "Could not archive this message safely. Reload the mailbox and try again.",
+    ),
+    false,
+  );
 }
 
 async function verifyGmailArchiveReconciliationCoordinator() {
@@ -1636,6 +1859,7 @@ async function verifyIndependentInboxCommit() {
 
 void Promise.all([
   verifyPreArchiveGmailInboxResponseIsRejected(),
+  verifyCustomImapCapabilityUnavailableRuntime(),
   verifyGmailArchiveReconciliationCoordinator(),
   verifyIndependentInboxCommit(),
 ])

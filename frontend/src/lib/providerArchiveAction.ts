@@ -2,6 +2,9 @@ import {
   isProviderArchiveMutationSuccessResponse,
   sanitizeProviderArchiveMutationUncertainResponse,
 } from "./inboxConnectionApi";
+import {
+  PROVIDER_ARCHIVE_CAPABILITY_UNAVAILABLE_MESSAGE,
+} from "./providerArchivePreflight";
 
 const MAX_PROVIDER_IDENTIFIER_LENGTH = 256;
 const MAX_IMAP_UID = 4_294_967_295;
@@ -84,7 +87,11 @@ export type ProviderArchiveTargetResult =
 
 export type ProviderArchiveResult =
   | {
-      classification: "success" | "ordinary_failure" | "uncertain";
+      classification:
+        | "success"
+        | "capability_unavailable"
+        | "ordinary_failure"
+        | "uncertain";
       inFlightKey: string;
       request: ProviderArchiveMutationRequest;
       response: ProviderArchiveMutationResponse;
@@ -360,7 +367,11 @@ function validateMutationResponse(
   response: ProviderArchiveMutationResponse,
   request: ProviderArchiveMutationRequest,
 ): {
-  classification: "success" | "ordinary_failure" | "uncertain";
+  classification:
+    | "success"
+    | "capability_unavailable"
+    | "ordinary_failure"
+    | "uncertain";
   response: ProviderArchiveMutationResponse;
 } {
   const uncertain = sanitizeProviderArchiveMutationUncertainResponse(
@@ -371,6 +382,20 @@ function validateMutationResponse(
     return {
       classification: "uncertain",
       response: uncertain,
+    };
+  }
+  if (
+    isCustomImapArchiveCapabilityUnavailableResponse(response, request)
+  ) {
+    return {
+      classification: "capability_unavailable",
+      response: {
+        ok: false,
+        error: {
+          code: "archive_folder_unavailable",
+          message: PROVIDER_ARCHIVE_CAPABILITY_UNAVAILABLE_MESSAGE,
+        },
+      },
     };
   }
   if (isProviderArchiveMutationSuccessResponse(response, request)) {
@@ -541,6 +566,22 @@ export function applyProviderArchiveFolderReadback<
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function isCustomImapArchiveCapabilityUnavailableResponse(
+  response: unknown,
+  request: ProviderArchiveMutationRequest,
+) {
+  if (
+    "messageId" in request ||
+    !isRecord(response) ||
+    response.ok !== false ||
+    !isRecord(response.error)
+  ) {
+    return false;
+  }
+
+  return response.error.code === "archive_folder_unavailable";
 }
 
 export function filterLegacyArchiveHydration<Message>(

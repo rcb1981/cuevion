@@ -122,6 +122,7 @@ import {
   type ProviderArchiveCandidate,
 } from "../../lib/providerArchiveAction";
 import {
+  PROVIDER_ARCHIVE_CAPABILITY_UNAVAILABLE_MESSAGE,
   PROVIDER_ARCHIVE_INVALID_SOURCE_MESSAGE,
   resolveProviderArchivePreflightBlock,
   type ProviderArchiveInvalidSourceReason,
@@ -12927,8 +12928,10 @@ function MailboxView({
   onOpenLinkedReview,
   onApplyProviderArchiveMutationSuccess,
   onProviderArchiveMutationSettled,
+  onProviderArchiveCapabilityUnavailable,
   onReconcileGmailArchive,
   isGmailArchiveReconciliationRunning,
+  isProviderArchiveCapabilityUnavailable,
   onArchiveFolderOpen,
   archiveFolderStatusMessage,
   onSyncMailbox,
@@ -13021,8 +13024,10 @@ function MailboxView({
     response: ProviderArchiveMutationSuccess,
   ) => boolean;
   onProviderArchiveMutationSettled: (mailboxId: InboxId) => void;
+  onProviderArchiveCapabilityUnavailable: (mailboxId: InboxId) => void;
   onReconcileGmailArchive: (mailboxId: InboxId) => void;
   isGmailArchiveReconciliationRunning: (mailboxId: InboxId) => boolean;
+  isProviderArchiveCapabilityUnavailable: (mailboxId: InboxId) => boolean;
   onArchiveFolderOpen: () => void;
   archiveFolderStatusMessage: string | null;
   onSyncMailbox: () => void;
@@ -14820,6 +14825,11 @@ function MailboxView({
   const normalAppFolderMessages = isSharedView
     ? folderMessages
     : filterOrganizerManagedMessagesForMailboxView(folderMessages);
+  const isActiveArchiveCapabilityUnavailable =
+    !isSharedView &&
+    !activeSmartFolder &&
+    activeFolder === "Archive" &&
+    isProviderArchiveCapabilityUnavailable(mailbox.id);
   const hiddenOrganizerManagedFolderMessageCount =
     folderMessages.length - normalAppFolderMessages.length;
   const isFilteredViewEmpty =
@@ -19993,6 +20003,7 @@ function MailboxView({
     const block = resolveProviderArchivePreflightBlock({
       invalidSourceReason,
       isGmailArchiveReconciliationRunning: false,
+      isProviderArchiveCapabilityUnavailable: false,
       hasPendingArchiveMutation: false,
     });
     setMailboxActionToastMessage(
@@ -20061,6 +20072,7 @@ function MailboxView({
           location !== null &&
           isGmailArchiveReconciliationRunning(location.mailboxId),
       ),
+      isProviderArchiveCapabilityUnavailable: false,
       hasPendingArchiveMutation: false,
     });
     if (reconciliationPreflightBlock) {
@@ -20142,6 +20154,9 @@ function MailboxView({
     const pendingPreflightBlock = resolveProviderArchivePreflightBlock({
       invalidSourceReason: null,
       isGmailArchiveReconciliationRunning: false,
+      isProviderArchiveCapabilityUnavailable:
+        sourceManagedMailbox.provider === "custom_imap" &&
+        isProviderArchiveCapabilityUnavailable(sourceLocation.mailboxId),
       hasPendingArchiveMutation: hasPendingProviderArchiveForMailbox(
         providerArchivePendingKeys,
         sourceManagedMailbox.id,
@@ -20167,6 +20182,15 @@ function MailboxView({
     setPendingProviderArchiveKeys([...providerArchivePendingKeys]);
     onProviderArchiveMutationSettled(sourceManagedMailbox.id as InboxId);
 
+    if (result.classification === "capability_unavailable") {
+      onProviderArchiveCapabilityUnavailable(
+        sourceManagedMailbox.id as InboxId,
+      );
+      setMailboxActionToastMessage(
+        PROVIDER_ARCHIVE_CAPABILITY_UNAVAILABLE_MESSAGE,
+      );
+      return;
+    }
     if (
       result.classification === "uncertain" &&
       result.response.status === "mutation_unconfirmed" &&
@@ -22241,7 +22265,8 @@ function MailboxView({
                         </button>
                       );
                     })}
-                    {visibleMessages.length === 0 ? (
+                    {visibleMessages.length === 0 &&
+                    !isActiveArchiveCapabilityUnavailable ? (
                       <div className="rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-6 text-[0.84rem] leading-6 text-[var(--workspace-text-faint)]">
                         {isOrganizerManagedFilteredViewEmpty ? (
                           <div className="space-y-3">
@@ -22405,7 +22430,9 @@ function MailboxView({
                     </div>
                   ) : null}
                   </div>
-                ) : !isSharedView && !activeSmartFolder && activeFolder === "Filtered" ? (
+                ) : isActiveArchiveCapabilityUnavailable ? null : !isSharedView &&
+                  !activeSmartFolder &&
+                  activeFolder === "Filtered" ? (
                   <div className="text-[0.92rem] leading-7 text-[var(--workspace-text-soft)]">
                     No filtered emails yet.
                   </div>
@@ -39505,6 +39532,17 @@ export function WorkspaceShell({
     });
   };
 
+  const markProviderArchiveCapabilityUnavailable = (mailboxId: InboxId) => {
+    providerArchiveCapabilitiesRef.current = {
+      ...providerArchiveCapabilitiesRef.current,
+      [mailboxId]: "unavailable",
+    };
+    setProviderArchiveFolderStatusMessage(
+      mailboxId,
+      PROVIDER_ARCHIVE_CAPABILITY_UNAVAILABLE_MESSAGE,
+    );
+  };
+
   const refreshProviderArchiveById = async (
     mailboxId: InboxId,
     reason: MailboxRefreshReason,
@@ -39617,9 +39655,12 @@ export function WorkspaceShell({
 
       setProviderArchiveFolderStatusMessage(
         mailboxId,
-        archiveSemantics.capabilityMessage ??
-          archiveSemantics.mailboxSyncError ??
-          ARCHIVE_REFRESH_ERROR_MESSAGE,
+        archiveCapability === "unavailable" &&
+          archiveSemantics.capability === "unknown"
+          ? ARCHIVE_CAPABILITY_UNAVAILABLE_MESSAGE
+          : archiveSemantics.capabilityMessage ??
+              archiveSemantics.mailboxSyncError ??
+              ARCHIVE_REFRESH_ERROR_MESSAGE,
       );
       return archiveSemantics.capability === "unavailable"
         ? "unavailable"
@@ -39627,7 +39668,9 @@ export function WorkspaceShell({
     } catch {
       setProviderArchiveFolderStatusMessage(
         mailboxId,
-        ARCHIVE_REFRESH_ERROR_MESSAGE,
+        archiveCapability === "unavailable"
+          ? ARCHIVE_CAPABILITY_UNAVAILABLE_MESSAGE
+          : ARCHIVE_REFRESH_ERROR_MESSAGE,
       );
       return "failed";
     } finally {
@@ -42776,11 +42819,18 @@ export function WorkspaceShell({
                   onProviderArchiveMutationSettled={
                     drainGmailArchiveReconciliation
                   }
+                  onProviderArchiveCapabilityUnavailable={
+                    markProviderArchiveCapabilityUnavailable
+                  }
                   onReconcileGmailArchive={requestGmailArchiveReconciliation}
                   isGmailArchiveReconciliationRunning={(mailboxId) =>
                     runningGmailArchiveReconciliationMailboxIdsRef.current.has(
                       mailboxId,
                     )
+                  }
+                  isProviderArchiveCapabilityUnavailable={(mailboxId) =>
+                    readCurrentProviderArchiveKnowledge(mailboxId)
+                      .capability === "unavailable"
                   }
                   onArchiveFolderOpen={handleOpenActiveMailboxArchive}
                   archiveFolderStatusMessage={
