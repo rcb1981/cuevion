@@ -804,6 +804,13 @@ test("direct refresh merge replaces stale identity and preserves current state r
 
 test("snapshot save/read/hydration and cached recovery preserve authoritative identity and state", () => {
   withMemoryLocalStorage(() => {
+    const authoritativeSourceEnvelope = {
+      serverMailboxId: "mailbox-a",
+      providerFolder: "INBOX",
+      imapUid: "42",
+      uidValidity: "900",
+      rfcMessageId: "root@example.com",
+    };
     const frontendFallback = mergeLiveInboxMessageState(
       richLiveMessage({ threadId: undefined }),
       undefined,
@@ -814,7 +821,10 @@ test("snapshot save/read/hydration and cached recovery preserve authoritative id
       },
     );
     const authoritative = mergeLiveInboxMessageState(
-      richLiveMessage({ threadId: "imap:rfc:mailbox-a:INBOX:root%40example.com" }),
+      richLiveMessage({
+        threadId: "imap:rfc:mailbox-a:INBOX:root%40example.com",
+        ...authoritativeSourceEnvelope,
+      }),
       frontendFallback,
       mailboxAContext,
       {
@@ -863,6 +873,19 @@ test("snapshot save/read/hydration and cached recovery preserve authoritative id
     assert.equal(cached.threadId, authoritative.threadId);
     assert.doesNotMatch(cached.threadId ?? "", /^same subject$/);
 
+    for (const restoredMessage of [hydrated.messages[0], cached]) {
+      assert.deepEqual(
+        {
+          serverMailboxId: restoredMessage?.serverMailboxId,
+          providerFolder: restoredMessage?.providerFolder,
+          imapUid: restoredMessage?.imapUid,
+          uidValidity: restoredMessage?.uidValidity,
+          rfcMessageId: restoredMessage?.rfcMessageId,
+        },
+        authoritativeSourceEnvelope,
+      );
+    }
+
     for (const key of [
       "id",
       "unread",
@@ -876,6 +899,45 @@ test("snapshot save/read/hydration and cached recovery preserve authoritative id
     ] as const) {
       assert.deepEqual((cached as any)[key], (authoritative as any)[key], key);
     }
+  });
+});
+
+test("partial custom-IMAP cache rows stay non-authoritative during hydration", () => {
+  withMemoryLocalStorage(() => {
+    saveLiveInboxSnapshot({
+      provider: "custom_imap",
+      inboxId: "mailbox-a",
+      email: "owner@example.com",
+      fetchedAt: "2026-07-13T08:00:00.000Z",
+      folder: "INBOX",
+      uidValidity: "900",
+      messages: [richLiveMessage()] as any,
+    });
+
+    const snapshot = readLiveInboxSnapshots({
+      "mailbox-a": {
+        mailboxId: "mailbox-a",
+        provider: "custom_imap",
+        folder: "INBOX",
+      },
+    })["mailbox-a"];
+    assert.ok(snapshot);
+    const hydratedMessage = hydrateLiveInboxSnapshot(snapshot).messages[0];
+
+    assert.deepEqual(
+      {
+        serverMailboxId: hydratedMessage?.serverMailboxId,
+        providerFolder: hydratedMessage?.providerFolder,
+        imapUid: hydratedMessage?.imapUid,
+        uidValidity: hydratedMessage?.uidValidity,
+      },
+      {
+        serverMailboxId: undefined,
+        providerFolder: undefined,
+        imapUid: "42",
+        uidValidity: undefined,
+      },
+    );
   });
 });
 

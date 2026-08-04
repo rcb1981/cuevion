@@ -14,6 +14,12 @@ import {
   resolveManagedMailboxIdentity,
   sendGmailMessage,
 } from "./inboxConnectionApi";
+import {
+  buildProviderArchiveMutationTarget,
+  createProviderArchiveCoordinator,
+  type ProviderArchiveCandidate,
+  type ProviderArchiveMutationRequest,
+} from "./providerArchiveAction";
 
 type CapturedRequest = { url: string; init: Record<string, unknown> };
 
@@ -58,6 +64,26 @@ async function run() {
   // not race that unchanged suite.
   await new Promise<void>((resolve) => globalThis.setTimeout(resolve, 0));
   const captured: CapturedRequest[] = [];
+  const canonicalRefreshPayload = {
+    ok: true,
+    messages: [{
+      id: "ui-id-must-not-be-used-as-imap-uid",
+      imapUid: "42",
+      uidValidity: "901",
+      threadId: "thread-id-must-not-be-used-as-imap-uid",
+      rfcMessageId: "rfc-id-must-not-be-used-as-imap-uid@example.com",
+      sender: "Sender",
+      subject: "Subject",
+      snippet: "preview-must-not-be-used-as-imap-uid",
+      from: "sender@example.com",
+      to: "owner@example.com",
+      timestamp: "July 13 at 10:00",
+      createdAt: "2026-07-13T08:00:00.000Z",
+      body: ["Body"],
+    }],
+    uidValidity: "900",
+  };
+  let connectImapPayload: unknown = canonicalRefreshPayload;
   const originalFetch = globalThis.fetch;
   const originalWindow = (globalThis as any).window;
   (globalThis as any).window = {
@@ -70,23 +96,7 @@ async function run() {
       return response(null);
     }
     if (url.endsWith("/connect-imap")) {
-      return response({
-        ok: true,
-        messages: [{
-          id: "message-1",
-          imapUid: "42",
-          threadId: "imap:rfc:stable-mailbox:INBOX:root%40example.com",
-          sender: "Sender",
-          subject: "Subject",
-          snippet: "Body",
-          from: "sender@example.com",
-          to: "owner@example.com",
-          timestamp: "July 13 at 10:00",
-          createdAt: "2026-07-13T08:00:00.000Z",
-          body: ["Body"],
-        }],
-        uidValidity: "900",
-      });
+      return response(connectImapPayload);
     }
     return response({ ok: true, action: requestBody(lastCaptured(captured)).action });
   };
@@ -98,9 +108,23 @@ async function run() {
       focusPreferences: { newsletters: "low" } as any,
     });
     const refreshResponse = await connectInboxWithImap(refresh);
-    assert.equal(
-      refreshResponse.messages?.[0]?.threadId,
-      "imap:rfc:stable-mailbox:INBOX:root%40example.com",
+    const refreshMessage = refreshResponse.messages?.[0];
+    assert.ok(refreshMessage);
+    assert.deepEqual(
+      {
+        serverMailboxId: refreshMessage.serverMailboxId,
+        providerFolder: refreshMessage.providerFolder,
+        imapUid: refreshMessage.imapUid,
+        uidValidity: refreshMessage.uidValidity,
+        rfcMessageId: refreshMessage.rfcMessageId,
+      },
+      {
+        serverMailboxId: "stable-mailbox",
+        providerFolder: "INBOX",
+        imapUid: "42",
+        uidValidity: "900",
+        rfcMessageId: "rfc-id-must-not-be-used-as-imap-uid@example.com",
+      },
     );
     assert.equal(refreshResponse.uidValidity, "900");
     assert.deepEqual(Object.keys(requestBody(lastCaptured(captured))).sort(), [
@@ -110,6 +134,168 @@ async function run() {
       "mode",
     ]);
     assert.equal(refresh.mode, "refresh");
+
+    const archiveCandidate = {
+      provider: "custom_imap",
+      mailboxId: refreshMessage.serverMailboxId,
+      folder: refreshMessage.providerFolder,
+      imapUid: refreshMessage.imapUid,
+      uidValidity: refreshMessage.uidValidity,
+      id: refreshMessage.id,
+      threadId: refreshMessage.threadId,
+      rfcMessageId: refreshMessage.rfcMessageId,
+      preview: refreshMessage.snippet,
+    } as ProviderArchiveCandidate;
+    const archiveTarget = buildProviderArchiveMutationTarget(archiveCandidate);
+    assert.equal(archiveTarget.ok, true);
+    if (!archiveTarget.ok) {
+      throw new Error("Expected the first custom-IMAP Archive preflight to pass");
+    }
+    assert.deepEqual(archiveTarget.request, {
+      mailboxId: "stable-mailbox",
+      folder: "INBOX",
+      uid: "42",
+      uidValidity: "900",
+      action: "archive",
+    });
+    assert.equal(
+      JSON.stringify(archiveTarget.request).includes(refreshMessage.id),
+      false,
+    );
+    assert.equal(
+      JSON.stringify(archiveTarget.request).includes(refreshMessage.threadId ?? ""),
+      false,
+    );
+    assert.equal(
+      JSON.stringify(archiveTarget.request).includes(refreshMessage.rfcMessageId ?? ""),
+      false,
+    );
+    assert.equal(
+      JSON.stringify(archiveTarget.request).includes(refreshMessage.snippet),
+      false,
+    );
+
+    const archiveRequests: ProviderArchiveMutationRequest[] = [];
+    const archiveCoordinator = createProviderArchiveCoordinator({
+      mutate: async (archiveRequest) => {
+        archiveRequests.push(archiveRequest);
+        return {
+          ok: false,
+          error: { code: "test_mutation_started" },
+        };
+      },
+    });
+    await archiveCoordinator.archive(archiveCandidate);
+    assert.deepEqual(archiveRequests, [archiveTarget.request]);
+
+    connectImapPayload = {
+      ...canonicalRefreshPayload,
+      messages: [{
+        ...canonicalRefreshPayload.messages[0],
+        imapUid: undefined,
+      }],
+    };
+    const missingUidResponse = await connectInboxWithImap(refresh);
+    const missingUidMessage = missingUidResponse.messages?.[0];
+    assert.ok(missingUidMessage);
+    assert.deepEqual(
+      buildProviderArchiveMutationTarget({
+        provider: "custom_imap",
+        mailboxId: missingUidMessage.serverMailboxId,
+        folder: missingUidMessage.providerFolder,
+        imapUid: missingUidMessage.imapUid,
+        uidValidity: missingUidMessage.uidValidity,
+      }),
+      {
+        ok: false,
+        classification: "blocked",
+        reason: "invalid_imap_uid",
+      },
+    );
+    await archiveCoordinator.archive({
+      provider: "custom_imap",
+      mailboxId: missingUidMessage.serverMailboxId,
+      folder: missingUidMessage.providerFolder,
+      imapUid: missingUidMessage.imapUid,
+      uidValidity: missingUidMessage.uidValidity,
+    });
+    assert.deepEqual(archiveRequests, [archiveTarget.request]);
+
+    connectImapPayload = {
+      ...canonicalRefreshPayload,
+      messages: [{
+        ...canonicalRefreshPayload.messages[0],
+        uidValidity: "901",
+      }],
+      uidValidity: null,
+    };
+    const missingUidValidityResponse = await connectInboxWithImap(refresh);
+    const missingUidValidityMessage = missingUidValidityResponse.messages?.[0];
+    assert.ok(missingUidValidityMessage);
+    assert.equal(missingUidValidityMessage.uidValidity, undefined);
+    assert.deepEqual(
+      buildProviderArchiveMutationTarget({
+        provider: "custom_imap",
+        mailboxId: missingUidValidityMessage.serverMailboxId,
+        folder: missingUidValidityMessage.providerFolder,
+        imapUid: missingUidValidityMessage.imapUid,
+        uidValidity: missingUidValidityMessage.uidValidity,
+      }),
+      {
+        ok: false,
+        classification: "blocked",
+        reason: "invalid_imap_uid_validity",
+      },
+    );
+    await archiveCoordinator.archive({
+      provider: "custom_imap",
+      mailboxId: missingUidValidityMessage.serverMailboxId,
+      folder: missingUidValidityMessage.providerFolder,
+      imapUid: missingUidValidityMessage.imapUid,
+      uidValidity: missingUidValidityMessage.uidValidity,
+    });
+    assert.deepEqual(archiveRequests, [archiveTarget.request]);
+
+    connectImapPayload = {
+      ...canonicalRefreshPayload,
+      messages: [{
+        ...canonicalRefreshPayload.messages[0],
+        serverMailboxId: "conflicting-mailbox",
+        providerFolder: "Archive",
+      }],
+    };
+    const conflictingEnvelopeResponse = await connectInboxWithImap(refresh);
+    assert.equal(
+      conflictingEnvelopeResponse.messages?.[0]?.serverMailboxId,
+      "conflicting-mailbox",
+    );
+    assert.equal(
+      conflictingEnvelopeResponse.messages?.[0]?.providerFolder,
+      "Archive",
+    );
+    assert.deepEqual(
+      buildProviderArchiveMutationTarget({
+        provider: "custom_imap",
+        mailboxId: "stable-mailbox",
+        folder: conflictingEnvelopeResponse.messages?.[0]?.providerFolder,
+        imapUid: conflictingEnvelopeResponse.messages?.[0]?.imapUid,
+        uidValidity: conflictingEnvelopeResponse.messages?.[0]?.uidValidity,
+      }),
+      {
+        ok: false,
+        classification: "blocked",
+        reason: "invalid_imap_source_folder",
+      },
+    );
+    await archiveCoordinator.archive({
+      provider: "custom_imap",
+      mailboxId: "stable-mailbox",
+      folder: conflictingEnvelopeResponse.messages?.[0]?.providerFolder,
+      imapUid: conflictingEnvelopeResponse.messages?.[0]?.imapUid,
+      uidValidity: conflictingEnvelopeResponse.messages?.[0]?.uidValidity,
+    });
+    assert.deepEqual(archiveRequests, [archiveTarget.request]);
+    connectImapPayload = canonicalRefreshPayload;
 
     const connection = {
       provider: "custom_imap" as const,
@@ -199,7 +385,19 @@ async function run() {
         mailboxId: "stable-mailbox",
         ...connection,
       });
-      await connectInboxWithImap(request);
+      const nonRefreshResponse = await connectInboxWithImap(request);
+      assert.deepEqual(
+        {
+          serverMailboxId: nonRefreshResponse.messages?.[0]?.serverMailboxId,
+          providerFolder: nonRefreshResponse.messages?.[0]?.providerFolder,
+          uidValidity: nonRefreshResponse.messages?.[0]?.uidValidity,
+        },
+        {
+          serverMailboxId: undefined,
+          providerFolder: undefined,
+          uidValidity: "901",
+        },
+      );
       const body = requestBody(lastCaptured(captured));
       assert.deepEqual(body, {
         mode,

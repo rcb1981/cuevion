@@ -2018,6 +2018,25 @@ function safeImapConnectionError(
   };
 }
 
+function applyTrustedCustomImapInboxSourceEnvelope(
+  message: LiveInboxMessageSnapshot,
+  mailboxId: string,
+  uidValidity: string | null | undefined,
+): LiveInboxMessageSnapshot {
+  return {
+    ...message,
+    serverMailboxId:
+      message.serverMailboxId === undefined
+        ? mailboxId
+        : message.serverMailboxId,
+    providerFolder:
+      message.providerFolder === undefined
+        ? "INBOX"
+        : message.providerFolder,
+    uidValidity: uidValidity ?? undefined,
+  };
+}
+
 export async function connectInboxWithImap(
   request: ConnectInboxRequest,
   signal?: AbortSignal,
@@ -2043,6 +2062,17 @@ export async function connectInboxWithImap(
 
     return {
       ...payload,
+      ...(request.mode === "refresh" && Array.isArray(payload.messages)
+        ? {
+            messages: payload.messages.map((message) =>
+              applyTrustedCustomImapInboxSourceEnvelope(
+                message,
+                request.mailboxId,
+                payload.uidValidity,
+              ),
+            ),
+          }
+        : {}),
       ok: true,
     };
   } catch {
