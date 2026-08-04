@@ -775,6 +775,70 @@ export async function mutateInboxMessageAction(
   }
 }
 
+export type ProviderTrashMessageRequest = {
+  mailboxId: string;
+  action: "trash";
+  providerMessageId: string;
+  sourceFolder: "INBOX";
+};
+
+export type ProviderTrashMessageReadback = {
+  inSource: false;
+  inTrash: true;
+};
+
+export type ProviderTrashMessageSuccess = {
+  ok: true;
+  action: "trash";
+  provider: "gmail";
+  mailboxId: string;
+  providerMessageId: string;
+  sourceFolder: "INBOX";
+  destinationFolder: "TRASH";
+  readback: ProviderTrashMessageReadback;
+  error?: never;
+};
+
+export type ProviderTrashMessageMutationUnconfirmedResponse = {
+  ok: false;
+  status: "mutation_unconfirmed";
+  action: "trash";
+  provider: "gmail";
+  mailboxId: string;
+  providerMessageId: string;
+  sourceFolder: "INBOX";
+  destinationFolder: "TRASH";
+  error: {
+    code: "trash_mutation_unconfirmed";
+    message: string;
+  };
+  readback?: never;
+};
+
+export type ProviderTrashMessageUncertainResponse =
+  ProviderTrashMessageMutationUnconfirmedResponse;
+
+export type ProviderTrashMessageFailureResponse = {
+  ok: false;
+  status?: never;
+  action?: never;
+  provider?: never;
+  mailboxId?: never;
+  providerMessageId?: never;
+  sourceFolder?: never;
+  destinationFolder?: never;
+  readback?: never;
+  error: {
+    code: string;
+    message: string;
+  };
+};
+
+export type ProviderTrashMessageResponse =
+  | ProviderTrashMessageSuccess
+  | ProviderTrashMessageUncertainResponse
+  | ProviderTrashMessageFailureResponse;
+
 export type GmailArchiveMutationRequest = {
   mailboxId: string;
   messageId: string;
@@ -1010,6 +1074,32 @@ export type ArchiveFetchResponse =
   | GmailArchiveFetchSuccess
   | ImapArchiveFetchSuccess
   | ArchiveFailureResponse;
+
+const MAX_TRASH_RESPONSE_BYTES = 64 * 1024;
+const PUBLIC_TRASH_ERROR_CODES = new Set([
+  "gmail_connection_not_found",
+  "gmail_connection_not_ready",
+  "gmail_modify_scope_required",
+  "gmail_permission_denied",
+  "gmail_rate_limited",
+  "gmail_refresh_unavailable",
+  "gmail_token_store_unavailable",
+  "gmail_trash_failed",
+  "internal_error",
+  "invalid_trash_request",
+  "mailbox_ownership_unavailable",
+  "reconnect_required",
+  "trash_provider_not_supported",
+  "trash_source_invalid",
+  "trash_source_unconfirmed",
+  "unauthorized",
+  "unsupported_provider",
+  "user_config_store_unavailable",
+]);
+const SAFE_TRASH_ERROR_MESSAGE =
+  "Could not complete this Trash request safely.";
+const SAFE_TRASH_MUTATION_UNCONFIRMED_MESSAGE =
+  "Trash may have completed, but provider confirmation was not definitive.";
 
 const MAX_ARCHIVE_RESPONSE_BYTES = 10 * 1024 * 1024;
 const MAX_ARCHIVE_SNAPSHOT_MESSAGES = 100;
@@ -1552,6 +1642,182 @@ function imapArchivedIdentityIsValid(
   );
 }
 
+function providerTrashFailure(
+  code: string,
+  message: string,
+): ProviderTrashMessageFailureResponse {
+  return {
+    ok: false,
+    error: {
+      code,
+      message,
+    },
+  };
+}
+
+function providerTrashMessageRequestBody(
+  request: ProviderTrashMessageRequest,
+): ProviderTrashMessageRequest | null {
+  if (
+    !isArchiveRecord(request) ||
+    !hasExactArchiveKeys(request, [
+      "mailboxId",
+      "action",
+      "providerMessageId",
+      "sourceFolder",
+    ]) ||
+    !isArchiveIdentifier(request.mailboxId) ||
+    request.action !== "trash" ||
+    !isGmailArchiveMessageId(request.providerMessageId) ||
+    request.sourceFolder !== "INBOX"
+  ) {
+    return null;
+  }
+
+  return {
+    mailboxId: request.mailboxId,
+    action: "trash",
+    providerMessageId: request.providerMessageId,
+    sourceFolder: "INBOX",
+  };
+}
+
+function isSafeTrashErrorMessage(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.trim().length >= 1 &&
+    value.length <= 2_048
+  );
+}
+
+function providerTrashErrorFromPayload(
+  value: unknown,
+): ProviderTrashMessageFailureResponse | null {
+  if (
+    containsForbiddenArchiveResponseField(value) ||
+    !isArchiveRecord(value) ||
+    !hasExactArchiveKeys(value, ["ok", "error"]) ||
+    value.ok !== false ||
+    !isArchiveRecord(value.error) ||
+    !hasExactArchiveKeys(value.error, ["code", "message"]) ||
+    typeof value.error.code !== "string" ||
+    !PUBLIC_TRASH_ERROR_CODES.has(value.error.code) ||
+    !isSafeTrashErrorMessage(value.error.message)
+  ) {
+    return null;
+  }
+
+  return providerTrashFailure(value.error.code, SAFE_TRASH_ERROR_MESSAGE);
+}
+
+function providerTrashUncertainResponse(
+  value: unknown,
+  request: ProviderTrashMessageRequest,
+): ProviderTrashMessageUncertainResponse | null {
+  if (
+    containsForbiddenArchiveResponseField(value) ||
+    !isArchiveRecord(value) ||
+    !hasExactArchiveKeys(value, [
+      "ok",
+      "status",
+      "action",
+      "provider",
+      "mailboxId",
+      "providerMessageId",
+      "sourceFolder",
+      "destinationFolder",
+      "error",
+    ]) ||
+    value.ok !== false ||
+    value.action !== "trash" ||
+    value.provider !== "gmail" ||
+    value.mailboxId !== request.mailboxId ||
+    value.providerMessageId !== request.providerMessageId ||
+    value.sourceFolder !== "INBOX" ||
+    value.destinationFolder !== "TRASH" ||
+    !isArchiveRecord(value.error) ||
+    !hasExactArchiveKeys(value.error, ["code", "message"]) ||
+    !isSafeTrashErrorMessage(value.error.message)
+  ) {
+    return null;
+  }
+
+  if (
+    value.status === "mutation_unconfirmed" &&
+    value.error.code === "trash_mutation_unconfirmed"
+  ) {
+    return providerTrashUnconfirmed(request);
+  }
+
+  return null;
+}
+
+function providerTrashUnconfirmed(
+  request: ProviderTrashMessageRequest,
+): ProviderTrashMessageUncertainResponse {
+  return {
+    ok: false,
+    status: "mutation_unconfirmed",
+    action: "trash",
+    provider: "gmail",
+    mailboxId: request.mailboxId,
+    providerMessageId: request.providerMessageId,
+    sourceFolder: "INBOX",
+    destinationFolder: "TRASH",
+    error: {
+      code: "trash_mutation_unconfirmed",
+      message: SAFE_TRASH_MUTATION_UNCONFIRMED_MESSAGE,
+    },
+  };
+}
+
+function providerTrashSuccessResponse(
+  value: unknown,
+  request: ProviderTrashMessageRequest,
+): ProviderTrashMessageSuccess | null {
+  if (
+    containsForbiddenArchiveResponseField(value) ||
+    !isArchiveRecord(value) ||
+    !hasExactArchiveKeys(value, [
+      "ok",
+      "action",
+      "provider",
+      "mailboxId",
+      "providerMessageId",
+      "sourceFolder",
+      "destinationFolder",
+      "readback",
+    ]) ||
+    value.ok !== true ||
+    value.action !== "trash" ||
+    value.provider !== "gmail" ||
+    value.mailboxId !== request.mailboxId ||
+    value.providerMessageId !== request.providerMessageId ||
+    value.sourceFolder !== "INBOX" ||
+    value.destinationFolder !== "TRASH" ||
+    !isArchiveRecord(value.readback) ||
+    !hasExactArchiveKeys(value.readback, ["inSource", "inTrash"]) ||
+    value.readback.inSource !== false ||
+    value.readback.inTrash !== true
+  ) {
+    return null;
+  }
+
+  return {
+    ok: true,
+    action: "trash",
+    provider: "gmail",
+    mailboxId: request.mailboxId,
+    providerMessageId: request.providerMessageId,
+    sourceFolder: "INBOX",
+    destinationFolder: "TRASH",
+    readback: {
+      inSource: false,
+      inTrash: true,
+    },
+  };
+}
+
 function archiveMutationRequestBody(
   request: ArchiveMutationRequest,
 ): GmailArchiveMutationRequest | ImapArchiveMutationRequest | null {
@@ -1838,6 +2104,80 @@ export function sanitizeProviderArchiveMutationUncertainResponse(
   return wireRequest
     ? archiveUncertainResponse(value, wireRequest)
     : null;
+}
+
+async function readProviderTrashResponsePayload(
+  response: Response,
+): Promise<unknown> {
+  const rawPayload = await response.text();
+  if (
+    !rawPayload.trim() ||
+    new TextEncoder().encode(rawPayload).byteLength > MAX_TRASH_RESPONSE_BYTES
+  ) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(rawPayload) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+export async function mutateProviderTrashMessage(
+  request: ProviderTrashMessageRequest,
+): Promise<ProviderTrashMessageResponse> {
+  const wireRequest = providerTrashMessageRequestBody(request);
+  if (!wireRequest) {
+    return providerTrashFailure(
+      "invalid_trash_request",
+      "Trash requires one valid Gmail provider message identity.",
+    );
+  }
+
+  try {
+    const response = await fetch("/api/inboxes/message-action", {
+      method: "POST",
+      credentials: "include",
+      cache: "no-store",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(wireRequest),
+    });
+    const payload = await readProviderTrashResponsePayload(response);
+
+    if (response.status === 502) {
+      const uncertain = providerTrashUncertainResponse(payload, wireRequest);
+      if (uncertain) {
+        return uncertain;
+      }
+    }
+
+    if (response.status !== 200) {
+      const failure = providerTrashErrorFromPayload(payload);
+      if (failure) {
+        return failure;
+      }
+
+      return providerTrashFailure(
+        "trash_response_invalid",
+        "Trash did not return a valid provider-confirmed mailbox state.",
+      );
+    }
+
+    const success = providerTrashSuccessResponse(payload, wireRequest);
+    if (success) {
+      return success;
+    }
+
+    return providerTrashErrorFromPayload(payload) ?? providerTrashFailure(
+      "trash_response_invalid",
+      "Trash did not return a valid provider-confirmed mailbox state.",
+    );
+  } catch {
+    return providerTrashUnconfirmed(wireRequest);
+  }
 }
 
 async function readArchiveResponsePayload(response: Response): Promise<unknown> {
