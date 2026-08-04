@@ -1244,6 +1244,8 @@ type CuevionInternalClassification =
   | "promo_reminder"
   | "workflow_update"
   | "distributor_update"
+  | "labelradar_update"
+  | "trackstack_submission"
   | "business_reminder"
   | "royalty_statement"
   | "finance"
@@ -2981,7 +2983,7 @@ function doesMessageMatchSmartFolderRule(
   return matchValue.includes(ruleValue);
 }
 
-function resolveVisibleCategoryLabelForMessageInContext(
+export function resolveVisibleCategoryLabelForMessageInContext(
   message: MailMessage,
   preferPromoMailboxContext: boolean,
 ) {
@@ -3020,6 +3022,8 @@ function resolveVisibleCategoryLabelForMessageInContext(
       return "Update";
     }
     case "distributor_update":
+    case "labelradar_update":
+    case "trackstack_submission":
       return "Update";
     case "reply":
       return "Reply";
@@ -5409,6 +5413,8 @@ const cuevionCategoryByInternalClassification: Record<
   promo_reminder: "Promo",
   workflow_update: "Updates",
   distributor_update: "Updates",
+  labelradar_update: "Updates",
+  trackstack_submission: "Updates",
   business_reminder: "Updates",
   royalty_statement: "Updates",
   finance: "Updates",
@@ -5420,6 +5426,18 @@ const cuevionCategoryByInternalClassification: Record<
   incomplete_demo: "Primary",
   unknown: "Primary",
 };
+
+export function normalizeCuevionInternalClassification(
+  value: unknown,
+): CuevionInternalClassification | undefined {
+  return typeof value === "string" &&
+    Object.prototype.hasOwnProperty.call(
+      cuevionCategoryByInternalClassification,
+      value,
+    )
+    ? (value as CuevionInternalClassification)
+    : undefined;
+}
 
 function normalizeSenderLearningKey(value: string) {
   const normalizedValue = value.trim().toLowerCase();
@@ -7514,6 +7532,8 @@ function getVisibleCategoryLabel(
       return "Business";
     case "workflow_update":
     case "distributor_update":
+    case "labelradar_update":
+    case "trackstack_submission":
     case "info":
       return "Update";
     case "reply":
@@ -7572,6 +7592,8 @@ const displayContentClassifications = new Set<DisplayContentClassification>([
   "royalty_statement",
   "distributor_update",
   "workflow_update",
+  "labelradar_update",
+  "trackstack_submission",
   "info",
   "unknown",
 ]);
@@ -7613,6 +7635,8 @@ function mapDisplayContentClassificationToLabel(
       return "Finance";
     case "workflow_update":
     case "distributor_update":
+    case "labelradar_update":
+    case "trackstack_submission":
     case "info":
       return "Update";
     case "unknown":
@@ -8570,7 +8594,7 @@ function resolveMailMessageBehaviorSuggestion(
   };
 }
 
-function normalizeMailMessage(
+export function normalizeMailMessage(
   message: MailMessageSeed,
   mailboxId: InboxId,
   senderCategoryLearning: SenderCategoryLearningStore,
@@ -9713,8 +9737,9 @@ function createInitialMailboxStore(
               flagged: message.flagged,
               signal: message.signal,
               ui_signal: message.ui_signal,
-              internalClassification:
-                message.internalClassification as CuevionInternalClassification | undefined,
+              internalClassification: normalizeCuevionInternalClassification(
+                message.internalClassification,
+              ),
               final_visibility: message.final_visibility,
               action: message.action,
               from: message.from,
@@ -35300,8 +35325,9 @@ export function WorkspaceShell({
           flagged: mergedMessageState.flagged ?? undefined,
           signal: mergedMessageState.signal,
           ui_signal: mergedMessageState.ui_signal,
-          internalClassification:
-            mergedMessageState.internalClassification as CuevionInternalClassification | undefined,
+          internalClassification: normalizeCuevionInternalClassification(
+            mergedMessageState.internalClassification,
+          ),
           classifierVersion: mergedMessageState.classifierVersion,
           final_visibility: mergedMessageState.final_visibility,
           action: mergedMessageState.action,
@@ -37585,7 +37611,8 @@ export function WorkspaceShell({
                   manualLabelCategory: manualLabelCategory ?? undefined,
                   canonicalThreadCategory,
                   learnedLabelCategory: learnedLabelCategory ?? undefined,
-                  internalClassification: message.internalClassification,
+                  internalClassification:
+                    message.internalClassification as BundleOrganizerWorkspaceMessage["internalClassification"],
                   category: messageCategory ?? undefined,
                   signal: message.signal,
                   uiSignal: message.ui_signal,
@@ -37638,6 +37665,8 @@ export function WorkspaceShell({
       case "updates":
       case "workflow_update":
       case "distributor_update":
+      case "labelradar_update":
+      case "trackstack_submission":
         return "Update";
       default:
         return null;
