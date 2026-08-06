@@ -93,11 +93,16 @@ def _base64url_decode(value: str) -> bytes:
 
 
 def _list_path(provider_folder: str, limit: int) -> str:
-    query = (
-        {"labelIds": "INBOX", "maxResults": limit}
-        if provider_folder == "Inbox"
-        else {"q": GMAIL_ARCHIVE_QUERY, "maxResults": limit}
-    )
+    if provider_folder == "Inbox":
+        query = {"labelIds": "INBOX", "maxResults": limit}
+    elif provider_folder == "Trash":
+        query = {
+            "labelIds": "TRASH",
+            "includeSpamTrash": "true",
+            "maxResults": limit,
+        }
+    else:
+        query = {"q": GMAIL_ARCHIVE_QUERY, "maxResults": limit}
     return f"/messages?{urlencode(query)}"
 
 
@@ -108,6 +113,8 @@ def _strict_labels_match_folder(
     normalized = {label_id.upper() for label_id in label_ids}
     if provider_folder == "Inbox":
         return "INBOX" in normalized
+    if provider_folder == "Trash":
+        return "TRASH" in normalized and "INBOX" not in normalized
     return not normalized.intersection(_ARCHIVE_EXCLUDED_LABELS)
 
 
@@ -155,7 +162,7 @@ def parse_gmail_message_detail(
     """
 
     if (
-        provider_folder not in {"Inbox", "Archive"}
+        provider_folder not in {"Inbox", "Archive", "Trash"}
         or not valid_identifier(requested_message_id)
         or not isinstance(index, int)
         or isinstance(index, bool)
@@ -257,7 +264,7 @@ def read_gmail_folder_snapshot(
     """
 
     if (
-        provider_folder not in {"Inbox", "Archive"}
+        provider_folder not in {"Inbox", "Archive", "Trash"}
         or not isinstance(limit, int)
         or isinstance(limit, bool)
         or limit < 1

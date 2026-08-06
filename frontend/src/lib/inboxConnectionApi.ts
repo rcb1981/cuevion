@@ -921,11 +921,48 @@ export type ImapProviderFolderSnapshot<Folder extends string = string> = {
 
 export type GmailInboxSnapshot = GmailProviderFolderSnapshot<"Inbox">;
 export type GmailArchiveSnapshot = GmailProviderFolderSnapshot<"Archive">;
+export type GmailTrashMessageSnapshot = ArchiveMessagePreviewSnapshot & {
+  serverMailboxId: string;
+  providerFolder: "Trash";
+  providerMessageId: string;
+  providerThreadId: string;
+  rfcMessageId?: string;
+  labelIds: string[];
+};
+export type GmailTrashSnapshot = {
+  serverMailboxId: string;
+  providerFolder: "Trash";
+  uidValidity: "gmail-api";
+  messages: GmailTrashMessageSnapshot[];
+};
 export type ImapInboxSnapshot = ImapProviderFolderSnapshot<"INBOX">;
 export type ImapArchiveSnapshot = ImapProviderFolderSnapshot;
 export type ArchiveFolderSnapshot =
   | GmailArchiveSnapshot
   | ImapArchiveSnapshot;
+
+export type GmailTrashFetchSuccess = {
+  ok: true;
+  status: "ok";
+  mailboxId: string;
+  folder: GmailTrashSnapshot;
+  error?: never;
+};
+
+export type GmailTrashFetchFailure = {
+  ok: false;
+  status?: never;
+  mailboxId?: never;
+  folder?: never;
+  error: {
+    code: string;
+    message: string;
+  };
+};
+
+export type GmailTrashFetchResponse =
+  | GmailTrashFetchSuccess
+  | GmailTrashFetchFailure;
 
 export type GmailArchivedMessageIdentity = {
   serverMailboxId: string;
@@ -1076,6 +1113,8 @@ export type ArchiveFetchResponse =
   | ArchiveFailureResponse;
 
 const MAX_TRASH_RESPONSE_BYTES = 64 * 1024;
+const MAX_GMAIL_TRASH_FETCH_RESPONSE_BYTES = 10 * 1024 * 1024;
+const MAX_GMAIL_TRASH_SNAPSHOT_MESSAGES = 100;
 const PUBLIC_TRASH_ERROR_CODES = new Set([
   "gmail_connection_not_found",
   "gmail_connection_not_ready",
@@ -1096,10 +1135,33 @@ const PUBLIC_TRASH_ERROR_CODES = new Set([
   "unsupported_provider",
   "user_config_store_unavailable",
 ]);
+const PUBLIC_GMAIL_TRASH_FETCH_ERROR_CODES = new Set([
+  "gmail_connection_not_found",
+  "gmail_connection_not_ready",
+  "gmail_fetch_failed",
+  "gmail_permission_denied",
+  "gmail_rate_limited",
+  "gmail_refresh_unavailable",
+  "gmail_response_invalid",
+  "gmail_response_too_large",
+  "gmail_token_store_unavailable",
+  "gmail_unavailable",
+  "internal_error",
+  "invalid_mailbox_id",
+  "invalid_request",
+  "mailbox_ownership_unavailable",
+  "reconnect_required",
+  "trash_snapshot_failed",
+  "unauthorized",
+  "unsupported_provider",
+  "user_config_store_unavailable",
+]);
 const SAFE_TRASH_ERROR_MESSAGE =
   "Could not complete this Trash request safely.";
 const SAFE_TRASH_MUTATION_UNCONFIRMED_MESSAGE =
   "Trash may have completed, but provider confirmation was not definitive.";
+const SAFE_GMAIL_TRASH_FETCH_ERROR_MESSAGE =
+  "Could not load Trash from this Gmail mailbox safely.";
 
 const MAX_ARCHIVE_RESPONSE_BYTES = 10 * 1024 * 1024;
 const MAX_ARCHIVE_SNAPSHOT_MESSAGES = 100;
@@ -1199,6 +1261,15 @@ const ARCHIVE_ATTACHMENT_FIELDS = new Set([
   "inlineSrc",
 ]);
 const GMAIL_ARCHIVE_MESSAGE_FIELDS = new Set([
+  ...ARCHIVE_PREVIEW_FIELDS,
+  "serverMailboxId",
+  "providerFolder",
+  "providerMessageId",
+  "providerThreadId",
+  "rfcMessageId",
+  "labelIds",
+]);
+const GMAIL_TRASH_MESSAGE_FIELDS = new Set([
   ...ARCHIVE_PREVIEW_FIELDS,
   "serverMailboxId",
   "providerFolder",
@@ -1490,6 +1561,66 @@ function gmailFolderSnapshotIsValid<Folder extends "Inbox" | "Archive">(
   for (const message of value.messages) {
     if (
       !gmailArchiveMessageIsValid(message, mailboxId, providerFolder) ||
+      providerMessageIds.has(message.providerMessageId)
+    ) {
+      return false;
+    }
+    providerMessageIds.add(message.providerMessageId);
+  }
+  return true;
+}
+
+function gmailTrashMessageIsValid(
+  value: unknown,
+  mailboxId: string,
+): value is GmailTrashMessageSnapshot {
+  if (
+    !isArchiveRecord(value) ||
+    !hasOnlyArchiveKeys(value, GMAIL_TRASH_MESSAGE_FIELDS) ||
+    !archivePreviewFieldsAreValid(value) ||
+    value.serverMailboxId !== mailboxId ||
+    value.providerFolder !== "Trash" ||
+    !isGmailArchiveMessageId(value.providerMessageId) ||
+    !isArchiveIdentifier(value.providerThreadId) ||
+    !Array.isArray(value.labelIds) ||
+    value.labelIds.length > 1_000 ||
+    value.labelIds.some((labelId) => !isArchiveIdentifier(labelId)) ||
+    new Set(value.labelIds).size !== value.labelIds.length ||
+    (
+      value.rfcMessageId !== undefined &&
+      !isArchiveIdentifier(value.rfcMessageId)
+    )
+  ) {
+    return false;
+  }
+
+  const labels = new Set(value.labelIds.map((labelId) => labelId.toUpperCase()));
+  return labels.has("TRASH") && !labels.has("INBOX");
+}
+
+function gmailTrashSnapshotIsValid(
+  value: unknown,
+  mailboxId: string,
+): value is GmailTrashSnapshot {
+  if (
+    !isArchiveRecord(value) ||
+    !hasExactArchiveKeys(
+      value,
+      ["serverMailboxId", "providerFolder", "uidValidity", "messages"],
+    ) ||
+    value.serverMailboxId !== mailboxId ||
+    value.providerFolder !== "Trash" ||
+    value.uidValidity !== "gmail-api" ||
+    !Array.isArray(value.messages) ||
+    value.messages.length > MAX_GMAIL_TRASH_SNAPSHOT_MESSAGES
+  ) {
+    return false;
+  }
+
+  const providerMessageIds = new Set<string>();
+  for (const message of value.messages) {
+    if (
+      !gmailTrashMessageIsValid(message, mailboxId) ||
       providerMessageIds.has(message.providerMessageId)
     ) {
       return false;
@@ -2104,6 +2235,125 @@ export function sanitizeProviderArchiveMutationUncertainResponse(
   return wireRequest
     ? archiveUncertainResponse(value, wireRequest)
     : null;
+}
+
+function gmailTrashFetchFailure(
+  code: string,
+  message: string,
+): GmailTrashFetchFailure {
+  return {
+    ok: false,
+    error: {
+      code,
+      message,
+    },
+  };
+}
+
+function gmailTrashFetchErrorFromPayload(
+  value: unknown,
+): GmailTrashFetchFailure | null {
+  if (
+    containsForbiddenArchiveResponseField(value) ||
+    !isArchiveRecord(value) ||
+    !hasExactArchiveKeys(value, ["ok", "error"]) ||
+    value.ok !== false ||
+    !isArchiveRecord(value.error) ||
+    !hasExactArchiveKeys(value.error, ["code", "message"]) ||
+    typeof value.error.code !== "string" ||
+    !PUBLIC_GMAIL_TRASH_FETCH_ERROR_CODES.has(value.error.code) ||
+    !isSafeTrashErrorMessage(value.error.message)
+  ) {
+    return null;
+  }
+
+  return gmailTrashFetchFailure(
+    value.error.code,
+    SAFE_GMAIL_TRASH_FETCH_ERROR_MESSAGE,
+  );
+}
+
+function gmailTrashFetchSuccessResponse(
+  value: unknown,
+  mailboxId: string,
+): GmailTrashFetchSuccess | null {
+  if (
+    containsForbiddenArchiveResponseField(value) ||
+    !isArchiveRecord(value) ||
+    !hasExactArchiveKeys(value, ["ok", "status", "mailboxId", "folder"]) ||
+    value.ok !== true ||
+    value.status !== "ok" ||
+    value.mailboxId !== mailboxId ||
+    !gmailTrashSnapshotIsValid(value.folder, mailboxId)
+  ) {
+    return null;
+  }
+
+  return value as GmailTrashFetchSuccess;
+}
+
+async function readGmailTrashFetchResponsePayload(
+  response: Response,
+): Promise<unknown> {
+  const rawPayload = await response.text();
+  if (
+    !rawPayload.trim() ||
+    new TextEncoder().encode(rawPayload).byteLength >
+      MAX_GMAIL_TRASH_FETCH_RESPONSE_BYTES
+  ) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(rawPayload) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchGmailTrash(
+  mailboxId: string,
+): Promise<GmailTrashFetchResponse> {
+  if (!isArchiveIdentifier(mailboxId)) {
+    return gmailTrashFetchFailure(
+      "invalid_trash_fetch_request",
+      "A valid Gmail mailbox identity is required.",
+    );
+  }
+
+  try {
+    const response = await fetch("/api/inboxes/fetch-trash", {
+      method: "POST",
+      credentials: "include",
+      cache: "no-store",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ mailboxId }),
+    });
+    const payload = await readGmailTrashFetchResponsePayload(response);
+    if (response.status !== 200) {
+      return gmailTrashFetchErrorFromPayload(payload) ?? gmailTrashFetchFailure(
+        "gmail_trash_fetch_response_invalid",
+        "Trash did not return a valid Gmail provider snapshot.",
+      );
+    }
+
+    const success = gmailTrashFetchSuccessResponse(payload, mailboxId);
+    if (success) {
+      return success;
+    }
+
+    return gmailTrashFetchErrorFromPayload(payload) ?? gmailTrashFetchFailure(
+      "gmail_trash_fetch_response_invalid",
+      "Trash did not return a valid Gmail provider snapshot.",
+    );
+  } catch {
+    return gmailTrashFetchFailure(
+      "gmail_trash_fetch_failed",
+      "Could not load Trash from this Gmail mailbox.",
+    );
+  }
 }
 
 async function readProviderTrashResponsePayload(

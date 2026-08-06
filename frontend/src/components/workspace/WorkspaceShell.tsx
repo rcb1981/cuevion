@@ -87,6 +87,7 @@ import {
   buildRefreshInboxRequest,
   connectInboxWithImap,
   downloadAttachment,
+  fetchGmailTrash,
   fetchProviderArchive,
   fetchGmailInbox,
   getMailboxCredentialStatuses,
@@ -99,6 +100,7 @@ import {
   type ArchiveMutationResponse,
   type GmailArchiveMessageSnapshot,
   type GmailProviderFolderSnapshot,
+  type GmailTrashSnapshot,
   type ImapProviderFolderSnapshot,
   type InboxMessageAction,
   type InboxMessageActionRequest,
@@ -128,6 +130,13 @@ import {
   type ProviderArchiveInvalidSourceReason,
 } from "../../lib/providerArchivePreflight";
 import { buildProviderMessageActionTarget } from "../../lib/providerMessageAction";
+import {
+  applyGmailProviderTrashFolderReadback,
+  createProviderTrashCoordinator,
+  hasPendingProviderTrashForMailbox,
+  replaceGmailProviderInboxAndTrashReadback,
+  resolveExactGmailTrashMutationTarget,
+} from "../../lib/providerTrashAction";
 import {
   ARCHIVE_CAPABILITY_UNAVAILABLE_MESSAGE,
   ARCHIVE_REFRESH_ERROR_MESSAGE,
@@ -1340,6 +1349,7 @@ const providerArchiveCoordinator = createProviderArchiveCoordinator({
   mutate: mutateProviderArchiveMessage,
   pendingKeys: providerArchivePendingKeys,
 });
+const providerTrashPendingKeys = new Set<string>();
 
 type ExactImapProviderMessageIdentity = {
   mailboxId: string;
@@ -12959,6 +12969,9 @@ function MailboxView({
   isProviderArchiveCapabilityUnavailable,
   onArchiveFolderOpen,
   archiveFolderStatusMessage,
+  onTrashFolderOpen,
+  trashFolderStatusMessage,
+  onReconcileProviderTrash,
   onSyncMailbox,
   isSyncingMailbox,
   onSyncUnreadOverrides,
@@ -12972,6 +12985,8 @@ function MailboxView({
   onComposeOpenChange,
   onMobileComposeSent,
   isMobileViewport = false,
+  workspaceDataMode,
+  hasAuthenticatedMemberAuthority,
 }: {
   mailbox: OrderedMailbox;
   activeMailboxTitleOverride?: string;
@@ -13055,6 +13070,13 @@ function MailboxView({
   isProviderArchiveCapabilityUnavailable: (mailboxId: InboxId) => boolean;
   onArchiveFolderOpen: () => void;
   archiveFolderStatusMessage: string | null;
+  onTrashFolderOpen: () => void;
+  trashFolderStatusMessage: string | null;
+  onReconcileProviderTrash: (
+    mailboxId: InboxId,
+    providerMessageId: string,
+    mutationConfirmed: boolean,
+  ) => Promise<boolean>;
   onSyncMailbox: () => void;
   isSyncingMailbox: boolean;
   onSyncUnreadOverrides: (messages: MessageIdentitySource[], unread: boolean) => void;
@@ -13084,6 +13106,8 @@ function MailboxView({
   /** True when rendered inside a mobile viewport — swaps the full desktop
    *  mailbox chrome for a native-feeling mobile compose overlay. */
   isMobileViewport?: boolean;
+  workspaceDataMode: WorkspaceDataMode;
+  hasAuthenticatedMemberAuthority: boolean;
 }) {
   const collaborationLastSeenStorageKey = buildCollaborationLastSeenStorageKey(
     currentViewerPersistenceKey,
@@ -13250,6 +13274,7 @@ function MailboxView({
   const [trashEmptiedToastMessage, setTrashEmptiedToastMessage] = useState<string | null>(null);
   const [mailboxActionToastMessage, setMailboxActionToastMessage] = useState<string | null>(null);
   const [pendingProviderArchiveKeys, setPendingProviderArchiveKeys] = useState<string[]>([]);
+  const [pendingProviderTrashKeys, setPendingProviderTrashKeys] = useState<string[]>([]);
   const dragPreviewCleanupRef = useRef<(() => void) | null>(null);
   const [composeTo, setComposeTo] = useState("");
   const [composeCc, setComposeCc] = useState("");
@@ -15666,6 +15691,8 @@ function MailboxView({
     setActiveFolder(targetFolder);
     if (targetFolder === "Archive") {
       onArchiveFolderOpen();
+    } else if (targetFolder === "Trash") {
+      onTrashFolderOpen();
     }
     setIsSharedView(targetMailboxId === sharedCollaborationMailboxId);
     setIsFullMessageOpen(Boolean(notificationNavigationRequest.openFullMessage));
@@ -16283,9 +16310,10 @@ function MailboxView({
             onClick={() => {
               deleteMessages([message.id]);
             }}
+            disabled={pendingProviderTrashKeys.length > 0}
             className={menuItemClass}
           >
-            Delete
+            {pendingProviderTrashKeys.length > 0 ? "Moving to Trash…" : "Delete"}
           </button>
           <button
             type="button"
@@ -19134,6 +19162,10 @@ function MailboxView({
     targetFolder: MailFolder,
     messageIds: string[],
   ) => {
+    if (targetFolder === "Trash" && workspaceDataMode === "live") {
+      void trashMessagesFromEntryPoint(messageIds);
+      return;
+    }
     if (shouldBlockSmartFolderMutation()) {
       return;
     }
@@ -19267,6 +19299,10 @@ function MailboxView({
     targetFolder: MailFolder,
     messageIds: string[],
   ) => {
+    if (targetFolder === "Trash" && workspaceDataMode === "live") {
+      void trashMessagesFromEntryPoint(messageIds);
+      return;
+    }
     if (shouldBlockSmartFolderMutation()) {
       return;
     }
@@ -19429,6 +19465,13 @@ function MailboxView({
     targetFolder: MailFolder,
     messageIds: string[],
   ) => {
+    if (targetFolder === "Trash" && workspaceDataMode === "live") {
+      void trashMessagesFromEntryPoint(messageIds, {
+        mailboxId: sourceMailboxId,
+        folder: sourceFolder,
+      });
+      return;
+    }
     if (shouldBlockSmartFolderMutation()) {
       return;
     }
@@ -19635,6 +19678,11 @@ function MailboxView({
       return;
     }
 
+    if (workspaceDataMode === "live") {
+      void trashMessagesFromEntryPoint(messageIds);
+      return;
+    }
+
     if (!isSharedView && !activeSmartFolder && activeFolder === "Trash") {
       removeMessagesFromTrash(mailbox.id, messageIds, "Message removed from Trash");
       return;
@@ -19655,6 +19703,12 @@ function MailboxView({
 
   const emptyTrash = () => {
     setIsEmptyTrashConfirmationOpen(false);
+    if (workspaceDataMode === "live") {
+      setMailboxActionToastMessage(
+        "Permanent delete and Empty Trash are not available for live mailboxes yet.",
+      );
+      return;
+    }
     removeMessagesFromTrash(
       mailbox.id,
       mailboxCollections.Trash.map((message) => message.id),
@@ -19772,6 +19826,10 @@ function MailboxView({
   const moveMessagesToManualTarget = (targetFolder: MailFolder, messageIds: string[]) => {
     if (targetFolder === "Archive") {
       void archiveMessagesFromEntryPoint(messageIds);
+      return;
+    }
+    if (targetFolder === "Trash") {
+      void trashMessagesFromEntryPoint(messageIds);
       return;
     }
 
@@ -20257,6 +20315,146 @@ function MailboxView({
     advanceSelectionAfterAction([messageId]);
   }
 
+  async function trashMessagesFromEntryPoint(
+    messageIds: string[],
+    explicitSource?: {
+      mailboxId: InboxId;
+      folder: MailFolder;
+    },
+  ) {
+    if (messageIds.length === 0) {
+      closeMenus();
+      return;
+    }
+    if (workspaceDataMode !== "live") {
+      const sourceMailboxId = explicitSource?.mailboxId ?? mailbox.id;
+      const sourceFolder = explicitSource?.folder ?? activeFolder;
+      moveMessages(
+        sourceMailboxId,
+        sourceFolder,
+        sourceMailboxId,
+        "Trash",
+        messageIds,
+      );
+      return;
+    }
+
+    const sourceLocation = explicitSource ?? {
+      mailboxId: mailbox.id,
+      folder: activeFolder,
+    };
+    const sourceManagedMailbox = managedInboxes.find(
+      (candidate) => candidate.id === sourceLocation.mailboxId,
+    );
+    if (
+      messageIds.length !== 1 ||
+      isMultiSelectActive ||
+      isSharedView ||
+      Boolean(activeSmartFolder) ||
+      sourceLocation.folder !== "Inbox"
+    ) {
+      setMailboxActionToastMessage(
+        "Provider-authoritative Trash currently supports exactly one Inbox message.",
+      );
+      closeMenus();
+      return;
+    }
+    if (!hasAuthenticatedMemberAuthority) {
+      setMailboxActionToastMessage(
+        "Provider-authoritative Trash requires a server-managed member mailbox.",
+      );
+      closeMenus();
+      return;
+    }
+    if (
+      !sourceManagedMailbox?.connected ||
+      sourceManagedMailbox.connectionStatus !== "connected"
+    ) {
+      setMailboxActionToastMessage(
+        "Trash is unavailable until this mailbox is connected.",
+      );
+      closeMenus();
+      return;
+    }
+    if (sourceManagedMailbox.provider !== "google") {
+      setMailboxActionToastMessage(
+        sourceManagedMailbox.provider === "custom_imap"
+          ? "Provider-authoritative Trash is not available for custom IMAP yet."
+          : "Provider-authoritative Trash is not available for this mailbox.",
+      );
+      closeMenus();
+      return;
+    }
+
+    const resolution = resolveExactGmailTrashMutationTarget({
+      isLiveMailbox:
+        workspaceDataMode === "live" && hasAuthenticatedMemberAuthority,
+      selectedMessageIds: messageIds,
+      sourceFolder: sourceLocation.folder,
+      sourceManagedMailbox,
+      sourceMessages:
+        mailboxStore[sourceLocation.mailboxId]?.Inbox ?? [],
+    });
+    if (!resolution) {
+      setMailboxActionToastMessage(
+        "This Gmail message does not have one safe provider message identity.",
+      );
+      closeMenus();
+      return;
+    }
+
+    const coordinator = createProviderTrashCoordinator({
+      pendingKeys: providerTrashPendingKeys,
+      reconcileReadOnly: async (request) => {
+        const reconciled = await onReconcileProviderTrash(
+          request.mailboxId as InboxId,
+          request.providerMessageId,
+          request.cause === "confirmed_success",
+        );
+        if (!reconciled) {
+          throw new Error("trash_reconciliation_failed");
+        }
+      },
+    });
+
+    closeMenus();
+    const trashPromise = coordinator.trash(resolution.target);
+    setPendingProviderTrashKeys([...providerTrashPendingKeys]);
+    const result = await trashPromise;
+    setPendingProviderTrashKeys([...providerTrashPendingKeys]);
+
+    if (result.classification === "success") {
+      advanceSelectionAfterAction(messageIds);
+      setMailboxActionToastMessage("Message moved to Gmail Trash.");
+      return;
+    }
+    if (result.classification === "uncertain") {
+      setMailboxActionToastMessage(
+        "Gmail could not confirm the mutation definitively; Inbox and Trash were refreshed once from provider data.",
+      );
+      return;
+    }
+    if (result.classification === "reconciliation_failed") {
+      setMailboxActionToastMessage(
+        result.mutationClassification === "success"
+          ? "Gmail confirmed Trash, but Inbox and Trash could not be reconciled safely. Refresh the folder to try the read-only fetch again."
+          : "The current Gmail state could not be confirmed safely. No second Trash request was sent.",
+      );
+      return;
+    }
+    if (result.classification === "ordinary_failure") {
+      setMailboxActionToastMessage(
+        "Could not move this message to Gmail Trash safely. No changes were applied.",
+      );
+      return;
+    }
+    setMailboxActionToastMessage(
+      result.reason === "already_pending"
+        ? "Trash is already in progress for this Gmail message."
+        : "This Gmail message cannot be moved to Trash safely.",
+    );
+  }
+
   const archiveSelectedMessages = () => {
     void archiveMessagesFromEntryPoint(actionableSelectionIds);
   };
@@ -20267,6 +20465,11 @@ function MailboxView({
     }
 
     if (shouldBlockSmartFolderMutation()) {
+      return;
+    }
+
+    if (workspaceDataMode === "live") {
+      void trashMessagesFromEntryPoint(actionableSelectionIds);
       return;
     }
 
@@ -20391,6 +20594,11 @@ function MailboxView({
           mailboxId: dragPayload.sourceMailboxId,
           folder: dragPayload.sourceFolder,
         });
+      } else if (target.folder === "Trash") {
+        void trashMessagesFromEntryPoint(dragPayload.messageIds, {
+          mailboxId: dragPayload.sourceMailboxId,
+          folder: dragPayload.sourceFolder,
+        });
       } else {
         moveMessages(
           dragPayload.sourceMailboxId,
@@ -20491,6 +20699,8 @@ function MailboxView({
     );
     if (folder === "Archive") {
       onArchiveFolderOpen();
+    } else if (folder === "Trash") {
+      onTrashFolderOpen();
     }
     closeMenus();
   };
@@ -20993,8 +21203,16 @@ function MailboxView({
             </svg>
           </MailToolbarIconButton>
           <MailToolbarIconButton
-            label="Delete"
-            disabled={!hasSelection || isReadOnlySmartFolderView}
+            label={
+              pendingProviderTrashKeys.length > 0
+                ? "Moving to Trash..."
+                : "Delete"
+            }
+            disabled={
+              !hasSelection ||
+              isReadOnlySmartFolderView ||
+              pendingProviderTrashKeys.length > 0
+            }
             onClick={deleteSelectedMessages}
           >
             <svg
@@ -21147,6 +21365,7 @@ function MailboxView({
                 ) : null}
                 {!isSharedView &&
                 !activeSmartFolder &&
+                workspaceDataMode !== "live" &&
                 activeFolder === "Trash" &&
                 mailboxCollections.Trash.length > 0 ? (
                   <button
@@ -21166,8 +21385,10 @@ function MailboxView({
                     key={`toolbar-folder-${target.folder}`}
                     type="button"
                     disabled={
-                      target.folder === "Archive" &&
-                      pendingProviderArchiveKeys.length > 0
+                      (target.folder === "Archive" &&
+                        pendingProviderArchiveKeys.length > 0) ||
+                      (target.folder === "Trash" &&
+                        pendingProviderTrashKeys.length > 0)
                     }
                     onClick={() => {
                       moveMessagesToManualTarget(target.folder, visibleSelectedMessageIds);
@@ -21188,6 +21409,14 @@ function MailboxView({
             className="mb-4 flex-none rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-3 text-[0.8rem] leading-5 text-[var(--workspace-text-soft)]"
           >
             {archiveFolderStatusMessage}
+          </div>
+        ) : null}
+        {activeFolder === "Trash" && trashFolderStatusMessage ? (
+          <div
+            role="status"
+            className="mb-4 flex-none rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-3 text-[0.8rem] leading-5 text-[var(--workspace-text-soft)]"
+          >
+            {trashFolderStatusMessage}
           </div>
         ) : null}
 
@@ -22675,6 +22904,7 @@ function MailboxView({
                       <button
                         type="button"
                         onClick={() => deleteMessages(contextMenuSelectionIds)}
+                        disabled={pendingProviderTrashKeys.length > 0}
                         className={contextMenuMainItemClass}
                       >
                         Delete
@@ -22796,8 +23026,10 @@ function MailboxView({
                       key={`context-folder-${target.folder}`}
                       type="button"
                       disabled={
-                        target.folder === "Archive" &&
-                        pendingProviderArchiveKeys.length > 0
+                        (target.folder === "Archive" &&
+                          pendingProviderArchiveKeys.length > 0) ||
+                        (target.folder === "Trash" &&
+                          pendingProviderTrashKeys.length > 0)
                       }
                       onClick={() => {
                         moveMessagesToManualTarget(target.folder, contextMenuSelectionIds);
@@ -25992,6 +26224,7 @@ function buildLiveThreadIdentityContext(
 
 type ProviderFolderSnapshotForWorkspace =
   | GmailProviderFolderSnapshot
+  | GmailTrashSnapshot
   | ImapProviderFolderSnapshot;
 
 function readRenderableProviderSnapshotMessages(
@@ -34729,8 +34962,32 @@ export function WorkspaceShell({
   ]
     .sort()
     .join("|");
+  const providerAuthoritativeGmailTrashMailboxIds = useMemo(
+    () =>
+      new Set(
+        workspaceDataMode === "live"
+          ? savedManagedInboxes
+              .filter(
+                (mailbox) =>
+                  mailbox.connected &&
+                  mailbox.connectionStatus === "connected" &&
+                  mailbox.provider === "google",
+              )
+              .map((mailbox) => mailbox.id)
+          : [],
+      ),
+    [savedManagedInboxes, workspaceDataMode],
+  );
+  const providerAuthoritativeGmailTrashMailboxKey = [
+    ...providerAuthoritativeGmailTrashMailboxIds,
+  ]
+    .sort()
+    .join("|");
   const previousProviderAuthoritativeArchiveMailboxIdsRef = useRef(
     new Set(providerAuthoritativeArchiveMailboxIds),
+  );
+  const previousProviderAuthoritativeGmailTrashMailboxIdsRef = useRef(
+    new Set(providerAuthoritativeGmailTrashMailboxIds),
   );
   const providerArchiveConnectionKeys = savedManagedInboxes.reduce(
     (keys, mailbox) => {
@@ -34883,12 +35140,18 @@ export function WorkspaceShell({
   mailboxStoreRef.current = mailboxStore;
   const providerArchiveFetchMailboxIdsRef = useRef<Set<InboxId>>(new Set());
   const providerArchiveSnapshotMailboxIdsRef = useRef<Set<InboxId>>(new Set());
+  const providerTrashFetchMailboxIdsRef = useRef<Set<InboxId>>(new Set());
+  const providerTrashFetchSequenceByMailboxRef = useRef<
+    Partial<Record<InboxId, number>>
+  >({});
   // Provider Archive capability is runtime product state, not a sync error.
   // "unavailable" means discovery found no single safe provider Archive folder.
   const providerArchiveCapabilitiesRef = useRef<
     Partial<Record<InboxId, ProviderArchiveCapability>>
   >({});
   const [providerArchiveFolderStatusMessages, setProviderArchiveFolderStatusMessages] =
+    useState<Partial<Record<InboxId, string>>>({});
+  const [providerTrashFolderStatusMessages, setProviderTrashFolderStatusMessages] =
     useState<Partial<Record<InboxId, string>>>({});
   useEffect(() => {
     const previousConnectionKeys =
@@ -34918,6 +35181,9 @@ export function WorkspaceShell({
 
     changedMailboxIds.forEach((mailboxId) => {
       providerArchiveSnapshotMailboxIdsRef.current.delete(mailboxId);
+      providerTrashFetchMailboxIdsRef.current.delete(mailboxId);
+      providerTrashFetchSequenceByMailboxRef.current[mailboxId] =
+        (providerTrashFetchSequenceByMailboxRef.current[mailboxId] ?? 0) + 1;
       gmailInboxAuthorityRef.current.resetMailbox(mailboxId);
     });
     providerArchiveCapabilitiesRef.current = Object.fromEntries(
@@ -34932,11 +35198,21 @@ export function WorkspaceShell({
         ),
       ) as Partial<Record<InboxId, string>>,
     );
+    setProviderTrashFolderStatusMessages((current) =>
+      Object.fromEntries(
+        Object.entries(current).filter(
+          ([mailboxId]) => !changedMailboxIds.includes(mailboxId as InboxId),
+        ),
+      ) as Partial<Record<InboxId, string>>,
+    );
     setMailboxStore((currentStore) => {
       let nextStore = currentStore;
       changedMailboxIds.forEach((mailboxId) => {
         const collections = nextStore[mailboxId];
-        if (!collections || collections.Archive.length === 0) {
+        if (
+          !collections ||
+          (collections.Archive.length === 0 && collections.Trash.length === 0)
+        ) {
           return;
         }
         nextStore = {
@@ -34944,6 +35220,7 @@ export function WorkspaceShell({
           [mailboxId]: {
             ...collections,
             Archive: [],
+            Trash: [],
           },
         };
       });
@@ -34980,6 +35257,36 @@ export function WorkspaceShell({
       return nextStore;
     });
   }, [providerAuthoritativeArchiveMailboxKey]);
+  useEffect(() => {
+    const previousMailboxIds =
+      previousProviderAuthoritativeGmailTrashMailboxIdsRef.current;
+    const newlyAuthoritativeMailboxIds = [
+      ...providerAuthoritativeGmailTrashMailboxIds,
+    ].filter((mailboxId) => !previousMailboxIds.has(mailboxId));
+    previousProviderAuthoritativeGmailTrashMailboxIdsRef.current =
+      new Set(providerAuthoritativeGmailTrashMailboxIds);
+    if (newlyAuthoritativeMailboxIds.length === 0) {
+      return;
+    }
+
+    setMailboxStore((currentStore) => {
+      let nextStore = currentStore;
+      newlyAuthoritativeMailboxIds.forEach((mailboxId) => {
+        const collections = nextStore[mailboxId as InboxId];
+        if (!collections || collections.Trash.length === 0) {
+          return;
+        }
+        nextStore = {
+          ...nextStore,
+          [mailboxId]: {
+            ...collections,
+            Trash: [],
+          },
+        };
+      });
+      return nextStore;
+    });
+  }, [providerAuthoritativeGmailTrashMailboxKey]);
   const [hydratedArchiveMessagesStorageKey, setHydratedArchiveMessagesStorageKey] =
     useState<string | null>(null);
   const [messageUnreadOverrides, setMessageUnreadOverrides] =
@@ -35677,6 +35984,476 @@ export function WorkspaceShell({
       });
     });
     return applied;
+  };
+  const isExactGmailReconciliationIdentifier = (value: unknown): value is string =>
+    typeof value === "string" &&
+    value.length >= 1 &&
+    value.length <= 512 &&
+    value === value.trim() &&
+    /^[\x20-\x7e]+$/.test(value);
+  const isConcreteGmailReconciliationMessageId = (
+    value: unknown,
+  ): value is string => {
+    if (
+      !isExactGmailReconciliationIdentifier(value) ||
+      value.includes("@") ||
+      value.includes("<") ||
+      value.includes(">")
+    ) {
+      return false;
+    }
+    const lowered = value.toLowerCase();
+    return !["imap-uid-", "rfc-", "thread-"].some((prefix) =>
+      lowered.startsWith(prefix),
+    );
+  };
+  const readStrictGmailInboxReconciliationMessages = (
+    mailboxId: InboxId,
+    response: Awaited<ReturnType<typeof fetchGmailInbox>>,
+  ): LiveInboxMessageSnapshot[] | null => {
+    if (
+      response.ok !== true ||
+      response.uidValidity !== "gmail-api" ||
+      !Array.isArray(response.messages) ||
+      response.messages.length > 100
+    ) {
+      return null;
+    }
+
+    const providerMessageIds = new Set<string>();
+    for (const message of response.messages) {
+      if (
+        !message ||
+        typeof message !== "object" ||
+        message.serverMailboxId !== mailboxId ||
+        message.providerFolder !== "Inbox" ||
+        !isConcreteGmailReconciliationMessageId(message.providerMessageId) ||
+        !isExactGmailReconciliationIdentifier(message.providerThreadId) ||
+        !Array.isArray(message.labelIds) ||
+        message.labelIds.length > 1_000 ||
+        message.labelIds.some(
+          (labelId) => !isExactGmailReconciliationIdentifier(labelId),
+        ) ||
+        new Set(message.labelIds).size !== message.labelIds.length ||
+        !message.labelIds.includes("INBOX") ||
+        message.labelIds.includes("TRASH") ||
+        message.imapUid !== undefined ||
+        providerMessageIds.has(message.providerMessageId)
+      ) {
+        return null;
+      }
+      providerMessageIds.add(message.providerMessageId);
+    }
+
+    return readRenderableProviderSnapshotMessages({
+      serverMailboxId: mailboxId,
+      providerFolder: "Inbox",
+      uidValidity: "gmail-api",
+      messages: response.messages as GmailProviderFolderSnapshot<"Inbox">["messages"],
+    })
+      ? response.messages
+      : null;
+  };
+  const normalizeGmailProviderMessages = (
+    mailboxId: InboxId,
+    providerFolder: "Inbox" | "Trash",
+    messages: LiveInboxMessageSnapshot[],
+    currentStore: MailboxStore,
+  ) =>
+    mergeLiveInboxMessages(
+      mailboxId,
+      messages,
+      [],
+      currentStore,
+      {
+        threadIdentityContext: buildLiveThreadIdentityContext(
+          mailboxId,
+          "google",
+          "gmail-api",
+          providerFolder,
+        ),
+        freshProviderStateKeys: new Set(
+          messages.flatMap((message) => getCanonicalMessageIdentityKeys(message)),
+        ),
+        authoritativeFolderSnapshot: true,
+      },
+    );
+  const applyProviderAuthoritativeGmailTrashSnapshot = (
+    mailboxId: InboxId,
+    snapshot: GmailTrashSnapshot,
+  ) => {
+    snapshot.messages.forEach((message) => {
+      gmailInboxAuthorityRef.current.confirmArchive(
+        mailboxId,
+        message.providerMessageId,
+      );
+    });
+
+    let applied = false;
+    flushSync(() => {
+      setMailboxStore((currentStore) => {
+        const currentCollections =
+          currentStore[mailboxId] ?? createEmptyMailboxCollections();
+        const normalizedTrash = normalizeGmailProviderMessages(
+          mailboxId,
+          "Trash",
+          snapshot.messages as LiveInboxMessageSnapshot[],
+          currentStore,
+        );
+        if (normalizedTrash.length !== snapshot.messages.length) {
+          return currentStore;
+        }
+        const readback = applyGmailProviderTrashFolderReadback(
+          currentCollections,
+          {
+            mailboxId,
+            Trash: normalizedTrash,
+          },
+        );
+        if (!readback.applied) {
+          return currentStore;
+        }
+        applied = true;
+        return {
+          ...currentStore,
+          [mailboxId]: readback.state,
+        };
+      });
+    });
+    if (applied) {
+      clearUnreadOverridesForProviderMessages(
+        snapshot.messages as LiveInboxMessageSnapshot[],
+      );
+    }
+    return applied;
+  };
+  const applyProviderAuthoritativeGmailTrashReconciliation = ({
+    mailboxId,
+    providerMessageId,
+    inboxMessages,
+    trashSnapshot,
+    mutationConfirmed,
+  }: {
+    mailboxId: InboxId;
+    providerMessageId: string;
+    inboxMessages: LiveInboxMessageSnapshot[];
+    trashSnapshot: GmailTrashSnapshot;
+    mutationConfirmed: boolean;
+  }) => {
+    const inboxProviderMessageIds = new Set(
+      inboxMessages.map((message) => message.providerMessageId as string),
+    );
+    const trashProviderMessageIds = new Set(
+      trashSnapshot.messages.map((message) => message.providerMessageId),
+    );
+    if (
+      [...inboxProviderMessageIds].some((messageId) =>
+        trashProviderMessageIds.has(messageId),
+      )
+    ) {
+      return false;
+    }
+
+    const targetInInbox = inboxProviderMessageIds.has(providerMessageId);
+    const targetInTrash = trashProviderMessageIds.has(providerMessageId);
+    if (
+      mutationConfirmed
+        ? targetInInbox || !targetInTrash
+        : targetInInbox === targetInTrash
+    ) {
+      return false;
+    }
+
+    if (!mutationConfirmed && targetInTrash) {
+      gmailInboxAuthorityRef.current.confirmArchive(
+        mailboxId,
+        providerMessageId,
+      );
+      removeConfirmedArchivedGmailMessageFromPersistedInboxSnapshot(
+        mailboxId,
+        providerMessageId,
+      );
+    }
+
+    let applied = false;
+    flushSync(() => {
+      setMailboxStore((currentStore) => {
+        const normalizedInbox = normalizeGmailProviderMessages(
+          mailboxId,
+          "Inbox",
+          inboxMessages,
+          currentStore,
+        );
+        const normalizedTrash = normalizeGmailProviderMessages(
+          mailboxId,
+          "Trash",
+          trashSnapshot.messages as LiveInboxMessageSnapshot[],
+          currentStore,
+        );
+        if (
+          normalizedInbox.length !== inboxMessages.length ||
+          normalizedTrash.length !== trashSnapshot.messages.length
+        ) {
+          return currentStore;
+        }
+        const currentCollections =
+          currentStore[mailboxId] ?? createEmptyMailboxCollections();
+        const readback = replaceGmailProviderInboxAndTrashReadback(
+          currentCollections,
+          {
+            mailboxId,
+            targetProviderMessageId: providerMessageId,
+            mutationConfirmed,
+            Inbox: normalizedInbox,
+            Trash: normalizedTrash,
+          },
+        );
+        if (!readback.applied) {
+          return currentStore;
+        }
+        applied = true;
+        return {
+          ...currentStore,
+          [mailboxId]: readback.state,
+        };
+      });
+    });
+    if (applied) {
+      clearUnreadOverridesForProviderMessages([
+        ...inboxMessages,
+        ...(trashSnapshot.messages as LiveInboxMessageSnapshot[]),
+      ]);
+    }
+    return applied;
+  };
+  const setProviderTrashFolderStatusMessage = (
+    mailboxId: InboxId,
+    message: string,
+  ) => {
+    setProviderTrashFolderStatusMessages((current) => ({
+      ...current,
+      [mailboxId]: message,
+    }));
+  };
+  const clearProviderTrashFolderStatusMessage = (mailboxId: InboxId) => {
+    setProviderTrashFolderStatusMessages((current) => {
+      if (!current[mailboxId]) {
+        return current;
+      }
+      const next = { ...current };
+      delete next[mailboxId];
+      return next;
+    });
+  };
+  const readProviderInboxTrashStateVersion = (mailboxId: InboxId) =>
+    JSON.stringify(
+      (["Inbox", "Trash"] as const).map((folder) =>
+        (mailboxStoreRef.current[mailboxId]?.[folder] ?? []).map((message) => ({
+          serverMailboxId: message.serverMailboxId,
+          providerFolder: message.providerFolder,
+          providerMessageId: message.providerMessageId,
+          providerThreadId: message.providerThreadId,
+          labelIds: message.labelIds,
+          unread: message.unread,
+          flagged: message.flagged,
+        })),
+      ),
+    );
+  const refreshProviderTrashById = async (
+    mailboxId: InboxId,
+  ): Promise<"applied" | "skipped" | "failed"> => {
+    if (
+      !hasAuthenticatedMemberAuthority ||
+      !providerAuthoritativeGmailTrashMailboxIds.has(mailboxId) ||
+      providerTrashFetchMailboxIdsRef.current.has(mailboxId) ||
+      hasPendingProviderTrashForMailbox(providerTrashPendingKeys, mailboxId)
+    ) {
+      return "skipped";
+    }
+
+    const managedMailbox = savedManagedInboxes.find(
+      (candidate) => candidate.id === mailboxId,
+    );
+    const requestConnectionKey =
+      providerArchiveCurrentConnectionKeysRef.current[mailboxId] ?? null;
+    const requestConnectionEpoch =
+      providerArchiveConnectionEpochsRef.current[mailboxId] ?? 0;
+    if (
+      !managedMailbox?.connected ||
+      managedMailbox.connectionStatus !== "connected" ||
+      managedMailbox.provider !== "google" ||
+      !requestConnectionKey
+    ) {
+      return "skipped";
+    }
+
+    const generationAtFetchStart =
+      gmailInboxAuthorityRef.current.captureGeneration(mailboxId);
+    const stateVersionAtFetchStart =
+      readProviderInboxTrashStateVersion(mailboxId);
+    const sequence =
+      (providerTrashFetchSequenceByMailboxRef.current[mailboxId] ?? 0) + 1;
+    providerTrashFetchSequenceByMailboxRef.current[mailboxId] = sequence;
+    providerTrashFetchMailboxIdsRef.current.add(mailboxId);
+
+    try {
+      const response = await fetchGmailTrash(managedMailbox.id);
+      if (
+        hasPendingProviderTrashForMailbox(providerTrashPendingKeys, mailboxId) ||
+        providerTrashFetchSequenceByMailboxRef.current[mailboxId] !== sequence ||
+        requestConnectionKey !==
+          (providerArchiveCurrentConnectionKeysRef.current[mailboxId] ?? null) ||
+        requestConnectionEpoch !==
+          (providerArchiveConnectionEpochsRef.current[mailboxId] ?? 0) ||
+        !gmailInboxAuthorityRef.current.isCurrentGeneration(
+          mailboxId,
+          generationAtFetchStart,
+        ) ||
+        stateVersionAtFetchStart !==
+          readProviderInboxTrashStateVersion(mailboxId)
+      ) {
+        return "skipped";
+      }
+      if (
+        response.ok !== true ||
+        !applyProviderAuthoritativeGmailTrashSnapshot(
+          mailboxId,
+          response.folder,
+        )
+      ) {
+        setProviderTrashFolderStatusMessage(
+          mailboxId,
+          "Trash could not be refreshed safely from Gmail.",
+        );
+        return "failed";
+      }
+      clearProviderTrashFolderStatusMessage(mailboxId);
+      return "applied";
+    } catch {
+      setProviderTrashFolderStatusMessage(
+        mailboxId,
+        "Trash could not be refreshed safely from Gmail.",
+      );
+      return "failed";
+    } finally {
+      providerTrashFetchMailboxIdsRef.current.delete(mailboxId);
+    }
+  };
+  const reconcileProviderTrashById = async (
+    mailboxId: InboxId,
+    providerMessageId: string,
+    mutationConfirmed: boolean,
+  ) => {
+    if (
+      !hasAuthenticatedMemberAuthority ||
+      !providerAuthoritativeGmailTrashMailboxIds.has(mailboxId) ||
+      !isConcreteGmailReconciliationMessageId(providerMessageId)
+    ) {
+      return false;
+    }
+
+    const managedMailbox = savedManagedInboxes.find(
+      (candidate) => candidate.id === mailboxId,
+    );
+    const requestConnectionKey =
+      providerArchiveCurrentConnectionKeysRef.current[mailboxId] ?? null;
+    const requestConnectionEpoch =
+      providerArchiveConnectionEpochsRef.current[mailboxId] ?? 0;
+    if (
+      !managedMailbox?.connected ||
+      managedMailbox.connectionStatus !== "connected" ||
+      managedMailbox.provider !== "google" ||
+      !requestConnectionKey
+    ) {
+      return false;
+    }
+
+    if (mutationConfirmed) {
+      gmailInboxAuthorityRef.current.confirmArchive(
+        mailboxId,
+        providerMessageId,
+      );
+      removeConfirmedArchivedGmailMessageFromPersistedInboxSnapshot(
+        mailboxId,
+        providerMessageId,
+      );
+    }
+    const generationAtFetchStart =
+      gmailInboxAuthorityRef.current.captureGeneration(mailboxId);
+    const sequence =
+      (providerTrashFetchSequenceByMailboxRef.current[mailboxId] ?? 0) + 1;
+    providerTrashFetchSequenceByMailboxRef.current[mailboxId] = sequence;
+
+    try {
+      const [inboxResponse, trashResponse] = await Promise.all([
+        fetchGmailInbox({
+          mailboxId: managedMailbox.id,
+          focusPreferences: effectiveFocusPreferencesByMailbox[mailboxId],
+        }),
+        fetchGmailTrash(managedMailbox.id),
+      ]);
+      if (
+        providerTrashFetchSequenceByMailboxRef.current[mailboxId] !== sequence ||
+        requestConnectionKey !==
+          (providerArchiveCurrentConnectionKeysRef.current[mailboxId] ?? null) ||
+        requestConnectionEpoch !==
+          (providerArchiveConnectionEpochsRef.current[mailboxId] ?? 0) ||
+        !gmailInboxAuthorityRef.current.isCurrentGeneration(
+          mailboxId,
+          generationAtFetchStart,
+        )
+      ) {
+        return false;
+      }
+
+      const inboxMessages = readStrictGmailInboxReconciliationMessages(
+        mailboxId,
+        inboxResponse,
+      );
+      if (inboxMessages === null || trashResponse.ok !== true) {
+        setProviderTrashFolderStatusMessage(
+          mailboxId,
+          "Gmail Trash changed, but Inbox and Trash could not be reconciled safely.",
+        );
+        return false;
+      }
+      const applied = applyProviderAuthoritativeGmailTrashReconciliation({
+        mailboxId,
+        providerMessageId,
+        inboxMessages,
+        trashSnapshot: trashResponse.folder,
+        mutationConfirmed,
+      });
+      if (!applied) {
+        setProviderTrashFolderStatusMessage(
+          mailboxId,
+          "Gmail Trash changed, but Inbox and Trash could not be reconciled safely.",
+        );
+        return false;
+      }
+
+      try {
+        saveLiveInboxSnapshot({
+          provider: "google",
+          inboxId: mailboxId,
+          email: managedMailbox.email.trim().toLowerCase(),
+          fetchedAt: new Date().toISOString(),
+          messages: inboxMessages,
+          folder: "INBOX",
+          uidValidity: "gmail-api",
+        });
+      } catch {
+        // Provider-confirmed state remains authoritative without local persistence.
+      }
+      clearProviderTrashFolderStatusMessage(mailboxId);
+      return true;
+    } catch {
+      setProviderTrashFolderStatusMessage(
+        mailboxId,
+        "Gmail Trash changed, but Inbox and Trash could not be reconciled safely.",
+      );
+      return false;
+    }
   };
   const connectedInboxCount = savedManagedInboxes.filter(
     (mailbox) => mailbox.connected,
@@ -39434,6 +40211,13 @@ export function WorkspaceShell({
                 currentCollections.Archive,
               )
             : currentCollections.Archive,
+          Trash: options.provenGmailInboxReentryProviderMessageIds
+            ? removeProvenGmailInboxReentriesFromArchive(
+                targetMailbox.id,
+                options.provenGmailInboxReentryProviderMessageIds,
+                currentCollections.Trash,
+              )
+            : currentCollections.Trash,
           Inbox: mergeLiveInboxMessages(
             targetMailbox.id,
             messages,
@@ -39828,6 +40612,7 @@ export function WorkspaceShell({
       }
       let response = await inboxPromise;
       if (
+        hasPendingProviderTrashForMailbox(providerTrashPendingKeys, mailboxId) ||
         canUseGmailOAuthFetch &&
         (
           gmailInboxAuthorityGenerationAtFetchStart === null ||
@@ -39934,6 +40719,9 @@ export function WorkspaceShell({
         setMailboxSyncError(mailboxId, refreshErrorMessage);
         if (canUseGmailOAuthFetch) {
           setMailboxSyncFeedbackMessage(refreshErrorMessage);
+          if (!isProviderReconciliation) {
+            await refreshProviderTrashById(mailboxId);
+          }
         }
         return "failed";
       }
@@ -40072,6 +40860,9 @@ export function WorkspaceShell({
         cacheRestored: 0,
         mergedCount: messagesForReactState.length,
       };
+      if (canUseGmailOAuthFetch && !isProviderReconciliation) {
+        await refreshProviderTrashById(mailboxId);
+      }
 	      return refreshPresentation.result;
     } finally {
       if (reconciliationArchivePromise) {
@@ -40109,6 +40900,14 @@ export function WorkspaceShell({
     }
 
     void refreshProviderArchiveById(activeMailbox.id, "archive_open");
+  };
+
+  const handleOpenActiveMailboxTrash = () => {
+    if (!activeMailbox) {
+      return;
+    }
+
+    void refreshProviderTrashById(activeMailbox.id);
   };
 
   useEffect(() => {
@@ -40790,6 +41589,9 @@ export function WorkspaceShell({
         const nextStore = { ...currentStore };
 
         orderedMailboxes.forEach((mailbox) => {
+          if (providerAuthoritativeGmailTrashMailboxIds.has(mailbox.id)) {
+            return;
+          }
           const storedMessages = Array.isArray(parsed[mailbox.id]) ? parsed[mailbox.id] ?? [] : [];
 
           if (storedMessages.length === 0) {
@@ -40821,6 +41623,7 @@ export function WorkspaceShell({
     senderCategoryLearning,
     messageOwnershipInteractions,
     currentWorkspaceUserId,
+    providerAuthoritativeGmailTrashMailboxKey,
   ]);
 
   useEffect(() => {
@@ -41299,17 +42102,26 @@ export function WorkspaceShell({
     }
 
     const trashMessagesByMailbox = Object.fromEntries(
-      orderedMailboxes.map((mailbox) => [
-        mailbox.id,
-        (mailboxStore[mailbox.id]?.Trash ?? []).slice(0, 100),
-      ]),
+      orderedMailboxes.flatMap((mailbox) =>
+        providerAuthoritativeGmailTrashMailboxIds.has(mailbox.id)
+          ? []
+          : [[
+              mailbox.id,
+              (mailboxStore[mailbox.id]?.Trash ?? []).slice(0, 100),
+            ]],
+      ),
     );
 
     window.localStorage.setItem(
       trashMessagesStorageKey,
       JSON.stringify(trashMessagesByMailbox),
     );
-  }, [mailboxStore, orderedMailboxes, trashMessagesStorageKey]);
+  }, [
+    mailboxStore,
+    orderedMailboxes,
+    providerAuthoritativeGmailTrashMailboxKey,
+    trashMessagesStorageKey,
+  ]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -42865,6 +43677,11 @@ export function WorkspaceShell({
                   archiveFolderStatusMessage={
                     providerArchiveFolderStatusMessages[activeMailbox.id] ?? null
                   }
+                  onTrashFolderOpen={handleOpenActiveMailboxTrash}
+                  trashFolderStatusMessage={
+                    providerTrashFolderStatusMessages[activeMailbox.id] ?? null
+                  }
+                  onReconcileProviderTrash={reconcileProviderTrashById}
                   onSyncMailbox={handleSyncActiveMailbox}
                   isSyncingMailbox={syncingMailboxId === activeMailbox.id}
                   onSyncUnreadOverrides={syncUnreadOverrides}
@@ -42876,6 +43693,10 @@ export function WorkspaceShell({
                   showBundleOrganizerManagedMail={showBundleOrganizerManagedMail}
                   onShowBundleOrganizerManagedMailChange={
                     updateShowBundleOrganizerManagedMail
+                  }
+                  workspaceDataMode={workspaceDataMode}
+                  hasAuthenticatedMemberAuthority={
+                    hasAuthenticatedMemberAuthority
                   }
                 />
               </div>

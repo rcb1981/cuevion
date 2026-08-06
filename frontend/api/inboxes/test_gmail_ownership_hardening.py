@@ -41,6 +41,7 @@ connect_oauth = load_route("connect-oauth.py", "connect_oauth_ownership_test")
 oauth_callback = load_route("oauth-callback.py", "oauth_callback_ownership_test")
 config_route = load_route("../user/config.py", "user_config_google_ownership_test")
 fetch_gmail = importlib.import_module("api.inboxes.fetch-gmail")
+fetch_trash = importlib.import_module("api.inboxes.fetch-trash")
 message_action = load_route("message-action.py", "message_action_ownership_test")
 send_gmail = load_route("send-gmail.py", "send_gmail_ownership_test")
 download_attachment = load_route("download-attachment.py", "download_attachment_ownership_test")
@@ -212,6 +213,7 @@ class RealHandlerOwnershipMatrixTests(unittest.TestCase):
         ).rstrip(b"=").decode()
         return [
             (fetch_gmail, {"mailboxId": "gmail-1"}, {"messages": []}, 200),
+            (fetch_trash, {"mailboxId": "gmail-1"}, {"messages": []}, 200),
             (
                 message_action,
                 {"mailboxId": "gmail-1", "messageId": "message-1", "action": "star"},
