@@ -131,6 +131,7 @@ import {
 } from "../../lib/providerArchivePreflight";
 import { buildProviderMessageActionTarget } from "../../lib/providerMessageAction";
 import {
+  applyConfirmedGmailTrashSourceRemoval,
   applyGmailProviderTrashFolderReadback,
   createProviderTrashCoordinator,
   hasPendingProviderTrashForMailbox,
@@ -12971,6 +12972,7 @@ function MailboxView({
   archiveFolderStatusMessage,
   onTrashFolderOpen,
   trashFolderStatusMessage,
+  onApplyConfirmedProviderTrashSourceRemoval,
   onReconcileProviderTrash,
   onSyncMailbox,
   isSyncingMailbox,
@@ -13072,6 +13074,10 @@ function MailboxView({
   archiveFolderStatusMessage: string | null;
   onTrashFolderOpen: () => void;
   trashFolderStatusMessage: string | null;
+  onApplyConfirmedProviderTrashSourceRemoval: (
+    mailboxId: InboxId,
+    providerMessageId: string,
+  ) => boolean;
   onReconcileProviderTrash: (
     mailboxId: InboxId,
     providerMessageId: string,
@@ -13260,6 +13266,22 @@ function MailboxView({
   const [selectionAnchorId, setSelectionAnchorId] = useState<string | null>(
     () => selectedMessageId,
   );
+  const providerTrashSelectionContextRef = useRef({
+    mailboxId: mailbox.id,
+    activeFolder,
+    activeSmartFolderId,
+    isSharedView,
+    selectedMessageId,
+    selectedMessageIds,
+  });
+  providerTrashSelectionContextRef.current = {
+    mailboxId: mailbox.id,
+    activeFolder,
+    activeSmartFolderId,
+    isSharedView,
+    selectedMessageId,
+    selectedMessageIds,
+  };
   const [resolvingSuggestionIds, setResolvingSuggestionIds] = useState<string[]>([]);
   const [resolvingBehaviorSuggestionIds, setResolvingBehaviorSuggestionIds] = useState<
     string[]
@@ -20405,6 +20427,30 @@ function MailboxView({
 
     const coordinator = createProviderTrashCoordinator({
       pendingKeys: providerTrashPendingKeys,
+      applyConfirmedSourceRemoval: (response) => {
+        const applied = onApplyConfirmedProviderTrashSourceRemoval(
+          response.mailboxId as InboxId,
+          response.providerMessageId,
+        );
+        const selectionContext = providerTrashSelectionContextRef.current;
+        if (
+          applied &&
+          selectionContext.mailboxId === sourceLocation.mailboxId &&
+          selectionContext.activeFolder === "Inbox" &&
+          selectionContext.activeSmartFolderId === null &&
+          !selectionContext.isSharedView &&
+          (selectionContext.selectedMessageId === resolution.sourceMessage.id ||
+            selectionContext.selectedMessageIds.includes(
+              resolution.sourceMessage.id,
+            ))
+        ) {
+          advanceSelectionAfterAction([resolution.sourceMessage.id]);
+        }
+        setMailboxActionToastMessage("Message moved to Gmail Trash.");
+      },
+      onPendingKeysChange: () => {
+        setPendingProviderTrashKeys([...providerTrashPendingKeys]);
+      },
       reconcileReadOnly: async (request) => {
         const reconciled = await onReconcileProviderTrash(
           request.mailboxId as InboxId,
@@ -20418,14 +20464,9 @@ function MailboxView({
     });
 
     closeMenus();
-    const trashPromise = coordinator.trash(resolution.target);
-    setPendingProviderTrashKeys([...providerTrashPendingKeys]);
-    const result = await trashPromise;
-    setPendingProviderTrashKeys([...providerTrashPendingKeys]);
+    const result = await coordinator.trash(resolution.target);
 
     if (result.classification === "success") {
-      advanceSelectionAfterAction(messageIds);
-      setMailboxActionToastMessage("Message moved to Gmail Trash.");
       return;
     }
     if (result.classification === "uncertain") {
@@ -36007,6 +36048,53 @@ export function WorkspaceShell({
       lowered.startsWith(prefix),
     );
   };
+  const applyConfirmedProviderTrashSourceRemoval = (
+    mailboxId: InboxId,
+    providerMessageId: string,
+  ) => {
+    if (
+      !providerAuthoritativeGmailTrashMailboxIds.has(mailboxId) ||
+      !isConcreteGmailReconciliationMessageId(providerMessageId)
+    ) {
+      return false;
+    }
+
+    gmailInboxAuthorityRef.current.confirmArchive(
+      mailboxId,
+      providerMessageId,
+    );
+
+    let applied = false;
+    flushSync(() => {
+      setMailboxStore((currentStore) => {
+        const currentCollections = currentStore[mailboxId];
+        if (!currentCollections) {
+          return currentStore;
+        }
+        const removal = applyConfirmedGmailTrashSourceRemoval(
+          currentCollections,
+          {
+            mailboxId,
+            providerMessageId,
+          },
+        );
+        if (!removal.applied) {
+          return currentStore;
+        }
+        applied = true;
+        return {
+          ...currentStore,
+          [mailboxId]: removal.state,
+        };
+      });
+    });
+
+    removeConfirmedArchivedGmailMessageFromPersistedInboxSnapshot(
+      mailboxId,
+      providerMessageId,
+    );
+    return applied;
+  };
   const readStrictGmailInboxReconciliationMessages = (
     mailboxId: InboxId,
     response: Awaited<ReturnType<typeof fetchGmailInbox>>,
@@ -36336,7 +36424,11 @@ export function WorkspaceShell({
       );
       return "failed";
     } finally {
-      providerTrashFetchMailboxIdsRef.current.delete(mailboxId);
+      if (
+        providerTrashFetchSequenceByMailboxRef.current[mailboxId] === sequence
+      ) {
+        providerTrashFetchMailboxIdsRef.current.delete(mailboxId);
+      }
     }
   };
   const reconcileProviderTrashById = async (
@@ -36368,21 +36460,12 @@ export function WorkspaceShell({
       return false;
     }
 
-    if (mutationConfirmed) {
-      gmailInboxAuthorityRef.current.confirmArchive(
-        mailboxId,
-        providerMessageId,
-      );
-      removeConfirmedArchivedGmailMessageFromPersistedInboxSnapshot(
-        mailboxId,
-        providerMessageId,
-      );
-    }
     const generationAtFetchStart =
       gmailInboxAuthorityRef.current.captureGeneration(mailboxId);
     const sequence =
       (providerTrashFetchSequenceByMailboxRef.current[mailboxId] ?? 0) + 1;
     providerTrashFetchSequenceByMailboxRef.current[mailboxId] = sequence;
+    providerTrashFetchMailboxIdsRef.current.add(mailboxId);
 
     try {
       const [inboxResponse, trashResponse] = await Promise.all([
@@ -36453,6 +36536,12 @@ export function WorkspaceShell({
         "Gmail Trash changed, but Inbox and Trash could not be reconciled safely.",
       );
       return false;
+    } finally {
+      if (
+        providerTrashFetchSequenceByMailboxRef.current[mailboxId] === sequence
+      ) {
+        providerTrashFetchMailboxIdsRef.current.delete(mailboxId);
+      }
     }
   };
   const connectedInboxCount = savedManagedInboxes.filter(
@@ -43680,6 +43769,9 @@ export function WorkspaceShell({
                   onTrashFolderOpen={handleOpenActiveMailboxTrash}
                   trashFolderStatusMessage={
                     providerTrashFolderStatusMessages[activeMailbox.id] ?? null
+                  }
+                  onApplyConfirmedProviderTrashSourceRemoval={
+                    applyConfirmedProviderTrashSourceRemoval
                   }
                   onReconcileProviderTrash={reconcileProviderTrashById}
                   onSyncMailbox={handleSyncActiveMailbox}

@@ -92,7 +92,26 @@ assert.match(
 );
 assert.match(
   liveTrashBranch,
-  /const trashPromise = coordinator\.trash\(resolution\.target\);[\s\S]*setPendingProviderTrashKeys\(\[\.\.\.providerTrashPendingKeys\]\);[\s\S]*const result = await trashPromise;[\s\S]*setPendingProviderTrashKeys\(\[\.\.\.providerTrashPendingKeys\]\)/,
+  /applyConfirmedSourceRemoval: \(response\) => \{[\s\S]*onApplyConfirmedProviderTrashSourceRemoval\([\s\S]*response\.mailboxId[\s\S]*response\.providerMessageId[\s\S]*advanceSelectionAfterAction\(\[resolution\.sourceMessage\.id\]\)/,
+  "strict provider success must apply exact source removal and repair selection before reconciliation completes",
+);
+assert.match(
+  liveTrashBranch,
+  /onPendingKeysChange: \(\) => \{\s+setPendingProviderTrashKeys\(\[\.\.\.providerTrashPendingKeys\]\);\s+\}/,
+  "provider mutation pending presentation must follow the coordinator's early strict-success release",
+);
+assert.match(
+  liveTrashBranch,
+  /const result = await coordinator\.trash\(resolution\.target\);/,
+);
+assert.match(
+  liveTrashBranch,
+  /result\.classification === "reconciliation_failed"[\s\S]*result\.mutationClassification === "success"[\s\S]*Gmail confirmed Trash, but Inbox and Trash could not be reconciled safely\./,
+  "a failed background readback must surface the existing safe confirmed-Trash message",
+);
+assert.match(
+  liveTrashBranch,
+  /result\.classification === "ordinary_failure"[\s\S]*Could not move this message to Gmail Trash safely\. No changes were applied\./,
 );
 
 assert.equal(
@@ -261,31 +280,31 @@ const reconciledStoreApplyIndex = trashReconciliation.indexOf(
 const reconciledSnapshotSaveIndex = trashReconciliation.indexOf(
   "saveLiveInboxSnapshot({",
 );
-const confirmedFenceBranchIndex = trashReconciliation.indexOf(
-  "if (mutationConfirmed) {",
-);
-const confirmedFenceIndex = trashReconciliation.indexOf(
-  "gmailInboxAuthorityRef.current.confirmArchive(",
-  confirmedFenceBranchIndex,
-);
 const reconciliationGenerationCaptureIndex = trashReconciliation.indexOf(
   "gmailInboxAuthorityRef.current.captureGeneration(mailboxId)",
 );
-const confirmedFenceBranch = trashReconciliation.slice(
-  confirmedFenceBranchIndex,
-  reconciliationGenerationCaptureIndex,
+const reconciliationFetchStatusAddIndex = trashReconciliation.indexOf(
+  "providerTrashFetchMailboxIdsRef.current.add(mailboxId)",
+);
+const reconciliationFetchStatusDeleteIndex = trashReconciliation.lastIndexOf(
+  "providerTrashFetchMailboxIdsRef.current.delete(mailboxId)",
 );
 assert.match(trashReconciliation, /await Promise\.all\(\[/);
 assert.ok(readOnlyInboxFetchIndex >= 0);
 assert.ok(readOnlyTrashFetchIndex >= 0);
-assert.ok(confirmedFenceBranchIndex >= 0);
-assert.ok(confirmedFenceBranchIndex < confirmedFenceIndex);
-assert.ok(confirmedFenceIndex < reconciliationGenerationCaptureIndex);
 assert.ok(reconciliationGenerationCaptureIndex < readOnlyInboxFetchIndex);
+assert.ok(reconciliationGenerationCaptureIndex < reconciliationFetchStatusAddIndex);
+assert.ok(reconciliationFetchStatusAddIndex < readOnlyInboxFetchIndex);
+assert.ok(readOnlyInboxFetchIndex < reconciliationFetchStatusDeleteIndex);
 assert.match(
-  confirmedFenceBranch,
-  /if \(mutationConfirmed\) \{\s+gmailInboxAuthorityRef\.current\.confirmArchive\(\s+mailboxId,\s+providerMessageId,\s+\);\s+removeConfirmedArchivedGmailMessageFromPersistedInboxSnapshot\(\s+mailboxId,\s+providerMessageId,\s+\);\s+\}/,
-  "confirmed Trash must fence the exact mailbox/provider identity before paired readback",
+  trashReconciliation.slice(reconciliationFetchStatusDeleteIndex - 180),
+  /providerTrashFetchSequenceByMailboxRef\.current\[mailboxId\] === sequence[\s\S]*providerTrashFetchMailboxIdsRef\.current\.delete\(mailboxId\)/,
+  "background reconciliation must own the existing Trash fetch status without releasing a newer fetch",
+);
+assert.doesNotMatch(
+  trashReconciliation,
+  /gmailInboxAuthorityRef\.current\.confirmArchive\(|removeConfirmedArchivedGmailMessageFromPersistedInboxSnapshot\(/,
+  "background reconciliation must not delay or repeat strict-success source removal",
 );
 assert.ok(readOnlyInboxFetchIndex < strictInboxValidationIndex);
 assert.ok(readOnlyTrashFetchIndex < strictInboxValidationIndex);
@@ -295,6 +314,36 @@ assert.doesNotMatch(
   trashReconciliation,
   /mutateProviderTrashMessage|coordinator\.trash\(|\bmoveMessages(?:AcrossWorkspace|ToFolderAcrossWorkspace)?\s*\(/,
   "Trash reconciliation must remain read-only until provider snapshots are validated",
+);
+
+const confirmedSourceRemoval = section(
+  "const applyConfirmedProviderTrashSourceRemoval = (",
+  "const readStrictGmailInboxReconciliationMessages = (",
+);
+const confirmedSourceFenceIndex = confirmedSourceRemoval.indexOf(
+  "gmailInboxAuthorityRef.current.confirmArchive(",
+);
+const confirmedSourceStoreIndex = confirmedSourceRemoval.indexOf(
+  "setMailboxStore(",
+);
+const exactSourceRemovalIndex = confirmedSourceRemoval.indexOf(
+  "applyConfirmedGmailTrashSourceRemoval(",
+);
+const confirmedSnapshotRemovalIndex = confirmedSourceRemoval.indexOf(
+  "removeConfirmedArchivedGmailMessageFromPersistedInboxSnapshot(",
+);
+assert.ok(confirmedSourceFenceIndex >= 0);
+assert.ok(confirmedSourceFenceIndex < confirmedSourceStoreIndex);
+assert.ok(confirmedSourceStoreIndex < exactSourceRemovalIndex);
+assert.ok(exactSourceRemovalIndex < confirmedSnapshotRemovalIndex);
+assert.match(
+  confirmedSourceRemoval,
+  /applyConfirmedGmailTrashSourceRemoval\(\s+currentCollections,\s+\{\s+mailboxId,\s+providerMessageId,\s+\},\s+\)/,
+);
+assert.doesNotMatch(
+  confirmedSourceRemoval,
+  /providerThreadId|rfcMessageId|subject|sender|timestamp|\bTrash\s*:|\bArchive\s*:/,
+  "confirmed source removal must use only mailbox/provider identity and must not mutate another folder",
 );
 
 const reconciliationApply = section(

@@ -98,6 +98,14 @@ export type ProviderTrashReadOnlyReconcile = (
   request: ProviderTrashReadOnlyReconciliationRequest,
 ) => void | Promise<void>;
 
+export type ProviderTrashConfirmedSourceRemoval = (
+  response: ProviderTrashConfirmedResponse,
+) => void;
+
+export type ProviderTrashPendingKeysChange = (
+  pendingKeys: ReadonlySet<string>,
+) => void;
+
 type ProviderTrashCompletedResult = {
   inFlightKey: string;
   request: ProviderTrashMutationRequest;
@@ -151,6 +159,42 @@ export type GmailProviderTrashStateMessage = {
   providerFolder?: string | null;
   providerMessageId?: string | null;
 };
+
+export function applyConfirmedGmailTrashSourceRemoval<
+  Message extends Pick<
+    GmailProviderTrashStateMessage,
+    "serverMailboxId" | "providerMessageId"
+  >,
+  Collections extends { Inbox: Message[] },
+>(
+  current: Collections,
+  target: Pick<ProviderTrashMutationRequest, "mailboxId" | "providerMessageId">,
+): { applied: boolean; state: Collections } {
+  if (
+    !isExactProviderIdentifier(target.mailboxId) ||
+    !isConcreteGmailProviderMessageId(target.providerMessageId)
+  ) {
+    return { applied: false, state: current };
+  }
+
+  const exactMatches = current.Inbox.filter(
+    (message) =>
+      message.serverMailboxId === target.mailboxId &&
+      message.providerMessageId === target.providerMessageId,
+  );
+  if (exactMatches.length !== 1) {
+    return { applied: false, state: current };
+  }
+
+  const exactMatch = exactMatches[0];
+  return {
+    applied: true,
+    state: {
+      ...current,
+      Inbox: current.Inbox.filter((message) => message !== exactMatch),
+    },
+  };
+}
 
 function readExactGmailFolderProviderMessageIds<
   Message extends GmailProviderTrashStateMessage,
@@ -598,11 +642,23 @@ export function createProviderTrashCoordinator({
   pendingKeys = new Set<string>(),
   mutate = defaultProviderTrashMutation,
   reconcileReadOnly,
+  applyConfirmedSourceRemoval,
+  onPendingKeysChange,
 }: {
   pendingKeys?: Set<string>;
   mutate?: ProviderTrashMutation;
   reconcileReadOnly: ProviderTrashReadOnlyReconcile;
+  applyConfirmedSourceRemoval?: ProviderTrashConfirmedSourceRemoval;
+  onPendingKeysChange?: ProviderTrashPendingKeysChange;
 }): ProviderTrashCoordinator {
+  const notifyPendingKeysChange = () => {
+    try {
+      onPendingKeysChange?.(pendingKeys);
+    } catch {
+      // Pending presentation must not affect the provider mutation contract.
+    }
+  };
+
   return {
     async trash(target) {
       if (!isExactProviderTrashMutationTarget(target)) {
@@ -627,6 +683,16 @@ export function createProviderTrashCoordinator({
       }
 
       pendingKeys.add(inFlightKey);
+      notifyPendingKeysChange();
+      let mutationPending = true;
+      const releaseMutationPending = () => {
+        if (!mutationPending) {
+          return;
+        }
+        mutationPending = false;
+        pendingKeys.delete(inFlightKey);
+        notifyPendingKeysChange();
+      };
       try {
         let response: ProviderTrashMutationResponse;
         try {
@@ -635,10 +701,13 @@ export function createProviderTrashCoordinator({
           response = uncertainResponseForException(request);
         }
 
-        const mutationClassification = isStrictConfirmedResponse(
+        const strictConfirmedResponse = isStrictConfirmedResponse(
           response,
           request,
         )
+          ? response
+          : null;
+        const mutationClassification = strictConfirmedResponse
           ? "success"
           : isStrictUncertainResponse(response, request)
             ? "uncertain"
@@ -654,6 +723,16 @@ export function createProviderTrashCoordinator({
             reconciliationAttempted: false,
             reconciled: false,
           };
+        }
+
+        if (strictConfirmedResponse) {
+          try {
+            applyConfirmedSourceRemoval?.(strictConfirmedResponse);
+          } catch {
+            // Strict provider success remains authoritative; read-only
+            // reconciliation still gets one chance to publish provider state.
+          }
+          releaseMutationPending();
         }
 
         try {
@@ -705,7 +784,7 @@ export function createProviderTrashCoordinator({
           reconciled: true,
         };
       } finally {
-        pendingKeys.delete(inFlightKey);
+        releaseMutationPending();
       }
     },
   };

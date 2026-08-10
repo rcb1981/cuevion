@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {
+  applyConfirmedGmailTrashSourceRemoval,
   applyGmailProviderTrashFolderReadback,
   createProviderTrashCoordinator,
   hasPendingProviderTrashForMailbox,
@@ -24,6 +25,9 @@ type TestMessage = {
   threadId?: string | null;
   rfcMessageId?: string | null;
   imapUid?: string | null;
+  subject?: string;
+  sender?: string;
+  timestamp?: string;
 };
 
 const tests: Test[] = [];
@@ -74,6 +78,9 @@ function sourceMessage(
     threadId: "ui-thread-with-two-messages",
     rfcMessageId: "message-1@example.test",
     imapUid: "42",
+    subject: "Shared subject",
+    sender: "same-sender@example.test",
+    timestamp: "2026-08-10T10:00:00.000Z",
     ...overrides,
   };
 }
@@ -269,18 +276,174 @@ test("UI, RFC, thread, and IMAP identities never substitute for a concrete Gmail
   );
 });
 
-test("pending execution performs no optimistic apply, blocks the same identity, reconciles once, and unlocks finally", async () => {
+test("confirmed source removal uses only the exact mailbox and provider message identity", () => {
+  const selected = sourceMessage();
+  const sameThreadAndMetadataSibling = sourceMessage({
+    id: "ui-message-2",
+    providerMessageId: "18f-provider-message-2",
+    rfcMessageId: "message-2@example.test",
+  });
+  const sameProviderIdOtherMailbox = sourceMessage({
+    id: "ui-message-other-mailbox",
+    serverMailboxId: "server-mailbox-2",
+  });
+  const existingTrashMessage = sourceMessage({
+    id: "existing-trash-message",
+    providerFolder: "Trash",
+    providerMessageId: "18f-existing-trash-message",
+  });
+  const archiveMessage = sourceMessage({
+    id: "archive-message",
+    providerFolder: "Archive",
+    providerMessageId: "18f-archive-message",
+  });
+  const current = {
+    Inbox: [selected, sameThreadAndMetadataSibling, sameProviderIdOtherMailbox],
+    Trash: [existingTrashMessage],
+    Archive: [archiveMessage],
+    Filtered: [sourceMessage({ id: "filtered-message" })],
+  };
+  assert.equal(
+    sameThreadAndMetadataSibling.providerThreadId,
+    selected.providerThreadId,
+  );
+  assert.equal(sameThreadAndMetadataSibling.subject, selected.subject);
+  assert.equal(sameThreadAndMetadataSibling.sender, selected.sender);
+  assert.equal(sameThreadAndMetadataSibling.timestamp, selected.timestamp);
+
+  const result = applyConfirmedGmailTrashSourceRemoval(current, {
+    mailboxId: "server-mailbox-1",
+    providerMessageId: "18f-provider-message-1",
+  });
+
+  assert.equal(result.applied, true);
+  assert.notStrictEqual(result.state, current);
+  assert.deepEqual(result.state.Inbox, [
+    sameThreadAndMetadataSibling,
+    sameProviderIdOtherMailbox,
+  ]);
+  assert.strictEqual(result.state.Inbox[0], sameThreadAndMetadataSibling);
+  assert.strictEqual(result.state.Trash, current.Trash);
+  assert.strictEqual(result.state.Archive, current.Archive);
+  assert.strictEqual(result.state.Filtered, current.Filtered);
+  assert.deepEqual(result.state.Trash, [existingTrashMessage]);
+});
+
+test("confirmed source removal fails closed for missing, duplicate, mismatched, or non-Inbox identities", () => {
+  const selected = sourceMessage();
+  const existingTrashMessage = sourceMessage({
+    id: "trash-only-target",
+    providerFolder: "Trash",
+  });
+  const archiveMessage = sourceMessage({
+    id: "archive-only-target",
+    providerFolder: "Archive",
+  });
+  const cases: Array<{
+    name: string;
+    current: {
+      Inbox: TestMessage[];
+      Trash: TestMessage[];
+      Archive: TestMessage[];
+    };
+    target?: { mailboxId: string; providerMessageId: string };
+  }> = [
+    {
+      name: "missing provider message id",
+      current: {
+        Inbox: [sourceMessage({ providerMessageId: undefined })],
+        Trash: [],
+        Archive: [],
+      },
+    },
+    {
+      name: "duplicate exact provider identity",
+      current: {
+        Inbox: [selected, { ...selected, id: "duplicate-ui-message" }],
+        Trash: [],
+        Archive: [],
+      },
+    },
+    {
+      name: "mailbox mismatch",
+      current: {
+        Inbox: [sourceMessage({ serverMailboxId: "server-mailbox-2" })],
+        Trash: [],
+        Archive: [],
+      },
+    },
+    {
+      name: "target only in Archive",
+      current: { Inbox: [], Trash: [], Archive: [archiveMessage] },
+    },
+    {
+      name: "target only in Trash",
+      current: { Inbox: [], Trash: [existingTrashMessage], Archive: [] },
+    },
+    {
+      name: "invalid target provider id",
+      current: { Inbox: [selected], Trash: [], Archive: [] },
+      target: {
+        mailboxId: "server-mailbox-1",
+        providerMessageId: "thread-provider-message",
+      },
+    },
+    {
+      name: "invalid target mailbox id",
+      current: { Inbox: [selected], Trash: [], Archive: [] },
+      target: {
+        mailboxId: " server-mailbox-1 ",
+        providerMessageId: "18f-provider-message-1",
+      },
+    },
+  ];
+
+  for (const currentCase of cases) {
+    const result = applyConfirmedGmailTrashSourceRemoval(
+      currentCase.current,
+      currentCase.target ?? {
+        mailboxId: "server-mailbox-1",
+        providerMessageId: "18f-provider-message-1",
+      },
+    );
+    assert.equal(result.applied, false, currentCase.name);
+    assert.strictEqual(result.state, currentCase.current, currentCase.name);
+  }
+});
+
+test("strict success removes the exact Inbox source and releases mutation pending before reconciliation resolves", async () => {
   const target = exactTarget();
   const mutation = deferred<ProviderTrashMutationResponse>();
   const reconciliation = deferred<void>();
   const pendingKeys = new Set<string>();
-  const mailboxState = {
-    Inbox: [{ id: "ui-message-1" }],
-    Trash: [{ id: "existing-trash-message" }],
+  const selected = sourceMessage();
+  const sibling = sourceMessage({
+    id: "ui-message-2",
+    providerMessageId: "18f-provider-message-2",
+    rfcMessageId: "message-2@example.test",
+  });
+  const existingTrashMessage = sourceMessage({
+    id: "existing-trash-message",
+    providerFolder: "Trash",
+    providerMessageId: "18f-existing-trash-message",
+  });
+  const archiveMessage = sourceMessage({
+    id: "archive-message",
+    providerFolder: "Archive",
+    providerMessageId: "18f-archive-message",
+  });
+  let mailboxState = {
+    Inbox: [selected, sibling],
+    Trash: [existingTrashMessage],
+    Archive: [archiveMessage],
   };
   const originalState = mailboxState;
+  const originalTrash = mailboxState.Trash;
+  const originalArchive = mailboxState.Archive;
   let mutationCalls = 0;
   const reconciliations: unknown[] = [];
+  let confirmedSourceRemovalCalls = 0;
+  const pendingSnapshots: string[][] = [];
 
   const mutationHandler: ProviderTrashMutation = (request) => {
     mutationCalls += 1;
@@ -290,18 +453,48 @@ test("pending execution performs no optimistic apply, blocks the same identity, 
   const coordinator = createProviderTrashCoordinator({
     pendingKeys,
     mutate: mutationHandler,
+    applyConfirmedSourceRemoval: (response) => {
+      confirmedSourceRemovalCalls += 1;
+      const removal = applyConfirmedGmailTrashSourceRemoval(
+        mailboxState,
+        response,
+      );
+      assert.equal(removal.applied, true);
+      mailboxState = removal.state;
+    },
+    onPendingKeysChange: (keys) => {
+      pendingSnapshots.push([...keys]);
+    },
     reconcileReadOnly: async (request) => {
       reconciliations.push(request);
       await reconciliation.promise;
+      const selectedTrashMessage = {
+        ...selected,
+        providerFolder: "Trash",
+      };
+      const readback = replaceGmailProviderInboxAndTrashReadback(
+        mailboxState,
+        {
+          mailboxId: target.request.mailboxId,
+          targetProviderMessageId: target.request.providerMessageId,
+          mutationConfirmed: true,
+          Inbox: [sibling],
+          Trash: [existingTrashMessage, selectedTrashMessage],
+        },
+      );
+      assert.equal(readback.applied, true);
+      mailboxState = readback.state;
     },
   });
 
   const first = coordinator.trash(target);
   assert.equal(mutationCalls, 1);
   assert.strictEqual(mailboxState, originalState);
-  assert.deepEqual(mailboxState.Inbox, [{ id: "ui-message-1" }]);
-  assert.deepEqual(mailboxState.Trash, [{ id: "existing-trash-message" }]);
+  assert.deepEqual(mailboxState.Inbox, [selected, sibling]);
+  assert.deepEqual(mailboxState.Trash, [existingTrashMessage]);
   assert.equal(reconciliations.length, 0);
+  assert.equal(confirmedSourceRemovalCalls, 0);
+  assert.deepEqual(pendingSnapshots, [[target.inFlightKey]]);
   assert.equal(pendingKeys.has(target.inFlightKey), true);
   assert.equal(
     hasPendingProviderTrashForMailbox(pendingKeys, "server-mailbox-1"),
@@ -329,8 +522,17 @@ test("pending execution performs no optimistic apply, blocks the same identity, 
       cause: "confirmed_success",
     },
   ]);
-  assert.strictEqual(mailboxState, originalState);
-  assert.equal(pendingKeys.has(target.inFlightKey), true);
+  assert.equal(confirmedSourceRemovalCalls, 1);
+  assert.notStrictEqual(mailboxState, originalState);
+  assert.deepEqual(mailboxState.Inbox, [sibling]);
+  assert.strictEqual(mailboxState.Inbox[0], sibling);
+  assert.strictEqual(mailboxState.Trash, originalTrash);
+  assert.deepEqual(mailboxState.Trash, [existingTrashMessage]);
+  assert.strictEqual(mailboxState.Archive, originalArchive);
+  assert.equal(pendingKeys.has(target.inFlightKey), false);
+  assert.deepEqual(pendingSnapshots, [[target.inFlightKey], []]);
+  assert.equal(mutationCalls, 1);
+  assert.equal(reconciliations.length, 1);
 
   reconciliation.resolve();
   const result = await first;
@@ -339,7 +541,15 @@ test("pending execution performs no optimistic apply, blocks the same identity, 
   assert.equal(result.reconciled, true);
   assert.equal(mutationCalls, 1);
   assert.equal(reconciliations.length, 1);
-  assert.strictEqual(mailboxState, originalState);
+  assert.deepEqual(mailboxState.Inbox, [sibling]);
+  assert.equal(
+    mailboxState.Trash.filter(
+      (message) =>
+        message.providerMessageId === target.request.providerMessageId,
+    ).length,
+    1,
+  );
+  assert.strictEqual(mailboxState.Archive, originalArchive);
   assert.equal(pendingKeys.size, 0);
 });
 
@@ -384,6 +594,68 @@ test("the coordinator default delegates once to the strict Trash client", async 
   }
 });
 
+test("a later reconciliation failure keeps confirmed source removal without creating local Trash", async () => {
+  const target = exactTarget();
+  const reconciliation = deferred<void>();
+  const pendingKeys = new Set<string>();
+  const selected = sourceMessage();
+  const sibling = sourceMessage({
+    id: "ui-message-2",
+    providerMessageId: "18f-provider-message-2",
+  });
+  const existingTrashMessage = sourceMessage({
+    id: "existing-trash-message",
+    providerFolder: "Trash",
+    providerMessageId: "18f-existing-trash-message",
+  });
+  let mailboxState = {
+    Inbox: [selected, sibling],
+    Trash: [existingTrashMessage],
+    Archive: [sourceMessage({ id: "archive-message" })],
+  };
+  const originalTrash = mailboxState.Trash;
+  const originalArchive = mailboxState.Archive;
+  let mutationCalls = 0;
+  let reconciliationCalls = 0;
+
+  const action = createProviderTrashCoordinator({
+    pendingKeys,
+    mutate: async (request) => {
+      mutationCalls += 1;
+      return successResponse(request);
+    },
+    applyConfirmedSourceRemoval: (response) => {
+      const removal = applyConfirmedGmailTrashSourceRemoval(
+        mailboxState,
+        response,
+      );
+      assert.equal(removal.applied, true);
+      mailboxState = removal.state;
+    },
+    reconcileReadOnly: async () => {
+      reconciliationCalls += 1;
+      await reconciliation.promise;
+    },
+  }).trash(target);
+
+  await waitFor(() => reconciliationCalls === 1);
+  assert.deepEqual(mailboxState.Inbox, [sibling]);
+  assert.strictEqual(mailboxState.Trash, originalTrash);
+  assert.deepEqual(mailboxState.Trash, [existingTrashMessage]);
+  assert.strictEqual(mailboxState.Archive, originalArchive);
+  assert.equal(pendingKeys.size, 0);
+  assert.equal(mutationCalls, 1);
+
+  reconciliation.reject(new Error("provider readback unavailable"));
+  const result = await action;
+  assert.equal(result.classification, "reconciliation_failed");
+  assert.equal(result.mutationClassification, "success");
+  assert.deepEqual(mailboxState.Inbox, [sibling]);
+  assert.strictEqual(mailboxState.Trash, originalTrash);
+  assert.equal(mutationCalls, 1);
+  assert.equal(reconciliationCalls, 1);
+});
+
 test("ordinary and malformed failures preserve state and never reconcile or retry", async () => {
   const target = exactTarget();
   const state = {
@@ -409,15 +681,21 @@ test("ordinary and malformed failures preserve state and never reconcile or retr
     },
   ] as ProviderTrashMutationResponse[]) {
     const originalState = state;
+    const pendingKeys = new Set<string>();
     let mutationCalls = 0;
     let reconciliationCalls = 0;
+    let confirmedSourceRemovalCalls = 0;
     const coordinator = createProviderTrashCoordinator({
+      pendingKeys,
       mutate: async () => {
         mutationCalls += 1;
         return response;
       },
       reconcileReadOnly: () => {
         reconciliationCalls += 1;
+      },
+      applyConfirmedSourceRemoval: () => {
+        confirmedSourceRemovalCalls += 1;
       },
     });
 
@@ -427,27 +705,55 @@ test("ordinary and malformed failures preserve state and never reconcile or retr
     assert.equal(result.reconciled, false);
     assert.equal(mutationCalls, 1);
     assert.equal(reconciliationCalls, 0);
+    assert.equal(confirmedSourceRemovalCalls, 0);
     assert.strictEqual(state, originalState);
+    assert.equal(pendingKeys.size, 0);
   }
 });
 
-test("mutation uncertainty performs exactly one read-only reconciliation and never retries mutation", async () => {
+test("mutation uncertainty preserves source state during its single read-only reconciliation", async () => {
   const target = exactTarget();
   const pendingKeys = new Set<string>();
+  const reconciliation = deferred<void>();
+  const state = {
+    Inbox: [sourceMessage()],
+    Trash: [
+      sourceMessage({
+        id: "existing-trash-message",
+        providerFolder: "Trash",
+        providerMessageId: "18f-existing-trash-message",
+      }),
+    ],
+  };
+  const originalState = state;
   let mutationCalls = 0;
   const reconciliations: unknown[] = [];
+  let confirmedSourceRemovalCalls = 0;
   const coordinator = createProviderTrashCoordinator({
     pendingKeys,
     mutate: async (request) => {
       mutationCalls += 1;
       return uncertainResponse(request);
     },
-    reconcileReadOnly: (request) => {
+    applyConfirmedSourceRemoval: () => {
+      confirmedSourceRemovalCalls += 1;
+    },
+    reconcileReadOnly: async (request) => {
       reconciliations.push(request);
+      await reconciliation.promise;
     },
   });
 
-  const result = await coordinator.trash(target);
+  const action = coordinator.trash(target);
+  await waitFor(() => reconciliations.length === 1);
+  assert.strictEqual(state, originalState);
+  assert.deepEqual(state.Inbox, [sourceMessage()]);
+  assert.equal(state.Trash.length, 1);
+  assert.equal(confirmedSourceRemovalCalls, 0);
+  assert.equal(pendingKeys.has(target.inFlightKey), true);
+
+  reconciliation.resolve();
+  const result = await action;
   assert.equal(result.classification, "uncertain");
   assert.equal(result.mutationClassification, "uncertain");
   assert.equal(result.reconciliationAttempted, true);
@@ -461,6 +767,7 @@ test("mutation uncertainty performs exactly one read-only reconciliation and nev
       cause: "mutation_unconfirmed",
     },
   ]);
+  assert.strictEqual(state, originalState);
   assert.equal(pendingKeys.size, 0);
 });
 
