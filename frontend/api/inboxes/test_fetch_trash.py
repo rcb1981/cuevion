@@ -27,6 +27,11 @@ MAILBOX_ID = "server-mailbox"
 MESSAGE_ID = "18f-provider-message"
 THREAD_ID = "18f-provider-thread"
 ACCESS_TOKEN = "test-only-trash-token-never-return"
+IMAP_HOST = "imap.test.invalid"
+IMAP_USERNAME = "server-imap-user"
+IMAP_PASSWORD = "test-only-imap-password-never-return"
+IMAP_EMAIL = "owned@imap.test"
+TRASH_FOLDER = 'Deleted "Items"\\2024'
 
 
 class FakeHandler:
@@ -75,6 +80,39 @@ class FakeResponse:
         return False
 
 
+class RecordingMailbox:
+    def __init__(self, *, logout_error: Exception | None = None):
+        self.logout_error = logout_error
+        self.logout_count = 0
+        self.shutdown_count = 0
+        self.unsafe_calls: list[tuple] = []
+
+    def logout(self):
+        self.logout_count += 1
+        if self.logout_error is not None:
+            raise self.logout_error
+        return "BYE", []
+
+    def shutdown(self):
+        self.shutdown_count += 1
+
+    def uid(self, *arguments):
+        self.unsafe_calls.append(("uid", *arguments))
+        raise AssertionError("the route must delegate read-only snapshot work")
+
+    def copy(self, *arguments):
+        self.unsafe_calls.append(("copy", *arguments))
+        raise AssertionError("Trash fetch must not COPY")
+
+    def store(self, *arguments):
+        self.unsafe_calls.append(("store", *arguments))
+        raise AssertionError("Trash fetch must not STORE")
+
+    def expunge(self, *arguments):
+        self.unsafe_calls.append(("expunge", *arguments))
+        raise AssertionError("Trash fetch must not EXPUNGE")
+
+
 def gmail_context(*, refresh_attempted: bool = False) -> dict:
     return {
         "mailbox_id": MAILBOX_ID,
@@ -83,6 +121,49 @@ def gmail_context(*, refresh_attempted: bool = False) -> dict:
         "access_token": ACCESS_TOKEN,
         "scope": "https://www.googleapis.com/auth/gmail.readonly",
         "refresh_attempted": refresh_attempted,
+    }
+
+
+def google_owned() -> dict:
+    return {
+        "status": "ok",
+        "user": {"email": "owner@example.test"},
+        "inbox": {
+            "id": MAILBOX_ID,
+            "email": "owned@gmail.test",
+            "provider": "google",
+        },
+    }
+
+
+def custom_imap_owned() -> dict:
+    return {
+        "status": "ok",
+        "user": {"email": "owner@example.test"},
+        "inbox": {
+            "id": MAILBOX_ID,
+            "email": IMAP_EMAIL,
+            "provider": "custom_imap",
+        },
+    }
+
+
+def resolved_imap_mailbox() -> dict:
+    return {
+        "status": "ok",
+        "mailbox": {
+            "mailboxId": MAILBOX_ID,
+            "ownerEmail": "owner@example.test",
+            "email": IMAP_EMAIL,
+            "imap": {
+                "host": IMAP_HOST,
+                "port": 993,
+                "ssl": True,
+                "username": IMAP_USERNAME,
+                "password": IMAP_PASSWORD,
+            },
+        },
+        "error": None,
     }
 
 
@@ -132,6 +213,63 @@ def trash_snapshot(*, messages: list[dict] | None = None, **overrides) -> dict:
     }
 
 
+def imap_trash_message(uid: str = "7", **overrides) -> dict:
+    return {
+        "id": "trash-message@example.test",
+        "sender": "Sender",
+        "subject": "Trashed message",
+        "threadId": "imap:rfc:trash-message@example.test",
+        "serverMailboxId": MAILBOX_ID,
+        "providerFolder": TRASH_FOLDER,
+        "uidValidity": "91",
+        "imapUid": uid,
+        "rfcMessageId": "trash-message@example.test",
+        **overrides,
+    }
+
+
+def imap_trash_snapshot(
+    *,
+    messages: list[dict] | None = None,
+    **overrides,
+) -> dict:
+    return {
+        "serverMailboxId": MAILBOX_ID,
+        "providerFolder": TRASH_FOLDER,
+        "uidValidity": "91",
+        "imapUidSet": ["7"],
+        "messages": (
+            [imap_trash_message()]
+            if messages is None
+            else messages
+        ),
+        **overrides,
+    }
+
+
+def imap_snapshot_result(snapshot: object = None) -> dict:
+    effective_snapshot = (
+        imap_trash_snapshot()
+        if snapshot is None
+        else snapshot
+    )
+    return {
+        "ok": True,
+        "status": "ok",
+        "snapshot": effective_snapshot,
+        "identities": {
+            "7": {
+                "providerFolder": TRASH_FOLDER,
+                "imapUid": "7",
+                "uidValidity": "91",
+                "rfcMessageId": "trash-message@example.test",
+                "fingerprint": "internal-fingerprint-never-return",
+            }
+        },
+        "error": None,
+    }
+
+
 _DEFAULT_SNAPSHOT = object()
 
 
@@ -153,25 +291,147 @@ def invoke_route(
     payload: object = None,
     *,
     resolution: dict | None = None,
+    gmail_resolution_result: dict | None = None,
     result: dict | None = None,
 ):
     target = FakeHandler({"mailboxId": MAILBOX_ID} if payload is None else payload)
     authority = Mock(
         return_value=resolution
-        or {"status": "ok", "context": gmail_context()}
+        or google_owned()
+    )
+    gmail_resolution = Mock(
+        return_value=(
+            gmail_resolution_result
+            or {"status": "ok", "context": gmail_context()}
+        )
     )
     snapshot_read = Mock(return_value=result or snapshot_result())
+    imap_resolution = Mock(
+        side_effect=AssertionError("Gmail must not resolve custom IMAP")
+    )
+    imap_connect = Mock(
+        side_effect=AssertionError("Gmail must not connect custom IMAP")
+    )
     with patch.object(
         fetch_trash,
-        "resolve_authenticated_gmail",
+        "resolve_owned_mailbox",
         authority,
+    ), patch.object(
+        fetch_trash,
+        "resolve_gmail_context",
+        gmail_resolution,
     ), patch.object(
         fetch_trash,
         "read_gmail_folder_snapshot",
         snapshot_read,
+    ), patch.object(
+        fetch_trash,
+        "resolve_authenticated_imap_mailbox",
+        imap_resolution,
+    ), patch.object(
+        fetch_trash,
+        "connect_mailbox_with_settings",
+        imap_connect,
     ):
         fetch_trash.handler.do_POST(target)
+    authority.gmail_resolution = gmail_resolution
+    authority.imap_resolution = imap_resolution
+    authority.imap_connect = imap_connect
     return target, authority, snapshot_read
+
+
+_DEFAULT_IMAP_RESULT = object()
+
+
+def invoke_imap_route(
+    *,
+    payload: object = None,
+    owned_result: dict | None = None,
+    resolution: dict | None = None,
+    mailbox: RecordingMailbox | None = None,
+    discovery_result: tuple[str | None, str | None] = (
+        TRASH_FOLDER,
+        None,
+    ),
+    result: object = _DEFAULT_IMAP_RESULT,
+    connect_error: Exception | None = None,
+    discovery_error: Exception | None = None,
+    snapshot_error: Exception | None = None,
+):
+    target = FakeHandler(
+        {"mailboxId": MAILBOX_ID}
+        if payload is None
+        else payload
+    )
+    mailbox = mailbox or RecordingMailbox()
+    authority = Mock(return_value=owned_result or custom_imap_owned())
+    imap_resolution = Mock(
+        return_value=resolution or resolved_imap_mailbox()
+    )
+    connection = (
+        Mock(side_effect=connect_error)
+        if connect_error is not None
+        else Mock(return_value=mailbox)
+    )
+    discovery = Mock(
+        side_effect=discovery_error,
+        return_value=discovery_result,
+    )
+    snapshot_read = Mock(
+        side_effect=snapshot_error,
+        return_value=(
+            imap_snapshot_result()
+            if result is _DEFAULT_IMAP_RESULT
+            else result
+        ),
+    )
+    gmail_resolution = Mock(
+        side_effect=AssertionError("custom IMAP must not resolve Gmail")
+    )
+    gmail_snapshot_read = Mock(
+        side_effect=AssertionError("custom IMAP must not read Gmail")
+    )
+    with patch.object(
+        fetch_trash,
+        "resolve_owned_mailbox",
+        authority,
+    ), patch.object(
+        fetch_trash,
+        "resolve_authenticated_imap_mailbox",
+        imap_resolution,
+    ), patch.object(
+        fetch_trash,
+        "connect_mailbox_with_settings",
+        connection,
+    ), patch.object(
+        fetch_trash.imap_trash,
+        "discover_trash_folder",
+        discovery,
+    ), patch.object(
+        fetch_trash,
+        "read_imap_folder_snapshot",
+        snapshot_read,
+    ), patch.object(
+        fetch_trash,
+        "resolve_gmail_context",
+        gmail_resolution,
+    ), patch.object(
+        fetch_trash,
+        "read_gmail_folder_snapshot",
+        gmail_snapshot_read,
+    ):
+        fetch_trash.handler.do_POST(target)
+    return {
+        "handler": target,
+        "mailbox": mailbox,
+        "authority": authority,
+        "imap_resolution": imap_resolution,
+        "connect": connection,
+        "discovery": discovery,
+        "snapshot": snapshot_read,
+        "gmail_resolution": gmail_resolution,
+        "gmail_snapshot": gmail_snapshot_read,
+    }
 
 
 class GmailTrashSnapshotPrimitiveTests(unittest.TestCase):
@@ -303,6 +563,9 @@ class FetchTrashRouteTests(unittest.TestCase):
 
         self.assertEqual(target.status, 200)
         authority.assert_called_once_with(target.headers, MAILBOX_ID)
+        authority.gmail_resolution.assert_called_once_with(google_owned())
+        authority.imap_resolution.assert_not_called()
+        authority.imap_connect.assert_not_called()
         snapshot_read.assert_called_once_with(
             gmail_context(),
             provider_folder="Trash",
@@ -369,6 +632,40 @@ class FetchTrashRouteTests(unittest.TestCase):
         self.assertEqual(target.status, 400)
         self.assertEqual(target.response(), error)
         authority.assert_called_once()
+        snapshot_read.assert_not_called()
+
+    def test_gmail_context_and_unsupported_provider_errors_remain_exact(self):
+        gmail_error = fetch_trash.error_payload(
+            "gmail_connection_not_ready",
+            "Gmail connection is not ready.",
+        )
+        target, authority, snapshot_read = invoke_route(
+            gmail_resolution_result={
+                "status": "error",
+                "status_code": 409,
+                "error": gmail_error,
+            }
+        )
+        self.assertEqual(target.status, 409)
+        self.assertEqual(target.response(), gmail_error)
+        authority.gmail_resolution.assert_called_once_with(google_owned())
+        snapshot_read.assert_not_called()
+
+        unsupported_owned = google_owned()
+        unsupported_owned["inbox"]["provider"] = "outlook"
+        target, authority, snapshot_read = invoke_route(
+            resolution=unsupported_owned,
+        )
+        self.assertEqual(target.status, 400)
+        self.assertEqual(
+            target.response(),
+            fetch_trash.error_payload(
+                "unsupported_provider",
+                "This mailbox is not a Gmail connection.",
+            ),
+        )
+        authority.gmail_resolution.assert_not_called()
+        authority.imap_resolution.assert_not_called()
         snapshot_read.assert_not_called()
 
     def test_provider_and_refresh_failures_use_safe_errors(self):
@@ -482,6 +779,550 @@ class FetchTrashRouteTests(unittest.TestCase):
             "internal_error",
         )
         self.assertNotIn(ACCESS_TOKEN, json.dumps(target.response()))
+
+
+class FetchTrashCustomImapTests(unittest.TestCase):
+    def test_owned_server_credentials_exact_folder_and_readonly_snapshot(self):
+        result = invoke_imap_route()
+
+        target = result["handler"]
+        self.assertEqual(target.status, 200)
+        result["authority"].assert_called_once_with(
+            target.headers,
+            MAILBOX_ID,
+        )
+        result["imap_resolution"].assert_called_once_with(
+            target.headers,
+            MAILBOX_ID,
+        )
+        result["connect"].assert_called_once_with(
+            host=IMAP_HOST,
+            port=993,
+            username=IMAP_USERNAME,
+            password=IMAP_PASSWORD,
+            ssl_enabled=True,
+        )
+        result["discovery"].assert_called_once_with(result["mailbox"])
+        result["snapshot"].assert_called_once_with(
+            result["mailbox"],
+            folder=TRASH_FOLDER,
+            mailbox_key=MAILBOX_ID,
+            email_address=IMAP_EMAIL,
+            limit=100,
+            readonly=True,
+        )
+        result["gmail_resolution"].assert_not_called()
+        result["gmail_snapshot"].assert_not_called()
+        self.assertEqual(result["mailbox"].logout_count, 1)
+        self.assertEqual(result["mailbox"].shutdown_count, 0)
+        self.assertEqual(result["mailbox"].unsafe_calls, [])
+
+        payload = target.response()
+        self.assertEqual(
+            set(payload),
+            {"ok", "status", "provider", "mailboxId", "folder"},
+        )
+        self.assertEqual(
+            payload,
+            {
+                "ok": True,
+                "status": "ok",
+                "provider": "custom_imap",
+                "mailboxId": MAILBOX_ID,
+                "folder": imap_trash_snapshot(),
+            },
+        )
+        self.assertIn(
+            ("Cache-Control", "no-store"),
+            target.response_headers,
+        )
+        serialized = json.dumps(payload)
+        for private_value in (
+            IMAP_HOST,
+            IMAP_USERNAME,
+            IMAP_PASSWORD,
+            "owner@example.test",
+            "internal-fingerprint-never-return",
+            "identities",
+        ):
+            self.assertNotIn(private_value, serialized)
+
+    def test_rfc_message_id_is_optional_but_provider_row_scope_is_required(self):
+        without_rfc = imap_trash_message()
+        without_rfc.pop("rfcMessageId")
+        result = invoke_imap_route(
+            result=imap_snapshot_result(
+                imap_trash_snapshot(messages=[without_rfc])
+            )
+        )
+
+        self.assertEqual(result["handler"].status, 200)
+        public_message = result["handler"].response()["folder"]["messages"][0]
+        self.assertNotIn("rfcMessageId", public_message)
+        for key in (
+            "serverMailboxId",
+            "providerFolder",
+            "uidValidity",
+            "imapUid",
+        ):
+            self.assertIn(key, public_message)
+
+    def test_custom_imap_rows_reject_gmail_provider_fields(self):
+        gmail_fields = {
+            "provider": "gmail",
+            "providerMessageId": MESSAGE_ID,
+            "providerThreadId": THREAD_ID,
+            "labelIds": ["TRASH"],
+        }
+        for field, value in gmail_fields.items():
+            with self.subTest(field=field):
+                result = invoke_imap_route(
+                    result=imap_snapshot_result(
+                        imap_trash_snapshot(
+                            messages=[imap_trash_message(**{field: value})]
+                        )
+                    )
+                )
+
+                self.assertEqual(result["handler"].status, 502)
+                self.assertEqual(
+                    result["handler"].response()["error"]["code"],
+                    "trash_snapshot_failed",
+                )
+
+    def test_custom_imap_rows_match_complete_latest_uid_window_in_order(self):
+        imap_uid_set = [
+            str(uid)
+            for uid in range(1, fetch_trash.TRASH_FETCH_LIMIT + 2)
+        ]
+        expected_message_uids = list(
+            reversed(imap_uid_set[-fetch_trash.TRASH_FETCH_LIMIT:])
+        )
+        valid_snapshot = imap_trash_snapshot(
+            imapUidSet=imap_uid_set,
+            messages=[
+                imap_trash_message(uid=uid)
+                for uid in expected_message_uids
+            ],
+        )
+
+        accepted = invoke_imap_route(
+            result=imap_snapshot_result(valid_snapshot)
+        )
+        self.assertEqual(accepted["handler"].status, 200)
+
+        reordered_message_uids = expected_message_uids.copy()
+        reordered_message_uids[0], reordered_message_uids[1] = (
+            reordered_message_uids[1],
+            reordered_message_uids[0],
+        )
+        invalid_message_uid_lists = (
+            expected_message_uids[:-1],
+            reordered_message_uids,
+        )
+        for message_uids in invalid_message_uid_lists:
+            with self.subTest(message_uids=message_uids[:3]):
+                rejected = invoke_imap_route(
+                    result=imap_snapshot_result(
+                        imap_trash_snapshot(
+                            imapUidSet=imap_uid_set,
+                            messages=[
+                                imap_trash_message(uid=uid)
+                                for uid in message_uids
+                            ],
+                        )
+                    )
+                )
+                self.assertEqual(rejected["handler"].status, 502)
+                self.assertEqual(
+                    rejected["handler"].response()["error"]["code"],
+                    "trash_snapshot_failed",
+                )
+
+    def test_unavailable_and_ambiguous_trash_roles_keep_exact_wire_codes(self):
+        for code in (
+            "trash_folder_unavailable",
+            "trash_folder_ambiguous",
+        ):
+            with self.subTest(code=code):
+                result = invoke_imap_route(
+                    discovery_result=(None, code),
+                )
+                target = result["handler"]
+                self.assertEqual(target.status, 409)
+                self.assertEqual(target.response()["error"]["code"], code)
+                result["snapshot"].assert_not_called()
+                self.assertEqual(result["mailbox"].logout_count, 1)
+                serialized = json.dumps(target.response())
+                self.assertNotIn(IMAP_PASSWORD, serialized)
+                self.assertNotIn(IMAP_HOST, serialized)
+
+    def test_authority_and_imap_resolution_fail_before_provider_connection(self):
+        authority_failures = (
+            (401, "unauthorized"),
+            (404, "gmail_connection_not_found"),
+        )
+        for status_code, code in authority_failures:
+            with self.subTest(stage="ownership", code=code):
+                result = invoke_imap_route(
+                    owned_result={
+                        "status": "error",
+                        "status_code": status_code,
+                        "error": fetch_trash.error_payload(
+                            code,
+                            "safe ownership failure",
+                        ),
+                    }
+                )
+                self.assertEqual(result["handler"].status, status_code)
+                result["imap_resolution"].assert_not_called()
+                result["connect"].assert_not_called()
+                result["discovery"].assert_not_called()
+                result["snapshot"].assert_not_called()
+
+        result = invoke_imap_route(
+            resolution={
+                "status": "reconnect_required",
+                "mailbox": None,
+                "error": {
+                    "code": "reconnect_required",
+                    "message": f"raw resolver {IMAP_PASSWORD}",
+                    "status_code": 409,
+                },
+            }
+        )
+        self.assertEqual(result["handler"].status, 409)
+        self.assertEqual(
+            result["handler"].response()["error"]["code"],
+            "reconnect_required",
+        )
+        result["connect"].assert_not_called()
+        self.assertNotIn(
+            IMAP_PASSWORD,
+            json.dumps(result["handler"].response()),
+        )
+
+    def test_mismatched_or_malformed_resolved_mailbox_never_connects(self):
+        base = resolved_imap_mailbox()["mailbox"]
+        invalid_mailboxes = (
+            {**base, "mailboxId": "other-mailbox"},
+            {**base, "email": "not-an-email"},
+            {**base, "email": "a" * 4_097 + "@example.test"},
+            {**base, "imap": None},
+            {
+                **base,
+                "imap": {**base["imap"], "host": "bad host.invalid"},
+            },
+            {
+                **base,
+                "imap": {**base["imap"], "host": "imap\x80.invalid"},
+            },
+            {
+                **base,
+                "imap": {**base["imap"], "port": "993"},
+            },
+            {
+                **base,
+                "imap": {**base["imap"], "ssl": False},
+            },
+            {
+                **base,
+                "imap": {
+                    **base["imap"],
+                    "credentialVersion": "private-version",
+                },
+            },
+            {
+                **base,
+                "imap": {**base["imap"], "username": ""},
+            },
+            {
+                **base,
+                "imap": {
+                    **base["imap"],
+                    "password": "private-password\ncontrol",
+                },
+            },
+        )
+        for resolved_mailbox in invalid_mailboxes:
+            with self.subTest(
+                mailbox_id=resolved_mailbox.get("mailboxId"),
+                email=resolved_mailbox.get("email"),
+            ):
+                result = invoke_imap_route(
+                    resolution={
+                        "status": "ok",
+                        "mailbox": resolved_mailbox,
+                        "error": None,
+                    }
+                )
+                target = result["handler"]
+                self.assertEqual(target.status, 500)
+                self.assertEqual(
+                    target.response()["error"]["code"],
+                    "mailbox_configuration_malformed",
+                )
+                result["connect"].assert_not_called()
+                result["discovery"].assert_not_called()
+                result["snapshot"].assert_not_called()
+                serialized = json.dumps(target.response())
+                self.assertNotIn("other-mailbox", serialized)
+                self.assertNotIn("bad host.invalid", serialized)
+                self.assertNotIn("private-password", serialized)
+
+    def test_malformed_mismatched_or_private_imap_snapshots_fail_closed(self):
+        valid = imap_trash_snapshot()
+        missing_mailbox_id = imap_trash_message()
+        missing_mailbox_id.pop("serverMailboxId")
+        missing_folder = imap_trash_message()
+        missing_folder.pop("providerFolder")
+        missing_uid_validity = imap_trash_message()
+        missing_uid_validity.pop("uidValidity")
+        missing_uid = imap_trash_message()
+        missing_uid.pop("imapUid")
+        invalid_snapshots = (
+            None,
+            {},
+            {**valid, "serverMailboxId": "other-mailbox"},
+            {**valid, "providerFolder": "Trash"},
+            {**valid, "uidValidity": "091"},
+            {**valid, "imapUidSet": "7"},
+            {**valid, "imapUidSet": ["07"]},
+            {**valid, "imapUidSet": ["9", "7"]},
+            {**valid, "imapUidSet": ["7", "7"]},
+            {**valid, "identities": {}},
+            {**valid, "messages": [missing_mailbox_id]},
+            {**valid, "messages": [missing_folder]},
+            {**valid, "messages": [missing_uid_validity]},
+            {**valid, "messages": [missing_uid]},
+            {
+                **valid,
+                "messages": [
+                    imap_trash_message(providerFolder="Trash")
+                ],
+            },
+            {
+                **valid,
+                "messages": [imap_trash_message(uidValidity="92")],
+            },
+            {
+                **valid,
+                "messages": [imap_trash_message(imapUid="8")],
+            },
+            {
+                **valid,
+                "messages": [
+                    imap_trash_message(),
+                    imap_trash_message(),
+                ],
+            },
+            {
+                **valid,
+                "messages": [
+                    imap_trash_message(
+                        fingerprint="private-fingerprint"
+                    )
+                ],
+            },
+            {
+                **valid,
+                "messages": [
+                    imap_trash_message(password="private-password")
+                ],
+            },
+            {
+                **valid,
+                "messages": [
+                    imap_trash_message(host="private-host.invalid")
+                ],
+            },
+            {
+                **valid,
+                "messages": [imap_trash_message(port=65_534)],
+            },
+            {
+                **valid,
+                "messages": [imap_trash_message(ssl=False)],
+            },
+            {
+                **valid,
+                "messages": [
+                    imap_trash_message(authMode="private-auth-mode")
+                ],
+            },
+            {
+                **valid,
+                "messages": [
+                    imap_trash_message(bodyHash="private-hash-value")
+                ],
+            },
+            {
+                **valid,
+                "messages": [imap_trash_message(rfcMessageId="")],
+            },
+            {
+                **valid,
+                "messages": [
+                    imap_trash_message(rfcMessageId="bad\nmessage-id")
+                ],
+            },
+        )
+        for snapshot in invalid_snapshots:
+            with self.subTest(snapshot_type=type(snapshot).__name__):
+                result = invoke_imap_route(
+                    result={
+                        "ok": True,
+                        "status": "ok",
+                        "snapshot": snapshot,
+                        "identities": {
+                            "7": {
+                                "fingerprint": "internal-only"
+                            }
+                        },
+                        "error": None,
+                    }
+                )
+                target = result["handler"]
+                self.assertEqual(target.status, 502)
+                self.assertEqual(
+                    target.response()["error"]["code"],
+                    "trash_snapshot_failed",
+                )
+                serialized = json.dumps(target.response())
+                self.assertNotIn("private-fingerprint", serialized)
+                self.assertNotIn("private-password", serialized)
+                self.assertNotIn("internal-only", serialized)
+                self.assertNotIn("private-host.invalid", serialized)
+                self.assertNotIn("private-auth-mode", serialized)
+                self.assertNotIn("private-hash-value", serialized)
+
+    def test_connection_discovery_and_snapshot_failures_are_sanitized(self):
+        cases = (
+            (
+                "credentials",
+                {
+                    "connect_error": fetch_trash.imaplib.IMAP4.error(
+                        f"bad {IMAP_PASSWORD}"
+                    )
+                },
+                401,
+                "invalid_credentials",
+            ),
+            (
+                "connection",
+                {
+                    "connect_error": RuntimeError(
+                        f"{IMAP_HOST} {IMAP_USERNAME} {IMAP_PASSWORD}"
+                    )
+                },
+                502,
+                "imap_connection_failed",
+            ),
+            (
+                "discovery",
+                {
+                    "discovery_error": RuntimeError(
+                        f"raw LIST {IMAP_PASSWORD}"
+                    )
+                },
+                502,
+                "trash_snapshot_failed",
+            ),
+            (
+                "snapshot_result",
+                {
+                    "result": {
+                        "ok": False,
+                        "status": "error",
+                        "snapshot": None,
+                        "identities": {},
+                        "error": {
+                            "code": "snapshot_fetch_failed",
+                            "detail": IMAP_PASSWORD,
+                        },
+                    }
+                },
+                502,
+                "trash_snapshot_failed",
+            ),
+            (
+                "snapshot_exception",
+                {
+                    "snapshot_error": RuntimeError(
+                        f"raw snapshot {IMAP_PASSWORD}"
+                    )
+                },
+                502,
+                "trash_snapshot_failed",
+            ),
+            (
+                "non_dict_snapshot_result",
+                {"result": []},
+                502,
+                "trash_snapshot_failed",
+            ),
+            (
+                "contradictory_snapshot_result",
+                {
+                    "result": {
+                        **imap_snapshot_result(),
+                        "ok": False,
+                    }
+                },
+                502,
+                "trash_snapshot_failed",
+            ),
+            (
+                "snapshot_result_with_error",
+                {
+                    "result": {
+                        **imap_snapshot_result(),
+                        "error": {"code": "private-provider-error"},
+                    }
+                },
+                502,
+                "trash_snapshot_failed",
+            ),
+            (
+                "snapshot_result_missing_identities",
+                {
+                    "result": {
+                        key: value
+                        for key, value in imap_snapshot_result().items()
+                        if key != "identities"
+                    }
+                },
+                502,
+                "trash_snapshot_failed",
+            ),
+        )
+        for name, kwargs, status_code, public_code in cases:
+            with self.subTest(name=name):
+                result = invoke_imap_route(**kwargs)
+                target = result["handler"]
+                self.assertEqual(target.status, status_code)
+                self.assertEqual(
+                    target.response()["error"]["code"],
+                    public_code,
+                )
+                serialized = json.dumps(target.response())
+                self.assertNotIn(IMAP_HOST, serialized)
+                self.assertNotIn(IMAP_USERNAME, serialized)
+                self.assertNotIn(IMAP_PASSWORD, serialized)
+
+    def test_logout_failure_uses_shutdown_without_changing_success(self):
+        mailbox = RecordingMailbox(
+            logout_error=RuntimeError(f"logout {IMAP_PASSWORD}")
+        )
+        result = invoke_imap_route(mailbox=mailbox)
+
+        self.assertEqual(result["handler"].status, 200)
+        self.assertEqual(mailbox.logout_count, 1)
+        self.assertEqual(mailbox.shutdown_count, 1)
+        self.assertNotIn(
+            IMAP_PASSWORD,
+            json.dumps(result["handler"].response()),
+        )
 
 
 class FetchTrashTransportAndMethodTests(unittest.TestCase):

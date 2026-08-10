@@ -26,6 +26,7 @@ from authenticated_imap import (  # noqa: E402
 )
 from api.inboxes.gmail_snapshot import parse_gmail_message_detail  # noqa: E402
 from api.inboxes.imap_archive import archive_imap_message  # noqa: E402
+from api.inboxes.imap_trash import trash_imap_message  # noqa: E402
 from api.inboxes.imap_snapshot import (  # noqa: E402
     read_imap_folder_snapshot,
     read_imap_message_identity,
@@ -78,6 +79,39 @@ IMAP_ACTION_FLAGS = {
 }
 _IMAP_UID_PATTERN = re.compile(r"[1-9][0-9]*", re.ASCII)
 _MAX_IMAP_UID = 4_294_967_295
+_GMAIL_TRASH_REQUEST_FIELDS = frozenset(
+    {"mailboxId", "providerMessageId", "sourceFolder", "action"}
+)
+_IMAP_TRASH_REQUEST_FIELDS = frozenset(
+    {"mailboxId", "imapUid", "uidValidity", "sourceFolder", "action"}
+)
+_IMAP_TRASH_CAPABILITY_ERROR_CODES = frozenset(
+    {
+        "trash_folder_unavailable",
+        "trash_folder_ambiguous",
+        "trash_move_unsupported",
+        "trash_uidplus_unsupported",
+    }
+)
+_IMAP_TRASH_SOURCE_INVALID_ERROR_CODES = frozenset(
+    {
+        "source_folder_unavailable",
+        "uid_validity_unavailable",
+        "uid_validity_changed",
+        "trash_message_not_found",
+    }
+)
+_IMAP_TRASH_MUTATION_UNCONFIRMED_ERROR_CODES = frozenset(
+    {
+        "trash_move_unconfirmed",
+        "target_folder_unavailable",
+        "target_uid_validity_unavailable",
+        "target_uid_validity_changed",
+        "target_message_not_found",
+        "target_identity_unconfirmed",
+        "trash_target_mismatch",
+    }
+)
 _GMAIL_ARCHIVE_FORBIDDEN_PUBLIC_KEYS = {
     "accesstoken",
     "authorization",
@@ -160,6 +194,35 @@ def _valid_archive_imap_uid(value: object) -> bool:
     return len(value) < len(maximum) or (
         len(value) == len(maximum) and value <= maximum
     )
+
+
+def _trash_request_kind(payload: object) -> str | None:
+    """Return the one exact provider request shape without trusting client provider data."""
+    if type(payload) is not dict:
+        return None
+    if (
+        payload.get("action") != "trash"
+        or payload.get("sourceFolder") != "INBOX"
+        or not valid_identifier(payload.get("mailboxId"))
+        or find_forbidden_custom_request_fields(payload)
+    ):
+        return None
+
+    fields = frozenset(payload)
+    if fields == _GMAIL_TRASH_REQUEST_FIELDS:
+        return (
+            "gmail"
+            if _valid_gmail_archive_message_id(payload.get("providerMessageId"))
+            else None
+        )
+    if fields == _IMAP_TRASH_REQUEST_FIELDS:
+        return (
+            "custom_imap"
+            if _valid_archive_imap_uid(payload.get("imapUid"))
+            and is_canonical_uid_validity(payload.get("uidValidity"))
+            else None
+        )
+    return None
 
 
 def _contains_forbidden_gmail_archive_public_fields(
@@ -1425,6 +1488,450 @@ def _perform_imap_archive(
                     pass
 
 
+def _send_invalid_trash_request(handler: BaseHTTPRequestHandler):
+    send_json(
+        handler,
+        400,
+        error_payload(
+            "invalid_trash_request",
+            "Trash requires one managed mailbox and provider message identity.",
+        ),
+    )
+
+
+def _valid_imap_folder_name(value: object) -> bool:
+    if type(value) is not str or value != value.strip():
+        return False
+    try:
+        encoded_value = value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError:
+        return False
+    return (
+        1 <= len(encoded_value) <= 16_384
+        and not any(
+            ord(character) < 32 or 127 <= ord(character) <= 159
+            for character in value
+        )
+    )
+
+
+def _valid_bounded_imap_connection_text(
+    value: object,
+    *,
+    maximum_bytes: int,
+    require_trimmed: bool,
+) -> bool:
+    if (
+        type(value) is not str
+        or not value
+        or (require_trimmed and value != value.strip())
+        or any(
+            ord(character) < 32 or 127 <= ord(character) <= 159
+            for character in value
+        )
+    ):
+        return False
+    try:
+        encoded_value = value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError:
+        return False
+    return len(encoded_value) <= maximum_bytes
+
+
+def _resolved_imap_connection_settings(
+    resolved_mailbox: object,
+    *,
+    expected_mailbox_id: str,
+) -> dict | None:
+    if (
+        type(resolved_mailbox) is not dict
+        or resolved_mailbox.get("mailboxId") != expected_mailbox_id
+    ):
+        return None
+
+    email = resolved_mailbox.get("email")
+    if (
+        not _valid_bounded_imap_connection_text(
+            email,
+            maximum_bytes=4_096,
+            require_trimmed=True,
+        )
+        or re.fullmatch(r"[^@\s]+@[^@\s]+", email) is None
+    ):
+        return None
+
+    imap = resolved_mailbox.get("imap")
+    if type(imap) is not dict or set(imap) != {
+        "host",
+        "port",
+        "ssl",
+        "username",
+        "password",
+    }:
+        return None
+    host = imap.get("host")
+    port = imap.get("port")
+    username = imap.get("username")
+    password = imap.get("password")
+    if (
+        not _valid_bounded_imap_connection_text(
+            host,
+            maximum_bytes=4_096,
+            require_trimmed=True,
+        )
+        or any(character.isspace() for character in host)
+        or type(port) is not int
+        or not 1 <= port <= 65_535
+        or imap.get("ssl") is not True
+        or not _valid_bounded_imap_connection_text(
+            username,
+            maximum_bytes=4_096,
+            require_trimmed=True,
+        )
+        or not _valid_bounded_imap_connection_text(
+            password,
+            maximum_bytes=65_536,
+            require_trimmed=False,
+        )
+    ):
+        return None
+    return imap
+
+
+def _imap_trash_result_is_confirmed(
+    result: object,
+    *,
+    source_folder: str,
+    source_uid: str,
+    source_uid_validity: str,
+) -> bool:
+    expected_fields = {
+        "ok",
+        "status",
+        "source_folder",
+        "source_uid",
+        "source_uid_validity",
+        "trash_folder",
+        "target_uid",
+        "target_uid_validity",
+        "confirmation",
+        "error",
+    }
+    return (
+        type(result) is dict
+        and set(result) == expected_fields
+        and result.get("ok") is True
+        and result.get("status") == "ok"
+        and result.get("source_folder") == source_folder
+        and result.get("source_uid") == source_uid
+        and result.get("source_uid_validity") == source_uid_validity
+        and _valid_imap_folder_name(result.get("trash_folder"))
+        and result.get("trash_folder").casefold() != source_folder.casefold()
+        and _valid_archive_imap_uid(result.get("target_uid"))
+        and is_canonical_uid_validity(result.get("target_uid_validity"))
+        and result.get("confirmation") == "exact_target_verified"
+        and result.get("error") is None
+    )
+
+
+def _imap_trash_error_details(result: object) -> tuple[str, str] | None:
+    if type(result) is not dict or result.get("ok") is not False:
+        return None
+    error = result.get("error")
+    if type(error) is not dict:
+        return None
+    code = error.get("code")
+    stage = error.get("stage")
+    if not isinstance(code, str) or not isinstance(stage, str):
+        return None
+    return code, stage
+
+
+def _imap_trash_stage_may_follow_move(stage: str) -> bool:
+    normalized = stage.strip().casefold()
+    return (
+        normalized in {
+            "copyuid",
+            "move",
+            "post_move",
+            "postcondition",
+            "source_readback",
+            "source_postcondition",
+            "target_binding",
+            "target_identity",
+            "target_readback",
+            "target_selection",
+            "target_uid_validity",
+        }
+        or normalized.startswith("post_")
+        or normalized.startswith("target_")
+    )
+
+
+def _send_imap_trash_unconfirmed(
+    handler: BaseHTTPRequestHandler,
+    *,
+    mailbox_id: str,
+    source_folder: str,
+    source_uid: str,
+    source_uid_validity: str,
+):
+    _json_response(
+        handler,
+        502,
+        {
+            "ok": False,
+            "status": "mutation_unconfirmed",
+            "action": "trash",
+            "provider": "custom_imap",
+            "mailboxId": mailbox_id,
+            "sourceFolder": source_folder,
+            "sourceImapUid": source_uid,
+            "sourceUidValidity": source_uid_validity,
+            "error": {
+                "code": "trash_mutation_unconfirmed",
+                "message": (
+                    "Trash may have completed; the current IMAP state could "
+                    "not be confirmed safely."
+                ),
+            },
+        },
+    )
+
+
+def _send_imap_trash_failure(
+    handler: BaseHTTPRequestHandler,
+    result: object,
+    *,
+    mailbox_id: str,
+    source_folder: str,
+    source_uid: str,
+    source_uid_validity: str,
+):
+    details = _imap_trash_error_details(result)
+    if details is None:
+        _send_imap_trash_unconfirmed(
+            handler,
+            mailbox_id=mailbox_id,
+            source_folder=source_folder,
+            source_uid=source_uid,
+            source_uid_validity=source_uid_validity,
+        )
+        return
+
+    code, stage = details
+    if code in _IMAP_TRASH_CAPABILITY_ERROR_CODES:
+        messages = {
+            "trash_folder_unavailable": "No provider-marked Trash mailbox is available.",
+            "trash_folder_ambiguous": "More than one provider-marked Trash mailbox is available.",
+            "trash_move_unsupported": "This IMAP server does not support safe Trash moves.",
+            "trash_uidplus_unsupported": "This IMAP server cannot bind the moved Trash message safely.",
+        }
+        _json_response(handler, 409, _error(code, messages[code]))
+        return
+    if code in {"invalid_source_folder", "invalid_imap_uid", "invalid_uid_validity"}:
+        _send_invalid_trash_request(handler)
+        return
+    if code == "trash_move_failed":
+        _json_response(
+            handler,
+            502,
+            _error(
+                "trash_move_failed",
+                "The IMAP server rejected this Trash move.",
+            ),
+        )
+        return
+    if (
+        code in _IMAP_TRASH_MUTATION_UNCONFIRMED_ERROR_CODES
+        or _imap_trash_stage_may_follow_move(stage)
+    ):
+        _send_imap_trash_unconfirmed(
+            handler,
+            mailbox_id=mailbox_id,
+            source_folder=source_folder,
+            source_uid=source_uid,
+            source_uid_validity=source_uid_validity,
+        )
+        return
+    if code in _IMAP_TRASH_SOURCE_INVALID_ERROR_CODES:
+        _json_response(
+            handler,
+            409,
+            _error(
+                "trash_source_invalid",
+                "The IMAP source message is no longer a valid Inbox target.",
+            ),
+        )
+        return
+    if code == "source_identity_unconfirmed":
+        _json_response(
+            handler,
+            502,
+            _error(
+                "trash_source_unconfirmed",
+                "The IMAP source message identity could not be confirmed safely.",
+            ),
+        )
+        return
+    _json_response(
+        handler,
+        502,
+        _error(
+            "imap_trash_failed",
+            "Could not move this message to Trash through IMAP.",
+        ),
+    )
+
+
+def _perform_imap_trash(handler: BaseHTTPRequestHandler, payload: dict):
+    mailbox_id = payload.get("mailboxId")
+    source_folder = payload.get("sourceFolder")
+    source_uid = payload.get("imapUid")
+    source_uid_validity = payload.get("uidValidity")
+    if _trash_request_kind(payload) != "custom_imap":
+        _send_invalid_trash_request(handler)
+        return
+
+    resolved = resolve_authenticated_imap_mailbox(handler.headers, mailbox_id)
+    if type(resolved) is not dict:
+        resolved = {
+            "status": "malformed",
+            "mailbox": None,
+            "error": None,
+        }
+    if resolved.get("status") != "ok" or not resolved.get("mailbox"):
+        error = resolved.get("error")
+        if (
+            type(error) is not dict
+            or type(error.get("status_code")) is not int
+            or type(error.get("code")) is not str
+            or type(error.get("message")) is not str
+        ):
+            error = {
+                "code": "mailbox_configuration_malformed",
+                "message": "Mailbox configuration is invalid.",
+                "status_code": 500,
+            }
+        _json_response(
+            handler,
+            error["status_code"],
+            _error(error["code"], error["message"]),
+        )
+        return
+
+    resolved_mailbox = resolved.get("mailbox")
+    imap = _resolved_imap_connection_settings(
+        resolved_mailbox,
+        expected_mailbox_id=mailbox_id,
+    )
+    if imap is None:
+        _json_response(
+            handler,
+            500,
+            _error(
+                "mailbox_configuration_malformed",
+                "Mailbox configuration is invalid.",
+            ),
+        )
+        return
+    mailbox = None
+    helper_invoked = False
+    try:
+        mailbox = connect_mailbox_with_settings(
+            host=imap["host"],
+            port=imap["port"],
+            username=imap["username"],
+            password=imap["password"],
+            ssl_enabled=imap["ssl"],
+        )
+        helper_invoked = True
+        result = trash_imap_message(
+            mailbox,
+            source_folder=source_folder,
+            uid=source_uid,
+            expected_uid_validity=source_uid_validity,
+        )
+        if _imap_trash_result_is_confirmed(
+            result,
+            source_folder=source_folder,
+            source_uid=source_uid,
+            source_uid_validity=source_uid_validity,
+        ):
+            _json_response(
+                handler,
+                200,
+                {
+                    "ok": True,
+                    "status": "ok",
+                    "action": "trash",
+                    "provider": "custom_imap",
+                    "mailboxId": mailbox_id,
+                    "sourceFolder": source_folder,
+                    "sourceImapUid": source_uid,
+                    "sourceUidValidity": source_uid_validity,
+                    "targetFolder": result["trash_folder"],
+                    "targetImapUid": result["target_uid"],
+                    "targetUidValidity": result["target_uid_validity"],
+                    "confirmation": "source_removed_target_bound",
+                },
+            )
+            return
+        _send_imap_trash_failure(
+            handler,
+            result,
+            mailbox_id=mailbox_id,
+            source_folder=source_folder,
+            source_uid=source_uid,
+            source_uid_validity=source_uid_validity,
+        )
+    except imaplib.IMAP4.error:
+        if helper_invoked:
+            _send_imap_trash_unconfirmed(
+                handler,
+                mailbox_id=mailbox_id,
+                source_folder=source_folder,
+                source_uid=source_uid,
+                source_uid_validity=source_uid_validity,
+            )
+        else:
+            _json_response(
+                handler,
+                401,
+                _error(
+                    "invalid_credentials",
+                    "Stored IMAP credentials were rejected.",
+                ),
+            )
+    except Exception:
+        if helper_invoked:
+            _send_imap_trash_unconfirmed(
+                handler,
+                mailbox_id=mailbox_id,
+                source_folder=source_folder,
+                source_uid=source_uid,
+                source_uid_validity=source_uid_validity,
+            )
+        else:
+            _json_response(
+                handler,
+                502,
+                _error(
+                    "imap_trash_failed",
+                    "Could not move this message to Trash through IMAP.",
+                ),
+            )
+    finally:
+        if mailbox is not None:
+            try:
+                mailbox.logout()
+            except Exception:
+                try:
+                    mailbox.shutdown()
+                except Exception:
+                    pass
+
+
 def _perform_imap_action(handler: BaseHTTPRequestHandler, payload: dict, action: str):
     if set(payload) - {"mailboxId", "folder", "uid", "uidValidity", "action"}:
         _json_response(
@@ -1579,40 +2086,16 @@ class handler(BaseHTTPRequestHandler):
             return
 
         action = payload.get("action")
+        trash_request_kind = None
 
         if action not in SUPPORTED_ACTIONS:
             send_json(self, 400, error_payload("unsupported_action", "This mailbox action is not supported."))
             return
 
         if action == "trash":
-            trash_fields = {
-                "mailboxId",
-                "providerMessageId",
-                "sourceFolder",
-                "action",
-            }
-            field_error = reject_unknown_fields(
-                payload,
-                trash_fields,
-            )
-            if (
-                field_error
-                or set(payload) != trash_fields
-                or not valid_identifier(payload.get("mailboxId"))
-                or not _valid_gmail_archive_message_id(
-                    payload.get("providerMessageId")
-                )
-                or payload.get("sourceFolder") != "INBOX"
-                or find_forbidden_custom_request_fields(payload)
-            ):
-                send_json(
-                    self,
-                    400,
-                    error_payload(
-                        "invalid_trash_request",
-                        "Trash requires one managed mailbox and provider message identity.",
-                    ),
-                )
+            trash_request_kind = _trash_request_kind(payload)
+            if trash_request_kind is None:
+                _send_invalid_trash_request(self)
                 return
         else:
             field_error = reject_unknown_fields(
@@ -1629,6 +2112,9 @@ class handler(BaseHTTPRequestHandler):
             return
         provider = owned["inbox"].get("provider")
         if provider == "google":
+            if action == "trash" and trash_request_kind != "gmail":
+                _send_invalid_trash_request(self)
+                return
             if action != "trash":
                 field_error = reject_unknown_fields(payload, {"mailboxId", "messageId", "action"})
                 if field_error:
@@ -1656,14 +2142,10 @@ class handler(BaseHTTPRequestHandler):
             return
         if provider == "custom_imap":
             if action == "trash":
-                send_json(
-                    self,
-                    409,
-                    error_payload(
-                        "trash_provider_not_supported",
-                        "Provider-authoritative Trash is not supported for this mailbox.",
-                    ),
-                )
+                if trash_request_kind != "custom_imap":
+                    _send_invalid_trash_request(self)
+                    return
+                _perform_imap_trash(self, payload)
                 return
             _perform_imap_action(self, payload, action)
             return
