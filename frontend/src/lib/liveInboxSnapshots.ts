@@ -35,6 +35,46 @@ export type TrustedLiveInboxSnapshotContexts = Record<
   TrustedLiveInboxSnapshotContext
 >;
 
+function isLiveInboxProvider(value: unknown): value is LiveInboxProvider {
+  return value === "google" || value === "custom_imap";
+}
+
+function isExactMailboxId(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value === value.trim()
+  );
+}
+
+function isExactLiveInboxFolder(value: unknown): value is "INBOX" {
+  return value === "INBOX";
+}
+
+function isExactProviderFolder(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value === value.trim() &&
+    !Array.from(value).some((character) => {
+      const codePoint = character.codePointAt(0) ?? 0;
+      return codePoint < 32 || codePoint === 127;
+    })
+  );
+}
+
+function hasCustomImapProviderIdentityConflict(
+  message: LiveInboxMessageSnapshot,
+) {
+  return (
+    (message.providerMessageId !== undefined &&
+      message.providerMessageId !== null) ||
+    (message.providerThreadId !== undefined &&
+      message.providerThreadId !== null) ||
+    (message.labelIds !== undefined && message.labelIds !== null)
+  );
+}
+
 export function removeGmailInboxProviderMessageFromSnapshot(
   snapshot: LiveInboxSnapshot | undefined,
   mailboxId: string,
@@ -94,29 +134,155 @@ export function removeAndPersistGmailInboxProviderMessageFromSnapshot(
   return { snapshot: nextSnapshot, changed: true };
 }
 
+const CANONICAL_IMAP_UID = /^[1-9][0-9]*$/;
+const CANONICAL_UID_VALIDITY = /^[1-9][0-9]{0,19}$/;
+const MAX_IMAP_UID = 4_294_967_295;
+
+function isCanonicalImapUid(value: unknown): value is string {
+  if (typeof value !== "string" || !CANONICAL_IMAP_UID.test(value)) {
+    return false;
+  }
+  const maximum = String(MAX_IMAP_UID);
+  return (
+    value.length < maximum.length ||
+    (value.length === maximum.length && value <= maximum)
+  );
+}
+
+function isCanonicalUidValidity(value: unknown): value is string {
+  return typeof value === "string" && CANONICAL_UID_VALIDITY.test(value);
+}
+
+export function removeCustomImapInboxMessageFromSnapshot(
+  snapshot: LiveInboxSnapshot | undefined,
+  mailboxId: string,
+  uidValidity: string,
+  imapUid: string,
+): LiveInboxSnapshot | undefined {
+  if (
+    !snapshot ||
+    snapshot.provider !== "custom_imap" ||
+    snapshot.folder !== "INBOX" ||
+    snapshot.inboxId !== mailboxId ||
+    snapshot.uidValidity !== uidValidity ||
+    !isCanonicalUidValidity(uidValidity) ||
+    !isCanonicalImapUid(imapUid)
+  ) {
+    return snapshot;
+  }
+
+  const exactMatches = snapshot.messages.filter(
+    (message) =>
+      message.serverMailboxId === mailboxId &&
+      message.providerFolder === "INBOX" &&
+      message.uidValidity === uidValidity &&
+      message.imapUid === imapUid,
+  );
+  if (exactMatches.length !== 1) {
+    return snapshot;
+  }
+
+  const exactMatch = exactMatches[0];
+  return {
+    ...snapshot,
+    messages: snapshot.messages.filter((message) => message !== exactMatch),
+  };
+}
+
+export function removeAndPersistCustomImapInboxMessageFromSnapshot(
+  snapshot: LiveInboxSnapshot | undefined,
+  mailboxId: string,
+  uidValidity: string,
+  imapUid: string,
+  persistSnapshot: (snapshot: LiveInboxSnapshot) => void,
+): { snapshot: LiveInboxSnapshot | undefined; changed: boolean } {
+  let nextSnapshot: LiveInboxSnapshot | undefined;
+
+  try {
+    nextSnapshot = removeCustomImapInboxMessageFromSnapshot(
+      snapshot,
+      mailboxId,
+      uidValidity,
+      imapUid,
+    );
+  } catch {
+    return { snapshot, changed: false };
+  }
+
+  if (!nextSnapshot || nextSnapshot === snapshot) {
+    return { snapshot, changed: false };
+  }
+
+  try {
+    persistSnapshot(nextSnapshot);
+  } catch {
+    // Provider-confirmed state stays authoritative without local persistence.
+  }
+
+  return { snapshot: nextSnapshot, changed: true };
+}
+
 export function buildLiveInboxSnapshotThreadIdentityContext(
   snapshot: LiveInboxSnapshot,
 ): LiveThreadIdentityContext | null {
-  if (!snapshot.provider) {
+  if (
+    !isLiveInboxProvider(snapshot.provider) ||
+    !isExactMailboxId(snapshot.inboxId) ||
+    !isExactLiveInboxFolder(snapshot.folder)
+  ) {
     return null;
   }
 
   return {
     mailboxId: snapshot.inboxId,
     provider: snapshot.provider,
-    folder: snapshot.folder?.trim() || "INBOX",
+    folder: snapshot.folder,
     uidValidity: snapshot.uidValidity ?? null,
   };
+}
+
+function hasLiveInboxMessageScopeConflict(snapshot: LiveInboxSnapshot) {
+  if (!Array.isArray(snapshot.messages)) {
+    return true;
+  }
+
+  const expectedProviderFolder =
+    snapshot.provider === "google"
+      ? "Inbox"
+      : snapshot.provider === "custom_imap"
+        ? "INBOX"
+        : null;
+
+  return (
+    expectedProviderFolder === null ||
+    snapshot.messages.some(
+      (message) =>
+        !message ||
+        typeof message !== "object" ||
+        (message.serverMailboxId !== undefined &&
+          message.serverMailboxId !== snapshot.inboxId) ||
+        (message.providerFolder !== undefined &&
+          message.providerFolder !== expectedProviderFolder) ||
+        (snapshot.provider === "custom_imap" &&
+          ((message.uidValidity !== undefined &&
+            message.uidValidity !== snapshot.uidValidity) ||
+            hasCustomImapProviderIdentityConflict(message))),
+    )
+  );
 }
 
 export function hydrateLiveInboxSnapshot(snapshot: LiveInboxSnapshot) {
   const context = buildLiveInboxSnapshotThreadIdentityContext(snapshot);
 
+  if (!context || hasLiveInboxMessageScopeConflict(snapshot)) {
+    return { context: null, messages: [] };
+  }
+
   return {
     context,
-    messages: context
-      ? snapshot.messages.map((message) => applyLiveThreadIdentity(message, context))
-      : snapshot.messages,
+    messages: snapshot.messages.map((message) =>
+      applyLiveThreadIdentity(message, context),
+    ),
   };
 }
 
@@ -156,7 +322,14 @@ function normalizeSnapshot(
   snapshot: LiveInboxSnapshot,
   trustedContext?: TrustedLiveInboxSnapshotContext,
 ): LiveInboxSnapshot | null {
-  if (snapshot.classifierVersion !== MUSIC_CLASSIFIER_VERSION) {
+  if (
+    !snapshot ||
+    typeof snapshot !== "object" ||
+    Array.isArray(snapshot) ||
+    snapshot.classifierVersion !== MUSIC_CLASSIFIER_VERSION ||
+    !isExactMailboxId(inboxId) ||
+    snapshot.inboxId !== inboxId
+  ) {
     return null;
   }
 
@@ -171,31 +344,65 @@ function normalizeSnapshot(
       )
     : [];
 
-  if (!snapshot.inboxId && !inboxId) {
+  const storedProvider = isLiveInboxProvider(snapshot.provider)
+    ? snapshot.provider
+    : undefined;
+  if (snapshot.provider !== undefined && !storedProvider) {
     return null;
   }
 
-  const normalizedInboxId = snapshot.inboxId || inboxId;
-  const storedProvider =
-    snapshot.provider === "google" || snapshot.provider === "custom_imap"
-      ? snapshot.provider
-      : undefined;
   if (
-    storedProvider &&
-    trustedContext?.provider &&
-    storedProvider !== trustedContext.provider
+    trustedContext &&
+    (
+      trustedContext.mailboxId !== inboxId ||
+      !isLiveInboxProvider(trustedContext.provider) ||
+      !isExactProviderFolder(trustedContext.folder) ||
+      (storedProvider !== undefined && storedProvider !== trustedContext.provider) ||
+      (snapshot.folder !== undefined && snapshot.folder !== trustedContext.folder)
+    )
   ) {
     return null;
   }
-  const provider = storedProvider ?? trustedContext?.provider;
-  const folder = String(snapshot.folder ?? trustedContext?.folder ?? "INBOX").trim() || "INBOX";
+
+  const provider = trustedContext?.provider ?? storedProvider;
+  const folder = trustedContext?.folder ?? snapshot.folder ?? "INBOX";
+  const isSafelyBoundLegacyNonInbox = Boolean(
+    trustedContext &&
+    storedProvider === undefined &&
+    snapshot.folder === undefined,
+  );
+  if (
+    provider &&
+    !isExactLiveInboxFolder(folder) &&
+    !isSafelyBoundLegacyNonInbox
+  ) {
+    return null;
+  }
   const uidValidity =
     typeof snapshot.uidValidity === "string" || snapshot.uidValidity === null
       ? snapshot.uidValidity
       : undefined;
+  const expectedProviderFolder =
+    provider === "google" ? "Inbox" : provider === "custom_imap" ? "INBOX" : null;
+  if (
+    expectedProviderFolder &&
+    messages.some(
+      (message) =>
+        (message.serverMailboxId !== undefined &&
+          message.serverMailboxId !== inboxId) ||
+        (message.providerFolder !== undefined &&
+          message.providerFolder !== expectedProviderFolder) ||
+        (provider === "custom_imap" &&
+          ((message.uidValidity !== undefined &&
+            message.uidValidity !== uidValidity) ||
+            hasCustomImapProviderIdentityConflict(message))),
+    )
+  ) {
+    return null;
+  }
   const threadIdentityContext = provider
     ? {
-        mailboxId: normalizedInboxId,
+        mailboxId: inboxId,
         provider,
         folder,
         uidValidity: uidValidity ?? null,
@@ -210,7 +417,7 @@ function normalizeSnapshot(
       : snapshot.threadIdentityVersion,
     classifierVersion: MUSIC_CLASSIFIER_VERSION,
     provider,
-    inboxId: normalizedInboxId,
+    inboxId,
     email: String(snapshot.email ?? "").trim().toLowerCase(),
     fetchedAt: String(snapshot.fetchedAt ?? new Date().toISOString()),
     messages: messages.map((message) => {
@@ -306,8 +513,9 @@ export function saveLiveInboxSnapshot(snapshot: LiveInboxSnapshot) {
   }
 
   if (
-    (snapshot.provider !== "google" && snapshot.provider !== "custom_imap") ||
-    !snapshot.folder?.trim()
+    !isLiveInboxProvider(snapshot.provider) ||
+    !isExactMailboxId(snapshot.inboxId) ||
+    !isExactLiveInboxFolder(snapshot.folder)
   ) {
     return;
   }

@@ -1174,7 +1174,11 @@ assert.match(refresh, /startIndependentMailboxFetches\(\{/);
 assert.match(refresh, /startInbox:[\s\S]*fetchGmailInbox\(\{/);
 assert.match(refresh, /startInbox:[\s\S]*connectInboxWithImap\(/);
 assert.equal((refresh.match(/fetchGmailInbox\(/g) ?? []).length, 1);
-assert.match(refresh, /startArchive: refreshPlan\.shouldFetchArchive/);
+assert.match(
+  refresh,
+  /const shouldFetchProviderArchive =\s+refreshPlan\.shouldFetchArchive && !isProviderImapTrashReconciliation/,
+);
+assert.match(refresh, /startArchive: shouldFetchProviderArchive/);
 assert.match(refresh, /void archivePromise;/);
 assert.match(refresh, /let response = await inboxPromise;/);
 const inboxAuthorityCaptureIndex = refresh.indexOf(

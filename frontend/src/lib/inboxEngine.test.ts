@@ -941,63 +941,42 @@ test("partial custom-IMAP cache rows stay non-authoritative during hydration", (
   });
 });
 
-test("non-default folder survives save/read/hydration and UIDVALIDITY changes fallback identity", () => {
-  withMemoryLocalStorage(() => {
-    const archiveContext: LiveThreadIdentityContext = {
-      ...mailboxAContext,
-      folder: "Archive/2026",
-    };
-    const fallback = mergeLiveInboxMessageState(
-      richLiveMessage({ threadId: undefined }),
-      undefined,
-      archiveContext,
-      {
-        providerStateIsFresh: false,
-        preferExistingUnreadWhenProviderStateIsNotFresh: true,
-      },
-    );
-    saveLiveInboxSnapshot({
-      provider: "custom_imap",
-      inboxId: "mailbox-a",
-      email: "owner@example.com",
-      fetchedAt: "2026-07-13T08:00:00.000Z",
-      folder: "Archive/2026",
-      uidValidity: "900",
-      messages: [fallback] as any,
-    });
-    const snapshot = readLiveInboxSnapshots({
-      "mailbox-a": {
-        mailboxId: "mailbox-a",
-        provider: "custom_imap",
-        folder: "Archive/2026",
-      },
-    })["mailbox-a"];
-    const hydrated = hydrateLiveInboxSnapshot(snapshot);
-    const refreshed = mergeLiveInboxMessageState(
-      richLiveMessage({ threadId: undefined }),
-      undefined,
-      hydrated.context as LiveThreadIdentityContext,
-      {
-        providerStateIsFresh: true,
-        preferExistingUnreadWhenProviderStateIsNotFresh: true,
-      },
-    );
-    const nextUidValidity = mergeLiveInboxMessageState(
-      richLiveMessage({ threadId: undefined }),
-      undefined,
-      { ...(hydrated.context as LiveThreadIdentityContext), uidValidity: "901" },
-      {
-        providerStateIsFresh: true,
-        preferExistingUnreadWhenProviderStateIsNotFresh: true,
-      },
-    );
+test("non-default folder context and UIDVALIDITY still scope fallback identity outside the Inbox cache", () => {
+  const archiveContext: LiveThreadIdentityContext = {
+    ...mailboxAContext,
+    folder: "Archive/2026",
+  };
+  const fallback = mergeLiveInboxMessageState(
+    richLiveMessage({ threadId: undefined }),
+    undefined,
+    archiveContext,
+    {
+      providerStateIsFresh: false,
+      preferExistingUnreadWhenProviderStateIsNotFresh: true,
+    },
+  );
+  const refreshed = mergeLiveInboxMessageState(
+    richLiveMessage({ threadId: undefined }),
+    undefined,
+    archiveContext,
+    {
+      providerStateIsFresh: true,
+      preferExistingUnreadWhenProviderStateIsNotFresh: true,
+    },
+  );
+  const nextUidValidity = mergeLiveInboxMessageState(
+    richLiveMessage({ threadId: undefined }),
+    undefined,
+    { ...archiveContext, uidValidity: "901" },
+    {
+      providerStateIsFresh: true,
+      preferExistingUnreadWhenProviderStateIsNotFresh: true,
+    },
+  );
 
-    assert.equal(snapshot.folder, "Archive/2026");
-    assert.equal(hydrated.context?.folder, "Archive/2026");
-    assert.equal(refreshed.threadId, fallback.threadId);
-    assert.match(refreshed.threadId ?? "", /Archive%2F2026/);
-    assert.notEqual(nextUidValidity.threadId, refreshed.threadId);
-  });
+  assert.equal(refreshed.threadId, fallback.threadId);
+  assert.match(refreshed.threadId ?? "", /Archive%2F2026/);
+  assert.notEqual(nextUidValidity.threadId, refreshed.threadId);
 });
 
 test("WorkspaceShell lazily resolves Smart Folder labels from a local thread index", () => {

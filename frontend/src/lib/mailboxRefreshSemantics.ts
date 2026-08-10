@@ -53,8 +53,195 @@ export type GmailInboxAuthority = {
         stale: false;
         messages: Message[];
         provenReentryProviderMessageIds: string[];
+  };
+};
+
+export type CustomImapInboxAuthorityMessage = {
+  serverMailboxId?: unknown;
+  providerFolder?: unknown;
+  imapUid?: unknown;
+  uidValidity?: unknown;
+};
+
+export type CustomImapInboxAuthority = {
+  captureGeneration: (mailboxId: string) => number;
+  confirmSourceRemoval: (
+    mailboxId: string,
+    uidValidity: string,
+    imapUid: string,
+  ) => number;
+  resetMailbox: (mailboxId: string) => void;
+  isCurrentGeneration: (mailboxId: string, generation: number) => boolean;
+  isRecentlyRemoved: (
+    mailboxId: string,
+    uidValidity: string,
+    imapUid: string,
+  ) => boolean;
+  resolveFetchResponse: <Message extends CustomImapInboxAuthorityMessage>(args: {
+    mailboxId: string;
+    generationAtFetchStart: number;
+    uidValidity: unknown;
+    messages: readonly Message[];
+  }) =>
+    | {
+        stale: true;
+        messages: [];
+      }
+    | {
+        stale: false;
+        messages: Message[];
       };
 };
+
+const MAX_IMAP_UID = 4_294_967_295;
+const CANONICAL_IMAP_UID = /^[1-9][0-9]*$/;
+const CANONICAL_UID_VALIDITY = /^[1-9][0-9]{0,19}$/;
+
+function isCanonicalImapUid(value: unknown): value is string {
+  if (typeof value !== "string" || !CANONICAL_IMAP_UID.test(value)) {
+    return false;
+  }
+
+  const maximum = String(MAX_IMAP_UID);
+  return (
+    value.length < maximum.length ||
+    (value.length === maximum.length && value <= maximum)
+  );
+}
+
+function isCanonicalUidValidity(value: unknown): value is string {
+  return typeof value === "string" && CANONICAL_UID_VALIDITY.test(value);
+}
+
+function buildCustomImapRemovalIdentity(
+  uidValidity: string,
+  imapUid: string,
+) {
+  return JSON.stringify([uidValidity, imapUid]);
+}
+
+function hasExactCurrentCustomImapInboxAuthority<
+  Message extends CustomImapInboxAuthorityMessage,
+>(mailboxId: string, uidValidity: string, messages: readonly Message[]) {
+  const seenUids = new Set<string>();
+  for (const message of messages) {
+    if (
+      message.serverMailboxId !== mailboxId ||
+      message.providerFolder !== "INBOX" ||
+      message.uidValidity !== uidValidity ||
+      !isCanonicalImapUid(message.imapUid) ||
+      seenUids.has(message.imapUid)
+    ) {
+      return false;
+    }
+    seenUids.add(message.imapUid);
+  }
+  return true;
+}
+
+export function createCustomImapInboxAuthority(): CustomImapInboxAuthority {
+  const generationByMailbox = new Map<string, number>();
+  const recentlyRemovedByMailbox = new Map<string, Set<string>>();
+  const readGeneration = (mailboxId: string) =>
+    generationByMailbox.get(mailboxId) ?? 0;
+  const readFence = (mailboxId: string) =>
+    recentlyRemovedByMailbox.get(mailboxId);
+
+  return {
+    captureGeneration: readGeneration,
+    confirmSourceRemoval: (mailboxId, uidValidity, imapUid) => {
+      if (
+        !isExactAuthorityIdentifier(mailboxId) ||
+        !isCanonicalUidValidity(uidValidity) ||
+        !isCanonicalImapUid(imapUid)
+      ) {
+        return readGeneration(mailboxId);
+      }
+
+      const nextGeneration = readGeneration(mailboxId) + 1;
+      generationByMailbox.set(mailboxId, nextGeneration);
+      const fence = readFence(mailboxId) ?? new Set<string>();
+      fence.add(buildCustomImapRemovalIdentity(uidValidity, imapUid));
+      recentlyRemovedByMailbox.set(mailboxId, fence);
+      return nextGeneration;
+    },
+    resetMailbox: (mailboxId) => {
+      generationByMailbox.set(mailboxId, readGeneration(mailboxId) + 1);
+      recentlyRemovedByMailbox.delete(mailboxId);
+    },
+    isCurrentGeneration: (mailboxId, generation) =>
+      readGeneration(mailboxId) === generation,
+    isRecentlyRemoved: (mailboxId, uidValidity, imapUid) =>
+      readFence(mailboxId)?.has(
+        buildCustomImapRemovalIdentity(uidValidity, imapUid),
+      ) ?? false,
+    resolveFetchResponse: ({
+      mailboxId,
+      generationAtFetchStart,
+      uidValidity,
+      messages,
+    }) => {
+      if (readGeneration(mailboxId) !== generationAtFetchStart) {
+        return { stale: true, messages: [] };
+      }
+
+      const fence = readFence(mailboxId);
+      if (!fence?.size) {
+        return { stale: false, messages: [...messages] };
+      }
+
+      if (
+        isCanonicalUidValidity(uidValidity) &&
+        hasExactCurrentCustomImapInboxAuthority(
+          mailboxId,
+          uidValidity,
+          messages,
+        )
+      ) {
+        const retainedFence = new Set(
+          [...fence].filter((identity) => {
+            try {
+              const parts = JSON.parse(identity);
+              return Array.isArray(parts) && parts[0] === uidValidity;
+            } catch {
+              return true;
+            }
+          }),
+        );
+        if (retainedFence.size === 0) {
+          recentlyRemovedByMailbox.delete(mailboxId);
+        } else if (retainedFence.size !== fence.size) {
+          recentlyRemovedByMailbox.set(mailboxId, retainedFence);
+        }
+      }
+
+      const currentFence = readFence(mailboxId);
+      if (!currentFence?.size) {
+        return { stale: false, messages: [...messages] };
+      }
+
+      return {
+        stale: false,
+        messages: messages.filter((message) => {
+          if (
+            message.serverMailboxId !== mailboxId ||
+            message.providerFolder !== "INBOX" ||
+            !isCanonicalUidValidity(message.uidValidity) ||
+            !isCanonicalImapUid(message.imapUid)
+          ) {
+            return true;
+          }
+          return !currentFence.has(
+            buildCustomImapRemovalIdentity(
+              message.uidValidity,
+              message.imapUid,
+            ),
+          );
+        }),
+      };
+    },
+  };
+}
 
 function isExactAuthorityIdentifier(value: unknown): value is string {
   return (
