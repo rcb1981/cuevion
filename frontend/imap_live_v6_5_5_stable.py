@@ -3,7 +3,12 @@ import email
 import logging
 from email.header import decode_header
 from email.utils import parseaddr
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+except ModuleNotFoundError as exc:
+    if exc.name != "dotenv":
+        raise
+    load_dotenv = None
 try:
     from openai import OpenAI
 except ImportError:
@@ -24,7 +29,8 @@ from v7_decision_layer import decide_message_behavior
 # =========================
 # LOAD ENV
 # =========================
-load_dotenv()
+if load_dotenv is not None:
+    load_dotenv()
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY")) if OpenAI else None
 logger = logging.getLogger(__name__)
