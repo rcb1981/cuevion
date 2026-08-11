@@ -3729,6 +3729,218 @@ async function run() {
     assert.equal(malformedStorage.getItem(OAUTH_CALLBACK_RESULT_KEY), null);
   });
 
+  await test("production startup hydrates the server-authoritative custom IMAP Trash mapping", async () => {
+    const customInboxId = "custom:inbox-2-mrxr3lp8";
+    const gmailMailboxId = "gmail-carltricksmusic";
+    const customImapMailboxId = "imap-4cf17258fbcc41b08afbca2f790715cf";
+    const productionState = accountConfigOrchestration.hydrateChoices({
+      ...accountConfigOrchestration.projectChoices(initialOnboardingState),
+      primaryInbox: customInboxId,
+      inboxCount: "2",
+      selectedInboxes: ["main", customInboxId],
+      customInboxes: [{ id: customInboxId, name: "Hysteria Records Promo" }],
+    });
+    assert.equal(
+      productionState.inboxConnections[customInboxId]?.connected,
+      false,
+    );
+    const onboardingSession = completedV1Session(
+      ONBOARDING_STEP_MAX,
+      productionState,
+    );
+    const config: UserAccountConfig = {
+      onboardingSession,
+      managedInboxes: [
+        {
+          connected: true,
+          connectionMethod: "oauth",
+          connectionStatus: "connected",
+          email: "carltricksmusic@gmail.com",
+          id: gmailMailboxId,
+          onboardingInboxId: "main",
+          provider: "google",
+          title: "Carltricksmusic",
+        },
+        {
+          connected: true,
+          connectionMethod: "imap",
+          connectionStatus: "connected",
+          customImapFolderMappings: {
+            schemaVersion: 1,
+            trashFolder: "Deleted Messages",
+          },
+          customImap: {
+            host: "mail.hysteriarecs.com",
+            port: "993",
+            ssl: true,
+            username: "promo@hysteriarecs.com",
+            password: "",
+          },
+          customSmtp: {
+            host: "mail.hysteriarecs.com",
+            port: "587",
+            security: "starttls",
+            username: "promo@hysteriarecs.com",
+            password: "",
+            useSameCredentials: true,
+          },
+          email: "promo@hysteriarecs.com",
+          fullyConnected: true,
+          id: customImapMailboxId,
+          imapConnectionStatus: "connected",
+          imapPasswordSet: true,
+          onboardingInboxId: customInboxId,
+          provider: "custom_imap",
+          smtpConnectionStatus: "connected",
+          smtpPasswordSet: true,
+        },
+      ],
+      primaryManagedInboxId: customImapMailboxId,
+    };
+    const storage = new MemoryStorage();
+
+    const outcome = await hydrateResult(
+      { status: "found", config },
+      storage,
+    );
+
+    assert.equal(outcome.status, "found");
+    if (outcome.status !== "found") {
+      throw new Error("Expected the production account config to hydrate");
+    }
+    assert.equal(outcome.accountState.view, "workspace");
+    const selectedMailboxConnections =
+      outcome.accountState.onboardingState.selectedInboxes.map(
+        (inboxId) => outcome.accountState.onboardingState.inboxConnections[inboxId],
+      );
+    assert.equal(selectedMailboxConnections.length, 2);
+    assert.equal(selectedMailboxConnections.every(Boolean), true);
+    assert.equal(
+      selectedMailboxConnections.filter((mailbox) => mailbox.connected).length,
+      2,
+    );
+    assert.deepEqual(
+      selectedMailboxConnections.map((mailbox) => mailbox.serverMailboxId),
+      [gmailMailboxId, customImapMailboxId],
+    );
+
+    const storedManagedInboxes = JSON.parse(
+      storage.getItem(MANAGED_INBOXES_KEY) ?? "[]",
+    ) as Array<Record<string, unknown>>;
+    assert.equal(storedManagedInboxes.length, 2);
+    assert.equal(storedManagedInboxes.every(Boolean), true);
+    assert.deepEqual(
+      storedManagedInboxes.find(
+        (mailbox) => mailbox.id === customImapMailboxId,
+      )?.customImapFolderMappings,
+      {
+        schemaVersion: 1,
+        trashFolder: "Deleted Messages",
+      },
+    );
+
+    const roundTrippedConfig =
+      accountConfigOrchestration.buildAuthoritativeConfig(
+        ACCOUNT_KEY,
+        onboardingSession,
+        {},
+        storage,
+      );
+    assert.equal(
+      roundTrippedConfig.primaryManagedInboxId,
+      customImapMailboxId,
+    );
+
+    const exactLiveStorage = new MemoryStorage();
+    const exactLiveOutcome = await hydrateResult(
+      {
+        status: "found",
+        config: {
+          onboardingSession,
+          managedInboxes: [
+            {
+              connected: true,
+              connectionMethod: "oauth",
+              connectionStatus: "connected",
+              email: "carltricksmusic@gmail.com",
+              id: gmailMailboxId,
+              provider: "google",
+              title: "Carltricksmusic",
+            },
+            {
+              connected: true,
+              connectionMethod: "imap",
+              connectionStatus: "connected",
+              customImapFolderMappings: {
+                schemaVersion: 1,
+                trashFolder: "Deleted Messages",
+              },
+              email: "promo@hysteriarecs.com",
+              fullyConnected: true,
+              id: customImapMailboxId,
+              imapConnectionStatus: "connected",
+              imapPasswordSet: true,
+              provider: "custom_imap",
+              smtpConnectionStatus: "connected",
+              smtpPasswordSet: true,
+            },
+          ],
+          primaryManagedInboxId: customImapMailboxId,
+        },
+      },
+      exactLiveStorage,
+    );
+
+    assert.equal(exactLiveOutcome.status, "found");
+    if (exactLiveOutcome.status !== "found") {
+      throw new Error("Expected the exact live account config to hydrate");
+    }
+    assert.equal(exactLiveOutcome.accountState.view, "workspace");
+    const exactLiveMailboxConnections =
+      exactLiveOutcome.accountState.onboardingState.selectedInboxes.map(
+        (inboxId) =>
+          exactLiveOutcome.accountState.onboardingState.inboxConnections[inboxId],
+      );
+    assert.equal(exactLiveMailboxConnections.length, 2);
+    assert.equal(exactLiveMailboxConnections.every(Boolean), true);
+    assert.equal(
+      exactLiveMailboxConnections.filter((mailbox) => mailbox.connected).length,
+      2,
+    );
+    assert.deepEqual(
+      exactLiveMailboxConnections.map((mailbox) => mailbox.serverMailboxId),
+      [gmailMailboxId, customImapMailboxId],
+    );
+    const exactLiveStoredManagedInboxes = JSON.parse(
+      exactLiveStorage.getItem(MANAGED_INBOXES_KEY) ?? "[]",
+    ) as Array<Record<string, unknown>>;
+    assert.equal(exactLiveStoredManagedInboxes.length, 2);
+    assert.equal(
+      exactLiveStoredManagedInboxes.every(
+        (mailbox) => mailbox.connected === true,
+      ),
+      true,
+    );
+    assert.deepEqual(
+      exactLiveStoredManagedInboxes.find(
+        (mailbox) => mailbox.id === customImapMailboxId,
+      )?.customImapFolderMappings,
+      {
+        schemaVersion: 1,
+        trashFolder: "Deleted Messages",
+      },
+    );
+    assert.equal(
+      accountConfigOrchestration.buildAuthoritativeConfig(
+        ACCOUNT_KEY,
+        onboardingSession,
+        {},
+        exactLiveStorage,
+      ).primaryManagedInboxId,
+      customImapMailboxId,
+    );
+  });
+
   await test("only one matching authoritative Google mailbox projects connected", () => {
     const hintedState: OnboardingState = {
       ...selectedChoiceState,

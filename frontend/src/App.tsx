@@ -140,6 +140,10 @@ type StoredManagedWorkspaceInbox = {
   imapPasswordSet?: boolean;
   smtpPasswordSet?: boolean;
   fullyConnected?: boolean;
+  customImapFolderMappings?: {
+    schemaVersion: 1;
+    trashFolder: string;
+  };
 };
 type StoredTeamMemberEntry = {
   email?: string;
@@ -1248,10 +1252,16 @@ function buildOnboardingStateFromChoices(choices: OnboardingChoices): Onboarding
     customInboxes: choices.customInboxes,
     inboxConnections: cleanDefaults.inboxConnections,
   });
+  const inboxConnections = { ...cleanDefaults.inboxConnections };
+  for (const inboxId of normalized.selectedInboxes) {
+    if (!inboxConnections[inboxId]) {
+      inboxConnections[inboxId] = createInboxConnection();
+    }
+  }
 
   return {
     ...normalized,
-    inboxConnections: cleanDefaults.inboxConnections,
+    inboxConnections,
   };
 }
 
@@ -1714,6 +1724,7 @@ const safeManagedMailboxFields = new Set([
   "fullyConnected",
   "internalRole",
   "focusPreferences",
+  "customImapFolderMappings",
 ]);
 const safeManagedCustomImapFields = new Set([
   "host",
@@ -1843,6 +1854,28 @@ function projectCustomSmtpForBrowserStorage(
   return projected;
 }
 
+function projectCustomImapFolderMappingsForBrowserStorage(
+  value: unknown,
+): StoredManagedWorkspaceInbox["customImapFolderMappings"] | undefined {
+  if (
+    !isPlainRecord(value) ||
+    !hasOnlyKeys(value, ["schemaVersion", "trashFolder"]) ||
+    value.schemaVersion !== 1 ||
+    typeof value.trashFolder !== "string" ||
+    !value.trashFolder ||
+    value.trashFolder !== value.trashFolder.trim() ||
+    value.trashFolder.toLowerCase() === "inbox" ||
+    /[\u0000-\u001f\u007f-\u009f]/u.test(value.trashFolder)
+  ) {
+    return undefined;
+  }
+
+  return {
+    schemaVersion: 1,
+    trashFolder: value.trashFolder,
+  };
+}
+
 function projectFocusPreferencesForBrowserStorage(
   value: unknown,
 ): Record<string, string> | undefined {
@@ -1960,6 +1993,13 @@ function projectManagedInboxForBrowserStorage(
   }
   if (typeof mailbox.fullyConnected === "boolean") {
     projected.fullyConnected = mailbox.fullyConnected;
+  }
+  const customImapFolderMappings =
+    projectCustomImapFolderMappingsForBrowserStorage(
+      mailbox.customImapFolderMappings,
+    );
+  if (customImapFolderMappings) {
+    projected.customImapFolderMappings = customImapFolderMappings;
   }
   if (
     mailbox.internalRole === null ||
@@ -2166,8 +2206,9 @@ function hasAuthoritativeCustomImapCapabilityShape(
     getAuthoritativeCustomImapCapabilityState(mailbox);
   if (capabilityState === "full") {
     return (
-      isSafeServerCustomSmtpSettings(mailbox.customSmtp) &&
-      !isSafeEmptyServerCustomSmtp(mailbox.customSmtp)
+      mailbox.customSmtp === undefined ||
+      (isSafeServerCustomSmtpSettings(mailbox.customSmtp) &&
+        !isSafeEmptyServerCustomSmtp(mailbox.customSmtp))
     );
   }
   if (capabilityState !== "partial") {
@@ -2231,17 +2272,44 @@ function parseServerCustomImapSettings(
   };
 }
 
+function projectServerCustomImapSettings(
+  value: unknown,
+  fallback: CustomImapSettings,
+): CustomImapSettings | null {
+  const parsed = parseServerCustomImapSettings(value);
+  if (parsed) {
+    return parsed;
+  }
+  return value === undefined
+    ? { ...fallback, password: "" }
+    : null;
+}
+
 function projectConnectedManagedInboxesOntoOnboardingState(
   state: OnboardingState,
   managedInboxes: StoredManagedWorkspaceInbox[],
 ): OnboardingState {
-  const selectedPositions = new Set(state.selectedInboxes);
+  const selectedInboxPositions = [...new Set(state.selectedInboxes)];
+  const selectedPositions = new Set(selectedInboxPositions);
+  const canRecoverPositionalMailboxIdentity =
+    managedInboxes.length === selectedInboxPositions.length &&
+    managedInboxes.every((mailbox, index) => {
+      const explicitPosition = mailbox?.onboardingInboxId;
+      return (
+        explicitPosition === undefined ||
+        explicitPosition === selectedInboxPositions[index]
+      );
+    });
   const nextConnections = { ...state.inboxConnections };
   let didProject = false;
 
   for (const inboxPosition of selectedPositions) {
     const positionMatches = managedInboxes.filter(
-      (mailbox) => mailbox?.onboardingInboxId === inboxPosition,
+      (mailbox, index) =>
+        mailbox?.onboardingInboxId === inboxPosition ||
+        (canRecoverPositionalMailboxIdentity &&
+          mailbox?.onboardingInboxId === undefined &&
+          selectedInboxPositions[index] === inboxPosition),
     );
     if (positionMatches.length !== 1) {
       continue;
@@ -2267,9 +2335,12 @@ function projectConnectedManagedInboxesOntoOnboardingState(
       mailbox.connectionMethod === "oauth" &&
       mailbox.connected === true &&
       mailbox.connectionStatus === "connected";
-    const parsedCustomImap =
+    const projectedCustomImap =
       mailbox.provider === "custom_imap"
-        ? parseServerCustomImapSettings(mailbox.customImap)
+        ? projectServerCustomImapSettings(
+            mailbox.customImap,
+            currentConnection.customImap,
+          )
         : null;
     const projectedCustomSmtp =
       mailbox.provider === "custom_imap"
@@ -2289,7 +2360,7 @@ function projectConnectedManagedInboxesOntoOnboardingState(
       mailbox.connected === true &&
       mailbox.connectionStatus === "connected" &&
       customImapCapabilityState !== null &&
-      parsedCustomImap !== null &&
+      projectedCustomImap !== null &&
       projectedCustomSmtp !== null &&
       hasAuthoritativeCustomImapCapabilityShape(mailbox) &&
       hasValidManagedMailboxOptionalMetadata(mailbox) &&
@@ -2346,7 +2417,7 @@ function projectConnectedManagedInboxesOntoOnboardingState(
               ? mailbox.connectionMessage
               : null,
           oauthAuthorizationUrl: null,
-          customImap: parsedCustomImap!,
+          customImap: projectedCustomImap!,
           customSmtp: projectedCustomSmtp!,
         };
     didProject = true;
@@ -2589,7 +2660,8 @@ function isWellFormedManagedMailboxEnvelope(
     hasValidManagedMailboxOptionalMetadata(mailbox) &&
     (mailbox.provider !== "custom_imap" ||
       mailbox.connected !== true ||
-      (parseServerCustomImapSettings(mailbox.customImap) !== null &&
+      ((mailbox.customImap === undefined ||
+        parseServerCustomImapSettings(mailbox.customImap) !== null) &&
         isSafeServerCustomSmtpSettings(mailbox.customSmtp) &&
         hasAuthoritativeCustomImapCapabilityShape(mailbox))) &&
     (mailbox.onboardingInboxId === undefined ||
@@ -2604,6 +2676,7 @@ function hasValidManagedMailboxOptionalMetadata(
   const metadata = mailbox as StoredManagedWorkspaceInbox &
     Record<string, unknown>;
   const focusPreferences = metadata.focusPreferences;
+  const customImapFolderMappings = metadata.customImapFolderMappings;
   return (
     (mailbox.title === undefined || typeof mailbox.title === "string") &&
     (mailbox.connectionMessage === undefined ||
@@ -2631,6 +2704,10 @@ function hasValidManagedMailboxOptionalMetadata(
       metadata.internalRole === null ||
       (typeof metadata.internalRole === "string" &&
         ONBOARDING_INTERNAL_ROLES.has(metadata.internalRole))) &&
+    (customImapFolderMappings === undefined ||
+      projectCustomImapFolderMappingsForBrowserStorage(
+        customImapFolderMappings,
+      ) !== undefined) &&
     (focusPreferences === undefined ||
       focusPreferences === null ||
       (isPlainRecord(focusPreferences) &&
