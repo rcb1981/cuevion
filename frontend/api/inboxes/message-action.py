@@ -21,6 +21,7 @@ if str(FRONTEND_DIR) not in sys.path:
     sys.path.insert(0, str(FRONTEND_DIR))
 
 from authenticated_imap import (  # noqa: E402
+    configured_imap_trash_folder,
     find_forbidden_custom_request_fields,
     resolve_authenticated_imap_mailbox,
 )
@@ -1835,6 +1836,19 @@ def _perform_imap_trash(handler: BaseHTTPRequestHandler, payload: dict):
             ),
         )
         return
+    configured_trash_folder, mapping_error = configured_imap_trash_folder(
+        resolved_mailbox.get("customImapFolderMappings")
+    )
+    if mapping_error is not None:
+        _json_response(
+            handler,
+            500,
+            _error(
+                "mailbox_configuration_malformed",
+                "Mailbox configuration is invalid.",
+            ),
+        )
+        return
     mailbox = None
     helper_invoked = False
     try:
@@ -1851,6 +1865,7 @@ def _perform_imap_trash(handler: BaseHTTPRequestHandler, payload: dict):
             source_folder=source_folder,
             uid=source_uid,
             expected_uid_validity=source_uid_validity,
+            configured_trash_folder=configured_trash_folder,
         )
         if _imap_trash_result_is_confirmed(
             result,

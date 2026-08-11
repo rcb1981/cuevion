@@ -7,6 +7,7 @@ import json
 import sys
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, call, patch
 from urllib.parse import parse_qs, urlsplit
 
@@ -155,6 +156,7 @@ def resolved_imap_mailbox() -> dict:
             "mailboxId": MAILBOX_ID,
             "ownerEmail": "owner@example.test",
             "email": IMAP_EMAIL,
+            "customImapFolderMappings": None,
             "imap": {
                 "host": IMAP_HOST,
                 "port": 993,
@@ -375,7 +377,10 @@ def invoke_imap_route(
     )
     discovery = Mock(
         side_effect=discovery_error,
-        return_value=discovery_result,
+        return_value=SimpleNamespace(
+            folder=discovery_result[0],
+            error=discovery_result[1],
+        ),
     )
     snapshot_read = Mock(
         side_effect=snapshot_error,
@@ -405,7 +410,7 @@ def invoke_imap_route(
         connection,
     ), patch.object(
         fetch_trash.imap_trash,
-        "discover_trash_folder",
+        "resolve_trash_folder",
         discovery,
     ), patch.object(
         fetch_trash,
@@ -802,7 +807,10 @@ class FetchTrashCustomImapTests(unittest.TestCase):
             password=IMAP_PASSWORD,
             ssl_enabled=True,
         )
-        result["discovery"].assert_called_once_with(result["mailbox"])
+        result["discovery"].assert_called_once_with(
+            result["mailbox"],
+            configured_trash_folder=None,
+        )
         result["snapshot"].assert_called_once_with(
             result["mailbox"],
             folder=TRASH_FOLDER,
@@ -846,6 +854,40 @@ class FetchTrashCustomImapTests(unittest.TestCase):
             "identities",
         ):
             self.assertNotIn(private_value, serialized)
+
+    def test_custom_imap_listing_passes_only_trusted_server_mapping(self):
+        resolution = resolved_imap_mailbox()
+        resolution["mailbox"]["customImapFolderMappings"] = {
+            "schemaVersion": 1,
+            "trashFolder": TRASH_FOLDER,
+        }
+
+        result = invoke_imap_route(resolution=resolution)
+
+        self.assertEqual(result["handler"].status, 200)
+        result["discovery"].assert_called_once_with(
+            result["mailbox"],
+            configured_trash_folder=TRASH_FOLDER,
+        )
+
+    def test_malformed_server_mapping_fails_before_connect_or_snapshot(self):
+        resolution = resolved_imap_mailbox()
+        resolution["mailbox"]["customImapFolderMappings"] = {
+            "schemaVersion": 1,
+            "trashFolder": TRASH_FOLDER,
+            "archiveFolder": "Archive",
+        }
+
+        result = invoke_imap_route(resolution=resolution)
+
+        self.assertEqual(result["handler"].status, 500)
+        self.assertEqual(
+            result["handler"].response()["error"]["code"],
+            "mailbox_configuration_malformed",
+        )
+        result["connect"].assert_not_called()
+        result["discovery"].assert_not_called()
+        result["snapshot"].assert_not_called()
 
     def test_rfc_message_id_is_optional_but_provider_row_scope_is_required(self):
         without_rfc = imap_trash_message()

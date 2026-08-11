@@ -217,6 +217,7 @@ def run_trash(
     uid: str = SOURCE_UID,
     expected_uid_validity: str = SOURCE_UID_VALIDITY,
     trash_folder: str = TRASH_FOLDER,
+    configured_trash_folder: str | None = None,
     source_result: object = _DEFAULT,
     target_result: object = _DEFAULT,
 ):
@@ -263,6 +264,7 @@ def run_trash(
             source_folder=source_folder,
             uid=uid,
             expected_uid_validity=expected_uid_validity,
+            configured_trash_folder=configured_trash_folder,
         )
     return result, mailbox, identity_calls
 
@@ -291,7 +293,7 @@ class ImapTrashDiscoveryTests(unittest.TestCase):
             ("Deleted Mail", None),
         )
 
-    def test_noselect_and_nonexistent_trash_are_never_targets(self):
+    def test_any_unsafe_raw_marker_makes_multiple_markers_category_e(self):
         mailbox = RecordingMailbox(
             list_response=(
                 "OK",
@@ -304,8 +306,15 @@ class ImapTrashDiscoveryTests(unittest.TestCase):
         )
         self.assertEqual(
             imap_trash.discover_trash_folder(mailbox),
-            ("Selectable", None),
+            (None, "trash_folder_unavailable"),
         )
+        resolution = imap_trash.resolve_trash_folder(
+            mailbox,
+            configured_trash_folder="Selectable",
+        )
+        self.assertEqual(resolution.analysis.category, "E")
+        self.assertEqual(resolution.analysis.raw_marker_count, 3)
+        self.assertEqual(resolution.error, "trash_folder_unavailable")
 
     def test_no_role_has_no_name_guessing_fallback(self):
         for name in ("Trash", "Deleted", "Bin", "Prullenbak", "INBOX.Trash"):
@@ -378,7 +387,7 @@ class ImapTrashDiscoveryTests(unittest.TestCase):
                     (None, "trash_folder_ambiguous"),
                 )
 
-    def test_unsafe_roles_are_filtered_before_safe_candidate_cardinality(self):
+    def test_mixed_safe_and_unsafe_roles_are_category_e(self):
         mailbox = RecordingMailbox(
             list_response=(
                 "OK",
@@ -391,8 +400,192 @@ class ImapTrashDiscoveryTests(unittest.TestCase):
         )
         self.assertEqual(
             imap_trash.discover_trash_folder(mailbox),
-            ("Valid", None),
+            (None, "trash_folder_unavailable"),
         )
+
+    def test_structured_analysis_classifies_a_through_e(self):
+        cases = (
+            (RuntimeError("provider secret"), "A", None, None),
+            (("OK", [r'(\HasNoChildren) "/" "Deleted"']), "B", 0, None),
+            (("OK", [r'(\Trash) "/" "Deleted"']), "C", 1, "Deleted"),
+            (
+                (
+                    "OK",
+                    [
+                        r'(\Trash) "/" "Deleted A"',
+                        r'(\Trash) "/" "Deleted B"',
+                    ],
+                ),
+                "D",
+                2,
+                None,
+            ),
+            (("OK", [r'(\Trash \Archive) "/" "Unsafe"']), "E", 1, None),
+        )
+        for response, category, raw_count, folder in cases:
+            with self.subTest(category=category):
+                mailbox = RecordingMailbox(list_response=response)
+                resolution = imap_trash.resolve_trash_folder(
+                    mailbox,
+                    configured_trash_folder="Deleted",
+                )
+                self.assertEqual(resolution.analysis.category, category)
+                self.assertEqual(
+                    resolution.analysis.raw_marker_count,
+                    raw_count,
+                )
+                self.assertEqual(
+                    resolution.analysis.special_use_folder,
+                    folder,
+                )
+                self.assertEqual(mailbox.list_calls, 1)
+
+    def test_mapping_fallback_requires_category_b_and_one_exact_safe_match(self):
+        valid_rows = [
+            r'(\HasNoChildren) "/" "Deleted Items"',
+            r'(\HasNoChildren) "/" "Archive"',
+        ]
+        resolution = imap_trash.resolve_trash_folder(
+            RecordingMailbox(list_response=("OK", valid_rows)),
+            configured_trash_folder="Deleted Items",
+        )
+        self.assertEqual(resolution.analysis.category, "B")
+        self.assertEqual(resolution.folder, "Deleted Items")
+        self.assertIsNone(resolution.error)
+        self.assertEqual(resolution.source, "configured")
+
+        inventory = imap_trash.read_imap_list_inventory(
+            RecordingMailbox(
+                list_response=(
+                    "OK",
+                    [
+                        *valid_rows,
+                        r'(\Noselect) "/" "Container"',
+                        r'(\Archive) "/" "Archive Role"',
+                        r'(\HasNoChildren) "/" "INBOX"',
+                    ],
+                )
+            )
+        )
+        self.assertEqual(
+            [
+                entry.mailbox
+                for entry in imap_trash.configurable_trash_folder_entries(
+                    inventory
+                )
+            ],
+            ["Deleted Items", "Archive"],
+        )
+
+        invalid_cases = (
+            (valid_rows, None),
+            (valid_rows, "deleted items"),
+            (valid_rows, " Deleted Items"),
+            ([*valid_rows, valid_rows[0]], "Deleted Items"),
+            ([r'(\Noselect) "/" "Deleted Items"'], "Deleted Items"),
+            ([r'(\NonExistent) "/" "Deleted Items"'], "Deleted Items"),
+            ([r'(\Archive) "/" "Deleted Items"'], "Deleted Items"),
+            ([r'(\HasNoChildren) "/" "INBOX"'], "INBOX"),
+        )
+        for rows, configured in invalid_cases:
+            with self.subTest(rows=rows, configured=configured):
+                resolution = imap_trash.resolve_trash_folder(
+                    RecordingMailbox(list_response=("OK", rows)),
+                    configured_trash_folder=configured,
+                )
+                self.assertEqual(resolution.analysis.category, "B")
+                self.assertIsNone(resolution.folder)
+                self.assertEqual(
+                    resolution.error,
+                    "trash_folder_unavailable",
+                )
+                self.assertIsNone(resolution.source)
+
+    def test_special_use_always_wins_over_configured_mapping(self):
+        resolution = imap_trash.resolve_trash_folder(
+            RecordingMailbox(
+                list_response=(
+                    "OK",
+                    [
+                        r'(\Trash) "/" "Provider Trash"',
+                        r'(\HasNoChildren) "/" "Configured Trash"',
+                    ],
+                )
+            ),
+            configured_trash_folder="Configured Trash",
+        )
+        self.assertEqual(resolution.analysis.category, "C")
+        self.assertEqual(resolution.folder, "Provider Trash")
+        self.assertEqual(resolution.source, "special_use")
+
+    def test_configured_mapping_preserves_opaque_utf7_unicode_and_paths(self):
+        for mapped_folder in (
+            "&AMk-l&AOk-ments",
+            "Prullenbak 🗑",
+            "Projects/Deleted/2026",
+        ):
+            with self.subTest(mapped_folder=mapped_folder):
+                resolution = imap_trash.resolve_trash_folder(
+                    RecordingMailbox(
+                        list_response=(
+                            "OK",
+                            [f'(\\HasNoChildren) "/" "{mapped_folder}"'],
+                        )
+                    ),
+                    configured_trash_folder=mapped_folder,
+                )
+                self.assertEqual(resolution.analysis.category, "B")
+                self.assertEqual(resolution.folder, mapped_folder)
+                self.assertEqual(resolution.source, "configured")
+
+    def test_mapping_is_never_a_fallback_for_a_d_or_e(self):
+        cases = (
+            (RuntimeError("LIST failed"), "A", "trash_folder_unavailable"),
+            (
+                (
+                    "OK",
+                    [
+                        r'(\Trash \Noselect) "/" "Unsafe"',
+                        r'(\Trash) "/" "Provider Trash"',
+                        r'(\HasNoChildren) "/" "Mapped"',
+                    ],
+                ),
+                "E",
+                "trash_folder_unavailable",
+            ),
+            (
+                (
+                    "OK",
+                    [
+                        r'(\Trash) "/" "Provider Trash A"',
+                        r'(\Trash) "/" "Provider Trash B"',
+                        r'(\HasNoChildren) "/" "Mapped"',
+                    ],
+                ),
+                "D",
+                "trash_folder_ambiguous",
+            ),
+            (
+                (
+                    "OK",
+                    [
+                        r'(\Trash \Archive) "/" "Unsafe"',
+                        r'(\HasNoChildren) "/" "Mapped"',
+                    ],
+                ),
+                "E",
+                "trash_folder_unavailable",
+            ),
+        )
+        for response, category, error in cases:
+            with self.subTest(category=category):
+                resolution = imap_trash.resolve_trash_folder(
+                    RecordingMailbox(list_response=response),
+                    configured_trash_folder="Mapped",
+                )
+                self.assertEqual(resolution.analysis.category, category)
+                self.assertIsNone(resolution.folder)
+                self.assertEqual(resolution.error, error)
 
     def test_literal_and_modified_utf7_mailbox_name_is_preserved_opaque(self):
         literal = b"&AMk-l&AOk-ments"
@@ -501,6 +694,93 @@ class ImapTrashInputAndCapabilityTests(unittest.TestCase):
         self.assertEqual(error_stage(result), "trash_discovery")
         self.assertEqual(identity_calls, [])
         self.assertEqual(mailbox.uid_calls, [])
+
+    def test_configured_mapping_is_freshly_validated_once_before_move(self):
+        mapped_folder = 'Deleted "Items"\\2024'
+        mailbox = RecordingMailbox(
+            list_response=(
+                "OK",
+                [r'(\HasNoChildren) "/" "Deleted \"Items\"\\2024"'],
+            )
+        )
+        result, mailbox, identity_calls = run_trash(
+            mailbox,
+            trash_folder=mapped_folder,
+            configured_trash_folder=mapped_folder,
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["trash_folder"], mapped_folder)
+        self.assertEqual(mailbox.list_calls, 1)
+        self.assertEqual(
+            [call for call in mailbox.uid_calls if call[0] == "MOVE"],
+            [("MOVE", SOURCE_UID, r'"Deleted \"Items\"\\2024"')],
+        )
+        self.assertEqual(identity_calls[1]["folder"], mapped_folder)
+
+    def test_stale_configured_mapping_stops_before_capability_or_identity(self):
+        mailbox = RecordingMailbox(
+            list_response=(
+                "OK",
+                [r'(\HasNoChildren) "/" "Renamed Trash"'],
+            )
+        )
+        result, mailbox, identity_calls = run_trash(
+            mailbox,
+            configured_trash_folder="Deleted Items",
+        )
+        self.assertEqual(error_code(result), "trash_folder_unavailable")
+        self.assertEqual(error_stage(result), "trash_discovery")
+        self.assertEqual(mailbox.list_calls, 1)
+        self.assertEqual(mailbox.capability_calls, 0)
+        self.assertEqual(identity_calls, [])
+        self.assertEqual(mailbox.uid_calls, [])
+
+    def test_c1_configured_mapping_stops_before_capability_or_identity(self):
+        mapped_folder = "Deleted\u0085Items"
+        mailbox = RecordingMailbox(
+            list_response=(
+                "OK",
+                [f'(\\HasNoChildren) "/" "{mapped_folder}"'],
+            )
+        )
+        result, mailbox, identity_calls = run_trash(
+            mailbox,
+            configured_trash_folder=mapped_folder,
+        )
+        self.assertEqual(error_code(result), "trash_folder_unavailable")
+        self.assertEqual(error_stage(result), "trash_discovery")
+        self.assertEqual(mailbox.list_calls, 1)
+        self.assertEqual(mailbox.capability_calls, 0)
+        self.assertEqual(identity_calls, [])
+        self.assertEqual(mailbox.uid_calls, [])
+
+    def test_invalid_configured_mapping_stops_before_capability_or_identity(self):
+        for configured_folder in (
+            " Deleted Items",
+            "Deleted Items ",
+            "Deleted\rItems",
+            "Deleted\nItems",
+            "Deleted\x00Items",
+            "\ud800",
+            "x" * 16_385,
+        ):
+            with self.subTest(configured_folder=repr(configured_folder)[:80]):
+                mailbox = RecordingMailbox(
+                    list_response=(
+                        "OK",
+                        [r'(\HasNoChildren) "/" "Deleted Items"'],
+                    )
+                )
+                result, mailbox, identity_calls = run_trash(
+                    mailbox,
+                    configured_trash_folder=configured_folder,
+                )
+                self.assertEqual(error_code(result), "trash_folder_unavailable")
+                self.assertEqual(error_stage(result), "trash_discovery")
+                self.assertEqual(mailbox.list_calls, 1)
+                self.assertEqual(mailbox.capability_calls, 0)
+                self.assertEqual(identity_calls, [])
+                self.assertEqual(mailbox.uid_calls, [])
 
 
 class ImapTrashCopyUidTests(unittest.TestCase):

@@ -78,6 +78,11 @@ import {
   sanitizeStoredMailboxCredentialJson,
 } from "../../lib/mailboxCredentialPersistence";
 import {
+  listImapTrashFolders,
+  saveImapTrashFolderMapping,
+  type ImapTrashFolderInventorySuccess,
+} from "../../lib/imapFolderMappingApi";
+import {
   hasAuthoritativeCustomSmtpConfiguration,
   isAuthoritativeCustomImapIncomingConnected,
   isCompleteAuthoritativeCustomSmtpConfiguration,
@@ -27947,6 +27952,249 @@ const managedInboxEditorTabs: ManagedInboxEditorTab[] = [
   "Sending",
 ];
 
+type ImapTrashFolderMappingPhase =
+  | "loading"
+  | "ready"
+  | "saving"
+  | "error";
+
+function getImapTrashFolderMappingErrorMessage(code: string) {
+  if (
+    code === "reconnect_required" ||
+    code === "imap_credentials_unavailable" ||
+    code === "imap_connection_not_ready"
+  ) {
+    return "Folder mapping is unavailable until this mailbox is connected again.";
+  }
+
+  return "Provider folders could not be verified safely. Refresh folders to try again.";
+}
+
+function CustomImapTrashFolderMappingCard({ mailboxId }: { mailboxId: string }) {
+  const operationGenerationRef = useRef(0);
+  const [phase, setPhase] = useState<ImapTrashFolderMappingPhase>("loading");
+  const [inventory, setInventory] =
+    useState<ImapTrashFolderInventorySuccess | null>(null);
+  const [selectedFolder, setSelectedFolder] = useState("");
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
+
+  const applyAuthoritativeInventory = useCallback(
+    (nextInventory: ImapTrashFolderInventorySuccess) => {
+      setInventory(nextInventory);
+      setSelectedFolder(
+        nextInventory.trash.mode === "configured"
+          ? nextInventory.trash.currentFolder
+          : "",
+      );
+      setErrorMessage(null);
+      setPhase("ready");
+    },
+    [],
+  );
+
+  const refreshFolders = useCallback(async () => {
+    const operationGeneration = ++operationGenerationRef.current;
+
+    // A previous inventory is presentation-only once a refresh starts. Remove its
+    // options immediately so a failed or stale refresh can never authorize Save.
+    setInventory(null);
+    setSelectedFolder("");
+    setErrorMessage(null);
+    setSuccessMessage(null);
+    setPhase("loading");
+
+    const response = await listImapTrashFolders({ mailboxId });
+    if (operationGeneration !== operationGenerationRef.current) {
+      return;
+    }
+
+    if (!response.ok) {
+      setErrorMessage(getImapTrashFolderMappingErrorMessage(response.error.code));
+      setPhase("error");
+      return;
+    }
+
+    applyAuthoritativeInventory(response);
+  }, [applyAuthoritativeInventory, mailboxId]);
+
+  useEffect(() => {
+    void refreshFolders();
+
+    return () => {
+      operationGenerationRef.current += 1;
+    };
+  }, [refreshFolders]);
+
+  const handleSaveFolderMapping = useCallback(async () => {
+    const exactSelectedFolder = inventory?.folders.find(
+      (folder) => folder.providerFolder === selectedFolder,
+    )?.providerFolder;
+
+    if (
+      !inventory ||
+      inventory.mailboxId !== mailboxId ||
+      inventory.trash.mode === "automatic" ||
+      !exactSelectedFolder
+    ) {
+      setErrorMessage(
+        "Choose a folder from the current provider folder list before saving.",
+      );
+      return;
+    }
+
+    const operationGeneration = ++operationGenerationRef.current;
+    setErrorMessage(null);
+    setSuccessMessage(null);
+    setPhase("saving");
+
+    const response = await saveImapTrashFolderMapping({
+      mailboxId,
+      role: "trash",
+      selectedFolder: exactSelectedFolder,
+    });
+    if (operationGeneration !== operationGenerationRef.current) {
+      return;
+    }
+
+    if (!response.ok) {
+      // Save performs a fresh server LIST. Any failure makes the older options
+      // stale, so discard them and require an explicit refresh before retrying.
+      setInventory(null);
+      setSelectedFolder("");
+      setErrorMessage(getImapTrashFolderMappingErrorMessage(response.error.code));
+      setPhase("error");
+      return;
+    }
+
+    applyAuthoritativeInventory(response);
+    setSuccessMessage(
+      response.trash.mode === "automatic"
+        ? "Trash is now detected automatically by the provider."
+        : "Trash folder mapping saved and verified.",
+    );
+  }, [applyAuthoritativeInventory, inventory, mailboxId, selectedFolder]);
+
+  const isBusy = phase === "loading" || phase === "saving";
+
+  return (
+    <div className="space-y-4 rounded-[24px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] p-5">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <p className="text-sm font-semibold text-[var(--workspace-text)]">
+            Folder mapping
+          </p>
+          <p className="mt-1 text-sm leading-6 text-[var(--workspace-text-muted)]">
+            Choose Trash only from folders freshly verified by your IMAP provider.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => void refreshFolders()}
+          disabled={isBusy}
+          className={`${settingsSubtleActionClass} ${
+            isBusy ? "cursor-default opacity-50" : ""
+          }`}
+        >
+          {phase === "loading" ? "Loading folders..." : "Refresh folders"}
+        </button>
+      </div>
+
+      {phase === "loading" ? (
+        <div
+          role="status"
+          className="rounded-2xl border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3 text-sm text-[var(--workspace-text-muted)]"
+        >
+          Verifying current provider folders...
+        </div>
+      ) : null}
+
+      {errorMessage ? (
+        <div
+          role="alert"
+          className="rounded-2xl border border-[color:rgba(146,82,73,0.24)] bg-[color:rgba(82,49,44,0.14)] px-4 py-3 text-sm leading-6 text-[color:rgba(225,196,188,0.92)]"
+        >
+          {errorMessage}
+        </div>
+      ) : null}
+
+      {inventory?.trash.mode === "automatic" ? (
+        <div className="rounded-2xl border border-[var(--workspace-status-success-border)] bg-[var(--workspace-status-success-bg)] px-4 py-3">
+          <div className="text-sm font-medium text-[var(--workspace-status-success-text)]">
+            Trash folder
+          </div>
+          <div className="mt-1 break-all text-sm text-[var(--workspace-text-muted)]">
+            Automatically detected: {inventory.trash.currentFolder}
+          </div>
+        </div>
+      ) : null}
+
+      {inventory && inventory.trash.mode !== "automatic" ? (
+        <div className="space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <label
+              htmlFor={`imap-trash-folder-${mailboxId}`}
+              className="text-sm font-medium text-[var(--workspace-text-soft)]"
+            >
+              Trash folder
+            </label>
+            <span className="text-xs text-[var(--workspace-text-faint)]">
+              {inventory.trash.mode === "configured"
+                ? `Mapped to ${inventory.trash.currentFolder}`
+                : "Needs selection"}
+            </span>
+          </div>
+          <select
+            id={`imap-trash-folder-${mailboxId}`}
+            aria-label="Trash folder"
+            value={selectedFolder}
+            onChange={(event) => {
+              setSelectedFolder(event.target.value);
+              setErrorMessage(null);
+              setSuccessMessage(null);
+            }}
+            disabled={phase === "saving" || inventory.folders.length === 0}
+            className={inputFieldClass}
+          >
+            <option value="">Select a provider folder</option>
+            {inventory.folders.map((folder) => (
+              <option key={folder.providerFolder} value={folder.providerFolder}>
+                {folder.providerFolder}
+              </option>
+            ))}
+          </select>
+          {inventory.folders.length === 0 ? (
+            <p className="text-sm leading-6 text-[var(--workspace-text-muted)]">
+              No safe selectable provider folders are available.
+            </p>
+          ) : null}
+          <button
+            type="button"
+            onClick={() => void handleSaveFolderMapping()}
+            disabled={phase === "saving" || !selectedFolder}
+            className={`${settingsPrimaryActionClass} ${
+              phase === "saving" || !selectedFolder
+                ? "cursor-default opacity-50"
+                : ""
+            }`}
+          >
+            {phase === "saving" ? "Saving..." : "Save folder mapping"}
+          </button>
+        </div>
+      ) : null}
+
+      {successMessage ? (
+        <div
+          role="status"
+          className="text-sm leading-6 text-[var(--workspace-status-success-text)]"
+        >
+          {successMessage}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function ManagedInboxEditor({
   mailbox: rawMailbox,
   displayTitle,
@@ -28483,6 +28731,14 @@ function ManagedInboxEditor({
               Select Gmail / Google Workspace or Custom IMAP to configure receiving.
             </div>
           )}
+
+          {isExisting &&
+          mailbox.provider === "custom_imap" &&
+          mailbox.connected &&
+          mailbox.connectionStatus === "connected" &&
+          !customImapCredentialUnavailable ? (
+            <CustomImapTrashFolderMappingCard mailboxId={mailbox.id} key={mailbox.id} />
+          ) : null}
         </div>
       ) : null}
 

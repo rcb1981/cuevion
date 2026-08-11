@@ -1,9 +1,16 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from typing import Literal, TypedDict
 
-from .imap_archive import parse_imap_list_entry
+from .imap_folder_inventory import (
+    ImapListEntry,
+    ImapListInventoryResult,
+    is_runtime_compatible_mailbox_name,
+    is_selectable_imap_list_entry,
+    read_imap_list_inventory,
+)
 from .imap_snapshot import read_imap_message_identity
 from .imap_uid_validity import (
     is_canonical_uid_validity,
@@ -17,15 +24,12 @@ _TAGGED_COPYUID_PATTERN = re.compile(
     re.ASCII | re.IGNORECASE,
 )
 _MAX_IMAP_UID = 4_294_967_295
-_MAX_LIST_ENTRIES = 4_096
 _MAX_CAPABILITY_BYTES = 16_384
 _MAX_COPYUID_BYTES = 4_096
 _MAX_COPYUID_SCALARS = 64
 _MAX_COPYUID_DRAIN_RESPONSES = 32
 
 _TRASH_ATTRIBUTE = r"\trash"
-_NOSELECT_ATTRIBUTE = r"\noselect"
-_NONEXISTENT_ATTRIBUTE = r"\nonexistent"
 _CONFLICTING_SPECIAL_USE_ATTRIBUTES = frozenset(
     {
         r"\all",
@@ -85,6 +89,24 @@ class ImapTrashResult(TypedDict):
     error: ImapTrashError | None
 
 
+@dataclass(frozen=True)
+class TrashRoleAnalysis:
+    category: Literal["A", "B", "C", "D", "E"]
+    raw_marker_count: int | None
+    special_use_folder: str | None
+
+
+@dataclass(frozen=True)
+class TrashFolderResolution:
+    folder: str | None
+    error: Literal[
+        "trash_folder_unavailable",
+        "trash_folder_ambiguous",
+    ] | None
+    analysis: TrashRoleAnalysis
+    source: Literal["special_use", "configured"] | None
+
+
 CopyUidMapping = tuple[str, str, str]
 
 
@@ -135,17 +157,7 @@ def _contains_control_characters(value: str) -> bool:
 
 
 def _valid_source_folder(value: object) -> bool:
-    if (
-        type(value) is not str
-        or not value
-        or value != value.strip()
-        or _contains_control_characters(value)
-    ):
-        return False
-    try:
-        return len(value.encode("utf-8", errors="strict")) <= 16_384
-    except UnicodeEncodeError:
-        return False
+    return is_runtime_compatible_mailbox_name(value)
 
 
 def _valid_imap_uid(value: object) -> bool:
@@ -185,53 +197,155 @@ def _response_parts(response: object) -> tuple[object, object] | None:
     return response[0], response[1]
 
 
-def discover_trash_folder(mailbox: object) -> tuple[str | None, str | None]:
-    """Return the single selectable, conflict-free SPECIAL-USE Trash mailbox."""
-    try:
-        response = mailbox.list()
-    except Exception:
-        return None, "trash_folder_unavailable"
+def _is_safe_trash_target_entry(entry: ImapListEntry) -> bool:
+    return (
+        is_selectable_imap_list_entry(entry)
+        and is_runtime_compatible_mailbox_name(entry.mailbox)
+        and entry.mailbox.casefold() != "inbox"
+        and not bool(entry.attributes & _CONFLICTING_SPECIAL_USE_ATTRIBUTES)
+    )
 
-    parts = _response_parts(response)
-    if parts is None or not _is_ok_status(parts[0]):
-        return None, "trash_folder_unavailable"
-    response_entries = parts[1]
+
+def analyze_trash_role(
+    inventory: ImapListInventoryResult,
+) -> TrashRoleAnalysis:
+    """Classify raw Trash-role evidence before applying any safety filter."""
+    if inventory.error is not None or inventory.entries is None:
+        return TrashRoleAnalysis(
+            category="A",
+            raw_marker_count=None,
+            special_use_folder=None,
+        )
+
+    raw_markers = tuple(
+        entry
+        for entry in inventory.entries
+        if _TRASH_ATTRIBUTE in entry.attributes
+    )
+    if not raw_markers:
+        return TrashRoleAnalysis(
+            category="B",
+            raw_marker_count=0,
+            special_use_folder=None,
+        )
+    if any(not _is_safe_trash_target_entry(entry) for entry in raw_markers):
+        return TrashRoleAnalysis(
+            category="E",
+            raw_marker_count=len(raw_markers),
+            special_use_folder=None,
+        )
+    if len(raw_markers) != 1:
+        return TrashRoleAnalysis(
+            category="D",
+            raw_marker_count=len(raw_markers),
+            special_use_folder=None,
+        )
+
+    candidate = raw_markers[0]
+    return TrashRoleAnalysis(
+        category="C",
+        raw_marker_count=1,
+        special_use_folder=candidate.mailbox,
+    )
+
+
+def configurable_trash_folder_entries(
+    inventory: ImapListInventoryResult,
+) -> tuple[ImapListEntry, ...]:
+    """Return exact, unique mapping candidates only for valid category B."""
+    analysis = analyze_trash_role(inventory)
+    if analysis.category != "B" or inventory.entries is None:
+        return ()
+
+    mailbox_counts: dict[str, int] = {}
+    for entry in inventory.entries:
+        mailbox_counts[entry.mailbox] = mailbox_counts.get(entry.mailbox, 0) + 1
+    return tuple(
+        entry
+        for entry in inventory.entries
+        if mailbox_counts[entry.mailbox] == 1
+        and _is_safe_trash_target_entry(entry)
+    )
+
+
+def resolve_trash_folder_from_inventory(
+    inventory: ImapListInventoryResult,
+    *,
+    configured_trash_folder: str | None = None,
+) -> TrashFolderResolution:
+    """Resolve SPECIAL-USE first, with an exact configured fallback only in B."""
+    analysis = analyze_trash_role(inventory)
+    if analysis.category == "C":
+        return TrashFolderResolution(
+            folder=analysis.special_use_folder,
+            error=None,
+            analysis=analysis,
+            source="special_use",
+        )
+    if analysis.category == "D":
+        return TrashFolderResolution(
+            folder=None,
+            error="trash_folder_ambiguous",
+            analysis=analysis,
+            source=None,
+        )
+    if analysis.category != "B":
+        return TrashFolderResolution(
+            folder=None,
+            error="trash_folder_unavailable",
+            analysis=analysis,
+            source=None,
+        )
+
     if (
-        type(response_entries) not in (list, tuple)
-        or len(response_entries) > _MAX_LIST_ENTRIES
+        inventory.entries is None
+        or not is_runtime_compatible_mailbox_name(configured_trash_folder)
     ):
-        return None, "trash_folder_unavailable"
+        return TrashFolderResolution(
+            folder=None,
+            error="trash_folder_unavailable",
+            analysis=analysis,
+            source=None,
+        )
+    exact_matches = tuple(
+        entry
+        for entry in configurable_trash_folder_entries(inventory)
+        if entry.mailbox == configured_trash_folder
+    )
+    if (
+        len(exact_matches) != 1
+        or not _is_safe_trash_target_entry(exact_matches[0])
+    ):
+        return TrashFolderResolution(
+            folder=None,
+            error="trash_folder_unavailable",
+            analysis=analysis,
+            source=None,
+        )
+    return TrashFolderResolution(
+        folder=exact_matches[0].mailbox,
+        error=None,
+        analysis=analysis,
+        source="configured",
+    )
 
-    candidates = []
-    entry_index = 0
-    while entry_index < len(response_entries):
-        raw_entry = response_entries[entry_index]
-        entry = parse_imap_list_entry(raw_entry)
-        if entry is None:
-            return None, "trash_folder_unavailable"
-        entry_index += 1
-        if (
-            type(raw_entry) is tuple
-            and entry_index < len(response_entries)
-            and response_entries[entry_index] in (b"", "")
-        ):
-            entry_index += 1
-        if _TRASH_ATTRIBUTE not in entry.attributes:
-            continue
-        if (
-            _NOSELECT_ATTRIBUTE in entry.attributes
-            or _NONEXISTENT_ATTRIBUTE in entry.attributes
-            or entry.attributes & _CONFLICTING_SPECIAL_USE_ATTRIBUTES
-            or entry.mailbox.casefold() == "inbox"
-        ):
-            continue
-        candidates.append(entry)
 
-    if not candidates:
-        return None, "trash_folder_unavailable"
-    if len(candidates) != 1:
-        return None, "trash_folder_ambiguous"
-    return candidates[0].mailbox, None
+def resolve_trash_folder(
+    mailbox: object,
+    *,
+    configured_trash_folder: str | None = None,
+) -> TrashFolderResolution:
+    """Run exactly one LIST and resolve the authoritative Trash target."""
+    return resolve_trash_folder_from_inventory(
+        read_imap_list_inventory(mailbox),
+        configured_trash_folder=configured_trash_folder,
+    )
+
+
+def discover_trash_folder(mailbox: object) -> tuple[str | None, str | None]:
+    """Backward-compatible SPECIAL-USE-only Trash discovery wrapper."""
+    resolution = resolve_trash_folder(mailbox)
+    return resolution.folder, resolution.error
 
 
 def _parse_capability_tokens(value: object) -> frozenset[str] | None:
@@ -610,12 +724,17 @@ def _trash_validated_imap_message(
     source_folder: str,
     uid: str,
     expected_uid_validity: str,
+    configured_trash_folder: str | None,
     mutation_state: dict[str, bool],
 ) -> ImapTrashResult:
-    trash_folder, discovery_error = discover_trash_folder(mailbox)
-    if discovery_error is not None or trash_folder is None:
+    resolution = resolve_trash_folder(
+        mailbox,
+        configured_trash_folder=configured_trash_folder,
+    )
+    trash_folder = resolution.folder
+    if resolution.error is not None or trash_folder is None:
         return _failure(
-            discovery_error or "trash_folder_unavailable",
+            resolution.error or "trash_folder_unavailable",
             "trash_discovery",
         )
     if source_folder.casefold() == trash_folder.casefold():
@@ -701,8 +820,9 @@ def trash_imap_message(
     source_folder: str,
     uid: str,
     expected_uid_validity: str,
+    configured_trash_folder: str | None = None,
 ) -> ImapTrashResult:
-    """MOVE one exact UID to SPECIAL-USE Trash and verify the exact target."""
+    """MOVE one exact UID to a freshly validated authoritative Trash target."""
     if not _valid_source_folder(source_folder):
         return _failure("invalid_source_folder", "input_validation")
     if source_folder != "INBOX":
@@ -719,6 +839,7 @@ def trash_imap_message(
             source_folder=source_folder,
             uid=uid,
             expected_uid_validity=expected_uid_validity,
+            configured_trash_folder=configured_trash_folder,
             mutation_state=mutation_state,
         )
     except Exception:

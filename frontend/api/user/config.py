@@ -30,6 +30,7 @@ from user_config_store import (  # noqa: E402
     read_user_config_record,
     resolve_authenticated_user,
     resolve_user_config_store,
+    validate_custom_imap_folder_mappings,
     write_user_config_record_if_missing,
     write_user_config_record_if_unchanged,
 )
@@ -971,6 +972,18 @@ def _has_valid_known_stored_config_shapes(record: dict) -> bool:
         or any(not isinstance(inbox, dict) for inbox in managed_inboxes)
     ):
         return False
+    if isinstance(managed_inboxes, list):
+        for inbox in managed_inboxes:
+            if "customImapFolderMappings" not in inbox:
+                continue
+            if (
+                inbox.get("provider") != "custom_imap"
+                or validate_custom_imap_folder_mappings(
+                    inbox.get("customImapFolderMappings")
+                )
+                is None
+            ):
+                return False
 
     for field in (
         "mailboxTitleOverrides",

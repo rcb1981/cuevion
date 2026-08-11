@@ -63,7 +63,10 @@ from .gmail_snapshot import (
     read_gmail_folder_snapshot,
 )
 from . import imap_trash
-from .authenticated_imap import resolve_authenticated_imap_mailbox
+from .authenticated_imap import (
+    configured_imap_trash_folder,
+    resolve_authenticated_imap_mailbox,
+)
 from .imap_snapshot import read_imap_folder_snapshot
 from .imap_uid_validity import is_canonical_uid_validity
 from imap_connect_preview import connect_mailbox_with_settings
@@ -666,6 +669,19 @@ def _perform_imap_trash_snapshot(
         )
         return
     imap = resolved_mailbox["imap"]
+    configured_trash_folder, mapping_error = configured_imap_trash_folder(
+        resolved_mailbox.get("customImapFolderMappings")
+    )
+    if mapping_error is not None:
+        _send_imap_resolution_error(
+            target,
+            {
+                "error": {
+                    "code": "mailbox_configuration_malformed",
+                }
+            },
+        )
+        return
     mailbox = None
     try:
         mailbox = connect_mailbox_with_settings(
@@ -675,9 +691,12 @@ def _perform_imap_trash_snapshot(
             password=imap["password"],
             ssl_enabled=imap["ssl"],
         )
-        trash_folder, discovery_error = imap_trash.discover_trash_folder(
-            mailbox
+        trash_resolution = imap_trash.resolve_trash_folder(
+            mailbox,
+            configured_trash_folder=configured_trash_folder,
         )
+        trash_folder = trash_resolution.folder
+        discovery_error = trash_resolution.error
         if discovery_error is not None or trash_folder is None:
             if discovery_error == "trash_folder_ambiguous":
                 send_json(

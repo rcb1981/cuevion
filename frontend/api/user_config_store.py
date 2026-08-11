@@ -32,6 +32,7 @@ else:
     import os
     import re
     import secrets
+    import unicodedata
     from collections.abc import Mapping
     from copy import deepcopy
     from datetime import datetime, timezone
@@ -74,6 +75,9 @@ else:
     MAILBOX_MUTATION_LEASE_TTL_MILLISECONDS = 25 * 60 * 1000
     MAX_CUSTOM_IMAP_CONFIG_WRITE_ATTEMPTS = 4
     MAILBOX_MUTATION_LEASE_TOKEN_PATTERN = re.compile(r"^[A-Za-z0-9_-]{43}$")
+    CUSTOM_IMAP_FOLDER_MAPPINGS_FIELD = "customImapFolderMappings"
+    CUSTOM_IMAP_FOLDER_MAPPINGS_SCHEMA_VERSION = 1
+    MAX_CUSTOM_IMAP_FOLDER_NAME_BYTES = 16 * 1024
 
 
     class AuthenticatedUserContext(TypedDict):
@@ -113,6 +117,7 @@ else:
         "user_config_rollback_ambiguous",
         "mailbox_mutation_lease_conflict",
         "mailbox_mutation_lease_ambiguous",
+        "imap_folder_mapping_invalid",
     ]
 
 
@@ -326,6 +331,44 @@ else:
             )
         except (TypeError, ValueError):
             return False
+
+
+    def is_valid_custom_imap_folder_name(value: object) -> bool:
+        """Accept one exact, runtime-compatible opaque LIST mailbox identity."""
+        if (
+            type(value) is not str
+            or not value
+            or value != value.strip()
+            or value.casefold() == "inbox"
+            or any(
+                unicodedata.category(character).startswith("C")
+                for character in value
+            )
+        ):
+            return False
+        try:
+            return len(value.encode("utf-8")) <= MAX_CUSTOM_IMAP_FOLDER_NAME_BYTES
+        except UnicodeEncodeError:
+            return False
+
+
+    def validate_custom_imap_folder_mappings(value: object) -> dict | None:
+        """Return a type-exact server mapping, or None for every invalid shape."""
+        if type(value) is not dict or set(value) != {
+            "schemaVersion",
+            "trashFolder",
+        }:
+            return None
+        if (
+            type(value.get("schemaVersion")) is not int
+            or value["schemaVersion"] != CUSTOM_IMAP_FOLDER_MAPPINGS_SCHEMA_VERSION
+            or not is_valid_custom_imap_folder_name(value.get("trashFolder"))
+        ):
+            return None
+        return {
+            "schemaVersion": CUSTOM_IMAP_FOLDER_MAPPINGS_SCHEMA_VERSION,
+            "trashFolder": value["trashFolder"],
+        }
 
 
     def _contains_mailbox_credential_generation(value: object) -> bool:
@@ -1166,6 +1209,283 @@ else:
             "user": user,
             "inbox": deepcopy(matching_inbox),
             "config": deepcopy(config),
+            "error": None,
+        }
+
+
+    def save_owned_custom_imap_folder_mapping(
+        headers,
+        mailbox_id: str,
+        trash_folder: str,
+        *,
+        expected_inbox: dict,
+    ) -> OwnedManagedInboxRecordResult:
+        """CAS-save one LIST-proven Trash identity without touching credentials."""
+        user, auth_error = resolve_authenticated_user(headers)
+        if auth_error or not user:
+            return {
+                "status": "unavailable"
+                if auth_error and auth_error["code"] == "session_auth_unavailable"
+                else "unauthorized",
+                "user": None,
+                "inbox": None,
+                "config": None,
+                "error": auth_error,
+            }
+        if (
+            type(mailbox_id) is not str
+            or not mailbox_id
+            or mailbox_id != mailbox_id.strip()
+            or type(expected_inbox) is not dict
+            or not is_valid_custom_imap_folder_name(trash_folder)
+        ):
+            return {
+                "status": "malformed",
+                "user": user,
+                "inbox": None,
+                "config": None,
+                "error": _error(
+                    "imap_folder_mapping_invalid",
+                    "The IMAP folder mapping is invalid.",
+                ),
+            }
+
+        store, store_error = resolve_user_config_store()
+        if store_error or not store:
+            return {
+                "status": "unavailable",
+                "user": user,
+                "inbox": None,
+                "config": None,
+                "error": store_error,
+            }
+        read_result = read_user_config_record(store, user["email"])
+        if read_result["status"] == "missing":
+            return {
+                "status": "not_found",
+                "user": user,
+                "inbox": None,
+                "config": None,
+                "error": _error(
+                    "managed_inbox_not_found",
+                    "The managed inbox was not found.",
+                ),
+            }
+        if read_result["status"] != "ok" or type(read_result.get("config")) is not dict:
+            return {
+                "status": "unavailable"
+                if read_result["status"] == "unavailable"
+                else "malformed",
+                "user": user,
+                "inbox": None,
+                "config": None,
+                "error": read_result["error"],
+            }
+
+        config = read_result["config"]
+        stored_owner = config.get("email")
+        if stored_owner is not None and (
+            type(stored_owner) is not str
+            or normalize_auth_email(stored_owner) != user["email"]
+        ):
+            return {
+                "status": "malformed",
+                "user": user,
+                "inbox": None,
+                "config": None,
+                "error": _error(
+                    "user_config_malformed",
+                    "User config ownership could not be verified.",
+                ),
+            }
+        managed_inboxes = config.get("managedInboxes")
+        if type(managed_inboxes) is not list or any(
+            type(inbox) is not dict for inbox in managed_inboxes
+        ):
+            return {
+                "status": "malformed",
+                "user": user,
+                "inbox": None,
+                "config": None,
+                "error": _error(
+                    "managed_inbox_malformed",
+                    "Managed inbox configuration is malformed.",
+                ),
+            }
+        casefold_matches = [
+            (index, inbox)
+            for index, inbox in enumerate(managed_inboxes)
+            if type(inbox.get("id")) is str
+            and inbox["id"].casefold() == mailbox_id.casefold()
+        ]
+        exact_matches = [
+            (index, inbox)
+            for index, inbox in casefold_matches
+            if inbox.get("id") == mailbox_id
+        ]
+        if not exact_matches:
+            return {
+                "status": "not_found",
+                "user": user,
+                "inbox": None,
+                "config": deepcopy(config),
+                "error": _error(
+                    "managed_inbox_not_found",
+                    "The managed inbox was not found.",
+                ),
+            }
+        if len(casefold_matches) != 1 or len(exact_matches) != 1:
+            return {
+                "status": "malformed",
+                "user": user,
+                "inbox": None,
+                "config": None,
+                "error": _error(
+                    "duplicate_mailbox_id",
+                    "Managed inbox configuration contains duplicate ids.",
+                ),
+            }
+
+        target_index, current_inbox = exact_matches[0]
+        if not _json_values_are_type_exact(current_inbox, expected_inbox):
+            return {
+                "status": "conflict",
+                "user": user,
+                "inbox": None,
+                "config": deepcopy(config),
+                "error": _error(
+                    "user_config_write_conflict",
+                    "Mailbox configuration changed before the mapping could be saved.",
+                ),
+            }
+        if (
+            current_inbox.get("provider") != "custom_imap"
+            or current_inbox.get("connected") is not True
+            or current_inbox.get("connectionStatus") != "connected"
+            or current_inbox.get("imapConnectionStatus") not in {None, "connected"}
+            or not is_valid_mailbox_credential_version(
+                current_inbox.get(MAILBOX_CREDENTIAL_VERSION_FIELD)
+            )
+        ):
+            return {
+                "status": "conflict",
+                "user": user,
+                "inbox": None,
+                "config": deepcopy(config),
+                "error": _error(
+                    "managed_inbox_provider_mismatch",
+                    "Only a connected Custom IMAP mailbox can store this mapping.",
+                ),
+            }
+        if CUSTOM_IMAP_FOLDER_MAPPINGS_FIELD in current_inbox and (
+            validate_custom_imap_folder_mappings(
+                current_inbox[CUSTOM_IMAP_FOLDER_MAPPINGS_FIELD]
+            )
+            is None
+        ):
+            return {
+                "status": "malformed",
+                "user": user,
+                "inbox": None,
+                "config": None,
+                "error": _error(
+                    "imap_folder_mapping_invalid",
+                    "The stored IMAP folder mapping is invalid.",
+                ),
+            }
+
+        expected_config = deepcopy(config)
+        next_inbox = deepcopy(current_inbox)
+        next_inbox[CUSTOM_IMAP_FOLDER_MAPPINGS_FIELD] = {
+            "schemaVersion": CUSTOM_IMAP_FOLDER_MAPPINGS_SCHEMA_VERSION,
+            "trashFolder": trash_folder,
+        }
+        replacement = deepcopy(config)
+        replacement["managedInboxes"][target_index] = next_inbox
+        replacement["v"] = USER_CONFIG_SCHEMA_VERSION
+        replacement["email"] = user["email"]
+        replacement["updatedAt"] = datetime.now(timezone.utc).isoformat().replace(
+            "+00:00", "Z"
+        )
+        replacement = _strip_known_mailbox_passwords(replacement)
+        next_inbox = deepcopy(replacement["managedInboxes"][target_index])
+        write_result = write_user_config_record_if_unchanged(
+            store,
+            user["email"],
+            expected_config,
+            replacement,
+        )
+        if write_result["status"] in {"conflict", "missing"}:
+            return {
+                "status": "conflict",
+                "user": user,
+                "inbox": None,
+                "config": deepcopy(expected_config),
+                "error": write_result["error"]
+                or _error(
+                    "user_config_write_conflict",
+                    "Mailbox configuration changed before the mapping could be saved.",
+                ),
+            }
+        if write_result["status"] != "ok":
+            return {
+                "status": "unavailable",
+                "user": user,
+                "inbox": None,
+                "config": deepcopy(replacement),
+                "error": write_result["error"],
+            }
+
+        verification = read_user_config_record(store, user["email"])
+        if verification["status"] != "ok" or type(verification.get("config")) is not dict:
+            return {
+                "status": "unavailable",
+                "user": user,
+                "inbox": None,
+                "config": None,
+                "error": verification["error"]
+                or _error(
+                    "user_config_store_unavailable",
+                    "Mailbox mapping readback could not be verified.",
+                ),
+            }
+        verified_config = verification["config"]
+        verified_owner = verified_config.get("email")
+        verified_inboxes = verified_config.get("managedInboxes")
+        verified_matches = (
+            [
+                inbox
+                for inbox in verified_inboxes
+                if type(inbox) is dict
+                and type(inbox.get("id")) is str
+                and inbox["id"].casefold() == mailbox_id.casefold()
+            ]
+            if type(verified_inboxes) is list
+            and all(type(inbox) is dict for inbox in verified_inboxes)
+            else []
+        )
+        if (
+            type(verified_owner) is not str
+            or normalize_auth_email(verified_owner) != user["email"]
+            or len(verified_matches) != 1
+            or verified_matches[0].get("id") != mailbox_id
+            or not _json_values_are_type_exact(verified_matches[0], next_inbox)
+        ):
+            return {
+                "status": "conflict",
+                "user": user,
+                "inbox": None,
+                "config": deepcopy(verified_config),
+                "error": _error(
+                    "user_config_write_conflict",
+                    "Mailbox mapping readback could not be verified.",
+                ),
+            }
+        return {
+            "status": "ok",
+            "user": user,
+            "inbox": deepcopy(verified_matches[0]),
+            "config": deepcopy(verified_config),
             "error": None,
         }
 

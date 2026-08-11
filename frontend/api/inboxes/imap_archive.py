@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
 from typing import Literal, TypedDict
 
+from .imap_folder_inventory import ImapListEntry, parse_imap_list_entry
 from .imap_uid_validity import (
     is_canonical_uid_validity,
     read_selected_mailbox_uid_validity,
@@ -11,7 +11,6 @@ from .imap_uid_validity import (
 
 
 _IMAP_UID_PATTERN = re.compile(r"[1-9][0-9]*", re.ASCII)
-_LIST_LITERAL_SUFFIX_PATTERN = re.compile(r"\{([0-9]+)\}\Z", re.ASCII)
 _MAX_IMAP_UID = 4_294_967_295
 _MAX_LIST_ENTRIES = 4_096
 _MAX_LIST_LINE_LENGTH = 16_384
@@ -64,13 +63,6 @@ class ImapArchiveResult(TypedDict):
     error: ImapArchiveError | None
 
 
-@dataclass(frozen=True)
-class ImapListEntry:
-    attributes: frozenset[str]
-    delimiter: str | None
-    mailbox: str
-
-
 def _failure(code: str, stage: str) -> ImapArchiveResult:
     return {
         "ok": False,
@@ -109,173 +101,6 @@ def _success(
 
 def _contains_control_characters(value: str) -> bool:
     return any(ord(character) < 32 or ord(character) == 127 for character in value)
-
-
-def _decode_list_line(value: object) -> str | None:
-    if type(value) is str:
-        text = value
-        try:
-            encoded_length = len(value.encode("utf-8", errors="strict"))
-        except UnicodeEncodeError:
-            return None
-    elif type(value) is bytes:
-        encoded_length = len(value)
-        try:
-            text = value.decode("utf-8", errors="strict")
-        except UnicodeDecodeError:
-            return None
-    else:
-        return None
-
-    if (
-        not text
-        or len(text) > _MAX_LIST_LINE_LENGTH
-        or encoded_length > _MAX_LIST_LINE_LENGTH
-        or _contains_control_characters(text)
-    ):
-        return None
-    return text
-
-
-def _parse_quoted_string(value: str, start: int) -> tuple[str, int] | None:
-    if start >= len(value) or value[start] != '"':
-        return None
-
-    parsed: list[str] = []
-    index = start + 1
-    while index < len(value):
-        character = value[index]
-        if character == '"':
-            return "".join(parsed), index + 1
-        if character == "\\":
-            index += 1
-            if index >= len(value) or value[index] not in {'"', "\\"}:
-                return None
-            parsed.append(value[index])
-        else:
-            if ord(character) < 32 or ord(character) == 127:
-                return None
-            parsed.append(character)
-        index += 1
-    return None
-
-
-def _skip_spaces(value: str, start: int) -> int | None:
-    if start >= len(value) or value[start] != " ":
-        return None
-    index = start + 1
-    if index < len(value) and value[index] == " ":
-        return None
-    return index
-
-
-def _valid_attribute_token(value: str) -> bool:
-    if not value.startswith("\\") or len(value) == 1 or not value.isascii():
-        return False
-    atom = value[1:]
-    return not any(
-        ord(character) < 33
-        or ord(character) > 126
-        or character in '(){}%*]"\\'
-        for character in atom
-    )
-
-
-def _valid_mailbox_atom(value: str) -> bool:
-    return (
-        bool(value)
-        and not _contains_control_characters(value)
-        and not any(
-            character.isspace() or character in '(){}"\\%*'
-            for character in value
-        )
-    )
-
-
-def parse_imap_list_entry(value: object) -> ImapListEntry | None:
-    """Parse one complete IMAP LIST response without guessing mailbox syntax."""
-    if type(value) is tuple:
-        if len(value) != 2:
-            return None
-        prefix = _decode_list_line(value[0])
-        literal = _decode_list_line(value[1])
-        if prefix is None or literal is None:
-            return None
-        literal_match = _LIST_LITERAL_SUFFIX_PATTERN.search(prefix)
-        if literal_match is None:
-            return None
-        expected_size = literal_match.group(1).lstrip("0") or "0"
-        if type(value[1]) is bytes:
-            actual_size = len(value[1])
-        else:
-            actual_size = len(value[1].encode("utf-8"))
-        if expected_size != str(actual_size):
-            return None
-        escaped_literal = literal.replace("\\", "\\\\").replace('"', '\\"')
-        value = (
-            prefix[:literal_match.start()]
-            + '"'
-            + escaped_literal
-            + '"'
-        )
-
-    text = _decode_list_line(value)
-    if text is None or not text.startswith("("):
-        return None
-
-    attributes_end = text.find(")", 1)
-    if attributes_end < 0:
-        return None
-    attributes_text = text[1:attributes_end]
-    attribute_tokens = (
-        tuple(attributes_text.split(" "))
-        if attributes_text
-        else ()
-    )
-    if any(not _valid_attribute_token(token) for token in attribute_tokens):
-        return None
-    attributes = frozenset(token.casefold() for token in attribute_tokens)
-
-    index = _skip_spaces(text, attributes_end + 1)
-    if index is None or index >= len(text):
-        return None
-
-    delimiter: str | None
-    if text[index] == '"':
-        parsed_delimiter = _parse_quoted_string(text, index)
-        if parsed_delimiter is None:
-            return None
-        delimiter, index = parsed_delimiter
-        if len(delimiter) != 1:
-            return None
-    else:
-        delimiter_end = text.find(" ", index)
-        if delimiter_end < 0 or text[index:delimiter_end].casefold() != "nil":
-            return None
-        delimiter = None
-        index = delimiter_end
-
-    index = _skip_spaces(text, index)
-    if index is None or index >= len(text):
-        return None
-
-    if text[index] == '"':
-        parsed_mailbox = _parse_quoted_string(text, index)
-        if parsed_mailbox is None:
-            return None
-        mailbox, index = parsed_mailbox
-        if index != len(text) or not mailbox:
-            return None
-    else:
-        mailbox = text[index:]
-        if not _valid_mailbox_atom(mailbox):
-            return None
-
-    return ImapListEntry(
-        attributes=attributes,
-        delimiter=delimiter,
-        mailbox=mailbox,
-    )
 
 
 def _is_ok_status(value: object) -> bool:

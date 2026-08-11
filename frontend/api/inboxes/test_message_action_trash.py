@@ -128,6 +128,7 @@ def _authenticated_imap_mailbox() -> dict:
             "mailboxId": MAILBOX_ID,
             "email": "owned@imap.test",
             "provider": "custom_imap",
+            "customImapFolderMappings": None,
             "imap": {
                 "host": "imap.example.test",
                 "port": 993,
@@ -734,6 +735,7 @@ class CustomImapTrashRouteTests(unittest.TestCase):
             source_folder="INBOX",
             uid=IMAP_UID,
             expected_uid_validity=IMAP_UID_VALIDITY,
+            configured_trash_folder=None,
         )
         result["mailbox"].logout.assert_called_once_with()
         result["mailbox"].shutdown.assert_not_called()
@@ -747,6 +749,41 @@ class CustomImapTrashRouteTests(unittest.TestCase):
             ("Cache-Control", "no-store"),
             result["handler"].response_headers,
         )
+
+    def test_custom_imap_trash_passes_only_trusted_server_mapping(self):
+        authenticated = _authenticated_imap_mailbox()
+        authenticated["mailbox"]["customImapFolderMappings"] = {
+            "schemaVersion": 1,
+            "trashFolder": TRASH_FOLDER,
+        }
+
+        result = _run_imap_trash(authenticated_result=authenticated)
+
+        self.assertEqual(result["handler"].status, 200)
+        result["trash_imap"].assert_called_once_with(
+            result["mailbox"],
+            source_folder="INBOX",
+            uid=IMAP_UID,
+            expected_uid_validity=IMAP_UID_VALIDITY,
+            configured_trash_folder=TRASH_FOLDER,
+        )
+
+    def test_malformed_server_mapping_fails_before_connect_or_move(self):
+        authenticated = _authenticated_imap_mailbox()
+        authenticated["mailbox"]["customImapFolderMappings"] = {
+            "schemaVersion": 2,
+            "trashFolder": TRASH_FOLDER,
+        }
+
+        result = _run_imap_trash(authenticated_result=authenticated)
+
+        self.assertEqual(result["handler"].status, 500)
+        self.assertEqual(
+            result["handler"].response()["error"]["code"],
+            "mailbox_configuration_malformed",
+        )
+        result["connect"].assert_not_called()
+        result["trash_imap"].assert_not_called()
 
     def test_exact_request_union_rejects_missing_mixed_and_authority_fields(self):
         missing_uid = _imap_request_payload()

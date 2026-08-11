@@ -35,7 +35,11 @@ else:
         is_valid_mailbox_credential_version,
         read_mailbox_secret,
     )
-    from ..user_config_store import resolve_owned_managed_inbox_record
+    from ..user_config_store import (
+        CUSTOM_IMAP_FOLDER_MAPPINGS_FIELD,
+        resolve_owned_managed_inbox_record,
+        validate_custom_imap_folder_mappings,
+    )
 
     FORBIDDEN_CUSTOM_REQUEST_FIELDS = {
         "password",
@@ -61,6 +65,9 @@ else:
         "secretVersion",
         "credentialGeneration",
         "secretGeneration",
+        "customImapFolderMappings",
+        "trashFolder",
+        "archiveFolder",
     }
 
 
@@ -125,6 +132,18 @@ else:
 
         visit(payload)
         return sorted(found)
+
+
+    def configured_imap_trash_folder(
+        value: object,
+    ) -> tuple[str | None, str | None]:
+        """Extract only a strictly versioned, server-owned Trash mapping."""
+        if value is None:
+            return None, None
+        mappings = validate_custom_imap_folder_mappings(value)
+        if mappings is None:
+            return None, "mailbox_configuration_malformed"
+        return mappings["trashFolder"], None
 
 
     def _exact_string(value, *, allow_empty: bool = False) -> str | None:
@@ -219,6 +238,18 @@ else:
                 "Reconnect this mailbox to continue.",
                 409,
             )
+        folder_mappings = None
+        if CUSTOM_IMAP_FOLDER_MAPPINGS_FIELD in inbox:
+            folder_mappings = validate_custom_imap_folder_mappings(
+                inbox.get(CUSTOM_IMAP_FOLDER_MAPPINGS_FIELD)
+            )
+            if folder_mappings is None:
+                return _failure(
+                    "malformed",
+                    "mailbox_configuration_malformed",
+                    "Mailbox configuration is invalid.",
+                    500,
+                )
         config_credential_version = inbox.get("credentialVersion")
         if not is_valid_mailbox_credential_version(config_credential_version):
             return _failure(
@@ -344,6 +375,7 @@ else:
                 "mailboxId": mailbox_id,
                 "ownerEmail": owned_result["user"]["email"],
                 "email": email,
+                "customImapFolderMappings": folder_mappings,
                 "imap": {
                     "host": imap_host,
                     "port": imap_port,
