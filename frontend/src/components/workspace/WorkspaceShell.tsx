@@ -1359,6 +1359,7 @@ type MailMessage = Partial<MessageNoiseAssessment> & {
   categoryConfidence: CuevionCategoryConfidence;
   final_visibility?: string;
   action?: string;
+  v7_final_priority?: string;
   suggestion?: MailMessageSuggestion;
   behaviorSuggestion?: MailMessageBehaviorSuggestion;
   aiSuggestionBanner?: MessageSuggestionBanner;
@@ -2950,6 +2951,13 @@ function resolveVisibleClassification(
       isColdSalesOutreachWithoutFinanceEvidence(message)
     ) {
       return "unknown";
+    }
+
+    // A trusted reminder subtype must stay authoritative for focus preferences.
+    // Generic promo/update heuristics below may refine legacy categories, but must
+    // not collapse promo_reminder back into the broader promo bucket.
+    if (message.internalClassification === "promo_reminder") {
+      return "promo_reminder";
     }
 
     if (
@@ -8941,7 +8949,7 @@ function isWebsiteContactFormSpam(
   return suspiciousSignals >= 2;
 }
 
-function shouldRouteMessageToFilteredFolder(
+export function shouldRouteMessageToFilteredFolder(
   message: MailMessage,
   senderCategoryLearning: SenderCategoryLearningStore,
 ) {
@@ -8953,13 +8961,30 @@ function shouldRouteMessageToFilteredFolder(
     return true;
   }
 
+  const hasExplicitQuietViewRouting =
+    message.final_visibility === "show_low" ||
+    message.action === "show_in_quiet_view";
+
+  // The effective promo-reminder preference is explicit routing authority. It
+  // must not depend on an unrelated sender having first taught Show Less.
   if (
-    message.categoryConfidence === "low" ||
+    message.internalClassification === "promo_reminder" &&
+    hasExplicitQuietViewRouting &&
+    message.v7_final_priority?.trim().toUpperCase() === "LOW"
+  ) {
+    return true;
+  }
+
+  if (
     message.signal === "Priority" ||
     message.signal === "Active" ||
     message.signal === "For review" ||
     message.signal === "Shortlist"
   ) {
+    return false;
+  }
+
+  if (message.categoryConfidence === "low") {
     return false;
   }
 
@@ -8984,11 +9009,7 @@ function shouldRouteMessageToFilteredFolder(
     return false;
   }
 
-  const hasExplicitQuietViewRouting =
-    message.final_visibility === "show_low" ||
-    message.action === "show_in_quiet_view";
   const isSafeLowValueClassification =
-    message.internalClassification === "promo_reminder" ||
     message.internalClassification === "business_reminder" ||
     message.internalClassification === "info";
 
@@ -8999,14 +9020,110 @@ function shouldRouteMessageToFilteredFolder(
   );
 }
 
-function applyFilteredRoutingToMailboxCollections(
+export function applyPromoReminderFocusPreferenceRouting(
+  message: MailMessage,
+  preference: FocusPreferenceLevel,
+): MailMessage {
+  if (message.internalClassification !== "promo_reminder") {
+    return message;
+  }
+
+  const isLowPreference = preference === "low";
+  const isNormalPreference = preference === "medium";
+
+  return {
+    ...message,
+    signal: undefined,
+    priorityScore: isNormalPreference ? "medium" : "low",
+    v7_final_priority: isLowPreference ? "LOW" : "NORMAL",
+    final_visibility: isNormalPreference ? "show_normal" : "show_low",
+    action: isNormalPreference ? "show_in_main_feed" : "show_in_quiet_view",
+  };
+}
+
+export function applyFocusPreferenceRoutingToMailboxCollections(
+  collections: MailboxCollections,
+  focusPreferences: UserConfig["focusPreferences"],
+  senderCategoryLearning: SenderCategoryLearningStore,
+  manualPriorityOverrides: ManualPriorityOverrideStore = {},
+  options?: PriorityVisibilityOptions,
+): MailboxCollections {
+  const nextInbox: MailMessage[] = [];
+  const nextFiltered: MailMessage[] = [];
+
+  [...collections.Inbox, ...collections.Filtered].forEach((message) => {
+    const preferenceAdjustedMessage = applyPromoReminderFocusPreferenceRouting(
+      message,
+      focusPreferences.promoReminders,
+    );
+    const manualPriorityOverride = resolveManualPriorityOverride(
+      manualPriorityOverrides,
+      preferenceAdjustedMessage,
+    );
+    const hasManualPromoReminderPriority =
+      preferenceAdjustedMessage.internalClassification === "promo_reminder" &&
+      manualPriorityOverride === "priority";
+
+    if (
+      !hasManualPromoReminderPriority &&
+      shouldRouteMessageToFilteredFolder(
+        preferenceAdjustedMessage,
+        senderCategoryLearning,
+      )
+    ) {
+      nextFiltered.push(preferenceAdjustedMessage);
+      return;
+    }
+
+    if (
+      shouldDisplayMessageInFilteredFolderForWorkspaceMessage(
+        preferenceAdjustedMessage,
+        manualPriorityOverride,
+        focusPreferences,
+        options,
+      )
+    ) {
+      nextFiltered.push(preferenceAdjustedMessage);
+      return;
+    }
+
+    nextInbox.push(preferenceAdjustedMessage);
+  });
+
+  return {
+    ...collections,
+    Inbox: nextInbox,
+    Filtered: nextFiltered,
+  };
+}
+
+export function applyFilteredRoutingToMailboxCollections(
   collections: MailboxCollections,
   senderCategoryLearning: SenderCategoryLearningStore,
+  manualPriorityOverrides: ManualPriorityOverrideStore = {},
 ): MailboxCollections {
+  const manuallyPrioritizedFiltered = collections.Filtered.filter(
+    (message) =>
+      message.internalClassification === "promo_reminder" &&
+      resolveManualPriorityOverride(manualPriorityOverrides, message) === "priority",
+  );
+  const remainingFiltered = collections.Filtered.filter(
+    (message) =>
+      message.internalClassification !== "promo_reminder" ||
+      resolveManualPriorityOverride(manualPriorityOverrides, message) !== "priority",
+  );
   const keptInbox: MailMessage[] = [];
   const routedToFiltered: MailMessage[] = [];
 
-  collections.Inbox.forEach((message) => {
+  [...collections.Inbox, ...manuallyPrioritizedFiltered].forEach((message) => {
+    if (
+      message.internalClassification === "promo_reminder" &&
+      resolveManualPriorityOverride(manualPriorityOverrides, message) === "priority"
+    ) {
+      keptInbox.push(message);
+      return;
+    }
+
     if (shouldRouteMessageToFilteredFolder(message, senderCategoryLearning)) {
       routedToFiltered.push(message);
       return;
@@ -9015,12 +9132,15 @@ function applyFilteredRoutingToMailboxCollections(
     keptInbox.push(message);
   });
 
-  if (routedToFiltered.length === 0) {
+  if (
+    routedToFiltered.length === 0 &&
+    manuallyPrioritizedFiltered.length === 0
+  ) {
     return collections;
   }
 
   const seenFilteredIdentityKeys = new Set<string>();
-  const filtered = [...collections.Filtered, ...routedToFiltered].filter((message) => {
+  const filtered = [...remainingFiltered, ...routedToFiltered].filter((message) => {
     const identityKeys = getCanonicalMessageIdentityKeys(message);
 
     if (identityKeys.some((key) => seenFilteredIdentityKeys.has(key))) {
@@ -9863,6 +9983,7 @@ function createInitialMailboxStore(
               ),
               final_visibility: message.final_visibility,
               action: message.action,
+              v7_final_priority: message.v7_final_priority ?? undefined,
               noiseDisposition: message.noiseDisposition,
               noiseConfidence: message.noiseConfidence,
               noiseReasons: message.noiseReasons,
@@ -10071,6 +10192,7 @@ function normalizeMailboxStore(
   senderCategoryLearning: SenderCategoryLearningStore,
   messageOwnershipInteractions: MessageOwnershipInteractionStore,
   currentUserId: string,
+  manualPriorityOverrides: ManualPriorityOverrideStore = {},
 ): MailboxStore {
   const mailboxOrder = [
     ...orderedMailboxes.map((mailbox) => mailbox.id),
@@ -10148,6 +10270,7 @@ function normalizeMailboxStore(
     nextStore[mailboxId] = applyFilteredRoutingToMailboxCollections(
       nextStore[mailboxId],
       senderCategoryLearning,
+      manualPriorityOverrides,
     );
   }
 
@@ -36249,6 +36372,7 @@ export function WorkspaceShell({
           classifierVersion: mergedMessageState.classifierVersion,
           final_visibility: mergedMessageState.final_visibility,
           action: mergedMessageState.action,
+          v7_final_priority: mergedMessageState.v7_final_priority ?? undefined,
           noiseDisposition: mergedMessageState.noiseDisposition,
           noiseConfidence: mergedMessageState.noiseConfidence,
           noiseReasons: mergedMessageState.noiseReasons,
@@ -41080,52 +41204,31 @@ export function WorkspaceShell({
             senderCategoryLearning,
             messageOwnershipInteractions,
             currentWorkspaceUserId,
+            manualPriorityOverrides,
           );
         }
 
-        const combinedInboxMessages = [
-          ...mailboxCollections.Inbox,
-          ...mailboxCollections.Filtered,
-        ];
-        const nextInboxMessages: MailMessage[] = [];
-        const nextFilteredMessages: MailMessage[] = [];
-
-        combinedInboxMessages.forEach((message) => {
-          if (shouldRouteMessageToFilteredFolder(message, senderCategoryLearning)) {
-            nextFilteredMessages.push(message);
-            return;
-          }
-
-          if (
-            shouldDisplayMessageInFilteredFolderForWorkspaceMessage(
-              message,
-              resolveManualPriorityOverride(manualPriorityOverrides, message),
-              nextFocusPreferences,
-              {
-                preferPromoMailboxContext: shouldPreferPromoMailboxContext,
-              },
-            )
-          ) {
-            nextFilteredMessages.push(message);
-            return;
-          }
-
-          nextInboxMessages.push(message);
-        });
+        const preferenceAdjustedCollections =
+          applyFocusPreferenceRoutingToMailboxCollections(
+            mailboxCollections,
+            nextFocusPreferences,
+            senderCategoryLearning,
+            manualPriorityOverrides,
+            {
+              preferPromoMailboxContext: shouldPreferPromoMailboxContext,
+            },
+          );
 
         return normalizeMailboxStore(
           {
             ...currentStore,
-            [inboxId]: {
-              ...mailboxCollections,
-              Inbox: nextInboxMessages,
-              Filtered: nextFilteredMessages,
-            },
+            [inboxId]: preferenceAdjustedCollections,
           },
           orderedMailboxes,
           senderCategoryLearning,
           messageOwnershipInteractions,
           currentWorkspaceUserId,
+          manualPriorityOverrides,
         );
       });
       setIsApplyingFocusPreferences(false);
@@ -41229,6 +41332,7 @@ export function WorkspaceShell({
         senderCategoryLearning,
         messageOwnershipInteractions,
         currentWorkspaceUserId,
+        manualPriorityOverrides,
       );
     });
   };
@@ -41267,6 +41371,7 @@ export function WorkspaceShell({
         senderCategoryLearning,
         messageOwnershipInteractions,
         currentWorkspaceUserId,
+        manualPriorityOverrides,
       );
     });
 
@@ -42271,6 +42376,7 @@ export function WorkspaceShell({
         senderCategoryLearning,
         messageOwnershipInteractions,
         currentWorkspaceUserId,
+        manualPriorityOverrides,
       );
     });
     setMailboxResetToken((current) => current + 1);
@@ -42327,6 +42433,7 @@ export function WorkspaceShell({
         senderCategoryLearning,
         messageOwnershipInteractions,
         currentWorkspaceUserId,
+        manualPriorityOverrides,
       );
     });
   }, [
@@ -42716,6 +42823,7 @@ export function WorkspaceShell({
           senderCategoryLearning,
           messageOwnershipInteractions,
           currentWorkspaceUserId,
+          manualPriorityOverrides,
         );
       });
     } catch {
@@ -42770,6 +42878,7 @@ export function WorkspaceShell({
           senderCategoryLearning,
           messageOwnershipInteractions,
           currentWorkspaceUserId,
+          manualPriorityOverrides,
         );
       });
     } catch {
@@ -42822,6 +42931,7 @@ export function WorkspaceShell({
           senderCategoryLearning,
           messageOwnershipInteractions,
           currentWorkspaceUserId,
+          manualPriorityOverrides,
         );
       });
     } catch {
@@ -42879,6 +42989,7 @@ export function WorkspaceShell({
           senderCategoryLearning,
           messageOwnershipInteractions,
           currentWorkspaceUserId,
+          manualPriorityOverrides,
         );
       });
     } catch {
@@ -43486,6 +43597,7 @@ export function WorkspaceShell({
         senderCategoryLearning,
         messageOwnershipInteractions,
         currentWorkspaceUserId,
+        manualPriorityOverrides,
       );
     });
     setOutOfOfficeReplyLog(nextReplyLog);
@@ -43508,9 +43620,16 @@ export function WorkspaceShell({
         senderCategoryLearning,
         messageOwnershipInteractions,
         currentWorkspaceUserId,
+        manualPriorityOverrides,
       ),
     );
-  }, [currentWorkspaceUserId, mailboxOrderKey, messageOwnershipInteractions, senderCategoryLearning]);
+  }, [
+    currentWorkspaceUserId,
+    mailboxOrderKey,
+    manualPriorityOverrides,
+    messageOwnershipInteractions,
+    senderCategoryLearning,
+  ]);
 
   useEffect(() => {
     if (!window.matchMedia) {

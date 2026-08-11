@@ -475,6 +475,20 @@ def decide_message_behavior(
             focus_preferences,
         )
 
+        promo_reminders_focus = focus_preferences.get("promoReminders")
+        if category == "promo_reminder" and promo_reminders_focus == "low":
+            final_priority = "LOW"
+            final_visibility = "show_low"
+            explanation.preference_adjustments.append(
+                "runtime promo reminders focus low -> priority=LOW, visibility=show_low"
+            )
+        elif category == "promo_reminder" and promo_reminders_focus == "medium":
+            final_priority = "NORMAL"
+            final_visibility = "show_normal"
+            explanation.preference_adjustments.append(
+                "runtime promo reminders focus medium -> priority=NORMAL, visibility=show_normal"
+            )
+
     if category == "demo":
         explanation.final_summary = "Shown prominently because this looks like a real demo submission."
 
@@ -485,7 +499,11 @@ def decide_message_behavior(
             explanation.final_summary = "Shown because this looks like a music promo email."
 
     elif category == "promo_reminder":
-        explanation.final_summary = "Kept low because promo reminders should stay visible without dominating the inbox."
+        explanation.final_summary = (
+            "Shown normally because the effective promo-reminder preference is normal."
+            if final_visibility == "show_normal"
+            else "Kept low because promo reminders should stay visible without dominating the inbox."
+        )
 
     elif category == "info":
         explanation.final_summary = "Shown quietly because this looks like a general information or business message."

@@ -14,6 +14,8 @@ from imap_live_v6_5_5_stable import (  # noqa: E402
     apply_deterministic_music_category_guardrails,
     extract_all_links,
 )
+from v7_config import EngineResult, MailboxConfig, UserConfig, UserPreferences
+from v7_decision_layer import decide_message_behavior
 
 
 def make_message(subject, body, sender="Sender <sender@example.com>", to="promo@hysteriarecs.com", **headers):
@@ -370,6 +372,141 @@ class MusicCategoryGuardrailTests(unittest.TestCase):
 
         self.assertEqual(result["category"], "promo_reminder")
         self.assertEqual(result["ui_signal"], "PROMO")
+
+    def test_alxb_promo_invite_reminder_is_internally_promo_reminder(self):
+        result = self.preview(
+            "(Reminder) Promo Invite from ALXB Records",
+            "",
+            sender="ALXB Records",
+            to="promo@hysteriarecs.com",
+        )
+
+        self.assertEqual(result["category"], "promo_reminder")
+        self.assertEqual(result["internalClassification"], "promo_reminder")
+        self.assertEqual(result["ui_signal"], "PROMO")
+
+    def test_music_promo_reminder_phrasing_is_internally_promo_reminder(self):
+        cases = [
+            (
+                "Friendly reminder: new DJ promo available",
+                "Listen and download the new release.",
+            ),
+            (
+                "Reminder - remix promo",
+                "Listen to the remix release.",
+            ),
+        ]
+
+        for subject, body in cases:
+            with self.subTest(subject=subject):
+                result = self.preview(subject, body)
+
+                self.assertEqual(result["category"], "promo_reminder")
+                self.assertEqual(
+                    result["internalClassification"],
+                    "promo_reminder",
+                )
+                self.assertEqual(result["ui_signal"], "PROMO")
+
+    def test_non_promo_reminders_do_not_become_promo_reminders(self):
+        payment = self.preview(
+            "Payment reminder for invoice 2026-0811",
+            "Please pay the outstanding invoice.",
+            sender="Accounts <billing@example.com>",
+            to="info@hysteriarecs.com",
+        )
+
+        self.assertEqual(payment["category"], "business_reminder")
+        self.assertEqual(
+            payment["internalClassification"],
+            "business_reminder",
+        )
+        self.assertEqual(payment["ui_signal"], "BUSINESS")
+
+        cases = [
+            (
+                "Reminder: contract approval needed",
+                "Please review and approve the contract.",
+            ),
+            (
+                "Reminder about tomorrow's meeting",
+                "The meeting starts tomorrow at 10:00.",
+            ),
+            (
+                "Security reminder",
+                "Review your account security settings.",
+            ),
+            (
+                "Subscription renewal reminder",
+                "Your software subscription renews next week.",
+            ),
+        ]
+
+        for subject, body in cases:
+            with self.subTest(subject=subject):
+                result = self.preview(
+                    subject,
+                    body,
+                    to="info@hysteriarecs.com",
+                )
+
+                self.assertNotEqual(result["category"], "promo_reminder")
+                self.assertNotEqual(
+                    result["internalClassification"],
+                    "promo_reminder",
+                )
+                self.assertNotEqual(result["ui_signal"], "PROMO")
+
+    def test_ordinary_music_promo_without_reminder_signal_stays_promo(self):
+        result = self.preview(
+            "New DJ promo available",
+            "Listen and download the new release.",
+        )
+
+        self.assertEqual(result["category"], "promo")
+        self.assertEqual(result["internalClassification"], "promo")
+        self.assertEqual(result["ui_signal"], "PROMO")
+
+    def test_alxb_promo_reminder_runtime_focus_preference_matrix(self):
+        engine_result = EngineResult(
+            inbox_name="promo@hysteriarecs.com",
+            category="promo_reminder",
+            priority="NORMAL",
+            metadata={
+                "subject": "(Reminder) Promo Invite from ALXB Records",
+                "sender": "ALXB Records",
+            },
+        )
+        user_config = UserConfig(
+            user_id="alxb-regression",
+            role="label_manager",
+            preferences=UserPreferences(promo_reminders_mode="show_low"),
+        )
+        mailbox_config = MailboxConfig(
+            email_address="promo@hysteriarecs.com",
+            inbox_profile="promo_first",
+            provider_type="custom_imap",
+            connection_type="imap",
+        )
+        cases = [
+            ("low", "LOW", "show_low", "show_in_quiet_view"),
+            ("medium", "NORMAL", "show_normal", "show_in_main_feed"),
+            ("high", "NORMAL", "show_low", "show_in_quiet_view"),
+        ]
+
+        for preference, priority, visibility, action in cases:
+            with self.subTest(preference=preference):
+                decision = decide_message_behavior(
+                    engine_result=engine_result,
+                    user_config=user_config,
+                    mailbox_config=mailbox_config,
+                    focus_preferences={"promoReminders": preference},
+                )
+
+                self.assertEqual(decision.final_category, "promo_reminder")
+                self.assertEqual(decision.final_priority, priority)
+                self.assertEqual(decision.final_visibility, visibility)
+                self.assertEqual(decision.action, action)
 
     def test_link_without_intent_does_not_auto_demo(self):
         subject = "New music"
