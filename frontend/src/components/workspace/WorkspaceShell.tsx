@@ -22873,19 +22873,19 @@ function MailboxView({
               </div>
             </div>
 
-            <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-[24px] border border-[color:rgba(128,142,121,0.14)] bg-[linear-gradient(180deg,rgba(255,255,253,0.98),rgba(249,245,238,0.97))] shadow-[0_12px_34px_rgba(164,147,125,0.06)] dark:border-[var(--workspace-border-soft)] dark:bg-[linear-gradient(180deg,var(--workspace-card-featured-start),var(--workspace-card-featured-end))]">
-              {/* Native macOS overlay scrollbars can ignore custom thumb styling; keep the real
-                  reading-pane scroller dark and opt it into dark color-scheme directly. */}
-              <div
-                ref={readingPaneViewportRef}
-                className="cuevion-dark-scroll cuevion-soft-scroll min-h-0 flex-1 overflow-y-auto overflow-x-auto bg-transparent p-5 pr-4 md:p-6 md:pr-5"
-                style={{
-                  colorScheme: themeMode,
-                  scrollbarWidth: "thin",
-                  scrollbarColor:
-                    "var(--workspace-scrollbar-thumb) var(--workspace-scrollbar-track)",
-                }}
-              >
+            {/* Native macOS overlay scrollbars can ignore custom thumb styling; keep the real
+                reading-pane scroller dark and opt it into dark color-scheme directly. */}
+            <div
+              ref={readingPaneViewportRef}
+              className="cuevion-dark-scroll cuevion-soft-scroll flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto overflow-x-auto rounded-[24px] border border-[color:rgba(128,142,121,0.14)] bg-[linear-gradient(180deg,rgba(255,255,253,0.98),rgba(249,245,238,0.97))] shadow-[0_12px_34px_rgba(164,147,125,0.06)] dark:border-[var(--workspace-border-soft)] dark:bg-[linear-gradient(180deg,var(--workspace-card-featured-start),var(--workspace-card-featured-end))]"
+              style={{
+                colorScheme: themeMode,
+                scrollbarWidth: "thin",
+                scrollbarColor:
+                  "var(--workspace-scrollbar-thumb) var(--workspace-scrollbar-track)",
+              }}
+            >
+              <div className="flex-none bg-transparent p-5 pr-4 md:p-6 md:pr-5">
                 {isMultiSelectActive ? (
                   <div className="space-y-3">
                     <div className="text-[0.72rem] font-medium uppercase tracking-[0.18em] text-[var(--workspace-text-faint)]">
