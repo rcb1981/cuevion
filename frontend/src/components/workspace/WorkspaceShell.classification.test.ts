@@ -336,11 +336,17 @@ const alxbReminderOverrides: Partial<MessageSeed> = {
   signal: undefined,
   ui_signal: "PROMO",
 };
+const alxbPromoAccessRequestOverrides: Partial<MessageSeed> = {
+  snippet: "Your promo access request is still available.",
+  from: "ALXB Records <promos@inflyteapp.com>",
+  body: ["Your promo access request is waiting for you."],
+};
 
 function projectAlxbReminder(
   providerIdentity: ProviderIdentity,
   visibility: "low" | "normal",
   rawInternalClassification: unknown,
+  contentOverrides: Partial<MessageSeed> = {},
 ) {
   const providerMetadata: Partial<MessageSeed> = providerIdentity.imapUid
     ? { providerFolder: "INBOX", labelIds: undefined }
@@ -348,6 +354,7 @@ function projectAlxbReminder(
 
   return projectMessage(rawInternalClassification, providerIdentity, {
     ...alxbReminderOverrides,
+    ...contentOverrides,
     ...providerMetadata,
     v7_final_priority: visibility === "low" ? "LOW" : "NORMAL",
     final_visibility: visibility === "low" ? "show_low" : "show_normal",
@@ -380,17 +387,18 @@ const alxbGmailLow = projectAlxbReminder(
   gmailIdentity,
   "low",
   "promo_reminder",
+  alxbPromoAccessRequestOverrides,
 );
 const alxbCustomImapLow = projectAlxbReminder(
   customImapIdentity,
   "low",
   "promo_reminder",
+  alxbPromoAccessRequestOverrides,
 );
 
 for (const projected of [alxbGmailLow, alxbCustomImapLow]) {
   assert.equal(projected.message.internalClassification, "promo_reminder");
   assert.equal(projected.message.category, "Promo");
-  assert.equal(projected.visibleCategoryLabel, "Promo");
   assert.equal(projected.message.priorityScore, "low");
   assert.equal(
     getVisiblePriorityBadgeForWorkspaceMessage(
@@ -401,7 +409,64 @@ for (const projected of [alxbGmailLow, alxbCustomImapLow]) {
     ),
     "LOW",
   );
+  assert.equal(projected.visibleCategoryLabel, "Promo");
 }
+
+const alxbGmailNormal = projectAlxbReminder(
+  gmailIdentity,
+  "normal",
+  "promo_reminder",
+  alxbPromoAccessRequestOverrides,
+);
+assert.equal(alxbGmailNormal.message.internalClassification, "promo_reminder");
+assert.equal(alxbGmailNormal.visibleCategoryLabel, "Promo");
+assert.equal(
+  getVisiblePriorityBadgeForWorkspaceMessage(
+    alxbGmailNormal.message,
+    undefined,
+    normalFocusPreferences,
+    { preferPromoMailboxContext: true },
+  ),
+  "NORMAL",
+);
+assert.deepEqual(
+  routeSingleInboxMessage(alxbGmailNormal.message).Inbox.map(
+    (message) => message.id,
+  ),
+  ["alxb-promo-reminder"],
+);
+assert.equal(routeSingleInboxMessage(alxbGmailNormal.message).Filtered.length, 0);
+
+const genericPromoAccessRequest = projectAlxbReminder(
+  gmailIdentity,
+  "normal",
+  "promo",
+  alxbPromoAccessRequestOverrides,
+);
+assert.equal(genericPromoAccessRequest.message.internalClassification, "promo");
+assert.equal(genericPromoAccessRequest.visibleCategoryLabel, "Business");
+assert.equal(
+  getVisiblePriorityBadgeForWorkspaceMessage(
+    genericPromoAccessRequest.message,
+    undefined,
+    normalFocusPreferences,
+    { preferPromoMailboxContext: true },
+  ),
+  "NORMAL",
+);
+
+assert.equal(
+  getVisiblePriorityBadgeForWorkspaceMessage(
+    alxbGmailLow.message,
+    undefined,
+    lowPromoReminderFocusPreferences,
+    {
+      preferPromoMailboxContext: true,
+      manualLabelOverride: "Business",
+    },
+  ),
+  "NORMAL",
+);
 
 const alxbLowWithStalePriority = {
   ...alxbGmailLow.message,
@@ -705,6 +770,7 @@ const trustedBackendReminder = projectAlxbReminder(
   gmailIdentity,
   "low",
   "promo_reminder",
+  alxbPromoAccessRequestOverrides,
 );
 assert.equal(trustedBackendReminder.message.internalClassification, "promo_reminder");
 assert.equal(trustedBackendReminder.message.categoryConfidence, "high");
@@ -1390,6 +1456,8 @@ const paymentReminder = projectMessage("business_reminder", gmailIdentity, {
   ui_signal: "BUSINESS",
 });
 assert.equal(paymentReminder.message.internalClassification, "business_reminder");
+assert.equal(paymentReminder.message.category, "Updates");
+assert.equal(paymentReminder.visibleCategoryLabel, "Business");
 assert.equal(
   getVisiblePriorityBadgeForWorkspaceMessage(
     paymentReminder.message,

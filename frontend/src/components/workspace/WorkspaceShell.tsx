@@ -2936,10 +2936,16 @@ function resolveVisibleClassification(
       !isMarketingNewsletterUpdate &&
       musicCampaignPromoSignal);
   const resolvedClassification = (() => {
+    // A trusted reminder subtype must stay authoritative for focus preferences.
+    // Generic promo/update heuristics below may refine legacy categories, but must
+    // not collapse promo_reminder back into the broader promo bucket.
+    if (message.internalClassification === "promo_reminder") {
+      return "promo_reminder";
+    }
+
     if (
       isPromoAccessRequest &&
       (message.internalClassification === "promo" ||
-        message.internalClassification === "promo_reminder" ||
         signalClassification === "promo")
     ) {
       return "business";
@@ -2951,13 +2957,6 @@ function resolveVisibleClassification(
       isColdSalesOutreachWithoutFinanceEvidence(message)
     ) {
       return "unknown";
-    }
-
-    // A trusted reminder subtype must stay authoritative for focus preferences.
-    // Generic promo/update heuristics below may refine legacy categories, but must
-    // not collapse promo_reminder back into the broader promo bucket.
-    if (message.internalClassification === "promo_reminder") {
-      return "promo_reminder";
     }
 
     if (
