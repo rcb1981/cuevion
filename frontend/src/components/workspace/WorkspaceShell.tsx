@@ -36,6 +36,10 @@ import {
   resolveOrganizerCategory,
   type BundleOrganizerVisibleCategory,
 } from "./bundleOrganizerFilters";
+import {
+  getAnchoredSubmenuPosition,
+  getContextMenuPosition,
+} from "./contextMenuGeometry";
 import type { ReviewItem, ReviewWorkspaceTarget } from "./review/types";
 import type {
   CustomInboxDefinition,
@@ -9745,52 +9749,6 @@ function ContextSubmenuTriggerRow({
       </span>
     </button>
   );
-}
-
-function getAnchoredSubmenuPosition({
-  parentLeft,
-  parentWidth,
-  anchorY,
-  anchorHeight,
-  submenuWidth,
-  submenuHeight,
-  interactionRect,
-  anchorOffsetY = -4,
-}: {
-  parentLeft: number;
-  parentWidth: number;
-  anchorY: number;
-  anchorHeight: number;
-  submenuWidth: number;
-  submenuHeight: number;
-  interactionRect?: DOMRect;
-  anchorOffsetY?: number;
-}) {
-  const menuGap = 8;
-  const viewportPadding = 12;
-  const boundsLeft = interactionRect?.left ?? viewportPadding;
-  const boundsTop = interactionRect?.top ?? viewportPadding;
-  const boundsRight = interactionRect?.right ?? window.innerWidth - viewportPadding;
-  const boundsBottom = interactionRect?.bottom ?? window.innerHeight - viewportPadding;
-  const parentMenuLeft = parentLeft;
-  const parentMenuRight = parentLeft + parentWidth;
-  const availableRight = boundsRight - parentMenuRight - viewportPadding - menuGap;
-  const openRight = availableRight >= submenuWidth;
-  const left = openRight
-    ? parentMenuRight + menuGap
-    : parentMenuLeft - submenuWidth - menuGap;
-  const preferredTop = anchorY + anchorOffsetY;
-  const minTop = boundsTop + viewportPadding;
-  const maxTop = Math.max(minTop, boundsBottom - submenuHeight - viewportPadding);
-  const top = Math.max(minTop, Math.min(preferredTop, maxTop));
-
-  return {
-    left: Math.max(
-      boundsLeft + viewportPadding,
-      Math.min(left, boundsRight - submenuWidth - viewportPadding),
-    ),
-    top,
-  };
 }
 
 function MailboxConnectionState() {
@@ -20106,44 +20064,14 @@ function MailboxView({
   const hasSelection = selectedCount > 0;
   const hasSingleSelection = selectedCount === 1;
   const contextMenuPosition = contextMenuState
-    ? (() => {
-        const menuWidth = 238;
-        const viewportPadding = 12;
-        const mailListRect = mailListViewportRef.current?.getBoundingClientRect();
-        const boundsLeft = mailListRect?.left ?? viewportPadding;
-        const boundsTop = mailListRect?.top ?? viewportPadding;
-        const boundsRight = mailListRect?.right ?? window.innerWidth - viewportPadding;
-        const boundsBottom = mailListRect?.bottom ?? window.innerHeight - viewportPadding;
-        const maxMenuHeight = Math.max(
-          180,
-          boundsBottom - boundsTop - viewportPadding * 2,
-        );
-        const menuHeight = Math.min(520, maxMenuHeight);
-        const openDownward =
-          contextMenuState.y + menuHeight + viewportPadding <= boundsBottom;
-        const preferredTop = openDownward
-          ? contextMenuState.y
-          : contextMenuState.y - menuHeight;
-        const preferredLeft = contextMenuState.x;
-
-        return {
-          left: Math.max(
-            boundsLeft + viewportPadding,
-            Math.min(
-              preferredLeft,
-              boundsRight - menuWidth - viewportPadding,
-            ),
-          ),
-          top: Math.max(
-            boundsTop + viewportPadding,
-            Math.min(
-              preferredTop,
-              boundsBottom - menuHeight - viewportPadding,
-            ),
-          ),
-          maxHeight: maxMenuHeight,
-        };
-      })()
+    ? getContextMenuPosition({
+        anchorX: contextMenuState.x,
+        anchorY: contextMenuState.y,
+        menuWidth: 238,
+        placementHeight: 520,
+        viewportHeight: window.innerHeight,
+        viewportWidth: window.innerWidth,
+      })
     : null;
   const moveTargets = [
     ...(activeFolder !== "Inbox"
@@ -20193,17 +20121,14 @@ function MailboxView({
     contextMenuState.moveAnchorY !== null &&
     contextMenuState.moveAnchorHeight !== null
       ? (() => {
-          const interactionRect =
-            inboxInteractionViewportRef.current?.getBoundingClientRect() ??
-            mailListViewportRef.current?.getBoundingClientRect();
           return getAnchoredSubmenuPosition({
             parentLeft: contextMenuPosition.left,
-            parentWidth: 238,
+            parentWidth: contextMenuPosition.width,
             anchorY: contextMenuState.moveAnchorY,
-            anchorHeight: contextMenuState.moveAnchorHeight,
             submenuWidth: 210,
             submenuHeight: Math.min(moveTargets.length * 32 + 20, 360),
-            interactionRect,
+            viewportHeight: window.innerHeight,
+            viewportWidth: window.innerWidth,
           });
         })()
       : null;
@@ -20214,17 +20139,14 @@ function MailboxView({
     contextMenuState.learningAnchorY !== null &&
     contextMenuState.learningAnchorHeight !== null
       ? (() => {
-          const interactionRect =
-            inboxInteractionViewportRef.current?.getBoundingClientRect() ??
-            mailListViewportRef.current?.getBoundingClientRect();
           return getAnchoredSubmenuPosition({
             parentLeft: contextMenuPosition.left,
-            parentWidth: 238,
+            parentWidth: contextMenuPosition.width,
             anchorY: contextMenuState.learningAnchorY,
-            anchorHeight: contextMenuState.learningAnchorHeight,
             submenuWidth: 210,
             submenuHeight: 230,
-            interactionRect,
+            viewportHeight: window.innerHeight,
+            viewportWidth: window.innerWidth,
           });
         })()
       : null;
@@ -20234,17 +20156,14 @@ function MailboxView({
     contextMenuState.learningAnchorY !== null &&
     contextMenuState.learningAnchorHeight !== null
       ? (() => {
-          const interactionRect =
-            inboxInteractionViewportRef.current?.getBoundingClientRect() ??
-            mailListViewportRef.current?.getBoundingClientRect();
           return getAnchoredSubmenuPosition({
             parentLeft: contextMenuPosition.left,
-            parentWidth: 238,
+            parentWidth: contextMenuPosition.width,
             anchorY: contextMenuState.learningAnchorY,
-            anchorHeight: contextMenuState.learningAnchorHeight,
             submenuWidth: 228,
             submenuHeight: Math.min(manualLabelOverrideOptions.length * 32 + 48, 320),
-            interactionRect,
+            viewportHeight: window.innerHeight,
+            viewportWidth: window.innerWidth,
           });
         })()
       : null;
@@ -23238,7 +23157,7 @@ function MailboxView({
           ? createPortal(
               <div
                 data-theme={themeMode}
-                className="cuevion-dark-scroll cuevion-soft-scroll fixed z-30 min-w-[238px] overflow-y-auto rounded-[20px] border border-[var(--workspace-menu-border)] bg-[var(--workspace-menu-bg)] p-2 shadow-panel"
+                className="cuevion-dark-scroll cuevion-soft-scroll fixed z-30 overflow-y-auto rounded-[20px] border border-[var(--workspace-menu-border)] bg-[var(--workspace-menu-bg)] p-2 shadow-panel"
                 style={contextMenuPosition}
                 onMouseDown={(event) => event.stopPropagation()}
               >
