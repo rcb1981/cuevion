@@ -80,6 +80,9 @@ async function run() {
       timestamp: "July 13 at 10:00",
       createdAt: "2026-07-13T08:00:00.000Z",
       body: ["Body"],
+      noiseDisposition: "strong_spam" as const,
+      noiseConfidence: "high" as const,
+      noiseReasons: ["provider_spam_evidence"] as const,
     }],
     uidValidity: "900",
   };
@@ -127,6 +130,19 @@ async function run() {
       },
     );
     assert.equal(refreshResponse.uidValidity, "900");
+    assert.deepEqual(
+      {
+        noiseDisposition: refreshMessage.noiseDisposition,
+        noiseConfidence: refreshMessage.noiseConfidence,
+        noiseReasons: refreshMessage.noiseReasons,
+      },
+      {
+        noiseDisposition: "strong_spam",
+        noiseConfidence: "high",
+        noiseReasons: ["provider_spam_evidence"],
+      },
+      "a complete valid assessment survives refresh normalization",
+    );
     assert.deepEqual(Object.keys(requestBody(lastCaptured(captured))).sort(), [
       "focusPreferences",
       "limit",
@@ -134,6 +150,77 @@ async function run() {
       "mode",
     ]);
     assert.equal(refresh.mode, "refresh");
+
+    connectImapPayload = {
+      ...canonicalRefreshPayload,
+      messages: [{
+        ...canonicalRefreshPayload.messages[0],
+        noiseReasons: undefined,
+      }],
+    };
+    const partialAssessmentResponse = await connectInboxWithImap(refresh);
+    const partialAssessmentMessage = partialAssessmentResponse.messages?.[0];
+    assert.ok(partialAssessmentMessage);
+    for (const key of [
+      "noiseDisposition",
+      "noiseConfidence",
+      "noiseReasons",
+    ]) {
+      assert.equal(
+        Object.prototype.hasOwnProperty.call(partialAssessmentMessage, key),
+        false,
+        "a partial assessment must be stripped as one unit",
+      );
+    }
+
+    connectImapPayload = {
+      ...canonicalRefreshPayload,
+      messages: [{
+        ...canonicalRefreshPayload.messages[0],
+        noiseDisposition: "provider-controlled-value",
+        noiseReasons: ["provider-controlled-reason"],
+      }],
+    };
+    const invalidAssessmentResponse = await connectInboxWithImap(refresh);
+    const invalidAssessmentMessage = invalidAssessmentResponse.messages?.[0];
+    assert.ok(invalidAssessmentMessage);
+    for (const key of [
+      "noiseDisposition",
+      "noiseConfidence",
+      "noiseReasons",
+    ]) {
+      assert.equal(
+        Object.prototype.hasOwnProperty.call(invalidAssessmentMessage, key),
+        false,
+        "an invalid assessment must not carry arbitrary strings forward",
+      );
+    }
+
+    const legacyMessage = {
+      ...canonicalRefreshPayload.messages[0],
+    } as Partial<(typeof canonicalRefreshPayload.messages)[number]>;
+    delete legacyMessage.noiseDisposition;
+    delete legacyMessage.noiseConfidence;
+    delete legacyMessage.noiseReasons;
+    connectImapPayload = {
+      ...canonicalRefreshPayload,
+      messages: [legacyMessage],
+    };
+    const legacyAssessmentResponse = await connectInboxWithImap(refresh);
+    const legacyAssessmentMessage = legacyAssessmentResponse.messages?.[0];
+    assert.ok(legacyAssessmentMessage);
+    for (const key of [
+      "noiseDisposition",
+      "noiseConfidence",
+      "noiseReasons",
+    ]) {
+      assert.equal(
+        Object.prototype.hasOwnProperty.call(legacyAssessmentMessage, key),
+        false,
+        "a legacy message without an assessment remains assessment-free",
+      );
+    }
+    connectImapPayload = canonicalRefreshPayload;
 
     const archiveCandidate = {
       provider: "custom_imap",
@@ -397,6 +484,19 @@ async function run() {
           providerFolder: undefined,
           uidValidity: "901",
         },
+      );
+      assert.deepEqual(
+        {
+          noiseDisposition: nonRefreshResponse.messages?.[0]?.noiseDisposition,
+          noiseConfidence: nonRefreshResponse.messages?.[0]?.noiseConfidence,
+          noiseReasons: nonRefreshResponse.messages?.[0]?.noiseReasons,
+        },
+        {
+          noiseDisposition: "strong_spam",
+          noiseConfidence: "high",
+          noiseReasons: ["provider_spam_evidence"],
+        },
+        `${mode} messages use the same assessment normalizer`,
       );
       const body = requestBody(lastCaptured(captured));
       assert.deepEqual(body, {
@@ -759,6 +859,19 @@ async function run() {
         customSmtp: connection.customSmtp,
       },
       onboardingAbortController.signal,
+    );
+    assert.deepEqual(
+      {
+        noiseDisposition: onboardingResult.messages?.[0]?.noiseDisposition,
+        noiseConfidence: onboardingResult.messages?.[0]?.noiseConfidence,
+        noiseReasons: onboardingResult.messages?.[0]?.noiseReasons,
+      },
+      {
+        noiseDisposition: "strong_spam",
+        noiseConfidence: "high",
+        noiseReasons: ["provider_spam_evidence"],
+      },
+      "onboarding messages use the same assessment normalizer",
     );
     const onboardingBody = requestBody(lastCaptured(captured));
     assert.equal(lastCaptured(captured).url, "/api/inboxes/connect-imap");

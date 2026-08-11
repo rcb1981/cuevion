@@ -9,8 +9,15 @@ import type {
   PriorityManualOverride,
   PrioritySource,
 } from "./prioritySource";
+import {
+  isMessageNoiseDisposition,
+  resolveMessageNoisePolicy,
+  type MessageNoiseAssessment,
+  type MessageNoiseDisposition,
+} from "./messageNoiseGate";
 
-export type NormalPriorityGateAdapterMessageLike = NormalPriorityLegacyState & {
+export type NormalPriorityGateAdapterMessageLike = NormalPriorityLegacyState &
+  MessageNoiseAssessment & {
   subject?: string | null;
   threadId?: string | null;
   from?: string | null;
@@ -48,6 +55,7 @@ export type BuildNormalPriorityGateInputOptions = {
   connectedMailboxes?: Array<{ email?: string | null }> | null;
   authenticatedUserEmail?: string | null;
   isStrongSystemRuleConcreteActionable?: boolean | null;
+  noiseDisposition?: MessageNoiseDisposition | null;
 };
 
 function normalizeSignal(value: unknown) {
@@ -282,6 +290,8 @@ export function buildNormalPriorityGateInput(
     message,
     options.currentLegacyPriority ?? null,
   );
+  const candidateNoiseDisposition =
+    options.noiseDisposition ?? resolveMessageNoisePolicy(message).disposition;
 
   return {
     currentLegacyPriority,
@@ -304,5 +314,8 @@ export function buildNormalPriorityGateInput(
     manualOverride: options.manualOverride ?? null,
     isStrongSystemRuleConcreteActionable:
       options.isStrongSystemRuleConcreteActionable ?? false,
+    noiseDisposition: isMessageNoiseDisposition(candidateNoiseDisposition)
+      ? candidateNoiseDisposition
+      : null,
   };
 }

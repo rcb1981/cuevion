@@ -12,6 +12,10 @@ import type {
   OnboardingState,
   ProviderId,
 } from "../types/onboarding";
+import {
+  resolveMessageNoiseAssessment,
+  type MessageNoiseAssessment,
+} from "./messageNoiseGate";
 
 export type LiveInboxAttachmentSnapshot = {
   id: string;
@@ -57,7 +61,7 @@ export type LiveInboxMessageSnapshot = {
   v7_final_priority?: string;
   threadId?: string;
   classifierVersion?: string;
-};
+} & Partial<MessageNoiseAssessment>;
 
 export type ImapConnectWireSettings = {
   host: string;
@@ -882,7 +886,7 @@ export type ArchiveMessagePreviewSnapshot = {
   action?: string | null;
   v7_final_priority?: string | null;
   classifierVersion?: string | null;
-};
+} & Partial<MessageNoiseAssessment>;
 
 export type GmailArchiveMessageSnapshot = ArchiveMessagePreviewSnapshot & {
   serverMailboxId: string;
@@ -1238,6 +1242,9 @@ const ARCHIVE_PREVIEW_FIELDS = new Set([
   "action",
   "v7_final_priority",
   "classifierVersion",
+  "noiseDisposition",
+  "noiseConfidence",
+  "noiseReasons",
 ]);
 const ARCHIVE_NULLABLE_PREVIEW_FIELDS = new Set([
   "category",
@@ -1472,8 +1479,42 @@ function archivePreviewFieldsAreValid(value: Record<string, unknown>) {
     return false;
   }
 
+  const noiseAssessmentFieldNames = [
+    "noiseDisposition",
+    "noiseConfidence",
+    "noiseReasons",
+  ] as const;
+  const hasNoiseAssessment = noiseAssessmentFieldNames.some((key) =>
+    Object.prototype.hasOwnProperty.call(value, key),
+  );
+  if (
+    hasNoiseAssessment &&
+    !resolveMessageNoiseAssessment({
+      noiseDisposition: Object.prototype.hasOwnProperty.call(
+        value,
+        "noiseDisposition",
+      )
+        ? value.noiseDisposition
+        : undefined,
+      noiseConfidence: Object.prototype.hasOwnProperty.call(
+        value,
+        "noiseConfidence",
+      )
+        ? value.noiseConfidence
+        : undefined,
+      noiseReasons: Object.prototype.hasOwnProperty.call(value, "noiseReasons")
+        ? value.noiseReasons
+        : undefined,
+    })
+  ) {
+    return false;
+  }
+
   for (const [key, item] of Object.entries(value)) {
     if (!ARCHIVE_PREVIEW_FIELDS.has(key)) continue;
+    if ((noiseAssessmentFieldNames as readonly string[]).includes(key)) {
+      continue;
+    }
     if (key === "body") {
       if (!Array.isArray(item) || item.some((part) => typeof part !== "string")) {
         return false;
@@ -2627,6 +2668,60 @@ function applyTrustedCustomImapInboxSourceEnvelope(
   };
 }
 
+const MESSAGE_NOISE_ASSESSMENT_FIELDS = [
+  "noiseDisposition",
+  "noiseConfidence",
+  "noiseReasons",
+] as const;
+
+function normalizeLiveInboxMessageNoiseAssessment(
+  message: LiveInboxMessageSnapshot,
+): LiveInboxMessageSnapshot {
+  if (!message || typeof message !== "object" || Array.isArray(message)) {
+    return message;
+  }
+
+  const messageRecord = message as LiveInboxMessageSnapshot &
+    Record<string, unknown>;
+  const hasNoiseAssessment = MESSAGE_NOISE_ASSESSMENT_FIELDS.some((key) =>
+    Object.prototype.hasOwnProperty.call(messageRecord, key),
+  );
+
+  if (!hasNoiseAssessment) {
+    return message;
+  }
+
+  const normalizedMessage = { ...messageRecord };
+  MESSAGE_NOISE_ASSESSMENT_FIELDS.forEach((key) => {
+    delete normalizedMessage[key];
+  });
+  const noiseAssessment = resolveMessageNoiseAssessment({
+    noiseDisposition: Object.prototype.hasOwnProperty.call(
+      messageRecord,
+      "noiseDisposition",
+    )
+      ? messageRecord.noiseDisposition
+      : undefined,
+    noiseConfidence: Object.prototype.hasOwnProperty.call(
+      messageRecord,
+      "noiseConfidence",
+    )
+      ? messageRecord.noiseConfidence
+      : undefined,
+    noiseReasons: Object.prototype.hasOwnProperty.call(
+      messageRecord,
+      "noiseReasons",
+    )
+      ? messageRecord.noiseReasons
+      : undefined,
+  });
+
+  return {
+    ...normalizedMessage,
+    ...(noiseAssessment ?? {}),
+  } as LiveInboxMessageSnapshot;
+}
+
 export async function connectInboxWithImap(
   request: ConnectInboxRequest,
   signal?: AbortSignal,
@@ -2650,19 +2745,23 @@ export async function connectInboxWithImap(
       };
     }
 
-    return {
-      ...payload,
-      ...(request.mode === "refresh" && Array.isArray(payload.messages)
-        ? {
-            messages: payload.messages.map((message) =>
-              applyTrustedCustomImapInboxSourceEnvelope(
-                message,
+    const normalizedMessages = Array.isArray(payload.messages)
+      ? payload.messages.map((message) => {
+          const normalizedMessage = normalizeLiveInboxMessageNoiseAssessment(message);
+
+          return request.mode === "refresh"
+            ? applyTrustedCustomImapInboxSourceEnvelope(
+                normalizedMessage,
                 request.mailboxId,
                 payload.uidValidity,
-              ),
-            ),
-          }
-        : {}),
+              )
+            : normalizedMessage;
+        })
+      : null;
+
+    return {
+      ...payload,
+      ...(normalizedMessages ? { messages: normalizedMessages } : {}),
       ok: true,
     };
   } catch {
@@ -3106,7 +3205,16 @@ export async function fetchGmailInbox(
       };
     }
 
-    return payload;
+    return {
+      ...payload,
+      ...(Array.isArray(payload.messages)
+        ? {
+            messages: payload.messages.map(
+              normalizeLiveInboxMessageNoiseAssessment,
+            ),
+          }
+        : {}),
+    };
   } catch (error) {
     return {
       ok: false,

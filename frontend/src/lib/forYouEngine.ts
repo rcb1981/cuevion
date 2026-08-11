@@ -14,6 +14,10 @@ import {
   type SenderCategoryLearningEntry,
   type SenderCategoryLearningStore,
 } from "./learningEngine";
+import {
+  resolveMessageNoisePolicy,
+  type MessageNoiseAssessment,
+} from "./messageNoiseGate";
 
 export type ForYouLearningSuggestion = {
   key: string;
@@ -75,7 +79,7 @@ export type ForYouRecentLearningDecision = {
   updatedAt?: string;
 };
 
-export type ForYouDerivationMessage = {
+export type ForYouDerivationMessage = MessageNoiseAssessment & {
   id: string;
   sender: string;
   from: string;
@@ -262,6 +266,10 @@ function formatForYouRecentLearningAction(
 }
 
 export function isReviewUncertainEligible(message: ForYouDerivationMessage) {
+  if (!resolveMessageNoisePolicy(message).allowsCategoryLearning) {
+    return false;
+  }
+
   return (
     message.categorySource === "system" &&
     message.suggestion?.type === "confirm_category"
@@ -269,6 +277,10 @@ export function isReviewUncertainEligible(message: ForYouDerivationMessage) {
 }
 
 export function isRefineCuevionEligible(message: ForYouDerivationMessage) {
+  if (!resolveMessageNoisePolicy(message).allowsCategoryLearning) {
+    return false;
+  }
+
   if (message.categorySource !== "system") {
     return false;
   }
@@ -308,7 +320,10 @@ export function buildForYouLearningPools<TMessage extends ForYouDerivationMessag
       message,
     })),
   );
-  const senderFrequencyByKey = inboxMessages.reduce<Record<string, number>>(
+  const learningEligibleInboxMessages = inboxMessages.filter(({ message }) =>
+    resolveMessageNoisePolicy(message).allowsCategoryLearning,
+  );
+  const senderFrequencyByKey = learningEligibleInboxMessages.reduce<Record<string, number>>(
     (frequencyMap, entry) => {
       const senderKey = normalizeSenderLearningKey(entry.message.from);
       return {
@@ -318,7 +333,7 @@ export function buildForYouLearningPools<TMessage extends ForYouDerivationMessag
     },
     {},
   );
-  const realUncertainMessages = inboxMessages
+  const realUncertainMessages = learningEligibleInboxMessages
     .filter(({ message }) => isRefineCuevionEligible(message) || isReviewUncertainEligible(message))
     .sort((firstEntry, secondEntry) => {
       const firstLow = firstEntry.message.categoryConfidence === "low" ? 1 : 0;

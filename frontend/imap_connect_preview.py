@@ -28,6 +28,7 @@ from api.inboxes.imap_uid_validity import (
     is_canonical_uid_validity,
     read_selected_mailbox_uid_validity,
 )
+from message_noise_assessment import assess_message_noise
 
 DEFAULT_GMAIL_HOST = "imap.gmail.com"
 DEFAULT_GMAIL_PORT = 993
@@ -1490,6 +1491,15 @@ def to_message_preview(
         internal_role=internal_role,
         focus_preferences=focus_preferences,
     )
+    noise_assessment = assess_message_noise(
+        message=message,
+        subject=subject,
+        sender_name=sender_name,
+        sender_email=sender_email,
+        recipient_email=email_address,
+        body=body,
+        semantic_classification=preview_routing.get("internalClassification"),
+    )
 
     return {
       "id": message_id.strip("<>"),
@@ -1514,6 +1524,7 @@ def to_message_preview(
       "v7_final_priority": preview_routing.get("v7_final_priority"),
       "category": preview_routing.get("category"),
       "classifierVersion": preview_routing.get("classifierVersion"),
+      **noise_assessment,
       **({"bodyHtml": html_body} if html_body else {}),
     }
 

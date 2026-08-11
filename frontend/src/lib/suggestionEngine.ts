@@ -4,6 +4,10 @@ import {
   type CuevionMessageCategory,
   type SenderCategoryLearningStore,
 } from "./learningEngine";
+import {
+  resolveMessageNoisePolicy,
+  type MessageNoiseAssessment,
+} from "./messageNoiseGate";
 
 export type SuggestionCategorySource = "system" | "user" | "learned";
 export type SuggestionCategoryConfidence = "low" | "medium" | "high";
@@ -32,13 +36,17 @@ export type MessageSuggestionBanner = {
   confidence: number;
 };
 
-type SuggestionDerivationMessage = {
+type SuggestionDerivationMessage = MessageNoiseAssessment & {
   from: string;
   sender: string;
   subject: string;
   snippet: string;
   body: string[];
   signal?: string;
+  ui_signal?: string;
+  internalClassification?: string | null;
+  final_visibility?: string;
+  action?: string;
   isAutoReply?: boolean;
   attachments?: Array<unknown>;
 };
@@ -294,10 +302,12 @@ export function shouldSuppressReplySuggestion(
   message: SuggestionDerivationMessage,
   category?: CuevionMessageCategory,
 ) {
+  const noisePolicy = resolveMessageNoisePolicy(message);
   const normalizedSender = normalizeSenderLearningKey(message.from);
   const normalizedText = normalizeSuggestionText(message);
 
   return (
+    !noisePolicy.allowsReplyRecommendation ||
     REPLY_SUPPRESSION_SENDER_PATTERNS.some((pattern) =>
       normalizedSender.includes(pattern),
     ) ||
@@ -312,6 +322,16 @@ export function resolveSuggestedMessageAction(
   category: CuevionMessageCategory,
   senderCategoryLearning?: SenderCategoryLearningStore,
 ): MessageActionSuggestion {
+  const noisePolicy = resolveMessageNoisePolicy(message);
+
+  if (!noisePolicy.allowsPositiveActionability) {
+    return {
+      type: "none",
+      confidence: 0.98,
+      reason: "Normalized noise policy suppresses positive actionability",
+    };
+  }
+
   if (isNonInteractiveSignal(message)) {
     return {
       type: "none",
@@ -455,6 +475,10 @@ export function resolveMailMessageSuggestion(
     return undefined;
   }
 
+  if (!resolveMessageNoisePolicy(message).allowsCategoryLearning) {
+    return undefined;
+  }
+
   if (message.suggestionDismissed) {
     return undefined;
   }
@@ -487,6 +511,10 @@ export function resolveMailMessageBehaviorSuggestion(
   isAIEnabled: boolean,
 ): MailMessageBehaviorSuggestion | undefined {
   if (!isAIEnabled) {
+    return undefined;
+  }
+
+  if (!resolveMessageNoisePolicy(message).allowsCategoryLearning) {
     return undefined;
   }
 

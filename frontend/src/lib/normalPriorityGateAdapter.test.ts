@@ -37,6 +37,62 @@ function allows(options: BuildNormalPriorityGateInputOptions) {
 
 console.log("\nnormalPriorityGateAdapter");
 
+test("strong_spam disposition is projected and blocks manual Priority", () => {
+  const input = build({
+    manualOverride: "priority",
+    message: {
+      noiseDisposition: "strong_spam",
+      noiseConfidence: "high",
+      noiseReasons: ["provider_spam_evidence"],
+    },
+  });
+
+  assert.equal(input.noiseDisposition, "strong_spam");
+  assert.equal(input.prioritySource?.source, "manual");
+  assert.equal(shouldAllowNormalPriority(input), false);
+});
+
+test("unsolicited_low_value option is projected and blocks collaboration", () => {
+  const input = build({
+    noiseDisposition: "unsolicited_low_value",
+    message: {
+      isShared: true,
+    },
+  });
+
+  assert.equal(input.noiseDisposition, "unsolicited_low_value");
+  assert.equal(input.prioritySource?.source, "collaboration");
+  assert.equal(shouldAllowNormalPriority(input), false);
+});
+
+test("invalid noise disposition fails closed to no assessment", () => {
+  const input = build({
+    message: {
+      noiseDisposition: "arbitrary-provider-value",
+    } as any,
+  });
+
+  assert.equal(input.noiseDisposition, null);
+});
+
+test("partial assessment with a valid blocking disposition remains neutral", () => {
+  const input = build({
+    manualOverride: "priority",
+    message: {
+      noiseDisposition: "strong_spam",
+    },
+  });
+
+  assert.equal(input.noiseDisposition, null);
+  assert.equal(shouldAllowNormalPriority(input), true);
+});
+
+test("legacy message without noise assessment remains neutral", () => {
+  const input = build({ message: { subject: "Legacy message" } });
+
+  assert.equal(input.noiseDisposition, null);
+});
+
 test("manual priority override maps to allowed gate input", () => {
   const input = build({
     manualOverride: "priority",

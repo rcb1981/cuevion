@@ -5,6 +5,7 @@ import type {
   PrioritySourceResult,
 } from "./prioritySource";
 import type { ReturnedReplyEvidence } from "./returnedReplyEvidence";
+import type { MessageNoiseDisposition } from "./messageNoiseGate";
 
 export type NormalPriorityLegacyState = {
   hasVisiblePriorityBadge?: boolean | null;
@@ -34,6 +35,7 @@ export type NormalPriorityGateInput = {
   isFromOwnAddress?: boolean | null;
   manualOverride?: PriorityManualOverride | null;
   isStrongSystemRuleConcreteActionable?: boolean | null;
+  noiseDisposition?: MessageNoiseDisposition | null;
 };
 
 function isPriorityLevel(value: unknown): value is PriorityLevel {
@@ -74,6 +76,13 @@ export function shouldAllowNormalPriority(input: NormalPriorityGateInput) {
   const hasHighConfidenceReturnedReply = hasHighConfidenceReturnedReplyEvidence(
     input.returnedReplyEvidence ?? null,
   );
+
+  if (
+    input.noiseDisposition === "strong_spam" ||
+    input.noiseDisposition === "unsolicited_low_value"
+  ) {
+    return false;
+  }
 
   if (input.manualOverride === "priority") {
     return true;

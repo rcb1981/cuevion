@@ -258,6 +258,10 @@ import {
 import { buildPriorityRuntimeSignalsForCandidates } from "../../lib/priorityRuntimeSignals";
 import { shouldAllowNormalPriority } from "../../lib/normalPriorityGate";
 import { buildNormalPriorityGateInput } from "../../lib/normalPriorityGateAdapter";
+import {
+  resolveMessageNoisePolicy,
+  type MessageNoiseAssessment,
+} from "../../lib/messageNoiseGate";
 import { formatPriorityReasonCopy, type PriorityReasonCopy } from "../../lib/priorityReasonCopy";
 import { applyLearningDecision } from "../../lib/applyLearningDecision";
 import type {
@@ -1306,7 +1310,7 @@ type MailAttachment = {
 type MailAttachmentInput = string | MailAttachment;
 type ComposeRecipientField = "to" | "cc" | "bcc";
 
-type MailMessage = {
+type MailMessage = Partial<MessageNoiseAssessment> & {
   id: string;
   serverMailboxId?: string;
   providerFolder?: string;
@@ -3038,6 +3042,11 @@ export function resolveVisibleCategoryLabelForMessageInContext(
   message: MailMessage,
   preferPromoMailboxContext: boolean,
 ) {
+  const noiseOverride = resolveMessageNoisePolicy(message).visibleClassificationOverride;
+  if (noiseOverride) {
+    return noiseOverride;
+  }
+
   const visibilityClassification = resolveVisibleClassification(message);
 
   switch (visibilityClassification) {
@@ -6735,7 +6744,12 @@ function resolveMessagePriorityScore(
   category: CuevionMessageCategory,
   owner?: MailMessageOwner,
   sharedContext?: MailMessageSharedContext,
+  noiseAssessment: Partial<MessageNoiseAssessment> = {},
 ): MailMessagePriorityScore {
+  if (resolveMessageNoisePolicy(noiseAssessment).blocksAutoPriority) {
+    return "low";
+  }
+
   if (
     category === "Primary" &&
     (sharedContext ||
@@ -6937,9 +6951,13 @@ function inferHeuristicSignal(
   // explicit subject like "Area53 Promo: …".  For everything else (promo detected
   // only in snippet/body) keep the existing billing-guard behaviour unchanged.
   const subjectText = (message.subject ?? "").toLowerCase();
-  const isPromoInSubject = includesAnyKeyword(subjectText, promoKeywords);
+  const includesPromoKeyword = (value: string) =>
+    promoKeywords.some((keyword) =>
+      keyword === "offer" ? /\boffer\b/.test(value) : value.includes(keyword),
+    );
+  const isPromoInSubject = includesPromoKeyword(subjectText);
   const isPromo =
-    includesAnyKeyword(searchableText, promoKeywords) &&
+    includesPromoKeyword(searchableText) &&
     !isPromoAccessRequest &&
     !isGoogleSecurityAuthMail &&
     (!isMetaBillingSystemMail || isPromoInSubject);
@@ -7188,9 +7206,18 @@ function isMarketingNewsletterUpdateMessage(
 }
 
 function resolveVisiblePrioritySignal(
-  message: Pick<MailMessage, "signal">,
+  message: Pick<
+    MailMessage,
+    "signal" | "noiseDisposition" | "noiseConfidence" | "noiseReasons"
+  >,
   override?: ManualPriorityOverride,
 ) {
+  // There is no "Not spam" override in this slice. A local/manual Priority
+  // preference therefore cannot raise a normalized strong-noise message.
+  if (resolveMessageNoisePolicy(message).blocksAutoPriority) {
+    return null;
+  }
+
   if (override === "priority") {
     return "Priority";
   }
@@ -7423,12 +7450,18 @@ function getPriorityVisibilityAdjustedMessage(
   };
 }
 
-function getVisiblePriorityBadgeForWorkspaceMessage(
+export function getVisiblePriorityBadgeForWorkspaceMessage(
   message: MailMessage,
   override: ManualPriorityOverride | undefined,
   focusPreferences: UserConfig["focusPreferences"],
   options?: PriorityVisibilityOptions,
 ) {
+  // Final clamp: stale backend visibility, learned/manual priority, focus and
+  // heuristics all lose to the normalized noise authority.
+  if (resolveMessageNoisePolicy(message).blocksAutoPriority) {
+    return "LOW" as const;
+  }
+
   const focusPreferenceLevel = resolveFocusPreferenceLevelForPriorityMessage(
     message,
     focusPreferences,
@@ -7541,9 +7574,24 @@ function getMailboxReadyInboxMessagesForWorkspaceMailbox(
 function getVisibleCategoryLabel(
   message: Pick<
     MailMessage,
-    "internalClassification" | "signal" | "ui_signal" | "subject" | "snippet" | "sender" | "from" | "body"
+    | "internalClassification"
+    | "signal"
+    | "ui_signal"
+    | "subject"
+    | "snippet"
+    | "sender"
+    | "from"
+    | "body"
+    | "noiseDisposition"
+    | "noiseConfidence"
+    | "noiseReasons"
   >,
 ) {
+  const noiseOverride = resolveMessageNoisePolicy(message).visibleClassificationOverride;
+  if (noiseOverride) {
+    return noiseOverride;
+  }
+
   if (
     !message.internalClassification &&
     (message.ui_signal === "FINANCE" || message.signal === "Finance") &&
@@ -7630,7 +7678,14 @@ type DisplayContentMailboxContext =
   | Pick<ManagedWorkspaceInbox | OrderedMailbox, "id" | "title" | "email">
   | null
   | undefined;
-type DisplayContentLabel = "Demo" | "Promo" | "Business" | "Finance" | "Update" | "Other";
+type DisplayContentLabel =
+  | "Demo"
+  | "Promo"
+  | "Business"
+  | "Finance"
+  | "Update"
+  | "Other"
+  | "Spam";
 
 const displayContentClassifications = new Set<DisplayContentClassification>([
   "demo",
@@ -7847,6 +7902,11 @@ function resolveDisplayContentLabel(
   threadMessages: MailMessage[],
   options: { mailboxContext?: DisplayContentMailboxContext } = {},
 ) {
+  const noiseOverride = resolveMessageNoisePolicy(message).visibleClassificationOverride;
+  if (noiseOverride) {
+    return noiseOverride;
+  }
+
   if (!isReplyLikeConversationMessage(message)) {
     return getVisibleCategoryLabel(message);
   }
@@ -8680,6 +8740,7 @@ export function normalizeMailMessage(
     categorization.category,
     owner,
     message.sharedContext,
+    message,
   );
   const inferredRoyaltyStatement =
     !message.internalClassification && isRoyaltyStatementLikeMessage(message);
@@ -8693,6 +8754,8 @@ export function normalizeMailMessage(
   const normalizedAttachments = (message.attachments ?? []).map((attachment) =>
     normalizeMailAttachment(attachment),
   );
+  const normalizedUiSignal =
+    message.ui_signal === "NEW" ? undefined : message.ui_signal;
 
   return {
     ...baseMessage,
@@ -8708,7 +8771,7 @@ export function normalizeMailMessage(
     // That blocks correct promo (and other) classification for messages where the
     // backend could not assign a category but the frontend keyword scan can.
     // Strip it here so the heuristic signal takes effect downstream.
-    ui_signal: baseMessage.ui_signal === "NEW" ? undefined : baseMessage.ui_signal,
+    ui_signal: normalizedUiSignal,
     attachments: normalizedAttachments,
     internalClassification,
     suggestionDismissed: message.suggestionDismissed,
@@ -8734,8 +8797,15 @@ export function normalizeMailMessage(
           sender: message.sender,
           subject: message.subject,
           snippet: message.snippet,
-          body: message.body,
+          body: normalizedBodyContent.body,
           signal: resolvedSignal,
+          ui_signal: normalizedUiSignal,
+          internalClassification,
+          final_visibility: message.final_visibility,
+          action: message.action,
+          noiseDisposition: message.noiseDisposition,
+          noiseConfidence: message.noiseConfidence,
+          noiseReasons: message.noiseReasons,
           isAutoReply: message.isAutoReply,
           attachments: normalizedAttachments,
           category: categorization.category,
@@ -9793,6 +9863,9 @@ function createInitialMailboxStore(
               ),
               final_visibility: message.final_visibility,
               action: message.action,
+              noiseDisposition: message.noiseDisposition,
+              noiseConfidence: message.noiseConfidence,
+              noiseReasons: message.noiseReasons,
               from: message.from,
               to: message.to,
               cc: message.cc,
@@ -21971,7 +22044,8 @@ function MailboxView({
 	                </div>
 	                <div className="flex flex-none flex-wrap items-start justify-end gap-4 self-start">
 	                  {renderMessageActions(fullWidthMessage, "full")}
-                  {aiSuggestionsEnabled ? (
+                  {aiSuggestionsEnabled &&
+                  resolveMessageNoisePolicy(fullWidthMessage).allowsCategoryLearning ? (
                   <ReadingLearningButton
                     open={isReadingLearningMenuOpen}
                     triggerId="full-message"
@@ -22876,7 +22950,8 @@ function MailboxView({
                           </div>
                       </div>
 	                      <div className="flex items-center gap-4">
-	                        {aiSuggestionsEnabled ? (
+	                        {aiSuggestionsEnabled &&
+                          resolveMessageNoisePolicy(selectedMessage).allowsCategoryLearning ? (
 	                        <ReadingLearningButton
                           open={isReadingLearningMenuOpen}
                           triggerId="reading-pane"
@@ -36174,6 +36249,9 @@ export function WorkspaceShell({
           classifierVersion: mergedMessageState.classifierVersion,
           final_visibility: mergedMessageState.final_visibility,
           action: mergedMessageState.action,
+          noiseDisposition: mergedMessageState.noiseDisposition,
+          noiseConfidence: mergedMessageState.noiseConfidence,
+          noiseReasons: mergedMessageState.noiseReasons,
           from: mergedMessageState.from,
           to: mergedMessageState.to,
           cc: mergedMessageState.cc,

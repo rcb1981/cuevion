@@ -41,6 +41,9 @@ function gmailMessage(
     providerThreadId: GMAIL_THREAD_ID,
     rfcMessageId: "rfc-message@example.test",
     labelIds: providerFolder === "Inbox" ? ["INBOX"] : ["STARRED"],
+    noiseDisposition: "bulk_marketing" as const,
+    noiseConfidence: "medium" as const,
+    noiseReasons: ["bulk_mail_evidence"] as const,
   };
 }
 
@@ -121,6 +124,9 @@ function imapMessage(
     imapUid,
     threadId: `imap:uid:${MAILBOX_ID}:${providerFolder}:${uidValidity}:${imapUid}`,
     rfcMessageId: "rfc-message@example.test",
+    noiseDisposition: "unsolicited_low_value" as const,
+    noiseConfidence: "high" as const,
+    noiseReasons: ["cold_sales_outreach"] as const,
   };
 }
 

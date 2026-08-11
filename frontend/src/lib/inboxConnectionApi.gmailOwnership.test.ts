@@ -30,8 +30,26 @@ async function run() {
     setTimeout: globalThis.setTimeout.bind(globalThis),
     clearTimeout: globalThis.clearTimeout.bind(globalThis),
   };
+  const canonicalGmailMessage = {
+    id: "message-1",
+    sender: "Sender",
+    subject: "Subject",
+    snippet: "Snippet",
+    from: "sender@example.com",
+    to: "owner@example.com",
+    timestamp: "July 13 at 10:00",
+    createdAt: "2026-07-13T08:00:00.000Z",
+    body: ["Body"],
+    noiseDisposition: "unsolicited_low_value" as const,
+    noiseConfidence: "high" as const,
+    noiseReasons: ["cold_sales_outreach"] as const,
+  };
+  let gmailInboxMessages: unknown[] = [canonicalGmailMessage];
   (globalThis as any).fetch = async (url: string, init: Record<string, any>) => {
     captured.push({ url, init });
+    if (url.endsWith("/fetch-gmail")) {
+      return response({ ok: true, messages: gmailInboxMessages });
+    }
     return response({ ok: true, action: "star", messages: [] });
   };
 
@@ -40,7 +58,7 @@ async function run() {
   const assertCredentialed = () => assert.equal(last().init.credentials, "include");
 
   try {
-    await fetchGmailInbox({
+    const validGmailInboxResponse = await fetchGmailInbox({
       mailboxId: "gmail-1",
       focusPreferences: { promo: "low" } as any,
       limit: 25,
@@ -51,6 +69,84 @@ async function run() {
       limit: 25,
     });
     assertCredentialed();
+    assert.deepEqual(
+      {
+        noiseDisposition:
+          validGmailInboxResponse.messages?.[0]?.noiseDisposition,
+        noiseConfidence:
+          validGmailInboxResponse.messages?.[0]?.noiseConfidence,
+        noiseReasons: validGmailInboxResponse.messages?.[0]?.noiseReasons,
+      },
+      {
+        noiseDisposition: "unsolicited_low_value",
+        noiseConfidence: "high",
+        noiseReasons: ["cold_sales_outreach"],
+      },
+    );
+
+    gmailInboxMessages = [{
+      ...canonicalGmailMessage,
+      noiseReasons: undefined,
+    }];
+    const partialAssessmentResponse = await fetchGmailInbox({
+      mailboxId: "gmail-1",
+    });
+    const partialAssessmentMessage = partialAssessmentResponse.messages?.[0];
+    assert.ok(partialAssessmentMessage);
+    for (const key of [
+      "noiseDisposition",
+      "noiseConfidence",
+      "noiseReasons",
+    ]) {
+      assert.equal(
+        Object.prototype.hasOwnProperty.call(partialAssessmentMessage, key),
+        false,
+      );
+    }
+
+    gmailInboxMessages = [{
+      ...canonicalGmailMessage,
+      noiseConfidence: "provider-controlled-confidence",
+      noiseReasons: ["provider-controlled-reason"],
+    }];
+    const invalidAssessmentResponse = await fetchGmailInbox({
+      mailboxId: "gmail-1",
+    });
+    const invalidAssessmentMessage = invalidAssessmentResponse.messages?.[0];
+    assert.ok(invalidAssessmentMessage);
+    for (const key of [
+      "noiseDisposition",
+      "noiseConfidence",
+      "noiseReasons",
+    ]) {
+      assert.equal(
+        Object.prototype.hasOwnProperty.call(invalidAssessmentMessage, key),
+        false,
+      );
+    }
+
+    const legacyGmailMessage = {
+      ...canonicalGmailMessage,
+    } as Partial<typeof canonicalGmailMessage>;
+    delete legacyGmailMessage.noiseDisposition;
+    delete legacyGmailMessage.noiseConfidence;
+    delete legacyGmailMessage.noiseReasons;
+    gmailInboxMessages = [legacyGmailMessage];
+    const legacyAssessmentResponse = await fetchGmailInbox({
+      mailboxId: "gmail-1",
+    });
+    const legacyAssessmentMessage = legacyAssessmentResponse.messages?.[0];
+    assert.ok(legacyAssessmentMessage);
+    for (const key of [
+      "noiseDisposition",
+      "noiseConfidence",
+      "noiseReasons",
+    ]) {
+      assert.equal(
+        Object.prototype.hasOwnProperty.call(legacyAssessmentMessage, key),
+        false,
+      );
+    }
 
     await mutateInboxMessageAction({
       mailboxId: "gmail-1",

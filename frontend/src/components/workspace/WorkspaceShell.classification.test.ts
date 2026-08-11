@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import "sucrase/register/tsx.js";
+import type { MessageNoiseAssessment } from "../../lib/messageNoiseGate";
 
 const {
+  getVisiblePriorityBadgeForWorkspaceMessage,
   normalizeCuevionInternalClassification,
   normalizeMailMessage,
   resolveVisibleCategoryLabelForMessageInContext,
@@ -153,5 +155,119 @@ for (const [classification, uiSignal, category, visibleCategoryLabel] of support
   assert.equal(projected.message.category, category);
   assert.equal(projected.visibleCategoryLabel, visibleCategoryLabel);
 }
+
+const loanBody = [
+  "Need a personal or business loan?",
+  "Arabian Investment Group offers a simple application process and flexible loan options.",
+  "Send us a message today to get started.",
+  "Approval is subject to eligibility and terms.",
+  "Best wishes, Mr.George Harry, Senior Consultant",
+];
+const strongNoiseAssessment: MessageNoiseAssessment = {
+  noiseDisposition: "strong_spam",
+  noiseConfidence: "medium",
+  noiseReasons: [
+    "unsolicited_financial_solicitation",
+    "cold_call_to_action",
+    "no_conversation_evidence",
+    "mailbox_relevance_mismatch",
+  ],
+};
+const learnedPrimaryStore = {
+  "george.harry@wh.commufra.jp": {
+    learnedCategory: "Primary" as const,
+    learnedFromCount: 5,
+    autoCategoryEnabled: false,
+    mailboxAction: "keep" as const,
+    sourcePrioritySelection: "Important" as const,
+  },
+};
+const normalizedLoan = normalizeMailMessage(
+  {
+    id: "loan-fixture",
+    sender: "Arabian Investment Group",
+    subject: "Apply for a Loan Today – Fast Processing",
+    snippet: `${loanBody[0]} ${loanBody[1]} ${loanBody[2]} ${loanBody[0]}`,
+    time: "10:00",
+    from: "Arabian Investment Group <george.harry@wh.commufra.jp>",
+    to: "promo@hysteriarecs.com",
+    timestamp: "2026-08-11T08:00:00.000Z",
+    body: [...loanBody, loanBody[0]],
+    ui_signal: "NEW",
+    internalClassification: "unknown",
+    final_visibility: "show_priority",
+    action: "show_in_priority",
+    ...strongNoiseAssessment,
+  },
+  "main",
+  learnedPrimaryStore,
+  {
+    "george.harry@wh.commufra.jp": {
+      userId: "user-1",
+      count: 3,
+    },
+  },
+  "user-1",
+);
+
+assert.notEqual(normalizedLoan.signal, "Promo");
+assert.equal(normalizedLoan.internalClassification, "unknown");
+assert.equal(normalizedLoan.category, "Primary");
+assert.equal(normalizedLoan.categorySource, "learned");
+assert.equal(normalizedLoan.priorityScore, "low");
+assert.equal(normalizedLoan.focusSignal, null);
+assert.equal(normalizedLoan.suggestion, undefined);
+assert.equal(normalizedLoan.behaviorSuggestion, undefined);
+assert.equal(normalizedLoan.aiSuggestionBanner, undefined);
+assert.equal(
+  resolveVisibleCategoryLabelForMessageInContext(normalizedLoan, true),
+  "Spam",
+);
+assert.equal(
+  getVisiblePriorityBadgeForWorkspaceMessage(
+    normalizedLoan,
+    "priority",
+    {} as Parameters<typeof getVisiblePriorityBadgeForWorkspaceMessage>[2],
+  ),
+  "LOW",
+);
+
+const pluralOfferWithoutNoise = projectMessage("unknown", gmailIdentity, {
+  subject: "Apply for a Loan Today",
+  snippet: "Our company offers flexible loan options",
+  body: ["Our company offers flexible loan options"],
+  signal: undefined,
+  ui_signal: "NEW",
+  final_visibility: undefined,
+  action: undefined,
+});
+assert.notEqual(pluralOfferWithoutNoise.message.signal, "Promo");
+assert.notEqual(pluralOfferWithoutNoise.visibleCategoryLabel, "Promo");
+
+const explicitOffer = projectMessage("unknown", gmailIdentity, {
+  subject: "Special offer",
+  snippet: "A special offer for subscribers",
+  body: ["A special offer for subscribers"],
+  signal: undefined,
+  ui_signal: "NEW",
+  final_visibility: undefined,
+  action: undefined,
+});
+assert.ok(
+  explicitOffer.message.signal === "Promo" ||
+    explicitOffer.message.signal === "Update",
+);
+
+const musicPromo = projectMessage("unknown", gmailIdentity, {
+  subject: "New remix out now – DJ promo",
+  snippet: "New track and remix for your sets",
+  body: ["New release and DJ promo for your sets"],
+  signal: undefined,
+  ui_signal: "NEW",
+  final_visibility: undefined,
+  action: undefined,
+});
+assert.equal(musicPromo.message.signal, "Promo");
+assert.equal(musicPromo.visibleCategoryLabel, "Promo");
 
 console.log("✓ WorkspaceShell classification contract");

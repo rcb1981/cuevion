@@ -54,6 +54,62 @@ function allows(input: NormalPriorityGateInput) {
 
 console.log("\nnormalPriorityGate");
 
+for (const noiseDisposition of [
+  "strong_spam",
+  "unsolicited_low_value",
+] as const) {
+  test(`${noiseDisposition} blocks every otherwise-concrete Priority source`, () => {
+    const concreteInputs: NormalPriorityGateInput[] = [
+      {
+        noiseDisposition,
+        manualOverride: "priority",
+        prioritySource: source({ source: "manual" }),
+      },
+      {
+        noiseDisposition,
+        prioritySource: source({ source: "learning" }),
+      },
+      {
+        noiseDisposition,
+        prioritySource: source({ source: "returned_reply" }),
+        returnedReplyEvidence: returnedReplyEvidence({ confidence: "high" }),
+      },
+      {
+        noiseDisposition,
+        prioritySource: source({ level: "normal", source: "collaboration" }),
+      },
+      {
+        noiseDisposition,
+        prioritySource: source({ level: "normal", source: "assigned_review" }),
+      },
+      {
+        noiseDisposition,
+        prioritySource: source({ source: "strong_system_rule" }),
+        isStrongSystemRuleConcreteActionable: true,
+      },
+      {
+        noiseDisposition,
+        prioritySource: source({ level: "normal", source: "none" }),
+        hasCollaborationContext: true,
+        hasAssignedReviewContext: true,
+      },
+    ];
+
+    concreteInputs.forEach((input) => assert.equal(allows(input), false));
+  });
+}
+
+test("bulk_marketing does not override an explicit manual Priority decision", () => {
+  assert.equal(
+    allows({
+      noiseDisposition: "bulk_marketing",
+      manualOverride: "priority",
+      prioritySource: source({ source: "manual" }),
+    }),
+    true,
+  );
+});
+
 test("manual source allows Priority", () => {
   assert.equal(
     allows({
