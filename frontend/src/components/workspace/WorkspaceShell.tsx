@@ -40,6 +40,12 @@ import {
   getAnchoredSubmenuPosition,
   getContextMenuPosition,
 } from "./contextMenuGeometry";
+import {
+  FULL_MESSAGE_MODAL_VIEWPORT,
+  reduceFullMessageModalInteraction,
+  resolveFullMessageModalMessageId,
+  type FullMessageModalInteractionState,
+} from "./fullMessageModalState";
 import type { ReviewItem, ReviewWorkspaceTarget } from "./review/types";
 import type {
   CustomInboxDefinition,
@@ -13435,6 +13441,9 @@ function MailboxView({
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const mailListViewportRef = useRef<HTMLDivElement | null>(null);
   const readingPaneViewportRef = useRef<HTMLDivElement | null>(null);
+  const fullMessageModalDialogRef = useRef<HTMLElement | null>(null);
+  const fullMessageModalCloseButtonRef = useRef<HTMLButtonElement | null>(null);
+  const fullMessageModalReturnFocusRef = useRef<HTMLElement | null>(null);
   const inboxInteractionViewportRef = useRef<HTMLDivElement | null>(null);
   const splitPaneContainerRef = useRef<HTMLDivElement | null>(null);
   const lastAppliedSmartFolderIdRef = useRef<string | null>(null);
@@ -14075,6 +14084,37 @@ function MailboxView({
     setIsReadingLearningMenuOpen(false);
     setIsReadingLearningLabelChooserOpen(false);
     setActiveReadingLearningTrigger(null);
+  };
+
+  const closeFullMessageModal = (reason: "close" | "escape" = "close") => {
+    const nextState = reduceFullMessageModalInteraction(
+      {
+        isOpen: isFullMessageOpen,
+        selectedMessageId,
+      },
+      { type: reason },
+    );
+
+    closeReadingLearningMenu();
+    setDetailActionsMenuState(null);
+    setIsFullMessageOpen(nextState.isOpen);
+
+    const storedReturnFocusTarget = fullMessageModalReturnFocusRef.current;
+    const selectedRowMessageId = fullMessageModalMessage?.id ?? selectedMessageId;
+    const selectedRowFocusTarget = selectedRowMessageId
+      ? mailListViewportRef.current?.querySelector<HTMLElement>(
+          `[data-message-row-id="${CSS.escape(selectedRowMessageId)}"]`,
+        ) ?? null
+      : null;
+    const returnFocusTarget = storedReturnFocusTarget?.isConnected
+      ? storedReturnFocusTarget
+      : selectedRowFocusTarget;
+    fullMessageModalReturnFocusRef.current = null;
+    window.requestAnimationFrame(() => {
+      if (returnFocusTarget?.isConnected) {
+        returnFocusTarget.focus({ preventScroll: true });
+      }
+    });
   };
 
   const openComposeFromMessage = (
@@ -15270,6 +15310,20 @@ function MailboxView({
     selectedMessageFallbackTop ??
     null;
   const fullWidthMessage = selectedMessageFromFolder ?? selectedMessage;
+  const fullMessageModalInteractionState: FullMessageModalInteractionState = {
+    isOpen: isFullMessageOpen,
+    selectedMessageId,
+  };
+  const fullMessageModalResolvedMessage =
+    selectedMessageFromFolder ?? selectedMessageFromCurrentId;
+  const fullMessageModalMessageId = resolveFullMessageModalMessageId(
+    fullMessageModalInteractionState,
+    fullMessageModalResolvedMessage?.id ?? null,
+  );
+  const fullMessageModalMessage =
+    fullMessageModalResolvedMessage?.id === fullMessageModalMessageId
+      ? fullMessageModalResolvedMessage
+      : null;
   const renderTargetMessage = isFullMessageOpen ? fullWidthMessage : selectedMessage;
   const getVisiblePriorityReasonCopyForMessage = (message: MailMessage | null) => {
     if (!message || isSharedView || activeSmartFolder) {
@@ -15334,6 +15388,92 @@ function MailboxView({
   useEffect(() => {
     readingPaneViewportRef.current?.scrollTo({ top: 0, left: 0 });
   }, [selectedMessage?.id]);
+
+  useEffect(() => {
+    if (!isFullMessageOpen) {
+      fullMessageModalReturnFocusRef.current = null;
+      return;
+    }
+
+    if (!fullMessageModalMessage) {
+      setIsFullMessageOpen(false);
+      return;
+    }
+
+    const dialog = fullMessageModalDialogRef.current;
+    if (
+      !fullMessageModalReturnFocusRef.current &&
+      document.activeElement instanceof HTMLElement &&
+      document.activeElement !== document.body &&
+      document.activeElement !== document.documentElement &&
+      !dialog?.contains(document.activeElement)
+    ) {
+      fullMessageModalReturnFocusRef.current = document.activeElement;
+    }
+
+    const focusFrame = window.requestAnimationFrame(() => {
+      fullMessageModalCloseButtonRef.current?.focus();
+    });
+    const handleFullMessageModalKeydown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        closeFullMessageModal("escape");
+        return;
+      }
+
+      if (event.key !== "Tab" || !dialog) {
+        return;
+      }
+
+      const modalFocusContainers = [
+        dialog,
+        detailActionsMenuRef.current,
+        readingLearningMenuRef.current,
+      ].filter((element): element is HTMLElement => Boolean(element));
+      const focusableElements = modalFocusContainers.flatMap((container) =>
+        Array.from(
+          container.querySelectorAll<HTMLElement>(
+            'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+          ),
+        ),
+      ).filter((element) => element.getAttribute("aria-hidden") !== "true");
+
+      if (focusableElements.length === 0) {
+        return;
+      }
+
+      const firstFocusableElement = focusableElements[0];
+      const lastFocusableElement = focusableElements[focusableElements.length - 1];
+      const activeElement = document.activeElement;
+      const activeElementIsOutside =
+        !(activeElement instanceof Node) ||
+        !modalFocusContainers.some((container) =>
+          container.contains(activeElement),
+        );
+
+      if (
+        event.shiftKey &&
+        (activeElement === firstFocusableElement || activeElementIsOutside)
+      ) {
+        event.preventDefault();
+        lastFocusableElement.focus();
+      } else if (
+        !event.shiftKey &&
+        (activeElement === lastFocusableElement || activeElementIsOutside)
+      ) {
+        event.preventDefault();
+        firstFocusableElement.focus();
+      }
+    };
+
+    window.addEventListener("keydown", handleFullMessageModalKeydown);
+
+    return () => {
+      window.cancelAnimationFrame(focusFrame);
+      window.removeEventListener("keydown", handleFullMessageModalKeydown);
+    };
+  }, [fullMessageModalMessage?.id, isFullMessageOpen]);
 
   const advanceSelectionAfterAction = (processedMessageIds: string[]) => {
     if (processedMessageIds.length === 0) {
@@ -16544,7 +16684,9 @@ function MailboxView({
         <div
           ref={detailActionsMenuRef}
           data-theme={themeMode}
-          className="cuevion-dark-scroll cuevion-soft-scroll fixed z-30 w-[188px] overflow-y-auto rounded-[18px] border border-[var(--workspace-menu-border)] bg-[var(--workspace-menu-bg)] p-2 shadow-[0_14px_32px_rgba(41,34,27,0.10)]"
+          className={`cuevion-dark-scroll cuevion-soft-scroll fixed w-[188px] overflow-y-auto rounded-[18px] border border-[var(--workspace-menu-border)] bg-[var(--workspace-menu-bg)] p-2 shadow-[0_14px_32px_rgba(41,34,27,0.10)] ${
+            placement === "full" ? "z-[330]" : "z-30"
+          }`}
           style={menuPosition}
         >
           {messageIsVisiblePriority ? (
@@ -19438,8 +19580,23 @@ function MailboxView({
 
     // Normal click must always leave multi-select mode immediately and reset the
     // range anchor to the clicked message.
-    setSelectionState([messageId], messageId, messageId);
-    setIsFullMessageOpen(Boolean(options?.openFull));
+    const nextModalState = reduceFullMessageModalInteraction(
+      {
+        isOpen: isFullMessageOpen,
+        selectedMessageId,
+      },
+      {
+        type: options?.openFull ? "double-click" : "single-click",
+        messageId,
+      },
+    );
+
+    setSelectionState(
+      nextModalState.selectedMessageId ? [nextModalState.selectedMessageId] : [],
+      nextModalState.selectedMessageId,
+      nextModalState.selectedMessageId,
+    );
+    setIsFullMessageOpen(nextModalState.isOpen);
     const ownershipMessage = getMessageById(messageId);
     if (ownershipMessage) {
       onRecordMessageOwnershipInteraction(ownershipMessage);
@@ -20171,7 +20328,9 @@ function MailboxView({
     isReadingLearningMenuOpen && readingLearningMenuAnchor
       ? (() => {
           const interactionRect =
-            inboxInteractionViewportRef.current?.getBoundingClientRect();
+            activeReadingLearningTrigger === "full-message"
+              ? null
+              : inboxInteractionViewportRef.current?.getBoundingClientRect();
           const menuWidth = 244;
           const menuHeight = 320;
           const viewportPadding = 12;
@@ -21163,7 +21322,12 @@ function MailboxView({
     };
 
     const handleMailboxKeydown = (event: KeyboardEvent) => {
-      if (isTypingTarget(event.target) || isComposeOpen || isCloseModalOpen) {
+      if (
+        isTypingTarget(event.target) ||
+        isComposeOpen ||
+        isCloseModalOpen ||
+        isFullMessageOpen
+      ) {
         return;
       }
 
@@ -21242,6 +21406,7 @@ function MailboxView({
     isReadOnlySmartFolderView,
     isCloseModalOpen,
     isComposeOpen,
+    isFullMessageOpen,
     selectedMessage,
     shouldBulkMarkAsRead,
     sortedMessages,
@@ -22096,135 +22261,6 @@ function MailboxView({
               </div>
             </div>
           </div>
-	        ) : isFullMessageOpen && fullWidthMessage ? (
-	          <div className="min-h-0 flex-1 overflow-y-auto rounded-[24px] border border-[color:rgba(128,142,121,0.14)] bg-[linear-gradient(180deg,rgba(255,255,253,0.98),rgba(250,246,239,0.96))] p-5 shadow-[0_10px_28px_rgba(164,147,125,0.06)] dark:border-[var(--workspace-border-soft)] dark:bg-[linear-gradient(180deg,var(--workspace-card-featured-start),var(--workspace-card-featured-end))] md:p-6">
-	            <div className="space-y-6">
-	              {(() => {
-	                const linkedReview = getLinkedReviewForMessage(fullWidthMessage.id);
-	                const linkedReviewLabel = getLinkedReviewBadgeLabel(fullWidthMessage.id);
-                    const priorityReasonCopy =
-                      getVisiblePriorityReasonCopyForMessage(fullWidthMessage);
-
-	                return (
-	              <div className="flex items-start justify-between gap-4">
-	                <div className="min-w-0 flex-1 space-y-1">
-	                  <div className="text-[0.68rem] font-medium uppercase tracking-[0.18em] text-[var(--workspace-text-faint)]">
-	                    Message
-	                  </div>
-	                  <h2 className="text-[1.3rem] font-medium tracking-tight text-[var(--workspace-text)] md:text-[1.45rem]">
-	                    {fullWidthMessage.subject}
-	                  </h2>
-	                  {linkedReview && linkedReviewLabel ? (
-	                    <button
-	                      type="button"
-	                      onClick={() => {
-	                        closeReadingLearningMenu();
-	                        onOpenLinkedReview(linkedReview.target);
-	                      }}
-	                      className="inline-flex rounded-full border border-[var(--workspace-border)] bg-[var(--workspace-hover-surface)] px-3 py-1 text-[0.68rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text)] transition-[background-color,border-color,color] duration-150 hover:border-[var(--workspace-border-hover)] hover:bg-[var(--workspace-hover-surface-strong)] focus-visible:outline-none"
-	                    >
-	                      {linkedReviewLabel}
-	                    </button>
-	                  ) : null}
-                      {priorityReasonCopy ? (
-                        <div className="text-[0.76rem] leading-5 text-[var(--workspace-text-soft)]">
-                          {priorityReasonCopy.title}
-                        </div>
-                      ) : null}
-	                </div>
-	                <div className="flex flex-none flex-wrap items-start justify-end gap-4 self-start">
-	                  {renderMessageActions(fullWidthMessage, "full")}
-                  {aiSuggestionsEnabled &&
-                  resolveMessageNoisePolicy(fullWidthMessage).allowsCategoryLearning ? (
-                  <ReadingLearningButton
-                    open={isReadingLearningMenuOpen}
-                    triggerId="full-message"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      const rect = event.currentTarget.getBoundingClientRect();
-                      toggleReadingLearningMenu("full-message", {
-                        top: rect.top,
-                        left: rect.left,
-                        width: rect.width,
-                        height: rect.height,
-                      });
-                    }}
-                  />
-                  ) : null}
-                  <button
-                    type="button"
-                    onClick={() => {
-                      closeReadingLearningMenu();
-                      setIsFullMessageOpen(false);
-                    }}
-                    className={navigationCloseBackButtonClass}
-                  >
-                    Close
-                  </button>
-	                </div>
-	              </div>
-	                );
-	              })()}
-
-              {aiSuggestionsEnabled ? renderAIDecisionBlock(fullWidthMessage) : null}
-
-              {renderMessageCollaboration(fullWidthMessage)}
-
-              <div className="space-y-3">
-                <div className="space-y-1.5 pb-1">
-                  <div className="text-[0.84rem] leading-[1.45] text-[var(--workspace-text)] break-words">
-                    <span className="text-[var(--workspace-text-faint)]">From:</span>{" "}
-                    <span className="text-[var(--workspace-text)]">{fullWidthMessage.from}</span>
-                  </div>
-                  <div className="text-[0.84rem] leading-[1.45] text-[var(--workspace-text)] break-words">
-                    <span className="text-[var(--workspace-text-faint)]">To:</span>{" "}
-                    <span>{fullWidthMessage.to}</span>
-                  </div>
-                  {fullWidthMessage.cc ? (
-                    <div className="text-[0.84rem] leading-[1.45] text-[var(--workspace-text)] break-words">
-                      <span className="text-[var(--workspace-text-faint)]">Cc:</span>{" "}
-                      <span>{fullWidthMessage.cc}</span>
-                    </div>
-                  ) : null}
-                  <div className="text-[0.8rem] leading-[1.45] text-[var(--workspace-text-faint)] break-words">
-                    <span className="text-[var(--workspace-text-faint)]">Received:</span>{" "}
-                    <span>{fullWidthMessage.timestamp}</span>
-                  </div>
-                </div>
-
-                {renderBehaviorSuggestion(fullWidthMessage)}
-
-                {fullWidthMessage.isShared && fullWidthMessage.sharedContext ? (
-                  <div className="flex items-center gap-2 text-[0.74rem] leading-6 text-[color:rgba(120,111,100,0.72)]">
-                    <span className="h-1.5 w-1.5 rounded-full bg-[color:rgba(108,141,108,0.72)]" />
-                    <span>{formatSharedContextDetail(fullWidthMessage.sharedContext)}</span>
-                  </div>
-                ) : null}
-
-	                {fullWidthMessageThreadMessages.length > 1
-	                  ? renderThreadTimeline(fullWidthMessage, "full")
-	                  : renderThreadMessage(fullWidthMessage, "full")}
-              </div>
-
-              <div className="rounded-[20px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-5 py-4">
-                <div className="mb-3 text-[0.72rem] font-medium uppercase tracking-[0.18em] text-[var(--workspace-text-faint)]">
-                  Attachments
-                </div>
-                <div className="flex flex-wrap gap-3">
-                  {(fullWidthMessage.attachments ?? [])
-                    .filter(shouldShowInAttachmentList)
-                    .map((attachment) =>
-                      renderAttachmentItem(attachment, { message: fullWidthMessage }),
-                    )}
-                  {!fullWidthMessage.attachments?.some(shouldShowInAttachmentList) ? (
-                    <div className="text-[0.82rem] leading-6 text-[var(--workspace-text-faint)]">
-                      No attachments
-                    </div>
-                  ) : null}
-                </div>
-              </div>
-            </div>
-          </div>
         ) : (
           <div
             ref={(node) => {
@@ -22751,14 +22787,22 @@ function MailboxView({
                             handleSelectMessage(activeFolder, message.id);
                             markInboxMessageReadOnOpen(message);
                           }}
-                          onDoubleClick={() => {
+                          onDoubleClick={(event) => {
+                            fullMessageModalReturnFocusRef.current = event.currentTarget;
                             handleSelectMessage(activeFolder, message.id, {
                               openFull: true,
                             });
                           }}
                           onContextMenu={(event) => {
                             event.preventDefault();
-                            setIsFullMessageOpen(false);
+                            const nextModalState = reduceFullMessageModalInteraction(
+                              {
+                                isOpen: isFullMessageOpen,
+                                selectedMessageId,
+                              },
+                              { type: "context-menu" },
+                            );
+                            setIsFullMessageOpen(nextModalState.isOpen);
                             setIsMoreMenuOpen(false);
                             setContextMenuState({
                               messageId: message.id,
@@ -23142,6 +23186,185 @@ function MailboxView({
             </div>
           </div>
         )}
+
+        {fullMessageModalMessage && typeof document !== "undefined"
+          ? createPortal(
+              <WorkspaceModalLayer themeMode={themeMode}>
+                <section
+                  ref={fullMessageModalDialogRef}
+                  data-full-message-modal-message-id={fullMessageModalMessage.id}
+                  role="dialog"
+                  aria-modal="true"
+                  aria-labelledby="full-message-modal-title"
+                  className="flex min-h-0 flex-col overflow-hidden rounded-[28px] border border-[color:rgba(128,142,121,0.18)] bg-[linear-gradient(180deg,rgba(255,255,253,0.99),rgba(250,246,239,0.98))] shadow-[0_28px_80px_rgba(61,44,32,0.18),0_10px_26px_rgba(61,44,32,0.1)] dark:border-[var(--workspace-border)] dark:bg-[linear-gradient(180deg,var(--workspace-card-featured-start),var(--workspace-card-featured-end))]"
+                  style={FULL_MESSAGE_MODAL_VIEWPORT}
+                  onMouseDown={(event) => event.stopPropagation()}
+                >
+                  <header className="flex flex-none flex-wrap items-start justify-between gap-4 border-b border-[color:rgba(129,144,122,0.14)] bg-[var(--workspace-modal-bg)] px-5 py-4 dark:border-[color:rgba(121,151,120,0.16)] md:px-6 md:py-5">
+                    {(() => {
+                      const linkedReview = getLinkedReviewForMessage(
+                        fullMessageModalMessage.id,
+                      );
+                      const linkedReviewLabel = getLinkedReviewBadgeLabel(
+                        fullMessageModalMessage.id,
+                      );
+                      const priorityReasonCopy =
+                        getVisiblePriorityReasonCopyForMessage(fullMessageModalMessage);
+
+                      return (
+                        <div className="min-w-0 flex-1 space-y-1">
+                          <div className="text-[0.68rem] font-medium uppercase tracking-[0.18em] text-[var(--workspace-text-faint)]">
+                            Message
+                          </div>
+                          <h2
+                            id="full-message-modal-title"
+                            className="break-words text-[1.3rem] font-medium tracking-tight text-[var(--workspace-text)] md:text-[1.45rem]"
+                          >
+                            {fullMessageModalMessage.subject}
+                          </h2>
+                          {linkedReview && linkedReviewLabel ? (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                closeReadingLearningMenu();
+                                onOpenLinkedReview(linkedReview.target);
+                              }}
+                              className="inline-flex rounded-full border border-[var(--workspace-border)] bg-[var(--workspace-hover-surface)] px-3 py-1 text-[0.68rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text)] transition-[background-color,border-color,color] duration-150 hover:border-[var(--workspace-border-hover)] hover:bg-[var(--workspace-hover-surface-strong)] focus-visible:outline-none"
+                            >
+                              {linkedReviewLabel}
+                            </button>
+                          ) : null}
+                          {priorityReasonCopy ? (
+                            <div className="text-[0.76rem] leading-5 text-[var(--workspace-text-soft)]">
+                              {priorityReasonCopy.title}
+                            </div>
+                          ) : null}
+                        </div>
+                      );
+                    })()}
+
+                    <div className="flex flex-none flex-wrap items-start justify-end gap-3 self-start">
+                      {renderMessageActions(fullMessageModalMessage, "full")}
+                      {aiSuggestionsEnabled &&
+                      resolveMessageNoisePolicy(fullMessageModalMessage)
+                        .allowsCategoryLearning ? (
+                        <ReadingLearningButton
+                          open={isReadingLearningMenuOpen}
+                          triggerId="full-message"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            const rect = event.currentTarget.getBoundingClientRect();
+                            toggleReadingLearningMenu("full-message", {
+                              top: rect.top,
+                              left: rect.left,
+                              width: rect.width,
+                              height: rect.height,
+                            });
+                          }}
+                        />
+                      ) : null}
+                      <button
+                        ref={fullMessageModalCloseButtonRef}
+                        type="button"
+                        aria-label="Close full message"
+                        onClick={() => closeFullMessageModal("close")}
+                        className={navigationCloseBackButtonClass}
+                      >
+                        Close
+                      </button>
+                    </div>
+                  </header>
+
+                  <div
+                    data-full-message-modal-scroll-region
+                    className="cuevion-dark-scroll cuevion-soft-scroll min-h-0 flex-1 overflow-y-auto overflow-x-hidden p-5 md:p-6"
+                    style={{
+                      colorScheme: themeMode,
+                      scrollbarWidth: "thin",
+                      scrollbarColor:
+                        "var(--workspace-scrollbar-thumb) var(--workspace-scrollbar-track)",
+                    }}
+                  >
+                    <div className="space-y-6">
+                      {aiSuggestionsEnabled
+                        ? renderAIDecisionBlock(fullMessageModalMessage)
+                        : null}
+
+                      {renderMessageCollaboration(fullMessageModalMessage)}
+
+                      <div className="space-y-3">
+                        <div className="space-y-1.5 pb-1">
+                          <div className="break-words text-[0.84rem] leading-[1.45] text-[var(--workspace-text)]">
+                            <span className="text-[var(--workspace-text-faint)]">From:</span>{" "}
+                            <span className="text-[var(--workspace-text)]">
+                              {fullMessageModalMessage.from}
+                            </span>
+                          </div>
+                          <div className="break-words text-[0.84rem] leading-[1.45] text-[var(--workspace-text)]">
+                            <span className="text-[var(--workspace-text-faint)]">To:</span>{" "}
+                            <span>{fullMessageModalMessage.to}</span>
+                          </div>
+                          {fullMessageModalMessage.cc ? (
+                            <div className="break-words text-[0.84rem] leading-[1.45] text-[var(--workspace-text)]">
+                              <span className="text-[var(--workspace-text-faint)]">Cc:</span>{" "}
+                              <span>{fullMessageModalMessage.cc}</span>
+                            </div>
+                          ) : null}
+                          <div className="break-words text-[0.8rem] leading-[1.45] text-[var(--workspace-text-faint)]">
+                            <span className="text-[var(--workspace-text-faint)]">
+                              Received:
+                            </span>{" "}
+                            <span>{fullMessageModalMessage.timestamp}</span>
+                          </div>
+                        </div>
+
+                        {renderBehaviorSuggestion(fullMessageModalMessage)}
+
+                        {fullMessageModalMessage.isShared &&
+                        fullMessageModalMessage.sharedContext ? (
+                          <div className="flex items-center gap-2 text-[0.74rem] leading-6 text-[color:rgba(120,111,100,0.72)]">
+                            <span className="h-1.5 w-1.5 rounded-full bg-[color:rgba(108,141,108,0.72)]" />
+                            <span>
+                              {formatSharedContextDetail(
+                                fullMessageModalMessage.sharedContext,
+                              )}
+                            </span>
+                          </div>
+                        ) : null}
+
+                        {fullWidthMessageThreadMessages.length > 1
+                          ? renderThreadTimeline(fullMessageModalMessage, "full")
+                          : renderThreadMessage(fullMessageModalMessage, "full")}
+                      </div>
+
+                      <div className="rounded-[20px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-5 py-4">
+                        <div className="mb-3 text-[0.72rem] font-medium uppercase tracking-[0.18em] text-[var(--workspace-text-faint)]">
+                          Attachments
+                        </div>
+                        <div className="flex flex-wrap gap-3">
+                          {(fullMessageModalMessage.attachments ?? [])
+                            .filter(shouldShowInAttachmentList)
+                            .map((attachment) =>
+                              renderAttachmentItem(attachment, {
+                                message: fullMessageModalMessage,
+                              }),
+                            )}
+                          {!fullMessageModalMessage.attachments?.some(
+                            shouldShowInAttachmentList,
+                          ) ? (
+                            <div className="text-[0.82rem] leading-6 text-[var(--workspace-text-faint)]">
+                              No attachments
+                            </div>
+                          ) : null}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </section>
+              </WorkspaceModalLayer>,
+              document.body,
+            )
+          : null}
 
         <SettingsConfirmationModal
           open={isEmptyTrashConfirmationOpen}
@@ -23596,26 +23819,19 @@ function MailboxView({
         {aiSuggestionsEnabled && isReadingLearningMenuOpen && readingLearningMenuPosition
           ? createPortal(
               (() => {
-                // The full-width view renders fullWidthMessage (found directly by
-                // selectedMessageId in folderMessages, bypassing thread dedup).
-                // The split reading pane renders selectedMessage (found in
-                // thread-deduped sortedMessages).
-                // When selectedMessageId points to a message that was deduped away,
-                // selectedMessage falls back to sortedMessages[0] — a completely
-                // different message. Using fullWidthMessage for the full-message
-                // trigger ensures the action targets what is actually rendered.
-                // fullWidthMessage resolves selectedMessageId directly from
-                // folderMessages (no thread-dedup fallback). selectedMessage
-                // falls back to sortedMessages[0] when the selected message was
-                // deduped away — producing a completely different message.
-                // Use fullWidthMessage for both triggers so the action always
-                // targets the message the user actually selected.
-                const readingLearningTargetMessage = fullWidthMessage ?? selectedMessage;
+                // The modal must use its exact, currently resolved message. The
+                // split pane keeps the existing folder-aware selection fallback.
+                const readingLearningTargetMessage =
+                  activeReadingLearningTrigger === "full-message"
+                    ? fullMessageModalMessage
+                    : fullWidthMessage ?? selectedMessage;
                 return (
               <div
                 ref={readingLearningMenuRef}
                 data-theme={themeMode}
-                className="fixed z-[31] w-[244px] rounded-[20px] border border-[var(--workspace-menu-border)] bg-[var(--workspace-menu-bg)] p-2 shadow-panel"
+                className={`fixed w-[244px] rounded-[20px] border border-[var(--workspace-menu-border)] bg-[var(--workspace-menu-bg)] p-2 shadow-panel ${
+                  activeReadingLearningTrigger === "full-message" ? "z-[330]" : "z-[31]"
+                }`}
                 style={readingLearningMenuPosition}
                 onMouseDown={(event) => event.stopPropagation()}
 	              >
