@@ -6,9 +6,10 @@ import {
   type LiveInboxProvider,
   type LiveThreadIdentityContext,
 } from "./inboxEngine";
+import { resolveMessageNoisePolicy } from "./messageNoiseGate";
 
 const LIVE_INBOX_SNAPSHOTS_STORAGE_KEY = "cuevion-live-inbox-snapshots";
-const LIVE_INBOX_SNAPSHOT_SCHEMA_VERSION = 5;
+export const LIVE_INBOX_SNAPSHOT_SCHEMA_VERSION = 6;
 export const LIVE_INBOX_THREAD_IDENTITY_VERSION = 1;
 export const MUSIC_CLASSIFIER_VERSION = "2026-07-01-universal-music-subject-v3";
 
@@ -26,6 +27,11 @@ export type LiveInboxSnapshot = {
 };
 
 type LiveInboxSnapshotStore = Record<string, LiveInboxSnapshot>;
+type LegacyLiveInboxMessageSnapshot = LiveInboxMessageSnapshot & {
+  isAutoReply?: boolean;
+  isShared?: boolean;
+  collaboration?: unknown;
+};
 export type TrustedLiveInboxSnapshotContext = Pick<
   LiveThreadIdentityContext,
   "mailboxId" | "provider" | "folder"
@@ -317,6 +323,92 @@ function hasMessageBodyPayload(message: LiveInboxMessageSnapshot) {
   return hasBodyHtml || hasTextBody || hasAttachments;
 }
 
+export function upconvertLegacyPromoReminderSnapshotMessage(
+  message: LiveInboxMessageSnapshot,
+): LiveInboxMessageSnapshot {
+  const legacyMessage = message as LegacyLiveInboxMessageSnapshot;
+  if (
+    legacyMessage.internalClassification !== "promo" ||
+    legacyMessage.isAutoReply ||
+    legacyMessage.isShared ||
+    legacyMessage.collaboration ||
+    legacyMessage.ui_signal === "REPLY" ||
+    legacyMessage.signal === "Follow-up" ||
+    /^(?:re|fw|fwd):/i.test(String(legacyMessage.subject ?? "").trim()) ||
+    resolveMessageNoisePolicy(legacyMessage).blocksAutoPriority
+  ) {
+    return message;
+  }
+
+  const contentText = [
+    legacyMessage.subject,
+    legacyMessage.snippet,
+    ...(legacyMessage.body ?? []),
+  ]
+    .join(" ")
+    .toLowerCase();
+  const subjectAndSnippetText = [
+    legacyMessage.subject,
+    legacyMessage.snippet,
+  ]
+    .join(" ")
+    .toLowerCase();
+  const bodyText = (legacyMessage.body ?? []).join(" ").toLowerCase();
+  const identityText = [
+    legacyMessage.sender,
+    legacyMessage.from,
+    legacyMessage.to,
+  ]
+    .join(" ")
+    .toLowerCase();
+  const hasReminderEvidence = /\bremind(?:er|ing)?\b/.test(
+    String(legacyMessage.subject ?? "").toLowerCase(),
+  );
+  const hasPromoEvidence = /\bpromo(?:tional)?\b/.test(contentText);
+  const hasMusicIdentityEvidence = [
+    "records",
+    "recordings",
+    "record label",
+    "music",
+    "dj",
+  ].some((keyword) => identityText.includes(keyword));
+  const hasMusicPromoContentEvidence = [
+    "promo invite",
+    "promo invitation",
+    "dj promo",
+    "promo download",
+    "promo release",
+    "promo track",
+    "promo remix",
+    "listen and download",
+    "for your sets",
+    "promobox",
+    "inflyte",
+    "fatdrop",
+  ].some((keyword) => contentText.includes(keyword));
+  const hasUnsafeReminderContext =
+    /\b(?:invoice|payment|payout|billing|amount due|past due|contract|agreement|legal|approval|approve|signature|security|password|verification|sign-in|login|meeting|calendar|appointment|subscription|renewal)\b/.test(
+      subjectAndSnippetText,
+    ) ||
+    /\b(?:invoice|payment|payout|billing|amount due|past due|contract|agreement|legal|signature)\b/.test(
+      bodyText,
+    );
+
+  if (
+    !hasReminderEvidence ||
+    !hasPromoEvidence ||
+    hasUnsafeReminderContext ||
+    (!hasMusicIdentityEvidence && !hasMusicPromoContentEvidence)
+  ) {
+    return message;
+  }
+
+  return {
+    ...message,
+    internalClassification: "promo_reminder",
+  };
+}
+
 function normalizeSnapshot(
   inboxId: string,
   snapshot: LiveInboxSnapshot,
@@ -408,6 +500,9 @@ function normalizeSnapshot(
         uidValidity: uidValidity ?? null,
       }
     : null;
+  const shouldUpconvertLegacyPromoReminders =
+    typeof snapshot.schemaVersion !== "number" ||
+    snapshot.schemaVersion < LIVE_INBOX_SNAPSHOT_SCHEMA_VERSION;
 
   return {
     ...snapshot,
@@ -421,8 +516,11 @@ function normalizeSnapshot(
     email: String(snapshot.email ?? "").trim().toLowerCase(),
     fetchedAt: String(snapshot.fetchedAt ?? new Date().toISOString()),
     messages: messages.map((message) => {
+      const compatibleMessage = shouldUpconvertLegacyPromoReminders
+        ? upconvertLegacyPromoReminderSnapshotMessage(message)
+        : message;
       const normalizedMessage = {
-        ...message,
+        ...compatibleMessage,
         classifierVersion: MUSIC_CLASSIFIER_VERSION,
       };
 

@@ -6,11 +6,19 @@ const {
   applyFilteredRoutingToMailboxCollections,
   applyFocusPreferenceRoutingToMailboxCollections,
   applyPromoReminderFocusPreferenceRouting,
+  applyPromoReminderFocusPreferenceRoutingToMailboxCollections,
   getVisiblePriorityBadgeForWorkspaceMessage,
   normalizeCuevionInternalClassification,
   normalizeMailMessage,
   resolveVisibleCategoryLabelForMessageInContext,
 } = require("./WorkspaceShell.tsx") as typeof import("./WorkspaceShell");
+const {
+  hydrateLiveInboxSnapshot,
+  LIVE_INBOX_SNAPSHOT_SCHEMA_VERSION,
+  MUSIC_CLASSIFIER_VERSION,
+  readLiveInboxSnapshots,
+  upconvertLegacyPromoReminderSnapshotMessage,
+} = require("../../lib/liveInboxSnapshots") as typeof import("../../lib/liveInboxSnapshots");
 
 type MessageSeed = Parameters<typeof normalizeMailMessage>[0];
 type MailboxCollections = Parameters<
@@ -700,6 +708,516 @@ const trustedBackendReminder = projectAlxbReminder(
 );
 assert.equal(trustedBackendReminder.message.internalClassification, "promo_reminder");
 assert.equal(trustedBackendReminder.message.categoryConfidence, "high");
+
+const legacyProductionAlxbGmailSnapshotMessage = projectMessage(
+  "promo",
+  gmailIdentity,
+  {
+    ...alxbReminderOverrides,
+    createdAt: "2026-07-16T08:00:00.000Z",
+    timestamp: "2026-07-16T08:00:00.000Z",
+    serverMailboxId: "main",
+    providerFolder: "Inbox",
+    labelIds: ["INBOX"],
+    v7_final_priority: "NORMAL",
+    final_visibility: "show_normal",
+    action: "show_in_main_feed",
+  },
+).message;
+const {
+  providerMessageId: _legacyProviderMessageId,
+  providerThreadId: _legacyProviderThreadId,
+  labelIds: _legacyLabelIds,
+  ...legacyProductionAlxbImapBase
+} = legacyProductionAlxbGmailSnapshotMessage;
+const legacyProductionAlxbImapSnapshotMessage = {
+  ...legacyProductionAlxbImapBase,
+  id: "alxb-promo-reminder-imap",
+  serverMailboxId: "promo",
+  providerFolder: "INBOX",
+  imapUid: "42",
+  uidValidity: "9001",
+};
+const liveSnapshotStorageKey = "cuevion-live-inbox-snapshots";
+assert.equal(LIVE_INBOX_SNAPSHOT_SCHEMA_VERSION, 6);
+const liveSnapshotStorage = new Map<string, string>();
+liveSnapshotStorage.set(
+  liveSnapshotStorageKey,
+  JSON.stringify({
+    main: {
+      schemaVersion: 5,
+      classifierVersion: MUSIC_CLASSIFIER_VERSION,
+      provider: "google",
+      inboxId: "main",
+      email: "promo@hysteriarecs.com",
+      fetchedAt: "2026-07-16T08:05:00.000Z",
+      folder: "INBOX",
+      uidValidity: "gmail-api",
+      messages: [legacyProductionAlxbGmailSnapshotMessage],
+    },
+    promo: {
+      schemaVersion: 5,
+      classifierVersion: MUSIC_CLASSIFIER_VERSION,
+      provider: "custom_imap",
+      inboxId: "promo",
+      email: "promo@hysteriarecs.com",
+      fetchedAt: "2026-07-16T08:05:00.000Z",
+      folder: "INBOX",
+      uidValidity: "9001",
+      messages: [legacyProductionAlxbImapSnapshotMessage],
+    },
+  }),
+);
+const originalWindowDescriptor = Object.getOwnPropertyDescriptor(
+  globalThis,
+  "window",
+);
+Object.defineProperty(globalThis, "window", {
+  configurable: true,
+  value: {
+    localStorage: {
+      getItem: (key: string) => liveSnapshotStorage.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        liveSnapshotStorage.set(key, value);
+      },
+    },
+  },
+});
+
+try {
+  const migratedSnapshots = readLiveInboxSnapshots({
+    main: { mailboxId: "main", provider: "google", folder: "INBOX" },
+    promo: { mailboxId: "promo", provider: "custom_imap", folder: "INBOX" },
+  });
+
+  for (const mailboxId of ["main", "promo"] as const) {
+    const hydratedSnapshot = hydrateLiveInboxSnapshot(
+      migratedSnapshots[mailboxId],
+    );
+    assert.ok(hydratedSnapshot.context);
+    assert.equal(hydratedSnapshot.messages.length, 1);
+    const reloadedLegacyMessage = normalizeMailMessage(
+      {
+        ...hydratedSnapshot.messages[0],
+        time: hydratedSnapshot.messages[0].timestamp,
+      } as MessageSeed,
+      mailboxId,
+      {},
+      {},
+      "user-1",
+    );
+    const liveInboxSentinel = createFolderSentinel(
+      `${mailboxId}-live-inbox-sentinel`,
+      mailboxId === "main" ? "Inbox" : "INBOX",
+    );
+    const liveFilteredSentinel = createFolderSentinel(
+      `${mailboxId}-live-filtered-sentinel`,
+      mailboxId === "main" ? "Inbox" : "INBOX",
+    );
+    const legacyProductionCollectionsInput: MailboxCollections = {
+      Inbox: [reloadedLegacyMessage, liveInboxSentinel],
+      Drafts: [],
+      Sent: [],
+      Archive: [],
+      Filtered: [liveFilteredSentinel],
+      Spam: [],
+      Trash: [],
+    };
+    const legacyProductionCollectionsInputBefore = structuredClone(
+      legacyProductionCollectionsInput,
+    );
+    const legacyProductionLowCollections =
+      applyPromoReminderFocusPreferenceRoutingToMailboxCollections(
+        legacyProductionCollectionsInput,
+        lowPromoReminderFocusPreferences,
+        {},
+      );
+    const upgradedLegacyProductionAlxb =
+      legacyProductionLowCollections.Filtered.find(
+        (message) => message.id === reloadedLegacyMessage.id,
+      );
+
+    assert.ok(upgradedLegacyProductionAlxb);
+    assert.deepEqual(
+      legacyProductionCollectionsInput,
+      legacyProductionCollectionsInputBefore,
+    );
+    assert.equal(
+      upgradedLegacyProductionAlxb.internalClassification,
+      "promo_reminder",
+    );
+    assert.equal(upgradedLegacyProductionAlxb.priorityScore, "low");
+    assert.equal(upgradedLegacyProductionAlxb.v7_final_priority, "LOW");
+    assert.equal(upgradedLegacyProductionAlxb.final_visibility, "show_low");
+    assert.equal(upgradedLegacyProductionAlxb.action, "show_in_quiet_view");
+    assert.deepEqual(
+      legacyProductionLowCollections.Inbox.map((message) => message.id),
+      [liveInboxSentinel.id],
+    );
+    assert.deepEqual(
+      legacyProductionLowCollections.Filtered.map((message) => message.id),
+      [liveFilteredSentinel.id, upgradedLegacyProductionAlxb.id],
+    );
+    const unrelatedSenderLearning = {
+      "learned-elsewhere@example.test": {
+        learnedCategory: "Updates" as const,
+        learnedFromCount: 3,
+        autoCategoryEnabled: true,
+        mailboxAction: "move" as const,
+        sourcePrioritySelection: "Show Less" as const,
+      },
+    };
+    const unrelatedSenderLearningBefore = structuredClone(
+      unrelatedSenderLearning,
+    );
+    const legacyLowWithUnrelatedLearning =
+      applyPromoReminderFocusPreferenceRoutingToMailboxCollections(
+        {
+          Inbox: [reloadedLegacyMessage],
+          Drafts: [],
+          Sent: [],
+          Archive: [],
+          Filtered: [],
+          Spam: [],
+          Trash: [],
+        },
+        lowPromoReminderFocusPreferences,
+        unrelatedSenderLearning,
+      );
+    assert.deepEqual(
+      legacyLowWithUnrelatedLearning.Filtered.map((message) => message.id),
+      [upgradedLegacyProductionAlxb.id],
+    );
+    assert.deepEqual(unrelatedSenderLearning, unrelatedSenderLearningBefore);
+    assert.equal(
+      upgradedLegacyProductionAlxb.createdAt,
+      "2026-07-16T08:00:00.000Z",
+    );
+    assert.equal(
+      upgradedLegacyProductionAlxb.serverMailboxId,
+      mailboxId,
+    );
+
+    if (mailboxId === "main") {
+      assert.equal(
+        upgradedLegacyProductionAlxb.providerMessageId,
+        "gmail-message-42",
+      );
+      assert.equal(
+        upgradedLegacyProductionAlxb.providerThreadId,
+        "gmail-thread-9",
+      );
+      assert.deepEqual(upgradedLegacyProductionAlxb.labelIds, ["INBOX"]);
+      assert.equal(upgradedLegacyProductionAlxb.providerFolder, "Inbox");
+    } else {
+      assert.equal(upgradedLegacyProductionAlxb.imapUid, "42");
+      assert.equal(upgradedLegacyProductionAlxb.uidValidity, "9001");
+      assert.equal(upgradedLegacyProductionAlxb.providerFolder, "INBOX");
+      assert.equal(upgradedLegacyProductionAlxb.providerMessageId, undefined);
+      assert.equal(upgradedLegacyProductionAlxb.labelIds, undefined);
+    }
+
+    const legacyProductionNormalCollections =
+      applyPromoReminderFocusPreferenceRoutingToMailboxCollections(
+        legacyProductionLowCollections,
+        normalFocusPreferences,
+        {},
+    );
+    const normalLegacyProductionAlxb =
+      legacyProductionNormalCollections.Inbox.find(
+        (message) => message.id === reloadedLegacyMessage.id,
+      );
+    assert.ok(normalLegacyProductionAlxb);
+    assert.equal(normalLegacyProductionAlxb.internalClassification, "promo_reminder");
+    assert.equal(normalLegacyProductionAlxb.priorityScore, "medium");
+    assert.equal(normalLegacyProductionAlxb.v7_final_priority, "NORMAL");
+    assert.equal(normalLegacyProductionAlxb.final_visibility, "show_normal");
+    assert.equal(normalLegacyProductionAlxb.action, "show_in_main_feed");
+    assert.deepEqual(
+      legacyProductionNormalCollections.Inbox.map((message) => message.id),
+      [liveInboxSentinel.id, normalLegacyProductionAlxb.id],
+    );
+    assert.deepEqual(
+      legacyProductionNormalCollections.Filtered.map((message) => message.id),
+      [liveFilteredSentinel.id],
+    );
+    const matchingSenderShowLessLearning = {
+      "promo@alxbrecords.com": {
+        learnedCategory: "Updates" as const,
+        learnedFromCount: 3,
+        autoCategoryEnabled: true,
+        mailboxAction: "move" as const,
+        sourcePrioritySelection: "Show Less" as const,
+      },
+    };
+    const normalWithMatchingSenderLearning =
+      applyPromoReminderFocusPreferenceRoutingToMailboxCollections(
+        legacyProductionLowCollections,
+        normalFocusPreferences,
+        matchingSenderShowLessLearning,
+      );
+    assert.ok(
+      normalWithMatchingSenderLearning.Inbox.some(
+        (message) => message.id === normalLegacyProductionAlxb.id,
+      ),
+    );
+    assert.equal(
+      normalWithMatchingSenderLearning.Filtered.some(
+        (message) => message.id === normalLegacyProductionAlxb.id,
+      ),
+      false,
+    );
+    if (mailboxId === "main") {
+      const manualPriorityLegacyCollections =
+        applyPromoReminderFocusPreferenceRoutingToMailboxCollections(
+          legacyProductionLowCollections,
+          lowPromoReminderFocusPreferences,
+          {},
+          { [normalLegacyProductionAlxb.id]: "priority" },
+        );
+      assert.ok(
+        manualPriorityLegacyCollections.Inbox.some(
+          (message) => message.id === normalLegacyProductionAlxb.id,
+        ),
+      );
+      assert.equal(
+        manualPriorityLegacyCollections.Filtered.some(
+          (message) => message.id === normalLegacyProductionAlxb.id,
+        ),
+        false,
+      );
+    }
+  }
+
+  const persistedMigratedSnapshots = JSON.parse(
+    liveSnapshotStorage.get(liveSnapshotStorageKey) ?? "{}",
+  ) as Record<string, {
+    schemaVersion?: number;
+    messages?: Array<{ internalClassification?: string }>;
+  }>;
+  assert.equal(
+    persistedMigratedSnapshots.main?.schemaVersion,
+    LIVE_INBOX_SNAPSHOT_SCHEMA_VERSION,
+  );
+  assert.equal(
+    persistedMigratedSnapshots.promo?.schemaVersion,
+    LIVE_INBOX_SNAPSHOT_SCHEMA_VERSION,
+  );
+  assert.equal(
+    persistedMigratedSnapshots.main?.messages?.[0]?.internalClassification,
+    "promo_reminder",
+  );
+  assert.equal(
+    persistedMigratedSnapshots.promo?.messages?.[0]?.internalClassification,
+    "promo_reminder",
+  );
+
+  const reloadedMigratedSnapshots = readLiveInboxSnapshots({
+    main: { mailboxId: "main", provider: "google", folder: "INBOX" },
+    promo: { mailboxId: "promo", provider: "custom_imap", folder: "INBOX" },
+  });
+  assert.equal(
+    reloadedMigratedSnapshots.main?.messages[0]?.internalClassification,
+    "promo_reminder",
+  );
+  assert.equal(
+    reloadedMigratedSnapshots.promo?.messages[0]?.internalClassification,
+    "promo_reminder",
+  );
+
+  liveSnapshotStorage.set(
+    liveSnapshotStorageKey,
+    JSON.stringify({
+      main: {
+        schemaVersion: LIVE_INBOX_SNAPSHOT_SCHEMA_VERSION,
+        classifierVersion: MUSIC_CLASSIFIER_VERSION,
+        provider: "google",
+        inboxId: "main",
+        email: "promo@hysteriarecs.com",
+        fetchedAt: "2026-08-11T08:05:00.000Z",
+        folder: "INBOX",
+        uidValidity: "gmail-api",
+        messages: [legacyProductionAlxbGmailSnapshotMessage],
+      },
+    }),
+  );
+  const currentSchemaSnapshot = readLiveInboxSnapshots({
+    main: { mailboxId: "main", provider: "google", folder: "INBOX" },
+  }).main;
+  assert.equal(
+    currentSchemaSnapshot?.messages[0]?.internalClassification,
+    "promo",
+  );
+} finally {
+  if (originalWindowDescriptor) {
+    Object.defineProperty(globalThis, "window", originalWindowDescriptor);
+  } else {
+    Reflect.deleteProperty(globalThis, "window");
+  }
+}
+
+for (const [id, internalClassification, subject, body, noiseAssessment] of [
+  [
+    "payment-reminder",
+    "business_reminder",
+    "Payment reminder for invoice 2026-0811",
+    "The invoice remains outstanding.",
+    undefined,
+  ],
+  [
+    "promo-payment-reminder",
+    "promo",
+    "Reminder: DJ promo payment invoice 2026-0811",
+    "Listen and download the new release.",
+    undefined,
+  ],
+  [
+    "promo-body-payment-reminder",
+    "promo",
+    "Reminder: action required for your DJ promo",
+    "The outstanding invoice payment is still due. Listen and download the new release.",
+    undefined,
+  ],
+  [
+    "promo-contract-reminder",
+    "promo",
+    "Reminder: DJ promo contract approval needed",
+    "Listen and download the new release.",
+    undefined,
+  ],
+  [
+    "promo-security-reminder",
+    "promo",
+    "Reminder: DJ promo security verification",
+    "Listen and download the new release.",
+    undefined,
+  ],
+  [
+    "promo-meeting-reminder",
+    "promo",
+    "Reminder: DJ promo meeting tomorrow",
+    "Listen and download the new release.",
+    undefined,
+  ],
+  [
+    "promo-subscription-reminder",
+    "promo",
+    "Reminder: DJ promo subscription renewal",
+    "Listen and download the new release.",
+    undefined,
+  ],
+  [
+    "ordinary-promo-compatibility",
+    "promo",
+    "New DJ promo available",
+    "Listen and download the new release.",
+    undefined,
+  ],
+  [
+    "forwarded-promo-reminder-compatibility",
+    "promo",
+    "Fwd: Friendly reminder: new DJ promo available",
+    "Listen and download the new release.",
+    undefined,
+  ],
+  [
+    "noise-promo-reminder",
+    "promo",
+    "Friendly reminder: new DJ promo available",
+    "Listen and download the new release.",
+    strongNoiseAssessment,
+  ],
+] as const) {
+  const candidate = {
+    ...legacyProductionAlxbGmailSnapshotMessage,
+    id,
+    internalClassification,
+    subject,
+    snippet: body,
+    body: [body],
+    ...(noiseAssessment ?? {}),
+  };
+  const candidateBeforeCompatibility = structuredClone(candidate);
+  const compatibleMessage =
+    upconvertLegacyPromoReminderSnapshotMessage(candidate);
+
+  assert.deepEqual(candidate, candidateBeforeCompatibility, id);
+  assert.equal(
+    compatibleMessage.internalClassification,
+    internalClassification,
+    id,
+  );
+  assert.equal(
+    compatibleMessage.providerMessageId,
+    candidateBeforeCompatibility.providerMessageId,
+  );
+  assert.equal(
+    compatibleMessage.providerThreadId,
+    candidateBeforeCompatibility.providerThreadId,
+  );
+  assert.deepEqual(
+    compatibleMessage.labelIds,
+    candidateBeforeCompatibility.labelIds,
+  );
+  assert.equal(
+    compatibleMessage.providerFolder,
+    candidateBeforeCompatibility.providerFolder,
+  );
+}
+
+for (const [id, compatibilityGuard] of [
+  ["reply-ui-signal", { ui_signal: "REPLY" }],
+  ["reply-signal", { signal: "Follow-up" }],
+  ["auto-reply", { isAutoReply: true }],
+  ["shared-message", { isShared: true }],
+  ["collaboration-message", { collaboration: { updatedAt: 1 } }],
+] as const) {
+  const guardedMessage = upconvertLegacyPromoReminderSnapshotMessage({
+    ...legacyProductionAlxbGmailSnapshotMessage,
+    id,
+    ...compatibilityGuard,
+  });
+  assert.equal(guardedMessage.internalClassification, "promo", id);
+}
+
+const footerOnlyReminderPromo =
+  upconvertLegacyPromoReminderSnapshotMessage({
+    ...legacyProductionAlxbGmailSnapshotMessage,
+    id: "footer-only-reminder-promo",
+    sender: "Artist Updates",
+    from: "artist-updates@example.test",
+    subject: "New release promo",
+    snippet: "Listen to our new release.",
+    body: ["We are reminding you about promotional emails."],
+  });
+assert.equal(footerOnlyReminderPromo.internalClassification, "promo");
+
+const legacyAlxbWithSubscriptionFooter =
+  upconvertLegacyPromoReminderSnapshotMessage({
+    ...legacyProductionAlxbGmailSnapshotMessage,
+    body: [
+      "Listen and download the promo when you are ready.",
+      "Manage your subscription or unsubscribe from future promo mail.",
+    ],
+  });
+assert.equal(
+  legacyAlxbWithSubscriptionFooter.internalClassification,
+  "promo_reminder",
+);
+const legacyPromoWithBodyOnlyPaymentContext =
+  upconvertLegacyPromoReminderSnapshotMessage({
+    ...legacyProductionAlxbGmailSnapshotMessage,
+    subject: "Reminder: action required for your DJ promo",
+    snippet: "Your promo invite is still available.",
+    body: [
+      "The outstanding invoice payment is still due.",
+      "Listen and download the new release.",
+    ],
+  });
+assert.equal(
+  legacyPromoWithBodyOnlyPaymentContext.internalClassification,
+  "promo",
+);
 
 for (const rawInternalClassification of [undefined, "unknown"] as const) {
   const legacyReminder = projectAlxbReminder(

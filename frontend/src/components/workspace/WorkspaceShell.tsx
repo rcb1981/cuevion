@@ -8976,6 +8976,13 @@ export function shouldRouteMessageToFilteredFolder(
   }
 
   if (
+    message.internalClassification === "promo_reminder" &&
+    message.v7_final_priority?.trim().toUpperCase() === "NORMAL"
+  ) {
+    return false;
+  }
+
+  if (
     message.signal === "Priority" ||
     message.signal === "Active" ||
     message.signal === "For review" ||
@@ -9094,6 +9101,48 @@ export function applyFocusPreferenceRoutingToMailboxCollections(
     ...collections,
     Inbox: nextInbox,
     Filtered: nextFiltered,
+  };
+}
+
+export function applyPromoReminderFocusPreferenceRoutingToMailboxCollections(
+  collections: MailboxCollections,
+  focusPreferences: UserConfig["focusPreferences"],
+  senderCategoryLearning: SenderCategoryLearningStore,
+  manualPriorityOverrides: ManualPriorityOverrideStore = {},
+  options?: PriorityVisibilityOptions,
+): MailboxCollections {
+  const promoReminderCollections = {
+    ...collections,
+    Inbox: collections.Inbox.filter(
+      (message) => message.internalClassification === "promo_reminder",
+    ),
+    Filtered: collections.Filtered.filter(
+      (message) => message.internalClassification === "promo_reminder",
+    ),
+  };
+  const adjustedPromoReminderCollections =
+    applyFocusPreferenceRoutingToMailboxCollections(
+      promoReminderCollections,
+      focusPreferences,
+      senderCategoryLearning,
+      manualPriorityOverrides,
+      options,
+    );
+
+  return {
+    ...collections,
+    Inbox: [
+      ...collections.Inbox.filter(
+        (message) => message.internalClassification !== "promo_reminder",
+      ),
+      ...adjustedPromoReminderCollections.Inbox,
+    ],
+    Filtered: [
+      ...collections.Filtered.filter(
+        (message) => message.internalClassification !== "promo_reminder",
+      ),
+      ...adjustedPromoReminderCollections.Filtered,
+    ],
   };
 }
 
@@ -38717,6 +38766,57 @@ export function WorkspaceShell({
       mailboxFocusPreferenceOverrides,
     ],
   );
+  const effectiveFocusPreferencesByMailboxRef = useRef(
+    effectiveFocusPreferencesByMailbox,
+  );
+  effectiveFocusPreferencesByMailboxRef.current =
+    effectiveFocusPreferencesByMailbox;
+  const normalizedUserFocusPreferencesRef = useRef(
+    normalizedUserFocusPreferences,
+  );
+  normalizedUserFocusPreferencesRef.current = normalizedUserFocusPreferences;
+  const manualPriorityOverridesRef = useRef(manualPriorityOverrides);
+  manualPriorityOverridesRef.current = manualPriorityOverrides;
+  const senderCategoryLearningRef = useRef(senderCategoryLearning);
+  senderCategoryLearningRef.current = senderCategoryLearning;
+  const applyCurrentFocusPreferencesToLiveMailboxStore = (
+    store: MailboxStore,
+    mailboxIds: readonly InboxId[],
+  ) =>
+    mailboxIds.reduce<MailboxStore>((nextStore, mailboxId) => {
+      const collections = nextStore[mailboxId];
+      if (!collections) {
+        return nextStore;
+      }
+
+      const mailbox =
+        savedManagedInboxes.find((candidate) => candidate.id === mailboxId) ??
+        orderedMailboxes.find((candidate) => candidate.id === mailboxId) ??
+        null;
+      const focusPreferences =
+        effectiveFocusPreferencesByMailboxRef.current[mailboxId] ??
+        normalizedUserFocusPreferencesRef.current;
+      const currentManualPriorityOverrides =
+        manualPriorityOverridesRef.current;
+      const currentSenderCategoryLearning =
+        senderCategoryLearningRef.current;
+
+      return {
+        ...nextStore,
+        [mailboxId]:
+          applyPromoReminderFocusPreferenceRoutingToMailboxCollections(
+            collections,
+            focusPreferences,
+            currentSenderCategoryLearning,
+            currentManualPriorityOverrides,
+            {
+              preferPromoMailboxContext: mailbox
+                ? isPromoMailboxContext(mailbox)
+                : false,
+            },
+          ),
+      };
+    }, store);
   const sidebarMailboxUnreadCounts = useMemo(() => {
     if (productAccess !== "bundle" || showBundleOrganizerManagedMail) {
       return mailboxUnreadCounts;
@@ -41196,15 +41296,19 @@ export function WorkspaceShell({
     window.setTimeout(() => {
       setMailboxStore((currentStore) => {
         const mailboxCollections = currentStore[inboxId];
+        const currentManualPriorityOverrides =
+          manualPriorityOverridesRef.current;
+        const currentSenderCategoryLearning =
+          senderCategoryLearningRef.current;
 
         if (!mailboxCollections) {
           return normalizeMailboxStore(
             currentStore,
             orderedMailboxes,
-            senderCategoryLearning,
+            currentSenderCategoryLearning,
             messageOwnershipInteractions,
             currentWorkspaceUserId,
-            manualPriorityOverrides,
+            currentManualPriorityOverrides,
           );
         }
 
@@ -41212,8 +41316,8 @@ export function WorkspaceShell({
           applyFocusPreferenceRoutingToMailboxCollections(
             mailboxCollections,
             nextFocusPreferences,
-            senderCategoryLearning,
-            manualPriorityOverrides,
+            currentSenderCategoryLearning,
+            currentManualPriorityOverrides,
             {
               preferPromoMailboxContext: shouldPreferPromoMailboxContext,
             },
@@ -41225,10 +41329,10 @@ export function WorkspaceShell({
             [inboxId]: preferenceAdjustedCollections,
           },
           orderedMailboxes,
-          senderCategoryLearning,
+          currentSenderCategoryLearning,
           messageOwnershipInteractions,
           currentWorkspaceUserId,
-          manualPriorityOverrides,
+          currentManualPriorityOverrides,
         );
       });
       setIsApplyingFocusPreferences(false);
@@ -41326,13 +41430,17 @@ export function WorkspaceShell({
         },
       };
 
-      return normalizeMailboxStore(
+      const normalizedStore = normalizeMailboxStore(
         nextStore,
         orderedMailboxes,
         senderCategoryLearning,
         messageOwnershipInteractions,
         currentWorkspaceUserId,
         manualPriorityOverrides,
+      );
+      return applyCurrentFocusPreferencesToLiveMailboxStore(
+        normalizedStore,
+        [targetMailbox.id],
       );
     });
   };
@@ -41365,13 +41473,17 @@ export function WorkspaceShell({
         },
       };
 
-      return normalizeMailboxStore(
+      const normalizedStore = normalizeMailboxStore(
         nextStore,
         orderedMailboxes,
         senderCategoryLearning,
         messageOwnershipInteractions,
         currentWorkspaceUserId,
         manualPriorityOverrides,
+      );
+      return applyCurrentFocusPreferencesToLiveMailboxStore(
+        normalizedStore,
+        [targetMailbox.id],
       );
     });
 
@@ -42427,7 +42539,7 @@ export function WorkspaceShell({
         };
       });
 
-      return normalizeMailboxStore(
+      const normalizedStore = normalizeMailboxStore(
         nextStore,
         orderedMailboxes,
         senderCategoryLearning,
@@ -42435,9 +42547,15 @@ export function WorkspaceShell({
         currentWorkspaceUserId,
         manualPriorityOverrides,
       );
+      return applyCurrentFocusPreferencesToLiveMailboxStore(
+        normalizedStore,
+        connectedSnapshots.map(({ mailbox }) => mailbox.id),
+      );
     });
   }, [
+    effectiveFocusPreferencesByMailbox,
     liveMailboxSyncKey,
+    manualPriorityOverrides,
     messageUnreadOverrides,
     senderCategoryLearning,
     messageOwnershipInteractions,
