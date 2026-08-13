@@ -3,7 +3,12 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
   FULL_MESSAGE_MODAL_VIEWPORT,
+  clampFullMessageModalSize,
+  createDefaultFullMessageModalSize,
+  planFullMessageModalComposeAction,
   reduceFullMessageModalInteraction,
+  resizeFullMessageModalSize,
+  resolveModalComposeReturnMessageId,
   resolveFullMessageModalMessageId,
   type FullMessageModalInteractionState,
 } from "./fullMessageModalState";
@@ -92,16 +97,276 @@ const initialState: FullMessageModalInteractionState = {
   );
 }
 
-assert.deepEqual(FULL_MESSAGE_MODAL_VIEWPORT, {
-  height: "88dvh",
-  maxHeight: "calc(100dvh - 2rem)",
-  maxWidth: "calc(100vw - 2rem)",
-  width: "88vw",
-});
-
 const workspaceShellSource = readFileSync(
   resolve(process.cwd(), "src/components/workspace/WorkspaceShell.tsx"),
   "utf8",
+);
+
+const correctionFailures: string[] = [];
+const recordCorrectionExpectation = (name: string, expectation: () => void) => {
+  try {
+    expectation();
+  } catch (error) {
+    correctionFailures.push(
+      `${name}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+};
+
+recordCorrectionExpectation("modal-origin compose presentation", () => {
+  const renderMessageActionsSource = workspaceShellSource.slice(
+    workspaceShellSource.indexOf("const renderMessageActions ="),
+    workspaceShellSource.indexOf("const serializeAttachmentBlob ="),
+  );
+  const hasModalOriginWiring =
+    /const composePresentation\s*=\s*placement === "full" \? "modal" : "workspace"/.test(
+      renderMessageActionsSource,
+    ) &&
+    /isComposeOpen\s*&&\s*composePresentation === "modal"[\s\S]{0,800}WorkspaceModalLayer/.test(
+      workspaceShellSource,
+    );
+
+  assert.equal(
+    hasModalOriginWiring ? "modal" : "workspace",
+    "modal",
+    "baseline currently routes full-message actions to the workspace compose presentation",
+  );
+});
+
+recordCorrectionExpectation("modal compose action plan", () => {
+  (["reply", "reply_all", "forward"] as const).forEach((mode) => {
+    assert.deepEqual(
+      planFullMessageModalComposeAction("message-root", mode),
+      {
+        composePresentation: "modal",
+        isComposeOpen: true,
+        isFullMessageOpen: false,
+        mode,
+        sourceMessageId: "message-root",
+      },
+      `${mode} must replace the message presentation with modal compose`,
+    );
+  });
+});
+
+recordCorrectionExpectation("modal compose return target", () => {
+  assert.equal(
+    resolveModalComposeReturnMessageId("message-root", ["message-root"]),
+    "message-root",
+    "a valid modal source must reopen after discard or send",
+  );
+  assert.equal(
+    resolveModalComposeReturnMessageId("message-root", ["message-other"]),
+    null,
+    "a removed modal source must fall back to the inbox",
+  );
+});
+
+recordCorrectionExpectation("default modal width contract", () => {
+  assert.deepEqual(FULL_MESSAGE_MODAL_VIEWPORT, {
+    height: "88dvh",
+    maxHeight: "calc(100dvh - 2rem)",
+    maxWidth: "min(1320px, calc(100vw - 2rem))",
+    width: "84vw",
+  });
+  assert.deepEqual(createDefaultFullMessageModalSize({ width: 1440, height: 900 }), {
+    width: 1209.6,
+    height: 792,
+  });
+  assert.deepEqual(createDefaultFullMessageModalSize({ width: 1920, height: 1080 }), {
+    width: 1320,
+    height: 950.4,
+  });
+});
+
+recordCorrectionExpectation("user resize geometry contract", () => {
+  assert.match(
+    workspaceShellSource,
+    /data-full-message-modal-resize-handle/,
+    "baseline currently has no user-resize handle",
+  );
+  const viewport = { width: 1280, height: 720 };
+
+  assert.deepEqual(
+    resizeFullMessageModalSize(
+      { width: 1000, height: 650 },
+      { width: -500, height: -400 },
+      viewport,
+    ),
+    { width: 720, height: 480 },
+    "desktop product minimums must clamp a smaller resize",
+  );
+  assert.deepEqual(
+    resizeFullMessageModalSize(
+      { width: 1000, height: 650 },
+      { width: 1000, height: 1000 },
+      viewport,
+    ),
+    { width: 1248, height: 688 },
+    "a larger resize must stop at the 16px viewport margin",
+  );
+  assert.deepEqual(
+    resizeFullMessageModalSize(
+      { width: 1320, height: 800 },
+      { width: 1000, height: 0 },
+      { width: 1920, height: 1080 },
+    ),
+    { width: 1888, height: 800 },
+    "the 1320px cap belongs to the default, not to the user's larger resize",
+  );
+  assert.deepEqual(
+    clampFullMessageModalSize(
+      { width: 720, height: 480 },
+      { width: 650, height: 430 },
+    ),
+    { width: 618, height: 398 },
+    "viewport safety must win when the viewport is below the product minimum",
+  );
+  assert.deepEqual(
+    clampFullMessageModalSize(
+      { width: 1200, height: 800 },
+      { width: 1024, height: 700 },
+    ),
+    { width: 992, height: 668 },
+    "an already resized modal must recontain after viewport shrink",
+  );
+  assert.deepEqual(
+    createDefaultFullMessageModalSize(viewport),
+    { width: 1075.2, height: 633.6 },
+    "a fresh opening must reset rather than reuse custom geometry",
+  );
+});
+
+recordCorrectionExpectation("modal action wiring", () => {
+  const renderMessageActionsSource = workspaceShellSource.slice(
+    workspaceShellSource.indexOf("const renderMessageActions ="),
+    workspaceShellSource.indexOf("const serializeAttachmentBlob ="),
+  );
+
+  assert.match(
+    renderMessageActionsSource,
+    /const composePresentation\s*=\s*placement === "full" \? "modal" : "workspace"/,
+    "full placement must preserve modal origin while split placement stays workspace",
+  );
+  (["reply", "reply_all", "forward"] as const).forEach((mode) => {
+    assert.match(
+      renderMessageActionsSource,
+      new RegExp(
+        `openComposeFromMessage\\(message, "${mode}", composePresentation\\)`,
+      ),
+      `${mode} must pass the presentation selected from the action placement`,
+    );
+  });
+  assert.match(
+    workspaceShellSource,
+    /isComposeOpen\s*&&\s*composePresentation === "modal"[\s\S]{0,800}WorkspaceModalLayer/,
+    "modal-origin compose must render inside the workspace modal layer",
+  );
+});
+
+recordCorrectionExpectation("shared composer and normal compose regression", () => {
+  assert.equal(
+    workspaceShellSource.match(/data-desktop-composer/g)?.length,
+    1,
+    "workspace and modal placements must render the same desktop composer element",
+  );
+  assert.equal(
+    workspaceShellSource.match(/const sendMessage\s*=/g)?.length,
+    1,
+    "modal compose must keep the existing send authority",
+  );
+  assert.match(
+    workspaceShellSource,
+    /const openComposeFromMessage\s*=\s*\([\s\S]{0,180}presentation: ComposePresentation = "workspace"/,
+    "non-modal reply, reply-all, and forward entry points must remain workspace presentation by default",
+  );
+  const openComposeSource = workspaceShellSource.slice(
+    workspaceShellSource.indexOf("const openCompose ="),
+    workspaceShellSource.indexOf("const openComposeAttachmentPicker ="),
+  );
+  assert.match(
+    openComposeSource,
+    /setComposePresentation\("workspace"\)/,
+    "the normal Compose button must explicitly retain workspace presentation",
+  );
+});
+
+recordCorrectionExpectation("modal compose completion wiring", () => {
+  const discardSource = workspaceShellSource.slice(
+    workspaceShellSource.indexOf("const discardCompose ="),
+    workspaceShellSource.indexOf("const sendMessage ="),
+  );
+  const sendSource = workspaceShellSource.slice(
+    workspaceShellSource.indexOf("const sendMessage ="),
+    workspaceShellSource.indexOf("const closeMenus ="),
+  );
+
+  assert.match(
+    discardSource,
+    /composePresentation === "modal"[\s\S]{0,350}restoreFullMessageModalAfterCompose\(\)/,
+    "discarding modal compose must return to its valid source message",
+  );
+  assert.match(
+    sendSource,
+    /if \(composePresentation === "modal"\)[\s\S]{0,250}restoreFullMessageModalAfterCompose\(\)/,
+    "successful modal send must use the same source-return path for every mode",
+  );
+  assert.match(
+    workspaceShellSource,
+    /function restoreFullMessageModalAfterCompose\(\)[\s\S]{0,500}resolveModalComposeReturnMessageId[\s\S]{0,600}setIsFullMessageOpen\(true\)/,
+    "the return path must validate the source before reopening the message modal",
+  );
+  assert.match(
+    workspaceShellSource,
+    /function restoreFullMessageModalAfterCompose\(\)[\s\S]{0,350}latestMailboxStoreRef\.current/,
+    "async send completion must validate against the latest mailbox store",
+  );
+  assert.match(
+    workspaceShellSource,
+    /ref=\{composeModalCloseButtonRef\}[\s\S]{0,150}setIsCloseModalOpen\(true\)/,
+    "Close must retain the established save/discard confirmation",
+  );
+  assert.match(
+    workspaceShellSource,
+    /ref=\{composeCloseConfirmationCancelRef\}[\s\S]{0,150}onClick=\{continueEditingCompose\}/,
+    "confirmation Cancel must keep modal compose open and restore focus",
+  );
+});
+
+recordCorrectionExpectation("resize interaction wiring", () => {
+  assert.match(
+    workspaceShellSource,
+    /setPointerCapture\(event\.pointerId\)/,
+    "the resize handle must capture its pointer",
+  );
+  assert.match(
+    workspaceShellSource,
+    /onPointerCancel=\{handleFullMessageModalResizePointerEnd\}/,
+    "pointer cancellation must share resize cleanup",
+  );
+  assert.match(
+    workspaceShellSource,
+    /releasePointerCapture\(pointerId\)/,
+    "resize completion must release pointer capture",
+  );
+  assert.match(
+    workspaceShellSource,
+    /window\.addEventListener\("resize", keepFullMessageModalInViewport\)[\s\S]{0,250}window\.removeEventListener\("resize", keepFullMessageModalInViewport\)/,
+    "viewport shrink handling must be installed and cleaned up",
+  );
+  assert.match(
+    workspaceShellSource,
+    /if \(options\?\.openFull\) \{\s*resetFullMessageModalSize\(\)/,
+    "each fresh double-click opening must reset to default geometry",
+  );
+});
+
+assert.equal(
+  correctionFailures.length,
+  0,
+  `full-message modal correction expectations failed:\n${correctionFailures
+    .map((failure) => `- ${failure}`)
+    .join("\n")}`,
 );
 
 assert.doesNotMatch(
