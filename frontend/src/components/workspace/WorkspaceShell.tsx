@@ -42,11 +42,15 @@ import {
   getContextMenuPosition,
 } from "./contextMenuGeometry";
 import {
+  COMPOSE_MODAL_VIEWPORT,
   FULL_MESSAGE_MODAL_VIEWPORT,
+  clampComposeModalSize,
   clampFullMessageModalSize,
+  createDefaultComposeModalSize,
   createDefaultFullMessageModalSize,
   planFullMessageModalComposeAction,
   reduceFullMessageModalInteraction,
+  resizeComposeModalSize,
   resizeFullMessageModalSize,
   resolveModalComposeReturnMessageId,
   resolveFullMessageModalMessageId,
@@ -13452,13 +13456,14 @@ function MailboxView({
   const fullMessageModalDialogRef = useRef<HTMLElement | null>(null);
   const fullMessageModalCloseButtonRef = useRef<HTMLButtonElement | null>(null);
   const fullMessageModalReturnFocusRef = useRef<HTMLElement | null>(null);
-  const fullMessageModalResizeSessionRef = useRef<{
+  const modalResizeSessionRef = useRef<{
+    kind: "compose" | "full-message";
     pointerId: number;
     startClientX: number;
     startClientY: number;
     startSize: FullMessageModalSize;
   } | null>(null);
-  const fullMessageModalResizeBodyStyleRef = useRef<{
+  const modalResizeBodyStyleRef = useRef<{
     cursor: string;
     userSelect: string;
   } | null>(null);
@@ -13472,6 +13477,8 @@ function MailboxView({
   const [isComposeOpen, setIsComposeOpen] = useState(false);
   const [isFullMessageOpen, setIsFullMessageOpen] = useState(false);
   const [fullMessageModalSize, setFullMessageModalSize] =
+    useState<FullMessageModalSize | null>(null);
+  const [composeModalSize, setComposeModalSize] =
     useState<FullMessageModalSize | null>(null);
   const [composePresentation, setComposePresentation] =
     useState<ComposePresentation>("workspace");
@@ -14018,7 +14025,7 @@ function MailboxView({
       ? clampMailListPaneWidth(preferredMailListPaneWidth)
       : null;
 
-  const getFullMessageModalViewport = (): FullMessageModalSize => ({
+  const getModalViewport = (): FullMessageModalSize => ({
     width: window.innerWidth,
     height: window.innerHeight,
   });
@@ -14030,11 +14037,11 @@ function MailboxView({
     }
 
     setFullMessageModalSize(
-      createDefaultFullMessageModalSize(getFullMessageModalViewport()),
+      createDefaultFullMessageModalSize(getModalViewport()),
     );
   };
 
-  const finishFullMessageModalResize = (
+  const finishModalResize = (
     target?: HTMLElement,
     pointerId?: number,
   ) => {
@@ -14046,26 +14053,31 @@ function MailboxView({
       target.releasePointerCapture(pointerId);
     }
 
-    fullMessageModalResizeSessionRef.current = null;
-    const bodyStyle = fullMessageModalResizeBodyStyleRef.current;
+    modalResizeSessionRef.current = null;
+    const bodyStyle = modalResizeBodyStyleRef.current;
     if (bodyStyle) {
       document.body.style.cursor = bodyStyle.cursor;
       document.body.style.userSelect = bodyStyle.userSelect;
-      fullMessageModalResizeBodyStyleRef.current = null;
+      modalResizeBodyStyleRef.current = null;
     }
   };
 
-  const handleFullMessageModalResizePointerDown = (
+  const handleModalResizePointerDown = (
     event: ReactPointerEvent<HTMLButtonElement>,
+    kind: "compose" | "full-message",
   ) => {
-    const dialog = fullMessageModalDialogRef.current;
+    const dialog =
+      kind === "compose"
+        ? composeModalDialogRef.current
+        : fullMessageModalDialogRef.current;
     if (!dialog || typeof window === "undefined") {
       return;
     }
 
     event.preventDefault();
     const rect = dialog.getBoundingClientRect();
-    fullMessageModalResizeSessionRef.current = {
+    modalResizeSessionRef.current = {
+      kind,
       pointerId: event.pointerId,
       startClientX: event.clientX,
       startClientY: event.clientY,
@@ -14074,7 +14086,7 @@ function MailboxView({
         height: rect.height,
       },
     };
-    fullMessageModalResizeBodyStyleRef.current = {
+    modalResizeBodyStyleRef.current = {
       cursor: document.body.style.cursor,
       userSelect: document.body.style.userSelect,
     };
@@ -14083,42 +14095,48 @@ function MailboxView({
     event.currentTarget.setPointerCapture(event.pointerId);
   };
 
-  const handleFullMessageModalResizePointerMove = (
+  const handleModalResizePointerMove = (
     event: ReactPointerEvent<HTMLButtonElement>,
   ) => {
-    const session = fullMessageModalResizeSessionRef.current;
+    const session = modalResizeSessionRef.current;
     if (!session || session.pointerId !== event.pointerId) {
       return;
     }
 
     event.preventDefault();
-    setFullMessageModalSize(
-      resizeFullMessageModalSize(
-        session.startSize,
-        {
-          // The dialog remains centered, so each pointer pixel moves the near
-          // edge by half the size delta. Doubling keeps the handle under the
-          // pointer without introducing draggable-window position state.
-          width: (event.clientX - session.startClientX) * 2,
-          height: (event.clientY - session.startClientY) * 2,
-        },
-        getFullMessageModalViewport(),
-      ),
-    );
+    const delta = {
+      // The dialog remains centered, so each pointer pixel moves the near
+      // edge by half the size delta. Doubling keeps the handle under the
+      // pointer without introducing draggable-window position state.
+      width: (event.clientX - session.startClientX) * 2,
+      height: (event.clientY - session.startClientY) * 2,
+    };
+    const viewport = getModalViewport();
+
+    if (session.kind === "compose") {
+      setComposeModalSize(
+        resizeComposeModalSize(session.startSize, delta, viewport),
+      );
+    } else {
+      setFullMessageModalSize(
+        resizeFullMessageModalSize(session.startSize, delta, viewport),
+      );
+    }
   };
 
-  const handleFullMessageModalResizePointerEnd = (
+  const handleModalResizePointerEnd = (
     event: ReactPointerEvent<HTMLButtonElement>,
   ) => {
-    if (fullMessageModalResizeSessionRef.current?.pointerId !== event.pointerId) {
+    if (modalResizeSessionRef.current?.pointerId !== event.pointerId) {
       return;
     }
 
-    finishFullMessageModalResize(event.currentTarget, event.pointerId);
+    finishModalResize(event.currentTarget, event.pointerId);
   };
 
-  const handleFullMessageModalResizeKeyDown = (
+  const handleModalResizeKeyDown = (
     event: ReactKeyboardEvent<HTMLButtonElement>,
+    kind: "compose" | "full-message",
   ) => {
     const direction = {
       ArrowDown: { width: 0, height: 1 },
@@ -14132,16 +14150,29 @@ function MailboxView({
 
     event.preventDefault();
     const step = event.shiftKey ? 48 : 16;
-    setFullMessageModalSize((current) =>
-      resizeFullMessageModalSize(
-        current ?? createDefaultFullMessageModalSize(getFullMessageModalViewport()),
-        {
-          width: direction.width * step,
-          height: direction.height * step,
-        },
-        getFullMessageModalViewport(),
-      ),
-    );
+    const delta = {
+      width: direction.width * step,
+      height: direction.height * step,
+    };
+    const viewport = getModalViewport();
+
+    if (kind === "compose") {
+      setComposeModalSize((current) =>
+        resizeComposeModalSize(
+          current ?? createDefaultComposeModalSize(viewport),
+          delta,
+          viewport,
+        ),
+      );
+    } else {
+      setFullMessageModalSize((current) =>
+        resizeFullMessageModalSize(
+          current ?? createDefaultFullMessageModalSize(viewport),
+          delta,
+          viewport,
+        ),
+      );
+    }
   };
 
   const continueEditingCompose = () => {
@@ -14265,7 +14296,7 @@ function MailboxView({
 
     closeReadingLearningMenu();
     setDetailActionsMenuState(null);
-    finishFullMessageModalResize();
+    finishModalResize();
     setIsFullMessageOpen(nextState.isOpen);
 
     const storedReturnFocusTarget = fullMessageModalReturnFocusRef.current;
@@ -15659,7 +15690,7 @@ function MailboxView({
     }
 
     const keepFullMessageModalInViewport = () => {
-      const viewport = getFullMessageModalViewport();
+      const viewport = getModalViewport();
       setFullMessageModalSize((current) =>
         current
           ? clampFullMessageModalSize(current, viewport)
@@ -15672,9 +15703,38 @@ function MailboxView({
 
     return () => {
       window.removeEventListener("resize", keepFullMessageModalInViewport);
-      finishFullMessageModalResize();
+      finishModalResize();
     };
   }, [isFullMessageOpen]);
+
+  useEffect(() => {
+    if (
+      !isComposeOpen ||
+      composePresentation !== "modal" ||
+      isMobileViewport ||
+      typeof window === "undefined"
+    ) {
+      return;
+    }
+
+    setComposeModalSize(createDefaultComposeModalSize(getModalViewport()));
+
+    const keepComposeModalInViewport = () => {
+      const viewport = getModalViewport();
+      setComposeModalSize((current) =>
+        current
+          ? clampComposeModalSize(current, viewport)
+          : createDefaultComposeModalSize(viewport),
+      );
+    };
+
+    window.addEventListener("resize", keepComposeModalInViewport);
+
+    return () => {
+      window.removeEventListener("resize", keepComposeModalInViewport);
+      finishModalResize();
+    };
+  }, [composePresentation, isComposeOpen, isMobileViewport]);
 
   useEffect(() => {
     if (
@@ -21872,6 +21932,8 @@ function MailboxView({
   const composeCloseConfirmation = (
     <div
       data-compose-close-confirmation-layer
+      data-theme={themeMode}
+      style={{ colorScheme: themeMode }}
       className={`${
         composePresentation === "modal"
           ? "fixed z-[340] rounded-none"
@@ -23627,16 +23689,46 @@ function MailboxView({
                         role="dialog"
                         aria-modal="true"
                         aria-labelledby="desktop-compose-title"
-                        className="flex min-h-0 shrink-0 flex-col overflow-hidden rounded-[24px] shadow-[0_28px_80px_rgba(61,44,32,0.18),0_10px_26px_rgba(61,44,32,0.1)]"
-                        style={{
-                          height: "76dvh",
-                          maxHeight: "calc(100dvh - 2rem)",
-                          maxWidth: "min(1180px, calc(100vw - 2rem))",
-                          width: "70vw",
-                        }}
+                        className="relative flex min-h-0 shrink-0 flex-col overflow-hidden rounded-[24px] shadow-[0_28px_80px_rgba(61,44,32,0.18),0_10px_26px_rgba(61,44,32,0.1)]"
+                        style={
+                          composeModalSize
+                            ? {
+                                height: composeModalSize.height,
+                                maxHeight: "calc(100dvh - 2rem)",
+                                maxWidth: "calc(100vw - 2rem)",
+                                width: composeModalSize.width,
+                              }
+                            : COMPOSE_MODAL_VIEWPORT
+                        }
                         onMouseDown={(event) => event.stopPropagation()}
                       >
                         {desktopComposer}
+                        <button
+                          type="button"
+                          data-compose-modal-resize-handle
+                          aria-label="Resize compose window"
+                          aria-describedby="compose-modal-resize-hint"
+                          onPointerDown={(event) =>
+                            handleModalResizePointerDown(event, "compose")
+                          }
+                          onPointerMove={handleModalResizePointerMove}
+                          onPointerUp={handleModalResizePointerEnd}
+                          onPointerCancel={handleModalResizePointerEnd}
+                          onLostPointerCapture={() => finishModalResize()}
+                          onKeyDown={(event) =>
+                            handleModalResizeKeyDown(event, "compose")
+                          }
+                          className="group absolute bottom-0 right-0 z-20 flex h-8 w-8 touch-none cursor-nwse-resize items-end justify-end rounded-br-[22px] p-2 text-[var(--workspace-text-faint)] focus-visible:outline-none"
+                        >
+                          <span
+                            aria-hidden="true"
+                            className="h-3 w-3 rounded-br-[2px] border-b-2 border-r-2 border-current opacity-45 transition-opacity group-hover:opacity-80 group-focus-visible:opacity-100"
+                          />
+                        </button>
+                        <span id="compose-modal-resize-hint" className="sr-only">
+                          Drag to resize. Use the arrow keys for precise resizing and
+                          hold Shift for larger steps.
+                        </span>
                       </section>
                     </WorkspaceModalLayer>,
                     document.body,
@@ -23834,12 +23926,16 @@ function MailboxView({
                     data-full-message-modal-resize-handle
                     aria-label="Resize full message"
                     aria-describedby="full-message-modal-resize-hint"
-                    onPointerDown={handleFullMessageModalResizePointerDown}
-                    onPointerMove={handleFullMessageModalResizePointerMove}
-                    onPointerUp={handleFullMessageModalResizePointerEnd}
-                    onPointerCancel={handleFullMessageModalResizePointerEnd}
-                    onLostPointerCapture={() => finishFullMessageModalResize()}
-                    onKeyDown={handleFullMessageModalResizeKeyDown}
+                    onPointerDown={(event) =>
+                      handleModalResizePointerDown(event, "full-message")
+                    }
+                    onPointerMove={handleModalResizePointerMove}
+                    onPointerUp={handleModalResizePointerEnd}
+                    onPointerCancel={handleModalResizePointerEnd}
+                    onLostPointerCapture={() => finishModalResize()}
+                    onKeyDown={(event) =>
+                      handleModalResizeKeyDown(event, "full-message")
+                    }
                     className="group absolute bottom-0 right-0 z-20 flex h-8 w-8 touch-none cursor-nwse-resize items-end justify-end rounded-br-[26px] p-2 text-[var(--workspace-text-faint)] focus-visible:outline-none"
                   >
                     <span

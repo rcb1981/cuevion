@@ -2,11 +2,14 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
+  COMPOSE_MODAL_VIEWPORT,
   FULL_MESSAGE_MODAL_VIEWPORT,
   clampFullMessageModalSize,
+  createDefaultComposeModalSize,
   createDefaultFullMessageModalSize,
   planFullMessageModalComposeAction,
   reduceFullMessageModalInteraction,
+  resizeComposeModalSize,
   resizeFullMessageModalSize,
   resolveModalComposeReturnMessageId,
   resolveFullMessageModalMessageId,
@@ -295,12 +298,17 @@ recordCorrectionExpectation("shared composer and normal compose regression", () 
   );
   assert.match(
     workspaceShellSource,
-    /data-modal-compose[\s\S]{0,500}height: "76dvh"[\s\S]{0,180}maxWidth: "min\(1180px, calc\(100vw - 2rem\)\)"[\s\S]{0,100}width: "70vw"/,
+    /data-modal-compose[\s\S]{0,700}composeModalSize[\s\S]{0,400}COMPOSE_MODAL_VIEWPORT/,
     "modal compose must use its own compact, viewport-safe desktop size",
   );
 });
 
 recordCorrectionExpectation("modal compose close confirmation layer", () => {
+  const confirmationSource = workspaceShellSource.slice(
+    workspaceShellSource.indexOf("const composeCloseConfirmation ="),
+    workspaceShellSource.indexOf("\n\n  return (", workspaceShellSource.indexOf("const composeCloseConfirmation =")),
+  );
+
   assert.match(
     workspaceShellSource,
     /ref=\{composeModalCloseButtonRef\}[\s\S]{0,150}setIsCloseModalOpen\(true\)/,
@@ -317,9 +325,83 @@ recordCorrectionExpectation("modal compose close confirmation layer", () => {
     "the portalled compose confirmation must remain above WorkspaceModalLayer z-[321]",
   );
   assert.match(
+    confirmationSource,
+    /data-compose-close-confirmation-layer[\s\S]{0,120}data-theme=\{themeMode\}[\s\S]{0,180}colorScheme: themeMode/,
+    "the body-portalled confirmation must carry the active theme variables and color scheme",
+  );
+  assert.match(
     workspaceShellSource,
     /data-compose-close-confirmation-layer[\s\S]{0,500}role="alertdialog"[\s\S]{0,1600}Save to Drafts[\s\S]{0,800}Discard[\s\S]{0,800}Cancel/,
     "the visible confirmation must retain Save, Discard, and Cancel",
+  );
+});
+
+recordCorrectionExpectation("modal compose resize geometry", () => {
+  assert.deepEqual(COMPOSE_MODAL_VIEWPORT, {
+    height: "76dvh",
+    maxHeight: "calc(100dvh - 2rem)",
+    maxWidth: "min(1180px, calc(100vw - 2rem))",
+    width: "70vw",
+  });
+  assert.deepEqual(
+    createDefaultComposeModalSize({ width: 1280, height: 720 }),
+    { width: 896, height: 547.2 },
+    "a fresh compose opening must use the approved default geometry",
+  );
+  assert.deepEqual(
+    resizeComposeModalSize(
+      { width: 900, height: 600 },
+      { width: -1000, height: -1000 },
+      { width: 1280, height: 720 },
+    ),
+    { width: 760, height: 520 },
+    "compose resizing must preserve a safe writing layout minimum",
+  );
+  assert.deepEqual(
+    resizeComposeModalSize(
+      { width: 900, height: 600 },
+      { width: 1000, height: 1000 },
+      { width: 1280, height: 720 },
+    ),
+    { width: 1248, height: 688 },
+    "compose resizing must stop at the shared 16px viewport margin",
+  );
+  assert.deepEqual(
+    resizeComposeModalSize(
+      { width: 760, height: 520 },
+      { width: -1000, height: -1000 },
+      { width: 650, height: 430 },
+    ),
+    { width: 618, height: 398 },
+    "viewport safety must win below the compose product minimum",
+  );
+});
+
+recordCorrectionExpectation("modal compose resize interaction wiring", () => {
+  assert.match(
+    workspaceShellSource,
+    /const \[composeModalSize, setComposeModalSize\]/,
+    "modal compose needs isolated in-memory resize geometry",
+  );
+  assert.match(
+    workspaceShellSource,
+    /data-compose-modal-resize-handle/,
+    "every desktop compose mode must expose the shared modal resize handle",
+  );
+  assert.match(
+    workspaceShellSource,
+    /modalResizeSessionRef[\s\S]{0,120}kind: "compose" \| "full-message"/,
+    "message and compose must share one resize interaction session",
+  );
+  assert.match(
+    workspaceShellSource,
+    /data-compose-modal-resize-handle[\s\S]{0,500}onPointerMove=\{handleModalResizePointerMove\}[\s\S]{0,400}handleModalResizeKeyDown\(event, "compose"\)/,
+    "compose pointer and keyboard resizing must use the shared lifecycle",
+  );
+  assert.match(
+    workspaceShellSource,
+    /isComposeOpen[\s\S]{0,500}createDefaultComposeModalSize[\s\S]{0,800}window\.addEventListener\("resize"/,
+    "opening must reset compose geometry and browser resize must recontain it",
   );
 });
 
@@ -373,7 +455,7 @@ recordCorrectionExpectation("resize interaction wiring", () => {
   );
   assert.match(
     workspaceShellSource,
-    /onPointerCancel=\{handleFullMessageModalResizePointerEnd\}/,
+    /data-full-message-modal-resize-handle[\s\S]{0,500}onPointerCancel=\{handleModalResizePointerEnd\}/,
     "pointer cancellation must share resize cleanup",
   );
   assert.match(

@@ -5,16 +5,52 @@ export const FULL_MESSAGE_MODAL_VIEWPORT = {
   width: "60vw",
 } as const;
 
+export const COMPOSE_MODAL_VIEWPORT = {
+  height: "76dvh",
+  maxHeight: "calc(100dvh - 2rem)",
+  maxWidth: "min(1180px, calc(100vw - 2rem))",
+  width: "70vw",
+} as const;
+
 const FULL_MESSAGE_MODAL_DEFAULT_WIDTH_RATIO = 0.6;
 const FULL_MESSAGE_MODAL_DEFAULT_HEIGHT_RATIO = 0.66;
 const FULL_MESSAGE_MODAL_DEFAULT_MAX_WIDTH = 1040;
 const FULL_MESSAGE_MODAL_MIN_WIDTH = 720;
 const FULL_MESSAGE_MODAL_MIN_HEIGHT = 480;
-const FULL_MESSAGE_MODAL_VIEWPORT_MARGIN = 16;
+const COMPOSE_MODAL_DEFAULT_WIDTH_RATIO = 0.7;
+const COMPOSE_MODAL_DEFAULT_HEIGHT_RATIO = 0.76;
+const COMPOSE_MODAL_DEFAULT_MAX_WIDTH = 1180;
+const COMPOSE_MODAL_MIN_WIDTH = 760;
+const COMPOSE_MODAL_MIN_HEIGHT = 520;
+const MODAL_VIEWPORT_MARGIN = 16;
 
 export type FullMessageModalSize = {
   width: number;
   height: number;
+};
+
+type ModalSizeContract = {
+  defaultHeightRatio: number;
+  defaultMaxWidth: number;
+  defaultWidthRatio: number;
+  minimumHeight: number;
+  minimumWidth: number;
+};
+
+const fullMessageModalSizeContract: ModalSizeContract = {
+  defaultHeightRatio: FULL_MESSAGE_MODAL_DEFAULT_HEIGHT_RATIO,
+  defaultMaxWidth: FULL_MESSAGE_MODAL_DEFAULT_MAX_WIDTH,
+  defaultWidthRatio: FULL_MESSAGE_MODAL_DEFAULT_WIDTH_RATIO,
+  minimumHeight: FULL_MESSAGE_MODAL_MIN_HEIGHT,
+  minimumWidth: FULL_MESSAGE_MODAL_MIN_WIDTH,
+};
+
+const composeModalSizeContract: ModalSizeContract = {
+  defaultHeightRatio: COMPOSE_MODAL_DEFAULT_HEIGHT_RATIO,
+  defaultMaxWidth: COMPOSE_MODAL_DEFAULT_MAX_WIDTH,
+  defaultWidthRatio: COMPOSE_MODAL_DEFAULT_WIDTH_RATIO,
+  minimumHeight: COMPOSE_MODAL_MIN_HEIGHT,
+  minimumWidth: COMPOSE_MODAL_MIN_WIDTH,
 };
 
 type FullMessageModalComposeMode = "reply" | "reply_all" | "forward";
@@ -41,20 +77,21 @@ export function resolveModalComposeReturnMessageId(
     : null;
 }
 
-export function clampFullMessageModalSize(
+function clampModalSize(
   size: FullMessageModalSize,
   viewport: FullMessageModalSize,
+  contract: ModalSizeContract,
 ): FullMessageModalSize {
   const availableWidth = Math.max(
     0,
-    viewport.width - FULL_MESSAGE_MODAL_VIEWPORT_MARGIN * 2,
+    viewport.width - MODAL_VIEWPORT_MARGIN * 2,
   );
   const availableHeight = Math.max(
     0,
-    viewport.height - FULL_MESSAGE_MODAL_VIEWPORT_MARGIN * 2,
+    viewport.height - MODAL_VIEWPORT_MARGIN * 2,
   );
-  const minimumWidth = Math.min(FULL_MESSAGE_MODAL_MIN_WIDTH, availableWidth);
-  const minimumHeight = Math.min(FULL_MESSAGE_MODAL_MIN_HEIGHT, availableHeight);
+  const minimumWidth = Math.min(contract.minimumWidth, availableWidth);
+  const minimumHeight = Math.min(contract.minimumHeight, availableHeight);
 
   return {
     width: Math.min(availableWidth, Math.max(minimumWidth, size.width)),
@@ -62,19 +99,50 @@ export function clampFullMessageModalSize(
   };
 }
 
+function createDefaultModalSize(
+  viewport: FullMessageModalSize,
+  contract: ModalSizeContract,
+): FullMessageModalSize {
+  return clampModalSize(
+    {
+      width: Math.min(
+        contract.defaultMaxWidth,
+        viewport.width * contract.defaultWidthRatio,
+      ),
+      height: viewport.height * contract.defaultHeightRatio,
+    },
+    viewport,
+    contract,
+  );
+}
+
+function resizeModalSize(
+  startSize: FullMessageModalSize,
+  delta: FullMessageModalSize,
+  viewport: FullMessageModalSize,
+  contract: ModalSizeContract,
+): FullMessageModalSize {
+  return clampModalSize(
+    {
+      width: startSize.width + delta.width,
+      height: startSize.height + delta.height,
+    },
+    viewport,
+    contract,
+  );
+}
+
+export function clampFullMessageModalSize(
+  size: FullMessageModalSize,
+  viewport: FullMessageModalSize,
+): FullMessageModalSize {
+  return clampModalSize(size, viewport, fullMessageModalSizeContract);
+}
+
 export function createDefaultFullMessageModalSize(
   viewport: FullMessageModalSize,
 ): FullMessageModalSize {
-  return clampFullMessageModalSize(
-    {
-      width: Math.min(
-        FULL_MESSAGE_MODAL_DEFAULT_MAX_WIDTH,
-        viewport.width * FULL_MESSAGE_MODAL_DEFAULT_WIDTH_RATIO,
-      ),
-      height: viewport.height * FULL_MESSAGE_MODAL_DEFAULT_HEIGHT_RATIO,
-    },
-    viewport,
-  );
+  return createDefaultModalSize(viewport, fullMessageModalSizeContract);
 }
 
 export function resizeFullMessageModalSize(
@@ -82,13 +150,33 @@ export function resizeFullMessageModalSize(
   delta: FullMessageModalSize,
   viewport: FullMessageModalSize,
 ): FullMessageModalSize {
-  return clampFullMessageModalSize(
-    {
-      width: startSize.width + delta.width,
-      height: startSize.height + delta.height,
-    },
+  return resizeModalSize(
+    startSize,
+    delta,
     viewport,
+    fullMessageModalSizeContract,
   );
+}
+
+export function clampComposeModalSize(
+  size: FullMessageModalSize,
+  viewport: FullMessageModalSize,
+): FullMessageModalSize {
+  return clampModalSize(size, viewport, composeModalSizeContract);
+}
+
+export function createDefaultComposeModalSize(
+  viewport: FullMessageModalSize,
+): FullMessageModalSize {
+  return createDefaultModalSize(viewport, composeModalSizeContract);
+}
+
+export function resizeComposeModalSize(
+  startSize: FullMessageModalSize,
+  delta: FullMessageModalSize,
+  viewport: FullMessageModalSize,
+): FullMessageModalSize {
+  return resizeModalSize(startSize, delta, viewport, composeModalSizeContract);
 }
 
 export type FullMessageModalInteractionState = {
