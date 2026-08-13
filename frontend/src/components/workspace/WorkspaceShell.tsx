@@ -23747,7 +23747,7 @@ function MailboxView({
                   role="dialog"
                   aria-modal="true"
                   aria-labelledby="full-message-modal-title"
-                  className="relative flex min-h-0 shrink-0 flex-col overflow-hidden rounded-[28px] border border-[color:rgba(128,142,121,0.18)] bg-[linear-gradient(180deg,rgba(255,255,253,0.99),rgba(250,246,239,0.98))] shadow-[0_28px_80px_rgba(61,44,32,0.18),0_10px_26px_rgba(61,44,32,0.1)] dark:border-[var(--workspace-border)] dark:bg-[linear-gradient(180deg,var(--workspace-card-featured-start),var(--workspace-card-featured-end))]"
+                  className="relative flex min-h-0 shrink-0 flex-col overflow-hidden rounded-[28px] border border-[color:rgba(128,142,121,0.18)] bg-[var(--workspace-modal-bg)] bg-[linear-gradient(180deg,rgba(255,255,253,0.99),rgba(250,246,239,0.98))] shadow-[0_28px_80px_rgba(61,44,32,0.18),0_10px_26px_rgba(61,44,32,0.1)] dark:border-[var(--workspace-border)] dark:bg-[linear-gradient(180deg,var(--workspace-card-featured-start),var(--workspace-card-featured-end))]"
                   style={
                     fullMessageModalSize
                       ? {
