@@ -164,18 +164,22 @@ recordCorrectionExpectation("modal compose return target", () => {
 
 recordCorrectionExpectation("default modal width contract", () => {
   assert.deepEqual(FULL_MESSAGE_MODAL_VIEWPORT, {
-    height: "88dvh",
+    height: "66dvh",
     maxHeight: "calc(100dvh - 2rem)",
-    maxWidth: "min(1320px, calc(100vw - 2rem))",
-    width: "84vw",
+    maxWidth: "min(1040px, calc(100vw - 2rem))",
+    width: "60vw",
   });
   assert.deepEqual(createDefaultFullMessageModalSize({ width: 1440, height: 900 }), {
-    width: 1209.6,
-    height: 792,
+    width: 864,
+    height: 594,
   });
   assert.deepEqual(createDefaultFullMessageModalSize({ width: 1920, height: 1080 }), {
-    width: 1320,
-    height: 950.4,
+    width: 1040,
+    height: 712.8000000000001,
+  });
+  assert.deepEqual(createDefaultFullMessageModalSize({ width: 1024, height: 700 }), {
+    width: 720,
+    height: 480,
   });
 });
 
@@ -232,7 +236,7 @@ recordCorrectionExpectation("user resize geometry contract", () => {
   );
   assert.deepEqual(
     createDefaultFullMessageModalSize(viewport),
-    { width: 1075.2, height: 633.6 },
+    { width: 768, height: 480 },
     "a fresh opening must reset rather than reuse custom geometry",
   );
 });
@@ -286,8 +290,36 @@ recordCorrectionExpectation("shared composer and normal compose regression", () 
   );
   assert.match(
     openComposeSource,
-    /setComposePresentation\("workspace"\)/,
-    "the normal Compose button must explicitly retain workspace presentation",
+    /setComposePresentation\("modal"\)/,
+    "the desktop Compose button must open the shared composer in modal presentation",
+  );
+  assert.match(
+    workspaceShellSource,
+    /data-modal-compose[\s\S]{0,500}height: "76dvh"[\s\S]{0,180}maxWidth: "min\(1180px, calc\(100vw - 2rem\)\)"[\s\S]{0,100}width: "70vw"/,
+    "modal compose must use its own compact, viewport-safe desktop size",
+  );
+});
+
+recordCorrectionExpectation("modal compose close confirmation layer", () => {
+  assert.match(
+    workspaceShellSource,
+    /ref=\{composeModalCloseButtonRef\}[\s\S]{0,150}setIsCloseModalOpen\(true\)/,
+    "clicking Close must request the established compose confirmation",
+  );
+  assert.match(
+    workspaceShellSource,
+    /isCloseModalOpen\s*\?\s*composePresentation === "modal"\s*&&\s*typeof document !== "undefined"[\s\S]{0,160}createPortal\(composeCloseConfirmation, document\.body\)/,
+    "modal compose confirmation must be portalled above the active workspace modal layer",
+  );
+  assert.match(
+    workspaceShellSource,
+    /data-compose-close-confirmation-layer[\s\S]{0,250}z-\[340\]/,
+    "the portalled compose confirmation must remain above WorkspaceModalLayer z-[321]",
+  );
+  assert.match(
+    workspaceShellSource,
+    /data-compose-close-confirmation-layer[\s\S]{0,500}role="alertdialog"[\s\S]{0,1600}Save to Drafts[\s\S]{0,800}Discard[\s\S]{0,800}Cancel/,
+    "the visible confirmation must retain Save, Discard, and Cancel",
   );
 });
 

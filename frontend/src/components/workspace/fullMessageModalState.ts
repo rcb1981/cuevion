@@ -1,13 +1,13 @@
 export const FULL_MESSAGE_MODAL_VIEWPORT = {
-  height: "88dvh",
+  height: "66dvh",
   maxHeight: "calc(100dvh - 2rem)",
-  maxWidth: "min(1320px, calc(100vw - 2rem))",
-  width: "84vw",
+  maxWidth: "min(1040px, calc(100vw - 2rem))",
+  width: "60vw",
 } as const;
 
-const FULL_MESSAGE_MODAL_DEFAULT_WIDTH_RATIO = 0.84;
-const FULL_MESSAGE_MODAL_DEFAULT_HEIGHT_RATIO = 0.88;
-const FULL_MESSAGE_MODAL_DEFAULT_MAX_WIDTH = 1320;
+const FULL_MESSAGE_MODAL_DEFAULT_WIDTH_RATIO = 0.6;
+const FULL_MESSAGE_MODAL_DEFAULT_HEIGHT_RATIO = 0.66;
+const FULL_MESSAGE_MODAL_DEFAULT_MAX_WIDTH = 1040;
 const FULL_MESSAGE_MODAL_MIN_WIDTH = 720;
 const FULL_MESSAGE_MODAL_MIN_HEIGHT = 480;
 const FULL_MESSAGE_MODAL_VIEWPORT_MARGIN = 16;

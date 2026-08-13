@@ -14175,7 +14175,7 @@ function MailboxView({
     );
     setIsCloseModalOpen(false);
     setIsFullMessageOpen(false);
-    setComposePresentation("workspace");
+    setComposePresentation("modal");
     setModalComposeSourceMessageId(null);
     setIsComposeOpen(true);
   };
@@ -21869,6 +21869,75 @@ function MailboxView({
     // result === undefined → send failed; composeSendError is set; keep overlay open.
   };
 
+  const composeCloseConfirmation = (
+    <div
+      data-compose-close-confirmation-layer
+      className={`${
+        composePresentation === "modal"
+          ? "fixed z-[340] rounded-none"
+          : "absolute rounded-[30px]"
+      } inset-0 flex items-center justify-center bg-[color:rgba(83,67,54,0.22)] p-6 backdrop-blur-[3px]`}
+    >
+      <div
+        ref={composeCloseConfirmationRef}
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="compose-close-confirmation-title"
+        className="w-full max-w-[440px] rounded-[24px] border p-6 shadow-[0_24px_60px_rgba(43,31,22,0.18),0_8px_24px_rgba(43,31,22,0.12)]"
+        style={
+          themeMode === "dark"
+            ? {
+                background: "rgba(34, 30, 27, 0.96)",
+                borderColor: "rgba(99, 90, 80, 0.48)",
+              }
+            : {
+                background: "rgba(255, 252, 248, 0.98)",
+                borderColor: "rgba(199, 186, 170, 0.62)",
+              }
+        }
+      >
+        <div className="space-y-2">
+          <div className="text-[0.68rem] font-medium uppercase tracking-[0.18em] text-[var(--workspace-text-faint)]">
+            Draft
+          </div>
+          <h3
+            id="compose-close-confirmation-title"
+            className="text-[1.18rem] font-medium tracking-tight text-[var(--workspace-text)]"
+          >
+            Save draft before closing?
+          </h3>
+          <p className="text-[0.88rem] leading-6 text-[var(--workspace-text-soft)]">
+            Keep this message in Drafts, discard it, or continue editing.
+          </p>
+        </div>
+        <div className="mt-6 flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={saveDraftAndClose}
+            className={mailboxPrimaryActionButtonClass}
+          >
+            Save to Drafts
+          </button>
+          <button
+            type="button"
+            onClick={discardCompose}
+            className="inline-flex h-9 items-center justify-center rounded-full border border-[color:rgba(146,82,73,0.34)] bg-[linear-gradient(180deg,rgba(170,103,93,0.96),rgba(138,76,67,0.98))] px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[color:rgba(255,248,244,0.98)] shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_8px_18px_rgba(123,70,61,0.14)] transition-[background-color,border-color,color,transform,box-shadow] duration-150 hover:border-[color:rgba(132,72,64,0.42)] hover:bg-[linear-gradient(180deg,rgba(156,91,82,0.98),rgba(126,67,60,0.98))] active:scale-[0.99] focus-visible:outline-none"
+          >
+            Discard
+          </button>
+          <button
+            ref={composeCloseConfirmationCancelRef}
+            type="button"
+            onClick={continueEditingCompose}
+            className="inline-flex h-9 items-center justify-center rounded-full border border-transparent bg-transparent px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)] transition-[color,transform] duration-150 hover:text-[var(--workspace-text-soft)] active:scale-[0.99] focus-visible:outline-none"
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+
   return (
     <div className="flex h-full min-h-0 flex-col gap-3 overflow-hidden md:gap-4">
       <header className="flex-none">
@@ -23559,7 +23628,12 @@ function MailboxView({
                         aria-modal="true"
                         aria-labelledby="desktop-compose-title"
                         className="flex min-h-0 shrink-0 flex-col overflow-hidden rounded-[24px] shadow-[0_28px_80px_rgba(61,44,32,0.18),0_10px_26px_rgba(61,44,32,0.1)]"
-                        style={FULL_MESSAGE_MODAL_VIEWPORT}
+                        style={{
+                          height: "76dvh",
+                          maxHeight: "calc(100dvh - 2rem)",
+                          maxWidth: "min(1180px, calc(100vw - 2rem))",
+                          width: "70vw",
+                        }}
                         onMouseDown={(event) => event.stopPropagation()}
                       >
                         {desktopComposer}
@@ -25030,73 +25104,11 @@ function MailboxView({
           }}
         />
 
-        {isCloseModalOpen ? (
-          <div
-            className={`${
-              composePresentation === "modal"
-                ? "fixed z-[340] rounded-none"
-                : "absolute rounded-[30px]"
-            } inset-0 flex items-center justify-center bg-[color:rgba(83,67,54,0.22)] p-6 backdrop-blur-[3px]`}
-          >
-            <div
-              ref={composeCloseConfirmationRef}
-              role="alertdialog"
-              aria-modal="true"
-              aria-labelledby="compose-close-confirmation-title"
-              className="w-full max-w-[440px] rounded-[24px] border p-6 shadow-[0_24px_60px_rgba(43,31,22,0.18),0_8px_24px_rgba(43,31,22,0.12)]"
-              style={
-                themeMode === "dark"
-                  ? {
-                      background: "rgba(34, 30, 27, 0.96)",
-                      borderColor: "rgba(99, 90, 80, 0.48)",
-                    }
-                  : {
-                      background: "rgba(255, 252, 248, 0.98)",
-                      borderColor: "rgba(199, 186, 170, 0.62)",
-                    }
-              }
-            >
-              <div className="space-y-2">
-                <div className="text-[0.68rem] font-medium uppercase tracking-[0.18em] text-[var(--workspace-text-faint)]">
-                  Draft
-                </div>
-                <h3
-                  id="compose-close-confirmation-title"
-                  className="text-[1.18rem] font-medium tracking-tight text-[var(--workspace-text)]"
-                >
-                  Save draft before closing?
-                </h3>
-                <p className="text-[0.88rem] leading-6 text-[var(--workspace-text-soft)]">
-                  Keep this message in Drafts, discard it, or continue editing.
-                </p>
-              </div>
-              <div className="mt-6 flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  onClick={saveDraftAndClose}
-                  className={mailboxPrimaryActionButtonClass}
-                >
-                  Save to Drafts
-                </button>
-                <button
-                  type="button"
-                  onClick={discardCompose}
-                  className="inline-flex h-9 items-center justify-center rounded-full border border-[color:rgba(146,82,73,0.34)] bg-[linear-gradient(180deg,rgba(170,103,93,0.96),rgba(138,76,67,0.98))] px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[color:rgba(255,248,244,0.98)] shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_8px_18px_rgba(123,70,61,0.14)] transition-[background-color,border-color,color,transform,box-shadow] duration-150 hover:border-[color:rgba(132,72,64,0.42)] hover:bg-[linear-gradient(180deg,rgba(156,91,82,0.98),rgba(126,67,60,0.98))] active:scale-[0.99] focus-visible:outline-none"
-                >
-                  Discard
-                </button>
-                <button
-                  ref={composeCloseConfirmationCancelRef}
-                  type="button"
-                  onClick={continueEditingCompose}
-                  className="inline-flex h-9 items-center justify-center rounded-full border border-transparent bg-transparent px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)] transition-[color,transform] duration-150 hover:text-[var(--workspace-text-soft)] active:scale-[0.99] focus-visible:outline-none"
-                >
-                  Cancel
-                </button>
-              </div>
-            </div>
-          </div>
-        ) : null}
+        {isCloseModalOpen
+          ? composePresentation === "modal" && typeof document !== "undefined"
+            ? createPortal(composeCloseConfirmation, document.body)
+            : composeCloseConfirmation
+          : null}
 
         {trashEmptiedToastMessage ? (
           <div className="pointer-events-none fixed bottom-6 right-6 z-[220]">
