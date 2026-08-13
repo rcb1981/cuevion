@@ -3708,18 +3708,16 @@ function buildEmailStageDocument(
       html, body {
         margin: 0;
         padding: 0;
-        /* Override any email CSS that restricts height or hides overflow —
-           these would cause incorrect iframe height measurement and visual clipping.
+        /* Override any email CSS that restricts height or hides overflow.
            Must come after the email's own styles, hence the !important.
            overflow-x: auto lets wide emails (e.g. table-based invoices) scroll
            horizontally inside the iframe rather than being silently cut off.
-           The browser forces overflow-y to auto too; since the iframe height is
-           set dynamically to the full content height, no vertical scrollbar appears. */
+           Long emails scroll vertically inside the bounded iframe stage. */
         height: auto !important;
         min-height: unset !important;
         max-height: none !important;
         overflow-x: auto !important;
-        overflow-y: visible !important;
+        overflow-y: auto !important;
       }
       body {
         /* Fallback only – external emails control their own background/color */
@@ -4330,159 +4328,9 @@ function EmailHtmlStage({
 }) {
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const cleanupRef = useRef<(() => void) | null>(null);
-  const [height, setHeight] = useState(320);
-  const fallbackClassName = "w-full overflow-visible bg-transparent";
-  const fallbackHeight = 2200;
-  const measurementSafetyBuffer = 24;
+  const stageClassName = "w-full bg-transparent";
 
-  const measureContentHeight = (iframeDoc: Document): number => {
-    const docEl = iframeDoc.documentElement;
-    const body = iframeDoc.body;
-
-    if (!body) {
-      return fallbackHeight;
-    }
-
-    const stageRoot =
-      body.firstElementChild instanceof HTMLElement ? body.firstElementChild : body;
-    const stageRootRect = stageRoot.getBoundingClientRect();
-    const meaningfulSelector = [
-      "table",
-      "thead",
-      "tbody",
-      "tfoot",
-      "section",
-      "article",
-      "main",
-      "header",
-      "footer",
-      "div",
-      "p",
-      "blockquote",
-      "pre",
-      "ul",
-      "ol",
-      "li",
-      "img",
-      "span",
-      "a",
-      "button",
-      "hr",
-      "td",
-      "th",
-      "tr",
-      "h1",
-      "h2",
-      "h3",
-      "h4",
-      "h5",
-      "h6",
-    ].join(",");
-    const contentBottomCandidates: number[] = [];
-
-    const visibleElements = Array.from(stageRoot.querySelectorAll(meaningfulSelector));
-
-    visibleElements.forEach((node) => {
-      if (!(node instanceof HTMLElement)) {
-        return;
-      }
-
-      const computedStyle = iframeDoc.defaultView?.getComputedStyle(node);
-
-      if (
-        computedStyle?.display === "none" ||
-        computedStyle?.visibility === "hidden" ||
-        computedStyle?.position === "absolute" ||
-        computedStyle?.position === "fixed"
-      ) {
-        return;
-      }
-
-      const rect = node.getBoundingClientRect();
-
-      if (rect.height < 6 || rect.width <= 0) {
-        return;
-      }
-
-      const hasMeaningfulText = (node.textContent ?? "").trim().length > 0;
-      const isMediaElement = node instanceof HTMLImageElement;
-      const isStructuralElement =
-        node instanceof HTMLTableElement ||
-        node instanceof HTMLTableSectionElement ||
-        node instanceof HTMLTableRowElement ||
-        node instanceof HTMLTableCellElement ||
-        /^(DIV|SECTION|ARTICLE|MAIN|HEADER|FOOTER|BLOCKQUOTE|PRE|HR|SPAN)$/.test(
-          node.tagName,
-        );
-
-      if (!hasMeaningfulText && !isMediaElement && !isStructuralElement) {
-        return;
-      }
-
-      contentBottomCandidates.push(Math.ceil(rect.bottom - stageRootRect.top));
-    });
-
-    const contentRange = iframeDoc.createRange();
-    contentRange.selectNodeContents(stageRoot);
-    const contentRangeRect = contentRange.getBoundingClientRect();
-
-    if (contentRangeRect.height > 0) {
-      contentBottomCandidates.push(
-        Math.ceil(contentRangeRect.bottom - stageRootRect.top),
-      );
-    }
-
-    const contentBottom = Math.max(
-      0,
-      ...contentBottomCandidates.filter((value) => Number.isFinite(value) && value > 0),
-    );
-
-    if (contentBottom <= 0) {
-      return fallbackHeight;
-    }
-
-    const safeContentHeight = contentBottom + measurementSafetyBuffer;
-    const scrollCandidates = [
-      stageRoot.scrollHeight,
-      body.scrollHeight,
-      docEl.scrollHeight,
-    ]
-      .map((value) => Math.ceil(value ?? 0))
-      .filter((value) => Number.isFinite(value) && value > 0);
-    const nextHeight = Math.max(safeContentHeight, ...scrollCandidates);
-
-    return Math.max(320, nextHeight);
-  };
-
-  const updateHeight = () => {
-    const iframe = iframeRef.current;
-
-    if (!iframe) {
-      return;
-    }
-
-    try {
-      const iframeDoc = iframe.contentDocument;
-
-      if (!iframeDoc || !iframeDoc.body) {
-        setHeight((currentHeight) => Math.max(currentHeight, fallbackHeight));
-        return;
-      }
-
-      const nextHeight = measureContentHeight(iframeDoc);
-
-      setHeight((currentHeight) =>
-        Math.abs(currentHeight - nextHeight) > 1
-          ? Math.max(nextHeight, 320)
-          : currentHeight,
-      );
-
-    } catch {
-      setHeight((currentHeight) => Math.max(currentHeight, fallbackHeight));
-    }
-  };
-
-  const attachMeasurementListeners = () => {
+  const applyRuntimeEmailStageCorrections = () => {
     cleanupRef.current?.();
 
     const iframe = iframeRef.current;
@@ -4491,10 +4339,15 @@ function EmailHtmlStage({
       return;
     }
 
-    const iframeDoc = iframe.contentDocument;
+    let iframeDoc: Document | null = null;
+
+    try {
+      iframeDoc = iframe.contentDocument;
+    } catch {
+      return;
+    }
 
     if (!iframeDoc?.body) {
-      setHeight((currentHeight) => Math.max(currentHeight, fallbackHeight));
       return;
     }
 
@@ -4554,10 +4407,6 @@ function EmailHtmlStage({
     applyDarkModeReadabilityFix();
 
     const timeoutIds: number[] = [];
-    const scheduleMeasure = (delay = 0) => {
-      const timeoutId = window.setTimeout(updateHeight, delay);
-      timeoutIds.push(timeoutId);
-    };
     const scheduleDarkModeReadabilityFix = (delay = 0) => {
       const timeoutId = window.setTimeout(applyDarkModeReadabilityFix, delay);
       timeoutIds.push(timeoutId);
@@ -4566,25 +4415,6 @@ function EmailHtmlStage({
       const timeoutId = window.setTimeout(applyLightEmailStageTextLinkFix, delay);
       timeoutIds.push(timeoutId);
     };
-    const images = Array.from(iframeDoc.images);
-    const handleImageEvent = () => {
-      scheduleMeasure(0);
-      scheduleMeasure(120);
-      scheduleMeasure(400);
-      scheduleMeasure(1200);
-    };
-
-    images.forEach((image) => {
-      image.addEventListener("load", handleImageEvent);
-      image.addEventListener("error", handleImageEvent);
-    });
-
-    scheduleMeasure(0);
-    scheduleMeasure(120);
-    scheduleMeasure(400);
-    scheduleMeasure(1200);
-    scheduleMeasure(2400);
-    scheduleMeasure(4800);
     scheduleDarkModeReadabilityFix(0);
     scheduleDarkModeReadabilityFix(120);
     scheduleDarkModeReadabilityFix(400);
@@ -4596,15 +4426,11 @@ function EmailHtmlStage({
 
     cleanupRef.current = () => {
       timeoutIds.forEach((timeoutId) => window.clearTimeout(timeoutId));
-      images.forEach((image) => {
-        image.removeEventListener("load", handleImageEvent);
-        image.removeEventListener("error", handleImageEvent);
-      });
     };
   };
 
   useEffect(() => {
-    attachMeasurementListeners();
+    applyRuntimeEmailStageCorrections();
 
     return () => {
       cleanupRef.current?.();
@@ -4622,11 +4448,11 @@ function EmailHtmlStage({
         isExternalHtml,
         isProviderHtmlEmail: isProviderHtml,
       })}
-      onLoad={attachMeasurementListeners}
-      className={`${fallbackClassName} block border-0`}
+      onLoad={applyRuntimeEmailStageCorrections}
+      className={`${stageClassName} block border-0`}
       style={{
-        height,
-        overflow: "visible",
+        height: "clamp(320px, 50dvh, 600px)",
+        maxHeight: "calc(100dvh - 96px)",
         ...(isExternalHtml ? { colorScheme: "light" } : {}),
         ...(isProviderHtml ? { backgroundColor: "#ffffff" } : {}),
       }}
