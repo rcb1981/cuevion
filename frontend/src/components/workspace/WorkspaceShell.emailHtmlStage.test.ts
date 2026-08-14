@@ -427,3 +427,266 @@ assert.match(
   /"template"[\s\S]*"animate"[\s\S]*"set"/,
   "declarative shadow DOM and SVG animation elements must be removed before rendering",
 );
+
+const renderModeResolverStart = workspaceShellSource.indexOf(
+  "function resolveMessageBodyRenderMode(",
+);
+const renderModeCacheStart = workspaceShellSource.indexOf(
+  "type MessageBodyRenderMode =",
+);
+const renderModeResolverEnd = workspaceShellSource.indexOf(
+  "function normalizeNativeMessageHtmlForPane(",
+);
+const renderModeCacheSource = workspaceShellSource.slice(
+  renderModeCacheStart >= 0 ? renderModeCacheStart : renderModeResolverStart,
+  renderModeResolverEnd,
+);
+const compiledRenderModeCacheSource = transform(renderModeCacheSource, {
+  transforms: ["typescript"],
+}).code;
+
+type RenderModeCacheHarness = {
+  resolveMessageBodyRenderMode: (
+    message: {
+      body: string[];
+      bodyHtml?: string;
+      attachments?: Array<{
+        contentId?: string;
+        inlineSrc?: string;
+        mimeType?: string;
+      }>;
+    },
+    options?: { allowRemoteImages?: boolean; themeMode?: "light" | "dark" },
+  ) => {
+    mode: string;
+    html?: string;
+    emailStyles?: string;
+    remoteImageCount: number;
+    cidImageCount: number;
+    invalidImageCount: number;
+  };
+  getCounts: () => { imported: number; compose: number };
+  getCacheSize: () => number;
+};
+
+const loadRenderModeCacheHarness = () =>
+  new Function(
+    `let importedSanitizationCount = 0;
+let composeSanitizationCount = 0;
+
+function isComposeGeneratedHtml(value) {
+  return /data-compose-(quote|signature)/i.test(value);
+}
+
+function buildStubSanitizedResult(bodyHtml, options, sourceType) {
+  const attachment = (options?.attachments ?? []).find(
+    (candidate) => candidate.contentId === "logo",
+  );
+  const allowRemoteImages = options?.allowRemoteImages ?? false;
+  const remoteImageCount = /https:\\/\\/tracker\\.example\\/image\\.png/.test(bodyHtml) ? 1 : 0;
+  const cidMarkup = attachment
+    ? \`<img data-cid-src="\${attachment.inlineSrc ?? ""}" data-cid-mime="\${attachment.mimeType ?? ""}">\`
+    : "<div data-cid-missing></div>";
+  const remoteMarkup = remoteImageCount
+    ? allowRemoteImages
+      ? '<img src="https://tracker.example/image.png">'
+      : '<div data-email-image-placeholder="true"></div>'
+    : "";
+
+  return {
+    html: \`<table data-source="\${sourceType}" data-theme="\${options?.themeMode ?? "unset"}"><tr><td>\${bodyHtml}\${cidMarkup}\${remoteMarkup}</td></tr></table>\`,
+    emailStyles: sourceType === "imported" ? ".newsletter { color: #123; }" : "",
+    remoteImageCount,
+    cidImageCount: /cid:logo/i.test(bodyHtml) && !attachment ? 1 : 0,
+    invalidImageCount: 0,
+  };
+}
+
+function sanitizeMessageBodyHtml(bodyHtml, options) {
+  importedSanitizationCount += 1;
+  return buildStubSanitizedResult(bodyHtml, options, "imported");
+}
+
+function sanitizeComposeGeneratedHtml(bodyHtml, options) {
+  composeSanitizationCount += 1;
+  return buildStubSanitizedResult(bodyHtml, options, "compose");
+}
+
+${compiledRenderModeCacheSource}
+
+return {
+  resolveMessageBodyRenderMode,
+  getCounts: () => ({
+    imported: importedSanitizationCount,
+    compose: composeSanitizationCount,
+  }),
+  getCacheSize: () =>
+    typeof messageBodyRenderModeCache === "undefined"
+      ? 0
+      : messageBodyRenderModeCache.length,
+};`,
+  )() as RenderModeCacheHarness;
+
+const identicalExternalHarness = loadRenderModeCacheHarness();
+const identicalExternalMessage = {
+  body: [],
+  bodyHtml:
+    '<style>.newsletter{color:#123}</style><table class="newsletter"><tr><td>Offer</td></tr></table>',
+  attachments: [],
+};
+const identicalExternalOptions = {
+  allowRemoteImages: false,
+  themeMode: "light" as const,
+};
+const firstIdenticalExternalResult =
+  identicalExternalHarness.resolveMessageBodyRenderMode(
+    identicalExternalMessage,
+    identicalExternalOptions,
+  );
+const secondIdenticalExternalResult =
+  identicalExternalHarness.resolveMessageBodyRenderMode(
+    identicalExternalMessage,
+    identicalExternalOptions,
+  );
+const thirdIdenticalExternalResult =
+  identicalExternalHarness.resolveMessageBodyRenderMode(
+    identicalExternalMessage,
+    identicalExternalOptions,
+  );
+assert.equal(
+  identicalExternalHarness.getCounts().imported,
+  1,
+  "identical split/modal render inputs must sanitize imported HTML only once",
+);
+assert.strictEqual(firstIdenticalExternalResult, secondIdenticalExternalResult);
+assert.strictEqual(secondIdenticalExternalResult, thirdIdenticalExternalResult);
+
+const bodyMutationHarness = loadRenderModeCacheHarness();
+const originalBodyResult = bodyMutationHarness.resolveMessageBodyRenderMode(
+  { body: [], bodyHtml: "<table><tr><td>Original</td></tr></table>", attachments: [] },
+  identicalExternalOptions,
+);
+const changedBodyResult = bodyMutationHarness.resolveMessageBodyRenderMode(
+  { body: [], bodyHtml: "<table><tr><td>Changed</td></tr></table>", attachments: [] },
+  identicalExternalOptions,
+);
+assert.equal(bodyMutationHarness.getCounts().imported, 2);
+assert.notDeepEqual(originalBodyResult, changedBodyResult);
+
+const cidMutationHarness = loadRenderModeCacheHarness();
+const cidBodyHtml = '<table><tr><td><img src="cid:logo"></td></tr></table>';
+const firstCidResult = cidMutationHarness.resolveMessageBodyRenderMode(
+  {
+    body: [],
+    bodyHtml: cidBodyHtml,
+    attachments: [
+      { contentId: "logo", inlineSrc: "data:image/png;base64,AAAA", mimeType: "image/png" },
+    ],
+  },
+  identicalExternalOptions,
+);
+const changedCidSourceResult = cidMutationHarness.resolveMessageBodyRenderMode(
+  {
+    body: [],
+    bodyHtml: cidBodyHtml,
+    attachments: [
+      { contentId: "logo", inlineSrc: "data:image/png;base64,BBBB", mimeType: "image/png" },
+    ],
+  },
+  identicalExternalOptions,
+);
+const changedCidMimeResult = cidMutationHarness.resolveMessageBodyRenderMode(
+  {
+    body: [],
+    bodyHtml: cidBodyHtml,
+    attachments: [
+      { contentId: "logo", inlineSrc: "data:image/png;base64,BBBB", mimeType: "image/webp" },
+    ],
+  },
+  identicalExternalOptions,
+);
+const changedCidContentIdResult = cidMutationHarness.resolveMessageBodyRenderMode(
+  {
+    body: [],
+    bodyHtml: cidBodyHtml,
+    attachments: [
+      { contentId: "other-logo", inlineSrc: "data:image/png;base64,BBBB", mimeType: "image/webp" },
+    ],
+  },
+  identicalExternalOptions,
+);
+assert.equal(cidMutationHarness.getCounts().imported, 4);
+assert.notDeepEqual(firstCidResult, changedCidSourceResult);
+assert.notDeepEqual(changedCidSourceResult, changedCidMimeResult);
+assert.notDeepEqual(changedCidMimeResult, changedCidContentIdResult);
+
+const showImagesHarness = loadRenderModeCacheHarness();
+const remoteBodyHtml = '<table><tr><td><img src="https://tracker.example/image.png"></td></tr></table>';
+const remoteImagesOffResult = showImagesHarness.resolveMessageBodyRenderMode(
+  { body: [], bodyHtml: remoteBodyHtml, attachments: [] },
+  { allowRemoteImages: false, themeMode: "light" },
+);
+const remoteImagesOnResult = showImagesHarness.resolveMessageBodyRenderMode(
+  { body: [], bodyHtml: remoteBodyHtml, attachments: [] },
+  { allowRemoteImages: true, themeMode: "light" },
+);
+const remoteImagesOffAgainResult = showImagesHarness.resolveMessageBodyRenderMode(
+  { body: [], bodyHtml: remoteBodyHtml, attachments: [] },
+  { allowRemoteImages: false, themeMode: "light" },
+);
+assert.equal(showImagesHarness.getCounts().imported, 2);
+assert.match(remoteImagesOffResult.html ?? "", /data-email-image-placeholder/);
+assert.match(remoteImagesOnResult.html ?? "", /src="https:\/\/tracker\.example\/image\.png"/);
+assert.strictEqual(remoteImagesOffResult, remoteImagesOffAgainResult);
+
+const themeHarness = loadRenderModeCacheHarness();
+const lightResult = themeHarness.resolveMessageBodyRenderMode(
+  identicalExternalMessage,
+  { allowRemoteImages: false, themeMode: "light" },
+);
+const darkResult = themeHarness.resolveMessageBodyRenderMode(
+  identicalExternalMessage,
+  { allowRemoteImages: false, themeMode: "dark" },
+);
+assert.equal(themeHarness.getCounts().imported, 2);
+assert.notDeepEqual(lightResult, darkResult);
+
+const sourceTypeHarness = loadRenderModeCacheHarness();
+const importedResult = sourceTypeHarness.resolveMessageBodyRenderMode(
+  { body: [], bodyHtml: "<table><tr><td>Imported</td></tr></table>", attachments: [] },
+  identicalExternalOptions,
+);
+const composeResult = sourceTypeHarness.resolveMessageBodyRenderMode(
+  {
+    body: [],
+    bodyHtml: '<div data-compose-signature="true">Compose</div>',
+    attachments: [],
+  },
+  identicalExternalOptions,
+);
+assert.equal(sourceTypeHarness.getCounts().imported, 1);
+assert.equal(sourceTypeHarness.getCounts().compose, 1);
+assert.equal(importedResult.mode, "html");
+assert.equal(composeResult.mode, "compose_html");
+
+const evictionHarness = loadRenderModeCacheHarness();
+for (let index = 0; index < 9; index += 1) {
+  evictionHarness.resolveMessageBodyRenderMode(
+    {
+      body: [],
+      bodyHtml: `<table><tr><td>Cache entry ${index}</td></tr></table>`,
+      attachments: [],
+    },
+    identicalExternalOptions,
+  );
+}
+assert.equal(evictionHarness.getCacheSize(), 8, "render cache must stay bounded at eight entries");
+evictionHarness.resolveMessageBodyRenderMode(
+  { body: [], bodyHtml: "<table><tr><td>Cache entry 0</td></tr></table>", attachments: [] },
+  identicalExternalOptions,
+);
+assert.equal(
+  evictionHarness.getCounts().imported,
+  10,
+  "the least-recently-used entry must be sanitized again after eviction",
+);

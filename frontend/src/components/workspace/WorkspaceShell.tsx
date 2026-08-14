@@ -5489,10 +5489,7 @@ function sanitizeComposeGeneratedHtml(
   };
 }
 
-function resolveMessageBodyRenderMode(
-  message: Pick<MailMessage, "body" | "bodyHtml" | "attachments">,
-  options?: { allowRemoteImages?: boolean; themeMode?: "light" | "dark" },
-):
+type MessageBodyRenderMode =
   | {
       mode: "html";
       html: string;
@@ -5522,15 +5519,142 @@ function resolveMessageBodyRenderMode(
       remoteImageCount: number;
       cidImageCount: number;
       invalidImageCount: number;
-    } {
-  const sanitizedHtmlResult = message.bodyHtml
-    ? isComposeGeneratedHtml(message.bodyHtml)
-      ? sanitizeComposeGeneratedHtml(message.bodyHtml, {
-          allowRemoteImages: options?.allowRemoteImages,
+    };
+
+type MessageBodyRenderSourceType = "imported" | "compose";
+
+type MessageBodyRenderAttachmentIdentity = Pick<
+  MailAttachment,
+  "contentId" | "inlineSrc" | "mimeType"
+>;
+
+type MessageBodyRenderModeCacheEntry = {
+  policyVersion: typeof MESSAGE_BODY_RENDER_CACHE_POLICY_VERSION;
+  sourceType: MessageBodyRenderSourceType;
+  bodyHtml: string;
+  attachments: MessageBodyRenderAttachmentIdentity[];
+  allowRemoteImages: boolean;
+  themeMode: "light" | "dark" | undefined;
+  result: MessageBodyRenderMode;
+};
+
+const MESSAGE_BODY_RENDER_CACHE_POLICY_VERSION = "phase-2a.5-v1";
+const MESSAGE_BODY_RENDER_CACHE_MAX_ENTRIES = 8;
+const messageBodyRenderModeCache: MessageBodyRenderModeCacheEntry[] = [];
+
+function hasExactMessageBodyRenderAttachmentInputs(
+  cachedAttachments: MessageBodyRenderAttachmentIdentity[],
+  attachments: MessageBodyRenderAttachmentIdentity[] | undefined,
+) {
+  const currentAttachments = attachments ?? [];
+
+  return (
+    cachedAttachments.length === currentAttachments.length &&
+    cachedAttachments.every((cachedAttachment, index) => {
+      const currentAttachment = currentAttachments[index];
+
+      return (
+        cachedAttachment.contentId === currentAttachment.contentId &&
+        cachedAttachment.inlineSrc === currentAttachment.inlineSrc &&
+        cachedAttachment.mimeType === currentAttachment.mimeType
+      );
+    })
+  );
+}
+
+function readCachedMessageBodyRenderMode(
+  bodyHtml: string,
+  attachments: MessageBodyRenderAttachmentIdentity[] | undefined,
+  allowRemoteImages: boolean,
+  themeMode: "light" | "dark" | undefined,
+  sourceType: MessageBodyRenderSourceType,
+) {
+  for (let index = messageBodyRenderModeCache.length - 1; index >= 0; index -= 1) {
+    const entry = messageBodyRenderModeCache[index];
+
+    if (
+      entry.policyVersion !== MESSAGE_BODY_RENDER_CACHE_POLICY_VERSION ||
+      entry.sourceType !== sourceType ||
+      entry.bodyHtml !== bodyHtml ||
+      entry.allowRemoteImages !== allowRemoteImages ||
+      entry.themeMode !== themeMode ||
+      !hasExactMessageBodyRenderAttachmentInputs(entry.attachments, attachments)
+    ) {
+      continue;
+    }
+
+    if (index !== messageBodyRenderModeCache.length - 1) {
+      messageBodyRenderModeCache.splice(index, 1);
+      messageBodyRenderModeCache.push(entry);
+    }
+
+    return entry.result;
+  }
+
+  return null;
+}
+
+function cacheMessageBodyRenderMode(
+  bodyHtml: string,
+  attachments: MessageBodyRenderAttachmentIdentity[] | undefined,
+  allowRemoteImages: boolean,
+  themeMode: "light" | "dark" | undefined,
+  sourceType: MessageBodyRenderSourceType,
+  result: MessageBodyRenderMode,
+) {
+  messageBodyRenderModeCache.push({
+    policyVersion: MESSAGE_BODY_RENDER_CACHE_POLICY_VERSION,
+    sourceType,
+    bodyHtml,
+    attachments: (attachments ?? []).map((attachment) => ({
+      contentId: attachment.contentId,
+      inlineSrc: attachment.inlineSrc,
+      mimeType: attachment.mimeType,
+    })),
+    allowRemoteImages,
+    themeMode,
+    result,
+  });
+
+  if (messageBodyRenderModeCache.length > MESSAGE_BODY_RENDER_CACHE_MAX_ENTRIES) {
+    messageBodyRenderModeCache.shift();
+  }
+}
+
+function resolveMessageBodyRenderMode(
+  message: Pick<MailMessage, "body" | "bodyHtml" | "attachments">,
+  options?: { allowRemoteImages?: boolean; themeMode?: "light" | "dark" },
+): MessageBodyRenderMode {
+  const messageBodyHtml = message.bodyHtml;
+  const allowRemoteImages = options?.allowRemoteImages ?? false;
+  const sourceType = messageBodyHtml
+    ? isComposeGeneratedHtml(messageBodyHtml)
+      ? "compose"
+      : "imported"
+    : null;
+  const cachedRenderMode =
+    messageBodyHtml && sourceType
+      ? readCachedMessageBodyRenderMode(
+          messageBodyHtml,
+          message.attachments,
+          allowRemoteImages,
+          options?.themeMode,
+          sourceType,
+        )
+      : null;
+
+  if (cachedRenderMode) {
+    return cachedRenderMode;
+  }
+
+  const sanitizedHtmlResult = messageBodyHtml
+    ? sourceType === "compose"
+      ? sanitizeComposeGeneratedHtml(messageBodyHtml, {
+          allowRemoteImages,
           attachments: message.attachments,
         })
-      : sanitizeMessageBodyHtml(message.bodyHtml, {
-          allowRemoteImages: options?.allowRemoteImages,
+      : sanitizeMessageBodyHtml(messageBodyHtml, {
+          allowRemoteImages,
           themeMode: options?.themeMode,
           attachments: message.attachments,
         })
@@ -5542,10 +5666,9 @@ function resolveMessageBodyRenderMode(
         invalidImageCount: 0,
       };
 
+  let renderMode: MessageBodyRenderMode;
+
   if (sanitizedHtmlResult.html) {
-    const messageBodyHtml = message.bodyHtml ?? "";
-    const isComposeHtml =
-      messageBodyHtml.length > 0 && isComposeGeneratedHtml(messageBodyHtml);
     const hasRichHtmlMarkup =
       /<(table|svg|canvas|video|audio|iframe)\b/i.test(
         sanitizedHtmlResult.html,
@@ -5558,22 +5681,35 @@ function resolveMessageBodyRenderMode(
       sanitizedHtmlResult.remoteImageCount > 0 ||
       hasRichHtmlMarkup;
 
-    return {
-      mode: isComposeHtml ? "compose_html" : isExternalHtml ? "html" : "native_html",
+    renderMode = {
+      mode: sourceType === "compose" ? "compose_html" : isExternalHtml ? "html" : "native_html",
       html: sanitizedHtmlResult.html,
       emailStyles: sanitizedHtmlResult.emailStyles,
       remoteImageCount: sanitizedHtmlResult.remoteImageCount,
       cidImageCount: sanitizedHtmlResult.cidImageCount,
       invalidImageCount: sanitizedHtmlResult.invalidImageCount,
     };
+  } else {
+    renderMode = {
+      mode: "plain",
+      remoteImageCount: sanitizedHtmlResult.remoteImageCount,
+      cidImageCount: sanitizedHtmlResult.cidImageCount,
+      invalidImageCount: sanitizedHtmlResult.invalidImageCount,
+    };
   }
 
-  return {
-    mode: "plain",
-    remoteImageCount: sanitizedHtmlResult.remoteImageCount,
-    cidImageCount: sanitizedHtmlResult.cidImageCount,
-    invalidImageCount: sanitizedHtmlResult.invalidImageCount,
-  };
+  if (messageBodyHtml && sourceType) {
+    cacheMessageBodyRenderMode(
+      messageBodyHtml,
+      message.attachments,
+      allowRemoteImages,
+      options?.themeMode,
+      sourceType,
+      renderMode,
+    );
+  }
+
+  return renderMode;
 }
 
 function normalizeNativeMessageHtmlForPane(html: string) {
