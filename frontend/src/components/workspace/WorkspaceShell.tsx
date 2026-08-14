@@ -3354,6 +3354,15 @@ const unsafeEmailHtmlSelectors = [
   "object",
   "embed",
   "applet",
+  "portal",
+  "fencedframe",
+  "template",
+  "animate",
+  "animateColor",
+  "animateMotion",
+  "animateTransform",
+  "discard",
+  "set",
   "form",
   "input",
   "button",
@@ -3362,34 +3371,10 @@ const unsafeEmailHtmlSelectors = [
   "option",
 ].join(",");
 
-const unsafeEmailUrlPattern =
-  /^\s*(javascript:|vbscript:|data:text\/html|data:application\/javascript)/i;
 const unsafeInlineStylePattern =
   /expression\s*\(|url\s*\(\s*['"]?\s*(javascript:|vbscript:|data:text\/html)/i;
 const plainLinkPattern =
   /((?:https?:\/\/|www\.)[^\s<]+|(?:[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}))/gi;
-
-function resolveEmailImageSourceType(sourceValue: string | null) {
-  const normalizedSource = sourceValue?.trim() ?? "";
-
-  if (!normalizedSource) {
-    return "missing" as const;
-  }
-
-  if (/^cid:/i.test(normalizedSource)) {
-    return "cid" as const;
-  }
-
-  if (/^https?:\/\//i.test(normalizedSource)) {
-    return "remote" as const;
-  }
-
-  if (/^data:image\//i.test(normalizedSource)) {
-    return "inline" as const;
-  }
-
-  return "invalid" as const;
-}
 
 function normalizeCidReference(sourceValue: string | null) {
   const normalizedSource = sourceValue?.trim() ?? "";
@@ -4460,6 +4445,485 @@ function EmailHtmlStage({
   );
 }
 
+type ImportedEmailResourceUrlType =
+  | "missing"
+  | "safe-embedded"
+  | "cid"
+  | "remote"
+  | "invalid";
+
+const unsafeEmailUrlPattern =
+  /^(javascript:|vbscript:|data:text\/html|data:application\/javascript)/i;
+
+function normalizeEmailUrlForProtocolCheck(value: string) {
+  return value.trim().replace(/[\u0000-\u0020\u007f]+/g, "");
+}
+
+function isUnsafeEmailUrl(value: string) {
+  return unsafeEmailUrlPattern.test(normalizeEmailUrlForProtocolCheck(value));
+}
+
+function resolveImportedEmailResourceUrlType(
+  resourceUrl: string | null,
+): ImportedEmailResourceUrlType {
+  const normalizedUrl = resourceUrl?.trim() ?? "";
+
+  if (!normalizedUrl) {
+    return "missing";
+  }
+
+  const protocolCheckUrl = normalizeEmailUrlForProtocolCheck(normalizedUrl);
+
+  if (unsafeEmailUrlPattern.test(protocolCheckUrl)) {
+    return "invalid";
+  }
+
+  if (/^data:image\//i.test(normalizedUrl) || normalizedUrl.startsWith("#")) {
+    return "safe-embedded";
+  }
+
+  if (/^cid:/i.test(protocolCheckUrl)) {
+    return "cid";
+  }
+
+  if (/^[a-z][a-z\d+.-]*:/i.test(protocolCheckUrl) && !/^https?:/i.test(protocolCheckUrl)) {
+    return "invalid";
+  }
+
+  // Absolute, protocol-relative, root-relative and document-relative values can all
+  // initiate a request once imported HTML is attached to either the app DOM or srcDoc.
+  return "remote";
+}
+
+function resolveEmailImageSourceType(sourceValue: string | null) {
+  const resourceType = resolveImportedEmailResourceUrlType(sourceValue);
+
+  if (resourceType !== "safe-embedded") {
+    return resourceType;
+  }
+
+  // A fragment is local for SVG/CSS references, but img[src="#fragment"] can
+  // resolve as an image load of the containing document. Only data images are
+  // embedded in the ordinary-image context.
+  return /^data:image\//i.test(sourceValue?.trim() ?? "")
+    ? ("inline" as const)
+    : ("remote" as const);
+}
+
+function decodeImportedEmailCssIdentifier(identifier: string) {
+  return identifier.replace(
+    /\\([\da-f]{1,6})\s?|\\([^\r\n\f])/gi,
+    (_matchedEscape, hexadecimalCodePoint, escapedCharacter) => {
+      if (hexadecimalCodePoint) {
+        const codePoint = Number.parseInt(hexadecimalCodePoint, 16);
+
+        return Number.isFinite(codePoint) && codePoint > 0 && codePoint <= 0x10ffff
+          ? String.fromCodePoint(codePoint)
+          : "\uFFFD";
+      }
+
+      return escapedCharacter ?? "";
+    },
+  );
+}
+
+function isImportedEmailCssNewline(character: string | undefined) {
+  return character === "\n" || character === "\r" || character === "\f";
+}
+
+function replaceImportedEmailCssOutsideQuotedStrings(
+  cssContent: string,
+  replaceOutsideQuotedString: (cssSegment: string) => string,
+) {
+  const sanitizedParts: string[] = [];
+  let segmentStart = 0;
+  let cursor = 0;
+
+  while (cursor < cssContent.length) {
+    const quoteCharacter = cssContent[cursor];
+
+    if (quoteCharacter === "\\") {
+      cursor += 2;
+      continue;
+    }
+
+    if (quoteCharacter !== '"' && quoteCharacter !== "'") {
+      cursor += 1;
+      continue;
+    }
+
+    sanitizedParts.push(replaceOutsideQuotedString(cssContent.slice(segmentStart, cursor)));
+    const quotedStringStart = cursor;
+    cursor += 1;
+
+    while (cursor < cssContent.length) {
+      if (cssContent[cursor] === "\\") {
+        cursor += 2;
+      } else if (cssContent[cursor] === quoteCharacter) {
+        cursor += 1;
+        break;
+      } else if (isImportedEmailCssNewline(cssContent[cursor])) {
+        break;
+      } else {
+        cursor += 1;
+      }
+    }
+
+    sanitizedParts.push(cssContent.slice(quotedStringStart, cursor));
+    segmentStart = cursor;
+  }
+
+  sanitizedParts.push(replaceOutsideQuotedString(cssContent.slice(segmentStart)));
+  return sanitizedParts.join("");
+}
+
+function stripImportedEmailCssComments(cssContent: string) {
+  const sanitizedParts: string[] = [];
+  let sourceCursor = 0;
+  let cursor = 0;
+  let quoteCharacter = "";
+  let escapedCharacter = false;
+
+  while (cursor < cssContent.length) {
+    const character = cssContent[cursor];
+
+    if (escapedCharacter) {
+      escapedCharacter = false;
+      cursor += 1;
+      continue;
+    }
+
+    if (character === "\\") {
+      escapedCharacter = true;
+      cursor += 1;
+      continue;
+    }
+
+    if (quoteCharacter) {
+      if (character === quoteCharacter || isImportedEmailCssNewline(character)) {
+        quoteCharacter = "";
+      }
+      cursor += 1;
+      continue;
+    }
+
+    if (character === '"' || character === "'") {
+      quoteCharacter = character;
+      cursor += 1;
+      continue;
+    }
+
+    if (character === "/" && cssContent[cursor + 1] === "*") {
+      sanitizedParts.push(cssContent.slice(sourceCursor, cursor));
+      const commentEnd = cssContent.indexOf("*/", cursor + 2);
+      cursor = commentEnd === -1 ? cssContent.length : commentEnd + 2;
+      sourceCursor = cursor;
+      continue;
+    }
+
+    cursor += 1;
+  }
+
+  sanitizedParts.push(cssContent.slice(sourceCursor));
+  return sanitizedParts.join("");
+}
+
+function normalizeImportedEmailCssResourceSyntax(cssContent: string) {
+  const cssIdentifierPattern = String.raw`(?:[-_a-z\d]|\\[\da-f]{1,6}\s?|\\[^\r\n\f])+`;
+  const cssFunctionSeparatorPattern = String.raw`(?:\s|\/\*[\s\S]*?\*\/)*`;
+  const atRulePattern = new RegExp(`@(${cssIdentifierPattern})`, "gi");
+  const functionPattern = new RegExp(
+    `(${cssIdentifierPattern})${cssFunctionSeparatorPattern}\\(`,
+    "gi",
+  );
+
+  // CSS comments have no rendering value and can otherwise split resource
+  // function/at-rule tokens to evade URL recognition.
+  const cssWithoutComments = stripImportedEmailCssComments(cssContent);
+
+  return replaceImportedEmailCssOutsideQuotedStrings(cssWithoutComments, (cssSegment) =>
+    cssSegment
+      .replace(atRulePattern, (matchedAtRule, identifier) =>
+        decodeImportedEmailCssIdentifier(identifier).toLowerCase() === "import"
+          ? "@import"
+          : matchedAtRule,
+      )
+      .replace(functionPattern, (matchedFunction, identifier) => {
+        const normalizedIdentifier = decodeImportedEmailCssIdentifier(identifier).toLowerCase();
+
+        return ["url", "image-set", "-webkit-image-set"].includes(normalizedIdentifier)
+          ? `${normalizedIdentifier}(`
+          : matchedFunction;
+      }),
+  );
+}
+
+function isImportedEmailCssIdentifierCharacter(character: string | undefined) {
+  return Boolean(character && /[-_a-z\d\\]/i.test(character));
+}
+
+function findImportedEmailCssConstructEnd(
+  cssContent: string,
+  startIndex: number,
+  initialParenthesisDepth: number,
+  stopAtSemicolon: boolean,
+) {
+  let cursor = startIndex;
+  let parenthesisDepth = initialParenthesisDepth;
+  let quoteCharacter = "";
+  let escapedCharacter = false;
+
+  while (cursor < cssContent.length) {
+    const character = cssContent[cursor];
+
+    if (escapedCharacter) {
+      escapedCharacter = false;
+    } else if (character === "\\") {
+      escapedCharacter = true;
+    } else if (quoteCharacter) {
+      if (character === quoteCharacter || isImportedEmailCssNewline(character)) {
+        quoteCharacter = "";
+      }
+    } else if (character === '"' || character === "'") {
+      quoteCharacter = character;
+    } else if (character === "(") {
+      parenthesisDepth += 1;
+    } else if (character === ")" && parenthesisDepth > 0) {
+      parenthesisDepth -= 1;
+      if (!stopAtSemicolon && parenthesisDepth === 0) {
+        return cursor + 1;
+      }
+    } else if (stopAtSemicolon && character === ";" && parenthesisDepth === 0) {
+      return cursor + 1;
+    }
+
+    cursor += 1;
+  }
+
+  return cursor;
+}
+
+function sanitizeImportedEmailCssResources(cssContent: string) {
+  const normalizedCss = normalizeImportedEmailCssResourceSyntax(cssContent);
+  const sanitizedParts: string[] = [];
+  let sourceCursor = 0;
+  let cursor = 0;
+  let quoteCharacter = "";
+  let escapedCharacter = false;
+
+  while (cursor < normalizedCss.length) {
+    const character = normalizedCss[cursor];
+
+    if (escapedCharacter) {
+      escapedCharacter = false;
+      cursor += 1;
+      continue;
+    }
+
+    if (character === "\\") {
+      escapedCharacter = true;
+      cursor += 1;
+      continue;
+    }
+
+    if (quoteCharacter) {
+      if (character === quoteCharacter || isImportedEmailCssNewline(character)) {
+        quoteCharacter = "";
+      }
+      cursor += 1;
+      continue;
+    }
+
+    if (character === '"' || character === "'") {
+      quoteCharacter = character;
+      cursor += 1;
+      continue;
+    }
+
+    const remainingCss = normalizedCss.slice(cursor);
+    const previousCharacter = normalizedCss[cursor - 1];
+
+    if (/^@import\b/i.test(remainingCss)) {
+      const importEnd = findImportedEmailCssConstructEnd(
+        normalizedCss,
+        cursor + "@import".length,
+        0,
+        true,
+      );
+      sanitizedParts.push(normalizedCss.slice(sourceCursor, cursor));
+      cursor = importEnd;
+      sourceCursor = importEnd;
+      continue;
+    }
+
+    const imageSetMatch = remainingCss.match(/^(?:-webkit-)?image-set\s*\(/i);
+
+    if (imageSetMatch && !isImportedEmailCssIdentifierCharacter(previousCharacter)) {
+      const openingParenthesisIndex = cursor + imageSetMatch[0].lastIndexOf("(");
+      const imageSetEnd = findImportedEmailCssConstructEnd(
+        normalizedCss,
+        openingParenthesisIndex + 1,
+        1,
+        false,
+      );
+      sanitizedParts.push(normalizedCss.slice(sourceCursor, cursor), "none");
+      cursor = imageSetEnd;
+      sourceCursor = imageSetEnd;
+      continue;
+    }
+
+    const urlMatch = remainingCss.match(/^url\s*\(/i);
+
+    if (urlMatch && !isImportedEmailCssIdentifierCharacter(previousCharacter)) {
+      const openingParenthesisIndex = cursor + urlMatch[0].lastIndexOf("(");
+      const functionEnd = findImportedEmailCssConstructEnd(
+        normalizedCss,
+        openingParenthesisIndex + 1,
+        1,
+        false,
+      );
+      const hasClosingParenthesis = normalizedCss[functionEnd - 1] === ")";
+      const rawResourceUrl = normalizedCss
+        .slice(openingParenthesisIndex + 1, hasClosingParenthesis ? functionEnd - 1 : functionEnd)
+        .trim();
+      const quoteMatch = rawResourceUrl.match(/^(["'])([\s\S]*)\1$/);
+      const resourceUrl = quoteMatch?.[2] ?? rawResourceUrl;
+
+      if (resolveImportedEmailResourceUrlType(resourceUrl) !== "safe-embedded") {
+        sanitizedParts.push(normalizedCss.slice(sourceCursor, cursor), "none");
+        sourceCursor = functionEnd;
+      }
+
+      cursor = functionEnd;
+      continue;
+    }
+
+    cursor += 1;
+  }
+
+  sanitizedParts.push(normalizedCss.slice(sourceCursor));
+  return sanitizedParts.join("");
+}
+
+const importedEmailCssResourceAttributeNames = new Set([
+  "background",
+  "background-image",
+  "border-image",
+  "border-image-source",
+  "clip-path",
+  "color-profile",
+  "content",
+  "cursor",
+  "fill",
+  "filter",
+  "list-style",
+  "list-style-image",
+  "marker",
+  "marker-end",
+  "marker-mid",
+  "marker-start",
+  "mask",
+  "mask-border-source",
+  "mask-image",
+  "offset-path",
+  "shape-inside",
+  "shape-outside",
+  "stroke",
+]);
+
+function sanitizeImportedEmailCssResourceAttributeValue(
+  attributeName: string,
+  attributeValue: string,
+) {
+  return importedEmailCssResourceAttributeNames.has(attributeName.toLowerCase())
+    ? sanitizeImportedEmailCssResources(attributeValue)
+    : attributeValue;
+}
+
+function isSafeImportedEmailImageAttributeUrl(attributeValue: string) {
+  return (
+    resolveImportedEmailResourceUrlType(attributeValue) === "safe-embedded" &&
+    /^data:image\//i.test(attributeValue.trim())
+  );
+}
+
+function shouldRemoveImportedEmailResourceAttribute(
+  tagName: string,
+  attributeName: string,
+  attributeValue: string,
+) {
+  const normalizedTagName = tagName.toUpperCase();
+  const normalizedAttributeName = attributeName.toLowerCase();
+
+  // Responsive candidates are deliberately not restored by Show images: only a
+  // normal img[src] participates in that existing, explicit consent action.
+  if (normalizedAttributeName === "srcset") {
+    return true;
+  }
+
+  // IMG is the only element whose src participates in the explicit Show-images
+  // contract. Remove src everywhere else, including uncommon resource-bearing
+  // namespaces, instead of relying on a finite media-element denylist.
+  if (normalizedAttributeName === "src" && normalizedTagName !== "IMG") {
+    return true;
+  }
+
+  if (
+    ["poster", "background", "dynsrc", "lowsrc"].includes(normalizedAttributeName)
+  ) {
+    return !isSafeImportedEmailImageAttributeUrl(attributeValue);
+  }
+
+  if (
+    ["href", "xlink:href"].includes(normalizedAttributeName) &&
+    !isImportedEmailClickOnlyLinkTagName(normalizedTagName)
+  ) {
+    return resolveImportedEmailResourceUrlType(attributeValue) !== "safe-embedded";
+  }
+
+  // These metadata attributes are not needed for rendering or click-only
+  // navigation. ping/attributionsrc can create tracking requests, while xml:base
+  // can turn an otherwise local SVG fragment into an external reference.
+  return ["ping", "attributionsrc", "xml:base"].includes(normalizedAttributeName);
+}
+
+function isImportedEmailClickOnlyLinkTagName(tagName: string) {
+  return ["A", "AREA"].includes(tagName.toUpperCase());
+}
+
+function hardenImportedEmailClickOnlyLink(element: Element) {
+  if (!isImportedEmailClickOnlyLinkTagName(element.tagName)) {
+    return;
+  }
+
+  element.setAttribute("target", "_blank");
+  element.setAttribute("rel", "noopener noreferrer");
+}
+
+function sanitizeImportedEmailResourceAttributes(element: Element) {
+  Array.from(element.attributes).forEach((attribute) => {
+    const sanitizedAttributeValue = sanitizeImportedEmailCssResourceAttributeValue(
+      attribute.name,
+      attribute.value,
+    );
+
+    if (
+      shouldRemoveImportedEmailResourceAttribute(
+        element.tagName,
+        attribute.name,
+        sanitizedAttributeValue,
+      )
+    ) {
+      element.removeAttribute(attribute.name);
+      return;
+    }
+
+    if (sanitizedAttributeValue !== attribute.value) {
+      element.setAttribute(attribute.name, sanitizedAttributeValue);
+    }
+  });
+}
+
 const allowedImportedEmailInlineStyleProperties = new Set([
   "text-align",
   "color",
@@ -4540,25 +5004,84 @@ const allowedImportedEmailInlineStyleProperties = new Set([
   "cursor",
 ]);
 
-function shouldPreserveImportedEmailInlineStyle(propertyName: string, propertyValue: string) {
-  return allowedImportedEmailInlineStyleProperties.has(propertyName) && propertyValue.length > 0;
+const allowedImportedEmailSvgInlineStyleProperties = new Set([
+  "alignment-baseline",
+  "baseline-shift",
+  "clip-path",
+  "clip-rule",
+  "color-interpolation",
+  "color-interpolation-filters",
+  "dominant-baseline",
+  "fill",
+  "fill-opacity",
+  "fill-rule",
+  "filter",
+  "flood-color",
+  "flood-opacity",
+  "lighting-color",
+  "marker-end",
+  "marker-mid",
+  "marker-start",
+  "mask",
+  "paint-order",
+  "pointer-events",
+  "shape-rendering",
+  "stop-color",
+  "stop-opacity",
+  "stroke",
+  "stroke-dasharray",
+  "stroke-dashoffset",
+  "stroke-linecap",
+  "stroke-linejoin",
+  "stroke-miterlimit",
+  "stroke-opacity",
+  "stroke-width",
+  "text-rendering",
+  "transform",
+  "transform-box",
+  "transform-origin",
+  "vector-effect",
+]);
+
+function shouldPreserveImportedEmailInlineStyle(
+  propertyName: string,
+  propertyValue: string,
+  isSvgElement = false,
+) {
+  return (
+    propertyValue.length > 0 &&
+    (allowedImportedEmailInlineStyleProperties.has(propertyName) ||
+      (isSvgElement && allowedImportedEmailSvgInlineStyleProperties.has(propertyName)))
+  );
 }
 
-function filterImportedEmailInlineStyles(element: HTMLElement) {
+function filterImportedEmailInlineStyles(element: Element) {
   if (!element.hasAttribute("style")) {
     return;
   }
 
+  if (!("style" in element)) {
+    element.removeAttribute("style");
+    return;
+  }
+
+  const styledElement = element as HTMLElement | SVGElement;
+  const isSvgElement = element.namespaceURI === "http://www.w3.org/2000/svg";
   const nextDeclarations: string[] = [];
 
-  Array.from(element.style).forEach((propertyName) => {
-    const propertyValue = element.style.getPropertyValue(propertyName).trim();
+  Array.from(styledElement.style).forEach((propertyName) => {
+    const propertyValue = sanitizeImportedEmailCssResources(
+      styledElement.style.getPropertyValue(propertyName),
+    ).trim();
 
-    if (!propertyValue || !shouldPreserveImportedEmailInlineStyle(propertyName, propertyValue)) {
+    if (
+      !propertyValue ||
+      !shouldPreserveImportedEmailInlineStyle(propertyName, propertyValue, isSvgElement)
+    ) {
       return;
     }
 
-    const priority = element.style.getPropertyPriority(propertyName);
+    const priority = styledElement.style.getPropertyPriority(propertyName);
     nextDeclarations.push(
       `${propertyName}: ${propertyValue}${priority ? " !important" : ""};`,
     );
@@ -4573,15 +5096,11 @@ function filterImportedEmailInlineStyles(element: HTMLElement) {
 }
 
 function sanitizeEmailStyleContent(cssContent: string): string {
-  return cssContent
+  return sanitizeImportedEmailCssResources(cssContent)
     // Remove CSS expressions (IE-era attack vector)
     .replace(/expression\s*\([^)]*\)/gi, "")
-    // Remove javascript: / vbscript: inside url()
-    .replace(/url\s*\(\s*['"]?\s*(javascript:|vbscript:)[^)]*\)/gi, "")
     // Remove IE behaviour property
     .replace(/\bbehavior\s*:[^;{]+/gi, "")
-    // Remove remote @import statements
-    .replace(/@import\s+(?:url\s*\(\s*['"]?|['"])\s*https?:[^)'"]+[)'"]\s*;?/gi, "")
     // Remove -moz-binding (Firefox XBL)
     .replace(/-moz-binding\s*:[^;{]+/gi, "");
 }
@@ -4676,7 +5195,7 @@ function sanitizeMessageBodyHtml(
         ["href", "src", "srcset", "poster", "xlink:href", "action", "formaction"].includes(
           attributeName,
         ) &&
-        unsafeEmailUrlPattern.test(attributeValue)
+        isUnsafeEmailUrl(attributeValue)
       ) {
         element.removeAttribute(attribute.name);
         return;
@@ -4692,10 +5211,9 @@ function sanitizeMessageBodyHtml(
       }
     });
 
-    if (element instanceof HTMLAnchorElement) {
-      element.setAttribute("target", "_blank");
-      element.setAttribute("rel", "noopener noreferrer");
-    }
+    sanitizeImportedEmailResourceAttributes(element);
+
+    hardenImportedEmailClickOnlyLink(element);
 
     if (element instanceof HTMLImageElement) {
       const sourceValue = element.getAttribute("src");
@@ -4758,9 +5276,9 @@ function sanitizeMessageBodyHtml(
       }
     }
 
-    if (element instanceof HTMLElement) {
-      filterImportedEmailInlineStyles(element);
+    filterImportedEmailInlineStyles(element);
 
+    if (element instanceof HTMLElement) {
       // Don't force table layout – let the email's own styles and attributes control it.
       // Only set a fallback if neither inline style nor html attribute provide a value.
       if (element.tagName === "TABLE") {
@@ -4858,7 +5376,7 @@ function sanitizeComposeGeneratedHtml(
         ["href", "src", "srcset", "poster", "xlink:href", "action", "formaction"].includes(
           attributeName,
         ) &&
-        unsafeEmailUrlPattern.test(attributeValue)
+        isUnsafeEmailUrl(attributeValue)
       ) {
         element.removeAttribute(attribute.name);
         return;
@@ -4878,10 +5396,9 @@ function sanitizeComposeGeneratedHtml(
       }
     });
 
-    if (element instanceof HTMLAnchorElement) {
-      element.setAttribute("target", "_blank");
-      element.setAttribute("rel", "noopener noreferrer");
-    }
+    sanitizeImportedEmailResourceAttributes(element);
+
+    hardenImportedEmailClickOnlyLink(element);
 
     if (element instanceof HTMLImageElement) {
       const sourceValue = element.getAttribute("src");
@@ -4935,6 +5452,8 @@ function sanitizeComposeGeneratedHtml(
         element.replaceWith(placeholder);
       }
     }
+
+    filterImportedEmailInlineStyles(element);
 
     if (element instanceof HTMLElement) {
       element.style.background = "transparent";
