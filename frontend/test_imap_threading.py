@@ -47,7 +47,6 @@ def rfc_thread_id(message_id, mailbox_key="mailbox-1", folder="INBOX"):
     return imap_connect_preview.build_bounded_thread_identity(
         "imap:rfc",
         mailbox_key,
-        folder,
         message_id,
     )
 
@@ -86,6 +85,31 @@ class MessageIdNormalizationTests(unittest.TestCase):
             ),
             [],
         )
+
+
+class FolderIndependentRfcIdentityTests(unittest.TestCase):
+    def test_rfc_conversation_identity_survives_folder_difference(self):
+        root = threading_record("root@example.com", uid="1")
+        reply = threading_record(
+            "reply@example.com",
+            in_reply_to="root@example.com",
+            references=["root@example.com"],
+            uid="2",
+        )
+        inbox_ids = imap_connect_preview.resolve_custom_imap_thread_ids(
+            [root, reply],
+            mailbox_key="mailbox-1",
+            folder="INBOX",
+            uid_validity="77",
+        )
+        archive_ids = imap_connect_preview.resolve_custom_imap_thread_ids(
+            [root, reply],
+            mailbox_key="mailbox-1",
+            folder="Archive",
+            uid_validity="88",
+        )
+
+        self.assertEqual(inbox_ids, archive_ids)
 
     def test_bracketed_id_ignores_bare_email_in_surrounding_prose(self):
         self.assertEqual(
@@ -434,7 +458,7 @@ class CustomImapThreadResolutionTests(unittest.TestCase):
             [uid_thread_id("1"), uid_thread_id("2"), uid_thread_id("3")],
         )
 
-    def test_same_rfc_root_is_scoped_by_mailbox_and_folder(self):
+    def test_same_rfc_root_is_scoped_by_mailbox_but_not_folder(self):
         record = threading_record("root@example.com", uid="1")
         mailbox_a = resolve([record], uid_validity="77")[0]
         mailbox_b = imap_connect_preview.resolve_custom_imap_thread_ids(
@@ -451,7 +475,7 @@ class CustomImapThreadResolutionTests(unittest.TestCase):
         )[0]
         self.assertEqual(mailbox_a, rfc_thread_id("root@example.com"))
         self.assertNotEqual(mailbox_a, mailbox_b)
-        self.assertNotEqual(mailbox_a, archive)
+        self.assertEqual(mailbox_a, archive)
         self.assertEqual(resolve([record])[0], resolve([record])[0])
 
     def test_long_scoped_rfc_identity_is_bounded_and_hashes_complete_scope(self):
@@ -459,19 +483,16 @@ class CustomImapThreadResolutionTests(unittest.TestCase):
         first = imap_connect_preview.build_bounded_thread_identity(
             "imap:rfc",
             "mailbox-" + "m" * 300,
-            "folder-" + "f" * 300,
             root,
         )
         repeated = imap_connect_preview.build_bounded_thread_identity(
             "imap:rfc",
             "mailbox-" + "m" * 300,
-            "folder-" + "f" * 300,
             root,
         )
         changed_tail = imap_connect_preview.build_bounded_thread_identity(
             "imap:rfc",
             "mailbox-" + "m" * 299 + "n",
-            "folder-" + "f" * 300,
             root,
         )
         self.assertLessEqual(len(first), imap_connect_preview.MAX_THREAD_ID_LENGTH)
@@ -480,19 +501,17 @@ class CustomImapThreadResolutionTests(unittest.TestCase):
 
     def test_long_unicode_scoped_identities_use_only_complete_percent_encoding(self):
         cases = [
-            ("é" * 180, "INBOX", "root@example.com"),
-            ("mailbox-1", "資料夾" * 180, "root@example.com"),
-            ("mailbox-1", "INBOX", f"{'é' * 180}@example.com"),
-            ("é" * 100, "INBOX", "root@example.com"),
-            ("mailbox-1", "é" * 79 + "A", f"{'é' * 100}@example.com"),
+            ("é" * 180, "root@example.com"),
+            ("mailbox-1", f"{'é' * 180}@example.com"),
+            ("é" * 100, "root@example.com"),
+            ("mailbox-1", f"{'é' * 100}@example.com"),
         ]
 
-        for mailbox_key, folder, root in cases:
-            with self.subTest(mailbox_key=mailbox_key[:12], folder=folder[:12]):
+        for mailbox_key, root in cases:
+            with self.subTest(mailbox_key=mailbox_key[:12], root=root[:12]):
                 identity = imap_connect_preview.build_bounded_thread_identity(
                     "imap:rfc",
                     mailbox_key,
-                    folder,
                     root,
                 )
                 self.assertLessEqual(
@@ -509,7 +528,6 @@ class CustomImapThreadResolutionTests(unittest.TestCase):
                     imap_connect_preview.build_bounded_thread_identity(
                         "imap:rfc",
                         mailbox_key,
-                        folder,
                         root,
                     ),
                 )

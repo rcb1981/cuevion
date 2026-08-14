@@ -232,6 +232,32 @@ const openComposeSource = workspaceShellSource.slice(
 );
 assert.match(openComposeSource, /const ownAddressSet = new Set<string>/);
 assert.match(openComposeSource, /const senderIsOwn = ownAddressSet\.has/);
+assert.match(
+  openComposeSource,
+  /selectLatestAuthoritativeConversationMessage\(/,
+  "normal Reply source must use canonical authoritative conversation membership",
+);
+for (const folder of ["Inbox", "Archive", "Filtered", "Sent"]) {
+  assert.match(
+    openComposeSource,
+    new RegExp(`"${folder}"`),
+    `${folder} must remain a qualifying normal Reply source folder`,
+  );
+}
+const normalReplyFolderSource = openComposeSource.slice(
+  openComposeSource.indexOf("const normalReplySourceFolders"),
+  openComposeSource.indexOf("]);", openComposeSource.indexOf("const normalReplySourceFolders")) + 3,
+);
+assert.doesNotMatch(
+  normalReplyFolderSource,
+  /Drafts|Trash|Spam/,
+  "Drafts, Trash, and Spam must not replace a normal Reply source",
+);
+assert.match(
+  openComposeSource,
+  /selectedSourceFolder === "Trash" \|\| selectedSourceFolder === "Spam"/,
+  "explicit Trash and Spam Reply behavior must remain folder-specific",
+);
 assert.match(openComposeSource, /if \(mode === "reply_all"\)/);
 assert.match(openComposeSource, /ownAddressSet\.has\(normalizedRecipient\)/);
 assert.match(openComposeSource, /replyToNormalized\.has\(normalizedRecipient\)/);

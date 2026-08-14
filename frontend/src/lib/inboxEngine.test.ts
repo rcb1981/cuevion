@@ -14,9 +14,11 @@ import {
   buildMailboxScopedThreadGroupingKey,
   buildConservativeLiveCustomImapThreadId,
   buildRenderedConversationRows,
+  dedupeLatestCanonicalConversationEntries,
   dedupeMailboxScopedMessageCopies,
   mergeLiveInboxMessageState,
   normalizeThreadSubject,
+  selectLatestAuthoritativeConversationMessage,
   resolveLiveCustomImapThreadId,
   resolveThreadKey,
   resolveMessageDateMs,
@@ -599,6 +601,16 @@ const mailboxBContext: LiveThreadIdentityContext = {
   ...mailboxAContext,
   mailboxId: "mailbox-b",
 };
+const gmailMailboxAContext: LiveThreadIdentityContext = {
+  mailboxId: "mailbox-a",
+  provider: "google",
+  folder: "INBOX",
+  uidValidity: "gmail-api",
+};
+const gmailMailboxBContext: LiveThreadIdentityContext = {
+  ...gmailMailboxAContext,
+  mailboxId: "mailbox-b",
+};
 
 function renderedMessage(
   id: string,
@@ -615,6 +627,251 @@ function renderedMessage(
     ...overrides,
   };
 }
+
+test("Gmail provider thread is promoted to canonical mailbox-scoped identity", () => {
+  const message = applyLiveThreadIdentity(
+    {
+      id: "gmail-message-1",
+      providerMessageId: "provider-message-1",
+      providerThreadId: "thread-123",
+    },
+    gmailMailboxAContext,
+  );
+
+  assert.equal(message.threadId, "gmail:mailbox-a:thread-123");
+  assert.equal(message.threadIdentityAuthority, "gmail");
+});
+
+test("same-subject Gmail messages with different provider threads stay separate", () => {
+  const baseMessage = {
+    sender: "Sender",
+    subject: "Release update",
+    snippet: "Update",
+    from: "sender@example.com",
+    to: "owner@example.com",
+    timestamp: "July 13 at 10:00",
+    createdAt: "2026-07-13T08:00:00.000Z",
+  };
+  const first = applyLiveThreadIdentity(
+    {
+      ...baseMessage,
+      id: "gmail-message-a",
+      providerMessageId: "provider-message-a",
+      providerThreadId: "gmail-thread-A",
+    },
+    gmailMailboxAContext,
+  );
+  const second = applyLiveThreadIdentity(
+    {
+      ...baseMessage,
+      id: "gmail-message-b",
+      providerMessageId: "provider-message-b",
+      providerThreadId: "gmail-thread-B",
+      subject: "Re: Release update",
+      createdAt: "2026-07-13T09:00:00.000Z",
+    },
+    gmailMailboxAContext,
+  );
+
+  const rows = buildRenderedConversationRows([
+    { message: first, context: gmailMailboxAContext },
+    { message: second, context: gmailMailboxAContext },
+  ]);
+
+  assert.equal(rows.length, 2);
+  assert.ok(rows.every((row) => row.threadCount === 1));
+});
+
+test("Gmail provider thread identity remains isolated between mailboxes", () => {
+  const first = applyLiveThreadIdentity(
+    {
+      id: "gmail-message-a",
+      providerMessageId: "provider-message-a",
+      providerThreadId: "shared-thread",
+      subject: "Release update",
+      from: "sender@example.com",
+      to: "owner@example.com",
+    },
+    gmailMailboxAContext,
+  );
+  const second = applyLiveThreadIdentity(
+    {
+      id: "gmail-message-b",
+      providerMessageId: "provider-message-b",
+      providerThreadId: "shared-thread",
+      subject: "Release update",
+      from: "sender@example.com",
+      to: "owner@example.com",
+    },
+    gmailMailboxBContext,
+  );
+
+  assert.notEqual(first.threadId, second.threadId);
+  assert.equal(
+    buildRenderedConversationRows([
+      { message: first, context: gmailMailboxAContext },
+      { message: second, context: gmailMailboxBContext },
+    ]).length,
+    2,
+  );
+});
+
+test("live Gmail messages without provider thread evidence stay message-unique", () => {
+  const baseMessage = {
+    subject: "Hello",
+    from: "sender@example.com",
+    to: "owner@example.com",
+  };
+  const first = applyLiveThreadIdentity(
+    { ...baseMessage, id: "gmail-message-a", providerMessageId: "provider-message-a" },
+    gmailMailboxAContext,
+  );
+  const second = applyLiveThreadIdentity(
+    { ...baseMessage, id: "gmail-message-b", providerMessageId: "provider-message-b" },
+    gmailMailboxAContext,
+  );
+
+  assert.notEqual(first.threadId, second.threadId);
+  assert.equal(first.threadIdentityAuthority, "unique_message");
+  assert.equal(second.threadIdentityAuthority, "unique_message");
+});
+
+test("authoritative Reply source advances to the uniquely latest Gmail message", () => {
+  const first = applyLiveThreadIdentity(
+    {
+      ...renderedMessage("gmail-message-a", "Release update"),
+      providerMessageId: "provider-message-a",
+      providerThreadId: "gmail-thread",
+      createdAt: "2026-07-13T08:00:00.000Z",
+    },
+    gmailMailboxAContext,
+  );
+  const latest = applyLiveThreadIdentity(
+    {
+      ...renderedMessage("gmail-message-b", "Re: Release update"),
+      providerMessageId: "provider-message-b",
+      providerThreadId: "gmail-thread",
+      createdAt: "2026-07-13T09:00:00.000Z",
+    },
+    gmailMailboxAContext,
+  );
+  const rows = buildRenderedConversationRows([
+    { message: first, context: gmailMailboxAContext },
+    { message: latest, context: gmailMailboxAContext },
+  ]);
+
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]?.threadCount, 2);
+  assert.equal(rows[0]?.message.id, latest.id);
+
+  assert.equal(
+    selectLatestAuthoritativeConversationMessage(
+      first,
+      [first, latest],
+      gmailMailboxAContext.mailboxId,
+    ).id,
+    latest.id,
+  );
+});
+
+test("Priority canonical dedupe cannot collapse provider or mailbox collisions", () => {
+  const base = {
+    subject: "Release update",
+    from: "sender@example.com",
+    to: "owner@example.com",
+    createdAt: "2026-07-13T08:00:00.000Z",
+  };
+  const entries = [
+    {
+      mailboxId: "mailbox-a",
+      message: applyLiveThreadIdentity(
+        {
+          ...base,
+          id: "gmail-a-1",
+          providerMessageId: "gmail-a-1",
+          providerThreadId: "thread-a",
+        },
+        gmailMailboxAContext,
+      ),
+    },
+    {
+      mailboxId: "mailbox-a",
+      message: applyLiveThreadIdentity(
+        {
+          ...base,
+          id: "gmail-a-2",
+          providerMessageId: "gmail-a-2",
+          providerThreadId: "thread-b",
+        },
+        gmailMailboxAContext,
+      ),
+    },
+    {
+      mailboxId: "mailbox-b",
+      message: applyLiveThreadIdentity(
+        {
+          ...base,
+          id: "gmail-b-1",
+          providerMessageId: "gmail-b-1",
+          providerThreadId: "thread-a",
+        },
+        gmailMailboxBContext,
+      ),
+    },
+  ];
+
+  assert.deepEqual(
+    dedupeLatestCanonicalConversationEntries(entries).map(({ message }) => message.id),
+    ["gmail-a-1", "gmail-a-2", "gmail-b-1"],
+  );
+});
+
+test("heuristic-only Reply source remains the explicitly selected message", () => {
+  const selected = {
+    ...renderedMessage("heuristic-a", "Release update"),
+    createdAt: "2026-07-13T08:00:00.000Z",
+  };
+  const newer = {
+    ...renderedMessage("heuristic-b", "Re: Release update"),
+    createdAt: "2026-07-13T09:00:00.000Z",
+  };
+
+  assert.equal(
+    selectLatestAuthoritativeConversationMessage(selected, [selected, newer], "mailbox-a").id,
+    selected.id,
+  );
+});
+
+test("authoritative Reply source fails safe when any candidate date is missing", () => {
+  const selected = applyLiveThreadIdentity(
+    {
+      ...renderedMessage("gmail-message-a", "Release update"),
+      providerMessageId: "provider-message-a",
+      providerThreadId: "gmail-thread",
+      createdAt: "2026-07-13T08:00:00.000Z",
+    },
+    gmailMailboxAContext,
+  );
+  const unknownDate = applyLiveThreadIdentity(
+    {
+      ...renderedMessage("gmail-message-b", "Re: Release update"),
+      providerMessageId: "provider-message-b",
+      providerThreadId: "gmail-thread",
+      createdAt: undefined,
+      timestamp: undefined,
+    },
+    gmailMailboxAContext,
+  );
+
+  assert.equal(
+    selectLatestAuthoritativeConversationMessage(
+      selected,
+      [selected, unknownDate],
+      gmailMailboxAContext.mailboxId,
+    ).id,
+    selected.id,
+  );
+});
 
 test("normal Inbox row pipeline retains cross-mailbox UID collisions", () => {
   const rows = buildRenderedConversationRows([
@@ -788,7 +1045,8 @@ test("direct refresh merge replaces stale identity and preserves current state r
     },
   );
 
-  assert.equal(merged.threadId, "imap:rfc:mailbox-a:INBOX:root%40example.com");
+  assert.equal(merged.threadId, "imap:rfc:mailbox-a:root%40example.com");
+  assert.equal(merged.threadIdentityAuthority, "rfc");
   assert.equal(merged.unread, false);
   assert.equal(merged.flagged, true);
   assert.deepEqual(merged.attachments, [{ id: "attachment-1", name: "demo.wav" }]);
@@ -1481,7 +1739,7 @@ test("legacy snapshot migration requires trusted provider context", () => {
   }
 });
 
-test("thread migration leaves Gmail provider snapshots unchanged", () => {
+test("thread migration promotes Gmail provider snapshots to canonical identity", () => {
   const store = new Map<string, string>();
   const previousWindow = (globalThis as { window?: unknown }).window;
   (globalThis as { window?: unknown }).window = {
@@ -1537,7 +1795,7 @@ test("thread migration leaves Gmail provider snapshots unchanged", () => {
     const gmailMessage = hydrateLiveInboxSnapshot(gmailSnapshot).messages[0];
     assert.equal(gmailMessage?.providerMessageId, "provider-message");
     assert.equal(gmailMessage?.providerThreadId, "gmail-thread-123");
-    assert.equal(gmailMessage?.threadId, "same subject");
+    assert.equal(gmailMessage?.threadId, "gmail:gmail:gmail-thread-123");
     assert.equal(gmailMessage?.unread, true);
     assert.equal(gmailMessage?.flagged, true);
     assert.equal(gmailMessage?.bodyHtml, "<p>Body</p>");

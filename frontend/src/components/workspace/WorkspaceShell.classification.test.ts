@@ -178,6 +178,95 @@ for (const [classification, uiSignal, category, visibleCategoryLabel] of support
   }
 }
 
+const emptyThreadCategorizationCollections = () => ({
+  Inbox: [],
+  Drafts: [],
+  Sent: [],
+  Archive: [],
+  Filtered: [],
+  Spam: [],
+  Trash: [],
+});
+const gmailThreadContext = {
+  mailboxId: "main",
+  provider: "google" as const,
+  folder: "INBOX",
+  uidValidity: "gmail-api",
+};
+const canonicalCategorizationHistory = normalizeMailMessage(
+  {
+    id: "categorization-history",
+    sender: "Sender",
+    subject: "Release update",
+    snippet: "Historical category",
+    time: "09:00",
+    createdAt: "2026-08-14T07:00:00.000Z",
+    from: "sender@example.test",
+    to: "owner@example.test",
+    timestamp: "2026-08-14T07:00:00.000Z",
+    body: ["Historical category"],
+    threadId: "gmail:main:thread-a",
+    providerThreadId: "thread-a",
+    threadIdentityContext: gmailThreadContext,
+    threadIdentityAuthority: "gmail",
+    category: "Promo",
+    categorySource: "user",
+    categoryConfidence: "high",
+  },
+  "main",
+  {},
+  {},
+  "user-1",
+);
+const categorizationStore = {
+  main: {
+    ...emptyThreadCategorizationCollections(),
+    Inbox: [canonicalCategorizationHistory],
+  },
+};
+const canonicalCategorizationSeed = {
+  id: "categorization-current",
+  sender: "Sender",
+  subject: "Re: Release update",
+  snippet: "Current message",
+  time: "10:00",
+  createdAt: "2026-08-14T08:00:00.000Z",
+  from: "sender@example.test",
+  to: "owner@example.test",
+  timestamp: "2026-08-14T08:00:00.000Z",
+  body: ["Current message"],
+  providerThreadId: "thread-a",
+  threadIdentityContext: gmailThreadContext,
+  threadIdentityAuthority: "gmail" as const,
+  internalClassification: "unknown" as const,
+};
+const sameCanonicalThreadCategorization = normalizeMailMessage(
+  {
+    ...canonicalCategorizationSeed,
+    threadId: "gmail:main:thread-a",
+  },
+  "main",
+  {},
+  {},
+  "user-1",
+  categorizationStore,
+);
+const differentProviderThreadCategorization = normalizeMailMessage(
+  {
+    ...canonicalCategorizationSeed,
+    threadId: "gmail:main:thread-b",
+    providerThreadId: "thread-b",
+  },
+  "main",
+  {},
+  {},
+  "user-1",
+  categorizationStore,
+);
+
+assert.equal(sameCanonicalThreadCategorization.category, "Promo");
+assert.equal(differentProviderThreadCategorization.category, "Primary");
+
 const loanBody = [
   "Need a personal or business loan?",
   "Arabian Investment Group offers a simple application process and flexible loan options.",

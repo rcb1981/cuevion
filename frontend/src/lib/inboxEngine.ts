@@ -7,6 +7,12 @@ export type ThreadableMessage = {
   timestamp?: string;
 };
 
+export type ThreadIdentityAuthority =
+  | "gmail"
+  | "rfc"
+  | "unique_message"
+  | "heuristic";
+
 export function normalizeThreadSubject(subject: string) {
   return subject
     .trim()
@@ -19,6 +25,9 @@ export type LiveCustomImapThreadIdentityMessage = {
   id: string;
   threadId?: string | null;
   imapUid?: string | null;
+  providerMessageId?: string | null;
+  providerThreadId?: string | null;
+  threadIdentityAuthority?: ThreadIdentityAuthority;
 };
 
 export type LiveInboxProvider = "google" | "custom_imap";
@@ -62,23 +71,69 @@ export function resolveLiveCustomImapThreadId(
   message: LiveCustomImapThreadIdentityMessage,
   context: LiveThreadIdentityContext,
 ) {
-  return (
-    message.threadId?.trim() ||
-    buildConservativeLiveCustomImapThreadId(message, context)
-  );
+  const threadId = message.threadId?.trim();
+  if (threadId?.startsWith("imap:rfc:")) {
+    const legacyFolderPrefix = [
+      "imap:rfc",
+      encodeLiveThreadIdentityComponent(context.mailboxId),
+      encodeLiveThreadIdentityComponent(context.folder),
+      "",
+    ].join(":");
+
+    if (threadId.startsWith(legacyFolderPrefix)) {
+      return [
+        "imap:rfc",
+        encodeLiveThreadIdentityComponent(context.mailboxId),
+        threadId.slice(legacyFolderPrefix.length),
+      ].join(":");
+    }
+  }
+
+  return threadId || buildConservativeLiveCustomImapThreadId(message, context);
+}
+
+function buildLiveGmailThreadId(
+  message: LiveCustomImapThreadIdentityMessage,
+  context: LiveThreadIdentityContext,
+) {
+  if (message.providerThreadId?.trim()) {
+    return [
+      "gmail",
+      encodeLiveThreadIdentityComponent(context.mailboxId),
+      encodeLiveThreadIdentityComponent(message.providerThreadId),
+    ].join(":");
+  }
+
+  return [
+    "gmail:message",
+    encodeLiveThreadIdentityComponent(context.mailboxId),
+    encodeLiveThreadIdentityComponent(message.providerMessageId || message.id),
+  ].join(":");
 }
 
 export function applyLiveThreadIdentity<
   T extends LiveCustomImapThreadIdentityMessage,
 >(message: T, context: LiveThreadIdentityContext): T & {
   threadIdentityContext: LiveThreadIdentityContext;
+  threadIdentityAuthority: ThreadIdentityAuthority;
 } {
+  const threadId =
+    context.provider === "custom_imap"
+      ? resolveLiveCustomImapThreadId(message, context)
+      : buildLiveGmailThreadId(message, context);
+  const threadIdentityAuthority: ThreadIdentityAuthority =
+    context.provider === "google"
+      ? message.providerThreadId?.trim()
+        ? "gmail"
+        : "unique_message"
+      : threadId.startsWith("imap:rfc:")
+        ? "rfc"
+        : "unique_message";
+
   return {
     ...message,
-    threadId:
-      context.provider === "custom_imap"
-        ? resolveLiveCustomImapThreadId(message, context)
-        : message.threadId ?? undefined,
+    threadId,
+    threadIdentityAuthority,
     threadIdentityContext: context,
   };
 }
@@ -145,6 +200,12 @@ export type RenderedConversationMessage = LiveCustomImapThreadIdentityMessage &
     collaboration?: { messages?: unknown[] } | null;
     threadIdentityContext?: LiveThreadIdentityContext;
   };
+
+export type CanonicalConversationIdentity = {
+  key: string;
+  authority: ThreadIdentityAuthority;
+  isAuthoritativeConversation: boolean;
+};
 
 export type RenderedConversationRecord<T extends RenderedConversationMessage> = {
   message: T;
@@ -222,25 +283,70 @@ function buildReplyParticipantKey(message: RenderedConversationMessage) {
   return Array.from(new Set(participants)).join(",");
 }
 
-export function resolveSafeThreadGroupingKey(
+function inferThreadIdentityAuthority(
+  message: RenderedConversationMessage,
+): ThreadIdentityAuthority {
+  if (message.threadIdentityAuthority) {
+    return message.threadIdentityAuthority;
+  }
+
+  const threadId = message.threadId?.trim() ?? "";
+  if (/^gmail:[^:]+:[^:]+$/.test(threadId) && !threadId.startsWith("gmail:message:")) {
+    return "gmail";
+  }
+  if (threadId.startsWith("imap:rfc:")) {
+    return "rfc";
+  }
+  if (
+    threadId.startsWith("gmail:message:") ||
+    threadId.startsWith("imap:uid:") ||
+    threadId.startsWith("imap:message:")
+  ) {
+    return "unique_message";
+  }
+
+  return "heuristic";
+}
+
+export function resolveCanonicalConversationIdentity(
   message: RenderedConversationMessage,
   mailboxId?: string,
-) {
+): CanonicalConversationIdentity {
   const normalizedSubject = normalizeThreadSubject(message.subject);
   const threadId = message.threadId?.trim();
   const resolvedMailboxId = message.threadIdentityContext?.mailboxId ?? mailboxId;
   const mailboxPrefix = resolvedMailboxId ? `${resolvedMailboxId}|` : "";
   const participantKey = buildReplyParticipantKey(message);
+  const authority = inferThreadIdentityAuthority(message);
+
+  if (threadId && authority !== "heuristic") {
+    return {
+      key: `thread:${buildMailboxScopedThreadGroupingKey(
+        threadId,
+        resolvedMailboxId ?? "missing",
+      )}`,
+      authority,
+      isAuthoritativeConversation: authority === "gmail" || authority === "rfc",
+    };
+  }
 
   if (threadId && threadId !== normalizedSubject) {
-    return `thread:${buildMailboxScopedThreadGroupingKey(
-      threadId,
-      resolvedMailboxId ?? "missing",
-    )}`;
+    return {
+      key: `thread:${buildMailboxScopedThreadGroupingKey(
+        threadId,
+        resolvedMailboxId ?? "missing",
+      )}`,
+      authority,
+      isAuthoritativeConversation: false,
+    };
   }
 
   if (hasStrongReplyThreadEvidence(message)) {
-    return `conversation:${mailboxPrefix}${normalizedSubject}|${participantKey}`;
+    return {
+      key: `conversation:${mailboxPrefix}${normalizedSubject}|${participantKey}`,
+      authority: "heuristic",
+      isAuthoritativeConversation: false,
+    };
   }
 
   if (
@@ -251,20 +357,103 @@ export function resolveSafeThreadGroupingKey(
       message.imapUid ||
       message.id ||
       `${normalizedSubject}|${message.from ?? ""}|${message.timestamp ?? ""}`;
-    return `message:${buildMailboxScopedThreadGroupingKey(
-      instanceKey,
-      resolvedMailboxId ?? "missing",
-    )}`;
+    return {
+      key: `message:${buildMailboxScopedThreadGroupingKey(
+        instanceKey,
+        resolvedMailboxId ?? "missing",
+      )}`,
+      authority: "unique_message",
+      isAuthoritativeConversation: false,
+    };
   }
 
   if (participantKey) {
-    return `conversation:${mailboxPrefix}${normalizedSubject}|${participantKey}`;
+    return {
+      key: `conversation:${mailboxPrefix}${normalizedSubject}|${participantKey}`,
+      authority: "heuristic",
+      isAuthoritativeConversation: false,
+    };
   }
 
   const normalizedSender = normalizeConversationParticipant(
     message.from ?? message.sender ?? "",
   );
-  return `fallback:${mailboxPrefix}${normalizedSubject}|${normalizedSender}`;
+  return {
+    key: `fallback:${mailboxPrefix}${normalizedSubject}|${normalizedSender}`,
+    authority: "heuristic",
+    isAuthoritativeConversation: false,
+  };
+}
+
+export function resolveSafeThreadGroupingKey(
+  message: RenderedConversationMessage,
+  mailboxId?: string,
+) {
+  return resolveCanonicalConversationIdentity(message, mailboxId).key;
+}
+
+export function selectLatestAuthoritativeConversationMessage<
+  T extends RenderedConversationMessage,
+>(selectedMessage: T, candidates: T[], mailboxId?: string): T {
+  const selectedIdentity = resolveCanonicalConversationIdentity(
+    selectedMessage,
+    mailboxId,
+  );
+
+  if (!selectedIdentity.isAuthoritativeConversation) {
+    return selectedMessage;
+  }
+
+  const matchingCandidates = candidates.filter(
+    (candidate) =>
+      resolveCanonicalConversationIdentity(candidate, mailboxId).key ===
+      selectedIdentity.key,
+  );
+  const hasUnknownCandidateDate = matchingCandidates.some(
+    (candidate) => resolveMessageDateMs(candidate) === 0,
+  );
+
+  if (hasUnknownCandidateDate || matchingCandidates.length === 0) {
+    return selectedMessage;
+  }
+
+  const latestDateMs = Math.max(
+    ...matchingCandidates.map((candidate) => resolveMessageDateMs(candidate)),
+  );
+  const latestCandidates = matchingCandidates.filter(
+    (candidate) => resolveMessageDateMs(candidate) === latestDateMs,
+  );
+
+  return latestCandidates.length === 1 ? latestCandidates[0] : selectedMessage;
+}
+
+export function dedupeLatestCanonicalConversationEntries<
+  T extends RenderedConversationMessage,
+  TMailboxId extends string,
+  TEntry extends { mailboxId: TMailboxId; message: T },
+>(entries: TEntry[]): TEntry[] {
+  const latestByConversation = new Map<string, TEntry>();
+
+  entries.forEach((entry) => {
+    const identity = resolveCanonicalConversationIdentity(
+      entry.message,
+      entry.mailboxId,
+    );
+    const existing = latestByConversation.get(identity.key);
+
+    if (!existing) {
+      latestByConversation.set(identity.key, entry);
+      return;
+    }
+
+    const candidateDateMs = resolveMessageDateMs(entry.message);
+    const existingDateMs = resolveMessageDateMs(existing.message);
+    if (candidateDateMs > 0 && existingDateMs > 0 && candidateDateMs > existingDateMs) {
+      latestByConversation.set(identity.key, entry);
+    }
+  });
+
+  return Array.from(latestByConversation.values());
 }
 
 export function buildRenderedConversationRows<T extends RenderedConversationMessage>(
@@ -321,7 +510,10 @@ export function mergeLiveInboxMessageState<T extends LiveInboxMergeMessage>(
     preferExistingUnreadWhenProviderStateIsNotFresh: boolean;
     localUnread?: boolean;
   },
-): T & { threadIdentityContext: LiveThreadIdentityContext } {
+): T & {
+  threadIdentityContext: LiveThreadIdentityContext;
+  threadIdentityAuthority: ThreadIdentityAuthority;
+} {
   const messageWithThreadIdentity = applyLiveThreadIdentity(incoming, context);
   const providerUnread =
     typeof messageWithThreadIdentity.unread === "boolean"
@@ -363,7 +555,10 @@ export function mergeLiveInboxMessageState<T extends LiveInboxMergeMessage>(
     flagged,
     collaboration,
     isShared,
-  } as T & { threadIdentityContext: LiveThreadIdentityContext };
+  } as T & {
+    threadIdentityContext: LiveThreadIdentityContext;
+    threadIdentityAuthority: ThreadIdentityAuthority;
+  };
 }
 
 export function buildMailboxScopedThreadGroupingKey(

@@ -435,7 +435,6 @@ def resolve_custom_imap_thread_ids(
                 build_bounded_thread_identity(
                     "imap:rfc",
                     mailbox_key,
-                    folder,
                     root_message_id,
                 )
             )

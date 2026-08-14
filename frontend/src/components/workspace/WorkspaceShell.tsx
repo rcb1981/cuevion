@@ -248,16 +248,19 @@ import * as suggestionEngine from "../../lib/suggestionEngine";
 import {
   applyLiveThreadIdentity,
   buildRenderedConversationRows,
+  dedupeLatestCanonicalConversationEntries,
   mergeLiveInboxMessageState,
   normalizeThreadSubject,
+  resolveCanonicalConversationIdentity,
   resolveSafeThreadGroupingKey,
-  resolveThreadKey,
+  selectLatestAuthoritativeConversationMessage,
   pruneInboxSnapshot,
   INBOX_SNAPSHOT_MAX_MESSAGES,
   INBOX_SNAPSHOT_MAX_AGE_MS,
   INBOX_SNAPSHOT_RECENT_GUARD_MS,
   type LiveInboxProvider,
   type LiveThreadIdentityContext,
+  type ThreadIdentityAuthority,
 } from "../../lib/inboxEngine";
 import {
   addPersistedMessageIdentityKeys,
@@ -1343,6 +1346,7 @@ type MailMessage = Partial<MessageNoiseAssessment> & {
   rfcMessageId?: string;
   labelIds?: string[];
   threadIdentityContext?: LiveThreadIdentityContext;
+  threadIdentityAuthority?: ThreadIdentityAuthority;
   sender: string;
   subject: string;
   snippet: string;
@@ -8869,7 +8873,18 @@ type ThreadCategorizationCandidate = Pick<
   MailMessageSeed,
   "id" | "threadId" | "subject" | "createdAt" | "timestamp"
 > &
-  Partial<Pick<MailMessageSeed, "imapUid" | "from" | "sender">> &
+  Partial<
+    Pick<
+      MailMessageSeed,
+      | "imapUid"
+      | "from"
+      | "sender"
+      | "providerMessageId"
+      | "providerThreadId"
+      | "threadIdentityContext"
+      | "threadIdentityAuthority"
+    >
+  > &
   Partial<
     Pick<MailMessage, "category" | "categorySource" | "categoryConfidence">
   >;
@@ -8939,13 +8954,27 @@ function getRecentThreadMessages<T extends ThreadCategorizationCandidate>(
 }
 
 function resolveThreadDominantCategorization(
-  message: Pick<MailMessageSeed, "id" | "threadId" | "subject" | "createdAt" | "timestamp">,
+  message: ThreadCategorizationCandidate,
+  mailboxId: InboxId,
   mailboxStore: MailboxStore,
 ) {
-  const threadHistory = Object.values(mailboxStore).flatMap((collections) =>
-    canonicalFolderOrder.flatMap((folder) => collections[folder]),
+  const messageIdentity = resolveCanonicalConversationIdentity(message, mailboxId);
+  if (message.threadIdentityContext && !messageIdentity.isAuthoritativeConversation) {
+    return null;
+  }
+
+  const mailboxCollections = mailboxStore[mailboxId];
+  if (!mailboxCollections) {
+    return null;
+  }
+
+  const threadHistory = canonicalFolderOrder.flatMap(
+    (folder) => mailboxCollections[folder],
   );
-  const recentThreadMessages = getRecentThreadMessages(message, threadHistory).filter(
+  const recentThreadMessages = getRecentThreadMessages(message, threadHistory, {
+    mailboxId,
+    useSafeGrouping: true,
+  }).filter(
     (
       candidate,
     ): candidate is MailMessage &
@@ -9044,6 +9073,7 @@ function resolveCuevionCategorization(
 
     const threadDominantCategorization = resolveThreadDominantCategorization(
       message,
+      mailboxId,
       mailboxStore,
     );
 
@@ -9084,6 +9114,7 @@ function resolveCuevionCategorization(
 
   const threadDominantCategorization = resolveThreadDominantCategorization(
     message,
+    mailboxId,
     mailboxStore,
   );
 
@@ -10445,6 +10476,7 @@ function createInitialMailboxStore(
               uidValidity: message.uidValidity,
               rfcMessageId: message.rfcMessageId,
               threadIdentityContext: threadIdentityContext ?? undefined,
+              threadIdentityAuthority: message.threadIdentityAuthority,
               sender: message.sender,
               subject: message.subject,
               snippet: message.snippet,
@@ -14780,13 +14812,35 @@ function MailboxView({
         ? planFullMessageModalComposeAction(message.id, mode)
         : null;
     const threadMessages = getThreadMessages(message);
-    // For reply / reply_all, always address and quote the most recent message in
-    // the thread.  `message` here is the root message whose row was selected in the
-    // list; getThreadMessages returns the full thread sorted oldest-first, so the
-    // last entry is the latest message. For forward we keep the selected message as-is.
+    const selectedMessageLocation = currentMessageLocationById[message.id];
+    const selectedSourceMailboxId =
+      selectedMessageLocation?.mailboxId ??
+      (message.threadIdentityContext?.mailboxId as InboxId | undefined) ??
+      mailbox.id;
+    const selectedSourceFolder = selectedMessageLocation?.folder;
+    const isExplicitTrashOrSpamReply =
+      selectedSourceFolder === "Trash" || selectedSourceFolder === "Spam";
+    const normalReplySourceFolders = new Set<MailFolder>([
+      "Inbox",
+      "Archive",
+      "Filtered",
+      "Sent",
+    ]);
+    const normalReplyCandidates = threadMessages.filter((candidate) => {
+      const candidateFolder = currentMessageLocationById[candidate.id]?.folder;
+      return candidate.id === message.id || Boolean(
+        candidateFolder && normalReplySourceFolders.has(candidateFolder)
+      );
+    });
     const effectiveMessage =
       mode === "reply" || mode === "reply_all"
-        ? threadMessages[threadMessages.length - 1] ?? message
+        ? isExplicitTrashOrSpamReply
+          ? threadMessages[threadMessages.length - 1] ?? message
+          : selectLatestAuthoritativeConversationMessage(
+              message,
+              normalReplyCandidates,
+              selectedSourceMailboxId,
+            )
         : message;
     const sourceMailboxId = currentMessageLocationById[effectiveMessage.id]?.mailboxId ?? mailbox.id;
     const originalSender = effectiveMessage.from.trim();
@@ -17793,6 +17847,10 @@ function MailboxView({
                   composeSourceMessage?.subject ??
                   (composeSubject.trim() || "Untitled message"),
               })
+            : undefined,
+        threadIdentityAuthority:
+          composeMode === "reply" || composeMode === "reply_all"
+            ? composeSourceMessage?.threadIdentityAuthority
             : undefined,
         sender: "You",
         subject: composeSubject.trim() || "Untitled message",
@@ -37531,6 +37589,7 @@ export function WorkspaceShell({
           rfcMessageId: mergedMessageState.rfcMessageId,
           labelIds: mergedMessageState.labelIds,
           threadIdentityContext: mergedMessageState.threadIdentityContext,
+          threadIdentityAuthority: mergedMessageState.threadIdentityAuthority,
           sender: mergedMessageState.sender,
           subject: mergedMessageState.subject,
           snippet: mergedMessageState.snippet,
@@ -40485,28 +40544,9 @@ export function WorkspaceShell({
     // This prevents an older priority message in the same thread from backfilling
     // the Priority queue/count after the latest visible message was manually set to
     // "Not priority".
-    const latestByThread = new Map<
-      string,
-      typeof normalPriorityGateCandidateEntries[number]
-    >();
-
-    for (const entry of normalPriorityGateCandidateEntries) {
-      const threadKey = resolveThreadKey({
-        threadId: entry.message.threadId,
-        subject: entry.message.subject,
-        from: entry.message.from ?? entry.message.sender ?? "",
-      });
-      const existing = latestByThread.get(threadKey);
-
-      if (
-        !existing ||
-        resolveMailDateMs(entry.message) >= resolveMailDateMs(existing.message)
-      ) {
-        latestByThread.set(threadKey, entry);
-      }
-    }
-
-    return Array.from(latestByThread.values()).filter(({ message, mailboxId }) => {
+    return dedupeLatestCanonicalConversationEntries(
+      normalPriorityGateCandidateEntries,
+    ).filter(({ message, mailboxId }) => {
       const override = resolveManualPriorityOverride(manualPriorityOverrides, message);
       const messageKey = createNormalPriorityMessageKey(mailboxId, message);
 
