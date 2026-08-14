@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { transform } from "sucrase";
+import { applyLiveThreadIdentity } from "../../lib/inboxEngine";
 
 const workspaceShellSource = readFileSync(
   resolve(process.cwd(), "src/components/workspace/WorkspaceShell.tsx"),
@@ -288,6 +289,168 @@ assert.match(sendSource, /const activeBodyHtml = options\?\.bodyHtml \?\? compos
 assert.match(sendSource, /const bodyPreview = extractComposePlainText\(activeBodyHtml\)/);
 assert.match(sendSource, /bodyHtml: activeBodyHtml/);
 assert.match(sendSource, /bodyText: bodyPreview \|\| " "/);
+
+const phase3B1Failures: string[] = [];
+const recordPhase3B1Expectation = (name: string, expectation: () => void) => {
+  try {
+    expectation();
+  } catch (error) {
+    phase3B1Failures.push(
+      `${name}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+};
+
+const sendRequestStart = sendSource.indexOf(
+  "const sendResponse = await sendGmailMessage({",
+);
+const sendRequestEnd = sendSource.indexOf("\n      });", sendRequestStart);
+assert.ok(
+  sendRequestStart >= 0 && sendRequestEnd > sendRequestStart,
+  "compose Gmail send request source markers must be present and ordered",
+);
+const sendRequestSource = sendSource.slice(sendRequestStart, sendRequestEnd);
+
+recordPhase3B1Expectation(
+  "Reply and Reply All send only authoritative Gmail source context",
+  () => {
+    assert.match(sendRequestSource, /replyContext\s*:/);
+
+    const replyContextIndex = sendSource.indexOf(
+      "buildGmailReplyContext",
+      sendRequestStart - 1600,
+    );
+    assert.ok(replyContextIndex >= 0 && replyContextIndex <= sendRequestEnd);
+    const replyContextGuardSource = sendSource.slice(
+      Math.max(0, replyContextIndex - 1600),
+      sendRequestEnd,
+    );
+    assert.match(replyContextGuardSource, /buildGmailReplyContext\s*\(/);
+    assert.match(replyContextGuardSource, /sendProvider\s*,/);
+    assert.match(replyContextGuardSource, /composeMode\s*,/);
+    assert.match(replyContextGuardSource, /mailboxId\s*:\s*managedMailbox\.id/);
+    assert.match(
+      replyContextGuardSource,
+      /sourceMessage\s*:\s*composeSourceMessage/,
+    );
+    assert.doesNotMatch(
+      sendRequestSource,
+      /\b(?:providerThreadId|threadId|rfcMessageId|References|In-Reply-To)\s*:/,
+      "the compose request must not submit client-controlled thread or RFC authority",
+    );
+  },
+);
+
+recordPhase3B1Expectation(
+  "local Gmail Sent identity comes from the provider response",
+  () => {
+    const sentIdentityStart = sendSource.indexOf("const sentId =", sendRequestEnd);
+    const sentIdentityEnd = sendSource.indexOf(
+      "setMailboxStore((currentStore)",
+      sentIdentityStart,
+    );
+    assert.ok(
+      sentIdentityStart >= 0 && sentIdentityEnd > sentIdentityStart,
+      "local Sent identity source markers must be present and ordered",
+    );
+    const sentIdentitySource = sendSource.slice(sentIdentityStart, sentIdentityEnd);
+
+    assert.match(sentIdentitySource, /sendProvider\s*===\s*"google"/);
+    assert.match(sentIdentitySource, /applyLiveThreadIdentity\s*\(/);
+    assert.match(
+      sentIdentitySource,
+      /providerMessageId\s*:\s*sendResponse\.providerMessageId/,
+    );
+    assert.match(
+      sentIdentitySource,
+      /providerThreadId\s*:\s*sendResponse\.providerThreadId/,
+    );
+    assert.match(sentIdentitySource, /mailboxId\s*:\s*activeComposeMailbox\.id/);
+    assert.match(sentIdentitySource, /provider\s*:\s*"google"/);
+    assert.match(sentIdentitySource, /sendProvider\s*===\s*"custom_imap"/);
+    assert.match(
+      sentIdentitySource,
+      /composeSourceMessage(?:\?\.|\.)threadId/,
+      "custom SMTP replies must preserve their existing local source-thread fallback",
+    );
+  },
+);
+
+const gmailReplySourceIdentity = applyLiveThreadIdentity(
+  {
+    id: "source-local-id",
+    providerMessageId: "source-provider-message",
+    providerThreadId: "thread-123",
+  },
+  {
+    mailboxId: "gmail-1",
+    provider: "google",
+    folder: "INBOX",
+    uidValidity: "gmail-api",
+  },
+);
+const gmailLocalSentIdentity = applyLiveThreadIdentity(
+  {
+    id: "gmail-1-sent-local-id",
+    providerMessageId: "sent-provider-message",
+    providerThreadId: "thread-123",
+  },
+  {
+    mailboxId: "gmail-1",
+    provider: "google",
+    folder: "SENT",
+    uidValidity: "gmail-api",
+  },
+);
+assert.equal(gmailLocalSentIdentity.threadIdentityAuthority, "gmail");
+assert.equal(
+  gmailLocalSentIdentity.threadId,
+  gmailReplySourceIdentity.threadId,
+  "a local Sent record built from the returned provider thread must resolve to the source canonical Gmail conversation",
+);
+const persistedGmailLocalSentIdentity = JSON.parse(
+  JSON.stringify(gmailLocalSentIdentity),
+) as typeof gmailLocalSentIdentity;
+assert.equal(persistedGmailLocalSentIdentity.id, "gmail-1-sent-local-id");
+assert.equal(
+  persistedGmailLocalSentIdentity.providerMessageId,
+  "sent-provider-message",
+);
+assert.equal(persistedGmailLocalSentIdentity.providerThreadId, "thread-123");
+assert.equal(persistedGmailLocalSentIdentity.threadIdentityAuthority, "gmail");
+assert.deepEqual(
+  persistedGmailLocalSentIdentity.threadIdentityContext,
+  gmailLocalSentIdentity.threadIdentityContext,
+  "whole-object Sent persistence must retain provider-authoritative identity",
+);
+
+const gmailMismatchedSentIdentity = applyLiveThreadIdentity(
+  {
+    id: "gmail-1-sent-mismatch-local-id",
+    providerMessageId: "sent-provider-message-mismatch",
+    providerThreadId: "provider-returned-different-thread",
+  },
+  {
+    mailboxId: "gmail-1",
+    provider: "google",
+    folder: "SENT",
+    uidValidity: "gmail-api",
+  },
+);
+assert.equal(gmailMismatchedSentIdentity.threadIdentityAuthority, "gmail");
+assert.notEqual(
+  gmailMismatchedSentIdentity.threadId,
+  gmailReplySourceIdentity.threadId,
+  "an unconfirmed send must use Gmail's returned thread rather than falsely copying the source thread",
+);
+
+assert.deepEqual(
+  phase3B1Failures,
+  [],
+  `Phase 3B1 Gmail compose expectations failed:\n${phase3B1Failures
+    .map((failure) => `- ${failure}`)
+    .join("\n")}`,
+);
 
 const serializedReplyHtml = `<div>Confirmed.</div><div data-compose-signature="true"><div data-compose-signature-text="true">Rutger Cuevion</div></div>${expectedConversationalReply}`;
 const serializedReplyText = extractComposePlainText(serializedReplyHtml);

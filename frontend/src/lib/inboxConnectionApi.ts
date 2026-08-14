@@ -663,11 +663,60 @@ export type SendGmailMessageRequest = {
   bodyHtml: string;
   bodyText: string;
   attachments?: SendInboxAttachmentRequest[];
+  replyContext?: {
+    sourceProviderMessageId: string;
+  };
 };
+
+export const GMAIL_PROVIDER_IDENTIFIER_MAX_LENGTH = 256;
+
+export function isValidGmailProviderIdentifier(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= GMAIL_PROVIDER_IDENTIFIER_MAX_LENGTH &&
+    value === value.trim() &&
+    /^[\x20-\x7e]+$/.test(value)
+  );
+}
+
+export type GmailReplyComposeMode = "new" | "reply" | "reply_all" | "forward";
+
+export function buildGmailReplyContext(options: {
+  sendProvider: string | null | undefined;
+  composeMode: GmailReplyComposeMode;
+  mailboxId: string;
+  sourceMessage?: {
+    providerMessageId?: string | null;
+    threadIdentityAuthority?: string | null;
+    threadIdentityContext?: {
+      provider?: string | null;
+      mailboxId?: string | null;
+    } | null;
+  } | null;
+}): SendGmailMessageRequest["replyContext"] {
+  const rawSourceProviderMessageId = options.sourceMessage?.providerMessageId;
+  const sourceProviderMessageId = rawSourceProviderMessageId?.trim();
+
+  return options.sendProvider === "google" &&
+    (options.composeMode === "reply" || options.composeMode === "reply_all") &&
+    options.sourceMessage?.threadIdentityAuthority === "gmail" &&
+    options.sourceMessage.threadIdentityContext?.provider === "google" &&
+    options.sourceMessage.threadIdentityContext.mailboxId === options.mailboxId &&
+    sourceProviderMessageId === rawSourceProviderMessageId &&
+    isValidGmailProviderIdentifier(sourceProviderMessageId)
+    ? { sourceProviderMessageId }
+    : undefined;
+}
 
 export function buildSendInboxWireRequest(
   request: SendGmailMessageRequest,
 ): SendGmailMessageRequest {
+  const sourceProviderMessageId =
+    typeof request.replyContext?.sourceProviderMessageId === "string"
+      ? request.replyContext.sourceProviderMessageId.trim()
+      : "";
+
   return {
     mailboxId: request.mailboxId,
     to: request.to,
@@ -677,6 +726,9 @@ export function buildSendInboxWireRequest(
     bodyHtml: request.bodyHtml,
     bodyText: request.bodyText,
     attachments: request.attachments,
+    ...(sourceProviderMessageId
+      ? { replyContext: { sourceProviderMessageId } }
+      : {}),
   };
 }
 
@@ -709,13 +761,34 @@ export type InboxMessageActionResponse = {
   };
 };
 
-type SendGmailMessageResponse = {
+export type SendGmailMessageResponse = {
   ok: boolean;
+  providerMessageId?: string;
+  providerThreadId?: string;
+  labelIds?: string[];
+  providerIdentityConfirmed?: boolean;
+  threadContinuityConfirmed?: boolean;
+  warning?: {
+    code?: string;
+    message?: string;
+  };
   error?: {
     code?: string;
     message?: string;
   };
 };
+
+function sentIdentityUnconfirmedResponse(): SendGmailMessageResponse {
+  return {
+    ok: true,
+    providerIdentityConfirmed: false,
+    threadContinuityConfirmed: false,
+    warning: {
+      code: "send_identity_unconfirmed",
+      message: "The message was sent, but its provider identity could not be confirmed.",
+    },
+  };
+}
 
 type AttachmentDownloadErrorPayload = {
   error?: {
@@ -3038,6 +3111,21 @@ export async function beginOnboardingInboxConnection(
 export async function sendGmailMessage(
   request: SendGmailMessageRequest,
 ): Promise<SendGmailMessageResponse> {
+  if (
+    request.replyContext !== undefined &&
+    !isValidGmailProviderIdentifier(
+      request.replyContext?.sourceProviderMessageId,
+    )
+  ) {
+    return {
+      ok: false,
+      error: {
+        code: "invalid_reply_context",
+        message: "Reply context must identify a valid Gmail source message.",
+      },
+    };
+  }
+
   const abortController = new AbortController();
   const timeoutId = window.setTimeout(() => {
     abortController.abort();
@@ -3053,28 +3141,114 @@ export async function sendGmailMessage(
       signal: abortController.signal,
       body: JSON.stringify(buildSendInboxWireRequest(request)),
     });
-    const rawPayload = await response.text();
-    let payload: SendGmailMessageResponse | null = null;
+    let rawPayload: string;
+    try {
+      rawPayload = await response.text();
+    } catch (error) {
+      if (response.ok) {
+        return sentIdentityUnconfirmedResponse();
+      }
+      throw error;
+    }
+    let payload: unknown = null;
 
     if (rawPayload.trim()) {
       try {
-        payload = JSON.parse(rawPayload) as SendGmailMessageResponse;
+        payload = JSON.parse(rawPayload) as unknown;
       } catch {
         payload = null;
       }
     }
 
     if (!response.ok) {
+      const responseError =
+        payload &&
+        typeof payload === "object" &&
+        !Array.isArray(payload) &&
+        "error" in payload &&
+        payload.error &&
+        typeof payload.error === "object" &&
+        !Array.isArray(payload.error)
+          ? payload.error as { code?: string; message?: string }
+          : null;
       return {
         ok: false,
-        error: payload?.error ?? {
+        error: responseError ?? {
           code: "send_failed",
           message: `Could not send email${response.status ? ` (${response.status})` : ""}.`,
         },
       };
     }
 
-    return payload ?? { ok: true };
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      return sentIdentityUnconfirmedResponse();
+    }
+
+    const successPayload = payload as Record<string, unknown>;
+    if (successPayload.ok !== true) {
+      return sentIdentityUnconfirmedResponse();
+    }
+
+    const providerMessageId = successPayload.providerMessageId;
+    const providerThreadId = successPayload.providerThreadId;
+    const providerIdentityWasRejected =
+      successPayload.providerIdentityConfirmed === false;
+    const hasProviderIdentity =
+      !providerIdentityWasRejected &&
+      isValidGmailProviderIdentifier(providerMessageId) &&
+      isValidGmailProviderIdentifier(providerThreadId);
+    const hasAnyProviderIdentity =
+      providerMessageId !== undefined ||
+      providerThreadId !== undefined ||
+      "providerIdentityConfirmed" in successPayload ||
+      "threadContinuityConfirmed" in successPayload;
+    const labelIds = successPayload.labelIds;
+    const safeLabelIds =
+      Array.isArray(labelIds) &&
+      labelIds.length <= 100 &&
+      labelIds.every(isValidGmailProviderIdentifier) &&
+      new Set(labelIds).size === labelIds.length
+        ? labelIds
+        : undefined;
+    const threadContinuityConfirmed =
+      typeof successPayload.threadContinuityConfirmed === "boolean"
+        ? successPayload.threadContinuityConfirmed
+        : undefined;
+    const providerIdentityConfirmed =
+      typeof successPayload.providerIdentityConfirmed === "boolean"
+        ? successPayload.providerIdentityConfirmed
+        : undefined;
+    const warningValue = successPayload.warning;
+    const safeWarning =
+      warningValue &&
+      typeof warningValue === "object" &&
+      !Array.isArray(warningValue) &&
+      typeof (warningValue as Record<string, unknown>).code === "string" &&
+      typeof (warningValue as Record<string, unknown>).message === "string"
+        ? {
+            code: (warningValue as Record<string, string>).code,
+            message: (warningValue as Record<string, string>).message,
+          }
+        : undefined;
+
+    if (hasAnyProviderIdentity && !hasProviderIdentity) {
+      return sentIdentityUnconfirmedResponse();
+    }
+
+    return {
+      ok: true,
+      ...(hasProviderIdentity
+        ? { providerMessageId, providerThreadId }
+        : {}),
+      ...(safeLabelIds ? { labelIds: safeLabelIds } : {}),
+      ...(providerIdentityConfirmed !== undefined
+        ? { providerIdentityConfirmed }
+        : {}),
+      ...(threadContinuityConfirmed !== undefined
+        ? { threadContinuityConfirmed }
+        : {}),
+      ...(safeWarning ? { warning: safeWarning } : {}),
+    };
   } catch (error) {
     return {
       ok: false,

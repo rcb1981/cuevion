@@ -1,13 +1,18 @@
 import base64
 import binascii
 import json
+import re
 import sys
+from email.errors import HeaderParseError
+from email.header import decode_header
 from email.message import EmailMessage
 from email.utils import getaddresses
 from http import HTTPStatus
+from http.client import IncompleteRead
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.error import HTTPError, URLError
+from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
 CURRENT_DIR = Path(__file__).resolve().parent
@@ -35,6 +40,7 @@ from authenticated_gmail import (
     resolve_owned_mailbox,
     send_json,
     send_method_not_allowed,
+    valid_identifier,
 )
 
 GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1/users/me"
@@ -43,6 +49,34 @@ MAX_TOTAL_ATTACHMENT_BYTES = 8 * 1024 * 1024
 MAX_RECIPIENTS = 100
 MAX_SUBJECT_CHARACTERS = 998
 MAX_BODY_CHARACTERS = 2 * 1024 * 1024
+MAX_GMAIL_METADATA_HEADERS = 64
+MAX_GMAIL_METADATA_HEADER_NAME_CHARACTERS = 64
+MAX_GMAIL_METADATA_HEADER_VALUE_CHARACTERS = 16 * 1024
+MAX_GMAIL_METADATA_TOTAL_CHARACTERS = 32 * 1024
+MAX_RFC_MESSAGE_ID_CHARACTERS = 998
+MAX_REPLY_REFERENCE_TOKENS = 32
+MAX_REPLY_REFERENCES_CHARACTERS = 4096
+MAX_GMAIL_SEND_LABELS = 100
+GMAIL_REPLY_METADATA_HEADERS = (
+    "Message-ID",
+    "References",
+    "In-Reply-To",
+    "Subject",
+)
+_RFC_MESSAGE_ID_ATOM = r"[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+"
+_RFC_MESSAGE_ID_LOCAL_PART = rf"{_RFC_MESSAGE_ID_ATOM}(?:\.{_RFC_MESSAGE_ID_ATOM})*"
+_RFC_MESSAGE_ID_RIGHT_DOT_ATOM = _RFC_MESSAGE_ID_LOCAL_PART
+_RFC_MESSAGE_ID_NO_FOLD_LITERAL = r"\[[\x21-\x5a\x5e-\x7e]+\]"
+_RFC_MESSAGE_ID_RIGHT = (
+    rf"(?:{_RFC_MESSAGE_ID_RIGHT_DOT_ATOM}|{_RFC_MESSAGE_ID_NO_FOLD_LITERAL})"
+)
+_RFC_MESSAGE_ID_INNER_PATTERN = re.compile(
+    rf"{_RFC_MESSAGE_ID_LOCAL_PART}@{_RFC_MESSAGE_ID_RIGHT}"
+)
+_RFC_MESSAGE_ID_TOKEN_PATTERN = re.compile(
+    rf"<{_RFC_MESSAGE_ID_LOCAL_PART}@{_RFC_MESSAGE_ID_RIGHT}>"
+)
+_REPLY_SUBJECT_PREFIX_PATTERN = re.compile(r"^re:\s*", re.IGNORECASE)
 
 
 def _json_response(handler: BaseHTTPRequestHandler, status_code: int, payload: dict):
@@ -78,18 +112,223 @@ def _is_safe_auth_value(value: str):
     return bool(value) and not _has_unsafe_header_chars(value)
 
 
-def _gmail_api_send(access_token: str, message: EmailMessage) -> tuple[dict | None, dict | None]:
-    encoded_message = base64.urlsafe_b64encode(message.as_bytes()).decode("ascii").rstrip("=")
+def _valid_gmail_identifier(value: object) -> bool:
+    return valid_identifier(value) and isinstance(value, str) and value.isascii()
+
+
+def _validate_reply_context(payload: dict) -> tuple[dict | None, dict | None]:
+    if "replyContext" not in payload:
+        return None, None
+
+    reply_context = payload.get("replyContext")
+    if (
+        type(reply_context) is not dict
+        or set(reply_context) != {"sourceProviderMessageId"}
+        or not _valid_gmail_identifier(
+            reply_context.get("sourceProviderMessageId")
+        )
+    ):
+        return None, error_payload(
+            "invalid_reply_context",
+            "Reply context must identify exactly one valid Gmail source message.",
+        )
+
+    return {
+        "sourceProviderMessageId": reply_context["sourceProviderMessageId"]
+    }, None
+
+
+def _normalize_rfc_message_id(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    if (
+        not normalized
+        or len(normalized) > MAX_RFC_MESSAGE_ID_CHARACTERS
+        or not normalized.isascii()
+        or _has_unsafe_header_chars(normalized)
+    ):
+        return None
+    if not normalized.startswith("<") or not normalized.endswith(">"):
+        return None
+    inner = normalized[1:-1]
+    if _RFC_MESSAGE_ID_INNER_PATTERN.fullmatch(inner) is None:
+        return None
+    return f"<{inner}>"
+
+
+def _parse_rfc_message_id_tokens(value: str) -> list[str]:
+    tokens: list[str] = []
+    seen: set[str] = set()
+    for match in _RFC_MESSAGE_ID_TOKEN_PATTERN.finditer(value):
+        token = _normalize_rfc_message_id(match.group(0))
+        if token is None or token in seen:
+            continue
+        seen.add(token)
+        tokens.append(token)
+        if len(tokens) >= MAX_REPLY_REFERENCE_TOKENS:
+            break
+    return tokens
+
+
+def _build_reply_references(raw_references: str, source_message_id: str) -> str:
+    historic_tokens = _parse_rfc_message_id_tokens(raw_references)
+    selected: list[str] = []
+    selected_characters = 0
+    maximum_historic_tokens = MAX_REPLY_REFERENCE_TOKENS - 1
+
+    for token in historic_tokens:
+        if token == source_message_id or len(selected) >= maximum_historic_tokens:
+            continue
+        separator_characters = 1 if selected else 0
+        reserved_source_characters = 1 + len(source_message_id)
+        if (
+            selected_characters
+            + separator_characters
+            + len(token)
+            + reserved_source_characters
+            > MAX_REPLY_REFERENCES_CHARACTERS
+        ):
+            break
+        selected.append(token)
+        selected_characters += separator_characters + len(token)
+
+    selected.append(source_message_id)
+    return " ".join(selected)
+
+
+def _decode_reply_subject(value: str) -> str | None:
+    try:
+        fragments = decode_header(value)
+    except (HeaderParseError, TypeError, ValueError):
+        return None
+
+    decoded_fragments: list[str] = []
+    for fragment, charset in fragments:
+        if isinstance(fragment, bytes):
+            try:
+                decoded_fragment = fragment.decode(charset or "ascii", errors="strict")
+            except (LookupError, UnicodeDecodeError):
+                return None
+        else:
+            decoded_fragment = fragment
+        decoded_fragments.append(decoded_fragment)
+    decoded = "".join(decoded_fragments)
+    return decoded if len(decoded) <= MAX_SUBJECT_CHARACTERS else None
+
+
+def _canonical_reply_subject(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    decoded = _decode_reply_subject(value)
+    if decoded is None:
+        return None
+    normalized = decoded.strip()
+    if (
+        len(normalized) > MAX_SUBJECT_CHARACTERS
+        or _has_unsafe_header_chars(normalized)
+        or any(ord(character) < 32 or ord(character) == 127 for character in normalized)
+    ):
+        return None
+    normalized = " ".join(normalized.split())
+    while _REPLY_SUBJECT_PREFIX_PATTERN.match(normalized):
+        normalized = _REPLY_SUBJECT_PREFIX_PATTERN.sub("", normalized, count=1).strip()
+    return normalized.casefold()
+
+
+def _metadata_headers(payload: object) -> dict[str, str] | None:
+    if not isinstance(payload, dict):
+        return None
+    raw_payload = payload.get("payload")
+    raw_headers = raw_payload.get("headers") if isinstance(raw_payload, dict) else None
+    if not isinstance(raw_headers, list) or len(raw_headers) > MAX_GMAIL_METADATA_HEADERS:
+        return None
+
+    selected: dict[str, str] = {}
+    total_characters = 0
+    requested_names = {name.casefold() for name in GMAIL_REPLY_METADATA_HEADERS}
+    for raw_header in raw_headers:
+        if not isinstance(raw_header, dict):
+            return None
+        name = raw_header.get("name")
+        value = raw_header.get("value")
+        if (
+            not isinstance(name, str)
+            or not isinstance(value, str)
+            or not name
+            or len(name) > MAX_GMAIL_METADATA_HEADER_NAME_CHARACTERS
+            or len(value) > MAX_GMAIL_METADATA_HEADER_VALUE_CHARACTERS
+        ):
+            return None
+        total_characters += len(name) + len(value)
+        if total_characters > MAX_GMAIL_METADATA_TOTAL_CHARACTERS:
+            return None
+        normalized_name = name.casefold()
+        if normalized_name not in requested_names:
+            continue
+        if normalized_name in selected:
+            return None
+        selected[normalized_name] = value
+    return selected
+
+
+def _validate_reply_source(
+    payload: object,
+    *,
+    requested_message_id: str,
+    outgoing_subject: object,
+) -> tuple[dict | None, dict | None]:
+    if (
+        not isinstance(payload, dict)
+        or payload.get("id") != requested_message_id
+        or not _valid_gmail_identifier(payload.get("id"))
+        or not _valid_gmail_identifier(payload.get("threadId"))
+    ):
+        return None, {"code": "gmail_reply_source_invalid"}
+
+    headers = _metadata_headers(payload)
+    if headers is None:
+        return None, {"code": "gmail_reply_source_invalid"}
+    source_message_id = _normalize_rfc_message_id(headers.get("message-id"))
+    source_subject = _canonical_reply_subject(headers.get("subject"))
+    normalized_outgoing_subject = _canonical_reply_subject(outgoing_subject)
+    if source_message_id is None or source_subject is None:
+        return None, {"code": "gmail_reply_source_invalid"}
+    if normalized_outgoing_subject is None or source_subject != normalized_outgoing_subject:
+        return None, {"code": "gmail_reply_subject_mismatch"}
+
+    raw_references = headers.get("references", "")
+    raw_in_reply_to = headers.get("in-reply-to", "")
+    _parse_rfc_message_id_tokens(raw_in_reply_to)
+    references = _build_reply_references(raw_references, source_message_id)
+    return {
+        "threadId": payload["threadId"],
+        "inReplyTo": source_message_id,
+        "references": references,
+    }, None
+
+
+def _gmail_api_get_reply_source(
+    access_token: str,
+    source_message_id: str,
+) -> tuple[dict | None, dict | None]:
+    query = urlencode(
+        [
+            ("format", "metadata"),
+            *(
+                ("metadataHeaders", header_name)
+                for header_name in GMAIL_REPLY_METADATA_HEADERS
+            ),
+        ]
+    )
     request = Request(
-        f"{GMAIL_API_BASE_URL}/messages/send",
-        data=json.dumps({"raw": encoded_message}).encode("utf-8"),
+        f"{GMAIL_API_BASE_URL}/messages/{quote(source_message_id, safe='')}?{query}",
         headers={
             "Authorization": f"Bearer {access_token}",
-            "Content-Type": "application/json",
+            "Accept": "application/json",
         },
-        method="POST",
+        method="GET",
     )
-
     try:
         with urlopen(request, timeout=30) as response:
             body = read_bounded_response(response, MAX_GMAIL_RESPONSE_BYTES)
@@ -97,26 +336,173 @@ def _gmail_api_send(access_token: str, message: EmailMessage) -> tuple[dict | No
                 return None, {"code": "gmail_response_too_large"}
             try:
                 payload = json.loads(body.decode("utf-8")) if body else {}
-            except (UnicodeDecodeError, json.JSONDecodeError):
+            except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
                 return None, {"code": "gmail_response_invalid"}
             if not isinstance(payload, dict):
                 return None, {"code": "gmail_response_invalid"}
             return payload, None
     except HTTPError as error:
-        return None, {"code": gmail_http_error_code(error.code, "gmail_send_failed")}
-    except (URLError, TimeoutError):
+        if error.code == 404:
+            return None, {"code": "gmail_reply_source_not_found"}
+        return None, {
+            "code": gmail_http_error_code(
+                error.code,
+                "gmail_reply_source_fetch_failed",
+            )
+        }
+    except IncompleteRead:
+        return None, {"code": "gmail_response_invalid"}
+    except (OSError, URLError, TimeoutError):
         return None, {"code": "gmail_unavailable"}
 
 
-def _send_with_gmail_oauth(context: dict, message: EmailMessage) -> tuple[bool, dict | None, dict | None]:
-    _, send_error = _gmail_api_send(context["access_token"], message)
+def _gmail_api_send(
+    access_token: str,
+    message: EmailMessage,
+    *,
+    thread_id: str | None = None,
+) -> tuple[dict | None, dict | None]:
+    encoded_message = base64.urlsafe_b64encode(message.as_bytes()).decode("ascii").rstrip("=")
+    gmail_payload = {"raw": encoded_message}
+    if thread_id is not None:
+        gmail_payload["threadId"] = thread_id
+    request = Request(
+        f"{GMAIL_API_BASE_URL}/messages/send",
+        data=json.dumps(gmail_payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+
+    response_received = False
+    try:
+        with urlopen(request, timeout=30) as response:
+            response_received = True
+            body = read_bounded_response(response, MAX_GMAIL_RESPONSE_BYTES)
+            if body is None:
+                return None, None
+            try:
+                payload = json.loads(body.decode("utf-8")) if body else {}
+            except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
+                return None, None
+            if not isinstance(payload, dict):
+                return None, None
+            return payload, None
+    except HTTPError as error:
+        return None, {"code": gmail_http_error_code(error.code, "gmail_send_failed")}
+    except (IncompleteRead, OSError, URLError, TimeoutError):
+        if response_received:
+            return None, None
+        return None, {"code": "gmail_unavailable"}
+
+
+def _send_with_gmail_oauth(
+    context: dict,
+    message: EmailMessage,
+    *,
+    thread_id: str | None = None,
+) -> tuple[dict | None, dict | None, dict | None]:
+    send_payload, send_error = _gmail_api_send(
+        context["access_token"],
+        message,
+        thread_id=thread_id,
+    )
     if send_error and send_error.get("code") == "gmail_token_invalid" and not context["refresh_attempted"]:
         refreshed = refresh_gmail_context(context)
         if refreshed["status"] != "ok":
-            return False, None, refreshed
+            return None, None, refreshed
         context = refreshed["context"]
-        _, send_error = _gmail_api_send(context["access_token"], message)
-    return send_error is None, send_error, None
+        send_payload, send_error = _gmail_api_send(
+            context["access_token"],
+            message,
+            thread_id=thread_id,
+        )
+    return send_payload, send_error, None
+
+
+def _validated_gmail_send_identity(payload: object) -> dict | None:
+    if (
+        not isinstance(payload, dict)
+        or not _valid_gmail_identifier(payload.get("id"))
+        or not _valid_gmail_identifier(payload.get("threadId"))
+    ):
+        return None
+
+    identity = {
+        "providerMessageId": payload["id"],
+        "providerThreadId": payload["threadId"],
+    }
+    raw_label_ids = payload.get("labelIds")
+    if (
+        isinstance(raw_label_ids, list)
+        and len(raw_label_ids) <= MAX_GMAIL_SEND_LABELS
+        and all(_valid_gmail_identifier(label_id) for label_id in raw_label_ids)
+        and len(raw_label_ids) == len(set(raw_label_ids))
+    ):
+        identity["labelIds"] = list(raw_label_ids)
+    return identity
+
+
+def _reply_source_error_response(error: dict) -> tuple[int, dict]:
+    code = error.get("code")
+    mapping = {
+        "gmail_reply_source_not_found": (
+            404,
+            "gmail_reply_source_not_found",
+            "The Gmail message being replied to was not found.",
+        ),
+        "gmail_reply_source_invalid": (
+            502,
+            "gmail_reply_source_invalid",
+            "Gmail returned invalid reply-thread information.",
+        ),
+        "gmail_reply_subject_mismatch": (
+            400,
+            "gmail_reply_subject_mismatch",
+            "The reply subject does not match the Gmail source message.",
+        ),
+        "gmail_token_invalid": (
+            401,
+            "reconnect_required",
+            "Reconnect this Gmail inbox to continue.",
+        ),
+        "gmail_permission_denied": (
+            403,
+            "gmail_reply_source_permission_denied",
+            "Gmail did not permit the reply source lookup.",
+        ),
+        "gmail_rate_limited": (
+            502,
+            "gmail_reply_source_rate_limited",
+            "Gmail is temporarily rate limited.",
+        ),
+        "gmail_unavailable": (
+            502,
+            "gmail_reply_source_unavailable",
+            "Gmail is temporarily unavailable.",
+        ),
+        "gmail_response_too_large": (
+            502,
+            "gmail_reply_source_invalid",
+            "Gmail returned invalid reply-thread information.",
+        ),
+        "gmail_response_invalid": (
+            502,
+            "gmail_reply_source_invalid",
+            "Gmail returned invalid reply-thread information.",
+        ),
+    }
+    status, response_code, message = mapping.get(
+        code,
+        (
+            502,
+            "gmail_reply_source_fetch_failed",
+            "The Gmail reply source could not be loaded.",
+        ),
+    )
+    return status, error_payload(response_code, message)
 
 
 def _build_message(payload: dict, *, require_password: bool = True):
@@ -277,6 +663,7 @@ class handler(BaseHTTPRequestHandler):
 
         allowed_fields = {
             "mailboxId", "to", "cc", "bcc", "subject", "bodyHtml", "bodyText", "attachments",
+            "replyContext",
         }
         field_error = reject_unknown_fields(payload, allowed_fields)
         if field_error or find_forbidden_custom_request_fields(payload):
@@ -285,6 +672,10 @@ class handler(BaseHTTPRequestHandler):
                 400,
                 error_payload("forbidden_connection_fields", "Connection and identity details are not accepted."),
             )
+            return
+        reply_context, reply_context_error = _validate_reply_context(payload)
+        if reply_context_error:
+            send_json(self, 400, reply_context_error)
             return
 
         owned = resolve_owned_mailbox(self.headers, payload.get("mailboxId"))
@@ -312,11 +703,58 @@ class handler(BaseHTTPRequestHandler):
                 send_json(self, 400, error_payload("invalid_request", str(error)))
                 return
 
-            sent, send_error, refresh_failure = _send_with_gmail_oauth(context, message)
+            reply_source = None
+            if reply_context is not None:
+                source_message_id = reply_context["sourceProviderMessageId"]
+                source_payload, source_error = _gmail_api_get_reply_source(
+                    context["access_token"],
+                    source_message_id,
+                )
+                if (
+                    source_error
+                    and source_error.get("code") == "gmail_token_invalid"
+                    and not context["refresh_attempted"]
+                ):
+                    refreshed = refresh_gmail_context(context)
+                    if refreshed["status"] != "ok":
+                        send_json(
+                            self,
+                            refreshed["status_code"],
+                            refreshed["error"],
+                        )
+                        return
+                    context = refreshed["context"]
+                    source_payload, source_error = _gmail_api_get_reply_source(
+                        context["access_token"],
+                        source_message_id,
+                    )
+                if source_error:
+                    status, response = _reply_source_error_response(source_error)
+                    send_json(self, status, response)
+                    return
+                reply_source, source_validation_error = _validate_reply_source(
+                    source_payload,
+                    requested_message_id=source_message_id,
+                    outgoing_subject=str(message.get("Subject", "")),
+                )
+                if source_validation_error:
+                    status, response = _reply_source_error_response(
+                        source_validation_error
+                    )
+                    send_json(self, status, response)
+                    return
+                message["In-Reply-To"] = reply_source["inReplyTo"]
+                message["References"] = reply_source["references"]
+
+            send_payload, send_error, refresh_failure = _send_with_gmail_oauth(
+                context,
+                message,
+                thread_id=(reply_source or {}).get("threadId"),
+            )
             if refresh_failure:
                 send_json(self, refresh_failure["status_code"], refresh_failure["error"])
                 return
-            if not sent:
+            if send_error:
                 code = (send_error or {}).get("code")
                 if code == "gmail_token_invalid":
                     send_json(self, 401, error_payload("reconnect_required", "Reconnect this Gmail inbox to continue."))
@@ -329,7 +767,50 @@ class handler(BaseHTTPRequestHandler):
                 else:
                     send_json(self, 502, error_payload("gmail_send_failed", "Gmail could not send this message."))
                 return
-            send_json(self, 200, {"ok": True})
+            send_identity = _validated_gmail_send_identity(send_payload)
+            if send_identity is None:
+                unconfirmed_response = {
+                    "ok": True,
+                    "providerIdentityConfirmed": False,
+                    "warning": {
+                        "code": "gmail_send_identity_unconfirmed",
+                        "message": (
+                            "The message was sent, but Gmail did not return "
+                            "a valid provider identity."
+                        ),
+                    },
+                }
+                if reply_source is not None:
+                    unconfirmed_response["threadContinuityConfirmed"] = False
+                send_json(self, 200, unconfirmed_response)
+                return
+
+            response = {"ok": True, **send_identity}
+            if reply_source is not None:
+                continuity_confirmed = (
+                    send_identity["providerThreadId"] == reply_source["threadId"]
+                )
+                response["threadContinuityConfirmed"] = continuity_confirmed
+                if not continuity_confirmed:
+                    response["warning"] = {
+                        "code": "gmail_thread_continuity_unconfirmed",
+                        "message": (
+                            "The message was sent, but Gmail returned a different "
+                            "conversation identity."
+                        ),
+                    }
+            send_json(self, 200, response)
+            return
+
+        if reply_context is not None:
+            send_json(
+                self,
+                400,
+                error_payload(
+                    "invalid_reply_context",
+                    "Gmail reply context cannot be used with this mailbox.",
+                ),
+            )
             return
 
         if provider != "custom_imap":

@@ -9,9 +9,11 @@ from contextlib import ExitStack
 from email.errors import MessageError
 from email.message import EmailMessage
 from email import message_from_bytes
+from http.client import IncompleteRead
 from pathlib import Path
 from unittest.mock import Mock, call, patch
 from urllib.error import HTTPError, URLError
+from urllib.parse import parse_qs, urlparse
 
 CURRENT_DIR = Path(__file__).resolve().parent
 API_DIR = CURRENT_DIR.parent
@@ -79,6 +81,18 @@ class OversizedStreamingResponse(BoundaryResponse):
     def read(self, amount=None):
         self.read_amounts.append(amount)
         return self.OversizedChunk((amount or 0) + 1)
+
+
+class FailedReadResponse(BoundaryResponse):
+    def read(self, amount=None):
+        self.read_amounts.append(amount)
+        raise URLError("raw response read failure")
+
+
+class IncompleteReadResponse(BoundaryResponse):
+    def read(self, amount=None):
+        self.read_amounts.append(amount)
+        raise IncompleteRead(b"partial", 10)
 
 
 def inbox(**overrides):
@@ -228,7 +242,7 @@ class RealHandlerOwnershipMatrixTests(unittest.TestCase):
                     "subject": "Subject",
                     "bodyText": "Body",
                 },
-                {},
+                {"id": "sent-msg", "threadId": "sent-thread"},
                 200,
             ),
             (
@@ -374,17 +388,24 @@ class RealHandlerOwnershipMatrixTests(unittest.TestCase):
                 "subject": "Subject",
                 "bodyText": "Body",
             },
-            {},
+            {"id": "sent-msg", "threadId": "sent-thread"},
         )
         provider_request = provider_transport.call_args.args[0]
-        encoded_message = json.loads(provider_request.data)["raw"]
+        gmail_payload = json.loads(provider_request.data)
+        self.assertEqual(set(gmail_payload), {"raw"})
+        encoded_message = gmail_payload["raw"]
         decoded_message = base64.urlsafe_b64decode(
             encoded_message + "=" * (-len(encoded_message) % 4)
         )
+        sent_message = message_from_bytes(decoded_message)
         self.assertEqual(
-            message_from_bytes(decoded_message).get("From"),
+            sent_message.get("From"),
             "verified@gmail.com",
         )
+        self.assertIsNone(sent_message.get("In-Reply-To"))
+        self.assertIsNone(sent_message.get("References"))
+        self.assertEqual(request.payload()["providerMessageId"], "sent-msg")
+        self.assertEqual(request.payload()["providerThreadId"], "sent-thread")
 
     def test_each_route_rejects_missing_session_and_other_users_mailbox(self):
         invalid_cookies = (
@@ -1455,6 +1476,552 @@ class FocusPreferencesTests(unittest.TestCase):
         gmail_transport.assert_not_called()
 
 
+class GmailReplyThreadContinuityTests(unittest.TestCase):
+    def setUp(self):
+        self.matrix = RealHandlerOwnershipMatrixTests()
+
+    def base_payload(self, **overrides):
+        return {
+            "mailboxId": "gmail-1",
+            "to": "recipient@example.com",
+            "subject": "Re: Subject",
+            "bodyText": "Reply body",
+            "replyContext": {"sourceProviderMessageId": "source-msg"},
+            **overrides,
+        }
+
+    def source_payload(self, **overrides):
+        return {
+            "id": "source-msg",
+            "threadId": "thread-123",
+            "payload": {
+                "headers": [
+                    {"name": "Message-ID", "value": "<source@example.com>"},
+                    {"name": "References", "value": "<root@example.com>"},
+                    {"name": "Subject", "value": "Subject"},
+                ]
+            },
+            **overrides,
+        }
+
+    def invoke(self, provider_transport, *, payload=None):
+        return self.matrix._invoke(
+            send_gmail,
+            payload if payload is not None else self.base_payload(),
+            {},
+            provider_transport_override=provider_transport,
+        )
+
+    def decoded_send(self, provider_transport):
+        provider_request = provider_transport.call_args_list[1].args[0]
+        self.assertEqual(provider_request.get_method(), "POST")
+        self.assertEqual(
+            urlparse(provider_request.full_url).path,
+            "/gmail/v1/users/me/messages/send",
+        )
+        gmail_payload = json.loads(provider_request.data)
+        encoded_message = gmail_payload["raw"]
+        decoded_message = base64.urlsafe_b64decode(
+            encoded_message + "=" * (-len(encoded_message) % 4)
+        )
+        return gmail_payload, message_from_bytes(decoded_message)
+
+    def test_reply_fetches_source_and_sends_provider_thread_with_rfc_headers(self):
+        provider_transport = Mock(
+            side_effect=(
+                BoundaryResponse(json.dumps(self.source_payload())),
+                BoundaryResponse(
+                    json.dumps(
+                        {
+                            "id": "sent-msg",
+                            "threadId": "thread-123",
+                            "labelIds": ["SENT"],
+                        }
+                    )
+                ),
+            )
+        )
+
+        request, _, _, _ = self.invoke(provider_transport)
+
+        self.assertEqual(request.status, 200)
+        response = request.payload()
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["providerMessageId"], "sent-msg")
+        self.assertEqual(response["providerThreadId"], "thread-123")
+        self.assertEqual(response.get("labelIds"), ["SENT"])
+        self.assertNotIn("raw", response)
+        self.assertEqual(provider_transport.call_count, 2)
+
+        source_request = provider_transport.call_args_list[0].args[0]
+        self.assertEqual(source_request.get_method(), "GET")
+        parsed_source_url = urlparse(source_request.full_url)
+        self.assertEqual(
+            parsed_source_url.path,
+            "/gmail/v1/users/me/messages/source-msg",
+        )
+        source_query = parse_qs(parsed_source_url.query)
+        self.assertEqual(source_query.get("format"), ["metadata"])
+        self.assertCountEqual(
+            source_query.get("metadataHeaders", []),
+            ["Message-ID", "References", "In-Reply-To", "Subject"],
+        )
+
+        gmail_payload, message = self.decoded_send(provider_transport)
+        self.assertEqual(set(gmail_payload), {"raw", "threadId"})
+        self.assertEqual(gmail_payload["threadId"], "thread-123")
+        self.assertEqual(message.get("In-Reply-To"), "<source@example.com>")
+        self.assertEqual(
+            " ".join(str(message.get("References")).split()),
+            "<root@example.com> <source@example.com>",
+        )
+
+    def test_reply_accepts_encoded_subject_and_uses_source_only_reference_fallback(self):
+        source_payload = self.source_payload(
+            payload={
+                "headers": [
+                    {
+                        "name": "Message-ID",
+                        "value": "<source@[127.0.0.1]>",
+                    },
+                    {
+                        "name": "Subject",
+                        "value": "=?utf-8?q?R=C3=A9sum=C3=A9?=",
+                    },
+                ]
+            }
+        )
+        provider_transport = Mock(
+            side_effect=(
+                BoundaryResponse(json.dumps(source_payload)),
+                BoundaryResponse(
+                    json.dumps({"id": "sent-msg", "threadId": "thread-123"})
+                ),
+            )
+        )
+
+        request, _, _, _ = self.invoke(
+            provider_transport,
+            payload=self.base_payload(subject="RE: Résumé"),
+        )
+
+        self.assertEqual(request.status, 200)
+        gmail_payload, message = self.decoded_send(provider_transport)
+        self.assertEqual(gmail_payload["threadId"], "thread-123")
+        self.assertEqual(message.get("In-Reply-To"), "<source@[127.0.0.1]>")
+        self.assertEqual(message.get("References"), "<source@[127.0.0.1]>")
+
+    def test_source_404_fails_closed_before_gmail_send(self):
+        provider_transport = Mock(
+            side_effect=HTTPError(
+                "https://gmail.invalid/messages/source-msg",
+                404,
+                "raw missing source",
+                {},
+                io.BytesIO(b"raw provider response"),
+            )
+        )
+
+        request, _, _, _ = self.invoke(provider_transport)
+
+        self.assertEqual(provider_transport.call_count, 1)
+        self.assertEqual(
+            provider_transport.call_args.args[0].get_method(),
+            "GET",
+        )
+        self.assertIn(request.status, {400, 404})
+        response = request.payload()
+        self.assertFalse(response["ok"])
+        self.assertIn("reply", response["error"]["code"])
+        self.assertNotIn("raw missing source", json.dumps(response))
+
+    def test_truncated_source_response_fails_closed_before_gmail_send(self):
+        provider_transport = Mock(return_value=IncompleteReadResponse(b""))
+
+        request, _, _, _ = self.invoke(provider_transport)
+
+        self.assertEqual(provider_transport.call_count, 1)
+        self.assertEqual(provider_transport.call_args.args[0].get_method(), "GET")
+        self.assertEqual(request.status, 502)
+        self.assertFalse(request.payload()["ok"])
+        self.assertEqual(
+            request.payload()["error"]["code"],
+            "gmail_reply_source_invalid",
+        )
+
+    def test_invalid_source_authority_fails_closed_before_gmail_send(self):
+        invalid_sources = {
+            "provider_id_mismatch": self.source_payload(id="different-msg"),
+            "missing_thread_id": self.source_payload(threadId=None),
+            "oversized_thread_id": self.source_payload(threadId="t" * 257),
+            "missing_rfc_message_id": self.source_payload(
+                payload={
+                    "headers": [
+                        {"name": "References", "value": "<root@example.com>"},
+                        {"name": "Subject", "value": "Subject"},
+                    ]
+                }
+            ),
+            "bare_rfc_message_id": self.source_payload(
+                payload={
+                    "headers": [
+                        {"name": "Message-ID", "value": "source@example.com"},
+                        {"name": "Subject", "value": "Subject"},
+                    ]
+                }
+            ),
+            "duplicate_rfc_message_id": self.source_payload(
+                payload={
+                    "headers": [
+                        {"name": "Message-ID", "value": "<source@example.com>"},
+                        {"name": "Message-ID", "value": "<other@example.com>"},
+                        {"name": "Subject", "value": "Subject"},
+                    ]
+                }
+            ),
+            "duplicate_subject": self.source_payload(
+                payload={
+                    "headers": [
+                        {"name": "Message-ID", "value": "<source@example.com>"},
+                        {"name": "Subject", "value": "Subject"},
+                        {"name": "Subject", "value": "Another subject"},
+                    ]
+                }
+            ),
+            "unrelated_subject": self.source_payload(
+                payload={
+                    "headers": [
+                        {"name": "Message-ID", "value": "<source@example.com>"},
+                        {"name": "Subject", "value": "Unrelated campaign"},
+                    ]
+                }
+            ),
+            "oversized_source_subject": self.source_payload(
+                payload={
+                    "headers": [
+                        {"name": "Message-ID", "value": "<source@example.com>"},
+                        {
+                            "name": "Subject",
+                            "value": "s" * (send_gmail.MAX_SUBJECT_CHARACTERS + 1),
+                        },
+                    ]
+                }
+            ),
+            "malformed_encoded_source_subject": self.source_payload(
+                payload={
+                    "headers": [
+                        {"name": "Message-ID", "value": "<source@example.com>"},
+                        {"name": "Subject", "value": "=?utf-8?b?a?="},
+                    ]
+                }
+            ),
+        }
+
+        for case, source_payload in invalid_sources.items():
+            provider_transport = Mock(
+                return_value=BoundaryResponse(json.dumps(source_payload))
+            )
+            with self.subTest(case=case):
+                request, _, _, _ = self.invoke(provider_transport)
+                self.assertEqual(provider_transport.call_count, 1)
+                self.assertEqual(
+                    provider_transport.call_args.args[0].get_method(),
+                    "GET",
+                )
+                self.assertIn(request.status, {400, 422, 502})
+                self.assertFalse(request.payload()["ok"])
+                self.assertIn("reply", request.payload()["error"]["code"])
+
+    def test_source_metadata_get_refreshes_once_before_single_send(self):
+        token_transport, refresh_state = self.matrix._refreshing_token_transport(
+            token()
+        )
+        provider_call_count = 0
+
+        def provider_transport(request, timeout):
+            nonlocal provider_call_count
+            provider_call_count += 1
+            if provider_call_count == 1:
+                raise HTTPError(
+                    request.full_url,
+                    401,
+                    "raw revoked source lookup",
+                    {},
+                    io.BytesIO(b"raw revoked provider response"),
+                )
+            if provider_call_count == 2:
+                return BoundaryResponse(json.dumps(self.source_payload()))
+            return BoundaryResponse(
+                json.dumps(
+                    {
+                        "id": "sent-msg",
+                        "threadId": "thread-123",
+                        "labelIds": ["SENT"],
+                    }
+                )
+            )
+
+        gmail_transport = Mock(side_effect=provider_transport)
+        request, _, _, _ = self.matrix._invoke(
+            send_gmail,
+            self.base_payload(),
+            {},
+            token_transport_override=token_transport,
+            provider_transport_override=gmail_transport,
+        )
+
+        self.assertEqual(request.status, 200)
+        self.assertEqual(
+            [
+                provider_call.args[0].get_method()
+                for provider_call in gmail_transport.call_args_list
+            ],
+            ["GET", "GET", "POST"],
+        )
+        self.assertEqual(
+            [
+                provider_call.args[0].get_header("Authorization")
+                for provider_call in gmail_transport.call_args_list
+            ],
+            [
+                "Bearer access-secret",
+                "Bearer refreshed-access",
+                "Bearer refreshed-access",
+            ],
+        )
+        self.assertEqual(refresh_state["exchange_calls"], 1)
+        self.assertEqual(refresh_state["writes"], 1)
+        self.assertEqual(request.payload()["providerMessageId"], "sent-msg")
+
+    def test_source_metadata_get_stops_after_second_unauthorized_response(self):
+        token_transport, refresh_state = self.matrix._refreshing_token_transport(
+            token()
+        )
+
+        def revoked_provider(request, timeout):
+            raise HTTPError(
+                request.full_url,
+                401,
+                "raw revoked source lookup",
+                {},
+                io.BytesIO(b"raw revoked provider response"),
+            )
+
+        gmail_transport = Mock(side_effect=revoked_provider)
+        request, _, _, _ = self.matrix._invoke(
+            send_gmail,
+            self.base_payload(),
+            {},
+            token_transport_override=token_transport,
+            provider_transport_override=gmail_transport,
+        )
+
+        self.assertEqual(
+            [
+                provider_call.args[0].get_method()
+                for provider_call in gmail_transport.call_args_list
+            ],
+            ["GET", "GET"],
+        )
+        self.assertEqual(refresh_state["exchange_calls"], 1)
+        self.assertEqual(refresh_state["writes"], 1)
+        self.assertEqual(request.status, 401)
+        self.assertEqual(request.payload()["error"]["code"], "reconnect_required")
+        self.assertNotIn("raw revoked", json.dumps(request.payload()))
+
+    def test_references_are_sanitized_deduplicated_and_bounded(self):
+        historic_references = [
+            f"<root-{index}@example.com>" for index in range(300)
+        ]
+        unsafe_references = " ".join(
+            [
+                historic_references[0],
+                "not-a-message-id",
+                "<broken>",
+                *historic_references,
+                historic_references[0],
+                "<source@example.com>",
+                "\r\nBcc:",
+                "victim@example.com",
+            ]
+        )
+        source_payload = self.source_payload(
+            payload={
+                "headers": [
+                    {"name": "Message-ID", "value": "<source@example.com>"},
+                    {"name": "References", "value": unsafe_references},
+                    {"name": "Subject", "value": "Subject"},
+                ]
+            }
+        )
+        provider_transport = Mock(
+            side_effect=(
+                BoundaryResponse(json.dumps(source_payload)),
+                BoundaryResponse(
+                    json.dumps(
+                        {"id": "sent-msg", "threadId": "thread-123"}
+                    )
+                ),
+            )
+        )
+
+        request, _, _, _ = self.invoke(provider_transport)
+
+        self.assertEqual(request.status, 200)
+        _, message = self.decoded_send(provider_transport)
+        references = " ".join(str(message.get("References")).split()).split(" ")
+        self.assertLessEqual(len(references), 50)
+        self.assertLessEqual(len(" ".join(references)), 4096)
+        self.assertEqual(len(references), len(set(references)))
+        self.assertEqual(references[-1], "<source@example.com>")
+        self.assertNotIn("not-a-message-id", references)
+        self.assertNotIn("<broken>", references)
+        self.assertNotIn("victim@example.com", references)
+
+    def test_reply_context_rejects_spoofed_authority_and_malformed_shapes(self):
+        invalid_payloads = {
+            "top_level_spoof": {
+                **self.base_payload(),
+                "providerThreadId": "another-thread",
+                "threadId": "gmail:gmail-1:another-thread",
+                "rfcMessageId": "fake@example.com",
+                "References": "<fake@example.com>",
+                "In-Reply-To": "<fake@example.com>",
+            },
+            "nested_spoof": self.base_payload(
+                replyContext={
+                    "sourceProviderMessageId": "source-msg",
+                    "providerThreadId": "another-thread",
+                    "threadId": "gmail:gmail-1:another-thread",
+                    "rfcMessageId": "fake@example.com",
+                    "References": "<fake@example.com>",
+                    "In-Reply-To": "<fake@example.com>",
+                }
+            ),
+            "not_an_object": self.base_payload(replyContext="source-msg"),
+            "empty_object": self.base_payload(replyContext={}),
+            "blank_source": self.base_payload(
+                replyContext={"sourceProviderMessageId": " "}
+            ),
+            "oversized_source": self.base_payload(
+                replyContext={"sourceProviderMessageId": "x" * 257}
+            ),
+            "nested_source": self.base_payload(
+                replyContext={"sourceProviderMessageId": {"id": "source-msg"}}
+            ),
+        }
+
+        for case, payload in invalid_payloads.items():
+            with self.subTest(case=case):
+                request, config_transport, token_transport, provider_transport = (
+                    self.invoke(Mock(), payload=payload)
+                )
+                self.assertEqual(request.status, 400)
+                self.assertFalse(request.payload()["ok"])
+                config_transport.assert_not_called()
+                token_transport.assert_not_called()
+                provider_transport.assert_not_called()
+
+    def test_malformed_send_identity_is_sent_unconfirmed_without_resend(self):
+        provider_transport = Mock(
+            side_effect=(
+                BoundaryResponse(json.dumps(self.source_payload())),
+                BoundaryResponse("{}"),
+            )
+        )
+
+        request, _, _, _ = self.invoke(provider_transport)
+
+        self.assertEqual(provider_transport.call_count, 2)
+        self.assertEqual(
+            [
+                provider_call.args[0].get_method()
+                for provider_call in provider_transport.call_args_list
+            ],
+            ["GET", "POST"],
+        )
+        self.assertEqual(request.status, 200)
+        response = request.payload()
+        self.assertTrue(response["ok"])
+        self.assertIs(response.get("providerIdentityConfirmed"), False)
+        self.assertIs(response.get("threadContinuityConfirmed"), False)
+        self.assertNotIn("providerMessageId", response)
+        self.assertNotIn("providerThreadId", response)
+        self.assertEqual(
+            response["warning"]["code"],
+            "gmail_send_identity_unconfirmed",
+        )
+
+    def test_unusable_success_response_is_sent_unconfirmed_without_resend(self):
+        response_factories = {
+            "invalid_utf8": lambda: BoundaryResponse(b"\xff"),
+            "invalid_json": lambda: BoundaryResponse("not-json"),
+            "non_object_json": lambda: BoundaryResponse("[]"),
+            "oversized": OversizedStreamingResponse,
+            "read_failure_after_response": lambda: FailedReadResponse(b""),
+            "truncated_response": lambda: IncompleteReadResponse(b""),
+        }
+
+        for case, response_factory in response_factories.items():
+            provider_transport = Mock(return_value=response_factory())
+            with self.subTest(case=case):
+                request, _, _, _ = self.matrix._invoke(
+                    send_gmail,
+                    {
+                        "mailboxId": "gmail-1",
+                        "to": "recipient@example.com",
+                        "subject": "Subject",
+                        "bodyText": "Body",
+                    },
+                    {},
+                    provider_transport_override=provider_transport,
+                )
+                self.assertEqual(provider_transport.call_count, 1)
+                self.assertEqual(
+                    provider_transport.call_args.args[0].get_method(),
+                    "POST",
+                )
+                self.assertEqual(request.status, 200)
+                response = request.payload()
+                self.assertTrue(response["ok"])
+                self.assertIs(response.get("providerIdentityConfirmed"), False)
+                self.assertNotIn("providerMessageId", response)
+                self.assertNotIn("providerThreadId", response)
+
+    def test_returned_thread_mismatch_is_sent_unconfirmed_without_resend(self):
+        provider_transport = Mock(
+            side_effect=(
+                BoundaryResponse(json.dumps(self.source_payload())),
+                BoundaryResponse(
+                    json.dumps(
+                        {
+                            "id": "sent-msg",
+                            "threadId": "different-thread",
+                            "labelIds": ["SENT"],
+                        }
+                    )
+                ),
+            )
+        )
+
+        request, _, _, _ = self.invoke(provider_transport)
+
+        self.assertEqual(provider_transport.call_count, 2)
+        self.assertEqual(
+            [
+                provider_call.args[0].get_method()
+                for provider_call in provider_transport.call_args_list
+            ],
+            ["GET", "POST"],
+        )
+        self.assertEqual(request.status, 200)
+        response = request.payload()
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["providerMessageId"], "sent-msg")
+        self.assertEqual(response["providerThreadId"], "different-thread")
+        self.assertIs(response.get("threadContinuityConfirmed"), False)
+
+
 class SendLimitTests(unittest.TestCase):
     def setUp(self):
         self.matrix = RealHandlerOwnershipMatrixTests()
@@ -1469,12 +2036,23 @@ class SendLimitTests(unittest.TestCase):
         }
 
     def invoke(self, payload):
-        return self.matrix._invoke(send_gmail, payload, {})
+        return self.matrix._invoke(
+            send_gmail,
+            payload,
+            {"id": "sent-msg", "threadId": "sent-thread"},
+        )
 
     def assert_accepted(self, payload):
         request, config_transport, token_transport, provider_transport = self.invoke(payload)
         self.assertEqual(request.status, 200)
-        self.assertEqual(request.payload(), {"ok": True})
+        self.assertEqual(
+            request.payload(),
+            {
+                "ok": True,
+                "providerMessageId": "sent-msg",
+                "providerThreadId": "sent-thread",
+            },
+        )
         self.assertIn(("Cache-Control", "no-store"), request.response_headers)
         config_transport.assert_called_once()
         self.assertEqual(token_transport.call_count, 1)

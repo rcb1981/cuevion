@@ -111,6 +111,7 @@ import {
 } from "../../lib/customSmtpAvailability";
 import {
   beginInboxConnection,
+  buildGmailReplyContext,
   buildRefreshInboxRequest,
   connectInboxWithImap,
   downloadAttachment,
@@ -122,6 +123,7 @@ import {
   mutateProviderArchiveMessage,
   projectManagedMailboxAccountConfigIdentity,
   resolveManagedMailboxIdentity,
+  isValidGmailProviderIdentifier,
   sendGmailMessage,
   type ArchiveFolderSnapshot,
   type ArchiveMutationResponse,
@@ -17813,6 +17815,12 @@ function MailboxView({
       });
 
       const bodyPreview = extractComposePlainText(activeBodyHtml);
+      const gmailReplyContext = buildGmailReplyContext({
+        sendProvider,
+        composeMode,
+        mailboxId: managedMailbox.id,
+        sourceMessage: composeSourceMessage,
+      });
       const sendResponse = await sendGmailMessage({
         mailboxId: managedMailbox.id,
         to: toRecipients,
@@ -17822,6 +17830,7 @@ function MailboxView({
         bodyHtml: activeBodyHtml,
         bodyText: bodyPreview || " ",
         attachments: serializedAttachments,
+        ...(gmailReplyContext ? { replyContext: gmailReplyContext } : {}),
       });
 
       if (!sendResponse.ok) {
@@ -17837,10 +17846,12 @@ function MailboxView({
 
       const sentId = `${activeComposeMailbox.id}-sent-${Date.now()}`;
       const bodyParagraphs = extractComposeParagraphs(activeBodyHtml);
-      const sentMessage = normalizeMailMessage({
+      const isReplyComposeMode =
+        composeMode === "reply" || composeMode === "reply_all";
+      const sentMessageSeed: MailMessageSeed = {
         id: sentId,
         threadId:
-          composeMode === "reply" || composeMode === "reply_all"
+          sendProvider === "custom_imap" && isReplyComposeMode
             ? composeSourceMessage?.threadId ??
               resolveMailThreadId({
                 subject:
@@ -17849,7 +17860,7 @@ function MailboxView({
               })
             : undefined,
         threadIdentityAuthority:
-          composeMode === "reply" || composeMode === "reply_all"
+          sendProvider === "custom_imap" && isReplyComposeMode
             ? composeSourceMessage?.threadIdentityAuthority
             : undefined,
         sender: "You",
@@ -17869,7 +17880,42 @@ function MailboxView({
         signature: undefined,
         attachments: composeAttachments,
         cc: composeCc.trim() || undefined,
-      }, activeComposeMailbox.id, senderCategoryLearning, messageOwnershipInteractions, currentUserId, mailboxStore);
+      };
+      const hasGmailProviderIdentity =
+        sendProvider === "google" &&
+        isValidGmailProviderIdentifier(sendResponse.providerMessageId) &&
+        isValidGmailProviderIdentifier(sendResponse.providerThreadId);
+      const providerLabelIds =
+        Array.isArray(sendResponse.labelIds) &&
+        sendResponse.labelIds.length <= 100 &&
+        sendResponse.labelIds.every(isValidGmailProviderIdentifier) &&
+        new Set(sendResponse.labelIds).size === sendResponse.labelIds.length
+          ? sendResponse.labelIds
+          : undefined;
+      const providerAuthoritativeSentMessageSeed = hasGmailProviderIdentity
+        ? applyLiveThreadIdentity(
+            {
+              ...sentMessageSeed,
+              providerMessageId: sendResponse.providerMessageId,
+              providerThreadId: sendResponse.providerThreadId,
+              labelIds: providerLabelIds,
+            },
+            {
+              mailboxId: activeComposeMailbox.id,
+              provider: "google",
+              folder: "SENT",
+              uidValidity: "gmail-api",
+            },
+          )
+        : sentMessageSeed;
+      const sentMessage = normalizeMailMessage(
+        providerAuthoritativeSentMessageSeed,
+        activeComposeMailbox.id,
+        senderCategoryLearning,
+        messageOwnershipInteractions,
+        currentUserId,
+        mailboxStore,
+      );
 
       setMailboxStore((currentStore) => ({
         ...currentStore,

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import {
+  buildGmailReplyContext,
   downloadAttachment,
   fetchGmailInbox,
   mutateInboxMessageAction,
@@ -45,10 +46,24 @@ async function run() {
     noiseReasons: ["cold_sales_outreach"] as const,
   };
   let gmailInboxMessages: unknown[] = [canonicalGmailMessage];
+  let sendGmailPayload: unknown = { ok: true };
+  let sendGmailTextFailure = false;
   (globalThis as any).fetch = async (url: string, init: Record<string, any>) => {
     captured.push({ url, init });
     if (url.endsWith("/fetch-gmail")) {
       return response({ ok: true, messages: gmailInboxMessages });
+    }
+    if (url.endsWith("/send-gmail")) {
+      if (sendGmailTextFailure) {
+        return {
+          ok: true,
+          status: 200,
+          text: async () => {
+            throw new Error("response body unavailable after send");
+          },
+        };
+      }
+      return response(sendGmailPayload);
     }
     return response({ ok: true, action: "star", messages: [] });
   };
@@ -192,6 +207,194 @@ async function run() {
     ]) {
       assert.equal(forbidden in body(), false);
     }
+
+    const authoritativeReplySource = {
+      providerMessageId: "source-provider-message-1",
+      threadIdentityAuthority: "gmail",
+      threadIdentityContext: {
+        provider: "google",
+        mailboxId: "gmail-1",
+      },
+    };
+    for (const composeMode of ["reply", "reply_all"] as const) {
+      assert.deepEqual(
+        buildGmailReplyContext({
+          sendProvider: "google",
+          composeMode,
+          mailboxId: "gmail-1",
+          sourceMessage: authoritativeReplySource,
+        }),
+        { sourceProviderMessageId: "source-provider-message-1" },
+      );
+    }
+    for (const composeMode of ["new", "forward"] as const) {
+      assert.equal(
+        buildGmailReplyContext({
+          sendProvider: "google",
+          composeMode,
+          mailboxId: "gmail-1",
+          sourceMessage: authoritativeReplySource,
+        }),
+        undefined,
+      );
+    }
+    for (const invalidOptions of [
+      { sendProvider: "custom_imap" },
+      {
+        sourceMessage: {
+          ...authoritativeReplySource,
+          threadIdentityAuthority: "unique_message",
+        },
+      },
+      {
+        sourceMessage: {
+          ...authoritativeReplySource,
+          threadIdentityContext: {
+            provider: "custom_imap",
+            mailboxId: "gmail-1",
+          },
+        },
+      },
+      { mailboxId: "gmail-2" },
+      {
+        sourceMessage: {
+          ...authoritativeReplySource,
+          providerMessageId: " source-provider-message-1 ",
+        },
+      },
+    ] as const) {
+      assert.equal(
+        buildGmailReplyContext({
+          sendProvider: "google",
+          composeMode: "reply",
+          mailboxId: "gmail-1",
+          sourceMessage: authoritativeReplySource,
+          ...invalidOptions,
+        }),
+        undefined,
+      );
+    }
+
+    sendGmailPayload = {
+      ok: true,
+      providerMessageId: "sent-provider-message-1",
+      providerThreadId: "sent-provider-thread-1",
+      labelIds: ["SENT"],
+      threadContinuityConfirmed: false,
+    };
+    const replySendResponse = await sendGmailMessage({
+      mailboxId: "gmail-1",
+      to: "to@example.com",
+      subject: "Re: Subject",
+      bodyHtml: "<p>Reply</p>",
+      bodyText: "Reply",
+      replyContext: {
+        sourceProviderMessageId: "source-provider-message-1",
+        providerThreadId: "client-controlled-thread",
+        threadId: "gmail:gmail-1:client-controlled-thread",
+        rfcMessageId: "client-controlled@example.com",
+        References: "<client-controlled@example.com>",
+        "In-Reply-To": "<client-controlled@example.com>",
+      },
+      providerThreadId: "top-level-client-controlled-thread",
+      threadId: "gmail:gmail-1:top-level-client-controlled-thread",
+      rfcMessageId: "top-level-client-controlled@example.com",
+      References: "<top-level-client-controlled@example.com>",
+      "In-Reply-To": "<top-level-client-controlled@example.com>",
+      composeMode: "reply",
+      composeSourceMessage: { id: "must-not-cross-the-wire" },
+    } as any);
+    assert.deepEqual(body(), {
+      mailboxId: "gmail-1",
+      to: "to@example.com",
+      subject: "Re: Subject",
+      bodyHtml: "<p>Reply</p>",
+      bodyText: "Reply",
+      replyContext: {
+        sourceProviderMessageId: "source-provider-message-1",
+      },
+    });
+    assertCredentialed();
+    for (const forbidden of [
+      "providerThreadId",
+      "threadId",
+      "rfcMessageId",
+      "References",
+      "In-Reply-To",
+      "composeMode",
+      "composeSourceMessage",
+    ]) {
+      assert.equal(forbidden in body(), false);
+    }
+    assert.deepEqual(replySendResponse, sendGmailPayload);
+    assert.equal(replySendResponse.providerMessageId, "sent-provider-message-1");
+    assert.equal(replySendResponse.providerThreadId, "sent-provider-thread-1");
+    assert.deepEqual(replySendResponse.labelIds, ["SENT"]);
+    assert.equal(replySendResponse.threadContinuityConfirmed, false);
+
+    const requestCountBeforeInvalidReply = captured.length;
+    const invalidReplyResponse = await sendGmailMessage({
+      mailboxId: "gmail-1",
+      to: "to@example.com",
+      subject: "Re: Subject",
+      bodyHtml: "<p>Reply</p>",
+      bodyText: "Reply",
+      replyContext: { sourceProviderMessageId: " " },
+    });
+    assert.equal(invalidReplyResponse.ok, false);
+    assert.equal(invalidReplyResponse.error?.code, "invalid_reply_context");
+    assert.equal(
+      captured.length,
+      requestCountBeforeInvalidReply,
+      "an explicit malformed reply context must fail before any send request",
+    );
+
+    sendGmailPayload = {
+      ok: true,
+      providerMessageId: "sent-provider-message-2",
+      providerThreadId: "\ud800",
+    };
+    const malformedIdentityResponse = await sendGmailMessage({
+      mailboxId: "gmail-1",
+      to: "to@example.com",
+      subject: "Subject",
+      bodyHtml: "<p>Message</p>",
+      bodyText: "Message",
+    });
+    assert.equal(malformedIdentityResponse.ok, true);
+    assert.equal(malformedIdentityResponse.providerIdentityConfirmed, false);
+    assert.equal(malformedIdentityResponse.providerMessageId, undefined);
+    assert.equal(malformedIdentityResponse.providerThreadId, undefined);
+
+    sendGmailPayload = {
+      ok: true,
+      providerIdentityConfirmed: true,
+      threadContinuityConfirmed: true,
+    };
+    const missingConfirmedIdentityResponse = await sendGmailMessage({
+      mailboxId: "gmail-1",
+      to: "to@example.com",
+      subject: "Subject",
+      bodyHtml: "<p>Message</p>",
+      bodyText: "Message",
+    });
+    assert.equal(missingConfirmedIdentityResponse.ok, true);
+    assert.equal(missingConfirmedIdentityResponse.providerIdentityConfirmed, false);
+    assert.equal(missingConfirmedIdentityResponse.threadContinuityConfirmed, false);
+
+    sendGmailTextFailure = true;
+    const unreadableSuccessResponse = await sendGmailMessage({
+      mailboxId: "gmail-1",
+      to: "to@example.com",
+      subject: "Subject",
+      bodyHtml: "<p>Message</p>",
+      bodyText: "Message",
+    });
+    sendGmailTextFailure = false;
+    assert.equal(unreadableSuccessResponse.ok, true);
+    assert.equal(unreadableSuccessResponse.providerIdentityConfirmed, false);
+    assert.equal(unreadableSuccessResponse.threadContinuityConfirmed, false);
+    assert.equal(unreadableSuccessResponse.error, undefined);
 
     await downloadAttachment({
       mailboxId: "gmail-1",
