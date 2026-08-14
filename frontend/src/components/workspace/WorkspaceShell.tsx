@@ -3203,49 +3203,7 @@ function buildReplyQuotedBodyText(body: string[]) {
     .join("\n\n");
 }
 
-function sanitizeComposeQuotedHtmlTextColors(html: string) {
-  const normalizedHtml = html.trim();
-
-  if (!normalizedHtml || typeof DOMParser === "undefined") {
-    return normalizedHtml;
-  }
-
-  const parsedDocument = new DOMParser().parseFromString(normalizedHtml, "text/html");
-
-  parsedDocument.body.querySelectorAll("*").forEach((element) => {
-    if (!(element instanceof HTMLElement)) {
-      return;
-    }
-
-    element.style.removeProperty("color");
-    element.style.removeProperty("-webkit-text-fill-color");
-
-    if (element.hasAttribute("color")) {
-      element.removeAttribute("color");
-    }
-
-    if (!element.getAttribute("style")?.trim()) {
-      element.removeAttribute("style");
-    }
-  });
-
-  return parsedDocument.body.innerHTML.trim();
-}
-
 function buildComposeQuoteHtml(mode: ComposeMode, sourceMessage: MailMessage) {
-  if (mode === "reply" || mode === "reply_all") {
-    const attributionHeader = `On ${sourceMessage.timestamp}, ${sourceMessage.from} wrote:`;
-    const sourceRenderMode = resolveMessageBodyRenderMode(sourceMessage);
-
-    if (sourceRenderMode.mode !== "plain") {
-      return `<div data-compose-quote-wrapper="true" style="margin-top:8px; padding-top:8px; border-top:1px solid rgba(255,255,255,0.05);"><div data-compose-quote="true"><div>${escapeComposeHtml(
-        attributionHeader,
-      )}</div><div><br></div>${sanitizeComposeQuotedHtmlTextColors(
-        sourceRenderMode.html,
-      )}</div></div>`;
-    }
-  }
-
   const quotedMessage =
     mode === "reply" || mode === "reply_all"
       ? `On ${sourceMessage.timestamp}, ${sourceMessage.from} wrote:\n\n${buildReplyQuotedBodyText(
