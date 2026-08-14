@@ -183,6 +183,24 @@ BULK_CONTENT_PATTERNS = _patterns(
     r"\b(?:newsletter|weekly\s+digest|monthly\s+digest|mailing\s+list)\b",
     r"\b(?:unsubscribe|email\s+preferences|view\s+in\s+(?:your\s+)?browser)\b",
 )
+COMMERCIAL_PRICE_PATTERNS = _patterns(
+    r"(?:[$€£]\s*\d|\b\d+(?:[.,]\d{2})?\s*(?:usd|eur|gbp)\b)",
+    r"\b(?:save|off)\s+\d{1,3}%\b",
+)
+COMMERCIAL_CTA_PATTERNS = _patterns(
+    r"\b(?:shop|buy|order)\s+(?:now|today|the\s+(?:offer|sale|collection))\b",
+    r"\b(?:special\s+offer|limited\s+time|discount|coupon|sale)\b",
+)
+COMMERCIAL_CONTEXT_PATTERNS = _patterns(
+    r"\b(?:premium|product|products|collection|catalogue|catalog|storefront)\b",
+    r"\b(?:marketing|campaign|promotion|promotional)\b",
+)
+PROTECTED_ACTION_PATTERNS = _patterns(
+    r"\b(?:invoice|payment|billing|overdue|amount\s+due|royalt(?:y|ies)|earnings|payout)\b",
+    r"\b(?:contract|agreement|rights|legal|signature|approval|deadline|cutoff)\b",
+    r"\b(?:please\s+(?:review|confirm|send|approve|sign)|can\s+you|could\s+you|need\s+your|let\s+me\s+know)\b",
+    r"\b(?:release\s+(?:delivery|status|ingestion)|metadata\s+(?:issue|warning)|store\s+delivery|content\s+id|takedown|dsp\s+(?:warning|delivery))\b",
+)
 MESSAGE_ID_REFERENCE_PATTERN = re.compile(
     r"<[^<>\s@]+@[^<>\s@]+>",
     re.IGNORECASE,
@@ -298,6 +316,69 @@ def _has_automated_sender_evidence(message: Message, sender_email: str) -> bool:
         )
     )
     return auto_submitted or automated_local_part
+
+
+def is_low_value_commercial_newsletter(
+    *,
+    message: Message,
+    subject: str,
+    body: str,
+    sender_email: str,
+    semantic_classification: str | None,
+    noise_assessment: MessageNoiseAssessment,
+    has_workflow_links: bool = False,
+) -> bool:
+    """Combine normalized bulk evidence with bounded commercial evidence.
+
+    Bulk evidence is necessary but never sufficient. Protected semantic classes,
+    RFC conversation state, actionable business/finance/operations language, and
+    workflow links all veto the quiet-newsletter authority.
+    """
+
+    if (
+        noise_assessment.get("noiseDisposition") != "bulk_marketing"
+        or semantic_classification not in {"workflow_update", "info", "unknown"}
+        or has_workflow_links
+        or _has_conversation_evidence(message)
+    ):
+        return False
+
+    text = " ".join(
+        value
+        for value in (
+            _normalize_text(subject, MAX_SUBJECT_LENGTH),
+            _normalize_text(body, MAX_BODY_LENGTH),
+            _normalize_text(sender_email, MAX_IDENTITY_LENGTH),
+        )
+        if value
+    )
+    if _matches(text, PROTECTED_ACTION_PATTERNS):
+        return False
+
+    commercial_support_count = sum(
+        (
+            _matches(text, COMMERCIAL_PRICE_PATTERNS),
+            _matches(text, COMMERCIAL_CTA_PATTERNS),
+            _matches(text, COMMERCIAL_CONTEXT_PATTERNS),
+        )
+    )
+    structured_campaign_support_count = sum(
+        (
+            any(value.strip() for value in _bounded_header_values(message, "List-Unsubscribe")),
+            any(
+                value.strip() in {"bulk", "list"}
+                for value in _bounded_header_values(message, "Precedence")
+            ),
+            any(
+                value and value != "no"
+                for value in _bounded_header_values(message, "Auto-Submitted")
+            ),
+        )
+    )
+
+    return commercial_support_count >= 2 or (
+        structured_campaign_support_count >= 3 and commercial_support_count >= 1
+    )
 
 
 def _has_mailbox_relevance_mismatch(

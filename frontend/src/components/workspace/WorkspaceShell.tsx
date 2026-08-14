@@ -7883,6 +7883,16 @@ function getPriorityVisibilityAdjustedMessage(
     message,
     options?.manualLabelOverride,
   );
+  const hasUserCategoryAuthority =
+    message.categorySource === "user" || message.categorySource === "learned";
+  const hasBackendLowValueCommercialNewsletterAuthority =
+    !hasUserCategoryAuthority &&
+    (visibilityClassification === "workflow_update" ||
+      visibilityClassification === "info") &&
+    message.noiseDisposition === "bulk_marketing" &&
+    message.v7_final_priority?.trim().toUpperCase() === "LOW" &&
+    message.final_visibility === "show_low" &&
+    message.action === "show_in_quiet_view";
   const shouldForceLowValueMarketingUpdateLow =
     !hasCorrectedBusinessCategory &&
     (visibilityClassification === "workflow_update" ||
@@ -7894,6 +7904,10 @@ function getPriorityVisibilityAdjustedMessage(
     hasProtectedPriorityVisibility(message) &&
     !shouldRespectFinanceNormalPreference
   ) {
+    return message;
+  }
+
+  if (hasBackendLowValueCommercialNewsletterAuthority) {
     return message;
   }
 

@@ -28,7 +28,10 @@ from api.inboxes.imap_uid_validity import (
     is_canonical_uid_validity,
     read_selected_mailbox_uid_validity,
 )
-from message_noise_assessment import assess_message_noise
+from message_noise_assessment import (
+    assess_message_noise,
+    is_low_value_commercial_newsletter,
+)
 
 DEFAULT_GMAIL_HOST = "imap.gmail.com"
 DEFAULT_GMAIL_PORT = 993
@@ -1379,6 +1382,26 @@ def resolve_preview_routing(
             elif any(keyword in classification_text for keyword in business_keywords):
                 result["category"] = "business"
 
+        noise_assessment = assess_message_noise(
+            message=message,
+            subject=subject,
+            sender_name=sender_name,
+            sender_email=sender_email,
+            recipient_email=email_address,
+            body=body,
+            semantic_classification=result.get("category"),
+        )
+        low_value_commercial_newsletter = is_low_value_commercial_newsletter(
+            message=message,
+            subject=subject,
+            body=body,
+            sender_email=sender_email,
+            semantic_classification=result.get("category"),
+            noise_assessment=noise_assessment,
+            has_workflow_links=bool(result.get("workflow_links")),
+        )
+        result.update(noise_assessment)
+
         result = normalize_priority(
             result,
             inbox_profile=inbox_profile,
@@ -1402,6 +1425,9 @@ def resolve_preview_routing(
                 workflow_links=result.get("workflow_links", []),
                 usable_demo_links=result.get("usable_demo_links", []),
                 reason=result.get("reason", ""),
+                metadata={
+                    "low_value_commercial_newsletter": low_value_commercial_newsletter,
+                },
             )
 
             v7_decision = decide_message_behavior(
@@ -1491,15 +1517,25 @@ def to_message_preview(
         internal_role=internal_role,
         focus_preferences=focus_preferences,
     )
-    noise_assessment = assess_message_noise(
-        message=message,
-        subject=subject,
-        sender_name=sender_name,
-        sender_email=sender_email,
-        recipient_email=email_address,
-        body=body,
-        semantic_classification=preview_routing.get("internalClassification"),
-    )
+    if all(
+        key in preview_routing
+        for key in ("noiseDisposition", "noiseConfidence", "noiseReasons")
+    ):
+        noise_assessment = {
+            "noiseDisposition": preview_routing["noiseDisposition"],
+            "noiseConfidence": preview_routing["noiseConfidence"],
+            "noiseReasons": preview_routing["noiseReasons"],
+        }
+    else:
+        noise_assessment = assess_message_noise(
+            message=message,
+            subject=subject,
+            sender_name=sender_name,
+            sender_email=sender_email,
+            recipient_email=email_address,
+            body=body,
+            semantic_classification=preview_routing.get("internalClassification"),
+        )
 
     return {
       "id": message_id.strip("<>"),

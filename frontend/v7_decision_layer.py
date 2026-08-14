@@ -252,6 +252,32 @@ def decide_message_behavior(
             explanation=explanation,
         )
 
+    # A provider-boundary decision has already combined normalized RFC bulk
+    # evidence with multiple commercial signals and applied the reply,
+    # business, finance, operations, and workflow-link vetoes. Keep the semantic
+    # Update label, but make its attention/routing contract quiet before role,
+    # mailbox, or focus weighting can promote it as an ordinary useful update.
+    if (
+        category in {"workflow_update", "info", "unknown"}
+        and engine_result.metadata.get("low_value_commercial_newsletter") is True
+    ):
+        final_priority = "LOW"
+        final_visibility = "show_low"
+        explanation.hard_rule_adjustments.append(
+            "low-value commercial newsletter forced to quiet visibility"
+        )
+        explanation.final_summary = (
+            "Kept quiet because independent bulk and commercial campaign evidence "
+            "was present without protected conversation or actionable mail signals."
+        )
+        return FinalDecision(
+            final_category=engine_result.category,
+            final_priority=final_priority,
+            final_visibility=final_visibility,
+            action=visibility_to_action(final_visibility),
+            explanation=explanation,
+        )
+
     # -----------------------------------------------------
     # HARD RULE: workflow links stay visible
     # -----------------------------------------------------

@@ -306,6 +306,120 @@ const normalFocusPreferences: Parameters<
   promoReminders: "medium",
   paymentReminders: "medium",
 };
+
+const structuredBulkNewsletter = projectMessage("workflow_update", gmailIdentity, {
+  id: "commercial-newsletter",
+  sender: "Studio Campaigns",
+  subject: "Studio tools collection update",
+  snippet: "Explore the latest premium effects collection.",
+  from: "Studio Campaigns <campaigns@studio-tools.example>",
+  body: ["Explore the latest premium effects collection."],
+  providerFolder: "Inbox",
+  labelIds: ["INBOX"],
+  signal: undefined,
+  ui_signal: "UPDATE",
+  v7_final_priority: "LOW",
+  final_visibility: "show_low",
+  action: "show_in_quiet_view",
+  noiseDisposition: "bulk_marketing",
+  noiseConfidence: "medium",
+  noiseReasons: ["bulk_mail_evidence", "automated_sender_evidence"],
+}).message;
+const structuredBulkNewsletterInput: MailboxCollections = {
+  Inbox: [structuredBulkNewsletter],
+  Drafts: [],
+  Sent: [],
+  Archive: [],
+  Filtered: [],
+  Spam: [],
+  Trash: [],
+};
+const structuredBulkNewsletterCollections =
+  applyFocusPreferenceRoutingToMailboxCollections(
+    structuredBulkNewsletterInput,
+    normalFocusPreferences,
+    {},
+  );
+
+assert.equal(
+  getVisiblePriorityBadgeForWorkspaceMessage(
+    structuredBulkNewsletter,
+    undefined,
+    normalFocusPreferences,
+  ),
+  "LOW",
+);
+assert.equal(structuredBulkNewsletterCollections.Inbox.length, 0);
+assert.deepEqual(
+  structuredBulkNewsletterCollections.Filtered.map((message) => message.id),
+  ["commercial-newsletter"],
+);
+assert.equal(
+  structuredBulkNewsletterCollections.Filtered[0]?.providerFolder,
+  "Inbox",
+);
+assert.deepEqual(
+  structuredBulkNewsletterCollections.Filtered[0]?.labelIds,
+  ["INBOX"],
+);
+assert.equal(
+  structuredBulkNewsletterCollections.Filtered[0]?.action,
+  "show_in_quiet_view",
+);
+
+const manuallyPrioritizedBulkNewsletterCollections =
+  applyFocusPreferenceRoutingToMailboxCollections(
+    structuredBulkNewsletterInput,
+    normalFocusPreferences,
+    {},
+    { "commercial-newsletter": "priority" },
+  );
+assert.deepEqual(
+  manuallyPrioritizedBulkNewsletterCollections.Inbox.map((message) => message.id),
+  ["commercial-newsletter"],
+);
+assert.equal(manuallyPrioritizedBulkNewsletterCollections.Filtered.length, 0);
+
+const learnedImportantBulkNewsletter = normalizeMailMessage(
+  {
+    ...structuredBulkNewsletter,
+    id: "learned-important-commercial-newsletter",
+  },
+  "main",
+  {
+    "campaigns@studio-tools.example": {
+      learnedCategory: "Primary",
+      learnedFromCount: 3,
+      autoCategoryEnabled: true,
+      mailboxAction: "keep",
+      sourcePrioritySelection: "Important",
+    },
+  },
+  {},
+  "user-1",
+);
+const learnedImportantCollections = applyFocusPreferenceRoutingToMailboxCollections(
+  {
+    ...structuredBulkNewsletterInput,
+    Inbox: [learnedImportantBulkNewsletter],
+  },
+  normalFocusPreferences,
+  {
+    "campaigns@studio-tools.example": {
+      learnedCategory: "Primary",
+      learnedFromCount: 3,
+      autoCategoryEnabled: true,
+      mailboxAction: "keep",
+      sourcePrioritySelection: "Important",
+    },
+  },
+);
+assert.deepEqual(
+  learnedImportantCollections.Inbox.map((message) => message.id),
+  ["learned-important-commercial-newsletter"],
+);
+assert.equal(learnedImportantCollections.Filtered.length, 0);
+
 const lowPromoReminderFocusPreferences: Parameters<
   typeof getVisiblePriorityBadgeForWorkspaceMessage
 >[2] = {

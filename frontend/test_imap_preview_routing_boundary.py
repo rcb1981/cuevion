@@ -24,11 +24,14 @@ def make_message(
     *,
     sender: str,
     to: str = "promo@hysteriarecs.com",
+    headers: tuple[tuple[str, str], ...] = (),
 ) -> EmailMessage:
     message = EmailMessage()
     message["Subject"] = subject
     message["From"] = sender
     message["To"] = to
+    for name, value in headers:
+        message[name] = value
     message.set_content(body)
     return message
 
@@ -51,6 +54,138 @@ def make_preview(
 
 
 class ImapPreviewRoutingBoundaryTests(unittest.TestCase):
+    def test_generic_commercial_newsletter_is_quiet_before_projection(self):
+        message = make_message(
+            "Improve your mixes this weekend",
+            "Our premium effects update: now $29. Shop the offer while it is available.",
+            sender="Studio Tools <campaigns@studio-tools.example>",
+            to="info@hysteriarecs.com",
+            headers=(
+                ("List-Unsubscribe", "<mailto:leave@studio-tools.example>"),
+                ("Precedence", "bulk"),
+            ),
+        )
+
+        preview = make_preview(message, internal_role=None)
+
+        self.assertEqual(preview["noiseDisposition"], "bulk_marketing")
+        self.assertEqual(preview["v7_final_priority"], "LOW")
+        self.assertEqual(preview["final_visibility"], "show_low")
+        self.assertEqual(preview["action"], "show_in_quiet_view")
+        self.assertEqual(preview["imapUid"], "1962")
+
+    def test_structured_bulk_campaign_is_quiet_without_plaintext_cta_terms(self):
+        message = make_message(
+            "Studio tools collection update",
+            "Explore the latest premium effects collection.",
+            sender="Studio Campaigns <campaigns@studio-tools.example>",
+            to="info@hysteriarecs.com",
+            headers=(
+                ("List-Unsubscribe", "<mailto:leave@studio-tools.example>"),
+                ("Precedence", "bulk"),
+                ("Auto-Submitted", "auto-generated"),
+            ),
+        )
+
+        preview = make_preview(message, internal_role=None)
+
+        self.assertNotIn("sale", preview["snippet"].lower())
+        self.assertNotIn("shop", preview["snippet"].lower())
+        self.assertNotIn("unsubscribe", preview["snippet"].lower())
+        self.assertEqual(preview["noiseDisposition"], "bulk_marketing")
+        self.assertEqual(preview["v7_final_priority"], "LOW")
+        self.assertEqual(preview["final_visibility"], "show_low")
+        self.assertEqual(preview["action"], "show_in_quiet_view")
+        self.assertEqual(preview["imapUid"], "1962")
+
+    def test_bulk_marketing_without_commercial_support_stays_useful(self):
+        message = make_message(
+            "Monthly account update",
+            "Your account settings summary is available.",
+            sender="Account Notifications <notifications@example.com>",
+            to="info@hysteriarecs.com",
+            headers=(
+                ("List-Unsubscribe", "<mailto:leave@example.com>"),
+                ("Precedence", "bulk"),
+                ("Auto-Submitted", "auto-generated"),
+            ),
+        )
+
+        preview = make_preview(message, internal_role=None)
+
+        self.assertEqual(preview["noiseDisposition"], "bulk_marketing")
+        self.assertEqual(preview["internalClassification"], "workflow_update")
+        self.assertEqual(preview["v7_final_priority"], "NORMAL")
+        self.assertNotEqual(preview["action"], "show_in_quiet_view")
+
+    def test_bulk_headers_do_not_demote_protected_useful_mail(self):
+        bulk_headers = (
+            ("List-Unsubscribe", "<mailto:leave@notifications.example>"),
+            ("Precedence", "bulk"),
+        )
+        cases = (
+            (
+                "distributor",
+                make_message(
+                    "Release delivery completed",
+                    "Your release delivery completed and the store delivery status is ready.",
+                    sender="Label Worx <delivery@label-worx.com>",
+                    to="info@hysteriarecs.com",
+                    headers=bulk_headers,
+                ),
+                "distributor_update",
+                "PRIORITY",
+            ),
+            (
+                "payment",
+                make_message(
+                    "Invoice overdue - payment due",
+                    "Please pay invoice 2026-0811 by the due date.",
+                    sender="Billing <billing@example.com>",
+                    to="info@hysteriarecs.com",
+                    headers=bulk_headers,
+                ),
+                "business_reminder",
+                "PRIORITY",
+            ),
+            (
+                "royalty",
+                make_message(
+                    "Royalty statement available",
+                    "Your royalty statement and earnings payout report is ready.",
+                    sender="Royalties <royalties@publisher.example>",
+                    to="info@hysteriarecs.com",
+                    headers=bulk_headers,
+                ),
+                "royalty_statement",
+                "PRIORITY",
+            ),
+            (
+                "reply",
+                make_message(
+                    "Re: Contract question",
+                    "Thanks for your note. Here is the answer.",
+                    sender="Alex <alex@example.com>",
+                    to="info@hysteriarecs.com",
+                    headers=(
+                        *bulk_headers,
+                        ("In-Reply-To", "<parent@example.com>"),
+                        ("References", "<parent@example.com>"),
+                    ),
+                ),
+                "reply",
+                "PRIORITY",
+            ),
+        )
+
+        for name, message, classification, priority in cases:
+            with self.subTest(case=name):
+                preview = make_preview(message, internal_role=None)
+                self.assertEqual(preview["noiseDisposition"], "bulk_marketing")
+                self.assertEqual(preview["internalClassification"], classification)
+                self.assertEqual(preview["v7_final_priority"], priority)
+                self.assertNotEqual(preview["action"], "show_in_quiet_view")
+
     def test_alxb_promo_reminder_respects_low_and_normal_focus(self):
         message = make_message(
             "(Reminder) Promo Invite from ALXB Records",
