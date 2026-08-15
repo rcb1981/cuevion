@@ -8,6 +8,7 @@ import {
   createDefaultComposeModalSize,
   createDefaultFullMessageModalSize,
   planFullMessageModalComposeAction,
+  planMessageComposeAction,
   reduceFullMessageModalInteraction,
   resizeComposeModalSize,
   resizeFullMessageModalSize,
@@ -20,6 +21,74 @@ const initialState: FullMessageModalInteractionState = {
   isOpen: false,
   selectedMessageId: "message-a",
 };
+
+{
+  const expectedReadingReplyPlan = {
+    composePresentation: "modal",
+    isComposeOpen: true,
+    isFullMessageOpen: false,
+    mode: "reply",
+    sourceMessageId: null,
+  };
+
+  assert.deepEqual(
+    planMessageComposeAction("message-a", "reply", "workspace"),
+    expectedReadingReplyPlan,
+    "reading-pane Reply must promote workspace origin to modal compose",
+  );
+  assert.deepEqual(
+    planMessageComposeAction("message-a", "reply"),
+    expectedReadingReplyPlan,
+    "toolbar Reply must promote its default workspace origin to modal compose",
+  );
+  assert.deepEqual(
+    planMessageComposeAction("message-a", "reply_all", "workspace"),
+    {
+      ...expectedReadingReplyPlan,
+      mode: "reply_all",
+    },
+    "reading-pane and toolbar Reply All must promote workspace origin to modal compose",
+  );
+  assert.deepEqual(
+    planMessageComposeAction("message-a", "reply", "modal"),
+    {
+      ...expectedReadingReplyPlan,
+      sourceMessageId: "message-a",
+    },
+    "full-message Reply must retain its return target while opening modal compose",
+  );
+  assert.deepEqual(
+    planMessageComposeAction("message-a", "reply_all", "modal"),
+    {
+      ...expectedReadingReplyPlan,
+      mode: "reply_all",
+      sourceMessageId: "message-a",
+    },
+    "full-message Reply All must retain its return target while opening modal compose",
+  );
+  assert.deepEqual(
+    planMessageComposeAction("message-a", "forward", "workspace"),
+    {
+      composePresentation: "workspace",
+      isComposeOpen: true,
+      isFullMessageOpen: false,
+      mode: "forward",
+      sourceMessageId: null,
+    },
+    "reading-pane and toolbar Forward presentation must remain unchanged",
+  );
+  assert.deepEqual(
+    planMessageComposeAction("message-a", "forward", "modal"),
+    {
+      composePresentation: "modal",
+      isComposeOpen: true,
+      isFullMessageOpen: false,
+      mode: "forward",
+      sourceMessageId: "message-a",
+    },
+    "full-message Forward presentation must remain unchanged",
+  );
+}
 
 {
   const state = reduceFullMessageModalInteraction(initialState, {
@@ -122,7 +191,7 @@ recordCorrectionExpectation("modal-origin compose presentation", () => {
     workspaceShellSource.indexOf("const serializeAttachmentBlob ="),
   );
   const hasModalOriginWiring =
-    /const composePresentation\s*=\s*placement === "full" \? "modal" : "workspace"/.test(
+    /const originPresentation\s*=\s*placement === "full" \? "modal" : "workspace"/.test(
       renderMessageActionsSource,
     ) &&
     /isComposeOpen\s*&&\s*composePresentation === "modal"[\s\S]{0,800}WorkspaceModalLayer/.test(
@@ -252,14 +321,14 @@ recordCorrectionExpectation("modal action wiring", () => {
 
   assert.match(
     renderMessageActionsSource,
-    /const composePresentation\s*=\s*placement === "full" \? "modal" : "workspace"/,
+    /const originPresentation\s*=\s*placement === "full" \? "modal" : "workspace"/,
     "full placement must preserve modal origin while split placement stays workspace",
   );
   (["reply", "reply_all", "forward"] as const).forEach((mode) => {
     assert.match(
       renderMessageActionsSource,
       new RegExp(
-        `openComposeFromMessage\\(message, "${mode}", composePresentation\\)`,
+        `openComposeFromMessage\\(message, "${mode}", originPresentation\\)`,
       ),
       `${mode} must pass the presentation selected from the action placement`,
     );
@@ -284,8 +353,13 @@ recordCorrectionExpectation("shared composer and normal compose regression", () 
   );
   assert.match(
     workspaceShellSource,
-    /const openComposeFromMessage\s*=\s*\([\s\S]{0,180}presentation: ComposePresentation = "workspace"/,
-    "non-modal reply, reply-all, and forward entry points must remain workspace presentation by default",
+    /const openComposeFromMessage\s*=\s*\([\s\S]{0,180}originPresentation: ComposePresentation = "workspace"/,
+    "toolbar actions must keep a deterministic default origin",
+  );
+  assert.match(
+    workspaceShellSource,
+    /const composePlan = planMessageComposeAction\([\s\S]{0,160}originPresentation/,
+    "every normal message compose action must use the centralized presentation plan",
   );
   const openComposeSource = workspaceShellSource.slice(
     workspaceShellSource.indexOf("const openCompose ="),
@@ -301,6 +375,18 @@ recordCorrectionExpectation("shared composer and normal compose regression", () 
     /data-modal-compose[\s\S]{0,700}composeModalSize[\s\S]{0,400}COMPOSE_MODAL_VIEWPORT/,
     "modal compose must use its own compact, viewport-safe desktop size",
   );
+});
+
+recordCorrectionExpectation("compose title contract", () => {
+  const titleSource = workspaceShellSource.slice(
+    workspaceShellSource.indexOf('id="desktop-compose-title"'),
+    workspaceShellSource.indexOf("</h2>", workspaceShellSource.indexOf('id="desktop-compose-title"')),
+  );
+
+  assert.match(titleSource, /composeMode === "reply"[\s\S]{0,80}\? "Reply"/);
+  assert.match(titleSource, /composeMode === "reply_all"[\s\S]{0,100}\? "Reply All"/);
+  assert.match(titleSource, /composeMode === "forward"[\s\S]{0,100}\? "Forward"/);
+  assert.match(titleSource, /: "New Message"/);
 });
 
 recordCorrectionExpectation("modal compose close confirmation layer", () => {

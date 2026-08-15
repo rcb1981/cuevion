@@ -48,7 +48,7 @@ import {
   clampFullMessageModalSize,
   createDefaultComposeModalSize,
   createDefaultFullMessageModalSize,
-  planFullMessageModalComposeAction,
+  planMessageComposeAction,
   reduceFullMessageModalInteraction,
   resizeComposeModalSize,
   resizeFullMessageModalSize,
@@ -14807,12 +14807,13 @@ function MailboxView({
   const openComposeFromMessage = (
     message: MailMessage,
     mode: Exclude<ComposeMode, "new">,
-    presentation: ComposePresentation = "workspace",
+    originPresentation: ComposePresentation = "workspace",
   ) => {
-    const modalComposePlan =
-      presentation === "modal"
-        ? planFullMessageModalComposeAction(message.id, mode)
-        : null;
+    const composePlan = planMessageComposeAction(
+      message.id,
+      mode,
+      originPresentation,
+    );
     const threadMessages = getThreadMessages(message);
     const selectedMessageLocation = currentMessageLocationById[message.id];
     const selectedSourceMailboxId =
@@ -14910,11 +14911,9 @@ function MailboxView({
     setDetailActionsMenuState(null);
     resetComposeState();
     setIsCloseModalOpen(false);
-    setIsFullMessageOpen(modalComposePlan?.isFullMessageOpen ?? false);
-    setComposePresentation(
-      modalComposePlan?.composePresentation ?? "workspace",
-    );
-    setModalComposeSourceMessageId(modalComposePlan?.sourceMessageId ?? null);
+    setIsFullMessageOpen(composePlan.isFullMessageOpen);
+    setComposePresentation(composePlan.composePresentation);
+    setModalComposeSourceMessageId(composePlan.sourceMessageId);
     setComposeMailboxId(sourceMailboxId);
     const sourceInboxSignature = normalizeInboxSignatureSettings(
       inboxSignatures[sourceMailboxId],
@@ -14923,7 +14922,7 @@ function MailboxView({
       sourceInboxSignature.useByDefault && hasSignatureContent(sourceInboxSignature)
         ? sourceInboxSignature
         : null;
-    setComposeMode(modalComposePlan?.mode ?? mode);
+    setComposeMode(composePlan.mode);
     setComposeSourceMessage(effectiveMessage);
     setComposeTo(mode === "forward" ? "" : replyToAddresses.join(", "));
     setComposeCc(mode === "reply_all" ? replyAllCcRecipients.join(", ") : "");
@@ -14961,7 +14960,7 @@ function MailboxView({
         }),
       ),
     );
-    setIsComposeOpen(modalComposePlan?.isComposeOpen ?? true);
+    setIsComposeOpen(composePlan.isComposeOpen);
   };
 
   useEffect(() => {
@@ -17472,7 +17471,7 @@ function MailboxView({
     message: MailMessage,
     placement: "split" | "full",
   ) => {
-    const composePresentation = placement === "full" ? "modal" : "workspace";
+    const originPresentation = placement === "full" ? "modal" : "workspace";
     const menuOpen =
       detailActionsMenuState?.messageId === message.id &&
       detailActionsMenuState.placement === placement;
@@ -17619,7 +17618,7 @@ function MailboxView({
         <button
           type="button"
           onClick={() =>
-            openComposeFromMessage(message, "reply", composePresentation)
+            openComposeFromMessage(message, "reply", originPresentation)
           }
           className={actionClass}
         >
@@ -17628,7 +17627,7 @@ function MailboxView({
         <button
           type="button"
           onClick={() =>
-            openComposeFromMessage(message, "reply_all", composePresentation)
+            openComposeFromMessage(message, "reply_all", originPresentation)
           }
           className={actionClass}
         >
@@ -17637,7 +17636,7 @@ function MailboxView({
         <button
           type="button"
           onClick={() =>
-            openComposeFromMessage(message, "forward", composePresentation)
+            openComposeFromMessage(message, "forward", originPresentation)
           }
           className={actionClass}
         >

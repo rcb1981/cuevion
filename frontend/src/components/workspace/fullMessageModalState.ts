@@ -53,19 +53,32 @@ const composeModalSizeContract: ModalSizeContract = {
   minimumWidth: COMPOSE_MODAL_MIN_WIDTH,
 };
 
-type FullMessageModalComposeMode = "reply" | "reply_all" | "forward";
+type MessageComposeMode = "reply" | "reply_all" | "forward";
+type MessageComposePresentation = "workspace" | "modal";
 
-export function planFullMessageModalComposeAction(
+export function planMessageComposeAction(
   sourceMessageId: string,
-  mode: FullMessageModalComposeMode,
+  mode: MessageComposeMode,
+  originPresentation: MessageComposePresentation = "workspace",
 ) {
+  const hasFullMessageOrigin = originPresentation === "modal";
+  const composePresentation =
+    mode === "reply" || mode === "reply_all" ? "modal" : originPresentation;
+
   return {
-    composePresentation: "modal" as const,
+    composePresentation,
     isComposeOpen: true,
     isFullMessageOpen: false,
     mode,
-    sourceMessageId,
+    sourceMessageId: hasFullMessageOrigin ? sourceMessageId : null,
   };
+}
+
+export function planFullMessageModalComposeAction(
+  sourceMessageId: string,
+  mode: MessageComposeMode,
+) {
+  return planMessageComposeAction(sourceMessageId, mode, "modal");
 }
 
 export function resolveModalComposeReturnMessageId(
