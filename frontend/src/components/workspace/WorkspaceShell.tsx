@@ -14859,10 +14859,9 @@ function MailboxView({
     // Build a normalised set of all own addresses across every connected mailbox.
     // Used to detect self-authored (Sent) messages and to scrub own addresses from
     // reply recipient lists regardless of which mailbox is currently active.
-    const ownAddressSet = new Set<string>([
-      normalizeSenderLearningKey(currentUserEmail),
-      ...orderedMailboxes.map((mb) => normalizeSenderLearningKey(mb.email)),
-    ]);
+    const ownAddressSet = new Set<string>(
+      orderedMailboxes.map((mb) => normalizeSenderLearningKey(mb.email)),
+    );
     const senderIsOwn = ownAddressSet.has(normalizeSenderLearningKey(originalSender));
 
     // When the original message was sent by the user (Sent / self-authored),

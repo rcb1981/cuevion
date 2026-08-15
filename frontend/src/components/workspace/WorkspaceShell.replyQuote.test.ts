@@ -231,6 +231,105 @@ const openComposeSource = workspaceShellSource.slice(
   workspaceShellSource.indexOf("const openComposeFromMessage ="),
   workspaceShellSource.indexOf("useEffect(() =>", workspaceShellSource.indexOf("const openComposeFromMessage =")),
 );
+const normalizeSenderLearningKeySource = workspaceShellSource.slice(
+  workspaceShellSource.indexOf("function normalizeSenderLearningKey("),
+  workspaceShellSource.indexOf("function normalizeSenderLearningDomain("),
+);
+const recipientOwnershipSource = openComposeSource.slice(
+  openComposeSource.indexOf("const ownAddressSet ="),
+  openComposeSource.indexOf("const replyAllCcRecipients"),
+);
+assert.ok(
+  normalizeSenderLearningKeySource.length > 0 && recipientOwnershipSource.length > 0,
+  "Reply recipient ownership source markers must remain present",
+);
+const compiledRecipientOwnership = transform(
+  `${normalizeSenderLearningKeySource}
+  function resolveReplyRecipients(options: {
+    currentUserEmail: string;
+    connectedMailboxEmails: string[];
+    originalSender: string;
+    originalToRecipients: string[];
+  }) {
+    const {
+      currentUserEmail,
+      connectedMailboxEmails,
+      originalSender,
+      originalToRecipients,
+    } = options;
+    const orderedMailboxes = connectedMailboxEmails.map((email) => ({ email }));
+    ${recipientOwnershipSource}
+    return { ownAddressSet: [...ownAddressSet], replyToAddresses, senderIsOwn };
+  }`,
+  { transforms: ["typescript"] },
+).code;
+const loadRecipientOwnershipHarness = new Function(
+  `${compiledRecipientOwnership}\nreturn resolveReplyRecipients;`,
+) as () => (options: {
+  currentUserEmail: string;
+  connectedMailboxEmails: string[];
+  originalSender: string;
+  originalToRecipients: string[];
+}) => {
+  ownAddressSet: string[];
+  replyToAddresses: string[];
+  senderIsOwn: boolean;
+};
+const resolveReplyRecipients = loadRecipientOwnershipHarness();
+
+assert.deepEqual(
+  resolveReplyRecipients({
+    currentUserEmail: "rutger@hysteriarecs.com",
+    connectedMailboxEmails: ["carltricksmusic@gmail.com"],
+    originalSender: "Rutger Bäumer <rutger@hysteriarecs.com>",
+    originalToRecipients: ["carltricksmusic@gmail.com"],
+  }).replyToAddresses,
+  ["Rutger Bäumer <rutger@hysteriarecs.com>"],
+  "an authenticated-user-only address must remain a valid Reply target",
+);
+assert.deepEqual(
+  resolveReplyRecipients({
+    currentUserEmail: "rutger@hysteriarecs.com",
+    connectedMailboxEmails: ["carltricksmusic@gmail.com"],
+    originalSender: "external@example.com",
+    originalToRecipients: ["carltricksmusic@gmail.com"],
+  }).replyToAddresses,
+  ["external@example.com"],
+  "a normal external sender must remain the Reply target",
+);
+assert.deepEqual(
+  resolveReplyRecipients({
+    currentUserEmail: "rutger@hysteriarecs.com",
+    connectedMailboxEmails: ["carltricksmusic@gmail.com"],
+    originalSender: "carltricksmusic@gmail.com",
+    originalToRecipients: ["carltricksmusic@gmail.com"],
+  }).replyToAddresses,
+  [],
+  "connected-mailbox self-to-self Reply must retain its documented empty result",
+);
+assert.deepEqual(
+  resolveReplyRecipients({
+    currentUserEmail: "login@example.com",
+    connectedMailboxEmails: ["mailbox-a@example.com", "mailbox-b@example.com"],
+    originalSender: "mailbox-a@example.com",
+    originalToRecipients: ["mailbox-b@example.com"],
+  }).replyToAddresses,
+  [],
+  "connected mailbox A to B must retain the existing multi-mailbox policy",
+);
+assert.deepEqual(
+  resolveReplyRecipients({
+    currentUserEmail: "rutger@hysteriarecs.com",
+    connectedMailboxEmails: [
+      "rutger@hysteriarecs.com",
+      "carltricksmusic@gmail.com",
+    ],
+    originalSender: "rutger@hysteriarecs.com",
+    originalToRecipients: ["carltricksmusic@gmail.com"],
+  }).replyToAddresses,
+  [],
+  "a login email that is also connected must remain an owned mailbox address",
+);
 assert.match(openComposeSource, /const ownAddressSet = new Set<string>/);
 assert.match(openComposeSource, /const senderIsOwn = ownAddressSet\.has/);
 assert.match(
