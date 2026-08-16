@@ -43,10 +43,18 @@ const loadQuoteHarness = new Function(
       : { mode: "plain" };
   }
   ${compiledQuoteHelpers}
-  return { buildComposeQuoteHtml, buildComposeParagraphsHtml };`,
+  return {
+    buildComposeQuoteHtml,
+    buildComposeParagraphsHtml,
+    resolveComposeQuoteHeaderTimestamp,
+  };`,
 ) as () => {
   buildComposeQuoteHtml: (mode: string, sourceMessage: QuoteMessage) => string;
   buildComposeParagraphsHtml: (value: string) => string;
+  resolveComposeQuoteHeaderTimestamp: (
+    sourceMessage: Pick<QuoteMessage, "createdAt" | "timestamp">,
+    nowMs?: number,
+  ) => string;
 };
 const quoteHarness = loadQuoteHarness();
 
@@ -75,6 +83,7 @@ type QuoteMessage = {
   body: string[];
   bodyHtml?: string;
   cc?: string;
+  createdAt?: string;
   from: string;
   subject: string;
   timestamp: string;
@@ -100,6 +109,53 @@ assert.equal(
   quoteHarness.buildComposeQuoteHtml("reply", conversationalMessage),
   expectedConversationalReply,
   "plain Reply must retain attribution, paragraphs, safe escaping, and the quote marker",
+);
+
+const syntheticSentMessage: QuoteMessage = {
+  ...conversationalMessage,
+  body: ["Reply vanuit Cuevion Custom IMAP."],
+  createdAt: "2026-08-16T13:12:00+02:00",
+  from: "promo@hysteriarecs.com",
+  timestamp: "Sent just now",
+};
+const syntheticSentReplyQuote = quoteHarness.buildComposeQuoteHtml(
+  "reply",
+  syntheticSentMessage,
+);
+
+assert.match(
+  syntheticSentReplyQuote,
+  /On August 16 at 13:12, promo@hysteriarecs\.com wrote:/,
+  "Reply must format a synthetic Sent quote header from its real createdAt",
+);
+assert.doesNotMatch(
+  syntheticSentReplyQuote,
+  /Sent just now/,
+  "a stale synthetic Sent label must not remain quote-header authority",
+);
+assert.equal(
+  quoteHarness.buildComposeQuoteHtml("reply_all", syntheticSentMessage),
+  syntheticSentReplyQuote,
+  "Reply All must use the same createdAt-backed quote header as Reply",
+);
+assert.equal(
+  quoteHarness.resolveComposeQuoteHeaderTimestamp(
+    {
+      createdAt: "2025-08-16T13:12:00+02:00",
+      timestamp: "stale label",
+    },
+    new Date("2026-08-16T12:00:00+02:00").getTime(),
+  ),
+  "August 16, 2025 at 13:12",
+  "quote dates from another year must include that year",
+);
+assert.equal(
+  quoteHarness.resolveComposeQuoteHeaderTimestamp(
+    { createdAt: "not-a-date", timestamp: "Existing timestamp" },
+    new Date("2026-08-16T12:00:00+02:00").getTime(),
+  ),
+  "Existing timestamp",
+  "invalid createdAt values must preserve the existing timestamp fallback",
 );
 
 const simpleHtmlMessage: QuoteMessage = {
@@ -388,6 +444,54 @@ assert.match(sendSource, /const activeBodyHtml = options\?\.bodyHtml \?\? compos
 assert.match(sendSource, /const bodyPreview = extractComposePlainText\(activeBodyHtml\)/);
 assert.match(sendSource, /bodyHtml: activeBodyHtml/);
 assert.match(sendSource, /bodyText: bodyPreview \|\| " "/);
+
+const composeStateSource = workspaceShellSource.slice(
+  workspaceShellSource.indexOf('const [composeTo, setComposeTo]'),
+  workspaceShellSource.indexOf('const [pendingComposeAttachmentPickerOpen'),
+);
+const resetComposeSource = workspaceShellSource.slice(
+  workspaceShellSource.indexOf("const resetComposeState ="),
+  workspaceShellSource.indexOf("const normalizeRememberedRecipient ="),
+);
+const desktopComposerSource = workspaceShellSource.slice(
+  workspaceShellSource.indexOf("const desktopComposer ="),
+  workspaceShellSource.indexOf("return (", workspaceShellSource.indexOf("const desktopComposer =")),
+);
+
+assert.match(
+  composeStateSource,
+  /const \[composeQuoteExpanded, setComposeQuoteExpanded\] = useState\(false\)/,
+  "desktop compose quote disclosure must start collapsed",
+);
+assert.match(
+  resetComposeSource,
+  /setComposeQuoteExpanded\(false\)/,
+  "every compose session must reset quote disclosure to collapsed",
+);
+assert.match(
+  desktopComposerSource,
+  /composeMode === "reply" \|\| composeMode === "reply_all"/,
+  "quote disclosure must be limited to Reply and Reply All",
+);
+assert.match(
+  desktopComposerSource,
+  /aria-expanded=\{composeQuoteExpanded\}[\s\S]*aria-controls="desktop-compose-body"[\s\S]*Show quoted content[\s\S]*Hide quoted content/,
+  "Reply quote disclosure must expose accessible Show/Hide state",
+);
+assert.match(
+  desktopComposerSource,
+  /!composeQuoteExpanded[\s\S]*\[&_\[data-compose-quote='true'\]\]:hidden/,
+  "collapsed quote presentation must hide the retained quote from the editor parent",
+);
+const quoteToggleSource = desktopComposerSource.slice(
+  desktopComposerSource.indexOf("aria-expanded={composeQuoteExpanded}"),
+  desktopComposerSource.indexOf("</button>", desktopComposerSource.indexOf("aria-expanded={composeQuoteExpanded}")),
+);
+assert.doesNotMatch(
+  quoteToggleSource,
+  /setComposeBody|innerHTML|querySelector/,
+  "quote disclosure must never rewrite composeBody or the editable quote node",
+);
 
 const phase3B1Failures: string[] = [];
 const recordPhase3B1Expectation = (name: string, expectation: () => void) => {

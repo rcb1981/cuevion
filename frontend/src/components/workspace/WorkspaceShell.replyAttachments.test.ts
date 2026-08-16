@@ -211,3 +211,39 @@ assert.match(
   /composeAttachments\.map\(serializeComposeAttachment\)/,
   "send serialization must continue using only the initialized/current compose attachments",
 );
+
+const desktopComposerStart = workspaceShellSource.indexOf("const desktopComposer =");
+const desktopComposerEnd = workspaceShellSource.indexOf(
+  "return (",
+  desktopComposerStart,
+);
+const desktopComposerSource = workspaceShellSource.slice(
+  desktopComposerStart,
+  desktopComposerEnd,
+);
+
+assert.doesNotMatch(
+  desktopComposerSource,
+  /Added files|No attachments yet|Message ready to send/,
+  "empty attachment and permanent ready-state chrome must be removed",
+);
+assert.doesNotMatch(
+  desktopComposerSource,
+  /xl:grid-cols-\[minmax\(0,1fr\)_280px\]/,
+  "the writing surface must no longer reserve a permanent 280px right rail",
+);
+assert.match(
+  desktopComposerSource,
+  /visibleComposeAttachmentCount > 0[\s\S]*visibleComposeAttachments\.map[\s\S]*attachment\.name[\s\S]*setComposeAttachments[\s\S]*current\.filter\(\(entry\) => entry\.id !== attachment\.id\)/,
+  "the compact removable attachment list must render only when files exist",
+);
+assert.match(
+  desktopComposerSource,
+  /composeSignatureOptions\.length > 0[\s\S]*aria-label="Select signature"/,
+  "the compact signature selector must render only when real options exist",
+);
+assert.match(
+  desktopComposerSource,
+  /onClick=\{openComposeAttachmentPicker\}[\s\S]*Attach/,
+  "the compact footer must retain the existing attachment picker",
+);

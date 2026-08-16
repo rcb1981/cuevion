@@ -3210,10 +3210,38 @@ function buildReplyQuotedBodyText(body: string[]) {
     .join("\n\n");
 }
 
+function resolveComposeQuoteHeaderTimestamp(
+  message: Pick<MailMessage, "createdAt" | "timestamp">,
+  nowMs = Date.now(),
+) {
+  const createdAt = message.createdAt?.trim();
+  const messageDate = createdAt ? new Date(createdAt) : null;
+
+  if (!messageDate || Number.isNaN(messageDate.getTime())) {
+    return message.timestamp;
+  }
+
+  const now = new Date(nowMs);
+  const dateLabel = messageDate.toLocaleDateString("en-US", {
+    month: "long",
+    day: "numeric",
+    ...(messageDate.getFullYear() === now.getFullYear()
+      ? {}
+      : { year: "numeric" as const }),
+  });
+  const timeLabel = messageDate.toLocaleTimeString("en-GB", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+
+  return `${dateLabel} at ${timeLabel}`;
+}
+
 function buildComposeQuoteHtml(mode: ComposeMode, sourceMessage: MailMessage) {
   const quotedMessage =
     mode === "reply" || mode === "reply_all"
-      ? `On ${sourceMessage.timestamp}, ${sourceMessage.from} wrote:\n\n${buildReplyQuotedBodyText(
+      ? `On ${resolveComposeQuoteHeaderTimestamp(sourceMessage)}, ${sourceMessage.from} wrote:\n\n${buildReplyQuotedBodyText(
           sourceMessage.body,
         )}`
       : `Forwarded message:\n\nFrom: ${sourceMessage.from}\nTo: ${sourceMessage.to}${
@@ -14290,6 +14318,7 @@ function MailboxView({
   const [showComposeBcc, setShowComposeBcc] = useState(false);
   const [composeSubject, setComposeSubject] = useState("");
   const [composeBody, setComposeBody] = useState("");
+  const [composeQuoteExpanded, setComposeQuoteExpanded] = useState(false);
   const [composeSignatureSelection, setComposeSignatureSelection] = useState<string>("none");
   const [composeMailboxId, setComposeMailboxId] = useState<InboxId>(mailbox.id);
   const [composeMode, setComposeMode] = useState<ComposeMode>("new");
@@ -14509,6 +14538,7 @@ function MailboxView({
     setShowComposeBcc(false);
     setComposeSubject("");
     setComposeBody("");
+    setComposeQuoteExpanded(false);
     setComposeSignatureSelection("none");
     setComposeMailboxId(mailbox.id);
     setComposeMode("new");
@@ -23601,10 +23631,11 @@ function MailboxView({
                 </label>
               </div>
 
-              <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_280px]">
+              <div className="space-y-4">
                 <div className="rounded-[20px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-4">
                   <span className="sr-only">Message body</span>
                   <div
+                    id="desktop-compose-body"
                     ref={composeBodyInputRef}
                     contentEditable
                     suppressContentEditableWarning
@@ -23620,127 +23651,125 @@ function MailboxView({
                     onKeyDown={handleComposeBodyKeyDown}
                     onPaste={handleComposeBodyPaste}
                     spellCheck
-                    className="min-h-[360px] w-full whitespace-pre-wrap bg-transparent text-[0.94rem] leading-7 text-[var(--workspace-text-soft)] outline-none [&_a]:text-[color:rgba(70,109,73,0.96)] [&_a]:underline [&_div]:min-h-[1.75rem] [&_div[data-compose-quote='true']]:pt-3 [&_div[data-compose-quote='true']]:text-[inherit] [&_div[data-compose-quote='true']]:[-webkit-text-fill-color:inherit] [&_div[data-compose-quote='true']_*]:text-[inherit] [&_div[data-compose-quote='true']_*]:[-webkit-text-fill-color:inherit] [&_div[data-compose-signature='true']]:space-y-0 [&_div[data-compose-signature-divider='true']]:my-2 [&_div[data-compose-signature-divider='true']]:h-px [&_div[data-compose-signature-divider='true']]:w-full [&_div[data-compose-signature-divider='true']]:bg-[color:rgba(121,151,120,0.18)] [&_div[data-compose-signature-logo='true']]:pt-1 [&_div[data-compose-signature-logo='true']_img]:max-h-[76px] [&_div[data-compose-signature-logo='true']_img]:w-auto [&_div[data-compose-signature-logo='true']_img]:max-w-full [&_div[data-compose-signature-logo='true']_img]:object-contain [&_div[data-compose-signature-right='true']]:min-w-0 [&_div[data-compose-signature-right='true']]:flex-1 [&_div[data-compose-signature-row='true']]:flex [&_div[data-compose-signature-row='true']]:items-start [&_div[data-compose-signature-row='true']]:gap-4 [&_div[data-compose-signature-spacer='true']]:min-h-[1.75rem] [&_div[data-compose-signature-text='true']]:whitespace-pre-wrap [&_div[data-compose-signature-text='true']]:text-[0.86rem] [&_div[data-compose-signature-text='true']]:leading-[1.45] [&_div[data-compose-signature-text='true']_div]:min-h-[1.2rem] [&_div[data-compose-signature-text='true']_p]:min-h-[1.2rem]"
+                    className={`min-h-[360px] w-full whitespace-pre-wrap bg-transparent text-[0.94rem] leading-7 text-[var(--workspace-text-soft)] outline-none [&_a]:text-[color:rgba(70,109,73,0.96)] [&_a]:underline [&_div]:min-h-[1.75rem] [&_div[data-compose-quote='true']]:pt-3 [&_div[data-compose-quote='true']]:text-[inherit] [&_div[data-compose-quote='true']]:[-webkit-text-fill-color:inherit] [&_div[data-compose-quote='true']_*]:text-[inherit] [&_div[data-compose-quote='true']_*]:[-webkit-text-fill-color:inherit] [&_div[data-compose-signature='true']]:space-y-0 [&_div[data-compose-signature-divider='true']]:my-2 [&_div[data-compose-signature-divider='true']]:h-px [&_div[data-compose-signature-divider='true']]:w-full [&_div[data-compose-signature-divider='true']]:bg-[color:rgba(121,151,120,0.18)] [&_div[data-compose-signature-logo='true']]:pt-1 [&_div[data-compose-signature-logo='true']_img]:max-h-[76px] [&_div[data-compose-signature-logo='true']_img]:w-auto [&_div[data-compose-signature-logo='true']_img]:max-w-full [&_div[data-compose-signature-logo='true']_img]:object-contain [&_div[data-compose-signature-right='true']]:min-w-0 [&_div[data-compose-signature-right='true']]:flex-1 [&_div[data-compose-signature-row='true']]:flex [&_div[data-compose-signature-row='true']]:items-start [&_div[data-compose-signature-row='true']]:gap-4 [&_div[data-compose-signature-spacer='true']]:min-h-[1.75rem] [&_div[data-compose-signature-text='true']]:whitespace-pre-wrap [&_div[data-compose-signature-text='true']]:text-[0.86rem] [&_div[data-compose-signature-text='true']]:leading-[1.45] [&_div[data-compose-signature-text='true']_div]:min-h-[1.2rem] [&_div[data-compose-signature-text='true']_p]:min-h-[1.2rem] ${
+                      (composeMode === "reply" || composeMode === "reply_all") &&
+                      !composeQuoteExpanded
+                        ? "[&_[data-compose-quote='true']]:hidden"
+                        : ""
+                    }`}
                   />
-                </div>
-
-                <div className="space-y-4">
-                  <div className="rounded-[20px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-4">
-                    <select
-                      aria-label="Select signature"
-                      value={composeSignatureSelection}
-                      onChange={(event) =>
-                        handleComposeSignatureSelectionChange(event.target.value)
-                      }
-                      className="w-full rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-3 py-2 text-[0.8rem] text-[var(--workspace-text-soft)] outline-none"
-                    >
-                      <option value="none">No signature</option>
-                      {composeSignatureOptions.map((option) => (
-                        <option key={option.id} value={option.id}>
-                          {option.email}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-
-                  <div className="rounded-[20px] border border-dashed border-[var(--workspace-border)] bg-[var(--workspace-card)] px-4 py-4">
-                    <input
-                      ref={composeAttachmentInputRef}
-                      type="file"
-                      multiple
-                      className="sr-only"
-                      onChange={handleComposeAttachmentSelection}
-                    />
-                    <div className="mb-2 flex items-center gap-2 text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
-                      <svg
-                        aria-hidden="true"
-                        viewBox="0 0 16 16"
-                        className="h-4 w-4"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="1.6"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                      >
-                        <path d="M6 6.5v4.5a2 2 0 0 0 4 0v-6a3 3 0 1 0-6 0v6.5a4 4 0 0 0 8 0V6.5" />
-                      </svg>
-                      Attachments
-                    </div>
-                    <div className="text-[0.84rem] leading-6 text-[var(--workspace-text-soft)]">
-                      Drop files here or add via paperclip
-                    </div>
+                  {(composeMode === "reply" || composeMode === "reply_all") &&
+                  composeBody.includes('data-compose-quote="true"') ? (
                     <button
                       type="button"
-                      onClick={openComposeAttachmentPicker}
-                      className="mt-4 inline-flex h-9 items-center justify-center gap-2 rounded-full border border-[var(--workspace-border)] bg-[var(--workspace-card-subtle)] px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-soft)] transition-[background-color,border-color,color,transform] duration-150 hover:border-[var(--workspace-border-hover)] hover:bg-[var(--workspace-hover-surface)] active:scale-[0.99] focus-visible:outline-none"
+                      aria-expanded={composeQuoteExpanded}
+                      aria-controls="desktop-compose-body"
+                      onClick={() => setComposeQuoteExpanded((expanded) => !expanded)}
+                      className="mt-3 inline-flex items-center gap-1.5 rounded-md px-1 py-1 text-[0.78rem] text-[var(--workspace-text-faint)] transition-colors duration-150 hover:text-[var(--workspace-text-soft)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-accent-border)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--workspace-card)]"
                     >
-                      <svg
-                        aria-hidden="true"
-                        viewBox="0 0 16 16"
-                        className="h-3.5 w-3.5"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="1.6"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                      >
-                        <path d="M6 6.5v4.5a2 2 0 0 0 4 0v-6a3 3 0 1 0-6 0v6.5a4 4 0 0 0 8 0V6.5" />
-                      </svg>
-                      Add attachment
+                      <span aria-hidden="true">
+                        {!composeQuoteExpanded ? "›" : "⌄"}
+                      </span>
+                      {!composeQuoteExpanded
+                        ? "Show quoted content"
+                        : "Hide quoted content"}
                     </button>
-                  </div>
+                  ) : null}
+                </div>
 
-                  <div className="rounded-[20px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-4">
-                    <div className="mb-3 text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
-                      Added files
-                    </div>
-                    <div className="flex min-w-0 max-w-full flex-wrap gap-3 overflow-hidden">
-                      {visibleComposeAttachmentCount > 0 ? (
-                        visibleComposeAttachments.map((attachment) => (
-                          <div
-                            key={attachment.id}
-                            className="min-w-0 max-w-full overflow-hidden [&>div]:max-w-full [&_button]:w-full [&_button]:max-w-full"
-                          >
-                            {renderAttachmentItem(attachment, {
-                              removable: true,
-                              onRemove: () =>
-                                setComposeAttachments((current) =>
-                                  current.filter((entry) => entry.id !== attachment.id),
-                                ),
-                            })}
-                          </div>
-                        ))
-                      ) : (
-                        <div className="text-[0.82rem] leading-6 text-[var(--workspace-text-faint)]">
-                          No attachments yet
-                        </div>
-                      )}
-                    </div>
-                  </div>
-
-                  <div className="rounded-[20px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-4">
-                    <div className="flex items-center justify-between gap-4">
-                      <div>
-                        <div className="text-[0.82rem] leading-6 text-[var(--workspace-text-faint)]">
-                          {visibleComposeAttachmentCount > 0
-                            ? `${visibleComposeAttachmentCount} attachment${visibleComposeAttachmentCount === 1 ? "" : "s"} ready`
-                            : "Message ready to send"}
-                        </div>
-                        {composeSendError ? (
-                          <div className="mt-1 text-[0.8rem] leading-5 text-[color:rgba(148,63,38,0.96)]">
-                            {composeSendError}
-                          </div>
-                        ) : null}
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => void sendMessage()}
-                        disabled={isSendingCompose}
-                        className="inline-flex h-10 min-w-[7.4rem] items-center justify-center rounded-full bg-pine px-6 text-[0.72rem] font-medium uppercase tracking-[0.18em] text-white transition-[background-color,transform] duration-150 hover:bg-moss active:scale-[0.99] focus-visible:outline-none disabled:cursor-not-allowed disabled:bg-[color:rgba(101,124,103,0.72)] disabled:hover:bg-[color:rgba(101,124,103,0.72)]"
+                {visibleComposeAttachmentCount > 0 ? (
+                  <div className="divide-y divide-[var(--workspace-border-soft)] rounded-[16px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-3">
+                    {visibleComposeAttachments.map((attachment) => (
+                      <div
+                        key={attachment.id}
+                        className="flex min-w-0 items-center gap-3 py-2"
                       >
-                        {isSendingCompose ? "Sending..." : "Send"}
-                      </button>
-                    </div>
+                        <button
+                          type="button"
+                          onClick={() => handleAttachmentOpen(attachment)}
+                          className="min-w-0 flex-1 truncate rounded-md px-1 py-1 text-left text-[0.82rem] text-[var(--workspace-text-soft)] hover:text-[var(--workspace-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-accent-border)]"
+                        >
+                          {attachment.name}
+                        </button>
+                        <button
+                          type="button"
+                          aria-label={`Remove ${attachment.name}`}
+                          onClick={() =>
+                            setComposeAttachments((current) =>
+                              current.filter((entry) => entry.id !== attachment.id),
+                            )
+                          }
+                          className="inline-flex h-7 w-7 flex-none items-center justify-center rounded-full text-[0.92rem] text-[var(--workspace-text-faint)] transition-colors duration-150 hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-accent-border)]"
+                        >
+                          ×
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+
+                <div className="flex flex-wrap items-center gap-2 border-t border-[var(--workspace-border-soft)] pt-4">
+                  <input
+                    ref={composeAttachmentInputRef}
+                    type="file"
+                    multiple
+                    className="sr-only"
+                    onChange={handleComposeAttachmentSelection}
+                  />
+                  <button
+                    type="button"
+                    onClick={openComposeAttachmentPicker}
+                    className="inline-flex h-9 items-center justify-center gap-2 rounded-full px-3 text-[0.76rem] text-[var(--workspace-text-soft)] transition-colors duration-150 hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-accent-border)]"
+                  >
+                    <svg
+                      aria-hidden="true"
+                      viewBox="0 0 16 16"
+                      className="h-3.5 w-3.5"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="1.6"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    >
+                      <path d="M6 6.5v4.5a2 2 0 0 0 4 0v-6a3 3 0 1 0-6 0v6.5a4 4 0 0 0 8 0V6.5" />
+                    </svg>
+                    Attach
+                  </button>
+                  {composeSignatureOptions.length > 0 ? (
+                    <label className="relative inline-flex h-9 cursor-pointer items-center gap-1.5 rounded-full px-3 text-[0.76rem] text-[var(--workspace-text-soft)] transition-colors duration-150 hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] focus-within:ring-2 focus-within:ring-[var(--workspace-accent-border)]">
+                      <span>Signature</span>
+                      <span aria-hidden="true">⌄</span>
+                      <select
+                        aria-label="Select signature"
+                        value={composeSignatureSelection}
+                        onChange={(event) =>
+                          handleComposeSignatureSelectionChange(event.target.value)
+                        }
+                        className="absolute inset-0 cursor-pointer opacity-0"
+                      >
+                        <option value="none">No signature</option>
+                        {composeSignatureOptions.map((option) => (
+                          <option key={option.id} value={option.id}>
+                            {option.email}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  ) : null}
+                  <div className="ml-auto flex min-w-0 items-center gap-3">
+                    {composeSendError ? (
+                      <div className="max-w-[24rem] text-right text-[0.8rem] leading-5 text-[color:rgba(148,63,38,0.96)]">
+                        {composeSendError}
+                      </div>
+                    ) : null}
+                    <button
+                      type="button"
+                      onClick={() => void sendMessage()}
+                      disabled={isSendingCompose}
+                      className="inline-flex h-10 min-w-[7.4rem] items-center justify-center rounded-full bg-pine px-6 text-[0.72rem] font-medium uppercase tracking-[0.18em] text-white transition-[background-color,transform] duration-150 hover:bg-moss active:scale-[0.99] focus-visible:outline-none disabled:cursor-not-allowed disabled:bg-[color:rgba(101,124,103,0.72)] disabled:hover:bg-[color:rgba(101,124,103,0.72)]"
+                    >
+                      {isSendingCompose ? "Sending..." : "Send"}
+                    </button>
                   </div>
                 </div>
               </div>
