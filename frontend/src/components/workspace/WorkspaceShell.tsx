@@ -9,6 +9,7 @@ import {
   useRef,
   useState,
   type Dispatch,
+  type ButtonHTMLAttributes,
   type ChangeEvent,
   type ClipboardEvent as ReactClipboardEvent,
   type KeyboardEvent as ReactKeyboardEvent,
@@ -35874,6 +35875,31 @@ function UtilityView({
   );
 }
 
+interface LearningChoiceButtonProps
+  extends ButtonHTMLAttributes<HTMLButtonElement> {
+  selected: boolean;
+}
+
+function LearningChoiceButton({
+  selected,
+  type = "button",
+  className,
+  ...buttonProps
+}: LearningChoiceButtonProps) {
+  return (
+    <button
+      type={type}
+      aria-pressed={selected}
+      className={`inline-flex h-8 items-center justify-center rounded-full border px-3 text-[0.8125rem] font-medium tracking-normal transition-[background-color,background-image,border-color,color,box-shadow,transform] duration-150 enabled:hover:border-[var(--workspace-border)] enabled:hover:bg-[var(--workspace-hover-surface-strong)] enabled:active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-text-soft)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--workspace-card)] disabled:pointer-events-none disabled:cursor-not-allowed disabled:scale-100 disabled:opacity-50 ${
+        selected
+          ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_6px_18px_rgba(118,170,112,0.08)]"
+          : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[var(--workspace-text-soft)]"
+      } ${className ?? ""}`.trim()}
+      {...buttonProps}
+    />
+  );
+}
+
 function ForYouView({
   context = "Main",
   onOpenTarget,
@@ -36353,13 +36379,13 @@ function ForYouView({
             </div>
           </div>
           {aiSuggestionsEnabled ? (
-            <button
-              type="button"
+            <DesktopActionButton
               onClick={openRefineCuevionModal}
-              className="inline-flex h-11 items-center justify-center rounded-full border border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] px-7 text-[0.74rem] font-medium uppercase tracking-[0.18em] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_8px_24px_rgba(118,170,112,0.08)] transition-[background-image,border-color,color,box-shadow,transform] duration-150 hover:bg-[linear-gradient(180deg,var(--workspace-accent-surface-hover-start),var(--workspace-accent-surface-hover-end))] active:scale-[0.99] focus-visible:outline-none"
+              variant="primary"
+              size="regular"
             >
               Refine Cuevion
-            </button>
+            </DesktopActionButton>
           ) : null}
         </div>
       </section>
@@ -36415,7 +36441,13 @@ function ForYouView({
                   Train Cuevion for all future emails from a sender or domain
                 </p>
               </div>
-              <CloseActionButton onClick={closeLearningModal} />
+              <DesktopActionButton
+                onClick={closeLearningModal}
+                variant="secondary"
+                size="compact"
+              >
+                Close
+              </DesktopActionButton>
             </div>
 
             <div className="mt-6 rounded-[24px] border border-[var(--workspace-modal-border-strong)] bg-[var(--workspace-modal-inner)] px-6 pb-6 pt-7 shadow-[inset_0_1px_0_rgba(255,255,255,0.14)]">
@@ -36462,20 +36494,15 @@ function ForYouView({
                 </div>
                 <div className="flex flex-wrap gap-2">
                   {cuevionLearningLabelOptions.map((label) => (
-                    <button
+                    <LearningChoiceButton
                       key={`paste-rule-label-${label}`}
-	                      type="button"
-	                      onClick={() => {
-	                        setSelectedPasteRuleLabel(label);
-	                      }}
-                      className={`inline-flex h-9 items-center justify-center rounded-full border px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color,box-shadow,transform] duration-150 focus-visible:outline-none ${
-                        selectedPasteRuleLabel === label
-                          ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_8px_24px_rgba(118,170,112,0.08)]"
-                          : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[var(--workspace-text-soft)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface-strong)]"
-                      }`}
+                      selected={selectedPasteRuleLabel === label}
+                      onClick={() => {
+                        setSelectedPasteRuleLabel(label);
+                      }}
                     >
                       {label}
-                    </button>
+                    </LearningChoiceButton>
                   ))}
                 </div>
               </div>
@@ -36491,20 +36518,15 @@ function ForYouView({
                 </div>
                 <div className="flex flex-wrap gap-2">
                   {cuevionLearningPriorityOptions.map((priority) => (
-                    <button
+                    <LearningChoiceButton
                       key={`paste-rule-priority-${priority}`}
-	                      type="button"
-	                      onClick={() => {
-	                        setSelectedPasteRulePriority(priority);
-	                      }}
-                      className={`inline-flex h-9 items-center justify-center rounded-full border px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color,box-shadow,transform] duration-150 focus-visible:outline-none ${
-                        selectedPasteRulePriority === priority
-                          ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_8px_24px_rgba(118,170,112,0.08)]"
-                          : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[var(--workspace-text-soft)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface-strong)]"
-                      }`}
+                      selected={selectedPasteRulePriority === priority}
+                      onClick={() => {
+                        setSelectedPasteRulePriority(priority);
+                      }}
                     >
                       {priority}
-                    </button>
+                    </LearningChoiceButton>
                   ))}
                 </div>
               </div>
@@ -36520,20 +36542,15 @@ function ForYouView({
                 </div>
                 <div className="flex flex-wrap gap-2">
                   {pasteRuleSenderBehaviorOptions.map((option) => (
-                    <button
+                    <LearningChoiceButton
                       key={`paste-rule-behavior-${option.value}`}
-	                      type="button"
-	                      onClick={() => {
-	                        setSelectedPasteRuleSenderBehavior(option.value);
-	                      }}
-                      className={`inline-flex h-9 items-center justify-center rounded-full border px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color,box-shadow,transform] duration-150 focus-visible:outline-none ${
-                        selectedPasteRuleSenderBehavior === option.value
-                          ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_8px_24px_rgba(118,170,112,0.08)]"
-                          : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[var(--workspace-text-soft)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface-strong)]"
-                      }`}
+                      selected={selectedPasteRuleSenderBehavior === option.value}
+                      onClick={() => {
+                        setSelectedPasteRuleSenderBehavior(option.value);
+                      }}
                     >
                       {option.label}
-                    </button>
+                    </LearningChoiceButton>
                   ))}
                 </div>
               </div>
@@ -36550,9 +36567,10 @@ function ForYouView({
                     ? "Rule saved"
                     : "Applies to future mail only"}
                 </div>
-                <button
-                  type="button"
+                <DesktopActionButton
                   disabled={!canSavePasteRule}
+                  variant="primary"
+                  size="regular"
                   onClick={() => {
                     if (
                       !pasteRuleType ||
@@ -36625,14 +36643,9 @@ function ForYouView({
                       pasteRuleSaveTimeoutRef.current = null;
                     }, 420);
                   }}
-                  className={
-                    canSavePasteRule
-                      ? closeActionButtonClass
-                      : `${learningModalPrimaryActionButtonClass} cursor-default border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] text-[var(--workspace-text-faint)] opacity-55`
-                  }
                 >
                   Save learning rule
-                </button>
+                </DesktopActionButton>
               </div>
               </div>
             </div>
@@ -36658,13 +36671,13 @@ function ForYouView({
                   Cuevion is not fully sure about this label and priority.
                 </p>
               </div>
-              <button
-                type="button"
+              <DesktopActionButton
                 onClick={closeLearningModal}
-                className={navigationCloseBackButtonClass}
+                variant="secondary"
+                size="compact"
               >
                 Close
-              </button>
+              </DesktopActionButton>
             </div>
 
             <div className="mt-6 rounded-[24px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-modal-subtle)] px-6 pb-6 pt-7 shadow-[inset_0_1px_0_rgba(255,255,255,0.12)]">
@@ -36733,20 +36746,15 @@ function ForYouView({
                 </div>
                 <div className="flex flex-wrap gap-2">
                   {cuevionLearningLabelOptions.map((label) => (
-                    <button
+                    <LearningChoiceButton
                       key={`review-uncertain-label-${label}`}
-	                      type="button"
-	                      onClick={() => {
-	                        setSelectedUncertainLabel(label);
-	                      }}
-                      className={`inline-flex h-9 items-center justify-center rounded-full border px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color,box-shadow,transform] duration-150 focus-visible:outline-none ${
-                        selectedUncertainLabel === label
-                          ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_8px_24px_rgba(118,170,112,0.08)]"
-                          : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[var(--workspace-text-soft)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface-strong)]"
-                      }`}
+                      selected={selectedUncertainLabel === label}
+                      onClick={() => {
+                        setSelectedUncertainLabel(label);
+                      }}
                     >
                       {label}
-                    </button>
+                    </LearningChoiceButton>
                   ))}
                 </div>
               </div>
@@ -36762,44 +36770,40 @@ function ForYouView({
                 </div>
                 <div className="flex flex-wrap gap-2">
                   {cuevionLearningPriorityOptions.map((priority) => (
-                    <button
+                    <LearningChoiceButton
                       key={`review-uncertain-priority-${priority}`}
-	                      type="button"
-	                      onClick={() => {
-	                        setSelectedUncertainPriority(priority);
-	                      }}
-                      className={`inline-flex h-9 items-center justify-center rounded-full border px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color,box-shadow,transform] duration-150 focus-visible:outline-none ${
-                        selectedUncertainPriority === priority
-                          ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_8px_24px_rgba(118,170,112,0.08)]"
-                          : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[var(--workspace-text-soft)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface-strong)]"
-                      }`}
+                      selected={selectedUncertainPriority === priority}
+                      onClick={() => {
+                        setSelectedUncertainPriority(priority);
+                      }}
                     >
                       {priority}
-                    </button>
+                    </LearningChoiceButton>
                   ))}
                 </div>
               </div>
 
               <div className="mt-6 grid grid-cols-[auto_1fr_auto_auto] items-center gap-3">
-                <button
-                  type="button"
+                <DesktopActionButton
                   onClick={() =>
                     setActiveUncertainEmailIndex((current) =>
                       current === 0 ? totalUncertainEmails - 1 : current - 1,
                     )
                   }
-                  className={navigationCloseBackButtonClass}
+                  variant="secondary"
+                  size="regular"
                 >
                   Back
-                </button>
+                </DesktopActionButton>
                 <div className="text-center text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)] transition-[color,opacity] duration-200">
                   {reviewUncertainCompletionFeedback === "done"
                     ? "Cuevion learned from your decisions"
                     : `Email ${safeUncertainEmailIndex + 1} of ${totalUncertainEmails}`}
                 </div>
-                <button
-                  type="button"
+                <DesktopActionButton
                   disabled={!hasValidUncertainSelection}
+                  variant="primary"
+                  size="regular"
                   onClick={() => {
                     if (!hasValidUncertainSelection || !persistActiveUncertainDecision()) {
                       return;
@@ -36818,25 +36822,21 @@ function ForYouView({
                     }
                     setActiveUncertainEmailIndex((current) => current + 1);
                   }}
-                  className={
-                    hasValidUncertainSelection
-                      ? `${closeActionButtonClass} animate-fade-in`
-                      : `${learningModalPrimaryActionButtonClass} cursor-default border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] text-[var(--workspace-text-faint)] opacity-55`
-                  }
+                  className="animate-fade-in"
                 >
                   {isLastUncertainEmail ? "Finish" : "Next suggestion"}
-                </button>
+                </DesktopActionButton>
                 {isLastUncertainEmail ? null : (
-                  <button
-                    type="button"
+                  <DesktopActionButton
                     onClick={() => {
                       closeLearningModal();
                       setActiveUncertainEmailIndex(0);
                     }}
-                    className={closeActionButtonClass}
+                    variant="secondary"
+                    size="regular"
                   >
                     Finish
-                  </button>
+                  </DesktopActionButton>
                 )}
               </div>
                 </>
@@ -36869,13 +36869,13 @@ function ForYouView({
                   See recent label, priority, and sender behavior decisions.
                 </p>
               </div>
-              <button
-                type="button"
+              <DesktopActionButton
                 onClick={closeLearningModal}
-                className={navigationCloseBackButtonClass}
+                variant="secondary"
+                size="compact"
               >
                 Close
-              </button>
+              </DesktopActionButton>
             </div>
 
             <div className="mt-6 rounded-[24px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-modal-subtle)] px-6 pb-6 pt-7 shadow-[inset_0_1px_0_rgba(255,255,255,0.12)]">
@@ -36898,7 +36898,7 @@ function ForYouView({
                         initializeRecentDecisionEditor(decision);
                         setActiveLearningModal("edit-recent-decision");
                       }}
-                      className="flex w-full items-center justify-between gap-4 py-3 text-left transition-colors duration-200 first:pt-1 first:pb-3 last:pt-3 last:pb-1 hover:text-[var(--workspace-text)] focus-visible:outline-none"
+                      className="flex w-full items-center justify-between gap-4 rounded-[8px] py-3 text-left transition-colors duration-200 first:pt-1 first:pb-3 last:pt-3 last:pb-1 hover:text-[var(--workspace-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-text-soft)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--workspace-card)]"
                     >
                       <div className="min-w-0 text-[0.9rem] leading-6 text-[var(--workspace-text-soft)]">
                         <span className="font-medium text-[var(--workspace-text)]">
@@ -36933,13 +36933,13 @@ function ForYouView({
                   Edit learning decision
                 </h2>
               </div>
-              <button
-                type="button"
+              <DesktopActionButton
                 onClick={closeLearningModal}
-                className={navigationCloseBackButtonClass}
+                variant="secondary"
+                size="compact"
               >
                 Close
-              </button>
+              </DesktopActionButton>
             </div>
 
             <div className="mt-6 rounded-[24px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-modal-subtle)] px-6 pb-6 pt-7 shadow-[inset_0_1px_0_rgba(255,255,255,0.12)]">
@@ -36994,18 +36994,13 @@ function ForYouView({
                 </div>
                 <div className="flex flex-wrap gap-2">
                   {cuevionLearningLabelOptions.map((label) => (
-                    <button
+                    <LearningChoiceButton
                       key={`recent-edit-label-${label}`}
-                      type="button"
+                      selected={selectedRecentDecisionLabel === label}
                       onClick={() => setSelectedRecentDecisionLabel(label)}
-                      className={`inline-flex h-9 items-center justify-center rounded-full border px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color,box-shadow,transform] duration-150 focus-visible:outline-none ${
-                        selectedRecentDecisionLabel === label
-                          ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_8px_24px_rgba(118,170,112,0.08)]"
-                          : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[var(--workspace-text-soft)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface-strong)]"
-                      }`}
                     >
                       {label}
-                    </button>
+                    </LearningChoiceButton>
                   ))}
                 </div>
               </div>
@@ -37021,18 +37016,13 @@ function ForYouView({
                 </div>
                 <div className="flex flex-wrap gap-2">
                   {cuevionLearningPriorityOptions.map((priority) => (
-                    <button
+                    <LearningChoiceButton
                       key={`recent-edit-priority-${priority}`}
-                      type="button"
+                      selected={selectedRecentDecisionPriority === priority}
                       onClick={() => setSelectedRecentDecisionPriority(priority)}
-                      className={`inline-flex h-9 items-center justify-center rounded-full border px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color,box-shadow,transform] duration-150 focus-visible:outline-none ${
-                        selectedRecentDecisionPriority === priority
-                          ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_8px_24px_rgba(118,170,112,0.08)]"
-                          : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[var(--workspace-text-soft)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface-strong)]"
-                      }`}
                     >
                       {priority}
-                    </button>
+                    </LearningChoiceButton>
                   ))}
                 </div>
               </div>
@@ -37048,32 +37038,26 @@ function ForYouView({
                 </div>
                 <div className="flex flex-wrap gap-2">
                   {senderLearningBehaviorOptions.map((option) => (
-                    <button
+                    <LearningChoiceButton
                       key={`recent-edit-behavior-${option.value}`}
-                      type="button"
+                      selected={selectedRecentDecisionSenderBehavior === option.value}
                       onClick={() => setSelectedRecentDecisionSenderBehavior(option.value)}
-                      className={`inline-flex h-9 items-center justify-center rounded-full border px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color,box-shadow,transform] duration-150 focus-visible:outline-none ${
-                        selectedRecentDecisionSenderBehavior === option.value
-                          ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_8px_24px_rgba(118,170,112,0.08)]"
-                          : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[var(--workspace-text-soft)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface-strong)]"
-                      }`}
                     >
                       {option.label}
-                    </button>
+                    </LearningChoiceButton>
                   ))}
                 </div>
               </div>
 
               <div className="mt-6 flex items-center justify-end gap-3">
-                <button
-                  type="button"
+                <DesktopActionButton
                   onClick={() => setActiveLearningModal("recent-decisions")}
-                  className={subtleSecondaryActionButtonClass}
+                  variant="secondary"
+                  size="regular"
                 >
                   Cancel
-                </button>
-                <button
-                  type="button"
+                </DesktopActionButton>
+                <DesktopActionButton
                   onClick={() => {
                     if (!activeRecentDecision) {
                       return;
@@ -37110,10 +37094,11 @@ function ForYouView({
                     );
                     setActiveLearningModal("recent-decisions");
                   }}
-                  className={closeActionButtonClass}
+                  variant="primary"
+                  size="regular"
                 >
                   Save changes
-                </button>
+                </DesktopActionButton>
               </div>
               </div>
             </div>
@@ -37134,13 +37119,13 @@ function ForYouView({
                   Refine Cuevion
                 </h2>
               </div>
-              <button
-                type="button"
+              <DesktopActionButton
                 onClick={closeLearningModal}
-                className={navigationCloseBackButtonClass}
+                variant="secondary"
+                size="compact"
               >
                 Close
-              </button>
+              </DesktopActionButton>
             </div>
 
             <div className="cuevion-soft-scroll mt-6 min-h-0 flex-1 overflow-y-auto rounded-[24px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-modal-subtle)] px-6 pb-0 pt-7 shadow-[inset_0_1px_0_rgba(255,255,255,0.12)]">
@@ -37160,13 +37145,13 @@ function ForYouView({
                   <div className="sticky top-0 z-10 -mx-1 bg-[var(--workspace-modal-subtle)] px-1 pb-3">
                     <div className="flex flex-wrap items-start justify-between gap-4">
                       <div className="space-y-2">
-                        <button
-                          type="button"
+                        <DesktopActionButton
                           onClick={() => setIsLearningFullMessageOpen(false)}
-                          className={navigationCloseBackButtonClass}
+                          variant="secondary"
+                          size="compact"
                         >
                           Back to Refine
-                        </button>
+                        </DesktopActionButton>
                         <div className="text-[0.78rem] leading-5 text-[var(--workspace-text-faint)]">
                           Return to the current suggestion without losing your choices.
                         </div>
@@ -37289,13 +37274,13 @@ function ForYouView({
                         <div className="text-[0.7rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
                           Preview
                         </div>
-                        <button
-                          type="button"
+                        <DesktopActionButton
                           onClick={() => setIsLearningFullMessageOpen(true)}
-                          className={subtleSecondaryActionButtonClass}
+                          variant="tertiary"
+                          size="compact"
                         >
                           View full message
-                        </button>
+                        </DesktopActionButton>
                       </div>
                     <div className="space-y-3">
                       {activeLearningSuggestion.snippet.map((paragraph) => (
@@ -37342,8 +37327,7 @@ function ForYouView({
               </div>
 
               <div className="mt-5 flex flex-wrap gap-2">
-                <button
-                  type="button"
+                <DesktopActionButton
                   onClick={() => {
                     if (!persistActiveLearningSuggestionDecision({ confirmCurrent: true })) {
                       return;
@@ -37358,17 +37342,19 @@ function ForYouView({
                       Math.min(current + 1, totalLearningSuggestions - 1),
                     );
                   }}
-                  className={closeActionButtonClass}
+                  variant="primary"
+                  size="regular"
                 >
                   Yes, correct
-                </button>
-                <button
-                  type="button"
+                </DesktopActionButton>
+                <DesktopActionButton
                   onClick={() => setIsLearningDecisionEditorOpen(true)}
-                  className={subtleSecondaryActionButtonClass}
+                  aria-expanded={isLearningDecisionEditorOpen}
+                  variant="secondary"
+                  size="regular"
                 >
                   Change label or priority
-                </button>
+                </DesktopActionButton>
               </div>
 
               {isLearningDecisionEditorOpen ? (
@@ -37384,20 +37370,15 @@ function ForYouView({
                     </div>
                     <div className="flex flex-wrap gap-2">
                       {cuevionLearningLabelOptions.map((label) => (
-                        <button
+                        <LearningChoiceButton
                           key={`refine-label-${label}`}
-	                          type="button"
-	                          onClick={() => {
-	                            setSelectedLearningLabel(label);
-	                          }}
-                          className={`inline-flex h-9 items-center justify-center rounded-full border px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color,box-shadow,transform] duration-150 focus-visible:outline-none ${
-                            selectedLearningLabel === label
-                              ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_8px_24px_rgba(118,170,112,0.08)]"
-                              : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[var(--workspace-text-soft)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface-strong)]"
-                          }`}
+                          selected={selectedLearningLabel === label}
+                          onClick={() => {
+                            setSelectedLearningLabel(label);
+                          }}
                         >
                           {label}
-                        </button>
+                        </LearningChoiceButton>
                       ))}
                     </div>
                   </div>
@@ -37413,20 +37394,15 @@ function ForYouView({
                     </div>
                     <div className="flex flex-wrap gap-2">
                       {cuevionLearningPriorityOptions.map((priority) => (
-                        <button
+                        <LearningChoiceButton
                           key={`refine-priority-${priority}`}
-	                          type="button"
-	                          onClick={() => {
-	                            setSelectedLearningPriority(priority);
-	                          }}
-                          className={`inline-flex h-9 items-center justify-center rounded-full border px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color,box-shadow,transform] duration-150 focus-visible:outline-none ${
-                            selectedLearningPriority === priority
-                              ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_8px_24px_rgba(118,170,112,0.08)]"
-                              : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[var(--workspace-text-soft)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface-strong)]"
-                          }`}
+                          selected={selectedLearningPriority === priority}
+                          onClick={() => {
+                            setSelectedLearningPriority(priority);
+                          }}
                         >
                           {priority}
-                        </button>
+                        </LearningChoiceButton>
                       ))}
                     </div>
                   </div>
@@ -37442,20 +37418,15 @@ function ForYouView({
                     </div>
                     <div className="flex flex-wrap gap-2">
                       {senderLearningBehaviorOptions.map((option) => (
-                        <button
+                        <LearningChoiceButton
                           key={`refine-behavior-${option.value}`}
-	                          type="button"
-	                          onClick={() => {
-	                            setSelectedLearningSenderBehavior(option.value);
-	                          }}
-                          className={`inline-flex h-9 items-center justify-center rounded-full border px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color,box-shadow,transform] duration-150 focus-visible:outline-none ${
-                            selectedLearningSenderBehavior === option.value
-                              ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_8px_24px_rgba(118,170,112,0.08)]"
-                              : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[var(--workspace-text-soft)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface-strong)]"
-                          }`}
+                          selected={selectedLearningSenderBehavior === option.value}
+                          onClick={() => {
+                            setSelectedLearningSenderBehavior(option.value);
+                          }}
                         >
                           {option.label}
-                        </button>
+                        </LearningChoiceButton>
                       ))}
                     </div>
                   </div>
@@ -37466,29 +37437,24 @@ function ForYouView({
 
               {!isLearningFullMessageOpen ? (
               <div className="sticky bottom-0 z-10 -mx-6 mt-6 grid grid-cols-[auto_1fr_auto] items-center gap-3 border-t border-[var(--workspace-border-soft)] bg-[var(--workspace-modal-subtle)] px-6 py-4 shadow-[0_-18px_30px_rgba(61,44,32,0.08)]">
-                <button
-                  type="button"
+                <DesktopActionButton
                   disabled={!hasActiveLearningSession || safeLearningSuggestionIndex === 0}
                   onClick={() =>
                     setActiveLearningSuggestionIndex((current) =>
                       Math.max(current - 1, 0),
                     )
                   }
-                  className={
-                    hasActiveLearningSession && safeLearningSuggestionIndex > 0
-                      ? navigationCloseBackButtonClass
-                      : navigationCloseBackButtonDisabledClass
-                  }
+                  variant="secondary"
+                  size="regular"
                 >
                   Back
-                </button>
+                </DesktopActionButton>
                 <div className="text-center text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
                   {hasActiveLearningSession
                     ? `${currentLearningSuggestionNumber} of ${totalLearningSuggestions}`
                     : "0 of 0"}
                 </div>
-                <button
-                  type="button"
+                <DesktopActionButton
                   disabled={!hasActiveLearningSession || !hasValidLearningSelection}
                   onClick={() => {
                     if (
@@ -37508,14 +37474,11 @@ function ForYouView({
                       Math.min(current + 1, totalLearningSuggestions - 1),
                     );
                   }}
-                  className={
-                    hasActiveLearningSession && hasValidLearningSelection
-                      ? navigationCloseBackButtonClass
-                      : navigationCloseBackButtonDisabledClass
-                  }
+                  variant="primary"
+                  size="regular"
                 >
                   {isLastLearningSuggestion ? "Finish" : "Next suggestion"}
-                </button>
+                </DesktopActionButton>
               </div>
               ) : null}
               </div>
