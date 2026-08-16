@@ -62,11 +62,9 @@ export function planMessageComposeAction(
   originPresentation: MessageComposePresentation = "workspace",
 ) {
   const hasFullMessageOrigin = originPresentation === "modal";
-  const composePresentation =
-    mode === "reply" || mode === "reply_all" ? "modal" : originPresentation;
 
   return {
-    composePresentation,
+    composePresentation: "modal" as const,
     isComposeOpen: true,
     isFullMessageOpen: false,
     mode,

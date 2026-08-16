@@ -69,13 +69,13 @@ const initialState: FullMessageModalInteractionState = {
   assert.deepEqual(
     planMessageComposeAction("message-a", "forward", "workspace"),
     {
-      composePresentation: "workspace",
+      composePresentation: "modal",
       isComposeOpen: true,
       isFullMessageOpen: false,
       mode: "forward",
       sourceMessageId: null,
     },
-    "reading-pane and toolbar Forward presentation must remain unchanged",
+    "reading-pane and toolbar Forward must promote workspace origin to modal compose without claiming a full-message return target",
   );
   assert.deepEqual(
     planMessageComposeAction("message-a", "forward", "modal"),
