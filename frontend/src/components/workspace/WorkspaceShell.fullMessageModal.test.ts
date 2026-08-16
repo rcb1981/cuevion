@@ -388,8 +388,13 @@ recordCorrectionExpectation("full-message toolbar action authority", () => {
   );
   assert.match(
     workspaceShellSource,
-    /placement === "full" \? \([\s\S]{0,220}<DesktopMessageActionIcon name="reply-all"[\s\S]{0,120}<span>Reply All<\/span>[\s\S]{0,100}: \(\s*"Reply all"/,
-    "the full toolbar must expose the requested Reply All label without changing split-view copy",
+    /<DesktopMessageActionIcon name="reply-all" \/>\s*<span>Reply All<\/span>/,
+    "the shared full-message and split-view action must expose the title-case Reply All label",
+  );
+  assert.doesNotMatch(
+    workspaceShellSource,
+    />Reply all</,
+    "split-view must not retain the lowercase Reply all label",
   );
 });
 
@@ -406,23 +411,33 @@ recordCorrectionExpectation("compact full-message toolbar icon contract", () => 
     workspaceShellSource.indexOf("data-full-message-modal-resize-handle"),
   );
 
-  for (const [action, icon] of [
-    ["Reply", "reply"],
-    ["Reply All", "reply-all"],
-    ["Forward", "forward"],
+  for (const [action, mode, icon] of [
+    ["Reply", "reply", "reply"],
+    ["Reply All", "reply_all", "reply-all"],
+    ["Forward", "forward", "forward"],
   ] as const) {
     assert.match(
       renderMessageActionsSource,
       new RegExp(
-        `placement === "full"[\\s\\S]{0,180}<DesktopMessageActionIcon name="${icon}"[\\s\\S]{0,180}${action}`,
+        `openComposeFromMessage\\(message, "${mode}", originPresentation\\)[\\s\\S]{0,260}<DesktopMessageActionIcon name="${icon}" \\/>[\\s\\S]{0,80}<span>${action}<\\/span>`,
       ),
-      `full-message ${action} must pair its label with the existing ${icon} icon`,
+      `split-view and full-message ${action} must keep the existing handler and pair its label with the shared ${icon} icon`,
     );
   }
   assert.match(
     renderMessageActionsSource,
-    /aria-label=\{placement === "full" \? "More" : undefined\}[\s\S]{0,1200}placement === "full" \? \([\s\S]{0,120}<DesktopMessageActionIcon name="more"/,
-    "full-message More must be icon-only with an accessible name",
+    /data-detail-actions-trigger\s+aria-label="More"\s+title="More"/,
+    "split-view and full-message More must retain an accessible name and tooltip",
+  );
+  assert.match(
+    renderMessageActionsSource,
+    /className=\{`\$\{secondaryActionClass\} w-8 px-0 lg:px-0`\}[\s\S]{0,100}<DesktopMessageActionIcon name="more"/,
+    "split-view and full-message More must reuse the compact icon-only presentation",
+  );
+  assert.doesNotMatch(
+    renderMessageActionsSource,
+    />\s*More ▾\s*</,
+    "split-view More must not display a visible text label",
   );
   assert.match(
     fullMessageModalSource,
@@ -436,21 +451,9 @@ recordCorrectionExpectation("compact full-message toolbar icon contract", () => 
   );
   assert.match(
     renderMessageActionsSource,
-    /placement === "full" \? \([\s\S]{0,220}<DesktopMessageActionIcon name="reply"/,
-    "icons must remain gated to the full-message placement",
-  );
-  assert.match(
-    renderMessageActionsSource,
     /const actionHeight = "h-7"/,
     "compact full-message sizing must preserve the existing direct-action height",
   );
-  for (const splitLabel of ["Reply", "Reply all", "Forward"]) {
-    assert.match(
-      renderMessageActionsSource,
-      new RegExp(`\\) : \\(\\s*"${splitLabel}"\\s*\\)}`),
-      `split-view ${splitLabel} text must retain the accepted renderer branch`,
-    );
-  }
 });
 
 recordCorrectionExpectation("full-message action extraction and split preservation", () => {

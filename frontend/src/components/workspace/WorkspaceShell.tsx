@@ -18529,14 +18529,8 @@ function MailboxView({
           }
           className={primaryActionClass}
         >
-          {placement === "full" ? (
-            <>
-              <DesktopMessageActionIcon name="reply" />
-              <span>Reply</span>
-            </>
-          ) : (
-            "Reply"
-          )}
+          <DesktopMessageActionIcon name="reply" />
+          <span>Reply</span>
         </button>
         <button
           type="button"
@@ -18545,14 +18539,8 @@ function MailboxView({
           }
           className={secondaryActionClass}
         >
-          {placement === "full" ? (
-            <>
-              <DesktopMessageActionIcon name="reply-all" />
-              <span>Reply All</span>
-            </>
-          ) : (
-            "Reply all"
-          )}
+          <DesktopMessageActionIcon name="reply-all" />
+          <span>Reply All</span>
         </button>
         <button
           type="button"
@@ -18561,22 +18549,16 @@ function MailboxView({
           }
           className={secondaryActionClass}
         >
-          {placement === "full" ? (
-            <>
-              <DesktopMessageActionIcon name="forward" />
-              <span>Forward</span>
-            </>
-          ) : (
-            "Forward"
-          )}
+          <DesktopMessageActionIcon name="forward" />
+          <span>Forward</span>
         </button>
         {!isReadOnlySmartFolderView ? (
           <div className="relative">
             <button
               type="button"
               data-detail-actions-trigger
-              aria-label={placement === "full" ? "More" : undefined}
-              title={placement === "full" ? "More" : undefined}
+              aria-label="More"
+              title="More"
               onClick={(event) => {
                 closeReadingLearningMenu();
                 const rect = event.currentTarget.getBoundingClientRect();
@@ -18595,15 +18577,9 @@ function MailboxView({
                       },
                 );
               }}
-              className={`${secondaryActionClass} ${
-                placement === "full" ? "w-8 px-0 lg:px-0" : ""
-              }`}
+              className={`${secondaryActionClass} w-8 px-0 lg:px-0`}
             >
-              {placement === "full" ? (
-                <DesktopMessageActionIcon name="more" />
-              ) : (
-                "More ▾"
-              )}
+              <DesktopMessageActionIcon name="more" />
             </button>
             {menuContent ? createPortal(menuContent, document.body) : null}
           </div>
