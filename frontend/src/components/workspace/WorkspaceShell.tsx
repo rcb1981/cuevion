@@ -32881,6 +32881,7 @@ const SignatureSettingsModal = memo(function SignatureSettingsModal({
           <DesktopActionButton
             onClick={onCancel}
             variant="secondary"
+            size="compact"
             className="w-[7.5rem]"
           >
             Cancel
@@ -32888,6 +32889,7 @@ const SignatureSettingsModal = memo(function SignatureSettingsModal({
           <DesktopActionButton
             onClick={onSave}
             variant="primary"
+            size="compact"
             className="w-[7.5rem]"
           >
             Save

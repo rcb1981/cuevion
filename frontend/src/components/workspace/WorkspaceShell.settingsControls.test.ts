@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
@@ -16,6 +17,15 @@ function componentSource(start: string, end: string) {
   return workspaceShellSource.slice(startIndex, endIndex);
 }
 
+function desktopActionButtonForHandler(source: string, handler: string) {
+  const openingTag = (source.match(/<DesktopActionButton\b[^>]*>/g) ?? []).find(
+    (candidate) => candidate.includes(`onClick={${handler}}`),
+  );
+
+  assert.ok(openingTag, `DesktopActionButton for ${handler} must exist`);
+  return openingTag;
+}
+
 const settingsComponentsSource = [
   componentSource("const WorkspaceSettingsCard", "const SmartFolderModal"),
   componentSource("const MailSettingsCard", "function createContactRequestId"),
@@ -27,6 +37,10 @@ const workspaceSettingsSource = componentSource(
 const managedInboxEditorSource = componentSource(
   "function ManagedInboxEditor",
   "const ManageInboxesView",
+);
+const signatureSettingsModalSource = componentSource(
+  "const SignatureSettingsModal",
+  "const OutOfOfficeSettingsModal",
 );
 const settingsToggleRowSource = componentSource(
   "const SettingsToggleRow",
@@ -70,6 +84,82 @@ assert.match(
   settingsComponentsSource,
   /size="compact"/,
   "dense Settings utilities must use the compact action scale",
+);
+
+for (const ordinaryActionLabel of [
+  "Manage",
+  "Close",
+  "Cancel",
+  "Apply",
+  "Save",
+  "Add inbox",
+  "Move up",
+  "Move down",
+  "Edit",
+  "Set as primary",
+  "Remove",
+  "Upload image",
+  "Reset",
+  "Back",
+] as const) {
+  assert.doesNotMatch(
+    settingsComponentsSource,
+    new RegExp(`>\\s*${ordinaryActionLabel.toUpperCase()}\\s*<`),
+    `${ordinaryActionLabel} must retain source-text title case`,
+  );
+}
+
+assert.doesNotMatch(
+  settingsComponentsSource,
+  /<DesktopActionButton[^>]*className="[^"]*(?:uppercase|tracking-\[)/,
+  "Settings action call sites must not reintroduce uppercase or wide tracking",
+);
+assert.match(
+  workspaceSettingsSource,
+  /onClick=\{handleOpenWorkspaceSettings\}[\s\S]*?variant="tertiary"[\s\S]*?>\s*Manage\s*</,
+  "Workspace Manage must remain a quiet tertiary action",
+);
+assert.doesNotMatch(
+  workspaceSettingsSource,
+  /navigationCloseBackButtonClass/,
+  "Workspace Close must not use the gold navigation action",
+);
+
+for (const [handler, variant] of [
+  ["onCancel", "secondary"],
+  ["onSave", "primary"],
+] as const) {
+  const signatureActionSource = desktopActionButtonForHandler(
+    signatureSettingsModalSource,
+    handler,
+  );
+  assert.match(
+    signatureActionSource,
+    new RegExp(`variant="${variant}"`),
+    `Signature ${handler === "onCancel" ? "Cancel" : "Save"} must be a compact ${variant} action`,
+  );
+  assert.match(
+    signatureActionSource,
+    /size="compact"/,
+    `Signature ${handler === "onCancel" ? "Cancel" : "Save"} must use the 32px compact size`,
+  );
+}
+
+const goldActionStart = workspaceShellSource.indexOf(
+  "const navigationCloseBackButtonClass =",
+);
+const goldActionEnd = workspaceShellSource.indexOf(
+  "const navigationCloseBackButtonDisabledClass =",
+  goldActionStart,
+);
+assert.notEqual(goldActionStart, -1, "the recoverable gold action definition must remain");
+assert.notEqual(goldActionEnd, -1, "the gold action definition must remain bounded");
+assert.equal(
+  createHash("sha256")
+    .update(workspaceShellSource.slice(goldActionStart, goldActionEnd).trim())
+    .digest("hex"),
+  "58b45463591b2a30ada1f7214ce120e117e57dce986982606cf8449295d2f1c0",
+  "the exact recoverable gold action definition must remain unchanged",
 );
 
 assert.match(settingsViewSource, /role="tablist"/);
