@@ -131,10 +131,13 @@ expectContract(
   /data-thread-message-actions[\s\S]*\{options\.actions\}/.test(
     threadMessageSource,
   ) &&
-    /isLatestThreadMessage && actionMessage[\s\S]*renderMessageActions\(actionMessage, density\)/.test(
+    /density === "split" && isLatestThreadMessage && actionMessage[\s\S]*renderMessageActions\(actionMessage, density\)/.test(
       threadTimelineSource,
+    ) &&
+    /actions=\{renderMessageActions\(fullMessageModalMessage, "full"\)\}/.test(
+      workspaceShellSource,
     ),
-  "the existing action row must render inside the latest physical message block",
+  "split actions must remain in the latest block while full-message actions move to the toolbar",
 );
 
 expectContract(

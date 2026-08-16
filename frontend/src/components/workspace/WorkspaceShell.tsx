@@ -10183,6 +10183,62 @@ function ReadingLearningButton({
   );
 }
 
+function DesktopWindowToolbar({
+  actions,
+  close,
+  metadata,
+  status,
+  title,
+  titleId,
+  titleText,
+}: {
+  actions: ReactNode;
+  close: ReactNode;
+  metadata?: ReactNode;
+  status?: ReactNode;
+  title: ReactNode;
+  titleId: string;
+  titleText: string;
+}) {
+  return (
+    <header
+      data-desktop-window-toolbar
+      className="flex-none border-b border-[color:rgba(129,144,122,0.14)] bg-[var(--workspace-modal-bg)] px-5 py-3.5 dark:border-[color:rgba(121,151,120,0.16)] md:px-6"
+    >
+      <div className="flex min-w-0 items-center gap-2.5">
+        <div className="flex min-w-0 flex-1 items-baseline gap-2">
+          <h2
+            id={titleId}
+            title={titleText}
+            className="min-w-0 flex-1 truncate text-[1.05rem] font-medium tracking-tight text-[var(--workspace-text)] md:text-[1.15rem] lg:text-[1.25rem]"
+          >
+            {title}
+          </h2>
+          {metadata ? (
+            <div className="flex-none whitespace-nowrap text-[0.68rem] text-[var(--workspace-text-faint)]">
+              {metadata}
+            </div>
+          ) : null}
+        </div>
+        <div data-desktop-window-toolbar-actions className="flex-none">
+          {actions}
+        </div>
+        <div data-desktop-window-toolbar-close className="flex-none">
+          {close}
+        </div>
+      </div>
+      {status ? (
+        <div
+          data-desktop-window-toolbar-status
+          className="mt-2 flex min-h-7 flex-wrap items-center gap-x-3 gap-y-1.5 text-[0.72rem] text-[var(--workspace-text-soft)]"
+        >
+          {status}
+        </div>
+      ) : null}
+    </header>
+  );
+}
+
 function WorkspaceModalLayer({
   children,
   themeMode,
@@ -17071,7 +17127,7 @@ function MailboxView({
             <div key={threadMessage.id}>
               {renderThreadMessage(threadMessage, density, {
                 actions:
-                  isLatestThreadMessage && actionMessage
+                  density === "split" && isLatestThreadMessage && actionMessage
                     ? renderMessageActions(actionMessage, density)
                     : undefined,
                 canCollapse:
@@ -17931,10 +17987,12 @@ function MailboxView({
       detailActionsMenuState?.messageId === message.id &&
       detailActionsMenuState.placement === placement;
     const messageIsVisiblePriority = isVisiblePriorityMessage(message);
+    const fullToolbarActionSpacing =
+      placement === "full" ? "flex-none whitespace-nowrap px-2.5 lg:px-3" : "px-3";
     const primaryActionClass =
-      "inline-flex h-7 cursor-pointer items-center justify-center rounded-full border border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] px-3 text-[var(--workspace-accent-text)] transition-[background-image,border-color,color,transform] duration-150 hover:bg-[linear-gradient(180deg,var(--workspace-accent-surface-hover-start),var(--workspace-accent-surface-hover-end))] active:translate-y-[0.5px] focus-visible:border-[var(--workspace-accent-border)] focus-visible:bg-[linear-gradient(180deg,var(--workspace-accent-surface-hover-start),var(--workspace-accent-surface-hover-end))] focus-visible:outline-none";
+      `inline-flex h-7 cursor-pointer items-center justify-center rounded-full border border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] transition-[background-image,border-color,color,transform] duration-150 hover:bg-[linear-gradient(180deg,var(--workspace-accent-surface-hover-start),var(--workspace-accent-surface-hover-end))] active:translate-y-[0.5px] focus-visible:border-[var(--workspace-accent-border)] focus-visible:bg-[linear-gradient(180deg,var(--workspace-accent-surface-hover-start),var(--workspace-accent-surface-hover-end))] focus-visible:outline-none ${fullToolbarActionSpacing}`;
     const secondaryActionClass =
-      "inline-flex h-7 cursor-pointer items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-transparent px-3 text-[var(--workspace-text-soft)] transition-[background-color,border-color,color,transform] duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] active:translate-y-[0.5px] focus-visible:border-[var(--workspace-border-hover)] focus-visible:bg-[var(--workspace-hover-surface)] focus-visible:text-[var(--workspace-text)] focus-visible:outline-none";
+      `inline-flex h-7 cursor-pointer items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-transparent text-[var(--workspace-text-soft)] transition-[background-color,border-color,color,transform] duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] active:translate-y-[0.5px] focus-visible:border-[var(--workspace-border-hover)] focus-visible:bg-[var(--workspace-hover-surface)] focus-visible:text-[var(--workspace-text)] focus-visible:outline-none ${fullToolbarActionSpacing}`;
     const menuItemClass =
       "flex w-full cursor-pointer items-center rounded-[14px] px-3 py-2.5 text-left text-[0.82rem] text-[var(--workspace-text-soft)] transition-colors duration-150 hover:bg-[var(--workspace-menu-hover)] focus-visible:outline-none";
     const menuWidth = 188;
@@ -18066,7 +18124,9 @@ function MailboxView({
 
     return (
       <div
-        className="relative flex flex-wrap items-center gap-x-2 gap-y-1.5 text-[0.68rem] font-medium text-[color:rgba(86,79,71,0.9)]"
+        className={`relative flex items-center gap-x-2 gap-y-1.5 text-[0.68rem] font-medium text-[color:rgba(86,79,71,0.9)] ${
+          placement === "full" ? "flex-nowrap" : "flex-wrap"
+        }`}
       >
         <button
           type="button"
@@ -18084,7 +18144,7 @@ function MailboxView({
           }
           className={secondaryActionClass}
         >
-          Reply all
+          {placement === "full" ? "Reply All" : "Reply all"}
         </button>
         <button
           type="button"
@@ -24760,8 +24820,28 @@ function MailboxView({
                   }
                   onMouseDown={(event) => event.stopPropagation()}
                 >
-                  <header className="flex flex-none flex-wrap items-start justify-between gap-4 border-b border-[color:rgba(129,144,122,0.14)] bg-[var(--workspace-modal-bg)] px-5 py-4 dark:border-[color:rgba(121,151,120,0.16)] md:px-6 md:py-5">
-                    {(() => {
+                  <DesktopWindowToolbar
+                    titleId="full-message-modal-title"
+                    titleText={fullMessageModalConversationTitle}
+                    title={fullMessageModalConversationTitle}
+                    metadata={
+                      fullMessageModalThreadMessages.length > 1 ? (
+                        <span>{fullMessageModalThreadMessages.length} messages</span>
+                      ) : undefined
+                    }
+                    actions={renderMessageActions(fullMessageModalMessage, "full")}
+                    close={
+                      <button
+                        ref={fullMessageModalCloseButtonRef}
+                        type="button"
+                        aria-label="Close full message"
+                        onClick={() => closeFullMessageModal("close")}
+                        className={navigationCloseBackButtonClass}
+                      >
+                        Close
+                      </button>
+                    }
+                    status={(() => {
                       const linkedReview = getLinkedReviewForMessage(
                         fullMessageModalMessage.id,
                       );
@@ -24770,22 +24850,17 @@ function MailboxView({
                       );
                       const priorityReasonCopy =
                         getVisiblePriorityReasonCopyForMessage(fullMessageModalMessage);
+                      const showLearning =
+                        aiSuggestionsEnabled &&
+                        resolveMessageNoisePolicy(fullMessageModalMessage)
+                          .allowsCategoryLearning;
+
+                      if (!linkedReviewLabel && !priorityReasonCopy && !showLearning) {
+                        return undefined;
+                      }
 
                       return (
-                        <div className="min-w-0 flex-1 space-y-1.5">
-                          <div className="flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-1">
-                            <h2
-                              id="full-message-modal-title"
-                              className="min-w-0 break-words text-[1.3rem] font-medium tracking-tight text-[var(--workspace-text)] md:text-[1.45rem]"
-                            >
-                              {fullMessageModalConversationTitle}
-                            </h2>
-                            {fullMessageModalThreadMessages.length > 1 ? (
-                              <span className="text-[0.72rem] text-[var(--workspace-text-faint)]">
-                                {fullMessageModalThreadMessages.length} messages
-                              </span>
-                            ) : null}
-                          </div>
+                        <>
                           {linkedReview && linkedReviewLabel ? (
                             <button
                               type="button"
@@ -24799,44 +24874,31 @@ function MailboxView({
                             </button>
                           ) : null}
                           {priorityReasonCopy ? (
-                            <div className="text-[0.76rem] leading-5 text-[var(--workspace-text-soft)]">
+                            <span className="leading-5">
                               {priorityReasonCopy.title}
-                            </div>
+                            </span>
                           ) : null}
-                        </div>
+                          {showLearning ? (
+                            <ReadingLearningButton
+                              open={isReadingLearningMenuOpen}
+                              triggerId="full-message"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                const rect =
+                                  event.currentTarget.getBoundingClientRect();
+                                toggleReadingLearningMenu("full-message", {
+                                  top: rect.top,
+                                  left: rect.left,
+                                  width: rect.width,
+                                  height: rect.height,
+                                });
+                              }}
+                            />
+                          ) : null}
+                        </>
                       );
                     })()}
-
-                    <div className="flex flex-none flex-wrap items-start justify-end gap-3 self-start">
-                      {aiSuggestionsEnabled &&
-                      resolveMessageNoisePolicy(fullMessageModalMessage)
-                        .allowsCategoryLearning ? (
-                        <ReadingLearningButton
-                          open={isReadingLearningMenuOpen}
-                          triggerId="full-message"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            const rect = event.currentTarget.getBoundingClientRect();
-                            toggleReadingLearningMenu("full-message", {
-                              top: rect.top,
-                              left: rect.left,
-                              width: rect.width,
-                              height: rect.height,
-                            });
-                          }}
-                        />
-                      ) : null}
-                      <button
-                        ref={fullMessageModalCloseButtonRef}
-                        type="button"
-                        aria-label="Close full message"
-                        onClick={() => closeFullMessageModal("close")}
-                        className={navigationCloseBackButtonClass}
-                      >
-                        Close
-                      </button>
-                    </div>
-                  </header>
+                  />
 
                   <div
                     data-full-message-modal-scroll-region
@@ -24873,7 +24935,7 @@ function MailboxView({
                         {renderThreadTimeline(
                           fullMessageModalMessage,
                           "full",
-                          fullMessageModalMessage,
+                          null,
                         )}
                       </div>
                     </div>

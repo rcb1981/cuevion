@@ -340,6 +340,85 @@ recordCorrectionExpectation("modal action wiring", () => {
   );
 });
 
+recordCorrectionExpectation("fixed full-message toolbar ordering", () => {
+  const fullMessageModalSource = workspaceShellSource.slice(
+    workspaceShellSource.indexOf("{fullMessageModalMessage && typeof document"),
+    workspaceShellSource.indexOf("data-full-message-modal-resize-handle"),
+  );
+  const toolbarIndex = fullMessageModalSource.indexOf("<DesktopWindowToolbar");
+  const scrollRegionIndex = fullMessageModalSource.indexOf(
+    "data-full-message-modal-scroll-region",
+  );
+
+  assert.match(
+    workspaceShellSource,
+    /function DesktopWindowToolbar\([\s\S]{0,1200}data-desktop-window-toolbar/,
+    "full-message chrome must use the small shared desktop window toolbar component",
+  );
+  assert.match(
+    workspaceShellSource,
+    /data-desktop-window-toolbar[\s\S]{0,120}flex-none[\s\S]{0,900}title=\{titleText\}[\s\S]{0,150}truncate[\s\S]{0,800}data-desktop-window-toolbar-actions[\s\S]{0,300}data-desktop-window-toolbar-close/,
+    "the fixed toolbar must expose accessible truncating title, action, and close slots",
+  );
+  assert.ok(
+    toolbarIndex >= 0 && toolbarIndex < scrollRegionIndex,
+    "the non-scrolling toolbar must precede the sole conversation scroll region",
+  );
+});
+
+recordCorrectionExpectation("full-message toolbar action authority", () => {
+  const fullMessageModalSource = workspaceShellSource.slice(
+    workspaceShellSource.indexOf("{fullMessageModalMessage && typeof document"),
+    workspaceShellSource.indexOf("data-full-message-modal-resize-handle"),
+  );
+  const toolbarSource = fullMessageModalSource.slice(
+    fullMessageModalSource.indexOf("<DesktopWindowToolbar"),
+    fullMessageModalSource.indexOf("data-full-message-modal-scroll-region"),
+  );
+
+  assert.match(
+    toolbarSource,
+    /actions=\{renderMessageActions\(fullMessageModalMessage, "full"\)\}/,
+    "Reply, Reply All, Forward, and More must retain fullMessageModalMessage as their source",
+  );
+  assert.doesNotMatch(
+    toolbarSource,
+    /threadMessages\.at\(-1\)|expandedMemberIds/,
+    "toolbar authority must not follow the latest physical block or disclosure state",
+  );
+  assert.match(
+    workspaceShellSource,
+    /placement === "full" \? "Reply All" : "Reply all"/,
+    "the full toolbar must expose the requested Reply All label without changing split-view copy",
+  );
+});
+
+recordCorrectionExpectation("full-message action extraction and split preservation", () => {
+  const threadTimelineSource = workspaceShellSource.slice(
+    workspaceShellSource.indexOf("const renderThreadTimeline ="),
+    workspaceShellSource.indexOf(
+      "const activeStoredCollaborationMessage =",
+      workspaceShellSource.indexOf("const renderThreadTimeline ="),
+    ),
+  );
+
+  assert.match(
+    threadTimelineSource,
+    /density === "split" &&\s*isLatestThreadMessage &&\s*actionMessage\s*\? renderMessageActions\(actionMessage, density\)/,
+    "only split view may inject the existing action row into the latest message block",
+  );
+  assert.match(
+    workspaceShellSource,
+    /renderThreadTimeline\(\s*fullMessageModalMessage,\s*"full",\s*null/,
+    "the full-message conversation renderer must own content only",
+  );
+  assert.match(
+    workspaceShellSource,
+    /renderThreadTimeline\(\s*selectedMessage,\s*"split",\s*fullWidthMessage \?\? selectedMessage/,
+    "split view must retain its existing action source and placement",
+  );
+});
+
 recordCorrectionExpectation("shared composer and normal compose regression", () => {
   assert.equal(
     workspaceShellSource.match(/data-desktop-composer/g)?.length,
@@ -626,8 +705,8 @@ assert.match(
 );
 assert.match(
   workspaceShellSource,
-  /data-full-message-modal-message-id=\{fullMessageModalMessage\.id\}[\s\S]*renderThreadTimeline\(\s*fullMessageModalMessage,\s*"full",\s*fullMessageModalMessage/,
-  "the modal must reuse the established action and message renderers",
+  /data-full-message-modal-message-id=\{fullMessageModalMessage\.id\}[\s\S]*actions=\{renderMessageActions\(fullMessageModalMessage, "full"\)\}[\s\S]*renderThreadTimeline\(\s*fullMessageModalMessage,\s*"full",\s*null/,
+  "the modal toolbar and content must reuse the established action and message renderers",
 );
 assert.match(
   workspaceShellSource,
