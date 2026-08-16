@@ -14943,21 +14943,23 @@ function MailboxView({
       }),
     );
     setComposeAttachments(
-      (effectiveMessage.attachments ?? []).map((attachment: MailAttachment) =>
-        normalizeMailAttachment({
-          ...attachment,
-          receivedSource: attachment.file
-            ? attachment.receivedSource
-            : {
-                mailboxId: sourceMailboxId as InboxId,
-                messageId: effectiveMessage.id,
-                messageUid: effectiveMessage.imapUid,
-                folder:
-                  currentMessageLocationById[effectiveMessage.id]?.folder ??
-                  "Inbox",
-              },
-        }),
-      ),
+      mode === "forward"
+        ? (effectiveMessage.attachments ?? []).map((attachment: MailAttachment) =>
+            normalizeMailAttachment({
+              ...attachment,
+              receivedSource: attachment.file
+                ? attachment.receivedSource
+                : {
+                    mailboxId: sourceMailboxId as InboxId,
+                    messageId: effectiveMessage.id,
+                    messageUid: effectiveMessage.imapUid,
+                    folder:
+                      currentMessageLocationById[effectiveMessage.id]?.folder ??
+                      "Inbox",
+                  },
+            }),
+          )
+        : [],
     );
     setIsComposeOpen(composePlan.isComposeOpen);
   };
