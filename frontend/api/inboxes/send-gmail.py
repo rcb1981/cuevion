@@ -28,7 +28,7 @@ from authenticated_imap import (
     resolve_authenticated_imap_mailbox,
 )
 from smtp_connection import SmtpConnectionError, send_public_smtp_message
-from inboxes.imap_snapshot import read_imap_reply_source
+from api.inboxes.imap_snapshot import read_imap_reply_source
 from authenticated_gmail import (
     MAX_GMAIL_RESPONSE_BYTES,
     MAX_SEND_REQUEST_BODY_BYTES,
