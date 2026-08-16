@@ -459,6 +459,17 @@ const desktopComposerSource = workspaceShellSource.slice(
 );
 
 assert.match(
+  desktopComposerSource,
+  /id="desktop-compose-body"[\s\S]*className=\{`min-h-\[260px\]/,
+  "the shared desktop compose writing area must use the compact minimum height",
+);
+assert.doesNotMatch(
+  desktopComposerSource,
+  /id="desktop-compose-body"[\s\S]*className=\{`min-h-\[360px\]/,
+  "the desktop compose writing area must not reserve the old 360px minimum",
+);
+
+assert.match(
   composeStateSource,
   /const \[composeQuoteExpanded, setComposeQuoteExpanded\] = useState\(false\)/,
   "desktop compose quote disclosure must start collapsed",
