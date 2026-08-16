@@ -626,12 +626,12 @@ assert.match(
 );
 assert.match(
   workspaceShellSource,
-  /data-full-message-modal-message-id=\{fullMessageModalMessage\.id\}[\s\S]*renderMessageActions\(fullMessageModalMessage, "full"\)[\s\S]*renderThread(?:Timeline|Message)\(fullMessageModalMessage, "full"\)/,
+  /data-full-message-modal-message-id=\{fullMessageModalMessage\.id\}[\s\S]*renderThreadTimeline\(\s*fullMessageModalMessage,\s*"full",\s*fullMessageModalMessage/,
   "the modal must reuse the established action and message renderers",
 );
 assert.match(
   workspaceShellSource,
-  /renderMessageActions\(fullWidthMessage \?\? selectedMessage, "split"\)/,
+  /renderThreadTimeline\(\s*selectedMessage,\s*"split",\s*fullWidthMessage \?\? selectedMessage/,
   "the split pane must keep using the same action renderer",
 );
 assert.equal(

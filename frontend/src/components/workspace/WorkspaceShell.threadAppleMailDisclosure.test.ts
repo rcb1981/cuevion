@@ -202,9 +202,9 @@ expectContract(
   "split and full must mutate one shared disclosure state inside MailboxView",
 );
 expectContract(
-  (threadTimelineSource.match(/data-thread-message-divider/g) ?? []).length === 1 &&
-    /threadIndex > 0/.test(threadTimelineSource),
-  "disclosure must retain the Slice A N-1 divider contract",
+  /className="space-y-3\.5"/.test(threadTimelineSource) &&
+    !/data-thread-message-divider|role="separator"/.test(threadTimelineSource),
+  "disclosure must use message-block spacing without cross-member dividers",
 );
 
 const emailStageDocumentStart = workspaceShellSource.indexOf(

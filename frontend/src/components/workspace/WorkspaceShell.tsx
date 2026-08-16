@@ -16552,7 +16552,11 @@ function MailboxView({
   const renderThreadMessage = (
     threadMessage: MailMessage,
     density: "split" | "full",
-    options?: { collapsed?: boolean; canCollapse?: boolean },
+    options?: {
+      actions?: ReactNode;
+      collapsed?: boolean;
+      canCollapse?: boolean;
+    },
   ) => {
     const collapsed = options?.collapsed ?? false;
     const canCollapse = options?.canCollapse ?? false;
@@ -16600,19 +16604,21 @@ function MailboxView({
     ) : (
       <span>{threadMessage.timestamp}</span>
     );
+    const messageBlockClassName =
+      "w-full rounded-[14px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-3.5 md:px-5 md:py-4";
 
     if (collapsed) {
       return (
         <article
           data-thread-message-id={threadMessage.id}
-          className="w-full"
+          className={messageBlockClassName}
         >
           <button
             type="button"
             aria-expanded={!collapsed}
             aria-controls={messageContentId}
             onClick={toggleMemberDisclosure}
-            className="grid w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-[4px] py-2.5 text-left text-[var(--workspace-text)] transition-colors duration-150 hover:text-[var(--workspace-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-border-hover)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--workspace-card)]"
+            className="grid w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-[4px] text-left text-[var(--workspace-text)] transition-colors duration-150 hover:text-[var(--workspace-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-border-hover)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--workspace-card)]"
           >
             <span className="min-w-0">
               <span className="grid grid-cols-[minmax(0,1fr)_auto] items-baseline gap-3">
@@ -16767,7 +16773,7 @@ function MailboxView({
     return (
       <article
         data-thread-message-id={threadMessage.id}
-        className="w-full py-4"
+        className={messageBlockClassName}
       >
         {canCollapse ? (
           <button
@@ -16925,6 +16931,14 @@ function MailboxView({
             </div>
           </div>
         ) : null}
+        {options?.actions ? (
+          <div
+            data-thread-message-actions
+            className="mt-4 border-t border-[var(--workspace-border-soft)] pt-3"
+          >
+            {options.actions}
+          </div>
+        ) : null}
         </div>
       </article>
     );
@@ -16932,6 +16946,7 @@ function MailboxView({
   const renderThreadTimeline = (
     message: MailMessage | null,
     density: "split" | "full",
+    actionMessage: MailMessage | null,
   ) => {
     const threadMessages = getThreadMessages(message);
     const initiallyExpandedMessageIds = resolveInitialExpandedThreadMessageIds(
@@ -16945,7 +16960,11 @@ function MailboxView({
     }
 
     return (
-      <section aria-labelledby={labelledById} data-thread-conversation>
+      <section
+        aria-labelledby={labelledById}
+        data-thread-conversation
+        className="space-y-3.5"
+      >
         {threadMessages.map((threadMessage, threadIndex) => {
           const isLatestThreadMessage =
             threadIndex === threadMessages.length - 1;
@@ -16957,14 +16976,11 @@ function MailboxView({
 
           return (
             <div key={threadMessage.id}>
-              {threadIndex > 0 ? (
-                <div
-                  data-thread-message-divider
-                  role="separator"
-                  className="h-px bg-[var(--workspace-divider)]"
-                />
-              ) : null}
               {renderThreadMessage(threadMessage, density, {
+                actions:
+                  isLatestThreadMessage && actionMessage
+                    ? renderMessageActions(actionMessage, density)
+                    : undefined,
                 canCollapse:
                   threadMessages.length >= 3 && !isLatestThreadMessage,
                 collapsed: !expanded,
@@ -24519,7 +24535,11 @@ function MailboxView({
                       </div>
                     ) : null}
 
-                    {renderThreadTimeline(selectedMessage, "split")}
+                    {renderThreadTimeline(
+                      selectedMessage,
+                      "split",
+                      fullWidthMessage ?? selectedMessage,
+                    )}
                   </div>
                   {selectedMessage.id === "main-1" ? (
                     <div className="grid gap-4 md:grid-cols-2">
@@ -24556,11 +24576,6 @@ function MailboxView({
                   </div>
                 )}
               </div>
-              {selectedMessage && !isMultiSelectActive ? (
-                <div className="shrink-0 border-t border-[color:rgba(129,144,122,0.12)] bg-transparent px-5 py-3 dark:border-[color:rgba(121,151,120,0.14)] md:px-6">
-                  {renderMessageActions(fullWidthMessage ?? selectedMessage, "split")}
-                </div>
-              ) : null}
             </div>
           </div>
               )}
@@ -24696,7 +24711,6 @@ function MailboxView({
                     })()}
 
                     <div className="flex flex-none flex-wrap items-start justify-end gap-3 self-start">
-                      {renderMessageActions(fullMessageModalMessage, "full")}
                       {aiSuggestionsEnabled &&
                       resolveMessageNoisePolicy(fullMessageModalMessage)
                         .allowsCategoryLearning ? (
@@ -24759,7 +24773,11 @@ function MailboxView({
                           </div>
                         ) : null}
 
-                        {renderThreadTimeline(fullMessageModalMessage, "full")}
+                        {renderThreadTimeline(
+                          fullMessageModalMessage,
+                          "full",
+                          fullMessageModalMessage,
+                        )}
                       </div>
                     </div>
                   </div>

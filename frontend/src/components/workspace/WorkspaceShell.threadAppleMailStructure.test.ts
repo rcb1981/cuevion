@@ -114,16 +114,36 @@ expectContract(
   !/isCurrentUser \? "pl-4 md:pl-8"/.test(threadMessageSource),
   "outgoing messages must not receive additional left indentation",
 );
+expectContract(
+  /const messageBlockClassName\s*=\s*"[^"]*rounded-\[14px\][^"]*border border-\[var\(--workspace-border-soft\)\][^"]*bg-\[var\(--workspace-card-subtle\)\][^"]*px-4 py-3\.5[^"]*md:px-5 md:py-4[^"]*"/.test(
+    threadMessageSource,
+  ),
+  "physical messages must use one calm rounded, bordered, subtly tinted block style",
+);
+expectContract(
+  (threadMessageSource.match(/className=\{messageBlockClassName\}/g) ?? [])
+    .length === 2,
+  "collapsed and expanded articles must share the same message-block surface",
+);
+expectContract(
+  /data-thread-message-actions[\s\S]*\{options\.actions\}/.test(
+    threadMessageSource,
+  ) &&
+    /isLatestThreadMessage && actionMessage[\s\S]*renderMessageActions\(actionMessage, density\)/.test(
+      threadTimelineSource,
+    ),
+  "the existing action row must render inside the latest physical message block",
+);
 
 expectContract(
-  /<section\s+aria-labelledby=\{labelledById\}/.test(threadTimelineSource),
+  /<section\s+aria-labelledby=\{labelledById\}[\s\S]*className="space-y-3\.5"/.test(
+    threadTimelineSource,
+  ),
   "the shared conversation timeline must be an accessible labelled section",
 );
 expectContract(
-  /threadIndex > 0\s*\?\s*\([\s\S]*data-thread-message-divider/.test(
-    threadTimelineSource,
-  ),
-  "the timeline must render one divider only before members after the first",
+  !/data-thread-message-divider|role="separator"/.test(threadTimelineSource),
+  "message-block spacing must replace the old cross-member divider",
 );
 expectContract(
   !/historical:/.test(threadTimelineSource),
