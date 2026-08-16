@@ -76,6 +76,7 @@ import {
 } from "../../types/onboarding";
 import type { UserConfig } from "../../types/userConfig";
 import { NavigationBar } from "../onboarding/NavigationBar";
+import { DesktopActionButton } from "../ui/DesktopActionButton";
 import {
   applyProviderDefaults,
   createDefaultCustomSmtpSettings,
@@ -10791,7 +10792,7 @@ function SettingsConfirmationModal({
   description,
   cancelLabel = "Cancel",
   confirmLabel,
-  confirmClassName,
+  confirmVariant = "primary",
   onCancel,
   onConfirm,
 }: {
@@ -10801,7 +10802,7 @@ function SettingsConfirmationModal({
   description: string;
   cancelLabel?: string;
   confirmLabel: string;
-  confirmClassName?: string;
+  confirmVariant?: "primary" | "destructive";
   onCancel: () => void;
   onConfirm: () => void;
 }) {
@@ -10817,20 +10818,20 @@ function SettingsConfirmationModal({
       </div>
 
       <div className="mt-6 flex items-center justify-end gap-3">
-        <button
+        <DesktopActionButton
           type="button"
           onClick={onCancel}
-          className={settingsSubtleActionClass}
+          variant="secondary"
         >
           {cancelLabel}
-        </button>
-        <button
+        </DesktopActionButton>
+        <DesktopActionButton
           type="button"
           onClick={onConfirm}
-          className={confirmClassName ?? settingsPrimaryActionClass}
+          variant={confirmVariant}
         >
           {confirmLabel}
-        </button>
+        </DesktopActionButton>
       </div>
     </SettingsModalShell>
   );
@@ -26737,7 +26738,7 @@ function MailboxView({
           description="This will close this collaboration for everyone. The shared mail will disappear from Shared for all participants."
           confirmLabel="End collaboration"
           cancelLabel="Cancel"
-          confirmClassName={settingsDangerActionClass}
+          confirmVariant="destructive"
           onCancel={() => setPendingEndCollaborationMessageId(null)}
           onConfirm={() => {
             const messageId = pendingEndCollaborationMessageId;
@@ -32610,7 +32611,7 @@ const ManageInboxesView = memo(function ManageInboxesView({
         description="You have changes that have not been applied yet. Do you want to discard them or continue editing?"
         cancelLabel="Continue editing"
         confirmLabel="Discard changes"
-        confirmClassName={settingsDangerActionClass}
+        confirmVariant="destructive"
         onCancel={() => setIsDiscardConfirmationOpen(false)}
         onConfirm={() => {
           setDraftManagedInboxes(savedManagedInboxes.map(cloneManagedWorkspaceInbox));
@@ -32650,7 +32651,7 @@ const ManageInboxesView = memo(function ManageInboxesView({
         description="Are you sure you want to remove this inbox? This action cannot be undone."
         cancelLabel="Cancel"
         confirmLabel="Remove inbox"
-        confirmClassName={settingsDangerActionClass}
+        confirmVariant="destructive"
         onCancel={() => setPendingInboxRemovalId(null)}
         onConfirm={() => {
           if (!pendingInboxRemoval) {
@@ -34889,7 +34890,7 @@ function SettingsView({
         description="You have connected-inbox changes that have not been applied yet. Do you want to discard them and switch tabs?"
         cancelLabel="Continue editing"
         confirmLabel="Discard changes"
-        confirmClassName={settingsDangerActionClass}
+        confirmVariant="destructive"
         onCancel={() => setPendingSettingsTab(null)}
         onConfirm={() => {
           const nextTab = pendingSettingsTab;
@@ -47615,7 +47616,7 @@ export function WorkspaceShell({
         description="You have changes that have not been applied yet. Do you want to discard them or continue editing?"
         cancelLabel="Continue editing"
         confirmLabel="Discard changes"
-        confirmClassName={settingsDangerActionClass}
+        confirmVariant="destructive"
         onCancel={() => setPendingManagedInboxNavigation(null)}
         onConfirm={() => {
           const pendingNavigation = pendingManagedInboxNavigation;
