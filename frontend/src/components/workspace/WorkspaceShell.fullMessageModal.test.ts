@@ -388,9 +388,69 @@ recordCorrectionExpectation("full-message toolbar action authority", () => {
   );
   assert.match(
     workspaceShellSource,
-    /placement === "full" \? "Reply All" : "Reply all"/,
+    /placement === "full" \? \([\s\S]{0,220}<DesktopMessageActionIcon name="reply-all"[\s\S]{0,120}<span>Reply All<\/span>[\s\S]{0,100}: \(\s*"Reply all"/,
     "the full toolbar must expose the requested Reply All label without changing split-view copy",
   );
+});
+
+recordCorrectionExpectation("compact full-message toolbar icon contract", () => {
+  const renderMessageActionsSource = workspaceShellSource.slice(
+    workspaceShellSource.indexOf("const renderMessageActions ="),
+    workspaceShellSource.indexOf(
+      "const serializeAttachmentBlob =",
+      workspaceShellSource.indexOf("const renderMessageActions ="),
+    ),
+  );
+  const fullMessageModalSource = workspaceShellSource.slice(
+    workspaceShellSource.indexOf("{fullMessageModalMessage && typeof document"),
+    workspaceShellSource.indexOf("data-full-message-modal-resize-handle"),
+  );
+
+  for (const [action, icon] of [
+    ["Reply", "reply"],
+    ["Reply All", "reply-all"],
+    ["Forward", "forward"],
+  ] as const) {
+    assert.match(
+      renderMessageActionsSource,
+      new RegExp(
+        `placement === "full"[\\s\\S]{0,180}<DesktopMessageActionIcon name="${icon}"[\\s\\S]{0,180}${action}`,
+      ),
+      `full-message ${action} must pair its label with the existing ${icon} icon`,
+    );
+  }
+  assert.match(
+    renderMessageActionsSource,
+    /aria-label=\{placement === "full" \? "More" : undefined\}[\s\S]{0,1200}placement === "full" \? \([\s\S]{0,120}<DesktopMessageActionIcon name="more"/,
+    "full-message More must be icon-only with an accessible name",
+  );
+  assert.match(
+    fullMessageModalSource,
+    /aria-label="Close full message"[\s\S]{0,900}<DesktopMessageActionIcon name="close"/,
+    "full-message Close must be a compact icon-only window control",
+  );
+  assert.doesNotMatch(
+    fullMessageModalSource,
+    /aria-label="Close full message"[\s\S]{0,260}>\s*Close\s*<\/button>/,
+    "full-message Close must not retain its pill label",
+  );
+  assert.match(
+    renderMessageActionsSource,
+    /placement === "full" \? \([\s\S]{0,220}<DesktopMessageActionIcon name="reply"/,
+    "icons must remain gated to the full-message placement",
+  );
+  assert.match(
+    renderMessageActionsSource,
+    /const actionHeight = "h-7"/,
+    "compact full-message sizing must preserve the existing direct-action height",
+  );
+  for (const splitLabel of ["Reply", "Reply all", "Forward"]) {
+    assert.match(
+      renderMessageActionsSource,
+      new RegExp(`\\) : \\(\\s*"${splitLabel}"\\s*\\)}`),
+      `split-view ${splitLabel} text must retain the accepted renderer branch`,
+    );
+  }
 });
 
 recordCorrectionExpectation("full-message action extraction and split preservation", () => {

@@ -10156,6 +10156,65 @@ function CloseActionButton({
   );
 }
 
+function DesktopMessageActionIcon({
+  name,
+}: {
+  name: "reply" | "reply-all" | "forward" | "more" | "close" | "learning";
+}) {
+  return (
+    <svg
+      aria-hidden="true"
+      focusable="false"
+      viewBox={name === "learning" ? "0 0 24 24" : "0 0 16 16"}
+      className="h-4 w-4 flex-none"
+      fill={name === "more" ? "currentColor" : "none"}
+      stroke="currentColor"
+      strokeWidth={name === "reply-all" ? "1.75" : "1.6"}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      {name === "reply" ? (
+        <>
+          <path d="M6 4 2.5 8 6 12" />
+          <path d="M3 8h7c2.3 0 4 1.2 4 3.5" />
+        </>
+      ) : null}
+      {name === "reply-all" ? (
+        <>
+          <path d="M5.75 4 2.5 8l3.25 4" />
+          <path d="M10.75 4 7.5 8l3.25 4" />
+          <path d="M3 8h7c2.1 0 3.75 1.1 3.75 3.3" />
+        </>
+      ) : null}
+      {name === "forward" ? (
+        <>
+          <path d="M10 4 13.5 8 10 12" />
+          <path d="M13 8H6.5C4.2 8 2.5 9.2 2.5 11.5" />
+        </>
+      ) : null}
+      {name === "more" ? (
+        <>
+          <circle cx="3.5" cy="8" r="1.1" stroke="none" />
+          <circle cx="8" cy="8" r="1.1" stroke="none" />
+          <circle cx="12.5" cy="8" r="1.1" stroke="none" />
+        </>
+      ) : null}
+      {name === "close" ? (
+        <>
+          <path d="M4 4l8 8" />
+          <path d="M12 4 4 12" />
+        </>
+      ) : null}
+      {name === "learning" ? (
+        <>
+          <path d="M12 3.5 13.7 8.3 18.5 10 13.7 11.7 12 16.5 10.3 11.7 5.5 10 10.3 8.3 12 3.5Z" />
+          <path d="M18.2 14.8 19 17 21.2 17.8 19 18.6 18.2 20.8 17.4 18.6 15.2 17.8 17.4 17 18.2 14.8Z" />
+        </>
+      ) : null}
+    </svg>
+  );
+}
+
 function ReadingLearningButton({
   open,
   onClick,
@@ -10165,19 +10224,30 @@ function ReadingLearningButton({
   onClick: (event: MouseEvent<HTMLButtonElement>) => void;
   triggerId: "reading-pane" | "full-message";
 }) {
+  const compact = triggerId === "full-message";
+
   return (
     <button
       type="button"
       onClick={onClick}
       data-reading-learning-trigger={triggerId}
-      className={`inline-flex h-9 flex-none items-center justify-center rounded-full border px-4 text-[0.68rem] font-medium uppercase tracking-[0.14em] transition-[background-color,border-color,color,transform,box-shadow] duration-150 focus-visible:outline-none ${
-        open
-          ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-panel"
-          : "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.16),0_8px_24px_rgba(118,170,112,0.08)] hover:bg-[linear-gradient(180deg,var(--workspace-accent-surface-hover-start),var(--workspace-accent-surface-hover-end))]"
+      className={`inline-flex flex-none items-center justify-center rounded-full border text-[0.68rem] font-medium uppercase transition-[background-color,border-color,color,transform,box-shadow] duration-150 focus-visible:outline-none ${
+        compact
+          ? `h-8 gap-1.5 px-3 tracking-[0.12em] ${
+              open
+                ? "border-[var(--workspace-border-hover)] bg-[var(--workspace-hover-surface)] text-[var(--workspace-text)]"
+                : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] text-[var(--workspace-text-soft)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)]"
+            }`
+          : `h-9 px-4 tracking-[0.14em] ${
+              open
+                ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-panel"
+                : "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.16),0_8px_24px_rgba(118,170,112,0.08)] hover:bg-[linear-gradient(180deg,var(--workspace-accent-surface-hover-start),var(--workspace-accent-surface-hover-end))]"
+            }`
       }`}
       aria-haspopup="menu"
       aria-expanded={open}
     >
+      {compact ? <DesktopMessageActionIcon name="learning" /> : null}
       Learning
     </button>
   );
@@ -10205,7 +10275,7 @@ function DesktopWindowToolbar({
       data-desktop-window-toolbar
       className="flex-none border-b border-[color:rgba(129,144,122,0.14)] bg-[var(--workspace-modal-bg)] px-5 py-3.5 dark:border-[color:rgba(121,151,120,0.16)] md:px-6"
     >
-      <div className="flex min-w-0 items-center gap-2.5">
+      <div className="flex min-w-0 items-center gap-2">
         <div className="flex min-w-0 flex-1 items-baseline gap-2">
           <h2
             id={titleId}
@@ -17988,11 +18058,14 @@ function MailboxView({
       detailActionsMenuState.placement === placement;
     const messageIsVisiblePriority = isVisiblePriorityMessage(message);
     const fullToolbarActionSpacing =
-      placement === "full" ? "flex-none whitespace-nowrap px-2.5 lg:px-3" : "px-3";
+      placement === "full"
+        ? "flex-none gap-1.5 whitespace-nowrap px-2.5 lg:px-3"
+        : "px-3";
+    const actionHeight = "h-7";
     const primaryActionClass =
-      `inline-flex h-7 cursor-pointer items-center justify-center rounded-full border border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] transition-[background-image,border-color,color,transform] duration-150 hover:bg-[linear-gradient(180deg,var(--workspace-accent-surface-hover-start),var(--workspace-accent-surface-hover-end))] active:translate-y-[0.5px] focus-visible:border-[var(--workspace-accent-border)] focus-visible:bg-[linear-gradient(180deg,var(--workspace-accent-surface-hover-start),var(--workspace-accent-surface-hover-end))] focus-visible:outline-none ${fullToolbarActionSpacing}`;
+      `inline-flex ${actionHeight} cursor-pointer items-center justify-center rounded-full border border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] transition-[background-image,border-color,color,transform] duration-150 hover:bg-[linear-gradient(180deg,var(--workspace-accent-surface-hover-start),var(--workspace-accent-surface-hover-end))] active:translate-y-[0.5px] focus-visible:border-[var(--workspace-accent-border)] focus-visible:bg-[linear-gradient(180deg,var(--workspace-accent-surface-hover-start),var(--workspace-accent-surface-hover-end))] focus-visible:outline-none ${fullToolbarActionSpacing}`;
     const secondaryActionClass =
-      `inline-flex h-7 cursor-pointer items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-transparent text-[var(--workspace-text-soft)] transition-[background-color,border-color,color,transform] duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] active:translate-y-[0.5px] focus-visible:border-[var(--workspace-border-hover)] focus-visible:bg-[var(--workspace-hover-surface)] focus-visible:text-[var(--workspace-text)] focus-visible:outline-none ${fullToolbarActionSpacing}`;
+      `inline-flex ${actionHeight} cursor-pointer items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-transparent text-[var(--workspace-text-soft)] transition-[background-color,border-color,color,transform] duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] active:translate-y-[0.5px] focus-visible:border-[var(--workspace-border-hover)] focus-visible:bg-[var(--workspace-hover-surface)] focus-visible:text-[var(--workspace-text)] focus-visible:outline-none ${fullToolbarActionSpacing}`;
     const menuItemClass =
       "flex w-full cursor-pointer items-center rounded-[14px] px-3 py-2.5 text-left text-[0.82rem] text-[var(--workspace-text-soft)] transition-colors duration-150 hover:bg-[var(--workspace-menu-hover)] focus-visible:outline-none";
     const menuWidth = 188;
@@ -18135,7 +18208,14 @@ function MailboxView({
           }
           className={primaryActionClass}
         >
-          Reply
+          {placement === "full" ? (
+            <>
+              <DesktopMessageActionIcon name="reply" />
+              <span>Reply</span>
+            </>
+          ) : (
+            "Reply"
+          )}
         </button>
         <button
           type="button"
@@ -18144,7 +18224,14 @@ function MailboxView({
           }
           className={secondaryActionClass}
         >
-          {placement === "full" ? "Reply All" : "Reply all"}
+          {placement === "full" ? (
+            <>
+              <DesktopMessageActionIcon name="reply-all" />
+              <span>Reply All</span>
+            </>
+          ) : (
+            "Reply all"
+          )}
         </button>
         <button
           type="button"
@@ -18153,13 +18240,22 @@ function MailboxView({
           }
           className={secondaryActionClass}
         >
-          Forward
+          {placement === "full" ? (
+            <>
+              <DesktopMessageActionIcon name="forward" />
+              <span>Forward</span>
+            </>
+          ) : (
+            "Forward"
+          )}
         </button>
         {!isReadOnlySmartFolderView ? (
           <div className="relative">
             <button
               type="button"
               data-detail-actions-trigger
+              aria-label={placement === "full" ? "More" : undefined}
+              title={placement === "full" ? "More" : undefined}
               onClick={(event) => {
                 closeReadingLearningMenu();
                 const rect = event.currentTarget.getBoundingClientRect();
@@ -18178,9 +18274,15 @@ function MailboxView({
                       },
                 );
               }}
-              className={secondaryActionClass}
+              className={`${secondaryActionClass} ${
+                placement === "full" ? "w-8 px-0 lg:px-0" : ""
+              }`}
             >
-              More ▾
+              {placement === "full" ? (
+                <DesktopMessageActionIcon name="more" />
+              ) : (
+                "More ▾"
+              )}
             </button>
             {menuContent ? createPortal(menuContent, document.body) : null}
           </div>
@@ -24835,10 +24937,11 @@ function MailboxView({
                         ref={fullMessageModalCloseButtonRef}
                         type="button"
                         aria-label="Close full message"
+                        title="Close full message"
                         onClick={() => closeFullMessageModal("close")}
-                        className={navigationCloseBackButtonClass}
+                        className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-transparent text-[var(--workspace-text-faint)] transition-[background-color,border-color,color,transform] duration-150 hover:border-[var(--workspace-border-soft)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] active:scale-[0.98] focus-visible:border-[var(--workspace-border-hover)] focus-visible:bg-[var(--workspace-hover-surface)] focus-visible:text-[var(--workspace-text)] focus-visible:outline-none"
                       >
-                        Close
+                        <DesktopMessageActionIcon name="close" />
                       </button>
                     }
                     status={(() => {
