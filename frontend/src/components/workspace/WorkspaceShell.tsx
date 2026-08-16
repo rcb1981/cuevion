@@ -3622,6 +3622,7 @@ function buildEmailStageDocument(
     emailStyles?: string;
     isExternalHtml?: boolean;
     isProviderHtmlEmail?: boolean;
+    quotedContentExpanded?: boolean;
   },
 ) {
   const isExternalHtml = options?.isExternalHtml ?? false;
@@ -3942,6 +3943,9 @@ function buildEmailStageDocument(
       }`;
 
   const stageSpecificStyles = isExternalHtml ? externalHtmlStageStyles : composeHtmlStageStyles;
+  const quoteVisibilityStyles = buildReliableQuoteVisibilityStyle(
+    options?.quotedContentExpanded ?? true,
+  );
 
   // For external HTML: inject the email's own styles BEFORE our overrides so our
   // safety-net rules can still take effect but don't overwrite the email's design.
@@ -3986,6 +3990,7 @@ html body [data-email-quote="true"] * {
     <style id="stage-styles">
       ${baseStageStyles}
       ${stageSpecificStyles}
+      ${quoteVisibilityStyles}
     </style>
   </head>
   <body>
@@ -4269,12 +4274,14 @@ function EmailHtmlStage({
   emailStyles,
   isExternalHtml,
   isProviderHtml,
+  quotedContentExpanded,
 }: {
   html: string;
   themeMode: "light" | "dark";
   emailStyles?: string;
   isExternalHtml?: boolean;
   isProviderHtml?: boolean;
+  quotedContentExpanded?: boolean;
 }) {
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const cleanupRef = useRef<(() => void) | null>(null);
@@ -4386,7 +4393,14 @@ function EmailHtmlStage({
       cleanupRef.current?.();
       cleanupRef.current = null;
     };
-  }, [html, themeMode, emailStyles, isExternalHtml, isProviderHtml]);
+  }, [
+    html,
+    themeMode,
+    emailStyles,
+    isExternalHtml,
+    isProviderHtml,
+    quotedContentExpanded,
+  ]);
 
   return (
     <iframe
@@ -4397,6 +4411,7 @@ function EmailHtmlStage({
         emailStyles,
         isExternalHtml,
         isProviderHtmlEmail: isProviderHtml,
+        quotedContentExpanded,
       })}
       onLoad={applyRuntimeEmailStageCorrections}
       className={`${stageClassName} block border-0`}
@@ -9796,6 +9811,57 @@ function getConversationDisplaySubject(
   );
 }
 
+function hasReliableQuotedContent(html?: string | null) {
+  if (!html) {
+    return false;
+  }
+
+  return (
+    /data-(?:compose|email)-quote\s*=\s*(?:"true"|'true'|true)/i.test(html) ||
+    /class\s*=\s*["'][^"']*\bgmail_quote\b[^"']*["']/i.test(html)
+  );
+}
+
+function buildReliableQuoteVisibilityStyle(expanded: boolean) {
+  return expanded
+    ? ""
+    : `
+      [data-compose-quote="true"],
+      [data-email-quote="true"],
+      .gmail_quote {
+        display: none !important;
+      }`;
+}
+
+type DesktopThreadDisclosureState = {
+  expandedMemberIds: string[];
+  expandedQuoteMessageIds: string[];
+  threadKey: string | null;
+};
+
+function reconcileDesktopThreadDisclosureState(
+  state: DesktopThreadDisclosureState,
+  threadKey: string | null,
+) {
+  return state.threadKey === threadKey
+    ? state
+    : {
+        expandedMemberIds: [],
+        expandedQuoteMessageIds: [],
+        threadKey,
+      };
+}
+
+function resolveInitialExpandedThreadMessageIds(messageIds: string[]) {
+  return messageIds.length <= 2 ? [...messageIds] : messageIds.slice(-1);
+}
+
+function toggleDisclosureId(ids: string[], id: string) {
+  return ids.includes(id)
+    ? ids.filter((candidateId) => candidateId !== id)
+    : [...ids, id];
+}
+
 function resolveMailDateMs(message: MailMessage) {
   if (message.createdAt) {
     const directDate = new Date(message.createdAt).getTime();
@@ -14085,6 +14151,12 @@ function MailboxView({
   const [selectionAnchorId, setSelectionAnchorId] = useState<string | null>(
     () => selectedMessageId,
   );
+  const [desktopThreadDisclosureState, setDesktopThreadDisclosureState] =
+    useState<DesktopThreadDisclosureState>(() => ({
+      expandedMemberIds: [],
+      expandedQuoteMessageIds: [],
+      threadKey: selectedMessageId,
+    }));
   const latestMailboxStoreRef = useRef(mailboxStore);
   latestMailboxStoreRef.current = mailboxStore;
   const providerTrashSelectionContextRef = useRef({
@@ -16082,6 +16154,11 @@ function MailboxView({
     fullMessageModalResolvedMessage?.id === fullMessageModalMessageId
       ? fullMessageModalResolvedMessage
       : null;
+  const activeDesktopThreadDisclosureState =
+    reconcileDesktopThreadDisclosureState(
+      desktopThreadDisclosureState,
+      selectedMessage?.id ?? null,
+    );
   const renderTargetMessage = isFullMessageOpen ? fullWidthMessage : selectedMessage;
   const getVisiblePriorityReasonCopyForMessage = (message: MailMessage | null) => {
     if (!message || isSharedView || activeSmartFolder) {
@@ -16093,6 +16170,15 @@ function MailboxView({
 
     return reason?.shouldShow && reason.title.trim().length > 0 ? reason : null;
   };
+
+  useEffect(() => {
+    setDesktopThreadDisclosureState((currentState) =>
+      reconcileDesktopThreadDisclosureState(
+        currentState,
+        selectedMessage?.id ?? null,
+      ),
+    );
+  }, [selectedMessage?.id]);
 
   useEffect(() => {
     if (!hideBundleOrganizerManagedMessages || !selectedMessageId) {
@@ -16466,7 +16552,10 @@ function MailboxView({
   const renderThreadMessage = (
     threadMessage: MailMessage,
     density: "split" | "full",
+    options?: { collapsed?: boolean; canCollapse?: boolean },
   ) => {
+    const collapsed = options?.collapsed ?? false;
+    const canCollapse = options?.canCollapse ?? false;
     const isCurrentUser =
       normalizeSenderLearningKey(threadMessage.from) ===
         normalizeSenderLearningKey(mailbox.email) ||
@@ -16489,6 +16578,90 @@ function MailboxView({
       threadMessage.createdAt &&
         !Number.isNaN(new Date(threadMessage.createdAt).getTime()),
     );
+    const messageContentId = `thread-message-content-${density}-${threadMessage.id}`;
+    const toggleMemberDisclosure = () => {
+      setDesktopThreadDisclosureState((currentState) => {
+        const reconciledState = reconcileDesktopThreadDisclosureState(
+          currentState,
+          selectedMessage?.id ?? null,
+        );
+
+        return {
+          ...reconciledState,
+          expandedMemberIds: toggleDisclosureId(
+            reconciledState.expandedMemberIds,
+            threadMessage.id,
+          ),
+        };
+      });
+    };
+    const timestamp = hasValidCreatedAt ? (
+      <time dateTime={threadMessage.createdAt}>{threadMessage.timestamp}</time>
+    ) : (
+      <span>{threadMessage.timestamp}</span>
+    );
+
+    if (collapsed) {
+      return (
+        <article
+          data-thread-message-id={threadMessage.id}
+          className="w-full"
+        >
+          <button
+            type="button"
+            aria-expanded={!collapsed}
+            aria-controls={messageContentId}
+            onClick={toggleMemberDisclosure}
+            className="grid w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-[4px] py-2.5 text-left text-[var(--workspace-text)] transition-colors duration-150 hover:text-[var(--workspace-text)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-border-hover)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--workspace-card)]"
+          >
+            <span className="min-w-0">
+              <span className="grid grid-cols-[minmax(0,1fr)_auto] items-baseline gap-3">
+                <span className="min-w-0 truncate text-[0.8rem] font-medium tracking-[-0.012em]">
+                  {isCurrentUser ? "You" : threadMessage.sender}
+                  {threadMessage.isAutoReply &&
+                  threadMessage.autoReplyType === "out_of_office"
+                    ? " · Automatic reply"
+                    : ""}
+                </span>
+                <span className="text-[0.66rem] leading-5 text-[var(--workspace-text-faint)]">
+                  {timestamp}
+                </span>
+              </span>
+              <span className="mt-0.5 flex min-w-0 items-center gap-2">
+                <span className="min-w-0 flex-1 truncate text-[0.72rem] leading-5 text-[var(--workspace-text-faint)]">
+                  {threadMessage.snippet.trim() || threadMessage.body[0]?.trim() || "Message"}
+                </span>
+                {visibleAttachments.length > 0 ? (
+                  <span
+                    aria-label={`${visibleAttachments.length} visible attachments`}
+                    className="inline-flex flex-none items-center gap-1 text-[0.64rem] text-[var(--workspace-text-faint)]"
+                  >
+                    <svg
+                      aria-hidden="true"
+                      viewBox="0 0 16 16"
+                      className="h-3 w-3"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="1.5"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    >
+                      <path d="M5.75 8.75 9.9 4.6a2.1 2.1 0 1 1 2.97 2.97l-5.18 5.18a3.15 3.15 0 1 1-4.46-4.46l5.01-5.01" />
+                    </svg>
+                    {visibleAttachments.length}
+                  </span>
+                ) : null}
+              </span>
+            </span>
+            <span aria-hidden="true" className="text-[0.8rem] text-[var(--workspace-text-faint)]">
+              ›
+            </span>
+          </button>
+          <div id={messageContentId} hidden />
+        </article>
+      );
+    }
+
     const quoteStartIndex = getQuotedParagraphStartIndex(threadMessage.body);
     const leadingParagraphs = compactMessageParagraphs(
       quoteStartIndex === -1
@@ -16508,6 +16681,36 @@ function MailboxView({
       bodyRenderMode.mode === "native_html"
         ? normalizeNativeMessageHtmlForPane(bodyRenderMode.html)
         : null;
+    const reliableQuoteHtml =
+      bodyRenderMode.mode === "plain"
+        ? null
+        : normalizedNativeHtml ?? bodyRenderMode.html;
+    const hasReliableQuote = hasReliableQuotedContent(reliableQuoteHtml);
+    const quoteExpanded =
+      activeDesktopThreadDisclosureState.expandedQuoteMessageIds.includes(
+        threadMessage.id,
+      );
+    const quoteContentId = `thread-message-quote-${density}-${threadMessage.id}`;
+    const quoteVisibilityClass =
+      hasReliableQuote && !quoteExpanded
+        ? "[&_[data-compose-quote='true']]:!hidden [&_[data-email-quote='true']]:!hidden [&_.gmail_quote]:!hidden"
+        : "";
+    const toggleQuoteDisclosure = () => {
+      setDesktopThreadDisclosureState((currentState) => {
+        const reconciledState = reconcileDesktopThreadDisclosureState(
+          currentState,
+          selectedMessage?.id ?? null,
+        );
+
+        return {
+          ...reconciledState,
+          expandedQuoteMessageIds: toggleDisclosureId(
+            reconciledState.expandedQuoteMessageIds,
+            threadMessage.id,
+          ),
+        };
+      });
+    };
     const hasHiddenRemoteImages =
       bodyRenderMode.remoteImageCount > 0 && !remoteImagesAllowed;
     const isExternalHtmlMessage = bodyRenderMode.mode === "html";
@@ -16535,45 +16738,60 @@ function MailboxView({
       density === "full" ? "leading-[1.82]" : "leading-[1.72]"
     } ${nativeBodyTextClass}`;
     const plainContentClassName = nativeBodyTextClass;
+    const expandedMessageHeader = (
+      <>
+        <div className="min-w-0">
+          <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+            <div className="truncate text-[0.84rem] font-medium tracking-[-0.012em] text-[var(--workspace-text)]">
+              {isCurrentUser ? "You" : threadMessage.sender}
+            </div>
+            {threadMessage.isAutoReply &&
+            threadMessage.autoReplyType === "out_of_office" ? (
+              <span className="inline-flex items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-2 py-0.5 text-[0.58rem] font-medium uppercase tracking-[0.12em] text-[var(--workspace-text-faint)]">
+                Automatic reply
+              </span>
+            ) : null}
+          </div>
+          {recipientContext ? (
+            <div className="mt-0.5 truncate text-[0.72rem] leading-5 text-[var(--workspace-text-faint)]">
+              {recipientContext}
+            </div>
+          ) : null}
+        </div>
+        <div className="pt-0.5 text-right text-[0.68rem] leading-5 text-[var(--workspace-text-faint)]">
+          {timestamp}
+        </div>
+      </>
+    );
 
     return (
       <article
         data-thread-message-id={threadMessage.id}
         className="w-full py-4"
       >
-        <div className={`grid grid-cols-[minmax(0,1fr)_auto] items-start ${isExternalHtmlMessage ? "gap-3 px-0.5" : "gap-3"}`}>
-          <div className="min-w-0">
-            <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-              <div className="truncate text-[0.84rem] font-medium tracking-[-0.012em] text-[var(--workspace-text)]">
-                {isCurrentUser ? "You" : threadMessage.sender}
-              </div>
-              {threadMessage.isAutoReply &&
-              threadMessage.autoReplyType === "out_of_office" ? (
-                <span className="inline-flex items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-2 py-0.5 text-[0.58rem] font-medium uppercase tracking-[0.12em] text-[var(--workspace-text-faint)]">
-                  Automatic reply
-                </span>
-              ) : null}
-            </div>
-            {recipientContext ? (
-              <div className="mt-0.5 truncate text-[0.72rem] leading-5 text-[var(--workspace-text-faint)]">
-                {recipientContext}
-              </div>
-            ) : null}
+        {canCollapse ? (
+          <button
+            type="button"
+            aria-expanded={!collapsed}
+            aria-controls={messageContentId}
+            onClick={toggleMemberDisclosure}
+            className={`grid w-full grid-cols-[minmax(0,1fr)_auto] items-start rounded-[4px] text-left transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-border-hover)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--workspace-card)] ${isExternalHtmlMessage ? "gap-3 px-0.5" : "gap-3"}`}
+          >
+            {expandedMessageHeader}
+          </button>
+        ) : (
+          <div className={`grid grid-cols-[minmax(0,1fr)_auto] items-start ${isExternalHtmlMessage ? "gap-3 px-0.5" : "gap-3"}`}>
+            {expandedMessageHeader}
           </div>
-          <div className="pt-0.5 text-right text-[0.68rem] leading-5 text-[var(--workspace-text-faint)]">
-            {hasValidCreatedAt ? (
-              <time dateTime={threadMessage.createdAt}>{threadMessage.timestamp}</time>
-            ) : (
-              <span>{threadMessage.timestamp}</span>
-            )}
-          </div>
-        </div>
+        )}
+        <div id={messageContentId}>
         <div
+          id={hasReliableQuote ? quoteContentId : undefined}
           data-render-mode={bodyRenderMode.mode}
           data-render-external-html={String(isExternalHtmlMessage)}
           data-render-native-html={String(isNativeHtmlMessage)}
           data-render-compose-generated={String(isComposeGeneratedBodyHtml)}
-          className={`mt-2.5 bg-transparent px-0 py-0 text-[var(--workspace-text)] dark:text-[color:rgba(228,235,230,0.94)] ${isExternalHtmlMessage ? "overflow-visible" : ""}`}
+          className={`mt-2.5 bg-transparent px-0 py-0 text-[var(--workspace-text)] dark:text-[color:rgba(228,235,230,0.94)] ${isExternalHtmlMessage ? "overflow-visible" : ""} ${quoteVisibilityClass}`}
         >
           <div
             style={
@@ -16613,6 +16831,7 @@ function MailboxView({
                   emailStyles={bodyRenderMode.emailStyles}
                   isExternalHtml={bodyRenderMode.mode === "html"}
                   isProviderHtml={isProviderHtmlMessage}
+                  quotedContentExpanded={quoteExpanded}
                 />
               </div>
             ) : bodyRenderMode.mode === "native_html" ? (
@@ -16680,6 +16899,18 @@ function MailboxView({
             )}
           </div>
         </div>
+        {hasReliableQuote ? (
+          <button
+            type="button"
+            aria-expanded={quoteExpanded}
+            aria-controls={quoteContentId}
+            onClick={toggleQuoteDisclosure}
+            className="mt-2 inline-flex items-center gap-1.5 rounded-[4px] py-1 text-[0.7rem] font-medium text-[var(--workspace-text-faint)] transition-colors duration-150 hover:text-[var(--workspace-text-soft)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-border-hover)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--workspace-card)]"
+          >
+            <span aria-hidden="true">{quoteExpanded ? "⌄" : "›"}</span>
+            {quoteExpanded ? "Hide quoted content" : "Show quoted content"}
+          </button>
+        ) : null}
         {visibleAttachments.length > 0 ? (
           <div className="mt-4 border-t border-[var(--workspace-border-soft)] pt-3">
             <div className="mb-2 text-[0.68rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)]">
@@ -16694,6 +16925,7 @@ function MailboxView({
             </div>
           </div>
         ) : null}
+        </div>
       </article>
     );
   };
@@ -16702,6 +16934,9 @@ function MailboxView({
     density: "split" | "full",
   ) => {
     const threadMessages = getThreadMessages(message);
+    const initiallyExpandedMessageIds = resolveInitialExpandedThreadMessageIds(
+      threadMessages.map((threadMessage) => threadMessage.id),
+    );
     const labelledById =
       density === "full" ? "full-message-modal-title" : "conversation-title";
 
@@ -16711,18 +16946,32 @@ function MailboxView({
 
     return (
       <section aria-labelledby={labelledById} data-thread-conversation>
-        {threadMessages.map((threadMessage, threadIndex) => (
-          <div key={threadMessage.id}>
-            {threadIndex > 0 ? (
-              <div
-                data-thread-message-divider
-                role="separator"
-                className="h-px bg-[var(--workspace-divider)]"
-              />
-            ) : null}
-            {renderThreadMessage(threadMessage, density)}
-          </div>
-        ))}
+        {threadMessages.map((threadMessage, threadIndex) => {
+          const isLatestThreadMessage =
+            threadIndex === threadMessages.length - 1;
+          const expanded =
+            initiallyExpandedMessageIds.includes(threadMessage.id) ||
+            activeDesktopThreadDisclosureState.expandedMemberIds.includes(
+              threadMessage.id,
+            );
+
+          return (
+            <div key={threadMessage.id}>
+              {threadIndex > 0 ? (
+                <div
+                  data-thread-message-divider
+                  role="separator"
+                  className="h-px bg-[var(--workspace-divider)]"
+                />
+              ) : null}
+              {renderThreadMessage(threadMessage, density, {
+                canCollapse:
+                  threadMessages.length >= 3 && !isLatestThreadMessage,
+                collapsed: !expanded,
+              })}
+            </div>
+          );
+        })}
       </section>
     );
   };
