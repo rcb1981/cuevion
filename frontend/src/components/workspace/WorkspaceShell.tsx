@@ -6017,6 +6017,289 @@ export function normalizeCuevionInternalClassification(
     : undefined;
 }
 
+type ReplyRecipientToken = {
+  key: string;
+  renderedValue: string;
+};
+
+type ReplyRecipientPlan = {
+  replyTo: ReplyRecipientToken[];
+  replyAllDelta: ReplyRecipientToken[];
+};
+
+type ReplyModeSession = {
+  sourceMessageId: string;
+  replyAllDelta: ReplyRecipientToken[];
+  managed: Map<string, { field: "cc"; renderedValue: string }>;
+  suppressed: Set<string>;
+};
+
+function normalizeReplyRecipientKey(value: string) {
+  const normalizedValue = value.trim().toLowerCase();
+  const emailMatch = normalizedValue.match(
+    /([a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,})/i,
+  );
+
+  return emailMatch?.[1] ?? normalizedValue;
+}
+
+function parseReplyRecipientTokens(value: string): ReplyRecipientToken[] {
+  return value
+    .split(/[,;]+/)
+    .map((renderedValue) => renderedValue.trim())
+    .filter(Boolean)
+    .map((renderedValue) => ({
+      key: normalizeReplyRecipientKey(renderedValue),
+      renderedValue,
+    }))
+    .filter((token) => Boolean(token.key));
+}
+
+function dedupeReplyRecipientTokens(tokens: ReplyRecipientToken[]) {
+  const seenKeys = new Set<string>();
+
+  return tokens.filter((token) => {
+    if (seenKeys.has(token.key)) {
+      return false;
+    }
+
+    seenKeys.add(token.key);
+    return true;
+  });
+}
+
+function deriveReplyRecipientPlan({
+  originalSender,
+  originalTo,
+  originalCc,
+  ownAddresses,
+}: {
+  originalSender: string;
+  originalTo: string;
+  originalCc: string;
+  ownAddresses: string[];
+}): ReplyRecipientPlan {
+  const ownAddressKeys = new Set(
+    ownAddresses.map(normalizeReplyRecipientKey).filter(Boolean),
+  );
+  const renderedSender = originalSender.trim();
+  const senderKey = normalizeReplyRecipientKey(renderedSender);
+  const senderToken =
+    renderedSender && senderKey
+      ? { key: senderKey, renderedValue: renderedSender }
+      : null;
+  const originalToTokens = parseReplyRecipientTokens(originalTo);
+  const originalCcTokens = parseReplyRecipientTokens(originalCc);
+  const senderIsOwn = Boolean(senderToken && ownAddressKeys.has(senderToken.key));
+  const replyTo = dedupeReplyRecipientTokens(
+    senderIsOwn
+      ? originalToTokens.filter((token) => !ownAddressKeys.has(token.key))
+      : senderToken
+        ? [senderToken]
+        : [],
+  );
+  const seenKeys = new Set(replyTo.map((token) => token.key));
+  const replyAllDelta: ReplyRecipientToken[] = [];
+
+  [...originalToTokens, ...originalCcTokens].forEach((token) => {
+    if (ownAddressKeys.has(token.key) || seenKeys.has(token.key)) {
+      return;
+    }
+
+    seenKeys.add(token.key);
+    replyAllDelta.push(token);
+  });
+
+  return { replyTo, replyAllDelta };
+}
+
+function cloneReplyModeSession(session: ReplyModeSession): ReplyModeSession {
+  return {
+    sourceMessageId: session.sourceMessageId,
+    replyAllDelta: session.replyAllDelta,
+    managed: new Map(session.managed),
+    suppressed: new Set(session.suppressed),
+  };
+}
+
+function createReplyModeSession({
+  sourceMessageId,
+  plan,
+  initialMode,
+}: {
+  sourceMessageId: string;
+  plan: ReplyRecipientPlan;
+  initialMode: "reply" | "reply_all";
+}) {
+  const managed = new Map<
+    string,
+    { field: "cc"; renderedValue: string }
+  >();
+
+  if (initialMode === "reply_all") {
+    plan.replyAllDelta.forEach((token) => {
+      managed.set(token.key, {
+        field: "cc",
+        renderedValue: token.renderedValue,
+      });
+    });
+  }
+
+  return {
+    mode: initialMode,
+    to: plan.replyTo.map((token) => token.renderedValue).join(", "),
+    cc:
+      initialMode === "reply_all"
+        ? plan.replyAllDelta.map((token) => token.renderedValue).join(", ")
+        : "",
+    bcc: "",
+    session: {
+      sourceMessageId,
+      replyAllDelta: plan.replyAllDelta,
+      managed,
+      suppressed: new Set<string>(),
+    } satisfies ReplyModeSession,
+  };
+}
+
+function appendReplyRecipientTokens(
+  currentValue: string,
+  additions: ReplyRecipientToken[],
+) {
+  if (additions.length === 0) {
+    return currentValue;
+  }
+
+  const renderedAdditions = additions
+    .map((token) => token.renderedValue)
+    .join(", ");
+
+  if (!currentValue.trim()) {
+    return renderedAdditions;
+  }
+
+  const separator = /[,;]\s*$/.test(currentValue)
+    ? /\s$/.test(currentValue)
+      ? ""
+      : " "
+    : ", ";
+  return `${currentValue}${separator}${renderedAdditions}`;
+}
+
+function switchReplyRecipientMode({
+  targetMode,
+  to,
+  cc,
+  bcc,
+  session,
+}: {
+  targetMode: "reply" | "reply_all";
+  to: string;
+  cc: string;
+  bcc: string;
+  session: ReplyModeSession;
+}) {
+  const nextSession = cloneReplyModeSession(session);
+
+  if (targetMode === "reply_all") {
+    const existingKeys = new Set(
+      [to, cc, bcc].flatMap(parseReplyRecipientTokens).map((token) => token.key),
+    );
+    const additions: ReplyRecipientToken[] = [];
+
+    nextSession.replyAllDelta.forEach((token) => {
+      if (nextSession.suppressed.has(token.key) || existingKeys.has(token.key)) {
+        return;
+      }
+
+      additions.push(token);
+      existingKeys.add(token.key);
+      nextSession.managed.set(token.key, {
+        field: "cc",
+        renderedValue: token.renderedValue,
+      });
+    });
+
+    return {
+      mode: targetMode,
+      to,
+      cc: appendReplyRecipientTokens(cc, additions),
+      bcc,
+      session: nextSession,
+    };
+  }
+
+  const removedManagedKeys = new Set<string>();
+  const nextCcTokens = parseReplyRecipientTokens(cc).filter((token) => {
+    const managedRecipient = nextSession.managed.get(token.key);
+
+    if (
+      !managedRecipient ||
+      managedRecipient.field !== "cc" ||
+      managedRecipient.renderedValue !== token.renderedValue ||
+      removedManagedKeys.has(token.key)
+    ) {
+      return true;
+    }
+
+    removedManagedKeys.add(token.key);
+    return false;
+  });
+
+  nextSession.managed.forEach((managedRecipient, key) => {
+    if (managedRecipient.field === "cc" && !removedManagedKeys.has(key)) {
+      nextSession.suppressed.add(key);
+    }
+  });
+  nextSession.managed.clear();
+
+  return {
+    mode: targetMode,
+    to,
+    cc: nextCcTokens.map((token) => token.renderedValue).join(", "),
+    bcc,
+    session: nextSession,
+  };
+}
+
+function reconcileReplyModeSessionRecipientEdit(
+  session: ReplyModeSession,
+  {
+    field,
+    previousValue,
+    nextValue,
+  }: {
+    field: ComposeRecipientField;
+    previousValue: string;
+    nextValue: string;
+  },
+) {
+  const nextSession = cloneReplyModeSession(session);
+
+  if (previousValue === nextValue) {
+    return nextSession;
+  }
+
+  const nextTokens = parseReplyRecipientTokens(nextValue);
+  nextSession.managed.forEach((managedRecipient, key) => {
+    if (managedRecipient.field !== field) {
+      return;
+    }
+
+    const matchingToken = nextTokens.find((token) => token.key === key);
+
+    if (
+      !matchingToken ||
+      matchingToken.renderedValue !== managedRecipient.renderedValue
+    ) {
+      nextSession.managed.delete(key);
+      nextSession.suppressed.add(key);
+    }
+  });
+
+  return nextSession;
+}
+
 function normalizeSenderLearningKey(value: string) {
   const normalizedValue = value.trim().toLowerCase();
   const emailMatch = normalizedValue.match(/([a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,})/i);
@@ -14473,6 +14756,7 @@ function MailboxView({
   const [composeMode, setComposeMode] = useState<ComposeMode>("new");
   const [composeSourceMessage, setComposeSourceMessage] = useState<MailMessage | null>(null);
   const [composeAttachments, setComposeAttachments] = useState<MailAttachment[]>([]);
+  const replyModeSessionRef = useRef<ReplyModeSession | null>(null);
   const [composeSendError, setComposeSendError] = useState<string | null>(null);
   const [isSendingCompose, setIsSendingCompose] = useState(false);
   // Plain-text body typed by the user in the mobile compose overlay.
@@ -14483,6 +14767,7 @@ function MailboxView({
   const composeToInputRef = useRef<HTMLInputElement | null>(null);
   const composeBodyInputRef = useRef<HTMLDivElement | null>(null);
   const composeAttachmentInputRef = useRef<HTMLInputElement | null>(null);
+  const pendingComposeInitialFocusRef = useRef<"to" | "body" | null>(null);
   const [isEditingMailboxTitle, setIsEditingMailboxTitle] = useState(false);
   const [mailboxTitleDraft, setMailboxTitleDraft] = useState(mailbox.title);
   const mailboxTitleInputRef = useRef<HTMLInputElement | null>(null);
@@ -14693,6 +14978,8 @@ function MailboxView({
     setComposeMode("new");
     setComposeSourceMessage(null);
     setComposeAttachments([]);
+    replyModeSessionRef.current = null;
+    pendingComposeInitialFocusRef.current = null;
     setComposeSendError(null);
     setIsSendingCompose(false);
   };
@@ -14747,6 +15034,23 @@ function MailboxView({
     setComposeBcc(value);
   };
 
+  const handleComposeRecipientChange = (
+    field: ComposeRecipientField,
+    value: string,
+  ) => {
+    const currentValue = getComposeRecipientValue(field);
+
+    if (replyModeSessionRef.current) {
+      replyModeSessionRef.current = reconcileReplyModeSessionRecipientEdit(
+        replyModeSessionRef.current,
+        { field, previousValue: currentValue, nextValue: value },
+      );
+    }
+
+    setComposeRecipientValue(field, value);
+    setActiveRecipientSuggestionField(field);
+  };
+
   const getComposeRecipientQuery = (value: string) => {
     const segments = value.split(/[,;]+/);
     return normalizeRememberedRecipient(segments[segments.length - 1] ?? "");
@@ -14778,11 +15082,11 @@ function MailboxView({
     const lastSeparatorIndex = Math.max(lastCommaIndex, lastSemicolonIndex);
 
     if (lastSeparatorIndex === -1) {
-      setComposeRecipientValue(field, recipient);
+      handleComposeRecipientChange(field, recipient);
     } else {
       const prefix = currentValue.slice(0, lastSeparatorIndex + 1);
       const spacer = /\s$/.test(prefix) ? "" : " ";
-      setComposeRecipientValue(field, `${prefix}${spacer}${recipient}`);
+      handleComposeRecipientChange(field, `${prefix}${spacer}${recipient}`);
     }
 
     setActiveRecipientSuggestionField(null);
@@ -15016,6 +15320,7 @@ function MailboxView({
 
   const openCompose = () => {
     resetComposeState();
+    pendingComposeInitialFocusRef.current = "to";
     const nextMailboxId = mailbox.id;
     const nextMailboxSignature = normalizeInboxSignatureSettings(
       inboxSignatures[nextMailboxId],
@@ -15203,69 +15508,29 @@ function MailboxView({
             )
         : message;
     const sourceMailboxId = currentMessageLocationById[effectiveMessage.id]?.mailboxId ?? mailbox.id;
-    const originalSender = effectiveMessage.from.trim();
-    const originalToRecipients = effectiveMessage.to
-      .split(",")
-      .map((value: string) => value.trim())
-      .filter(Boolean);
-    const originalCcRecipients = (effectiveMessage.cc ?? "")
-      .split(",")
-      .map((value: string) => value.trim())
-      .filter(Boolean);
-
-    // Build a normalised set of all own addresses across every connected mailbox.
-    // Used to detect self-authored (Sent) messages and to scrub own addresses from
-    // reply recipient lists regardless of which mailbox is currently active.
-    const ownAddressSet = new Set<string>(
-      orderedMailboxes.map((mb) => normalizeSenderLearningKey(mb.email)),
-    );
-    const senderIsOwn = ownAddressSet.has(normalizeSenderLearningKey(originalSender));
-
-    // When the original message was sent by the user (Sent / self-authored),
-    // replying to `from` would loop back to the user's own address.  Address
-    // the reply to the original To recipients instead, filtering out any own
-    // addresses in case the user sent to themselves.
-    const replyToAddresses: string[] = senderIsOwn
-      ? originalToRecipients.filter((r) => !ownAddressSet.has(normalizeSenderLearningKey(r)))
-      : [originalSender];
-
-    const replyAllCcRecipients: string[] = [];
-
-    if (mode === "reply_all") {
-      // Track which addresses are already going in the To field so we can
-      // exclude them from Cc (avoids duplication when replying to a sent message
-      // where all original To recipients become the new To).
-      const replyToNormalized = new Set(replyToAddresses.map(normalizeSenderLearningKey));
-
-      const originalRecipientsExcludingOwn = [
-        ...originalToRecipients,
-        ...originalCcRecipients,
-      ].filter((recipient) => !ownAddressSet.has(normalizeSenderLearningKey(recipient)));
-
-      if (originalRecipientsExcludingOwn.length > 1) {
-        [...originalToRecipients, ...originalCcRecipients].forEach((recipient) => {
-          const normalizedRecipient = normalizeSenderLearningKey(recipient);
-
-          if (
-            ownAddressSet.has(normalizedRecipient) ||
-            replyToNormalized.has(normalizedRecipient) ||
-            replyAllCcRecipients.some(
-              (existingRecipient) =>
-                normalizeSenderLearningKey(existingRecipient) === normalizedRecipient,
-            )
-          ) {
-            return;
-          }
-
-          replyAllCcRecipients.push(recipient);
-        });
-      }
-
-    }
+    const replyRecipientPlan =
+      mode === "reply" || mode === "reply_all"
+        ? deriveReplyRecipientPlan({
+            originalSender: effectiveMessage.from,
+            originalTo: effectiveMessage.to,
+            originalCc: effectiveMessage.cc ?? "",
+            ownAddresses: orderedMailboxes.map((orderedMailbox) => orderedMailbox.email),
+          })
+        : null;
 
     closeReadingLearningMenu();
     setDetailActionsMenuState(null);
     resetComposeState();
+    pendingComposeInitialFocusRef.current =
+      mode === "reply" || mode === "reply_all" ? "body" : "to";
+    const initialReplyModeState = replyRecipientPlan
+      ? createReplyModeSession({
+          sourceMessageId: effectiveMessage.id,
+          plan: replyRecipientPlan,
+          initialMode: mode as "reply" | "reply_all",
+        })
+      : null;
+    replyModeSessionRef.current = initialReplyModeState?.session ?? null;
     setIsCloseModalOpen(false);
     setIsFullMessageOpen(composePlan.isFullMessageOpen);
     setComposePresentation(composePlan.composePresentation);
@@ -15280,8 +15545,8 @@ function MailboxView({
         : null;
     setComposeMode(composePlan.mode);
     setComposeSourceMessage(effectiveMessage);
-    setComposeTo(mode === "forward" ? "" : replyToAddresses.join(", "));
-    setComposeCc(mode === "reply_all" ? replyAllCcRecipients.join(", ") : "");
+    setComposeTo(initialReplyModeState?.to ?? "");
+    setComposeCc(initialReplyModeState?.cc ?? "");
     setComposeSubject(
       mode === "reply" || mode === "reply_all"
         ? effectiveMessage.subject.startsWith("Re:")
@@ -15319,6 +15584,36 @@ function MailboxView({
         : [],
     );
     setIsComposeOpen(composePlan.isComposeOpen);
+  };
+
+  const handleReplyModeSwitch = (targetMode: "reply" | "reply_all") => {
+    const replyModeSession = replyModeSessionRef.current;
+
+    if (
+      !isComposeOpen ||
+      composePresentation !== "modal" ||
+      (composeMode !== "reply" && composeMode !== "reply_all") ||
+      composeMode === targetMode ||
+      !composeSourceMessage ||
+      !replyModeSession ||
+      replyModeSession.sourceMessageId !== composeSourceMessage.id
+    ) {
+      return;
+    }
+
+    const transition = switchReplyRecipientMode({
+      targetMode,
+      to: composeTo,
+      cc: composeCc,
+      bcc: composeBcc,
+      session: replyModeSession,
+    });
+
+    replyModeSessionRef.current = transition.session;
+    if (transition.cc !== composeCc) {
+      setComposeCc(transition.cc);
+    }
+    setComposeMode(transition.mode);
   };
 
   useEffect(() => {
@@ -15405,12 +15700,15 @@ function MailboxView({
   }, [aiSuggestionsEnabled]);
 
   useEffect(() => {
-    if (!isComposeOpen) {
+    const initialFocusTarget = pendingComposeInitialFocusRef.current;
+
+    if (!isComposeOpen || !initialFocusTarget) {
       return;
     }
+    pendingComposeInitialFocusRef.current = null;
 
     requestAnimationFrame(() => {
-      if (composeMode === "new" || composeMode === "forward") {
+      if (initialFocusTarget === "to") {
         composeToInputRef.current?.focus();
         return;
       }
@@ -23687,11 +23985,9 @@ function MailboxView({
         {(() => {
           const desktopComposeWindowTitle =
             composePresentation === "modal"
-              ? composeMode === "reply"
+              ? composeMode === "reply" || composeMode === "reply_all"
                 ? "Reply"
-                : composeMode === "reply_all"
-                  ? "Reply All"
-                  : composeMode === "forward"
+                : composeMode === "forward"
                     ? "Forward"
                     : "New Message"
               : "New Message";
@@ -23736,8 +24032,7 @@ function MailboxView({
                       ref={composeToInputRef}
                       value={composeTo}
                       onChange={(event) => {
-                        setComposeTo(event.target.value);
-                        setActiveRecipientSuggestionField("to");
+                        handleComposeRecipientChange("to", event.target.value);
                       }}
                       onFocus={() => setActiveRecipientSuggestionField("to")}
                       onBlur={handleComposeRecipientBlur}
@@ -23759,8 +24054,7 @@ function MailboxView({
                     <input
                       value={composeCc}
                       onChange={(event) => {
-                        setComposeCc(event.target.value);
-                        setActiveRecipientSuggestionField("cc");
+                        handleComposeRecipientChange("cc", event.target.value);
                       }}
                       onFocus={() => setActiveRecipientSuggestionField("cc")}
                       onBlur={handleComposeRecipientBlur}
@@ -23783,8 +24077,7 @@ function MailboxView({
                       <input
                         value={composeBcc}
                         onChange={(event) => {
-                          setComposeBcc(event.target.value);
-                          setActiveRecipientSuggestionField("bcc");
+                          handleComposeRecipientChange("bcc", event.target.value);
                         }}
                         onFocus={() => setActiveRecipientSuggestionField("bcc")}
                         onBlur={handleComposeRecipientBlur}
@@ -23974,6 +24267,41 @@ function MailboxView({
 
           const desktopComposeToolbarActions = (
             <div className="flex min-w-0 items-center gap-1.5">
+              {composePresentation === "modal" &&
+              (composeMode === "reply" || composeMode === "reply_all") ? (
+                <div
+                  role="group"
+                  aria-label="Reply mode"
+                  className="flex h-8 flex-none items-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] p-0.5"
+                >
+                  <button
+                    type="button"
+                    aria-pressed={composeMode === "reply"}
+                    onClick={() => handleReplyModeSwitch("reply")}
+                    className={`inline-flex h-7 flex-none items-center justify-center gap-1 rounded-full px-2 text-[0.64rem] font-medium uppercase tracking-[0.08em] transition-[background-color,color,box-shadow] duration-150 focus-visible:outline-none ${
+                      composeMode === "reply"
+                        ? "bg-[var(--workspace-card)] text-[var(--workspace-text)] shadow-[0_1px_4px_rgba(31,42,36,0.12)]"
+                        : "text-[var(--workspace-text-faint)] hover:text-[var(--workspace-text-soft)]"
+                    }`}
+                  >
+                    <DesktopMessageActionIcon name="reply" />
+                    <span>Reply</span>
+                  </button>
+                  <button
+                    type="button"
+                    aria-pressed={composeMode === "reply_all"}
+                    onClick={() => handleReplyModeSwitch("reply_all")}
+                    className={`inline-flex h-7 flex-none items-center justify-center gap-1 rounded-full px-2 text-[0.64rem] font-medium uppercase tracking-[0.08em] transition-[background-color,color,box-shadow] duration-150 focus-visible:outline-none ${
+                      composeMode === "reply_all"
+                        ? "bg-[var(--workspace-card)] text-[var(--workspace-text)] shadow-[0_1px_4px_rgba(31,42,36,0.12)]"
+                        : "text-[var(--workspace-text-faint)] hover:text-[var(--workspace-text-soft)]"
+                    }`}
+                  >
+                    <DesktopMessageActionIcon name="reply-all" />
+                    <span>Reply All</span>
+                  </button>
+                </div>
+              ) : null}
               <button
                 type="button"
                 onClick={openComposeAttachmentPicker}

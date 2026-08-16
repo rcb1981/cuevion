@@ -580,6 +580,21 @@ recordCorrectionExpectation("modal compose toolbar actions", () => {
     /ref=\{composeModalCloseButtonRef\}[\s\S]{0,220}aria-label="Close compose"[\s\S]{0,220}onClick=\{\(\) => setIsCloseModalOpen\(true\)\}[\s\S]{0,900}<DesktopMessageActionIcon name="close"/,
     "fixed Close must retain the established ref and confirmation handler",
   );
+  assert.match(
+    toolbarActionsSource,
+    /composePresentation === "modal"[\s\S]{0,180}composeMode === "reply"[\s\S]{0,120}composeMode === "reply_all"[\s\S]{0,500}role="group"[\s\S]{0,120}aria-label="Reply mode"/,
+    "modal Reply and Reply All must always expose one stable segmented mode group",
+  );
+  assert.match(
+    toolbarActionsSource,
+    /aria-pressed=\{composeMode === "reply"\}[\s\S]{0,1000}<DesktopMessageActionIcon name="reply"[\s\S]{0,120}Reply[\s\S]{0,1200}aria-pressed=\{composeMode === "reply_all"\}[\s\S]{0,1000}<DesktopMessageActionIcon name="reply-all"[\s\S]{0,120}Reply All/,
+    "both compact mode buttons must expose icon, label, and semantic active state",
+  );
+  assert.doesNotMatch(
+    toolbarActionsSource,
+    /replyAllDelta\.length|visibleComposeAttachmentCount|composeCc\s*&&/,
+    "mode-control visibility must not depend on recipient or attachment state",
+  );
 });
 
 recordCorrectionExpectation("modal compose content and workspace boundary", () => {
@@ -627,10 +642,39 @@ recordCorrectionExpectation("compose title contract", () => {
     workspaceShellSource.indexOf("const desktopComposeContent ="),
   );
 
-  assert.match(titleSource, /composeMode === "reply"[\s\S]{0,80}\? "Reply"/);
-  assert.match(titleSource, /composeMode === "reply_all"[\s\S]{0,100}\? "Reply All"/);
+  assert.match(
+    titleSource,
+    /composeMode === "reply" \|\| composeMode === "reply_all"[\s\S]{0,80}\? "Reply"/,
+    "both Reply recipient modes must retain the stable Reply window title",
+  );
+  assert.doesNotMatch(titleSource, /\? "Reply All"/);
   assert.match(titleSource, /composeMode === "forward"[\s\S]{0,100}\? "Forward"/);
   assert.match(titleSource, /: "New Message"/);
+});
+
+recordCorrectionExpectation("reply mode initial-focus guard", () => {
+  const focusSource = workspaceShellSource.slice(
+    workspaceShellSource.indexOf("const pendingComposeInitialFocusRef"),
+    workspaceShellSource.indexOf("const syncComposeBodyValue ="),
+  );
+  const switchHandlerSource = workspaceShellSource.slice(
+    workspaceShellSource.indexOf("const handleReplyModeSwitch ="),
+    workspaceShellSource.indexOf(
+      "useEffect(() =>",
+      workspaceShellSource.indexOf("const handleReplyModeSwitch ="),
+    ),
+  );
+
+  assert.match(
+    focusSource,
+    /pendingComposeInitialFocusRef[\s\S]*initialFocusTarget[\s\S]*pendingComposeInitialFocusRef\.current = null/,
+    "initial compose focus must be consumed once per newly opened session",
+  );
+  assert.doesNotMatch(
+    switchHandlerSource,
+    /pendingComposeInitialFocusRef|\.focus\(|setComposeBody|setComposeSubject|setComposeAttachments/,
+    "mode switching must not reinitialize focus or draft state",
+  );
 });
 
 recordCorrectionExpectation("modal compose close confirmation layer", () => {

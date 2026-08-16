@@ -287,107 +287,17 @@ const openComposeSource = workspaceShellSource.slice(
   workspaceShellSource.indexOf("const openComposeFromMessage ="),
   workspaceShellSource.indexOf("useEffect(() =>", workspaceShellSource.indexOf("const openComposeFromMessage =")),
 );
-const normalizeSenderLearningKeySource = workspaceShellSource.slice(
+const replyRecipientPlanSource = workspaceShellSource.slice(
+  workspaceShellSource.indexOf("type ReplyRecipientToken ="),
   workspaceShellSource.indexOf("function normalizeSenderLearningKey("),
-  workspaceShellSource.indexOf("function normalizeSenderLearningDomain("),
 );
-const recipientOwnershipSource = openComposeSource.slice(
-  openComposeSource.indexOf("const ownAddressSet ="),
-  openComposeSource.indexOf("const replyAllCcRecipients"),
+assert.match(replyRecipientPlanSource, /function normalizeReplyRecipientKey/);
+assert.match(replyRecipientPlanSource, /function deriveReplyRecipientPlan/);
+assert.match(
+  openComposeSource,
+  /deriveReplyRecipientPlan\([\s\S]*ownAddresses: orderedMailboxes\.map/,
+  "Reply ownership must continue using connected mailbox identities only",
 );
-assert.ok(
-  normalizeSenderLearningKeySource.length > 0 && recipientOwnershipSource.length > 0,
-  "Reply recipient ownership source markers must remain present",
-);
-const compiledRecipientOwnership = transform(
-  `${normalizeSenderLearningKeySource}
-  function resolveReplyRecipients(options: {
-    currentUserEmail: string;
-    connectedMailboxEmails: string[];
-    originalSender: string;
-    originalToRecipients: string[];
-  }) {
-    const {
-      currentUserEmail,
-      connectedMailboxEmails,
-      originalSender,
-      originalToRecipients,
-    } = options;
-    const orderedMailboxes = connectedMailboxEmails.map((email) => ({ email }));
-    ${recipientOwnershipSource}
-    return { ownAddressSet: [...ownAddressSet], replyToAddresses, senderIsOwn };
-  }`,
-  { transforms: ["typescript"] },
-).code;
-const loadRecipientOwnershipHarness = new Function(
-  `${compiledRecipientOwnership}\nreturn resolveReplyRecipients;`,
-) as () => (options: {
-  currentUserEmail: string;
-  connectedMailboxEmails: string[];
-  originalSender: string;
-  originalToRecipients: string[];
-}) => {
-  ownAddressSet: string[];
-  replyToAddresses: string[];
-  senderIsOwn: boolean;
-};
-const resolveReplyRecipients = loadRecipientOwnershipHarness();
-
-assert.deepEqual(
-  resolveReplyRecipients({
-    currentUserEmail: "rutger@hysteriarecs.com",
-    connectedMailboxEmails: ["carltricksmusic@gmail.com"],
-    originalSender: "Rutger Bäumer <rutger@hysteriarecs.com>",
-    originalToRecipients: ["carltricksmusic@gmail.com"],
-  }).replyToAddresses,
-  ["Rutger Bäumer <rutger@hysteriarecs.com>"],
-  "an authenticated-user-only address must remain a valid Reply target",
-);
-assert.deepEqual(
-  resolveReplyRecipients({
-    currentUserEmail: "rutger@hysteriarecs.com",
-    connectedMailboxEmails: ["carltricksmusic@gmail.com"],
-    originalSender: "external@example.com",
-    originalToRecipients: ["carltricksmusic@gmail.com"],
-  }).replyToAddresses,
-  ["external@example.com"],
-  "a normal external sender must remain the Reply target",
-);
-assert.deepEqual(
-  resolveReplyRecipients({
-    currentUserEmail: "rutger@hysteriarecs.com",
-    connectedMailboxEmails: ["carltricksmusic@gmail.com"],
-    originalSender: "carltricksmusic@gmail.com",
-    originalToRecipients: ["carltricksmusic@gmail.com"],
-  }).replyToAddresses,
-  [],
-  "connected-mailbox self-to-self Reply must retain its documented empty result",
-);
-assert.deepEqual(
-  resolveReplyRecipients({
-    currentUserEmail: "login@example.com",
-    connectedMailboxEmails: ["mailbox-a@example.com", "mailbox-b@example.com"],
-    originalSender: "mailbox-a@example.com",
-    originalToRecipients: ["mailbox-b@example.com"],
-  }).replyToAddresses,
-  [],
-  "connected mailbox A to B must retain the existing multi-mailbox policy",
-);
-assert.deepEqual(
-  resolveReplyRecipients({
-    currentUserEmail: "rutger@hysteriarecs.com",
-    connectedMailboxEmails: [
-      "rutger@hysteriarecs.com",
-      "carltricksmusic@gmail.com",
-    ],
-    originalSender: "rutger@hysteriarecs.com",
-    originalToRecipients: ["carltricksmusic@gmail.com"],
-  }).replyToAddresses,
-  [],
-  "a login email that is also connected must remain an owned mailbox address",
-);
-assert.match(openComposeSource, /const ownAddressSet = new Set<string>/);
-assert.match(openComposeSource, /const senderIsOwn = ownAddressSet\.has/);
 assert.match(
   openComposeSource,
   /selectLatestAuthoritativeConversationMessage\(/,
@@ -414,14 +324,10 @@ assert.match(
   /selectedSourceFolder === "Trash" \|\| selectedSourceFolder === "Spam"/,
   "explicit Trash and Spam Reply behavior must remain folder-specific",
 );
-assert.match(openComposeSource, /if \(mode === "reply_all"\)/);
-assert.match(openComposeSource, /ownAddressSet\.has\(normalizedRecipient\)/);
-assert.match(openComposeSource, /replyToNormalized\.has\(normalizedRecipient\)/);
-assert.match(openComposeSource, /replyAllCcRecipients\.some/);
 assert.match(
   openComposeSource,
-  /setComposeCc\(mode === "reply_all" \? replyAllCcRecipients\.join\(", "\) : ""\)/,
-  "Reply All must retain own-address exclusion and recipient de-duplication",
+  /createReplyModeSession\([\s\S]*setComposeSourceMessage\(effectiveMessage\)[\s\S]*setComposeTo\(initialReplyModeState\?\.to \?\? ""\)[\s\S]*setComposeCc\(initialReplyModeState\?\.cc \?\? ""\)/,
+  "Reply and Reply All must initialize recipients from one immutable session plan",
 );
 
 const signatureSource = workspaceShellSource.slice(
@@ -708,4 +614,345 @@ assert.match(
   workspaceShellSource,
   /\[&_\[data-compose-quote='true'\]_\*\]:text-\[inherit\]/,
   "quoted history must remain Cuevion-colored in Light and Dark modes",
+);
+
+const replyModeContractFailures: string[] = [];
+const recordReplyModeExpectation = (name: string, expectation: () => void) => {
+  try {
+    expectation();
+  } catch (error) {
+    replyModeContractFailures.push(
+      `${name}: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+};
+
+const replyModeHelpersStart = workspaceShellSource.indexOf(
+  "type ReplyRecipientToken =",
+);
+const replyModeHelpersEnd = workspaceShellSource.indexOf(
+  "function normalizeSenderLearningKey(",
+  replyModeHelpersStart,
+);
+let replyModeHarness:
+  | {
+      deriveReplyRecipientPlan: (options: any) => any;
+      createReplyModeSession: (options: any) => any;
+      switchReplyRecipientMode: (options: any) => any;
+      reconcileReplyModeSessionRecipientEdit: (session: any, edit: any) => any;
+    }
+  | null = null;
+
+if (replyModeHelpersStart >= 0 && replyModeHelpersEnd > replyModeHelpersStart) {
+  const compiledReplyModeHelpers = transform(
+    workspaceShellSource.slice(replyModeHelpersStart, replyModeHelpersEnd),
+    { transforms: ["typescript"] },
+  ).code;
+  replyModeHarness = new Function(
+    `${compiledReplyModeHelpers}\nreturn { deriveReplyRecipientPlan, createReplyModeSession, switchReplyRecipientMode, reconcileReplyModeSessionRecipientEdit };`,
+  )() as NonNullable<typeof replyModeHarness>;
+}
+
+const requireReplyModeHarness = () => {
+  assert.ok(
+    replyModeHarness,
+    "reply recipient planning and provenance helpers must exist",
+  );
+  return replyModeHarness;
+};
+const derivePlan = (overrides: Record<string, unknown> = {}) =>
+  requireReplyModeHarness().deriveReplyRecipientPlan({
+    originalSender: "Alice <alice@example.com>",
+    originalTo: "owner@example.com",
+    originalCc: "",
+    ownAddresses: ["owner@example.com"],
+    ...overrides,
+  });
+
+recordReplyModeExpectation("one-to-one zero-delta switching", () => {
+  const harness = requireReplyModeHarness();
+  const opened = harness.createReplyModeSession({
+    sourceMessageId: "source-one-to-one",
+    plan: derivePlan(),
+    initialMode: "reply",
+  });
+  assert.equal(opened.to, "Alice <alice@example.com>");
+  assert.equal(opened.cc, "");
+  const replyAll = harness.switchReplyRecipientMode({
+    targetMode: "reply_all",
+    ...opened,
+  });
+  assert.deepEqual(
+    { mode: replyAll.mode, to: replyAll.to, cc: replyAll.cc, bcc: replyAll.bcc },
+    {
+      mode: "reply_all",
+      to: opened.to,
+      cc: opened.cc,
+      bcc: opened.bcc,
+    },
+  );
+  const reply = harness.switchReplyRecipientMode({
+    targetMode: "reply",
+    ...replyAll,
+  });
+  assert.deepEqual(
+    { mode: reply.mode, to: reply.to, cc: reply.cc, bcc: reply.bcc },
+    { mode: "reply", to: opened.to, cc: opened.cc, bcc: opened.bcc },
+  );
+});
+
+recordReplyModeExpectation("single meaningful Reply All delta", () => {
+  const plan = derivePlan({ originalCc: "Carol <carol@example.com>" });
+  assert.deepEqual(
+    plan.replyAllDelta,
+    [{ key: "carol@example.com", renderedValue: "Carol <carol@example.com>" }],
+    "one additional external recipient must be sufficient for Reply All",
+  );
+  const source = workspaceShellSource.slice(
+    workspaceShellSource.indexOf("const openComposeFromMessage ="),
+    workspaceShellSource.indexOf(
+      "useEffect(() =>",
+      workspaceShellSource.indexOf("const openComposeFromMessage ="),
+    ),
+  );
+  assert.doesNotMatch(source, /originalRecipientsExcludingOwn\.length > 1/);
+});
+
+recordReplyModeExpectation("manual Cc and pre-existing recipients survive", () => {
+  const harness = requireReplyModeHarness();
+  const opened = harness.createReplyModeSession({
+    sourceMessageId: "source-manual",
+    plan: derivePlan({ originalCc: "Carol <carol@example.com>" }),
+    initialMode: "reply",
+  });
+  const withManualBefore = { ...opened, cc: "Bob <bob@example.com>" };
+  const replyAll = harness.switchReplyRecipientMode({
+    targetMode: "reply_all",
+    ...withManualBefore,
+  });
+  assert.equal(replyAll.cc, "Bob <bob@example.com>, Carol <carol@example.com>");
+  const editedCc = `${replyAll.cc}, Dana <dana@example.com>`;
+  const editedSession = harness.reconcileReplyModeSessionRecipientEdit(
+    replyAll.session,
+    { field: "cc", previousValue: replyAll.cc, nextValue: editedCc },
+  );
+  const reply = harness.switchReplyRecipientMode({
+    targetMode: "reply",
+    ...replyAll,
+    cc: editedCc,
+    session: editedSession,
+  });
+  assert.equal(reply.cc, "Bob <bob@example.com>, Dana <dana@example.com>");
+});
+
+recordReplyModeExpectation("suppressed automatic recipient stays suppressed", () => {
+  const harness = requireReplyModeHarness();
+  const opened = harness.createReplyModeSession({
+    sourceMessageId: "source-suppressed",
+    plan: derivePlan({ originalCc: "Carol <carol@example.com>" }),
+    initialMode: "reply",
+  });
+  const replyAll = harness.switchReplyRecipientMode({
+    targetMode: "reply_all",
+    ...opened,
+  });
+  const suppressedSession = harness.reconcileReplyModeSessionRecipientEdit(
+    replyAll.session,
+    { field: "cc", previousValue: replyAll.cc, nextValue: "" },
+  );
+  const reply = harness.switchReplyRecipientMode({
+    targetMode: "reply",
+    ...replyAll,
+    cc: "",
+    session: suppressedSession,
+  });
+  const replyAllAgain = harness.switchReplyRecipientMode({
+    targetMode: "reply_all",
+    ...reply,
+  });
+  assert.equal(replyAllAgain.cc, "");
+  assert.equal(replyAllAgain.session.suppressed.has("carol@example.com"), true);
+});
+
+recordReplyModeExpectation("manual move releases automatic ownership", () => {
+  const harness = requireReplyModeHarness();
+  const opened = harness.createReplyModeSession({
+    sourceMessageId: "source-move",
+    plan: derivePlan({ originalCc: "Carol <carol@example.com>" }),
+    initialMode: "reply_all",
+  });
+  const releasedSession = harness.reconcileReplyModeSessionRecipientEdit(
+    opened.session,
+    { field: "cc", previousValue: opened.cc, nextValue: "" },
+  );
+  const manualTo = `${opened.to}, Carol <carol@example.com>`;
+  const reply = harness.switchReplyRecipientMode({
+    targetMode: "reply",
+    ...opened,
+    to: manualTo,
+    cc: "",
+    session: releasedSession,
+  });
+  assert.equal(reply.to, manualTo);
+  assert.equal(reply.cc, "");
+});
+
+recordReplyModeExpectation("initial Reply All provenance", () => {
+  const harness = requireReplyModeHarness();
+  const opened = harness.createReplyModeSession({
+    sourceMessageId: "source-initial-all",
+    plan: derivePlan({ originalCc: "Carol <carol@example.com>" }),
+    initialMode: "reply_all",
+  });
+  assert.equal(opened.cc, "Carol <carol@example.com>");
+  assert.equal(opened.session.managed.has("carol@example.com"), true);
+  const reply = harness.switchReplyRecipientMode({
+    targetMode: "reply",
+    ...opened,
+  });
+  assert.equal(reply.cc, "");
+  const replyAll = harness.switchReplyRecipientMode({
+    targetMode: "reply_all",
+    ...reply,
+  });
+  assert.equal(replyAll.cc, "Carol <carol@example.com>");
+});
+
+recordReplyModeExpectation("owned-address exclusion and normalized dedupe", () => {
+  const harness = requireReplyModeHarness();
+  const replyCases = [
+    {
+      originalSender: "Rutger Bäumer <rutger@hysteriarecs.com>",
+      originalTo: "carltricksmusic@gmail.com",
+      ownAddresses: ["carltricksmusic@gmail.com"],
+      expected: ["Rutger Bäumer <rutger@hysteriarecs.com>"],
+      label: "login-only sender remains external",
+    },
+    {
+      originalSender: "external@example.com",
+      originalTo: "carltricksmusic@gmail.com",
+      ownAddresses: ["carltricksmusic@gmail.com"],
+      expected: ["external@example.com"],
+      label: "external sender remains Reply target",
+    },
+    {
+      originalSender: '"Doe, Alice" <alice@example.com>',
+      originalTo: "carltricksmusic@gmail.com",
+      ownAddresses: ["carltricksmusic@gmail.com"],
+      expected: ['"Doe, Alice" <alice@example.com>'],
+      label: "formatted sender remains intact",
+    },
+    {
+      originalSender: "carltricksmusic@gmail.com",
+      originalTo: "carltricksmusic@gmail.com",
+      ownAddresses: ["carltricksmusic@gmail.com"],
+      expected: [],
+      label: "connected self-to-self remains empty",
+    },
+    {
+      originalSender: "mailbox-a@example.com",
+      originalTo: "mailbox-b@example.com",
+      ownAddresses: ["mailbox-a@example.com", "mailbox-b@example.com"],
+      expected: [],
+      label: "connected mailbox A-to-B remains owned",
+    },
+  ];
+  replyCases.forEach(({ expected, label, ...options }) => {
+    const plan = harness.deriveReplyRecipientPlan({
+      ...options,
+      originalCc: "",
+    });
+    assert.deepEqual(
+      plan.replyTo.map((token: { renderedValue: string }) => token.renderedValue),
+      expected,
+      label,
+    );
+  });
+
+  const ownedPlan = derivePlan({
+    originalTo: "owner@example.com, second-owner@example.com",
+    originalCc: "login-only@example.com",
+    ownAddresses: ["owner@example.com", "second-owner@example.com"],
+  });
+  assert.deepEqual(ownedPlan.replyAllDelta, [
+    { key: "login-only@example.com", renderedValue: "login-only@example.com" },
+  ]);
+
+  const duplicatePlan = derivePlan({
+    originalTo: "owner@example.com, alice@example.com",
+    originalCc:
+      "Alice <ALICE@example.com>, Carol <carol@example.com>, CAROL@example.com",
+  });
+  assert.deepEqual(duplicatePlan.replyAllDelta, [
+    { key: "carol@example.com", renderedValue: "Carol <carol@example.com>" },
+  ]);
+});
+
+recordReplyModeExpectation("Bcc and draft state remain untouched", () => {
+  const harness = requireReplyModeHarness();
+  const attachment = { id: "attachment-1" };
+  const sourceMessage = { id: "source-draft" };
+  const draft = {
+    ...harness.createReplyModeSession({
+      sourceMessageId: sourceMessage.id,
+      plan: derivePlan({ originalCc: "Carol <carol@example.com>" }),
+      initialMode: "reply",
+    }),
+    bcc: "Private <private@example.com>",
+    composeSubject: "Re: Contract",
+    composeBody: '<div>Draft</div><div data-compose-signature="true">Sig</div><div data-compose-quote="true">Quote</div>',
+    editorInnerHtml: "editor-byte-state",
+    composeAttachments: [attachment],
+    composeSignatureSelection: "mailbox-1",
+    composeQuoteExpanded: true,
+    composeSourceMessage: sourceMessage,
+    composeMailboxId: "mailbox-1",
+  };
+  const switched = {
+    ...draft,
+    ...harness.switchReplyRecipientMode({
+      targetMode: "reply_all",
+      to: draft.to,
+      cc: draft.cc,
+      bcc: draft.bcc,
+      session: draft.session,
+    }),
+  };
+  for (const key of [
+    "bcc",
+    "composeSubject",
+    "composeBody",
+    "editorInnerHtml",
+    "composeAttachments",
+    "composeSignatureSelection",
+    "composeQuoteExpanded",
+    "composeSourceMessage",
+    "composeMailboxId",
+  ] as const) {
+    assert.equal(switched[key], draft[key], `${key} must retain identity/value`);
+  }
+  assert.equal(switched.composeAttachments[0], attachment);
+});
+
+recordReplyModeExpectation("local-only switch handler", () => {
+  const handlerSource = workspaceShellSource.slice(
+    workspaceShellSource.indexOf("const handleReplyModeSwitch ="),
+    workspaceShellSource.indexOf(
+      "useEffect(() =>",
+      workspaceShellSource.indexOf("const handleReplyModeSwitch ="),
+    ),
+  );
+  assert.match(handlerSource, /switchReplyRecipientMode\(/);
+  assert.doesNotMatch(
+    handlerSource,
+    /openComposeFromMessage|resetComposeState|sendMessage|sendGmailMessage|fetch|mutate|buildComposeBody|buildComposeQuoteHtml/,
+  );
+});
+
+assert.deepEqual(
+  replyModeContractFailures,
+  [],
+  `Reply mode switch expectations failed:\n${replyModeContractFailures
+    .map((failure) => `- ${failure}`)
+    .join("\n")}`,
 );
