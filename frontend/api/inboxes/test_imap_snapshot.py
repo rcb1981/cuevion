@@ -144,6 +144,11 @@ def preview_for(_message, index, _email, unread, uid, flagged=False):
     }
 
 
+def uid_fetch_response(raw_message: bytes, uid: str = "123"):
+    metadata = f"1 (UID {uid} BODY[] {{{len(raw_message)}}}".encode("ascii")
+    return "OK", [(metadata, raw_message), b")"]
+
+
 class ImapMessageIdentityTests(unittest.TestCase):
     def test_reads_exact_uid_after_safely_quoted_select(self):
         mailbox = RecordingMailbox()
@@ -269,6 +274,622 @@ class ImapMessageIdentityTests(unittest.TestCase):
             uid="123",
             expected_uid_validity="456",
         )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "message_not_found")
+        self.assertEqual(result["error"]["stage"], "message_fetch")
+
+
+class ImapReplySourceTests(unittest.TestCase):
+    def test_reads_only_exact_uid_body_peek_from_readonly_quoted_folder(self):
+        raw_message = (
+            b"Message-ID: <Source-Local@EXAMPLE.COM>\r\n"
+            b"References: <First@EXAMPLE.COM> <second@example.net>\r\n"
+            b"In-Reply-To: <Parent@EXAMPLE.COM>\r\n"
+            b"Subject: Reply source\r\n"
+            b"\r\n"
+            b"Source body.\r\n"
+        )
+        mailbox = RecordingMailbox(
+            fetch_response=uid_fetch_response(raw_message),
+        )
+
+        result = imap_snapshot.read_imap_reply_source(
+            mailbox,
+            folder='Source "A"\\2024',
+            uid="123",
+            expected_uid_validity="456",
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(
+            mailbox.select_readonly_calls,
+            [(r'"Source \"A\"\\2024"', True)],
+        )
+        self.assertEqual(mailbox.response_calls, ["UIDVALIDITY"])
+        self.assertEqual(
+            mailbox.uid_calls,
+            [("FETCH", "123", "(UID BODY.PEEK[])")],
+        )
+        self.assertEqual(mailbox.unsafe_calls, [])
+        self.assertEqual(
+            mailbox.operations,
+            [
+                ("select", r'"Source \"A\"\\2024"'),
+                ("response", "UIDVALIDITY"),
+                ("uid", "FETCH", "123", "(UID BODY.PEEK[])"),
+            ],
+        )
+        self.assertEqual(
+            result["source"],
+            {
+                "providerFolder": 'Source "A"\\2024',
+                "imapUid": "123",
+                "uidValidity": "456",
+                "messageId": "<Source-Local@example.com>",
+                "references": [
+                    "<First@example.com>",
+                    "<second@example.net>",
+                ],
+                "inReplyTo": "<Parent@example.com>",
+            },
+        )
+        self.assertNotIn("Source body", json.dumps(result))
+
+    def test_uidvalidity_mismatch_stops_before_exact_uid_fetch(self):
+        mailbox = RecordingMailbox(uid_validity="457")
+        result = imap_snapshot.read_imap_reply_source(
+            mailbox,
+            folder="INBOX",
+            uid="123",
+            expected_uid_validity="456",
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error"]["code"], "uid_validity_changed")
+        self.assertEqual(result["source"], None)
+        self.assertEqual(mailbox.uid_calls, [])
+
+    def test_noncanonical_selected_uidvalidity_is_unavailable(self):
+        mailbox = RecordingMailbox(uid_validity="0456")
+        result = imap_snapshot.read_imap_reply_source(
+            mailbox,
+            folder="INBOX",
+            uid="123",
+            expected_uid_validity="456",
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(
+            result["error"]["code"],
+            "uid_validity_unavailable",
+        )
+        self.assertEqual(mailbox.uid_calls, [])
+
+    def test_invalid_inputs_stop_before_any_provider_call(self):
+        cases = (
+            {
+                "folder": " INBOX",
+                "uid": "123",
+                "expected_uid_validity": "456",
+                "code": "invalid_folder",
+            },
+            {
+                "folder": "INBOX",
+                "uid": "01",
+                "expected_uid_validity": "456",
+                "code": "invalid_imap_uid",
+            },
+            {
+                "folder": "INBOX",
+                "uid": "1:2",
+                "expected_uid_validity": "456",
+                "code": "invalid_imap_uid",
+            },
+            {
+                "folder": "INBOX",
+                "uid": "123",
+                "expected_uid_validity": "0456",
+                "code": "invalid_uid_validity",
+            },
+        )
+        for case in cases:
+            with self.subTest(case=case):
+                mailbox = RecordingMailbox()
+                result = imap_snapshot.read_imap_reply_source(
+                    mailbox,
+                    folder=case["folder"],
+                    uid=case["uid"],
+                    expected_uid_validity=case["expected_uid_validity"],
+                )
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["error"]["code"], case["code"])
+                self.assertEqual(mailbox.operations, [])
+
+    def test_select_failures_are_safe_and_stop_before_uidvalidity(self):
+        failures = (
+            (
+                RuntimeError("private provider selection detail"),
+                "provider_unavailable",
+            ),
+            (("NO", [b"private provider selection detail"]), "folder_unavailable"),
+            (("OK",), "folder_unavailable"),
+        )
+        for select_response, expected_code in failures:
+            with self.subTest(select_response=select_response):
+                mailbox = RecordingMailbox(select_response=select_response)
+                result = imap_snapshot.read_imap_reply_source(
+                    mailbox,
+                    folder="INBOX",
+                    uid="123",
+                    expected_uid_validity="456",
+                )
+                self.assertFalse(result["ok"])
+                self.assertEqual(
+                    result["error"]["code"],
+                    expected_code,
+                )
+                self.assertEqual(mailbox.response_calls, [])
+                self.assertEqual(mailbox.uid_calls, [])
+                self.assertNotIn(
+                    "private provider selection detail",
+                    json.dumps(result),
+                )
+
+    def test_fetch_failures_are_safe_and_identity_unconfirmed(self):
+        secret_body = b"Message-ID: <secret@example.com>\r\n\r\nSECRET BODY"
+        failures = (
+            RuntimeError("private provider fetch detail"),
+            ("NO", [b"private provider fetch detail"]),
+            uid_fetch_response(secret_body, uid="124"),
+            (
+                "OK",
+                [
+                    (
+                        b"1 (UID 123 FLAGS () BODY[] {1}",
+                        b"x",
+                    ),
+                    b")",
+                ],
+            ),
+        )
+        for fetch_response in failures:
+            with self.subTest(fetch_response=repr(fetch_response)[:100]):
+                mailbox = RecordingMailbox(fetch_response=fetch_response)
+                result = imap_snapshot.read_imap_reply_source(
+                    mailbox,
+                    folder="INBOX",
+                    uid="123",
+                    expected_uid_validity="456",
+                )
+                self.assertFalse(result["ok"])
+                self.assertEqual(
+                    result["error"]["code"],
+                    "message_identity_unconfirmed",
+                )
+                serialized = json.dumps(result)
+                self.assertNotIn("private provider fetch detail", serialized)
+                self.assertNotIn("SECRET BODY", serialized)
+
+    def test_missing_malformed_or_ambiguous_message_id_is_unthreadable(self):
+        raw_messages = (
+            b"Subject: Missing\r\n\r\nbody",
+            b"Message-ID: not a message id\r\n\r\nbody",
+            b"Message-ID: <one@example.com> trailing garbage\r\n\r\nbody",
+            b"Message-ID: <one@example.com> <two@example.com>\r\n\r\nbody",
+            (
+                b"Message-ID: <one@example.com>\r\n"
+                b"Message-ID: <two@example.com>\r\n\r\nbody"
+            ),
+            (
+                b"Message-ID: <one@example.com>\r\n"
+                b"Message-ID: malformed\r\n\r\nbody"
+            ),
+        )
+        for raw_message in raw_messages:
+            with self.subTest(raw_message=raw_message):
+                mailbox = RecordingMailbox(
+                    fetch_response=uid_fetch_response(raw_message),
+                )
+                result = imap_snapshot.read_imap_reply_source(
+                    mailbox,
+                    folder="INBOX",
+                    uid="123",
+                    expected_uid_validity="456",
+                )
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["status"], "error")
+                self.assertEqual(result["source"], None)
+                self.assertEqual(
+                    result["error"]["code"],
+                    "imap_reply_source_unthreadable",
+                )
+
+    def test_identical_duplicate_message_id_headers_are_unthreadable(self):
+        raw_message = (
+            b"Message-ID: <same@example.com>\r\n"
+            b"Message-ID: <same@example.com>\r\n"
+            b"\r\n"
+            b"body"
+        )
+        result = imap_snapshot.read_imap_reply_source(
+            RecordingMailbox(
+                fetch_response=uid_fetch_response(raw_message),
+            ),
+            folder="INBOX",
+            uid="123",
+            expected_uid_validity="456",
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["source"], None)
+        self.assertEqual(
+            result["error"]["code"],
+            "imap_reply_source_unthreadable",
+        )
+
+    def test_folded_bcc_and_cc_token_injection_drops_ancestry(self):
+        raw_message = (
+            b"Message-ID: <source@EXAMPLE.COM>\r\n"
+            b"References: <kept@EXAMPLE.COM>\r\n"
+            b"\tBcc: <victim@example.com>\r\n"
+            b"In-Reply-To: <parent@EXAMPLE.COM>\r\n"
+            b"\tCc: <victim@example.com>\r\n"
+            b"\r\n"
+            b"body"
+        )
+        mailbox = RecordingMailbox(
+            fetch_response=uid_fetch_response(raw_message),
+        )
+        result = imap_snapshot.read_imap_reply_source(
+            mailbox,
+            folder="INBOX",
+            uid="123",
+            expected_uid_validity="456",
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["source"]["messageId"], "<source@example.com>")
+        self.assertEqual(result["source"]["references"], [])
+        self.assertIsNone(result["source"]["inReplyTo"])
+        self.assertNotIn("victim@example.com", json.dumps(result))
+
+    def test_comment_hidden_tokens_are_ignored_without_hiding_real_ancestry(self):
+        raw_message = (
+            b"Message-ID: <source@example.com>\r\n"
+            b"References: (Bcc: Victim <victim@example.com>) "
+            b"<kept@example.com>\r\n"
+            b"In-Reply-To: (Cc: Victim <victim@example.com>) "
+            b"<parent@example.com>\r\n"
+            b"\r\n"
+            b"body"
+        )
+        result = imap_snapshot.read_imap_reply_source(
+            RecordingMailbox(
+                fetch_response=uid_fetch_response(raw_message),
+            ),
+            folder="INBOX",
+            uid="123",
+            expected_uid_validity="456",
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            result["source"]["references"],
+            ["<kept@example.com>"],
+        )
+        self.assertEqual(
+            result["source"]["inReplyTo"],
+            "<parent@example.com>",
+        )
+        self.assertNotIn("victim@example.com", json.dumps(result))
+
+    def test_cfws_quoted_local_and_domain_literal_message_ids_remain_valid(self):
+        raw_message_ids = (
+            b"(source comment) <source@example.com> (tail comment)",
+            b'<"quoted local"@example.com>',
+            b"<source@[IPv6:2001:db8::1]>",
+        )
+        for raw_message_id in raw_message_ids:
+            with self.subTest(raw_message_id=raw_message_id):
+                raw_message = (
+                    b"Message-ID: " + raw_message_id + b"\r\n\r\nbody"
+                )
+                result = imap_snapshot.read_imap_reply_source(
+                    RecordingMailbox(
+                        fetch_response=uid_fetch_response(raw_message),
+                    ),
+                    folder="INBOX",
+                    uid="123",
+                    expected_uid_validity="456",
+                )
+
+                self.assertTrue(result["ok"])
+                self.assertTrue(result["source"]["messageId"].startswith("<"))
+                self.assertTrue(result["source"]["messageId"].endswith(">"))
+
+    def test_quoted_greater_than_and_empty_quoted_local_remain_valid(self):
+        cases = (
+            (
+                b'<"a>b"@EXAMPLE.COM>',
+                '<"a>b"@example.com>',
+            ),
+            (
+                b'<"a\\>b"@EXAMPLE.COM>',
+                '<"a\\>b"@example.com>',
+            ),
+            (
+                b'<""@EXAMPLE.COM>',
+                '<""@example.com>',
+            ),
+            (
+                b"<source@[route>segment@host]>",
+                "<source@[route>segment@host]>",
+            ),
+        )
+        for raw_message_id, expected_message_id in cases:
+            with self.subTest(raw_message_id=raw_message_id):
+                raw_message = (
+                    b"Message-ID: " + raw_message_id + b"\r\n\r\nbody"
+                )
+                result = imap_snapshot.read_imap_reply_source(
+                    RecordingMailbox(
+                        fetch_response=uid_fetch_response(raw_message),
+                    ),
+                    folder="INBOX",
+                    uid="123",
+                    expected_uid_validity="456",
+                )
+
+                self.assertTrue(result["ok"])
+                self.assertEqual(
+                    result["source"]["messageId"],
+                    expected_message_id,
+                )
+
+    def test_compat_message_id_rejects_malformed_or_appended_content(self):
+        raw_messages = (
+            b'Message-ID: <"a>b@example.com>\r\n\r\nbody',
+            b'Message-ID: <"a>b"@example.com> trailing\r\n\r\nbody',
+            (
+                b'Message-ID: <"a>b"@example.com>\r\n'
+                b"\tBcc: <victim@example.com>\r\n\r\nbody"
+            ),
+            b'Message-ID: <"a\r\n\t>b"@example.com>\r\n\r\nbody',
+            b"Message-ID: <source@[route>segment@host>\r\n\r\nbody",
+        )
+        for raw_message in raw_messages:
+            with self.subTest(raw_message=raw_message):
+                result = imap_snapshot.read_imap_reply_source(
+                    RecordingMailbox(
+                        fetch_response=uid_fetch_response(raw_message),
+                    ),
+                    folder="INBOX",
+                    uid="123",
+                    expected_uid_validity="456",
+                )
+
+                self.assertFalse(result["ok"])
+                self.assertEqual(
+                    result["error"]["code"],
+                    "imap_reply_source_unthreadable",
+                )
+                self.assertNotIn("victim@example.com", json.dumps(result))
+
+    def test_source_rejects_folding_inside_quoted_or_literal_message_id(self):
+        raw_messages = (
+            (
+                b'Message-ID: <"a\r\n'
+                b' Bcc: victim@example.net"@example.com>\r\n'
+                b"\r\nbody"
+            ),
+            (
+                b"Message-ID: <source@[route\r\n"
+                b" segment@host]>\r\n"
+                b"\r\nbody"
+            ),
+        )
+        for raw_message in raw_messages:
+            with self.subTest(raw_message=raw_message):
+                result = imap_snapshot.read_imap_reply_source(
+                    RecordingMailbox(
+                        fetch_response=uid_fetch_response(raw_message),
+                    ),
+                    folder="INBOX",
+                    uid="123",
+                    expected_uid_validity="456",
+                )
+
+                self.assertFalse(result["ok"])
+                self.assertEqual(
+                    result["error"]["code"],
+                    "imap_reply_source_unthreadable",
+                )
+                self.assertNotIn("victim@example.net", json.dumps(result))
+
+    def test_quoted_and_domain_literal_greater_than_ancestry_is_preserved(self):
+        cases = (
+            (
+                (
+                    b"Message-ID: <source@example.com>\r\n"
+                    b'References: <"older>one"@EXAMPLE.COM> '
+                    b"<ancestor@[route>segment@host]>\r\n"
+                    b'In-Reply-To: <"parent>one"@EXAMPLE.COM>\r\n'
+                    b"\r\nbody"
+                ),
+                [
+                    '<"older>one"@example.com>',
+                    "<ancestor@[route>segment@host]>",
+                ],
+                '<"parent>one"@example.com>',
+            ),
+            (
+                (
+                    b"Message-ID: <source@example.com>\r\n"
+                    b"In-Reply-To: <parent@[route>segment@host]>\r\n"
+                    b"\r\nbody"
+                ),
+                [],
+                "<parent@[route>segment@host]>",
+            ),
+        )
+        for raw_message, expected_references, expected_in_reply_to in cases:
+            with self.subTest(raw_message=raw_message):
+                result = imap_snapshot.read_imap_reply_source(
+                    RecordingMailbox(
+                        fetch_response=uid_fetch_response(raw_message),
+                    ),
+                    folder="INBOX",
+                    uid="123",
+                    expected_uid_validity="456",
+                )
+
+                self.assertTrue(result["ok"])
+                self.assertEqual(
+                    result["source"]["references"],
+                    expected_references,
+                )
+                self.assertEqual(
+                    result["source"]["inReplyTo"],
+                    expected_in_reply_to,
+                )
+
+    def test_ancestry_drops_folding_inside_quoted_or_literal_token(self):
+        cases = (
+            (
+                (
+                    b"Message-ID: <source@example.com>\r\n"
+                    b'References: <"ancestor\r\n'
+                    b' Bcc: victim@example.net"@example.com>\r\n'
+                    b"In-Reply-To: <parent@example.com>\r\n"
+                    b"\r\nbody"
+                ),
+                [],
+                None,
+            ),
+            (
+                (
+                    b"Message-ID: <source@example.com>\r\n"
+                    b"In-Reply-To: <parent@[route\r\n"
+                    b" segment@host]>\r\n"
+                    b"\r\nbody"
+                ),
+                [],
+                None,
+            ),
+        )
+        for raw_message, expected_references, expected_in_reply_to in cases:
+            with self.subTest(raw_message=raw_message):
+                result = imap_snapshot.read_imap_reply_source(
+                    RecordingMailbox(
+                        fetch_response=uid_fetch_response(raw_message),
+                    ),
+                    folder="INBOX",
+                    uid="123",
+                    expected_uid_validity="456",
+                )
+
+                self.assertTrue(result["ok"])
+                self.assertEqual(
+                    result["source"]["references"],
+                    expected_references,
+                )
+                self.assertEqual(
+                    result["source"]["inReplyTo"],
+                    expected_in_reply_to,
+                )
+                self.assertNotIn("victim@example.net", json.dumps(result))
+
+    def test_present_tainted_references_disable_in_reply_to_fallback(self):
+        raw_message = (
+            b"Message-ID: <source@example.com>\r\n"
+            b'References: <"valid>ancestor"@example.com> '
+            b"<invalid..ancestor@example.com>\r\n"
+            b"In-Reply-To: <parent@[route>segment@host]>\r\n"
+            b"\r\nbody"
+        )
+        result = imap_snapshot.read_imap_reply_source(
+            RecordingMailbox(
+                fetch_response=uid_fetch_response(raw_message),
+            ),
+            folder="INBOX",
+            uid="123",
+            expected_uid_validity="456",
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["source"]["references"], [])
+        self.assertIsNone(result["source"]["inReplyTo"])
+
+    def test_ambiguous_in_reply_to_is_not_exposed_as_fallback_ancestry(self):
+        raw_messages = (
+            (
+                b"Message-ID: <source@example.com>\r\n"
+                b"In-Reply-To: <one@example.com> <two@example.com>\r\n"
+                b"\r\nbody"
+            ),
+            (
+                b"Message-ID: <source@example.com>\r\n"
+                b"In-Reply-To: <one@example.com>\r\n"
+                b"In-Reply-To: <one@example.com>\r\n"
+                b"\r\nbody"
+            ),
+        )
+        for raw_message in raw_messages:
+            with self.subTest(raw_message=raw_message):
+                result = imap_snapshot.read_imap_reply_source(
+                    RecordingMailbox(
+                        fetch_response=uid_fetch_response(raw_message),
+                    ),
+                    folder="INBOX",
+                    uid="123",
+                    expected_uid_validity="456",
+                )
+
+                self.assertTrue(result["ok"])
+                self.assertIsNone(result["source"]["inReplyTo"])
+
+    def test_legitimate_folded_token_only_references_are_preserved(self):
+        raw_message = (
+            b"Message-ID: <source@EXAMPLE.COM>\r\n"
+            b"References: <first@EXAMPLE.COM>\r\n"
+            b"\t<second@example.net>\r\n"
+            b" <third@example.org>\r\n"
+            b"In-Reply-To: <parent@EXAMPLE.COM>\r\n"
+            b"\r\n"
+            b"body"
+        )
+        result = imap_snapshot.read_imap_reply_source(
+            RecordingMailbox(
+                fetch_response=uid_fetch_response(raw_message),
+            ),
+            folder="INBOX",
+            uid="123",
+            expected_uid_validity="456",
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            result["source"]["references"],
+            [
+                "<first@example.com>",
+                "<second@example.net>",
+                "<third@example.org>",
+            ],
+        )
+        self.assertEqual(
+            result["source"]["inReplyTo"],
+            "<parent@example.com>",
+        )
+
+    def test_unavailable_exact_uid_is_distinct_from_unthreadable_message(self):
+        result = imap_snapshot.read_imap_reply_source(
+            RecordingMailbox(fetch_response=("OK", [None])),
+            folder="INBOX",
+            uid="123",
+            expected_uid_validity="456",
+        )
+
         self.assertFalse(result["ok"])
         self.assertEqual(result["error"]["code"], "message_not_found")
         self.assertEqual(result["error"]["stage"], "message_fetch")

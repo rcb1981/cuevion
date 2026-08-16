@@ -112,6 +112,7 @@ import {
 import {
   beginInboxConnection,
   buildGmailReplyContext,
+  buildImapReplyContext,
   buildRefreshInboxRequest,
   connectInboxWithImap,
   downloadAttachment,
@@ -14820,6 +14821,18 @@ function MailboxView({
       selectedMessageLocation?.mailboxId ??
       (message.threadIdentityContext?.mailboxId as InboxId | undefined) ??
       mailbox.id;
+    const selectedSourceProvider = managedInboxes.find(
+      (candidate) => candidate.id === selectedSourceMailboxId,
+    )?.provider;
+    const preserveLocatorlessCustomReplySource =
+      (mode === "reply" || mode === "reply_all") &&
+      selectedSourceProvider === "custom_imap" &&
+      !buildImapReplyContext({
+        sendProvider: selectedSourceProvider,
+        composeMode: mode,
+        mailboxId: selectedSourceMailboxId,
+        sourceMessage: message,
+      });
     const selectedSourceFolder = selectedMessageLocation?.folder;
     const isExplicitTrashOrSpamReply =
       selectedSourceFolder === "Trash" || selectedSourceFolder === "Spam";
@@ -14837,7 +14850,9 @@ function MailboxView({
     });
     const effectiveMessage =
       mode === "reply" || mode === "reply_all"
-        ? isExplicitTrashOrSpamReply
+        ? preserveLocatorlessCustomReplySource
+          ? message
+          : isExplicitTrashOrSpamReply
           ? threadMessages[threadMessages.length - 1] ?? message
           : selectLatestAuthoritativeConversationMessage(
               message,
@@ -17792,6 +17807,26 @@ function MailboxView({
       return;
     }
 
+    const isReplyComposeMode =
+      composeMode === "reply" || composeMode === "reply_all";
+    const imapReplyContext = buildImapReplyContext({
+      sendProvider,
+      composeMode,
+      mailboxId: managedMailbox.id,
+      sourceMessage: composeSourceMessage,
+    });
+
+    if (
+      sendProvider === "custom_imap" &&
+      isReplyComposeMode &&
+      !imapReplyContext
+    ) {
+      setComposeSendError(
+        "Refresh the mailbox or select a provider-backed message before replying.",
+      );
+      return;
+    }
+
     const toRecipients = composeTo.trim();
 
     if (!toRecipients) {
@@ -17831,6 +17866,7 @@ function MailboxView({
         bodyText: bodyPreview || " ",
         attachments: serializedAttachments,
         ...(gmailReplyContext ? { replyContext: gmailReplyContext } : {}),
+        ...(imapReplyContext ? { imapReplyContext } : {}),
       });
 
       if (!sendResponse.ok) {
@@ -17846,8 +17882,6 @@ function MailboxView({
 
       const sentId = `${activeComposeMailbox.id}-sent-${Date.now()}`;
       const bodyParagraphs = extractComposeParagraphs(activeBodyHtml);
-      const isReplyComposeMode =
-        composeMode === "reply" || composeMode === "reply_all";
       const sentMessageSeed: MailMessageSeed = {
         id: sentId,
         threadId:

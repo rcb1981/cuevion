@@ -666,6 +666,11 @@ export type SendGmailMessageRequest = {
   replyContext?: {
     sourceProviderMessageId: string;
   };
+  imapReplyContext?: {
+    sourceProviderFolder: string;
+    sourceImapUid: string;
+    sourceUidValidity: string;
+  };
 };
 
 export const GMAIL_PROVIDER_IDENTIFIER_MAX_LENGTH = 256;
@@ -709,6 +714,65 @@ export function buildGmailReplyContext(options: {
     : undefined;
 }
 
+export type ImapReplyContext = NonNullable<
+  SendGmailMessageRequest["imapReplyContext"]
+>;
+
+function isValidImapReplyContext(value: unknown): value is ImapReplyContext {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+
+  const context = value as Record<string, unknown>;
+  return (
+    isArchiveFolder(context.sourceProviderFolder) &&
+    isCanonicalImapUid(context.sourceImapUid) &&
+    isCanonicalUidValidity(context.sourceUidValidity)
+  );
+}
+
+export function buildImapReplyContext(options: {
+  sendProvider: string | null | undefined;
+  composeMode: GmailReplyComposeMode;
+  mailboxId: string;
+  sourceMessage?: {
+    serverMailboxId?: string | null;
+    providerFolder?: string | null;
+    imapUid?: string | null;
+    uidValidity?: string | null;
+    threadIdentityContext?: {
+      provider?: string | null;
+      mailboxId?: string | null;
+    } | null;
+  } | null;
+}): SendGmailMessageRequest["imapReplyContext"] {
+  const sourceMessage = options.sourceMessage;
+  const mailboxId = options.mailboxId.trim();
+  const threadIdentityContext = sourceMessage?.threadIdentityContext;
+  const contextMatchesMailbox =
+    threadIdentityContext === null ||
+    threadIdentityContext === undefined ||
+    (
+      threadIdentityContext.provider === "custom_imap" &&
+      threadIdentityContext.mailboxId === mailboxId
+    );
+  const replyContext = {
+    sourceProviderFolder: sourceMessage?.providerFolder,
+    sourceImapUid: sourceMessage?.imapUid,
+    sourceUidValidity: sourceMessage?.uidValidity,
+  };
+
+  return options.sendProvider === "custom_imap" &&
+    (options.composeMode === "reply" || options.composeMode === "reply_all") &&
+    Boolean(mailboxId) &&
+    mailboxId === options.mailboxId &&
+    sourceMessage?.serverMailboxId === mailboxId &&
+    contextMatchesMailbox &&
+    isValidImapReplyContext(replyContext)
+    ? replyContext
+    : undefined;
+}
+
 export function buildSendInboxWireRequest(
   request: SendGmailMessageRequest,
 ): SendGmailMessageRequest {
@@ -716,6 +780,13 @@ export function buildSendInboxWireRequest(
     typeof request.replyContext?.sourceProviderMessageId === "string"
       ? request.replyContext.sourceProviderMessageId.trim()
       : "";
+  const imapReplyContext = isValidImapReplyContext(request.imapReplyContext)
+    ? {
+        sourceProviderFolder: request.imapReplyContext.sourceProviderFolder,
+        sourceImapUid: request.imapReplyContext.sourceImapUid,
+        sourceUidValidity: request.imapReplyContext.sourceUidValidity,
+      }
+    : undefined;
 
   return {
     mailboxId: request.mailboxId,
@@ -729,6 +800,7 @@ export function buildSendInboxWireRequest(
     ...(sourceProviderMessageId
       ? { replyContext: { sourceProviderMessageId } }
       : {}),
+    ...(imapReplyContext ? { imapReplyContext } : {}),
   };
 }
 
@@ -3122,6 +3194,30 @@ export async function sendGmailMessage(
       error: {
         code: "invalid_reply_context",
         message: "Reply context must identify a valid Gmail source message.",
+      },
+    };
+  }
+  if (
+    request.imapReplyContext !== undefined &&
+    !isValidImapReplyContext(request.imapReplyContext)
+  ) {
+    return {
+      ok: false,
+      error: {
+        code: "invalid_imap_reply_context",
+        message: "Reply context must identify a valid custom IMAP source message.",
+      },
+    };
+  }
+  if (
+    request.replyContext !== undefined &&
+    request.imapReplyContext !== undefined
+  ) {
+    return {
+      ok: false,
+      error: {
+        code: "invalid_reply_context",
+        message: "Reply context must identify exactly one provider source message.",
       },
     };
   }

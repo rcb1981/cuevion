@@ -1,12 +1,13 @@
 import base64
 import binascii
+import imaplib
 import json
 import re
 import sys
 from email.errors import HeaderParseError
 from email.header import decode_header
 from email.message import EmailMessage
-from email.utils import getaddresses
+from email.utils import formatdate, getaddresses, make_msgid
 from http import HTTPStatus
 from http.client import IncompleteRead
 from http.server import BaseHTTPRequestHandler
@@ -27,6 +28,7 @@ from authenticated_imap import (
     resolve_authenticated_imap_mailbox,
 )
 from smtp_connection import SmtpConnectionError, send_public_smtp_message
+from inboxes.imap_snapshot import read_imap_reply_source
 from authenticated_gmail import (
     MAX_GMAIL_RESPONSE_BYTES,
     MAX_SEND_REQUEST_BODY_BYTES,
@@ -77,6 +79,13 @@ _RFC_MESSAGE_ID_TOKEN_PATTERN = re.compile(
     rf"<{_RFC_MESSAGE_ID_LOCAL_PART}@{_RFC_MESSAGE_ID_RIGHT}>"
 )
 _REPLY_SUBJECT_PREFIX_PATTERN = re.compile(r"^re:\s*", re.IGNORECASE)
+_CANONICAL_IMAP_NUMBER_PATTERN = re.compile(r"[1-9][0-9]*", re.ASCII)
+_MAX_IMAP_NUMBER = 4_294_967_295
+_MAX_IMAP_FOLDER_BYTES = 16_384
+
+
+class _CustomImapAuthenticationError(Exception):
+    pass
 
 
 def _json_response(handler: BaseHTTPRequestHandler, status_code: int, payload: dict):
@@ -138,6 +147,67 @@ def _validate_reply_context(payload: dict) -> tuple[dict | None, dict | None]:
     }, None
 
 
+def _valid_imap_context_number(value: object) -> bool:
+    if (
+        type(value) is not str
+        or _CANONICAL_IMAP_NUMBER_PATTERN.fullmatch(value) is None
+    ):
+        return False
+    maximum = str(_MAX_IMAP_NUMBER)
+    return len(value) < len(maximum) or (
+        len(value) == len(maximum) and value <= maximum
+    )
+
+
+def _valid_imap_context_folder(value: object) -> bool:
+    if (
+        type(value) is not str
+        or not value
+        or value != value.strip()
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        return False
+    try:
+        return len(value.encode("utf-8", errors="strict")) <= _MAX_IMAP_FOLDER_BYTES
+    except UnicodeEncodeError:
+        return False
+
+
+def _validate_imap_reply_context(
+    payload: dict,
+) -> tuple[dict | None, dict | None]:
+    if "imapReplyContext" not in payload:
+        return None, None
+
+    reply_context = payload.get("imapReplyContext")
+    if (
+        type(reply_context) is not dict
+        or set(reply_context)
+        != {
+            "sourceProviderFolder",
+            "sourceImapUid",
+            "sourceUidValidity",
+        }
+        or not _valid_imap_context_folder(
+            reply_context.get("sourceProviderFolder")
+        )
+        or not _valid_imap_context_number(reply_context.get("sourceImapUid"))
+        or not _valid_imap_context_number(
+            reply_context.get("sourceUidValidity")
+        )
+    ):
+        return None, error_payload(
+            "invalid_imap_reply_context",
+            "IMAP reply context must identify exactly one valid source message.",
+        )
+
+    return {
+        "sourceProviderFolder": reply_context["sourceProviderFolder"],
+        "sourceImapUid": reply_context["sourceImapUid"],
+        "sourceUidValidity": reply_context["sourceUidValidity"],
+    }, None
+
+
 def _normalize_rfc_message_id(value: object) -> str | None:
     if not isinstance(value, str):
         return None
@@ -153,6 +223,85 @@ def _normalize_rfc_message_id(value: object) -> str | None:
         return None
     inner = normalized[1:-1]
     if _RFC_MESSAGE_ID_INNER_PATTERN.fullmatch(inner) is None:
+        return None
+    return f"<{inner}>"
+
+
+def _normalize_custom_rfc_message_id(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    if (
+        not normalized
+        or normalized != value
+        or len(normalized) > MAX_RFC_MESSAGE_ID_CHARACTERS
+        or not normalized.isascii()
+        or _has_unsafe_header_chars(normalized)
+        or any(ord(character) < 32 or ord(character) == 127 for character in normalized)
+        or not normalized.startswith("<")
+        or not normalized.endswith(">")
+    ):
+        return None
+    inner = normalized[1:-1]
+    if not inner:
+        return None
+
+    if inner.startswith('"'):
+        index = 1
+        while index < len(inner):
+            character = inner[index]
+            if character == "\\":
+                index += 2
+                continue
+            if character == '"':
+                break
+            index += 1
+        if (
+            index >= len(inner)
+            or index + 1 >= len(inner)
+            or inner[index + 1] != "@"
+        ):
+            return None
+        left = inner[: index + 1]
+        right = inner[index + 2 :]
+    else:
+        separator_index = inner.find("@")
+        if separator_index < 0:
+            return None
+        left = inner[:separator_index]
+        right = inner[separator_index + 1 :]
+
+    if not left or not right:
+        return None
+    valid_left = re.fullmatch(_RFC_MESSAGE_ID_LOCAL_PART, left) is not None
+    if not valid_left and len(left) >= 2 and left[0] == '"' and left[-1] == '"':
+        index = 1
+        valid_left = True
+        while index < len(left) - 1:
+            character = left[index]
+            if character == "\\":
+                index += 1
+                if index >= len(left) - 1:
+                    valid_left = False
+                    break
+                character = left[index]
+            elif character == '"':
+                valid_left = False
+                break
+            if ord(character) < 32 or ord(character) > 126:
+                valid_left = False
+                break
+            index += 1
+    valid_right = re.fullmatch(_RFC_MESSAGE_ID_RIGHT_DOT_ATOM, right) is not None
+    if not valid_right and right.startswith("[") and right.endswith("]"):
+        literal = right[1:-1]
+        valid_right = not any(
+            ord(character) < 33
+            or ord(character) > 126
+            or character in "[\\]"
+            for character in literal
+        )
+    if not valid_left or not valid_right:
         return None
     return f"<{inner}>"
 
@@ -195,6 +344,89 @@ def _build_reply_references(raw_references: str, source_message_id: str) -> str:
 
     selected.append(source_message_id)
     return " ".join(selected)
+
+
+def _build_custom_reply_references(
+    raw_references: object,
+    raw_in_reply_to: object,
+    source_message_id: str,
+) -> str:
+    historic_tokens: list[str] = []
+    seen: set[str] = set()
+
+    if type(raw_references) is list:
+        for value in raw_references:
+            token = _normalize_custom_rfc_message_id(value)
+            if token is None or token == source_message_id or token in seen:
+                continue
+            seen.add(token)
+            historic_tokens.append(token)
+
+    if type(raw_references) is list and not raw_references:
+        fallback_parent = _normalize_custom_rfc_message_id(raw_in_reply_to)
+        if fallback_parent is not None and fallback_parent != source_message_id:
+            historic_tokens.append(fallback_parent)
+
+    maximum_historic_tokens = MAX_REPLY_REFERENCE_TOKENS - 1
+    if len(historic_tokens) > maximum_historic_tokens:
+        selected = [
+            historic_tokens[0],
+            *historic_tokens[-(maximum_historic_tokens - 1) :],
+        ]
+    else:
+        selected = list(historic_tokens)
+
+    while (
+        len(" ".join([*selected, source_message_id]))
+        > MAX_REPLY_REFERENCES_CHARACTERS
+        and len(selected) > 1
+    ):
+        selected.pop(1)
+
+    selected.append(source_message_id)
+    return " ".join(selected)
+
+
+def _validate_custom_reply_source(
+    result: object,
+    context: dict,
+) -> tuple[dict | None, tuple[int, dict] | None]:
+    if type(result) is not dict:
+        return None, _imap_reply_source_error_response(
+            {"code": "message_identity_unconfirmed"}
+        )
+
+    if result.get("ok") is not True or result.get("status") != "ok":
+        raw_error = result.get("error")
+        error = raw_error if type(raw_error) is dict else {}
+        return None, _imap_reply_source_error_response(error)
+
+    source = result.get("source")
+    if (
+        type(source) is not dict
+        or source.get("providerFolder") != context["sourceProviderFolder"]
+        or source.get("imapUid") != context["sourceImapUid"]
+        or source.get("uidValidity") != context["sourceUidValidity"]
+    ):
+        return None, _imap_reply_source_error_response(
+            {"code": "message_identity_unconfirmed"}
+        )
+
+    source_message_id = _normalize_custom_rfc_message_id(source.get("messageId"))
+    if source_message_id is None:
+        return None, _imap_reply_source_error_response(
+            {"code": "imap_reply_source_unthreadable"}
+        )
+
+    references = _build_custom_reply_references(
+        source.get("references"),
+        source.get("inReplyTo"),
+        source_message_id,
+    )
+    return {
+        "inReplyTo": source_message_id,
+        "references": references,
+    }, None
 
 
 def _decode_reply_subject(value: str) -> str | None:
@@ -505,6 +737,97 @@ def _reply_source_error_response(error: dict) -> tuple[int, dict]:
     return status, error_payload(response_code, message)
 
 
+def _imap_reply_source_error_response(error: dict) -> tuple[int, dict]:
+    code = error.get("code")
+    if code in {"invalid_folder", "invalid_imap_uid", "invalid_uid_validity"}:
+        return 400, error_payload(
+            "invalid_imap_reply_context",
+            "IMAP reply context must identify exactly one valid source message.",
+        )
+    if code in {"uid_validity_changed", "message_not_found", "folder_unavailable"}:
+        return 409, error_payload(
+            "imap_reply_source_stale",
+            "The IMAP message being replied to is no longer available at that identity.",
+        )
+    if code == "imap_reply_source_unthreadable":
+        return 422, error_payload(
+            "imap_reply_source_unthreadable",
+            "The IMAP message being replied to has no unambiguous Message-ID.",
+        )
+    return 503, error_payload(
+        "imap_reply_source_unavailable",
+        "The IMAP reply source is temporarily unavailable.",
+    )
+
+
+def _custom_imap_connection_config(mailbox: object) -> tuple[str, int, bool, str, str]:
+    if type(mailbox) is not dict or type(mailbox.get("imap")) is not dict:
+        raise ValueError("Stored IMAP configuration is invalid.")
+    config = mailbox["imap"]
+    host = config.get("host")
+    raw_port = config.get("port")
+    if type(raw_port) is int:
+        port = raw_port
+    elif (
+        type(raw_port) is str
+        and len(raw_port) <= 5
+        and _CANONICAL_IMAP_NUMBER_PATTERN.fullmatch(raw_port) is not None
+    ):
+        port = int(raw_port)
+    else:
+        raise ValueError("Stored IMAP configuration is invalid.")
+    use_ssl = config.get("ssl")
+    username = config.get("username")
+    password = config.get("password")
+    if (
+        type(host) is not str
+        or not host
+        or host != host.strip()
+        or _has_unsafe_header_chars(host)
+        or any(character.isspace() for character in host)
+        or not 1 <= port <= 65535
+        or use_ssl is not True
+        or type(username) is not str
+        or not _is_safe_auth_value(username)
+        or type(password) is not str
+        or not _is_safe_auth_value(password)
+    ):
+        raise ValueError("Stored IMAP configuration is invalid.")
+    return host, port, use_ssl, username, password
+
+
+def _safe_close_custom_imap(connection: object) -> None:
+    try:
+        connection.logout()
+    except Exception:
+        pass
+
+
+def _open_custom_imap_connection(mailbox: object):
+    host, port, _use_ssl, username, password = _custom_imap_connection_config(
+        mailbox
+    )
+    connection = None
+    try:
+        connection = imaplib.IMAP4_SSL(host, port, timeout=30)
+        try:
+            connection.login(username, password)
+        except imaplib.IMAP4.abort:
+            raise
+        except imaplib.IMAP4.error as error:
+            raise _CustomImapAuthenticationError from error
+        return connection
+    except Exception:
+        if connection is not None:
+            _safe_close_custom_imap(connection)
+        raise
+
+
+def _add_custom_message_identity_headers(message: EmailMessage) -> None:
+    message["Date"] = formatdate(localtime=False, usegmt=True)
+    message["Message-ID"] = make_msgid()
+
+
 def _build_message(payload: dict, *, require_password: bool = True):
     provider = str(payload.get("provider", "")).strip().lower()
     mailbox_email = str(payload.get("email", "")).strip()
@@ -663,10 +986,10 @@ class handler(BaseHTTPRequestHandler):
 
         allowed_fields = {
             "mailboxId", "to", "cc", "bcc", "subject", "bodyHtml", "bodyText", "attachments",
-            "replyContext",
+            "replyContext", "imapReplyContext",
         }
         field_error = reject_unknown_fields(payload, allowed_fields)
-        if field_error or find_forbidden_custom_request_fields(payload):
+        if field_error:
             send_json(
                 self,
                 400,
@@ -677,6 +1000,27 @@ class handler(BaseHTTPRequestHandler):
         if reply_context_error:
             send_json(self, 400, reply_context_error)
             return
+        imap_reply_context, imap_reply_context_error = (
+            _validate_imap_reply_context(payload)
+        )
+        if imap_reply_context_error:
+            send_json(self, 400, imap_reply_context_error)
+            return
+        connection_field_payload = {
+            key: value
+            for key, value in payload.items()
+            if key not in {"replyContext", "imapReplyContext"}
+        }
+        if find_forbidden_custom_request_fields(connection_field_payload):
+            send_json(
+                self,
+                400,
+                error_payload(
+                    "forbidden_connection_fields",
+                    "Connection and identity details are not accepted.",
+                ),
+            )
+            return
 
         owned = resolve_owned_mailbox(self.headers, payload.get("mailboxId"))
         if owned["status"] != "ok":
@@ -685,6 +1029,16 @@ class handler(BaseHTTPRequestHandler):
         provider = owned["inbox"].get("provider")
 
         if provider == "google":
+            if imap_reply_context is not None:
+                send_json(
+                    self,
+                    400,
+                    error_payload(
+                        "invalid_imap_reply_context",
+                        "IMAP reply context cannot be used with this mailbox.",
+                    ),
+                )
+                return
             gmail = resolve_gmail_context(owned)
             if gmail["status"] != "ok":
                 send_json(self, gmail["status_code"], gmail["error"])
@@ -847,6 +1201,49 @@ class handler(BaseHTTPRequestHandler):
         except ValueError as error:
             send_json(self, 400, error_payload("invalid_request", str(error)))
             return
+
+        _add_custom_message_identity_headers(message)
+
+        if imap_reply_context is not None:
+            imap_connection = None
+            try:
+                imap_connection = _open_custom_imap_connection(mailbox)
+                source_result = read_imap_reply_source(
+                    imap_connection,
+                    folder=imap_reply_context["sourceProviderFolder"],
+                    uid=imap_reply_context["sourceImapUid"],
+                    expected_uid_validity=imap_reply_context[
+                        "sourceUidValidity"
+                    ],
+                )
+            except _CustomImapAuthenticationError:
+                send_json(
+                    self,
+                    401,
+                    error_payload(
+                        "reconnect_required",
+                        "Reconnect this IMAP inbox to continue.",
+                    ),
+                )
+                return
+            except Exception:
+                status, response = _imap_reply_source_error_response({})
+                send_json(self, status, response)
+                return
+            finally:
+                if imap_connection is not None:
+                    _safe_close_custom_imap(imap_connection)
+
+            custom_reply_source, source_response = _validate_custom_reply_source(
+                source_result,
+                imap_reply_context,
+            )
+            if source_response is not None:
+                status, response = source_response
+                send_json(self, status, response)
+                return
+            message["In-Reply-To"] = custom_reply_source["inReplyTo"]
+            message["References"] = custom_reply_source["references"]
 
         try:
             send_public_smtp_message(
