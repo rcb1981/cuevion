@@ -3,35 +3,46 @@ import type { ButtonHTMLAttributes } from "react";
 export type DesktopActionButtonVariant =
   | "primary"
   | "secondary"
+  | "tertiary"
   | "destructive";
+export type DesktopActionButtonSize = "regular" | "compact";
 
 export interface DesktopActionButtonProps
   extends ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: DesktopActionButtonVariant;
+  size?: DesktopActionButtonSize;
 }
 
 const baseClassName =
-  "inline-flex h-9 items-center justify-center rounded-full px-4 text-[0.8125rem] font-medium tracking-normal transition-[background-color,background-image,border-color,color,transform,box-shadow] duration-150 active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-text-soft)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--workspace-card)] disabled:pointer-events-none disabled:cursor-not-allowed disabled:scale-100 disabled:opacity-50 disabled:shadow-none";
+  "inline-flex items-center justify-center rounded-full px-4 text-[0.8125rem] font-medium tracking-normal transition-[background-color,background-image,border-color,color,transform,box-shadow] duration-150 enabled:active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-text-soft)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--workspace-card)] disabled:pointer-events-none disabled:cursor-not-allowed disabled:scale-100 disabled:opacity-50 disabled:shadow-none";
+
+const sizeClassNames: Record<DesktopActionButtonSize, string> = {
+  regular: "h-9",
+  compact: "h-8 px-3 text-xs",
+};
 
 const variantClassNames: Record<DesktopActionButtonVariant, string> = {
   primary:
-    "border border-[color:rgba(66,99,69,0.52)] bg-[linear-gradient(180deg,rgba(103,141,103,0.98),rgba(69,103,72,0.98))] text-[color:rgba(251,248,242,0.98)] shadow-[inset_0_1px_0_rgba(255,255,255,0.1),0_8px_18px_rgba(66,99,69,0.12)] hover:border-[color:rgba(58,88,62,0.6)] hover:bg-[linear-gradient(180deg,rgba(93,130,95,0.98),rgba(61,95,65,0.98))]",
+    "border border-[color:rgba(66,99,69,0.52)] bg-[linear-gradient(180deg,rgba(103,141,103,0.98),rgba(69,103,72,0.98))] text-[color:rgba(251,248,242,0.98)] shadow-[inset_0_1px_0_rgba(255,255,255,0.1),0_8px_18px_rgba(66,99,69,0.12)] enabled:hover:border-[color:rgba(58,88,62,0.6)] enabled:hover:bg-[linear-gradient(180deg,rgba(93,130,95,0.98),rgba(61,95,65,0.98))]",
   secondary:
-    "border border-[var(--workspace-border)] bg-[var(--workspace-card)] text-[var(--workspace-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] hover:border-[var(--workspace-border-hover)] hover:bg-[var(--workspace-hover-surface)]",
+    "border border-[var(--workspace-border)] bg-[var(--workspace-card)] text-[var(--workspace-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] enabled:hover:border-[var(--workspace-border-hover)] enabled:hover:bg-[var(--workspace-hover-surface)]",
+  tertiary:
+    "border border-transparent bg-transparent text-[var(--workspace-text-soft)] shadow-none enabled:hover:border-[var(--workspace-border-soft)] enabled:hover:bg-[var(--workspace-hover-surface)] enabled:hover:text-[var(--workspace-text)]",
   destructive:
-    "border border-[color:rgba(146,82,73,0.34)] bg-[linear-gradient(180deg,rgba(170,103,93,0.96),rgba(138,76,67,0.98))] text-[color:rgba(255,248,244,0.98)] shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_8px_18px_rgba(123,70,61,0.14)] hover:border-[color:rgba(132,72,64,0.42)] hover:bg-[linear-gradient(180deg,rgba(156,91,82,0.98),rgba(126,67,60,0.98))]",
+    "border border-[color:rgba(146,82,73,0.34)] bg-[linear-gradient(180deg,rgba(170,103,93,0.96),rgba(138,76,67,0.98))] text-[color:rgba(255,248,244,0.98)] shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_8px_18px_rgba(123,70,61,0.14)] enabled:hover:border-[color:rgba(132,72,64,0.42)] enabled:hover:bg-[linear-gradient(180deg,rgba(156,91,82,0.98),rgba(126,67,60,0.98))]",
 };
 
 export function DesktopActionButton({
   className,
   type = "button",
   variant = "secondary",
+  size = "regular",
   ...buttonProps
 }: DesktopActionButtonProps) {
   return (
     <button
       type={type}
-      className={`${baseClassName} ${variantClassNames[variant]} ${className ?? ""}`.trim()}
+      className={`${baseClassName} ${sizeClassNames[size]} ${variantClassNames[variant]} ${className ?? ""}`.trim()}
       {...buttonProps}
     />
   );

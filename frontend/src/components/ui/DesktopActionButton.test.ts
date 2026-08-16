@@ -7,7 +7,7 @@ const buttonSource = readFileSync(
   "utf8",
 );
 
-for (const variant of ["primary", "secondary", "destructive"] as const) {
+for (const variant of ["primary", "secondary", "tertiary", "destructive"] as const) {
   assert.match(
     buttonSource,
     new RegExp(`\\b${variant}:`),
@@ -16,11 +16,23 @@ for (const variant of ["primary", "secondary", "destructive"] as const) {
 }
 
 assert.match(buttonSource, /<button\b/, "the primitive must render a native button");
-assert.match(buttonSource, /(?:^|\s)h-9(?:\s|$)/, "regular height must be 36px");
+assert.match(
+  buttonSource,
+  /regular:\s*"h-9"/,
+  "regular height must remain 36px",
+);
+assert.match(buttonSource, /compact:\s*"h-8(?:\s|")/, "compact height must be 32px");
+assert.match(
+  buttonSource,
+  /size\s*=\s*"regular"/,
+  "regular must remain the conservative default size",
+);
 assert.doesNotMatch(buttonSource, /(?:^|\s)uppercase(?:\s|$)/);
 assert.doesNotMatch(buttonSource, /tracking-\[/, "wide action tracking is forbidden");
 assert.match(buttonSource, /focus-visible:(?:ring|outline)/);
 assert.match(buttonSource, /disabled:/, "a clear disabled state must exist");
+assert.match(buttonSource, /disabled:pointer-events-none/);
+assert.match(buttonSource, /disabled:scale-100/);
 assert.match(
   buttonSource,
   /extends ButtonHTMLAttributes<HTMLButtonElement>/,

@@ -28621,16 +28621,14 @@ const settingsInfoRowClass =
   "flex items-center justify-between gap-4 rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-2.5";
 const settingsCardSectionClass =
   "rounded-[20px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-3";
-const settingsSubtleActionClass =
-  "inline-flex h-9 items-center justify-center rounded-full border border-[var(--workspace-border)] bg-[var(--workspace-card)] px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-soft)] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] transition-[background-color,border-color,color,transform,box-shadow] duration-150 hover:border-[color:rgba(120,104,89,0.22)] hover:bg-[color:rgba(245,238,229,0.86)] hover:text-[var(--workspace-text)] hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_8px_18px_rgba(120,104,89,0.08)] active:scale-[0.99] focus-visible:outline-none dark:hover:border-[var(--workspace-border-hover)] dark:hover:bg-[var(--workspace-hover-surface-strong)] dark:hover:text-[var(--workspace-text)] dark:hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_8px_18px_rgba(0,0,0,0.16)]";
 const settingsPairedSecondaryActionClass =
   "inline-flex h-10 w-[7.5rem] items-center justify-center rounded-full border border-[var(--workspace-border)] bg-[var(--workspace-card)] px-5 text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-soft)] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] transition-[background-color,border-color,color,transform,box-shadow] duration-150 hover:border-[color:rgba(120,104,89,0.22)] hover:bg-[color:rgba(245,238,229,0.86)] hover:text-[var(--workspace-text)] hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_8px_18px_rgba(120,104,89,0.08)] active:scale-[0.99] focus-visible:outline-none dark:hover:border-[var(--workspace-border-hover)] dark:hover:bg-[var(--workspace-hover-surface-strong)] dark:hover:text-[var(--workspace-text)] dark:hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_8px_18px_rgba(0,0,0,0.16)]";
-const settingsAccentSecondaryActionClass =
-  "inline-flex h-9 items-center justify-center rounded-full border border-[color:rgba(103,141,103,0.34)] bg-[linear-gradient(180deg,rgba(223,235,219,0.78),rgba(240,245,237,0.92))] px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[color:rgba(74,108,75,0.96)] transition-[background-color,border-color,color,transform,box-shadow] duration-150 hover:border-[color:rgba(93,130,95,0.48)] hover:bg-[linear-gradient(180deg,rgba(211,229,206,0.92),rgba(233,241,229,0.98))] hover:shadow-[0_6px_14px_rgba(118,170,112,0.08)] active:scale-[0.99] focus-visible:outline-none";
 const settingsGhostActionClass =
   "inline-flex h-8 items-center justify-center rounded-full border border-[var(--workspace-border)] bg-[var(--workspace-card)] px-3 text-[0.65rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-soft)] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] transition-[background-color,border-color,color,transform,box-shadow] duration-150 hover:border-[color:rgba(120,104,89,0.22)] hover:bg-[color:rgba(245,238,229,0.9)] hover:text-[var(--workspace-text)] hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_6px_14px_rgba(120,104,89,0.08)] active:scale-[0.99] focus-visible:outline-none dark:hover:border-[var(--workspace-border-hover)] dark:hover:bg-[var(--workspace-hover-surface-strong)] dark:hover:text-[var(--workspace-text)] dark:hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_6px_14px_rgba(0,0,0,0.14)]";
 const settingsSecondaryGhostActionClass =
   "inline-flex h-8 items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-3 text-[0.65rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-soft)] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] transition-[background-color,border-color,color,transform,box-shadow] duration-150 hover:border-[color:rgba(120,104,89,0.2)] hover:bg-[color:rgba(241,233,223,0.82)] hover:text-[var(--workspace-text)] hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_6px_14px_rgba(120,104,89,0.07)] active:scale-[0.99] focus-visible:outline-none dark:hover:border-[var(--workspace-border)] dark:hover:bg-[var(--workspace-hover-surface)] dark:hover:text-[var(--workspace-text)] dark:hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.05),0_6px_14px_rgba(0,0,0,0.14)]";
+const settingsFileActionClass =
+  "inline-flex h-8 cursor-pointer items-center justify-center rounded-full border border-transparent bg-transparent px-3 text-xs font-medium tracking-normal text-[var(--workspace-text-soft)] transition-[background-color,border-color,color,box-shadow] duration-150 hover:border-[var(--workspace-border-soft)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] focus-within:ring-2 focus-within:ring-[var(--workspace-text-soft)] focus-within:ring-offset-2 focus-within:ring-offset-[var(--workspace-card)]";
 const settingsPrimaryActionClass =
   `inline-flex h-10 items-center justify-center rounded-full px-5 text-[0.72rem] font-medium uppercase tracking-[0.16em] ${primaryActionSurfaceClass}`;
 const settingsDangerActionClass =
@@ -28773,7 +28771,7 @@ function settingsPageSurfaceClass(themeMode: "light" | "dark") {
 }
 
 function settingsPillButtonClass(selected: boolean) {
-  return `inline-flex h-8 items-center justify-center rounded-full border px-3.5 text-[0.65rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color,box-shadow,transform] duration-150 active:scale-[0.99] focus-visible:outline-none ${
+  return `inline-flex h-8 items-center justify-center rounded-full border px-3.5 text-xs font-medium tracking-normal transition-[background-color,border-color,color,box-shadow,transform] duration-150 active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-text-soft)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--workspace-card)] ${
     selected
       ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_4px_12px_rgba(118,170,112,0.06)]"
       : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] text-[var(--workspace-text-soft)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface-strong)]"
@@ -28781,7 +28779,7 @@ function settingsPillButtonClass(selected: boolean) {
 }
 
 function settingsTabButtonClass(selected: boolean) {
-  return `inline-flex h-10 items-center justify-center rounded-full border px-4 text-[0.72rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color,box-shadow,transform] duration-150 active:scale-[0.99] focus-visible:outline-none ${
+  return `inline-flex h-9 items-center justify-center rounded-full border px-4 text-[0.8125rem] font-medium tracking-normal transition-[background-color,border-color,color,box-shadow,transform] duration-150 active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-text-soft)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--workspace-card)] ${
     selected
       ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_8px_18px_rgba(118,170,112,0.08)]"
       : "border-transparent bg-transparent text-[var(--workspace-text-soft)] hover:border-[var(--workspace-border-soft)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)]"
@@ -28789,7 +28787,7 @@ function settingsTabButtonClass(selected: boolean) {
 }
 
 function settingsToggleButtonClass(enabled: boolean) {
-  return `relative inline-flex h-7 w-[3rem] items-center rounded-full border transition-[background-color,border-color,box-shadow,transform] duration-150 active:scale-[0.98] focus-visible:outline-none ${
+  return `relative inline-flex h-7 w-[3rem] items-center rounded-full border transition-[background-color,border-color,box-shadow,transform] duration-150 active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-text-soft)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--workspace-card)] ${
     enabled
       ? "justify-end border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-toggle-on-start),var(--workspace-toggle-on-end))] px-[0.2rem] shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_4px_10px_rgba(66,99,69,0.1)]"
       : "justify-start border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-[0.2rem]"
@@ -28817,13 +28815,14 @@ const SettingsInfoRow = memo(function SettingsInfoRow({
           <div className="text-[0.86rem] font-medium text-[var(--workspace-text)]">
             {value}
           </div>
-          <button
+          <DesktopActionButton
             type="button"
             onClick={onActionClick}
-            className="text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)] transition-colors duration-150 hover:text-[var(--workspace-text)] focus-visible:outline-none"
+            variant="tertiary"
+            size="compact"
           >
             {actionLabel ?? "Manage"}
-          </button>
+          </DesktopActionButton>
         </div>
       </div>
     );
@@ -30147,15 +30146,19 @@ const WorkspaceSettingsCard = memo(function WorkspaceSettingsCard({
           </h2>
           <div className="ml-auto flex flex-none items-center gap-2.5 self-start">
             {isEditing ? (
-              <CloseActionButton onClick={handleCloseWorkspaceSettings} />
+              <DesktopActionButton
+                onClick={handleCloseWorkspaceSettings}
+                variant="tertiary"
+              >
+                Close
+              </DesktopActionButton>
             ) : (
-              <button
-                type="button"
+              <DesktopActionButton
                 onClick={handleOpenWorkspaceSettings}
-                className={settingsPrimaryActionClass}
+                variant="tertiary"
               >
                 Manage
-              </button>
+              </DesktopActionButton>
             )}
           </div>
         </div>
@@ -30180,20 +30183,20 @@ const WorkspaceSettingsCard = memo(function WorkspaceSettingsCard({
                 </div>
               ) : null}
               <div className="mt-3 flex justify-end gap-3">
-                <button
-                  type="button"
+                <DesktopActionButton
                   onClick={handleCloseWorkspaceSettings}
-                  className={settingsPairedSecondaryActionClass}
+                  variant="secondary"
+                  className="w-[7.5rem]"
                 >
                   Cancel
-                </button>
-                <button
-                  type="button"
+                </DesktopActionButton>
+                <DesktopActionButton
                   onClick={handleSaveWorkspaceName}
-                  className={`${settingsPrimaryActionClass} w-[7.5rem]`}
+                  variant="primary"
+                  className="w-[7.5rem]"
                 >
                   Apply
-                </button>
+                </DesktopActionButton>
               </div>
             </div>
 
@@ -30207,6 +30210,7 @@ const WorkspaceSettingsCard = memo(function WorkspaceSettingsCard({
                     key={option}
                     type="button"
                     onClick={() => onChangeMode(option)}
+                    aria-pressed={appliedMode === option}
                     className={settingsPillButtonClass(appliedMode === option)}
                   >
                     {option}
@@ -30243,6 +30247,7 @@ const WorkspaceSettingsCard = memo(function WorkspaceSettingsCard({
                       key={option}
                       type="button"
                       onClick={() => setDraftAutomationLevel(option)}
+                      aria-pressed={draftAutomationLevel === option}
                       className={settingsPillButtonClass(draftAutomationLevel === option)}
                     >
                       {option}
@@ -30253,20 +30258,20 @@ const WorkspaceSettingsCard = memo(function WorkspaceSettingsCard({
 
               {hasUnsavedAutomationLevelChanges ? (
                 <div className="flex justify-end gap-3 pt-1">
-                  <button
-                    type="button"
+                  <DesktopActionButton
                     onClick={() => setDraftAutomationLevel(savedAutomationLevel)}
-                    className={settingsPairedSecondaryActionClass}
+                    variant="secondary"
+                    className="w-[7.5rem]"
                   >
                     Cancel
-                  </button>
-                  <button
-                    type="button"
+                  </DesktopActionButton>
+                  <DesktopActionButton
                     onClick={() => setSavedAutomationLevel(draftAutomationLevel)}
-                    className={`${settingsPrimaryActionClass} w-[7.5rem]`}
+                    variant="primary"
+                    className="w-[7.5rem]"
                   >
                     Apply
-                  </button>
+                  </DesktopActionButton>
                 </div>
               ) : null}
             </div>
@@ -30558,16 +30563,13 @@ function CustomImapTrashFolderMappingCard({ mailboxId }: { mailboxId: string }) 
             Choose Trash only from folders freshly verified by your IMAP provider.
           </p>
         </div>
-        <button
-          type="button"
+        <DesktopActionButton
           onClick={() => void refreshFolders()}
           disabled={isBusy}
-          className={`${settingsSubtleActionClass} ${
-            isBusy ? "cursor-default opacity-50" : ""
-          }`}
+          variant="tertiary"
         >
           {phase === "loading" ? "Loading folders..." : "Refresh folders"}
-        </button>
+        </DesktopActionButton>
       </div>
 
       {phase === "loading" ? (
@@ -30638,18 +30640,13 @@ function CustomImapTrashFolderMappingCard({ mailboxId }: { mailboxId: string }) 
               No safe selectable provider folders are available.
             </p>
           ) : null}
-          <button
-            type="button"
+          <DesktopActionButton
             onClick={() => void handleSaveFolderMapping()}
             disabled={phase === "saving" || !selectedFolder}
-            className={`${settingsPrimaryActionClass} ${
-              phase === "saving" || !selectedFolder
-                ? "cursor-default opacity-50"
-                : ""
-            }`}
+            variant="primary"
           >
             {phase === "saving" ? "Saving..." : "Save folder mapping"}
-          </button>
+          </DesktopActionButton>
         </div>
       ) : null}
 
@@ -30779,8 +30776,6 @@ function ManagedInboxEditor({
     "rounded-2xl border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-3 text-[0.94rem] text-[var(--workspace-text)]";
   const readOnlyNestedValueClass =
     "rounded-2xl border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3 text-[0.94rem] text-[var(--workspace-text)]";
-  const moveButtonDisabledClass =
-    "cursor-default opacity-45 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-card)] hover:text-[var(--workspace-text-soft)] hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]";
 
   useEffect(() => {
     if (!shouldShowFieldErrors || missingRequiredFields.length === 0) {
@@ -30840,13 +30835,19 @@ function ManagedInboxEditor({
       </div>
 
       <div className="mb-5 overflow-x-auto pb-1">
-        <div className="inline-flex min-w-max items-center gap-1 rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] p-1">
+        <div
+          role="tablist"
+          aria-label="Inbox settings"
+          className="inline-flex min-w-max items-center gap-1 rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] p-1"
+        >
           {managedInboxEditorTabs.map((tab) => (
             <button
               key={`managed-inbox-tab-${tab}`}
               type="button"
+              role="tab"
+              aria-selected={activeTab === tab}
               onClick={() => onTabChange(tab)}
-              className={`inline-flex h-9 items-center justify-center rounded-full px-4 text-[0.68rem] font-medium uppercase tracking-[0.14em] transition-[background-color,color,box-shadow] duration-150 focus-visible:outline-none ${
+              className={`inline-flex h-9 items-center justify-center rounded-full px-4 text-[0.8125rem] font-medium tracking-normal transition-[background-color,color,box-shadow] duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-text-soft)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--workspace-card)] ${
                 activeTab === tab
                   ? "bg-[var(--workspace-card)] text-[var(--workspace-text)] shadow-[0_8px_18px_rgba(31,42,36,0.06)]"
                   : "text-[var(--workspace-text-faint)] hover:text-[var(--workspace-text-soft)]"
@@ -30903,44 +30904,40 @@ function ManagedInboxEditor({
               Inbox actions
             </div>
             <div className="flex flex-wrap gap-3">
-              <button
-                type="button"
+              <DesktopActionButton
                 onClick={onMoveUpAction}
                 disabled={!canMoveUp}
-                className={`${settingsSubtleActionClass} ${canMoveUp ? "" : moveButtonDisabledClass}`}
+                variant="tertiary"
+                size="compact"
               >
                 Move up
-              </button>
-              <button
-                type="button"
+              </DesktopActionButton>
+              <DesktopActionButton
                 onClick={onMoveDownAction}
                 disabled={!canMoveDown}
-                className={`${settingsSubtleActionClass} ${canMoveDown ? "" : moveButtonDisabledClass}`}
+                variant="tertiary"
+                size="compact"
               >
                 Move down
-              </button>
+              </DesktopActionButton>
               {!isPrimary && canSetPrimary && onSetPrimaryAction ? (
-                <button
-                  type="button"
+                <DesktopActionButton
                   onClick={onSetPrimaryAction}
-                  className={settingsSubtleActionClass}
+                  variant="tertiary"
+                  size="compact"
                 >
                   Set as primary
-                </button>
+                </DesktopActionButton>
               ) : null}
               {isExisting && !isPrimary && onRemoveAction ? (
-                <button
-                  type="button"
+                <DesktopActionButton
                   onClick={onRemoveAction}
                   disabled={removeDisabled}
-                  className={`${settingsSubtleActionClass} ${
-                    removeDisabled
-                      ? "cursor-default opacity-45 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-card)] hover:text-[var(--workspace-text-soft)] hover:shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"
-                      : "border-[color:rgba(146,82,73,0.18)] text-[color:rgba(134,79,71,0.92)] hover:border-[color:rgba(146,82,73,0.28)] hover:bg-[color:rgba(249,238,235,0.92)] hover:text-[color:rgba(116,63,56,0.96)]"
-                  }`}
+                  variant="destructive"
+                  size="compact"
                 >
                   Remove
-                </button>
+                </DesktopActionButton>
               ) : null}
             </div>
           </div>
@@ -30961,7 +30958,8 @@ function ManagedInboxEditor({
                     editable ? onChange(mailbox.id, "provider", provider.id) : undefined
                   }
                   disabled={!editable}
-                  className={`rounded-[22px] border px-4 py-3 text-left transition outline-none ${
+                  aria-pressed={selected}
+                  className={`rounded-[22px] border px-4 py-3 text-left transition outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-text-soft)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--workspace-card)] ${
                     selected
                       ? "border-[var(--workspace-provider-selected-border)] bg-[var(--workspace-provider-selected-surface)] text-[var(--workspace-provider-selected-text)] shadow-panel"
                       : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] text-[var(--workspace-text)]"
@@ -31154,13 +31152,12 @@ function ManagedInboxEditor({
                 customImapCredentialUnavailable) &&
               !editable &&
               onReconnectAction ? (
-                <button
-                  type="button"
+                <DesktopActionButton
                   onClick={onReconnectAction}
-                  className={settingsSubtleActionClass}
+                  variant="tertiary"
                 >
                   Reconnect mailbox
-                </button>
+                </DesktopActionButton>
               ) : null}
             </div>
           ) : isOAuthConnectionProvider(mailbox.provider) ? (
@@ -31179,14 +31176,13 @@ function ManagedInboxEditor({
                 mailbox.connected &&
                 mailbox.connectionStatus === "connected" &&
                 onReconnectAction ? (
-                  <button
-                    type="button"
+                  <DesktopActionButton
                     onClick={onReconnectAction}
                     disabled={isApplying}
-                    className={settingsSubtleActionClass}
+                    variant="tertiary"
                   >
                     {isApplying ? "Opening..." : "Reconnect Gmail"}
-                  </button>
+                  </DesktopActionButton>
                 ) : null}
               </div>
               <div className={readOnlyNestedValueClass}>
@@ -31313,7 +31309,7 @@ function ManagedInboxEditor({
                           : undefined
                       }
                       disabled={!editable}
-                      className={`peer absolute inset-0 m-0 h-full w-full appearance-none rounded-[5px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-input-bg)] outline-none transition checked:border-moss/55 checked:bg-[linear-gradient(180deg,rgba(226,236,229,0.92),rgba(246,249,246,0.98))] ${editable ? "cursor-pointer" : "cursor-default"}`}
+                      className={`peer absolute inset-0 m-0 h-full w-full appearance-none rounded-[5px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-input-bg)] outline-none transition checked:border-moss/55 checked:bg-[linear-gradient(180deg,rgba(226,236,229,0.92),rgba(246,249,246,0.98))] focus-visible:ring-2 focus-visible:ring-[var(--workspace-text-soft)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--workspace-card)] ${editable ? "cursor-pointer" : "cursor-default"}`}
                     />
                     <span className="pointer-events-none absolute inset-0 flex items-center justify-center text-[10px] font-semibold leading-none text-moss opacity-0 transition peer-checked:opacity-100">
                       ✓
@@ -31407,30 +31403,29 @@ function ManagedInboxEditor({
       <div className="mt-6 flex flex-wrap justify-end gap-3 border-t border-[var(--workspace-border-soft)] pt-5">
         {editable && onCancelAction && onApplyAction ? (
           <>
-            <button
-              type="button"
+            <DesktopActionButton
               onClick={onCancelAction}
-              className={settingsPairedSecondaryActionClass}
+              variant="secondary"
+              className="w-[7.5rem]"
             >
               Cancel
-            </button>
-            <button
-              type="button"
+            </DesktopActionButton>
+            <DesktopActionButton
               onClick={onApplyAction}
               disabled={isApplying}
-              className={`${settingsPrimaryActionClass} w-[7.5rem]`}
+              variant="primary"
+              className="w-[7.5rem]"
             >
               {isApplying ? "Connecting..." : "Apply"}
-            </button>
+            </DesktopActionButton>
           </>
         ) : onEditAction ? (
-          <button
-            type="button"
+          <DesktopActionButton
             onClick={onEditAction}
-            className={settingsSubtleActionClass}
+            variant="tertiary"
           >
             Edit
-          </button>
+          </DesktopActionButton>
         ) : null}
       </div>
     </section>
@@ -32433,13 +32428,13 @@ const ManageInboxesView = memo(function ManageInboxesView({
                 Manage the inboxes connected to this workspace with the same guided flow used during setup.
               </p>
             </div>
-            <button
-              type="button"
+            <DesktopActionButton
               onClick={handleStartAddInbox}
-              className={`${settingsAccentSecondaryActionClass} self-start`}
+              variant="secondary"
+              className="self-start"
             >
               Add inbox
-            </button>
+            </DesktopActionButton>
           </div>
 
           {draftManagedInboxes.length === 0 ? (
@@ -32450,13 +32445,13 @@ const ManageInboxesView = memo(function ManageInboxesView({
               <p className="mx-auto mt-2 max-w-xl text-[0.92rem] leading-7 text-[var(--workspace-text-muted)]">
                 Add a Gmail / Google Workspace inbox or configure Custom IMAP to start testing live inbox behavior.
               </p>
-              <button
-                type="button"
+              <DesktopActionButton
                 onClick={handleStartAddInbox}
-                className={`${settingsAccentSecondaryActionClass} mt-5`}
+                variant="secondary"
+                className="mt-5"
               >
                 Add inbox
-              </button>
+              </DesktopActionButton>
             </div>
           ) : (
             <div className="grid gap-5 xl:grid-cols-[minmax(230px,300px)_minmax(0,1fr)]">
@@ -32488,7 +32483,8 @@ const ManageInboxesView = memo(function ManageInboxesView({
                           setSelectedInboxId(mailbox.id);
                           setActiveInboxEditorTab("Details");
                         }}
-                        className={`w-full rounded-[18px] border px-3 py-3 text-left transition-[background-color,border-color,box-shadow] duration-150 focus-visible:outline-none ${
+                        aria-pressed={isSelected}
+                        className={`w-full rounded-[18px] border px-3 py-3 text-left transition-[background-color,border-color,box-shadow] duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-text-soft)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--workspace-card)] ${
                           isSelected
                             ? "border-[var(--workspace-border-hover)] bg-[var(--workspace-card-subtle)] shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]"
                             : "border-transparent hover:border-[var(--workspace-border-soft)] hover:bg-[var(--workspace-hover-surface)]"
@@ -32595,13 +32591,12 @@ const ManageInboxesView = memo(function ManageInboxesView({
 
       {onBack ? (
         <div className="mt-8 flex justify-start">
-          <button
-            type="button"
+          <DesktopActionButton
             onClick={handleClose}
-            className={navigationCloseBackButtonClass}
+            variant="tertiary"
           >
             Back
-          </button>
+          </DesktopActionButton>
         </div>
       ) : null}
       <SettingsConfirmationModal
@@ -32883,20 +32878,20 @@ const SignatureSettingsModal = memo(function SignatureSettingsModal({
           </h2>
         </div>
         <div className="flex items-center gap-3">
-          <button
-            type="button"
+          <DesktopActionButton
             onClick={onCancel}
-            className={settingsPairedSecondaryActionClass}
+            variant="secondary"
+            className="w-[7.5rem]"
           >
             Cancel
-          </button>
-          <button
-            type="button"
+          </DesktopActionButton>
+          <DesktopActionButton
             onClick={onSave}
-            className={`${settingsPrimaryActionClass} w-[7.5rem]`}
+            variant="primary"
+            className="w-[7.5rem]"
           >
             Save
-          </button>
+          </DesktopActionButton>
         </div>
       </div>
 
@@ -32922,6 +32917,7 @@ const SignatureSettingsModal = memo(function SignatureSettingsModal({
                 key={option.value}
                 type="button"
                 onClick={() => onChangeLayout(option.value)}
+                aria-pressed={signature.layout === option.value}
                 className={settingsPillButtonClass(signature.layout === option.value)}
               >
                 {option.label}
@@ -32940,7 +32936,7 @@ const SignatureSettingsModal = memo(function SignatureSettingsModal({
                 Add one logo or mark for a clean professional signature.
               </div>
             </div>
-            <label className={`${settingsGhostActionClass} cursor-pointer`}>
+            <label className={settingsFileActionClass}>
               {signature.logoImageUrl ? "Replace image" : "Upload image"}
               <input
                 type="file"
@@ -32973,13 +32969,13 @@ const SignatureSettingsModal = memo(function SignatureSettingsModal({
                 alt=""
                 className="max-h-[56px] w-auto max-w-[160px] object-contain"
               />
-              <button
-                type="button"
+              <DesktopActionButton
                 onClick={() => onChangeLogoImageUrl(null)}
-                className={settingsSecondaryGhostActionClass}
+                variant="tertiary"
+                size="compact"
               >
                 Remove
-              </button>
+              </DesktopActionButton>
             </div>
           ) : (
             <div className="rounded-[18px] border border-dashed border-[var(--workspace-border)] bg-[var(--workspace-card)] px-4 py-4 text-[0.84rem] leading-6 text-[var(--workspace-text-muted)]">
@@ -32994,7 +32990,7 @@ const SignatureSettingsModal = memo(function SignatureSettingsModal({
               type="checkbox"
               checked={signature.useByDefault}
               onChange={(event) => onChangeUseByDefault(event.target.checked)}
-              className="peer absolute inset-0 m-0 h-full w-full appearance-none rounded-[5px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-input-bg)] outline-none transition checked:border-moss/55 checked:bg-[linear-gradient(180deg,rgba(226,236,229,0.92),rgba(246,249,246,0.98))] cursor-pointer"
+              className="peer absolute inset-0 m-0 h-full w-full cursor-pointer appearance-none rounded-[5px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-input-bg)] outline-none transition checked:border-moss/55 checked:bg-[linear-gradient(180deg,rgba(226,236,229,0.92),rgba(246,249,246,0.98))] focus-visible:ring-2 focus-visible:ring-[var(--workspace-text-soft)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--workspace-card)]"
             />
             <span className="pointer-events-none absolute inset-0 flex items-center justify-center text-[10px] font-semibold leading-none text-moss opacity-0 transition peer-checked:opacity-100">
               ✓
@@ -33009,7 +33005,7 @@ const SignatureSettingsModal = memo(function SignatureSettingsModal({
               type="checkbox"
               checked={signature.showDivider}
               onChange={(event) => onChangeShowDivider(event.target.checked)}
-              className="peer absolute inset-0 m-0 h-full w-full appearance-none rounded-[5px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-input-bg)] outline-none transition checked:border-moss/55 checked:bg-[linear-gradient(180deg,rgba(226,236,229,0.92),rgba(246,249,246,0.98))] cursor-pointer"
+              className="peer absolute inset-0 m-0 h-full w-full cursor-pointer appearance-none rounded-[5px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-input-bg)] outline-none transition checked:border-moss/55 checked:bg-[linear-gradient(180deg,rgba(226,236,229,0.92),rgba(246,249,246,0.98))] focus-visible:ring-2 focus-visible:ring-[var(--workspace-text-soft)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--workspace-card)]"
             />
             <span className="pointer-events-none absolute inset-0 flex items-center justify-center text-[10px] font-semibold leading-none text-moss opacity-0 transition peer-checked:opacity-100">
               ✓
@@ -33073,20 +33069,20 @@ const OutOfOfficeSettingsModal = memo(function OutOfOfficeSettingsModal({
           </h2>
         </div>
         <div className="flex items-center gap-3">
-          <button
-            type="button"
+          <DesktopActionButton
             onClick={onCancel}
-            className={settingsPairedSecondaryActionClass}
+            variant="secondary"
+            className="w-[7.5rem]"
           >
             Cancel
-          </button>
-          <button
-            type="button"
+          </DesktopActionButton>
+          <DesktopActionButton
             onClick={onSave}
-            className={`${settingsPrimaryActionClass} w-[7.5rem]`}
+            variant="primary"
+            className="w-[7.5rem]"
           >
             Save
-          </button>
+          </DesktopActionButton>
         </div>
       </div>
 
@@ -33124,14 +33120,14 @@ const OutOfOfficeSettingsModal = memo(function OutOfOfficeSettingsModal({
             </div>
             <div className="flex flex-wrap gap-2">
               {reuseOptions.map((option) => (
-                <button
+                <DesktopActionButton
                   key={`${inboxEmail}-${option.inboxEmail}`}
-                  type="button"
                   onClick={() => onReuseMessage(option.message)}
-                  className={settingsPillButtonClass(false)}
+                  variant="tertiary"
+                  size="compact"
                 >
                   {option.inboxEmail}
-                </button>
+                </DesktopActionButton>
               ))}
             </div>
           </div>
@@ -33518,13 +33514,12 @@ const MailSettingsCard = memo(function MailSettingsCard({
                         {mailbox.email}
                       </div>
                     </div>
-                    <button
-                      type="button"
+                    <DesktopActionButton
                       onClick={() => onManageSignature(mailbox)}
-                      className={settingsSubtleActionClass}
+                      variant="tertiary"
                     >
                       Manage signature
-                    </button>
+                    </DesktopActionButton>
                   </div>
                 ))}
               </div>
@@ -33572,13 +33567,12 @@ const MailSettingsCard = memo(function MailSettingsCard({
                           >
                             {outOfOfficeEnabled ? "On" : "Off"}
                           </span>
-                          <button
-                            type="button"
+                          <DesktopActionButton
                             onClick={() => onManageOutOfOffice(mailbox)}
-                            className={settingsSubtleActionClass}
+                            variant="tertiary"
                           >
                             Manage
-                          </button>
+                          </DesktopActionButton>
                         </div>
                       </div>
                     );
@@ -33659,6 +33653,7 @@ const InboxBehaviorSettingsCard = memo(function InboxBehaviorSettingsCard({
               <button
                 type="button"
                 onClick={() => setDraftUnknownSendersChoice("keep")}
+                aria-pressed={draftUnknownSendersChoice === "keep"}
                 className={settingsPillButtonClass(draftUnknownSendersChoice === "keep")}
               >
                 Keep in Inbox
@@ -33666,6 +33661,7 @@ const InboxBehaviorSettingsCard = memo(function InboxBehaviorSettingsCard({
               <button
                 type="button"
                 onClick={() => setDraftUnknownSendersChoice("review")}
+                aria-pressed={draftUnknownSendersChoice === "review"}
                 className={settingsPillButtonClass(draftUnknownSendersChoice === "review")}
               >
                 Move out of Inbox
@@ -33683,6 +33679,7 @@ const InboxBehaviorSettingsCard = memo(function InboxBehaviorSettingsCard({
                   key={option}
                   type="button"
                   onClick={() => setDraftAutomationLevel(option)}
+                  aria-pressed={draftAutomationLevel === option}
                   className={settingsPillButtonClass(draftAutomationLevel === option)}
                 >
                   {option}
@@ -33693,20 +33690,20 @@ const InboxBehaviorSettingsCard = memo(function InboxBehaviorSettingsCard({
 
           {hasUnsavedChanges ? (
             <div className="flex justify-end gap-3 pt-1">
-              <button
-                type="button"
+              <DesktopActionButton
                 onClick={handleCancel}
-                className={settingsPairedSecondaryActionClass}
+                variant="secondary"
+                className="w-[7.5rem]"
               >
                 Cancel
-              </button>
-              <button
-                type="button"
+              </DesktopActionButton>
+              <DesktopActionButton
                 onClick={handleApply}
-                className={`${settingsPrimaryActionClass} w-[7.5rem]`}
+                variant="primary"
+                className="w-[7.5rem]"
               >
                 Apply
-              </button>
+              </DesktopActionButton>
             </div>
           ) : null}
         </div>
@@ -33809,7 +33806,8 @@ const FocusPreferencesSettingsCard = memo(function FocusPreferencesSettingsCard(
                     key={`focus-preferences-inbox-${mailbox.id}`}
                     type="button"
                     onClick={() => setActiveInboxId(mailbox.id as InboxId)}
-                    className={`min-w-[14rem] rounded-[18px] border px-3.5 py-3 text-left transition-[background-color,border-color,box-shadow,transform] duration-150 focus-visible:outline-none ${
+                    aria-pressed={isSelected}
+                    className={`min-w-[14rem] rounded-[18px] border px-3.5 py-3 text-left transition-[background-color,border-color,box-shadow,transform] duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-text-soft)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--workspace-card)] ${
                       isSelected
                         ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_8px_24px_rgba(118,170,112,0.08)]"
                         : "border-[var(--workspace-border)] bg-[var(--workspace-card)] hover:border-[var(--workspace-border-hover)] hover:bg-[var(--workspace-hover-surface)]"
@@ -33893,6 +33891,7 @@ const FocusPreferencesSettingsCard = memo(function FocusPreferencesSettingsCard(
                               return nextValue;
                             })
                           }
+                          aria-pressed={activeFocusPreferences[field] === option}
                           className={settingsPillButtonClass(
                             activeFocusPreferences[field] === option,
                           )}
@@ -33919,8 +33918,7 @@ const FocusPreferencesSettingsCard = memo(function FocusPreferencesSettingsCard(
                   </div>
                 </div>
                 <div className="flex items-center justify-end gap-3">
-                  <button
-                    type="button"
+                  <DesktopActionButton
                     onClick={() =>
                       setDraftFocusPreferenceOverrides((current) => {
                         if (!activeInboxId) {
@@ -33940,18 +33938,18 @@ const FocusPreferencesSettingsCard = memo(function FocusPreferencesSettingsCard(
                       })
                     }
                     disabled={isApplying}
-                    className={settingsPairedSecondaryActionClass}
+                    variant="tertiary"
                   >
                     Reset
-                  </button>
-                  <button
-                    type="button"
+                  </DesktopActionButton>
+                  <DesktopActionButton
                     onClick={() => setIsConfirmOpen(true)}
                     disabled={isApplying}
-                    className={`${settingsPrimaryActionClass} w-[9rem] disabled:cursor-not-allowed disabled:opacity-70`}
+                    variant="primary"
+                    className="w-[9rem]"
                   >
                     {isApplying ? "Applying…" : "Apply changes"}
-                  </button>
+                  </DesktopActionButton>
                 </div>
               </div>
             </div>
@@ -34169,15 +34167,16 @@ const AccountSettingsCard = memo(function AccountSettingsCard({
           </h2>
           <div className="ml-auto flex flex-none items-center gap-2.5 self-start">
             {isManaging ? (
-              <CloseActionButton onClick={handleCloseManage} />
+              <DesktopActionButton onClick={handleCloseManage} variant="tertiary">
+                Close
+              </DesktopActionButton>
             ) : (
-              <button
-                type="button"
+              <DesktopActionButton
                 onClick={() => setIsManaging(true)}
-                className={settingsPrimaryActionClass}
+                variant="tertiary"
               >
                 Manage
-              </button>
+              </DesktopActionButton>
             )}
           </div>
         </div>
@@ -34216,13 +34215,12 @@ const AccountSettingsCard = memo(function AccountSettingsCard({
                     Update your sign-in password securely.
                   </div>
                 </div>
-                <button
-                  type="button"
+                <DesktopActionButton
                   onClick={() => setIsResetPasswordOpen(true)}
-                  className={settingsSubtleActionClass}
+                  variant="tertiary"
                 >
                   Reset password
-                </button>
+                </DesktopActionButton>
               </div>
             </div>
           ) : (
@@ -34231,20 +34229,20 @@ const AccountSettingsCard = memo(function AccountSettingsCard({
 
           {isManaging && hasUnsavedChanges ? (
             <div className="flex justify-end gap-3 pt-1">
-              <button
-                type="button"
+              <DesktopActionButton
                 onClick={handleCancel}
-                className={settingsPairedSecondaryActionClass}
+                variant="secondary"
+                className="w-[7.5rem]"
               >
                 Cancel
-              </button>
-              <button
-                type="button"
+              </DesktopActionButton>
+              <DesktopActionButton
                 onClick={handleApply}
-                className={`${settingsPrimaryActionClass} w-[7.5rem]`}
+                variant="primary"
+                className="w-[7.5rem]"
               >
                 Apply
-              </button>
+              </DesktopActionButton>
             </div>
           ) : null}
         </div>
@@ -34278,13 +34276,12 @@ const AccountSettingsCard = memo(function AccountSettingsCard({
                   Email Client and Organizer are available in this workspace.
                 </p>
               </div>
-              <button
-                type="button"
+              <DesktopActionButton
                 onClick={handleRemoveProductAccess}
-                className={settingsSubtleActionClass}
+                variant="secondary"
               >
                 Switch to Email Client only
-              </button>
+              </DesktopActionButton>
             </div>
           </div>
         ) : (
@@ -34308,13 +34305,13 @@ const AccountSettingsCard = memo(function AccountSettingsCard({
                 className={accessCodeError ? inputFieldErrorClass : inputFieldClass}
                 placeholder="Enter workspace code"
               />
-              <button
-                type="button"
+              <DesktopActionButton
                 onClick={handleApplyProductAccessCode}
-                className={`${settingsPrimaryActionClass} h-[3.05rem] shrink-0 px-5`}
+                variant="primary"
+                className="shrink-0"
               >
                 Apply
-              </button>
+              </DesktopActionButton>
             </div>
             {accessCodeError ? (
               <div className="mt-2 text-[0.78rem] leading-5 text-[color:rgba(146,82,73,0.96)] dark:text-[color:rgba(244,186,168,0.86)]">
@@ -34397,15 +34394,14 @@ const AccountSettingsCard = memo(function AccountSettingsCard({
         </div>
 
         <div className="mt-6 flex items-center justify-end gap-3">
-          <button
-            type="button"
+          <DesktopActionButton
             onClick={handleCloseChangeEmail}
-            className={settingsPairedSecondaryActionClass}
+            variant="secondary"
+            className="w-[7.5rem]"
           >
             Cancel
-          </button>
-          <button
-            type="button"
+          </DesktopActionButton>
+          <DesktopActionButton
             onClick={() => {
               if (!canSubmitEmailChange) {
                 return;
@@ -34413,12 +34409,13 @@ const AccountSettingsCard = memo(function AccountSettingsCard({
 
 	              setSavedEmail(normalizedNextEmail);
 	              handleCloseChangeEmail();
-	            }}
+            }}
             disabled={!canSubmitEmailChange}
-            className={`${settingsPrimaryActionClass} w-[7.5rem] disabled:cursor-not-allowed disabled:border-[color:rgba(120,104,89,0.14)] disabled:bg-[linear-gradient(180deg,rgba(167,174,167,0.42),rgba(131,137,131,0.52))] disabled:text-[color:rgba(251,248,242,0.78)] disabled:shadow-none`}
+            variant="primary"
+            className="w-[7.5rem]"
           >
             Continue
-          </button>
+          </DesktopActionButton>
         </div>
       </SettingsModalShell>
       <SettingsModalShell
@@ -34438,13 +34435,12 @@ const AccountSettingsCard = memo(function AccountSettingsCard({
             </div>
 
             <div className="mt-6 flex items-center justify-end">
-              <button
-                type="button"
+              <DesktopActionButton
                 onClick={handleCloseResetPassword}
-                className={settingsPrimaryActionClass}
+                variant="primary"
               >
                 Done
-              </button>
+              </DesktopActionButton>
             </div>
           </>
         ) : (
@@ -34468,22 +34464,21 @@ const AccountSettingsCard = memo(function AccountSettingsCard({
             </div>
 
             <div className="mt-6 flex items-center justify-end gap-3">
-              <button
-                type="button"
+              <DesktopActionButton
                 onClick={handleCloseResetPassword}
-                className={settingsPairedSecondaryActionClass}
+                variant="secondary"
+                className="w-[7.5rem]"
               >
                 Cancel
-              </button>
-              <button
-                type="button"
+              </DesktopActionButton>
+              <DesktopActionButton
 	                onClick={() => {
 	                  setIsResetPasswordSent(true);
 	                }}
-                className={settingsPrimaryActionClass}
+                variant="primary"
               >
                 Send reset link
-              </button>
+              </DesktopActionButton>
             </div>
           </>
         )}
@@ -34512,7 +34507,8 @@ const AccountSettingsCard = memo(function AccountSettingsCard({
                 key={plan}
                 type="button"
                 onClick={() => setDraftPlan(plan)}
-                className={`w-full rounded-[20px] border px-4 py-4 text-left transition-[background-color,border-color,box-shadow,transform] duration-150 active:scale-[0.995] focus-visible:outline-none ${
+                aria-pressed={selected}
+                className={`w-full rounded-[20px] border px-4 py-4 text-left transition-[background-color,border-color,box-shadow,transform] duration-150 active:scale-[0.995] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-text-soft)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--workspace-card)] ${
                   current
                     ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_6px_14px_rgba(118,170,112,0.08)]"
                     : selected
@@ -34566,33 +34562,31 @@ const AccountSettingsCard = memo(function AccountSettingsCard({
 
         {draftPlan !== savedPlan ? (
           <div className="mt-6 flex items-center justify-end gap-3">
-            <button
-              type="button"
+            <DesktopActionButton
               onClick={() => setDraftPlan(savedPlan)}
-              className={settingsPairedSecondaryActionClass}
+              variant="secondary"
+              className="w-[7.5rem]"
             >
               Cancel
-            </button>
-            <button
-              type="button"
+            </DesktopActionButton>
+            <DesktopActionButton
 	              onClick={() => {
 	                setSavedPlan(draftPlan);
 	                setIsManagePlanOpen(false);
 	              }}
-              className={settingsPrimaryActionClass}
+              variant="primary"
             >
               Continue
-            </button>
+            </DesktopActionButton>
           </div>
         ) : (
           <div className="mt-6 flex items-center justify-end">
-            <button
-              type="button"
+            <DesktopActionButton
               onClick={handleCloseManagePlan}
-              className={navigationCloseBackButtonClass}
+              variant="tertiary"
             >
               Close
-            </button>
+            </DesktopActionButton>
           </div>
         )}
       </SettingsModalShell>
@@ -34865,11 +34859,17 @@ function SettingsView({
       </header>
 
       <div className="overflow-x-auto pb-1">
-        <div className="inline-flex min-w-max items-center gap-1 rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] p-1 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+        <div
+          role="tablist"
+          aria-label="Settings sections"
+          className="inline-flex min-w-max items-center gap-1 rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] p-1 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"
+        >
           {settingsTabs.map((tab) => (
             <button
               key={`settings-tab-${tab}`}
               type="button"
+              role="tab"
+              aria-selected={activeSettingsTab === tab}
               onClick={() => handleSettingsTabChange(tab)}
               className={settingsTabButtonClass(activeSettingsTab === tab)}
             >
