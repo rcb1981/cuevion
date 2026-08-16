@@ -454,8 +454,11 @@ const resetComposeSource = workspaceShellSource.slice(
   workspaceShellSource.indexOf("const normalizeRememberedRecipient ="),
 );
 const desktopComposerSource = workspaceShellSource.slice(
-  workspaceShellSource.indexOf("const desktopComposer ="),
-  workspaceShellSource.indexOf("return (", workspaceShellSource.indexOf("const desktopComposer =")),
+  workspaceShellSource.indexOf("const desktopComposeContent ="),
+  workspaceShellSource.indexOf(
+    "return (",
+    workspaceShellSource.indexOf("const desktopComposer ="),
+  ),
 );
 
 assert.match(

@@ -212,7 +212,9 @@ assert.match(
   "send serialization must continue using only the initialized/current compose attachments",
 );
 
-const desktopComposerStart = workspaceShellSource.indexOf("const desktopComposer =");
+const desktopComposerStart = workspaceShellSource.indexOf(
+  "const desktopComposeContent =",
+);
 const desktopComposerEnd = workspaceShellSource.indexOf(
   "return (",
   desktopComposerStart,

@@ -516,10 +516,115 @@ recordCorrectionExpectation("shared composer and normal compose regression", () 
   );
 });
 
+recordCorrectionExpectation("fixed modal compose toolbar and scroll ownership", () => {
+  const desktopComposerSource = workspaceShellSource.slice(
+    workspaceShellSource.indexOf("const desktopComposer ="),
+    workspaceShellSource.indexOf("return (", workspaceShellSource.indexOf("const desktopComposer =")),
+  );
+  const composeContentSource = workspaceShellSource.slice(
+    workspaceShellSource.indexOf("const desktopComposeContent ="),
+    workspaceShellSource.indexOf("const desktopComposeToolbarActions ="),
+  );
+  const toolbarIndex = desktopComposerSource.indexOf("<DesktopWindowToolbar");
+  const errorIndex = desktopComposerSource.indexOf("data-desktop-compose-error");
+  const scrollRegionIndex = desktopComposerSource.indexOf("{desktopComposeContent}");
+
+  assert.ok(
+    toolbarIndex >= 0 && toolbarIndex < scrollRegionIndex,
+    "the modal compose toolbar must precede the draft content scroll region",
+  );
+  assert.match(
+    desktopComposerSource,
+    /data-desktop-composer[\s\S]{0,120}onDragOver=\{handleComposeFileDragOver\}[\s\S]{0,120}onDrop=\{handleComposeFileDrop\}[\s\S]{0,500}flex-col overflow-hidden/,
+    "the whole dedicated compose window must retain drag/drop ownership",
+  );
+  assert.ok(
+    errorIndex < 0 || (toolbarIndex < errorIndex && errorIndex < scrollRegionIndex),
+    "compose errors must render between the fixed toolbar and scroll region",
+  );
+  assert.match(
+    desktopComposerSource,
+    /data-desktop-compose-error[\s\S]{0,160}role="alert"/,
+    "the conditional fixed compose error strip must keep alert semantics",
+  );
+  assert.match(
+    composeContentSource,
+    /data-desktop-compose-scroll-region[\s\S]{0,350}min-h-0 flex-1 overflow-y-auto/,
+    "modal draft content must be the sole vertical scroll owner below the toolbar",
+  );
+});
+
+recordCorrectionExpectation("modal compose toolbar actions", () => {
+  const toolbarActionsSource = workspaceShellSource.slice(
+    workspaceShellSource.indexOf("const desktopComposeToolbarActions ="),
+    workspaceShellSource.indexOf("const desktopComposer ="),
+  );
+
+  assert.match(
+    toolbarActionsSource,
+    /onClick=\{openComposeAttachmentPicker\}[\s\S]{0,1200}<DesktopMessageActionIcon name="attach"[\s\S]{0,120}Attach/,
+    "fixed Attach must reuse the existing picker with a shared toolbar icon",
+  );
+  assert.match(
+    toolbarActionsSource,
+    /composeSignatureOptions\.length > 0[\s\S]{0,1200}<DesktopMessageActionIcon name="signature"[\s\S]{0,500}aria-label="Select signature"/,
+    "fixed Signature must remain conditional and retain its selector handler",
+  );
+  assert.match(
+    toolbarActionsSource,
+    /onClick=\{\(\) => void sendMessage\(\)\}[\s\S]{0,120}disabled=\{isSendingCompose\}[\s\S]{0,1200}<DesktopMessageActionIcon name="send"[\s\S]{0,160}Sending\.\.\.[\s\S]{0,80}Send/,
+    "fixed Send must retain the existing authority, progress, and disabled state",
+  );
+  assert.match(
+    workspaceShellSource,
+    /ref=\{composeModalCloseButtonRef\}[\s\S]{0,220}aria-label="Close compose"[\s\S]{0,220}onClick=\{\(\) => setIsCloseModalOpen\(true\)\}[\s\S]{0,900}<DesktopMessageActionIcon name="close"/,
+    "fixed Close must retain the established ref and confirmation handler",
+  );
+});
+
+recordCorrectionExpectation("modal compose content and workspace boundary", () => {
+  const composeContentSource = workspaceShellSource.slice(
+    workspaceShellSource.indexOf("const desktopComposeContent ="),
+    workspaceShellSource.indexOf("const desktopComposeToolbarActions ="),
+  );
+  const workspaceBranchSource = workspaceShellSource.slice(
+    workspaceShellSource.indexOf('composePresentation === "workspace" ? ('),
+    workspaceShellSource.indexOf("const desktopComposeToolbarActions ="),
+  );
+
+  assert.match(
+    composeContentSource,
+    /data-desktop-compose-scroll-region[\s\S]*>\s*To\s*</,
+    "To must remain in scrolling draft content",
+  );
+  for (const field of ["CC", "BCC", "Subject"]) {
+    assert.match(
+      composeContentSource,
+      new RegExp(`data-desktop-compose-scroll-region[\\s\\S]*>\\s*${field}\\s*<`),
+      `${field} must remain in scrolling draft content`,
+    );
+  }
+  assert.match(
+    composeContentSource,
+    /data-desktop-compose-scroll-region[\s\S]*id="desktop-compose-body"[\s\S]*min-h-\[260px\][\s\S]*Show quoted content[\s\S]*visibleComposeAttachments\.map/,
+    "editor, quote disclosure, and visible attachments must remain in scrolling content",
+  );
+  assert.match(
+    workspaceBranchSource,
+    /composePresentation === "workspace" \? \([\s\S]{0,1200}id="desktop-compose-title"[\s\S]{0,1200}ref=\{composeModalCloseButtonRef\}/,
+    "workspace compose must retain its existing local title and Close row",
+  );
+  assert.doesNotMatch(
+    workspaceBranchSource,
+    /<DesktopWindowToolbar/,
+    "workspace compose must not receive dedicated window chrome",
+  );
+});
+
 recordCorrectionExpectation("compose title contract", () => {
   const titleSource = workspaceShellSource.slice(
-    workspaceShellSource.indexOf('id="desktop-compose-title"'),
-    workspaceShellSource.indexOf("</h2>", workspaceShellSource.indexOf('id="desktop-compose-title"')),
+    workspaceShellSource.indexOf("const desktopComposeWindowTitle ="),
+    workspaceShellSource.indexOf("const desktopComposeContent ="),
   );
 
   assert.match(titleSource, /composeMode === "reply"[\s\S]{0,80}\? "Reply"/);

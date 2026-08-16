@@ -10159,7 +10159,16 @@ function CloseActionButton({
 function DesktopMessageActionIcon({
   name,
 }: {
-  name: "reply" | "reply-all" | "forward" | "more" | "close" | "learning";
+  name:
+    | "reply"
+    | "reply-all"
+    | "forward"
+    | "more"
+    | "close"
+    | "learning"
+    | "attach"
+    | "signature"
+    | "send";
 }) {
   return (
     <svg
@@ -10203,6 +10212,20 @@ function DesktopMessageActionIcon({
         <>
           <path d="M4 4l8 8" />
           <path d="M12 4 4 12" />
+        </>
+      ) : null}
+      {name === "attach" ? (
+        <path d="M6 6.5v4.5a2 2 0 0 0 4 0v-6a3 3 0 1 0-6 0v6.5a4 4 0 0 0 8 0V6.5" />
+      ) : null}
+      {name === "signature" ? (
+        <>
+          <path d="M3 12.5c2.1-1.6 3.6-3.7 4.7-6.3.5-1.2 1.1-2.2 1.8-2.7.5-.4 1.1-.2 1.2.4.2.9-.7 2.4-2.5 4.5" />
+          <path d="M6.8 11.2c1.2-1.1 2-1.4 2.4-.9.4.6.8.8 1.3.4.7-.6 1.3-.6 1.8 0 .4.4.9.4 1.7-.1" />
+        </>
+      ) : null}
+      {name === "send" ? (
+        <>
+          <path d="m2.5 3 11 5-11 5 1.6-4.1L9 8 4.1 7.1 2.5 3Z" />
         </>
       ) : null}
       {name === "learning" ? (
@@ -23662,40 +23685,48 @@ function MailboxView({
         ) : null}
 
         {(() => {
-          const desktopComposer = (
-          <div
-            data-desktop-composer
-            onDragOver={handleComposeFileDragOver}
-            onDrop={handleComposeFileDrop}
-            className="min-h-0 flex-1 overflow-y-auto rounded-[24px] border border-[color:rgba(128,142,121,0.14)] bg-[linear-gradient(180deg,rgba(255,255,253,0.98),rgba(250,246,239,0.96))] p-5 shadow-[0_10px_28px_rgba(164,147,125,0.06)] dark:border-[var(--workspace-border-soft)] dark:bg-[linear-gradient(180deg,var(--workspace-card-featured-start),var(--workspace-card-featured-end))] md:p-6"
-          >
-            <div className="space-y-5">
-              <div className="flex items-center justify-between gap-4">
-                <h2
-                  id="desktop-compose-title"
-                  className="text-[1.3rem] font-medium tracking-tight text-[var(--workspace-text)] md:text-[1.45rem]"
-                >
-                  {composePresentation === "modal"
-                    ? composeMode === "reply"
-                      ? "Reply"
-                      : composeMode === "reply_all"
-                        ? "Reply All"
-                        : composeMode === "forward"
-                          ? "Forward"
-                          : "New Message"
-                    : "New Message"}
-                </h2>
-                <button
-                  ref={composeModalCloseButtonRef}
-                  type="button"
-                  onClick={() => setIsCloseModalOpen(true)}
-                  className={navigationCloseBackButtonClass}
-                >
-                  Close
-                </button>
-              </div>
+          const desktopComposeWindowTitle =
+            composePresentation === "modal"
+              ? composeMode === "reply"
+                ? "Reply"
+                : composeMode === "reply_all"
+                  ? "Reply All"
+                  : composeMode === "forward"
+                    ? "Forward"
+                    : "New Message"
+              : "New Message";
+          const desktopComposeContent = (
+            <div
+              data-desktop-compose-scroll-region={
+                composePresentation === "modal" ? true : undefined
+              }
+              className={
+                composePresentation === "modal"
+                  ? "min-h-0 flex-1 overflow-y-auto p-5 md:p-6"
+                  : undefined
+              }
+            >
+              <div className="space-y-5">
+                {composePresentation === "workspace" ? (
+                  <div className="flex items-center justify-between gap-4">
+                    <h2
+                      id="desktop-compose-title"
+                      className="text-[1.3rem] font-medium tracking-tight text-[var(--workspace-text)] md:text-[1.45rem]"
+                    >
+                      {desktopComposeWindowTitle}
+                    </h2>
+                    <button
+                      ref={composeModalCloseButtonRef}
+                      type="button"
+                      onClick={() => setIsCloseModalOpen(true)}
+                      className={navigationCloseBackButtonClass}
+                    >
+                      Close
+                    </button>
+                  </div>
+                ) : null}
 
-              <div className="space-y-3">
+                <div className="space-y-3">
                 <label className="grid grid-cols-[72px_minmax(0,1fr)] items-center gap-4 rounded-[18px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-3">
                   <span className="text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
                     To
@@ -23870,14 +23901,15 @@ function MailboxView({
                   </div>
                 ) : null}
 
-                <div className="flex flex-wrap items-center gap-2 border-t border-[var(--workspace-border-soft)] pt-4">
-                  <input
-                    ref={composeAttachmentInputRef}
-                    type="file"
-                    multiple
-                    className="sr-only"
-                    onChange={handleComposeAttachmentSelection}
-                  />
+                <input
+                  ref={composeAttachmentInputRef}
+                  type="file"
+                  multiple
+                  className="sr-only"
+                  onChange={handleComposeAttachmentSelection}
+                />
+                {composePresentation === "workspace" ? (
+                  <div className="flex flex-wrap items-center gap-2 border-t border-[var(--workspace-border-soft)] pt-4">
                   <button
                     type="button"
                     onClick={openComposeAttachmentPicker}
@@ -23933,10 +23965,100 @@ function MailboxView({
                       {isSendingCompose ? "Sending..." : "Send"}
                     </button>
                   </div>
-                </div>
+                  </div>
+                ) : null}
               </div>
             </div>
           </div>
+          );
+
+          const desktopComposeToolbarActions = (
+            <div className="flex min-w-0 items-center gap-1.5">
+              <button
+                type="button"
+                onClick={openComposeAttachmentPicker}
+                className="inline-flex h-8 flex-none items-center justify-center gap-1.5 rounded-full border border-transparent px-2.5 text-[0.68rem] font-medium uppercase tracking-[0.1em] text-[var(--workspace-text-soft)] transition-[background-color,border-color,color,transform] duration-150 hover:border-[var(--workspace-border-soft)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] active:scale-[0.98] focus-visible:border-[var(--workspace-border-hover)] focus-visible:bg-[var(--workspace-hover-surface)] focus-visible:outline-none"
+              >
+                <DesktopMessageActionIcon name="attach" />
+                <span>Attach</span>
+              </button>
+              {composeSignatureOptions.length > 0 ? (
+                <label className="relative inline-flex h-8 flex-none cursor-pointer items-center justify-center gap-1.5 rounded-full border border-transparent px-2.5 text-[0.68rem] font-medium uppercase tracking-[0.1em] text-[var(--workspace-text-soft)] transition-[background-color,border-color,color] duration-150 hover:border-[var(--workspace-border-soft)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] focus-within:border-[var(--workspace-border-hover)] focus-within:bg-[var(--workspace-hover-surface)]">
+                  <DesktopMessageActionIcon name="signature" />
+                  <span>Signature</span>
+                  <select
+                    aria-label="Select signature"
+                    value={composeSignatureSelection}
+                    onChange={(event) =>
+                      handleComposeSignatureSelectionChange(event.target.value)
+                    }
+                    className="absolute inset-0 cursor-pointer opacity-0"
+                  >
+                    <option value="none">No signature</option>
+                    {composeSignatureOptions.map((option) => (
+                      <option key={option.id} value={option.id}>
+                        {option.email}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : null}
+              <button
+                type="button"
+                onClick={() => void sendMessage()}
+                disabled={isSendingCompose}
+                className="inline-flex h-8 flex-none items-center justify-center gap-1.5 rounded-full bg-pine px-3 text-[0.68rem] font-medium uppercase tracking-[0.12em] text-white transition-[background-color,transform] duration-150 hover:bg-moss active:scale-[0.98] focus-visible:outline-none disabled:cursor-not-allowed disabled:bg-[color:rgba(101,124,103,0.72)] disabled:hover:bg-[color:rgba(101,124,103,0.72)]"
+              >
+                <DesktopMessageActionIcon name="send" />
+                <span>{isSendingCompose ? "Sending..." : "Send"}</span>
+              </button>
+            </div>
+          );
+
+          const desktopComposer = (
+            <div
+              data-desktop-composer
+              onDragOver={handleComposeFileDragOver}
+              onDrop={handleComposeFileDrop}
+              className={
+                composePresentation === "modal"
+                  ? "flex min-h-0 flex-1 flex-col overflow-hidden"
+                  : "min-h-0 flex-1 overflow-y-auto rounded-[24px] border border-[color:rgba(128,142,121,0.14)] bg-[linear-gradient(180deg,rgba(255,255,253,0.98),rgba(250,246,239,0.96))] p-5 shadow-[0_10px_28px_rgba(164,147,125,0.06)] dark:border-[var(--workspace-border-soft)] dark:bg-[linear-gradient(180deg,var(--workspace-card-featured-start),var(--workspace-card-featured-end))] md:p-6"
+              }
+            >
+              {composePresentation === "modal" ? (
+                <>
+                  <DesktopWindowToolbar
+                    titleId="desktop-compose-title"
+                    titleText={desktopComposeWindowTitle}
+                    title={desktopComposeWindowTitle}
+                    actions={desktopComposeToolbarActions}
+                    close={
+                      <button
+                        ref={composeModalCloseButtonRef}
+                        type="button"
+                        aria-label="Close compose"
+                        title="Close compose"
+                        onClick={() => setIsCloseModalOpen(true)}
+                        className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-transparent text-[var(--workspace-text-faint)] transition-[background-color,border-color,color,transform] duration-150 hover:border-[var(--workspace-border-soft)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] active:scale-[0.98] focus-visible:border-[var(--workspace-border-hover)] focus-visible:bg-[var(--workspace-hover-surface)] focus-visible:text-[var(--workspace-text)] focus-visible:outline-none"
+                      >
+                        <DesktopMessageActionIcon name="close" />
+                      </button>
+                    }
+                  />
+                  {composeSendError ? (
+                    <div
+                      data-desktop-compose-error
+                      role="alert"
+                      className="flex-none border-b border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-5 py-2 text-[0.78rem] leading-5 text-[color:rgba(148,63,38,0.96)] md:px-6"
+                    >
+                      {composeSendError}
+                    </div>
+                  ) : null}
+                </>
+              ) : null}
+              {desktopComposeContent}
+            </div>
           );
 
           return (
