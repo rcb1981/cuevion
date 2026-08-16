@@ -9771,6 +9771,31 @@ function shouldShowInAttachmentList(attachment: MailAttachment) {
   );
 }
 
+function normalizeConversationDisplaySubject(subject?: string | null) {
+  let normalizedSubject = (subject ?? "").replace(/\s+/g, " ").trim();
+
+  while (/^(?:re|fw|fwd)\s*:\s*/i.test(normalizedSubject)) {
+    normalizedSubject = normalizedSubject
+      .replace(/^(?:re|fw|fwd)\s*:\s*/i, "")
+      .trim();
+  }
+
+  return normalizedSubject.replace(/\s+/g, " ").trim();
+}
+
+function getConversationDisplaySubject(
+  messages: Array<{ subject?: string | null }>,
+  selectedSubject?: string | null,
+) {
+  const earliestSubject = messages.find((message) => message.subject?.trim())?.subject;
+
+  return (
+    normalizeConversationDisplaySubject(earliestSubject) ||
+    normalizeConversationDisplaySubject(selectedSubject) ||
+    "No subject"
+  );
+}
+
 function resolveMailDateMs(message: MailMessage) {
   if (message.createdAt) {
     const directDate = new Date(message.createdAt).getTime();
@@ -16420,7 +16445,15 @@ function MailboxView({
       });
   };
   const selectedMessageThreadMessages = getThreadMessages(selectedMessage);
-  const fullWidthMessageThreadMessages = getThreadMessages(fullWidthMessage);
+  const selectedConversationTitle = getConversationDisplaySubject(
+    selectedMessageThreadMessages,
+    selectedMessage?.subject,
+  );
+  const fullMessageModalThreadMessages = getThreadMessages(fullMessageModalMessage);
+  const fullMessageModalConversationTitle = getConversationDisplaySubject(
+    fullMessageModalThreadMessages,
+    fullMessageModalMessage?.subject,
+  );
   const canShowRemoteImagesForMessage = (messageId: string) =>
     revealedRemoteImageMessageIds.includes(messageId);
   const revealRemoteImagesForMessage = (messageId: string) => {
@@ -16433,14 +16466,29 @@ function MailboxView({
   const renderThreadMessage = (
     threadMessage: MailMessage,
     density: "split" | "full",
-    options?: { historical?: boolean },
   ) => {
     const isCurrentUser =
       normalizeSenderLearningKey(threadMessage.from) ===
         normalizeSenderLearningKey(mailbox.email) ||
       threadMessage.signal === "Sent" ||
       threadMessage.sender === "You";
-    const isHistoricalThreadMessage = options?.historical ?? false;
+    const visibleAttachments = (threadMessage.attachments ?? [])
+      .filter(shouldShowInAttachmentList);
+    const recipient = threadMessage.to.trim();
+    const recipientContext = recipient
+      ? `to ${
+          !isCurrentUser &&
+          normalizeSenderLearningKey(recipient).includes(
+            normalizeSenderLearningKey(mailbox.email),
+          )
+            ? "me"
+            : recipient
+        }`
+      : null;
+    const hasValidCreatedAt = Boolean(
+      threadMessage.createdAt &&
+        !Number.isNaN(new Date(threadMessage.createdAt).getTime()),
+    );
     const quoteStartIndex = getQuotedParagraphStartIndex(threadMessage.body);
     const leadingParagraphs = compactMessageParagraphs(
       quoteStartIndex === -1
@@ -16489,28 +16537,35 @@ function MailboxView({
     const plainContentClassName = nativeBodyTextClass;
 
     return (
-      <div
-        key={threadMessage.id}
-        className={`w-full ${
-          isHistoricalThreadMessage
-            ? "border-t border-[color:rgba(129,144,122,0.12)] pt-3 dark:border-[color:rgba(121,151,120,0.14)]"
-            : "pt-0"
-        } ${isCurrentUser ? "pl-4 md:pl-8" : ""}`}
+      <article
+        data-thread-message-id={threadMessage.id}
+        className="w-full py-4"
       >
-        <div className={`flex flex-wrap items-center justify-between ${isExternalHtmlMessage ? "gap-2 px-0.5" : "gap-2"}`}>
-          <div className="flex items-center gap-2">
-            <div className={`font-medium tracking-[-0.012em] text-[var(--workspace-text)] ${isHistoricalThreadMessage ? "text-[0.78rem]" : "text-[0.84rem]"}`}>
-              {isCurrentUser ? "You" : threadMessage.sender}
+        <div className={`grid grid-cols-[minmax(0,1fr)_auto] items-start ${isExternalHtmlMessage ? "gap-3 px-0.5" : "gap-3"}`}>
+          <div className="min-w-0">
+            <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+              <div className="truncate text-[0.84rem] font-medium tracking-[-0.012em] text-[var(--workspace-text)]">
+                {isCurrentUser ? "You" : threadMessage.sender}
+              </div>
+              {threadMessage.isAutoReply &&
+              threadMessage.autoReplyType === "out_of_office" ? (
+                <span className="inline-flex items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-2 py-0.5 text-[0.58rem] font-medium uppercase tracking-[0.12em] text-[var(--workspace-text-faint)]">
+                  Automatic reply
+                </span>
+              ) : null}
             </div>
-            {threadMessage.isAutoReply &&
-            threadMessage.autoReplyType === "out_of_office" ? (
-              <span className="inline-flex items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-2.5 py-1 text-[0.6rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)]">
-                Automatic reply
-              </span>
+            {recipientContext ? (
+              <div className="mt-0.5 truncate text-[0.72rem] leading-5 text-[var(--workspace-text-faint)]">
+                {recipientContext}
+              </div>
             ) : null}
           </div>
-          <div className={`uppercase tracking-[0.12em] text-[var(--workspace-text-faint)] ${isHistoricalThreadMessage ? "text-[0.62rem]" : "text-[0.68rem]"}`}>
-            {threadMessage.timestamp}
+          <div className="pt-0.5 text-right text-[0.68rem] leading-5 text-[var(--workspace-text-faint)]">
+            {hasValidCreatedAt ? (
+              <time dateTime={threadMessage.createdAt}>{threadMessage.timestamp}</time>
+            ) : (
+              <span>{threadMessage.timestamp}</span>
+            )}
           </div>
         </div>
         <div
@@ -16518,7 +16573,7 @@ function MailboxView({
           data-render-external-html={String(isExternalHtmlMessage)}
           data-render-native-html={String(isNativeHtmlMessage)}
           data-render-compose-generated={String(isComposeGeneratedBodyHtml)}
-          className={`mt-1.5 bg-transparent px-0 py-0 text-[var(--workspace-text)] dark:text-[color:rgba(228,235,230,0.94)] ${isExternalHtmlMessage ? "overflow-visible" : ""}`}
+          className={`mt-2.5 bg-transparent px-0 py-0 text-[var(--workspace-text)] dark:text-[color:rgba(228,235,230,0.94)] ${isExternalHtmlMessage ? "overflow-visible" : ""}`}
         >
           <div
             style={
@@ -16625,24 +16680,50 @@ function MailboxView({
             )}
           </div>
         </div>
-      </div>
+        {visibleAttachments.length > 0 ? (
+          <div className="mt-4 border-t border-[var(--workspace-border-soft)] pt-3">
+            <div className="mb-2 text-[0.68rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)]">
+              Attachments
+            </div>
+            <div className="flex flex-wrap gap-3">
+              {visibleAttachments.map((attachment) =>
+                renderAttachmentItem(attachment, {
+                  message: threadMessage,
+                }),
+              )}
+            </div>
+          </div>
+        ) : null}
+      </article>
     );
   };
-  const renderThreadTimeline = (message: MailMessage | null, density: "split" | "full") => {
+  const renderThreadTimeline = (
+    message: MailMessage | null,
+    density: "split" | "full",
+  ) => {
     const threadMessages = getThreadMessages(message);
+    const labelledById =
+      density === "full" ? "full-message-modal-title" : "conversation-title";
 
     if (threadMessages.length === 0) {
       return null;
     }
 
     return (
-      <div className={density === "full" ? "space-y-3" : "space-y-2.5"}>
-        {threadMessages.map((threadMessage, threadIndex) =>
-          renderThreadMessage(threadMessage, density, {
-            historical: threadIndex !== threadMessages.length - 1,
-          }),
-        )}
-      </div>
+      <section aria-labelledby={labelledById} data-thread-conversation>
+        {threadMessages.map((threadMessage, threadIndex) => (
+          <div key={threadMessage.id}>
+            {threadIndex > 0 ? (
+              <div
+                data-thread-message-divider
+                role="separator"
+                className="h-px bg-[var(--workspace-divider)]"
+              />
+            ) : null}
+            {renderThreadMessage(threadMessage, density)}
+          </div>
+        ))}
+      </section>
     );
   };
   const activeStoredCollaborationMessage = getMessageById(activeCollaborationMessageId);
@@ -17492,8 +17573,10 @@ function MailboxView({
       detailActionsMenuState?.messageId === message.id &&
       detailActionsMenuState.placement === placement;
     const messageIsVisiblePriority = isVisiblePriorityMessage(message);
-    const actionClass =
-      "inline-flex h-8 cursor-pointer items-center justify-center rounded-full border border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] px-3 text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.16),0_8px_24px_rgba(118,170,112,0.08)] transition-[background-image,border-color,color,transform,box-shadow] duration-150 hover:bg-[linear-gradient(180deg,var(--workspace-accent-surface-hover-start),var(--workspace-accent-surface-hover-end))] active:translate-y-[0.5px] focus-visible:border-[var(--workspace-accent-border)] focus-visible:bg-[linear-gradient(180deg,var(--workspace-accent-surface-hover-start),var(--workspace-accent-surface-hover-end))] focus-visible:outline-none";
+    const primaryActionClass =
+      "inline-flex h-7 cursor-pointer items-center justify-center rounded-full border border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] px-3 text-[var(--workspace-accent-text)] transition-[background-image,border-color,color,transform] duration-150 hover:bg-[linear-gradient(180deg,var(--workspace-accent-surface-hover-start),var(--workspace-accent-surface-hover-end))] active:translate-y-[0.5px] focus-visible:border-[var(--workspace-accent-border)] focus-visible:bg-[linear-gradient(180deg,var(--workspace-accent-surface-hover-start),var(--workspace-accent-surface-hover-end))] focus-visible:outline-none";
+    const secondaryActionClass =
+      "inline-flex h-7 cursor-pointer items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-transparent px-3 text-[var(--workspace-text-soft)] transition-[background-color,border-color,color,transform] duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] active:translate-y-[0.5px] focus-visible:border-[var(--workspace-border-hover)] focus-visible:bg-[var(--workspace-hover-surface)] focus-visible:text-[var(--workspace-text)] focus-visible:outline-none";
     const menuItemClass =
       "flex w-full cursor-pointer items-center rounded-[14px] px-3 py-2.5 text-left text-[0.82rem] text-[var(--workspace-text-soft)] transition-colors duration-150 hover:bg-[var(--workspace-menu-hover)] focus-visible:outline-none";
     const menuWidth = 188;
@@ -17625,18 +17708,14 @@ function MailboxView({
 
     return (
       <div
-        className={`relative flex flex-wrap items-center ${
-          placement === "full"
-            ? "gap-x-2.5 gap-y-2 text-[0.76rem] font-medium uppercase tracking-[0.14em] text-[color:rgba(86,79,71,0.9)]"
-            : "gap-x-2.5 gap-y-2 pt-5 text-[0.76rem] font-medium uppercase tracking-[0.14em] text-[color:rgba(86,79,71,0.9)]"
-        }`}
+        className="relative flex flex-wrap items-center gap-x-2 gap-y-1.5 text-[0.68rem] font-medium text-[color:rgba(86,79,71,0.9)]"
       >
         <button
           type="button"
           onClick={() =>
             openComposeFromMessage(message, "reply", originPresentation)
           }
-          className={actionClass}
+          className={primaryActionClass}
         >
           Reply
         </button>
@@ -17645,7 +17724,7 @@ function MailboxView({
           onClick={() =>
             openComposeFromMessage(message, "reply_all", originPresentation)
           }
-          className={actionClass}
+          className={secondaryActionClass}
         >
           Reply all
         </button>
@@ -17654,7 +17733,7 @@ function MailboxView({
           onClick={() =>
             openComposeFromMessage(message, "forward", originPresentation)
           }
-          className={actionClass}
+          className={secondaryActionClass}
         >
           Forward
         </button>
@@ -17681,7 +17760,7 @@ function MailboxView({
                       },
                 );
               }}
-              className={actionClass}
+              className={secondaryActionClass}
             >
               More ▾
             </button>
@@ -24114,18 +24193,28 @@ function MailboxView({
                     </div>
                   </div>
                 ) : selectedMessage ? (
-	                  <div className="space-y-6">
+	                  <div className="space-y-4">
 	                    {(() => {
 	                      const linkedReview = getLinkedReviewForMessage(selectedMessage.id);
 	                      const linkedReviewLabel = getLinkedReviewBadgeLabel(selectedMessage.id);
                           const priorityReasonCopy =
                             getVisiblePriorityReasonCopyForMessage(selectedMessage);
 	                      return (
-	                    <div className="flex items-start justify-between gap-4">
-	                      <div className="min-w-0 flex-1 space-y-3">
-	                        <h2 className="text-[1.3rem] font-medium tracking-tight text-[var(--workspace-text)] md:text-[1.45rem]">
-	                          {selectedMessage.subject}
-	                        </h2>
+	                    <div className="flex flex-wrap items-start justify-between gap-3">
+	                      <div className="min-w-0 flex-1 space-y-2">
+                            <div className="flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-1">
+	                          <h2
+                                id="conversation-title"
+                                className="min-w-0 break-words text-[1.3rem] font-medium tracking-tight text-[var(--workspace-text)] md:text-[1.45rem]"
+                              >
+	                            {selectedConversationTitle}
+	                          </h2>
+                              {selectedMessageThreadMessages.length > 1 ? (
+                                <span className="text-[0.72rem] text-[var(--workspace-text-faint)]">
+                                  {selectedMessageThreadMessages.length} messages
+                                </span>
+                              ) : null}
+                            </div>
 	                        {linkedReview && linkedReviewLabel ? (
 	                          <button
 	                            type="button"
@@ -24143,28 +24232,8 @@ function MailboxView({
                                 {priorityReasonCopy.title}
                               </div>
                             ) : null}
-                          <div className="space-y-1.5 pb-1">
-                            <div className="text-[0.84rem] leading-[1.45] text-[var(--workspace-text)] break-words">
-                              <span className="text-[var(--workspace-text-faint)]">From:</span>{" "}
-                              <span className="text-[var(--workspace-text)]">{selectedMessage.from}</span>
-                            </div>
-                            <div className="text-[0.84rem] leading-[1.45] text-[var(--workspace-text)] break-words">
-                              <span className="text-[var(--workspace-text-faint)]">To:</span>{" "}
-                              <span>{selectedMessage.to}</span>
-                            </div>
-                            {selectedMessage.cc ? (
-                              <div className="text-[0.84rem] leading-[1.45] text-[var(--workspace-text)] break-words">
-                                <span className="text-[var(--workspace-text-faint)]">Cc:</span>{" "}
-                                <span>{selectedMessage.cc}</span>
-                              </div>
-                            ) : null}
-                            <div className="text-[0.8rem] leading-[1.45] text-[var(--workspace-text-faint)] break-words">
-                              <span className="text-[var(--workspace-text-faint)]">Received:</span>{" "}
-                              <span>{selectedMessage.timestamp}</span>
-                            </div>
-                          </div>
                       </div>
-	                      <div className="flex items-center gap-4">
+	                      <div className="flex items-center gap-3">
 	                        {aiSuggestionsEnabled &&
                           resolveMessageNoisePolicy(selectedMessage).allowsCategoryLearning ? (
 	                        <ReadingLearningButton
@@ -24201,9 +24270,7 @@ function MailboxView({
                       </div>
                     ) : null}
 
-	                    {selectedMessageThreadMessages.length > 1
-	                      ? renderThreadTimeline(selectedMessage, "split")
-	                      : renderThreadMessage(selectedMessage, "split")}
+                    {renderThreadTimeline(selectedMessage, "split")}
                   </div>
                   {selectedMessage.id === "main-1" ? (
                     <div className="grid gap-4 md:grid-cols-2">
@@ -24241,27 +24308,8 @@ function MailboxView({
                 )}
               </div>
               {selectedMessage && !isMultiSelectActive ? (
-                <div className="shrink-0 border-t border-[color:rgba(129,144,122,0.12)] bg-transparent px-5 py-4 dark:border-[color:rgba(121,151,120,0.14)] md:px-6 md:py-5">
-                  <div className="space-y-3">
-                    {renderMessageActions(fullWidthMessage ?? selectedMessage, "split")}
-                    <div className="space-y-2">
-                      <div className="text-[0.72rem] font-medium uppercase tracking-[0.18em] text-[var(--workspace-text-faint)]">
-                        Attachments
-                      </div>
-                      <div className="flex flex-wrap gap-3">
-                        {(selectedMessage.attachments ?? [])
-                          .filter(shouldShowInAttachmentList)
-                          .map((attachment) =>
-                            renderAttachmentItem(attachment, { message: selectedMessage }),
-                          )}
-                        {!selectedMessage.attachments?.some(shouldShowInAttachmentList) ? (
-                          <div className="text-[0.82rem] leading-6 text-[var(--workspace-text-faint)]">
-                            No attachments
-                          </div>
-                        ) : null}
-                      </div>
-                    </div>
-                  </div>
+                <div className="shrink-0 border-t border-[color:rgba(129,144,122,0.12)] bg-transparent px-5 py-3 dark:border-[color:rgba(121,151,120,0.14)] md:px-6">
+                  {renderMessageActions(fullWidthMessage ?? selectedMessage, "split")}
                 </div>
               ) : null}
             </div>
@@ -24363,16 +24411,20 @@ function MailboxView({
                         getVisiblePriorityReasonCopyForMessage(fullMessageModalMessage);
 
                       return (
-                        <div className="min-w-0 flex-1 space-y-1">
-                          <div className="text-[0.68rem] font-medium uppercase tracking-[0.18em] text-[var(--workspace-text-faint)]">
-                            Message
+                        <div className="min-w-0 flex-1 space-y-1.5">
+                          <div className="flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-1">
+                            <h2
+                              id="full-message-modal-title"
+                              className="min-w-0 break-words text-[1.3rem] font-medium tracking-tight text-[var(--workspace-text)] md:text-[1.45rem]"
+                            >
+                              {fullMessageModalConversationTitle}
+                            </h2>
+                            {fullMessageModalThreadMessages.length > 1 ? (
+                              <span className="text-[0.72rem] text-[var(--workspace-text-faint)]">
+                                {fullMessageModalThreadMessages.length} messages
+                              </span>
+                            ) : null}
                           </div>
-                          <h2
-                            id="full-message-modal-title"
-                            className="break-words text-[1.3rem] font-medium tracking-tight text-[var(--workspace-text)] md:text-[1.45rem]"
-                          >
-                            {fullMessageModalMessage.subject}
-                          </h2>
                           {linkedReview && linkedReviewLabel ? (
                             <button
                               type="button"
@@ -24444,31 +24496,6 @@ function MailboxView({
                       {renderMessageCollaboration(fullMessageModalMessage)}
 
                       <div className="space-y-3">
-                        <div className="space-y-1.5 pb-1">
-                          <div className="break-words text-[0.84rem] leading-[1.45] text-[var(--workspace-text)]">
-                            <span className="text-[var(--workspace-text-faint)]">From:</span>{" "}
-                            <span className="text-[var(--workspace-text)]">
-                              {fullMessageModalMessage.from}
-                            </span>
-                          </div>
-                          <div className="break-words text-[0.84rem] leading-[1.45] text-[var(--workspace-text)]">
-                            <span className="text-[var(--workspace-text-faint)]">To:</span>{" "}
-                            <span>{fullMessageModalMessage.to}</span>
-                          </div>
-                          {fullMessageModalMessage.cc ? (
-                            <div className="break-words text-[0.84rem] leading-[1.45] text-[var(--workspace-text)]">
-                              <span className="text-[var(--workspace-text-faint)]">Cc:</span>{" "}
-                              <span>{fullMessageModalMessage.cc}</span>
-                            </div>
-                          ) : null}
-                          <div className="break-words text-[0.8rem] leading-[1.45] text-[var(--workspace-text-faint)]">
-                            <span className="text-[var(--workspace-text-faint)]">
-                              Received:
-                            </span>{" "}
-                            <span>{fullMessageModalMessage.timestamp}</span>
-                          </div>
-                        </div>
-
                         {renderBehaviorSuggestion(fullMessageModalMessage)}
 
                         {fullMessageModalMessage.isShared &&
@@ -24483,31 +24510,7 @@ function MailboxView({
                           </div>
                         ) : null}
 
-                        {fullWidthMessageThreadMessages.length > 1
-                          ? renderThreadTimeline(fullMessageModalMessage, "full")
-                          : renderThreadMessage(fullMessageModalMessage, "full")}
-                      </div>
-
-                      <div className="rounded-[20px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-5 py-4">
-                        <div className="mb-3 text-[0.72rem] font-medium uppercase tracking-[0.18em] text-[var(--workspace-text-faint)]">
-                          Attachments
-                        </div>
-                        <div className="flex flex-wrap gap-3">
-                          {(fullMessageModalMessage.attachments ?? [])
-                            .filter(shouldShowInAttachmentList)
-                            .map((attachment) =>
-                              renderAttachmentItem(attachment, {
-                                message: fullMessageModalMessage,
-                              }),
-                            )}
-                          {!fullMessageModalMessage.attachments?.some(
-                            shouldShowInAttachmentList,
-                          ) ? (
-                            <div className="text-[0.82rem] leading-6 text-[var(--workspace-text-faint)]">
-                              No attachments
-                            </div>
-                          ) : null}
-                        </div>
+                        {renderThreadTimeline(fullMessageModalMessage, "full")}
                       </div>
                     </div>
                   </div>
