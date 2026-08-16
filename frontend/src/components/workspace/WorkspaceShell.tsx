@@ -32448,13 +32448,14 @@ const ManageInboxesView = memo(function ManageInboxesView({
             <div className="grid gap-5 xl:grid-cols-[minmax(230px,300px)_minmax(0,1fr)]">
               <aside className="rounded-[26px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] p-3 shadow-panel">
                 <div className="flex items-center justify-between gap-2 px-2 pb-2">
-                  <div className="text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                  <div className="min-w-0 text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
                     Connected inboxes
                   </div>
                   <DesktopActionButton
                     onClick={handleStartAddInbox}
                     variant="secondary"
                     size="compact"
+                    className="flex-none whitespace-nowrap"
                   >
                     + Add inbox
                   </DesktopActionButton>

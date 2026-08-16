@@ -166,6 +166,11 @@ assert.match(
   "Add inbox must be a compact secondary action in the connected-inbox list",
 );
 assert.match(
+  contextualAddInboxAction,
+  /\bwhitespace-nowrap\b/,
+  "the contextual Add inbox label must not wrap",
+);
+assert.match(
   connectedInboxListSource,
   />\s*\+ Add inbox\s*</,
   "the contextual Add inbox action must retain its label and visible add cue",
