@@ -348,7 +348,6 @@ type WorkspaceSection =
   | "Priority"
   | "Inboxes"
   | "Organizer"
-  | "Activity"
   | "Notifications"
   | "Team"
   | "Settings"
@@ -362,7 +361,7 @@ type ProductAccess = "bundle" | null;
 type ReviewFilter = "All priority" | "Priority";
 type InboxFilter = "All inboxes" | "Connected";
 type ForYouContext = "Main" | "Promo";
-type WorkbenchSection = "Activity" | "Notifications" | "Team";
+type WorkbenchSection = "Notifications" | "Team";
 type UtilitySection = "Help" | "Contact";
 type HelpTopic = {
   id: string;
@@ -27017,12 +27016,6 @@ function WorkbenchView({
       summary: string;
     }
   > = {
-    Activity: {
-      eyebrow: "Workspace activity",
-      title: "Activity",
-      summary:
-        "A dedicated activity surface inside the existing shell for recent operational changes and workflow movement.",
-    },
     Notifications: {
       eyebrow: "Workspace notifications",
       title: "Notifications",
@@ -27038,7 +27031,6 @@ function WorkbenchView({
   };
 
   const view = content[section];
-  const visibleActivityItems = activityItems;
   const visibleTeamActivityItems = activityItems.filter(isTeamActivityItem);
   const visibleNotificationItems = notificationItems;
   const visibleTeamCollaborationItems = collaborationItems;
@@ -27585,69 +27577,7 @@ function WorkbenchView({
       </header>
 
       <section className="rounded-[30px] border border-[var(--workspace-border)] bg-[var(--workspace-card)] p-6 shadow-panel">
-        {section === "Activity" ? (
-          visibleActivityItems.length > 0 ? (
-            <div className="divide-y divide-[var(--workspace-divider)]">
-              {visibleActivityItems.map((item, index) => (
-                item.action ? (
-                  <button
-                    key={item.id}
-                    type="button"
-                    onClick={item.action}
-                    className={`flex w-full items-start justify-between gap-4 rounded-[18px] px-2 py-4 text-left transition-colors duration-200 first:pt-1 last:pb-1 hover:bg-[var(--workspace-surface-hover)] focus-visible:bg-[var(--workspace-surface-selected)] focus-visible:outline-none ${
-                      index === 0
-                        ? "bg-[var(--workspace-surface-selected)]"
-                        : "bg-transparent"
-                    }`}
-                  >
-                    <div className="min-w-0 space-y-1">
-                      <div className="text-[0.62rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-accent-text)]">
-                        {item.type}
-                      </div>
-                      <div className="text-[0.98rem] font-medium tracking-[-0.014em] text-[var(--workspace-text)]">
-                        {item.title}
-                      </div>
-                      <div className="text-[0.84rem] leading-6 text-[var(--workspace-text-soft)]">
-                        {item.detail}
-                      </div>
-                    </div>
-                    <div className="flex-none pt-0.5 text-[0.68rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)]">
-                      {item.time}
-                    </div>
-                  </button>
-                ) : (
-                  <div
-                    key={item.id}
-                    className={`flex items-start justify-between gap-4 rounded-[18px] px-2 py-4 text-left first:pt-1 last:pb-1 ${
-                      index === 0
-                        ? "bg-[var(--workspace-surface-selected)]"
-                        : "bg-transparent"
-                    }`}
-                  >
-                    <div className="min-w-0 space-y-1">
-                      <div className="text-[0.62rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-accent-text)]">
-                        {item.type}
-                      </div>
-                      <div className="text-[0.98rem] font-medium tracking-[-0.014em] text-[var(--workspace-text)]">
-                        {item.title}
-                      </div>
-                      <div className="text-[0.84rem] leading-6 text-[var(--workspace-text-soft)]">
-                        {item.detail}
-                      </div>
-                    </div>
-                    <div className="flex-none pt-0.5 text-[0.68rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)]">
-                      {item.time}
-                    </div>
-                  </div>
-                )
-              ))}
-            </div>
-          ) : (
-            <div className="text-[0.92rem] leading-7 text-[var(--workspace-text-soft)]">
-              No activity yet.
-            </div>
-          )
-        ) : section === "Notifications" ? (
+        {section === "Notifications" ? (
           visibleNotificationItems.length > 0 ? (
             <div className="divide-y divide-[var(--workspace-divider)]">
               {visibleNotificationItems.map((item) => (
@@ -27683,13 +27613,21 @@ function WorkbenchView({
           )
         ) : section === "Team" ? (
           <div className="space-y-6">
-            <div className="inline-flex rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] p-1">
+            <div
+              role="tablist"
+              aria-label="Team views"
+              className="inline-flex rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] p-1"
+            >
               {teamTabs.map((tab) => (
                 <button
                   key={tab}
+                  id={`team-tab-${tab.toLowerCase()}`}
                   type="button"
+                  role="tab"
+                  aria-selected={activeTeamTab === tab}
+                  aria-controls="team-panel"
                   onClick={() => setActiveTeamTab(tab)}
-                  className={`inline-flex h-9 items-center justify-center rounded-full px-4 text-[0.68rem] font-medium uppercase tracking-[0.14em] transition-[background-color,color,box-shadow] duration-150 focus-visible:outline-none ${
+                  className={`inline-flex h-9 items-center justify-center rounded-full px-4 text-[0.68rem] font-medium uppercase tracking-[0.14em] transition-[background-color,color,box-shadow] duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-border-hover)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--workspace-card)] ${
                     activeTeamTab === tab
                       ? "bg-[var(--workspace-card)] text-[var(--workspace-text)] shadow-[0_8px_18px_rgba(31,42,36,0.06)]"
                       : "text-[var(--workspace-text-faint)] hover:text-[var(--workspace-text-soft)]"
@@ -27700,6 +27638,11 @@ function WorkbenchView({
               ))}
             </div>
 
+            <div
+              role="tabpanel"
+              id="team-panel"
+              aria-labelledby={`team-tab-${activeTeamTab.toLowerCase()}`}
+            >
             {activeTeamTab === "Members" ? (
               <>
             {pendingTeamInvitation ? (
@@ -27916,15 +27859,13 @@ function WorkbenchView({
               </div>
               {visibleTeamActivityItems.length > 0 ? (
                 <div className="divide-y divide-[var(--workspace-divider)]">
-                  {visibleTeamActivityItems.map((item, index) =>
+                  {visibleTeamActivityItems.map((item) =>
                     item.action ? (
                       <button
                         key={item.id}
                         type="button"
                         onClick={item.action}
-                        className={`flex w-full items-start justify-between gap-4 rounded-[18px] px-2 py-4 text-left transition-colors duration-200 first:pt-1 last:pb-1 hover:bg-[var(--workspace-surface-hover)] focus-visible:bg-[var(--workspace-surface-selected)] focus-visible:outline-none ${
-                          index === 0 ? "bg-[var(--workspace-surface-selected)]" : "bg-transparent"
-                        }`}
+                        className="flex w-full items-start justify-between gap-4 rounded-[18px] bg-transparent px-2 py-4 text-left transition-colors duration-200 first:pt-1 last:pb-1 hover:bg-[var(--workspace-surface-hover)] focus-visible:bg-[var(--workspace-surface-selected)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-border-hover)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--workspace-card)]"
                       >
                         <div className="min-w-0 space-y-1">
                           <div className="text-[0.62rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-accent-text)]">
@@ -27944,9 +27885,7 @@ function WorkbenchView({
                     ) : (
                       <div
                         key={item.id}
-                        className={`flex items-start justify-between gap-4 rounded-[18px] px-2 py-4 text-left first:pt-1 last:pb-1 ${
-                          index === 0 ? "bg-[var(--workspace-surface-selected)]" : "bg-transparent"
-                        }`}
+                        className="flex items-start justify-between gap-4 rounded-[18px] bg-transparent px-2 py-4 text-left first:pt-1 last:pb-1"
                       >
                         <div className="min-w-0 space-y-1">
                           <div className="text-[0.62rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-accent-text)]">
@@ -27973,6 +27912,7 @@ function WorkbenchView({
               )}
             </div>
             )}
+            </div>
           </div>
         ) : (
           <div className="text-[0.95rem] leading-7 text-[var(--workspace-text-soft)]">
@@ -47346,8 +47286,7 @@ export function WorkspaceShell({
                   showLocalPriorityNav={false}
                 />
               </Suspense>
-            ) : activeSection === "Activity" ||
-              activeSection === "Notifications" ||
+            ) : activeSection === "Notifications" ||
               activeSection === "Team" ? (
               <div className="min-h-0 flex-1 overflow-y-auto pr-1">
                 <WorkbenchView
