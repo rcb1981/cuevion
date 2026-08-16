@@ -18,7 +18,7 @@ function componentSource(start: string, end: string) {
 }
 
 function desktopActionButtonForHandler(source: string, handler: string) {
-  const openingTag = (source.match(/<DesktopActionButton\b[^>]*>/g) ?? []).find(
+  const openingTag = (source.match(/<DesktopActionButton\b[\s\S]*?\n\s*>/g) ?? []).find(
     (candidate) => candidate.includes(`onClick={${handler}}`),
   );
 
@@ -38,9 +38,21 @@ const managedInboxEditorSource = componentSource(
   "function ManagedInboxEditor",
   "const ManageInboxesView",
 );
+const manageInboxesViewSource = componentSource(
+  "const ManageInboxesView",
+  "const SignatureBlock",
+);
 const signatureSettingsModalSource = componentSource(
   "const SignatureSettingsModal",
   "const OutOfOfficeSettingsModal",
+);
+const accountSettingsSource = componentSource(
+  "const AccountSettingsCard",
+  "function SettingsView",
+);
+const settingsPageSurfaceSource = componentSource(
+  "function settingsPageSurfaceClass",
+  "function settingsPillButtonClass",
 );
 const settingsToggleRowSource = componentSource(
   "const SettingsToggleRow",
@@ -115,14 +127,64 @@ assert.doesNotMatch(
   "Settings action call sites must not reintroduce uppercase or wide tracking",
 );
 assert.match(
-  workspaceSettingsSource,
-  /onClick=\{handleOpenWorkspaceSettings\}[\s\S]*?variant="tertiary"[\s\S]*?>\s*Manage\s*</,
-  "Workspace Manage must remain a quiet tertiary action",
+  desktopActionButtonForHandler(
+    workspaceSettingsSource,
+    "handleOpenWorkspaceSettings",
+  ),
+  /variant="secondary"[^>]*size="compact"|size="compact"[^>]*variant="secondary"/,
+  "Workspace Manage must be a compact secondary action",
+);
+assert.match(
+  desktopActionButtonForHandler(accountSettingsSource, "() => setIsManaging(true)"),
+  /variant="secondary"[^>]*size="compact"|size="compact"[^>]*variant="secondary"/,
+  "Account Manage must be a compact secondary action",
 );
 assert.doesNotMatch(
   workspaceSettingsSource,
   /navigationCloseBackButtonClass/,
   "Workspace Close must not use the gold navigation action",
+);
+
+const connectedInboxListStart = manageInboxesViewSource.indexOf("<aside");
+const connectedInboxListEnd = manageInboxesViewSource.indexOf(
+  "</aside>",
+  connectedInboxListStart,
+);
+assert.notEqual(connectedInboxListStart, -1, "the connected-inbox list panel must exist");
+assert.notEqual(connectedInboxListEnd, -1, "the connected-inbox list panel must be bounded");
+const connectedInboxListSource = manageInboxesViewSource.slice(
+  connectedInboxListStart,
+  connectedInboxListEnd,
+);
+const contextualAddInboxAction = desktopActionButtonForHandler(
+  connectedInboxListSource,
+  "handleStartAddInbox",
+);
+assert.match(
+  contextualAddInboxAction,
+  /variant="secondary"[^>]*size="compact"|size="compact"[^>]*variant="secondary"/,
+  "Add inbox must be a compact secondary action in the connected-inbox list",
+);
+assert.match(
+  connectedInboxListSource,
+  />\s*\+ Add inbox\s*</,
+  "the contextual Add inbox action must retain its label and visible add cue",
+);
+
+assert.doesNotMatch(
+  settingsPageSurfaceSource,
+  /(?:rounded-|\bborder\b|\bbg-|\bshadow)/,
+  "the Settings page wrapper must be a layout container rather than another card",
+);
+assert.match(
+  workspaceShellSource,
+  /function settingsCardClass[\s\S]*?rounded-\[28px\][\s\S]*?\bborder\b/,
+  "actual Settings section cards must retain their boundaries",
+);
+assert.match(
+  connectedInboxListSource,
+  /<aside className="[^"]*rounded-\[26px\][^"]*\bborder\b/,
+  "the Connected inboxes list must retain its panel boundary",
 );
 
 for (const [handler, variant] of [

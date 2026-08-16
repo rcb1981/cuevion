@@ -28762,12 +28762,8 @@ function settingsCardClass(themeMode: "light" | "dark") {
   }`;
 }
 
-function settingsPageSurfaceClass(themeMode: "light" | "dark") {
-  return `space-y-6 rounded-[30px] px-3 py-3 md:px-4 md:py-4 ${
-    themeMode === "dark"
-      ? "bg-[radial-gradient(circle_at_top_left,rgba(255,255,255,0.03),transparent_34%),linear-gradient(180deg,rgba(26,24,22,0.92),rgba(18,17,15,0.96))] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]"
-      : "bg-[linear-gradient(180deg,rgba(250,247,242,0.72),rgba(247,243,237,0.56))] shadow-[inset_0_1px_0_rgba(255,255,255,0.2)]"
-  }`;
+function settingsPageSurfaceClass() {
+  return "space-y-5 px-1 py-1 md:px-2 md:py-2";
 }
 
 function settingsPillButtonClass(selected: boolean) {
@@ -30155,7 +30151,8 @@ const WorkspaceSettingsCard = memo(function WorkspaceSettingsCard({
             ) : (
               <DesktopActionButton
                 onClick={handleOpenWorkspaceSettings}
-                variant="tertiary"
+                variant="secondary"
+                size="compact"
               >
                 Manage
               </DesktopActionButton>
@@ -32419,7 +32416,7 @@ const ManageInboxesView = memo(function ManageInboxesView({
     <div className="flex min-h-[720px] flex-col">
       <div className="flex-1 space-y-8">
         <section className="space-y-8">
-          <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+          <div className="space-y-3">
             <div className="space-y-3">
               <h1 className="text-3xl font-semibold tracking-tight text-[var(--workspace-text)]">
                 Connected inboxes
@@ -32428,13 +32425,6 @@ const ManageInboxesView = memo(function ManageInboxesView({
                 Manage the inboxes connected to this workspace with the same guided flow used during setup.
               </p>
             </div>
-            <DesktopActionButton
-              onClick={handleStartAddInbox}
-              variant="secondary"
-              className="self-start"
-            >
-              Add inbox
-            </DesktopActionButton>
           </div>
 
           {draftManagedInboxes.length === 0 ? (
@@ -32448,16 +32438,26 @@ const ManageInboxesView = memo(function ManageInboxesView({
               <DesktopActionButton
                 onClick={handleStartAddInbox}
                 variant="secondary"
+                size="compact"
                 className="mt-5"
               >
-                Add inbox
+                + Add inbox
               </DesktopActionButton>
             </div>
           ) : (
             <div className="grid gap-5 xl:grid-cols-[minmax(230px,300px)_minmax(0,1fr)]">
               <aside className="rounded-[26px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] p-3 shadow-panel">
-                <div className="px-2 pb-2 text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
-                  Connected inboxes
+                <div className="flex items-center justify-between gap-2 px-2 pb-2">
+                  <div className="text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
+                    Connected inboxes
+                  </div>
+                  <DesktopActionButton
+                    onClick={handleStartAddInbox}
+                    variant="secondary"
+                    size="compact"
+                  >
+                    + Add inbox
+                  </DesktopActionButton>
                 </div>
                 <div className="space-y-2">
                   {draftManagedInboxes.map((mailbox) => {
@@ -34175,7 +34175,8 @@ const AccountSettingsCard = memo(function AccountSettingsCard({
             ) : (
               <DesktopActionButton
                 onClick={() => setIsManaging(true)}
-                variant="tertiary"
+                variant="secondary"
+                size="compact"
               >
                 Manage
               </DesktopActionButton>
@@ -34850,7 +34851,7 @@ function SettingsView({
   })();
 
   return (
-    <div className={settingsPageSurfaceClass(themeMode)}>
+    <div className={settingsPageSurfaceClass()}>
       <header className="space-y-3">
         <h1 className="text-[1.85rem] font-medium tracking-tight text-[var(--workspace-text)] md:text-[2.25rem]">
           Settings
