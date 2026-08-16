@@ -9862,6 +9862,72 @@ function toggleDisclosureId(ids: string[], id: string) {
     : [...ids, id];
 }
 
+function resolveDesktopThreadTimestamp(
+  message: Pick<MailMessage, "createdAt" | "timestamp">,
+  nowMs = Date.now(),
+) {
+  const createdAt = message.createdAt?.trim();
+  const messageDate = createdAt ? new Date(createdAt) : null;
+
+  if (!createdAt || !messageDate || Number.isNaN(messageDate.getTime())) {
+    return {
+      dateTime: null,
+      label: message.timestamp,
+    };
+  }
+
+  const storedTimestamp = message.timestamp.trim();
+  const shouldFormatFromCreatedAt =
+    storedTimestamp === createdAt || /^(?:sent\s+)?just now$/i.test(storedTimestamp);
+
+  if (!shouldFormatFromCreatedAt) {
+    return {
+      dateTime: createdAt,
+      label: message.timestamp,
+    };
+  }
+
+  const now = new Date(nowMs);
+  const timeLabel = messageDate.toLocaleTimeString("en-GB", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+  const isSameLocalDate = (first: Date, second: Date) =>
+    first.getFullYear() === second.getFullYear() &&
+    first.getMonth() === second.getMonth() &&
+    first.getDate() === second.getDate();
+
+  if (isSameLocalDate(messageDate, now)) {
+    return {
+      dateTime: createdAt,
+      label: timeLabel,
+    };
+  }
+
+  const yesterday = new Date(now);
+  yesterday.setDate(yesterday.getDate() - 1);
+  if (isSameLocalDate(messageDate, yesterday)) {
+    return {
+      dateTime: createdAt,
+      label: `Yesterday, ${timeLabel}`,
+    };
+  }
+
+  const dateLabel = messageDate.toLocaleDateString("en-US", {
+    month: "long",
+    day: "numeric",
+    ...(messageDate.getFullYear() === now.getFullYear()
+      ? {}
+      : { year: "numeric" as const }),
+  });
+
+  return {
+    dateTime: createdAt,
+    label: `${dateLabel} at ${timeLabel}`,
+  };
+}
+
 function resolveMailDateMs(message: MailMessage) {
   if (message.createdAt) {
     const directDate = new Date(message.createdAt).getTime();
@@ -16578,10 +16644,7 @@ function MailboxView({
             : recipient
         }`
       : null;
-    const hasValidCreatedAt = Boolean(
-      threadMessage.createdAt &&
-        !Number.isNaN(new Date(threadMessage.createdAt).getTime()),
-    );
+    const resolvedTimestamp = resolveDesktopThreadTimestamp(threadMessage);
     const messageContentId = `thread-message-content-${density}-${threadMessage.id}`;
     const toggleMemberDisclosure = () => {
       setDesktopThreadDisclosureState((currentState) => {
@@ -16599,10 +16662,10 @@ function MailboxView({
         };
       });
     };
-    const timestamp = hasValidCreatedAt ? (
-      <time dateTime={threadMessage.createdAt}>{threadMessage.timestamp}</time>
+    const timestamp = resolvedTimestamp.dateTime ? (
+      <time dateTime={resolvedTimestamp.dateTime}>{resolvedTimestamp.label}</time>
     ) : (
-      <span>{threadMessage.timestamp}</span>
+      <span>{resolvedTimestamp.label}</span>
     );
     const messageBlockClassName =
       "w-full rounded-[14px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-3.5 md:px-5 md:py-4";
@@ -18224,7 +18287,12 @@ function MailboxView({
         composeBcc.trim() || undefined,
       ]);
 
-      const sentId = `${activeComposeMailbox.id}-sent-${Date.now()}`;
+      const sentAt = new Date().toISOString();
+      const sentTimeLabel = resolveDesktopThreadTimestamp({
+        createdAt: sentAt,
+        timestamp: sentAt,
+      }).label;
+      const sentId = `${activeComposeMailbox.id}-sent-${new Date(sentAt).getTime()}`;
       const bodyParagraphs = extractComposeParagraphs(activeBodyHtml);
       const sentMessageSeed: MailMessageSeed = {
         id: sentId,
@@ -18247,12 +18315,12 @@ function MailboxView({
           bodyPreview.length > 0
             ? bodyPreview.replace(/\s+/g, " ").slice(0, 96)
             : "Message sent",
-        time: "Now",
-        createdAt: new Date().toISOString(),
+        time: sentTimeLabel,
+        createdAt: sentAt,
         signal: "Sent",
         from: activeComposeMailbox.email,
         to: composeTo.trim() || "No recipient yet",
-        timestamp: "Sent just now",
+        timestamp: sentAt,
         body: bodyParagraphs.length > 0 ? bodyParagraphs : ["Message sent"],
         bodyHtml: activeBodyHtml,
         signature: undefined,
@@ -45163,6 +45231,14 @@ export function WorkspaceShell({
         }
 
         const autoReplyId = `${mailbox.id}-ooo-${message.id}`;
+        const autoReplySentAt = new Date(now).toISOString();
+        const autoReplyTimeLabel = resolveDesktopThreadTimestamp(
+          {
+            createdAt: autoReplySentAt,
+            timestamp: autoReplySentAt,
+          },
+          now,
+        ).label;
         const autoReplyBody = outOfOfficeSettings.message
           .replace(/\r\n/g, "\n")
           .split("\n")
@@ -45177,12 +45253,12 @@ export function WorkspaceShell({
               sender: "You",
               subject: buildOutOfOfficeReplySubject(message.subject),
               snippet: outOfOfficeSettings.message.replace(/\s+/g, " ").trim().slice(0, 96),
-              time: "Now",
-              createdAt: new Date(now).toISOString(),
+              time: autoReplyTimeLabel,
+              createdAt: autoReplySentAt,
               signal: "Auto-reply",
               from: mailbox.email,
               to: message.from,
-              timestamp: "Sent just now",
+              timestamp: autoReplySentAt,
               body:
                 autoReplyBody.length > 0
                   ? autoReplyBody

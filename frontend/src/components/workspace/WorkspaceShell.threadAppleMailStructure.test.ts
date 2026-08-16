@@ -91,7 +91,9 @@ expectContract(
   "each physical message must be an article with its own identity",
 );
 expectContract(
-  /<time\s+dateTime=\{threadMessage\.createdAt\}/.test(threadMessageSource),
+  /<time\s+dateTime=\{resolvedTimestamp\.dateTime\}>\{resolvedTimestamp\.label\}<\/time>/.test(
+    threadMessageSource,
+  ),
   "valid createdAt values must be exposed through a semantic time element",
 );
 expectContract(
