@@ -24278,10 +24278,10 @@ function MailboxView({
                     type="button"
                     aria-pressed={composeMode === "reply"}
                     onClick={() => handleReplyModeSwitch("reply")}
-                    className={`inline-flex h-7 flex-none items-center justify-center gap-1 rounded-full px-2 text-[0.64rem] font-medium uppercase tracking-[0.08em] transition-[background-color,color,box-shadow] duration-150 focus-visible:outline-none ${
+                    className={`inline-flex h-7 flex-none items-center justify-center gap-1 rounded-full px-2 text-[0.68rem] font-medium transition-[background-color,color,box-shadow] duration-150 focus-visible:outline-none ${
                       composeMode === "reply"
                         ? "bg-[var(--workspace-card)] text-[var(--workspace-text)] shadow-[0_1px_4px_rgba(31,42,36,0.12)]"
-                        : "text-[var(--workspace-text-faint)] hover:text-[var(--workspace-text-soft)]"
+                        : "text-[var(--workspace-text-soft)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)]"
                     }`}
                   >
                     <DesktopMessageActionIcon name="reply" />
@@ -24291,10 +24291,10 @@ function MailboxView({
                     type="button"
                     aria-pressed={composeMode === "reply_all"}
                     onClick={() => handleReplyModeSwitch("reply_all")}
-                    className={`inline-flex h-7 flex-none items-center justify-center gap-1 rounded-full px-2 text-[0.64rem] font-medium uppercase tracking-[0.08em] transition-[background-color,color,box-shadow] duration-150 focus-visible:outline-none ${
+                    className={`inline-flex h-7 flex-none items-center justify-center gap-1 rounded-full px-2 text-[0.68rem] font-medium transition-[background-color,color,box-shadow] duration-150 focus-visible:outline-none ${
                       composeMode === "reply_all"
                         ? "bg-[var(--workspace-card)] text-[var(--workspace-text)] shadow-[0_1px_4px_rgba(31,42,36,0.12)]"
-                        : "text-[var(--workspace-text-faint)] hover:text-[var(--workspace-text-soft)]"
+                        : "text-[var(--workspace-text-soft)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)]"
                     }`}
                   >
                     <DesktopMessageActionIcon name="reply-all" />
@@ -24305,13 +24305,13 @@ function MailboxView({
               <button
                 type="button"
                 onClick={openComposeAttachmentPicker}
-                className="inline-flex h-8 flex-none items-center justify-center gap-1.5 rounded-full border border-transparent px-2.5 text-[0.68rem] font-medium uppercase tracking-[0.1em] text-[var(--workspace-text-soft)] transition-[background-color,border-color,color,transform] duration-150 hover:border-[var(--workspace-border-soft)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] active:scale-[0.98] focus-visible:border-[var(--workspace-border-hover)] focus-visible:bg-[var(--workspace-hover-surface)] focus-visible:outline-none"
+                className="inline-flex h-8 flex-none items-center justify-center gap-1.5 rounded-full border border-transparent px-2.5 text-[0.68rem] font-medium text-[var(--workspace-text-soft)] transition-[background-color,border-color,color,transform] duration-150 hover:border-[var(--workspace-border-soft)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] active:scale-[0.98] focus-visible:border-[var(--workspace-border-hover)] focus-visible:bg-[var(--workspace-hover-surface)] focus-visible:outline-none"
               >
                 <DesktopMessageActionIcon name="attach" />
                 <span>Attach</span>
               </button>
               {composeSignatureOptions.length > 0 ? (
-                <label className="relative inline-flex h-8 flex-none cursor-pointer items-center justify-center gap-1.5 rounded-full border border-transparent px-2.5 text-[0.68rem] font-medium uppercase tracking-[0.1em] text-[var(--workspace-text-soft)] transition-[background-color,border-color,color] duration-150 hover:border-[var(--workspace-border-soft)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] focus-within:border-[var(--workspace-border-hover)] focus-within:bg-[var(--workspace-hover-surface)]">
+                <label className="relative inline-flex h-8 flex-none cursor-pointer items-center justify-center gap-1.5 rounded-full border border-transparent px-2.5 text-[0.68rem] font-medium text-[var(--workspace-text-soft)] transition-[background-color,border-color,color] duration-150 hover:border-[var(--workspace-border-soft)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)] focus-within:border-[var(--workspace-border-hover)] focus-within:bg-[var(--workspace-hover-surface)]">
                   <DesktopMessageActionIcon name="signature" />
                   <span>Signature</span>
                   <select
@@ -24335,7 +24335,7 @@ function MailboxView({
                 type="button"
                 onClick={() => void sendMessage()}
                 disabled={isSendingCompose}
-                className="inline-flex h-8 flex-none items-center justify-center gap-1.5 rounded-full bg-pine px-3 text-[0.68rem] font-medium uppercase tracking-[0.12em] text-white transition-[background-color,transform] duration-150 hover:bg-moss active:scale-[0.98] focus-visible:outline-none disabled:cursor-not-allowed disabled:bg-[color:rgba(101,124,103,0.72)] disabled:hover:bg-[color:rgba(101,124,103,0.72)]"
+                className="inline-flex h-8 flex-none items-center justify-center gap-1.5 rounded-full bg-pine px-3 text-[0.68rem] font-medium text-white transition-[background-color,transform] duration-150 hover:bg-moss active:scale-[0.98] focus-visible:outline-none disabled:cursor-not-allowed disabled:bg-[color:rgba(101,124,103,0.72)] disabled:hover:bg-[color:rgba(101,124,103,0.72)]"
               >
                 <DesktopMessageActionIcon name="send" />
                 <span>{isSendingCompose ? "Sending..." : "Send"}</span>

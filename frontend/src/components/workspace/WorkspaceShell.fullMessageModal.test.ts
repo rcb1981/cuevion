@@ -595,6 +595,16 @@ recordCorrectionExpectation("modal compose toolbar actions", () => {
     /replyAllDelta\.length|visibleComposeAttachmentCount|composeCc\s*&&/,
     "mode-control visibility must not depend on recipient or attachment state",
   );
+  assert.doesNotMatch(
+    toolbarActionsSource,
+    /uppercase|tracking-\[/,
+    "modal toolbar labels must use compact title-case typography without uppercase tracking",
+  );
+  assert.doesNotMatch(
+    toolbarActionsSource,
+    /aria-pressed=\{composeMode === "(?:reply|reply_all)"\}[\s\S]{0,700}opacity-/,
+    "inactive Reply modes must stay legible instead of using disabled opacity",
+  );
 });
 
 recordCorrectionExpectation("modal compose content and workspace boundary", () => {
@@ -715,12 +725,17 @@ recordCorrectionExpectation("modal compose resize geometry", () => {
     height: "76dvh",
     maxHeight: "calc(100dvh - 2rem)",
     maxWidth: "min(1180px, calc(100vw - 2rem))",
-    width: "70vw",
+    width: "min(840px, calc(100vw - 2rem))",
   });
   assert.deepEqual(
     createDefaultComposeModalSize({ width: 1280, height: 720 }),
-    { width: 896, height: 547.2 },
+    { width: 840, height: 547.2 },
     "a fresh compose opening must use the approved default geometry",
+  );
+  assert.deepEqual(
+    createDefaultComposeModalSize({ width: 1920, height: 1080 }),
+    { width: 840, height: 820.8 },
+    "compose width must remain focused on larger desktop viewports",
   );
   assert.deepEqual(
     resizeComposeModalSize(
