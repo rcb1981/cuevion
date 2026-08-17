@@ -328,7 +328,6 @@ const primaryNavigationItems = [
 const utilityNavigationItems = [
   { section: "Settings", label: "Settings", shortLabel: "Set", icon: "settings" },
   { section: "Help", label: "Help", shortLabel: "Help", icon: "help" },
-  { section: "Contact", label: "Contact", shortLabel: "Talk", icon: "contact" },
 ] as const;
 
 type SidebarNavigationIconName =
@@ -13832,7 +13831,6 @@ function WorkspaceSidebar({
   showMailboxUnreadCounts,
   orderedMailboxes,
   smartFolders,
-  onLogoutClick,
   onChangeSection,
   onOpenMailbox,
   onOpenSmartFolder,
@@ -13851,7 +13849,6 @@ function WorkspaceSidebar({
   showMailboxUnreadCounts: boolean;
   orderedMailboxes: OrderedMailbox[];
   smartFolders: SmartFolderDefinition[];
-  onLogoutClick: () => void;
   onChangeSection: (view: WorkspaceSection) => void;
   onOpenMailbox: (mailbox: OrderedMailbox) => void;
   onOpenSmartFolder: (folderId: string) => void;
@@ -14287,23 +14284,6 @@ function WorkspaceSidebar({
                 </div>
               ) : null}
               <ul className="space-y-1">{utilityNavigationItems.map(renderItem)}</ul>
-              <button
-                type="button"
-                onClick={onLogoutClick}
-                className="mt-3 flex h-9 w-full items-center justify-center rounded-xl px-3 text-center text-sm font-medium text-[var(--workspace-sidebar-text-muted)] transition-[background-color,color,box-shadow] duration-100 hover:bg-[var(--workspace-sidebar-hover)] hover:text-[var(--workspace-sidebar-text)] focus:outline-none focus-visible:shadow-[inset_0_0_0_1px_rgba(255,255,255,0.12),0_0_0_1px_rgba(214,230,221,0.16)] xl:justify-start xl:px-3.5 xl:text-left"
-              >
-                <span className="hidden items-center gap-2 xl:inline-flex">
-                  <SidebarNavigationIcon name="logout" />
-                  <span>Log out</span>
-                </span>
-                <span className="inline-flex items-center justify-center gap-1.5 text-[11px] uppercase tracking-[0.18em] xl:hidden">
-                  <SidebarNavigationIcon name="logout" />
-                  <span>Out</span>
-                </span>
-              </button>
-              <div className="pt-4 text-center text-[0.68rem] font-medium tracking-[0.05em] text-[color:rgba(146,122,98,0.78)] xl:px-3.5 xl:text-left">
-                Version 1.0.0
-              </div>
             </div>
           </nav>
         </div>
@@ -36155,6 +36135,8 @@ const AccountSettingsCard = memo(function AccountSettingsCard({
   productAccess,
   onProductAccessChange,
   onAccountNameChange,
+  onOpenContact,
+  onLogoutClick,
 }: {
   themeMode: "light" | "dark";
   accountName: string;
@@ -36162,6 +36144,8 @@ const AccountSettingsCard = memo(function AccountSettingsCard({
   productAccess: ProductAccess;
   onProductAccessChange: (nextAccess: ProductAccess) => void;
   onAccountNameChange?: (name: string) => void;
+  onOpenContact: () => void;
+  onLogoutClick: () => void;
 }) {
   const [isManaging, setIsManaging] = useState(false);
   const [savedName, setSavedName] = useState(accountName);
@@ -36349,6 +36333,30 @@ const AccountSettingsCard = memo(function AccountSettingsCard({
           ) : (
             <SettingsInfoRow label="Password" value="Reset password" />
           )}
+
+          <SettingsInfoRow
+            label="Support"
+            value="Cuevion support"
+            actionLabel="Contact support"
+            onActionClick={onOpenContact}
+          />
+          <div className={settingsInfoRowClass}>
+            <div className="text-[0.86rem] text-[var(--workspace-text-soft)]">Session</div>
+            <div className="flex items-center gap-3 text-right">
+              <div className="text-[0.86rem] font-medium text-[var(--workspace-text)]">
+                Signed in
+              </div>
+              <DesktopActionButton
+                type="button"
+                onClick={onLogoutClick}
+                variant="tertiary"
+                size="compact"
+                className="text-[color:rgba(146,82,73,0.96)] enabled:hover:text-[color:rgba(132,72,64,1)] dark:text-[color:rgba(244,186,168,0.86)] dark:enabled:hover:text-[color:rgba(250,205,191,0.96)]"
+              >
+                Log out
+              </DesktopActionButton>
+            </div>
+          </div>
 
           {isManaging && hasUnsavedChanges ? (
             <div className="flex justify-end gap-3 pt-1">
@@ -36769,6 +36777,8 @@ function SettingsView({
   onSaveInboxOutOfOffice,
   onProductAccessChange,
   onAccountNameChange,
+  onOpenContact,
+  onLogoutClick,
 }: {
   workspaceName: string;
   accountName: string;
@@ -36807,6 +36817,8 @@ function SettingsView({
   ) => void;
   onProductAccessChange: (nextAccess: ProductAccess) => void;
   onAccountNameChange?: (name: string) => void;
+  onOpenContact: () => void;
+  onLogoutClick: () => void;
 }) {
   const [activeSettingsTab, setActiveSettingsTab] = useState<SettingsTab>("Workspace");
   const [pendingSettingsTab, setPendingSettingsTab] = useState<SettingsTab | null>(null);
@@ -36925,6 +36937,8 @@ function SettingsView({
             productAccess={productAccess}
             onProductAccessChange={onProductAccessChange}
             onAccountNameChange={onAccountNameChange}
+            onOpenContact={onOpenContact}
+            onLogoutClick={onLogoutClick}
           />
         );
       case "Focus":
@@ -49226,7 +49240,6 @@ export function WorkspaceShell({
         showMailboxUnreadCounts={areMailboxCountsHydrated}
         orderedMailboxes={sidebarMailboxes}
         smartFolders={smartFolders}
-        onLogoutClick={() => setIsLogoutConfirmationOpen(true)}
         onChangeSection={handleChangeSection}
         onOpenMailbox={(mailbox) =>
           openMailboxFromContext(mailbox, { preserveCurrentContext: false })
@@ -49578,6 +49591,8 @@ export function WorkspaceShell({
                   }}
                   onProductAccessChange={handleProductAccessChange}
                   onAccountNameChange={onAuthenticatedUserNameChange}
+                  onOpenContact={() => handleChangeSection("Contact")}
+                  onLogoutClick={() => setIsLogoutConfirmationOpen(true)}
                 />
               </div>
             ) : activeSection === "Help" || activeSection === "Contact" ? (
