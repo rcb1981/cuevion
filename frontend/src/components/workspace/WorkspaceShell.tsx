@@ -723,6 +723,24 @@ type TeamMemberEntry = {
   teamInviteToken?: string;
   teamInviteStatus?: TeamInviteStatus;
 };
+type TeamRosterReadStatus =
+  | "demo"
+  | "loading"
+  | "success"
+  | "unauthorized"
+  | "forbidden"
+  | "unavailable";
+type TeamRosterPresentation =
+  | {
+      kind: "members";
+      members: TeamMemberEntry[];
+      canRetry: false;
+    }
+  | {
+      kind: "loading" | "empty" | "unauthorized" | "forbidden" | "unavailable";
+      message: string;
+      canRetry: boolean;
+    };
 type TeamMembershipEntry = {
   name: string;
   email: string;
@@ -773,7 +791,7 @@ function mapBackendTeamMemberToEntry(member: TeamMemberRecord): TeamMemberEntry 
     return null;
   }
 
-  const name = (member.displayName || member.name || email).trim();
+  const name = (member.displayName || email).trim();
 
   return {
     name,
@@ -781,7 +799,6 @@ function mapBackendTeamMemberToEntry(member: TeamMemberRecord): TeamMemberEntry 
     accessLevel: normalizeTeamRole(member.accessLevel),
     selectedInboxes: [],
     status: "Active",
-    teamInviteToken: member.inviteToken,
     teamInviteStatus: "accepted",
   };
 }
@@ -807,8 +824,8 @@ function areTeamMemberEntriesEqual(left: TeamMemberEntry[], right: TeamMemberEnt
   });
 }
 
-function mergeBackendTeamMembers(
-  localMembers: TeamMemberEntry[],
+export function replaceWithAuthoritativeTeamMembers(
+  _localMembers: TeamMemberEntry[],
   backendMembers: TeamMemberRecord[],
 ) {
   const backendMembersByEmail = new Map<string, TeamMemberEntry>();
@@ -823,41 +840,102 @@ function mergeBackendTeamMembers(
     backendMembersByEmail.set(normalizedMember.email, normalizedMember);
   });
 
-  const seenEmails = new Set<string>();
-  const mergedMembers: TeamMemberEntry[] = [];
+  return [...backendMembersByEmail.values()];
+}
 
-  localMembers.forEach((member) => {
-    const normalizedMember = normalizeTeamMemberEntry(member);
-    const email = normalizedMember.email.trim().toLowerCase();
+const DEMO_TEAM_MEMBERS: TeamMemberEntry[] = [
+  {
+    name: "Emma Stone",
+    email: "emma@cuevion.com",
+    accessLevel: "Shared",
+    selectedInboxes: [],
+    status: "Active",
+  },
+  {
+    name: "David Cole",
+    email: "david@cuevion.com",
+    accessLevel: "Shared",
+    selectedInboxes: [],
+    status: "Invited",
+  },
+  {
+    name: "Mila Hart",
+    email: "mila@cuevion.com",
+    accessLevel: "Limited",
+    selectedInboxes: [],
+    status: "Active",
+  },
+];
+const EMPTY_TEAM_MEMBERS: TeamMemberEntry[] = [];
 
-    if (!email || seenEmails.has(email)) {
-      return;
+export function getPublishedTeamMembers(
+  status: TeamRosterReadStatus,
+  members: TeamMemberEntry[],
+) {
+  return status === "demo" || status === "success" ? members : EMPTY_TEAM_MEMBERS;
+}
+
+export function buildInitialTeamMembers(
+  showDemoContent: boolean,
+  storedValue: string | null,
+): TeamMemberEntry[] {
+  if (!showDemoContent) {
+    return [];
+  }
+
+  if (storedValue) {
+    try {
+      const parsedValue = JSON.parse(storedValue);
+      if (Array.isArray(parsedValue)) {
+        return (parsedValue as TeamMemberEntry[]).map(normalizeTeamMemberEntry);
+      }
+    } catch {
+      return [];
     }
+  }
 
-    const backendMember = backendMembersByEmail.get(email);
-    if (backendMember) {
-      mergedMembers.push(backendMember);
-      backendMembersByEmail.delete(email);
-    } else {
-      mergedMembers.push({
-        ...normalizedMember,
-        email,
-        selectedInboxes: [],
-      });
-    }
-    seenEmails.add(email);
-  });
+  return DEMO_TEAM_MEMBERS.map(normalizeTeamMemberEntry);
+}
 
-  backendMembersByEmail.forEach((member, email) => {
-    if (seenEmails.has(email)) {
-      return;
-    }
+export function getTeamRosterPresentation(
+  status: TeamRosterReadStatus,
+  members: TeamMemberEntry[],
+): TeamRosterPresentation {
+  if (status === "demo" || status === "success") {
+    return members.length > 0
+      ? { kind: "members", members, canRetry: false }
+      : { kind: "empty", message: "No team members yet.", canRetry: false };
+  }
 
-    mergedMembers.push(member);
-    seenEmails.add(email);
-  });
+  if (status === "loading") {
+    return { kind: "loading", message: "Loading team members…", canRetry: false };
+  }
 
-  return mergedMembers;
+  if (status === "unauthorized") {
+    return {
+      kind: "unauthorized",
+      message: "Sign in to view team members.",
+      canRetry: true,
+    };
+  }
+
+  if (status === "forbidden") {
+    return {
+      kind: "forbidden",
+      message: "You do not have permission to view team members.",
+      canRetry: true,
+    };
+  }
+
+  return {
+    kind: "unavailable",
+    message: "Team members are temporarily unavailable.",
+    canRetry: true,
+  };
+}
+
+export function shouldAllowLocalTeamMemberMutation(showDemoContent: boolean) {
+  return showDemoContent;
 }
 
 type ContactRequestStatus = "Sent" | "Saved locally";
@@ -29128,71 +29206,14 @@ function WorkbenchView({
   const visibleNotificationItems = notificationItems;
   const visibleTeamCollaborationItems = collaborationItems;
   const teamMembersStorageKey = buildTeamMembersStorageKey(workspacePersistenceKey);
-  const [teamMembers, setTeamMembers] = useState<TeamMemberEntry[]>(() => {
-    if (typeof window === "undefined") {
-      return showDemoContent
-        ? [
-            {
-              name: "Emma Stone",
-              email: "emma@cuevion.com",
-              accessLevel: "Shared" as const,
-              selectedInboxes: [],
-              status: "Active",
-            },
-            {
-              name: "David Cole",
-              email: "david@cuevion.com",
-              accessLevel: "Shared" as const,
-              selectedInboxes: [],
-              status: "Invited",
-            },
-            {
-              name: "Mila Hart",
-              email: "mila@cuevion.com",
-              accessLevel: "Limited" as const,
-              selectedInboxes: [],
-              status: "Active",
-            },
-          ]
-        : [];
-    }
-
-    const storedValue = window.localStorage.getItem(teamMembersStorageKey);
-
-    if (!storedValue) {
-      return showDemoContent
-        ? [
-            {
-              name: "Emma Stone",
-              email: "emma@cuevion.com",
-              accessLevel: "Shared" as const,
-              selectedInboxes: [],
-              status: "Active",
-            },
-            {
-              name: "David Cole",
-              email: "david@cuevion.com",
-              accessLevel: "Shared" as const,
-              selectedInboxes: [],
-              status: "Invited",
-            },
-            {
-              name: "Mila Hart",
-              email: "mila@cuevion.com",
-              accessLevel: "Limited" as const,
-              selectedInboxes: [],
-              status: "Active",
-            },
-          ]
-        : [];
-    }
-
-    try {
-      return (JSON.parse(storedValue) as TeamMemberEntry[]).map(normalizeTeamMemberEntry);
-    } catch {
-      return [];
-    }
-  });
+  const [teamMembers, setTeamMembers] = useState<TeamMemberEntry[]>(() =>
+    buildInitialTeamMembers(
+      showDemoContent,
+      typeof window === "undefined"
+        ? null
+        : window.localStorage.getItem(teamMembersStorageKey),
+    ),
+  );
   const [activeTeamMemberIndex, setActiveTeamMemberIndex] = useState<number | null>(null);
   const [activeTeamTab, setActiveTeamTab] = useState<
     "Members" | "Collaborations" | "Activity"
@@ -29205,8 +29226,23 @@ function WorkbenchView({
   const [teamFeedbackMessage, setTeamFeedbackMessage] = useState<string | null>(null);
   const [isSendingTeamInvite, setIsSendingTeamInvite] = useState(false);
   const [backendTeamMembersRefreshKey, setBackendTeamMembersRefreshKey] = useState(0);
+  const [teamRosterReadStatus, setTeamRosterReadStatus] = useState<TeamRosterReadStatus>(
+    showDemoContent ? "demo" : shouldPollTeamMembers ? "loading" : "unauthorized",
+  );
+  const teamRosterPresentation = getTeamRosterPresentation(
+    teamRosterReadStatus,
+    teamMembers,
+  );
+  const publishedTeamMembers = getPublishedTeamMembers(
+    teamRosterReadStatus,
+    teamMembers,
+  );
+  const allowLocalTeamMemberMutation =
+    shouldAllowLocalTeamMemberMutation(showDemoContent);
   const activeTeamMember =
-    activeTeamMemberIndex !== null ? teamMembers[activeTeamMemberIndex] : null;
+    teamRosterPresentation.kind === "members" && activeTeamMemberIndex !== null
+      ? teamRosterPresentation.members[activeTeamMemberIndex]
+      : null;
   const teamTabs = ["Members", "Collaborations", "Activity"] as const;
   const [selectedTeamAccessLevel, setSelectedTeamAccessLevel] = useState<TeamAccessLevel>(
     "Shared",
@@ -29574,22 +29610,37 @@ function WorkbenchView({
       return;
     }
 
-    window.localStorage.setItem(teamMembersStorageKey, JSON.stringify(teamMembers));
-    onTeamMembersChange(teamMembers);
-  }, [onTeamMembersChange, teamMembers, teamMembersStorageKey]);
+    if (showDemoContent || teamRosterReadStatus === "success") {
+      window.localStorage.setItem(teamMembersStorageKey, JSON.stringify(teamMembers));
+    }
+    onTeamMembersChange(publishedTeamMembers);
+  }, [
+    onTeamMembersChange,
+    publishedTeamMembers,
+    showDemoContent,
+    teamMembers,
+    teamMembersStorageKey,
+    teamRosterReadStatus,
+  ]);
 
   useEffect(() => {
-    if (typeof window === "undefined" || !shouldPollTeamMembers) {
+    if (typeof window === "undefined") {
       return;
     }
 
-    const workspaceId = workspacePersistenceKey.trim().toLowerCase();
-    if (!workspaceId) {
+    if (showDemoContent) {
+      setTeamRosterReadStatus("demo");
+      return;
+    }
+
+    if (!shouldPollTeamMembers) {
+      setTeamRosterReadStatus("unauthorized");
       return;
     }
 
     let isCancelled = false;
     let isRequestInFlight = false;
+    setTeamRosterReadStatus("loading");
 
     const loadBackendTeamMembers = async () => {
       if (isRequestInFlight) {
@@ -29599,17 +29650,28 @@ function WorkbenchView({
       isRequestInFlight = true;
 
       try {
-        const result = await fetchTeamMembers(workspaceId);
+        const result = await fetchTeamMembers();
 
-        if (isCancelled || !result.ok) {
+        if (isCancelled) {
+          return;
+        }
+
+        if (!result.ok) {
+          setTeamRosterReadStatus(result.status);
           return;
         }
 
         setTeamMembers((current) => {
-          const mergedMembers = mergeBackendTeamMembers(current, result.members);
+          const authoritativeMembers = replaceWithAuthoritativeTeamMembers(
+            current,
+            result.members,
+          );
 
-          return areTeamMemberEntriesEqual(current, mergedMembers) ? current : mergedMembers;
+          return areTeamMemberEntriesEqual(current, authoritativeMembers)
+            ? current
+            : authoritativeMembers;
         });
+        setTeamRosterReadStatus("success");
       } finally {
         isRequestInFlight = false;
       }
@@ -29639,11 +29701,18 @@ function WorkbenchView({
       window.removeEventListener("focus", handleFocus);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [backendTeamMembersRefreshKey, shouldPollTeamMembers, workspacePersistenceKey]);
+  }, [
+    backendTeamMembersRefreshKey,
+    shouldPollTeamMembers,
+    showDemoContent,
+    workspacePersistenceKey,
+  ]);
 
   useEffect(() => {
-    void syncInviteOnlyTeamInviteStatuses();
-  }, [teamMembers]);
+    if (showDemoContent) {
+      void syncInviteOnlyTeamInviteStatuses();
+    }
+  }, [showDemoContent, teamMembers]);
 
   useEffect(() => {
     if (!activeTeamMember) {
@@ -29738,7 +29807,7 @@ function WorkbenchView({
             >
             {activeTeamTab === "Members" ? (
               <>
-            {pendingTeamInvitation ? (
+            {showDemoContent && pendingTeamInvitation ? (
               <div className="rounded-[22px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-5 py-5">
                 <div className="space-y-1">
                   <div className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
@@ -29800,10 +29869,11 @@ function WorkbenchView({
                 </button>
               </div>
 
-              <div className="divide-y divide-[var(--workspace-divider)]">
-              {teamMembers.map((member, index) => (
+              {teamRosterPresentation.kind === "members" ? (
+                <div className="divide-y divide-[var(--workspace-divider)]">
+              {teamRosterPresentation.members.map((member, index) => (
                 <button
-                  key={member.name}
+                  key={member.email}
                   type="button"
                   onClick={() => setActiveTeamMemberIndex(index)}
                   className={`flex w-full items-start justify-between gap-4 rounded-[18px] px-2 py-4 text-left transition-colors duration-200 first:mt-[-0.25rem] first:pt-[1.15rem] last:mb-[-0.25rem] last:pb-[0.4rem] ${
@@ -29830,15 +29900,24 @@ function WorkbenchView({
                   </div>
                 </button>
               ))}
-              </div>
-              {teamMembers.length === 0 ? (
-                <div className="text-[0.92rem] leading-7 text-[var(--workspace-text-soft)]">
-                  No team members yet.
                 </div>
-              ) : null}
+              ) : (
+                <div className="flex flex-wrap items-center gap-3 text-[0.92rem] leading-7 text-[var(--workspace-text-soft)]">
+                  <span>{teamRosterPresentation.message}</span>
+                  {teamRosterPresentation.canRetry && shouldPollTeamMembers ? (
+                    <button
+                      type="button"
+                      onClick={() => setBackendTeamMembersRefreshKey((current) => current + 1)}
+                      className={teamInvitationSecondaryActionClass}
+                    >
+                      Retry
+                    </button>
+                  ) : null}
+                </div>
+              )}
             </div>
 
-            {memberOfEntries.length > 0 ? (
+            {showDemoContent && memberOfEntries.length > 0 ? (
               <div className="space-y-5 pt-1">
                 <div className="h-px w-full bg-[var(--workspace-divider)]" />
                 <div className="space-y-3">
@@ -30205,6 +30284,7 @@ function WorkbenchView({
                 <div className="mt-6 flex flex-wrap items-center gap-3">
                   {activeTeamMember.status === "Active" ? (
                     <>
+                      {allowLocalTeamMemberMutation ? (
                       <button
                         type="button"
                         onClick={() => setIsChangeAccessOpen(true)}
@@ -30212,6 +30292,7 @@ function WorkbenchView({
                       >
                         Change access
                       </button>
+                      ) : null}
                       <button
                         type="button"
                         onClick={() => setActiveTeamConfirmation("revoke")}
@@ -30559,7 +30640,11 @@ function WorkbenchView({
           modalHost,
         )
       : null}
-    {activeTeamMember && isChangeAccessOpen && !activeTeamConfirmation && modalHost
+    {allowLocalTeamMemberMutation &&
+    activeTeamMember &&
+    isChangeAccessOpen &&
+    !activeTeamConfirmation &&
+    modalHost
       ? createPortal(
           <WorkspaceModalLayer>
             <div
@@ -39877,6 +39962,13 @@ export function WorkspaceShell({
   const currentWorkspaceUserId = normalizeSenderLearningKey(activeWorkspaceEmail);
   const workspacePersistenceScope =
     auth0WorkspaceStorageScope || currentWorkspaceUserId;
+  const teamRosterAuthorityKey = `${
+    isDemoWorkspace
+      ? "demo"
+      : hasAuthenticatedMemberAuthority && !collaborationInviteRoute
+        ? "member"
+        : "unavailable"
+  }:${workspacePersistenceScope}`;
   const viewerPersistenceScope =
     auth0ViewerStorageScope ||
     activeCollaborationViewerEmail ||
@@ -42441,23 +42533,36 @@ export function WorkspaceShell({
       return [];
     }
   });
-  const [teamMemberEntries, setTeamMemberEntries] = useState<TeamMemberEntry[]>(() => {
-    if (typeof window === "undefined") {
-      return [];
-    }
-
-    const storedValue = window.localStorage.getItem(teamMembersStorageKey);
-
-    if (!storedValue) {
-      return [];
-    }
-
-    try {
-      return (JSON.parse(storedValue) as TeamMemberEntry[]).map(normalizeTeamMemberEntry);
-    } catch {
-      return [];
-    }
-  });
+  const [teamMemberRosterState, setTeamMemberRosterState] = useState<{
+    authorityKey: string;
+    members: TeamMemberEntry[];
+  }>(() => ({
+    authorityKey: teamRosterAuthorityKey,
+    members:
+      typeof window === "undefined" || !isDemoWorkspace
+        ? []
+        : buildInitialTeamMembers(
+            true,
+            window.localStorage.getItem(teamMembersStorageKey),
+          ),
+  }));
+  const teamMemberEntries =
+    teamMemberRosterState.authorityKey === teamRosterAuthorityKey
+      ? teamMemberRosterState.members
+      : EMPTY_TEAM_MEMBERS;
+  const handleTeamMembersChange = useCallback(
+    (members: TeamMemberEntry[]) => {
+      setTeamMemberRosterState((current) =>
+        current.authorityKey === teamRosterAuthorityKey && current.members === members
+          ? current
+          : {
+              authorityKey: teamRosterAuthorityKey,
+              members,
+            },
+      );
+    },
+    [teamRosterAuthorityKey],
+  );
   const workspaceCollaborationPeople = [
     authenticatedUser
       ? {
@@ -49379,6 +49484,7 @@ export function WorkspaceShell({
               activeSection === "Team" ? (
               <div className="min-h-0 flex-1 overflow-y-auto pr-1">
                 <WorkbenchView
+                  key={teamRosterAuthorityKey}
                   section={activeSection}
 	                  orderedMailboxes={orderedMailboxes}
 	                  managedInboxes={savedManagedInboxes}
@@ -49401,7 +49507,7 @@ export function WorkspaceShell({
                   onAddMemberOfEntry={(entry) => {
                     setMemberOfEntries((current) => [...current, entry]);
                   }}
-                  onTeamMembersChange={setTeamMemberEntries}
+                  onTeamMembersChange={handleTeamMembersChange}
                   onAcceptPendingTeamInvitation={() => {
                     setPendingTeamInvitation(null);
                   }}

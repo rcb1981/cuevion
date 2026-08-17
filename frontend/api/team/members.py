@@ -23,7 +23,6 @@ from api.auth.runtime import (  # noqa: E402
     resolve_authenticated_member,
 )
 
-TEAM_MEMBER_SCHEMA_VERSION = 1
 TEAM_ROLES = {"Limited", "Shared"}
 ACTIVE_TEAM_MEMBER_STATUS = "active"
 REMOVED_TEAM_MEMBER_STATUS = "removed"
@@ -198,25 +197,11 @@ def _normalize_member_record(value: dict | None, workspace_id: str, email: str) 
     ):
         return None
 
-    invited_by_user_id = str(value.get("invitedByUserId") or value.get("inviterUserId") or "").strip()
-    invited_by_user_name = str(value.get("invitedByUserName") or value.get("inviterName") or "").strip()
-
     return {
-        "v": TEAM_MEMBER_SCHEMA_VERSION,
-        "workspaceId": normalized_workspace_id,
         "email": normalized_email,
         "displayName": display_name,
-        "name": display_name,
         "accessLevel": access_level,
         "status": ACTIVE_TEAM_MEMBER_STATUS,
-        "inviteToken": invite_token,
-        "invitedByUserId": invited_by_user_id,
-        "invitedByUserName": invited_by_user_name,
-        "inviterUserId": invited_by_user_id,
-        "inviterName": invited_by_user_name,
-        "createdAt": created_at,
-        "updatedAt": updated_at,
-        "acceptedAt": accepted_at,
     }
 
 
@@ -481,17 +466,24 @@ def _handle_list(
     handler: BaseHTTPRequestHandler,
     authenticated_member: AuthenticatedMemberContext,
 ):
-    workspace_id = _get_workspace_id(handler)
-    if not workspace_id:
-        _send_json(handler, 400, _build_error("invalid_request", "workspaceId is required."))
-        return
-    if workspace_id != authenticated_member.workspace_id:
+    requested_workspace_id = _get_workspace_id(handler)
+    if (
+        requested_workspace_id
+        and requested_workspace_id != authenticated_member.workspace_id
+    ):
         _send_json(handler, 403, _build_error("forbidden", "Workspace access is forbidden."))
         return
 
-    members, error = _list_team_members(workspace_id)
+    members, error = _list_team_members(authenticated_member.workspace_id)
     if error:
-        _send_json(handler, 503, _build_error(error["code"], error["message"]))
+        _send_json(
+            handler,
+            503,
+            _build_error(
+                "team_members_unavailable",
+                "Team members are temporarily unavailable.",
+            ),
+        )
         return
 
     _send_json(handler, 200, {"ok": True, "members": members or []})
@@ -533,14 +525,13 @@ def _handle_remove(
 
 class handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        if _send_disabled_response(self):
+        operation = _get_operation(self)
+        if operation != "list" and _send_disabled_response(self):
             return
 
         authenticated_member = _require_authenticated_member(self)
         if authenticated_member is None:
             return
-
-        operation = _get_operation(self)
 
         if operation == "list":
             _handle_list(self, authenticated_member)

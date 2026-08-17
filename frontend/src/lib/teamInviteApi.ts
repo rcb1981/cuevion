@@ -15,21 +15,10 @@ export type TeamInvite = {
 };
 
 export type TeamMemberRecord = {
-  v: 1;
-  workspaceId: string;
   email: string;
-  displayName?: string;
-  name?: string;
+  displayName: string;
   accessLevel: "Shared" | "Limited";
   status: "active";
-  inviteToken?: string;
-  invitedByUserId?: string;
-  invitedByUserName?: string;
-  inviterUserId?: string;
-  inviterName?: string;
-  createdAt?: number;
-  updatedAt?: number;
-  acceptedAt?: number;
 };
 
 type IssueTeamInviteRequest = {
@@ -74,6 +63,7 @@ type FetchTeamMembersResponse =
     }
   | {
       ok: false;
+      status: "unauthorized" | "forbidden" | "unavailable";
       error?: TeamInviteError;
     };
 
@@ -185,37 +175,99 @@ export async function fetchTeamInvite(token: string): Promise<FetchTeamInviteRes
   }
 }
 
-export async function fetchTeamMembers(workspaceId: string): Promise<FetchTeamMembersResponse> {
-  try {
-    const url = new URL("/api/team/members", window.location.origin);
-    url.searchParams.set("op", "list");
-    url.searchParams.set("workspaceId", workspaceId);
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
 
-    const response = await fetch(`${url.pathname}${url.search}`, {
-      method: "GET",
-      headers: {
-        "Content-Type": "application/json",
-      },
-    });
-    const payload = (await response.json()) as FetchTeamMembersResponse;
-
-    if (!response.ok || !payload.ok || !Array.isArray(payload.members)) {
-      return {
-        ok: false,
-        error: payload && "error" in payload ? payload.error : undefined,
-      };
-    }
-
-    return payload;
-  } catch {
-    return {
-      ok: false,
-      error: {
-        code: "unavailable",
-        message: "Could not load team members.",
-      },
-    };
+function parseTeamMemberRecord(value: unknown): TeamMemberRecord | null {
+  if (
+    !isRecord(value) ||
+    typeof value.email !== "string" ||
+    typeof value.displayName !== "string" ||
+    (value.accessLevel !== "Shared" && value.accessLevel !== "Limited") ||
+    value.status !== "active"
+  ) {
+    return null;
   }
+
+  return {
+    email: value.email,
+    displayName: value.displayName,
+    accessLevel: value.accessLevel,
+    status: value.status,
+  };
+}
+
+function parseTeamMembersError(value: unknown): TeamInviteError | undefined {
+  if (!isRecord(value) || !isRecord(value.error)) {
+    return undefined;
+  }
+
+  const code = typeof value.error.code === "string" ? value.error.code : undefined;
+  const message = typeof value.error.message === "string" ? value.error.message : undefined;
+  return code || message ? { code, message } : undefined;
+}
+
+function unavailableTeamMembersResponse(
+  error?: TeamInviteError,
+): FetchTeamMembersResponse {
+  return {
+    ok: false,
+    status: "unavailable",
+    error: error ?? {
+      code: "unavailable",
+      message: "Could not load team members.",
+    },
+  };
+}
+
+export async function fetchTeamMembers(): Promise<FetchTeamMembersResponse> {
+  let response: Response;
+  try {
+    response = await fetch("/api/team/members?op=list", {
+      method: "GET",
+      credentials: "include",
+      cache: "no-store",
+    });
+  } catch {
+    return unavailableTeamMembersResponse();
+  }
+
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    payload = undefined;
+  }
+
+  const error = parseTeamMembersError(payload);
+
+  if (response.status === 401) {
+    return { ok: false, status: "unauthorized", error };
+  }
+
+  if (response.status === 403) {
+    return { ok: false, status: "forbidden", error };
+  }
+
+  if (
+    !response.ok ||
+    !isRecord(payload) ||
+    payload.ok !== true ||
+    !Array.isArray(payload.members)
+  ) {
+    return unavailableTeamMembersResponse(error);
+  }
+
+  const members = payload.members.map(parseTeamMemberRecord);
+  if (members.some((member) => member === null)) {
+    return unavailableTeamMembersResponse();
+  }
+
+  return {
+    ok: true,
+    members: members as TeamMemberRecord[],
+  };
 }
 
 export async function removeTeamMember(

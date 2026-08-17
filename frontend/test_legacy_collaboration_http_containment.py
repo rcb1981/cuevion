@@ -45,6 +45,14 @@ ROUTES = (
 FRONTEND_ROOT = Path(__file__).resolve().parent
 
 
+def _legacy_disabled_probe_method(route) -> str:
+    return "POST" if route is team_members else "GET"
+
+
+def _is_safe_team_roster_read(route, method: str) -> bool:
+    return route is team_members and method == "GET"
+
+
 class _ForbiddenRequestAccess(AssertionError):
     pass
 
@@ -213,12 +221,13 @@ class LegacyCollaborationHttpContainmentTests(unittest.TestCase):
             "Legacy_Unsafe_On",
         )
         for route_name, route in ROUTES:
+            method = _legacy_disabled_probe_method(route)
             for value in disabled_values:
                 with self.subTest(route=route_name, value=value), patch.dict(os.environ, {}, clear=True):
                     if value is not None:
                         os.environ[MODE_ENVIRONMENT_NAME] = value
-                    request_handler = _invoke_direct(route, "GET")
-                    self.assert_disabled_direct(request_handler, method="GET")
+                    request_handler = _invoke_direct(route, method)
+                    self.assert_disabled_direct(request_handler, method=method)
 
             with self.subTest(route=route_name, value=UNSAFE_MODE), patch.dict(
                 os.environ, {MODE_ENVIRONMENT_NAME: UNSAFE_MODE}, clear=True
@@ -233,40 +242,43 @@ class LegacyCollaborationHttpContainmentTests(unittest.TestCase):
         self.assertNotEqual(request_handler.wfile.getvalue(), DISABLED_BODY)
 
         for route_name, route in ROUTES:
+            method = _legacy_disabled_probe_method(route)
             with self.subTest(route=route_name, behavior="per-request"), patch.dict(
                 os.environ, {}, clear=True
             ):
-                first = _invoke_direct(route, "GET")
+                first = _invoke_direct(route, method)
                 os.environ[MODE_ENVIRONMENT_NAME] = UNSAFE_MODE
                 self.assertTrue(route._legacy_http_is_enabled())
                 os.environ.pop(MODE_ENVIRONMENT_NAME)
-                third = _invoke_direct(route, "GET")
-            self.assert_disabled_direct(first, method="GET")
-            self.assert_disabled_direct(third, method="GET")
+                third = _invoke_direct(route, method)
+            self.assert_disabled_direct(first, method=method)
+            self.assert_disabled_direct(third, method=method)
 
     def test_configuration_requires_an_exact_builtin_string(self):
         values = (_ExplosiveString(UNSAFE_MODE), _ExplosiveValue(), 1, True, b"legacy_unsafe_on")
         for route_name, route in ROUTES:
+            method = _legacy_disabled_probe_method(route)
             for value in values:
                 with self.subTest(route=route_name, value_type=type(value).__name__), patch.object(
                     route.os, "getenv", return_value=value
                 ):
-                    request_handler = _invoke_direct(route, "GET")
-                    self.assert_disabled_direct(request_handler, method="GET")
+                    request_handler = _invoke_direct(route, method)
+                    self.assert_disabled_direct(request_handler, method=method)
 
     def test_environment_read_exceptions_fail_closed_without_catching_base_exception(self):
         for route_name, route in ROUTES:
+            method = _legacy_disabled_probe_method(route)
             with self.subTest(route=route_name, exception="RuntimeError"), patch.object(
                 route.os, "getenv", side_effect=RuntimeError("environment unavailable")
             ):
-                request_handler = _invoke_direct(route, "GET")
-                self.assert_disabled_direct(request_handler, method="GET")
+                request_handler = _invoke_direct(route, method)
+                self.assert_disabled_direct(request_handler, method=method)
 
             for exception_type in (KeyboardInterrupt, SystemExit):
                 with self.subTest(route=route_name, exception=exception_type.__name__), patch.object(
                     route.os, "getenv", side_effect=exception_type()
                 ), self.assertRaises(exception_type):
-                    _invoke_direct(route, "GET")
+                    _invoke_direct(route, method)
 
     def test_disabled_wire_contract_is_uniform_for_every_route_and_method(self):
         body = b'{"private":"request bytes must remain unread"}'
@@ -275,6 +287,8 @@ class LegacyCollaborationHttpContainmentTests(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True):
             for route_name, route in ROUTES:
                 for method in METHODS:
+                    if _is_safe_team_roster_read(route, method):
+                        continue
                     with self.subTest(route=route_name, method=method):
                         self.assertIn(f"do_{method}", route.handler.__dict__)
                         raw_response, unread_body = _dispatch_raw_http(
@@ -314,6 +328,8 @@ class LegacyCollaborationHttpContainmentTests(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True):
             for route_name, route in ROUTES:
                 for method in METHODS:
+                    if _is_safe_team_roster_read(route, method):
+                        continue
                     with self.subTest(route=route_name, method=method):
                         request_handler = _invoke_direct(route, method)
                         self.assert_disabled_direct(request_handler, method=method)
@@ -449,6 +465,8 @@ class LegacyCollaborationHttpContainmentTests(unittest.TestCase):
                 forbidden_calls.append(store_command_transport)
 
                 for method in ("GET", "POST"):
+                    if _is_safe_team_roster_read(route, method):
+                        continue
                     request_handler = _invoke_direct(route, method)
                     self.assert_disabled_direct(request_handler, method=method)
                 for mocked in forbidden_calls:
@@ -642,8 +660,6 @@ class LegacyCollaborationHttpContainmentTests(unittest.TestCase):
             (team_invite, "POST", "/api/team/invite?op=action", b'{"token":"team-token","action":"accept"}'),
             (team_invite, "POST", "/api/team/invite?op=unknown", b"{"),
             (team_invite, "POST", "/api/team/invite", b"{}"),
-            (team_members, "GET", "/api/team/members?op=list&workspaceId=workspace-existing", b"existing-workspace"),
-            (team_members, "GET", "/api/team/members?op=list&workspaceId=workspace-missing", b"missing-workspace"),
             (team_members, "POST", "/api/team/members?op=remove&workspaceId=workspace-existing", b'{"email":"existing-member@example.invalid"}'),
             (team_members, "POST", "/api/team/members?op=revoke&workspaceId=workspace-existing", b'{"email":"missing-member@example.invalid"}'),
             (team_members, "POST", "/api/team/members?op=unknown", b"not-json"),
@@ -841,12 +857,13 @@ class LegacyCollaborationHttpContainmentTests(unittest.TestCase):
     def test_disabled_response_failures_propagate_without_retry(self):
         failure_points = ("status", "header-1", "header-2", "header-3", "end-headers", "write")
         for route_name, route in ROUTES:
+            method = _legacy_disabled_probe_method(route)
             for failure_point in failure_points:
                 with self.subTest(route=route_name, failure=failure_point), patch.object(
                     route.os, "getenv", return_value=None
                 ), self.assertRaisesRegex(_ResponseFailure, failure_point):
                     request_handler = _controlled_handler(route, fail_at=failure_point)
-                    route.handler.do_GET(request_handler)
+                    getattr(route.handler, f"do_{method}")(request_handler)
                 self.assertEqual(request_handler.status_only, [404])
                 self.assertEqual(request_handler.status_normal, [])
                 self.assertEqual(request_handler.status_errors, [])
@@ -857,13 +874,14 @@ class LegacyCollaborationHttpContainmentTests(unittest.TestCase):
         self.assertEqual(len(DISABLED_BODY), 64)
         self.assertEqual(len(UNSUPPORTED_BODY), 79)
         for route_name, route in ROUTES:
+            method = _legacy_disabled_probe_method(route)
             with self.subTest(route=route_name), patch.object(route.os, "getenv", return_value=None), patch.object(
                 route.json, "dumps", side_effect=AssertionError("json.dumps called")
             ) as dumps:
                 self.assertEqual(route._DISABLED_RESPONSE_BODY, DISABLED_BODY)
                 self.assertEqual(route._DISABLED_RESPONSE_CONTENT_LENGTH, str(len(DISABLED_BODY)))
-                request_handler = _invoke_direct(route, "GET")
-                self.assert_disabled_direct(request_handler, method="GET")
+                request_handler = _invoke_direct(route, method)
+                self.assert_disabled_direct(request_handler, method=method)
                 dumps.assert_not_called()
 
     def test_pristine_import_and_disabled_invocation_do_not_load_inactive_collaboration_modules(self):
