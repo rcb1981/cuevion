@@ -94,6 +94,7 @@ import {
   removeAndPersistCustomImapInboxMessageFromSnapshot,
   removeAndPersistGmailInboxProviderMessageFromSnapshot,
   saveLiveInboxSnapshot,
+  type LiveInboxSnapshot,
   type TrustedLiveInboxSnapshotContexts,
 } from "../../lib/liveInboxSnapshots";
 import {
@@ -252,11 +253,13 @@ import * as forYouEngine from "../../lib/forYouEngine";
 import * as suggestionEngine from "../../lib/suggestionEngine";
 import {
   applyLiveThreadIdentity,
+  buildMailboxScopedThreadGroupingKey,
   buildRenderedConversationRows,
   dedupeLatestCanonicalConversationEntries,
   mergeLiveInboxMessageState,
   normalizeThreadSubject,
   resolveCanonicalConversationIdentity,
+  resolveMailboxScopedMessageIdentity,
   resolveSafeThreadGroupingKey,
   selectLatestAuthoritativeConversationMessage,
   pruneInboxSnapshot,
@@ -1018,6 +1021,27 @@ function findMatchingMessageByIdentity<T>(
   return indexes.byPreviewIdentity.get(buildStablePreviewIdentity(message));
 }
 
+function buildMessageIdentityIndexes<T extends MessageIdentitySource>(messages: T[]) {
+  return {
+    byId: new Map<string, T>(
+      messages
+        .filter(
+          (message): message is T & { id: string } =>
+            typeof message.id === "string" && message.id.length > 0,
+        )
+        .map((message) => [message.id, message]),
+    ),
+    byImapUid: new Map(
+      messages
+        .filter((message) => Boolean(message.imapUid))
+        .map((message) => [message.imapUid as string, message]),
+    ),
+    byPreviewIdentity: new Map(
+      messages.map((message) => [buildStablePreviewIdentity(message), message]),
+    ),
+  };
+}
+
 function buildCollaborationThreadIdentitySource(
   thread: CollaborationThread,
 ): MessageIdentitySource {
@@ -1030,22 +1054,26 @@ function buildCollaborationThreadIdentitySource(
   };
 }
 
-function buildCanonicalIdentityKeySetForMessageIds(
+function buildCanonicalIdentityKeySetForMailboxMessageIds(
   store: MailboxStore,
+  mailboxId: InboxId,
   messageIds: string[],
 ) {
+  const collections = store[mailboxId];
   const messageIdSet = new Set(messageIds);
   const identityKeys = new Set<string>();
 
-  Object.values(store).forEach((collections) => {
-    canonicalFolderOrder.forEach((folder) => {
-      collections[folder].forEach((message) => {
-        if (!messageIdSet.has(message.id)) {
-          return;
-        }
+  if (!collections) {
+    return identityKeys;
+  }
 
-        getCanonicalMessageIdentityKeys(message).forEach((key) => identityKeys.add(key));
-      });
+  canonicalFolderOrder.forEach((folder) => {
+    collections[folder].forEach((message) => {
+      if (!messageIdSet.has(message.id)) {
+        return;
+      }
+
+      getCanonicalMessageIdentityKeys(message).forEach((key) => identityKeys.add(key));
     });
   });
 
@@ -1172,7 +1200,12 @@ type MailMessagePriorityScore = "low" | "medium" | "high";
 type MailMessageFocusSignal = "attention" | null;
 type ManualPriorityOverride = "priority" | "removed";
 type ManualPriorityOverrideStore = Record<string, ManualPriorityOverride>;
-type ManualPriorityUpdateOptions = { showConfirmation?: boolean };
+type ManualPriorityUpdateOptions = {
+  showConfirmation?: boolean;
+  storageMailboxId?: InboxId | null;
+  sourceMailboxId?: InboxId | null;
+  sourceMessage?: MailMessage | null;
+};
 
 function resolveManualPriorityOverride(
   overrides: ManualPriorityOverrideStore,
@@ -1334,6 +1367,8 @@ type MailAttachment = {
     messageId: string;
     messageUid?: string;
     folder?: MailFolder;
+    providerFolder?: string;
+    uidValidity?: string;
   };
 };
 type MailAttachmentInput = string | MailAttachment;
@@ -1516,6 +1551,1054 @@ type MailFolder = "Inbox" | "Drafts" | "Sent" | "Archive" | "Filtered" | "Spam" 
 type MailSortOrder = "desc" | "asc";
 type MailboxCollections = Record<MailFolder, MailMessage[]>;
 type MailboxStore = Record<string, MailboxCollections>;
+
+export type MailboxScopedMessageSelection = {
+  key: string;
+  mailboxId: InboxId;
+  messageId: string;
+  imapUid: string | null;
+  folder: MailFolder | null;
+};
+
+export type MailboxScopedMessageSelectionState = {
+  selected: MailboxScopedMessageSelection[];
+  primaryKey: string | null;
+  anchorKey: string | null;
+};
+
+export type MailboxScopedMessageEntry = {
+  mailboxId: InboxId;
+  folder: MailFolder;
+  message: MailMessage;
+  selection: MailboxScopedMessageSelection;
+};
+
+export function getMailboxMessageById(
+  store: MailboxStore,
+  mailboxId: InboxId,
+  messageId: string,
+) {
+  const collections = store[mailboxId];
+
+  if (!collections) {
+    return null;
+  }
+
+  return (
+    canonicalFolderOrder
+      .flatMap((folder) => collections[folder])
+      .find((message) => message.id === messageId) ?? null
+  );
+}
+
+export function updateMailboxMessageById(
+  store: MailboxStore,
+  mailboxId: InboxId,
+  messageId: string,
+  updater: (message: MailMessage) => MailMessage,
+) {
+  const collections = store[mailboxId];
+
+  if (!collections) {
+    return { store, updatedMessage: null as MailMessage | null };
+  }
+
+  let updatedMessage: MailMessage | null = null;
+  let didChange = false;
+  const updateFolder = (messages: MailMessage[]) =>
+    messages.map((message) => {
+      if (message.id !== messageId) {
+        return message;
+      }
+
+      const nextMessage = updater(message);
+      updatedMessage = nextMessage;
+      didChange = didChange || nextMessage !== message;
+      return nextMessage;
+    });
+  const nextCollections: MailboxCollections = {
+    Inbox: updateFolder(collections.Inbox),
+    Drafts: updateFolder(collections.Drafts),
+    Sent: updateFolder(collections.Sent),
+    Archive: updateFolder(collections.Archive),
+    Filtered: updateFolder(collections.Filtered),
+    Spam: updateFolder(collections.Spam),
+    Trash: updateFolder(collections.Trash),
+  };
+
+  return {
+    store: didChange
+      ? {
+          ...store,
+          [mailboxId]: nextCollections,
+        }
+      : store,
+    updatedMessage,
+  };
+}
+
+export function getCollaborationMessageSourceMailboxId(
+  message: Pick<
+    MailMessage,
+    "collaborationMailboxId" | "threadIdentityContext" | "serverMailboxId"
+  >,
+) {
+  const sourceMailboxId =
+    message.collaborationMailboxId?.trim() ||
+    message.threadIdentityContext?.mailboxId?.trim() ||
+    message.serverMailboxId?.trim() ||
+    "";
+
+  return sourceMailboxId ? (sourceMailboxId as InboxId) : null;
+}
+
+export function upsertMailboxScopedInviteMessage(
+  store: MailboxStore,
+  mailboxId: InboxId,
+  storedMessageId: string | null,
+  message: MailMessage,
+) {
+  const collections = store[mailboxId];
+
+  if (!collections) {
+    return store;
+  }
+
+  const sourceMailboxId = getCollaborationMessageSourceMailboxId(message);
+  const persistedMessage =
+    sourceMailboxId && !message.collaborationMailboxId?.trim()
+      ? {
+          ...message,
+          collaborationMailboxId: sourceMailboxId,
+        }
+      : message;
+
+  const targetMessageId =
+    storedMessageId ??
+    (getMailboxMessageById(store, mailboxId, persistedMessage.id)
+      ? persistedMessage.id
+      : null);
+
+  if (targetMessageId) {
+    return updateMailboxMessageById(
+      store,
+      mailboxId,
+      targetMessageId,
+      (currentMessage) => {
+        const currentUpdatedAt = currentMessage.collaboration?.updatedAt ?? 0;
+        const nextUpdatedAt = persistedMessage.collaboration?.updatedAt ?? 0;
+        const hasSameCanonicalIdentity =
+          currentMessage.id === persistedMessage.id &&
+          currentMessage.collaborationMessageId ===
+            persistedMessage.collaborationMessageId &&
+          currentMessage.collaborationWorkspaceId ===
+            persistedMessage.collaborationWorkspaceId &&
+          currentMessage.collaborationMailboxId ===
+            persistedMessage.collaborationMailboxId;
+
+        if (hasSameCanonicalIdentity && currentUpdatedAt >= nextUpdatedAt) {
+          return currentMessage;
+        }
+
+        return persistedMessage;
+      },
+    ).store;
+  }
+
+  return {
+    ...store,
+    [mailboxId]: {
+      ...collections,
+      Inbox: [persistedMessage, ...collections.Inbox],
+    },
+  };
+}
+
+export function updateMailboxSnapshotCollaboration(
+  snapshot: LiveInboxSnapshot | undefined,
+  mailboxId: InboxId,
+  messageId: string,
+  updatedMessage: MailMessage,
+) {
+  if (!snapshot || snapshot.inboxId !== mailboxId) {
+    return snapshot;
+  }
+
+  let didChange = false;
+  const messages = snapshot.messages.map((snapshotMessage) => {
+    if (snapshotMessage.id !== messageId) {
+      return snapshotMessage;
+    }
+
+    didChange = true;
+    return {
+      ...snapshotMessage,
+      collaboration: updatedMessage.collaboration,
+      isShared: updatedMessage.isShared,
+      collaborationMessageId: updatedMessage.collaborationMessageId,
+      collaborationWorkspaceId: updatedMessage.collaborationWorkspaceId,
+      collaborationMailboxId: updatedMessage.collaborationMailboxId,
+    } as PersistedLiveInboxMessageSnapshot;
+  });
+
+  return didChange
+    ? {
+        ...snapshot,
+        messages,
+      }
+    : snapshot;
+}
+
+export function applyMailboxScopedCollaborationSnapshotUpdates(
+  snapshots: Record<string, LiveInboxSnapshot>,
+  updates: Array<{
+    mailboxId: InboxId;
+    messageId: string;
+    updatedMessage: MailMessage;
+  }>,
+) {
+  return updates.reduce<Record<string, LiveInboxSnapshot>>(
+    (currentSnapshots, update) => {
+      const currentSnapshot = currentSnapshots[update.mailboxId];
+      const nextSnapshot = updateMailboxSnapshotCollaboration(
+        currentSnapshot,
+        update.mailboxId,
+        update.messageId,
+        update.updatedMessage,
+      );
+
+      if (!nextSnapshot || nextSnapshot === currentSnapshot) {
+        return currentSnapshots;
+      }
+
+      return {
+        ...currentSnapshots,
+        [update.mailboxId]: nextSnapshot,
+      };
+    },
+    snapshots,
+  );
+}
+
+export function mergeMailboxScopedCollaborationSnapshotMessage(
+  message: MailMessage,
+  snapshotMessage: PersistedLiveInboxMessageSnapshot & {
+    collaborationMessageId?: string;
+    collaborationWorkspaceId?: string;
+    collaborationMailboxId?: string;
+  },
+) {
+  const preferredSnapshotState = resolvePreferredCollaborationSnapshotState(
+    snapshotMessage.collaboration,
+    message.collaboration,
+    snapshotMessage.isShared,
+    message.isShared,
+  );
+
+  return {
+    ...message,
+    collaboration: preferredSnapshotState.collaboration,
+    isShared: preferredSnapshotState.isShared,
+    collaborationMessageId:
+      message.collaborationMessageId?.trim() ||
+      snapshotMessage.collaborationMessageId,
+    collaborationWorkspaceId:
+      message.collaborationWorkspaceId?.trim() ||
+      snapshotMessage.collaborationWorkspaceId,
+    collaborationMailboxId:
+      message.collaborationMailboxId?.trim() ||
+      snapshotMessage.collaborationMailboxId,
+  };
+}
+
+function resolveWorkspaceMessageIdentityContext(
+  mailboxId: InboxId,
+  message: MailMessage,
+) {
+  const context = message.threadIdentityContext;
+
+  if (context?.mailboxId === mailboxId) {
+    return context;
+  }
+
+  return null;
+}
+
+export function getMailboxScopedWorkspaceMessageIdentity(
+  mailboxId: InboxId,
+  message: MailMessage,
+) {
+  const context = resolveWorkspaceMessageIdentityContext(mailboxId, message);
+
+  if (context) {
+    return resolveMailboxScopedMessageIdentity(message, context);
+  }
+
+  return buildMailboxScopedThreadGroupingKey(
+    `message:${message.id.trim()}`,
+    mailboxId,
+  );
+}
+
+export function buildCollaborationLocalStateKey(
+  messageId: string,
+  storageMailboxId: InboxId,
+) {
+  return buildMailboxScopedThreadGroupingKey(
+    `collaboration-local:${messageId}`,
+    storageMailboxId,
+  );
+}
+
+export function buildMailboxScopedMessageSelection(
+  mailboxId: InboxId,
+  message: MailMessage,
+  folder: MailFolder | null = null,
+): MailboxScopedMessageSelection {
+  return {
+    key: getMailboxScopedWorkspaceMessageIdentity(mailboxId, message),
+    mailboxId,
+    messageId: message.id,
+    imapUid: message.imapUid?.trim() || null,
+    folder,
+  };
+}
+
+export function shouldPersistMailboxSelectionForRemount({
+  isSharedView,
+  activeSmartFolderId,
+  hostMailboxId,
+  selection,
+}: {
+  isSharedView: boolean;
+  activeSmartFolderId: string | null;
+  hostMailboxId: InboxId;
+  selection: MailboxScopedMessageSelection;
+}) {
+  return (
+    !isSharedView &&
+    !activeSmartFolderId &&
+    selection.mailboxId === hostMailboxId
+  );
+}
+
+export function reduceMailboxScopedMessageSelection(
+  state: MailboxScopedMessageSelectionState,
+  orderedSelections: MailboxScopedMessageSelection[],
+  target: MailboxScopedMessageSelection,
+  mode: "single" | "toggle" | "range",
+): MailboxScopedMessageSelectionState {
+  if (mode === "single") {
+    return {
+      selected: [target],
+      primaryKey: target.key,
+      anchorKey: target.key,
+    };
+  }
+
+  if (mode === "toggle") {
+    const alreadySelected = state.selected.some(
+      (selection) => selection.key === target.key,
+    );
+
+    if (!alreadySelected) {
+      return {
+        selected: [...state.selected, target],
+        primaryKey: target.key,
+        anchorKey: target.key,
+      };
+    }
+
+    const selected = state.selected.filter(
+      (selection) => selection.key !== target.key,
+    );
+    const primaryKey = selected.some(
+      (selection) => selection.key === state.primaryKey,
+    )
+      ? state.primaryKey
+      : selected[selected.length - 1]?.key ?? null;
+    const anchorKey = selected.some(
+      (selection) => selection.key === state.anchorKey,
+    )
+      ? state.anchorKey
+      : primaryKey;
+
+    return { selected, primaryKey, anchorKey };
+  }
+
+  const orderedKeys = orderedSelections.map((selection) => selection.key);
+  const anchorKey =
+    (state.anchorKey && orderedKeys.includes(state.anchorKey)
+      ? state.anchorKey
+      : state.primaryKey && orderedKeys.includes(state.primaryKey)
+        ? state.primaryKey
+        : target.key);
+  const anchorIndex = orderedKeys.indexOf(anchorKey);
+  const targetIndex = orderedKeys.indexOf(target.key);
+
+  if (anchorIndex === -1 || targetIndex === -1) {
+    return {
+      selected: [target],
+      primaryKey: target.key,
+      anchorKey: target.key,
+    };
+  }
+
+  const [startIndex, endIndex] =
+    anchorIndex <= targetIndex
+      ? [anchorIndex, targetIndex]
+      : [targetIndex, anchorIndex];
+
+  return {
+    selected: orderedSelections.slice(startIndex, endIndex + 1),
+    primaryKey: target.key,
+    anchorKey,
+  };
+}
+
+export function resolveAdjacentMailboxScopedMessageSelection(
+  orderedSelections: MailboxScopedMessageSelection[],
+  currentKey: string | null,
+  direction: "next" | "previous",
+) {
+  if (orderedSelections.length === 0) {
+    return null;
+  }
+
+  const currentIndex = currentKey
+    ? orderedSelections.findIndex((selection) => selection.key === currentKey)
+    : -1;
+  const fallbackIndex = direction === "next" ? 0 : orderedSelections.length - 1;
+  const targetIndex =
+    currentIndex === -1
+      ? fallbackIndex
+      : direction === "next"
+        ? Math.min(currentIndex + 1, orderedSelections.length - 1)
+        : Math.max(currentIndex - 1, 0);
+
+  return orderedSelections[targetIndex] ?? null;
+}
+
+export function resolveMailboxScopedSelectionAfterAction(
+  orderedSelections: MailboxScopedMessageSelection[],
+  primaryKey: string | null,
+  processedSelectionKeys: string[],
+) {
+  const processedKeys = new Set(processedSelectionKeys);
+  const currentIndex = orderedSelections.findIndex(
+    (selection) =>
+      selection.key === primaryKey && processedKeys.has(selection.key),
+  );
+  const fallbackIndex = orderedSelections.findIndex((selection) =>
+    processedKeys.has(selection.key),
+  );
+  const anchorIndex = currentIndex >= 0 ? currentIndex : fallbackIndex;
+  const remainingSelections = orderedSelections.filter(
+    (selection) => !processedKeys.has(selection.key),
+  );
+
+  return anchorIndex >= 0
+    ? remainingSelections[
+        Math.min(anchorIndex, remainingSelections.length - 1)
+      ] ?? null
+    : remainingSelections[0] ?? null;
+}
+
+export function resolveEffectiveMailboxScopedContextSelection(
+  selected: MailboxScopedMessageSelection[],
+  target: MailboxScopedMessageSelection,
+) {
+  return selected.some((selection) => selection.key === target.key)
+    ? selected
+    : [target];
+}
+
+export function resolveMailboxScopedSelectionEntries(
+  store: MailboxStore,
+  selections: MailboxScopedMessageSelection[],
+): MailboxScopedMessageEntry[] {
+  return selections.flatMap((selection) => {
+    const collections = store[selection.mailboxId];
+
+    if (!collections) {
+      return [];
+    }
+
+    const orderedFolders = selection.folder
+      ? [
+          selection.folder,
+          ...canonicalFolderOrder.filter((folder) => folder !== selection.folder),
+        ]
+      : canonicalFolderOrder;
+    const entries = orderedFolders.flatMap((folder) =>
+      collections[folder].map((message) => ({ folder, message })),
+    );
+    const exactIdentityMatches = entries.filter(
+      ({ message }) =>
+        getMailboxScopedWorkspaceMessageIdentity(selection.mailboxId, message) ===
+        selection.key,
+    );
+    const idMatches = entries.filter(
+      ({ message }) => message.id === selection.messageId,
+    );
+    const uidMatches = selection.imapUid
+      ? entries.filter(
+          ({ message }) => message.imapUid?.trim() === selection.imapUid,
+        )
+      : [];
+    const resolved =
+      exactIdentityMatches.length === 1
+        ? exactIdentityMatches[0]
+        : idMatches.length === 1
+          ? idMatches[0]
+          : uidMatches.length === 1
+            ? uidMatches[0]
+            : null;
+
+    if (!resolved) {
+      return [];
+    }
+
+    return [
+      {
+        mailboxId: selection.mailboxId,
+        folder: resolved.folder,
+        message: resolved.message,
+        selection: buildMailboxScopedMessageSelection(
+          selection.mailboxId,
+          resolved.message,
+          resolved.folder,
+        ),
+      },
+    ];
+  });
+}
+
+export function resolveMailboxScopedWorkspaceMessageContext(
+  store: MailboxStore,
+  selection: MailboxScopedMessageSelection,
+) {
+  const entry = resolveMailboxScopedSelectionEntries(store, [selection])[0];
+
+  if (!entry) {
+    return null;
+  }
+
+  const collections = store[entry.mailboxId];
+  const threadSourceMessages = canonicalFolderOrder.flatMap(
+    (folder) => collections[folder],
+  );
+  const threadMessages = [
+    entry.message,
+    ...getRecentThreadMessages(entry.message, threadSourceMessages, {
+      mailboxId: entry.mailboxId,
+      useSafeGrouping: true,
+    }),
+  ].filter(
+    (message, index, messages) =>
+      messages.findIndex(
+        (candidate) =>
+          getMailboxScopedWorkspaceMessageIdentity(entry.mailboxId, candidate) ===
+          getMailboxScopedWorkspaceMessageIdentity(entry.mailboxId, message),
+      ) === index,
+  );
+
+  return {
+    ...entry,
+    threadMessages,
+  };
+}
+
+export function resolveMailboxScopedManualPriorityTarget({
+  store,
+  messageId,
+  storageMailboxId,
+  sourceMailboxId,
+  sourceMessage,
+}: {
+  store: MailboxStore;
+  messageId: string;
+  storageMailboxId?: InboxId | null;
+  sourceMailboxId: InboxId;
+  sourceMessage?: MailMessage | null;
+}) {
+  if (sourceMessage?.id !== undefined && sourceMessage.id !== messageId) {
+    return null;
+  }
+
+  const declaredSourceMailboxId = sourceMessage
+    ? getCollaborationMessageSourceMailboxId(sourceMessage)
+    : null;
+
+  if (
+    declaredSourceMailboxId &&
+    declaredSourceMailboxId !== sourceMailboxId
+  ) {
+    return null;
+  }
+
+  const storedMessage = getMailboxMessageById(
+    store,
+    storageMailboxId ?? sourceMailboxId,
+    messageId,
+  );
+
+  if (storedMessage) {
+    return {
+      storageMailboxId: storageMailboxId ?? sourceMailboxId,
+      mailboxId: sourceMailboxId,
+      message: storedMessage,
+    };
+  }
+
+  if (sourceMessage?.id !== messageId) {
+    return null;
+  }
+
+  return {
+    storageMailboxId: storageMailboxId ?? sourceMailboxId,
+    mailboxId: sourceMailboxId,
+    message: sourceMessage,
+  };
+}
+
+export function resolveInitialComposeAttachments(
+  mode: ComposeMode,
+  sourceMessage: MailMessage,
+  sourceLocation: { mailboxId: InboxId; folder: MailFolder },
+) {
+  if (mode !== "forward") {
+    return [];
+  }
+
+  return (sourceMessage.attachments ?? []).map((attachment: MailAttachment) =>
+    normalizeMailAttachment({
+      ...attachment,
+      receivedSource: attachment.file
+        ? attachment.receivedSource
+        : {
+            mailboxId: sourceLocation.mailboxId,
+            messageId: sourceMessage.id,
+            messageUid: sourceMessage.imapUid,
+            folder: sourceLocation.folder,
+            providerFolder: sourceMessage.providerFolder,
+            uidValidity: sourceMessage.uidValidity,
+          },
+    }),
+  );
+}
+
+export function moveMailboxScopedSelectionsToFolder(
+  store: MailboxStore,
+  selections: MailboxScopedMessageSelection[],
+  targetFolder: MailFolder,
+) {
+  const selectionsByMailbox = selections.reduce<
+    Partial<Record<InboxId, MailboxScopedMessageSelection[]>>
+  >((groups, selection) => {
+    groups[selection.mailboxId] = [
+      ...(groups[selection.mailboxId] ?? []),
+      selection,
+    ];
+    return groups;
+  }, {});
+  let didChange = false;
+  const nextStore = { ...store };
+
+  Object.entries(selectionsByMailbox).forEach(([rawMailboxId, mailboxSelections]) => {
+    const mailboxId = rawMailboxId as InboxId;
+    const collections = store[mailboxId];
+
+    if (!collections || !mailboxSelections?.length) {
+      return;
+    }
+
+    const identityKeys = buildCanonicalIdentityKeySetForMailboxMessageIds(
+      store,
+      mailboxId,
+      mailboxSelections.map((selection) => selection.messageId),
+    );
+    const messagesToMove = canonicalFolderOrder.flatMap((folder) =>
+      collections[folder].filter((message) =>
+        doesMessageMatchCanonicalIdentitySet(message, identityKeys),
+      ),
+    );
+
+    if (messagesToMove.length === 0) {
+      return;
+    }
+
+    didChange = true;
+    nextStore[mailboxId] = canonicalFolderOrder.reduce<MailboxCollections>(
+      (nextCollections, folder) => {
+        const remainingMessages = collections[folder].filter(
+          (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeys),
+        );
+        nextCollections[folder] =
+          folder === targetFolder
+            ? [...messagesToMove, ...remainingMessages]
+            : remainingMessages;
+        return nextCollections;
+      },
+      createEmptyMailboxCollections(),
+    );
+  });
+
+  return didChange ? nextStore : store;
+}
+
+export function resolveAuthoritativeMessageLocation({
+  message,
+  exactLocation,
+  explicitMailboxId,
+  explicitFolder,
+  bareIdLocation,
+}: {
+  message: MailMessage;
+  exactLocation?: { mailboxId: InboxId; folder: MailFolder } | null;
+  explicitMailboxId?: InboxId | null;
+  explicitFolder?: MailFolder | null;
+  bareIdLocation?: { mailboxId: InboxId; folder: MailFolder } | null;
+}) {
+  if (exactLocation) {
+    return exactLocation;
+  }
+
+  const knownMailboxId =
+    explicitMailboxId ??
+    (message.threadIdentityContext?.mailboxId as InboxId | undefined) ??
+    (message.serverMailboxId as InboxId | undefined) ??
+    (message.collaborationMailboxId as InboxId | undefined) ??
+    null;
+
+  if (knownMailboxId) {
+    const canonicalContextFolder = canonicalFolderOrder.find((folder) =>
+      [message.threadIdentityContext?.folder, message.providerFolder].some(
+        (candidate) => candidate?.trim().toLowerCase() === folder.toLowerCase(),
+      ),
+    );
+    const sameMailboxBareIdLocation =
+      bareIdLocation?.mailboxId === knownMailboxId ? bareIdLocation : null;
+
+    return {
+      mailboxId: knownMailboxId,
+      folder:
+        explicitFolder ??
+        canonicalContextFolder ??
+        sameMailboxBareIdLocation?.folder ??
+        "Inbox",
+    };
+  }
+
+  return bareIdLocation ?? null;
+}
+
+export function resolveUnambiguousCollaborationMutationTarget({
+  store,
+  storageMailboxId,
+  messageId,
+  fallbackWorkspaceId,
+  sharedMailboxId,
+}: {
+  store: MailboxStore;
+  storageMailboxId: InboxId;
+  messageId: string;
+  fallbackWorkspaceId: string;
+  sharedMailboxId: InboxId;
+}):
+  | {
+      ok: true;
+      target: {
+        storageMailboxId: InboxId;
+        sourceMailboxId: InboxId;
+        workspaceId: string;
+        canonicalMessageId: string;
+        message: MailMessage;
+      };
+    }
+  | {
+      ok: false;
+      reason: "missing_source" | "missing_thread" | "ambiguous_mailbox";
+    } {
+  const message = getMailboxMessageById(store, storageMailboxId, messageId);
+
+  if (!message?.collaboration) {
+    return { ok: false, reason: "missing_thread" };
+  }
+
+  const sourceMailboxId =
+    (message.collaborationMailboxId?.trim() as InboxId | undefined) ??
+    (storageMailboxId !== sharedMailboxId ? storageMailboxId : null);
+  const workspaceId =
+    message.collaborationWorkspaceId?.trim().toLowerCase() ||
+    fallbackWorkspaceId.trim().toLowerCase();
+  const canonicalMessageId =
+    message.collaborationMessageId?.trim() || message.id.trim();
+
+  if (!sourceMailboxId || !workspaceId || !canonicalMessageId) {
+    return { ok: false, reason: "missing_source" };
+  }
+
+  const matchingSourceMailboxIds = new Set<InboxId>();
+  let hasUnresolvedMatchingSource = false;
+  Object.entries(store).forEach(([rawMailboxId, collections]) => {
+    const candidateStorageMailboxId = rawMailboxId as InboxId;
+    canonicalFolderOrder.forEach((folder) => {
+      collections[folder].forEach((candidate) => {
+        if (!candidate.collaboration) {
+          return;
+        }
+
+        const candidateWorkspaceId =
+          candidate.collaborationWorkspaceId?.trim().toLowerCase() ||
+          fallbackWorkspaceId.trim().toLowerCase();
+        const candidateCanonicalMessageId =
+          candidate.collaborationMessageId?.trim() || candidate.id.trim();
+
+        if (
+          candidateWorkspaceId !== workspaceId ||
+          candidateCanonicalMessageId !== canonicalMessageId
+        ) {
+          return;
+        }
+
+        const candidateSourceMailboxId =
+          (candidate.collaborationMailboxId?.trim() as InboxId | undefined) ??
+          (candidateStorageMailboxId !== sharedMailboxId
+            ? candidateStorageMailboxId
+            : null);
+
+        if (candidateSourceMailboxId) {
+          matchingSourceMailboxIds.add(candidateSourceMailboxId);
+        } else {
+          hasUnresolvedMatchingSource = true;
+        }
+      });
+    });
+  });
+
+  if (
+    hasUnresolvedMatchingSource ||
+    matchingSourceMailboxIds.size !== 1 ||
+    !matchingSourceMailboxIds.has(sourceMailboxId)
+  ) {
+    return {
+      ok: false,
+      reason:
+        hasUnresolvedMatchingSource || matchingSourceMailboxIds.size > 1
+          ? "ambiguous_mailbox"
+          : "missing_source",
+    };
+  }
+
+  return {
+    ok: true,
+    target: {
+      storageMailboxId,
+      sourceMailboxId,
+      workspaceId,
+      canonicalMessageId,
+      message,
+    },
+  };
+}
+
+export function resolveCollaborationInviteStorageMailboxId({
+  authoritativeSourceMailboxId,
+  decodedSourceMailboxId,
+  ownedMailboxIds,
+  sharedMailboxId,
+  storedEntries,
+}: {
+  authoritativeSourceMailboxId: InboxId | null;
+  decodedSourceMailboxId: InboxId | null;
+  ownedMailboxIds: InboxId[];
+  sharedMailboxId: InboxId;
+  storedEntries: Array<{
+    mailboxId: InboxId;
+    messageId: string;
+    sourceMailboxId: InboxId | null;
+  }>;
+}): {
+  sourceMailboxId: InboxId;
+  storageMailboxId: InboxId;
+  storedMessageId: string | null;
+} | null {
+  const sourceMailboxId =
+    authoritativeSourceMailboxId ?? decodedSourceMailboxId;
+
+  if (sourceMailboxId) {
+    const storageMailboxId = ownedMailboxIds.includes(sourceMailboxId)
+      ? sourceMailboxId
+      : sharedMailboxId;
+    const storedEntriesInTargetMailbox = storedEntries.filter(
+      (entry) => entry.mailboxId === storageMailboxId,
+    );
+    const hasUnresolvedSharedEntry =
+      storageMailboxId === sharedMailboxId &&
+      storedEntriesInTargetMailbox.some((entry) => !entry.sourceMailboxId);
+
+    if (hasUnresolvedSharedEntry) {
+      return null;
+    }
+
+    const matchingStoredEntry = storedEntriesInTargetMailbox.find(
+      (entry) =>
+        entry.sourceMailboxId === sourceMailboxId ||
+        (!entry.sourceMailboxId && entry.mailboxId === sourceMailboxId),
+    );
+
+    return {
+      sourceMailboxId,
+      storageMailboxId,
+      storedMessageId: matchingStoredEntry?.messageId ?? null,
+    };
+  }
+
+  if (storedEntries.length !== 1) {
+    return null;
+  }
+
+  const [storedEntry] = storedEntries;
+  const storedSourceMailboxId =
+    storedEntry.sourceMailboxId ??
+    (storedEntry.mailboxId !== sharedMailboxId ? storedEntry.mailboxId : null);
+
+  if (!storedSourceMailboxId) {
+    return null;
+  }
+
+  return {
+    sourceMailboxId: storedSourceMailboxId,
+    storageMailboxId: storedEntry.mailboxId,
+    storedMessageId: storedEntry.messageId,
+  };
+}
+
+export function getCollaborationMailboxIdentityKey(
+  storageMailboxId: InboxId,
+  message: MailMessage,
+  fallbackWorkspaceId: string,
+) {
+  const workspaceId =
+    message.collaborationWorkspaceId?.trim().toLowerCase() ||
+    fallbackWorkspaceId.trim().toLowerCase();
+  const sourceMailboxId =
+    (message.collaborationMailboxId?.trim() as InboxId | undefined) ||
+    storageMailboxId;
+  const canonicalMessageId = message.collaborationMessageId?.trim();
+  const messageIdentity = canonicalMessageId
+    ? buildMailboxScopedThreadGroupingKey(
+        `collaboration:${canonicalMessageId}`,
+        sourceMailboxId,
+      )
+    : getMailboxScopedWorkspaceMessageIdentity(sourceMailboxId, message);
+
+  return `${workspaceId}::${messageIdentity}`;
+}
+
+export function getCollaborationThreadIdentityKey(thread: CollaborationThread) {
+  return `${thread.workspaceId.trim().toLowerCase()}::${buildMailboxScopedThreadGroupingKey(
+    `collaboration:${thread.messageId.trim()}`,
+    thread.mailboxId,
+  )}`;
+}
+
+export function applyMailboxScopedCollaborationThreadOverlays(
+  store: MailboxStore,
+  scopedThreads: Array<{ mailboxId: InboxId; thread: CollaborationThread }>,
+) {
+  let didChange = false;
+  const nextStore = Object.entries(store).reduce<MailboxStore>(
+    (nextStoreByMailbox, [rawMailboxId, collections]) => {
+      const mailboxId = rawMailboxId as InboxId;
+      const mailboxThreads = scopedThreads.filter(
+        ({ mailboxId: responseMailboxId, thread }) =>
+          responseMailboxId === mailboxId && thread.mailboxId === mailboxId,
+      );
+
+      if (mailboxThreads.length === 0) {
+        nextStoreByMailbox[mailboxId] = collections;
+        return nextStoreByMailbox;
+      }
+
+      const mailboxMessages = canonicalFolderOrder.flatMap(
+        (folder) => collections[folder],
+      );
+      const messageIndexes = buildMessageIdentityIndexes(mailboxMessages);
+      const threadsByMessageIdentity = new Map<string, CollaborationThread>();
+
+      mailboxThreads.forEach(({ thread }) => {
+        const matchedMessage = findMatchingMessageByIdentity(
+          buildCollaborationThreadIdentitySource(thread),
+          messageIndexes,
+        );
+
+        if (!matchedMessage) {
+          return;
+        }
+
+        threadsByMessageIdentity.set(
+          getMailboxScopedWorkspaceMessageIdentity(mailboxId, matchedMessage),
+          thread,
+        );
+      });
+
+      if (threadsByMessageIdentity.size === 0) {
+        nextStoreByMailbox[mailboxId] = collections;
+        return nextStoreByMailbox;
+      }
+
+      const overlayCollection = (messages: MailMessage[]) =>
+        messages.map((message) => {
+          const thread = threadsByMessageIdentity.get(
+            getMailboxScopedWorkspaceMessageIdentity(mailboxId, message),
+          );
+
+          if (!thread) {
+            return message;
+          }
+
+          const collaborationChanged =
+            JSON.stringify(message.collaboration ?? null) !==
+            JSON.stringify(thread.collaboration);
+          const sharedChanged = Boolean(message.isShared) !== Boolean(thread.isShared);
+          const identityChanged =
+            message.collaborationMessageId !== thread.messageId ||
+            message.collaborationWorkspaceId !== thread.workspaceId ||
+            message.collaborationMailboxId !== thread.mailboxId;
+
+          if (!collaborationChanged && !sharedChanged && !identityChanged) {
+            return message;
+          }
+
+          didChange = true;
+          return {
+            ...message,
+            collaboration: thread.collaboration as MailMessageCollaboration,
+            isShared: thread.isShared,
+            collaborationMessageId: thread.messageId,
+            collaborationWorkspaceId: thread.workspaceId,
+            collaborationMailboxId: thread.mailboxId,
+          };
+        });
+
+      nextStoreByMailbox[mailboxId] = {
+        Inbox: overlayCollection(collections.Inbox),
+        Drafts: overlayCollection(collections.Drafts),
+        Sent: overlayCollection(collections.Sent),
+        Archive: overlayCollection(collections.Archive),
+        Filtered: overlayCollection(collections.Filtered),
+        Spam: overlayCollection(collections.Spam),
+        Trash: overlayCollection(collections.Trash),
+      };
+      return nextStoreByMailbox;
+    },
+    {} as MailboxStore,
+  );
+
+  return didChange ? nextStore : store;
+}
 type BundleOrganizerManagedMessageInput = Pick<
   MailMessage,
   "internalClassification" | "category" | "signal" | "ui_signal"
@@ -1756,35 +2839,33 @@ function buildCollaborationLastSeenStorageKey(userEmail: string) {
 
 function buildCollaborationLastSeenKey(
   message: MailMessage,
+  storageMailboxId: InboxId,
   viewerKey: string,
   fallbackWorkspaceId: string,
-  canonicalMessageIdOverride?: string,
 ) {
   if (!message.collaboration) {
     return null;
   }
 
-  const workspaceId =
-    message.collaborationWorkspaceId?.trim().toLowerCase() ||
-    fallbackWorkspaceId.trim().toLowerCase();
-  const canonicalMessageId =
-    canonicalMessageIdOverride?.trim() ||
-    message.collaborationMessageId?.trim() ||
-    message.id.trim();
+  const collaborationIdentityKey = getCollaborationMailboxIdentityKey(
+    storageMailboxId,
+    message,
+    fallbackWorkspaceId,
+  );
 
-  if (!viewerKey || !workspaceId || !canonicalMessageId) {
+  if (!viewerKey || !collaborationIdentityKey) {
     return null;
   }
 
-  return `${viewerKey}::${workspaceId}::${canonicalMessageId}`;
+  return `${viewerKey}::${collaborationIdentityKey}`;
 }
 
 function hasUnreadCollaborationUpdateForViewer(
   message: MailMessage,
+  storageMailboxId: InboxId,
   collaborationLastSeenByKey: Record<string, number>,
   viewerKey: string,
   fallbackWorkspaceId: string,
-  canonicalMessageIdOverride?: string,
 ) {
   if (!message.collaboration || message.collaboration.state === "resolved") {
     return false;
@@ -1792,9 +2873,9 @@ function hasUnreadCollaborationUpdateForViewer(
 
   const seenKey = buildCollaborationLastSeenKey(
     message,
+    storageMailboxId,
     viewerKey,
     fallbackWorkspaceId,
-    canonicalMessageIdOverride,
   );
 
   if (!seenKey) {
@@ -6785,9 +7866,13 @@ function isMessageInSharedView(message: MailMessage) {
   return Boolean(message.isShared && !message.sharedContext);
 }
 
-function buildSharedCollaborationProjection(thread: CollaborationThread): MailMessage {
+export function buildSharedCollaborationProjection(thread: CollaborationThread): MailMessage {
+  const projectionId = `shared-collaboration:${encodeURIComponent(
+    getCollaborationThreadIdentityKey(thread),
+  )}`;
+
   return {
-    id: thread.sourceMessage.id || thread.messageId,
+    id: projectionId,
     sender: thread.sourceMessage.sender,
     subject: thread.sourceMessage.subject,
     snippet: thread.sourceMessage.snippet,
@@ -6810,16 +7895,14 @@ function buildSharedCollaborationProjection(thread: CollaborationThread): MailMe
   };
 }
 
-function getSharedCollaborationProjectionIdentityKeys(thread: CollaborationThread) {
-  const threadWorkspaceId = thread.workspaceId.trim().toLowerCase();
-
-  if (!threadWorkspaceId) {
+export function getSharedCollaborationProjectionIdentityKeys(
+  thread: CollaborationThread,
+) {
+  if (!thread.workspaceId.trim() || !thread.mailboxId.trim() || !thread.messageId.trim()) {
     return [];
   }
 
-  return getCanonicalMessageIdentityKeys(buildCollaborationThreadIdentitySource(thread)).map(
-    (identityKey) => `${threadWorkspaceId}::${identityKey}`,
-  );
+  return [getCollaborationThreadIdentityKey(thread)];
 }
 
 function getAIDecisionCopy(message: MailMessage) {
@@ -7483,10 +8566,16 @@ function dedupeMessagesForNormalAppRenderedRows(
   messages: MailMessage[],
   mailboxId: InboxId,
   messageLocationById: Record<string, { mailboxId: InboxId; folder: MailFolder }> = {},
+  messageLocationByMessage?: WeakMap<
+    MailMessage,
+    { mailboxId: InboxId; folder: MailFolder }
+  >,
 ) {
   return buildRenderedConversationRows(
     messages.map((message) => {
-      const messageLocation = messageLocationById[message.id];
+      const messageLocation =
+        messageLocationByMessage?.get(message) ??
+        messageLocationById[message.id];
       const context = message.threadIdentityContext ?? {
         mailboxId: messageLocation?.mailboxId ?? mailboxId,
         provider: message.imapUid ? "custom_imap" : "google",
@@ -13223,7 +14312,7 @@ function TopCards({
   );
 }
 
-function buildVisibleNotificationItems({
+export function buildVisibleNotificationItems({
   mailboxStore,
   orderedMailboxes,
   authenticatedUser,
@@ -13272,7 +14361,7 @@ function buildVisibleNotificationItems({
           message,
           mailboxId: mailbox.id,
           navigationMailboxId: mailbox.id,
-          sourceMailboxId: undefined as InboxId | undefined,
+          sourceMailboxId: mailbox.id,
           sharedProjectionOnly: false,
         })),
       ),
@@ -13303,6 +14392,7 @@ function buildVisibleNotificationItems({
             sharedProjectionOnly &&
             !hasUnreadCollaborationUpdateForViewer(
               message,
+              mailboxId,
               collaborationLastSeenByKey,
               persistenceViewerKey,
               currentUserId,
@@ -13317,14 +14407,20 @@ function buildVisibleNotificationItems({
             message.collaboration.requestedBy === currentUserName;
           const collaborationSeenKey = buildCollaborationLastSeenKey(
             message,
+            mailboxId,
             persistenceViewerKey,
             currentUserId,
           );
           const collaborationSeenAt = collaborationSeenKey
             ? collaborationLastSeenByKey[collaborationSeenKey] ?? 0
             : 0;
+          const collaborationIdentityKey = getCollaborationMailboxIdentityKey(
+            mailboxId,
+            message,
+            currentUserId,
+          );
           const messageNotificationKey =
-            collaborationSeenKey ?? message.id;
+            collaborationSeenKey ?? `${persistenceViewerKey}::${collaborationIdentityKey}`;
           const openRequestBase = {
             mailboxId: navigationMailboxId,
             messageId: message.id,
@@ -13337,7 +14433,9 @@ function buildVisibleNotificationItems({
           ) {
             items.push({
               id: `notification:created:${messageNotificationKey}:${message.collaboration.createdAt}`,
-              sourceIds: [`notification:created:${message.id}:${message.collaboration.createdAt}`],
+              sourceIds: [
+                `notification:created:${collaborationIdentityKey}:${message.collaboration.createdAt}`,
+              ],
               kind: "collaboration",
               mailboxId,
               messageId: message.id,
@@ -13364,7 +14462,9 @@ function buildVisibleNotificationItems({
           ) {
             items.push({
               id: `notification:resolved:${messageNotificationKey}:${message.collaboration.resolvedAt}`,
-              sourceIds: [`notification:resolved:${message.id}:${message.collaboration.resolvedAt}`],
+              sourceIds: [
+                `notification:resolved:${collaborationIdentityKey}:${message.collaboration.resolvedAt}`,
+              ],
               kind: "collaboration",
               mailboxId,
               messageId: message.id,
@@ -13403,7 +14503,7 @@ function buildVisibleNotificationItems({
                 items.push({
                   id: `notification:mention:${messageNotificationKey}:${entry.id}:${persistenceViewerKey}`,
                   sourceIds: [
-                    `notification:mention:${message.id}:${entry.id}:${persistenceViewerKey}`,
+                    `notification:mention:${collaborationIdentityKey}:${entry.id}:${persistenceViewerKey}`,
                   ],
                   kind: "mention",
                   mailboxId,
@@ -13426,7 +14526,9 @@ function buildVisibleNotificationItems({
 
               items.push({
                 id: `notification:reply:${messageNotificationKey}:${entry.id}`,
-                sourceIds: [`notification:reply:${message.id}:${entry.id}`],
+                sourceIds: [
+                  `notification:reply:${collaborationIdentityKey}:${entry.id}`,
+                ],
                 kind: "reply",
                 mailboxId,
                 messageId: message.id,
@@ -13578,7 +14680,7 @@ function formatVisibleActivityTimestamp(timestamp: number) {
   });
 }
 
-function buildVisibleActivityItems({
+export function buildVisibleActivityItems({
   mailboxStore,
   orderedMailboxes,
   authenticatedUser,
@@ -13618,21 +14720,29 @@ function buildVisibleActivityItems({
       canonicalFolderOrder.flatMap((folder) =>
         (mailboxStore[mailbox.id]?.[folder] ?? []).map((message) => ({
           message,
+          storageMailboxId: mailbox.id,
           navigationMailboxId: mailbox.id,
-          sourceMailboxId: undefined as InboxId | undefined,
+          sourceMailboxId: mailbox.id,
           sharedProjectionOnly: false,
         })),
       ),
     ),
     ...sharedCollaborationMessages.map((message) => ({
       message,
+      storageMailboxId: sharedCollaborationMailboxId,
       navigationMailboxId: sharedNavigationMailboxId as InboxId,
       sourceMailboxId: sharedCollaborationMailboxId,
       sharedProjectionOnly: true,
     })),
   ];
   const items = messageSources.flatMap(
-    ({ message, navigationMailboxId, sourceMailboxId, sharedProjectionOnly }) => {
+    ({
+      message,
+      storageMailboxId,
+      navigationMailboxId,
+      sourceMailboxId,
+      sharedProjectionOnly,
+    }) => {
         if (!message.collaboration) {
           return [];
         }
@@ -13641,6 +14751,7 @@ function buildVisibleActivityItems({
           sharedProjectionOnly &&
           !hasUnreadCollaborationUpdateForViewer(
             message,
+            storageMailboxId,
             collaborationLastSeenByKey,
             persistenceViewerKey,
             currentUserId,
@@ -13652,6 +14763,7 @@ function buildVisibleActivityItems({
         const subjectDetail = message.subject;
         const collaborationSeenKey = buildCollaborationLastSeenKey(
           message,
+          storageMailboxId,
           persistenceViewerKey,
           currentUserId,
         );
@@ -13659,7 +14771,12 @@ function buildVisibleActivityItems({
           ? collaborationLastSeenByKey[collaborationSeenKey] ?? 0
           : 0;
         const messageActivityKey =
-          collaborationSeenKey ?? message.id;
+          collaborationSeenKey ??
+          getCollaborationMailboxIdentityKey(
+            storageMailboxId,
+            message,
+            currentUserId,
+          );
         const openRequestBase = {
           mailboxId: navigationMailboxId,
           messageId: message.id,
@@ -13759,7 +14876,7 @@ function buildVisibleActivityItems({
   return items;
 }
 
-function buildVisibleTeamCollaborationItems({
+export function buildVisibleTeamCollaborationItems({
   mailboxStore,
   orderedMailboxes,
   currentUserId,
@@ -13785,14 +14902,16 @@ function buildVisibleTeamCollaborationItems({
       canonicalFolderOrder.flatMap((folder) =>
         (mailboxStore[mailbox.id]?.[folder] ?? []).map((message) => ({
           message,
+          storageMailboxId: mailbox.id,
           navigationMailboxId: mailbox.id,
-          sourceMailboxId: undefined as InboxId | undefined,
+          sourceMailboxId: mailbox.id,
           sharedProjectionOnly: false,
         })),
       ),
     ),
     ...sharedCollaborationMessages.map((message) => ({
       message,
+      storageMailboxId: sharedCollaborationMailboxId,
       navigationMailboxId: sharedNavigationMailboxId as InboxId,
       sourceMailboxId: sharedCollaborationMailboxId,
       sharedProjectionOnly: true,
@@ -13803,6 +14922,7 @@ function buildVisibleTeamCollaborationItems({
     .flatMap(
       ({
         message,
+        storageMailboxId,
         navigationMailboxId,
         sourceMailboxId,
         sharedProjectionOnly,
@@ -13811,12 +14931,11 @@ function buildVisibleTeamCollaborationItems({
           return [];
         }
 
-        const collaborationWorkspaceId =
-          message.collaborationWorkspaceId?.trim().toLowerCase() ||
-          currentUserId.trim().toLowerCase();
-        const collaborationMessageId =
-          message.collaborationMessageId?.trim() || message.id.trim();
-        const collaborationKey = `${collaborationWorkspaceId}:${collaborationMessageId}`;
+        const collaborationKey = getCollaborationMailboxIdentityKey(
+          storageMailboxId,
+          message,
+          currentUserId,
+        );
 
         if (seenCollaborationKeys.has(collaborationKey)) {
           return [];
@@ -14532,28 +15651,38 @@ function MailboxView({
   // folder + isSharedView + smartFolderId so each view retains its own
   // last selection independently. Stored in a ref so updates are
   // synchronous and never trigger re-renders.
-  const lastFolderSelectionRef = useRef<Partial<Record<string, string>>>({});
+  const lastFolderSelectionRef = useRef<
+    Partial<Record<string, MailboxScopedMessageSelection>>
+  >({});
   const getFolderViewKey = (
     folder: MailFolder,
     sharedView: boolean,
     smartFolderId: string | null,
   ) => `${folder}|${sharedView}|${smartFolderId ?? ""}`;
-  // Given a target folder's messages and its view key, return the id to
-  // select: the remembered one if still present, otherwise the date-sorted top.
-  const resolveNextMessageId = (
-    targetMessages: MailMessage[],
+  // Given a target folder's scoped rows and its view key, return the exact row
+  // to select: the remembered one if still present, otherwise the date-sorted top.
+  const resolveNextMessageSelection = (
+    targetRows: Array<{
+      message: MailMessage;
+      selection: MailboxScopedMessageSelection;
+    }>,
     targetFolder: MailFolder,
     targetSharedView: boolean,
     targetSmartFolderId: string | null,
-  ): string | null => {
+  ): MailboxScopedMessageSelection | null => {
     const key = getFolderViewKey(targetFolder, targetSharedView, targetSmartFolderId);
     const remembered = lastFolderSelectionRef.current[key];
-    if (remembered && targetMessages.some((m) => m.id === remembered)) {
+    if (
+      remembered &&
+      targetRows.some(({ selection }) => selection.key === remembered.key)
+    ) {
       return remembered;
     }
     return (
-      [...targetMessages].sort((a, b) => resolveMailDateMs(b) - resolveMailDateMs(a))[0]
-        ?.id ?? null
+      [...targetRows].sort(
+        (firstRow, secondRow) =>
+          resolveMailDateMs(secondRow.message) - resolveMailDateMs(firstRow.message),
+      )[0]?.selection ?? null
     );
   };
   const searchInputRef = useRef<HTMLInputElement | null>(null);
@@ -14588,9 +15717,10 @@ function MailboxView({
     useState<FullMessageModalSize | null>(null);
   const [composePresentation, setComposePresentation] =
     useState<ComposePresentation>("workspace");
-  const [modalComposeSourceMessageId, setModalComposeSourceMessageId] = useState<
-    string | null
+  const [modalComposeSourceSelection, setModalComposeSourceSelection] = useState<
+    MailboxScopedMessageSelection | null
   >(null);
+  const modalComposeSourceMessageId = modalComposeSourceSelection?.messageId ?? null;
   const [lastNavigationSource, setLastNavigationSource] = useState<"priority" | null>(null);
   const [isCloseModalOpen, setIsCloseModalOpen] = useState(false);
   const [isMoreMenuOpen, setIsMoreMenuOpen] = useState(false);
@@ -14622,6 +15752,7 @@ function MailboxView({
   const detailActionsMenuRef = useRef<HTMLDivElement | null>(null);
   const [detailActionsMenuState, setDetailActionsMenuState] = useState<{
     messageId: string;
+    selectionKey: string;
     placement: "split" | "full";
     anchor: {
       bottom: number;
@@ -14638,6 +15769,8 @@ function MailboxView({
   } | null>(null);
   const [contextMenuState, setContextMenuState] = useState<{
     messageId: string;
+    sourceMailboxId: InboxId;
+    selectionKey: string;
     x: number;
     y: number;
     moveMenuOpen: boolean;
@@ -14655,35 +15788,51 @@ function MailboxView({
     organizerAnchorY: number | null;
     organizerAnchorHeight: number | null;
   } | null>(null);
-  const [selectedMessageId, setSelectedMessageId] = useState<string | null>(() => {
+  const [mailboxScopedSelectionState, setMailboxScopedSelectionState] =
+    useState<MailboxScopedMessageSelectionState>(() => {
     const inboxMessages = mailboxStore[mailbox.id]?.Inbox ?? [];
     // Restore last selection if the message is still present in the inbox.
-    if (initialSelectedMessageId && inboxMessages.some((m) => m.id === initialSelectedMessageId)) {
-      return initialSelectedMessageId;
+    const initialMessage =
+      (initialSelectedMessageId
+        ? inboxMessages.find((message) => message.id === initialSelectedMessageId)
+        : null) ??
+      [...inboxMessages].sort(
+        (firstMessage, secondMessage) =>
+          resolveMailDateMs(secondMessage) - resolveMailDateMs(firstMessage),
+      )[0] ??
+      null;
+
+    if (!initialMessage) {
+      return { selected: [], primaryKey: null, anchorKey: null };
     }
-    // Otherwise select the top of the date-sorted inbox (matches sortedMessages[0]).
-    const sorted = [...inboxMessages].sort(
-      (a, b) => resolveMailDateMs(b) - resolveMailDateMs(a),
+
+    const selection = buildMailboxScopedMessageSelection(
+      mailbox.id,
+      initialMessage,
+      "Inbox",
     );
-    return sorted[0]?.id ?? null;
+    return {
+      selected: [selection],
+      primaryKey: selection.key,
+      anchorKey: selection.key,
+    };
   });
-  // Tracks the imapUid of the currently-navigated-to message so that
-  // selectedMessageFromFolder can still find it if a background IMAP sync
-  // reassigns its id (e.g. SHA1 → imap-uid-X via preview identity match).
-  // Cleared on every manual selection change; only set by the nav useEffect.
-  const [selectedMessageImapUid, setSelectedMessageImapUid] = useState<string | null>(null);
-  const [selectedMessageIds, setSelectedMessageIds] = useState<string[]>(() =>
-    selectedMessageId ? [selectedMessageId] : [],
-  );
-  const [selectionAnchorId, setSelectionAnchorId] = useState<string | null>(
-    () => selectedMessageId,
+  const selectedMessageSelections = mailboxScopedSelectionState.selected;
+  const primaryMessageSelection =
+    selectedMessageSelections.find(
+      (selection) => selection.key === mailboxScopedSelectionState.primaryKey,
+    ) ?? null;
+  const selectedMessageId = primaryMessageSelection?.messageId ?? null;
+  const selectedMessageSourceMailboxId = primaryMessageSelection?.mailboxId ?? null;
+  const selectedMessageIds = selectedMessageSelections.map(
+    (selection) => selection.messageId,
   );
   const [desktopThreadDisclosureState, setDesktopThreadDisclosureState] =
     useState<DesktopThreadDisclosureState>(() => ({
-      expandedMemberIds: [],
-      expandedQuoteMessageIds: [],
-      threadKey: selectedMessageId,
-    }));
+    expandedMemberIds: [],
+    expandedQuoteMessageIds: [],
+    threadKey: primaryMessageSelection?.key ?? null,
+  }));
   const latestMailboxStoreRef = useRef(mailboxStore);
   latestMailboxStoreRef.current = mailboxStore;
   const providerTrashSelectionContextRef = useRef({
@@ -14711,6 +15860,7 @@ function MailboxView({
     sourceMailboxId: InboxId;
     sourceFolder: MailFolder;
     messageIds: string[];
+    selections: MailboxScopedMessageSelection[];
   } | null>(null);
   const [isEmptyTrashConfirmationOpen, setIsEmptyTrashConfirmationOpen] = useState(false);
   const [trashEmptiedToastMessage, setTrashEmptiedToastMessage] = useState<string | null>(null);
@@ -14781,6 +15931,8 @@ function MailboxView({
   const [activeCollaborationMessageId, setActiveCollaborationMessageId] = useState<
     string | null
   >(null);
+  const [activeCollaborationSourceMailboxId, setActiveCollaborationSourceMailboxId] =
+    useState<InboxId | null>(null);
   const [pendingEndCollaborationMessageId, setPendingEndCollaborationMessageId] = useState<
     string | null
   >(null);
@@ -15343,7 +16495,7 @@ function MailboxView({
     setIsCloseModalOpen(false);
     setIsFullMessageOpen(false);
     setComposePresentation("modal");
-    setModalComposeSourceMessageId(null);
+    setModalComposeSourceSelection(null);
     setIsComposeOpen(true);
   };
 
@@ -15436,10 +16588,10 @@ function MailboxView({
     setIsFullMessageOpen(nextState.isOpen);
 
     const storedReturnFocusTarget = fullMessageModalReturnFocusRef.current;
-    const selectedRowMessageId = fullMessageModalMessage?.id ?? selectedMessageId;
-    const selectedRowFocusTarget = selectedRowMessageId
+    const selectedRowSelectionKey = primaryMessageSelection?.key ?? null;
+    const selectedRowFocusTarget = selectedRowSelectionKey
       ? mailListViewportRef.current?.querySelector<HTMLElement>(
-          `[data-message-row-id="${CSS.escape(selectedRowMessageId)}"]`,
+          `[data-message-row-identity="${CSS.escape(selectedRowSelectionKey)}"]`,
         ) ?? null
       : null;
     const returnFocusTarget = storedReturnFocusTarget?.isConnected
@@ -15464,7 +16616,22 @@ function MailboxView({
       originPresentation,
     );
     const threadMessages = getThreadMessages(message);
-    const selectedMessageLocation = currentMessageLocationById[message.id];
+    const selectedMessageMatchesPrimary = primaryMessageSelection
+      ? buildMailboxScopedMessageSelection(
+          primaryMessageSelection.mailboxId,
+          message,
+          primaryMessageSelection.folder,
+        ).key === primaryMessageSelection.key
+      : false;
+    const selectedMessageLocation = resolveAuthoritativeMessageLocation({
+      message,
+      exactLocation: currentMessageLocationByMessage.get(message) ?? null,
+      explicitMailboxId: selectedMessageMatchesPrimary && primaryMessageSelection
+        ? primaryMessageSelection.mailboxId
+        : null,
+      explicitFolder: primaryMessageSelection?.folder ?? null,
+      bareIdLocation: currentMessageLocationById[message.id] ?? null,
+    });
     const selectedSourceMailboxId =
       selectedMessageLocation?.mailboxId ??
       (message.threadIdentityContext?.mailboxId as InboxId | undefined) ??
@@ -15491,7 +16658,12 @@ function MailboxView({
       "Sent",
     ]);
     const normalReplyCandidates = threadMessages.filter((candidate) => {
-      const candidateFolder = currentMessageLocationById[candidate.id]?.folder;
+      const candidateFolder = resolveAuthoritativeMessageLocation({
+        message: candidate,
+        exactLocation: currentMessageLocationByMessage.get(candidate) ?? null,
+        explicitMailboxId: selectedSourceMailboxId,
+        bareIdLocation: currentMessageLocationById[candidate.id] ?? null,
+      })?.folder;
       return candidate.id === message.id || Boolean(
         candidateFolder && normalReplySourceFolders.has(candidateFolder)
       );
@@ -15508,7 +16680,17 @@ function MailboxView({
               selectedSourceMailboxId,
             )
         : message;
-    const sourceMailboxId = currentMessageLocationById[effectiveMessage.id]?.mailboxId ?? mailbox.id;
+    const effectiveMessageLocation = resolveAuthoritativeMessageLocation({
+      message: effectiveMessage,
+      exactLocation: currentMessageLocationByMessage.get(effectiveMessage) ?? null,
+      explicitMailboxId: selectedSourceMailboxId,
+      explicitFolder: selectedMessageLocation?.folder ?? null,
+      bareIdLocation: currentMessageLocationById[effectiveMessage.id] ?? null,
+    });
+    const sourceMailboxId =
+      effectiveMessageLocation?.mailboxId ??
+      (effectiveMessage.threadIdentityContext?.mailboxId as InboxId | undefined) ??
+      selectedSourceMailboxId;
     const replyRecipientPlan =
       mode === "reply" || mode === "reply_all"
         ? deriveReplyRecipientPlan({
@@ -15535,7 +16717,15 @@ function MailboxView({
     setIsCloseModalOpen(false);
     setIsFullMessageOpen(composePlan.isFullMessageOpen);
     setComposePresentation(composePlan.composePresentation);
-    setModalComposeSourceMessageId(composePlan.sourceMessageId);
+    setModalComposeSourceSelection(
+      composePlan.sourceMessageId
+        ? buildMailboxScopedMessageSelection(
+            selectedSourceMailboxId,
+            message,
+            selectedMessageLocation?.folder ?? activeFolder,
+          )
+        : null,
+    );
     setComposeMailboxId(sourceMailboxId);
     const sourceInboxSignature = normalizeInboxSignatureSettings(
       inboxSignatures[sourceMailboxId],
@@ -15566,23 +16756,10 @@ function MailboxView({
       }),
     );
     setComposeAttachments(
-      mode === "forward"
-        ? (effectiveMessage.attachments ?? []).map((attachment: MailAttachment) =>
-            normalizeMailAttachment({
-              ...attachment,
-              receivedSource: attachment.file
-                ? attachment.receivedSource
-                : {
-                    mailboxId: sourceMailboxId as InboxId,
-                    messageId: effectiveMessage.id,
-                    messageUid: effectiveMessage.imapUid,
-                    folder:
-                      currentMessageLocationById[effectiveMessage.id]?.folder ??
-                      "Inbox",
-                  },
-            }),
-          )
-        : [],
+      resolveInitialComposeAttachments(mode, effectiveMessage, {
+        mailboxId: sourceMailboxId,
+        folder: effectiveMessageLocation?.folder ?? "Inbox",
+      }),
     );
     setIsComposeOpen(composePlan.isComposeOpen);
   };
@@ -16137,13 +17314,30 @@ function MailboxView({
     Trash: visibleMailboxCollections.Trash,
   };
   const mailboxThreadMessages = canonicalFolderOrder.flatMap((folder) => messageCollections[folder]);
-  const getSharedEntryIdentityKeys = (message: MailMessage) => {
+  const getSharedEntryIdentityKeys = (
+    message: MailMessage,
+    storageMailboxId: InboxId,
+  ) => {
     const workspaceId =
       message.collaborationWorkspaceId?.trim().toLowerCase() ||
       currentUserId;
-    const strictIdentityKeys = getCanonicalMessageIdentityKeys(message).map(
-      (identityKey) => `${workspaceId}::${identityKey}`,
-    );
+    const sourceMailboxId =
+      (message.collaborationMailboxId?.trim() as InboxId | undefined) ||
+      storageMailboxId;
+    const strictIdentityKeys = [
+      getCollaborationMailboxIdentityKey(
+        storageMailboxId,
+        message,
+        currentUserId,
+      ),
+      ...getCanonicalMessageIdentityKeys(message).map(
+        (identityKey) =>
+          `${workspaceId}::${buildMailboxScopedThreadGroupingKey(
+            identityKey,
+            sourceMailboxId,
+          )}`,
+      ),
+    ];
     const normalizedSender = normalizeSenderLearningKey(message.from || message.sender || "");
     const normalizedSubject = normalizeThreadSubject(message.subject || "");
 
@@ -16153,8 +17347,10 @@ function MailboxView({
 
     return [
       ...strictIdentityKeys,
-      `${workspaceId}::shared-source:${normalizedSender}::${normalizedSubject}`,
-      `shared-source:${normalizedSender}::${normalizedSubject}`,
+      `${workspaceId}::${buildMailboxScopedThreadGroupingKey(
+        `shared-source:${normalizedSender}::${normalizedSubject}`,
+        sourceMailboxId,
+      )}`,
     ];
   };
   const shouldPreferSharedEntry = (
@@ -16209,10 +17405,16 @@ function MailboxView({
     const dedupedEntries: typeof sharedEntries = [];
 
     sharedEntries.forEach((entry) => {
-      const entryIdentityKeys = getSharedEntryIdentityKeys(entry.message);
+      const entryIdentityKeys = getSharedEntryIdentityKeys(
+        entry.message,
+        entry.mailboxId,
+      );
       const existingEntryIndex = dedupedEntries.findIndex((existingEntry) => {
         const existingIdentityKeys = new Set(
-          getSharedEntryIdentityKeys(existingEntry.message),
+          getSharedEntryIdentityKeys(
+            existingEntry.message,
+            existingEntry.mailboxId,
+          ),
         );
 
         return entryIdentityKeys.some((identityKey) =>
@@ -16233,6 +17435,16 @@ function MailboxView({
     return dedupedEntries;
   })();
   const workspaceSharedMessages = workspaceSharedEntries.map((entry) => entry.message);
+  const workspaceMessageLocationByMessage = new WeakMap<
+    MailMessage,
+    { mailboxId: InboxId; folder: MailFolder }
+  >();
+  workspaceSharedEntries.forEach((entry) => {
+    workspaceMessageLocationByMessage.set(entry.message, {
+      mailboxId: entry.mailboxId,
+      folder: entry.folder,
+    });
+  });
   const workspaceMessageLocationById = workspaceSharedEntries.reduce<
     Record<string, { mailboxId: InboxId; folder: MailFolder }>
   >((locations, entry) => {
@@ -16267,6 +17479,16 @@ function MailboxView({
     };
     return locations;
   }, {});
+  const currentMailboxMessageLocationByMessage = new WeakMap<
+    MailMessage,
+    { mailboxId: InboxId; folder: MailFolder }
+  >();
+  currentMailboxEntries.forEach((entry) => {
+    currentMailboxMessageLocationByMessage.set(entry.message, {
+      mailboxId: entry.mailboxId,
+      folder: entry.folder,
+    });
+  });
   const activeSmartFolder =
     smartFolders.find((folder) => folder.id === activeSmartFolderId) ?? null;
   const smartFolderScopeMailboxIds =
@@ -16474,6 +17696,16 @@ function MailboxView({
       )
     : [];
   const smartFolderMessages = smartFolderEntries.map((entry) => entry.message);
+  const smartFolderMessageLocationByMessage = new WeakMap<
+    MailMessage,
+    { mailboxId: InboxId; folder: MailFolder }
+  >();
+  smartFolderEntries.forEach((entry) => {
+    smartFolderMessageLocationByMessage.set(entry.message, {
+      mailboxId: entry.mailboxId,
+      folder: entry.folder,
+    });
+  });
   const smartFolderMessageLocationById = smartFolderEntries.reduce<
     Record<string, { mailboxId: InboxId; folder: MailFolder }>
   >((locations, entry) => {
@@ -16488,10 +17720,25 @@ function MailboxView({
     : isSharedView
       ? workspaceMessageLocationById
       : currentMailboxMessageLocationById;
+  const currentMessageLocationByMessage = activeSmartFolder
+    ? smartFolderMessageLocationByMessage
+    : isSharedView
+      ? workspaceMessageLocationByMessage
+      : currentMailboxMessageLocationByMessage;
   const dedupeMessagesForRenderedRows = (
     messages: MailMessage[],
     messageLocationById: Record<string, { mailboxId: InboxId; folder: MailFolder }>,
-  ) => dedupeMessagesForNormalAppRenderedRows(messages, mailbox.id, messageLocationById);
+    messageLocationByMessage: WeakMap<
+      MailMessage,
+      { mailboxId: InboxId; folder: MailFolder }
+    >,
+  ) =>
+    dedupeMessagesForNormalAppRenderedRows(
+      messages,
+      mailbox.id,
+      messageLocationById,
+      messageLocationByMessage,
+    );
   const resolveSmartFolderRenderContextForMessage = (message: MailMessage) => {
     if (!activeSmartFolder) {
       return {
@@ -16503,6 +17750,7 @@ function MailboxView({
     }
 
     const sourceMailboxId = (
+      smartFolderMessageLocationByMessage.get(message)?.mailboxId ??
       message.threadIdentityContext?.mailboxId ??
       smartFolderMessageLocationById[message.id]?.mailboxId ??
       mailbox.id
@@ -16637,10 +17885,12 @@ function MailboxView({
   const threadDedupedMessages = dedupeMessagesForRenderedRows(
     visibleMessages,
     currentMessageLocationById,
+    currentMessageLocationByMessage,
   );
   const sharedRenderedMessages = dedupeMessagesForRenderedRows(
     workspaceSharedMessages,
     workspaceMessageLocationById,
+    workspaceMessageLocationByMessage,
   );
 
   const sortedMessages = [...threadDedupedMessages].sort((firstMessage, secondMessage) => {
@@ -16651,31 +17901,80 @@ function MailboxView({
       ? secondTime - firstTime
       : firstTime - secondTime;
   });
-  const selectedMessageFromFolder =
-    // Primary: match by id (the common fast path).
-    normalAppFolderMessages.find((message) => message.id === selectedMessageId) ??
-    // Fallback: match by imapUid. Handles the race where a background IMAP
-    // sync reassigns a message's id (SHA1 snapshot id → imap-uid-X) after the
-    // navigation useEffect already fixed selectedMessageId to the old id.
-    // selectedMessageImapUid is set by the nav useEffect and cleared on every
-    // manual selection, so this only fires during that narrow sync-race window.
-    (selectedMessageImapUid
-      ? normalAppFolderMessages.find((m) => m.imapUid === selectedMessageImapUid) ?? null
-      : null);
-  const visibleSelectedMessageIds = selectedMessageIds.filter((messageId) =>
-    sortedMessages.some((message) => message.id === messageId),
+  const getCurrentMessageSourceMailboxId = (message: MailMessage) =>
+    currentMessageLocationByMessage.get(message)?.mailboxId ??
+    (message.threadIdentityContext?.mailboxId as InboxId | undefined) ??
+    (message.serverMailboxId as InboxId | undefined) ??
+    mailbox.id;
+  const buildManualPriorityUpdateOptions = (
+    message: MailMessage,
+    options: Pick<ManualPriorityUpdateOptions, "showConfirmation"> = {},
+  ): ManualPriorityUpdateOptions => {
+    const storageMailboxId = getCurrentMessageSourceMailboxId(message);
+
+    return {
+      ...options,
+      storageMailboxId,
+      sourceMailboxId:
+        getCollaborationMessageSourceMailboxId(message) ?? storageMailboxId,
+      sourceMessage: message,
+    };
+  };
+  const buildCurrentMessageSelection = (message: MailMessage) => {
+    const location = resolveAuthoritativeMessageLocation({
+      message,
+      exactLocation: currentMessageLocationByMessage.get(message) ?? null,
+      bareIdLocation: currentMessageLocationById[message.id] ?? null,
+    });
+    const sourceMailboxId = location?.mailboxId ?? getCurrentMessageSourceMailboxId(message);
+
+    return buildMailboxScopedMessageSelection(
+      sourceMailboxId,
+      message,
+      location?.folder ?? activeFolder,
+    );
+  };
+  const selectableMessageRows = sortedMessages.map((message) => ({
+    message,
+    selection: buildCurrentMessageSelection(message),
+  }));
+  const selectableMessageSelections = selectableMessageRows.map(
+    ({ selection }) => selection,
   );
-  const isMultiSelectActive = visibleSelectedMessageIds.length > 1;
+  const matchesPrimarySelection = (message: MailMessage) => {
+    if (!primaryMessageSelection) {
+      return false;
+    }
+
+    return buildCurrentMessageSelection(message).key === primaryMessageSelection.key;
+  };
+  const selectedMessageFromFolder = primaryMessageSelection
+    ? resolveMailboxScopedSelectionEntries(
+        mailboxStore,
+        [primaryMessageSelection],
+      )[0]?.message ?? null
+    : null;
+  const visibleSelectedMessageKeys = selectedMessageSelections
+    .map((selection) => selection.key)
+    .filter((selectionKey) =>
+      selectableMessageSelections.some(
+        (selection) => selection.key === selectionKey,
+      ),
+    );
+  const visibleSelectedMessageIds = selectableMessageRows
+    .filter(({ selection }) => visibleSelectedMessageKeys.includes(selection.key))
+    .map(({ message }) => message.id);
+  const isMultiSelectActive = visibleSelectedMessageKeys.length > 1;
   const selectedMessageFromVisiblePrimary =
-    sortedMessages.find(
-      (message) =>
-        message.id === selectedMessageId &&
-        visibleSelectedMessageIds.includes(message.id),
-    ) ?? null;
+    selectableMessageRows.find(
+      ({ selection }) => selection.key === mailboxScopedSelectionState.primaryKey,
+    )?.message ?? null;
   const selectedMessageFromVisibleSelection =
-    sortedMessages.find((message) => visibleSelectedMessageIds.includes(message.id)) ?? null;
+    selectableMessageRows.find(({ selection }) =>
+      visibleSelectedMessageKeys.includes(selection.key),
+    )?.message ?? null;
   const selectedMessageFromCurrentId =
-    sortedMessages.find((message) => message.id === selectedMessageId) ?? null;
+    sortedMessages.find(matchesPrimarySelection) ?? null;
   const selectedMessageFallbackTop = sortedMessages[0] ?? null;
   const selectedMessage =
     selectedMessageFromVisiblePrimary ??
@@ -16701,7 +18000,7 @@ function MailboxView({
   const activeDesktopThreadDisclosureState =
     reconcileDesktopThreadDisclosureState(
       desktopThreadDisclosureState,
-      selectedMessage?.id ?? null,
+      primaryMessageSelection?.key ?? null,
     );
   const renderTargetMessage = isFullMessageOpen ? fullWidthMessage : selectedMessage;
   const getVisiblePriorityReasonCopyForMessage = (message: MailMessage | null) => {
@@ -16709,7 +18008,11 @@ function MailboxView({
       return null;
     }
 
-    const sourceMailboxId = currentMessageLocationById[message.id]?.mailboxId ?? mailbox.id;
+    const sourceMailboxId =
+      currentMessageLocationByMessage.get(message)?.mailboxId ??
+      message.threadIdentityContext?.mailboxId ??
+      currentMessageLocationById[message.id]?.mailboxId ??
+      mailbox.id;
     const reason = priorityReasonCopyByMessageKey[`${sourceMailboxId}:${message.id}`];
 
     return reason?.shouldShow && reason.title.trim().length > 0 ? reason : null;
@@ -16719,22 +18022,27 @@ function MailboxView({
     setDesktopThreadDisclosureState((currentState) =>
       reconcileDesktopThreadDisclosureState(
         currentState,
-        selectedMessage?.id ?? null,
+        primaryMessageSelection?.key ?? null,
       ),
     );
-  }, [selectedMessage?.id]);
+  }, [primaryMessageSelection?.key]);
 
   useEffect(() => {
-    if (!hideBundleOrganizerManagedMessages || !selectedMessageId) {
+    if (!hideBundleOrganizerManagedMessages || !primaryMessageSelection) {
       return;
     }
 
-    if (sortedMessages.some((message) => message.id === selectedMessageId)) {
+    if (
+      selectableMessageSelections.some(
+        (selection) => selection.key === primaryMessageSelection.key,
+      )
+    ) {
       return;
     }
 
     const hiddenSelectedMessage = folderMessages.find(
-      (message) => message.id === selectedMessageId,
+      (message) =>
+        buildCurrentMessageSelection(message).key === primaryMessageSelection.key,
     );
 
     if (
@@ -16759,23 +18067,26 @@ function MailboxView({
     }
 
     const nextMessage = sortedMessages[0] ?? null;
-    setSelectionState(
-      nextMessage ? [nextMessage.id] : [],
-      nextMessage?.id ?? null,
-      nextMessage?.id ?? null,
-    );
+    const nextSelection = nextMessage
+      ? buildCurrentMessageSelection(nextMessage)
+      : null;
+    setMailboxScopedSelectionState({
+      selected: nextSelection ? [nextSelection] : [],
+      primaryKey: nextSelection?.key ?? null,
+      anchorKey: nextSelection?.key ?? null,
+    });
     setIsFullMessageOpen(false);
   }, [
     folderMessages,
     hideBundleOrganizerManagedMessages,
     productAccess,
-    selectedMessageId,
+    primaryMessageSelection?.key,
     sortedMessages,
   ]);
 
   useEffect(() => {
     readingPaneViewportRef.current?.scrollTo({ top: 0, left: 0 });
-  }, [selectedMessage?.id]);
+  }, [primaryMessageSelection?.key]);
 
   useEffect(() => {
     if (!isFullMessageOpen) {
@@ -16861,7 +18172,7 @@ function MailboxView({
       window.cancelAnimationFrame(focusFrame);
       window.removeEventListener("keydown", handleFullMessageModalKeydown);
     };
-  }, [fullMessageModalMessage?.id, isFullMessageOpen]);
+  }, [fullMessageModalMessage?.id, isFullMessageOpen, primaryMessageSelection?.key]);
 
   useEffect(() => {
     if (!isFullMessageOpen || typeof window === "undefined") {
@@ -16991,34 +18302,40 @@ function MailboxView({
     };
   }, [composePresentation, isCloseModalOpen, isComposeOpen, isMobileViewport]);
 
-  const advanceSelectionAfterAction = (processedMessageIds: string[]) => {
+  const advanceSelectionAfterAction = (
+    processedMessageIds: string[],
+    processedSelections: MailboxScopedMessageSelection[] = [],
+  ) => {
     if (processedMessageIds.length === 0) {
       return;
     }
 
-    const processedIdSet = new Set(processedMessageIds);
-    const currentIndex = sortedMessages.findIndex(
-      (message) => message.id === selectedMessageId && processedIdSet.has(message.id),
+    const processedSelectionKeys = new Set(
+      (processedSelections.length > 0
+        ? processedSelections
+        : selectedMessageSelections.filter((selection) =>
+            processedMessageIds.includes(selection.messageId),
+          )
+      ).map((selection) => selection.key),
     );
-    const fallbackIndex = sortedMessages.findIndex((message) =>
-      processedIdSet.has(message.id),
+    const nextSelection = resolveMailboxScopedSelectionAfterAction(
+      selectableMessageSelections,
+      mailboxScopedSelectionState.primaryKey,
+      [...processedSelectionKeys],
     );
-    const anchorIndex = currentIndex >= 0 ? currentIndex : fallbackIndex;
-    const remainingMessages = sortedMessages.filter(
-      (message) => !processedIdSet.has(message.id),
-    );
-    const nextMessage =
-      anchorIndex >= 0
-        ? remainingMessages[Math.min(anchorIndex, remainingMessages.length - 1)] ?? null
-        : remainingMessages[0] ?? null;
+    const nextRow = nextSelection
+      ? selectableMessageRows.find(
+          ({ selection }) => selection.key === nextSelection.key,
+        ) ?? null
+      : null;
 
-    setSelectionState(
-      nextMessage ? [nextMessage.id] : [],
-      nextMessage?.id ?? null,
-      nextMessage?.id ?? null,
-    );
+    setMailboxScopedSelectionState({
+      selected: nextRow ? [nextRow.selection] : [],
+      primaryKey: nextRow?.selection.key ?? null,
+      anchorKey: nextRow?.selection.key ?? null,
+    });
 
-    if (!nextMessage) {
+    if (!nextRow) {
       setIsFullMessageOpen(false);
     }
   };
@@ -17027,18 +18344,36 @@ function MailboxView({
       return [];
     }
 
-    const contextMailboxId = message.threadIdentityContext?.mailboxId as InboxId | undefined;
-    const messageLocation = contextMailboxId
-      ? {
-          mailboxId: contextMailboxId,
-          folder: currentMessageLocationById[message.id]?.folder ?? ("Inbox" as MailFolder),
-        }
-      : currentMessageLocationById[message.id];
-    const threadSourceMessages = messageLocation
-      ? canonicalFolderOrder.flatMap(
-          (folder) => mailboxStore[messageLocation.mailboxId][folder],
+    const explicitMailboxId =
+      primaryMessageSelection &&
+      buildMailboxScopedMessageSelection(
+        primaryMessageSelection.mailboxId,
+        message,
+        primaryMessageSelection.folder,
+      ).key === primaryMessageSelection.key
+        ? primaryMessageSelection.mailboxId
+        : null;
+    const messageLocation = resolveAuthoritativeMessageLocation({
+      message,
+      exactLocation: currentMessageLocationByMessage.get(message) ?? null,
+      explicitMailboxId,
+      explicitFolder:
+        explicitMailboxId === primaryMessageSelection?.mailboxId
+          ? primaryMessageSelection.folder
+          : null,
+      bareIdLocation: currentMessageLocationById[message.id] ?? null,
+    });
+    const scopedContext = messageLocation
+      ? resolveMailboxScopedWorkspaceMessageContext(
+          mailboxStore,
+          buildMailboxScopedMessageSelection(
+            messageLocation.mailboxId,
+            message,
+            messageLocation.folder,
+          ),
         )
-      : mailboxThreadMessages;
+      : null;
+    const threadSourceMessages = scopedContext?.threadMessages ?? mailboxThreadMessages;
 
     return [
       message,
@@ -17128,7 +18463,7 @@ function MailboxView({
       setDesktopThreadDisclosureState((currentState) => {
         const reconciledState = reconcileDesktopThreadDisclosureState(
           currentState,
-          selectedMessage?.id ?? null,
+          primaryMessageSelection?.key ?? null,
         );
 
         return {
@@ -17246,7 +18581,7 @@ function MailboxView({
       setDesktopThreadDisclosureState((currentState) => {
         const reconciledState = reconcileDesktopThreadDisclosureState(
           currentState,
-          selectedMessage?.id ?? null,
+          primaryMessageSelection?.key ?? null,
         );
 
         return {
@@ -17540,8 +18875,15 @@ function MailboxView({
   };
   const hasStoredCanonicalCollaboration = (messageId: string | null) =>
     Boolean(getStoredCanonicalCollaborationMessage(messageId));
-  const activeDraftCollaboration = activeCollaborationMessageId
-    ? draftCollaborationByMessageId[activeCollaborationMessageId]
+  const activeCollaborationLocalStateKey =
+    activeCollaborationMessageId && activeCollaborationSourceMailboxId
+      ? buildCollaborationLocalStateKey(
+          activeCollaborationMessageId,
+          activeCollaborationSourceMailboxId,
+        )
+      : null;
+  const activeDraftCollaboration = activeCollaborationLocalStateKey
+    ? draftCollaborationByMessageId[activeCollaborationLocalStateKey]
     : undefined;
   const activeCollaborationMessage =
     activeStoredCollaborationMessage &&
@@ -17564,12 +18906,12 @@ function MailboxView({
       activeDraftCollaboration,
   );
   const isActiveCollaborationThreadPreparing = Boolean(
-    activeCollaborationMessageId &&
-      collaborationThreadPreparingByMessageId[activeCollaborationMessageId],
+    activeCollaborationLocalStateKey &&
+      collaborationThreadPreparingByMessageId[activeCollaborationLocalStateKey],
   );
   const isActiveCollaborationReplySending = Boolean(
-    activeCollaborationMessageId &&
-      collaborationReplySendingMessageId === activeCollaborationMessageId,
+    activeCollaborationLocalStateKey &&
+      collaborationReplySendingMessageId === activeCollaborationLocalStateKey,
   );
   const activeStoredCanonicalCollaborationMessage =
     getStoredCanonicalCollaborationMessage(activeCollaborationMessageId);
@@ -17642,8 +18984,12 @@ function MailboxView({
   );
   const hasExternalInviteActivityForCollaborationMessage = (messageId: string) =>
     Boolean(
-      collaborationThreadPreparingByMessageId[messageId] ||
-        collaborationExternalInviteIssuedByMessageId[messageId] ||
+      (activeCollaborationLocalStateKey &&
+        collaborationThreadPreparingByMessageId[activeCollaborationLocalStateKey]) ||
+        (activeCollaborationLocalStateKey &&
+          collaborationExternalInviteIssuedByMessageId[
+            activeCollaborationLocalStateKey
+          ]) ||
         (activeCollaborationMessageId === messageId &&
           (pendingExternalInviteEmails.length > 0 ||
             externalInviteInFlightEmails.length > 0)),
@@ -17771,7 +19117,13 @@ function MailboxView({
       return;
     }
 
-    const refreshKey = `${mailbox.id}:${directCanonicalCollaborationRefreshMessage.id}`;
+    const refreshStorageMailboxId =
+      activeCollaborationSourceMailboxId ?? mailbox.id;
+    const refreshKey = getCollaborationMailboxIdentityKey(
+      refreshStorageMailboxId,
+      directCanonicalCollaborationRefreshMessage,
+      currentUserId,
+    );
 
     if (lastActiveCanonicalCollaborationRefreshKeyRef.current === refreshKey) {
       return;
@@ -17784,6 +19136,7 @@ function MailboxView({
   }, [
     directCanonicalCollaborationRefreshMessage?.id,
     directCanonicalCollaborationRefreshMessage?.collaboration?.createdAt,
+    activeCollaborationSourceMailboxId,
     mailbox.id,
   ]);
 
@@ -17881,18 +19234,20 @@ function MailboxView({
       [notificationNavigationRequest.messageId],
       notificationNavigationRequest.messageId,
       notificationNavigationRequest.messageId,
+      {
+        sourceMailboxId: targetMailboxId,
+        sourceMessage: targetMessage,
+        sourceFolder: targetFolder,
+      },
     );
-    // Record the target message's imapUid so selectedMessageFromFolder can
-    // still locate it if a background IMAP sync reassigns its id afterwards
-    // (e.g. SHA1 fallback id → imap-uid-X after the first live fetch).
-    // setSelectionState above clears selectedMessageImapUid first; we overwrite
-    // here only for navigation-driven selections.
-    if (targetMessage.imapUid) {
-      setSelectedMessageImapUid(targetMessage.imapUid);
-    }
+    const targetSelection = buildMailboxScopedMessageSelection(
+      targetMailboxId,
+      targetMessage,
+      targetFolder,
+    );
     requestAnimationFrame(() => {
       const targetRow = mailListViewportRef.current?.querySelector<HTMLElement>(
-        `[data-message-row-id="${CSS.escape(notificationNavigationRequest.messageId)}"]`,
+        `[data-message-row-identity="${CSS.escape(targetSelection.key)}"]`,
       );
 
       targetRow?.scrollIntoView({ behavior: "smooth", block: "nearest" });
@@ -17910,7 +19265,9 @@ function MailboxView({
       setHighlightedCollaborationMessageId(
         notificationNavigationRequest.collaborationMessageId ?? null,
       );
-      openCollaborationOverlay(notificationNavigationRequest.messageId);
+      openCollaborationOverlay(notificationNavigationRequest.messageId, {
+        sourceMailboxId: targetMailboxId,
+      });
     }
     onConsumeNotificationNavigation?.(notificationNavigationRequest.requestKey);
   }, [
@@ -17920,7 +19277,7 @@ function MailboxView({
     messageCollections.Filtered,
     notificationNavigationRequest,
     onConsumeNotificationNavigation,
-    selectedMessageId,
+    primaryMessageSelection?.key,
     visibleMessages,
   ]);
 
@@ -18017,8 +19374,14 @@ function MailboxView({
     let isRequestInFlight = false;
 
     const syncActiveCollaborationFromSnapshot = () => {
-      syncMessageFromLiveSnapshot(activeCollaborationMessageId);
-      const message = getMessageById(activeCollaborationMessageId);
+      syncMessageFromLiveSnapshot(
+        activeCollaborationMessageId,
+        activeCollaborationSourceMailboxId,
+      );
+      const message = getMessageById(
+        activeCollaborationMessageId,
+        activeCollaborationSourceMailboxId,
+      );
 
       if (message?.collaboration) {
         if (isRequestInFlight) {
@@ -18050,19 +19413,23 @@ function MailboxView({
       window.removeEventListener("focus", syncActiveCollaborationFromSnapshot);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [activeCollaborationMessageId]);
+  }, [activeCollaborationMessageId, activeCollaborationSourceMailboxId]);
 
   const renderBehaviorSuggestion = (message: MailMessage) => {
     void message;
     return null;
   };
 
-  const markPriorityMessageDone = (messageId: string) => {
-    onSetManualPriority(messageId, false);
+  const markPriorityMessageDone = (message: MailMessage) => {
+    onSetManualPriority(
+      message.id,
+      false,
+      buildManualPriorityUpdateOptions(message),
+    );
 
     if (
       isFullMessageOpen &&
-      fullWidthMessage?.id === messageId &&
+      fullWidthMessage?.id === message.id &&
       lastNavigationSource === "priority"
     ) {
       setLastNavigationSource(null);
@@ -18071,7 +19438,12 @@ function MailboxView({
   };
 
   const renderMessageCollaboration = (message: MailMessage) => {
-    const liveMessage = getMessageById(message.id) ?? message;
+    const sourceMailboxId = resolveCollaborationStorageMailboxId(
+      message.id,
+      null,
+      message,
+    );
+    const liveMessage = getMessageById(message.id, sourceMailboxId) ?? message;
     const collaboration = liveMessage.collaboration;
 
     if (!collaboration) {
@@ -18079,7 +19451,10 @@ function MailboxView({
     }
 
     const isResolvedCollaboration = collaboration.state === "resolved";
-    const hasUnreadCollaboration = hasUnreadCollaborationUpdate(liveMessage);
+    const hasUnreadCollaboration = hasUnreadCollaborationUpdate(
+      liveMessage,
+      sourceMailboxId,
+    );
 
     const collaborationButtonClass =
       isResolvedCollaboration
@@ -18104,7 +19479,9 @@ function MailboxView({
         </div>
         <button
           type="button"
-          onClick={() => openCollaborationOverlay(liveMessage.id)}
+          onClick={() =>
+            openCollaborationOverlay(liveMessage.id, { sourceMailboxId })
+          }
           className={collaborationButtonClass}
           style={collaborationButtonStyle}
         >
@@ -18261,8 +19638,22 @@ function MailboxView({
     sourceMessage?: MailMessage,
   ) => {
     const messageLocation = sourceMessage
-      ? currentMessageLocationById[sourceMessage.id]
-      : undefined;
+      ? resolveAuthoritativeMessageLocation({
+          message: sourceMessage,
+          exactLocation: currentMessageLocationByMessage.get(sourceMessage) ?? null,
+          explicitMailboxId:
+            primaryMessageSelection &&
+            buildMailboxScopedMessageSelection(
+              primaryMessageSelection.mailboxId,
+              sourceMessage,
+              primaryMessageSelection.folder,
+            ).key === primaryMessageSelection.key
+              ? primaryMessageSelection.mailboxId
+              : null,
+          explicitFolder: primaryMessageSelection?.folder ?? null,
+          bareIdLocation: currentMessageLocationById[sourceMessage.id] ?? null,
+        })
+      : null;
     const sourceMailboxId =
       attachment.receivedSource?.mailboxId ??
       messageLocation?.mailboxId ??
@@ -18292,9 +19683,18 @@ function MailboxView({
 
       return downloadAttachment({
         mailboxId: sourceMailbox.id,
-        folder: "INBOX",
+        folder:
+          attachment.receivedSource?.providerFolder ??
+          sourceMessage?.providerFolder ??
+          attachment.receivedSource?.folder ??
+          messageLocation?.folder ??
+          "INBOX",
         uid: sourceMessageUid,
-        uidValidity: snapshot?.uidValidity ?? null,
+        uidValidity:
+          attachment.receivedSource?.uidValidity ??
+          sourceMessage?.uidValidity ??
+          snapshot?.uidValidity ??
+          null,
         attachmentId: attachment.id,
       });
     }
@@ -18375,8 +19775,9 @@ function MailboxView({
     placement: "split" | "full",
   ) => {
     const originPresentation = placement === "full" ? "modal" : "workspace";
+    const messageSelection = buildCurrentMessageSelection(message);
     const menuOpen =
-      detailActionsMenuState?.messageId === message.id &&
+      detailActionsMenuState?.selectionKey === messageSelection.key &&
       detailActionsMenuState.placement === placement;
     const messageIsVisiblePriority = isVisiblePriorityMessage(message);
     const fullToolbarActionSpacing =
@@ -18453,7 +19854,7 @@ function MailboxView({
               <button
                 type="button"
                 onClick={() => {
-                  markPriorityMessageDone(message.id);
+                  markPriorityMessageDone(message);
                   setDetailActionsMenuState(null);
                 }}
                 className={menuItemClass}
@@ -18478,7 +19879,11 @@ function MailboxView({
           <button
             type="button"
             onClick={() => {
-              onSetManualPriority(message.id, !messageIsVisiblePriority);
+              onSetManualPriority(
+                message.id,
+                !messageIsVisiblePriority,
+                buildManualPriorityUpdateOptions(message),
+              );
               setDetailActionsMenuState(null);
             }}
             className={menuItemClass}
@@ -18564,7 +19969,8 @@ function MailboxView({
                 closeReadingLearningMenu();
                 const rect = event.currentTarget.getBoundingClientRect();
                 setDetailActionsMenuState((current) =>
-                  current?.messageId === message.id && current.placement === placement
+                  current?.selectionKey === messageSelection.key &&
+                  current.placement === placement
                     ? null
                     : {
                         anchor: {
@@ -18574,6 +19980,7 @@ function MailboxView({
                           top: rect.top,
                         },
                         messageId: message.id,
+                        selectionKey: messageSelection.key,
                         placement,
                       },
                 );
@@ -18655,12 +20062,16 @@ function MailboxView({
     if (activeComposeMailbox.id === mailbox.id) {
       setActiveFolder("Drafts");
     }
-    setSelectionState([draftId], draftId, draftId);
+    setSelectionState([draftId], draftId, draftId, {
+      sourceMailboxId: activeComposeMailbox.id,
+      sourceMessage: draftMessage,
+      sourceFolder: "Drafts",
+    });
     setIsFullMessageOpen(false);
     setIsCloseModalOpen(false);
     setIsComposeOpen(false);
     setComposePresentation("workspace");
-    setModalComposeSourceMessageId(null);
+    setModalComposeSourceSelection(null);
     resetComposeState();
   };
 
@@ -18673,7 +20084,7 @@ function MailboxView({
       restoreFullMessageModalAfterCompose();
     } else {
       setComposePresentation("workspace");
-      setModalComposeSourceMessageId(null);
+      setModalComposeSourceSelection(null);
     }
   };
 
@@ -18868,9 +20279,13 @@ function MailboxView({
           composeMode === "forward") &&
         isVisiblePriorityMessage(composeSourceMessage)
       ) {
-        onSetManualPriority(composeSourceMessage.id, false, {
-          showConfirmation: false,
-        });
+        onSetManualPriority(
+          composeSourceMessage.id,
+          false,
+          buildManualPriorityUpdateOptions(composeSourceMessage, {
+            showConfirmation: false,
+          }),
+        );
       }
 
       if (composePresentation === "modal") {
@@ -18886,9 +20301,22 @@ function MailboxView({
           [composeSourceMessage.id],
           composeSourceMessage.id,
           composeSourceMessage.id,
+          {
+            sourceMailboxId: composeMailboxId,
+            sourceMessage: composeSourceMessage,
+            sourceFolder:
+              resolveAuthoritativeMessageLocation({
+                message: composeSourceMessage,
+                exactLocation:
+                  currentMessageLocationByMessage.get(composeSourceMessage) ?? null,
+                explicitMailboxId: composeMailboxId,
+                bareIdLocation:
+                  currentMessageLocationById[composeSourceMessage.id] ?? null,
+              })?.folder ?? activeFolder,
+          },
         );
         setComposePresentation("workspace");
-        setModalComposeSourceMessageId(null);
+        setModalComposeSourceSelection(null);
         resetComposeState();
         return "sent" as const;
       }
@@ -18897,7 +20325,7 @@ function MailboxView({
       setIsFullMessageOpen(false);
       setIsComposeOpen(false);
       setComposePresentation("workspace");
-      setModalComposeSourceMessageId(null);
+      setModalComposeSourceSelection(null);
       resetComposeState();
       return "sent" as const;
     } catch (error) {
@@ -19008,27 +20436,42 @@ function MailboxView({
   ]);
 
   useEffect(() => {
-    const availableMessageIds = new Set(folderMessages.map((message) => message.id));
-    const nextSelectedMessageIds = selectedMessageIds.filter((messageId) =>
-      availableMessageIds.has(messageId),
+    const availableSelectionKeys = new Set(
+      folderMessages.map((message) => buildCurrentMessageSelection(message).key),
     );
-    if (nextSelectedMessageIds.length !== selectedMessageIds.length) {
-      setSelectedMessageIds(nextSelectedMessageIds);
-    }
 
-    if (selectedMessageId && !availableMessageIds.has(selectedMessageId)) {
-      setSelectedMessageId(nextSelectedMessageIds[0] ?? null);
-    }
+    setMailboxScopedSelectionState((current) => {
+      const resolvedSelections = resolveMailboxScopedSelectionEntries(
+        mailboxStore,
+        current.selected,
+      )
+        .map((entry) => entry.selection)
+        .filter((selection) => availableSelectionKeys.has(selection.key));
+      const primaryKey = resolvedSelections.some(
+        (selection) => selection.key === current.primaryKey,
+      )
+        ? current.primaryKey
+        : resolvedSelections[0]?.key ?? null;
+      const anchorKey = resolvedSelections.some(
+        (selection) => selection.key === current.anchorKey,
+      )
+        ? current.anchorKey
+        : primaryKey;
+      const didChange =
+        primaryKey !== current.primaryKey ||
+        anchorKey !== current.anchorKey ||
+        resolvedSelections.length !== current.selected.length ||
+        resolvedSelections.some(
+          (selection, index) =>
+            selection.key !== current.selected[index]?.key ||
+            selection.messageId !== current.selected[index]?.messageId,
+        );
 
-    if (selectionAnchorId && !availableMessageIds.has(selectionAnchorId)) {
-      setSelectionAnchorId(nextSelectedMessageIds[0] ?? null);
-    }
-  }, [
-    folderMessages,
-    selectedMessageId,
-    selectedMessageIds,
-    selectionAnchorId,
-  ]);
+      return didChange
+        ? { selected: resolvedSelections, primaryKey, anchorKey }
+        : current;
+    });
+  }, [folderMessages, mailboxStore]);
 
   useEffect(() => {
     if (!isCollaborationParticipantPickerOpen) {
@@ -19104,26 +20547,32 @@ function MailboxView({
     };
   }, [isCollaborationActionsMenuOpen]);
 
-  useEffect(() => {
-    if (selectedMessageIds.length === 1 && selectionAnchorId !== selectedMessageIds[0]) {
-      setSelectionAnchorId(selectedMessageIds[0]);
-    }
-
-    if (selectedMessageIds.length === 0 && selectionAnchorId !== null) {
-      setSelectionAnchorId(null);
-    }
-  }, [selectedMessageIds, selectionAnchorId]);
-
   // Persist the selection whenever it changes:
   // - into lastFolderSelectionRef (per folder/view, within this MailboxView mount)
   // - into onMessageSelected (per mailbox, across unmount/remount cycles)
   useEffect(() => {
-    if (selectedMessageId) {
+    if (primaryMessageSelection) {
       const key = getFolderViewKey(activeFolder, isSharedView, activeSmartFolderId);
-      lastFolderSelectionRef.current[key] = selectedMessageId;
-      onMessageSelected?.(selectedMessageId);
+      lastFolderSelectionRef.current[key] = primaryMessageSelection;
+      if (
+        shouldPersistMailboxSelectionForRemount({
+          isSharedView,
+          activeSmartFolderId,
+          hostMailboxId: mailbox.id,
+          selection: primaryMessageSelection,
+        })
+      ) {
+        onMessageSelected?.(primaryMessageSelection.messageId);
+      }
     }
-  }, [selectedMessageId, activeFolder, isSharedView, activeSmartFolderId, onMessageSelected]);
+  }, [
+    primaryMessageSelection,
+    activeFolder,
+    isSharedView,
+    activeSmartFolderId,
+    mailbox.id,
+    onMessageSelected,
+  ]);
 
   useEffect(() => {
     return () => {
@@ -19171,93 +20620,215 @@ function MailboxView({
     }));
   };
 
-  const getMessagesByIds = (messageIds: string[]) => {
+  const getMessagesByIds = (
+    messageIds: string[],
+    selections: MailboxScopedMessageSelection[] = [],
+  ) => {
     if (messageIds.length === 0) {
       return [];
     }
 
-    const messageIdSet = new Set(messageIds);
+    const scopedSelections =
+      selections.length > 0
+        ? selections
+        : selectedMessageSelections.filter((selection) =>
+            messageIds.includes(selection.messageId),
+          );
 
-    return Object.values(mailboxStore).flatMap((collections) =>
-      canonicalFolderOrder.flatMap((folder) =>
-        collections[folder].filter((message) => messageIdSet.has(message.id)),
-      ),
-    );
+    if (scopedSelections.length === 0) {
+      const messageIdSet = new Set(messageIds);
+      return canonicalFolderOrder.flatMap((folder) =>
+        (mailboxStore[mailbox.id]?.[folder] ?? []).filter((message) =>
+          messageIdSet.has(message.id),
+        ),
+      );
+    }
+
+    const selectionsByMailbox = scopedSelections.reduce<
+      Partial<Record<InboxId, string[]>>
+    >((groups, selection) => {
+      groups[selection.mailboxId] = [
+        ...(groups[selection.mailboxId] ?? []),
+        selection.messageId,
+      ];
+      return groups;
+    }, {});
+
+    return Object.entries(selectionsByMailbox).flatMap(([rawMailboxId, ids]) => {
+      const sourceMailboxId = rawMailboxId as InboxId;
+      const collections = mailboxStore[sourceMailboxId];
+      const identityKeys = buildCanonicalIdentityKeySetForMailboxMessageIds(
+        mailboxStore,
+        sourceMailboxId,
+        ids ?? [],
+      );
+
+      return collections
+        ? canonicalFolderOrder.flatMap((folder) =>
+            collections[folder].filter((message) =>
+              doesMessageMatchCanonicalIdentitySet(message, identityKeys),
+            ),
+          )
+        : [];
+    });
+  };
+
+  const resolveCollaborationStorageMailboxId = (
+    messageId: string,
+    explicitMailboxId?: InboxId | null,
+    sourceMessage?: MailMessage | null,
+  ) => {
+    if (explicitMailboxId) {
+      return explicitMailboxId;
+    }
+
+    if (sourceMessage) {
+      const sourceLocation = currentMessageLocationByMessage.get(sourceMessage);
+
+      if (sourceLocation) {
+        return sourceLocation.mailboxId;
+      }
+
+      const contextualMailboxIds = [
+        sourceMessage.threadIdentityContext?.mailboxId,
+        sourceMessage.serverMailboxId,
+      ].filter(Boolean) as InboxId[];
+      const sourceMailboxId = contextualMailboxIds.find((candidateMailboxId) =>
+        Boolean(
+          getMailboxMessageById(
+            mailboxStore,
+            candidateMailboxId,
+            sourceMessage.id,
+          ),
+        ),
+      );
+
+      if (sourceMailboxId) {
+        return sourceMailboxId;
+      }
+
+      if (
+        isSharedView &&
+        getMailboxMessageById(
+          mailboxStore,
+          sharedCollaborationMailboxId,
+          sourceMessage.id,
+        )
+      ) {
+        return sharedCollaborationMailboxId;
+      }
+    }
+
+    if (
+      activeCollaborationMessageId === messageId &&
+      activeCollaborationSourceMailboxId
+    ) {
+      return activeCollaborationSourceMailboxId;
+    }
+
+    if (notificationNavigationRequest?.messageId === messageId) {
+      return (
+        notificationNavigationRequest.sourceMailboxId ??
+        notificationNavigationRequest.mailboxId
+      );
+    }
+
+    if (
+      selectedMessageId === messageId &&
+      selectedMessageSourceMailboxId
+    ) {
+      return selectedMessageSourceMailboxId;
+    }
+
+    if (
+      isSharedView &&
+      getMailboxMessageById(
+        mailboxStore,
+        sharedCollaborationMailboxId,
+        messageId,
+      )
+    ) {
+      return sharedCollaborationMailboxId;
+    }
+
+    return currentMessageLocationById[messageId]?.mailboxId ?? mailbox.id;
   };
 
   const updateMessageById = (
     messageId: string,
     updater: (message: MailMessage) => MailMessage,
+    explicitMailboxId?: InboxId | null,
   ) => {
+    const targetMailboxId = resolveCollaborationStorageMailboxId(
+      messageId,
+      explicitMailboxId,
+    );
+
     setMailboxStore((currentStore) => {
-      let updatedMessage: MailMessage | null = null;
-
-      const nextStore = Object.entries(currentStore).reduce<MailboxStore>(
-        (nextStoreValue, [mailboxId, collections]) => {
-          const updateFolder = (messages: MailMessage[]) =>
-            messages.map((message) => {
-              if (message.id !== messageId) {
-                return message;
-              }
-
-              const nextMessage = updater(message);
-              updatedMessage = nextMessage;
-              return nextMessage;
-            });
-
-          nextStoreValue[mailboxId as InboxId] = {
-            Inbox: updateFolder(collections.Inbox),
-            Drafts: updateFolder(collections.Drafts),
-            Sent: updateFolder(collections.Sent),
-            Archive: updateFolder(collections.Archive),
-            Filtered: updateFolder(collections.Filtered),
-            Spam: updateFolder(collections.Spam),
-            Trash: updateFolder(collections.Trash),
-          };
-
-          return nextStoreValue;
-        },
-        {} as MailboxStore,
+      const { store: nextStore, updatedMessage } = updateMailboxMessageById(
+        currentStore,
+        targetMailboxId,
+        messageId,
+        updater,
       );
 
       if (updatedMessage) {
         const snapshots = readLiveInboxSnapshots(
           buildTrustedLiveInboxSnapshotContexts(managedInboxes),
         );
+        const currentSnapshot = snapshots[targetMailboxId];
+        const nextSnapshot = updateMailboxSnapshotCollaboration(
+          currentSnapshot,
+          targetMailboxId,
+          messageId,
+          updatedMessage,
+        );
 
-        Object.entries(snapshots).forEach(([snapshotMailboxId, snapshot]) => {
-          const nextMessages = snapshot.messages.map((snapshotMessage) => {
-            if (snapshotMessage.id !== messageId) {
-              return snapshotMessage;
-            }
-
-            return {
-              ...snapshotMessage,
-              collaboration: updatedMessage?.collaboration,
-              isShared: updatedMessage?.isShared,
-            } as PersistedLiveInboxMessageSnapshot;
-          });
-
-          saveLiveInboxSnapshot({
-            ...snapshot,
-            inboxId: snapshotMailboxId,
-            messages: nextMessages,
-          });
-        });
+        if (nextSnapshot && nextSnapshot !== currentSnapshot) {
+          saveLiveInboxSnapshot(nextSnapshot);
+        }
       }
 
       return nextStore;
     });
   };
 
-  function getMessageById(messageId: string | null) {
+  function getMessageById(
+    messageId: string | null,
+    explicitMailboxId?: InboxId | null,
+  ) {
     if (!messageId) {
       return null;
     }
 
-    return Object.values(mailboxStore)
-      .flatMap((collections) => canonicalFolderOrder.flatMap((folder) => collections[folder]))
-      .find((message) => message.id === messageId) ?? null;
+    const targetMailboxId =
+      explicitMailboxId ||
+      (activeCollaborationMessageId === messageId
+        ? activeCollaborationSourceMailboxId
+        : null) ||
+      (notificationNavigationRequest?.messageId === messageId
+        ? notificationNavigationRequest.sourceMailboxId ??
+          notificationNavigationRequest.mailboxId
+        : null) ||
+      (primaryMessageSelection?.messageId === messageId
+        ? primaryMessageSelection.mailboxId
+        : null) ||
+      (isSharedView &&
+      getMailboxMessageById(
+        mailboxStore,
+        sharedCollaborationMailboxId,
+        messageId,
+      )
+        ? sharedCollaborationMailboxId
+        : null) ||
+      currentMessageLocationById[messageId]?.mailboxId ||
+      mailbox.id;
+
+    return getMailboxMessageById(
+      mailboxStore,
+      targetMailboxId,
+      messageId,
+    );
   }
 
   const isProjectedSharedCollaborationMessage = (messageId: string | null) =>
@@ -19274,8 +20845,26 @@ function MailboxView({
     const message = getMessageById(messageId);
     return message?.collaborationWorkspaceId?.trim().toLowerCase() || currentUserId;
   };
+  const getCollaborationMailboxIdForMessage = (messageId: string) => {
+    const storageMailboxId = resolveCollaborationStorageMailboxId(messageId);
+    const message = getMessageById(messageId, storageMailboxId);
+
+    return (
+      (message?.collaborationMailboxId?.trim() as InboxId | undefined) ||
+      storageMailboxId
+    );
+  };
+  const getCollaborationLocalStateKey = (
+    messageId: string,
+    explicitMailboxId?: InboxId | null,
+  ) =>
+    buildCollaborationLocalStateKey(
+      messageId,
+      resolveCollaborationStorageMailboxId(messageId, explicitMailboxId),
+    );
   const getCollaborationMessageIdForMessage = (messageId: string) => {
-    const message = getMessageById(messageId);
+    const storageMailboxId = resolveCollaborationStorageMailboxId(messageId);
+    const message = getMessageById(messageId, storageMailboxId);
     const canonicalMessageId = message?.collaborationMessageId?.trim();
 
     if (canonicalMessageId) {
@@ -19286,22 +20875,32 @@ function MailboxView({
       return messageId;
     }
 
-    const messageIdentityKeys = new Set(getSharedEntryIdentityKeys(message));
-    const matchingCanonicalProjection = Object.values(mailboxStore)
-      .flatMap((collections) =>
-        canonicalFolderOrder.flatMap((folder) => collections[folder]),
+    const messageIdentityKeys = new Set(
+      getSharedEntryIdentityKeys(message, storageMailboxId),
+    );
+    const matchingCanonicalProjection = Object.entries(mailboxStore)
+      .flatMap(([candidateMailboxId, collections]) =>
+        canonicalFolderOrder.flatMap((folder) =>
+          collections[folder].map((candidate) => ({
+            candidate,
+            candidateMailboxId: candidateMailboxId as InboxId,
+          })),
+        ),
       )
-      .find((candidate) => {
+      .find(({ candidate, candidateMailboxId }) => {
         if (!candidate.collaborationMessageId?.trim()) {
           return false;
         }
 
-        return getSharedEntryIdentityKeys(candidate).some((identityKey) =>
-          messageIdentityKeys.has(identityKey),
+        return getSharedEntryIdentityKeys(candidate, candidateMailboxId).some(
+          (identityKey) => messageIdentityKeys.has(identityKey),
         );
       });
 
-    return matchingCanonicalProjection?.collaborationMessageId?.trim() || messageId;
+    return (
+      matchingCanonicalProjection?.candidate.collaborationMessageId?.trim() ||
+      messageId
+    );
   };
   const updateCollaborationLastSeenByKey = (
     updater: SetStateAction<Record<string, number>>,
@@ -19309,34 +20908,58 @@ function MailboxView({
     setCollaborationLastSeenByKey(updater);
     onCollaborationLastSeenChange?.(updater);
   };
-  const getCollaborationLastSeenKeyForMessage = (message: MailMessage) => {
+  const getCollaborationLastSeenKeyForMessage = (
+    message: MailMessage,
+    explicitMailboxId?: InboxId | null,
+  ) => {
     const viewerKey = normalizeSenderLearningKey(currentViewerPersistenceKey);
-    const canonicalMessageId = getCollaborationMessageIdForMessage(message.id);
+    const storageMailboxId = resolveCollaborationStorageMailboxId(
+      message.id,
+      explicitMailboxId,
+      message,
+    );
     return buildCollaborationLastSeenKey(
       message,
+      storageMailboxId,
       viewerKey,
       currentUserId,
-      canonicalMessageId,
     );
   };
-  const hasUnreadCollaborationUpdate = (message: MailMessage) => {
+  const hasUnreadCollaborationUpdate = (
+    message: MailMessage,
+    explicitMailboxId?: InboxId | null,
+  ) => {
     const viewerKey = normalizeSenderLearningKey(currentViewerPersistenceKey);
-    const canonicalMessageId = getCollaborationMessageIdForMessage(message.id);
+    const storageMailboxId = resolveCollaborationStorageMailboxId(
+      message.id,
+      explicitMailboxId,
+      message,
+    );
     return hasUnreadCollaborationUpdateForViewer(
       message,
+      storageMailboxId,
       collaborationLastSeenByKey,
       viewerKey,
       currentUserId,
-      canonicalMessageId,
     );
   };
-  const markCollaborationSeen = (messageId: string) => {
-    const message = getMessageById(messageId);
+  const markCollaborationSeen = (
+    messageId: string,
+    explicitMailboxId?: InboxId | null,
+  ) => {
+    const storageMailboxId = resolveCollaborationStorageMailboxId(
+      messageId,
+      explicitMailboxId,
+    );
+    const message = getMessageById(messageId, storageMailboxId);
     if (!message?.collaboration) {
       return;
     }
 
-    const seenKey = getCollaborationLastSeenKeyForMessage(message);
+    const seenKey = getCollaborationLastSeenKeyForMessage(
+      message,
+      storageMailboxId,
+    );
     if (!seenKey) {
       return;
     }
@@ -19353,14 +20976,13 @@ function MailboxView({
   };
   const markCanonicalCollaborationThreadSeen = (thread: CollaborationThread) => {
     const viewerKey = normalizeSenderLearningKey(currentViewerPersistenceKey);
-    const workspaceId = thread.workspaceId.trim().toLowerCase();
-    const canonicalMessageId = thread.messageId.trim();
+    const collaborationIdentityKey = getCollaborationThreadIdentityKey(thread);
 
-    if (!viewerKey || !workspaceId || !canonicalMessageId) {
+    if (!viewerKey || !collaborationIdentityKey) {
       return;
     }
 
-    const seenKey = `${viewerKey}::${workspaceId}::${canonicalMessageId}`;
+    const seenKey = `${viewerKey}::${collaborationIdentityKey}`;
     const nextSeenAt = thread.collaboration.updatedAt;
     updateCollaborationLastSeenByKey((current) =>
       current[seenKey] && current[seenKey] >= nextSeenAt
@@ -19372,21 +20994,27 @@ function MailboxView({
     );
   };
 
-  const syncMessageFromLiveSnapshot = (messageId: string | null) => {
+  const syncMessageFromLiveSnapshot = (
+    messageId: string | null,
+    explicitMailboxId?: InboxId | null,
+  ) => {
     if (!messageId) {
       return;
     }
 
-    if (isProjectedSharedCollaborationMessage(messageId)) {
+    const targetMailboxId = resolveCollaborationStorageMailboxId(
+      messageId,
+      explicitMailboxId,
+    );
+
+    if (targetMailboxId === sharedCollaborationMailboxId) {
       return;
     }
 
     const snapshots = readLiveInboxSnapshots(
       buildTrustedLiveInboxSnapshotContexts(managedInboxes),
     );
-    const matchingSnapshot = Object.values(snapshots).find((snapshot) =>
-      snapshot.messages.some((message) => message.id === messageId),
-    );
+    const matchingSnapshot = snapshots[targetMailboxId];
     const snapshotMessage = matchingSnapshot?.messages.find(
       (message) => message.id === messageId,
     ) as PersistedLiveInboxMessageSnapshot | undefined;
@@ -19396,39 +21024,16 @@ function MailboxView({
     }
 
     setMailboxStore((currentStore) =>
-      Object.entries(currentStore).reduce<MailboxStore>((nextStore, [mailboxId, collections]) => {
-        const syncFolder = (messages: MailMessage[]) =>
-          messages.map((message) => {
-            if (message.id !== messageId) {
-              return message;
-            }
-
-            const preferredSnapshotState = resolvePreferredCollaborationSnapshotState(
-              snapshotMessage.collaboration,
-              message.collaboration,
-              snapshotMessage.isShared,
-              message.isShared,
-            );
-
-            return {
-              ...message,
-              collaboration: preferredSnapshotState.collaboration,
-              isShared: preferredSnapshotState.isShared,
-            };
-          });
-
-        nextStore[mailboxId as InboxId] = {
-          Inbox: syncFolder(collections.Inbox),
-          Drafts: syncFolder(collections.Drafts),
-          Sent: syncFolder(collections.Sent),
-          Archive: syncFolder(collections.Archive),
-          Filtered: syncFolder(collections.Filtered),
-          Spam: syncFolder(collections.Spam),
-          Trash: syncFolder(collections.Trash),
-        };
-
-        return nextStore;
-      }, {} as MailboxStore),
+      updateMailboxMessageById(
+        currentStore,
+        targetMailboxId,
+        messageId,
+        (message) =>
+          mergeMailboxScopedCollaborationSnapshotMessage(
+            message,
+            snapshotMessage,
+          ),
+      ).store,
     );
   };
 
@@ -19436,32 +21041,84 @@ function MailboxView({
     nextSelectedMessageIds: string[],
     nextPrimaryMessageId: string | null,
     nextAnchorId?: string | null,
+    options?: {
+      sourceMailboxId?: InboxId;
+      sourceMessage?: MailMessage | null;
+      sourceFolder?: MailFolder | null;
+    },
   ) => {
-    setSelectedMessageIds(nextSelectedMessageIds);
-    setSelectedMessageId(nextPrimaryMessageId);
-    // Clear the imapUid fallback on every explicit selection change so stale
-    // navigation identity doesn't bleed into unrelated future selections.
-    setSelectedMessageImapUid(null);
-    if (nextAnchorId !== undefined) {
-      setSelectionAnchorId(nextAnchorId);
-    }
+    const sourceSelection =
+      options?.sourceMailboxId && options.sourceMessage
+        ? buildMailboxScopedMessageSelection(
+            options.sourceMailboxId,
+            options.sourceMessage,
+            options.sourceFolder ?? activeFolder,
+          )
+        : null;
+    const candidateSelections = [
+      ...(sourceSelection ? [sourceSelection] : []),
+      ...selectableMessageSelections,
+      ...selectedMessageSelections,
+    ];
+    const usedKeys = new Set<string>();
+    const nextSelections = nextSelectedMessageIds.flatMap((messageId) => {
+      const candidate = candidateSelections.find(
+        (selection) =>
+          selection.messageId === messageId &&
+          !usedKeys.has(selection.key) &&
+          (!options?.sourceMailboxId ||
+            selection.mailboxId === options.sourceMailboxId ||
+            nextSelectedMessageIds.length > 1),
+      );
+
+      if (!candidate) {
+        return [];
+      }
+
+      usedKeys.add(candidate.key);
+      return [candidate];
+    });
+    const nextPrimarySelection =
+      (sourceSelection?.messageId === nextPrimaryMessageId
+        ? nextSelections.find((selection) => selection.key === sourceSelection.key)
+        : null) ??
+      nextSelections.find(
+        (selection) => selection.messageId === nextPrimaryMessageId,
+      ) ??
+      null;
+    const nextAnchorSelection =
+      nextAnchorId === undefined
+        ? nextSelections.find(
+            (selection) =>
+              selection.key === mailboxScopedSelectionState.anchorKey,
+          ) ?? nextPrimarySelection
+        : nextSelections.find(
+            (selection) => selection.messageId === nextAnchorId,
+          ) ?? nextPrimarySelection;
+
+    setMailboxScopedSelectionState({
+      selected: nextSelections,
+      primaryKey: nextPrimarySelection?.key ?? null,
+      anchorKey: nextAnchorSelection?.key ?? null,
+    });
   };
 
   function restoreFullMessageModalAfterCompose() {
-    const sourceMessageStillExists = modalComposeSourceMessageId
-      ? Object.values(latestMailboxStoreRef.current)
-          .flatMap((collections) =>
-            canonicalFolderOrder.flatMap((folder) => collections[folder]),
-          )
-          .find((message) => message.id === modalComposeSourceMessageId) ?? null
+    const sourceEntry = modalComposeSourceSelection
+      ? resolveMailboxScopedSelectionEntries(
+          latestMailboxStoreRef.current,
+          [modalComposeSourceSelection],
+        )[0] ?? null
       : null;
-    const returnMessageId = resolveModalComposeReturnMessageId(
-      modalComposeSourceMessageId,
-      sourceMessageStillExists ? [sourceMessageStillExists.id] : [],
-    );
+    const returnMessageId = sourceEntry
+      ? sourceEntry.message.id
+      : resolveModalComposeReturnMessageId(
+          modalComposeSourceMessageId,
+          [],
+        );
 
     setComposePresentation("workspace");
-    setModalComposeSourceMessageId(null);
+    setModalComposeSourceSelection(null);
     setIsCloseModalOpen(false);
 
     if (!returnMessageId) {
@@ -19469,22 +21126,62 @@ function MailboxView({
       return;
     }
 
-    setSelectionState([returnMessageId], returnMessageId, returnMessageId);
+    setSelectionState([returnMessageId], returnMessageId, returnMessageId, {
+      sourceMailboxId: sourceEntry?.mailboxId,
+      sourceMessage: sourceEntry?.message,
+      sourceFolder: sourceEntry?.folder,
+    });
     setIsFullMessageOpen(true);
   }
 
-  const getEffectiveSelectionIds = (messageId?: string | null) => {
-    if (messageId && selectedMessageIds.includes(messageId)) {
-      return selectedMessageIds;
-    }
+  const getEffectiveScopedSelections = (
+    targetSelection?: MailboxScopedMessageSelection | null,
+  ) => {
+    return targetSelection
+      ? resolveEffectiveMailboxScopedContextSelection(
+          selectedMessageSelections,
+          targetSelection,
+        )
+      : selectedMessageSelections;
+  };
 
-    return messageId ? [messageId] : selectedMessageIds;
+  const resolveCurrentCollaborationMutationTarget = (messageId: string) => {
+    const storageMailboxId = resolveCollaborationStorageMailboxId(
+      messageId,
+      activeCollaborationSourceMailboxId ?? undefined,
+    );
+
+    return resolveUnambiguousCollaborationMutationTarget({
+      store: mailboxStore,
+      storageMailboxId,
+      messageId,
+      fallbackWorkspaceId: currentUserId,
+      sharedMailboxId: sharedCollaborationMailboxId,
+    });
+  };
+
+  const reportAmbiguousCollaborationMutation = () => {
+    setCollaborationReplyFeedback("Could not prepare collaboration. Try again.");
   };
 
   const applyCanonicalCollaborationThreadToMessage = (
     messageId: string,
     thread: CollaborationThread,
+    explicitStorageMailboxId?: InboxId,
   ) => {
+    const storageMailboxId =
+      explicitStorageMailboxId ?? resolveCollaborationStorageMailboxId(messageId);
+    const currentMessage = getMessageById(messageId, storageMailboxId);
+    const expectedSourceMailboxId =
+      currentMessage?.collaborationMailboxId?.trim() ||
+      (storageMailboxId === sharedCollaborationMailboxId
+        ? thread.mailboxId
+        : storageMailboxId);
+
+    if (!currentMessage || thread.mailboxId !== expectedSourceMailboxId) {
+      return;
+    }
+
     updateMessageById(messageId, (message) => ({
       ...message,
       collaboration: thread.collaboration as MailMessageCollaboration,
@@ -19492,16 +21189,22 @@ function MailboxView({
       collaborationMessageId: thread.messageId,
       collaborationWorkspaceId: thread.workspaceId,
       collaborationMailboxId: thread.mailboxId,
-    }));
+    }), storageMailboxId);
   };
 
   const refreshCanonicalCollaborationThreadForMessage = async (
     message: MailMessage,
   ) => {
+    const collaborationStorageMailboxId = resolveCollaborationStorageMailboxId(
+      message.id,
+      null,
+      message,
+    );
     const canonicalMessageId = getCollaborationMessageIdForMessage(message.id);
+    const canonicalMailboxId = getCollaborationMailboxIdForMessage(message.id);
     const threadsByMessageId = await fetchCollaborationThreadsGetMany({
       workspaceId: message.collaborationWorkspaceId ?? currentUserId,
-      mailboxId: message.collaborationMailboxId ?? mailbox.id,
+      mailboxId: canonicalMailboxId,
       messageIds: [canonicalMessageId],
       messages: [
         {
@@ -19513,14 +21216,21 @@ function MailboxView({
         },
       ],
     });
-    const thread =
-      threadsByMessageId[canonicalMessageId] ?? Object.values(threadsByMessageId)[0];
+    const thread = Object.values(threadsByMessageId).find(
+      (candidate) =>
+        candidate.mailboxId === canonicalMailboxId &&
+        candidate.messageId === canonicalMessageId,
+    );
 
     if (!thread?.collaboration) {
       return;
     }
 
-    applyCanonicalCollaborationThreadToMessage(message.id, thread);
+    applyCanonicalCollaborationThreadToMessage(
+      message.id,
+      thread,
+      collaborationStorageMailboxId,
+    );
   };
 
   const buildCollaborationSourceMessageSnapshot = (message: MailMessage) => ({
@@ -19638,16 +21348,26 @@ function MailboxView({
       return;
     }
 
+    const collaborationStorageMailboxId = resolveCollaborationStorageMailboxId(
+      messageId,
+      null,
+      initialCollaboration.sourceMessage,
+    );
+    const sourceMailboxId =
+      (initialCollaboration.sourceMessage.collaborationMailboxId?.trim() as
+        | InboxId
+        | undefined) ?? collaborationStorageMailboxId;
+
     updateMessageById(messageId, (message) => ({
       ...message,
       isShared: true,
       collaboration: initialCollaboration.collaboration,
-    }));
+    }), collaborationStorageMailboxId);
 
     void (async () => {
       const result = await createCollaborationThread({
         workspaceId: currentUserId,
-        mailboxId: mailbox.id,
+        mailboxId: sourceMailboxId,
         sourceMessage: buildCollaborationSourceMessageSnapshot(initialCollaboration.sourceMessage),
         collaboration: initialCollaboration.collaboration,
         isShared: true,
@@ -19657,19 +21377,55 @@ function MailboxView({
         return;
       }
 
-      applyCanonicalCollaborationThreadToMessage(messageId, result.thread);
+      applyCanonicalCollaborationThreadToMessage(
+        messageId,
+        result.thread,
+        collaborationStorageMailboxId,
+      );
     })();
   };
 
-  const openShareCollaboration = (messageId: string) => {
-    const message = getMessageById(messageId);
+  const openShareCollaboration = (
+    messageId: string,
+    sourceMessage?: MailMessage | null,
+  ) => {
+    const scopedSourceMessage =
+      sourceMessage ??
+      (detailActionsMenuState
+        ? selectableMessageRows.find(
+            ({ selection }) =>
+              selection.key === detailActionsMenuState.selectionKey,
+          )?.message ?? null
+        : null);
+    const sourceMailboxId = resolveCollaborationStorageMailboxId(
+      messageId,
+      null,
+      scopedSourceMessage,
+    );
+    const message = getMessageById(messageId, sourceMailboxId);
 
     if (message?.collaboration) {
-      openCollaborationOverlay(messageId);
+      openCollaborationOverlay(messageId, { sourceMailboxId });
       return;
     }
 
-    setSelectionState([messageId], messageId, messageId);
+    setSelectionState([messageId], messageId, messageId, {
+      sourceMailboxId,
+      sourceMessage: message ?? scopedSourceMessage,
+      sourceFolder:
+        (message || scopedSourceMessage
+          ? resolveAuthoritativeMessageLocation({
+              message: (message ?? scopedSourceMessage) as MailMessage,
+              exactLocation:
+                currentMessageLocationByMessage.get(
+                  (message ?? scopedSourceMessage) as MailMessage,
+                ) ?? null,
+              explicitMailboxId: sourceMailboxId,
+              bareIdLocation:
+                currentMessageLocationById[messageId] ?? null,
+            })?.folder
+          : null) ?? activeFolder,
+    });
     setContextMenuState(null);
     setDetailActionsMenuState(null);
     setIsMoreMenuOpen(false);
@@ -19679,18 +21435,26 @@ function MailboxView({
     setCollaborationMemberSearch("");
     setStartCollaborationInviteEmail("");
     setCollaborationNote("");
-    openCollaborationOverlay(messageId);
+    openCollaborationOverlay(messageId, { sourceMailboxId });
   };
 
   const openCollaborationOverlay = (
     messageId: string,
-    options?: { focusComposer?: boolean },
+    options?: { focusComposer?: boolean; sourceMailboxId?: InboxId },
   ) => {
-    syncMessageFromLiveSnapshot(messageId);
-    markCollaborationSeen(messageId);
-    const message = getMessageById(messageId);
+    const sourceMailboxId = resolveCollaborationStorageMailboxId(
+      messageId,
+      options?.sourceMailboxId,
+    );
+    const collaborationStateKey = getCollaborationLocalStateKey(
+      messageId,
+      sourceMailboxId,
+    );
+    syncMessageFromLiveSnapshot(messageId, sourceMailboxId);
+    markCollaborationSeen(messageId, sourceMailboxId);
+    const message = getMessageById(messageId, sourceMailboxId);
     const collaboration =
-      message?.collaboration ?? draftCollaborationByMessageId[messageId];
+      message?.collaboration ?? draftCollaborationByMessageId[collaborationStateKey];
     const hasInternalParticipant = collaboration
       ? hasActiveInternalCollaborationParticipant(
           getCollaborationParticipants(collaboration as MailMessageCollaboration),
@@ -19703,62 +21467,108 @@ function MailboxView({
     } else if (!hasRealInternalTeamContext) {
       setCollaborationReplyVisibility("shared");
     }
-    setSelectionState([messageId], messageId, messageId);
+    setSelectionState([messageId], messageId, messageId, {
+      sourceMailboxId,
+      sourceMessage: message,
+      sourceFolder:
+        (message
+          ? resolveAuthoritativeMessageLocation({
+              message,
+              exactLocation: currentMessageLocationByMessage.get(message) ?? null,
+              explicitMailboxId: sourceMailboxId,
+              bareIdLocation: currentMessageLocationById[message.id] ?? null,
+            })?.folder
+          : null) ?? activeFolder,
+    });
     setActiveCollaborationMessageId(messageId);
+    setActiveCollaborationSourceMailboxId(sourceMailboxId);
     setFocusCollaborationComposer(Boolean(options?.focusComposer));
     setContextMenuState(null);
     setDetailActionsMenuState(null);
     setIsCollaborationActionsMenuOpen(false);
   };
 
-  const clearCollaborationDraft = (messageId: string) => {
+  const clearCollaborationDraft = (
+    messageId: string,
+    explicitMailboxId?: InboxId | null,
+  ) => {
+    const collaborationStateKey = getCollaborationLocalStateKey(
+      messageId,
+      explicitMailboxId,
+    );
     setDraftCollaborationByMessageId((current) => {
-      if (!current[messageId]) {
+      if (!current[collaborationStateKey]) {
         return current;
       }
 
-      const { [messageId]: _discardedDraft, ...remainingDrafts } = current;
+      const {
+        [collaborationStateKey]: _discardedDraft,
+        ...remainingDrafts
+      } = current;
       return remainingDrafts;
     });
   };
 
-  const markCollaborationExternalInviteIssued = (messageId: string) => {
+  const markCollaborationExternalInviteIssued = (
+    messageId: string,
+    explicitMailboxId?: InboxId | null,
+  ) => {
+    const collaborationStateKey = getCollaborationLocalStateKey(
+      messageId,
+      explicitMailboxId,
+    );
     setCollaborationExternalInviteIssuedByMessageId((current) =>
-      current[messageId]
+      current[collaborationStateKey]
         ? current
         : {
             ...current,
-            [messageId]: true,
+            [collaborationStateKey]: true,
           },
     );
   };
 
-  const setCollaborationThreadPreparing = (messageId: string, isPreparing: boolean) => {
+  const setCollaborationThreadPreparing = (
+    messageId: string,
+    isPreparing: boolean,
+    explicitMailboxId?: InboxId | null,
+  ) => {
+    const collaborationStateKey = getCollaborationLocalStateKey(
+      messageId,
+      explicitMailboxId,
+    );
     setCollaborationThreadPreparingByMessageId((current) => {
       if (isPreparing) {
         return {
           ...current,
-          [messageId]: true,
+          [collaborationStateKey]: true,
         };
       }
 
-      if (!current[messageId]) {
+      if (!current[collaborationStateKey]) {
         return current;
       }
 
-      const { [messageId]: _clearedPreparing, ...remainingPreparing } = current;
+      const {
+        [collaborationStateKey]: _clearedPreparing,
+        ...remainingPreparing
+      } = current;
       return remainingPreparing;
     });
   };
 
   const closeCollaborationOverlay = () => {
     const closingMessageId = activeCollaborationMessageId;
+    const closingSourceMailboxId = activeCollaborationSourceMailboxId;
 
-    if (closingMessageId && !getMessageById(closingMessageId)?.collaboration) {
-      clearCollaborationDraft(closingMessageId);
+    if (
+      closingMessageId &&
+      !getMessageById(closingMessageId, closingSourceMailboxId)?.collaboration
+    ) {
+      clearCollaborationDraft(closingMessageId, closingSourceMailboxId);
     }
 
     setActiveCollaborationMessageId(null);
+    setActiveCollaborationSourceMailboxId(null);
     setCollaborationPersonIds([]);
     setCollaborationMemberSearch("");
     setStartCollaborationInviteEmail("");
@@ -19847,25 +21657,36 @@ function MailboxView({
   };
 
   const markMessageCollaborationDone = (messageId: string) => {
-    const currentMessage = getMessageById(messageId);
+    const mutationTargetResult = resolveCurrentCollaborationMutationTarget(messageId);
+
+    if (!mutationTargetResult.ok) {
+      reportAmbiguousCollaborationMutation();
+      return;
+    }
+
+    const mutationTarget = mutationTargetResult.target;
+    const currentMessage = mutationTarget.message;
     const expectedUpdatedAt = currentMessage?.collaboration?.updatedAt;
     const nextTimestamp = Date.now();
 
-    updateMessageById(messageId, (message) =>
-      message.collaboration
-        ? {
-            ...message,
-            isShared: false,
-            collaboration: {
-              ...message.collaboration,
-              state: "resolved",
-              updatedAt: nextTimestamp,
-              resolvedAt: nextTimestamp,
-              resolvedByUserId: currentUserId,
-              resolvedByUserName: currentUserName,
-            },
-          }
-        : message,
+    updateMessageById(
+      messageId,
+      (message) =>
+        message.collaboration
+          ? {
+              ...message,
+              isShared: false,
+              collaboration: {
+                ...message.collaboration,
+                state: "resolved",
+                updatedAt: nextTimestamp,
+                resolvedAt: nextTimestamp,
+                resolvedByUserId: currentUserId,
+                resolvedByUserName: currentUserName,
+              },
+            }
+          : message,
+      mutationTarget.storageMailboxId,
     );
 
     if (activeCollaborationMessageId === messageId) {
@@ -19874,8 +21695,8 @@ function MailboxView({
 
     void (async () => {
       const result = await mutateCollaborationThread({
-        workspaceId: getCollaborationWorkspaceIdForMessage(messageId),
-        messageId: getCollaborationMessageIdForMessage(messageId),
+        workspaceId: mutationTarget.workspaceId,
+        messageId: mutationTarget.canonicalMessageId,
         expectedUpdatedAt,
         action: {
           type: "resolve",
@@ -19885,24 +21706,40 @@ function MailboxView({
       });
 
       if (result.ok) {
-        applyCanonicalCollaborationThreadToMessage(messageId, result.thread);
+        applyCanonicalCollaborationThreadToMessage(
+          messageId,
+          result.thread,
+          mutationTarget.storageMailboxId,
+        );
         return;
       }
 
       if (result.code === "stale_thread") {
-        applyCanonicalCollaborationThreadToMessage(messageId, result.thread);
+        applyCanonicalCollaborationThreadToMessage(
+          messageId,
+          result.thread,
+          mutationTarget.storageMailboxId,
+        );
       }
     })();
   };
 
   const reopenMessageCollaboration = (messageId: string) => {
-    const currentMessage = getMessageById(messageId);
+    const mutationTargetResult = resolveCurrentCollaborationMutationTarget(messageId);
+
+    if (!mutationTargetResult.ok) {
+      reportAmbiguousCollaborationMutation();
+      return;
+    }
+
+    const mutationTarget = mutationTargetResult.target;
+    const currentMessage = mutationTarget.message;
     const expectedUpdatedAt = currentMessage?.collaboration?.updatedAt;
 
     void (async () => {
       const result = await mutateCollaborationThread({
-        workspaceId: getCollaborationWorkspaceIdForMessage(messageId),
-        messageId: getCollaborationMessageIdForMessage(messageId),
+        workspaceId: mutationTarget.workspaceId,
+        messageId: mutationTarget.canonicalMessageId,
         expectedUpdatedAt,
         action: {
           type: "reopen",
@@ -19910,12 +21747,20 @@ function MailboxView({
       });
 
       if (result.ok) {
-        applyCanonicalCollaborationThreadToMessage(messageId, result.thread);
+        applyCanonicalCollaborationThreadToMessage(
+          messageId,
+          result.thread,
+          mutationTarget.storageMailboxId,
+        );
         return;
       }
 
       if (result.code === "stale_thread") {
-        applyCanonicalCollaborationThreadToMessage(messageId, result.thread);
+        applyCanonicalCollaborationThreadToMessage(
+          messageId,
+          result.thread,
+          mutationTarget.storageMailboxId,
+        );
       }
     })();
   };
@@ -19933,15 +21778,27 @@ function MailboxView({
       return;
     }
 
+    const collaborationStateKey = getCollaborationLocalStateKey(
+      activeCollaborationMessageId,
+    );
+
     setDraftCollaborationByMessageId((current) => ({
       ...current,
-      [activeCollaborationMessageId]: initialCollaboration.collaboration,
+      [collaborationStateKey]: initialCollaboration.collaboration,
     }));
     setStartCollaborationInviteEmail("");
   };
 
   const sendCollaborationReply = (messageId: string) => {
-    if (collaborationThreadPreparingByMessageId[messageId]) {
+    const collaborationStorageMailboxId = resolveCollaborationStorageMailboxId(
+      messageId,
+    );
+    const collaborationStateKey = getCollaborationLocalStateKey(
+      messageId,
+      collaborationStorageMailboxId,
+    );
+
+    if (collaborationThreadPreparingByMessageId[collaborationStateKey]) {
       setCollaborationReplyFeedback("Collaboration is preparing. Try again in a moment.");
       return;
     }
@@ -19956,7 +21813,10 @@ function MailboxView({
       return;
     }
 
-    const currentMessage = getMessageById(messageId);
+    const currentMessage = getMessageById(
+      messageId,
+      collaborationStorageMailboxId,
+    );
     const canonicalMessage = getStoredCanonicalCollaborationMessage(messageId);
     const nextTimestamp = Date.now();
     const mentions = extractCollaborationMentions(
@@ -19967,7 +21827,7 @@ function MailboxView({
     const replyVisibility = hasRealInternalTeamContext
       ? collaborationReplyVisibility
       : "shared";
-    const draftCollaboration = draftCollaborationByMessageId[messageId];
+    const draftCollaboration = draftCollaborationByMessageId[collaborationStateKey];
     const hasExternalParticipantWithoutCanonical =
       activeCollaborationMessageId === messageId && activeCollaborationHasExternalParticipant;
 
@@ -20014,12 +21874,12 @@ function MailboxView({
       };
 
       setCollaborationReplyFeedback("");
-      setCollaborationReplySendingMessageId(messageId);
+      setCollaborationReplySendingMessageId(collaborationStateKey);
       void (async () => {
         try {
           const result = await createCollaborationThread({
             workspaceId: currentUserId,
-            mailboxId: mailbox.id,
+            mailboxId: getCollaborationMailboxIdForMessage(messageId),
             sourceMessage: buildCollaborationSourceMessageSnapshot(currentMessage),
             collaboration: nextCollaboration,
             isShared: true,
@@ -20030,9 +21890,13 @@ function MailboxView({
             return;
           }
 
-          applyCanonicalCollaborationThreadToMessage(messageId, result.thread);
+          applyCanonicalCollaborationThreadToMessage(
+            messageId,
+            result.thread,
+            collaborationStorageMailboxId,
+          );
           markCanonicalCollaborationThreadSeen(result.thread);
-          clearCollaborationDraft(messageId);
+          clearCollaborationDraft(messageId, collaborationStorageMailboxId);
           setCollaborationReplyDraft("");
           setCollaborationReplyFeedback("");
           if (!hasManualCollaborationReplyVisibility) {
@@ -20042,7 +21906,7 @@ function MailboxView({
           setCollaborationReplySelection(null);
         } finally {
           setCollaborationReplySendingMessageId((current) =>
-            current === messageId ? null : current,
+            current === collaborationStateKey ? null : current,
           );
         }
       })();
@@ -20054,16 +21918,25 @@ function MailboxView({
       return;
     }
 
+    const mutationTargetResult = resolveCurrentCollaborationMutationTarget(messageId);
+
+    if (!mutationTargetResult.ok) {
+      reportAmbiguousCollaborationMutation();
+      return;
+    }
+
+    const mutationTarget = mutationTargetResult.target;
+
     const expectedUpdatedAt = canonicalMessage.collaboration.updatedAt;
 
     setCollaborationReplyFeedback("");
-    setCollaborationReplySendingMessageId(messageId);
+    setCollaborationReplySendingMessageId(collaborationStateKey);
     void (async () => {
       try {
         const sendCanonicalReplyWithExpectedUpdatedAt = (nextExpectedUpdatedAt?: number) =>
           mutateCollaborationThread({
-            workspaceId: getCollaborationWorkspaceIdForMessage(messageId),
-            messageId: getCollaborationMessageIdForMessage(messageId),
+            workspaceId: mutationTarget.workspaceId,
+            messageId: mutationTarget.canonicalMessageId,
             expectedUpdatedAt: nextExpectedUpdatedAt,
             action: {
               type: "reply",
@@ -20075,7 +21948,11 @@ function MailboxView({
             },
           });
         const applySuccessfulReplyResult = (thread: CollaborationThread) => {
-          applyCanonicalCollaborationThreadToMessage(messageId, thread);
+          applyCanonicalCollaborationThreadToMessage(
+            messageId,
+            thread,
+            mutationTarget.storageMailboxId,
+          );
           markCanonicalCollaborationThreadSeen(thread);
           setCollaborationReplyDraft("");
           setCollaborationReplyFeedback("");
@@ -20094,7 +21971,11 @@ function MailboxView({
         }
 
         if (result.code === "stale_thread") {
-          applyCanonicalCollaborationThreadToMessage(messageId, result.thread);
+          applyCanonicalCollaborationThreadToMessage(
+            messageId,
+            result.thread,
+            mutationTarget.storageMailboxId,
+          );
           const retryResult = await sendCanonicalReplyWithExpectedUpdatedAt(
             result.thread.collaboration.updatedAt,
           );
@@ -20105,7 +21986,11 @@ function MailboxView({
           }
 
           if (retryResult.code === "stale_thread") {
-            applyCanonicalCollaborationThreadToMessage(messageId, retryResult.thread);
+            applyCanonicalCollaborationThreadToMessage(
+              messageId,
+              retryResult.thread,
+              mutationTarget.storageMailboxId,
+            );
             setCollaborationReplyFeedback(
               "Collaboration changed. Review the latest thread and try again.",
             );
@@ -20119,7 +22004,7 @@ function MailboxView({
         setCollaborationReplyFeedback("Could not send reply. Try again.");
       } finally {
         setCollaborationReplySendingMessageId((current) =>
-          current === messageId ? null : current,
+          current === collaborationStateKey ? null : current,
         );
       }
     })();
@@ -20133,6 +22018,9 @@ function MailboxView({
       return;
     }
 
+    const collaborationStorageMailboxId = resolveCollaborationStorageMailboxId(
+      messageId,
+    );
     const nextTimestamp = Date.now();
     const selectedParticipants = collaborationSelectablePeople.filter(
       (person) => participantPersonIds.includes(person.id),
@@ -20142,11 +22030,32 @@ function MailboxView({
       return;
     }
 
-    const currentMessage = getMessageById(messageId);
+    const currentMessage = getMessageById(
+      messageId,
+      collaborationStorageMailboxId,
+    );
     const canonicalCollaboration = currentMessage?.collaboration;
+    const canonicalMutationTargetResult = canonicalCollaboration
+      ? resolveCurrentCollaborationMutationTarget(messageId)
+      : null;
+
+    if (canonicalMutationTargetResult && !canonicalMutationTargetResult.ok) {
+      reportAmbiguousCollaborationMutation();
+      return;
+    }
+
+    const canonicalMutationTarget =
+      canonicalMutationTargetResult?.ok
+        ? canonicalMutationTargetResult.target
+        : null;
     const draftCollaboration = canonicalCollaboration
       ? undefined
-      : draftCollaborationByMessageId[messageId];
+      : draftCollaborationByMessageId[
+          getCollaborationLocalStateKey(
+            messageId,
+            collaborationStorageMailboxId,
+          )
+        ];
     const expectedUpdatedAt = canonicalCollaboration?.updatedAt;
     let nextParticipantsForCanonicalWrite: MailMessageCollaborationParticipant[] | null = null;
     let draftCollaborationForCanonicalCreate: CollaborationThread["collaboration"] | null = null;
@@ -20223,24 +22132,28 @@ function MailboxView({
         didApplyInternalParticipants = true;
       }
 
-      updateMessageById(messageId, (message) => {
-        if (!message.collaboration) {
-          return message;
-        }
+      updateMessageById(
+        messageId,
+        (message) => {
+          if (!message.collaboration) {
+            return message;
+          }
 
-        if (!nextParticipantsForCanonicalWrite) {
-          return message;
-        }
+          if (!nextParticipantsForCanonicalWrite) {
+            return message;
+          }
 
-        return {
-          ...message,
-          collaboration: {
-            ...message.collaboration,
-            updatedAt: nextTimestamp,
-            participants: nextParticipantsForCanonicalWrite,
-          },
-        };
-      });
+          return {
+            ...message,
+            collaboration: {
+              ...message.collaboration,
+              updatedAt: nextTimestamp,
+              participants: nextParticipantsForCanonicalWrite,
+            },
+          };
+        },
+        canonicalMutationTarget?.storageMailboxId,
+      );
     } else if (selectedInternalParticipants.length > 0 && draftCollaboration) {
       const mergedParticipants = mergeSelectedInternalParticipants(
         draftCollaboration.participants ?? [],
@@ -20275,12 +22188,16 @@ function MailboxView({
     if (draftCollaborationForCanonicalCreate && currentMessage) {
       const nextDraftCollaboration = draftCollaborationForCanonicalCreate;
 
-      setCollaborationThreadPreparing(messageId, true);
+      setCollaborationThreadPreparing(
+        messageId,
+        true,
+        collaborationStorageMailboxId,
+      );
       void (async () => {
         try {
           const result = await createCollaborationThread({
             workspaceId: currentUserId,
-            mailboxId: mailbox.id,
+            mailboxId: getCollaborationMailboxIdForMessage(messageId),
             sourceMessage: buildCollaborationSourceMessageSnapshot(currentMessage),
             collaboration: nextDraftCollaboration,
             isShared: true,
@@ -20291,14 +22208,22 @@ function MailboxView({
             return;
           }
 
-          applyCanonicalCollaborationThreadToMessage(messageId, result.thread);
-          clearCollaborationDraft(messageId);
+          applyCanonicalCollaborationThreadToMessage(
+            messageId,
+            result.thread,
+            collaborationStorageMailboxId,
+          );
+          clearCollaborationDraft(messageId, collaborationStorageMailboxId);
           setCollaborationParticipantPersonIds([]);
           setCollaborationParticipantSearch("");
           setIsCollaborationParticipantPickerOpen(false);
           setCollaborationReplyFeedback("");
         } finally {
-          setCollaborationThreadPreparing(messageId, false);
+          setCollaborationThreadPreparing(
+            messageId,
+            false,
+            collaborationStorageMailboxId,
+          );
         }
       })();
       return;
@@ -20308,10 +22233,15 @@ function MailboxView({
       return;
     }
 
+    if (!canonicalMutationTarget) {
+      reportAmbiguousCollaborationMutation();
+      return;
+    }
+
     void (async () => {
       const result = await mutateCollaborationThread({
-        workspaceId: getCollaborationWorkspaceIdForMessage(messageId),
-        messageId: getCollaborationMessageIdForMessage(messageId),
+        workspaceId: canonicalMutationTarget.workspaceId,
+        messageId: canonicalMutationTarget.canonicalMessageId,
         expectedUpdatedAt,
         action: {
           type: "participants_set",
@@ -20320,12 +22250,20 @@ function MailboxView({
       });
 
       if (result.ok) {
-        applyCanonicalCollaborationThreadToMessage(messageId, result.thread);
+        applyCanonicalCollaborationThreadToMessage(
+          messageId,
+          result.thread,
+          canonicalMutationTarget.storageMailboxId,
+        );
         return;
       }
 
       if (result.code === "stale_thread") {
-        applyCanonicalCollaborationThreadToMessage(messageId, result.thread);
+        applyCanonicalCollaborationThreadToMessage(
+          messageId,
+          result.thread,
+          canonicalMutationTarget.storageMailboxId,
+        );
       }
     })();
   };
@@ -20389,28 +22327,42 @@ function MailboxView({
       return;
     }
 
-    const currentMessage = getMessageById(messageId);
-    const expectedUpdatedAt = currentMessage?.collaboration?.updatedAt;
+    const mutationTargetResult = resolveCurrentCollaborationMutationTarget(messageId);
+
+    if (!mutationTargetResult.ok) {
+      reportAmbiguousCollaborationMutation();
+      return;
+    }
+
+    const mutationTarget = mutationTargetResult.target;
+    const currentMessage = mutationTarget.message;
+    const expectedUpdatedAt = currentMessage.collaboration?.updatedAt;
     let nextParticipantsForCanonicalWrite: MailMessageCollaborationParticipant[] | null = null;
 
-    updateMessageById(messageId, (message) => {
-      if (!message.collaboration) {
-        return message;
-      }
+    updateMessageById(
+      messageId,
+      (message) => {
+        if (!message.collaboration) {
+          return message;
+        }
 
-      nextParticipantsForCanonicalWrite = (message.collaboration.participants ?? []).filter(
-        (participant) => participant.email.toLowerCase() !== normalizedEmail,
-      );
+        nextParticipantsForCanonicalWrite = (
+          message.collaboration.participants ?? []
+        ).filter(
+          (participant) => participant.email.toLowerCase() !== normalizedEmail,
+        );
 
-      return {
-        ...message,
-        collaboration: {
-          ...message.collaboration,
-          updatedAt: Date.now(),
-          participants: nextParticipantsForCanonicalWrite,
-        },
-      };
-    });
+        return {
+          ...message,
+          collaboration: {
+            ...message.collaboration,
+            updatedAt: Date.now(),
+            participants: nextParticipantsForCanonicalWrite,
+          },
+        };
+      },
+      mutationTarget.storageMailboxId,
+    );
 
     if (!nextParticipantsForCanonicalWrite) {
       return;
@@ -20418,8 +22370,8 @@ function MailboxView({
 
     void (async () => {
       const result = await mutateCollaborationThread({
-        workspaceId: getCollaborationWorkspaceIdForMessage(messageId),
-        messageId: getCollaborationMessageIdForMessage(messageId),
+        workspaceId: mutationTarget.workspaceId,
+        messageId: mutationTarget.canonicalMessageId,
         expectedUpdatedAt,
         action: {
           type: "participants_set",
@@ -20428,12 +22380,20 @@ function MailboxView({
       });
 
       if (result.ok) {
-        applyCanonicalCollaborationThreadToMessage(messageId, result.thread);
+        applyCanonicalCollaborationThreadToMessage(
+          messageId,
+          result.thread,
+          mutationTarget.storageMailboxId,
+        );
         return;
       }
 
       if (result.code === "stale_thread") {
-        applyCanonicalCollaborationThreadToMessage(messageId, result.thread);
+        applyCanonicalCollaborationThreadToMessage(
+          messageId,
+          result.thread,
+          mutationTarget.storageMailboxId,
+        );
       }
     })();
   };
@@ -20448,12 +22408,20 @@ function MailboxView({
 
     let inviteUrl = "";
 
-    const currentMessage = getMessageById(messageId);
+    const collaborationStorageMailboxId = resolveCollaborationStorageMailboxId(
+      messageId,
+    );
+    const sourceMailboxId = getCollaborationMailboxIdForMessage(messageId);
+    const currentMessage = getMessageById(
+      messageId,
+      collaborationStorageMailboxId,
+    );
     if (currentMessage?.collaboration) {
+      const canonicalMessageId = getCollaborationMessageIdForMessage(messageId);
       let issueResult = await issueCollaborationInvite({
         workspaceId: currentUserId,
-        mailboxId: mailbox.id,
-        messageId,
+        mailboxId: sourceMailboxId,
+        messageId: canonicalMessageId,
         inviteeEmail: participant.email.toLowerCase(),
         createdByUserId: currentUserId,
         createdByUserName: currentUserName,
@@ -20462,18 +22430,22 @@ function MailboxView({
       if (!issueResult.ok) {
         const createResult = await createCollaborationThread({
           workspaceId: currentUserId,
-          mailboxId: mailbox.id,
+          mailboxId: sourceMailboxId,
           sourceMessage: buildCollaborationSourceMessageSnapshot(currentMessage),
           collaboration: currentMessage.collaboration as CollaborationThread["collaboration"],
           isShared: currentMessage.isShared === true,
         });
 
         if (createResult.ok && createResult.thread) {
-          applyCanonicalCollaborationThreadToMessage(messageId, createResult.thread);
+          applyCanonicalCollaborationThreadToMessage(
+            messageId,
+            createResult.thread,
+            collaborationStorageMailboxId,
+          );
           issueResult = await issueCollaborationInvite({
             workspaceId: currentUserId,
-            mailboxId: mailbox.id,
-            messageId,
+            mailboxId: sourceMailboxId,
+            messageId: canonicalMessageId,
             inviteeEmail: participant.email.toLowerCase(),
             createdByUserId: currentUserId,
             createdByUserName: currentUserName,
@@ -20483,7 +22455,11 @@ function MailboxView({
 
       if (issueResult.ok) {
         inviteUrl = issueResult.inviteUrl;
-        applyCanonicalCollaborationThreadToMessage(messageId, issueResult.thread);
+        applyCanonicalCollaborationThreadToMessage(
+          messageId,
+          issueResult.thread,
+          collaborationStorageMailboxId,
+        );
       }
     }
 
@@ -20512,7 +22488,7 @@ function MailboxView({
     }
 
     const inviteUrl = buildExternalCollaborationReviewLinkFromToken(
-      messageId,
+      getCollaborationMessageIdForMessage(messageId),
       participant.email,
       participant.externalReviewToken,
     );
@@ -20546,19 +22522,36 @@ function MailboxView({
       return;
     }
 
-    const currentMessage = getMessageById(messageId);
+    const collaborationStorageMailboxId = resolveCollaborationStorageMailboxId(
+      messageId,
+    );
+    const sourceMailboxId = getCollaborationMailboxIdForMessage(messageId);
+    const canonicalMessageId = getCollaborationMessageIdForMessage(messageId);
+    const currentMessage = getMessageById(
+      messageId,
+      collaborationStorageMailboxId,
+    );
     const draftCollaboration = currentMessage?.collaboration
       ? undefined
-      : draftCollaborationByMessageId[messageId];
+      : draftCollaborationByMessageId[
+          getCollaborationLocalStateKey(
+            messageId,
+            collaborationStorageMailboxId,
+          )
+        ];
     let inviteLink = "";
 
     if (currentMessage?.collaboration || (currentMessage && draftCollaboration)) {
-      setCollaborationThreadPreparing(messageId, true);
+      setCollaborationThreadPreparing(
+        messageId,
+        true,
+        collaborationStorageMailboxId,
+      );
       try {
         const issueResult = await issueCollaborationInvite({
           workspaceId: currentUserId,
-          mailboxId: mailbox.id,
-          messageId,
+          mailboxId: sourceMailboxId,
+          messageId: canonicalMessageId,
           inviteeEmail: normalizedEmail,
           createdByUserId: currentUserId,
           createdByUserName: currentUserName,
@@ -20572,12 +22565,23 @@ function MailboxView({
 
         if (issueResult.ok) {
           inviteLink = issueResult.inviteUrl;
-          applyCanonicalCollaborationThreadToMessage(messageId, issueResult.thread);
-          markCollaborationExternalInviteIssued(messageId);
-          clearCollaborationDraft(messageId);
+          applyCanonicalCollaborationThreadToMessage(
+            messageId,
+            issueResult.thread,
+            collaborationStorageMailboxId,
+          );
+          markCollaborationExternalInviteIssued(
+            messageId,
+            collaborationStorageMailboxId,
+          );
+          clearCollaborationDraft(messageId, collaborationStorageMailboxId);
         }
       } finally {
-        setCollaborationThreadPreparing(messageId, false);
+        setCollaborationThreadPreparing(
+          messageId,
+          false,
+          collaborationStorageMailboxId,
+        );
       }
     }
 
@@ -20620,11 +22624,23 @@ function MailboxView({
       return;
     }
 
-    const existingInviteMessage = getMessageById(messageId);
+    const collaborationStorageMailboxId = resolveCollaborationStorageMailboxId(
+      messageId,
+    );
+    const existingInviteMessage = getMessageById(
+      messageId,
+      collaborationStorageMailboxId,
+    );
     const draftInviteCollaboration = existingInviteMessage?.collaboration
       ? undefined
-      : draftCollaborationByMessageId[messageId];
-    const sourceMailboxId = currentMessageLocationById[messageId]?.mailboxId ?? mailbox.id;
+      : draftCollaborationByMessageId[
+          getCollaborationLocalStateKey(
+            messageId,
+            collaborationStorageMailboxId,
+          )
+        ];
+    const sourceMailboxId = getCollaborationMailboxIdForMessage(messageId);
+    const canonicalMessageId = getCollaborationMessageIdForMessage(messageId);
     const sendingMailbox =
       orderedMailboxes.find((candidate) => candidate.id === sourceMailboxId) ?? mailbox;
     const managedMailbox = managedInboxes.find(
@@ -20659,12 +22675,16 @@ function MailboxView({
         formatCollaborationParticipantNameFromEmail(normalizedEmail) ||
         normalizedEmail;
 
-      setCollaborationThreadPreparing(messageId, true);
+      setCollaborationThreadPreparing(
+        messageId,
+        true,
+        collaborationStorageMailboxId,
+      );
       try {
         const issueResult = await issueCollaborationInvite({
           workspaceId: currentUserId,
           mailboxId: sourceMailboxId,
-          messageId,
+          messageId: canonicalMessageId,
           inviteeEmail: normalizedEmail,
           createdByUserId: currentUserId,
           createdByUserName: currentUserName,
@@ -20678,16 +22698,29 @@ function MailboxView({
         if (issueResult.ok) {
           inviteLink = issueResult.inviteUrl;
           issuedInviteThread = issueResult.thread;
-          applyCanonicalCollaborationThreadToMessage(messageId, issueResult.thread);
-          markCollaborationExternalInviteIssued(messageId);
-          clearCollaborationDraft(messageId);
+          applyCanonicalCollaborationThreadToMessage(
+            messageId,
+            issueResult.thread,
+            collaborationStorageMailboxId,
+          );
+          markCollaborationExternalInviteIssued(
+            messageId,
+            collaborationStorageMailboxId,
+          );
+          clearCollaborationDraft(messageId, collaborationStorageMailboxId);
         }
       } finally {
-        setCollaborationThreadPreparing(messageId, false);
+        setCollaborationThreadPreparing(
+          messageId,
+          false,
+          collaborationStorageMailboxId,
+        );
       }
     }
 
-    const sourceMessage = getMessageById(messageId) ?? existingInviteMessage;
+    const sourceMessage =
+      getMessageById(messageId, collaborationStorageMailboxId) ??
+      existingInviteMessage;
     const sourceCollaboration = sourceMessage?.collaboration ?? issuedInviteThread?.collaboration;
 
     if (!sourceMessage || !sourceCollaboration || !inviteLink) {
@@ -20905,7 +22938,11 @@ function MailboxView({
   };
 
   const isMessageFromImapMailbox = (message: MailMessage) => {
-    const sourceMailboxId = currentMessageLocationById[message.id]?.mailboxId ?? mailbox.id;
+    const sourceMailboxId =
+      currentMessageLocationByMessage.get(message)?.mailboxId ??
+      message.threadIdentityContext?.mailboxId ??
+      currentMessageLocationById[message.id]?.mailboxId ??
+      mailbox.id;
     const sourceMailbox = managedInboxes.find((candidate) => candidate.id === sourceMailboxId);
 
     return Boolean(sourceMailbox && isImapCredentialsProvider(sourceMailbox.provider));
@@ -20921,7 +22958,11 @@ function MailboxView({
         return;
       }
 
-      const messageLocation = currentMessageLocationById[message.id];
+      const messageLocation = resolveAuthoritativeMessageLocation({
+        message,
+        exactLocation: currentMessageLocationByMessage.get(message) ?? null,
+        bareIdLocation: currentMessageLocationById[message.id] ?? null,
+      });
       const sourceMailboxId = messageLocation?.mailboxId ?? mailbox.id;
       const sourceMailbox = managedInboxes.find((candidate) => candidate.id === sourceMailboxId);
 
@@ -20961,6 +23002,8 @@ function MailboxView({
   ): InboxMessageActionRequest | null => {
     const sourceMailboxId =
       exactImapSource?.mailboxId ??
+      currentMessageLocationByMessage.get(message)?.mailboxId ??
+      message.threadIdentityContext?.mailboxId ??
       currentMessageLocationById[message.id]?.mailboxId ??
       mailbox.id;
     const sourceMailbox = managedInboxes.find((candidate) => candidate.id === sourceMailboxId);
@@ -21169,7 +23212,11 @@ function MailboxView({
       return;
     }
 
-    const explicitLocation = currentMessageLocationById[message.id];
+    const explicitLocation = resolveAuthoritativeMessageLocation({
+      message,
+      exactLocation: currentMessageLocationByMessage.get(message) ?? null,
+      bareIdLocation: currentMessageLocationById[message.id] ?? null,
+    });
     const candidateMailboxIds = Array.from(
       new Set(
         [explicitLocation?.mailboxId, mailbox.id].filter(
@@ -21396,70 +23443,50 @@ function MailboxView({
   };
 
   const handleSelectMessage = (
-    _folder: MailFolder,
+    folder: MailFolder,
     messageId: string,
     options?: {
       openFull?: boolean;
       isToggle?: boolean;
       isRange?: boolean;
       triggerAutoRead?: boolean;
+      sourceMailboxId?: InboxId;
+      sourceMessage?: MailMessage;
     },
   ) => {
-    const sortedMessageIds = sortedMessages.map((message) => message.id);
-    if (options?.isRange) {
-      const anchorId =
-        selectionAnchorId && sortedMessageIds.includes(selectionAnchorId)
-          ? selectionAnchorId
-          : selectedMessageId && sortedMessageIds.includes(selectedMessageId)
-            ? selectedMessageId
-            : messageId;
-      const anchorIndex = sortedMessageIds.indexOf(anchorId);
-      const targetIndex = sortedMessageIds.indexOf(messageId);
+    const targetRow =
+      (options?.sourceMessage
+        ? {
+            message: options.sourceMessage,
+            selection: buildMailboxScopedMessageSelection(
+              options.sourceMailboxId ??
+                getCurrentMessageSourceMailboxId(options.sourceMessage),
+              options.sourceMessage,
+              folder,
+            ),
+          }
+        : null) ??
+      selectableMessageRows.find(
+        ({ message, selection }) =>
+          message.id === messageId &&
+          (!options?.sourceMailboxId ||
+            selection.mailboxId === options.sourceMailboxId),
+      ) ??
+      null;
 
-      if (anchorIndex !== -1 && targetIndex !== -1) {
-        const [startIndex, endIndex] =
-          anchorIndex <= targetIndex
-            ? [anchorIndex, targetIndex]
-            : [targetIndex, anchorIndex];
-        const rangeIds = sortedMessageIds.slice(startIndex, endIndex + 1);
-
-        setSelectionState(rangeIds, messageId, anchorId);
-      } else {
-        setSelectionState([messageId], messageId, messageId);
-      }
-      setIsFullMessageOpen(false);
+    if (!targetRow) {
       return;
     }
 
-    if (options?.isToggle) {
-      const alreadySelected = selectedMessageIds.includes(messageId);
-
-      if (alreadySelected) {
-        const remainingMessageIds = selectedMessageIds.filter(
-          (selectedId) => selectedId !== messageId,
-        );
-        const nextPrimaryMessageId = remainingMessageIds.includes(
-          selectedMessageId ?? "",
-        )
-          ? selectedMessageId
-          : remainingMessageIds[remainingMessageIds.length - 1] ?? null;
-
-        setSelectionState(
-          remainingMessageIds,
-          nextPrimaryMessageId,
-          remainingMessageIds.length > 0
-            ? selectionAnchorId && remainingMessageIds.includes(selectionAnchorId)
-              ? selectionAnchorId
-              : nextPrimaryMessageId
-            : null,
-        );
-      } else {
-        setSelectionState(
-          [...selectedMessageIds, messageId],
-          messageId,
-          messageId,
-        );
-      }
+    if (options?.isRange || options?.isToggle) {
+      setMailboxScopedSelectionState(
+        reduceMailboxScopedMessageSelection(
+          mailboxScopedSelectionState,
+          selectableMessageSelections,
+          targetRow.selection,
+          options.isRange ? "range" : "toggle",
+        ),
+      );
       setIsFullMessageOpen(false);
       return;
     }
@@ -21481,159 +23508,37 @@ function MailboxView({
       resetFullMessageModalSize();
     }
 
-    setSelectionState(
-      nextModalState.selectedMessageId ? [nextModalState.selectedMessageId] : [],
-      nextModalState.selectedMessageId,
-      nextModalState.selectedMessageId,
+    setMailboxScopedSelectionState(
+      nextModalState.selectedMessageId
+        ? reduceMailboxScopedMessageSelection(
+            mailboxScopedSelectionState,
+            selectableMessageSelections,
+            targetRow.selection,
+            "single",
+          )
+        : { selected: [], primaryKey: null, anchorKey: null },
     );
     setIsFullMessageOpen(nextModalState.isOpen);
-    const ownershipMessage = getMessageById(messageId);
-    if (ownershipMessage) {
-      onRecordMessageOwnershipInteraction(ownershipMessage);
-    }
+    onRecordMessageOwnershipInteraction(targetRow.message);
   };
 
   const moveMessagesAcrossWorkspace = (
-    targetMailboxId: InboxId,
+    _targetMailboxId: InboxId,
     targetFolder: MailFolder,
     messageIds: string[],
+    selections: MailboxScopedMessageSelection[],
   ) => {
     if (targetFolder === "Trash" && workspaceDataMode === "live") {
       void trashMessagesFromEntryPoint(messageIds);
       return;
     }
-    if (shouldBlockSmartFolderMutation()) {
-      return;
-    }
-
-    if (messageIds.length === 0) {
-      closeMenus();
-      return;
-    }
-
-    const identityKeySet = buildCanonicalIdentityKeySetForMessageIds(mailboxStore, messageIds);
-    const messagesToMove = Object.values(mailboxStore).flatMap((collections) =>
-      canonicalFolderOrder.flatMap((folder) =>
-        collections[folder].filter((message) =>
-          doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
-        ),
-      ),
-    );
-
-    if (targetFolder === "Filtered") {
-      applyFilteredLearningFromMessages(messagesToMove, onSaveLearningRule);
-    }
-
-    setMailboxStore((currentStore) => {
-      const currentMessagesToMove = Object.values(currentStore).flatMap((collections) =>
-        canonicalFolderOrder.flatMap((folder) =>
-          collections[folder].filter((message) =>
-            doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
-          ),
-        ),
-      );
-
-      if (currentMessagesToMove.length === 0) {
-        return currentStore;
-      }
-
-      return Object.entries(currentStore).reduce<MailboxStore>((nextStore, [mailboxId, collections]) => {
-        const typedMailboxId = mailboxId as InboxId;
-
-        nextStore[typedMailboxId] = {
-          Inbox:
-            typedMailboxId === targetMailboxId && targetFolder === "Inbox"
-              ? [
-                  ...currentMessagesToMove,
-                  ...collections.Inbox.filter(
-                    (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
-                  ),
-                ]
-              : collections.Inbox.filter(
-                  (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
-                ),
-          Drafts:
-            typedMailboxId === targetMailboxId && targetFolder === "Drafts"
-              ? [
-                  ...currentMessagesToMove,
-                  ...collections.Drafts.filter(
-                    (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
-                  ),
-                ]
-              : collections.Drafts.filter(
-                  (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
-                ),
-          Sent:
-            typedMailboxId === targetMailboxId && targetFolder === "Sent"
-              ? [
-                  ...currentMessagesToMove,
-                  ...collections.Sent.filter(
-                    (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
-                  ),
-                ]
-              : collections.Sent.filter(
-                  (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
-                ),
-          Archive:
-            typedMailboxId === targetMailboxId && targetFolder === "Archive"
-              ? [
-                  ...currentMessagesToMove,
-                  ...collections.Archive.filter(
-                    (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
-                  ),
-                ]
-              : collections.Archive.filter(
-                  (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
-                ),
-          Filtered:
-            typedMailboxId === targetMailboxId && targetFolder === "Filtered"
-              ? [
-                  ...currentMessagesToMove,
-                  ...collections.Filtered.filter(
-                    (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
-                  ),
-                ]
-              : collections.Filtered.filter(
-                  (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
-                ),
-          Spam:
-            typedMailboxId === targetMailboxId && targetFolder === "Spam"
-              ? [
-                  ...currentMessagesToMove,
-                  ...collections.Spam.filter(
-                    (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
-                  ),
-                ]
-              : collections.Spam.filter(
-                  (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
-                ),
-          Trash:
-            typedMailboxId === targetMailboxId && targetFolder === "Trash"
-              ? [
-                  ...currentMessagesToMove,
-                  ...collections.Trash.filter(
-                    (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
-                  ),
-                ]
-              : collections.Trash.filter(
-                  (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
-                ),
-        };
-
-        return nextStore;
-      }, {} as MailboxStore);
-    });
-
-    if (isSharedView) {
-      advanceSelectionAfterAction(messageIds);
-    }
-
-    closeMenus();
+    moveMessagesToFolderAcrossWorkspace(targetFolder, messageIds, selections);
   };
 
   const moveMessagesToFolderAcrossWorkspace = (
     targetFolder: MailFolder,
     messageIds: string[],
+    selections: MailboxScopedMessageSelection[] = [],
   ) => {
     if (targetFolder === "Trash" && workspaceDataMode === "live") {
       void trashMessagesFromEntryPoint(messageIds);
@@ -21648,28 +23553,28 @@ function MailboxView({
       return;
     }
 
-    const groupedMessageIds = messageIds.reduce<Partial<Record<InboxId, string[]>>>(
-      (groups, messageId) => {
-        const messageLocation = currentMessageLocationById[messageId];
-
-        if (!messageLocation) {
-          return groups;
-        }
-
-        groups[messageLocation.mailboxId] = [
-          ...(groups[messageLocation.mailboxId] ?? []),
-          messageId,
-        ];
-        return groups;
-      },
-      {},
-    );
+    const scopedSelections =
+      selections.length > 0
+        ? selections
+        : selectableMessageSelections.filter((selection) =>
+            messageIds.includes(selection.messageId),
+          );
+    const groupedMessageIds = scopedSelections.reduce<
+      Partial<Record<InboxId, string[]>>
+    >((groups, selection) => {
+      groups[selection.mailboxId] = [
+        ...(groups[selection.mailboxId] ?? []),
+        selection.messageId,
+      ];
+      return groups;
+    }, {});
 
     if (targetFolder === "Filtered") {
       const groupedMessagesToMove = Object.entries(groupedMessageIds).flatMap(([mailboxId, ids]) => {
         const typedMailboxId = mailboxId as InboxId;
-        const identityKeySet = buildCanonicalIdentityKeySetForMessageIds(
+        const identityKeySet = buildCanonicalIdentityKeySetForMailboxMessageIds(
           mailboxStore,
+          typedMailboxId,
           ids ?? [],
         );
         const mailboxCollections = mailboxStore[typedMailboxId];
@@ -21688,109 +23593,16 @@ function MailboxView({
       applyFilteredLearningFromMessages(groupedMessagesToMove, onSaveLearningRule);
     }
 
-    setMailboxStore((currentStore) => {
-      const nextStore = { ...currentStore };
-
-      Object.entries(groupedMessageIds).forEach(([mailboxId, ids]) => {
-        const typedMailboxId = mailboxId as InboxId;
-        const identityKeySet = buildCanonicalIdentityKeySetForMessageIds(
-          currentStore,
-          ids ?? [],
-        );
-        const mailboxCollections = currentStore[typedMailboxId];
-        const messagesToMove = canonicalFolderOrder.flatMap((folder) =>
-          mailboxCollections[folder].filter((message) =>
-            doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
-          ),
-        );
-
-        if (messagesToMove.length === 0) {
-          return;
-        }
-
-        nextStore[typedMailboxId] = {
-          Inbox:
-            targetFolder === "Inbox"
-              ? [
-                  ...messagesToMove,
-                  ...mailboxCollections.Inbox.filter(
-                    (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
-                  ),
-                ]
-              : mailboxCollections.Inbox.filter(
-                  (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
-                ),
-          Drafts:
-            targetFolder === "Drafts"
-              ? [
-                  ...messagesToMove,
-                  ...mailboxCollections.Drafts.filter(
-                    (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
-                  ),
-                ]
-              : mailboxCollections.Drafts.filter(
-                  (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
-                ),
-          Sent:
-            targetFolder === "Sent"
-              ? [
-                  ...messagesToMove,
-                  ...mailboxCollections.Sent.filter(
-                    (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
-                  ),
-                ]
-              : mailboxCollections.Sent.filter(
-                  (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
-                ),
-          Archive:
-            targetFolder === "Archive"
-              ? [
-                  ...messagesToMove,
-                  ...mailboxCollections.Archive.filter(
-                    (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
-                  ),
-                ]
-              : mailboxCollections.Archive.filter(
-                  (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
-                ),
-          Filtered:
-            targetFolder === "Filtered"
-              ? [
-                  ...messagesToMove,
-                  ...mailboxCollections.Filtered.filter(
-                    (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
-                  ),
-                ]
-              : mailboxCollections.Filtered.filter(
-                  (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
-                ),
-          Spam:
-            targetFolder === "Spam"
-              ? [
-                  ...messagesToMove,
-                  ...mailboxCollections.Spam.filter(
-                    (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
-                  ),
-                ]
-              : mailboxCollections.Spam.filter(
-                  (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
-                ),
-          Trash:
-            targetFolder === "Trash"
-              ? [
-                  ...messagesToMove,
-                  ...mailboxCollections.Trash.filter(
-                    (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
-                  ),
-                ]
-              : mailboxCollections.Trash.filter(
-                  (message) => !doesMessageMatchCanonicalIdentitySet(message, identityKeySet),
-                ),
-        };
-      });
-
-      return nextStore;
-    });
+    setMailboxStore((currentStore) =>
+      moveMailboxScopedSelectionsToFolder(
+        currentStore,
+        scopedSelections,
+        targetFolder,
+      ),
+    );
+    if (isSharedView) {
+      advanceSelectionAfterAction(messageIds, scopedSelections);
+    }
     closeMenus();
   };
 
@@ -21823,8 +23635,9 @@ function MailboxView({
     }
 
     const sourceMessages = mailboxStore[sourceMailboxId][sourceFolder];
-    const identityKeySet = buildCanonicalIdentityKeySetForMessageIds(
+    const identityKeySet = buildCanonicalIdentityKeySetForMailboxMessageIds(
       mailboxStore,
+      sourceMailboxId,
       messageIds,
     );
     const targetMessages = sourceMessages.filter((message) =>
@@ -21901,7 +23714,10 @@ function MailboxView({
   };
 
   const getLearningTargetMessages = (message: MailMessage) => {
-    const matchedMessages = getMessagesByIds([message.id]);
+    const matchedMessages = getMessagesByIds(
+      [message.id],
+      [buildCurrentMessageSelection(message)],
+    );
     return matchedMessages.length > 0 ? matchedMessages : [message];
   };
 
@@ -21915,14 +23731,18 @@ function MailboxView({
     onAddSpamSuppression(targetMessages);
 
     if (isSharedView) {
-      moveMessagesToFolderAcrossWorkspace("Spam", [message.id]);
+      moveMessagesToFolderAcrossWorkspace("Spam", [message.id], [
+        buildCurrentMessageSelection(message),
+      ]);
       return;
     }
 
-    const sourceLocation = currentMessageLocationById[message.id] ?? {
-      mailboxId: mailbox.id,
-      folder: activeFolder,
-    };
+    const sourceLocation =
+      resolveAuthoritativeMessageLocation({
+        message,
+        exactLocation: currentMessageLocationByMessage.get(message) ?? null,
+        bareIdLocation: currentMessageLocationById[message.id] ?? null,
+      }) ?? { mailboxId: mailbox.id, folder: activeFolder };
 
     moveMessages(
       sourceLocation.mailboxId,
@@ -21942,10 +23762,12 @@ function MailboxView({
     const targetMessages = getLearningTargetMessages(message);
     onRemoveSpamSuppression(targetMessages);
 
-    const sourceLocation = currentMessageLocationById[message.id] ?? {
-      mailboxId: mailbox.id,
-      folder: activeFolder,
-    };
+    const sourceLocation =
+      resolveAuthoritativeMessageLocation({
+        message,
+        exactLocation: currentMessageLocationByMessage.get(message) ?? null,
+        bareIdLocation: currentMessageLocationById[message.id] ?? null,
+      }) ?? { mailboxId: mailbox.id, folder: activeFolder };
 
     if (sourceLocation.folder !== "Filtered" && sourceLocation.folder !== "Spam") {
       closeMenus();
@@ -21953,7 +23775,9 @@ function MailboxView({
     }
 
     if (isSharedView) {
-      moveMessagesToFolderAcrossWorkspace("Inbox", [message.id]);
+      moveMessagesToFolderAcrossWorkspace("Inbox", [message.id], [
+        buildCurrentMessageSelection(message),
+      ]);
       return;
     }
 
@@ -22010,6 +23834,26 @@ function MailboxView({
   };
 
   const deleteMessages = (messageIds: string[]) => {
+    const detailActionSelection = detailActionsMenuState
+      ? selectableMessageRows.find(
+          ({ selection }) =>
+            selection.key === detailActionsMenuState.selectionKey,
+        )?.selection ?? null
+      : null;
+    const selections =
+      messageIds === actionableSelectionIds
+        ? actionableSelections
+        : messageIds === contextMenuSelectionIds
+          ? contextMenuSelections
+          : dragPayload && messageIds === dragPayload.messageIds
+            ? dragPayload.selections
+            : messageIds.length === 1 &&
+                detailActionSelection?.messageId === messageIds[0]
+              ? [detailActionSelection]
+            : messageIds.length === 1 &&
+                primaryMessageSelection?.messageId === messageIds[0]
+              ? [primaryMessageSelection]
+              : [];
     if (shouldBlockSmartFolderMutation()) {
       return;
     }
@@ -22025,12 +23869,12 @@ function MailboxView({
     }
 
     if (isSharedView) {
-      moveMessagesAcrossWorkspace(mailbox.id, "Trash", messageIds);
+      moveMessagesAcrossWorkspace(mailbox.id, "Trash", messageIds, selections);
       return;
     }
 
     if (activeFolder === "Spam") {
-      moveMessagesToFolderAcrossWorkspace("Trash", messageIds);
+      moveMessagesToFolderAcrossWorkspace("Trash", messageIds, selections);
       return;
     }
 
@@ -22090,24 +23934,35 @@ function MailboxView({
     return () => window.clearTimeout(timeoutId);
   }, [mailboxActionToastMessage]);
 
-  const contextMenuMessage = contextMenuState
-    ? folderMessages.find((message) => message.id === contextMenuState.messageId) ?? null
+  const contextMenuRow = contextMenuState
+    ? selectableMessageRows.find(
+        ({ selection }) => selection.key === contextMenuState.selectionKey,
+      ) ?? null
     : null;
-  const contextMenuSelectionIds = contextMenuState
-    ? getEffectiveSelectionIds(contextMenuState.messageId)
+  const contextMenuMessage = contextMenuRow?.message ?? null;
+  const contextMenuSelections = contextMenuRow
+    ? getEffectiveScopedSelections(contextMenuRow.selection)
     : [];
-  const selectedMessages = sortedMessages.filter((message) =>
-    visibleSelectedMessageIds.includes(message.id),
-  );
+  const contextMenuSelectionIds = contextMenuState
+    ? contextMenuSelections.map((selection) => selection.messageId)
+    : [];
+  const selectedMessages = selectableMessageRows
+    .filter(({ selection }) => visibleSelectedMessageKeys.includes(selection.key))
+    .map(({ message }) => message);
   const selectedUnreadCount = selectedMessages.filter((message) => message.unread).length;
   const shouldBulkMarkAsRead = selectedUnreadCount > 0;
-  const selectedCount = visibleSelectedMessageIds.length;
-  const actionableSelectionIds =
-    visibleSelectedMessageIds.length > 0
-      ? visibleSelectedMessageIds
-      : selectedMessageId
-        ? [selectedMessageId]
+  const selectedCount = visibleSelectedMessageKeys.length;
+  const actionableSelections =
+    visibleSelectedMessageKeys.length > 0
+      ? selectedMessageSelections.filter((selection) =>
+          visibleSelectedMessageKeys.includes(selection.key),
+        )
+      : primaryMessageSelection
+        ? [primaryMessageSelection]
         : [];
+  const actionableSelectionIds = actionableSelections.map(
+    (selection) => selection.messageId,
+  );
   const hasSelection = selectedCount > 0;
   const hasSingleSelection = selectedCount === 1;
   const contextMenuPosition = contextMenuState
@@ -22129,17 +23984,39 @@ function MailboxView({
     { label: "Spam", folder: "Spam" as MailFolder },
     { label: "Trash", folder: "Trash" as MailFolder },
   ].filter((target) => target.folder !== activeFolder);
-  const moveMessagesToManualTarget = (targetFolder: MailFolder, messageIds: string[]) => {
+  const moveMessagesToManualTarget = (
+    targetFolder: MailFolder,
+    messageIds: string[],
+    selections: MailboxScopedMessageSelection[] = [],
+  ) => {
     if (targetFolder === "Archive") {
+      if (isSharedView) {
+        moveMessagesAcrossWorkspace(
+          mailbox.id,
+          "Archive",
+          messageIds,
+          selections,
+        );
+        return;
+      }
       void archiveMessagesFromEntryPoint(messageIds);
       return;
     }
     if (targetFolder === "Trash") {
+      if (isSharedView) {
+        moveMessagesAcrossWorkspace(
+          mailbox.id,
+          "Trash",
+          messageIds,
+          selections,
+        );
+        return;
+      }
       void trashMessagesFromEntryPoint(messageIds);
       return;
     }
 
-    const targetMessages = getMessagesByIds(messageIds);
+    const targetMessages = getMessagesByIds(messageIds, selections);
 
     if (targetFolder === "Spam") {
       onAddSpamSuppression(targetMessages);
@@ -22150,12 +24027,12 @@ function MailboxView({
     }
 
     if (isSharedView) {
-      moveMessagesAcrossWorkspace(mailbox.id, targetFolder, messageIds);
+      moveMessagesAcrossWorkspace(mailbox.id, targetFolder, messageIds, selections);
       return;
     }
 
     if (activeSmartFolder || activeFolder === "Spam") {
-      moveMessagesToFolderAcrossWorkspace(targetFolder, messageIds);
+      moveMessagesToFolderAcrossWorkspace(targetFolder, messageIds, selections);
       return;
     }
 
@@ -22336,7 +24213,7 @@ function MailboxView({
     isFullMessageOpen,
     isMultiSelectActive,
     isSharedView,
-    selectedMessageId,
+    primaryMessageSelection?.key,
   ]);
 
   const isProviderAuthoritativeArchiveMailbox = (
@@ -22357,14 +24234,15 @@ function MailboxView({
       mailboxId: InboxId;
       folder: MailFolder;
     },
+    selections: MailboxScopedMessageSelection[] = [],
   ) => {
     if (isSharedView) {
-      moveMessagesAcrossWorkspace(mailbox.id, "Archive", messageIds);
+      moveMessagesAcrossWorkspace(mailbox.id, "Archive", messageIds, selections);
       return;
     }
 
     if (activeSmartFolder || (!explicitSource && activeFolder === "Spam")) {
-      moveMessagesToFolderAcrossWorkspace("Archive", messageIds);
+      moveMessagesToFolderAcrossWorkspace("Archive", messageIds, selections);
       return;
     }
 
@@ -22399,14 +24277,42 @@ function MailboxView({
       mailboxId: InboxId;
       folder: MailFolder;
     },
+    selections: MailboxScopedMessageSelection[] = [],
   ) {
     if (messageIds.length === 0) {
       return;
     }
+    const detailActionSelection = detailActionsMenuState
+      ? selectableMessageRows.find(
+          ({ selection }) =>
+            selection.key === detailActionsMenuState.selectionKey,
+        )?.selection ?? null
+      : null;
+    const scopedSelections =
+      selections.length > 0
+        ? selections
+        : messageIds === actionableSelectionIds
+          ? actionableSelections
+          : messageIds === contextMenuSelectionIds
+            ? contextMenuSelections
+            : messageIds.length === 1 &&
+                detailActionSelection?.messageId === messageIds[0]
+              ? [detailActionSelection]
+            : messageIds.length === 1 &&
+                primaryMessageSelection?.messageId === messageIds[0]
+              ? [primaryMessageSelection]
+              : [];
 
-    const sourceLocations = messageIds.map((messageId) => {
+    const sourceLocations = messageIds.map((messageId, index) => {
       if (explicitSource) {
         return explicitSource;
+      }
+      const selection = scopedSelections[index];
+      if (selection) {
+        return {
+          mailboxId: selection.mailboxId,
+          folder: selection.folder ?? activeFolder,
+        };
       }
       if (!isSharedView && !activeSmartFolder) {
         return {
@@ -22429,7 +24335,7 @@ function MailboxView({
       if (shouldBlockSmartFolderMutation()) {
         return;
       }
-      archiveMessagesLocally(messageIds, explicitSource);
+      archiveMessagesLocally(messageIds, explicitSource, scopedSelections);
       return;
     }
 
@@ -22620,12 +24526,43 @@ function MailboxView({
       mailboxId: InboxId;
       folder: MailFolder;
     },
+    selections: MailboxScopedMessageSelection[] = [],
   ) {
     if (messageIds.length === 0) {
       closeMenus();
       return;
     }
+    const detailActionSelection = detailActionsMenuState
+      ? selectableMessageRows.find(
+          ({ selection }) =>
+            selection.key === detailActionsMenuState.selectionKey,
+        )?.selection ?? null
+      : null;
+    const scopedSelections =
+      selections.length > 0
+        ? selections
+        : messageIds === actionableSelectionIds
+          ? actionableSelections
+          : messageIds === contextMenuSelectionIds
+            ? contextMenuSelections
+          : dragPayload && messageIds === dragPayload.messageIds
+            ? dragPayload.selections
+            : messageIds.length === 1 &&
+                detailActionSelection?.messageId === messageIds[0]
+              ? [detailActionSelection]
+            : messageIds.length === 1 &&
+                  primaryMessageSelection?.messageId === messageIds[0]
+                ? [primaryMessageSelection]
+                : [];
     if (workspaceDataMode !== "live") {
+      if (scopedSelections.length > 0) {
+        moveMessagesToFolderAcrossWorkspace(
+          "Trash",
+          messageIds,
+          scopedSelections,
+        );
+        return;
+      }
       const sourceMailboxId = explicitSource?.mailboxId ?? mailbox.id;
       const sourceFolder = explicitSource?.folder ?? activeFolder;
       moveMessages(
@@ -22638,10 +24575,19 @@ function MailboxView({
       return;
     }
 
-    const sourceLocation = explicitSource ?? {
-      mailboxId: mailbox.id,
-      folder: activeFolder,
-    };
+    const sourceSelection =
+      scopedSelections.length === 1 ? scopedSelections[0] : null;
+    const sourceLocation =
+      explicitSource ??
+      (sourceSelection
+        ? {
+            mailboxId: sourceSelection.mailboxId,
+            folder: sourceSelection.folder ?? activeFolder,
+          }
+        : {
+            mailboxId: mailbox.id,
+            folder: activeFolder,
+          });
     const sourceManagedMailbox = managedInboxes.find(
       (candidate) => candidate.id === sourceLocation.mailboxId,
     );
@@ -22936,7 +24882,12 @@ function MailboxView({
     }
 
     if (isSharedView) {
-      moveMessagesAcrossWorkspace(mailbox.id, "Trash", actionableSelectionIds);
+      moveMessagesAcrossWorkspace(
+        mailbox.id,
+        "Trash",
+        actionableSelectionIds,
+        actionableSelections,
+      );
       return;
     }
 
@@ -22957,27 +24908,33 @@ function MailboxView({
 
   const handleDragStart = (
     event: DragEvent<HTMLButtonElement>,
-    messageId: string,
+    targetSelection: MailboxScopedMessageSelection,
   ) => {
-    const messageIds =
-      selectedMessageIds.includes(messageId) && selectedMessageIds.length > 1
-        ? selectedMessageIds
-        : [messageId];
+    const selections =
+      selectedMessageSelections.some(
+        (selection) => selection.key === targetSelection.key,
+      ) && selectedMessageSelections.length > 1
+        ? selectedMessageSelections
+        : [targetSelection];
+    const messageIds = selections.map((selection) => selection.messageId);
 
-    if (!selectedMessageIds.includes(messageId)) {
-      setSelectionState([messageId], messageId, messageId);
+    if (
+      !selectedMessageSelections.some(
+        (selection) => selection.key === targetSelection.key,
+      )
+    ) {
+      setMailboxScopedSelectionState({
+        selected: [targetSelection],
+        primaryKey: targetSelection.key,
+        anchorKey: targetSelection.key,
+      });
     }
 
     setDragPayload({
-      sourceMailboxId:
-        isSharedView || activeSmartFolder
-          ? currentMessageLocationById[messageId]?.mailboxId ?? mailbox.id
-          : mailbox.id,
-      sourceFolder:
-        isSharedView || activeSmartFolder
-          ? currentMessageLocationById[messageId]?.folder ?? "Inbox"
-          : activeFolder,
+      sourceMailboxId: targetSelection.mailboxId,
+      sourceFolder: targetSelection.folder ?? activeFolder,
       messageIds,
+      selections,
     });
     dragPreviewCleanupRef.current?.();
 
@@ -23052,32 +25009,43 @@ function MailboxView({
 
     if (target.type === "folder") {
       if (target.folder === "Archive") {
-        void archiveMessagesFromEntryPoint(dragPayload.messageIds, {
-          mailboxId: dragPayload.sourceMailboxId,
-          folder: dragPayload.sourceFolder,
-        });
+        void archiveMessagesFromEntryPoint(
+          dragPayload.messageIds,
+          undefined,
+          dragPayload.selections,
+        );
       } else if (target.folder === "Trash") {
         void trashMessagesFromEntryPoint(dragPayload.messageIds, {
           mailboxId: dragPayload.sourceMailboxId,
           folder: dragPayload.sourceFolder,
-        });
+        },
+          dragPayload.selections,
+        );
       } else {
-        moveMessages(
-          dragPayload.sourceMailboxId,
-          dragPayload.sourceFolder,
-          dragPayload.sourceMailboxId,
+        moveMessagesToFolderAcrossWorkspace(
           target.folder,
           dragPayload.messageIds,
+          dragPayload.selections,
         );
       }
     } else {
-      moveMessages(
-        dragPayload.sourceMailboxId,
-        dragPayload.sourceFolder,
-        target.mailboxId,
-        "Inbox",
-        dragPayload.messageIds,
-      );
+      const groupedSelections = dragPayload.selections.reduce<
+        Record<string, MailboxScopedMessageSelection[]>
+      >((groups, selection) => {
+        const groupKey = `${selection.mailboxId}::${selection.folder ?? "Inbox"}`;
+        groups[groupKey] = [...(groups[groupKey] ?? []), selection];
+        return groups;
+      }, {});
+      Object.values(groupedSelections).forEach((selections) => {
+        const [firstSelection] = selections;
+        moveMessages(
+          firstSelection.mailboxId,
+          firstSelection.folder ?? "Inbox",
+          target.mailboxId,
+          "Inbox",
+          selections.map((selection) => selection.messageId),
+        );
+      });
     }
 
     setDragPayload(null);
@@ -23091,30 +25059,51 @@ function MailboxView({
       folder?.scope === "selected" && folder.selectedInboxIds.length > 0
         ? folder.selectedInboxIds
         : orderedMailboxes.map((candidate) => candidate.id);
-    const candidateMessages = folder
+    const candidateRows = folder
       ? scopeMailboxIds.flatMap((mailboxId) =>
-          getSmartFolderMessagesForMailbox(mailboxId, folder),
+          getSmartFolderMessagesForMailbox(mailboxId, folder).map((message) => ({
+            message,
+            selection: buildMailboxScopedMessageSelection(
+              mailboxId,
+              message,
+              "Inbox",
+            ),
+          })),
         )
       : [];
-    const nextMessageId = resolveNextMessageId(candidateMessages, "Inbox", false, folderId);
+    const nextSelection = resolveNextMessageSelection(
+      candidateRows,
+      "Inbox",
+      false,
+      folderId,
+    );
 
     setActiveSmartFolderId(folderId);
     setIsSharedView(false);
     setActiveFolder("Inbox");
     setIsFullMessageOpen(false);
-    setSelectionState(
-      nextMessageId ? [nextMessageId] : [],
-      nextMessageId,
-      nextMessageId,
-    );
+    setMailboxScopedSelectionState({
+      selected: nextSelection ? [nextSelection] : [],
+      primaryKey: nextSelection?.key ?? null,
+      anchorKey: nextSelection?.key ?? null,
+    });
     closeMenus();
   };
 
   useEffect(() => {
     if (activeSmartFolderId === null) {
       if (lastAppliedSmartFolderIdRef.current !== null) {
-        const nextMessageId = resolveNextMessageId(
-          filterOrganizerManagedMessagesForMailboxView(messageCollections.Inbox),
+        const nextSelection = resolveNextMessageSelection(
+          filterOrganizerManagedMessagesForMailboxView(messageCollections.Inbox).map(
+            (message) => ({
+              message,
+              selection: buildMailboxScopedMessageSelection(
+                mailbox.id,
+                message,
+                "Inbox",
+              ),
+            }),
+          ),
           "Inbox",
           false,
           null,
@@ -23123,11 +25112,11 @@ function MailboxView({
         setIsSharedView(false);
         setActiveFolder("Inbox");
         setIsFullMessageOpen(false);
-        setSelectionState(
-          nextMessageId ? [nextMessageId] : [],
-          nextMessageId,
-          nextMessageId,
-        );
+        setMailboxScopedSelectionState({
+          selected: nextSelection ? [nextSelection] : [],
+          primaryKey: nextSelection?.key ?? null,
+          anchorKey: nextSelection?.key ?? null,
+        });
       }
 
       lastAppliedSmartFolderIdRef.current = null;
@@ -23143,8 +25132,13 @@ function MailboxView({
   }, [activeSmartFolderId]);
 
   const switchToFolder = (folder: MailFolder) => {
-    const nextMessageId = resolveNextMessageId(
-      filterOrganizerManagedMessagesForMailboxView(messageCollections[folder]),
+    const nextSelection = resolveNextMessageSelection(
+      filterOrganizerManagedMessagesForMailboxView(messageCollections[folder]).map(
+        (message) => ({
+          message,
+          selection: buildMailboxScopedMessageSelection(mailbox.id, message, folder),
+        }),
+      ),
       folder,
       false,
       null,
@@ -23154,11 +25148,11 @@ function MailboxView({
     setIsSharedView(false);
     setActiveFolder(folder);
     setIsFullMessageOpen(false);
-    setSelectionState(
-      nextMessageId ? [nextMessageId] : [],
-      nextMessageId,
-      nextMessageId,
-    );
+    setMailboxScopedSelectionState({
+      selected: nextSelection ? [nextSelection] : [],
+      primaryKey: nextSelection?.key ?? null,
+      anchorKey: nextSelection?.key ?? null,
+    });
     if (folder === "Archive") {
       onArchiveFolderOpen();
     } else if (folder === "Trash") {
@@ -23168,17 +25162,29 @@ function MailboxView({
   };
 
   const switchToSharedView = () => {
-    const nextMessageId = resolveNextMessageId(workspaceSharedMessages, "Inbox", true, null);
+    const nextSelection = resolveNextMessageSelection(
+      workspaceSharedEntries.map((entry) => ({
+        message: entry.message,
+        selection: buildMailboxScopedMessageSelection(
+          entry.mailboxId,
+          entry.message,
+          entry.folder,
+        ),
+      })),
+      "Inbox",
+      true,
+      null,
+    );
 
     setActiveSmartFolderId(null);
     setIsSharedView(true);
     setActiveFolder("Inbox");
     setIsFullMessageOpen(false);
-    setSelectionState(
-      nextMessageId ? [nextMessageId] : [],
-      nextMessageId,
-      nextMessageId,
-    );
+    setMailboxScopedSelectionState({
+      selected: nextSelection ? [nextSelection] : [],
+      primaryKey: nextSelection?.key ?? null,
+      anchorKey: nextSelection?.key ?? null,
+    });
     closeMenus();
   };
 
@@ -23237,20 +25243,22 @@ function MailboxView({
       if (event.key === "ArrowDown" || event.key === "ArrowUp") {
         event.preventDefault();
 
-        const currentIndex = selectedMessage
-          ? sortedMessages.findIndex((message) => message.id === selectedMessage.id)
-          : -1;
-        const fallbackIndex = event.key === "ArrowDown" ? 0 : sortedMessages.length - 1;
-        const targetIndex =
-          currentIndex === -1
-            ? fallbackIndex
-            : event.key === "ArrowDown"
-              ? Math.min(currentIndex + 1, sortedMessages.length - 1)
-              : Math.max(currentIndex - 1, 0);
-        const targetMessage = sortedMessages[targetIndex];
+        const targetSelection = resolveAdjacentMailboxScopedMessageSelection(
+          selectableMessageSelections,
+          mailboxScopedSelectionState.primaryKey,
+          event.key === "ArrowDown" ? "next" : "previous",
+        );
+        const targetMessage = targetSelection
+          ? selectableMessageRows.find(
+              ({ selection }) => selection.key === targetSelection.key,
+            )?.message ?? null
+          : null;
 
-        if (targetMessage) {
-          handleSelectMessage(activeFolder, targetMessage.id);
+        if (targetMessage && targetSelection) {
+          handleSelectMessage(activeFolder, targetMessage.id, {
+            sourceMailboxId: targetSelection.mailboxId,
+            sourceMessage: targetMessage,
+          });
         }
         return;
       }
@@ -23261,7 +25269,10 @@ function MailboxView({
         }
 
         event.preventDefault();
-        handleSelectMessage(activeFolder, selectedMessage.id);
+        handleSelectMessage(activeFolder, selectedMessage.id, {
+          sourceMailboxId: primaryMessageSelection?.mailboxId,
+          sourceMessage: selectedMessage,
+        });
         return;
       }
 
@@ -23848,14 +25859,21 @@ function MailboxView({
                 <button
                   type="button"
                   onClick={() => {
-                    const primaryMessageId =
-                      visibleSelectedMessageIds[0] ?? selectedMessageId ?? null;
+                    const primarySelectedRow =
+                      selectableMessageRows.find(({ selection }) =>
+                        visibleSelectedMessageKeys[0]
+                          ? selection.key === visibleSelectedMessageKeys[0]
+                          : selection.key === primaryMessageSelection?.key,
+                      ) ?? null;
 
-                    if (!primaryMessageId) {
+                    if (!primarySelectedRow) {
                       return;
                     }
 
-                    openShareCollaboration(primaryMessageId);
+                    openShareCollaboration(
+                      primarySelectedRow.message.id,
+                      primarySelectedRow.message,
+                    );
                   }}
                   className={contextMenuMainItemClass}
                 >
@@ -23879,6 +25897,7 @@ function MailboxView({
                         onSetManualPriority(
                           targetMsg.id,
                           !isVisiblePriorityMessage(targetMsg),
+                          buildManualPriorityUpdateOptions(targetMsg),
                         );
                         closeMenus();
                       }}
@@ -23892,7 +25911,7 @@ function MailboxView({
                       <button
                         type="button"
                         onClick={() => {
-                          markPriorityMessageDone(selectedMessage.id);
+                          markPriorityMessageDone(selectedMessage);
                           closeMenus();
                         }}
                         className={contextMenuMainItemClass}
@@ -24784,7 +26803,10 @@ function MailboxView({
                 ) : (
                   <div className="space-y-2">
                     {sortedMessages.map((message) => {
-                      const active = visibleSelectedMessageIds.includes(message.id);
+                      const rowSelection = buildCurrentMessageSelection(message);
+                      const active = visibleSelectedMessageKeys.includes(
+                        rowSelection.key,
+                      );
                       const compactSnippet =
                         message.snippet.length > MAIL_LIST_PREVIEW_CHARACTER_CAP
                           ? message.snippet
@@ -24858,12 +26880,19 @@ function MailboxView({
                         themeMode === "dark"
                           ? "text-[color:rgba(220,212,202,0.84)]"
                           : "text-[color:rgba(120,111,100,0.76)]";
-                      const hasUnreadCollaboration = hasUnreadCollaborationUpdate(message);
+                      const collaborationStorageMailboxId = rowSelection.mailboxId;
+                      const renderedRowIdentity = rowSelection.key;
+                      const hasUnreadCollaboration =
+                        hasUnreadCollaborationUpdate(
+                          message,
+                          collaborationStorageMailboxId,
+                        );
                       return (
                         <button
-                          key={message.id}
+                          key={renderedRowIdentity}
                           type="button"
                           data-message-row-id={message.id}
+                          data-message-row-identity={renderedRowIdentity}
                           draggable={!isReadOnlySmartFolderView}
                           onDragStart={(event) => {
                             if (isReadOnlySmartFolderView) {
@@ -24871,7 +26900,7 @@ function MailboxView({
                               return;
                             }
 
-                            handleDragStart(event, message.id);
+                            handleDragStart(event, rowSelection);
                           }}
                           onDragEnd={() => {
                             if (isReadOnlySmartFolderView) {
@@ -24884,6 +26913,9 @@ function MailboxView({
                             if (event.shiftKey) {
                               handleSelectMessage(activeFolder, message.id, {
                                 isRange: true,
+                                sourceMailboxId:
+                                  collaborationStorageMailboxId,
+                                sourceMessage: message,
                               });
                               return;
                             }
@@ -24891,17 +26923,27 @@ function MailboxView({
                             if (event.metaKey || event.ctrlKey) {
                               handleSelectMessage(activeFolder, message.id, {
                                 isToggle: true,
+                                sourceMailboxId:
+                                  collaborationStorageMailboxId,
+                                sourceMessage: message,
                               });
                               return;
                             }
 
-                            handleSelectMessage(activeFolder, message.id);
+                            handleSelectMessage(activeFolder, message.id, {
+                              sourceMailboxId:
+                                collaborationStorageMailboxId,
+                              sourceMessage: message,
+                            });
                             markInboxMessageReadOnOpen(message);
                           }}
                           onDoubleClick={(event) => {
                             fullMessageModalReturnFocusRef.current = event.currentTarget;
                             handleSelectMessage(activeFolder, message.id, {
                               openFull: true,
+                              sourceMailboxId:
+                                collaborationStorageMailboxId,
+                              sourceMessage: message,
                             });
                           }}
                           onContextMenu={(event) => {
@@ -24917,6 +26959,9 @@ function MailboxView({
                             setIsMoreMenuOpen(false);
                             setContextMenuState({
                               messageId: message.id,
+                              sourceMailboxId:
+                                collaborationStorageMailboxId,
+                              selectionKey: rowSelection.key,
                               x: event.clientX,
                               y: event.clientY,
                               moveMenuOpen: false,
@@ -25065,7 +27110,10 @@ function MailboxView({
                                     type="button"
                                     onClick={(event) => {
                                       event.stopPropagation();
-                                      openCollaborationOverlay(message.id);
+                                      openCollaborationOverlay(message.id, {
+                                        sourceMailboxId:
+                                          collaborationStorageMailboxId,
+                                      });
                                     }}
                                     className="inline-flex items-center gap-1.5 text-[0.68rem] leading-5 text-[color:rgba(120,111,100,0.72)] transition-colors duration-150 hover:text-[var(--workspace-text)] focus-visible:outline-none"
                                   >
@@ -25525,7 +27573,10 @@ function MailboxView({
                   <button
                     type="button"
                     onClick={() => {
-                      handleSelectMessage(activeFolder, contextMenuMessage.id);
+                      handleSelectMessage(activeFolder, contextMenuMessage.id, {
+                        sourceMailboxId: contextMenuState.sourceMailboxId,
+                        sourceMessage: contextMenuMessage,
+                      });
                       markInboxMessageReadOnOpen(contextMenuMessage, { imapOnly: true });
                       closeMenus();
                     }}
@@ -25571,8 +27622,16 @@ function MailboxView({
                           [contextMenuMessage.id],
                           contextMenuMessage.id,
                           contextMenuMessage.id,
+                          {
+                            sourceMailboxId: contextMenuState.sourceMailboxId,
+                            sourceMessage: contextMenuMessage,
+                            sourceFolder: contextMenuRow?.selection.folder,
+                          },
                         );
-                        openShareCollaboration(contextMenuMessage.id);
+                        openShareCollaboration(
+                          contextMenuMessage.id,
+                          contextMenuMessage,
+                        );
                       }}
                       className={contextMenuMainItemClass}
                     >
@@ -25614,6 +27673,7 @@ function MailboxView({
                       onSetManualPriority(
                         contextMenuMessage.id,
                         !isVisiblePriorityMessage(contextMenuMessage),
+                        buildManualPriorityUpdateOptions(contextMenuMessage),
                       );
                       closeMenus();
                     }}
@@ -25627,7 +27687,7 @@ function MailboxView({
                     <button
                       type="button"
                       onClick={() => {
-                        markPriorityMessageDone(contextMenuMessage.id);
+                        markPriorityMessageDone(contextMenuMessage);
                         closeMenus();
                       }}
                       className={contextMenuMainItemClass}
@@ -25807,7 +27867,11 @@ function MailboxView({
                           pendingProviderTrashKeys.length > 0)
                       }
                       onClick={() => {
-                        moveMessagesToManualTarget(target.folder, contextMenuSelectionIds);
+                        moveMessagesToManualTarget(
+                          target.folder,
+                          contextMenuSelectionIds,
+                          contextMenuSelections,
+                        );
                       }}
                       className={contextMenuItemClass}
                     >
@@ -25841,7 +27905,11 @@ function MailboxView({
 	                  <button
 	                    type="button"
 	                    onClick={() => {
-	                      onSetManualPriority(contextMenuMessage.id, true);
+	                      onSetManualPriority(
+	                        contextMenuMessage.id,
+	                        true,
+	                        buildManualPriorityUpdateOptions(contextMenuMessage),
+	                      );
 	                      closeMenus();
 	                    }}
 	                    className={contextMenuItemClass}
@@ -25851,7 +27919,11 @@ function MailboxView({
 	                  <button
 	                    type="button"
 	                    onClick={() => {
-	                      onSetManualPriority(contextMenuMessage.id, false);
+	                      onSetManualPriority(
+	                        contextMenuMessage.id,
+	                        false,
+	                        buildManualPriorityUpdateOptions(contextMenuMessage),
+	                      );
 	                      closeMenus();
 	                    }}
 	                    className={contextMenuItemClass}
@@ -25937,9 +28009,13 @@ function MailboxView({
 	                      onClick={() => {
 	                        onSetManualLabelOverride(contextMenuMessage, label);
 	                        if (label === "Reply") {
-	                          onSetManualPriority(contextMenuMessage.id, true, {
-	                            showConfirmation: false,
-	                          });
+	                          onSetManualPriority(
+	                            contextMenuMessage.id,
+	                            true,
+	                            buildManualPriorityUpdateOptions(contextMenuMessage, {
+	                              showConfirmation: false,
+	                            }),
+	                          );
 	                        }
 	                        closeMenus();
 	                      }}
@@ -25977,7 +28053,13 @@ function MailboxView({
 	                    type="button"
 	                    onClick={() => {
 	                      if (readingLearningTargetMessage) {
-	                        onSetManualPriority(readingLearningTargetMessage.id, true);
+	                        onSetManualPriority(
+	                          readingLearningTargetMessage.id,
+	                          true,
+	                          buildManualPriorityUpdateOptions(
+	                            readingLearningTargetMessage,
+	                          ),
+	                        );
 	                      }
 	                      closeMenus();
 	                    }}
@@ -25989,7 +28071,13 @@ function MailboxView({
 	                    type="button"
 	                    onClick={() => {
 	                      if (readingLearningTargetMessage) {
-	                        onSetManualPriority(readingLearningTargetMessage.id, false);
+	                        onSetManualPriority(
+	                          readingLearningTargetMessage.id,
+	                          false,
+	                          buildManualPriorityUpdateOptions(
+	                            readingLearningTargetMessage,
+	                          ),
+	                        );
 	                      }
 	                      closeMenus();
 	                    }}
@@ -26016,9 +28104,14 @@ function MailboxView({
 	                            if (readingLearningTargetMessage) {
 	                              onSetManualLabelOverride(readingLearningTargetMessage, label);
 	                              if (label === "Reply") {
-	                                onSetManualPriority(readingLearningTargetMessage.id, true, {
-	                                  showConfirmation: false,
-	                                });
+	                                onSetManualPriority(
+	                                  readingLearningTargetMessage.id,
+	                                  true,
+	                                  buildManualPriorityUpdateOptions(
+	                                    readingLearningTargetMessage,
+	                                    { showConfirmation: false },
+	                                  ),
+	                                );
 	                              }
 	                            }
 	                            closeMenus();
@@ -38307,24 +40400,6 @@ export function WorkspaceShell({
       return changed || migratedOverrides !== current ? nextOverrides : current;
     });
   };
-  const buildMessageIdentityIndexes = <T extends MessageIdentitySource>(messages: T[]) => ({
-    byId: new Map<string, T>(
-      messages
-        .filter(
-          (message): message is T & { id: string } =>
-            typeof message.id === "string" && message.id.length > 0,
-        )
-        .map((message) => [message.id, message]),
-    ),
-    byImapUid: new Map(
-      messages
-        .filter((message) => Boolean(message.imapUid))
-        .map((message) => [message.imapUid as string, message]),
-    ),
-    byPreviewIdentity: new Map(
-      messages.map((message) => [buildStablePreviewIdentity(message), message]),
-    ),
-  });
   const hasRenderableMessagePayload = (message: {
     body?: unknown;
     bodyHtml?: unknown;
@@ -40690,25 +42765,35 @@ export function WorkspaceShell({
   const applyCanonicalCollaborationThreadToInviteRoute = (
     thread: CollaborationThread,
   ) => {
-    setInviteMessageOverride({
-      id: thread.sourceMessage.id,
-      sender: thread.sourceMessage.sender,
-      subject: thread.sourceMessage.subject,
-      snippet: thread.sourceMessage.snippet,
-      time: thread.sourceMessage.timestamp,
-      createdAt: thread.sourceMessage.timestamp,
-      from: thread.sourceMessage.from,
-      to: "",
-      timestamp: thread.sourceMessage.timestamp,
-      body: [...thread.sourceMessage.body],
-      bodyHtml: thread.sourceMessage.bodyHtml,
-      isShared: thread.isShared,
-      collaboration: thread.collaboration as MailMessageCollaboration,
-      priorityScore: "medium",
-      category: "Primary",
-      categorySource: "system",
-      categoryConfidence: "medium",
-    });
+    const isOwnedSourceMailbox = orderedMailboxes.some(
+      (candidate) => candidate.id === thread.mailboxId,
+    );
+    setInviteMessageOverride(
+      isOwnedSourceMailbox
+        ? {
+            id: thread.sourceMessage.id,
+            sender: thread.sourceMessage.sender,
+            subject: thread.sourceMessage.subject,
+            snippet: thread.sourceMessage.snippet,
+            time: thread.sourceMessage.timestamp,
+            createdAt: thread.sourceMessage.timestamp,
+            from: thread.sourceMessage.from,
+            to: "",
+            timestamp: thread.sourceMessage.timestamp,
+            body: [...thread.sourceMessage.body],
+            bodyHtml: thread.sourceMessage.bodyHtml,
+            isShared: thread.isShared,
+            collaboration: thread.collaboration as MailMessageCollaboration,
+            collaborationMessageId: thread.messageId,
+            collaborationWorkspaceId: thread.workspaceId,
+            collaborationMailboxId: thread.mailboxId,
+            priorityScore: "medium",
+            category: "Primary",
+            categorySource: "system",
+            categoryConfidence: "medium",
+          }
+        : buildSharedCollaborationProjection(thread),
+    );
   };
   const [notificationNavigationRequest, setNotificationNavigationRequest] =
     useState<NotificationNavigationRequest | null>(null);
@@ -41058,73 +43143,34 @@ export function WorkspaceShell({
   }, [mailboxFocusPreferenceOverridesStorageKey]);
 
   const updateWorkspaceMessageById = (
+    mailboxId: InboxId,
     messageId: string,
     updater: (message: MailMessage) => MailMessage,
   ) => {
     setMailboxStore((currentStore) => {
-      const updatedMessagesByMailbox = new Map<InboxId, MailMessage>();
-      const nextStore = Object.entries(currentStore).reduce<MailboxStore>(
-        (nextCollectionsByMailbox, [mailboxId, collections]) => {
-          const updateCollection = (messages: MailMessage[]) =>
-            messages.map((message) => {
-              if (message.id !== messageId) {
-                return message;
-              }
-
-              const updatedMessage = updater(message);
-              updatedMessagesByMailbox.set(mailboxId as InboxId, updatedMessage);
-              return updatedMessage;
-            });
-
-          nextCollectionsByMailbox[mailboxId as InboxId] = {
-            Inbox: updateCollection(collections.Inbox),
-            Drafts: updateCollection(collections.Drafts),
-            Sent: updateCollection(collections.Sent),
-            Archive: updateCollection(collections.Archive),
-            Filtered: updateCollection(collections.Filtered),
-            Spam: updateCollection(collections.Spam),
-            Trash: updateCollection(collections.Trash),
-          };
-
-          return nextCollectionsByMailbox;
-        },
-        {} as MailboxStore,
+      const { store: nextStore, updatedMessage } = updateMailboxMessageById(
+        currentStore,
+        mailboxId,
+        messageId,
+        updater,
       );
 
-      const liveInboxSnapshots = readLiveInboxSnapshots(
-        buildTrustedLiveInboxSnapshotContexts(savedManagedInboxes),
-      );
-
-      updatedMessagesByMailbox.forEach((updatedMessage, mailboxId) => {
+      if (updatedMessage) {
+        const liveInboxSnapshots = readLiveInboxSnapshots(
+          buildTrustedLiveInboxSnapshotContexts(savedManagedInboxes),
+        );
         const snapshot = liveInboxSnapshots[mailboxId];
-
-        if (!snapshot) {
-          return;
-        }
-
-        const nextSnapshotMessages = snapshot.messages.map((message) =>
-          message.id === updatedMessage.id
-            ? ({
-                ...message,
-                isShared: updatedMessage.isShared,
-                collaboration: updatedMessage.collaboration,
-              } as PersistedLiveInboxMessageSnapshot)
-            : message,
+        const nextSnapshot = updateMailboxSnapshotCollaboration(
+          snapshot,
+          mailboxId,
+          messageId,
+          updatedMessage,
         );
 
-        const hasMatchingSnapshotMessage = nextSnapshotMessages.some(
-          (message) => message.id === updatedMessage.id,
-        );
-
-        if (!hasMatchingSnapshotMessage) {
-          return;
+        if (nextSnapshot && nextSnapshot !== snapshot) {
+          saveLiveInboxSnapshot(nextSnapshot);
         }
-
-        saveLiveInboxSnapshot({
-          ...snapshot,
-          messages: nextSnapshotMessages,
-        });
-      });
+      }
 
       return nextStore;
     });
@@ -41945,16 +43991,62 @@ export function WorkspaceShell({
   const decodedExternalInviteMessage = decodedInviteMessage
     ? buildExternalSafeInviteMessage(decodedInviteMessage)
     : null;
-  const storedInviteMessage = collaborationInviteRoute
-    ? Object.values(mailboxStore)
-        .flatMap((collections) => canonicalFolderOrder.flatMap((folder) => collections[folder]))
-        .find((message) => message.id === collaborationInviteRoute.messageId) ?? null
+  const storedInviteMessageEntries = collaborationInviteRoute?.messageId
+    ? Object.entries(mailboxStore).flatMap(([mailboxId, collections]) =>
+        canonicalFolderOrder.flatMap((folder) =>
+          collections[folder]
+            .filter(
+              (message) =>
+                message.id === collaborationInviteRoute.messageId ||
+                message.collaborationMessageId ===
+                  collaborationInviteRoute.messageId,
+            )
+            .map((message) => ({
+              mailboxId: mailboxId as InboxId,
+              message,
+            })),
+        ),
+      )
+    : [];
+  const decodedInviteSourceMailboxId = decodedInviteMessage
+    ? getCollaborationMessageSourceMailboxId(decodedInviteMessage)
     : null;
+  const authoritativeInviteSourceMailboxId = inviteMessageOverride
+    ? getCollaborationMessageSourceMailboxId(inviteMessageOverride)
+    : null;
+  const inviteStorageResolution = resolveCollaborationInviteStorageMailboxId({
+    authoritativeSourceMailboxId: authoritativeInviteSourceMailboxId,
+    decodedSourceMailboxId: decodedInviteSourceMailboxId ?? null,
+    ownedMailboxIds: orderedMailboxes.map((candidate) => candidate.id),
+    sharedMailboxId: sharedCollaborationMailboxId,
+    storedEntries: storedInviteMessageEntries.map(({ mailboxId, message }) => ({
+      mailboxId,
+      messageId: message.id,
+      sourceMailboxId: getCollaborationMessageSourceMailboxId(message),
+    })),
+  });
+  const storedInviteMessageEntry = inviteStorageResolution?.storedMessageId
+    ? storedInviteMessageEntries.find(
+        ({ mailboxId, message }) =>
+          mailboxId === inviteStorageResolution.storageMailboxId &&
+          message.id === inviteStorageResolution.storedMessageId,
+      ) ?? null
+    : inviteStorageResolution
+      ? storedInviteMessageEntries.find(
+          ({ mailboxId, message }) =>
+            mailboxId === inviteStorageResolution.storageMailboxId &&
+            message.collaborationMailboxId ===
+              inviteStorageResolution.sourceMailboxId,
+        ) ?? null
+      : null;
+  const storedInviteMessage = storedInviteMessageEntry?.message ?? null;
   const inviteMessage =
     (inviteMessageOverride &&
     collaborationInviteRoute &&
     (!collaborationInviteRoute.messageId ||
-      inviteMessageOverride.id === collaborationInviteRoute.messageId)
+      inviteMessageOverride.id === collaborationInviteRoute.messageId ||
+      inviteMessageOverride.collaborationMessageId ===
+        collaborationInviteRoute.messageId)
       ? inviteMessageOverride
       : null) ??
     (isExternalReviewRoute
@@ -41962,6 +44054,8 @@ export function WorkspaceShell({
       : storedInviteMessage?.collaboration
         ? storedInviteMessage
         : decodedInviteMessage ?? storedInviteMessage);
+  const inviteStorageMailboxId =
+    inviteStorageResolution?.storageMailboxId ?? null;
   const inviteCollaboration = inviteMessage?.collaboration ?? null;
   const inviteParticipants = inviteCollaboration
     ? getCollaborationParticipants(inviteCollaboration)
@@ -42070,83 +44164,62 @@ export function WorkspaceShell({
     updater: (message: MailMessage) => MailMessage,
     fallbackMessage?: MailMessage | null,
   ) => {
+    if (!inviteStorageMailboxId) {
+      return;
+    }
+
     setMailboxStore((currentStore) => {
-      const updatedMessagesByMailbox = new Map<InboxId, MailMessage>();
-      let didMatchExistingMessage = false;
-      const nextStore = Object.entries(currentStore).reduce<MailboxStore>(
-        (nextCollectionsByMailbox, [mailboxId, collections]) => {
-          const updateCollection = (messages: MailMessage[]) =>
-            messages.map((message) => {
-              if (message.id !== messageId) {
-                return message;
-              }
-
-              didMatchExistingMessage = true;
-              const updatedMessage = updater(message);
-              updatedMessagesByMailbox.set(mailboxId as InboxId, updatedMessage);
-              return updatedMessage;
-            });
-
-          nextCollectionsByMailbox[mailboxId as InboxId] = {
-            Inbox: updateCollection(collections.Inbox),
-            Drafts: updateCollection(collections.Drafts),
-            Sent: updateCollection(collections.Sent),
-            Archive: updateCollection(collections.Archive),
-            Filtered: updateCollection(collections.Filtered),
-            Spam: updateCollection(collections.Spam),
-            Trash: updateCollection(collections.Trash),
-          };
-
-          return nextCollectionsByMailbox;
-        },
-        {} as MailboxStore,
+      const updateResult = updateMailboxMessageById(
+        currentStore,
+        inviteStorageMailboxId,
+        messageId,
+        updater,
       );
+      let nextStore = updateResult.store;
+      let updatedMessage = updateResult.updatedMessage;
 
-      if (!didMatchExistingMessage && fallbackMessage && orderedMailboxes[0]) {
-        const fallbackMailboxId = orderedMailboxes[0].id;
-        const fallbackCollections = nextStore[fallbackMailboxId];
+      if (!updatedMessage && fallbackMessage) {
+        const fallbackCollections = nextStore[inviteStorageMailboxId];
 
         if (fallbackCollections) {
-          const updatedFallbackMessage = updater(fallbackMessage);
-          nextStore[fallbackMailboxId] = {
-            ...fallbackCollections,
-            Inbox: [updatedFallbackMessage, ...fallbackCollections.Inbox],
+          updatedMessage = updater(fallbackMessage);
+          nextStore = {
+            ...nextStore,
+            [inviteStorageMailboxId]: {
+              ...fallbackCollections,
+              Inbox: [updatedMessage, ...fallbackCollections.Inbox],
+            },
           };
-          updatedMessagesByMailbox.set(fallbackMailboxId, updatedFallbackMessage);
         }
       }
 
-      const liveInboxSnapshots = readLiveInboxSnapshots(
-        buildTrustedLiveInboxSnapshotContexts(savedManagedInboxes),
-      );
-
-      updatedMessagesByMailbox.forEach((updatedMessage, mailboxId) => {
-        const snapshot = liveInboxSnapshots[mailboxId];
-
-        if (!snapshot) {
-          return;
-        }
-
-        const existingIndex = snapshot.messages.findIndex(
-          (message) => message.id === updatedMessage.id,
+      if (updatedMessage) {
+        const liveInboxSnapshots = readLiveInboxSnapshots(
+          buildTrustedLiveInboxSnapshotContexts(savedManagedInboxes),
         );
-        const persistedMessage = {
-          ...(updatedMessage as unknown as PersistedLiveInboxMessageSnapshot),
-          isShared: updatedMessage.isShared,
-          collaboration: updatedMessage.collaboration,
-        };
-        const nextSnapshotMessages =
-          existingIndex >= 0
-            ? snapshot.messages.map((message, index) =>
-                index === existingIndex ? persistedMessage : message,
-              )
-            : [persistedMessage, ...snapshot.messages];
+        const snapshot = liveInboxSnapshots[inviteStorageMailboxId];
 
-        saveLiveInboxSnapshot({
-          ...snapshot,
-          messages: nextSnapshotMessages,
-        });
-      });
+        if (snapshot && inviteStorageMailboxId !== sharedCollaborationMailboxId) {
+          const updatedSnapshot = updateMailboxSnapshotCollaboration(
+            snapshot,
+            inviteStorageMailboxId,
+            updatedMessage.id,
+            updatedMessage,
+          );
+
+          if (updatedSnapshot && updatedSnapshot !== snapshot) {
+            saveLiveInboxSnapshot(updatedSnapshot);
+          } else {
+            saveLiveInboxSnapshot({
+              ...snapshot,
+              messages: [
+                updatedMessage as unknown as PersistedLiveInboxMessageSnapshot,
+                ...snapshot.messages,
+              ],
+            });
+          }
+        }
+      }
 
       return nextStore;
     });
@@ -42221,13 +44294,18 @@ export function WorkspaceShell({
   }, [collaborationInviteRoute, inviteMessageOverride, storedInviteMessage]);
 
   const joinCollaborationFromInvite = () => {
-    if (!collaborationInviteRoute || !authenticatedUser || !inviteMessage?.collaboration) {
+    if (
+      !collaborationInviteRoute ||
+      !authenticatedUser ||
+      !inviteMessage?.collaboration ||
+      !inviteStorageMailboxId
+    ) {
       return;
     }
 
     const nextTimestamp = Date.now();
 
-    updateWorkspaceMessageById(inviteMessage.id, (message) => {
+    updateInviteWorkspaceMessageById(inviteMessage.id, (message) => {
       if (!message.collaboration) {
         return message;
       }
@@ -42275,33 +44353,36 @@ export function WorkspaceShell({
           })(),
         },
       };
-    });
+    }, inviteMessage);
   };
 
   const declineCollaborationInvite = () => {
-    if (!inviteMessage?.collaboration || !authenticatedUser) {
+    if (!inviteMessage?.collaboration || !authenticatedUser || !inviteStorageMailboxId) {
       setInviteDecisionState("declined");
       return;
     }
 
-    updateWorkspaceMessageById(inviteMessage.id, (message) =>
-      message.collaboration
-        ? {
-            ...message,
-            collaboration: {
-              ...message.collaboration,
-              updatedAt: Date.now(),
-              participants: (message.collaboration.participants ?? []).map((participant) =>
-                participant.email.toLowerCase() === authenticatedUser.email.toLowerCase()
-                  ? {
-                      ...participant,
-                      status: "declined",
-                    }
-                  : participant,
-              ),
-            },
-          }
-        : message,
+    updateInviteWorkspaceMessageById(
+      inviteMessage.id,
+      (message) =>
+        message.collaboration
+          ? {
+              ...message,
+              collaboration: {
+                ...message.collaboration,
+                updatedAt: Date.now(),
+                participants: (message.collaboration.participants ?? []).map((participant) =>
+                  participant.email.toLowerCase() === authenticatedUser.email.toLowerCase()
+                    ? {
+                        ...participant,
+                        status: "declined",
+                      }
+                    : participant,
+                ),
+              },
+            }
+          : message,
+      inviteMessage,
     );
 
     setInviteDecisionState("declined");
@@ -42544,48 +44625,54 @@ export function WorkspaceShell({
   };
 
   const markInviteFlowDone = () => {
-    if (!inviteMessage?.collaboration || !authenticatedUser) {
+    if (!inviteMessage?.collaboration || !authenticatedUser || !inviteStorageMailboxId) {
       return;
     }
 
     const nextTimestamp = Date.now();
 
-    updateWorkspaceMessageById(inviteMessage.id, (message) =>
-      message.collaboration
-        ? {
-            ...message,
-            isShared: false,
-            collaboration: {
-              ...message.collaboration,
-              state: "resolved",
-              updatedAt: nextTimestamp,
-              resolvedAt: nextTimestamp,
-              resolvedByUserId: normalizeSenderLearningKey(authenticatedUser.email),
-              resolvedByUserName: authenticatedUser.name,
-            },
-          }
-        : message,
+    updateInviteWorkspaceMessageById(
+      inviteMessage.id,
+      (message) =>
+        message.collaboration
+          ? {
+              ...message,
+              isShared: false,
+              collaboration: {
+                ...message.collaboration,
+                state: "resolved",
+                updatedAt: nextTimestamp,
+                resolvedAt: nextTimestamp,
+                resolvedByUserId: normalizeSenderLearningKey(authenticatedUser.email),
+                resolvedByUserName: authenticatedUser.name,
+              },
+            }
+          : message,
+      inviteMessage,
     );
   };
 
   const leaveCollaborationFromInvite = () => {
-    if (!inviteMessage?.collaboration || !authenticatedUser) {
+    if (!inviteMessage?.collaboration || !authenticatedUser || !inviteStorageMailboxId) {
       return;
     }
 
-    updateWorkspaceMessageById(inviteMessage.id, (message) =>
-      message.collaboration
-        ? {
-            ...message,
-            collaboration: {
-              ...message.collaboration,
-              participants: (message.collaboration.participants ?? []).filter(
-                (participant) =>
-                  participant.email.toLowerCase() !== authenticatedUser.email.toLowerCase(),
-              ),
-            },
-          }
-        : message,
+    updateInviteWorkspaceMessageById(
+      inviteMessage.id,
+      (message) =>
+        message.collaboration
+          ? {
+              ...message,
+              collaboration: {
+                ...message.collaboration,
+                participants: (message.collaboration.participants ?? []).filter(
+                  (participant) =>
+                    participant.email.toLowerCase() !== authenticatedUser.email.toLowerCase(),
+                ),
+              },
+            }
+          : message,
+      inviteMessage,
     );
 
     setInviteDecisionState("left");
@@ -42597,40 +44684,31 @@ export function WorkspaceShell({
   useEffect(() => {
     if (
       !collaborationInviteRoute ||
-      storedInviteMessage ||
-      !decodedInvitePayload?.message ||
-      !orderedMailboxes[0]
+      !inviteMessage ||
+      !inviteStorageMailboxId
     ) {
       return;
     }
 
-    setMailboxStore((currentStore) => {
-      const mailboxId = orderedMailboxes[0].id;
-      const mailboxCollections = currentStore[mailboxId];
+    if (inviteLookupState === "idle" || inviteLookupState === "loading") {
+      return;
+    }
 
-      if (!mailboxCollections) {
-        return currentStore;
-      }
-
-      const alreadyExists = canonicalFolderOrder.some((folder) =>
-        currentStore[mailboxId][folder].some(
-          (message) => message.id === decodedInvitePayload.message.id,
-        ),
-      );
-
-      if (alreadyExists) {
-        return currentStore;
-      }
-
-      return {
-        ...currentStore,
-        [mailboxId]: {
-          ...mailboxCollections,
-          Inbox: [decodedInvitePayload.message, ...mailboxCollections.Inbox],
-        },
-      };
-    });
-  }, [collaborationInviteRoute, decodedInvitePayload, orderedMailboxes, storedInviteMessage]);
+    setMailboxStore((currentStore) =>
+      upsertMailboxScopedInviteMessage(
+        currentStore,
+        inviteStorageMailboxId,
+        storedInviteMessage?.id ?? null,
+        inviteMessage,
+      ),
+    );
+  }, [
+    collaborationInviteRoute,
+    inviteLookupState,
+    inviteMessage,
+    inviteStorageMailboxId,
+    storedInviteMessage,
+  ]);
 
   useEffect(() => {
     if (!activeMailbox) {
@@ -42851,8 +44929,23 @@ export function WorkspaceShell({
     shouldBePriority: boolean,
     options: ManualPriorityUpdateOptions = {},
   ) => {
-    const sourceMessage = getWorkspaceMessageById(messageId);
-    const sourceLocation = getWorkspaceMessageLocationById(messageId);
+    const scopedTarget = options.sourceMailboxId
+      ? resolveMailboxScopedManualPriorityTarget({
+          store: mailboxStore,
+          messageId,
+          storageMailboxId: options.storageMailboxId,
+          sourceMailboxId: options.sourceMailboxId,
+          sourceMessage: options.sourceMessage,
+        })
+      : null;
+    const sourceMessage = options.sourceMailboxId
+      ? scopedTarget?.message ?? null
+      : getWorkspaceMessageById(messageId);
+    const sourceLocation = options.sourceMailboxId
+      ? scopedTarget
+        ? { mailboxId: scopedTarget.mailboxId }
+        : null
+      : getWorkspaceMessageLocationById(messageId);
 
     if (!sourceMessage) {
       return;
@@ -44765,14 +46858,23 @@ export function WorkspaceShell({
         return;
       }
 
-      const serverThreads = threadResponses.reduce<CollaborationThread[]>(
+      const serverThreads = threadResponses.reduce<
+        Array<{ mailboxId: InboxId; thread: CollaborationThread }>
+      >(
         (nextValue, response) => {
           Object.values(response.threadsByMessageId).forEach((thread) => {
-            if (!thread?.messageId || !thread.collaboration) {
+            if (
+              !thread?.messageId ||
+              !thread.collaboration ||
+              thread.mailboxId !== response.mailboxId
+            ) {
               return;
             }
 
-            nextValue.push(thread);
+            nextValue.push({
+              mailboxId: response.mailboxId,
+              thread,
+            });
           });
 
           return nextValue;
@@ -44785,79 +46887,49 @@ export function WorkspaceShell({
       }
 
       setMailboxStore((currentStore) => {
-        let didChange = false;
-        const currentMessages = Object.values(currentStore).flatMap((collections) =>
-          canonicalFolderOrder.flatMap((folder) => collections[folder]),
+        const nextStore = applyMailboxScopedCollaborationThreadOverlays(
+          currentStore,
+          serverThreads,
         );
-        const currentMessageIndexes = buildMessageIdentityIndexes(currentMessages);
-        const threadsByResolvedMessageId = serverThreads.reduce<
-          Record<string, { collaboration: MailMessageCollaboration; isShared: boolean }>
-        >((nextValue, thread) => {
-          const matchedMessage = findMatchingMessageByIdentity(
-            buildCollaborationThreadIdentitySource(thread),
-            currentMessageIndexes,
-          );
+        const snapshots = readLiveInboxSnapshots(
+          buildTrustedLiveInboxSnapshotContexts(savedManagedInboxes),
+        );
+        const snapshotUpdates = serverThreads.flatMap(({ mailboxId, thread }) => {
+          const updatedMessage = canonicalFolderOrder
+            .flatMap((folder) => nextStore[mailboxId]?.[folder] ?? [])
+            .find(
+              (message) =>
+                message.collaborationWorkspaceId === thread.workspaceId &&
+                message.collaborationMailboxId === thread.mailboxId &&
+                message.collaborationMessageId === thread.messageId,
+            );
 
-          if (!matchedMessage?.id) {
-            return nextValue;
-          }
+          return updatedMessage
+            ? [
+                {
+                  mailboxId,
+                  messageId: updatedMessage.id,
+                  updatedMessage,
+                },
+              ]
+            : [];
+        });
+        const nextSnapshots = applyMailboxScopedCollaborationSnapshotUpdates(
+          snapshots,
+          snapshotUpdates,
+        );
 
-          nextValue[matchedMessage.id] = {
-            collaboration: thread.collaboration as MailMessageCollaboration,
-            isShared: thread.isShared,
-          };
+        new Set(snapshotUpdates.map((update) => update.mailboxId)).forEach(
+          (mailboxId) => {
+            const nextSnapshot = nextSnapshots[mailboxId];
 
-          return nextValue;
-        }, {});
-
-        if (Object.keys(threadsByResolvedMessageId).length === 0) {
-          return currentStore;
-        }
-
-        const nextStore = Object.entries(currentStore).reduce<MailboxStore>(
-          (nextCollectionsByMailbox, [mailboxId, collections]) => {
-            const overlayCollection = (messages: MailMessage[]) =>
-              messages.map((message) => {
-                const serverThread = threadsByResolvedMessageId[message.id];
-
-                if (!serverThread) {
-                  return message;
-                }
-
-                const collaborationChanged =
-                  JSON.stringify(message.collaboration ?? null) !==
-                  JSON.stringify(serverThread.collaboration);
-                const sharedChanged =
-                  Boolean(message.isShared) !== Boolean(serverThread.isShared);
-
-                if (!collaborationChanged && !sharedChanged) {
-                  return message;
-                }
-
-                didChange = true;
-                return {
-                  ...message,
-                  collaboration: serverThread.collaboration,
-                  isShared: serverThread.isShared,
-                };
-              });
-
-            nextCollectionsByMailbox[mailboxId as InboxId] = {
-              Inbox: overlayCollection(collections.Inbox),
-              Drafts: overlayCollection(collections.Drafts),
-              Sent: overlayCollection(collections.Sent),
-              Archive: overlayCollection(collections.Archive),
-              Filtered: overlayCollection(collections.Filtered),
-              Spam: overlayCollection(collections.Spam),
-              Trash: overlayCollection(collections.Trash),
-            };
-
-            return nextCollectionsByMailbox;
+            if (nextSnapshot && nextSnapshot !== snapshots[mailboxId]) {
+              saveLiveInboxSnapshot(nextSnapshot);
+            }
           },
-          {} as MailboxStore,
         );
 
-        return didChange ? nextStore : currentStore;
+        return nextStore;
       });
     };
 
@@ -44902,8 +46974,13 @@ export function WorkspaceShell({
         setMailboxStore((currentStore) => {
           const realMailboxMessages = Object.entries(currentStore)
             .filter(([mailboxId]) => mailboxId !== sharedCollaborationMailboxId)
-            .flatMap(([, collections]) =>
-              canonicalFolderOrder.flatMap((folder) => collections[folder]),
+            .flatMap(([mailboxId, collections]) =>
+              canonicalFolderOrder.flatMap((folder) =>
+                collections[folder].map((message) => ({
+                  mailboxId: mailboxId as InboxId,
+                  message,
+                })),
+              ),
             );
           const dedupedUnresolvedThreads: CollaborationThread[] = [];
 
@@ -44950,8 +47027,20 @@ export function WorkspaceShell({
                   .filter(Boolean),
               );
 
-              return !realMailboxMessages.some((message) => {
-                if (!threadMessageIds.has(message.id)) {
+              return !realMailboxMessages.some(({ mailboxId, message }) => {
+                const messageIds = [
+                  message.id,
+                  message.collaborationMessageId?.trim(),
+                ].filter(Boolean) as string[];
+
+                if (!messageIds.some((messageId) => threadMessageIds.has(messageId))) {
+                  return false;
+                }
+
+                const messageSourceMailboxId =
+                  message.collaborationMailboxId?.trim() || mailboxId;
+
+                if (messageSourceMailboxId !== thread.mailboxId) {
                   return false;
                 }
 

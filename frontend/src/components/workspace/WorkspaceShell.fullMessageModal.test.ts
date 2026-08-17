@@ -915,12 +915,32 @@ assert.match(
 );
 assert.match(
   workspaceShellSource,
+  /selectedRowSelectionKey[\s\S]{0,500}data-message-row-identity/,
+  "fallback focus return must use the mailbox-scoped row identity",
+);
+assert.match(
+  workspaceShellSource,
+  /modalComposeSourceSelection[\s\S]{0,500}resolveMailboxScopedSelectionEntries/,
+  "modal compose return must reconcile only inside its source mailbox",
+);
+assert.match(
+  workspaceShellSource,
   /if \(!isFullMessageOpen\) \{\s*fullMessageModalReturnFocusRef\.current = null/,
   "non-Close modal exits must not retain a stale opener",
 );
 assert.match(
   workspaceShellSource,
-  /data-message-row-id=\{message\.id\}[\s\S]{0,1800}onClick=\{\(event\)[\s\S]{0,900}handleSelectMessage\(activeFolder, message\.id\);[\s\S]{0,300}onDoubleClick=\{\(event\)[\s\S]{0,500}openFull: true/,
+  /data-message-row-id=\{message\.id\}[\s\S]{0,120}data-message-row-identity=\{renderedRowIdentity\}/,
+  "rows must expose their mailbox-scoped identity for exact modal focus return",
+);
+assert.match(
+  workspaceShellSource,
+  /onClick=\{\(event\)[\s\S]{0,1600}handleSelectMessage\(activeFolder, message\.id, \{[\s\S]{0,220}sourceMailboxId:\s*collaborationStorageMailboxId,[\s\S]{0,120}sourceMessage: message,[\s\S]{0,80}\}\);/,
+  "row selection must carry the exact source object and mailbox",
+);
+assert.match(
+  workspaceShellSource,
+  /onDoubleClick=\{\(event\)[\s\S]{0,600}openFull: true,[\s\S]{0,220}sourceMessage: message/,
 );
 assert.match(
   workspaceShellSource,

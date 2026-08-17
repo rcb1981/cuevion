@@ -2,77 +2,16 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { transform } from "sucrase";
+import "sucrase/register/tsx.js";
+
+const { resolveInitialComposeAttachments } = require(
+  "./WorkspaceShell.tsx"
+) as typeof import("./WorkspaceShell");
 
 const workspaceShellSource = readFileSync(
   resolve(process.cwd(), "src/components/workspace/WorkspaceShell.tsx"),
   "utf8",
 );
-const openComposeStart = workspaceShellSource.indexOf(
-  "const openComposeFromMessage =",
-);
-const openComposeEnd = workspaceShellSource.indexOf(
-  "useEffect(() =>",
-  openComposeStart,
-);
-
-assert.ok(
-  openComposeStart >= 0 && openComposeEnd > openComposeStart,
-  "message compose source markers must be present and ordered",
-);
-
-const openComposeSource = workspaceShellSource.slice(
-  openComposeStart,
-  openComposeEnd,
-);
-const attachmentInitializationStart = openComposeSource.indexOf(
-  "setComposeAttachments(",
-);
-const attachmentInitializationEndMarker = "\n    );";
-const attachmentInitializationEnd =
-  openComposeSource.indexOf(
-    attachmentInitializationEndMarker,
-    attachmentInitializationStart,
-  ) + attachmentInitializationEndMarker.length;
-
-assert.ok(
-  attachmentInitializationStart >= 0 &&
-    attachmentInitializationEnd > attachmentInitializationStart,
-  "source-attachment initialization markers must be present and ordered",
-);
-
-const attachmentInitializationSource = openComposeSource.slice(
-  attachmentInitializationStart,
-  attachmentInitializationEnd,
-);
-const compiledAttachmentInitialization = transform(
-  `function resolveInitialComposeAttachments(mode, effectiveMessage) {
-    const sourceMailboxId = "mailbox-google";
-    const currentMessageLocationById = {
-      [effectiveMessage.id]: { folder: "Inbox" },
-    };
-    const normalizeMailAttachment = (attachment) => attachment;
-    let composeAttachments = [{ id: "stale", name: "stale.txt" }];
-    const setComposeAttachments = (attachments) => {
-      composeAttachments = attachments;
-    };
-    ${attachmentInitializationSource}
-    return composeAttachments;
-  }`,
-  { transforms: ["typescript"] },
-).code;
-const loadAttachmentInitializationHarness = new Function(
-  `${compiledAttachmentInitialization}\nreturn resolveInitialComposeAttachments;`,
-) as () => (
-  mode: "reply" | "reply_all" | "forward",
-  effectiveMessage: {
-    id: string;
-    imapUid?: string;
-    attachments?: SourceAttachment[];
-  },
-) => SourceAttachment[];
-const resolveInitialComposeAttachments =
-  loadAttachmentInitializationHarness();
-
 type SourceAttachment = {
   id: string;
   name: string;
@@ -92,29 +31,61 @@ const pdfAttachment: SourceAttachment = {
 };
 const sourceMessage = (attachments: SourceAttachment[]) => ({
   id: "source-message",
+  sender: "Sender",
+  subject: "Subject",
+  snippet: "Snippet",
+  time: "10:00",
+  from: "sender@example.test",
+  to: "viewer@example.test",
+  timestamp: "2026-08-17T10:00:00.000Z",
+  body: ["Body"],
+  priorityScore: "medium" as const,
+  category: "Primary" as const,
+  categorySource: "system" as const,
+  categoryConfidence: "medium" as const,
   attachments,
 });
+const sourceLocation = {
+  mailboxId: "mailbox-google" as never,
+  folder: "Inbox" as const,
+};
 
 for (const mode of ["reply", "reply_all"] as const) {
   assert.deepEqual(
-    resolveInitialComposeAttachments(mode, sourceMessage([inlineAttachment])),
+    resolveInitialComposeAttachments(
+      mode,
+      sourceMessage([inlineAttachment]) as never,
+      sourceLocation,
+    ),
     [],
     `${mode} must not inherit an inline/CID source attachment`,
   );
   assert.deepEqual(
-    resolveInitialComposeAttachments(mode, sourceMessage([pdfAttachment])),
+    resolveInitialComposeAttachments(
+      mode,
+      sourceMessage([pdfAttachment]) as never,
+      sourceLocation,
+    ),
     [],
     `${mode} must not inherit an ordinary source attachment`,
   );
   assert.deepEqual(
-    resolveInitialComposeAttachments(mode, sourceMessage([])),
+    resolveInitialComposeAttachments(
+      mode,
+      sourceMessage([]) as never,
+      sourceLocation,
+    ),
     [],
     `${mode} without source attachments must remain empty`,
   );
 }
 
 assert.deepEqual(
-  resolveInitialComposeAttachments("forward", sourceMessage([pdfAttachment])).map(
+  resolveInitialComposeAttachments(
+    "forward",
+    sourceMessage([pdfAttachment]) as never,
+    sourceLocation,
+  ).map(
     ({ id, name }) => ({ id, name }),
   ),
   [pdfAttachment],
@@ -123,7 +94,8 @@ assert.deepEqual(
 assert.deepEqual(
   resolveInitialComposeAttachments(
     "forward",
-    sourceMessage([inlineAttachment]),
+    sourceMessage([inlineAttachment]) as never,
+    sourceLocation,
   ).map(({ id, name, disposition, contentId }) => ({
     id,
     name,
@@ -178,7 +150,11 @@ const manualFile = {
   type: "text/plain",
 };
 const replyWithManualAttachment = addManualComposeFiles(
-  resolveInitialComposeAttachments("reply", sourceMessage([pdfAttachment])),
+  resolveInitialComposeAttachments(
+    "reply",
+    sourceMessage([pdfAttachment]) as never,
+    sourceLocation,
+  ),
   [manualFile],
 );
 
