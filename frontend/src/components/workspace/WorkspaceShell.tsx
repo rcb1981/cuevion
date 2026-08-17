@@ -13898,7 +13898,7 @@ function WorkspaceSidebar({
       <button
         type="button"
         onClick={() => setIsSmartFoldersOpen((current) => !current)}
-        className={`flex w-full items-center justify-center rounded-2xl px-3 py-3 text-center text-sm font-medium transition-[background-color,color,box-shadow] duration-100 focus:outline-none focus-visible:shadow-[inset_0_0_0_1px_rgba(255,255,255,0.12),0_0_0_1px_rgba(214,230,221,0.16)] xl:justify-start xl:px-3.5 xl:text-left ${
+        className={`flex h-9 w-full items-center justify-center rounded-xl px-3 text-center text-sm font-medium transition-[background-color,color,box-shadow] duration-100 focus:outline-none focus-visible:shadow-[inset_0_0_0_1px_rgba(255,255,255,0.12),0_0_0_1px_rgba(214,230,221,0.16)] xl:justify-start xl:px-3.5 xl:text-left ${
           activeSmartFolderId
             ? "bg-[linear-gradient(180deg,var(--workspace-sidebar-active-start),var(--workspace-sidebar-active-end))] text-[var(--workspace-sidebar-text)]"
             : "text-[var(--workspace-sidebar-text-muted)] hover:bg-[var(--workspace-sidebar-hover)] hover:text-[var(--workspace-sidebar-text)]"
@@ -13934,7 +13934,7 @@ function WorkspaceSidebar({
         </span>
       </button>
       {isSmartFoldersOpen ? (
-        <ul className="mt-2 space-y-2">
+        <ul className="mt-1 space-y-1">
           {smartFolders.length > 0 ? (
             smartFolders.map((folder) => {
               const active = activeSmartFolderId === folder.id;
@@ -13948,7 +13948,7 @@ function WorkspaceSidebar({
                       setSmartFolderMenuId(null);
                       onOpenSmartFolder(folder.id);
                     }}
-                    className={`flex w-full items-center justify-between rounded-2xl px-4 py-2.5 pr-11 text-left text-sm font-medium transition-[background-color,color,box-shadow] duration-100 focus:outline-none focus-visible:shadow-[inset_0_0_0_1px_rgba(255,255,255,0.12),0_0_0_1px_rgba(214,230,221,0.16)] ${
+                    className={`flex h-8 w-full items-center justify-between rounded-xl px-4 pr-11 text-left text-sm font-medium transition-[background-color,color,box-shadow] duration-100 focus:outline-none focus-visible:shadow-[inset_0_0_0_1px_rgba(255,255,255,0.12),0_0_0_1px_rgba(214,230,221,0.16)] ${
                       active
                         ? "bg-[linear-gradient(180deg,var(--workspace-sidebar-active-start),var(--workspace-sidebar-active-end))] text-[var(--workspace-sidebar-text)]"
                         : "text-[var(--workspace-sidebar-text-muted)] hover:bg-[var(--workspace-sidebar-hover)] hover:text-[var(--workspace-sidebar-text)]"
@@ -14021,7 +14021,7 @@ function WorkspaceSidebar({
             <button
               type="button"
               onClick={onOpenSmartFolderModal}
-              className="flex w-full items-center rounded-2xl px-4 py-2.5 text-left text-[0.74rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-sidebar-text-muted)] transition-[background-color,color] duration-150 hover:bg-[var(--workspace-sidebar-hover)] hover:text-[var(--workspace-sidebar-text)] focus-visible:outline-none"
+              className="flex h-8 w-full items-center rounded-xl px-4 text-left text-[0.74rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-sidebar-text-muted)] transition-[background-color,color] duration-150 hover:bg-[var(--workspace-sidebar-hover)] hover:text-[var(--workspace-sidebar-text)] focus-visible:outline-none"
             >
               <span className="block pl-4">+ Add smart folder</span>
             </button>
@@ -14049,7 +14049,7 @@ function WorkspaceSidebar({
             <button
               type="button"
               onClick={() => setIsInboxesOpen((current) => !current)}
-              className={`flex w-full items-center justify-center rounded-2xl px-3 py-3 text-center text-sm font-medium transition-[background-color,color,box-shadow] duration-100 focus:outline-none focus-visible:shadow-[inset_0_0_0_1px_rgba(255,255,255,0.12),0_0_0_1px_rgba(214,230,221,0.16)] xl:justify-start xl:px-3.5 xl:text-left ${
+              className={`flex h-9 w-full items-center justify-center rounded-xl px-3 text-center text-sm font-medium transition-[background-color,color,box-shadow] duration-100 focus:outline-none focus-visible:shadow-[inset_0_0_0_1px_rgba(255,255,255,0.12),0_0_0_1px_rgba(214,230,221,0.16)] xl:justify-start xl:px-3.5 xl:text-left ${
                 active
                   ? "bg-[linear-gradient(180deg,var(--workspace-sidebar-active-start),var(--workspace-sidebar-active-end))] text-[var(--workspace-sidebar-text)]"
                   : "text-[var(--workspace-sidebar-text-muted)] hover:bg-[var(--workspace-sidebar-hover)] hover:text-[var(--workspace-sidebar-text)]"
@@ -14085,7 +14085,7 @@ function WorkspaceSidebar({
               </span>
             </button>
             {shouldShowInboxChildren ? (
-              <ul className="mt-2 space-y-2">
+              <ul className="mt-1 space-y-1">
                 {inboxSidebarItems.map((mailbox) => {
                   const activeInbox = mailbox.id === activeSidebarInboxId;
 
@@ -14103,7 +14103,7 @@ function WorkspaceSidebar({
 
                           onOpenMailbox(targetMailbox);
                         }}
-                        className={`hidden w-full items-center justify-between gap-3 rounded-2xl px-4 py-3 text-left text-sm font-medium transition-[background-color,color,box-shadow] duration-100 focus:outline-none focus-visible:shadow-[inset_0_0_0_1px_rgba(255,255,255,0.12),0_0_0_1px_rgba(214,230,221,0.16)] xl:flex ${
+                        className={`hidden h-8 w-full items-center justify-between gap-3 rounded-xl px-4 text-left text-sm font-medium transition-[background-color,color,box-shadow] duration-100 focus:outline-none focus-visible:shadow-[inset_0_0_0_1px_rgba(255,255,255,0.12),0_0_0_1px_rgba(214,230,221,0.16)] xl:flex ${
                           activeInbox
                             ? "bg-[linear-gradient(180deg,var(--workspace-sidebar-active-start),var(--workspace-sidebar-active-end))] text-[var(--workspace-sidebar-text)]"
                             : "text-[var(--workspace-sidebar-text-muted)] hover:bg-[var(--workspace-sidebar-hover)] hover:text-[var(--workspace-sidebar-text)]"
@@ -14127,7 +14127,7 @@ function WorkspaceSidebar({
       }
 
       return (
-        <li key={item.label} className="pt-2">
+        <li key={item.label} className="pt-1">
           <div className="hidden items-center justify-between px-4 pb-2 xl:flex">
             <span className="inline-flex items-center gap-2 text-[0.68rem] font-medium uppercase tracking-[0.18em] text-[var(--workspace-sidebar-text-muted)]">
               <SidebarNavigationIcon name={item.icon} />
@@ -14135,12 +14135,12 @@ function WorkspaceSidebar({
             </span>
           </div>
           {singleMailbox ? (
-            <ul className="mt-2 space-y-2">
+            <ul className="mt-1 space-y-1">
               <li>
                 <button
                   type="button"
                   onClick={() => onOpenMailbox(singleMailbox)}
-                  className={`hidden w-full items-center justify-between gap-3 rounded-2xl px-4 py-3 text-left text-sm font-medium transition-[background-color,color,box-shadow] duration-100 focus:outline-none focus-visible:shadow-[inset_0_0_0_1px_rgba(255,255,255,0.12),0_0_0_1px_rgba(214,230,221,0.16)] xl:flex ${
+                  className={`hidden h-8 w-full items-center justify-between gap-3 rounded-xl px-4 text-left text-sm font-medium transition-[background-color,color,box-shadow] duration-100 focus:outline-none focus-visible:shadow-[inset_0_0_0_1px_rgba(255,255,255,0.12),0_0_0_1px_rgba(214,230,221,0.16)] xl:flex ${
                     activeSidebarInboxId === singleMailbox.id
                       ? "bg-[linear-gradient(180deg,var(--workspace-sidebar-active-start),var(--workspace-sidebar-active-end))] text-[var(--workspace-sidebar-text)]"
                       : "text-[var(--workspace-sidebar-text-muted)] hover:bg-[var(--workspace-sidebar-hover)] hover:text-[var(--workspace-sidebar-text)]"
@@ -14157,7 +14157,7 @@ function WorkspaceSidebar({
               </li>
             </ul>
           ) : shouldShowInboxChildren ? (
-            <ul className="mt-2 space-y-2">
+            <ul className="mt-1 space-y-1">
               {inboxSidebarItems.map((mailbox) => {
                 const activeInbox = mailbox.id === activeSidebarInboxId;
 
@@ -14175,7 +14175,7 @@ function WorkspaceSidebar({
 
                         onOpenMailbox(targetMailbox);
                       }}
-                      className={`hidden w-full items-center justify-between gap-3 rounded-2xl px-4 py-3 text-left text-sm font-medium transition-[background-color,color,box-shadow] duration-100 focus:outline-none focus-visible:shadow-[inset_0_0_0_1px_rgba(255,255,255,0.12),0_0_0_1px_rgba(214,230,221,0.16)] xl:flex ${
+                      className={`hidden h-8 w-full items-center justify-between gap-3 rounded-xl px-4 text-left text-sm font-medium transition-[background-color,color,box-shadow] duration-100 focus:outline-none focus-visible:shadow-[inset_0_0_0_1px_rgba(255,255,255,0.12),0_0_0_1px_rgba(214,230,221,0.16)] xl:flex ${
                         activeInbox
                           ? "bg-[linear-gradient(180deg,var(--workspace-sidebar-active-start),var(--workspace-sidebar-active-end))] text-[var(--workspace-sidebar-text)]"
                           : "text-[var(--workspace-sidebar-text-muted)] hover:bg-[var(--workspace-sidebar-hover)] hover:text-[var(--workspace-sidebar-text)]"
@@ -14205,7 +14205,7 @@ function WorkspaceSidebar({
           onClick={() => {
             onChangeSection(item.section);
           }}
-          className={`flex w-full items-center justify-center rounded-2xl px-3 py-3 text-center text-sm font-medium transition-[background-color,color,box-shadow] duration-100 focus:outline-none focus-visible:shadow-[inset_0_0_0_1px_rgba(255,255,255,0.12),0_0_0_1px_rgba(214,230,221,0.16)] xl:justify-start xl:px-3.5 xl:text-left ${
+          className={`flex h-9 w-full items-center justify-center rounded-xl px-3 text-center text-sm font-medium transition-[background-color,color,box-shadow] duration-100 focus:outline-none focus-visible:shadow-[inset_0_0_0_1px_rgba(255,255,255,0.12),0_0_0_1px_rgba(214,230,221,0.16)] xl:justify-start xl:px-3.5 xl:text-left ${
             active
               ? "bg-[linear-gradient(180deg,var(--workspace-sidebar-active-start),var(--workspace-sidebar-active-end))] text-[var(--workspace-sidebar-text)]"
               : "text-[var(--workspace-sidebar-text-muted)] hover:bg-[var(--workspace-sidebar-hover)] hover:text-[var(--workspace-sidebar-text)]"
@@ -14251,8 +14251,8 @@ function WorkspaceSidebar({
               <CuevionMark />
             </div>
           </div>
-          <nav aria-label="Workspace navigation" className="mt-8 flex min-h-0 flex-1 flex-col overflow-y-auto pr-1">
-            <ul className="space-y-2">
+          <nav aria-label="Workspace navigation" className="mt-6 flex min-h-0 flex-1 flex-col overflow-y-auto pr-1">
+            <ul className="space-y-1">
               {primaryNavigationItems.map((item) =>
                 item.section === "Inboxes"
                   ? [
@@ -14262,13 +14262,13 @@ function WorkspaceSidebar({
                   : renderItem(item),
               )}
             </ul>
-            <div className="mt-auto pt-8">
+            <div className="mt-auto pt-5">
               {productAccess === "bundle" ? (
-                <div className="mb-5 rounded-[22px] border border-[color:rgba(218,194,142,0.2)] bg-[linear-gradient(180deg,rgba(238,224,190,0.1),rgba(33,58,49,0.28))] p-2.5 shadow-[inset_0_1px_0_rgba(255,248,226,0.1)]">
+                <div className="mb-3 rounded-[18px] border border-[color:rgba(218,194,142,0.2)] bg-[linear-gradient(180deg,rgba(238,224,190,0.1),rgba(33,58,49,0.28))] p-2 shadow-[inset_0_1px_0_rgba(255,248,226,0.1)]">
                   <button
                     type="button"
                     onClick={() => onChangeSection("Organizer")}
-                    className={`flex w-full items-center justify-center rounded-2xl px-3 py-3 text-center text-sm font-medium transition-[background-color,color,box-shadow] duration-100 focus:outline-none focus-visible:shadow-[inset_0_0_0_1px_rgba(255,255,255,0.12),0_0_0_1px_rgba(214,230,221,0.16)] xl:justify-start xl:px-3.5 xl:text-left ${
+                    className={`flex h-9 w-full items-center justify-center rounded-xl px-3 text-center text-sm font-medium transition-[background-color,color,box-shadow] duration-100 focus:outline-none focus-visible:shadow-[inset_0_0_0_1px_rgba(255,255,255,0.12),0_0_0_1px_rgba(214,230,221,0.16)] xl:justify-start xl:px-3.5 xl:text-left ${
                       isOrganizerActive
                         ? "bg-[linear-gradient(180deg,var(--workspace-sidebar-active-start),var(--workspace-sidebar-active-end))] text-[var(--workspace-sidebar-text)]"
                         : "text-[var(--workspace-sidebar-text-muted)] hover:bg-[var(--workspace-sidebar-hover)] hover:text-[var(--workspace-sidebar-text)]"
@@ -14286,11 +14286,11 @@ function WorkspaceSidebar({
                   </button>
                 </div>
               ) : null}
-              <ul className="space-y-2">{utilityNavigationItems.map(renderItem)}</ul>
+              <ul className="space-y-1">{utilityNavigationItems.map(renderItem)}</ul>
               <button
                 type="button"
                 onClick={onLogoutClick}
-                className="mt-5 flex w-full items-center justify-center rounded-2xl px-3 py-3 text-center text-sm font-medium text-[var(--workspace-sidebar-text-muted)] transition-[background-color,color,box-shadow] duration-100 hover:bg-[var(--workspace-sidebar-hover)] hover:text-[var(--workspace-sidebar-text)] focus:outline-none focus-visible:shadow-[inset_0_0_0_1px_rgba(255,255,255,0.12),0_0_0_1px_rgba(214,230,221,0.16)] xl:justify-start xl:px-3.5 xl:text-left"
+                className="mt-3 flex h-9 w-full items-center justify-center rounded-xl px-3 text-center text-sm font-medium text-[var(--workspace-sidebar-text-muted)] transition-[background-color,color,box-shadow] duration-100 hover:bg-[var(--workspace-sidebar-hover)] hover:text-[var(--workspace-sidebar-text)] focus:outline-none focus-visible:shadow-[inset_0_0_0_1px_rgba(255,255,255,0.12),0_0_0_1px_rgba(214,230,221,0.16)] xl:justify-start xl:px-3.5 xl:text-left"
               >
                 <span className="hidden items-center gap-2 xl:inline-flex">
                   <SidebarNavigationIcon name="logout" />
@@ -14301,7 +14301,7 @@ function WorkspaceSidebar({
                   <span>Out</span>
                 </span>
               </button>
-              <div className="pt-5 text-center text-[0.68rem] font-medium tracking-[0.05em] text-[color:rgba(146,122,98,0.78)] xl:px-3.5 xl:text-left">
+              <div className="pt-4 text-center text-[0.68rem] font-medium tracking-[0.05em] text-[color:rgba(146,122,98,0.78)] xl:px-3.5 xl:text-left">
                 Version 1.0.0
               </div>
             </div>
