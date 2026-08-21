@@ -103,6 +103,56 @@ test("returned reply evidence resolves to returned_reply", () => {
   assert.equal(result.confidence, "medium");
 });
 
+test("waiting_on_other is concrete Priority evidence", () => {
+  const result = resolvePrioritySource({
+    hasWaitingOnOtherEvidence: true,
+    message: {
+      priorityScore: "medium",
+    },
+  });
+
+  assert.equal(result.level, "priority");
+  assert.equal(result.source, "waiting_on_other");
+  assert.equal(result.confidence, "high");
+});
+
+test("new returned reply evidence outranks stale waiting evidence", () => {
+  const result = resolvePrioritySource({
+    hasWaitingOnOtherEvidence: true,
+    hasReturnedReplyEvidence: true,
+    message: {
+      priorityScore: "medium",
+    },
+  });
+
+  assert.equal(result.source, "returned_reply");
+});
+
+test("waiting_on_other reason outranks learned sender priority", () => {
+  const result = resolvePrioritySource({
+    hasWaitingOnOtherEvidence: true,
+    learnedPrioritySelection: "Important",
+    message: {
+      priorityScore: "high",
+    },
+  });
+
+  assert.equal(result.source, "waiting_on_other");
+});
+
+test("manual removed beats waiting_on_other", () => {
+  const result = resolvePrioritySource({
+    manualOverride: "removed",
+    hasWaitingOnOtherEvidence: true,
+    message: {
+      priorityScore: "high",
+    },
+  });
+
+  assert.equal(result.level, "normal");
+  assert.equal(result.source, "manual");
+});
+
 test("learning Important resolves to learning", () => {
   const result = resolvePrioritySource({
     learnedPrioritySelection: "Important",

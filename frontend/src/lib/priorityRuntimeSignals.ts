@@ -38,6 +38,7 @@ export type PriorityRuntimeSignalInput = {
   >;
   hasCollaborationContextByMessageKey?: Record<string, boolean | undefined>;
   hasAssignedReviewContextByMessageKey?: Record<string, boolean | undefined>;
+  waitingOnOtherByMessageKey?: Record<string, boolean | undefined>;
   resolveMessageKey?: (
     message: PriorityRuntimeCandidateMessage,
     index: number,
@@ -107,6 +108,8 @@ export function buildPriorityRuntimeSignalsForCandidates(
           input.hasCollaborationContextByMessageKey?.[messageKey],
         hasAssignedReviewContext:
           input.hasAssignedReviewContextByMessageKey?.[messageKey],
+        hasWaitingOnOtherEvidence:
+          input.waitingOnOtherByMessageKey?.[messageKey],
         returnedReplyEvidence,
       });
 

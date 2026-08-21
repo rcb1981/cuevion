@@ -46,6 +46,7 @@ function isPrioritySource(value: unknown): value is PrioritySource {
   return (
     value === "manual" ||
     value === "learning" ||
+    value === "waiting_on_other" ||
     value === "returned_reply" ||
     value === "collaboration" ||
     value === "assigned_review" ||
@@ -95,6 +96,9 @@ export function shouldAllowNormalPriority(input: NormalPriorityGateInput) {
   switch (source) {
     case "manual":
     case "learning":
+      return hasPriorityLevel(prioritySource);
+
+    case "waiting_on_other":
       return hasPriorityLevel(prioritySource);
 
     case "returned_reply":

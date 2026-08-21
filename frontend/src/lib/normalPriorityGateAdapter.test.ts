@@ -150,6 +150,21 @@ test("runtime source learning is preserved", () => {
   assert.equal(shouldAllowNormalPriority(input), true);
 });
 
+test("runtime waiting_on_other source is preserved and allowed", () => {
+  const input = build({
+    runtimeSignal: {
+      prioritySource: {
+        level: "priority",
+        source: "waiting_on_other",
+        confidence: "high",
+      },
+    },
+  });
+
+  assert.equal(input.prioritySource?.source, "waiting_on_other");
+  assert.equal(shouldAllowNormalPriority(input), true);
+});
+
 test("high-confidence returned_reply evidence maps to allowed gate input", () => {
   const input = build({
     returnedReplyEvidence: {

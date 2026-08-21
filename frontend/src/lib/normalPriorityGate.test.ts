@@ -71,6 +71,10 @@ for (const noiseDisposition of [
       },
       {
         noiseDisposition,
+        prioritySource: source({ source: "waiting_on_other" }),
+      },
+      {
+        noiseDisposition,
         prioritySource: source({ source: "returned_reply" }),
         returnedReplyEvidence: returnedReplyEvidence({ confidence: "high" }),
       },
@@ -142,6 +146,25 @@ test("learning low source does not allow Priority", () => {
   assert.equal(
     allows({
       prioritySource: source({ level: "low", source: "learning" }),
+    }),
+    false,
+  );
+});
+
+test("waiting_on_other source allows Priority independently of read state", () => {
+  assert.equal(
+    allows({
+      prioritySource: source({ source: "waiting_on_other" }),
+    }),
+    true,
+  );
+});
+
+test("manual removed beats waiting_on_other at the gate", () => {
+  assert.equal(
+    allows({
+      manualOverride: "removed",
+      prioritySource: source({ source: "waiting_on_other" }),
     }),
     false,
   );

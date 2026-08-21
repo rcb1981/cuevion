@@ -31,6 +31,10 @@ const priorityReasonCopyBySource: Record<
   learning: {
     title: "Marked important by your learning preferences",
   },
+  waiting_on_other: {
+    title: "Waiting for their reply",
+    detail: "You replied and this conversation is still open.",
+  },
   returned_reply: {
     title: "They replied after your last reply",
     detail: "This looks like an active conversation.",
@@ -64,6 +68,7 @@ const priorityReasonCopyBySource: Record<
 const visiblePriorityReasonSources = new Set<PrioritySource>([
   "manual",
   "learning",
+  "waiting_on_other",
   "returned_reply",
   "collaboration",
   "assigned_review",

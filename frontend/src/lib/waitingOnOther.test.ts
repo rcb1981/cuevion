@@ -1,0 +1,297 @@
+import assert from "node:assert/strict";
+import {
+  clearConversationWaitingOnOther,
+  normalizeWaitingOnOtherStore,
+  reconcileWaitingOnOtherStore,
+  resolveWaitingOnOtherState,
+  selectWaitingOnOtherRepresentatives,
+  transitionWaitingOnOtherAfterSend,
+  WAITING_ON_OTHER_MAX_INACTIVITY_MS,
+  type WaitingOnOtherStore,
+} from "./waitingOnOther";
+import type {
+  LiveThreadIdentityContext,
+  RenderedConversationMessage,
+  ThreadIdentityAuthority,
+} from "./inboxEngine";
+
+let passed = 0;
+let failed = 0;
+
+function test(name: string, fn: () => void) {
+  try {
+    fn();
+    console.log(`  ✓ ${name}`);
+    passed += 1;
+  } catch (error) {
+    console.error(`  ✗ ${name}`);
+    console.error(`    ${(error as Error).message}`);
+    failed += 1;
+  }
+}
+
+const transitionTime = "2026-08-21T10:00:00.000Z";
+const transitionMs = new Date(transitionTime).getTime();
+
+function context(
+  mailboxId: string,
+  provider: "google" | "custom_imap",
+): LiveThreadIdentityContext {
+  return {
+    mailboxId,
+    provider,
+    folder: "INBOX",
+    uidValidity: provider === "google" ? "gmail-api" : "77",
+  };
+}
+
+function message(
+  overrides: Partial<RenderedConversationMessage> & {
+    mailboxId?: string;
+    provider?: "google" | "custom_imap";
+    authority?: ThreadIdentityAuthority;
+  } = {},
+): RenderedConversationMessage {
+  const mailboxId = overrides.mailboxId ?? "mail-a";
+  const provider = overrides.provider ?? "google";
+  const authority = overrides.authority ?? (provider === "google" ? "gmail" : "rfc");
+  const threadId =
+    overrides.threadId ??
+    (provider === "google"
+      ? `gmail:${mailboxId}:thread-1`
+      : `imap:rfc:${mailboxId}:root%40example.com`);
+
+  return {
+    id: "incoming-1",
+    threadId,
+    threadIdentityAuthority: authority,
+    threadIdentityContext: context(mailboxId, provider),
+    subject: "Re: Licensing question",
+    from: "partner@example.com",
+    to: "me@example.com",
+    sender: "Partner",
+    createdAt: "2026-08-21T09:00:00.000Z",
+    timestamp: "2026-08-21T09:00:00.000Z",
+    ...overrides,
+  };
+}
+
+function replyTransition(
+  source = message(),
+  store: WaitingOnOtherStore = {},
+  composeMode: "reply" | "reply_all" = "reply",
+) {
+  return transitionWaitingOnOtherAfterSend(store, {
+    mailboxId: source.threadIdentityContext?.mailboxId ?? "mail-a",
+    message: source,
+    composeMode,
+    sendSucceeded: true,
+    transitionedAt: transitionTime,
+  });
+}
+
+console.log("\nwaitingOnOther");
+
+test("Gmail incoming -> successful Reply -> waiting_on_other", () => {
+  const source = message();
+  const store = replyTransition(source);
+  const state = resolveWaitingOnOtherState(store, "mail-a", source, transitionMs);
+
+  assert.equal(state?.state, "waiting_on_other");
+  assert.equal(state?.mailboxId, "mail-a");
+  assert.match(state?.conversationKey ?? "", /gmail/);
+});
+
+test("custom IMAP RFC ancestry -> successful Reply -> waiting_on_other", () => {
+  const source = message({ provider: "custom_imap", authority: "rfc" });
+  const store = replyTransition(source);
+
+  assert.equal(
+    resolveWaitingOnOtherState(store, "mail-a", source, transitionMs)?.state,
+    "waiting_on_other",
+  );
+});
+
+test("unsafe heuristic identity fails closed", () => {
+  const source = message({ threadId: "licensing question", authority: "heuristic" });
+  assert.deepEqual(replyTransition(source), {});
+});
+
+test("conflicting mailbox context fails closed", () => {
+  const source = message({ mailboxId: "mail-a" });
+  assert.deepEqual(
+    transitionWaitingOnOtherAfterSend({}, {
+      mailboxId: "mail-b",
+      message: source,
+      composeMode: "reply",
+      sendSucceeded: true,
+      transitionedAt: transitionTime,
+    }),
+    {},
+  );
+});
+
+test("same waiting thread is represented exactly once", () => {
+  const source = message();
+  const olderCopy = message({
+    id: "incoming-older",
+    createdAt: "2026-08-20T09:00:00.000Z",
+  });
+  const representatives = selectWaitingOnOtherRepresentatives(
+    replyTransition(source),
+    [
+      { mailboxId: "mail-a", message: olderCopy },
+      { mailboxId: "mail-a", message: source },
+      { mailboxId: "mail-a", message: source },
+    ],
+    transitionMs,
+  );
+
+  assert.equal(representatives.length, 1);
+  assert.equal(representatives[0].message.id, "incoming-1");
+});
+
+test("serialized state reconstructs after refresh", () => {
+  const source = message();
+  const stored = JSON.parse(JSON.stringify(replyTransition(source)));
+  const reconstructed = normalizeWaitingOnOtherStore(stored, transitionMs);
+
+  assert.equal(
+    resolveWaitingOnOtherState(reconstructed, "mail-a", source, transitionMs)?.state,
+    "waiting_on_other",
+  );
+});
+
+test("newer external inbound supersedes waiting_on_other", () => {
+  const source = message();
+  const returnedReply = message({
+    id: "incoming-2",
+    createdAt: "2026-08-21T11:00:00.000Z",
+    timestamp: "2026-08-21T11:00:00.000Z",
+  });
+  const reconciled = reconcileWaitingOnOtherStore(
+    replyTransition(source),
+    [{ mailboxId: "mail-a", message: returnedReply }],
+    new Date("2026-08-21T11:01:00.000Z").getTime(),
+  );
+
+  assert.deepEqual(reconciled, {});
+});
+
+test("older inbound does not clear the post-reply waiting state", () => {
+  const source = message();
+  const store = replyTransition(source);
+  assert.deepEqual(
+    reconcileWaitingOnOtherStore(
+      store,
+      [{ mailboxId: "mail-a", message: source }],
+      transitionMs,
+    ),
+    store,
+  );
+});
+
+for (const action of ["Mark as done", "Remove from Priority"] as const) {
+  test(`${action} clears the conversation state`, () => {
+    const source = message();
+    const cleared = clearConversationWaitingOnOther(replyTransition(source), {
+      mailboxId: "mail-a",
+      message: source,
+    });
+    assert.deepEqual(cleared, {});
+  });
+}
+
+test("opening/reading the representative does not clear waiting", () => {
+  const source = message();
+  const readSource = { ...source, unread: false };
+  assert.equal(
+    resolveWaitingOnOtherState(replyTransition(source), "mail-a", readSource, transitionMs)
+      ?.state,
+    "waiting_on_other",
+  );
+});
+
+for (const composeMode of ["new", "forward"] as const) {
+  test(`${composeMode} send does not create waiting state`, () => {
+    assert.deepEqual(
+      transitionWaitingOnOtherAfterSend({}, {
+        mailboxId: "mail-a",
+        message: message(),
+        composeMode,
+        sendSucceeded: true,
+        transitionedAt: transitionTime,
+      }),
+      {},
+    );
+  });
+}
+
+test("failed Reply does not create waiting state", () => {
+  assert.deepEqual(
+    transitionWaitingOnOtherAfterSend({}, {
+      mailboxId: "mail-a",
+      message: message(),
+      composeMode: "reply",
+      sendSucceeded: false,
+      transitionedAt: transitionTime,
+    }),
+    {},
+  );
+});
+
+test("Reply All creates the same waiting state as Reply", () => {
+  assert.deepEqual(replyTransition(message(), {}, "reply_all"), replyTransition());
+});
+
+test("colliding raw message ids remain isolated by mailbox and provider thread", () => {
+  const first = message({ mailboxId: "mail-a", id: "collision" });
+  const second = message({ mailboxId: "mail-b", id: "collision" });
+  const store = replyTransition(second, replyTransition(first));
+
+  assert.equal(Object.keys(store).length, 2);
+  assert.equal(
+    resolveWaitingOnOtherState(store, "mail-a", first, transitionMs)?.mailboxId,
+    "mail-a",
+  );
+  assert.equal(
+    resolveWaitingOnOtherState(store, "mail-b", second, transitionMs)?.mailboxId,
+    "mail-b",
+  );
+});
+
+test("expired waiting state is not active Priority evidence", () => {
+  const source = message();
+  const store = replyTransition(source);
+  const expiredNow = transitionMs + WAITING_ON_OTHER_MAX_INACTIVITY_MS + 1;
+
+  assert.equal(resolveWaitingOnOtherState(store, "mail-a", source, expiredNow), null);
+  assert.deepEqual(normalizeWaitingOnOtherStore(store, expiredNow), {});
+});
+
+test("ordinary Sent messages cannot create waiting state", () => {
+  const sent = message({ id: "sent-ordinary", from: "me@example.com", signal: "Sent" });
+  assert.deepEqual(
+    transitionWaitingOnOtherAfterSend({}, {
+      mailboxId: "mail-a",
+      message: sent,
+      composeMode: "new",
+      sendSucceeded: true,
+      transitionedAt: transitionTime,
+    }),
+    {},
+  );
+});
+
+assert.equal(
+  WAITING_ON_OTHER_MAX_INACTIVITY_MS,
+  14 * 24 * 60 * 60 * 1000,
+  "waiting_on_other must reuse the 14-day Priority inactivity contract",
+);
+
+if (failed > 0) {
+  console.error(`\n${failed} waitingOnOther test${failed === 1 ? "" : "s"} failed.`);
+  process.exit(1);
+}
+
+console.log(`\n${passed} waitingOnOther tests passed.`);

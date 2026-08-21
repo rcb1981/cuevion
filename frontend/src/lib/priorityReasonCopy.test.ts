@@ -34,6 +34,7 @@ function test(name: string, fn: () => void) {
 const knownSources: PrioritySource[] = [
   "manual",
   "learning",
+  "waiting_on_other",
   "returned_reply",
   "collaboration",
   "assigned_review",
@@ -48,6 +49,7 @@ const knownSources: PrioritySource[] = [
 const visibleSources: PrioritySource[] = [
   "manual",
   "learning",
+  "waiting_on_other",
   "returned_reply",
   "collaboration",
   "assigned_review",
@@ -150,6 +152,17 @@ test("returned_reply copy does not expose internal source names", () => {
   assert.equal(copy.shouldShow, true);
   assert.equal(copy.title, "They replied after your last reply");
   assert.equal(copy.detail, "This looks like an active conversation.");
+  assertNoForbiddenTerms(copy);
+});
+
+test("waiting_on_other copy describes the open loop", () => {
+  const copy = formatPriorityReasonCopy({
+    prioritySource: sourceResult("waiting_on_other", { confidence: "high" }),
+  });
+
+  assert.equal(copy.shouldShow, true);
+  assert.equal(copy.title, "Waiting for their reply");
+  assert.equal(copy.detail, "You replied and this conversation is still open.");
   assertNoForbiddenTerms(copy);
 });
 

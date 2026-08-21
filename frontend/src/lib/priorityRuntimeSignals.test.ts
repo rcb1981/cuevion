@@ -323,6 +323,39 @@ test("prioritySource returns returned_reply only when returned-reply evidence is
   assert.equal(signals["main:inbound-2"].prioritySource.source, "none");
 });
 
+test("waiting state is projected as a concrete runtime Priority source", () => {
+  const signals = buildPriorityRuntimeSignalsForCandidates({
+    ownEmailAddresses,
+    candidateMessages: [
+      message({ id: "inbound-1", threadId: "provider-thread-1" }),
+    ],
+    waitingOnOtherByMessageKey: {
+      "main:inbound-1": true,
+    },
+  });
+
+  assert.equal(signals["main:inbound-1"].prioritySource.source, "waiting_on_other");
+  assert.equal(signals["main:inbound-1"].prioritySource.level, "priority");
+});
+
+test("manual removed beats runtime waiting state", () => {
+  const signals = buildPriorityRuntimeSignalsForCandidates({
+    ownEmailAddresses,
+    candidateMessages: [
+      message({ id: "inbound-1", threadId: "provider-thread-1" }),
+    ],
+    manualPriorityOverrides: {
+      "main:inbound-1": "removed",
+    },
+    waitingOnOtherByMessageKey: {
+      "main:inbound-1": true,
+    },
+  });
+
+  assert.equal(signals["main:inbound-1"].prioritySource.source, "manual");
+  assert.equal(signals["main:inbound-1"].prioritySource.level, "normal");
+});
+
 test("manual priority source takes precedence over returned_reply", () => {
   const signals = buildPriorityRuntimeSignalsForCandidates({
     ownEmailAddresses,

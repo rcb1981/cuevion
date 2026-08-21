@@ -3,6 +3,7 @@ export type PriorityLevel = "priority" | "normal" | "low";
 export type PrioritySource =
   | "manual"
   | "learning"
+  | "waiting_on_other"
   | "returned_reply"
   | "collaboration"
   | "assigned_review"
@@ -57,6 +58,7 @@ export type ResolvePrioritySourceInput = {
   learnedPrioritySelection?: PriorityLearningSelection | string | null;
   hasCollaborationContext?: boolean | null;
   hasAssignedReviewContext?: boolean | null;
+  hasWaitingOnOtherEvidence?: boolean | null;
   hasReturnedReplyEvidence?: boolean | null;
   focusPreferenceVisibility?: PriorityFocusPreferenceVisibility | string | null;
 };
@@ -186,6 +188,24 @@ export function resolvePrioritySource(
       level: currentLevel === "low" ? "low" : "normal",
       source: "manual",
       reason: "User manually removed this message or thread from Priority.",
+      confidence: "high",
+    };
+  }
+
+  if (input.hasWaitingOnOtherEvidence) {
+    if (input.hasReturnedReplyEvidence) {
+      return {
+        level: "priority",
+        source: "returned_reply",
+        reason: "The other party replied after a user response in this thread.",
+        confidence: "medium",
+      };
+    }
+
+    return {
+      level: "priority",
+      source: "waiting_on_other",
+      reason: "The user replied and is waiting for the other party to respond.",
       confidence: "high",
     };
   }

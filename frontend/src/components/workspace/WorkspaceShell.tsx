@@ -306,6 +306,15 @@ import {
   type MessageNoiseAssessment,
 } from "../../lib/messageNoiseGate";
 import { formatPriorityReasonCopy, type PriorityReasonCopy } from "../../lib/priorityReasonCopy";
+import {
+  clearConversationWaitingOnOther,
+  normalizeWaitingOnOtherStore,
+  reconcileWaitingOnOtherStore,
+  resolveWaitingOnOtherState,
+  selectWaitingOnOtherRepresentatives,
+  transitionWaitingOnOtherAfterSend,
+  type WaitingOnOtherStore,
+} from "../../lib/waitingOnOther";
 import { applyLearningDecision } from "../../lib/applyLearningDecision";
 import type {
   MailMessageBehaviorSuggestion as EngineMailMessageBehaviorSuggestion,
@@ -2889,6 +2898,7 @@ const CUEVION_SPAM_MESSAGES_STORAGE_KEY = "cuevion-spam-messages";
 const CUEVION_ARCHIVE_MESSAGES_STORAGE_KEY = "cuevion-archive-messages";
 const CUEVION_MANUAL_PRIORITY_OVERRIDES_STORAGE_KEY = "cuevion-manual-priority-overrides";
 const CUEVION_PRIORITY_CLEARED_STORAGE_KEY = "cuevion-priority-cleared";
+const CUEVION_WAITING_ON_OTHER_STORAGE_KEY = "cuevion-waiting-on-other";
 const CUEVION_MANUAL_LABEL_OVERRIDES_STORAGE_KEY = "cuevion-manual-label-overrides";
 const CUEVION_SPAM_SUPPRESSION_STORAGE_KEY = "cuevion-spam-suppression";
 const MAIL_SIGNATURES_STORAGE_KEY = "cuevion-mail-signatures";
@@ -3013,6 +3023,13 @@ function buildPriorityClearedStorageKey(
   orderedMailboxKey: string,
 ) {
   return `${CUEVION_PRIORITY_CLEARED_STORAGE_KEY}:${workspaceUserId}:${orderedMailboxKey}`;
+}
+
+function buildWaitingOnOtherStorageKey(
+  workspaceUserId: string,
+  orderedMailboxKey: string,
+) {
+  return `${CUEVION_WAITING_ON_OTHER_STORAGE_KEY}:${workspaceUserId}:${orderedMailboxKey}`;
 }
 
 function buildManualLabelOverridesStorageKey(
@@ -15509,6 +15526,7 @@ function MailboxView({
   manualOrganizerInclusions,
   spamSuppressionKeys,
   onSetManualPriority,
+  onSuccessfulConversationReply,
   onSetManualLabelOverride,
   onSetManualOrganizerInclusion,
   onAddSpamSuppression,
@@ -15609,6 +15627,12 @@ function MailboxView({
     messageId: string,
     shouldBePriority: boolean,
     options?: ManualPriorityUpdateOptions,
+  ) => void;
+  onSuccessfulConversationReply: (
+    mailboxId: InboxId,
+    message: MailMessage,
+    composeMode: "reply" | "reply_all",
+    transitionedAt: string,
   ) => void;
   onSetManualLabelOverride: (message: MessageIdentitySource, label: ManualLabelOverride) => void;
   onSetManualOrganizerInclusion: (
@@ -20333,6 +20357,15 @@ function MailboxView({
         mailboxStore,
       );
 
+      if (isReplyComposeMode && composeSourceMessage) {
+        onSuccessfulConversationReply(
+          activeComposeMailbox.id,
+          composeSourceMessage,
+          composeMode,
+          sentAt,
+        );
+      }
+
       setMailboxStore((currentStore) => ({
         ...currentStore,
         [activeComposeMailbox.id]: {
@@ -20343,9 +20376,7 @@ function MailboxView({
 
       if (
         composeSourceMessage &&
-        (composeMode === "reply" ||
-          composeMode === "reply_all" ||
-          composeMode === "forward") &&
+        composeMode === "forward" &&
         isVisiblePriorityMessage(composeSourceMessage)
       ) {
         onSetManualPriority(
@@ -40448,6 +40479,10 @@ export function WorkspaceShell({
     workspacePersistenceScope,
     mailboxOrderKey,
   );
+  const waitingOnOtherStorageKey = buildWaitingOnOtherStorageKey(
+    workspacePersistenceScope,
+    mailboxOrderKey,
+  );
   const manualLabelOverridesStorageKey = buildManualLabelOverridesStorageKey(
     workspacePersistenceScope,
     mailboxOrderKey,
@@ -43302,6 +43337,23 @@ export function WorkspaceShell({
       return [];
     }
   });
+  const [waitingOnOtherStore, setWaitingOnOtherStore] =
+    useState<WaitingOnOtherStore>(() => {
+      if (typeof window === "undefined") {
+        return {};
+      }
+
+      const storedValue = window.localStorage.getItem(waitingOnOtherStorageKey);
+      if (!storedValue) {
+        return {};
+      }
+
+      try {
+        return normalizeWaitingOnOtherStore(JSON.parse(storedValue));
+      } catch {
+        return {};
+      }
+    });
   const [manualLabelOverrides, setManualLabelOverrides] =
     useState<ManualLabelOverrideStore>(() => {
       if (typeof window === "undefined") {
@@ -43796,13 +43848,77 @@ export function WorkspaceShell({
     getPriorityClearedIdentityKeys(mailboxId, message).some((key) =>
       priorityClearedKeySet.has(key),
     );
+  const externalInboundConversationEntries = useMemo(
+    () =>
+      orderedMailboxes.flatMap((candidate) => {
+        const collections =
+          mailboxStore[candidate.id] ?? createEmptyMailboxCollections();
+
+        return [...collections.Inbox, ...collections.Filtered].map((message) => ({
+          mailboxId: candidate.id,
+          message,
+        }));
+      }),
+    [mailboxStore, orderedMailboxes],
+  );
+  const effectiveWaitingOnOtherStore = useMemo(
+    () =>
+      reconcileWaitingOnOtherStore(
+        waitingOnOtherStore,
+        externalInboundConversationEntries,
+      ),
+    [externalInboundConversationEntries, waitingOnOtherStore],
+  );
+
+  useEffect(() => {
+    if (
+      JSON.stringify(effectiveWaitingOnOtherStore) !==
+      JSON.stringify(waitingOnOtherStore)
+    ) {
+      setWaitingOnOtherStore(effectiveWaitingOnOtherStore);
+    }
+  }, [effectiveWaitingOnOtherStore, waitingOnOtherStore]);
+
+  const waitingOnOtherRepresentativeEntries = useMemo(
+    () =>
+      selectWaitingOnOtherRepresentatives(
+        effectiveWaitingOnOtherStore,
+        orderedMailboxes.flatMap((candidate) => {
+          const collections =
+            mailboxStore[candidate.id] ?? createEmptyMailboxCollections();
+
+          return [
+            ...collections.Inbox,
+            ...collections.Filtered,
+            ...collections.Archive,
+          ].map((message) => ({
+            mailboxId: candidate.id,
+            mailboxTitle: candidate.title,
+            message,
+          }));
+        }),
+      ),
+    [effectiveWaitingOnOtherStore, mailboxStore, orderedMailboxes],
+  );
   const normalPriorityGateCandidateEntries = (() => {
-    const seenMessageIds = new Set<string>();
+    const seenMessageKeys = new Set<string>();
     const uniqueEntries: Array<{
       mailboxId: InboxId;
       mailboxTitle: string;
       message: MailMessage;
     }> = [];
+    const addUniqueEntry = (entry: (typeof uniqueEntries)[number]) => {
+      const messageKey = createNormalPriorityMessageKey(
+        entry.mailboxId,
+        entry.message,
+      );
+      if (seenMessageKeys.has(messageKey)) {
+        return;
+      }
+
+      seenMessageKeys.add(messageKey);
+      uniqueEntries.push(entry);
+    };
 
     for (const candidate of orderedMailboxes) {
       const candidateFocusPreferences =
@@ -43825,18 +43941,15 @@ export function WorkspaceShell({
       // Central Priority must evaluate the ready inbox before Bundle UI hiding so
       // strict Priority Demo/Promo work can surface without changing normal lists.
       for (const message of candidateVisibleInboxMessages) {
-        if (seenMessageIds.has(message.id)) {
-          continue;
-        }
-
-        seenMessageIds.add(message.id);
-        uniqueEntries.push({
+        addUniqueEntry({
           mailboxId: candidate.id,
           mailboxTitle: candidate.title,
           message,
         });
       }
     }
+
+    waitingOnOtherRepresentativeEntries.forEach(addUniqueEntry);
 
     return uniqueEntries;
   })();
@@ -43880,6 +43993,18 @@ export function WorkspaceShell({
         Boolean(reviewController.getReviewBySourceId(message.id)),
       ]),
     );
+    const runtimeWaitingOnOtherEvidence = Object.fromEntries(
+      normalPriorityGateCandidateEntries.map(({ mailboxId, message }) => [
+        createNormalPriorityMessageKey(mailboxId, message),
+        Boolean(
+          resolveWaitingOnOtherState(
+            effectiveWaitingOnOtherStore,
+            mailboxId,
+            message,
+          ),
+        ),
+      ]),
+    );
 
     return buildPriorityRuntimeSignalsForCandidates({
       candidateMessages: normalPriorityGateCandidateEntries.map(({ mailboxId, message }) => ({
@@ -43894,11 +44019,13 @@ export function WorkspaceShell({
       manualPriorityOverrides: runtimeManualPriorityOverrides,
       learnedPrioritySelections: runtimeLearnedPrioritySelections,
       hasAssignedReviewContextByMessageKey: runtimeAssignedReviewContexts,
+      waitingOnOtherByMessageKey: runtimeWaitingOnOtherEvidence,
     });
   }, [
     activeWorkspaceEmail,
     authenticatedUser?.email,
     connectedOrderedMailboxes,
+    effectiveWaitingOnOtherStore,
     mailboxStore,
     manualPriorityOverrides,
     normalPriorityGateCandidateEntries,
@@ -43966,11 +44093,20 @@ export function WorkspaceShell({
     ).filter(({ message, mailboxId }) => {
       const override = resolveManualPriorityOverride(manualPriorityOverrides, message);
       const messageKey = createNormalPriorityMessageKey(mailboxId, message);
+      const hasWaitingOnOtherEvidence = Boolean(
+        resolveWaitingOnOtherState(
+          effectiveWaitingOnOtherStore,
+          mailboxId,
+          message,
+        ),
+      );
 
       return (
         !isPriorityMessageCleared(mailboxId, message) &&
-        isPriorityQueueEligibleMessage(message, override) &&
-        isPriorityPageVisiblePriorityMessage(message, mailboxId) &&
+        (hasWaitingOnOtherEvidence ||
+          isPriorityQueueEligibleMessage(message, override)) &&
+        (hasWaitingOnOtherEvidence ||
+          isPriorityPageVisiblePriorityMessage(message, mailboxId)) &&
         strictNormalPriorityAllowedMessageKeys.has(messageKey)
       );
     });
@@ -45392,6 +45528,15 @@ export function WorkspaceShell({
       ),
     );
 
+    if (!shouldBePriority && sourceLocation) {
+      setWaitingOnOtherStore((current) =>
+        clearConversationWaitingOnOther(current, {
+          mailboxId: sourceLocation.mailboxId,
+          message: sourceMessage,
+        }),
+      );
+    }
+
     if (shouldBePriority) {
       if (sourceLocation) {
         const restoredKeys = new Set(
@@ -45444,6 +45589,12 @@ export function WorkspaceShell({
       );
       return Array.from(new Set([...migratedCurrent, ...clearedKeys]));
     });
+    setWaitingOnOtherStore((current) =>
+      clearConversationWaitingOnOther(current, {
+        mailboxId,
+        message: sourceMessage,
+      }),
+    );
   };
 
   const handlePriorityListAction = (
@@ -45451,7 +45602,16 @@ export function WorkspaceShell({
     action: "remove_priority" | "mark_done",
   ) => {
     if (action === "remove_priority") {
-      handleSetManualPriority(reviewItem.sourceId, false);
+      const mailboxId = getReviewItemSourceMailboxId(reviewItem);
+      const sourceMessage = mailboxId
+        ? getMailboxMessageById(mailboxId, reviewItem.sourceId)
+        : null;
+
+      handleSetManualPriority(reviewItem.sourceId, false, {
+        storageMailboxId: mailboxId,
+        sourceMailboxId: mailboxId,
+        sourceMessage,
+      });
       return;
     }
 
@@ -47821,6 +47981,26 @@ export function WorkspaceShell({
       return;
     }
 
+    const storedValue = window.localStorage.getItem(waitingOnOtherStorageKey);
+    if (!storedValue) {
+      setWaitingOnOtherStore({});
+      return;
+    }
+
+    try {
+      setWaitingOnOtherStore(
+        normalizeWaitingOnOtherStore(JSON.parse(storedValue)),
+      );
+    } catch {
+      setWaitingOnOtherStore({});
+    }
+  }, [waitingOnOtherStorageKey]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
     const storedValue = window.localStorage.getItem(manualLabelOverridesStorageKey);
 
     if (!storedValue) {
@@ -47995,6 +48175,17 @@ export function WorkspaceShell({
       JSON.stringify(priorityClearedKeys),
     );
   }, [priorityClearedKeys, priorityClearedStorageKey]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    window.localStorage.setItem(
+      waitingOnOtherStorageKey,
+      JSON.stringify(waitingOnOtherStore),
+    );
+  }, [waitingOnOtherStorageKey, waitingOnOtherStore]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -49681,6 +49872,22 @@ export function WorkspaceShell({
                   manualOrganizerInclusions={manualOrganizerInclusions}
                   spamSuppressionKeys={spamSuppressionKeys}
                   onSetManualPriority={handleSetManualPriority}
+                  onSuccessfulConversationReply={(
+                    mailboxId,
+                    message,
+                    composeMode,
+                    transitionedAt,
+                  ) =>
+                    setWaitingOnOtherStore((current) =>
+                      transitionWaitingOnOtherAfterSend(current, {
+                        mailboxId,
+                        message,
+                        composeMode,
+                        sendSucceeded: true,
+                        transitionedAt,
+                      }),
+                    )
+                  }
                   onSetManualLabelOverride={handleSetManualLabelOverride}
                   onSetManualOrganizerInclusion={handleSetManualOrganizerInclusion}
                   onAddSpamSuppression={handleAddSpamSuppression}
