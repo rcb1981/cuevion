@@ -25,6 +25,7 @@ def make_message(
     sender: str,
     to: str = "promo@hysteriarecs.com",
     headers: tuple[tuple[str, str], ...] = (),
+    html_body: str | None = None,
 ) -> EmailMessage:
     message = EmailMessage()
     message["Subject"] = subject
@@ -33,6 +34,8 @@ def make_message(
     for name, value in headers:
         message[name] = value
     message.set_content(body)
+    if html_body is not None:
+        message.add_alternative(html_body, subtype="html")
     return message
 
 
@@ -54,6 +57,34 @@ def make_preview(
 
 
 class ImapPreviewRoutingBoundaryTests(unittest.TestCase):
+    def test_image_led_sale_campaign_keeps_update_category_but_routes_quiet(self):
+        message = make_message(
+            "Studio collection update: iconic rooms",
+            "View this message online.",
+            sender="Audio Studio <mail@studio.example>",
+            to="info@hysteriarecs.com",
+            headers=(("List-Unsubscribe", "<mailto:leave@studio.example>"),),
+            html_body="""
+                <html><body>
+                  <a href="https://studio.example/sale">
+                    <img src="https://cdn.studio.example/hero.jpg" alt="Save up to 60%">
+                  </a>
+                  <a href="https://studio.example/shop">
+                    <img src="https://cdn.studio.example/shop.jpg" alt="Shop Now">
+                  </a>
+                  <img src="https://cdn.studio.example/rooms.jpg" alt="Iconic Rooms">
+                </body></html>
+            """,
+        )
+
+        preview = make_preview(message, internal_role=None)
+
+        self.assertEqual(preview["internalClassification"], "workflow_update")
+        self.assertEqual(preview["noiseDisposition"], "bulk_marketing")
+        self.assertEqual(preview["v7_final_priority"], "LOW")
+        self.assertEqual(preview["final_visibility"], "show_low")
+        self.assertEqual(preview["action"], "show_in_quiet_view")
+
     def test_generic_commercial_newsletter_is_quiet_before_projection(self):
         message = make_message(
             "Improve your mixes this weekend",
@@ -117,6 +148,32 @@ class ImapPreviewRoutingBoundaryTests(unittest.TestCase):
         self.assertEqual(preview["internalClassification"], "workflow_update")
         self.assertEqual(preview["v7_final_priority"], "NORMAL")
         self.assertNotEqual(preview["action"], "show_in_quiet_view")
+
+    def test_bulk_template_with_one_commercial_word_stays_useful(self):
+        message = make_message(
+            "Monthly account update",
+            "Your account settings summary is available.",
+            sender="Account Notifications <notifications@example.com>",
+            to="info@hysteriarecs.com",
+            headers=(("List-Unsubscribe", "<mailto:leave@example.com>"),),
+            html_body="""
+                <html><body>
+                  <p>Your account settings summary is available.</p>
+                  <a href="https://example.com/summary">
+                    <img src="https://cdn.example.com/summary.jpg" alt="Account summary">
+                  </a>
+                  <a href="https://example.com/details">
+                    <img src="https://cdn.example.com/details.jpg" alt="Sale">
+                  </a>
+                  <img src="https://cdn.example.com/logo.jpg" alt="Company logo">
+                </body></html>
+            """,
+        )
+
+        preview = make_preview(message, internal_role=None)
+
+        self.assertEqual(preview["noiseDisposition"], "bulk_marketing")
+        self.assertNotEqual(preview["v7_final_priority"], "LOW")
 
     def test_bulk_headers_do_not_demote_protected_useful_mail(self):
         bulk_headers = (
@@ -185,6 +242,93 @@ class ImapPreviewRoutingBoundaryTests(unittest.TestCase):
                 self.assertEqual(preview["internalClassification"], classification)
                 self.assertEqual(preview["v7_final_priority"], priority)
                 self.assertNotEqual(preview["action"], "show_in_quiet_view")
+
+    def test_marketing_footer_does_not_quiet_transactional_or_operational_mail(self):
+        bulk_headers = (
+            ("List-Unsubscribe", "<mailto:leave@notifications.example>"),
+            ("Precedence", "bulk"),
+        )
+        marketing_footer = """
+            <footer>
+              <a href="https://example.com/sale">
+                <img src="https://cdn.example.com/sale.jpg" alt="Save 20%">
+              </a>
+              <a href="https://example.com/shop">
+                <img src="https://cdn.example.com/shop.jpg" alt="Shop Now">
+              </a>
+              <img src="https://cdn.example.com/products.jpg" alt="Product collection">
+            </footer>
+        """
+        cases = (
+            (
+                "receipt",
+                "Payment receipt for order #12345",
+                "Your payment was received. Order #12345 is confirmed.",
+                (),
+            ),
+            (
+                "invoice",
+                "Invoice attached",
+                "Invoice attached. Payment due September 1.",
+                (),
+            ),
+            (
+                "security",
+                "Security alert",
+                "New sign-in detected. Review activity at accounts.google.com.",
+                (),
+            ),
+            (
+                "account",
+                "Subscription renewal notice",
+                "Your subscription will renew tomorrow. Action required to update billing.",
+                (),
+            ),
+            (
+                "service incident",
+                "Service outage update",
+                "The service incident is resolved. Review the outage timeline.",
+                (),
+            ),
+            (
+                "returned reply",
+                "Re: Project discount",
+                "Thanks for your note. The discount works for the project.",
+                (
+                    ("In-Reply-To", "<parent@example.com>"),
+                    ("References", "<parent@example.com>"),
+                ),
+            ),
+        )
+
+        for name, subject, body, conversation_headers in cases:
+            with self.subTest(case=name):
+                message = make_message(
+                    subject,
+                    body,
+                    sender="Notifications <notifications@example.com>",
+                    to="info@hysteriarecs.com",
+                    headers=(*bulk_headers, *conversation_headers),
+                    html_body=f"<main><p>{body}</p></main>{marketing_footer}",
+                )
+
+                preview = make_preview(message, internal_role=None)
+
+                self.assertNotEqual(preview["v7_final_priority"], "LOW")
+
+    def test_human_discount_discussion_is_not_bulk_filtered(self):
+        message = make_message(
+            "Collaboration project pricing",
+            "Hi Rutger, can we discuss a discount for the project?",
+            sender="Alex <alex@example.com>",
+            to="info@hysteriarecs.com",
+        )
+
+        preview = make_preview(message, internal_role=None)
+
+        self.assertEqual(preview["noiseDisposition"], "none")
+        self.assertNotEqual(preview["v7_final_priority"], "LOW")
+        self.assertNotEqual(preview["action"], "show_in_quiet_view")
 
     def test_alxb_promo_reminder_respects_low_and_normal_focus(self):
         message = make_message(

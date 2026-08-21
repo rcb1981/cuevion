@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from html.parser import HTMLParser
 from email.message import Message
 from email.utils import parseaddr
 from typing import Final, Literal, TypedDict
@@ -74,6 +75,9 @@ MAX_IDENTITY_LENGTH: Final = 2_048
 MAX_HEADER_INSTANCES: Final = 16
 MAX_HEADER_VALUE_LENGTH: Final = 8_192
 MAX_TOTAL_HEADER_LENGTH: Final = 32_768
+MAX_HTML_EVIDENCE_LENGTH: Final = 200_000
+MAX_HTML_ATTRIBUTE_VALUE_LENGTH: Final = 2_048
+MAX_HTML_ATTRIBUTE_TEXT_LENGTH: Final = 32_768
 
 
 def _patterns(*values: str) -> tuple[re.Pattern[str], ...]:
@@ -196,10 +200,12 @@ COMMERCIAL_CONTEXT_PATTERNS = _patterns(
     r"\b(?:marketing|campaign|promotion|promotional)\b",
 )
 PROTECTED_ACTION_PATTERNS = _patterns(
-    r"\b(?:invoice|payment|billing|overdue|amount\s+due|royalt(?:y|ies)|earnings|payout)\b",
+    r"\b(?:invoice|receipt|payment|billing|overdue|amount\s+due|royalt(?:y|ies)|earnings|payout|transaction)\b",
     r"\b(?:contract|agreement|rights|legal|signature|approval|deadline|cutoff)\b",
     r"\b(?:please\s+(?:review|confirm|send|approve|sign)|can\s+you|could\s+you|need\s+your|let\s+me\s+know)\b",
     r"\b(?:release\s+(?:delivery|status|ingestion)|metadata\s+(?:issue|warning)|store\s+delivery|content\s+id|takedown|dsp\s+(?:warning|delivery))\b",
+    r"\b(?:security\s+alert|new\s+sign[ -]?in|suspicious\s+activity|verification\s+code|account\s+(?:alert|locked|suspended))\b",
+    r"\b(?:order\s*#|order\s+(?:status|confirmed)|booking\s+(?:status|confirmed)|shipping\s+(?:status|confirmation)|subscription\s+(?:will\s+)?renew|service\s+(?:incident|outage))\b",
 )
 MESSAGE_ID_REFERENCE_PATTERN = re.compile(
     r"<[^<>\s@]+@[^<>\s@]+>",
@@ -318,6 +324,82 @@ def _has_automated_sender_evidence(message: Message, sender_email: str) -> bool:
     return auto_submitted or automated_local_part
 
 
+class _CommercialTemplateEvidenceParser(HTMLParser):
+    """Collect bounded structural and attribute evidence from one HTML body."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.remote_image_count = 0
+        self.remote_link_count = 0
+        self.attribute_text_parts: list[str] = []
+        self.attribute_text_length = 0
+
+    def handle_starttag(
+        self,
+        tag: str,
+        attrs: list[tuple[str, str | None]],
+    ) -> None:
+        normalized_attributes = {
+            name.casefold(): value
+            for name, value in attrs
+            if isinstance(name, str) and isinstance(value, str)
+        }
+        source = normalized_attributes.get("src", "").strip().casefold()
+        href = normalized_attributes.get("href", "").strip().casefold()
+
+        if tag.casefold() == "img" and source.startswith(("https://", "http://")):
+            self.remote_image_count += 1
+        if tag.casefold() == "a" and href.startswith(("https://", "http://")):
+            self.remote_link_count += 1
+
+        for attribute_name in ("alt", "title", "aria-label", "href"):
+            value = normalized_attributes.get(attribute_name, "")
+            if (
+                not value
+                or len(value) > MAX_HTML_ATTRIBUTE_VALUE_LENGTH
+                or self.attribute_text_length + len(value)
+                > MAX_HTML_ATTRIBUTE_TEXT_LENGTH
+            ):
+                continue
+            self.attribute_text_parts.append(value)
+            self.attribute_text_length += len(value)
+
+
+def _commercial_html_template_evidence(message: Message) -> tuple[str, bool]:
+    """Return bounded commercial attribute text and strong template structure."""
+
+    parser = _CommercialTemplateEvidenceParser()
+    remaining_length = MAX_HTML_EVIDENCE_LENGTH
+
+    try:
+        parts = message.walk()
+    except Exception:
+        return "", False
+
+    for part in parts:
+        if remaining_length <= 0 or part.get_content_type() != "text/html":
+            continue
+        try:
+            payload = part.get_payload(decode=True)
+            if not isinstance(payload, bytes):
+                continue
+            charset = part.get_content_charset() or "utf-8"
+            html_body = payload[:remaining_length].decode(charset, errors="ignore")
+            remaining_length -= len(html_body)
+            parser.feed(html_body)
+        except Exception:
+            continue
+
+    attribute_text = _normalize_text(
+        " ".join(parser.attribute_text_parts),
+        MAX_HTML_ATTRIBUTE_TEXT_LENGTH,
+    )
+    has_strong_template_structure = (
+        parser.remote_image_count >= 3 and parser.remote_link_count >= 2
+    )
+    return attribute_text, has_strong_template_structure
+
+
 def is_low_value_commercial_newsletter(
     *,
     message: Message,
@@ -343,12 +425,16 @@ def is_low_value_commercial_newsletter(
     ):
         return False
 
+    html_attribute_text, has_strong_template_structure = (
+        _commercial_html_template_evidence(message)
+    )
     text = " ".join(
         value
         for value in (
             _normalize_text(subject, MAX_SUBJECT_LENGTH),
             _normalize_text(body, MAX_BODY_LENGTH),
             _normalize_text(sender_email, MAX_IDENTITY_LENGTH),
+            html_attribute_text,
         )
         if value
     )
@@ -373,6 +459,7 @@ def is_low_value_commercial_newsletter(
                 value and value != "no"
                 for value in _bounded_header_values(message, "Auto-Submitted")
             ),
+            has_strong_template_structure,
         )
     )
 

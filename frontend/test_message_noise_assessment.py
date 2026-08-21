@@ -14,7 +14,10 @@ from unittest.mock import MagicMock, patch
 os.environ.setdefault("OPENAI_API_KEY", "test-key")
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from imap_connect_preview import build_connect_preview_response  # noqa: E402
+from imap_connect_preview import (  # noqa: E402
+    build_connect_preview_response,
+    to_message_preview,
+)
 
 
 def _valid_gmail_identifier(value: object) -> bool:
@@ -519,6 +522,73 @@ class MessageNoiseAssessmentTests(unittest.TestCase):
         for field in ("noiseDisposition", "noiseConfidence", "noiseReasons"):
             self.assertEqual(gmail_message[field], custom_preview[field])
         self.assertEqual(gmail_message["noiseDisposition"], "strong_spam")
+
+    def test_oauth_gmail_and_custom_imap_image_campaigns_route_quiet_with_parity(self):
+        source_message = make_message(
+            "Studio collection update: iconic rooms",
+            "View this message online.",
+            sender="Audio Studio <mail@studio.example>",
+            recipient="info@hysteriarecs.com",
+            headers=(("List-Unsubscribe", "<mailto:leave@studio.example>"),),
+        )
+        source_message.add_alternative(
+            """
+            <html><body>
+              <a href="https://studio.example/sale">
+                <img src="https://cdn.studio.example/hero.jpg" alt="Save up to 60%">
+              </a>
+              <a href="https://studio.example/shop">
+                <img src="https://cdn.studio.example/shop.jpg" alt="Shop Now">
+              </a>
+              <img src="https://cdn.studio.example/rooms.jpg" alt="Iconic Rooms">
+            </body></html>
+            """,
+            subtype="html",
+        )
+        raw_message = source_message.as_bytes()
+
+        gmail_message = parse_gmail_message_detail(
+            {
+                "id": "gmail-commercial-42",
+                "threadId": "gmail-commercial-thread-42",
+                "labelIds": ["INBOX", "UNREAD"],
+                "raw": base64.urlsafe_b64encode(raw_message)
+                .decode("ascii")
+                .rstrip("="),
+            },
+            context={
+                "mailbox_email": "info@hysteriarecs.com",
+                "mailbox_id": "gmail-mailbox",
+            },
+            provider_folder="Inbox",
+            requested_message_id="gmail-commercial-42",
+            index=0,
+            strict=True,
+        )
+        custom_message = to_message_preview(
+            message_from_bytes(raw_message),
+            0,
+            "info@hysteriarecs.com",
+            True,
+            "42",
+        )
+
+        self.assertIsNotNone(gmail_message)
+        for field in (
+            "internalClassification",
+            "noiseDisposition",
+            "noiseConfidence",
+            "noiseReasons",
+            "v7_final_priority",
+            "final_visibility",
+            "action",
+        ):
+            self.assertEqual(gmail_message[field], custom_message[field])
+        self.assertEqual(gmail_message["internalClassification"], "workflow_update")
+        self.assertEqual(gmail_message["noiseDisposition"], "bulk_marketing")
+        self.assertEqual(gmail_message["v7_final_priority"], "LOW")
+        self.assertEqual(gmail_message["final_visibility"], "show_low")
+        self.assertEqual(gmail_message["action"], "show_in_quiet_view")
 
 
 if __name__ == "__main__":
