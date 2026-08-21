@@ -478,6 +478,78 @@ class ImapPreviewRoutingBoundaryTests(unittest.TestCase):
         self.assertNotEqual(preview["v7_final_priority"], "LOW")
         self.assertNotEqual(preview["action"], "show_in_quiet_view")
 
+    def test_dynamic_mailbox_noncommercial_messages_do_not_gain_v7_weighting(self):
+        dynamic_recipient = "artistoffice@example.com"
+        cases = (
+            (
+                "ordinary update",
+                "Project workflow update",
+                "The project status was updated after today's planning meeting.",
+                (),
+            ),
+            (
+                "finance",
+                "Finance report",
+                "The quarterly finance report and budget summary are attached.",
+                (),
+            ),
+            (
+                "business",
+                "Partnership meeting",
+                "Let's discuss the partnership agenda at tomorrow's meeting.",
+                (),
+            ),
+            (
+                "human conversation",
+                "Studio planning",
+                "Hi Rutger, are you free to discuss the studio plan tomorrow?",
+                (),
+            ),
+            (
+                "transactional",
+                "Payment receipt",
+                "Your payment was received. Receipt 2026-0811 is attached.",
+                (),
+            ),
+            (
+                "security",
+                "Security alert",
+                "A new sign-in was detected on your account.",
+                (),
+            ),
+            (
+                "reply",
+                "Re: Studio planning",
+                "Thanks for your earlier message. Tomorrow works for me.",
+                (
+                    ("In-Reply-To", "<parent@example.com>"),
+                    ("References", "<parent@example.com>"),
+                ),
+            ),
+            (
+                "legal rights",
+                "Master rights confirmation",
+                "Can you confirm who owns the master rights for this release?",
+                (),
+            ),
+        )
+
+        for name, subject, body, headers in cases:
+            with self.subTest(case=name):
+                message = make_message(
+                    subject,
+                    body,
+                    sender="Project Contact <contact@example.net>",
+                    to=dynamic_recipient,
+                    headers=headers,
+                )
+
+                preview = make_preview(message, internal_role=None)
+
+                self.assertIsNone(preview.get("v7_final_priority"))
+                self.assertIsNone(preview.get("final_visibility"))
+                self.assertIsNone(preview.get("action"))
+
     def test_alxb_promo_reminder_respects_low_and_normal_focus(self):
         message = make_message(
             "(Reminder) Promo Invite from ALXB Records",

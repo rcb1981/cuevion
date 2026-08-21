@@ -151,6 +151,21 @@ def visibility_to_action(visibility: VisibilityMode) -> str:
     return mapping.get(visibility, "show_in_main_feed")
 
 
+def resolve_low_value_commercial_hard_rule(
+    category: str,
+    low_value_commercial_newsletter: bool,
+) -> tuple[PriorityLevel, VisibilityMode, str] | None:
+    if (
+        category in {"workflow_update", "info", "unknown"}
+        and low_value_commercial_newsletter is True
+    ):
+        priority: PriorityLevel = "LOW"
+        visibility: VisibilityMode = "show_low"
+        return priority, visibility, visibility_to_action(visibility)
+
+    return None
+
+
 def is_demo_like(category: str) -> bool:
     return category in {"demo", "high_priority_demo", "bulk_demo", "weak_demo"}
 
@@ -257,12 +272,12 @@ def decide_message_behavior(
     # business, finance, operations, and workflow-link vetoes. Keep the semantic
     # Update label, but make its attention/routing contract quiet before role,
     # mailbox, or focus weighting can promote it as an ordinary useful update.
-    if (
-        category in {"workflow_update", "info", "unknown"}
-        and engine_result.metadata.get("low_value_commercial_newsletter") is True
-    ):
-        final_priority = "LOW"
-        final_visibility = "show_low"
+    low_value_commercial_routing = resolve_low_value_commercial_hard_rule(
+        category,
+        engine_result.metadata.get("low_value_commercial_newsletter") is True,
+    )
+    if low_value_commercial_routing is not None:
+        final_priority, final_visibility, action = low_value_commercial_routing
         explanation.hard_rule_adjustments.append(
             "low-value commercial newsletter forced to quiet visibility"
         )
@@ -274,7 +289,7 @@ def decide_message_behavior(
             final_category=engine_result.category,
             final_priority=final_priority,
             final_visibility=final_visibility,
-            action=visibility_to_action(final_visibility),
+            action=action,
             explanation=explanation,
         )
 

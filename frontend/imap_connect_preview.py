@@ -1079,7 +1079,10 @@ def resolve_preview_routing(
             strip_url_tracking_params_for_keyword_matching,
         )
         from v7_config import EngineResult
-        from v7_decision_layer import decide_message_behavior
+        from v7_decision_layer import (
+            decide_message_behavior,
+            resolve_low_value_commercial_hard_rule,
+        )
     except Exception as exc:
         logger.error(
             "Could not load message preview dependencies error_code=preview_dependencies_unavailable exception_type=%s",
@@ -1406,6 +1409,17 @@ def resolve_preview_routing(
             inbox_profile=inbox_profile,
             user_reminder_settings=USER_REMINDER_SETTINGS,
         )
+
+        low_value_commercial_routing = resolve_low_value_commercial_hard_rule(
+            result.get("category") or "unknown",
+            low_value_commercial_newsletter,
+        )
+        if low_value_commercial_routing is not None:
+            (
+                result["v7_final_priority"],
+                result["final_visibility"],
+                result["action"],
+            ) = low_value_commercial_routing
 
         mailbox_match = next(
             (
