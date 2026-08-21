@@ -57,29 +57,59 @@ def make_preview(
 
 
 class ImapPreviewRoutingBoundaryTests(unittest.TestCase):
-    def test_image_led_sale_campaign_keeps_update_category_but_routes_quiet(self):
+    def test_save_up_to_image_campaign_keeps_update_category_but_routes_quiet(self):
         message = make_message(
-            "Studio collection update: iconic rooms",
+            "Studio rooms update",
             "View this message online.",
-            sender="Audio Studio <mail@studio.example>",
+            sender="Studio Rooms <mail@rooms.example>",
             to="info@hysteriarecs.com",
-            headers=(("List-Unsubscribe", "<mailto:leave@studio.example>"),),
+            headers=(("List-Unsubscribe", "<mailto:leave@rooms.example>"),),
             html_body="""
                 <html><body>
-                  <a href="https://studio.example/sale">
-                    <img src="https://cdn.studio.example/hero.jpg" alt="Save up to 60%">
+                  <a href="https://rooms.example/sale">
+                    <img src="https://cdn.rooms.example/hero.jpg" alt="Save up to 60%">
                   </a>
-                  <a href="https://studio.example/shop">
-                    <img src="https://cdn.studio.example/shop.jpg" alt="Shop Now">
+                  <a href="https://rooms.example/shop">
+                    <img src="https://cdn.rooms.example/shop.jpg" alt="Shop Now">
                   </a>
-                  <img src="https://cdn.studio.example/rooms.jpg" alt="Iconic Rooms">
+                  <img src="https://cdn.rooms.example/east.jpg" alt="East room">
+                  <img src="https://cdn.rooms.example/west.jpg" alt="Sale ends August 31">
                 </body></html>
             """,
         )
 
         preview = make_preview(message, internal_role=None)
 
+        self.assertEqual(preview["category"], "workflow_update")
         self.assertEqual(preview["internalClassification"], "workflow_update")
+        self.assertEqual(preview["noiseDisposition"], "bulk_marketing")
+        self.assertEqual(preview["v7_final_priority"], "LOW")
+        self.assertEqual(preview["final_visibility"], "show_low")
+        self.assertEqual(preview["action"], "show_in_quiet_view")
+
+    def test_existing_save_percentage_image_campaign_still_routes_quiet(self):
+        message = make_message(
+            "Studio rooms update",
+            "View this message online.",
+            sender="Studio Rooms <mail@rooms.example>",
+            to="info@hysteriarecs.com",
+            headers=(("List-Unsubscribe", "<mailto:leave@rooms.example>"),),
+            html_body="""
+                <html><body>
+                  <a href="https://rooms.example/sale">
+                    <img src="https://cdn.rooms.example/hero.jpg" alt="Save 60%">
+                  </a>
+                  <a href="https://rooms.example/shop">
+                    <img src="https://cdn.rooms.example/shop.jpg" alt="Shop Now">
+                  </a>
+                  <img src="https://cdn.rooms.example/east.jpg" alt="East room">
+                  <img src="https://cdn.rooms.example/west.jpg" alt="Sale ends August 31">
+                </body></html>
+            """,
+        )
+
+        preview = make_preview(message, internal_role=None)
+
         self.assertEqual(preview["noiseDisposition"], "bulk_marketing")
         self.assertEqual(preview["v7_final_priority"], "LOW")
         self.assertEqual(preview["final_visibility"], "show_low")
@@ -175,6 +205,21 @@ class ImapPreviewRoutingBoundaryTests(unittest.TestCase):
         self.assertEqual(preview["noiseDisposition"], "bulk_marketing")
         self.assertNotEqual(preview["v7_final_priority"], "LOW")
 
+    def test_save_up_to_price_signal_alone_stays_useful(self):
+        message = make_message(
+            "Studio rooms update",
+            "Save up to 60%",
+            sender="Studio Rooms <mail@rooms.example>",
+            to="info@hysteriarecs.com",
+            headers=(("List-Unsubscribe", "<mailto:leave@rooms.example>"),),
+        )
+
+        preview = make_preview(message, internal_role=None)
+
+        self.assertEqual(preview["noiseDisposition"], "bulk_marketing")
+        self.assertNotEqual(preview["v7_final_priority"], "LOW")
+        self.assertNotEqual(preview["action"], "show_in_quiet_view")
+
     def test_bulk_headers_do_not_demote_protected_useful_mail(self):
         bulk_headers = (
             ("List-Unsubscribe", "<mailto:leave@notifications.example>"),
@@ -251,7 +296,7 @@ class ImapPreviewRoutingBoundaryTests(unittest.TestCase):
         marketing_footer = """
             <footer>
               <a href="https://example.com/sale">
-                <img src="https://cdn.example.com/sale.jpg" alt="Save 20%">
+                <img src="https://cdn.example.com/sale.jpg" alt="Save up to 60%">
               </a>
               <a href="https://example.com/shop">
                 <img src="https://cdn.example.com/shop.jpg" alt="Shop Now">
@@ -319,7 +364,8 @@ class ImapPreviewRoutingBoundaryTests(unittest.TestCase):
     def test_human_discount_discussion_is_not_bulk_filtered(self):
         message = make_message(
             "Collaboration project pricing",
-            "Hi Rutger, can we discuss a discount for the project?",
+            "Hi Rutger,\nWe may be able to save up to 60% on the project.\n"
+            "Can we discuss the options?",
             sender="Alex <alex@example.com>",
             to="info@hysteriarecs.com",
         )

@@ -525,22 +525,23 @@ class MessageNoiseAssessmentTests(unittest.TestCase):
 
     def test_oauth_gmail_and_custom_imap_image_campaigns_route_quiet_with_parity(self):
         source_message = make_message(
-            "Studio collection update: iconic rooms",
+            "Studio rooms update",
             "View this message online.",
-            sender="Audio Studio <mail@studio.example>",
+            sender="Studio Rooms <mail@rooms.example>",
             recipient="info@hysteriarecs.com",
-            headers=(("List-Unsubscribe", "<mailto:leave@studio.example>"),),
+            headers=(("List-Unsubscribe", "<mailto:leave@rooms.example>"),),
         )
         source_message.add_alternative(
             """
             <html><body>
-              <a href="https://studio.example/sale">
-                <img src="https://cdn.studio.example/hero.jpg" alt="Save up to 60%">
+              <a href="https://rooms.example/sale">
+                <img src="https://cdn.rooms.example/hero.jpg" alt="Save up to 60%">
               </a>
-              <a href="https://studio.example/shop">
-                <img src="https://cdn.studio.example/shop.jpg" alt="Shop Now">
+              <a href="https://rooms.example/shop">
+                <img src="https://cdn.rooms.example/shop.jpg" alt="Shop Now">
               </a>
-              <img src="https://cdn.studio.example/rooms.jpg" alt="Iconic Rooms">
+              <img src="https://cdn.rooms.example/east.jpg" alt="East room">
+              <img src="https://cdn.rooms.example/west.jpg" alt="Sale ends August 31">
             </body></html>
             """,
             subtype="html",
@@ -584,6 +585,7 @@ class MessageNoiseAssessmentTests(unittest.TestCase):
             "action",
         ):
             self.assertEqual(gmail_message[field], custom_message[field])
+        self.assertEqual(gmail_message["category"], "workflow_update")
         self.assertEqual(gmail_message["internalClassification"], "workflow_update")
         self.assertEqual(gmail_message["noiseDisposition"], "bulk_marketing")
         self.assertEqual(gmail_message["v7_final_priority"], "LOW")

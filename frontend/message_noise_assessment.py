@@ -189,7 +189,7 @@ BULK_CONTENT_PATTERNS = _patterns(
 )
 COMMERCIAL_PRICE_PATTERNS = _patterns(
     r"(?:[$€£]\s*\d|\b\d+(?:[.,]\d{2})?\s*(?:usd|eur|gbp)\b)",
-    r"\b(?:save|off)\s+\d{1,3}%\b",
+    r"\b(?:save\s+(?:up\s+to\s+)?|off\s+)\d{1,3}\s*%",
 )
 COMMERCIAL_CTA_PATTERNS = _patterns(
     r"\b(?:shop|buy|order)\s+(?:now|today|the\s+(?:offer|sale|collection))\b",
