@@ -115,6 +115,108 @@ class ImapPreviewRoutingBoundaryTests(unittest.TestCase):
         self.assertEqual(preview["final_visibility"], "show_low")
         self.assertEqual(preview["action"], "show_in_quiet_view")
 
+    def test_generic_legal_footer_does_not_protect_commercial_campaign(self):
+        message = make_message(
+            "Studio rooms update",
+            "Save up to 60% on studio software. Shop Now. Unsubscribe. Legal",
+            sender="Studio Rooms <mail@rooms.example>",
+            to="info@hysteriarecs.com",
+            headers=(
+                ("List-Unsubscribe", "<mailto:leave@rooms.example>"),
+                ("List-Unsubscribe-Post", "List-Unsubscribe=One-Click"),
+            ),
+            html_body="""
+                <html><body>
+                  <a href="https://rooms.example/sale">
+                    <img src="https://cdn.rooms.example/hero.jpg" alt="Save up to 60%">
+                  </a>
+                  <a href="https://rooms.example/shop">
+                    <img src="https://cdn.rooms.example/shop.jpg" alt="Shop Now">
+                  </a>
+                  <img src="https://cdn.rooms.example/logo.jpg" alt="Studio products">
+                  <footer>Unsubscribe | Legal</footer>
+                </body></html>
+            """,
+        )
+
+        preview = make_preview(message, internal_role=None)
+
+        self.assertEqual(preview["category"], "workflow_update")
+        self.assertEqual(preview["internalClassification"], "workflow_update")
+        self.assertEqual(preview["noiseDisposition"], "bulk_marketing")
+        self.assertEqual(preview["v7_final_priority"], "LOW")
+        self.assertEqual(preview["final_visibility"], "show_low")
+        self.assertEqual(preview["action"], "show_in_quiet_view")
+
+    def test_actionable_rights_and_legal_mail_stays_protected(self):
+        bulk_headers = (
+            ("List-Unsubscribe", "<mailto:leave@notifications.example>"),
+            ("List-Unsubscribe-Post", "List-Unsubscribe=One-Click"),
+        )
+        cases = (
+            (
+                "master rights",
+                "Master rights confirmation",
+                "Hi Rutger,\nCan you confirm who owns the master rights for this release?",
+            ),
+            (
+                "publishing rights",
+                "Publishing rights split",
+                "Please review the publishing rights split before we sign the agreement.",
+            ),
+            (
+                "copyright clearance",
+                "Copyright clearance",
+                "We still need your approval on the copyright clearance.",
+            ),
+            (
+                "legal approval",
+                "Legal approval required",
+                "Legal approval is required before release.",
+            ),
+            (
+                "rights issue",
+                "Rights issue",
+                "There is a rights issue with this master.",
+            ),
+            (
+                "legal review",
+                "Release legal review",
+                "This release is pending legal review.",
+            ),
+        )
+
+        for name, subject, body in cases:
+            with self.subTest(case=name):
+                message = make_message(
+                    subject,
+                    body,
+                    sender="Rights Team <notifications@example.com>",
+                    to="info@hysteriarecs.com",
+                    headers=bulk_headers,
+                    html_body=f"""
+                        <html><body>
+                          <p>Workflow update</p>
+                          <main>{body}</main>
+                          <a href="https://example.com/catalog">
+                            <img src="https://cdn.example.com/catalog.jpg" alt="Product collection">
+                          </a>
+                          <a href="https://example.com/offer">
+                            <img src="https://cdn.example.com/offer.jpg" alt="Shop Now">
+                          </a>
+                          <img src="https://cdn.example.com/sale.jpg" alt="Save up to 60%">
+                        </body></html>
+                    """,
+                )
+
+                preview = make_preview(message, internal_role=None)
+
+                self.assertEqual(preview["category"], "workflow_update")
+                self.assertEqual(preview["internalClassification"], "workflow_update")
+                self.assertEqual(preview["noiseDisposition"], "bulk_marketing")
+                self.assertNotEqual(preview["v7_final_priority"], "LOW")
+                self.assertNotEqual(preview["action"], "show_in_quiet_view")
+
     def test_generic_commercial_newsletter_is_quiet_before_projection(self):
         message = make_message(
             "Improve your mixes this weekend",

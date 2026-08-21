@@ -523,17 +523,36 @@ class MessageNoiseAssessmentTests(unittest.TestCase):
             self.assertEqual(gmail_message[field], custom_preview[field])
         self.assertEqual(gmail_message["noiseDisposition"], "strong_spam")
 
-    def test_oauth_gmail_and_custom_imap_image_campaigns_route_quiet_with_parity(self):
+    def test_oauth_gmail_and_custom_imap_legal_footer_campaigns_route_quiet_with_parity(self):
         source_message = make_message(
             "Studio rooms update",
-            "View this message online.",
+            """Record in Rooms That Made Music History
+
+Save up to 60% on studio software.
+
+Don't wait, the sale ends August 31.
+
+Shop Now
+
+Thanks for being on the Promotions email list.
+Unsubscribe
+
+© 2026 Example Audio, Inc.
+All rights reserved.
+Product features, specifications, pricing, and availability are subject to change.""",
             sender="Studio Rooms <mail@rooms.example>",
             recipient="info@hysteriarecs.com",
-            headers=(("List-Unsubscribe", "<mailto:leave@rooms.example>"),),
+            headers=(
+                ("List-Unsubscribe", "<mailto:leave@rooms.example>"),
+                ("List-Unsubscribe-Post", "List-Unsubscribe=One-Click"),
+            ),
         )
         source_message.add_alternative(
             """
             <html><body>
+              <h1>Record in Rooms That Made Music History</h1>
+              <p>Save up to 60% on studio software.</p>
+              <p>Don't wait, the sale ends August 31.</p>
               <a href="https://rooms.example/sale">
                 <img src="https://cdn.rooms.example/hero.jpg" alt="Save up to 60%">
               </a>
@@ -542,6 +561,12 @@ class MessageNoiseAssessmentTests(unittest.TestCase):
               </a>
               <img src="https://cdn.rooms.example/east.jpg" alt="East room">
               <img src="https://cdn.rooms.example/west.jpg" alt="Sale ends August 31">
+              <footer>
+                Thanks for being on the Promotions email list.
+                <a href="https://rooms.example/unsubscribe">Unsubscribe</a>
+                <p>© 2026 Example Audio, Inc.<br>All rights reserved.</p>
+                <p>Product features, specifications, pricing, and availability are subject to change.</p>
+              </footer>
             </body></html>
             """,
             subtype="html",
@@ -576,6 +601,7 @@ class MessageNoiseAssessmentTests(unittest.TestCase):
 
         self.assertIsNotNone(gmail_message)
         for field in (
+            "category",
             "internalClassification",
             "noiseDisposition",
             "noiseConfidence",

@@ -201,7 +201,11 @@ COMMERCIAL_CONTEXT_PATTERNS = _patterns(
 )
 PROTECTED_ACTION_PATTERNS = _patterns(
     r"\b(?:invoice|receipt|payment|billing|overdue|amount\s+due|royalt(?:y|ies)|earnings|payout|transaction)\b",
-    r"\b(?:contract|agreement|rights|legal|signature|approval|deadline|cutoff)\b",
+    r"\b(?:contract|agreement|signature|approval|deadline|cutoff)\b",
+    r"\b(?:master|publishing|recording|music|sync|licensing|usage)\s+rights\b",
+    r"\b(?:copyright|rights)\s+clearance\b",
+    r"\brights\s+(?:issue|claim|request|ownership|dispute)\b",
+    r"\blegal\s+(?:approval|request|issue|action|review)\b",
     r"\b(?:please\s+(?:review|confirm|send|approve|sign)|can\s+you|could\s+you|need\s+your|let\s+me\s+know)\b",
     r"\b(?:release\s+(?:delivery|status|ingestion)|metadata\s+(?:issue|warning)|store\s+delivery|content\s+id|takedown|dsp\s+(?:warning|delivery))\b",
     r"\b(?:security\s+alert|new\s+sign[ -]?in|suspicious\s+activity|verification\s+code|account\s+(?:alert|locked|suspended))\b",
