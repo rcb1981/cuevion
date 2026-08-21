@@ -244,11 +244,24 @@ else:
         return _token_expiry_status(token_record) == "expired"
 
 
-    def resolve_owned_mailbox(headers, mailbox_id: object) -> dict:
+    def resolve_owned_mailbox(
+        headers,
+        mailbox_id: object,
+        *,
+        include_member_authority: bool = False,
+    ) -> dict:
         if not valid_identifier(mailbox_id):
             return result_error(400, "invalid_mailbox_id", "Mailbox id is invalid.")
 
-        owned = resolve_owned_managed_inbox_record(headers, mailbox_id)
+        owned = (
+            resolve_owned_managed_inbox_record(
+                headers,
+                mailbox_id,
+                include_member_authority=True,
+            )
+            if include_member_authority
+            else resolve_owned_managed_inbox_record(headers, mailbox_id)
+        )
         if owned["status"] != "ok" or not owned.get("user") or not owned.get("inbox"):
             status = owned.get("status")
             if status == "unauthorized":
@@ -267,11 +280,23 @@ else:
                 "Mailbox ownership could not be verified.",
             )
 
-        return {
+        result = {
             "status": "ok",
             "user": owned["user"],
             "inbox": owned["inbox"],
         }
+        if include_member_authority:
+            member = owned.get("memberAuthority")
+            config = owned.get("config")
+            if member is None or not isinstance(config, dict):
+                return result_error(
+                    503,
+                    "mailbox_ownership_unavailable",
+                    "Mailbox ownership could not be verified.",
+                )
+            result["memberAuthority"] = member
+            result["config"] = config
+        return result
 
 
     def _token_failure(error: dict | None = None) -> dict:

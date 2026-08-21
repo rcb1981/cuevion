@@ -586,7 +586,11 @@ def connect_mailbox_with_settings(
     username: str,
     password: str,
     ssl_enabled: bool,
+    *,
+    timeout: int = 30,
 ):
+    if type(timeout) is not int or type(timeout) is bool or not 1 <= timeout <= 30:
+        raise ValueError("Invalid IMAP timeout.")
     mailbox = open_public_imap_connection(
         host,
         port,
@@ -596,7 +600,7 @@ def connect_mailbox_with_settings(
             if ssl_enabled
             else None
         ),
-        timeout=30,
+        timeout=timeout,
     )
 
     try:

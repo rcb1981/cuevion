@@ -4,6 +4,7 @@ import imaplib
 import json
 import re
 import sys
+import time
 from email.errors import HeaderParseError
 from email.header import decode_header
 from email.message import EmailMessage
@@ -44,6 +45,14 @@ from authenticated_gmail import (
     send_method_not_allowed,
     valid_identifier,
 )
+from api.priority.authority import (
+    PriorityAuthority,
+    mint_outgoing_event_reference_for_authority,
+    priority_authority_from_owned_mailbox,
+)
+from api.priority.event_reference import resolve_priority_hmac_secret
+from api.priority.semantic_config import SemanticMode, load_semantic_runtime_config
+from imap_connect_preview import connect_mailbox_with_settings
 
 GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1/users/me"
 MAX_ATTACHMENTS = 10
@@ -429,6 +438,91 @@ def _validate_custom_reply_source(
     }, None
 
 
+def _prepare_semantic_event_context(
+    owned: object,
+    *,
+    mailbox_id: object,
+    provider: str,
+) -> dict | None:
+    """Capture all potentially blocking semantic authority before provider send."""
+    if type(mailbox_id) is not str or provider != "google":
+        return None
+    try:
+        config = load_semantic_runtime_config()
+        if config.mode is not SemanticMode.SHADOW or not config.model:
+            return None
+        secret = resolve_priority_hmac_secret()
+        if type(owned) is not dict or owned.get("status") != "ok":
+            return None
+        authority = priority_authority_from_owned_mailbox(
+            owned.get("memberAuthority"),
+            owned,
+            mailbox_id,
+        )
+        if authority.provider != provider:
+            return None
+        return {
+            "authority": authority,
+            "semanticVersion": config.schema_version,
+            "hmacSecret": secret,
+        }
+    except Exception:
+        return None
+
+
+def _semantic_authority_capture_enabled() -> bool:
+    """Return whether this request may need one-pass member authority capture."""
+    try:
+        config = load_semantic_runtime_config()
+        return config.mode is SemanticMode.SHADOW and bool(config.model)
+    except Exception:
+        return False
+
+
+def _try_semantic_event_reference(
+    prepared_context: object,
+    *,
+    provider: str,
+    provider_conversation_id: object,
+    latest_turn_id: object,
+    authored_text: object,
+) -> str | None:
+    """Mint a shadow-only ticket without ever changing send success semantics."""
+    if (
+        type(prepared_context) is not dict
+        or set(prepared_context) != {"authority", "semanticVersion", "hmacSecret"}
+        or provider != "google"
+        or type(provider_conversation_id) is not str
+        or type(latest_turn_id) is not str
+    ):
+        return None
+    try:
+        authority = prepared_context["authority"]
+        semantic_version = prepared_context["semanticVersion"]
+        secret = prepared_context["hmacSecret"]
+        if (
+            not isinstance(authority, PriorityAuthority)
+            or type(semantic_version) is not str
+            or type(secret) is not str
+        ):
+            return None
+        now_ms = int(time.time() * 1_000)
+        reference, _conversation_id = mint_outgoing_event_reference_for_authority(
+            authority,
+            provider=provider,
+            provider_conversation_id=provider_conversation_id,
+            latest_turn_id=latest_turn_id,
+            authored_text=authored_text,
+            occurred_at=now_ms,
+            semantic_version=semantic_version,
+            hmac_secret=secret,
+            now=now_ms // 1_000,
+        )
+        return reference
+    except Exception:
+        return None
+
+
 def _decode_reply_subject(value: str) -> str | None:
     try:
         fragments = decode_header(value)
@@ -807,20 +901,19 @@ def _open_custom_imap_connection(mailbox: object):
     host, port, _use_ssl, username, password = _custom_imap_connection_config(
         mailbox
     )
-    connection = None
     try:
-        connection = imaplib.IMAP4_SSL(host, port, timeout=30)
-        try:
-            connection.login(username, password)
-        except imaplib.IMAP4.abort:
-            raise
-        except imaplib.IMAP4.error as error:
-            raise _CustomImapAuthenticationError from error
-        return connection
-    except Exception:
-        if connection is not None:
-            _safe_close_custom_imap(connection)
+        return connect_mailbox_with_settings(
+            host,
+            port,
+            username,
+            password,
+            True,
+            timeout=30,
+        )
+    except imaplib.IMAP4.abort:
         raise
+    except imaplib.IMAP4.error as error:
+        raise _CustomImapAuthenticationError from error
 
 
 def _add_custom_message_identity_headers(message: EmailMessage) -> None:
@@ -1022,7 +1115,17 @@ class handler(BaseHTTPRequestHandler):
             )
             return
 
-        owned = resolve_owned_mailbox(self.headers, payload.get("mailboxId"))
+        if reply_context is not None and _semantic_authority_capture_enabled():
+            owned = resolve_owned_mailbox(
+                self.headers,
+                payload.get("mailboxId"),
+                include_member_authority=True,
+            )
+        else:
+            owned = resolve_owned_mailbox(
+                self.headers,
+                payload.get("mailboxId"),
+            )
         if owned["status"] != "ok":
             send_json(self, owned["status_code"], owned["error"])
             return
@@ -1100,6 +1203,19 @@ class handler(BaseHTTPRequestHandler):
                 message["In-Reply-To"] = reply_source["inReplyTo"]
                 message["References"] = reply_source["references"]
 
+            # The optional context is captured before transport. This work is
+            # environment/config parsing and construction from the authority
+            # already returned above; it performs no network or store I/O.
+            semantic_event_context = (
+                _prepare_semantic_event_context(
+                    owned,
+                    mailbox_id=payload.get("mailboxId"),
+                    provider="google",
+                )
+                if reply_source is not None
+                else None
+            )
+
             send_payload, send_error, refresh_failure = _send_with_gmail_oauth(
                 context,
                 message,
@@ -1153,6 +1269,16 @@ class handler(BaseHTTPRequestHandler):
                             "conversation identity."
                         ),
                     }
+                else:
+                    semantic_event_ref = _try_semantic_event_reference(
+                        semantic_event_context,
+                        provider="google",
+                        provider_conversation_id=send_identity["providerThreadId"],
+                        latest_turn_id=send_identity["providerMessageId"],
+                        authored_text=payload.get("bodyText"),
+                    )
+                    if semantic_event_ref is not None:
+                        response["semanticEventRef"] = semantic_event_ref
             send_json(self, 200, response)
             return
 
@@ -1204,6 +1330,7 @@ class handler(BaseHTTPRequestHandler):
 
         _add_custom_message_identity_headers(message)
 
+        custom_reply_source = None
         if imap_reply_context is not None:
             imap_connection = None
             try:

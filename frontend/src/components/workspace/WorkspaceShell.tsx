@@ -131,6 +131,7 @@ import {
   projectManagedMailboxAccountConfigIdentity,
   resolveManagedMailboxIdentity,
   isValidGmailProviderIdentifier,
+  requestPrioritySemanticAssessment,
   sendGmailMessage,
   type ArchiveFolderSnapshot,
   type ArchiveMutationResponse,
@@ -319,6 +320,26 @@ import {
   transitionWaitingOnOtherAfterSend,
   type WaitingOnOtherStore,
 } from "../../lib/waitingOnOther";
+import {
+  addPrioritySemanticShadowObservation,
+  buildPrioritySemanticActiveEventRefStorageKey,
+  findPrioritySemanticReturnedReplyTriggers,
+  normalizePrioritySemanticActiveEventRefStore,
+  normalizePrioritySemanticAuthoredText,
+  normalizePrioritySemanticEventRef,
+  normalizePrioritySemanticLatestTurnId,
+  persistPrioritySemanticActiveEventRefStore,
+  projectPrioritySemanticShadowObservation,
+  readPrioritySemanticActiveEventRefStore,
+  recordPrioritySemanticActiveEventRef,
+  rememberPrioritySemanticPendingTrigger,
+  rememberPrioritySemanticRequestedTriggerKey,
+  resolvePrioritySemanticActiveEventRef,
+  type PrioritySemanticActiveEventRefStore,
+  type PrioritySemanticAssessmentRequest,
+  type PrioritySemanticReturnedReplyTrigger,
+  type PrioritySemanticShadowObservation,
+} from "../../lib/prioritySemanticState";
 import { applyLearningDecision } from "../../lib/applyLearningDecision";
 import type {
   MailMessageBehaviorSuggestion as EngineMailMessageBehaviorSuggestion,
@@ -15531,6 +15552,7 @@ function MailboxView({
   spamSuppressionKeys,
   onSetManualPriority,
   onSuccessfulConversationReply,
+  onPrioritySemanticReplyConfirmed,
   onSetManualLabelOverride,
   onSetManualOrganizerInclusion,
   onAddSpamSuppression,
@@ -15638,6 +15660,14 @@ function MailboxView({
     composeMode: "reply" | "reply_all",
     transitionedAt: string,
   ) => void;
+  onPrioritySemanticReplyConfirmed: (input: {
+    mailboxId: InboxId;
+    sourceMessage: MailMessage;
+    semanticEventRef: string;
+    authoredText: string;
+    sentLatestTurnId?: string;
+    sentAt: string;
+  }) => void;
   onSetManualLabelOverride: (message: MessageIdentitySource, label: ManualLabelOverride) => void;
   onSetManualOrganizerInclusion: (
     message: MessageIdentitySource,
@@ -20295,6 +20325,20 @@ function MailboxView({
           composeMode,
           sentAt,
         );
+        if (sendResponse.semanticEventRef) {
+          try {
+            onPrioritySemanticReplyConfirmed({
+              mailboxId: activeComposeMailbox.id,
+              sourceMessage: composeSourceMessage,
+              semanticEventRef: sendResponse.semanticEventRef,
+              authoredText: bodyPreview,
+              sentLatestTurnId: sendResponse.providerMessageId,
+              sentAt,
+            });
+          } catch {
+            // A shadow-only assessment must never change confirmed send UX.
+          }
+        }
       }
 
       setMailboxStore((currentStore) => ({
@@ -40390,6 +40434,152 @@ export function WorkspaceShell({
     workspacePersistenceScope,
     mailboxOrderKey,
   );
+  const prioritySemanticActiveEventRefStorageKey =
+    buildPrioritySemanticActiveEventRefStorageKey(
+      workspacePersistenceScope,
+      mailboxOrderKey,
+    );
+  const prioritySemanticActiveEventRefStoreRef =
+    useRef<PrioritySemanticActiveEventRefStore>({});
+  const prioritySemanticObservationsRef = useRef<
+    Record<string, PrioritySemanticShadowObservation>
+  >({});
+  const requestedPrioritySemanticTriggerKeysRef = useRef<Set<string>>(
+    new Set(),
+  );
+  const pendingPrioritySemanticReturnedReplyTriggersRef = useRef<
+    Map<string, PrioritySemanticReturnedReplyTrigger>
+  >(new Map());
+  const pendingPrioritySemanticOutgoingReplyTriggersRef = useRef<
+    Map<
+      string,
+      {
+        mailboxId: InboxId;
+        conversationId: string;
+        activeEventRef: string;
+        authoredText: string;
+        latestTurnId: string;
+        sentAt: string;
+      }
+    >
+  >(new Map());
+  const pendingPrioritySemanticReconciliationRef = useRef<{
+    previousStore: WaitingOnOtherStore;
+    reconciledStore: WaitingOnOtherStore;
+    externalInboundEntries: Array<{
+      mailboxId: InboxId;
+      message: MailMessage;
+    }>;
+  } | null>(null);
+  const commitPrioritySemanticActiveEventRefStore = useCallback(
+    (store: PrioritySemanticActiveEventRefStore) => {
+      try {
+        prioritySemanticActiveEventRefStoreRef.current =
+          typeof window === "undefined"
+            ? normalizePrioritySemanticActiveEventRefStore(store)
+            : persistPrioritySemanticActiveEventRefStore(
+                window.localStorage,
+                prioritySemanticActiveEventRefStorageKey,
+                store,
+              );
+      } catch {
+        // Accessing the localStorage property itself may throw in hardened
+        // browser contexts. Keep the signed reference in bounded memory only.
+        prioritySemanticActiveEventRefStoreRef.current =
+          normalizePrioritySemanticActiveEventRefStore(store);
+      }
+    },
+    [prioritySemanticActiveEventRefStorageKey],
+  );
+  const recordPrioritySemanticObservation = useCallback(
+    (
+      observationKey: string,
+      responsePromise: ReturnType<typeof requestPrioritySemanticAssessment>,
+      expectedIdentity: {
+        mailboxId: string;
+        conversationId: string;
+        latestTurnId: string;
+      },
+    ) => {
+      void responsePromise
+        .then((response) => {
+          const observation = projectPrioritySemanticShadowObservation(
+            response,
+            expectedIdentity,
+          );
+          if (observation) {
+            prioritySemanticObservationsRef.current =
+              addPrioritySemanticShadowObservation(
+                prioritySemanticObservationsRef.current,
+                observationKey,
+                observation,
+              );
+          }
+        })
+        .catch(() => {
+          // Semantic analysis is fail-open shadow telemetry. Deterministic mail
+          // state remains authoritative when the background request fails.
+        });
+    },
+    [],
+  );
+  const handlePrioritySemanticReplyConfirmed = useCallback(
+    (input: {
+      mailboxId: InboxId;
+      sourceMessage: MailMessage;
+      semanticEventRef: string;
+      authoredText: string;
+      sentLatestTurnId?: string;
+      sentAt: string;
+    }) => {
+      const conversation = resolveCanonicalConversationIdentity(
+        input.sourceMessage,
+        input.mailboxId,
+      );
+      const activeEventRef = normalizePrioritySemanticEventRef(
+        input.semanticEventRef,
+      );
+      const authoredText = normalizePrioritySemanticAuthoredText(
+        input.authoredText,
+      );
+      const latestTurnId = normalizePrioritySemanticLatestTurnId(
+        input.sentLatestTurnId,
+      );
+      if (
+        !conversation.isAuthoritativeConversation ||
+        !activeEventRef ||
+        !authoredText
+      ) {
+        return;
+      }
+
+      commitPrioritySemanticActiveEventRefStore(
+        recordPrioritySemanticActiveEventRef(
+          prioritySemanticActiveEventRefStoreRef.current,
+          {
+            mailboxId: input.mailboxId,
+            conversationId: conversation.key,
+            activeEventRef,
+            recordedAt: input.sentAt,
+          },
+        ),
+      );
+
+      rememberPrioritySemanticPendingTrigger(
+        pendingPrioritySemanticOutgoingReplyTriggersRef.current,
+        activeEventRef,
+        {
+          mailboxId: input.mailboxId,
+          conversationId: conversation.key,
+          activeEventRef,
+          authoredText,
+          latestTurnId,
+          sentAt: input.sentAt,
+        },
+      );
+    },
+    [commitPrioritySemanticActiveEventRefStore],
+  );
   const manualLabelOverridesStorageKey = buildManualLabelOverridesStorageKey(
     workspacePersistenceScope,
     mailboxOrderKey,
@@ -43755,6 +43945,40 @@ export function WorkspaceShell({
     getPriorityClearedIdentityKeys(mailboxId, message).some((key) =>
       priorityClearedKeySet.has(key),
     );
+  useEffect(() => {
+    let storedEventRefs: PrioritySemanticActiveEventRefStore = {};
+    try {
+      storedEventRefs =
+        typeof window === "undefined"
+          ? {}
+          : readPrioritySemanticActiveEventRefStore(
+              window.localStorage,
+              prioritySemanticActiveEventRefStorageKey,
+            );
+    } catch {
+      // Shadow persistence is optional; deterministic state has no dependency
+      // on browser storage availability.
+    }
+
+    prioritySemanticActiveEventRefStoreRef.current = storedEventRefs;
+    prioritySemanticObservationsRef.current = {};
+    requestedPrioritySemanticTriggerKeysRef.current.clear();
+    pendingPrioritySemanticReturnedReplyTriggersRef.current.clear();
+    pendingPrioritySemanticOutgoingReplyTriggersRef.current.clear();
+    pendingPrioritySemanticReconciliationRef.current = null;
+    if (typeof window !== "undefined") {
+      try {
+        persistPrioritySemanticActiveEventRefStore(
+          window.localStorage,
+          prioritySemanticActiveEventRefStorageKey,
+          storedEventRefs,
+        );
+      } catch {
+        // Access to window.localStorage itself can be denied.
+      }
+    }
+  }, [prioritySemanticActiveEventRefStorageKey]);
+
   const externalInboundConversationEntries = useMemo(
     () =>
       orderedMailboxes.flatMap((candidate) => {
@@ -43795,8 +44019,238 @@ export function WorkspaceShell({
       JSON.stringify(waitingOnOtherStore)
     ) {
       setWaitingOnOtherStore(effectiveWaitingOnOtherStore);
+      try {
+        pendingPrioritySemanticReconciliationRef.current = {
+          previousStore: waitingOnOtherStore,
+          reconciledStore: effectiveWaitingOnOtherStore,
+          externalInboundEntries: externalInboundConversationEntries,
+        };
+      } catch {
+        pendingPrioritySemanticReconciliationRef.current = null;
+      }
     }
-  }, [effectiveWaitingOnOtherStore, waitingOnOtherStore]);
+  }, [
+    effectiveWaitingOnOtherStore,
+    externalInboundConversationEntries,
+    waitingOnOtherStore,
+  ]);
+
+  useEffect(() => {
+    try {
+      const pendingReconciliation =
+        pendingPrioritySemanticReconciliationRef.current;
+      if (
+        !pendingReconciliation ||
+        JSON.stringify(waitingOnOtherStore) !==
+          JSON.stringify(pendingReconciliation.reconciledStore)
+      ) {
+        return;
+      }
+      pendingPrioritySemanticReconciliationRef.current = null;
+
+      findPrioritySemanticReturnedReplyTriggers(
+        pendingReconciliation.previousStore,
+        pendingReconciliation.reconciledStore,
+        pendingReconciliation.externalInboundEntries,
+      ).forEach((trigger) => {
+        if (trigger.incomingLocator.provider === "google") {
+          const activeEvent = resolvePrioritySemanticActiveEventRef(
+            prioritySemanticActiveEventRefStoreRef.current,
+            trigger.mailboxId,
+            trigger.conversationId,
+          );
+          if (!activeEvent) {
+            return;
+          }
+        }
+        const pendingKey = [
+          trigger.mailboxId,
+          trigger.conversationId,
+          trigger.returnedMessageKey,
+        ].join("::");
+        rememberPrioritySemanticPendingTrigger(
+          pendingPrioritySemanticReturnedReplyTriggersRef.current,
+          pendingKey,
+          trigger,
+        );
+      });
+    } catch {
+      pendingPrioritySemanticReconciliationRef.current = null;
+      // Deterministic returned_reply is already committed. Shadow discovery is
+      // discarded atomically if any malformed runtime input reaches this path.
+    }
+  }, [waitingOnOtherStore]);
+
+  useEffect(() => {
+    try {
+      [...pendingPrioritySemanticOutgoingReplyTriggersRef.current].forEach(
+        ([pendingKey, trigger]) => {
+          try {
+            const committedConversationRecord = Object.values(
+              waitingOnOtherStore,
+            ).find(
+              (record) =>
+                record.mailboxId === trigger.mailboxId &&
+                record.conversationKey === trigger.conversationId,
+            );
+            const isDeterministicWaitingCommitted =
+              committedConversationRecord?.state === "waiting_on_other" &&
+              committedConversationRecord.transitionedAt === trigger.sentAt;
+            const activeEvent = resolvePrioritySemanticActiveEventRef(
+              prioritySemanticActiveEventRefStoreRef.current,
+              trigger.mailboxId,
+              trigger.conversationId,
+            );
+            if (
+              !isDeterministicWaitingCommitted ||
+              activeEvent?.activeEventRef !== trigger.activeEventRef
+            ) {
+              pendingPrioritySemanticOutgoingReplyTriggersRef.current.delete(
+                pendingKey,
+              );
+              return;
+            }
+            pendingPrioritySemanticOutgoingReplyTriggersRef.current.delete(
+              pendingKey,
+            );
+
+            const triggerKey = `outgoing_reply::${trigger.activeEventRef}`;
+            if (
+              !rememberPrioritySemanticRequestedTriggerKey(
+                requestedPrioritySemanticTriggerKeysRef.current,
+                triggerKey,
+              )
+            ) {
+              return;
+            }
+
+            const responsePromise = requestPrioritySemanticAssessment({
+              mailboxId: trigger.mailboxId,
+              trigger: "outgoing_reply",
+              eventRef: trigger.activeEventRef,
+              authoredText: trigger.authoredText,
+            });
+
+            if (trigger.latestTurnId) {
+              recordPrioritySemanticObservation(triggerKey, responsePromise, {
+                mailboxId: trigger.mailboxId,
+                conversationId: trigger.conversationId,
+                latestTurnId: trigger.latestTurnId,
+              });
+            } else {
+              void responsePromise.catch(() => undefined);
+            }
+          } catch {
+            pendingPrioritySemanticOutgoingReplyTriggersRef.current.delete(
+              pendingKey,
+            );
+          }
+        },
+      );
+    } catch {
+      // Outgoing semantic orchestration cannot surface into workspace effects.
+    }
+  }, [recordPrioritySemanticObservation, waitingOnOtherStore]);
+
+  useEffect(() => {
+    try {
+      [...pendingPrioritySemanticReturnedReplyTriggersRef.current].forEach(
+        ([pendingKey, trigger]) => {
+          try {
+            const committedConversationRecord = Object.values(
+              waitingOnOtherStore,
+            ).find(
+              (record) =>
+                record.mailboxId === trigger.mailboxId &&
+                record.conversationKey === trigger.conversationId,
+            );
+            const isDeterministicReturnedReplyCommitted =
+              committedConversationRecord?.state === "returned_reply" &&
+              committedConversationRecord.returnedMessageKey ===
+                trigger.returnedMessageKey;
+            if (!isDeterministicReturnedReplyCommitted) {
+              pendingPrioritySemanticReturnedReplyTriggersRef.current.delete(
+                pendingKey,
+              );
+              return;
+            }
+            pendingPrioritySemanticReturnedReplyTriggersRef.current.delete(
+              pendingKey,
+            );
+
+            const activeEvent =
+              trigger.incomingLocator.provider === "google"
+                ? resolvePrioritySemanticActiveEventRef(
+                    prioritySemanticActiveEventRefStoreRef.current,
+                    trigger.mailboxId,
+                    trigger.conversationId,
+                  )
+                : null;
+            if (
+              trigger.incomingLocator.provider === "google" &&
+              !activeEvent
+            ) {
+              return;
+            }
+
+            const triggerKey = trigger.incomingLocator.provider === "google"
+              ? [
+                  "incoming_reply",
+                  activeEvent?.activeEventRef,
+                  trigger.returnedMessageKey,
+                ].join("::")
+              : [
+                  "incoming_reply",
+                  trigger.mailboxId,
+                  trigger.incomingLocator.providerFolder,
+                  trigger.incomingLocator.uidValidity,
+                  trigger.incomingLocator.imapUid,
+                  trigger.returnedMessageKey,
+                ].join("::");
+            if (
+              !rememberPrioritySemanticRequestedTriggerKey(
+                requestedPrioritySemanticTriggerKeysRef.current,
+                triggerKey,
+              )
+            ) {
+              return;
+            }
+
+            const semanticRequestBase = {
+              mailboxId: trigger.mailboxId,
+              trigger: "incoming_reply" as const,
+            };
+            const semanticRequest: PrioritySemanticAssessmentRequest =
+              trigger.incomingLocator.provider === "google"
+                ? {
+                    ...semanticRequestBase,
+                    activeEventRef: activeEvent!.activeEventRef,
+                    incomingLocator: trigger.incomingLocator,
+                  }
+                : {
+                    ...semanticRequestBase,
+                    incomingLocator: trigger.incomingLocator,
+                  };
+            recordPrioritySemanticObservation(
+              triggerKey,
+              requestPrioritySemanticAssessment(semanticRequest),
+              {
+                mailboxId: trigger.mailboxId,
+                conversationId: trigger.conversationId,
+                latestTurnId: trigger.latestTurnId,
+              },
+            );
+          } catch {
+            pendingPrioritySemanticReturnedReplyTriggersRef.current.delete(
+              pendingKey,
+            );
+          }
+        },
+      );
+    } catch {
+      // Incoming semantic orchestration cannot surface into sync or Priority.
+    }
+  }, [recordPrioritySemanticObservation, waitingOnOtherStore]);
 
   const waitingOnOtherRepresentativeEntries = useMemo(
     () =>
@@ -49870,6 +50324,9 @@ export function WorkspaceShell({
                         transitionedAt,
                       }),
                     )
+                  }
+                  onPrioritySemanticReplyConfirmed={
+                    handlePrioritySemanticReplyConfirmed
                   }
                   onSetManualLabelOverride={handleSetManualLabelOverride}
                   onSetManualOrganizerInclusion={handleSetManualOrganizerInclusion}

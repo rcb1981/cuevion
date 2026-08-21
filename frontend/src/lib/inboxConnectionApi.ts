@@ -16,6 +16,13 @@ import {
   resolveMessageNoiseAssessment,
   type MessageNoiseAssessment,
 } from "./messageNoiseGate";
+import {
+  buildPrioritySemanticAssessmentWireRequest,
+  normalizePrioritySemanticEventRef,
+  parsePrioritySemanticAssessmentResponse,
+  type PrioritySemanticAssessmentRequest,
+  type PrioritySemanticAssessmentResponse,
+} from "./prioritySemanticState";
 
 export type LiveInboxAttachmentSnapshot = {
   id: string;
@@ -838,6 +845,7 @@ export type SendGmailMessageResponse = {
   providerMessageId?: string;
   providerThreadId?: string;
   labelIds?: string[];
+  semanticEventRef?: string;
   providerIdentityConfirmed?: boolean;
   threadContinuityConfirmed?: boolean;
   warning?: {
@@ -849,6 +857,8 @@ export type SendGmailMessageResponse = {
     message?: string;
   };
 };
+
+export const PRIORITY_SEMANTIC_ASSESSMENT_TIMEOUT_MS = 60_000;
 
 function sentIdentityUnconfirmedResponse(): SendGmailMessageResponse {
   return {
@@ -3284,6 +3294,11 @@ export async function sendGmailMessage(
     if (successPayload.ok !== true) {
       return sentIdentityUnconfirmedResponse();
     }
+    if (request.imapReplyContext !== undefined) {
+      // Generic SMTP has no Gmail-authoritative sent identity or semantic
+      // ticket. Ignore hostile/legacy success metadata at this boundary.
+      return { ok: true };
+    }
 
     const providerMessageId = successPayload.providerMessageId;
     const providerThreadId = successPayload.providerThreadId;
@@ -3314,6 +3329,14 @@ export async function sendGmailMessage(
       typeof successPayload.providerIdentityConfirmed === "boolean"
         ? successPayload.providerIdentityConfirmed
         : undefined;
+    const semanticEventRef =
+      request.replyContext !== undefined &&
+      request.imapReplyContext === undefined &&
+      hasProviderIdentity &&
+      providerIdentityConfirmed !== false &&
+      threadContinuityConfirmed === true
+        ? normalizePrioritySemanticEventRef(successPayload.semanticEventRef)
+        : "";
     const warningValue = successPayload.warning;
     const safeWarning =
       warningValue &&
@@ -3337,6 +3360,7 @@ export async function sendGmailMessage(
         ? { providerMessageId, providerThreadId }
         : {}),
       ...(safeLabelIds ? { labelIds: safeLabelIds } : {}),
+      ...(semanticEventRef ? { semanticEventRef } : {}),
       ...(providerIdentityConfirmed !== undefined
         ? { providerIdentityConfirmed }
         : {}),
@@ -3362,6 +3386,97 @@ export async function sendGmailMessage(
     };
   } finally {
     window.clearTimeout(timeoutId);
+  }
+}
+
+export async function requestPrioritySemanticAssessment(
+  request: PrioritySemanticAssessmentRequest,
+): Promise<PrioritySemanticAssessmentResponse> {
+  const wireRequest = buildPrioritySemanticAssessmentWireRequest(request);
+  if (!wireRequest) {
+    return {
+      ok: false,
+      error: {
+        code: "invalid_semantic_request",
+        message: "Semantic assessment request is invalid.",
+      },
+    };
+  }
+
+  const abortController = new AbortController();
+  const timeoutId = globalThis.setTimeout(() => {
+    abortController.abort();
+  }, PRIORITY_SEMANTIC_ASSESSMENT_TIMEOUT_MS);
+
+  try {
+    const response = await fetch("/api/priority/semantic-assessment", {
+      method: "POST",
+      credentials: "include",
+      cache: "no-store",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      signal: abortController.signal,
+      body: JSON.stringify(wireRequest),
+    });
+    let rawPayload = "";
+    try {
+      rawPayload = await response.text();
+    } catch {
+      return {
+        ok: false,
+        error: {
+          code: "semantic_response_unreadable",
+          message: "Semantic assessment response could not be read.",
+        },
+      };
+    }
+
+    let payload: unknown = null;
+    if (rawPayload.trim()) {
+      try {
+        payload = JSON.parse(rawPayload) as unknown;
+      } catch {
+        payload = null;
+      }
+    }
+    const parsedResponse = parsePrioritySemanticAssessmentResponse(payload);
+
+    if (!response.ok) {
+      return parsedResponse && !parsedResponse.ok
+        ? parsedResponse
+        : {
+            ok: false,
+            error: {
+              code: "semantic_request_failed",
+              message: `Semantic assessment failed${
+                response.status ? ` (${response.status})` : ""
+              }.`,
+            },
+          };
+    }
+
+    return parsedResponse ?? {
+      ok: false,
+      error: {
+        code: "invalid_semantic_response",
+        message: "Semantic assessment returned an invalid response.",
+      },
+    };
+  } catch (error) {
+    const didTimeout =
+      error instanceof DOMException && error.name === "AbortError";
+    return {
+      ok: false,
+      error: {
+        code: didTimeout ? "semantic_timeout" : "semantic_request_failed",
+        message: didTimeout
+          ? "Semantic assessment timed out."
+          : "Semantic assessment could not be reached.",
+      },
+    };
+  } finally {
+    globalThis.clearTimeout(timeoutId);
   }
 }
 

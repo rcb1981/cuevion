@@ -8,6 +8,7 @@ from email.parser import BytesParser
 from typing import Any, Literal, TypedDict
 
 from imap_connect_preview import (
+    build_bounded_thread_identity,
     extract_message_thread_metadata,
     fetch_recent_messages,
     resolve_custom_imap_thread_ids,
@@ -39,6 +40,13 @@ _MAX_MESSAGE_BYTES = 25 * 1024 * 1024
 _MAX_UID_SEARCH_BYTES = 1024 * 1024
 _MAX_UID_SEARCH_RESULTS = 100_000
 _MAX_SNAPSHOT_LIMIT = 100
+_MAX_SEMANTIC_THREAD_SCAN = 25
+_MAX_SEMANTIC_HEADER_BYTES = 64 * 1024
+_SEMANTIC_HEADER_FETCH_PATTERN = re.compile(
+    r"\A([1-9][0-9]*) \(UID ([1-9][0-9]*) BODY\[HEADER\] "
+    r"\{(0|[1-9][0-9]*)\}(\))?\Z",
+    re.ASCII,
+)
 
 _FINGERPRINT_POLICY = policy.default.clone(
     linesep="\r\n",
@@ -63,6 +71,7 @@ _ERROR_MESSAGES = {
     "snapshot_fetch_incomplete": "The IMAP mailbox snapshot was incomplete.",
     "snapshot_uid_set_unavailable": "The IMAP mailbox UID set could not be verified.",
     "snapshot_serialization_failed": "The IMAP mailbox snapshot could not be prepared.",
+    "semantic_thread_scan_unavailable": "The IMAP thread freshness could not be verified.",
 }
 
 
@@ -935,6 +944,215 @@ def read_imap_reply_source(
             "messageId": message_id,
             "references": references,
             "inReplyTo": in_reply_to,
+        },
+        "error": None,
+    }
+
+
+def _parse_semantic_header_fetch_response(
+    response: object,
+    *,
+    expected_uid: str,
+) -> bytes | None:
+    parts = _response_parts(response)
+    if parts is None or not _is_ok_status(parts[0]):
+        return None
+    values = parts[1]
+    if type(values) not in (list, tuple) or len(values) not in (1, 2):
+        return None
+    literal = values[0]
+    if type(literal) is not tuple or len(literal) != 2:
+        return None
+    metadata = _decode_bounded_ascii(literal[0], _MAX_FETCH_METADATA_BYTES)
+    raw_headers = literal[1]
+    if (
+        metadata is None
+        or type(raw_headers) is not bytes
+        or len(raw_headers) > _MAX_SEMANTIC_HEADER_BYTES
+    ):
+        return None
+    match = _SEMANTIC_HEADER_FETCH_PATTERN.fullmatch(metadata)
+    if match is None:
+        return None
+    sequence_number, fetched_uid, literal_size_text, inline_close = match.groups()
+    if (
+        not _valid_imap_uid(sequence_number)
+        or fetched_uid != expected_uid
+        or not _valid_imap_uid(fetched_uid)
+        or int(literal_size_text) != len(raw_headers)
+    ):
+        return None
+    if len(values) == 1:
+        if inline_close != ")":
+            return None
+    elif inline_close is not None or values[1] not in (b")", ")"):
+        return None
+    return raw_headers
+
+
+def _record_touches_expected_rfc_thread(
+    record: dict[str, Any],
+    *,
+    mailbox_key: str,
+    expected_thread_id: str,
+) -> bool:
+    references = record.get("references")
+    candidates = list(references) if type(references) is list else []
+    candidates.extend((record.get("in_reply_to"), record.get("message_id")))
+    return any(
+        type(candidate) is str
+        and bool(candidate)
+        and build_bounded_thread_identity(
+            "imap:rfc",
+            mailbox_key,
+            candidate,
+        )
+        == expected_thread_id
+        for candidate in candidates
+    )
+
+
+def read_imap_latest_thread_identity(
+    mailbox: object,
+    *,
+    mailbox_key: str,
+    folder: str,
+    expected_uid_validity: str,
+    target_uid: str,
+    expected_thread_id: str,
+    require_predecessor: bool = False,
+) -> dict[str, object]:
+    """Prove the target is the newest same-RFC-root UID in one exact folder.
+
+    The folder + UIDVALIDITY pair is the complete provider-authority stream.
+    At most 25 headers are read. When ``require_predecessor`` is true, the
+    bounded window must include an earlier UID resolving to the same RFC root;
+    singleton/root-only messages therefore fail closed.
+    """
+    if (
+        type(mailbox_key) is not str
+        or not mailbox_key
+        or not _valid_folder(folder)
+        or not is_canonical_uid_validity(expected_uid_validity)
+        or not _valid_imap_uid(target_uid)
+        or type(expected_thread_id) is not str
+        or not expected_thread_id.startswith("imap:rfc:")
+        or type(require_predecessor) is not bool
+    ):
+        return _snapshot_failure("semantic_thread_scan_unavailable", "input_validation")
+    try:
+        select_response = mailbox.select(_quote_mailbox_argument(folder), readonly=True)
+    except Exception:
+        return _snapshot_failure("semantic_thread_scan_unavailable", "folder_selection")
+    select_parts = _response_parts(select_response)
+    if select_parts is None or not _is_ok_status(select_parts[0]):
+        return _snapshot_failure("semantic_thread_scan_unavailable", "folder_selection")
+    uid_validity = read_selected_mailbox_uid_validity(mailbox)
+    if uid_validity != expected_uid_validity:
+        return _snapshot_failure("semantic_thread_scan_unavailable", "uid_validity")
+    uid_set = _read_selected_uid_set(mailbox)
+    if uid_set is None or target_uid not in uid_set:
+        return _snapshot_failure("semantic_thread_scan_unavailable", "uid_search")
+    target_index = uid_set.index(target_uid)
+    later_count = len(uid_set) - target_index - 1
+    target_and_later_count = later_count + 1
+    if target_and_later_count > _MAX_SEMANTIC_THREAD_SCAN:
+        return _snapshot_failure("semantic_thread_scan_unavailable", "scan_bound")
+    scan_start = target_index
+    if require_predecessor:
+        prior_budget = _MAX_SEMANTIC_THREAD_SCAN - target_and_later_count
+        if target_index < 1 or prior_budget < 1:
+            return _snapshot_failure("semantic_thread_scan_unavailable", "predecessor")
+        scan_start = target_index - min(target_index, prior_budget)
+    scan_uids = uid_set[scan_start:]
+    target_offset = target_index - scan_start
+
+    records: list[dict[str, Any]] = []
+    for uid in scan_uids:
+        try:
+            response = mailbox.uid("FETCH", uid, "(UID BODY.PEEK[HEADER])")
+        except Exception:
+            return _snapshot_failure("semantic_thread_scan_unavailable", "header_fetch")
+        raw_headers = _parse_semantic_header_fetch_response(
+            response,
+            expected_uid=uid,
+        )
+        if raw_headers is None:
+            return _snapshot_failure("semantic_thread_scan_unavailable", "header_fetch")
+        try:
+            message = BytesParser().parsebytes(raw_headers)
+            metadata = extract_message_thread_metadata(
+                message,
+                uid,
+                f"imap-uid-{uid}",
+            )
+        except Exception:
+            return _snapshot_failure("semantic_thread_scan_unavailable", "header_parsing")
+        if type(metadata) is not dict:
+            return _snapshot_failure("semantic_thread_scan_unavailable", "header_parsing")
+        records.append(metadata)
+
+    try:
+        thread_ids = resolve_custom_imap_thread_ids(
+            records,
+            mailbox_key=mailbox_key,
+            folder=folder,
+            uid_validity=expected_uid_validity,
+        )
+    except Exception:
+        return _snapshot_failure("semantic_thread_scan_unavailable", "thread_resolution")
+    if (
+        type(thread_ids) is not list
+        or len(thread_ids) != len(scan_uids)
+        or thread_ids[target_offset] != expected_thread_id
+    ):
+        return _snapshot_failure("semantic_thread_scan_unavailable", "thread_resolution")
+    for index in range(target_offset + 1, len(records)):
+        record = records[index]
+        if (
+            record.get("message_id_ambiguous") is True
+            or (
+                _record_touches_expected_rfc_thread(
+                    record,
+                    mailbox_key=mailbox_key,
+                    expected_thread_id=expected_thread_id,
+                )
+                and (
+                    record.get("message_id_ambiguous") is not False
+                    or type(record.get("message_id")) is not str
+                    or thread_ids[index] != expected_thread_id
+                )
+            )
+        ):
+            # A later message that directly names this RFC root but lacks one
+            # unambiguous identity cannot be treated as unrelated UID fallback.
+            return _snapshot_failure(
+                "semantic_thread_scan_unavailable",
+                "thread_resolution",
+            )
+    matching_indexes = [
+        index for index, thread_id in enumerate(thread_ids) if thread_id == expected_thread_id
+    ]
+    if not matching_indexes:
+        return _snapshot_failure("semantic_thread_scan_unavailable", "thread_resolution")
+    if require_predecessor and not any(
+        index < target_offset for index in matching_indexes
+    ):
+        return _snapshot_failure("semantic_thread_scan_unavailable", "predecessor")
+    latest_index = matching_indexes[-1]
+    latest_record = records[latest_index]
+    latest_message_id = latest_record.get("message_id")
+    if type(latest_message_id) is not str or not latest_message_id:
+        return _snapshot_failure("semantic_thread_scan_unavailable", "thread_resolution")
+    return {
+        "ok": True,
+        "status": "ok",
+        "latest": {
+            "providerFolder": folder,
+            "uidValidity": expected_uid_validity,
+            "imapUid": scan_uids[latest_index],
+            "threadId": expected_thread_id,
+            "rfcMessageId": latest_message_id,
         },
         "error": None,
     }

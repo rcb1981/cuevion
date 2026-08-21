@@ -985,6 +985,38 @@ else:
         return user, read_user_config_record(store, user["email"])
 
 
+    def read_user_config_for_authenticated_member(
+        headers,
+    ) -> tuple[
+        auth_runtime.AuthenticatedMemberContext | None,
+        AuthenticatedUserContext | None,
+        UserConfigReadResult,
+    ]:
+        """Read config while retaining the already-resolved server authority."""
+        member, auth_error = resolve_authenticated_member_authority(headers)
+        if member is None:
+            return None, None, {
+                "status": "unavailable"
+                if auth_error and auth_error["code"] == "session_auth_unavailable"
+                else "unauthorized",
+                "config": None,
+                "error": auth_error,
+            }
+        user: AuthenticatedUserContext = {
+            "email": member.email,
+            "name": member.name,
+            "userType": member.user_type,
+        }
+        store, store_error = resolve_user_config_store()
+        if store_error or not store:
+            return member, user, {
+                "status": "unavailable",
+                "config": None,
+                "error": store_error,
+            }
+        return member, user, read_user_config_record(store, user["email"])
+
+
     def _managed_inbox_error(
         status: Literal["malformed", "not_found"],
         code: UserConfigAccessErrorCode,
@@ -1139,9 +1171,17 @@ else:
     def resolve_owned_managed_inbox_record(
         headers,
         mailbox_id: str,
+        *,
+        include_member_authority: bool = False,
     ) -> OwnedManagedInboxRecordResult:
         """Resolve a full mailbox record without changing the Gmail-safe helper above."""
-        user, read_result = read_user_config_for_authenticated_user(headers)
+        member = None
+        if include_member_authority:
+            member, user, read_result = read_user_config_for_authenticated_member(
+                headers
+            )
+        else:
+            user, read_result = read_user_config_for_authenticated_user(headers)
         if not user:
             return {
                 "status": "unavailable"
@@ -1204,13 +1244,27 @@ else:
             for inbox in config["managedInboxes"]
             if isinstance(inbox, dict) and inbox.get("id") == mailbox_id
         )
-        return {
+        result = {
             "status": "ok",
             "user": user,
             "inbox": deepcopy(matching_inbox),
             "config": deepcopy(config),
             "error": None,
         }
+        if include_member_authority:
+            if member is None:
+                return {
+                    "status": "unavailable",
+                    "user": user,
+                    "inbox": None,
+                    "config": None,
+                    "error": _error(
+                        "session_auth_unavailable",
+                        "Authenticated session validation is unavailable.",
+                    ),
+                }
+            result["memberAuthority"] = member
+        return result
 
 
     def save_owned_custom_imap_folder_mapping(
