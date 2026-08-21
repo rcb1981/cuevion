@@ -46,11 +46,13 @@ FRONTEND_ROOT = Path(__file__).resolve().parent
 
 
 def _legacy_disabled_probe_method(route) -> str:
-    return "POST" if route is team_members else "GET"
+    if route in (team_invite, team_members):
+        return "OPTIONS"
+    return "GET"
 
 
-def _is_safe_team_roster_read(route, method: str) -> bool:
-    return route is team_members and method == "GET"
+def _is_safe_team_http_method(route, method: str) -> bool:
+    return route in (team_invite, team_members) and method in ("GET", "POST")
 
 
 class _ForbiddenRequestAccess(AssertionError):
@@ -287,7 +289,7 @@ class LegacyCollaborationHttpContainmentTests(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True):
             for route_name, route in ROUTES:
                 for method in METHODS:
-                    if _is_safe_team_roster_read(route, method):
+                    if _is_safe_team_http_method(route, method):
                         continue
                     with self.subTest(route=route_name, method=method):
                         self.assertIn(f"do_{method}", route.handler.__dict__)
@@ -328,7 +330,7 @@ class LegacyCollaborationHttpContainmentTests(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True):
             for route_name, route in ROUTES:
                 for method in METHODS:
-                    if _is_safe_team_roster_read(route, method):
+                    if _is_safe_team_http_method(route, method):
                         continue
                     with self.subTest(route=route_name, method=method):
                         request_handler = _invoke_direct(route, method)
@@ -465,7 +467,7 @@ class LegacyCollaborationHttpContainmentTests(unittest.TestCase):
                 forbidden_calls.append(store_command_transport)
 
                 for method in ("GET", "POST"):
-                    if _is_safe_team_roster_read(route, method):
+                    if _is_safe_team_http_method(route, method):
                         continue
                     request_handler = _invoke_direct(route, method)
                     self.assert_disabled_direct(request_handler, method=method)
@@ -654,14 +656,11 @@ class LegacyCollaborationHttpContainmentTests(unittest.TestCase):
             (collaboration_invite, "POST", "/api/collaboration/invite?op=action", b'{"token":"raw-token","action":"comment"}'),
             (collaboration_invite, "POST", "/api/collaboration/invite?op=unknown", b"not-json"),
             (collaboration_invite, "POST", "/api/collaboration/invite", b"{}"),
-            (team_invite, "GET", "/api/team/invite?op=lookup&token=existing-team-invite", b"existing-team-invite"),
-            (team_invite, "GET", "/api/team/invite?op=lookup&token=missing-team-invite", b"missing-team-invite"),
-            (team_invite, "POST", "/api/team/invite?op=issue", b'{"workspaceId":"workspace-existing"}'),
-            (team_invite, "POST", "/api/team/invite?op=action", b'{"token":"team-token","action":"accept"}'),
+            (team_invite, "GET", "/api/team/invite?op=unknown", b"unknown-team-invite"),
             (team_invite, "POST", "/api/team/invite?op=unknown", b"{"),
             (team_invite, "POST", "/api/team/invite", b"{}"),
-            (team_members, "POST", "/api/team/members?op=remove&workspaceId=workspace-existing", b'{"email":"existing-member@example.invalid"}'),
-            (team_members, "POST", "/api/team/members?op=revoke&workspaceId=workspace-existing", b'{"email":"missing-member@example.invalid"}'),
+            (team_members, "GET", "/api/team/members?op=unknown", b"unknown-team-members"),
+            (team_members, "POST", "/api/team/members?op=delete&workspaceId=workspace-existing", b'{"email":"missing-member@example.invalid"}'),
             (team_members, "POST", "/api/team/members?op=unknown", b"not-json"),
             (team_members, "POST", "/api/team/members", b"{}"),
         )
@@ -763,8 +762,6 @@ class LegacyCollaborationHttpContainmentTests(unittest.TestCase):
 
         unsafe_cases = (
             (collaboration_invite, "lookup", "issue", "_handle_lookup", "_handle_issue", True),
-            (team_invite, "lookup", "issue", "_handle_lookup", "_handle_issue", True),
-            (team_members, "list", "remove", "_handle_list", "_handle_remove", False),
         )
         for route, get_operation, post_operation, get_callback, post_callback, post_reads_body in unsafe_cases:
             with self.subTest(route=route.__name__), patch.object(route.os, "getenv", return_value=UNSAFE_MODE):
@@ -916,6 +913,7 @@ class LegacyCollaborationHttpContainmentTests(unittest.TestCase):
 
             class Fake:
                 def __init__(self):
+                    self.path = "/api/private?op=unknown"
                     self.status = None
                     self.headers = []
                     self.wfile = Writer()

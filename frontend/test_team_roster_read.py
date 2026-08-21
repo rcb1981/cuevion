@@ -131,6 +131,26 @@ class TeamRosterReadTests(unittest.TestCase):
         self.assertEqual(request.payload()["error"]["code"], "forbidden")
         list_members.assert_not_called()
 
+    def test_workspace_ids_are_opaque_and_case_sensitive(self):
+        canonical_workspace_id = "wsp_AaZz09_-"
+        accepted, accepted_store = self.invoke_get(
+            f"/api/team/members?op=list&workspaceId={canonical_workspace_id}",
+            resolution=authenticated(canonical_workspace_id),
+        )
+        rejected, rejected_store = self.invoke_get(
+            "/api/team/members?op=list&workspaceId=wsp_aazz09_-",
+            resolution=authenticated(canonical_workspace_id),
+        )
+
+        self.assertEqual(accepted.status, 200)
+        accepted_store.assert_called_once_with(canonical_workspace_id)
+        self.assertEqual(rejected.status, 403)
+        rejected_store.assert_not_called()
+        self.assertEqual(
+            team_members._build_members_index_key(canonical_workspace_id),
+            f"cuevion:team:v1:members-index:{canonical_workspace_id}",
+        )
+
     def test_cross_workspace_storage_record_is_not_projected(self):
         record = self.stored_member(workspaceId="workspace-b")
 
@@ -168,6 +188,72 @@ class TeamRosterReadTests(unittest.TestCase):
         self.assertNotIn("workspaceId", projected)
         self.assertNotIn("invitedByUserId", projected)
 
+    def test_historical_v1_non_email_identifier_remains_visible_and_redacted(self):
+        record = self.stored_member(email="legacy-recipient")
+
+        self.assertEqual(
+            team_members._normalize_member_record(
+                record,
+                "workspace-a",
+                "legacy-recipient",
+            ),
+            {
+                "email": "legacy-recipient",
+                "displayName": "Team Mate",
+                "accessLevel": "Limited",
+                "status": "active",
+            },
+        )
+
+    def test_secure_v2_membership_is_roster_visible_without_token_fields(self):
+        record = {
+            "v": 2,
+            "workspaceId": "wsp_AaZz09_-",
+            "email": "teammate@example.test",
+            "verifiedRecipientEmail": "teammate@example.test",
+            "memberUserId": "usr_recipient",
+            "displayName": "Team Mate",
+            "accessLevel": "Shared",
+            "status": "active",
+            "sourceInvitationId": "tinv_test",
+            "createdAt": 1_800_000_000_000,
+            "acceptedAt": 1_800_000_000_100,
+            "updatedAt": 1_800_000_000_100,
+        }
+
+        self.assertEqual(
+            team_members._normalize_member_record(
+                record,
+                "wsp_AaZz09_-",
+                "teammate@example.test",
+            ),
+            {
+                "email": "teammate@example.test",
+                "displayName": "Team Mate",
+                "accessLevel": "Shared",
+                "status": "active",
+            },
+        )
+        self.assertIsNone(
+            team_members._normalize_member_record(
+                {**record, "sourceInvitationId": "invalid"},
+                "wsp_AaZz09_-",
+                "teammate@example.test",
+            )
+        )
+
+    def test_unknown_member_schema_is_not_roster_visible(self):
+        for schema_version in (999, [], {}):
+            with self.subTest(schema_version=schema_version):
+                record = self.stored_member(v=schema_version)
+                self.assertIsNone(
+                    team_members._normalize_member_record(
+                        record,
+                        "workspace-a",
+                        "teammate@example.test",
+                    )
+                )
+
     def test_empty_success_is_distinct_from_store_failure(self):
         success, success_store = self.invoke_get(
             "/api/team/members?op=list",
@@ -203,10 +289,11 @@ class TeamRosterReadTests(unittest.TestCase):
         success_store.assert_called_once_with("workspace-a")
         failure_store.assert_called_once_with("workspace-a")
 
-    def test_legacy_team_writes_remain_disabled(self):
+    def test_unknown_team_writes_remain_disabled_without_body_auth_or_storage(self):
+        request_body = b'not-json-and-must-remain-unread'
         request = FakeHandler(
-            "/api/team/members?op=remove",
-            b'{"workspaceId":"workspace-a","memberEmail":"teammate@example.test"}',
+            "/api/team/members?op=unknown",
+            request_body,
         )
         with patch.dict(os.environ, {}, clear=True), patch.object(
             team_members,
@@ -214,24 +301,31 @@ class TeamRosterReadTests(unittest.TestCase):
             side_effect=AssertionError("disabled write reached authentication"),
         ), patch.object(
             team_members,
-            "_remove_team_member",
+            "_read_json_body",
+            side_effect=AssertionError("disabled write parsed its body"),
+        ), patch.object(
+            team_members,
+            "build_runtime_team_authority",
             side_effect=AssertionError("disabled write reached storage"),
+            create=True,
         ):
             team_members.handler.do_POST(request)
 
         self.assertEqual(request.status, 404)
         self.assertEqual(request.payload()["error"]["code"], "not_found")
+        self.assertEqual(request.rfile.read(), request_body)
 
-    def test_non_roster_get_operations_remain_legacy_disabled(self):
-        request = FakeHandler("/api/team/members?op=remove")
+    def test_unknown_team_get_operations_remain_legacy_disabled(self):
+        request = FakeHandler("/api/team/members?op=unknown")
         with patch.dict(os.environ, {}, clear=True), patch.object(
             team_members,
             "resolve_authenticated_member",
             side_effect=AssertionError("disabled operation reached authentication"),
         ), patch.object(
             team_members,
-            "_remove_team_member",
+            "build_runtime_team_authority",
             side_effect=AssertionError("disabled operation reached storage"),
+            create=True,
         ):
             team_members.handler.do_GET(request)
 

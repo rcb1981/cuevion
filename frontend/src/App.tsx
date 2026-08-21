@@ -12,7 +12,8 @@ import {
 import {
   fetchTeamInvite,
   mutateTeamInvite,
-  type TeamInvite,
+  type PublicTeamInvite,
+  type TeamLifecycleFailureStatus,
 } from "./lib/teamInviteApi";
 import {
   completeUserOnboarding,
@@ -3615,11 +3616,53 @@ function CollaborationInviteAuthGate({
   );
 }
 
-function TeamInviteRouteView({ route }: { route: TeamInviteRoute }) {
-  const [invite, setInvite] = useState<TeamInvite | null>(null);
-  const [status, setStatus] = useState<"loading" | "ready" | "unavailable" | "updating">(
-    "loading",
-  );
+type TeamInviteRouteStatus =
+  | "loading"
+  | "ready"
+  | "updating"
+  | "accepted"
+  | "declined"
+  | "expired"
+  | "used"
+  | "wrong-user"
+  | "invalid"
+  | "unauthorized"
+  | "unavailable";
+
+export function classifyTeamInviteRouteFailure(
+  failureStatus: TeamLifecycleFailureStatus,
+  errorCode?: string,
+): TeamInviteRouteStatus {
+  const code = errorCode?.trim().toLowerCase().replace(/[\s-]+/g, "_") ?? "";
+  if (failureStatus === "forbidden" && code.includes("recipient")) {
+    return "wrong-user";
+  }
+  if (failureStatus === "expired") {
+    return "expired";
+  }
+  if (failureStatus === "used" || failureStatus === "conflict") {
+    return "used";
+  }
+  if (failureStatus === "invalid") {
+    return "invalid";
+  }
+  if (failureStatus === "unauthorized") {
+    return "unauthorized";
+  }
+  return "unavailable";
+}
+
+function TeamInviteRouteView({
+  route,
+  sessionStatus,
+  sessionUser,
+}: {
+  route: TeamInviteRoute;
+  sessionStatus: MemberSessionStatus;
+  sessionUser: AuthenticatedCuevionUser | null;
+}) {
+  const [invite, setInvite] = useState<PublicTeamInvite | null>(null);
+  const [status, setStatus] = useState<TeamInviteRouteStatus>("loading");
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -3638,12 +3681,20 @@ function TeamInviteRouteView({ route }: { route: TeamInviteRoute }) {
       if (!result.ok) {
         setInvite(null);
         setError(result.error?.message ?? "This team invite is no longer available.");
-        setStatus("unavailable");
+        setStatus(classifyTeamInviteRouteFailure(result.status, result.error?.code));
         return;
       }
 
       setInvite(result.invite);
-      setStatus("ready");
+      setStatus(
+        result.invite.status === "accepted"
+          ? "accepted"
+          : result.invite.status === "declined"
+            ? "declined"
+            : result.invite.status === "cancelled"
+              ? "used"
+              : "ready",
+      );
     };
 
     void loadInvite();
@@ -3654,7 +3705,13 @@ function TeamInviteRouteView({ route }: { route: TeamInviteRoute }) {
   }, [route.inviteToken]);
 
   const handleInviteAction = async (actionType: "accept" | "decline") => {
-    if (!invite || status === "updating") {
+    if (
+      !invite ||
+      invite.status !== "pending" ||
+      status === "updating" ||
+      sessionStatus !== "authenticated" ||
+      !sessionUser
+    ) {
       return;
     }
 
@@ -3662,7 +3719,7 @@ function TeamInviteRouteView({ route }: { route: TeamInviteRoute }) {
     setError(null);
 
     const result = await mutateTeamInvite({
-      token: invite.token,
+      token: route.inviteToken,
       action: {
         type: actionType,
       },
@@ -3670,12 +3727,12 @@ function TeamInviteRouteView({ route }: { route: TeamInviteRoute }) {
 
     if (!result.ok) {
       setError(result.error?.message ?? "Could not update this team invite.");
-      setStatus("ready");
+      setStatus(classifyTeamInviteRouteFailure(result.status, result.error?.code));
       return;
     }
 
     setInvite(result.invite);
-    setStatus("ready");
+    setStatus(result.invite.status === "accepted" ? "accepted" : "declined");
   };
 
   const inviteStatusLabel =
@@ -3684,8 +3741,29 @@ function TeamInviteRouteView({ route }: { route: TeamInviteRoute }) {
       : invite?.status === "declined"
         ? "Declined"
         : invite?.status === "cancelled"
-          ? "Invite cancelled"
+          ? "Already handled"
           : "Invited";
+
+  const effectiveStatus: TeamInviteRouteStatus =
+    status === "ready" && sessionStatus === "unauthenticated"
+      ? "unauthorized"
+      : status === "ready" && sessionStatus === "unavailable"
+        ? "unavailable"
+        : status;
+  const stateMessage =
+    effectiveStatus === "expired"
+      ? "This invitation has expired."
+      : effectiveStatus === "used"
+        ? "This invitation has already been handled."
+        : effectiveStatus === "wrong-user"
+          ? "This invitation belongs to a different signed-in user."
+          : effectiveStatus === "invalid"
+            ? "This invitation link is invalid."
+            : effectiveStatus === "unauthorized"
+              ? "Sign in with the invited email address, then reopen this link."
+              : effectiveStatus === "unavailable"
+                ? "Team invitation authority is temporarily unavailable."
+                : null;
 
   return (
     <div className="min-h-screen bg-[linear-gradient(180deg,#f6efe7_0%,#efe5da_100%)] px-6 py-10 text-[color:#2f2a24] dark:bg-[linear-gradient(180deg,#171411_0%,#221c17_100%)] dark:text-[color:#f1e9de]">
@@ -3696,7 +3774,7 @@ function TeamInviteRouteView({ route }: { route: TeamInviteRoute }) {
               Team invite
             </div>
             <h1 className="text-[1.7rem] font-medium tracking-[-0.03em]">
-              {status === "loading"
+              {effectiveStatus === "loading"
                 ? "Loading invite"
                 : invite
                   ? "Cuevion team invite"
@@ -3704,7 +3782,7 @@ function TeamInviteRouteView({ route }: { route: TeamInviteRoute }) {
             </h1>
             <p className="text-[0.96rem] leading-7 text-[rgba(88,80,71,0.84)] dark:text-[rgba(222,211,200,0.76)]">
               {invite
-                ? `${invite.createdByUserName} invited ${invite.inviteeName} to invite-only collaboration access.`
+                ? `${invite.inviteeName} was invited to collaboration-only Team access.`
                 : "This invite could not be opened."}
             </p>
           </div>
@@ -3713,18 +3791,23 @@ function TeamInviteRouteView({ route }: { route: TeamInviteRoute }) {
             {invite ? (
               <div className="rounded-[20px] border border-[rgba(120,104,89,0.14)] bg-[rgba(255,255,255,0.52)] px-4 py-4 text-[0.9rem] leading-7 text-[rgba(88,80,71,0.86)] dark:border-[rgba(255,255,255,0.08)] dark:bg-[rgba(44,38,33,0.7)] dark:text-[rgba(222,211,200,0.76)]">
                 <div>Status: {inviteStatusLabel}</div>
-                <div>Email: {invite.inviteeEmail}</div>
-                <div>Access: Invite-only</div>
+                <div>Access: {invite.accessLevel}</div>
+                {sessionStatus === "authenticated" && sessionUser ? (
+                  <div>Signed in as: {sessionUser.email}</div>
+                ) : null}
               </div>
             ) : null}
-            {error ? (
+            {stateMessage || error ? (
               <div className="text-[0.84rem] leading-6 text-[rgba(132,77,63,0.94)] dark:text-[rgba(244,186,168,0.84)]">
-                {error}
+                {stateMessage ?? error}
               </div>
             ) : null}
           </div>
 
-          {invite?.status === "invited" ? (
+          {invite?.status === "pending" &&
+          effectiveStatus === "ready" &&
+          sessionStatus === "authenticated" &&
+          sessionUser ? (
             <div className="mt-6 flex justify-end gap-3">
               <button
                 type="button"
@@ -4299,7 +4382,7 @@ function CuevionApp() {
   }, []);
 
   useEffect(() => {
-    if (collaborationInviteRoute || teamInviteRoute) {
+    if (collaborationInviteRoute) {
       setSessionStatus("unauthenticated");
       setSessionUser(null);
       setAccountConfigHydrationStatus("ready");
@@ -4570,7 +4653,14 @@ function CuevionApp() {
   }
 
   if (teamInviteRoute) {
-    return <TeamInviteRouteView route={teamInviteRoute} />;
+    return (
+      <TeamInviteRouteView
+        key={teamInviteRoute.inviteToken}
+        route={teamInviteRoute}
+        sessionStatus={sessionStatus}
+        sessionUser={sessionUser}
+      />
+    );
   }
 
   if (collaborationInviteRoute) {

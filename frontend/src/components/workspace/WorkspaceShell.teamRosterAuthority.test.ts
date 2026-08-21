@@ -122,7 +122,7 @@ const rosterEffectEnd = workspaceShellSource.indexOf(
 assert.notEqual(rosterEffectStart, -1);
 assert.notEqual(rosterEffectEnd, -1);
 const rosterEffect = workspaceShellSource.slice(rosterEffectStart, rosterEffectEnd);
-assert.match(rosterEffect, /await fetchTeamMembers\(\)/);
+assert.match(rosterEffect, /await refreshProductionTeamAuthority\(\)/);
 assert.match(rosterEffect, /backendTeamMembersRefreshKey/);
 assert.match(
   rosterEffect,

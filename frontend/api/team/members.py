@@ -22,10 +22,16 @@ from api.auth.runtime import (  # noqa: E402
     MemberResolutionOutcome,
     resolve_authenticated_member,
 )
+from api.team.authority import (  # noqa: E402
+    build_runtime_team_authority,
+    project_team_member,
+)
+from api.team.http_security import require_safe_json_mutation  # noqa: E402
 
 TEAM_ROLES = {"Limited", "Shared"}
 ACTIVE_TEAM_MEMBER_STATUS = "active"
 REMOVED_TEAM_MEMBER_STATUS = "removed"
+_MAX_JSON_BODY_BYTES = 16 * 1024
 LEGACY_TEAM_ROLE_MAP = {
     "review": "Shared",
     "admin": "Shared",
@@ -122,12 +128,25 @@ def _get_operation(handler: BaseHTTPRequestHandler) -> str:
 
 
 def _get_workspace_id(handler: BaseHTTPRequestHandler) -> str:
-    return str((_get_query(handler).get("workspaceId") or [""])[0] or "").strip().lower()
+    # Workspace IDs are opaque authority identifiers. Their case is significant.
+    return str((_get_query(handler).get("workspaceId") or [""])[0] or "").strip()
 
 
 def _read_json_body(handler: BaseHTTPRequestHandler) -> tuple[dict | None, dict | None]:
-    content_length = int(handler.headers.get("content-length", "0"))
-    raw_body = handler.rfile.read(content_length).decode("utf-8") if content_length > 0 else ""
+    try:
+        content_length = int(handler.headers.get("content-length", "0"))
+    except (TypeError, ValueError):
+        return None, _build_error("invalid_request", "Content-Length is invalid.")
+    if content_length < 0 or content_length > _MAX_JSON_BODY_BYTES:
+        return None, _build_error("invalid_request", "Request body is too large.")
+    try:
+        raw_body = (
+            handler.rfile.read(content_length).decode("utf-8")
+            if content_length > 0
+            else ""
+        )
+    except UnicodeDecodeError:
+        return None, _build_error("invalid_request", "Request body must be valid UTF-8.")
 
     try:
         payload = json.loads(raw_body or "{}")
@@ -174,35 +193,20 @@ def _normalize_member_record(value: dict | None, workspace_id: str, email: str) 
     if not isinstance(value, dict):
         return None
 
-    normalized_workspace_id = str(value.get("workspaceId") or "").strip().lower()
+    normalized_workspace_id = str(value.get("workspaceId") or "").strip()
     normalized_email = _normalize_email(value.get("email"))
-    access_level = _normalize_team_role(value.get("accessLevel"))
-    status = str(value.get("status") or "").strip().lower()
-    display_name = str(value.get("displayName") or value.get("name") or "").strip()
-    invite_token = str(value.get("inviteToken") or "").strip()
-    created_at = value.get("createdAt")
-    updated_at = value.get("updatedAt")
-    accepted_at = value.get("acceptedAt")
-
-    if (
-        normalized_workspace_id != workspace_id
-        or normalized_email != email
-        or access_level not in TEAM_ROLES
-        or status != ACTIVE_TEAM_MEMBER_STATUS
-        or not display_name
-        or not invite_token
-        or not isinstance(created_at, int)
-        or not isinstance(updated_at, int)
-        or not isinstance(accepted_at, int)
-    ):
-        return None
-
-    return {
-        "email": normalized_email,
-        "displayName": display_name,
-        "accessLevel": access_level,
-        "status": ACTIVE_TEAM_MEMBER_STATUS,
-    }
+    schema_version = value.get("v")
+    if type(schema_version) is int and schema_version in (1, 2):
+        projected_member = project_team_member(value)
+        if (
+            projected_member is None
+            or normalized_workspace_id != workspace_id
+            or normalized_email != email
+            or projected_member.get("status") != ACTIVE_TEAM_MEMBER_STATUS
+        ):
+            return None
+        return projected_member
+    return None
 
 
 def _resolve_durable_store_config() -> dict | None:
@@ -219,11 +223,11 @@ def _resolve_durable_store_config() -> dict | None:
 
 
 def _build_member_key(workspace_id: str, email: str) -> str:
-    return f"cuevion:team:v1:member:{workspace_id.strip().lower()}:{email.strip().lower()}"
+    return f"cuevion:team:v1:member:{workspace_id.strip()}:{email.strip().lower()}"
 
 
 def _build_members_index_key(workspace_id: str) -> str:
-    return f"cuevion:team:v1:members-index:{workspace_id.strip().lower()}"
+    return f"cuevion:team:v1:members-index:{workspace_id.strip()}"
 
 
 def _perform_rest_request(
@@ -333,9 +337,21 @@ def _write_durable_record(config: dict, store_key: str, record: object) -> tuple
 
 def _require_authenticated_member(
     handler: BaseHTTPRequestHandler,
+    *,
+    require_json_mutation: bool = False,
 ) -> AuthenticatedMemberContext | None:
     try:
-        resolution = resolve_authenticated_member(snapshot_request_headers(handler))
+        request_headers = snapshot_request_headers(handler)
+    except HttpBoundaryError as error:
+        _send_json(
+            handler,
+            error.status,
+            _build_error(error.code, "Request headers are invalid."),
+        )
+        return None
+
+    try:
+        resolution = resolve_authenticated_member(request_headers)
     except HttpBoundaryError:
         _send_json(
             handler,
@@ -358,6 +374,16 @@ def _require_authenticated_member(
         resolution.outcome is MemberResolutionOutcome.AUTHENTICATED
         and resolution.member is not None
     ):
+        if require_json_mutation:
+            try:
+                require_safe_json_mutation(request_headers)
+            except HttpBoundaryError as error:
+                _send_json(
+                    handler,
+                    error.status,
+                    _build_error(error.code, "Request origin or media type is invalid."),
+                )
+                return None
         return resolution.member
 
     status_code = (
@@ -523,6 +549,224 @@ def _handle_remove(
     _send_json(handler, 200, {"ok": True, "member": member})
 
 
+def _team_mutation_error_status(error: dict) -> int:
+    code = str(error.get("code") or "")
+    if code in {"invalid_request", "invalid_member", "invalid_access_level"}:
+        return 400
+    if code in {"unauthorized"}:
+        return 401
+    if code in {"forbidden"}:
+        return 403
+    if code in {"team_member_not_found"}:
+        return 404
+    if code in {
+        "team_member_not_active",
+        "team_member_exists",
+        "conflict",
+        "stale_transition",
+    }:
+        return 409
+    return 503
+
+
+def _send_team_mutation_error(handler: BaseHTTPRequestHandler, error: dict):
+    code = str(error.get("code") or "team_authority_unavailable")
+    status_code = _team_mutation_error_status(error)
+    if status_code == 503:
+        _send_json(
+            handler,
+            503,
+            _build_error(
+                "team_authority_unavailable",
+                "Team membership authority is temporarily unavailable.",
+            ),
+        )
+        return
+    fallback_message = (
+        "The Team member could not be found."
+        if status_code == 404
+        else "The Team member could not be updated."
+        if status_code in {400, 409}
+        else "Team membership authority is temporarily unavailable."
+    )
+    message = str(error.get("message") or fallback_message)
+    _send_json(handler, status_code, _build_error(code, message))
+
+
+def _validate_safe_management_request(
+    handler: BaseHTTPRequestHandler,
+    authenticated_member: AuthenticatedMemberContext,
+    payload: dict,
+) -> bool:
+    requested_workspace_ids: list[str] = []
+    query_workspace_id = _get_workspace_id(handler)
+    if query_workspace_id:
+        requested_workspace_ids.append(query_workspace_id)
+
+    if "workspaceId" in payload:
+        body_workspace_id = str(payload.get("workspaceId") or "").strip()
+        if not body_workspace_id:
+            _send_json(
+                handler,
+                400,
+                _build_error(
+                    "invalid_request",
+                    "workspaceId must be non-empty when supplied.",
+                ),
+            )
+            return False
+        requested_workspace_ids.append(body_workspace_id)
+
+    if any(
+        workspace_id != authenticated_member.workspace_id
+        for workspace_id in requested_workspace_ids
+    ):
+        _send_json(
+            handler,
+            403,
+            _build_error("forbidden", "Workspace access is forbidden."),
+        )
+        return False
+
+    if authenticated_member.membership_role != "owner":
+        _send_json(
+            handler,
+            403,
+            _build_error(
+                "forbidden",
+                "Only the workspace owner can manage Team members.",
+            ),
+        )
+        return False
+
+    return True
+
+
+def _build_team_authority(handler: BaseHTTPRequestHandler):
+    try:
+        return build_runtime_team_authority(os.environ)
+    except Exception:
+        _send_json(
+            handler,
+            503,
+            _build_error(
+                "team_authority_unavailable",
+                "Team membership authority is temporarily unavailable.",
+            ),
+        )
+        return None
+
+
+def _handle_safe_remove(
+    handler: BaseHTTPRequestHandler,
+    authenticated_member: AuthenticatedMemberContext,
+):
+    payload, read_error = _read_json_body(handler)
+    if read_error or payload is None:
+        _send_json(handler, 400, read_error or _build_error("invalid_request", "Request is invalid."))
+        return
+
+    if not _validate_safe_management_request(handler, authenticated_member, payload):
+        return
+
+    member_email_value = payload.get("memberEmail")
+    member_email = (
+        member_email_value.strip().lower()
+        if type(member_email_value) is str
+        else ""
+    )
+    if not member_email:
+        _send_json(
+            handler,
+            400,
+            _build_error("invalid_request", "A Team member identifier is required."),
+        )
+        return
+
+    if member_email == _normalize_email(authenticated_member.email):
+        _send_json(
+            handler,
+            409,
+            _build_error("conflict", "The workspace owner cannot revoke their own Team access."),
+        )
+        return
+
+    authority = _build_team_authority(handler)
+    if authority is None:
+        return
+
+    member, error = authority.remove_member(
+        actor=authenticated_member,
+        member_email=member_email,
+    )
+    if error or member is None:
+        _send_team_mutation_error(
+            handler,
+            error
+            or {
+                "code": "team_authority_unavailable",
+                "message": "Team membership authority is temporarily unavailable.",
+            },
+        )
+        return
+
+    _send_json(handler, 200, {"ok": True, "member": member})
+
+
+def _handle_safe_update_access(
+    handler: BaseHTTPRequestHandler,
+    authenticated_member: AuthenticatedMemberContext,
+):
+    payload, read_error = _read_json_body(handler)
+    if read_error or payload is None:
+        _send_json(handler, 400, read_error or _build_error("invalid_request", "Request is invalid."))
+        return
+
+    if not _validate_safe_management_request(handler, authenticated_member, payload):
+        return
+
+    member_email_value = payload.get("memberEmail")
+    member_email = (
+        member_email_value.strip().lower()
+        if type(member_email_value) is str
+        else ""
+    )
+    access_level_value = payload.get("accessLevel")
+    access_level = access_level_value if type(access_level_value) is str else ""
+    if not member_email or access_level not in TEAM_ROLES:
+        _send_json(
+            handler,
+            400,
+            _build_error(
+                "invalid_request",
+                "A Team member identifier and Shared or Limited access are required.",
+            ),
+        )
+        return
+
+    authority = _build_team_authority(handler)
+    if authority is None:
+        return
+
+    member, error = authority.update_member_access(
+        actor=authenticated_member,
+        member_email=member_email,
+        access_level=access_level,
+    )
+    if error or member is None:
+        _send_team_mutation_error(
+            handler,
+            error
+            or {
+                "code": "team_authority_unavailable",
+                "message": "Team membership authority is temporarily unavailable.",
+            },
+        )
+        return
+
+    _send_json(handler, 200, {"ok": True, "member": member})
+
+
 class handler(BaseHTTPRequestHandler):
     def do_GET(self):
         operation = _get_operation(self)
@@ -540,14 +784,27 @@ class handler(BaseHTTPRequestHandler):
         _send_json(self, 404, _build_error("not_found", "Unsupported team members operation."))
 
     def do_POST(self):
+        operation = _get_operation(self)
+        if operation in {"remove", "revoke", "update-access"}:
+            authenticated_member = _require_authenticated_member(
+                self,
+                require_json_mutation=True,
+            )
+            if authenticated_member is None:
+                return
+
+            if operation in {"remove", "revoke"}:
+                _handle_safe_remove(self, authenticated_member)
+            else:
+                _handle_safe_update_access(self, authenticated_member)
+            return
+
         if _send_disabled_response(self):
             return
 
         authenticated_member = _require_authenticated_member(self)
         if authenticated_member is None:
             return
-
-        operation = _get_operation(self)
 
         if operation in {"remove", "revoke"}:
             _handle_remove(self, authenticated_member)

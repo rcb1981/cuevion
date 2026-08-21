@@ -214,6 +214,9 @@ import {
   type CollaborationThread,
 } from "../../lib/collaborationApi";
 import {
+  cancelTeamInvite,
+  changeTeamMemberAccess,
+  fetchPendingTeamInvites,
   fetchTeamMembers,
   fetchTeamInvite,
   issueTeamInvite,
@@ -223,6 +226,14 @@ import {
   type TeamInvite,
   type TeamInviteStatus,
 } from "../../lib/teamInviteApi";
+import {
+  createScopedFreshTeamInviteUrls,
+  createLatestTeamAuthorityRefreshCoordinator,
+  findTeamMemberIndexByEmail,
+  readScopedFreshTeamInviteUrls,
+  resetScopedFreshTeamInviteUrls,
+  updateScopedFreshTeamInviteUrls,
+} from "../../lib/teamAuthorityUi";
 import {
   createUserAccountConfigConflictRetryQueue,
   loadUserAccountConfig,
@@ -29128,6 +29139,8 @@ function WorkbenchView({
   onTeamMembersChange,
   onAcceptPendingTeamInvitation,
   onDeclinePendingTeamInvitation,
+  freshTeamInviteUrls,
+  onFreshTeamInviteUrlsChange,
   showDemoContent,
   workspacePersistenceKey,
   shouldPollTeamMembers,
@@ -29155,6 +29168,10 @@ function WorkbenchView({
   onTeamMembersChange: (members: TeamMemberEntry[]) => void;
   onAcceptPendingTeamInvitation: () => void;
   onDeclinePendingTeamInvitation: () => void;
+  freshTeamInviteUrls: Record<string, string>;
+  onFreshTeamInviteUrlsChange: (
+    update: (current: Record<string, string>) => Record<string, string>,
+  ) => void;
   showDemoContent: boolean;
   workspacePersistenceKey: string;
   shouldPollTeamMembers: boolean;
@@ -29194,7 +29211,15 @@ function WorkbenchView({
         : window.localStorage.getItem(teamMembersStorageKey),
     ),
   );
-  const [activeTeamMemberIndex, setActiveTeamMemberIndex] = useState<number | null>(null);
+  const [pendingTeamInvites, setPendingTeamInvites] = useState<TeamInvite[]>([]);
+  const [pendingTeamInvitesStatus, setPendingTeamInvitesStatus] =
+    useState<TeamRosterReadStatus>(showDemoContent ? "demo" : "loading");
+  const teamAuthorityRefreshCoordinatorRef =
+    useRef<ReturnType<typeof createLatestTeamAuthorityRefreshCoordinator> | null>(null);
+  teamAuthorityRefreshCoordinatorRef.current ??=
+    createLatestTeamAuthorityRefreshCoordinator();
+  const teamAuthorityRefreshCoordinator = teamAuthorityRefreshCoordinatorRef.current;
+  const [activeTeamMemberEmail, setActiveTeamMemberEmail] = useState<string | null>(null);
   const [activeTeamTab, setActiveTeamTab] = useState<
     "Members" | "Collaborations" | "Activity"
   >("Members");
@@ -29209,6 +29234,68 @@ function WorkbenchView({
   const [teamRosterReadStatus, setTeamRosterReadStatus] = useState<TeamRosterReadStatus>(
     showDemoContent ? "demo" : shouldPollTeamMembers ? "loading" : "unauthorized",
   );
+  const refreshProductionTeamAuthority = useCallback(
+    () =>
+      teamAuthorityRefreshCoordinator.run(
+        () =>
+          Promise.all([
+            fetchTeamMembers(),
+            fetchPendingTeamInvites(),
+          ]),
+        ([membersResult, pendingResult]) => {
+          if (!membersResult.ok) {
+            setTeamRosterReadStatus(membersResult.status);
+          } else {
+            setTeamMembers((current) => {
+              const authoritativeMembers = replaceWithAuthoritativeTeamMembers(
+                current,
+                membersResult.members,
+              );
+
+              return areTeamMemberEntriesEqual(current, authoritativeMembers)
+                ? current
+                : authoritativeMembers;
+            });
+            setTeamRosterReadStatus("success");
+          }
+
+          if (!pendingResult.ok) {
+            setPendingTeamInvites([]);
+            if (
+              pendingResult.status === "unauthorized" ||
+              pendingResult.status === "forbidden"
+            ) {
+              onFreshTeamInviteUrlsChange(() => ({}));
+            }
+            setPendingTeamInvitesStatus(
+              pendingResult.status === "unauthorized" ||
+                pendingResult.status === "forbidden"
+                ? pendingResult.status
+                : "unavailable",
+            );
+          } else {
+            setPendingTeamInvites(pendingResult.invitations);
+            setPendingTeamInvitesStatus("success");
+            const liveInvitationIds = new Set(
+              pendingResult.invitations.map((invitation) => invitation.invitationId),
+            );
+            onFreshTeamInviteUrlsChange((current) =>
+              Object.fromEntries(
+                Object.entries(current).filter(([invitationId]) =>
+                  liveInvitationIds.has(invitationId),
+                ),
+              ),
+            );
+          }
+
+          return (
+            membersResult.ok &&
+            (pendingResult.ok || pendingResult.status === "forbidden")
+          );
+        },
+      ),
+    [onFreshTeamInviteUrlsChange, teamAuthorityRefreshCoordinator],
+  );
   const teamRosterPresentation = getTeamRosterPresentation(
     teamRosterReadStatus,
     teamMembers,
@@ -29219,6 +29306,15 @@ function WorkbenchView({
   );
   const allowLocalTeamMemberMutation =
     shouldAllowLocalTeamMemberMutation(showDemoContent);
+  const canManageTeam =
+    showDemoContent || pendingTeamInvitesStatus === "success";
+  const activeTeamMemberIndex =
+    teamRosterPresentation.kind === "members"
+      ? findTeamMemberIndexByEmail(
+          teamRosterPresentation.members,
+          activeTeamMemberEmail,
+        )
+      : null;
   const activeTeamMember =
     teamRosterPresentation.kind === "members" && activeTeamMemberIndex !== null
       ? teamRosterPresentation.members[activeTeamMemberIndex]
@@ -29294,6 +29390,17 @@ function WorkbenchView({
     await navigator.clipboard.writeText(inviteUrl);
     setTeamFeedbackMessage("Invite link copied");
   };
+  const copyFreshTeamInviteUrl = async (inviteUrl: string) => {
+    try {
+      if (typeof navigator === "undefined" || !navigator.clipboard) {
+        throw new Error("Clipboard unavailable");
+      }
+      await navigator.clipboard.writeText(inviteUrl);
+      setTeamFeedbackMessage("Invite link copied");
+    } catch {
+      setTeamFeedbackMessage("Copy the invite link shown below manually.");
+    }
+  };
   const getPrimaryTeamInviteMailbox = () => {
     const primaryMailbox = orderedMailboxes[0];
 
@@ -29327,6 +29434,8 @@ function WorkbenchView({
     invite: TeamInvite;
     inviteUrl: string;
   }) => {
+    const inviterName =
+      currentUserName.trim() || orderedMailboxes[0]?.title.trim() || "Cuevion";
     const primaryMailbox = getPrimaryTeamInviteMailbox();
 
     if (!primaryMailbox) {
@@ -29356,7 +29465,7 @@ function WorkbenchView({
     const inviteBodyText = [
       `Hi ${invite.inviteeName},`,
       "",
-      `${invite.createdByUserName} invited you to Cuevion with invite-only collaboration access.`,
+      `${inviterName} invited you to Cuevion with invite-only collaboration access.`,
       "",
       "Open in Cuevion:",
       inviteUrl,
@@ -29369,7 +29478,7 @@ function WorkbenchView({
     const inviteBodyHtml = `<div style="font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#261f17;line-height:1.6;"><p>Hi ${escapeInviteHtml(
       invite.inviteeName,
     )},</p><p>${escapeInviteHtml(
-      invite.createdByUserName,
+      inviterName,
     )} invited you to Cuevion with invite-only collaboration access.</p><p><a href="${escapeInviteHtml(
       inviteUrl,
     )}">Open in Cuevion</a></p><p style="word-break:break-word;">${escapeInviteHtml(
@@ -29379,7 +29488,7 @@ function WorkbenchView({
     const sendResponse = await sendGmailMessage({
       mailboxId: managedMailbox.id,
       to: invite.inviteeEmail,
-      subject: `${invite.createdByUserName} invited you to Cuevion`,
+      subject: `${inviterName} invited you to Cuevion`,
       bodyHtml: inviteBodyHtml,
       bodyText: inviteBodyText,
     });
@@ -29400,14 +29509,31 @@ function WorkbenchView({
     existingMemberIndex?: number;
     cancelIssuedInviteOnSendFailure?: boolean;
   }) => {
+    if (showDemoContent) {
+      const nextMember: TeamMemberEntry = {
+        name,
+        email,
+        accessLevel: "Limited",
+        selectedInboxes: [],
+        status: "Invited",
+        teamInviteToken: `demo-team-invite-${Date.now()}`,
+        teamInviteStatus: "pending",
+      };
+      setTeamMembers((current) =>
+        typeof existingMemberIndex === "number"
+          ? current.map((member, index) =>
+              index === existingMemberIndex ? nextMember : member,
+            )
+          : [...current, nextMember],
+      );
+      setTeamFeedbackMessage("External review invite sent");
+      return true;
+    }
+
     const issueResult = await issueTeamInvite({
-      workspaceId: workspacePersistenceKey,
       inviteeEmail: email,
       inviteeName: name,
       accessLevel: "Limited",
-      createdByUserId: workspacePersistenceKey,
-      createdByUserName:
-        currentUserName.trim() || orderedMailboxes[0]?.title.trim() || "Cuevion",
     });
 
     if (!issueResult.ok) {
@@ -29421,37 +29547,29 @@ function WorkbenchView({
     });
 
     if (!sendResult.ok) {
+      let cancellationConfirmed = false;
       if (cancelIssuedInviteOnSendFailure) {
-        await mutateTeamInvite({
-          token: issueResult.invite.token,
-          action: {
-            type: "cancel",
-          },
+        const cancellationResult = await cancelTeamInvite({
+          invitationId: issueResult.invite.invitationId,
         });
+        cancellationConfirmed = cancellationResult.ok;
       }
-      setTeamFeedbackMessage(sendResult.message);
+      await refreshProductionTeamAuthority();
+      setTeamFeedbackMessage(
+        cancellationConfirmed
+          ? `${sendResult.message} The invitation was cancelled.`
+          : `${sendResult.message} Invitation cancellation could not be confirmed.`,
+      );
       return false;
     }
 
-    const nextMember: TeamMemberEntry = {
-      name,
-      email,
-      accessLevel: "Limited",
-      selectedInboxes: [],
-      status: mapTeamInviteStatusToMemberStatus(issueResult.invite.status),
-      teamInviteToken: issueResult.invite.token,
-      teamInviteStatus: issueResult.invite.status,
-    };
+    if (!(await refreshProductionTeamAuthority())) {
+      setTeamFeedbackMessage(
+        "Invite email sent, but confirmed Team state is temporarily unavailable.",
+      );
+      return true;
+    }
 
-    setTeamMembers((current) => {
-      if (typeof existingMemberIndex === "number") {
-        return current.map((member, index) =>
-          index === existingMemberIndex ? nextMember : member,
-        );
-      }
-
-      return [...current, nextMember];
-    });
     setTeamFeedbackMessage("External review invite sent");
     return true;
   };
@@ -29464,14 +29582,33 @@ function WorkbenchView({
     email: string;
     existingMemberIndex?: number;
   }) => {
+    if (showDemoContent) {
+      const nextMember: TeamMemberEntry = {
+        name,
+        email,
+        accessLevel: "Shared",
+        selectedInboxes: [],
+        status: "Invited",
+        teamInviteToken: `demo-team-invite-${Date.now()}`,
+        teamInviteStatus: "pending",
+      };
+      setTeamMembers((current) =>
+        typeof existingMemberIndex === "number"
+          ? current.map((member, index) =>
+              index === existingMemberIndex ? nextMember : member,
+            )
+          : [...current, nextMember],
+      );
+      setTeamFeedbackMessage(
+        "Shared invite created. Copy the invite link and send it to this person.",
+      );
+      return true;
+    }
+
     const issueResult = await issueTeamInvite({
-      workspaceId: workspacePersistenceKey,
       inviteeEmail: email,
       inviteeName: name,
       accessLevel: "Shared",
-      createdByUserId: workspacePersistenceKey,
-      createdByUserName:
-        currentUserName.trim() || orderedMailboxes[0]?.title.trim() || "Cuevion",
     });
 
     if (!issueResult.ok) {
@@ -29479,25 +29616,17 @@ function WorkbenchView({
       return false;
     }
 
-    const nextMember: TeamMemberEntry = {
-      name,
-      email,
-      accessLevel: "Shared",
-      selectedInboxes: [],
-      status: mapTeamInviteStatusToMemberStatus(issueResult.invite.status),
-      teamInviteToken: issueResult.invite.token,
-      teamInviteStatus: issueResult.invite.status,
-    };
+    onFreshTeamInviteUrlsChange((current) => ({
+      ...current,
+      [issueResult.invite.invitationId]: issueResult.inviteUrl,
+    }));
 
-    setTeamMembers((current) => {
-      if (typeof existingMemberIndex === "number") {
-        return current.map((member, index) =>
-          index === existingMemberIndex ? nextMember : member,
-        );
-      }
-
-      return [...current, nextMember];
-    });
+    if (!(await refreshProductionTeamAuthority())) {
+      setTeamFeedbackMessage(
+        "Invite created, but confirmed Team state is temporarily unavailable.",
+      );
+      return true;
+    }
     setTeamFeedbackMessage(
       "Shared invite created. Copy the invite link and send it to this person.",
     );
@@ -29590,8 +29719,10 @@ function WorkbenchView({
       return;
     }
 
-    if (showDemoContent || teamRosterReadStatus === "success") {
+    if (showDemoContent) {
       window.localStorage.setItem(teamMembersStorageKey, JSON.stringify(teamMembers));
+    } else {
+      window.localStorage.removeItem(teamMembersStorageKey);
     }
     onTeamMembersChange(publishedTeamMembers);
   }, [
@@ -29610,17 +29741,20 @@ function WorkbenchView({
 
     if (showDemoContent) {
       setTeamRosterReadStatus("demo");
+      setPendingTeamInvitesStatus("demo");
       return;
     }
 
     if (!shouldPollTeamMembers) {
       setTeamRosterReadStatus("unauthorized");
+      setPendingTeamInvites([]);
+      setPendingTeamInvitesStatus("unauthorized");
       return;
     }
 
-    let isCancelled = false;
     let isRequestInFlight = false;
     setTeamRosterReadStatus("loading");
+    setPendingTeamInvitesStatus("loading");
 
     const loadBackendTeamMembers = async () => {
       if (isRequestInFlight) {
@@ -29630,28 +29764,7 @@ function WorkbenchView({
       isRequestInFlight = true;
 
       try {
-        const result = await fetchTeamMembers();
-
-        if (isCancelled) {
-          return;
-        }
-
-        if (!result.ok) {
-          setTeamRosterReadStatus(result.status);
-          return;
-        }
-
-        setTeamMembers((current) => {
-          const authoritativeMembers = replaceWithAuthoritativeTeamMembers(
-            current,
-            result.members,
-          );
-
-          return areTeamMemberEntriesEqual(current, authoritativeMembers)
-            ? current
-            : authoritativeMembers;
-        });
-        setTeamRosterReadStatus("success");
+        await refreshProductionTeamAuthority();
       } finally {
         isRequestInFlight = false;
       }
@@ -29676,13 +29789,14 @@ function WorkbenchView({
     document.addEventListener("visibilitychange", handleVisibilityChange);
 
     return () => {
-      isCancelled = true;
+      teamAuthorityRefreshCoordinator.invalidate();
       window.clearInterval(intervalId);
       window.removeEventListener("focus", handleFocus);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
   }, [
     backendTeamMembersRefreshKey,
+    refreshProductionTeamAuthority,
     shouldPollTeamMembers,
     showDemoContent,
     workspacePersistenceKey,
@@ -29697,11 +29811,15 @@ function WorkbenchView({
   useEffect(() => {
     if (!activeTeamMember) {
       setIsChangeAccessOpen(false);
+      if (teamRosterReadStatus === "success" && activeTeamMemberEmail) {
+        setActiveTeamMemberEmail(null);
+        setActiveTeamConfirmation(null);
+      }
       return;
     }
 
     setSelectedTeamAccessLevel(activeTeamMember.accessLevel);
-  }, [activeTeamMember]);
+  }, [activeTeamMember, activeTeamMemberEmail, teamRosterReadStatus]);
 
   return (
     <>
@@ -29840,46 +29958,179 @@ function WorkbenchView({
                 <div className="text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
                   Team members
                 </div>
-                <button
-                  type="button"
-                  onClick={() => setIsInviteMemberOpen(true)}
-                  className={closeActionButtonClass}
-                >
-                  Invite member
-                </button>
+                {canManageTeam ? (
+                  <button
+                    type="button"
+                    onClick={() => setIsInviteMemberOpen(true)}
+                    className={closeActionButtonClass}
+                  >
+                    Invite member
+                  </button>
+                ) : null}
               </div>
+
+              {!showDemoContent && pendingTeamInvitesStatus === "success" ? (
+                pendingTeamInvites.length > 0 ? (
+                  <div className="space-y-2 rounded-[22px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-3">
+                    <div className="px-1 text-[0.66rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)]">
+                      Pending invitations
+                    </div>
+                    <div className="divide-y divide-[var(--workspace-divider)]">
+                      {pendingTeamInvites.map((invitation) => {
+                        const freshInviteUrl =
+                          freshTeamInviteUrls[invitation.invitationId];
+                        return (
+                          <div
+                            key={invitation.invitationId}
+                            className="flex flex-wrap items-center justify-between gap-3 px-1 py-3 first:pt-2 last:pb-2"
+                          >
+                            <div className="min-w-0">
+                              <div className="text-[0.9rem] font-medium text-[var(--workspace-text)]">
+                                {invitation.inviteeName}
+                              </div>
+                              <div className="text-[0.76rem] leading-6 text-[var(--workspace-text-soft)]">
+                                {invitation.inviteeEmail} · {invitation.accessLevel} · Expires {new Date(
+                                  invitation.expiresAt,
+                                ).toLocaleDateString()}
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              {freshInviteUrl ? (
+                                <div className="min-w-0 space-y-1">
+                                  <button
+                                    type="button"
+                                    disabled={isSendingTeamInvite}
+                                    onClick={() => void copyFreshTeamInviteUrl(freshInviteUrl)}
+                                    className={teamInvitationSecondaryActionClass}
+                                  >
+                                    Copy link
+                                  </button>
+                                  <div className="max-w-[22rem] break-all text-[0.68rem] leading-5 text-[var(--workspace-text-faint)]">
+                                    {freshInviteUrl}
+                                  </div>
+                                </div>
+                              ) : null}
+                              <button
+                                type="button"
+                                disabled={isSendingTeamInvite}
+                                onClick={async () => {
+                                  if (isSendingTeamInvite) {
+                                    return;
+                                  }
+                                  setIsSendingTeamInvite(true);
+                                  try {
+                                    const result = await cancelTeamInvite({
+                                      invitationId: invitation.invitationId,
+                                    });
+                                    if (!result.ok) {
+                                      setTeamFeedbackMessage(
+                                        result.error?.message ?? "Could not cancel invite",
+                                      );
+                                      return;
+                                    }
+                                    onFreshTeamInviteUrlsChange((current) => {
+                                      const next = { ...current };
+                                      delete next[invitation.invitationId];
+                                      return next;
+                                    });
+                                    if (!(await refreshProductionTeamAuthority())) {
+                                      setTeamFeedbackMessage(
+                                        "Invite cancelled, but confirmed Team state is temporarily unavailable.",
+                                      );
+                                      return;
+                                    }
+                                    setTeamFeedbackMessage("Invite cancelled");
+                                  } finally {
+                                    setIsSendingTeamInvite(false);
+                                  }
+                                }}
+                                className={teamInvitationSecondaryActionClass}
+                              >
+                                Cancel invite
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ) : null
+              ) : !showDemoContent &&
+                (pendingTeamInvitesStatus === "loading" ||
+                  pendingTeamInvitesStatus === "unavailable") ? (
+                <div className="flex flex-wrap items-center gap-3 text-[0.82rem] leading-6 text-[var(--workspace-text-soft)]">
+                  <span>
+                    {pendingTeamInvitesStatus === "loading"
+                      ? "Loading pending invitations…"
+                      : "Pending invitations are temporarily unavailable."}
+                  </span>
+                  {pendingTeamInvitesStatus === "unavailable" ? (
+                    <div className="space-y-3">
+                      <button
+                        type="button"
+                        onClick={() => setBackendTeamMembersRefreshKey((current) => current + 1)}
+                        className={teamInvitationSecondaryActionClass}
+                      >
+                        Retry
+                      </button>
+                      {Object.entries(freshTeamInviteUrls).map(
+                        ([invitationId, freshInviteUrl]) => (
+                          <div
+                            key={invitationId}
+                            className="max-w-[34rem] space-y-2 rounded-[16px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-3 py-3"
+                          >
+                            <div className="text-[0.76rem] text-[var(--workspace-text-soft)]">
+                              Newly issued link (server confirmed)
+                            </div>
+                            <div className="break-all text-[0.68rem] leading-5 text-[var(--workspace-text-faint)]">
+                              {freshInviteUrl}
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => void copyFreshTeamInviteUrl(freshInviteUrl)}
+                              className={teamInvitationSecondaryActionClass}
+                            >
+                              Copy link
+                            </button>
+                          </div>
+                        ),
+                      )}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
 
               {teamRosterPresentation.kind === "members" ? (
                 <div className="divide-y divide-[var(--workspace-divider)]">
-              {teamRosterPresentation.members.map((member, index) => (
-                <button
-                  key={member.email}
-                  type="button"
-                  onClick={() => setActiveTeamMemberIndex(index)}
-                  className={`flex w-full items-start justify-between gap-4 rounded-[18px] px-2 py-4 text-left transition-colors duration-200 first:mt-[-0.25rem] first:pt-[1.15rem] last:mb-[-0.25rem] last:pb-[0.4rem] ${
-                    activeTeamMemberIndex === index
-                      ? "bg-[var(--workspace-surface-selected)]"
-                      : "hover:bg-[var(--workspace-surface-hover)]"
-                  } focus-visible:bg-[var(--workspace-surface-selected)] focus-visible:outline-none`}
-                >
-                  <div className="min-w-0 flex items-start gap-3">
-                    <div className="flex h-10 w-10 flex-none items-center justify-center rounded-full bg-[color:rgba(78,32,112,0.12)] text-[0.74rem] font-medium uppercase tracking-[0.08em] text-[#4E2070]">
-                      {getInitials(member.name)}
-                    </div>
-                    <div className="min-w-0 space-y-0.5">
-                      <div className="text-[0.94rem] font-medium tracking-[-0.014em] text-[var(--workspace-text)]">
-                        {member.name}
+                  {teamRosterPresentation.members.map((member) => (
+                    <button
+                      key={member.email}
+                      type="button"
+                      onClick={() => setActiveTeamMemberEmail(member.email)}
+                      className={`flex w-full items-start justify-between gap-4 rounded-[18px] px-2 py-4 text-left transition-colors duration-200 first:mt-[-0.25rem] first:pt-[1.15rem] last:mb-[-0.25rem] last:pb-[0.4rem] ${
+                        activeTeamMemberEmail === member.email
+                          ? "bg-[var(--workspace-surface-selected)]"
+                          : "hover:bg-[var(--workspace-surface-hover)]"
+                      } focus-visible:bg-[var(--workspace-surface-selected)] focus-visible:outline-none`}
+                    >
+                      <div className="min-w-0 flex items-start gap-3">
+                        <div className="flex h-10 w-10 flex-none items-center justify-center rounded-full bg-[color:rgba(78,32,112,0.12)] text-[0.74rem] font-medium uppercase tracking-[0.08em] text-[#4E2070]">
+                          {getInitials(member.name)}
+                        </div>
+                        <div className="min-w-0 space-y-0.5">
+                          <div className="text-[0.94rem] font-medium tracking-[-0.014em] text-[var(--workspace-text)]">
+                            {member.name}
+                          </div>
+                          <div className="text-[0.8rem] leading-6 text-[var(--workspace-text-soft)]">
+                            {getTeamRoleDescription(member)}
+                          </div>
+                        </div>
                       </div>
-                      <div className="text-[0.8rem] leading-6 text-[var(--workspace-text-soft)]">
-                        {getTeamRoleDescription(member)}
+                      <div className="flex-none pt-0.5 text-[0.68rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)]">
+                        {member.status}
                       </div>
-                    </div>
-                  </div>
-                  <div className="flex-none pt-0.5 text-[0.68rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)]">
-                    {member.status}
-                  </div>
-                </button>
-              ))}
+                    </button>
+                  ))}
                 </div>
               ) : (
                 <div className="flex flex-wrap items-center gap-3 text-[0.92rem] leading-7 text-[var(--workspace-text-soft)]">
@@ -30196,7 +30447,7 @@ function WorkbenchView({
                 </div>
                 <button
                   type="button"
-                  onClick={() => setActiveTeamMemberIndex(null)}
+                  onClick={() => setActiveTeamMemberEmail(null)}
                   className={learningModalPrimaryActionButtonClass}
                 >
                   Close
@@ -30263,8 +30514,8 @@ function WorkbenchView({
 
                 <div className="mt-6 flex flex-wrap items-center gap-3">
                   {activeTeamMember.status === "Active" ? (
+                    canManageTeam ? (
                     <>
-                      {allowLocalTeamMemberMutation ? (
                       <button
                         type="button"
                         onClick={() => setIsChangeAccessOpen(true)}
@@ -30272,7 +30523,6 @@ function WorkbenchView({
                       >
                         Change access
                       </button>
-                      ) : null}
                       <button
                         type="button"
                         onClick={() => setActiveTeamConfirmation("revoke")}
@@ -30281,7 +30531,8 @@ function WorkbenchView({
                         Revoke access
                       </button>
                     </>
-                  ) : activeTeamMember.status === "Access removed" ? (
+                    ) : null
+                  ) : showDemoContent && activeTeamMember.status === "Access removed" ? (
                     <>
                       <button
                         type="button"
@@ -30310,7 +30561,7 @@ function WorkbenchView({
                         Remove member
                       </button>
                     </>
-                  ) : activeTeamMember.status === "Invite cancelled" ? (
+                  ) : showDemoContent && activeTeamMember.status === "Invite cancelled" ? (
                     <>
                       <button
                         type="button"
@@ -30327,7 +30578,7 @@ function WorkbenchView({
                         Remove member
                       </button>
                     </>
-                  ) : (
+                  ) : showDemoContent ? (
                     <>
                       {activeTeamMember.status === "Invited" && activeTeamMember.teamInviteToken ? (
                         <button
@@ -30353,7 +30604,7 @@ function WorkbenchView({
                         Cancel invite
                       </button>
                     </>
-                  )}
+                  ) : null}
                 </div>
                 {teamFeedbackMessage ? (
                   <div className="mt-3 text-[0.72rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)]">
@@ -30392,7 +30643,7 @@ function WorkbenchView({
                       ? "Are you sure you want to remove this Team member?"
                     : activeTeamConfirmation === "cancel-invite"
                       ? "Are you sure you want to cancel this invitation?"
-                    : activeTeamConfirmation === "resend-invite"
+                      : activeTeamConfirmation === "resend-invite"
                         ? activeTeamMember?.accessLevel === "Limited"
                           ? "Send this external review invite again by email?"
                           : "Reopen this shared collaboration invite in Cuevion? No email is sent automatically. Copy and send the invite link manually."
@@ -30400,6 +30651,11 @@ function WorkbenchView({
                           ? "Send this external review invite by email?"
                           : "Create this shared collaboration invite in Cuevion? No email is sent automatically. Copy and send the invite link manually."}
                 </p>
+                {teamFeedbackMessage ? (
+                  <div className="text-[0.8rem] leading-6 text-[var(--workspace-text-soft)]">
+                    {teamFeedbackMessage}
+                  </div>
+                ) : null}
               </div>
 
               <div className="mt-6 flex items-center justify-end gap-3">
@@ -30426,46 +30682,50 @@ function WorkbenchView({
                         return;
                       }
 
-                      setIsSendingTeamInvite(true);
-                      try {
-                        const removeResult = await removeTeamMember({
-                          workspaceId: workspacePersistenceKey,
-                          memberEmail,
-                        });
-
-                        if (!removeResult.ok) {
-                          setTeamFeedbackMessage(
-                            removeResult.error?.message ?? "Could not revoke access",
-                          );
-                          return;
-                        }
-
-                        if (activeTeamMember?.teamInviteToken) {
-                          await mutateTeamInvite({
-                            token: activeTeamMember.teamInviteToken,
-                            action: {
-                              type: "cancel",
-                            },
+                      if (showDemoContent) {
+                        setTeamMembers((current) =>
+                          current.map((member, index) =>
+                            index === activeTeamMemberIndex
+                              ? {
+                                  ...member,
+                                  status: "Access removed",
+                                  teamInviteStatus:
+                                    member.teamInviteToken
+                                      ? "cancelled"
+                                      : member.teamInviteStatus,
+                                  teamInviteToken: undefined,
+                                }
+                              : member,
+                          ),
+                        );
+                        setTeamFeedbackMessage("Access revoked");
+                      } else {
+                        setIsSendingTeamInvite(true);
+                        try {
+                          const removeResult = await removeTeamMember({
+                            memberEmail,
                           });
-                        }
-                      } finally {
-                        setIsSendingTeamInvite(false);
-                      }
 
-                      setTeamMembers((current) =>
-                        current.map((member, index) =>
-                          index === activeTeamMemberIndex
-                            ? {
-                                ...member,
-                                status: "Access removed",
-                                teamInviteStatus:
-                                  member.teamInviteToken ? "cancelled" : member.teamInviteStatus,
-                                teamInviteToken: undefined,
-                              }
-                            : member,
-                        ),
-                      );
-                      setBackendTeamMembersRefreshKey((current) => current + 1);
+                          if (!removeResult.ok) {
+                            setTeamFeedbackMessage(
+                              removeResult.error?.message ?? "Could not revoke access",
+                            );
+                            return;
+                          }
+
+                          setActiveTeamConfirmation(null);
+                          setActiveTeamMemberEmail(null);
+                          if (!(await refreshProductionTeamAuthority())) {
+                            setTeamFeedbackMessage(
+                              "Access revoked, but confirmed Team state is temporarily unavailable.",
+                            );
+                            return;
+                          }
+                          setTeamFeedbackMessage("Access revoked");
+                        } finally {
+                          setIsSendingTeamInvite(false);
+                        }
+                      }
                     }
 
                     if (
@@ -30475,7 +30735,7 @@ function WorkbenchView({
                       setTeamMembers((current) =>
                         current.filter((_, index) => index !== activeTeamMemberIndex),
                       );
-                      setActiveTeamMemberIndex(null);
+                      setActiveTeamMemberEmail(null);
                       setTeamFeedbackMessage("Member removed");
                     }
 
@@ -30524,31 +30784,10 @@ function WorkbenchView({
 	                      setInviteEmail("");
 	                      setInviteAccessLevel("Shared");
 	                      setIsInviteMemberOpen(false);
-	                    } else if (
+                    } else if (
                       activeTeamConfirmation === "cancel-invite" &&
                       activeTeamMemberIndex !== null
                     ) {
-                      if (activeTeamMember?.teamInviteToken) {
-                        setIsSendingTeamInvite(true);
-                        try {
-                          const cancelResult = await mutateTeamInvite({
-                            token: activeTeamMember.teamInviteToken,
-                            action: {
-                              type: "cancel",
-                            },
-                          });
-
-                          if (!cancelResult.ok) {
-                            setTeamFeedbackMessage(
-                              cancelResult.error?.message ?? "Could not cancel invite",
-                            );
-                            return;
-                          }
-                        } finally {
-                          setIsSendingTeamInvite(false);
-                        }
-                      }
-
                       setTeamMembers((current) =>
                         current.map((member, index) =>
                           index === activeTeamMemberIndex
@@ -30574,7 +30813,7 @@ function WorkbenchView({
                             email: activeTeamMember.email.trim().toLowerCase(),
                             existingMemberIndex: activeTeamMemberIndex,
                             cancelIssuedInviteOnSendFailure:
-                              activeTeamMember.teamInviteStatus !== "invited",
+                              activeTeamMember.teamInviteStatus !== "pending",
                           });
 
                           if (!didSendInvite) {
@@ -30620,8 +30859,7 @@ function WorkbenchView({
           modalHost,
         )
       : null}
-    {allowLocalTeamMemberMutation &&
-    activeTeamMember &&
+    {activeTeamMember &&
     isChangeAccessOpen &&
     !activeTeamConfirmation &&
     modalHost
@@ -30670,6 +30908,11 @@ function WorkbenchView({
                     Unsaved changes
                   </div>
                 ) : null}
+                {teamFeedbackMessage ? (
+                  <div className="mt-3 text-[0.8rem] leading-6 text-[var(--workspace-text-soft)]">
+                    {teamFeedbackMessage}
+                  </div>
+                ) : null}
 
                 <div className="mt-6 flex items-center justify-end gap-3">
                   <button
@@ -30681,19 +30924,55 @@ function WorkbenchView({
                   </button>
                   <button
                     type="button"
-                    onClick={() => {
-                      setTeamMembers((current) =>
-                        current.map((member, index) =>
-                          index === activeTeamMemberIndex
-                            ? {
-                                ...member,
-                                accessLevel: selectedTeamAccessLevel,
-                                selectedInboxes: [],
-                              }
-                            : member,
-                        ),
-                      );
-	                      setIsChangeAccessOpen(false);
+                    disabled={!hasTeamAccessChanges || isSendingTeamInvite}
+                    onClick={async () => {
+                      if (
+                        !hasTeamAccessChanges ||
+                        isSendingTeamInvite ||
+                        activeTeamMemberIndex === null
+                      ) {
+                        return;
+                      }
+
+                      if (allowLocalTeamMemberMutation) {
+                        setTeamMembers((current) =>
+                          current.map((member, index) =>
+                            index === activeTeamMemberIndex
+                              ? {
+                                  ...member,
+                                  accessLevel: selectedTeamAccessLevel,
+                                  selectedInboxes: [],
+                                }
+                              : member,
+                          ),
+                        );
+                        setIsChangeAccessOpen(false);
+                        return;
+                      }
+
+                      setIsSendingTeamInvite(true);
+                      try {
+                        const result = await changeTeamMemberAccess({
+                          memberEmail: activeTeamMember.email,
+                          accessLevel: selectedTeamAccessLevel,
+                        });
+                        if (!result.ok) {
+                          setTeamFeedbackMessage(
+                            result.error?.message ?? "Could not change access",
+                          );
+                          return;
+                        }
+                        setIsChangeAccessOpen(false);
+                        if (!(await refreshProductionTeamAuthority())) {
+                          setTeamFeedbackMessage(
+                            "Access changed, but confirmed Team state is temporarily unavailable.",
+                          );
+                          return;
+                        }
+                        setTeamFeedbackMessage("Access changed");
+                      } finally {
+                        setIsSendingTeamInvite(false);
+                      }
                     }}
                     className={`${learningModalPrimaryActionButtonClass} ${
                       hasTeamAccessChanges
@@ -42500,26 +42779,26 @@ export function WorkspaceShell({
   }, [mailboxSyncFeedbackMessage, startupSyncStatus]);
   const [pendingTeamInvitation, setPendingTeamInvitation] =
     useState<PendingTeamInvitation>(() => {
+      if (!isDemoWorkspace) {
+        return null;
+      }
+
       if (typeof window === "undefined") {
-        return isDemoWorkspace
-          ? {
-              inviter: "Emma Stone",
-              accessLevel: "Shared",
-              selectedInboxes: [],
-            }
-          : null;
+        return {
+          inviter: "Emma Stone",
+          accessLevel: "Shared",
+          selectedInboxes: [],
+        };
       }
 
       const storedValue = window.localStorage.getItem(teamPendingInvitationStorageKey);
 
       if (!storedValue) {
-        return isDemoWorkspace
-          ? {
-              inviter: "Emma Stone",
-              accessLevel: "Shared",
-              selectedInboxes: [],
-            }
-          : null;
+        return {
+          inviter: "Emma Stone",
+          accessLevel: "Shared",
+          selectedInboxes: [],
+        };
       }
 
       try {
@@ -42529,7 +42808,7 @@ export function WorkspaceShell({
       }
     });
   const [memberOfEntries, setMemberOfEntries] = useState<TeamMembershipEntry[]>(() => {
-    if (typeof window === "undefined") {
+    if (!isDemoWorkspace || typeof window === "undefined") {
       return [];
     }
 
@@ -42547,6 +42826,8 @@ export function WorkspaceShell({
       return [];
     }
   });
+  const visiblePendingTeamInvitation = isDemoWorkspace ? pendingTeamInvitation : null;
+  const visibleMemberOfEntries = isDemoWorkspace ? memberOfEntries : [];
   const [teamMemberRosterState, setTeamMemberRosterState] = useState<{
     authorityKey: string;
     members: TeamMemberEntry[];
@@ -42560,6 +42841,31 @@ export function WorkspaceShell({
             window.localStorage.getItem(teamMembersStorageKey),
           ),
   }));
+  const [scopedFreshTeamInviteUrls, setScopedFreshTeamInviteUrls] = useState(() =>
+    createScopedFreshTeamInviteUrls(teamRosterAuthorityKey),
+  );
+  useEffect(() => {
+    setScopedFreshTeamInviteUrls((current) =>
+      resetScopedFreshTeamInviteUrls(current, teamRosterAuthorityKey),
+    );
+  }, [teamRosterAuthorityKey]);
+  const workspaceFreshTeamInviteUrls = readScopedFreshTeamInviteUrls(
+    scopedFreshTeamInviteUrls,
+    teamRosterAuthorityKey,
+  );
+  const handleFreshTeamInviteUrlsChange = useCallback(
+    (update: (current: Record<string, string>) => Record<string, string>) => {
+      setScopedFreshTeamInviteUrls((current) =>
+        updateScopedFreshTeamInviteUrls(
+          current,
+          teamRosterAuthorityKey,
+          scopedFreshTeamInviteUrls.epoch,
+          update,
+        ),
+      );
+    },
+    [scopedFreshTeamInviteUrls.epoch, teamRosterAuthorityKey],
+  );
   const teamMemberEntries =
     teamMemberRosterState.authorityKey === teamRosterAuthorityKey
       ? teamMemberRosterState.members
@@ -42589,7 +42895,7 @@ export function WorkspaceShell({
           name: orderedMailboxes[0]?.title ?? "You",
           email: activeWorkspaceEmail,
         },
-    ...memberOfEntries
+    ...visibleMemberOfEntries
       .filter(
         (member) =>
           member.status === "Active" &&
@@ -42605,7 +42911,7 @@ export function WorkspaceShell({
     (person, index, people) =>
       people.findIndex((candidate) => candidate.id === person.id) === index,
   );
-  const hasRealInternalCollaborationTeammates = memberOfEntries.some(
+  const hasRealInternalCollaborationTeammates = visibleMemberOfEntries.some(
     (member) =>
       authenticatedUser?.userType !== "guest" &&
       normalizeSenderLearningKey(member.email) !== currentWorkspaceUserId,
@@ -48185,14 +48491,24 @@ export function WorkspaceShell({
       return;
     }
 
+    if (!isDemoWorkspace) {
+      window.localStorage.removeItem(teamPendingInvitationStorageKey);
+      return;
+    }
+
     window.localStorage.setItem(
       teamPendingInvitationStorageKey,
       JSON.stringify(pendingTeamInvitation),
     );
-  }, [pendingTeamInvitation, teamPendingInvitationStorageKey]);
+  }, [isDemoWorkspace, pendingTeamInvitation, teamPendingInvitationStorageKey]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
+      return;
+    }
+
+    if (!isDemoWorkspace) {
+      window.localStorage.removeItem(teamMembershipsStorageKey);
       return;
     }
 
@@ -48200,7 +48516,7 @@ export function WorkspaceShell({
       teamMembershipsStorageKey,
       JSON.stringify(memberOfEntries),
     );
-  }, [memberOfEntries, teamMembershipsStorageKey]);
+  }, [isDemoWorkspace, memberOfEntries, teamMembershipsStorageKey]);
 
   useEffect(() => {
     window.localStorage.setItem(
@@ -49234,7 +49550,7 @@ export function WorkspaceShell({
         activeSection={activeSection}
         activeMailboxId={activeMailbox?.id ?? null}
         activeSmartFolderId={activeSmartFolderId}
-        hasPendingTeamInvitation={Boolean(pendingTeamInvitation)}
+        hasPendingTeamInvitation={Boolean(visiblePendingTeamInvitation)}
         notificationUnreadCount={notificationUnreadCount}
         mailboxUnreadCounts={sidebarMailboxUnreadCounts}
         showMailboxUnreadCounts={areMailboxCountsHydrated}
@@ -49316,7 +49632,7 @@ export function WorkspaceShell({
                   onCollaborationLastSeenChange={setCollaborationLastSeenByKey}
                   workspaceCollaborationPeople={workspaceCollaborationPeople}
                   inviteOnlyCollaborationPeople={inviteOnlyCollaborationPeople}
-                  memberOfEntries={memberOfEntries}
+                  memberOfEntries={visibleMemberOfEntries}
                   teamMemberEntries={teamMemberEntries}
                   focusPreferences={activeFocusPreferences}
                   effectiveFocusPreferencesByMailbox={effectiveFocusPreferencesByMailbox}
@@ -49515,8 +49831,8 @@ export function WorkspaceShell({
                   inboxChangesEnabled={inboxChangesEnabled}
                   teamActivityEnabled={teamActivityEnabled}
                   modalHost={workspaceModalHostRef.current}
-                  pendingTeamInvitation={pendingTeamInvitation}
-                  memberOfEntries={memberOfEntries}
+                  pendingTeamInvitation={visiblePendingTeamInvitation}
+                  memberOfEntries={visibleMemberOfEntries}
                   onAddMemberOfEntry={(entry) => {
                     setMemberOfEntries((current) => [...current, entry]);
                   }}
@@ -49527,6 +49843,8 @@ export function WorkspaceShell({
                   onDeclinePendingTeamInvitation={() => {
                     setPendingTeamInvitation(null);
                   }}
+                  freshTeamInviteUrls={workspaceFreshTeamInviteUrls}
+                  onFreshTeamInviteUrlsChange={handleFreshTeamInviteUrlsChange}
                   showDemoContent={isDemoWorkspace}
                   workspacePersistenceKey={workspacePersistenceScope}
                   shouldPollTeamMembers={Boolean(

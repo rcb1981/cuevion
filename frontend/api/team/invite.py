@@ -3,11 +3,28 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import sys
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler
+from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, quote, urlsplit
 from urllib.request import Request, urlopen
+
+CURRENT_DIR = Path(__file__).resolve().parent
+API_DIR = CURRENT_DIR.parent
+if str(API_DIR) not in sys.path:
+    sys.path.insert(0, str(API_DIR))
+
+from api.auth.email_address import is_valid_auth_email  # noqa: E402
+from api.auth.http import HttpBoundaryError, snapshot_request_headers  # noqa: E402
+from api.auth.runtime import (  # noqa: E402
+    AuthenticatedMemberContext,
+    MemberResolutionOutcome,
+    resolve_authenticated_member,
+)
+from api.team.authority import build_runtime_team_authority  # noqa: E402
+from api.team.http_security import require_safe_json_mutation  # noqa: E402
 
 TEAM_INVITE_SCHEMA_VERSION = 1
 TEAM_ROLES = {"Limited", "Shared"}
@@ -24,6 +41,9 @@ LEGACY_TEAM_ROLE_MAP = {
 
 _LEGACY_HTTP_MODE_ENVIRONMENT_NAME = "CUEVION_LEGACY_COLLAB_V1_HTTP_MODE"
 _LEGACY_HTTP_UNSAFE_VALUE = "legacy_unsafe_on"
+_PRODUCTION_APP_ORIGIN = "https://app.cuevion.com"
+_LOCAL_APP_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+_MAX_JSON_BODY_BYTES = 16 * 1024
 _DISABLED_RESPONSE_BODY = b'{"ok":false,"error":{"code":"not_found","message":"Not found."}}'
 _DISABLED_RESPONSE_CONTENT_LENGTH = str(len(_DISABLED_RESPONSE_BODY))
 _UNSUPPORTED_METHOD_RESPONSE_BODY = (
@@ -72,12 +92,20 @@ def _send_unsupported_method_response(
         handler.wfile.write(_UNSUPPORTED_METHOD_RESPONSE_BODY)
 
 
-def _send_json(handler: BaseHTTPRequestHandler, status_code: int, payload: dict):
+def _send_json(
+    handler: BaseHTTPRequestHandler,
+    status_code: int,
+    payload: dict,
+    *,
+    set_cookies: tuple[str, ...] = (),
+):
     response_body = json.dumps(payload).encode("utf-8")
     handler.send_response(status_code)
     handler.send_header("Content-Type", "application/json")
     handler.send_header("Cache-Control", "no-store")
     handler.send_header("Content-Length", str(len(response_body)))
+    for cookie in set_cookies:
+        handler.send_header("Set-Cookie", cookie)
     handler.end_headers()
     handler.wfile.write(response_body)
 
@@ -104,9 +132,26 @@ def _get_token(handler: BaseHTTPRequestHandler) -> str:
     return str((_get_query(handler).get("token") or [""])[0] or "").strip()
 
 
+def _get_workspace_id(handler: BaseHTTPRequestHandler) -> str:
+    # Workspace IDs are opaque authority identifiers. Their case is significant.
+    return str((_get_query(handler).get("workspaceId") or [""])[0] or "").strip()
+
+
 def _read_json_body(handler: BaseHTTPRequestHandler) -> tuple[dict | None, dict | None]:
-    content_length = int(handler.headers.get("content-length", "0"))
-    raw_body = handler.rfile.read(content_length).decode("utf-8") if content_length > 0 else ""
+    try:
+        content_length = int(handler.headers.get("content-length", "0"))
+    except (TypeError, ValueError):
+        return None, _build_error("invalid_request", "Content-Length is invalid.")
+    if content_length < 0 or content_length > _MAX_JSON_BODY_BYTES:
+        return None, _build_error("invalid_request", "Request body is too large.")
+    try:
+        raw_body = (
+            handler.rfile.read(content_length).decode("utf-8")
+            if content_length > 0
+            else ""
+        )
+    except UnicodeDecodeError:
+        return None, _build_error("invalid_request", "Request body must be valid UTF-8.")
 
     try:
         payload = json.loads(raw_body or "{}")
@@ -503,17 +548,542 @@ def _save_membership_for_accepted_invite(
     return membership_record, None
 
 
+def _normalize_invite_origin(value: object, *, allow_local_http: bool) -> str | None:
+    if type(value) is not str or not value or value != value.strip():
+        return None
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError:
+        return None
+    hostname = parsed.hostname.lower() if isinstance(parsed.hostname, str) else ""
+    if (
+        not hostname
+        or not parsed.netloc
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+        or parsed.username is not None
+        or parsed.password is not None
+        or any(character.isspace() for character in value)
+    ):
+        return None
+    scheme = parsed.scheme.lower()
+    is_local = hostname in _LOCAL_APP_HOSTS
+    if scheme != "https" and not (allow_local_http and scheme == "http" and is_local):
+        return None
+    normalized_host = f"[{hostname}]" if ":" in hostname else hostname
+    normalized_netloc = f"{normalized_host}:{port}" if port is not None else normalized_host
+    if parsed.netloc.lower() != normalized_netloc.lower():
+        return None
+    return f"{scheme}://{normalized_netloc}"
+
+
+def _resolve_invite_origin(handler: BaseHTTPRequestHandler) -> str | None:
+    deployment = str(os.getenv("VERCEL_ENV") or "").strip().lower()
+    if deployment == "production":
+        return _PRODUCTION_APP_ORIGIN
+
+    configured = str(os.getenv("CUEVION_APP_URL") or "")
+    if configured:
+        origin = _normalize_invite_origin(
+            configured.rstrip("/"),
+            allow_local_http=deployment in {"", "development"},
+        )
+        if origin == _PRODUCTION_APP_ORIGIN:
+            return origin
+        if deployment == "preview" and origin and origin.startswith("https://"):
+            return origin
+        if deployment in {"", "development"} and origin:
+            return origin
+        return None
+
+    if deployment in {"preview", "", "development"}:
+        origin = _normalize_invite_origin(
+            handler.headers.get("origin"),
+            allow_local_http=deployment in {"", "development"},
+        )
+        if origin is not None:
+            parsed_origin = urlsplit(origin)
+            expected_host = parsed_origin.netloc
+            host = str(handler.headers.get("host") or "").strip()
+            forwarded_host = str(handler.headers.get("x-forwarded-host") or "").strip()
+            forwarded_proto = str(handler.headers.get("x-forwarded-proto") or "").strip()
+            if (
+                host != expected_host
+                or (forwarded_host and forwarded_host != expected_host)
+                or (forwarded_proto and forwarded_proto != parsed_origin.scheme)
+            ):
+                return None
+            return origin
+
+    if deployment not in {"", "development"}:
+        return None
+    forwarded_proto = str(handler.headers.get("x-forwarded-proto") or "http").strip().lower()
+    host = str(handler.headers.get("host") or "").strip()
+    origin = _normalize_invite_origin(
+        f"{forwarded_proto}://{host}",
+        allow_local_http=True,
+    )
+    if origin and urlsplit(origin).hostname in _LOCAL_APP_HOSTS:
+        return origin
+    return None
+
+
 def _build_invite_url(handler: BaseHTTPRequestHandler, *, token: str) -> str:
-    forwarded_proto = str(handler.headers.get("x-forwarded-proto") or "").strip()
-    forwarded_host = str(handler.headers.get("x-forwarded-host") or "").strip()
-    host = forwarded_host or str(handler.headers.get("host") or "").strip()
-    scheme = forwarded_proto or ("http" if host.startswith("localhost") or host.startswith("127.0.0.1") else "https")
+    origin = _resolve_invite_origin(handler)
+    return f"{origin or ''}/?team_invite={token}"
 
-    origin = f"{scheme}://{host}" if host else ""
-    if not origin:
-        return f"/?team_invite={token}"
 
-    return f"{origin}/?team_invite={token}"
+_SAFE_AUTHORITY_ERROR_STATUS = {
+    "invalid_request": 400,
+    "invalid_email": 400,
+    "invalid_role": 400,
+    "unauthorized": 401,
+    "forbidden": 403,
+    "wrong_recipient": 403,
+    "invalid_invite": 404,
+    "not_found": 404,
+    "invitation_not_found": 404,
+    "team_member_not_found": 404,
+    "self_invite": 409,
+    "team_member_exists": 409,
+    "live_invitation_exists": 409,
+    "conflict": 409,
+    "cancelled_invite": 409,
+    "declined_invite": 409,
+    "used_invite": 409,
+    "accepted_invite": 409,
+    "expired_invite": 410,
+    "team_authority_unavailable": 503,
+    "team_invite_store_unavailable": 503,
+    "team_members_store_unavailable": 503,
+    "unavailable": 503,
+}
+
+
+def _send_safe_authority_error(handler: BaseHTTPRequestHandler, error: object):
+    if not isinstance(error, dict):
+        _send_json(
+            handler,
+            503,
+            _build_error(
+                "team_authority_unavailable",
+                "Team invitations are temporarily unavailable.",
+            ),
+        )
+        return
+
+    code = str(error.get("code") or "").strip()
+    status_code = _SAFE_AUTHORITY_ERROR_STATUS.get(code)
+    if status_code is None:
+        normalized_code = code.lower()
+        if "expired" in normalized_code:
+            status_code = 410
+        elif "wrong_recipient" in normalized_code:
+            status_code = 403
+        elif "not_found" in normalized_code or "invalid_invite" in normalized_code:
+            status_code = 404
+        elif any(
+            marker in normalized_code
+            for marker in (
+                "conflict",
+                "duplicate",
+                "already_",
+                "_exists",
+                "used",
+                "consumed",
+                "cancelled",
+                "declined",
+                "accepted",
+                "terminal",
+            )
+        ):
+            status_code = 409
+        elif normalized_code.startswith("invalid_"):
+            status_code = 400
+        else:
+            status_code = 503
+    if status_code == 503:
+        message = "Team invitations are temporarily unavailable."
+        if code not in _SAFE_AUTHORITY_ERROR_STATUS:
+            code = "team_authority_unavailable"
+    else:
+        message = str(error.get("message") or "").strip() or "Team invitation request was rejected."
+
+    _send_json(handler, status_code, _build_error(code, message))
+
+
+def _require_authenticated_member(
+    handler: BaseHTTPRequestHandler,
+    *,
+    require_json_mutation: bool = False,
+) -> AuthenticatedMemberContext | None:
+    try:
+        request_headers = snapshot_request_headers(handler)
+    except HttpBoundaryError as error:
+        _send_json(
+            handler,
+            error.status,
+            _build_error(error.code, "Request headers are invalid."),
+        )
+        return None
+
+    try:
+        resolution = resolve_authenticated_member(request_headers)
+    except HttpBoundaryError:
+        _send_json(
+            handler,
+            401,
+            _build_error("unauthorized", "Authentication is required."),
+        )
+        return None
+    except Exception:
+        _send_json(
+            handler,
+            503,
+            _build_error(
+                "authentication_unavailable",
+                "Authentication is temporarily unavailable.",
+            ),
+        )
+        return None
+
+    if (
+        resolution.outcome is MemberResolutionOutcome.AUTHENTICATED
+        and resolution.member is not None
+    ):
+        if require_json_mutation:
+            try:
+                mutation_origin = require_safe_json_mutation(request_headers)
+            except HttpBoundaryError as error:
+                _send_json(
+                    handler,
+                    error.status,
+                    _build_error(error.code, "Request origin or media type is invalid."),
+                )
+                return None
+            setattr(handler, "_trusted_team_mutation_origin", mutation_origin)
+        return resolution.member
+
+    status_code = 503 if resolution.outcome is MemberResolutionOutcome.UNAVAILABLE else 401
+    error_code = "authentication_unavailable" if status_code == 503 else "unauthorized"
+    message = (
+        "Authentication is temporarily unavailable."
+        if status_code == 503
+        else "Authentication is required."
+    )
+    _send_json(
+        handler,
+        status_code,
+        _build_error(error_code, message),
+        set_cookies=resolution.set_cookies,
+    )
+    return None
+
+
+def _require_owner(
+    handler: BaseHTTPRequestHandler,
+    actor: AuthenticatedMemberContext,
+) -> bool:
+    if actor.membership_role == "owner":
+        return True
+
+    _send_json(
+        handler,
+        403,
+        _build_error("forbidden", "Only the workspace owner can manage Team invitations."),
+    )
+    return False
+
+
+def _reject_foreign_management_workspace(
+    handler: BaseHTTPRequestHandler,
+    actor: AuthenticatedMemberContext,
+    payload: dict | None = None,
+) -> bool:
+    requested_workspace_ids: list[str] = []
+    query_workspace_id = _get_workspace_id(handler)
+    if query_workspace_id:
+        requested_workspace_ids.append(query_workspace_id)
+
+    if payload is not None and "workspaceId" in payload:
+        body_workspace_id = str(payload.get("workspaceId") or "").strip()
+        if not body_workspace_id:
+            _send_json(
+                handler,
+                400,
+                _build_error("invalid_request", "workspaceId must be non-empty when supplied."),
+            )
+            return True
+        requested_workspace_ids.append(body_workspace_id)
+
+    if any(workspace_id != actor.workspace_id for workspace_id in requested_workspace_ids):
+        _send_json(
+            handler,
+            403,
+            _build_error("forbidden", "Workspace access is forbidden."),
+        )
+        return True
+
+    return False
+
+
+def _invoke_safe_authority(
+    handler: BaseHTTPRequestHandler,
+    method_name: str,
+    **kwargs,
+) -> tuple[object | None, bool]:
+    try:
+        authority = build_runtime_team_authority()
+        method = getattr(authority, method_name)
+        result = method(**kwargs)
+    except Exception:
+        _send_safe_authority_error(handler, None)
+        return None, False
+
+    if (
+        not isinstance(result, tuple)
+        or len(result) != 2
+    ):
+        _send_safe_authority_error(handler, None)
+        return None, False
+
+    value, error = result
+    if error is not None:
+        _send_safe_authority_error(handler, error)
+        return None, False
+
+    return value, True
+
+
+def _handle_safe_issue(
+    handler: BaseHTTPRequestHandler,
+    payload: dict,
+    *,
+    actor: AuthenticatedMemberContext | None = None,
+):
+    canonical_actor = actor or _require_authenticated_member(handler)
+    if canonical_actor is None:
+        return
+    if not _require_owner(handler, canonical_actor):
+        return
+    if _reject_foreign_management_workspace(handler, canonical_actor, payload):
+        return
+
+    invite_origin = getattr(handler, "_trusted_team_mutation_origin", None)
+    if type(invite_origin) is not str or not invite_origin:
+        _send_json(
+            handler,
+            503,
+            _build_error(
+                "team_authority_unavailable",
+                "Team invitation links are temporarily unavailable.",
+            ),
+        )
+        return
+
+    invitee_email_value = payload.get("inviteeEmail")
+    invitee_name_value = payload.get("inviteeName")
+    invitee_email = (
+        invitee_email_value.strip().lower()
+        if type(invitee_email_value) is str
+        else ""
+    )
+    invitee_name = invitee_name_value.strip() if type(invitee_name_value) is str else ""
+    access_level = payload.get("accessLevel")
+
+    if not is_valid_auth_email(invitee_email) or not invitee_name:
+        _send_json(
+            handler,
+            400,
+            _build_error(
+                "invalid_request",
+                "A valid inviteeEmail and non-empty inviteeName are required.",
+            ),
+        )
+        return
+    if type(access_level) is not str or access_level not in TEAM_INVITE_ISSUABLE_ROLES:
+        _send_json(
+            handler,
+            400,
+            _build_error("invalid_request", "accessLevel must be Shared or Limited."),
+        )
+        return
+    if invitee_email == canonical_actor.email.strip().lower():
+        _send_json(
+            handler,
+            409,
+            _build_error("self_invite", "You cannot invite yourself to your own Team."),
+        )
+        return
+
+    result, ok = _invoke_safe_authority(
+        handler,
+        "issue_invitation",
+        actor=canonical_actor,
+        invitee_email=invitee_email,
+        invitee_name=invitee_name,
+        access_level=access_level,
+    )
+    if not ok:
+        return
+    if not isinstance(result, dict):
+        _send_safe_authority_error(handler, None)
+        return
+
+    invite = result.get("invite")
+    raw_token = result.get("rawToken")
+    if not isinstance(invite, dict) or type(raw_token) is not str or not raw_token:
+        _send_safe_authority_error(handler, None)
+        return
+
+    _send_json(
+        handler,
+        200,
+        {
+            "ok": True,
+            "invite": invite,
+            "inviteUrl": f"{invite_origin}/?team_invite={raw_token}",
+        },
+    )
+
+
+def _handle_safe_lookup(handler: BaseHTTPRequestHandler):
+    token = _get_token(handler)
+    if not token:
+        _send_json(handler, 404, _build_error("invalid_invite", "Team invite was not found."))
+        return
+
+    invite, ok = _invoke_safe_authority(handler, "lookup_invitation", token=token)
+    if not ok:
+        return
+    if not isinstance(invite, dict):
+        _send_safe_authority_error(handler, None)
+        return
+
+    _send_json(handler, 200, {"ok": True, "invite": invite})
+
+
+def _handle_safe_pending(handler: BaseHTTPRequestHandler):
+    actor = _require_authenticated_member(handler)
+    if actor is None:
+        return
+    if not _require_owner(handler, actor):
+        return
+    if _reject_foreign_management_workspace(handler, actor):
+        return
+
+    invitations, ok = _invoke_safe_authority(
+        handler,
+        "list_pending_invitations",
+        actor=actor,
+    )
+    if not ok:
+        return
+    if not isinstance(invitations, list) or any(
+        not isinstance(invitation, dict) for invitation in invitations
+    ):
+        _send_safe_authority_error(handler, None)
+        return
+
+    _send_json(handler, 200, {"ok": True, "invitations": invitations})
+
+
+def _handle_safe_cancel(
+    handler: BaseHTTPRequestHandler,
+    payload: dict,
+    *,
+    actor: AuthenticatedMemberContext | None = None,
+    invitation_id: object | None = None,
+):
+    canonical_actor = actor or _require_authenticated_member(handler)
+    if canonical_actor is None:
+        return
+    if not _require_owner(handler, canonical_actor):
+        return
+    if _reject_foreign_management_workspace(handler, canonical_actor, payload):
+        return
+
+    normalized_invitation_id = str(
+        invitation_id if invitation_id is not None else payload.get("invitationId") or ""
+    ).strip()
+    if not normalized_invitation_id:
+        _send_json(
+            handler,
+            400,
+            _build_error("invalid_request", "invitationId is required."),
+        )
+        return
+
+    result, ok = _invoke_safe_authority(
+        handler,
+        "cancel_invitation",
+        actor=canonical_actor,
+        invitation_id=normalized_invitation_id,
+    )
+    if not ok:
+        return
+    if not isinstance(result, dict):
+        _send_safe_authority_error(handler, None)
+        return
+
+    response = {"ok": True, **result}
+    response["ok"] = True
+    _send_json(handler, 200, response)
+
+
+def _handle_safe_action(
+    handler: BaseHTTPRequestHandler,
+    payload: dict,
+    *,
+    actor: AuthenticatedMemberContext | None = None,
+):
+    action = payload.get("action")
+    action_type = str(action.get("type") if isinstance(action, dict) else "").strip().lower()
+    if action_type not in {"accept", "decline", "cancel"}:
+        _send_json(
+            handler,
+            400,
+            _build_error("invalid_request", "Unsupported team invite action."),
+        )
+        return
+
+    canonical_actor = actor or _require_authenticated_member(handler)
+    if canonical_actor is None:
+        return
+
+    if action_type == "cancel":
+        invitation_id = action.get("invitationId") if isinstance(action, dict) else None
+        _handle_safe_cancel(
+            handler,
+            payload,
+            actor=canonical_actor,
+            invitation_id=invitation_id,
+        )
+        return
+
+    token = _get_token(handler)
+    if not token:
+        _send_json(handler, 404, _build_error("invalid_invite", "Team invite was not found."))
+        return
+
+    method_name = "accept_invitation" if action_type == "accept" else "decline_invitation"
+    result, ok = _invoke_safe_authority(
+        handler,
+        method_name,
+        actor=canonical_actor,
+        token=token,
+    )
+    if not ok:
+        return
+    if not isinstance(result, dict):
+        _send_safe_authority_error(handler, None)
+        return
+
+    response = {"ok": True, **result}
+    response["ok"] = True
+    _send_json(handler, 200, response)
 
 
 def _handle_issue(handler: BaseHTTPRequestHandler, payload: dict):
@@ -673,10 +1243,18 @@ def _handle_action(handler: BaseHTTPRequestHandler, payload: dict):
 
 class handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        if _send_disabled_response(self):
+        operation = _get_operation(self)
+
+        if operation == "lookup":
+            _handle_safe_lookup(self)
             return
 
-        operation = _get_operation(self)
+        if operation == "pending":
+            _handle_safe_pending(self)
+            return
+
+        if _send_disabled_response(self):
+            return
 
         if operation == "lookup":
             _handle_lookup(self)
@@ -685,10 +1263,39 @@ class handler(BaseHTTPRequestHandler):
         _send_json(self, 404, _build_error("not_found", "Unsupported team invite operation."))
 
     def do_POST(self):
+        operation = _get_operation(self)
+
+        if operation in {"issue", "action", "cancel"}:
+            authenticated_member = _require_authenticated_member(
+                self,
+                require_json_mutation=True,
+            )
+            if authenticated_member is None:
+                return
+            payload, payload_error = _read_json_body(self)
+
+            if payload_error or payload is None:
+                _send_json(
+                    self,
+                    400,
+                    payload_error or _build_error("invalid_request", "Request is invalid."),
+                )
+                return
+
+            if operation == "issue":
+                _handle_safe_issue(self, payload, actor=authenticated_member)
+                return
+
+            if operation == "action":
+                _handle_safe_action(self, payload, actor=authenticated_member)
+                return
+
+            _handle_safe_cancel(self, payload, actor=authenticated_member)
+            return
+
         if _send_disabled_response(self):
             return
 
-        operation = _get_operation(self)
         payload, payload_error = _read_json_body(self)
 
         if payload_error or payload is None:
