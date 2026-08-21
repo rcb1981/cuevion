@@ -8,6 +8,10 @@ const workspaceShellSource = readFileSync(
   resolve(process.cwd(), "src/components/workspace/WorkspaceShell.tsx"),
   "utf8",
 );
+const desktopComposeBodyEditorSource = readFileSync(
+  resolve(process.cwd(), "src/components/workspace/DesktopComposeBodyEditor.tsx"),
+  "utf8",
+);
 
 const quoteHelpersStart = workspaceShellSource.indexOf("function escapeComposeHtml(");
 const quoteHelpersEnd = workspaceShellSource.indexOf(
@@ -346,7 +350,10 @@ const sendSource = workspaceShellSource.slice(
   workspaceShellSource.indexOf("const sendMessage = async"),
   workspaceShellSource.indexOf("const closeMenus ="),
 );
-assert.match(sendSource, /const activeBodyHtml = options\?\.bodyHtml \?\? composeBody/);
+assert.match(
+  sendSource,
+  /const activeBodyHtml = options\?\.bodyHtml \?\? getCurrentComposeBodyHtml\(\)/,
+);
 assert.match(sendSource, /const bodyPreview = extractComposePlainText\(activeBodyHtml\)/);
 assert.match(sendSource, /bodyHtml: activeBodyHtml/);
 assert.match(sendSource, /bodyText: bodyPreview \|\| " "/);
@@ -369,12 +376,13 @@ const desktopComposerSource = workspaceShellSource.slice(
 
 assert.match(
   desktopComposerSource,
-  /id="desktop-compose-body"[\s\S]*className=\{`min-h-\[260px\]/,
+  /<DesktopComposeBodyEditor[\s\S]*className=\{`min-h-\[260px\]/,
   "the shared desktop compose writing area must use the compact minimum height",
 );
+assert.match(desktopComposeBodyEditorSource, /id="desktop-compose-body"/);
 assert.doesNotMatch(
   desktopComposerSource,
-  /id="desktop-compose-body"[\s\S]*className=\{`min-h-\[360px\]/,
+  /<DesktopComposeBodyEditor[\s\S]*className=\{`min-h-\[360px\]/,
   "the desktop compose writing area must not reserve the old 360px minimum",
 );
 
@@ -394,8 +402,8 @@ assert.match(
   "quote disclosure must be limited to Reply and Reply All",
 );
 assert.match(
-  desktopComposerSource,
-  /aria-expanded=\{composeQuoteExpanded\}[\s\S]*aria-controls="desktop-compose-body"[\s\S]*Show quoted content[\s\S]*Hide quoted content/,
+  desktopComposeBodyEditorSource,
+  /aria-expanded=\{quoteExpanded\}[\s\S]*aria-controls="desktop-compose-body"[\s\S]*Hide quoted content[\s\S]*Show quoted content/,
   "Reply quote disclosure must expose accessible Show/Hide state",
 );
 assert.match(
@@ -403,9 +411,12 @@ assert.match(
   /!composeQuoteExpanded[\s\S]*\[&_\[data-compose-quote='true'\]\]:hidden/,
   "collapsed quote presentation must hide the retained quote from the editor parent",
 );
-const quoteToggleSource = desktopComposerSource.slice(
-  desktopComposerSource.indexOf("aria-expanded={composeQuoteExpanded}"),
-  desktopComposerSource.indexOf("</button>", desktopComposerSource.indexOf("aria-expanded={composeQuoteExpanded}")),
+const quoteToggleSource = desktopComposeBodyEditorSource.slice(
+  desktopComposeBodyEditorSource.indexOf("aria-expanded={quoteExpanded}"),
+  desktopComposeBodyEditorSource.indexOf(
+    "</button>",
+    desktopComposeBodyEditorSource.indexOf("aria-expanded={quoteExpanded}"),
+  ),
 );
 assert.doesNotMatch(
   quoteToggleSource,

@@ -173,6 +173,10 @@ const workspaceShellSource = readFileSync(
   resolve(process.cwd(), "src/components/workspace/WorkspaceShell.tsx"),
   "utf8",
 );
+const desktopComposeBodyEditorSource = readFileSync(
+  resolve(process.cwd(), "src/components/workspace/DesktopComposeBodyEditor.tsx"),
+  "utf8",
+);
 
 const correctionFailures: string[] = [];
 const recordCorrectionExpectation = (name: string, expectation: () => void) => {
@@ -634,8 +638,13 @@ recordCorrectionExpectation("modal compose content and workspace boundary", () =
   }
   assert.match(
     composeContentSource,
-    /data-desktop-compose-scroll-region[\s\S]*id="desktop-compose-body"[\s\S]*min-h-\[260px\][\s\S]*Show quoted content[\s\S]*visibleComposeAttachments\.map/,
+    /data-desktop-compose-scroll-region[\s\S]*<DesktopComposeBodyEditor[\s\S]*min-h-\[260px\][\s\S]*visibleComposeAttachments\.map/,
     "editor, quote disclosure, and visible attachments must remain in scrolling content",
+  );
+  assert.match(
+    desktopComposeBodyEditorSource,
+    /id="desktop-compose-body"[\s\S]*Hide quoted content[\s\S]*Show quoted content/,
+    "the isolated editor must retain the quoted-content disclosure",
   );
   assert.match(
     workspaceBranchSource,

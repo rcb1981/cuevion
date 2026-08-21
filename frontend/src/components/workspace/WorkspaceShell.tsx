@@ -11,7 +11,6 @@ import {
   type Dispatch,
   type ButtonHTMLAttributes,
   type ChangeEvent,
-  type ClipboardEvent as ReactClipboardEvent,
   type KeyboardEvent as ReactKeyboardEvent,
   type DragEvent,
   type MouseEvent,
@@ -33,6 +32,10 @@ import {
   type MobileWorkspaceMailbox,
   type MobileWorkspaceMessage,
 } from "./mobile/MobileWorkspaceShell";
+import {
+  DesktopComposeBodyEditor,
+  type DesktopComposeBodyEditorHandle,
+} from "./DesktopComposeBodyEditor";
 import type { BundleOrganizerWorkspaceMessage } from "./BundleOrganizerSurface";
 import {
   resolveOrganizerCategory,
@@ -16009,7 +16012,7 @@ function MailboxView({
   const [pendingComposeAttachmentPickerOpen, setPendingComposeAttachmentPickerOpen] =
     useState(false);
   const composeToInputRef = useRef<HTMLInputElement | null>(null);
-  const composeBodyInputRef = useRef<HTMLDivElement | null>(null);
+  const composeBodyEditorRef = useRef<DesktopComposeBodyEditorHandle | null>(null);
   const composeAttachmentInputRef = useRef<HTMLInputElement | null>(null);
   const pendingComposeInitialFocusRef = useRef<"to" | "body" | null>(null);
   const [isEditingMailboxTitle, setIsEditingMailboxTitle] = useState(false);
@@ -16984,91 +16987,9 @@ function MailboxView({
         return;
       }
 
-      const editor = composeBodyInputRef.current;
-
-      if (!editor) {
-        return;
-      }
-
-      editor.focus();
-
-      const selection = window.getSelection();
-
-      if (!selection) {
-        return;
-      }
-
-      const range = document.createRange();
-      range.setStart(editor, 0);
-      range.collapse(true);
-      selection.removeAllRanges();
-      selection.addRange(range);
+      composeBodyEditorRef.current?.focusAtStart();
     });
   }, [composeMode, isComposeOpen]);
-
-  useEffect(() => {
-    const editor = composeBodyInputRef.current;
-
-    if (!editor || editor.innerHTML === composeBody) {
-      return;
-    }
-
-    editor.innerHTML = composeBody;
-  }, [composeBody]);
-
-  const syncComposeBodyValue = () => {
-    const editor = composeBodyInputRef.current;
-
-    if (!editor) {
-      return;
-    }
-
-    const nextValue = editor.innerHTML;
-    setComposeBody(nextValue);
-    const signatureNode = editor.querySelector("[data-compose-signature]");
-    const hasSignatureNodeContent =
-      Boolean(signatureNode?.querySelector("img")) ||
-      Boolean(signatureNode?.textContent?.replace(/\u00a0/g, " ").trim());
-
-    if (!signatureNode || !hasSignatureNodeContent) {
-      setComposeSignatureSelection("none");
-    }
-  };
-
-  const handleComposeBodyKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
-    if (!(event.metaKey || event.ctrlKey)) {
-      return;
-    }
-
-    const key = event.key.toLowerCase();
-
-    if (key === "b" || key === "i") {
-      event.preventDefault();
-      document.execCommand(key === "b" ? "bold" : "italic");
-      syncComposeBodyValue();
-    }
-  };
-
-  const handleComposeBodyPaste = (event: ReactClipboardEvent<HTMLDivElement>) => {
-    event.preventDefault();
-    const pastedText = event.clipboardData.getData("text/plain");
-
-    if (!pastedText) {
-      return;
-    }
-
-    pastedText.split("\n").forEach((line, index) => {
-      if (index > 0) {
-        document.execCommand("insertLineBreak");
-      }
-
-      if (line.length > 0) {
-        document.execCommand("insertText", false, line);
-      }
-    });
-
-    syncComposeBodyValue();
-  };
 
   const handleComposeSignatureSelectionChange = (nextValue: string) => {
     const nextSignature =
@@ -17077,7 +16998,12 @@ function MailboxView({
         : composeSignatureOptions.find((option) => option.id === nextValue)?.signature ?? null;
 
     setComposeSignatureSelection(nextSignature ? nextValue : "none");
-    setComposeBody((current) => withComposeSignatureMarkup(current, nextSignature));
+    const nextBodyHtml = composeBodyEditorRef.current?.applyBodyTransform((current) =>
+      withComposeSignatureMarkup(current, nextSignature),
+    );
+    setComposeBody((current) =>
+      nextBodyHtml ?? withComposeSignatureMarkup(current, nextSignature),
+    );
   };
 
   useEffect(() => {
@@ -20120,10 +20046,14 @@ function MailboxView({
     throw new Error(`Could not attach ${attachment.name}; source file data is unavailable.`);
   };
 
+  const getCurrentComposeBodyHtml = () =>
+    composeBodyEditorRef.current?.getBodyHtml() ?? composeBody;
+
   const saveDraftAndClose = () => {
     const draftId = `${activeComposeMailbox.id}-draft-${Date.now()}`;
-    const bodyPreview = extractComposePlainText(composeBody);
-    const bodyParagraphs = extractComposeParagraphs(composeBody);
+    const currentComposeBodyHtml = getCurrentComposeBodyHtml();
+    const bodyPreview = extractComposePlainText(currentComposeBodyHtml);
+    const bodyParagraphs = extractComposeParagraphs(currentComposeBodyHtml);
     const draftMessage = normalizeMailMessage({
       id: draftId,
       sender: "Draft",
@@ -20139,7 +20069,7 @@ function MailboxView({
       to: composeTo.trim() || "No recipient yet",
       timestamp: "Saved just now",
       body: bodyParagraphs.length > 0 ? bodyParagraphs : ["Draft message"],
-      bodyHtml: composeBody,
+      bodyHtml: currentComposeBodyHtml,
       signature: undefined,
       attachments: composeAttachments,
       cc: composeCc.trim() || undefined,
@@ -20188,7 +20118,7 @@ function MailboxView({
     // Mobile reply passes an override body (user text prepended to the pre-filled
     // quote/signature HTML). Desktop callers pass no options so the behaviour is
     // identical to before.
-    const activeBodyHtml = options?.bodyHtml ?? composeBody;
+    const activeBodyHtml = options?.bodyHtml ?? getCurrentComposeBodyHtml();
 
     const managedMailbox = managedInboxes.find(
       (candidate) => candidate.id === activeComposeMailbox.id,
@@ -26216,23 +26146,16 @@ function MailboxView({
               <div className="space-y-4">
                 <div className="rounded-[20px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-4 py-4">
                   <span className="sr-only">Message body</span>
-                  <div
-                    id="desktop-compose-body"
-                    ref={composeBodyInputRef}
-                    contentEditable
-                    suppressContentEditableWarning
-                    role="textbox"
-                    aria-multiline="true"
-                    dir="ltr"
-                    style={{
-                      direction: "ltr",
-                      unicodeBidi: "plaintext",
-                      textAlign: "left",
-                    }}
-                    onInput={syncComposeBodyValue}
-                    onKeyDown={handleComposeBodyKeyDown}
-                    onPaste={handleComposeBodyPaste}
-                    spellCheck
+                  <DesktopComposeBodyEditor
+                    ref={composeBodyEditorRef}
+                    bodyHtml={composeBody}
+                    quoteExpanded={composeQuoteExpanded}
+                    setQuoteExpanded={setComposeQuoteExpanded}
+                    showQuoteDisclosure={
+                      composeMode === "reply" || composeMode === "reply_all"
+                    }
+                    signatureSelection={composeSignatureSelection}
+                    setSignatureSelection={setComposeSignatureSelection}
                     className={`min-h-[260px] w-full whitespace-pre-wrap bg-transparent text-[0.94rem] leading-7 text-[var(--workspace-text-soft)] outline-none [&_a]:text-[color:rgba(70,109,73,0.96)] [&_a]:underline [&_div]:min-h-[1.75rem] [&_div[data-compose-quote='true']]:pt-3 [&_div[data-compose-quote='true']]:text-[inherit] [&_div[data-compose-quote='true']]:[-webkit-text-fill-color:inherit] [&_div[data-compose-quote='true']_*]:text-[inherit] [&_div[data-compose-quote='true']_*]:[-webkit-text-fill-color:inherit] [&_div[data-compose-signature='true']]:space-y-0 [&_div[data-compose-signature-divider='true']]:my-2 [&_div[data-compose-signature-divider='true']]:h-px [&_div[data-compose-signature-divider='true']]:w-full [&_div[data-compose-signature-divider='true']]:bg-[color:rgba(121,151,120,0.18)] [&_div[data-compose-signature-logo='true']]:pt-1 [&_div[data-compose-signature-logo='true']_img]:max-h-[76px] [&_div[data-compose-signature-logo='true']_img]:w-auto [&_div[data-compose-signature-logo='true']_img]:max-w-full [&_div[data-compose-signature-logo='true']_img]:object-contain [&_div[data-compose-signature-right='true']]:min-w-0 [&_div[data-compose-signature-right='true']]:flex-1 [&_div[data-compose-signature-row='true']]:flex [&_div[data-compose-signature-row='true']]:items-start [&_div[data-compose-signature-row='true']]:gap-4 [&_div[data-compose-signature-spacer='true']]:min-h-[1.75rem] [&_div[data-compose-signature-text='true']]:whitespace-pre-wrap [&_div[data-compose-signature-text='true']]:text-[0.86rem] [&_div[data-compose-signature-text='true']]:leading-[1.45] [&_div[data-compose-signature-text='true']_div]:min-h-[1.2rem] [&_div[data-compose-signature-text='true']_p]:min-h-[1.2rem] ${
                       (composeMode === "reply" || composeMode === "reply_all") &&
                       !composeQuoteExpanded
@@ -26240,23 +26163,6 @@ function MailboxView({
                         : ""
                     }`}
                   />
-                  {(composeMode === "reply" || composeMode === "reply_all") &&
-                  composeBody.includes('data-compose-quote="true"') ? (
-                    <button
-                      type="button"
-                      aria-expanded={composeQuoteExpanded}
-                      aria-controls="desktop-compose-body"
-                      onClick={() => setComposeQuoteExpanded((expanded) => !expanded)}
-                      className="mt-3 inline-flex items-center gap-1.5 rounded-md px-1 py-1 text-[0.78rem] text-[var(--workspace-text-faint)] transition-colors duration-150 hover:text-[var(--workspace-text-soft)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-accent-border)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--workspace-card)]"
-                    >
-                      <span aria-hidden="true">
-                        {!composeQuoteExpanded ? "›" : "⌄"}
-                      </span>
-                      {!composeQuoteExpanded
-                        ? "Show quoted content"
-                        : "Hide quoted content"}
-                    </button>
-                  ) : null}
                 </div>
 
                 {visibleComposeAttachmentCount > 0 ? (
