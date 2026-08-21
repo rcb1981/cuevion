@@ -7,7 +7,6 @@ from collections.abc import Callable, Mapping
 
 from .semantic_config import (
     SEMANTIC_PROVIDER_DEADLINE_SECONDS,
-    SemanticMode,
     SemanticRuntimeConfig,
     read_openai_api_key,
 )
@@ -216,9 +215,9 @@ def build_openai_semantic_adapter(
     environ: Mapping[str, str] | None = None,
     client_factory: Callable[..., object] | None = None,
 ) -> OpenAIResponsesSemanticAdapter:
-    if config.mode is not SemanticMode.SHADOW or not config.model:
+    if not config.enabled or not config.model:
         raise SemanticConfigurationError(
-            "OpenAI semantic adapter may only run in explicit shadow mode."
+            "OpenAI semantic adapter requires an explicitly enabled mode."
         )
     return OpenAIResponsesSemanticAdapter(
         model=config.model,

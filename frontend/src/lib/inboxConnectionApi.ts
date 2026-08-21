@@ -18,10 +18,12 @@ import {
 } from "./messageNoiseGate";
 import {
   buildPrioritySemanticAssessmentWireRequest,
+  buildPrioritySemanticCurrentLookupWireRequest,
   normalizePrioritySemanticEventRef,
   parsePrioritySemanticAssessmentResponse,
   type PrioritySemanticAssessmentRequest,
   type PrioritySemanticAssessmentResponse,
+  type PrioritySemanticCurrentLookupRequest,
 } from "./prioritySemanticState";
 
 export type LiveInboxAttachmentSnapshot = {
@@ -3390,9 +3392,13 @@ export async function sendGmailMessage(
 }
 
 export async function requestPrioritySemanticAssessment(
-  request: PrioritySemanticAssessmentRequest,
+  request:
+    | PrioritySemanticAssessmentRequest
+    | PrioritySemanticCurrentLookupRequest,
 ): Promise<PrioritySemanticAssessmentResponse> {
-  const wireRequest = buildPrioritySemanticAssessmentWireRequest(request);
+  const wireRequest =
+    buildPrioritySemanticAssessmentWireRequest(request) ??
+    buildPrioritySemanticCurrentLookupWireRequest(request);
   if (!wireRequest) {
     return {
       ok: false,

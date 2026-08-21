@@ -143,6 +143,8 @@ class SemanticStoreTests(unittest.TestCase):
         self.assertIn("conversationDigest", stored_payload)
         self.assertIn("latestTurnDigest", stored_payload)
         self.assertIn("inputHash", stored_payload)
+        self.assertNotIn("semanticMode", stored_payload)
+        self.assertNotIn("priorityEffect", stored_payload)
 
     def test_max_two_attempts_per_24h_scope(self):
         cache_scope = scope()
@@ -219,6 +221,37 @@ class SemanticStoreTests(unittest.TestCase):
         )
         self.assertFalse(is_current)
         self.assertIsNone(cached)
+
+    def test_exact_scope_lookup_is_one_result_get_with_no_cache_mutation(self):
+        cache_scope = scope("lookup-message")
+        self.store.mark_current_if_newer(cache_scope, occurred_at=10_000)
+        lease = self.store.try_acquire_lease(
+            cache_scope,
+            random_bytes=lambda length: bytes([14]) * length,
+        )
+        self.assertTrue(self.store.commit_result_if_lease_owned(
+            cache_scope,
+            lease_token=lease,
+            assessment=ASSESSMENT,
+            input_hash="f" * 64,
+            occurred_at=10_000,
+            assessed_at=25,
+        ))
+
+        self.redis.commands.clear()
+        cached = self.store.get_result_for_exact_scope(cache_scope)
+        self.assertEqual(cached.assessment, ASSESSMENT)
+        self.assertEqual(cached.input_hash, "f" * 64)
+        self.assertEqual(len(self.redis.commands), 1)
+        self.assertEqual(self.redis.commands[0][0], "GET")
+        self.assertIn(":result:", self.redis.commands[0][1])
+
+        self.redis.commands.clear()
+        self.assertIsNone(
+            self.store.get_result_for_exact_scope(scope("different-message"))
+        )
+        self.assertEqual(len(self.redis.commands), 1)
+        self.assertEqual(self.redis.commands[0][0], "GET")
 
     def test_lost_lease_cannot_write_negative_or_delete_new_owner(self):
         cache_scope = scope()

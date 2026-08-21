@@ -1,4 +1,4 @@
-"""Fail-closed runtime configuration for shadow semantic analysis."""
+"""Fail-closed runtime configuration for Priority semantic analysis."""
 
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ _MODEL_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", re.ASCII)
 class SemanticMode(str, Enum):
     OFF = "off"
     SHADOW = "shadow"
+    ACTIVE = "active"
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,12 +35,11 @@ class SemanticRuntimeConfig:
 
     @property
     def enabled(self) -> bool:
-        return self.mode is SemanticMode.SHADOW
+        return self.mode in {SemanticMode.SHADOW, SemanticMode.ACTIVE}
 
     @property
     def can_mutate_priority(self) -> bool:
-        # Slice 1 is observation-only by construction.
-        return False
+        return self.mode is SemanticMode.ACTIVE
 
 
 def _read_env(environ: Mapping[str, str], key: str) -> str:
@@ -55,15 +55,18 @@ def load_semantic_runtime_config(
     source = os.environ if environ is None else environ
     raw_mode = _read_env(source, SEMANTIC_MODE_ENV).lower()
     # Unknown values fail closed.  They must never accidentally enable calls.
-    mode = SemanticMode.SHADOW if raw_mode == SemanticMode.SHADOW.value else SemanticMode.OFF
+    mode = {
+        SemanticMode.SHADOW.value: SemanticMode.SHADOW,
+        SemanticMode.ACTIVE.value: SemanticMode.ACTIVE,
+    }.get(raw_mode, SemanticMode.OFF)
 
     model = _read_env(source, SEMANTIC_MODEL_ENV) or None
-    if mode is SemanticMode.SHADOW and model is None:
+    if mode in {SemanticMode.SHADOW, SemanticMode.ACTIVE} and model is None:
         raise SemanticConfigurationError(
-            "Shadow semantic mode requires an explicit model."
+            "Enabled semantic mode requires an explicit model."
         )
     if model is not None and _MODEL_NAME_PATTERN.fullmatch(model) is None:
-        if mode is SemanticMode.SHADOW:
+        if mode in {SemanticMode.SHADOW, SemanticMode.ACTIVE}:
             raise SemanticConfigurationError("Semantic model name is invalid.")
         model = None
 

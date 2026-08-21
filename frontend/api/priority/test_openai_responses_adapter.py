@@ -380,7 +380,7 @@ class OpenAIResponsesSemanticAdapterTests(unittest.TestCase):
                     adapter.assess(window_for("Hello"))
                 self.assertNotIn("raw", str(raised.exception))
 
-    def test_factory_requires_shadow_mode_and_uses_standard_api_key_env(self):
+    def test_factory_requires_enabled_mode_and_uses_standard_api_key_env(self):
         responses = FakeResponses(
             output_text=(
                 '{"state":"uncertain","confidence":0.2,'
@@ -396,6 +396,16 @@ class OpenAIResponsesSemanticAdapterTests(unittest.TestCase):
         )
         self.assertEqual(adapter.model, "gpt-explicit")
         self.assertEqual(factory.calls[0]["api_key"], "sk-explicit")
+
+        active_adapter = build_openai_semantic_adapter(
+            SemanticRuntimeConfig(
+                mode=SemanticMode.ACTIVE,
+                model="gpt-explicit",
+            ),
+            environ={"OPENAI_API_KEY": "sk-explicit"},
+            client_factory=factory,
+        )
+        self.assertEqual(active_adapter.model, "gpt-explicit")
 
         with self.assertRaises(SemanticConfigurationError):
             build_openai_semantic_adapter(

@@ -958,6 +958,13 @@ class SemanticConfigTests(unittest.TestCase):
         self.assertFalse(config.enabled)
         self.assertFalse(config.can_mutate_priority)
 
+        explicit_off = load_semantic_runtime_config(
+            {SEMANTIC_MODE_ENV: "off", SEMANTIC_MODEL_ENV: "gpt-unused"}
+        )
+        self.assertEqual(explicit_off.mode, SemanticMode.OFF)
+        self.assertFalse(explicit_off.enabled)
+        self.assertFalse(explicit_off.can_mutate_priority)
+
     def test_invalid_mode_fails_closed_to_off(self):
         config = load_semantic_runtime_config(
             {SEMANTIC_MODE_ENV: "enforce", SEMANTIC_MODEL_ENV: "gpt-test"}
@@ -974,6 +981,26 @@ class SemanticConfigTests(unittest.TestCase):
         self.assertEqual(config.mode, SemanticMode.SHADOW)
         self.assertEqual(config.model, "gpt-test-1")
         self.assertEqual(config.deadline_seconds, 8.0)
+        self.assertTrue(config.enabled)
+        self.assertFalse(config.can_mutate_priority)
+
+    def test_active_requires_explicit_valid_model_and_can_mutate_priority(self):
+        with self.assertRaises(SemanticConfigurationError):
+            load_semantic_runtime_config({SEMANTIC_MODE_ENV: "active"})
+        with self.assertRaises(SemanticConfigurationError):
+            load_semantic_runtime_config(
+                {
+                    SEMANTIC_MODE_ENV: "active",
+                    SEMANTIC_MODEL_ENV: "invalid model",
+                }
+            )
+        config = load_semantic_runtime_config(
+            {SEMANTIC_MODE_ENV: "active", SEMANTIC_MODEL_ENV: "gpt-test-1"}
+        )
+        self.assertEqual(config.mode, SemanticMode.ACTIVE)
+        self.assertEqual(config.model, "gpt-test-1")
+        self.assertTrue(config.enabled)
+        self.assertTrue(config.can_mutate_priority)
 
     def test_legacy_env_names_do_not_enable_calls(self):
         config = load_semantic_runtime_config(

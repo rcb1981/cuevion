@@ -7,6 +7,10 @@ import type {
   WaitingConversationState,
   WaitingOnOtherStore,
 } from "./waitingOnOther";
+import {
+  normalizeWaitingOnOtherStore,
+  resolveWaitingReturnedReplyEvidence,
+} from "./waitingOnOther";
 
 export const SEMANTIC_SCHEMA_VERSION = "priority-semantic-state-v1";
 export const PRIORITY_SEMANTIC_AUTHORED_TEXT_MAX_CODE_POINTS = 12_000;
@@ -15,8 +19,23 @@ export const PRIORITY_SEMANTIC_EVENT_REF_MAX_AGE_MS =
   14 * 24 * 60 * 60 * 1000;
 export const PRIORITY_SEMANTIC_EVENT_REF_STORE_MAX_RECORDS = 256;
 export const PRIORITY_SEMANTIC_SHADOW_OBSERVATION_MAX_RECORDS = 256;
+export const PRIORITY_SEMANTIC_OBSERVATION_MAX_RECORDS =
+  PRIORITY_SEMANTIC_SHADOW_OBSERVATION_MAX_RECORDS;
 export const PRIORITY_SEMANTIC_REQUESTED_TRIGGER_MAX_KEYS = 512;
 export const PRIORITY_SEMANTIC_PENDING_RETURNED_TRIGGER_MAX_RECORDS = 256;
+export const PRIORITY_SEMANTIC_CURRENT_LOOKUP_TRIGGER_MAX_RECORDS = 256;
+
+export const PRIORITY_SEMANTIC_MODES = ["shadow", "active"] as const;
+
+export type PrioritySemanticMode = (typeof PRIORITY_SEMANTIC_MODES)[number];
+
+export const PRIORITY_SEMANTIC_PRIORITY_EFFECTS = [
+  "observe_only",
+  "suppress_automatic_open_loop",
+] as const;
+
+export type PrioritySemanticPriorityEffect =
+  (typeof PRIORITY_SEMANTIC_PRIORITY_EFFECTS)[number];
 
 export const PRIORITY_SEMANTIC_STATES = [
   "needs_user_action",
@@ -131,9 +150,38 @@ export type PrioritySemanticAssessmentRequest =
   | PrioritySemanticOutgoingAssessmentRequest
   | PrioritySemanticIncomingAssessmentRequest;
 
+export type PrioritySemanticCurrentLookupRequest =
+  | {
+      operation: "lookup_current";
+      mailboxId: string;
+      trigger: "outgoing_reply";
+      eventRef: string;
+    }
+  | {
+      operation: "lookup_current";
+      mailboxId: string;
+      trigger: "incoming_reply";
+      activeEventRef: string;
+      incomingLocator: Extract<
+        PrioritySemanticIncomingLocator,
+        { provider: "google" }
+      >;
+    }
+  | {
+      operation: "lookup_current";
+      mailboxId: string;
+      trigger: "incoming_reply";
+      incomingLocator: Extract<
+        PrioritySemanticIncomingLocator,
+        { provider: "custom_imap" }
+      >;
+    };
+
 export type PrioritySemanticAssessmentSuccess = {
   ok: true;
   status: "assessed" | "cached";
+  semanticMode: PrioritySemanticMode;
+  priorityEffect: PrioritySemanticPriorityEffect;
   assessment: PrioritySemanticAssessment;
   effectiveSemanticState: PrioritySemanticState;
   identity: PrioritySemanticIdentity;
@@ -144,6 +192,8 @@ export type PrioritySemanticAssessmentSuccess = {
 export type PrioritySemanticAssessmentFallback = {
   ok: true;
   status: "pending" | "deferred";
+  semanticMode: PrioritySemanticMode;
+  priorityEffect: "observe_only";
   identity: PrioritySemanticIdentity;
   retryAfterSeconds: number;
 };
@@ -161,20 +211,27 @@ export type PrioritySemanticAssessmentResponse =
   | PrioritySemanticAssessmentFallback
   | PrioritySemanticAssessmentError;
 
-export type PrioritySemanticShadowObservation = {
+export type PrioritySemanticObservation = {
   status: "assessed" | "cached" | "pending" | "deferred";
+  identity: PrioritySemanticIdentity;
+  semanticMode: PrioritySemanticMode;
+  priorityEffect: PrioritySemanticPriorityEffect;
+  activeEventRef?: string;
   state?: PrioritySemanticState;
   effectiveSemanticState?: PrioritySemanticState;
   confidence?: number;
   reasonCode?: PrioritySemanticReasonCode;
   assessedAt?: string;
-  isShadow: true;
+  isShadow: boolean;
 };
+
+export type PrioritySemanticShadowObservation = PrioritySemanticObservation;
 
 export type PrioritySemanticActiveEventRefRecord = {
   mailboxId: string;
   conversationId: string;
   activeEventRef: string;
+  latestTurnId?: string;
   recordedAt: string;
 };
 
@@ -196,18 +253,57 @@ export type PrioritySemanticReturnedReplyTrigger = {
   incomingLocator: PrioritySemanticIncomingLocator;
 };
 
+export type PrioritySemanticCurrentLookupTrigger = {
+  request: PrioritySemanticCurrentLookupRequest;
+  expectedIdentity: PrioritySemanticIdentity;
+  observationKey: string;
+  deterministicState: WaitingConversationState["state"];
+};
+
+export function buildPrioritySemanticObservationKey(
+  identity: PrioritySemanticIdentity,
+) {
+  return JSON.stringify([
+    identity.mailboxId,
+    identity.conversationId,
+    identity.latestTurnId,
+    identity.semanticVersion,
+  ]);
+}
+
+export function addPrioritySemanticObservation(
+  observations: Record<string, PrioritySemanticObservation>,
+  observationKey: string,
+  observation: PrioritySemanticObservation,
+) {
+  const nextObservations = { ...observations };
+  Object.entries(nextObservations).forEach(([key, candidate]) => {
+    if (
+      key === observationKey ||
+      (candidate.identity.mailboxId === observation.identity.mailboxId &&
+        candidate.identity.conversationId ===
+          observation.identity.conversationId)
+    ) {
+      delete nextObservations[key];
+    }
+  });
+  nextObservations[observationKey] = observation;
+  const nextEntries = Object.entries(nextObservations).slice(
+    -PRIORITY_SEMANTIC_OBSERVATION_MAX_RECORDS,
+  );
+  return Object.fromEntries(nextEntries);
+}
+
 export function addPrioritySemanticShadowObservation(
   observations: Record<string, PrioritySemanticShadowObservation>,
   observationKey: string,
   observation: PrioritySemanticShadowObservation,
 ) {
-  const nextObservations = { ...observations };
-  delete nextObservations[observationKey];
-  nextObservations[observationKey] = observation;
-  const nextEntries = Object.entries(nextObservations).slice(
-    -PRIORITY_SEMANTIC_SHADOW_OBSERVATION_MAX_RECORDS,
+  return addPrioritySemanticObservation(
+    observations,
+    observationKey,
+    observation,
   );
-  return Object.fromEntries(nextEntries);
 }
 
 export function rememberPrioritySemanticRequestedTriggerKey(
@@ -260,7 +356,7 @@ export function rememberPrioritySemanticPendingTrigger<T>(
   }
 }
 
-type PrioritySemanticInboundMessage = RenderedConversationMessage & {
+export type PrioritySemanticInboundMessage = RenderedConversationMessage & {
   providerFolder?: string | null;
   providerMessageId?: string | null;
   rfcMessageId?: string | null;
@@ -268,7 +364,9 @@ type PrioritySemanticInboundMessage = RenderedConversationMessage & {
   uidValidity?: string | null;
 };
 
-type PrioritySemanticInboundEntry<T extends PrioritySemanticInboundMessage> = {
+export type PrioritySemanticInboundEntry<
+  T extends PrioritySemanticInboundMessage,
+> = {
   mailboxId: string;
   message: T;
 };
@@ -511,8 +609,112 @@ export function buildPrioritySemanticAssessmentWireRequest(
   return null;
 }
 
+/**
+ * Selects the lookup-only wire body. Unlike an assessment trigger, this shape
+ * cannot carry authored text and therefore cannot be upgraded into model work
+ * by a permissive client call site.
+ */
+export function buildPrioritySemanticCurrentLookupWireRequest(
+  value: unknown,
+): PrioritySemanticCurrentLookupRequest | null {
+  if (
+    !isPlainObject(value) ||
+    value.operation !== "lookup_current"
+  ) {
+    return null;
+  }
+
+  const mailboxId = normalizeMailboxId(value.mailboxId);
+  if (!mailboxId) {
+    return null;
+  }
+
+  if (value.trigger === "outgoing_reply") {
+    if (
+      !hasExactKeys(value, [
+        "operation",
+        "mailboxId",
+        "trigger",
+        "eventRef",
+      ])
+    ) {
+      return null;
+    }
+    const eventRef = normalizePrioritySemanticEventRef(value.eventRef);
+    return eventRef
+      ? {
+          operation: "lookup_current",
+          mailboxId,
+          trigger: "outgoing_reply",
+          eventRef,
+        }
+      : null;
+  }
+
+  if (value.trigger === "incoming_reply") {
+    const incomingLocator = normalizePrioritySemanticIncomingLocator(
+      value.incomingLocator,
+    );
+    if (!incomingLocator) {
+      return null;
+    }
+
+    if (incomingLocator.provider === "google") {
+      if (
+        !hasExactKeys(value, [
+          "operation",
+          "mailboxId",
+          "trigger",
+          "activeEventRef",
+          "incomingLocator",
+        ])
+      ) {
+        return null;
+      }
+      const activeEventRef = normalizePrioritySemanticEventRef(
+        value.activeEventRef,
+      );
+      return activeEventRef
+        ? {
+            operation: "lookup_current",
+            mailboxId,
+            trigger: "incoming_reply",
+            activeEventRef,
+            incomingLocator,
+          }
+        : null;
+    }
+
+    return hasExactKeys(value, [
+      "operation",
+      "mailboxId",
+      "trigger",
+      "incomingLocator",
+    ])
+      ? {
+          operation: "lookup_current",
+          mailboxId,
+          trigger: "incoming_reply",
+          incomingLocator,
+        }
+      : null;
+  }
+
+  return null;
+}
+
 function isPrioritySemanticState(value: unknown): value is PrioritySemanticState {
   return PRIORITY_SEMANTIC_STATES.some((state) => state === value);
+}
+
+function isPrioritySemanticMode(value: unknown): value is PrioritySemanticMode {
+  return PRIORITY_SEMANTIC_MODES.some((mode) => mode === value);
+}
+
+function isPrioritySemanticPriorityEffect(
+  value: unknown,
+): value is PrioritySemanticPriorityEffect {
+  return PRIORITY_SEMANTIC_PRIORITY_EFFECTS.some((effect) => effect === value);
 }
 
 function isPrioritySemanticReasonCode(
@@ -526,6 +728,32 @@ export function isPrioritySemanticStateReasonCodePair(
   reasonCode: PrioritySemanticReasonCode,
 ) {
   return PRIORITY_SEMANTIC_REASON_CODES_BY_STATE[state].includes(reasonCode);
+}
+
+export function isPrioritySemanticPolicyCombinationValid(input: {
+  semanticMode: PrioritySemanticMode;
+  priorityEffect: PrioritySemanticPriorityEffect;
+  assessment?: PrioritySemanticAssessment;
+  effectiveSemanticState?: PrioritySemanticState;
+}) {
+  if (
+    input.semanticMode === "shadow" &&
+    input.priorityEffect !== "observe_only"
+  ) {
+    return false;
+  }
+
+  if (input.priorityEffect === "observe_only") {
+    return true;
+  }
+
+  return Boolean(
+    input.semanticMode === "active" &&
+      input.assessment?.state === "resolved" &&
+      input.effectiveSemanticState === "resolved" &&
+      input.assessment.confidence >=
+        PRIORITY_SEMANTIC_CONFIDENCE_THRESHOLDS.resolved,
+  );
 }
 
 function parsePrioritySemanticIdentity(
@@ -587,7 +815,13 @@ export function parsePrioritySemanticAssessmentResponse(
   }
 
   const identity = parsePrioritySemanticIdentity(value.identity);
-  if (!identity) {
+  const semanticMode = value.semanticMode;
+  const priorityEffect = value.priorityEffect;
+  if (
+    !identity ||
+    !isPrioritySemanticMode(semanticMode) ||
+    !isPrioritySemanticPriorityEffect(priorityEffect)
+  ) {
     return null;
   }
 
@@ -596,9 +830,12 @@ export function parsePrioritySemanticAssessmentResponse(
       !hasExactKeys(value, [
         "ok",
         "status",
+        "semanticMode",
+        "priorityEffect",
         "identity",
         "retryAfterSeconds",
-      ])
+      ]) ||
+      priorityEffect !== "observe_only"
     ) {
       return null;
     }
@@ -610,6 +847,8 @@ export function parsePrioritySemanticAssessmentResponse(
       ? {
           ok: true,
           status: value.status,
+          semanticMode,
+          priorityEffect,
           identity,
           retryAfterSeconds,
         }
@@ -622,6 +861,8 @@ export function parsePrioritySemanticAssessmentResponse(
     !hasOnlyKeys(value, [
       "ok",
       "status",
+      "semanticMode",
+      "priorityEffect",
       "assessment",
       "effectiveSemanticState",
       "identity",
@@ -658,15 +899,26 @@ export function parsePrioritySemanticAssessmentResponse(
   if (hasActiveEventRef && !activeEventRef) {
     return null;
   }
-  if (!isPrioritySemanticState(value.effectiveSemanticState)) {
+  const effectiveSemanticState = value.effectiveSemanticState;
+  if (
+    !isPrioritySemanticState(effectiveSemanticState) ||
+    !isPrioritySemanticPolicyCombinationValid({
+      semanticMode,
+      priorityEffect,
+      assessment: { state, confidence, reasonCode },
+      effectiveSemanticState,
+    })
+  ) {
     return null;
   }
 
   return {
     ok: true,
     status: value.status,
+    semanticMode,
+    priorityEffect,
     assessment: { state, confidence, reasonCode },
-    effectiveSemanticState: value.effectiveSemanticState,
+    effectiveSemanticState,
     identity,
     ...(activeEventRef ? { activeEventRef } : {}),
     assessedAt,
@@ -686,26 +938,73 @@ export function resolvePrioritySemanticEffectiveState(
     : "uncertain";
 }
 
-export function projectPrioritySemanticShadowObservation(
+export function isPrioritySemanticIdentityMatch(
+  identity: PrioritySemanticIdentity,
+  expectedIdentity: PrioritySemanticIdentity,
+) {
+  return (
+    identity.mailboxId === expectedIdentity.mailboxId &&
+    identity.conversationId === expectedIdentity.conversationId &&
+    identity.latestTurnId ===
+      normalizePrioritySemanticLatestTurnId(expectedIdentity.latestTurnId) &&
+    identity.semanticVersion === expectedIdentity.semanticVersion
+  );
+}
+
+export function projectPrioritySemanticObservation(
   response: PrioritySemanticAssessmentResponse,
   expectedIdentity: Omit<PrioritySemanticIdentity, "semanticVersion">,
-): PrioritySemanticShadowObservation | null {
+): PrioritySemanticObservation | null {
   if (!response.ok) {
     return null;
   }
+  const normalizedExpectedIdentity: PrioritySemanticIdentity = {
+    mailboxId: expectedIdentity.mailboxId,
+    conversationId: expectedIdentity.conversationId,
+    latestTurnId: normalizePrioritySemanticLatestTurnId(
+      expectedIdentity.latestTurnId,
+    ),
+    semanticVersion: SEMANTIC_SCHEMA_VERSION,
+  };
   if (
-    response.identity.mailboxId !== expectedIdentity.mailboxId ||
-    response.identity.conversationId !== expectedIdentity.conversationId ||
-    response.identity.latestTurnId !==
-      normalizePrioritySemanticLatestTurnId(expectedIdentity.latestTurnId)
+    !isPrioritySemanticIdentityMatch(
+      response.identity,
+      normalizedExpectedIdentity,
+    )
   ) {
     return null;
   }
 
   if (response.status === "pending" || response.status === "deferred") {
-    return { status: response.status, isShadow: true };
+    if (
+      response.priorityEffect !== "observe_only" ||
+      !isPrioritySemanticPolicyCombinationValid({
+        semanticMode: response.semanticMode,
+        priorityEffect: response.priorityEffect,
+      })
+    ) {
+      return null;
+    }
+    return {
+      status: response.status,
+      identity: response.identity,
+      semanticMode: response.semanticMode,
+      priorityEffect: response.priorityEffect,
+      isShadow: response.semanticMode === "shadow",
+    };
   }
   if (!("assessment" in response)) {
+    return null;
+  }
+
+  if (
+    !isPrioritySemanticPolicyCombinationValid({
+      semanticMode: response.semanticMode,
+      priorityEffect: response.priorityEffect,
+      assessment: response.assessment,
+      effectiveSemanticState: response.effectiveSemanticState,
+    })
+  ) {
     return null;
   }
 
@@ -720,13 +1019,70 @@ export function projectPrioritySemanticShadowObservation(
 
   return {
     status: response.status,
+    identity: response.identity,
+    semanticMode: response.semanticMode,
+    priorityEffect: response.priorityEffect,
+    ...(response.activeEventRef
+      ? { activeEventRef: response.activeEventRef }
+      : {}),
     state: response.assessment.state,
     effectiveSemanticState,
     confidence: response.assessment.confidence,
     reasonCode: response.assessment.reasonCode,
     assessedAt: response.assessedAt,
-    isShadow: true,
+    isShadow: response.semanticMode === "shadow",
   };
+}
+
+export function projectPrioritySemanticShadowObservation(
+  response: PrioritySemanticAssessmentResponse,
+  expectedIdentity: Omit<PrioritySemanticIdentity, "semanticVersion">,
+) {
+  return projectPrioritySemanticObservation(response, expectedIdentity);
+}
+
+export type ShouldSuppressAutomaticOpenLoopPriorityInput = {
+  observation?: PrioritySemanticObservation | null;
+  currentIdentity: PrioritySemanticIdentity;
+  currentActiveEventRef?: string | null;
+  hasAutomaticOpenLoopEvidence: boolean;
+  hasIndependentPriorityAuthority: boolean;
+};
+
+export function shouldSuppressAutomaticOpenLoopPriority(
+  input: ShouldSuppressAutomaticOpenLoopPriorityInput,
+) {
+  const observation = input.observation;
+  const requiresActiveEventRef = input.currentActiveEventRef !== undefined;
+  const currentActiveEventRef = requiresActiveEventRef
+    ? normalizePrioritySemanticEventRef(input.currentActiveEventRef)
+    : "";
+  if (
+    !observation ||
+    !input.hasAutomaticOpenLoopEvidence ||
+    input.hasIndependentPriorityAuthority ||
+    (observation.status !== "assessed" && observation.status !== "cached") ||
+    !isPrioritySemanticIdentityMatch(
+      observation.identity,
+      input.currentIdentity,
+    ) ||
+    (requiresActiveEventRef &&
+      (!currentActiveEventRef ||
+        observation.activeEventRef !== currentActiveEventRef))
+  ) {
+    return false;
+  }
+
+  return Boolean(
+    observation.semanticMode === "active" &&
+      observation.priorityEffect === "suppress_automatic_open_loop" &&
+      observation.state === "resolved" &&
+      observation.effectiveSemanticState === "resolved" &&
+      typeof observation.confidence === "number" &&
+      Number.isFinite(observation.confidence) &&
+      observation.confidence >=
+        PRIORITY_SEMANTIC_CONFIDENCE_THRESHOLDS.resolved,
+  );
 }
 
 function buildPrioritySemanticActiveEventRefStoreKey(
@@ -758,6 +1114,7 @@ function normalizePrioritySemanticActiveEventRefRecord(
   const mailboxId = normalizeMailboxId(value.mailboxId);
   const conversationId = normalizeConversationId(value.conversationId);
   const activeEventRef = normalizePrioritySemanticEventRef(value.activeEventRef);
+  const latestTurnId = normalizePrioritySemanticLatestTurnId(value.latestTurnId);
   const recordedAt = normalizeIsoTimestamp(value.recordedAt);
   const recordedAtMs = recordedAt ? new Date(recordedAt).getTime() : Number.NaN;
   return mailboxId &&
@@ -770,6 +1127,7 @@ function normalizePrioritySemanticActiveEventRefRecord(
         mailboxId,
         conversationId,
         activeEventRef,
+        ...(latestTurnId ? { latestTurnId } : {}),
         recordedAt,
       }
     : null;
@@ -1053,4 +1411,283 @@ export function findPrioritySemanticReturnedReplyTriggers<
         ),
       ),
   );
+}
+
+function parseExactSemanticTime(value: string) {
+  const valueMs = new Date(value).getTime();
+  return Number.isFinite(valueMs) && valueMs > 0 ? valueMs : null;
+}
+
+function resolveCurrentConversationEntries<
+  T extends PrioritySemanticInboundMessage,
+>(
+  entries: PrioritySemanticInboundEntry<T>[],
+  mailboxId: string,
+  conversationId: string,
+) {
+  return entries.filter((entry) => {
+    if (
+      entry.mailboxId !== mailboxId ||
+      entry.message.threadIdentityContext?.mailboxId !== mailboxId
+    ) {
+      return false;
+    }
+    const identity = resolveCanonicalConversationIdentity(
+      entry.message,
+      mailboxId,
+    );
+    return (
+      identity.isAuthoritativeConversation &&
+      identity.key === conversationId
+    );
+  });
+}
+
+function resolveCurrentActiveEvent(
+  store: PrioritySemanticActiveEventRefStore,
+  record: WaitingConversationState,
+  nowMs: number,
+) {
+  const activeEvent = resolvePrioritySemanticActiveEventRef(
+    store,
+    record.mailboxId,
+    record.conversationKey,
+    nowMs,
+  );
+  const transitionMs = parseExactSemanticTime(record.transitionedAt);
+  const activeEventMs = activeEvent
+    ? parseExactSemanticTime(activeEvent.recordedAt)
+    : null;
+  return activeEvent && transitionMs && activeEventMs === transitionMs
+    ? activeEvent
+    : null;
+}
+
+function buildCurrentSemanticIdentity(
+  mailboxId: string,
+  conversationId: string,
+  latestTurnId: string,
+): PrioritySemanticIdentity | null {
+  const normalizedLatestTurnId = normalizePrioritySemanticLatestTurnId(
+    latestTurnId,
+  );
+  return normalizedLatestTurnId
+    ? {
+        mailboxId,
+        conversationId,
+        latestTurnId: normalizedLatestTurnId,
+        semanticVersion: SEMANTIC_SCHEMA_VERSION,
+      }
+    : null;
+}
+
+function findCurrentWaitingLookupTrigger<
+  T extends PrioritySemanticInboundMessage,
+>(
+  record: Extract<WaitingConversationState, { state: "waiting_on_other" }>,
+  entries: PrioritySemanticInboundEntry<T>[],
+  activeEventRefStore: PrioritySemanticActiveEventRefStore,
+  nowMs: number,
+): PrioritySemanticCurrentLookupTrigger | null {
+  const activeEvent = resolveCurrentActiveEvent(
+    activeEventRefStore,
+    record,
+    nowMs,
+  );
+  if (!activeEvent) {
+    return null;
+  }
+
+  const transitionMs = parseExactSemanticTime(record.transitionedAt);
+  const conversationEntries = resolveCurrentConversationEntries(
+    entries,
+    record.mailboxId,
+    record.conversationKey,
+  );
+  const gmailEntries = conversationEntries.filter(
+    (entry) =>
+      entry.message.threadIdentityContext?.provider === "google" &&
+      entry.message.threadIdentityAuthority === "gmail",
+  );
+  if (
+    !transitionMs ||
+    gmailEntries.length === 0 ||
+    conversationEntries.some(
+      (entry) => resolveMessageDateMs(entry.message) > transitionMs,
+    )
+  ) {
+    return null;
+  }
+
+  const exactTransitionTurnIds = Array.from(
+    new Set(
+      gmailEntries.flatMap((entry) =>
+        resolveMessageDateMs(entry.message) === transitionMs
+          ? [normalizeProviderMessageId(entry.message.providerMessageId)]
+          : [],
+      ).filter(Boolean),
+    ),
+  );
+  const persistedLatestTurnId = normalizePrioritySemanticLatestTurnId(
+    activeEvent.latestTurnId,
+  );
+  if (
+    persistedLatestTurnId &&
+    exactTransitionTurnIds.length > 0 &&
+    !exactTransitionTurnIds.includes(persistedLatestTurnId)
+  ) {
+    return null;
+  }
+  const latestTurnId =
+    persistedLatestTurnId ||
+    (exactTransitionTurnIds.length === 1 ? exactTransitionTurnIds[0] : "");
+  const expectedIdentity = buildCurrentSemanticIdentity(
+    record.mailboxId,
+    record.conversationKey,
+    latestTurnId,
+  );
+  if (!expectedIdentity) {
+    return null;
+  }
+
+  return {
+    request: {
+      operation: "lookup_current",
+      mailboxId: record.mailboxId,
+      trigger: "outgoing_reply",
+      eventRef: activeEvent.activeEventRef,
+    },
+    expectedIdentity,
+    observationKey: buildPrioritySemanticObservationKey(expectedIdentity),
+    deterministicState: record.state,
+  };
+}
+
+function findCurrentReturnedLookupTrigger<
+  T extends PrioritySemanticInboundMessage,
+>(
+  store: WaitingOnOtherStore,
+  record: Extract<WaitingConversationState, { state: "returned_reply" }>,
+  entries: PrioritySemanticInboundEntry<T>[],
+  activeEventRefStore: PrioritySemanticActiveEventRefStore,
+  ownEmailAddresses: readonly string[],
+  nowMs: number,
+): PrioritySemanticCurrentLookupTrigger | null {
+  const candidates = resolveCurrentConversationEntries(
+    entries,
+    record.mailboxId,
+    record.conversationKey,
+  ).flatMap((entry) => {
+    if (
+      !resolveWaitingReturnedReplyEvidence(
+        store,
+        record.mailboxId,
+        entry.message,
+        ownEmailAddresses,
+        nowMs,
+      )
+    ) {
+      return [];
+    }
+    const incoming = buildIncomingLocator(entry.message);
+    return incoming ? [incoming] : [];
+  });
+  const uniqueCandidates = new Map(
+    candidates.map((candidate) => [JSON.stringify(candidate), candidate]),
+  );
+  if (uniqueCandidates.size !== 1) {
+    return null;
+  }
+
+  const [{ locator, latestTurnId }] = [...uniqueCandidates.values()];
+  const expectedIdentity = buildCurrentSemanticIdentity(
+    record.mailboxId,
+    record.conversationKey,
+    latestTurnId,
+  );
+  if (!expectedIdentity) {
+    return null;
+  }
+
+  if (locator.provider === "google") {
+    const activeEvent = resolveCurrentActiveEvent(
+      activeEventRefStore,
+      record,
+      nowMs,
+    );
+    if (!activeEvent) {
+      return null;
+    }
+    return {
+      request: {
+        operation: "lookup_current",
+        mailboxId: record.mailboxId,
+        trigger: "incoming_reply",
+        activeEventRef: activeEvent.activeEventRef,
+        incomingLocator: locator,
+      },
+      expectedIdentity,
+      observationKey: buildPrioritySemanticObservationKey(expectedIdentity),
+      deterministicState: record.state,
+    };
+  }
+
+  return {
+    request: {
+      operation: "lookup_current",
+      mailboxId: record.mailboxId,
+      trigger: "incoming_reply",
+      incomingLocator: locator,
+    },
+    expectedIdentity,
+    observationKey: buildPrioritySemanticObservationKey(expectedIdentity),
+    deterministicState: record.state,
+  };
+}
+
+/**
+ * Discovers only currently active deterministic open loops that can have an
+ * existing semantic cache record. It never carries message text, and custom
+ * SMTP waiting records deliberately have no outgoing lookup branch.
+ */
+export function findPrioritySemanticCurrentLookupTriggers<
+  T extends PrioritySemanticInboundMessage,
+>(input: {
+  waitingStore: WaitingOnOtherStore;
+  messageEntries: PrioritySemanticInboundEntry<T>[];
+  activeEventRefStore: PrioritySemanticActiveEventRefStore;
+  ownEmailAddresses: readonly string[];
+  nowMs?: number;
+}): PrioritySemanticCurrentLookupTrigger[] {
+  const nowMs = input.nowMs ?? Date.now();
+  const activeStore = normalizeWaitingOnOtherStore(input.waitingStore, nowMs);
+  const triggers = Object.values(activeStore).flatMap((record) => {
+    const trigger =
+      record.state === "waiting_on_other"
+        ? findCurrentWaitingLookupTrigger(
+            record,
+            input.messageEntries,
+            input.activeEventRefStore,
+            nowMs,
+          )
+        : findCurrentReturnedLookupTrigger(
+            activeStore,
+            record,
+            input.messageEntries,
+            input.activeEventRefStore,
+            input.ownEmailAddresses,
+            nowMs,
+          );
+    return trigger ? [trigger] : [];
+  });
+
+  return Array.from(
+    new Map(
+      triggers.map((trigger) => [trigger.observationKey, trigger]),
+    ).values(),
+  )
+    .sort((left, right) =>
+      left.observationKey.localeCompare(right.observationKey),
+    )
+    .slice(0, PRIORITY_SEMANTIC_CURRENT_LOOKUP_TRIGGER_MAX_RECORDS);
 }

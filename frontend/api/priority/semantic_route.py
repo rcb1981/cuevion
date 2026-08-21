@@ -1,4 +1,4 @@
-"""Authenticated shadow semantic-assessment orchestration."""
+"""Authenticated semantic-assessment and cache-lookup orchestration."""
 
 from __future__ import annotations
 
@@ -30,17 +30,20 @@ from .event_reference import (
 )
 from .openai_responses_adapter import build_openai_semantic_adapter
 from .semantic_config import (
-    SemanticMode,
     SemanticRuntimeConfig,
     load_semantic_runtime_config,
 )
 from .semantic_core import assess_semantic_conversation
 from .semantic_errors import SemanticCoreError, SemanticInputError
 from .semantic_text import build_semantic_text_window
-from .semantic_thresholds import evaluate_semantic_confidence
+from .semantic_thresholds import (
+    confidence_threshold_for,
+    evaluate_semantic_confidence,
+)
 from .semantic_types import (
     SemanticAssessment,
     SemanticAssessmentRequest,
+    SemanticState,
     SemanticTurn,
     SpeakerRole,
     TurnDirection,
@@ -57,6 +60,11 @@ from .store import (
 
 
 MAX_ROUTE_AUTHORED_TEXT_CHARACTERS = MAX_AUTHORED_TEXT_CHARACTERS
+SEMANTIC_LOOKUP_OPERATION = "lookup_current"
+PRIORITY_EFFECT_OBSERVE_ONLY = "observe_only"
+PRIORITY_EFFECT_SUPPRESS_AUTOMATIC_OPEN_LOOP = (
+    "suppress_automatic_open_loop"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,18 +106,35 @@ def _authority_error(error: SemanticAuthorityError) -> SemanticRouteResponse:
     )
 
 
-def _validate_payload_shape(payload: object) -> tuple[str, str] | SemanticRouteResponse:
+def _validate_payload_shape(
+    payload: object,
+) -> tuple[str, str, bool] | SemanticRouteResponse:
     if type(payload) is not dict:
         return _error(400, "invalid_request", "Request body must be a JSON object.")
+    operation = payload.get("operation")
+    lookup_current = operation == SEMANTIC_LOOKUP_OPERATION
+    if "operation" in payload and not lookup_current:
+        return _error(400, "invalid_request", "Semantic operation is invalid.")
     trigger = payload.get("trigger")
     if trigger == "outgoing_reply":
-        if set(payload) != {"mailboxId", "trigger", "eventRef", "authoredText"}:
+        expected_fields = (
+            {"mailboxId", "operation", "trigger", "eventRef"}
+            if lookup_current
+            else {"mailboxId", "trigger", "eventRef", "authoredText"}
+        )
+        if set(payload) != expected_fields:
             return _error(400, "invalid_request", "Request contains unsupported fields.")
         if (
             type(payload.get("eventRef")) is not str
-            or type(payload.get("authoredText")) is not str
-            or not canonicalize_authored_text(payload["authoredText"])
-            or len(payload["authoredText"]) > MAX_ROUTE_AUTHORED_TEXT_CHARACTERS
+            or (
+                not lookup_current
+                and (
+                    type(payload.get("authoredText")) is not str
+                    or not canonicalize_authored_text(payload["authoredText"])
+                    or len(payload["authoredText"])
+                    > MAX_ROUTE_AUTHORED_TEXT_CHARACTERS
+                )
+            )
         ):
             return _error(400, "invalid_request", "Outgoing semantic input is invalid.")
     elif trigger == "incoming_reply":
@@ -118,21 +143,26 @@ def _validate_payload_shape(payload: object) -> tuple[str, str] | SemanticRouteR
             return _error(400, "invalid_request", "Incoming locator is invalid.")
         provider = locator.get("provider")
         if provider == "google":
+            expected_fields = {
+                "mailboxId",
+                "trigger",
+                "activeEventRef",
+                "incomingLocator",
+            }
+            if lookup_current:
+                expected_fields.add("operation")
             if (
-                set(payload)
-                != {
-                    "mailboxId",
-                    "trigger",
-                    "activeEventRef",
-                    "incomingLocator",
-                }
+                set(payload) != expected_fields
                 or type(payload.get("activeEventRef")) is not str
                 or set(locator) != {"provider", "providerMessageId"}
             ):
                 return _error(400, "invalid_request", "Incoming locator is invalid.")
         elif provider == "custom_imap":
+            expected_fields = {"mailboxId", "trigger", "incomingLocator"}
+            if lookup_current:
+                expected_fields.add("operation")
             if (
-                set(payload) != {"mailboxId", "trigger", "incomingLocator"}
+                set(payload) != expected_fields
                 or set(locator)
                 != {
                     "provider",
@@ -149,7 +179,7 @@ def _validate_payload_shape(payload: object) -> tuple[str, str] | SemanticRouteR
     mailbox_id = payload.get("mailboxId")
     if type(mailbox_id) is not str:
         return _error(400, "invalid_request", "Mailbox id is invalid.")
-    return trigger, mailbox_id
+    return trigger, mailbox_id, lookup_current
 
 
 def _verify_event(
@@ -198,6 +228,25 @@ def _outgoing_source(
                 "timestamp": timestamp,
             },
         ),
+        revalidation_locator={
+            "provider": "google",
+            "providerMessageId": claims.latest_turn_id,
+        },
+    )
+
+
+def _outgoing_lookup_source(
+    authority: PriorityAuthority,
+    claims: OutgoingEventClaims,
+) -> AuthorizedSemanticSource:
+    """Reconstruct only the signed identity needed for a cache-only lookup."""
+    return AuthorizedSemanticSource(
+        authority=authority,
+        conversation_id=claims.conversation_id,
+        provider_conversation_id=claims.provider_conversation_id,
+        latest_turn_id=claims.latest_turn_id,
+        occurred_at=claims.occurred_at,
+        turns=(),
         revalidation_locator={
             "provider": "google",
             "providerMessageId": claims.latest_turn_id,
@@ -256,6 +305,34 @@ def _identity(source: AuthorizedSemanticSource, config: SemanticRuntimeConfig) -
     }
 
 
+def _priority_effect(
+    config: SemanticRuntimeConfig,
+    cached: CachedSemanticAssessment | None,
+) -> str:
+    if (
+        config.can_mutate_priority
+        and cached is not None
+        and cached.assessment.state is SemanticState.RESOLVED
+        and cached.effective_state is SemanticState.RESOLVED
+        and cached.assessment.confidence
+        >= confidence_threshold_for(SemanticState.RESOLVED)
+    ):
+        return PRIORITY_EFFECT_SUPPRESS_AUTOMATIC_OPEN_LOOP
+    return PRIORITY_EFFECT_OBSERVE_ONLY
+
+
+def _policy_fields(
+    config: SemanticRuntimeConfig,
+    cached: CachedSemanticAssessment | None = None,
+) -> dict[str, str]:
+    if not config.enabled:
+        return {}
+    return {
+        "semanticMode": config.mode.value,
+        "priorityEffect": _priority_effect(config, cached),
+    }
+
+
 def _assessed_response(
     source: AuthorizedSemanticSource,
     config: SemanticRuntimeConfig,
@@ -274,6 +351,7 @@ def _assessed_response(
             tz=timezone.utc,
         ).isoformat(timespec="seconds").replace("+00:00", "Z"),
         "identity": _identity(source, config),
+        **_policy_fields(config, cached),
     }
     if active_event_ref is not None:
         payload["activeEventRef"] = active_event_ref
@@ -294,6 +372,7 @@ def _deferred_response(
             "status": status,
             "identity": _identity(source, config),
             "retryAfterSeconds": retry_after,
+            **_policy_fields(config),
         },
         retry_after=retry_after,
     )
@@ -313,7 +392,7 @@ def process_semantic_request(
     shape = _validate_payload_shape(payload)
     if isinstance(shape, SemanticRouteResponse):
         return shape
-    trigger, mailbox_id = shape
+    trigger, mailbox_id, lookup_current = shape
     current = int(time.time()) if now is None else now
     try:
         authority = resolve_priority_authority(headers, mailbox_id)
@@ -324,7 +403,7 @@ def process_semantic_request(
         runtime_config = config if config is not None else config_loader()
     except SemanticCoreError:
         return _error(503, "semantic_unavailable", "Semantic analysis is unavailable.")
-    if runtime_config.mode is not SemanticMode.SHADOW or not runtime_config.model:
+    if not runtime_config.enabled or not runtime_config.model:
         # Mode OFF deliberately performs no provider, KV, or HMAC work.
         placeholder_source = AuthorizedSemanticSource(
             authority=authority,
@@ -375,7 +454,7 @@ def process_semantic_request(
             )
         except SemanticAuthorityError as error:
             return _authority_error(error)
-    if trigger == "outgoing_reply" and (
+    if not lookup_current and trigger == "outgoing_reply" and (
         claims is None
         or not authored_text_matches(claims, payload["authoredText"])
     ):
@@ -387,14 +466,19 @@ def process_semantic_request(
 
     if trigger == "outgoing_reply":
         assert claims is not None
-        source = _outgoing_source(authority, claims, payload["authoredText"])
+        source = (
+            _outgoing_lookup_source(authority, claims)
+            if lookup_current
+            else _outgoing_source(authority, claims, payload["authoredText"])
+        )
         active_event_ref = payload["eventRef"]
-        try:
-            # Replayed outgoing refs may only use cached/model results while the
-            # signed provider conversation still has this exact latest turn.
-            prove_authorized_source_current(headers, source, claims)
-        except SemanticAuthorityError as error:
-            return _authority_error(error)
+        if not lookup_current:
+            try:
+                # Replayed outgoing refs may only use cached/model results while the
+                # signed provider conversation still has this exact latest turn.
+                prove_authorized_source_current(headers, source, claims)
+            except SemanticAuthorityError as error:
+                return _authority_error(error)
     else:
         locator = payload["incomingLocator"]
         try:
@@ -416,15 +500,11 @@ def process_semantic_request(
                 )
         except SemanticAuthorityError as error:
             return _authority_error(error)
-        active_event_ref = None
-
-    try:
-        typed_turns = _typed_turns(source)
-        input_hash, normalized_latest_turn_id = _input_hash(typed_turns)
-    except SemanticCoreError:
-        return _error(422, "input_invalid", "No bounded semantic input is available.")
-    if normalized_latest_turn_id != source.latest_turn_id:
-        return _error(409, "incoming_message_stale", "Semantic input is stale.")
+        active_event_ref = (
+            payload["activeEventRef"]
+            if locator["provider"] == "google"
+            else None
+        )
 
     scope = SemanticCacheScope(
         workspace_id=authority.workspace_id,
@@ -436,6 +516,67 @@ def process_semantic_request(
         semantic_version=runtime_config.schema_version,
         model_version=runtime_config.model,
     )
+    if lookup_current:
+        try:
+            # Lookup is permitted only around two current-provider proofs.  The
+            # store operation between them is an exact result GET and nothing
+            # else: no pointer write, negative cache, lease, attempt, or model.
+            prove_authorized_source_current(headers, source, claims)
+            semantic_store = store or build_runtime_semantic_store(
+                hmac_secret=secret
+            )
+            cached = semantic_store.get_result_for_exact_scope(scope)
+        except SemanticAuthorityError as error:
+            return _authority_error(error)
+        except SemanticStoreUnavailable:
+            return _deferred_response(
+                source,
+                runtime_config,
+                status="deferred",
+                retry_after=NEGATIVE_TTL_SECONDS,
+            )
+        if cached is None:
+            return _deferred_response(
+                source,
+                runtime_config,
+                status="deferred",
+                retry_after=NEGATIVE_TTL_SECONDS,
+            )
+        try:
+            prove_authorized_source_current(headers, source, claims)
+            cached = semantic_store.get_result_for_exact_scope(scope)
+        except SemanticAuthorityError as error:
+            return _authority_error(error)
+        except SemanticStoreUnavailable:
+            return _deferred_response(
+                source,
+                runtime_config,
+                status="deferred",
+                retry_after=NEGATIVE_TTL_SECONDS,
+            )
+        if cached is None:
+            return _deferred_response(
+                source,
+                runtime_config,
+                status="deferred",
+                retry_after=NEGATIVE_TTL_SECONDS,
+            )
+        return _assessed_response(
+            source,
+            runtime_config,
+            cached,
+            status="cached",
+            active_event_ref=active_event_ref,
+        )
+
+    try:
+        typed_turns = _typed_turns(source)
+        input_hash, normalized_latest_turn_id = _input_hash(typed_turns)
+    except SemanticCoreError:
+        return _error(422, "input_invalid", "No bounded semantic input is available.")
+    if normalized_latest_turn_id != source.latest_turn_id:
+        return _error(409, "incoming_message_stale", "Semantic input is stale.")
+
     try:
         semantic_store = store or build_runtime_semantic_store(hmac_secret=secret)
         semantic_store.set_current_exact(

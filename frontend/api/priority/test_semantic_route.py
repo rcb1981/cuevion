@@ -37,6 +37,7 @@ WORKSPACE_ID = _account("wsp_", 1)
 USER_ID = _account("usr_", 2)
 AUTHORED_TEXT = "Everything is complete from my side."
 CONFIG = SemanticRuntimeConfig(mode=SemanticMode.SHADOW, model="test-model")
+ACTIVE_CONFIG = SemanticRuntimeConfig(mode=SemanticMode.ACTIVE, model="test-model")
 
 
 def authority() -> PriorityAuthority:
@@ -111,6 +112,15 @@ def request(reference: str | None = None) -> dict:
     }
 
 
+def lookup_request(reference: str | None = None) -> dict:
+    return {
+        "mailboxId": "mailbox-1",
+        "operation": "lookup_current",
+        "trigger": "outgoing_reply",
+        "eventRef": reference or event_reference(),
+    }
+
+
 def custom_incoming_request() -> dict:
     return {
         "mailboxId": "mailbox-1",
@@ -120,6 +130,23 @@ def custom_incoming_request() -> dict:
             "providerFolder": "INBOX",
             "uidValidity": "7",
             "imapUid": "9",
+        },
+    }
+
+
+def gmail_incoming_request(
+    reference: str | None = None,
+    *,
+    lookup_current: bool = False,
+) -> dict:
+    return {
+        "mailboxId": "mailbox-1",
+        **({"operation": "lookup_current"} if lookup_current else {}),
+        "trigger": "incoming_reply",
+        "activeEventRef": reference or event_reference(),
+        "incomingLocator": {
+            "provider": "google",
+            "providerMessageId": "incoming-2",
         },
     }
 
@@ -209,11 +236,18 @@ class SemanticRouteTests(unittest.TestCase):
         self.provider_proof = self.provider_proof_patch.start()
         self.addCleanup(self.provider_proof_patch.stop)
 
-    def process(self, payload: dict, adapter, *, now: int = 11) -> object:
+    def process(
+        self,
+        payload: dict,
+        adapter,
+        *,
+        now: int = 11,
+        config: SemanticRuntimeConfig = CONFIG,
+    ) -> object:
         return process_semantic_request(
             [],
             payload,
-            config=CONFIG,
+            config=config,
             hmac_secret=SECRET,
             store=self.store,
             adapter=adapter,
@@ -239,6 +273,8 @@ class SemanticRouteTests(unittest.TestCase):
                 "assessedAt",
                 "identity",
                 "activeEventRef",
+                "semanticMode",
+                "priorityEffect",
             },
         )
         self.assertEqual(
@@ -247,6 +283,10 @@ class SemanticRouteTests(unittest.TestCase):
         )
         self.assertEqual(first.payload["assessment"], ASSESSMENT.to_wire_dict())
         self.assertEqual(first.payload["effectiveSemanticState"], "resolved")
+        self.assertEqual(first.payload["semanticMode"], "shadow")
+        self.assertEqual(first.payload["priorityEffect"], "observe_only")
+        self.assertEqual(second.payload["semanticMode"], "shadow")
+        self.assertEqual(second.payload["priorityEffect"], "observe_only")
         self.assertNotIn("modelVersion", first.payload["identity"])
 
     def test_authored_text_mismatch_is_rejected_before_kv_or_model(self):
@@ -268,6 +308,8 @@ class SemanticRouteTests(unittest.TestCase):
         self.assertEqual(first.status_code, 202)
         self.assertEqual(first.payload["status"], "deferred")
         self.assertEqual(first.payload["retryAfterSeconds"], 300)
+        self.assertEqual(first.payload["semanticMode"], "shadow")
+        self.assertEqual(first.payload["priorityEffect"], "observe_only")
         self.assertEqual(second.payload["status"], "deferred")
         self.assertEqual(adapter.calls, 1)
         negative_commands = [
@@ -300,6 +342,202 @@ class SemanticRouteTests(unittest.TestCase):
         response = self.process(request(), adapter)
         self.assertEqual(response.payload["assessment"]["state"], "resolved")
         self.assertEqual(response.payload["effectiveSemanticState"], "uncertain")
+
+    def test_active_policy_suppresses_only_resolved_at_exact_threshold(self):
+        cases = (
+            (
+                "resolved-below",
+                SemanticAssessment(
+                    state=SemanticState.RESOLVED,
+                    confidence=0.969,
+                    reason_code=SemanticReasonCode.COMPLETED_CONFIRMATION,
+                ),
+                "uncertain",
+                "observe_only",
+            ),
+            (
+                "resolved-at",
+                SemanticAssessment(
+                    state=SemanticState.RESOLVED,
+                    confidence=0.970,
+                    reason_code=SemanticReasonCode.COMPLETED_CONFIRMATION,
+                ),
+                "resolved",
+                "suppress_automatic_open_loop",
+            ),
+            (
+                "needs-action",
+                SemanticAssessment(
+                    state=SemanticState.NEEDS_USER_ACTION,
+                    confidence=0.99,
+                    reason_code=SemanticReasonCode.EXPLICIT_REQUEST,
+                ),
+                "needs_user_action",
+                "observe_only",
+            ),
+            (
+                "waiting",
+                SemanticAssessment(
+                    state=SemanticState.WAITING_ON_OTHER,
+                    confidence=0.99,
+                    reason_code=SemanticReasonCode.AWAITING_CONFIRMATION,
+                ),
+                "waiting_on_other",
+                "observe_only",
+            ),
+            (
+                "informational",
+                SemanticAssessment(
+                    state=SemanticState.INFORMATIONAL,
+                    confidence=1.0,
+                    reason_code=SemanticReasonCode.INFORMATIONAL_UPDATE,
+                ),
+                "informational",
+                "observe_only",
+            ),
+            (
+                "uncertain",
+                SemanticAssessment(
+                    state=SemanticState.UNCERTAIN,
+                    confidence=1.0,
+                    reason_code=SemanticReasonCode.AMBIGUOUS_CONTEXT,
+                ),
+                "uncertain",
+                "observe_only",
+            ),
+        )
+        for index, (name, assessment, effective, effect) in enumerate(cases):
+            with self.subTest(name=name):
+                reference = event_reference(
+                    latest_turn_id=f"sent-{index + 10}",
+                    occurred_at=10_000 + index,
+                )
+                response = self.process(
+                    request(reference),
+                    FixedAdapter(assessment),
+                    config=ACTIVE_CONFIG,
+                )
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.payload["semanticMode"], "active")
+                self.assertEqual(
+                    response.payload["effectiveSemanticState"],
+                    effective,
+                )
+                self.assertEqual(response.payload["priorityEffect"], effect)
+
+    def test_cached_semantics_rederive_policy_across_shadow_active_switches(self):
+        adapter = FixedAdapter()
+        payload = request()
+
+        shadow = self.process(payload, adapter, config=CONFIG)
+        active = self.process(payload, adapter, config=ACTIVE_CONFIG)
+        rolled_back = self.process(payload, adapter, config=CONFIG)
+
+        self.assertEqual(adapter.calls, 1)
+        self.assertEqual(shadow.payload["status"], "assessed")
+        self.assertEqual(shadow.payload["semanticMode"], "shadow")
+        self.assertEqual(shadow.payload["priorityEffect"], "observe_only")
+        self.assertEqual(active.payload["status"], "cached")
+        self.assertEqual(active.payload["semanticMode"], "active")
+        self.assertEqual(
+            active.payload["priorityEffect"],
+            "suppress_automatic_open_loop",
+        )
+        self.assertEqual(rolled_back.payload["status"], "cached")
+        self.assertEqual(rolled_back.payload["semanticMode"], "shadow")
+        self.assertEqual(rolled_back.payload["priorityEffect"], "observe_only")
+
+    def test_lookup_current_uses_only_exact_result_gets_and_never_calls_model(self):
+        adapter = FixedAdapter()
+        self.assertEqual(
+            self.process(request(), adapter, config=CONFIG).payload["status"],
+            "assessed",
+        )
+        self.redis.commands.clear()
+        self.provider_proof.reset_mock()
+
+        response = self.process(
+            lookup_request(),
+            adapter,
+            config=ACTIVE_CONFIG,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.payload["status"], "cached")
+        self.assertEqual(response.payload["semanticMode"], "active")
+        self.assertEqual(
+            response.payload["priorityEffect"],
+            "suppress_automatic_open_loop",
+        )
+        self.assertEqual(adapter.calls, 1)
+        self.assertEqual(self.provider_proof.call_count, 2)
+        self.assertEqual(len(self.redis.commands), 2)
+        self.assertTrue(all(command[0] == "GET" for command in self.redis.commands))
+        self.assertTrue(
+            all(":result:" in command[1] for command in self.redis.commands)
+        )
+
+    def test_lookup_current_cache_miss_is_observe_only_without_model_or_writes(self):
+        adapter = FixedAdapter()
+        missing_reference = event_reference(
+            latest_turn_id="sent-cache-miss",
+            occurred_at=10_001,
+        )
+
+        response = self.process(
+            lookup_request(missing_reference),
+            adapter,
+            config=ACTIVE_CONFIG,
+        )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.payload["status"], "deferred")
+        self.assertEqual(response.payload["semanticMode"], "active")
+        self.assertEqual(response.payload["priorityEffect"], "observe_only")
+        self.assertEqual(adapter.calls, 0)
+        self.assertEqual(len(self.redis.commands), 1)
+        self.assertEqual(self.redis.commands[0][0], "GET")
+        self.assertIn(":result:", self.redis.commands[0][1])
+
+    def test_lookup_current_has_exact_distinct_request_shapes(self):
+        invalid_payloads = (
+            {**lookup_request(), "authoredText": AUTHORED_TEXT},
+            {**request(), "operation": "assess"},
+            {
+                "mailboxId": "mailbox-1",
+                "operation": "lookup_current",
+                "trigger": "outgoing_reply",
+            },
+        )
+        for payload in invalid_payloads:
+            with self.subTest(fields=tuple(sorted(payload))):
+                self.authority_resolver.reset_mock()
+                response = self.process(payload, FixedAdapter())
+                self.assertEqual(response.status_code, 400)
+                self.authority_resolver.assert_not_called()
+
+    def test_lookup_current_stale_provider_identity_returns_no_cached_policy(self):
+        adapter = FixedAdapter()
+        self.assertEqual(
+            self.process(request(), adapter, config=CONFIG).payload["status"],
+            "assessed",
+        )
+        self.redis.commands.clear()
+        self.provider_proof.reset_mock()
+        self.provider_proof.side_effect = SemanticAuthorityError(
+            "incoming_message_stale",
+            409,
+        )
+
+        response = self.process(
+            lookup_request(),
+            adapter,
+            config=ACTIVE_CONFIG,
+        )
+        self.assertEqual(response.status_code, 409)
+        self.assertNotIn("priorityEffect", response.payload)
+        self.assertEqual(self.redis.commands, [])
+        self.assertEqual(adapter.calls, 1)
 
     def test_provider_change_during_model_call_without_competing_route_is_rejected(self):
         self.provider_proof.side_effect = [
@@ -353,17 +591,24 @@ class SemanticRouteTests(unittest.TestCase):
             event_reference(user_id=_account("usr_", 9)),
             event_reference(mailbox_id="mailbox-2"),
         )
-        for reference in forged_references:
-            with self.subTest(reference=reference[:12]):
-                self.redis.commands.clear()
-                self.provider_proof.reset_mock()
-                adapter = FixedAdapter()
-                response = self.process(request(reference), adapter)
-                self.assertEqual(response.status_code, 403)
-                self.assertEqual(response.payload["error"]["code"], "event_scope_mismatch")
-                self.provider_proof.assert_not_called()
-                self.assertEqual(self.redis.commands, [])
-                self.assertEqual(adapter.calls, 0)
+        for request_builder in (request, lookup_request):
+            for reference in forged_references:
+                with self.subTest(
+                    operation=request_builder.__name__,
+                    reference=reference[:12],
+                ):
+                    self.redis.commands.clear()
+                    self.provider_proof.reset_mock()
+                    adapter = FixedAdapter()
+                    response = self.process(request_builder(reference), adapter)
+                    self.assertEqual(response.status_code, 403)
+                    self.assertEqual(
+                        response.payload["error"]["code"],
+                        "event_scope_mismatch",
+                    )
+                    self.provider_proof.assert_not_called()
+                    self.assertEqual(self.redis.commands, [])
+                    self.assertEqual(adapter.calls, 0)
 
     def test_invalid_and_expired_refs_fail_before_provider_kv_model(self):
         cases = (
@@ -426,6 +671,8 @@ class SemanticRouteTests(unittest.TestCase):
                     )
                 self.assertEqual(response.status_code, 202)
                 self.assertEqual(response.payload["status"], "deferred")
+                self.assertNotIn("semanticMode", response.payload)
+                self.assertNotIn("priorityEffect", response.payload)
                 self.provider_proof.assert_not_called()
                 self.assertEqual(self.redis.commands, [])
                 self.assertEqual(adapter.calls, 0)
@@ -453,6 +700,91 @@ class SemanticRouteTests(unittest.TestCase):
         self.provider_proof.assert_not_called()
         self.assertEqual(self.redis.commands, [])
         self.assertEqual(adapter.calls, 0)
+
+    def test_custom_outgoing_lookup_remains_unsupported_before_hmac_kv_or_model(self):
+        self.authority_resolver.return_value = custom_authority()
+        adapter = FixedAdapter()
+        with patch(
+            "api.priority.semantic_route.resolve_priority_hmac_secret",
+            side_effect=AssertionError("custom outgoing must not resolve HMAC"),
+        ):
+            response = process_semantic_request(
+                [],
+                lookup_request("legacy-custom-outgoing-reference"),
+                config=ACTIVE_CONFIG,
+                store=self.store,
+                adapter=adapter,
+                now=22,
+            )
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(
+            response.payload["error"]["code"],
+            "outgoing_semantic_unsupported",
+        )
+        self.provider_proof.assert_not_called()
+        self.assertEqual(self.redis.commands, [])
+        self.assertEqual(adapter.calls, 0)
+
+    def test_gmail_incoming_lookup_rehydrates_exact_cached_returned_turn(self):
+        current = authority()
+        source = AuthorizedSemanticSource(
+            authority=current,
+            conversation_id=canonical_conversation_id(
+                "mailbox-1",
+                gmail_thread_id("mailbox-1", "thread-1"),
+            ),
+            provider_conversation_id="thread-1",
+            latest_turn_id="incoming-2",
+            occurred_at=12_000,
+            turns=(
+                {
+                    "turnId": "incoming-2",
+                    "speaker": "external",
+                    "direction": "incoming",
+                    "text": "Thanks, everything is sorted.",
+                    "timestamp": "2026-01-01T00:00:20Z",
+                },
+            ),
+            revalidation_locator={
+                "provider": "google",
+                "providerMessageId": "incoming-2",
+            },
+        )
+        adapter = FixedAdapter()
+        with patch(
+            "api.priority.semantic_route.load_authorized_gmail_incoming",
+            return_value=source,
+        ) as loader:
+            assessed = self.process(
+                gmail_incoming_request(),
+                adapter,
+                config=CONFIG,
+            )
+            self.redis.commands.clear()
+            self.provider_proof.reset_mock()
+            lookup = self.process(
+                gmail_incoming_request(lookup_current=True),
+                adapter,
+                config=ACTIVE_CONFIG,
+            )
+
+        self.assertEqual(assessed.payload["status"], "assessed")
+        self.assertEqual(assessed.payload["priorityEffect"], "observe_only")
+        self.assertEqual(lookup.payload["status"], "cached")
+        self.assertEqual(lookup.payload["semanticMode"], "active")
+        self.assertEqual(
+            lookup.payload["activeEventRef"],
+            gmail_incoming_request()["activeEventRef"],
+        )
+        self.assertEqual(
+            lookup.payload["priorityEffect"],
+            "suppress_automatic_open_loop",
+        )
+        self.assertEqual(loader.call_count, 2)
+        self.assertEqual(self.provider_proof.call_count, 2)
+        self.assertEqual(adapter.calls, 1)
+        self.assertEqual(len(self.redis.commands), 2)
+        self.assertTrue(all(command[0] == "GET" for command in self.redis.commands))
 
     def test_ref_less_custom_incoming_assesses_and_returns_no_active_ref(self):
         current = custom_authority()
@@ -490,20 +822,39 @@ class SemanticRouteTests(unittest.TestCase):
         ) as loader:
             response = self.process(custom_incoming_request(), adapter)
             cached_response = self.process(custom_incoming_request(), adapter)
+            self.redis.commands.clear()
+            lookup_response = self.process(
+                {
+                    **custom_incoming_request(),
+                    "operation": "lookup_current",
+                },
+                adapter,
+                config=ACTIVE_CONFIG,
+            )
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.payload["status"], "assessed")
         self.assertEqual(cached_response.status_code, 200)
         self.assertEqual(cached_response.payload["status"], "cached")
+        self.assertEqual(lookup_response.status_code, 200)
+        self.assertEqual(lookup_response.payload["status"], "cached")
+        self.assertEqual(lookup_response.payload["semanticMode"], "active")
+        self.assertEqual(
+            lookup_response.payload["priorityEffect"],
+            "suppress_automatic_open_loop",
+        )
         self.assertNotIn("activeEventRef", response.payload)
         self.assertNotIn("activeEventRef", cached_response.payload)
-        self.assertEqual(loader.call_count, 2)
+        self.assertNotIn("activeEventRef", lookup_response.payload)
+        self.assertEqual(loader.call_count, 3)
         loader.assert_called_with(
             [], current, provider_folder="INBOX", uid_validity="7", imap_uid="9"
         )
-        self.assertEqual(self.provider_proof.call_count, 2)
+        self.assertEqual(self.provider_proof.call_count, 4)
         self.provider_proof.assert_called_with([], source, None)
         self.assertEqual(adapter.calls, 1)
+        self.assertEqual(len(self.redis.commands), 2)
+        self.assertTrue(all(command[0] == "GET" for command in self.redis.commands))
 
     def test_custom_incoming_rejects_refs_text_roots_and_authority_extras(self):
         forbidden_fields = {

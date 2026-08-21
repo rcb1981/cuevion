@@ -296,31 +296,33 @@ class SendSemanticIntegrationTests(unittest.TestCase):
 
     def test_preparation_reuses_owned_member_and_config_without_auth_io(self):
         owned = _owned_mailbox()
-        with patch.object(
-            SEND,
-            "load_semantic_runtime_config",
-            return_value=SemanticRuntimeConfig(
-                mode=SemanticMode.SHADOW,
-                model="test-model",
-            ),
-        ), patch.object(
-            SEND,
-            "resolve_priority_hmac_secret",
-            return_value=SECRET,
-        ):
-            prepared = SEND._prepare_semantic_event_context(
-                owned,
-                mailbox_id="mailbox-1",
-                provider="google",
-            )
-        self.assertIsNotNone(prepared)
-        authority = prepared["authority"]
-        self.assertEqual(authority.workspace_id, _account("wsp_", 1))
-        self.assertEqual(authority.user_id, _account("usr_", 2))
-        self.assertEqual(authority.member_email, "owner@example.com")
-        self.assertEqual(authority.mailbox_id, "mailbox-1")
-        self.assertEqual(authority.provider, "google")
-        self.assertEqual(prepared["hmacSecret"], SECRET)
+        for mode in (SemanticMode.SHADOW, SemanticMode.ACTIVE):
+            with self.subTest(mode=mode.value), patch.object(
+                SEND,
+                "load_semantic_runtime_config",
+                return_value=SemanticRuntimeConfig(
+                    mode=mode,
+                    model="test-model",
+                ),
+            ), patch.object(
+                SEND,
+                "resolve_priority_hmac_secret",
+                return_value=SECRET,
+            ):
+                self.assertTrue(SEND._semantic_authority_capture_enabled())
+                prepared = SEND._prepare_semantic_event_context(
+                    owned,
+                    mailbox_id="mailbox-1",
+                    provider="google",
+                )
+            self.assertIsNotNone(prepared)
+            authority = prepared["authority"]
+            self.assertEqual(authority.workspace_id, _account("wsp_", 1))
+            self.assertEqual(authority.user_id, _account("usr_", 2))
+            self.assertEqual(authority.member_email, "owner@example.com")
+            self.assertEqual(authority.mailbox_id, "mailbox-1")
+            self.assertEqual(authority.provider, "google")
+            self.assertEqual(prepared["hmacSecret"], SECRET)
 
     def test_custom_semantic_thread_root_is_best_effort_for_legacy_send(self):
         context = {

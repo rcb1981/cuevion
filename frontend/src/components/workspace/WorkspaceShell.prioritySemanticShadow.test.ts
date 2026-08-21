@@ -40,7 +40,7 @@ assert.doesNotMatch(
 );
 assert.match(
   sendSource,
-  /try \{[\s\S]*?onPrioritySemanticReplyConfirmed\([\s\S]*?\} catch \{[\s\S]*?shadow-only assessment/,
+  /try \{[\s\S]*?onPrioritySemanticReplyConfirmed\([\s\S]*?\} catch \{[\s\S]*?Semantic projection/,
   "post-send semantic orchestration must be contained so it cannot change send UX",
 );
 assert.doesNotMatch(
@@ -132,8 +132,8 @@ const requestCalls = workspaceSource.match(
 ) ?? [];
 assert.equal(
   requestCalls.length,
-  2,
-  "Workspace may request semantics only for outgoing_reply and incoming_reply",
+  3,
+  "Workspace has two assessment sites and one bounded cache-only lookup site",
 );
 assert.equal(
   workspaceSource.match(/trigger: "outgoing_reply"/g)?.length,
@@ -148,8 +148,8 @@ assert.equal(
 
 assert.match(
   workspaceSource,
-  /prioritySemanticObservationsRef\.current =[\s\S]*?addPrioritySemanticShadowObservation\([\s\S]*?observationKey,[\s\S]*?observation/,
-  "semantic results must remain in a private observation ref",
+  /prioritySemanticObservationState[\s\S]*?scopeKey: prioritySemanticActiveEventRefStorageKey[\s\S]*?observations: \{\}[\s\S]*?prioritySemanticObservationState\.scopeKey ===[\s\S]*?prioritySemanticActiveEventRefStorageKey[\s\S]*?setPrioritySemanticObservationState\(\(current\) =>[\s\S]*?addPrioritySemanticObservation\(/,
+  "bounded parsed observations must be scope-tagged and gated before active projection",
 );
 assert.match(
   workspaceSource,
@@ -163,8 +163,51 @@ assert.match(
 );
 assert.doesNotMatch(
   workspaceSource,
-  /setPrioritySemantic|localStorage\.setItem\([^)]*observation|JSON\.stringify\([^)]*observation/,
-  "semantic assessments must not enter React state or local persistence",
+  /localStorage\.setItem\([^)]*observation|JSON\.stringify\([^)]*observation/,
+  "semantic observations must never become browser-persisted authority",
+);
+
+const lookupDiscoveryStart = workspaceSource.indexOf(
+  "const prioritySemanticCurrentLookupTriggers",
+);
+const lookupRequestStart = workspaceSource.indexOf(
+  "requestPrioritySemanticAssessment(trigger.request)",
+  lookupDiscoveryStart,
+);
+const lookupEffectStart = workspaceSource.lastIndexOf(
+  "prioritySemanticCurrentLookupTriggers.forEach",
+  lookupRequestStart,
+);
+const lookupEffectBoundary = workspaceSource.lastIndexOf(
+  "useEffect(() => {",
+  lookupEffectStart,
+);
+assert.ok(
+  lookupDiscoveryStart >= 0 &&
+    lookupEffectBoundary > lookupDiscoveryStart &&
+    lookupEffectStart > lookupDiscoveryStart &&
+    lookupRequestStart > lookupEffectStart,
+  "cache-only rehydration discovery and request must exist",
+);
+assert.match(
+  workspaceSource.slice(lookupDiscoveryStart, lookupRequestStart + 100),
+  /findPrioritySemanticCurrentLookupTriggers\(\{[\s\S]*?waitingStore: waitingOnOtherStore[\s\S]*?rememberPrioritySemanticRequestedTriggerKey\([\s\S]*?lookup_current::/,
+  "rehydration must use committed deterministic records and bounded request keys",
+);
+assert.match(
+  workspaceSource.slice(lookupDiscoveryStart, lookupRequestStart + 100),
+  /activeEventRefStore: prioritySemanticActiveEventRefStore[\s\S]*?requestedPrioritySemanticAssessmentObservationKeysRef\.current\.has/,
+  "hydrated refs must invalidate lookup discovery and lookup must not race a new assessment",
+);
+assert.doesNotMatch(
+  workspaceSource.slice(lookupEffectBoundary, lookupRequestStart),
+  /setWaitingOnOtherStore|authoredText/,
+  "lookup-only rehydration must neither mutate evidence nor carry authored text",
+);
+assert.match(
+  workspaceSource.slice(lookupEffectBoundary, lookupRequestStart),
+  /if \(!isPrioritySemanticDeterministicStoreCommitted\) \{[\s\S]*?return;/,
+  "lookup-only rehydration must wait for the exact deterministic turn to commit",
 );
 
 const priorityGateStart = workspaceSource.indexOf(
@@ -179,24 +222,26 @@ assert.ok(
   priorityGateStart >= 0 && priorityItemsEnd > priorityGateStart,
   "Priority assembly source must exist",
 );
-assert.doesNotMatch(
+assert.equal(
+  priorityAssembly.match(/shouldSuppressAutomaticOpenLoopPriority\(/g)?.length,
+  1,
+  "semantic suppression must be applied once in the canonical Priority collection",
+);
+assert.match(
   priorityAssembly,
-  /prioritySemantic|semanticState|effectiveSemanticState/i,
-  "shadow semantics must not enter eligibility, filtering, sorting, or the gate",
+  /currentSemanticTrigger =[\s\S]*?isPrioritySemanticDeterministicStoreCommitted &&[\s\S]*?shouldSuppressAutomaticOpenLoopPriority/,
+  "semantic suppression must fail open until the newest deterministic turn is committed",
+);
+assert.match(
+  priorityAssembly,
+  /hasIndependentPriorityAuthority = Boolean\([\s\S]*?override === "priority"[\s\S]*?message\.collaboration[\s\S]*?reviewController\.getReviewBySourceId[\s\S]*?shouldSuppressAutomaticOpenLoopPriority\([\s\S]*?!isAutomaticOpenLoopSemanticallySuppressed/,
+  "manual, learned, collaboration, and assigned-review authority must precede the one overlay filter",
 );
 
-const dashboardCountStart = workspaceSource.indexOf(
-  "priorityCount={",
-  priorityItemsEnd,
-);
-const dashboardCountEnd = workspaceSource.indexOf(
-  "supplementalItems={livePriorityInboxItems}",
-  dashboardCountStart,
-);
-assert.doesNotMatch(
-  workspaceSource.slice(dashboardCountStart, dashboardCountEnd),
-  /prioritySemantic|semanticState|effectiveSemanticState/i,
-  "Dashboard Priority count parity must remain independent of shadow semantics",
+assert.match(
+  workspaceSource,
+  /priorityInboxCount=\{[\s\S]*?livePriorityInboxItems\.length[\s\S]*?supplementalItems=\{livePriorityInboxItems\}/,
+  "Dashboard count and Priority page must consume the same projected collection",
 );
 
 assert.match(
@@ -210,4 +255,4 @@ assert.match(
   "semantic ticket writes must swallow browser storage errors",
 );
 
-console.log("\nWorkspaceShell Priority semantic shadow integration tests passed.");
+console.log("\nWorkspaceShell Priority semantic activation integration tests passed.");

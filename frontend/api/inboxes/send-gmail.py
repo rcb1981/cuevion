@@ -51,7 +51,7 @@ from api.priority.authority import (
     priority_authority_from_owned_mailbox,
 )
 from api.priority.event_reference import resolve_priority_hmac_secret
-from api.priority.semantic_config import SemanticMode, load_semantic_runtime_config
+from api.priority.semantic_config import load_semantic_runtime_config
 from imap_connect_preview import connect_mailbox_with_settings
 
 GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1/users/me"
@@ -449,7 +449,7 @@ def _prepare_semantic_event_context(
         return None
     try:
         config = load_semantic_runtime_config()
-        if config.mode is not SemanticMode.SHADOW or not config.model:
+        if not config.enabled or not config.model:
             return None
         secret = resolve_priority_hmac_secret()
         if type(owned) is not dict or owned.get("status") != "ok":
@@ -474,7 +474,7 @@ def _semantic_authority_capture_enabled() -> bool:
     """Return whether this request may need one-pass member authority capture."""
     try:
         config = load_semantic_runtime_config()
-        return config.mode is SemanticMode.SHADOW and bool(config.model)
+        return config.enabled and bool(config.model)
     except Exception:
         return False
 
@@ -487,7 +487,7 @@ def _try_semantic_event_reference(
     latest_turn_id: object,
     authored_text: object,
 ) -> str | None:
-    """Mint a shadow-only ticket without ever changing send success semantics."""
+    """Mint a semantic ticket without ever changing send success semantics."""
     if (
         type(prepared_context) is not dict
         or set(prepared_context) != {"authority", "semanticVersion", "hmacSecret"}

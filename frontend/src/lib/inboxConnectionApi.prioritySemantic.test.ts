@@ -7,6 +7,7 @@ import {
 import {
   SEMANTIC_SCHEMA_VERSION,
   type PrioritySemanticAssessmentRequest,
+  type PrioritySemanticCurrentLookupRequest,
 } from "./prioritySemanticState";
 
 const originalFetch = globalThis.fetch;
@@ -28,6 +29,8 @@ async function run() {
     return response({
       ok: true,
       status: "assessed",
+      semanticMode: "active",
+      priorityEffect: "suppress_automatic_open_loop",
       assessment: {
         state: "resolved",
         confidence: 0.99,
@@ -76,6 +79,8 @@ async function run() {
     return response({
       ok: true,
       status: "deferred",
+      semanticMode: "active",
+      priorityEffect: "observe_only",
       identity: {
         mailboxId: "mailbox-1",
         conversationId: "thread:mailbox-1|gmail:mailbox-1:thread-1",
@@ -121,6 +126,24 @@ async function run() {
   assert.doesNotMatch(
     String(fetchCalls[2].init?.body),
     /activeEventRef|text|subject|workspace/i,
+  );
+
+  const lookupRequest: PrioritySemanticCurrentLookupRequest = {
+    operation: "lookup_current",
+    mailboxId: "mailbox-1",
+    trigger: "outgoing_reply",
+    eventRef: "pse1.ticket.signature",
+  };
+  assert.equal(
+    (await requestPrioritySemanticAssessment(lookupRequest)).ok,
+    true,
+  );
+  assert.equal(fetchCalls.length, 4);
+  assert.equal(fetchCalls[3].init?.body, JSON.stringify(lookupRequest));
+  assert.doesNotMatch(
+    String(fetchCalls[3].init?.body),
+    /authoredText|body|subject|workspace/i,
+    "cache-only rehydration must not carry message content",
   );
 
   const callsBeforeInvalidRequest = fetchCalls.length;

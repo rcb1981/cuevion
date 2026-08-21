@@ -321,24 +321,28 @@ import {
   type WaitingOnOtherStore,
 } from "../../lib/waitingOnOther";
 import {
-  addPrioritySemanticShadowObservation,
+  SEMANTIC_SCHEMA_VERSION,
+  addPrioritySemanticObservation,
   buildPrioritySemanticActiveEventRefStorageKey,
+  buildPrioritySemanticObservationKey,
+  findPrioritySemanticCurrentLookupTriggers,
   findPrioritySemanticReturnedReplyTriggers,
   normalizePrioritySemanticActiveEventRefStore,
   normalizePrioritySemanticAuthoredText,
   normalizePrioritySemanticEventRef,
   normalizePrioritySemanticLatestTurnId,
   persistPrioritySemanticActiveEventRefStore,
-  projectPrioritySemanticShadowObservation,
+  projectPrioritySemanticObservation,
   readPrioritySemanticActiveEventRefStore,
   recordPrioritySemanticActiveEventRef,
   rememberPrioritySemanticPendingTrigger,
   rememberPrioritySemanticRequestedTriggerKey,
   resolvePrioritySemanticActiveEventRef,
+  shouldSuppressAutomaticOpenLoopPriority,
   type PrioritySemanticActiveEventRefStore,
   type PrioritySemanticAssessmentRequest,
+  type PrioritySemanticObservation,
   type PrioritySemanticReturnedReplyTrigger,
-  type PrioritySemanticShadowObservation,
 } from "../../lib/prioritySemanticState";
 import { applyLearningDecision } from "../../lib/applyLearningDecision";
 import type {
@@ -20336,7 +20340,7 @@ function MailboxView({
               sentAt,
             });
           } catch {
-            // A shadow-only assessment must never change confirmed send UX.
+            // Semantic projection must never change confirmed send UX.
           }
         }
       }
@@ -40439,14 +40443,64 @@ export function WorkspaceShell({
       workspacePersistenceScope,
       mailboxOrderKey,
     );
-  const prioritySemanticActiveEventRefStoreRef =
-    useRef<PrioritySemanticActiveEventRefStore>({});
-  const prioritySemanticObservationsRef = useRef<
-    Record<string, PrioritySemanticShadowObservation>
-  >({});
+  const prioritySemanticActiveEventRefStoreRef = useRef<{
+    scopeKey: string;
+    store: PrioritySemanticActiveEventRefStore;
+  }>({
+    scopeKey: prioritySemanticActiveEventRefStorageKey,
+    store: {},
+  });
+  const [
+    prioritySemanticActiveEventRefStoreState,
+    setPrioritySemanticActiveEventRefStoreState,
+  ] = useState<{
+      scopeKey: string;
+      store: PrioritySemanticActiveEventRefStore;
+    }>({
+      scopeKey: prioritySemanticActiveEventRefStorageKey,
+      store: {},
+    });
+  const [prioritySemanticObservationState, setPrioritySemanticObservationState] =
+    useState<{
+      scopeKey: string;
+      observations: Record<string, PrioritySemanticObservation>;
+    }>({
+      scopeKey: prioritySemanticActiveEventRefStorageKey,
+      observations: {},
+    });
+  const prioritySemanticObservationScopeRef = useRef(
+    prioritySemanticActiveEventRefStorageKey,
+  );
+  prioritySemanticObservationScopeRef.current =
+    prioritySemanticActiveEventRefStorageKey;
+  const prioritySemanticActiveEventRefStore = useMemo(
+    () =>
+      prioritySemanticActiveEventRefStoreState.scopeKey ===
+      prioritySemanticActiveEventRefStorageKey
+        ? prioritySemanticActiveEventRefStoreState.store
+        : {},
+    [
+      prioritySemanticActiveEventRefStorageKey,
+      prioritySemanticActiveEventRefStoreState,
+    ],
+  );
+  const prioritySemanticObservations = useMemo(
+    () =>
+      prioritySemanticObservationState.scopeKey ===
+      prioritySemanticActiveEventRefStorageKey
+        ? prioritySemanticObservationState.observations
+        : {},
+    [
+      prioritySemanticActiveEventRefStorageKey,
+      prioritySemanticObservationState,
+    ],
+  );
   const requestedPrioritySemanticTriggerKeysRef = useRef<Set<string>>(
     new Set(),
   );
+  const requestedPrioritySemanticAssessmentObservationKeysRef = useRef<
+    Set<string>
+  >(new Set());
   const pendingPrioritySemanticReturnedReplyTriggersRef = useRef<
     Map<string, PrioritySemanticReturnedReplyTrigger>
   >(new Map());
@@ -40473,8 +40527,15 @@ export function WorkspaceShell({
   } | null>(null);
   const commitPrioritySemanticActiveEventRefStore = useCallback(
     (store: PrioritySemanticActiveEventRefStore) => {
+      if (
+        prioritySemanticObservationScopeRef.current !==
+        prioritySemanticActiveEventRefStorageKey
+      ) {
+        return;
+      }
+      let committedStore: PrioritySemanticActiveEventRefStore;
       try {
-        prioritySemanticActiveEventRefStoreRef.current =
+        committedStore =
           typeof window === "undefined"
             ? normalizePrioritySemanticActiveEventRefStore(store)
             : persistPrioritySemanticActiveEventRefStore(
@@ -40485,9 +40546,14 @@ export function WorkspaceShell({
       } catch {
         // Accessing the localStorage property itself may throw in hardened
         // browser contexts. Keep the signed reference in bounded memory only.
-        prioritySemanticActiveEventRefStoreRef.current =
-          normalizePrioritySemanticActiveEventRefStore(store);
+        committedStore = normalizePrioritySemanticActiveEventRefStore(store);
       }
+      const scopedStore = {
+        scopeKey: prioritySemanticActiveEventRefStorageKey,
+        store: committedStore,
+      };
+      prioritySemanticActiveEventRefStoreRef.current = scopedStore;
+      setPrioritySemanticActiveEventRefStoreState(scopedStore);
     },
     [prioritySemanticActiveEventRefStorageKey],
   );
@@ -40501,27 +40567,67 @@ export function WorkspaceShell({
         latestTurnId: string;
       },
     ) => {
+      const observationScope = prioritySemanticActiveEventRefStorageKey;
+      const removeFailedObservation = () => {
+        if (
+          prioritySemanticObservationScopeRef.current !== observationScope
+        ) {
+          return;
+        }
+        setPrioritySemanticObservationState((current) => {
+          const observations =
+            current.scopeKey === observationScope
+              ? current.observations
+              : {};
+          if (
+            !Object.prototype.hasOwnProperty.call(
+              observations,
+              observationKey,
+            )
+          ) {
+            return current.scopeKey === observationScope
+              ? current
+              : { scopeKey: observationScope, observations: {} };
+          }
+          const next = { ...observations };
+          delete next[observationKey];
+          return { scopeKey: observationScope, observations: next };
+        });
+      };
+
       void responsePromise
         .then((response) => {
-          const observation = projectPrioritySemanticShadowObservation(
+          if (
+            prioritySemanticObservationScopeRef.current !== observationScope
+          ) {
+            return;
+          }
+          const observation = projectPrioritySemanticObservation(
             response,
             expectedIdentity,
           );
           if (observation) {
-            prioritySemanticObservationsRef.current =
-              addPrioritySemanticShadowObservation(
-                prioritySemanticObservationsRef.current,
+            setPrioritySemanticObservationState((current) => ({
+              scopeKey: observationScope,
+              observations: addPrioritySemanticObservation(
+                current.scopeKey === observationScope
+                  ? current.observations
+                  : {},
                 observationKey,
                 observation,
-              );
+              ),
+            }));
+          } else {
+            removeFailedObservation();
           }
         })
         .catch(() => {
-          // Semantic analysis is fail-open shadow telemetry. Deterministic mail
-          // state remains authoritative when the background request fails.
+          removeFailedObservation();
+          // Semantic analysis is fail-open. Deterministic mail state remains
+          // authoritative when the background request fails.
         });
     },
-    [],
+    [prioritySemanticActiveEventRefStorageKey],
   );
   const handlePrioritySemanticReplyConfirmed = useCallback(
     (input: {
@@ -40553,13 +40659,19 @@ export function WorkspaceShell({
         return;
       }
 
+      const currentScopedEventRefs =
+        prioritySemanticActiveEventRefStoreRef.current.scopeKey ===
+        prioritySemanticActiveEventRefStorageKey
+          ? prioritySemanticActiveEventRefStoreRef.current.store
+          : {};
       commitPrioritySemanticActiveEventRefStore(
         recordPrioritySemanticActiveEventRef(
-          prioritySemanticActiveEventRefStoreRef.current,
+          currentScopedEventRefs,
           {
             mailboxId: input.mailboxId,
             conversationId: conversation.key,
             activeEventRef,
+            ...(latestTurnId ? { latestTurnId } : {}),
             recordedAt: input.sentAt,
           },
         ),
@@ -40578,7 +40690,10 @@ export function WorkspaceShell({
         },
       );
     },
-    [commitPrioritySemanticActiveEventRefStore],
+    [
+      commitPrioritySemanticActiveEventRefStore,
+      prioritySemanticActiveEventRefStorageKey,
+    ],
   );
   const manualLabelOverridesStorageKey = buildManualLabelOverridesStorageKey(
     workspacePersistenceScope,
@@ -43956,13 +44071,28 @@ export function WorkspaceShell({
               prioritySemanticActiveEventRefStorageKey,
             );
     } catch {
-      // Shadow persistence is optional; deterministic state has no dependency
-      // on browser storage availability.
+      // Signed-reference persistence is optional; deterministic state has no
+      // dependency on browser storage availability.
     }
 
-    prioritySemanticActiveEventRefStoreRef.current = storedEventRefs;
-    prioritySemanticObservationsRef.current = {};
+    if (
+      prioritySemanticObservationScopeRef.current !==
+      prioritySemanticActiveEventRefStorageKey
+    ) {
+      return;
+    }
+    const scopedEventRefs = {
+      scopeKey: prioritySemanticActiveEventRefStorageKey,
+      store: storedEventRefs,
+    };
+    prioritySemanticActiveEventRefStoreRef.current = scopedEventRefs;
+    setPrioritySemanticActiveEventRefStoreState(scopedEventRefs);
+    setPrioritySemanticObservationState({
+      scopeKey: prioritySemanticActiveEventRefStorageKey,
+      observations: {},
+    });
     requestedPrioritySemanticTriggerKeysRef.current.clear();
+    requestedPrioritySemanticAssessmentObservationKeysRef.current.clear();
     pendingPrioritySemanticReturnedReplyTriggersRef.current.clear();
     pendingPrioritySemanticOutgoingReplyTriggersRef.current.clear();
     pendingPrioritySemanticReconciliationRef.current = null;
@@ -43992,6 +44122,24 @@ export function WorkspaceShell({
       }),
     [mailboxStore, orderedMailboxes],
   );
+  const prioritySemanticLookupConversationEntries = useMemo(
+    () =>
+      orderedMailboxes.flatMap((candidate) => {
+        const collections =
+          mailboxStore[candidate.id] ?? createEmptyMailboxCollections();
+
+        return [
+          ...collections.Inbox,
+          ...collections.Filtered,
+          ...collections.Archive,
+          ...collections.Sent,
+        ].map((message) => ({
+          mailboxId: candidate.id,
+          message,
+        }));
+      }),
+    [mailboxStore, orderedMailboxes],
+  );
   const effectiveWaitingOnOtherStore = useMemo(
     () =>
       reconcileWaitingOnOtherStore(
@@ -44012,12 +44160,35 @@ export function WorkspaceShell({
       waitingOnOtherStore,
     ],
   );
+  const prioritySemanticCurrentLookupTriggers = useMemo(
+    () =>
+      findPrioritySemanticCurrentLookupTriggers({
+        waitingStore: waitingOnOtherStore,
+        messageEntries: prioritySemanticLookupConversationEntries,
+        activeEventRefStore: prioritySemanticActiveEventRefStore,
+        ownEmailAddresses: [
+          ...connectedOrderedMailboxes.map((mailbox) => mailbox.email),
+          authenticatedUser?.email ?? activeWorkspaceEmail,
+        ],
+      }),
+    [
+      activeWorkspaceEmail,
+      authenticatedUser?.email,
+      connectedOrderedMailboxes,
+      prioritySemanticActiveEventRefStore,
+      prioritySemanticLookupConversationEntries,
+      waitingOnOtherStore,
+    ],
+  );
+  const isPrioritySemanticDeterministicStoreCommitted = useMemo(
+    () =>
+      JSON.stringify(effectiveWaitingOnOtherStore) ===
+      JSON.stringify(waitingOnOtherStore),
+    [effectiveWaitingOnOtherStore, waitingOnOtherStore],
+  );
 
   useEffect(() => {
-    if (
-      JSON.stringify(effectiveWaitingOnOtherStore) !==
-      JSON.stringify(waitingOnOtherStore)
-    ) {
+    if (!isPrioritySemanticDeterministicStoreCommitted) {
       setWaitingOnOtherStore(effectiveWaitingOnOtherStore);
       try {
         pendingPrioritySemanticReconciliationRef.current = {
@@ -44032,6 +44203,7 @@ export function WorkspaceShell({
   }, [
     effectiveWaitingOnOtherStore,
     externalInboundConversationEntries,
+    isPrioritySemanticDeterministicStoreCommitted,
     waitingOnOtherStore,
   ]);
 
@@ -44055,7 +44227,7 @@ export function WorkspaceShell({
       ).forEach((trigger) => {
         if (trigger.incomingLocator.provider === "google") {
           const activeEvent = resolvePrioritySemanticActiveEventRef(
-            prioritySemanticActiveEventRefStoreRef.current,
+            prioritySemanticActiveEventRefStore,
             trigger.mailboxId,
             trigger.conversationId,
           );
@@ -44079,7 +44251,7 @@ export function WorkspaceShell({
       // Deterministic returned_reply is already committed. Shadow discovery is
       // discarded atomically if any malformed runtime input reaches this path.
     }
-  }, [waitingOnOtherStore]);
+  }, [prioritySemanticActiveEventRefStore, waitingOnOtherStore]);
 
   useEffect(() => {
     try {
@@ -44097,7 +44269,7 @@ export function WorkspaceShell({
               committedConversationRecord?.state === "waiting_on_other" &&
               committedConversationRecord.transitionedAt === trigger.sentAt;
             const activeEvent = resolvePrioritySemanticActiveEventRef(
-              prioritySemanticActiveEventRefStoreRef.current,
+              prioritySemanticActiveEventRefStore,
               trigger.mailboxId,
               trigger.conversationId,
             );
@@ -44132,11 +44304,23 @@ export function WorkspaceShell({
             });
 
             if (trigger.latestTurnId) {
-              recordPrioritySemanticObservation(triggerKey, responsePromise, {
+              const expectedIdentity = {
                 mailboxId: trigger.mailboxId,
                 conversationId: trigger.conversationId,
                 latestTurnId: trigger.latestTurnId,
-              });
+                semanticVersion: SEMANTIC_SCHEMA_VERSION,
+              } as const;
+              const observationKey =
+                buildPrioritySemanticObservationKey(expectedIdentity);
+              rememberPrioritySemanticRequestedTriggerKey(
+                requestedPrioritySemanticAssessmentObservationKeysRef.current,
+                observationKey,
+              );
+              recordPrioritySemanticObservation(
+                observationKey,
+                responsePromise,
+                expectedIdentity,
+              );
             } else {
               void responsePromise.catch(() => undefined);
             }
@@ -44150,7 +44334,11 @@ export function WorkspaceShell({
     } catch {
       // Outgoing semantic orchestration cannot surface into workspace effects.
     }
-  }, [recordPrioritySemanticObservation, waitingOnOtherStore]);
+  }, [
+    prioritySemanticActiveEventRefStore,
+    recordPrioritySemanticObservation,
+    waitingOnOtherStore,
+  ]);
 
   useEffect(() => {
     try {
@@ -44181,7 +44369,7 @@ export function WorkspaceShell({
             const activeEvent =
               trigger.incomingLocator.provider === "google"
                 ? resolvePrioritySemanticActiveEventRef(
-                    prioritySemanticActiveEventRefStoreRef.current,
+                    prioritySemanticActiveEventRefStore,
                     trigger.mailboxId,
                     trigger.conversationId,
                   )
@@ -44231,14 +44419,22 @@ export function WorkspaceShell({
                     ...semanticRequestBase,
                     incomingLocator: trigger.incomingLocator,
                   };
+            const expectedIdentity = {
+              mailboxId: trigger.mailboxId,
+              conversationId: trigger.conversationId,
+              latestTurnId: trigger.latestTurnId,
+              semanticVersion: SEMANTIC_SCHEMA_VERSION,
+            } as const;
+            const observationKey =
+              buildPrioritySemanticObservationKey(expectedIdentity);
+            rememberPrioritySemanticRequestedTriggerKey(
+              requestedPrioritySemanticAssessmentObservationKeysRef.current,
+              observationKey,
+            );
             recordPrioritySemanticObservation(
-              triggerKey,
+              observationKey,
               requestPrioritySemanticAssessment(semanticRequest),
-              {
-                mailboxId: trigger.mailboxId,
-                conversationId: trigger.conversationId,
-                latestTurnId: trigger.latestTurnId,
-              },
+              expectedIdentity,
             );
           } catch {
             pendingPrioritySemanticReturnedReplyTriggersRef.current.delete(
@@ -44250,7 +44446,50 @@ export function WorkspaceShell({
     } catch {
       // Incoming semantic orchestration cannot surface into sync or Priority.
     }
-  }, [recordPrioritySemanticObservation, waitingOnOtherStore]);
+  }, [
+    prioritySemanticActiveEventRefStore,
+    recordPrioritySemanticObservation,
+    waitingOnOtherStore,
+  ]);
+
+  useEffect(() => {
+    try {
+      if (!isPrioritySemanticDeterministicStoreCommitted) {
+        return;
+      }
+      prioritySemanticCurrentLookupTriggers.forEach((trigger) => {
+        if (
+          requestedPrioritySemanticAssessmentObservationKeysRef.current.has(
+            trigger.observationKey,
+          )
+        ) {
+          return;
+        }
+        const requestedKey = `lookup_current::${trigger.observationKey}`;
+        if (
+          !rememberPrioritySemanticRequestedTriggerKey(
+            requestedPrioritySemanticTriggerKeysRef.current,
+            requestedKey,
+          )
+        ) {
+          return;
+        }
+
+        recordPrioritySemanticObservation(
+          trigger.observationKey,
+          requestPrioritySemanticAssessment(trigger.request),
+          trigger.expectedIdentity,
+        );
+      });
+    } catch {
+      // Cache-only rehydration is optional. Any lookup failure leaves the
+      // deterministic open loop visible in Priority.
+    }
+  }, [
+    isPrioritySemanticDeterministicStoreCommitted,
+    prioritySemanticCurrentLookupTriggers,
+    recordPrioritySemanticObservation,
+  ]);
 
   const waitingOnOtherRepresentativeEntries = useMemo(
     () =>
@@ -44535,9 +44774,71 @@ export function WorkspaceShell({
         returnedReplyEvidence?.hasEvidence &&
           returnedReplyEvidence.confidence === "high",
       );
+      const canonicalConversation = resolveCanonicalConversationIdentity(
+        message,
+        mailboxId,
+      );
+      const deterministicSemanticState = hasWaitingOnOtherEvidence
+        ? "waiting_on_other"
+        : hasReturnedReplyEvidence
+          ? "returned_reply"
+          : null;
+      const currentSemanticTrigger =
+        isPrioritySemanticDeterministicStoreCommitted &&
+        deterministicSemanticState &&
+        canonicalConversation.isAuthoritativeConversation
+          ? prioritySemanticCurrentLookupTriggers.find(
+              (trigger) =>
+                trigger.deterministicState === deterministicSemanticState &&
+                trigger.expectedIdentity.mailboxId === mailboxId &&
+                trigger.expectedIdentity.conversationId ===
+                  canonicalConversation.key,
+            ) ?? null
+          : null;
+      const currentSemanticActiveEventRef = currentSemanticTrigger
+        ? currentSemanticTrigger.request.trigger === "outgoing_reply"
+          ? currentSemanticTrigger.request.eventRef
+          : "activeEventRef" in currentSemanticTrigger.request
+            ? currentSemanticTrigger.request.activeEventRef
+            : undefined
+        : undefined;
+      const learnedPrioritySelection = resolveSenderLearningEntry(
+        message.from,
+        senderCategoryLearning,
+      )?.entry.sourcePrioritySelection;
+      const normalizedLearnedPrioritySelection =
+        typeof learnedPrioritySelection === "string"
+          ? learnedPrioritySelection.trim().toLowerCase()
+          : "";
+      const hasIndependentPriorityAuthority = Boolean(
+        override === "priority" ||
+          normalizedLearnedPrioritySelection === "priority" ||
+          normalizedLearnedPrioritySelection === "important" ||
+          message.collaboration ||
+          message.isShared ||
+          message.sharedContext ||
+          reviewController.getReviewBySourceId(message.id),
+      );
+      const isAutomaticOpenLoopSemanticallySuppressed = Boolean(
+        currentSemanticTrigger &&
+          shouldSuppressAutomaticOpenLoopPriority({
+            observation:
+              prioritySemanticObservations[
+                currentSemanticTrigger.observationKey
+              ] ?? null,
+            currentIdentity: currentSemanticTrigger.expectedIdentity,
+            ...(currentSemanticActiveEventRef
+              ? { currentActiveEventRef: currentSemanticActiveEventRef }
+              : {}),
+            hasAutomaticOpenLoopEvidence:
+              hasWaitingOnOtherEvidence || hasReturnedReplyEvidence,
+            hasIndependentPriorityAuthority,
+          }),
+      );
 
       return (
         !isPriorityMessageCleared(mailboxId, message) &&
+        !isAutomaticOpenLoopSemanticallySuppressed &&
         (hasWaitingOnOtherEvidence ||
           hasReturnedReplyEvidence ||
           isPriorityQueueEligibleMessage(message, override)) &&

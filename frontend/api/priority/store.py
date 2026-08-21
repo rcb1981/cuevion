@@ -276,6 +276,34 @@ class SemanticAssessmentStore:
             raise SemanticStoreUnavailable()
         return record
 
+    def get_result_for_exact_scope(
+        self,
+        scope: SemanticCacheScope,
+    ) -> CachedSemanticAssessment | None:
+        """Read only the result bound to an already-proven exact scope.
+
+        This lookup intentionally performs no current-pointer write, negative
+        cache read, lease acquisition, or attempt consumption.  Callers must
+        independently prove the provider source current before and after use.
+        """
+        keys = self._keys(scope)
+        value = self._command(["GET", keys["result"]])
+        if value is None:
+            return None
+        conversation_digest, latest_turn_digest = self._record_digests(scope)
+        record = _decode_result(
+            value,
+            expected_scope_digest=keys["digest"],
+            expected_semantic_version=scope.semantic_version,
+            expected_model_version=scope.model_version,
+            expected_conversation_digest=conversation_digest,
+            expected_latest_turn_digest=latest_turn_digest,
+            expected_input_hash=None,
+        )
+        if record is None:
+            raise SemanticStoreUnavailable()
+        return record
+
     def get_result_if_current(
         self,
         scope: SemanticCacheScope,
@@ -532,7 +560,7 @@ def _decode_result(
     expected_model_version: str,
     expected_conversation_digest: str,
     expected_latest_turn_digest: str,
-    expected_input_hash: str,
+    expected_input_hash: str | None,
 ) -> CachedSemanticAssessment | None:
     if type(value) is not str or len(value) > 4_096:
         return None
@@ -564,7 +592,12 @@ def _decode_result(
             or payload["modelVersion"] != expected_model_version
             or payload["conversationDigest"] != expected_conversation_digest
             or payload["latestTurnDigest"] != expected_latest_turn_digest
-            or payload["inputHash"] != expected_input_hash
+            or type(payload["inputHash"]) is not str
+            or _HEX_DIGEST_RE.fullmatch(payload["inputHash"]) is None
+            or (
+                expected_input_hash is not None
+                and payload["inputHash"] != expected_input_hash
+            )
             or type(payload["assessedAt"]) is not int
             or payload["assessedAt"] < 0
         ):
