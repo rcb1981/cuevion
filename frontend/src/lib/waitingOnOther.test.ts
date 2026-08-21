@@ -3,6 +3,7 @@ import {
   clearConversationWaitingOnOther,
   normalizeWaitingOnOtherStore,
   reconcileWaitingOnOtherStore,
+  resolveWaitingReturnedReplyEvidence,
   resolveWaitingOnOtherState,
   selectWaitingOnOtherRepresentatives,
   transitionWaitingOnOtherAfterSend,
@@ -32,6 +33,7 @@ function test(name: string, fn: () => void) {
 
 const transitionTime = "2026-08-21T10:00:00.000Z";
 const transitionMs = new Date(transitionTime).getTime();
+const ownEmailAddresses = ["me@example.com", "alias@example.com"];
 
 function context(
   mailboxId: string,
@@ -172,10 +174,23 @@ test("newer external inbound supersedes waiting_on_other", () => {
   const reconciled = reconcileWaitingOnOtherStore(
     replyTransition(source),
     [{ mailboxId: "mail-a", message: returnedReply }],
-    new Date("2026-08-21T11:01:00.000Z").getTime(),
+    {
+      ownEmailAddresses,
+      nowMs: new Date("2026-08-21T11:01:00.000Z").getTime(),
+    },
   );
 
-  assert.deepEqual(reconciled, {});
+  assert.equal(resolveWaitingOnOtherState(reconciled, "mail-a", returnedReply), null);
+  assert.equal(
+    resolveWaitingReturnedReplyEvidence(
+      reconciled,
+      "mail-a",
+      returnedReply,
+      ownEmailAddresses,
+      new Date("2026-08-21T11:01:00.000Z").getTime(),
+    )?.confidence,
+    "high",
+  );
 });
 
 test("older inbound does not clear the post-reply waiting state", () => {
@@ -185,9 +200,327 @@ test("older inbound does not clear the post-reply waiting state", () => {
     reconcileWaitingOnOtherStore(
       store,
       [{ mailboxId: "mail-a", message: source }],
-      transitionMs,
+      { ownEmailAddresses, nowMs: transitionMs },
     ),
     store,
+  );
+});
+
+test("Gmail returned-reply evidence survives refresh without local Sent history", () => {
+  const source = message();
+  const returnedReply = message({
+    id: "gmail-returned-1",
+    providerMessageId: "gmail-provider-message-1",
+    createdAt: "2026-08-21T11:00:00.000Z",
+    timestamp: "2026-08-21T11:00:00.000Z",
+  });
+  const reconciled = reconcileWaitingOnOtherStore(
+    replyTransition(source),
+    [{ mailboxId: "mail-a", message: returnedReply }],
+    { ownEmailAddresses, nowMs: new Date(returnedReply.createdAt!).getTime() },
+  );
+  const refreshed = normalizeWaitingOnOtherStore(
+    JSON.parse(JSON.stringify(reconciled)),
+    new Date(returnedReply.createdAt!).getTime(),
+  );
+
+  const evidence = resolveWaitingReturnedReplyEvidence(
+    refreshed,
+    "mail-a",
+    returnedReply,
+    ownEmailAddresses,
+    new Date(returnedReply.createdAt!).getTime(),
+  );
+  assert.equal(evidence?.hasEvidence, true);
+  assert.equal(evidence?.lastUserReplyAt, transitionTime);
+  assert.equal(evidence?.returnedReplyAt, returnedReply.createdAt);
+});
+
+test("custom IMAP RFC-root return becomes high-confidence evidence", () => {
+  const source = message({ provider: "custom_imap", authority: "rfc" });
+  const returnedReply = message({
+    id: "imap-returned-1",
+    imapUid: "102",
+    provider: "custom_imap",
+    authority: "rfc",
+    createdAt: "2026-08-21T11:00:00.000Z",
+    timestamp: "2026-08-21T11:00:00.000Z",
+  });
+  const reconciled = reconcileWaitingOnOtherStore(
+    replyTransition(source),
+    [{ mailboxId: "mail-a", message: returnedReply }],
+    { ownEmailAddresses, nowMs: new Date(returnedReply.createdAt!).getTime() },
+  );
+
+  assert.equal(
+    resolveWaitingReturnedReplyEvidence(
+      reconciled,
+      "mail-a",
+      returnedReply,
+      ownEmailAddresses,
+      new Date(returnedReply.createdAt!).getTime(),
+    )?.confidence,
+    "high",
+  );
+});
+
+for (const unsafeSource of [
+  message({ threadId: "licensing question", authority: "heuristic" }),
+  message({ threadId: undefined, authority: "heuristic", subject: "Re: Licensing question" }),
+]) {
+  test(`unsafe ${unsafeSource.threadId ? "subject-derived identity" : "Re: alone"} cannot transition to returned_reply`, () => {
+    const waitingStore = replyTransition(unsafeSource);
+    const newerInbound = {
+      ...unsafeSource,
+      id: "unsafe-returned",
+      createdAt: "2026-08-21T11:00:00.000Z",
+      timestamp: "2026-08-21T11:00:00.000Z",
+    };
+
+    assert.deepEqual(waitingStore, {});
+    assert.deepEqual(
+      reconcileWaitingOnOtherStore(
+        waitingStore,
+        [{ mailboxId: "mail-a", message: newerInbound }],
+        { ownEmailAddresses, nowMs: new Date(newerInbound.createdAt).getTime() },
+      ),
+      {},
+    );
+  });
+}
+
+test("equal timestamp ambiguity cannot satisfy waiting", () => {
+  const source = message();
+  const equalTimestampInbound = message({
+    id: "equal-time",
+    createdAt: transitionTime,
+    timestamp: transitionTime,
+  });
+  const store = replyTransition(source);
+
+  assert.deepEqual(
+    reconcileWaitingOnOtherStore(
+      store,
+      [{ mailboxId: "mail-a", message: equalTimestampInbound }],
+      { ownEmailAddresses, nowMs: transitionMs },
+    ),
+    store,
+  );
+});
+
+test("two distinct newest inbounds with equal timestamps fail conservatively", () => {
+  const source = message();
+  const firstInbound = message({
+    id: "equal-newest-a",
+    providerMessageId: "provider-a",
+    createdAt: "2026-08-21T11:00:00.000Z",
+    timestamp: "2026-08-21T11:00:00.000Z",
+  });
+  const secondInbound = message({
+    id: "equal-newest-b",
+    providerMessageId: "provider-b",
+    createdAt: firstInbound.createdAt,
+    timestamp: firstInbound.timestamp,
+  });
+  const store = replyTransition(source);
+
+  assert.deepEqual(
+    reconcileWaitingOnOtherStore(
+      store,
+      [
+        { mailboxId: "mail-a", message: firstInbound },
+        { mailboxId: "mail-a", message: secondInbound },
+      ],
+      {
+        ownEmailAddresses,
+        nowMs: new Date(firstInbound.createdAt!).getTime(),
+      },
+    ),
+    store,
+  );
+});
+
+for (const from of ["Me <me@example.com>", "alias@example.com"] as const) {
+  test(`owned sender ${from} cannot satisfy waiting`, () => {
+    const source = message();
+    const ownCopy = message({
+      id: `own-${from}`,
+      from,
+      createdAt: "2026-08-21T11:00:00.000Z",
+      timestamp: "2026-08-21T11:00:00.000Z",
+    });
+    const store = replyTransition(source);
+
+    assert.deepEqual(
+      reconcileWaitingOnOtherStore(
+        store,
+        [{ mailboxId: "mail-a", message: ownCopy }],
+        { ownEmailAddresses, nowMs: new Date(ownCopy.createdAt!).getTime() },
+      ),
+      store,
+    );
+  });
+}
+
+test("missing or malformed sender identity cannot satisfy waiting", () => {
+  const source = message();
+  const malformedInbound = message({
+    id: "missing-sender",
+    from: "not-an-email",
+    sender: "",
+    createdAt: "2026-08-21T11:00:00.000Z",
+    timestamp: "2026-08-21T11:00:00.000Z",
+  });
+  const store = replyTransition(source);
+
+  assert.deepEqual(
+    reconcileWaitingOnOtherStore(
+      store,
+      [{ mailboxId: "mail-a", message: malformedInbound }],
+      { ownEmailAddresses, nowMs: new Date(malformedInbound.createdAt!).getTime() },
+    ),
+    store,
+  );
+});
+
+test("cross-mailbox authoritative thread collision cannot return another mailbox", () => {
+  const waitingSource = message({ mailboxId: "mail-a", id: "collision" });
+  const wrongMailboxInbound = message({
+    mailboxId: "mail-b",
+    id: "collision",
+    threadId: "gmail:mail-a:thread-1",
+    createdAt: "2026-08-21T11:00:00.000Z",
+    timestamp: "2026-08-21T11:00:00.000Z",
+  });
+  const store = replyTransition(waitingSource);
+
+  assert.deepEqual(
+    reconcileWaitingOnOtherStore(
+      store,
+      [{ mailboxId: "mail-b", message: wrongMailboxInbound }],
+      { ownEmailAddresses, nowMs: new Date(wrongMailboxInbound.createdAt!).getTime() },
+    ),
+    store,
+  );
+});
+
+test("duplicate provider delivery is idempotent and retains one conversation record", () => {
+  const source = message();
+  const returnedReply = message({
+    id: "gmail-returned-duplicate",
+    providerMessageId: "provider-returned-duplicate",
+    createdAt: "2026-08-21T11:00:00.000Z",
+    timestamp: "2026-08-21T11:00:00.000Z",
+  });
+  const options = {
+    ownEmailAddresses,
+    nowMs: new Date(returnedReply.createdAt!).getTime(),
+  };
+  const once = reconcileWaitingOnOtherStore(
+    replyTransition(source),
+    [{ mailboxId: "mail-a", message: returnedReply }],
+    options,
+  );
+  const duplicated = reconcileWaitingOnOtherStore(
+    once,
+    [
+      { mailboxId: "mail-a", message: returnedReply },
+      { mailboxId: "mail-a", message: { ...returnedReply } },
+    ],
+    options,
+  );
+
+  assert.deepEqual(duplicated, once);
+  assert.equal(Object.keys(duplicated).length, 1);
+});
+
+test("only the persisted returned inbound receives transition evidence", () => {
+  const source = message();
+  const returnedReply = message({
+    id: "returned-current",
+    createdAt: "2026-08-21T11:00:00.000Z",
+    timestamp: "2026-08-21T11:00:00.000Z",
+  });
+  const otherThreadMessage = message({
+    id: "other-same-thread",
+    createdAt: "2026-08-21T10:30:00.000Z",
+    timestamp: "2026-08-21T10:30:00.000Z",
+  });
+  const nowMs = new Date(returnedReply.createdAt!).getTime();
+  const reconciled = reconcileWaitingOnOtherStore(
+    replyTransition(source),
+    [{ mailboxId: "mail-a", message: returnedReply }],
+    { ownEmailAddresses, nowMs },
+  );
+
+  assert.equal(
+    resolveWaitingReturnedReplyEvidence(
+      reconciled,
+      "mail-a",
+      returnedReply,
+      ownEmailAddresses,
+      nowMs,
+    )?.hasEvidence,
+    true,
+  );
+  assert.equal(
+    resolveWaitingReturnedReplyEvidence(
+      reconciled,
+      "mail-a",
+      otherThreadMessage,
+      ownEmailAddresses,
+      nowMs,
+    ),
+    null,
+  );
+});
+
+test("reading a returned inbound does not remove its evidence", () => {
+  const source = message();
+  const returnedReply = message({
+    id: "returned-read",
+    createdAt: "2026-08-21T11:00:00.000Z",
+    timestamp: "2026-08-21T11:00:00.000Z",
+  });
+  const nowMs = new Date(returnedReply.createdAt!).getTime();
+  const reconciled = reconcileWaitingOnOtherStore(
+    replyTransition(source),
+    [{ mailboxId: "mail-a", message: returnedReply }],
+    { ownEmailAddresses, nowMs },
+  );
+
+  assert.equal(
+    resolveWaitingReturnedReplyEvidence(
+      reconciled,
+      "mail-a",
+      { ...returnedReply, unread: false },
+      ownEmailAddresses,
+      nowMs,
+    )?.hasEvidence,
+    true,
+  );
+});
+
+test("Done or Remove clears persisted returned-reply evidence", () => {
+  const source = message();
+  const returnedReply = message({
+    id: "returned-cleared",
+    createdAt: "2026-08-21T11:00:00.000Z",
+    timestamp: "2026-08-21T11:00:00.000Z",
+  });
+  const nowMs = new Date(returnedReply.createdAt!).getTime();
+  const reconciled = reconcileWaitingOnOtherStore(
+    replyTransition(source),
+    [{ mailboxId: "mail-a", message: returnedReply }],
+    { ownEmailAddresses, nowMs },
+  );
+
+  assert.deepEqual(
+    clearConversationWaitingOnOther(reconciled, {
+      mailboxId: "mail-a",
+      message: returnedReply,
+    }),
+    {},
   );
 });
 

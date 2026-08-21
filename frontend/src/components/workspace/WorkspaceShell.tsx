@@ -313,6 +313,7 @@ import {
   clearConversationWaitingOnOther,
   normalizeWaitingOnOtherStore,
   reconcileWaitingOnOtherStore,
+  resolveWaitingReturnedReplyEvidence,
   resolveWaitingOnOtherState,
   selectWaitingOnOtherRepresentatives,
   transitionWaitingOnOtherAfterSend,
@@ -43772,8 +43773,20 @@ export function WorkspaceShell({
       reconcileWaitingOnOtherStore(
         waitingOnOtherStore,
         externalInboundConversationEntries,
+        {
+          ownEmailAddresses: [
+            ...connectedOrderedMailboxes.map((mailbox) => mailbox.email),
+            authenticatedUser?.email ?? activeWorkspaceEmail,
+          ],
+        },
       ),
-    [externalInboundConversationEntries, waitingOnOtherStore],
+    [
+      activeWorkspaceEmail,
+      authenticatedUser?.email,
+      connectedOrderedMailboxes,
+      externalInboundConversationEntries,
+      waitingOnOtherStore,
+    ],
   );
 
   useEffect(() => {
@@ -43806,6 +43819,45 @@ export function WorkspaceShell({
       ),
     [effectiveWaitingOnOtherStore, mailboxStore, orderedMailboxes],
   );
+  const returnedReplyRepresentativeEntries = useMemo(() => {
+    const ownedEmailAddresses = [
+      ...connectedOrderedMailboxes.map((mailbox) => mailbox.email),
+      authenticatedUser?.email ?? activeWorkspaceEmail,
+    ];
+
+    return dedupeLatestCanonicalConversationEntries(
+      orderedMailboxes.flatMap((candidate) => {
+        const collections =
+          mailboxStore[candidate.id] ?? createEmptyMailboxCollections();
+
+        return [...collections.Inbox, ...collections.Filtered]
+          .filter((message) => !isWorkspaceMessageSpamSuppressed(message))
+          .flatMap((message) =>
+            resolveWaitingReturnedReplyEvidence(
+              effectiveWaitingOnOtherStore,
+              candidate.id,
+              message,
+              ownedEmailAddresses,
+            )
+              ? [
+                  {
+                    mailboxId: candidate.id,
+                    mailboxTitle: candidate.title,
+                    message,
+                  },
+                ]
+              : [],
+          );
+      }),
+    );
+  }, [
+    activeWorkspaceEmail,
+    authenticatedUser?.email,
+    connectedOrderedMailboxes,
+    effectiveWaitingOnOtherStore,
+    mailboxStore,
+    orderedMailboxes,
+  ]);
   const normalPriorityGateCandidateEntries = (() => {
     const seenMessageKeys = new Set<string>();
     const uniqueEntries: Array<{
@@ -43856,6 +43908,7 @@ export function WorkspaceShell({
     }
 
     waitingOnOtherRepresentativeEntries.forEach(addUniqueEntry);
+    returnedReplyRepresentativeEntries.forEach(addUniqueEntry);
 
     return uniqueEntries;
   })();
@@ -43911,6 +43964,21 @@ export function WorkspaceShell({
         ),
       ]),
     );
+    const ownedEmailAddresses = [
+      ...connectedOrderedMailboxes.map((mailbox) => mailbox.email),
+      authenticatedUser?.email ?? activeWorkspaceEmail,
+    ];
+    const runtimeReturnedReplyEvidence = Object.fromEntries(
+      normalPriorityGateCandidateEntries.map(({ mailboxId, message }) => [
+        createNormalPriorityMessageKey(mailboxId, message),
+        resolveWaitingReturnedReplyEvidence(
+          effectiveWaitingOnOtherStore,
+          mailboxId,
+          message,
+          ownedEmailAddresses,
+        ),
+      ]),
+    );
 
     return buildPriorityRuntimeSignalsForCandidates({
       candidateMessages: normalPriorityGateCandidateEntries.map(({ mailboxId, message }) => ({
@@ -43926,6 +43994,7 @@ export function WorkspaceShell({
       learnedPrioritySelections: runtimeLearnedPrioritySelections,
       hasAssignedReviewContextByMessageKey: runtimeAssignedReviewContexts,
       waitingOnOtherByMessageKey: runtimeWaitingOnOtherEvidence,
+      returnedReplyEvidenceByMessageKey: runtimeReturnedReplyEvidence,
     });
   }, [
     activeWorkspaceEmail,
@@ -44006,12 +44075,20 @@ export function WorkspaceShell({
           message,
         ),
       );
+      const returnedReplyEvidence =
+        priorityRuntimeSignalsForCandidates[messageKey]?.returnedReplyEvidence;
+      const hasReturnedReplyEvidence = Boolean(
+        returnedReplyEvidence?.hasEvidence &&
+          returnedReplyEvidence.confidence === "high",
+      );
 
       return (
         !isPriorityMessageCleared(mailboxId, message) &&
         (hasWaitingOnOtherEvidence ||
+          hasReturnedReplyEvidence ||
           isPriorityQueueEligibleMessage(message, override)) &&
         (hasWaitingOnOtherEvidence ||
+          hasReturnedReplyEvidence ||
           isPriorityPageVisiblePriorityMessage(message, mailboxId)) &&
         strictNormalPriorityAllowedMessageKeys.has(messageKey)
       );

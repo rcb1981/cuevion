@@ -10,7 +10,10 @@ import type {
   PriorityManualOverride,
   PrioritySourceResult,
 } from "./prioritySource";
-import type { ReturnedReplyEvidence } from "./returnedReplyEvidence";
+import {
+  selectStrongestReturnedReplyEvidence,
+  type ReturnedReplyEvidence,
+} from "./returnedReplyEvidence";
 
 export type PriorityRuntimeCandidateMessage = RuntimePriorityMessageLike & {
   mailboxId?: string | null;
@@ -39,6 +42,10 @@ export type PriorityRuntimeSignalInput = {
   hasCollaborationContextByMessageKey?: Record<string, boolean | undefined>;
   hasAssignedReviewContextByMessageKey?: Record<string, boolean | undefined>;
   waitingOnOtherByMessageKey?: Record<string, boolean | undefined>;
+  returnedReplyEvidenceByMessageKey?: Record<
+    string,
+    ReturnedReplyEvidence | null | undefined
+  >;
   resolveMessageKey?: (
     message: PriorityRuntimeCandidateMessage,
     index: number,
@@ -90,7 +97,7 @@ export function buildPriorityRuntimeSignalsForCandidates(
         mailboxId,
         input.sentMessagesByMailboxId,
       );
-      const returnedReplyEvidence = resolveRuntimeReturnedReplyEvidence({
+      const localSentReturnedReplyEvidence = resolveRuntimeReturnedReplyEvidence({
         currentMessage: candidateMessage,
         threadMessages,
         sentMessages,
@@ -98,6 +105,10 @@ export function buildPriorityRuntimeSignalsForCandidates(
         connectedMailboxes: input.connectedMailboxes,
         authenticatedUserEmail: input.authenticatedUserEmail,
       });
+      const returnedReplyEvidence = selectStrongestReturnedReplyEvidence(
+        input.returnedReplyEvidenceByMessageKey?.[messageKey],
+        localSentReturnedReplyEvidence,
+      );
       const prioritySource = resolveRuntimePrioritySource({
         message: candidateMessage,
         manualOverride: input.manualPriorityOverrides?.[messageKey],

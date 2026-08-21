@@ -39,7 +39,41 @@ const noReturnedReplyEvidence = (
   reason,
 });
 
-function normalizeEmailAddress(value: string | null | undefined) {
+const returnedReplyConfidenceRank: Record<ReturnedReplyConfidence, number> = {
+  high: 3,
+  medium: 2,
+  low: 1,
+};
+
+export function selectStrongestReturnedReplyEvidence(
+  ...candidates: Array<ReturnedReplyEvidence | null | undefined>
+): ReturnedReplyEvidence {
+  const availableCandidates = candidates.filter(
+    (candidate): candidate is ReturnedReplyEvidence => Boolean(candidate),
+  );
+
+  return (
+    availableCandidates.reduce<ReturnedReplyEvidence | null>((strongest, candidate) => {
+      if (!strongest) {
+        return candidate;
+      }
+
+      if (candidate.hasEvidence !== strongest.hasEvidence) {
+        return candidate.hasEvidence ? candidate : strongest;
+      }
+
+      return returnedReplyConfidenceRank[candidate.confidence] >
+        returnedReplyConfidenceRank[strongest.confidence]
+        ? candidate
+        : strongest;
+    }, null) ??
+    noReturnedReplyEvidence("No returned-reply evidence source was available.")
+  );
+}
+
+export function normalizeReturnedReplyEmailAddress(
+  value: string | null | undefined,
+) {
   const normalizedValue = (value ?? "").trim().toLowerCase();
   const emailMatch = normalizedValue.match(
     /([a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,})/i,
@@ -51,12 +85,14 @@ function normalizeEmailAddress(value: string | null | undefined) {
 function splitAddressList(value: string | null | undefined) {
   return (value ?? "")
     .split(/[,;]/)
-    .map(normalizeEmailAddress)
+    .map(normalizeReturnedReplyEmailAddress)
     .filter(Boolean);
 }
 
-function getMessageSenderAddress(message: ReturnedReplyMessageLike) {
-  return normalizeEmailAddress(message.from || message.sender);
+export function getReturnedReplySenderAddress(
+  message: ReturnedReplyMessageLike,
+) {
+  return normalizeReturnedReplyEmailAddress(message.from || message.sender);
 }
 
 function getMessageDate(message: ReturnedReplyMessageLike) {
@@ -97,7 +133,7 @@ function hasFallbackParticipantEvidence(
   sentMessage: ReturnedReplyMessageLike,
   threadMessages: ReturnedReplyMessageLike[],
 ) {
-  const currentSender = getMessageSenderAddress(currentMessage);
+  const currentSender = getReturnedReplySenderAddress(currentMessage);
 
   if (!currentSender) {
     return false;
@@ -120,7 +156,7 @@ function hasFallbackParticipantEvidence(
     }
 
     const participants = new Set([
-      getMessageSenderAddress(message),
+      getReturnedReplySenderAddress(message),
       ...splitAddressList(message.to),
       ...splitAddressList(message.cc),
     ].filter(Boolean));
@@ -157,10 +193,10 @@ function isUserAuthoredSentMessage(
   message: ReturnedReplyMessageLike,
   ownAddressSet: Set<string>,
 ) {
-  const sender = getMessageSenderAddress(message);
+  const sender = getReturnedReplySenderAddress(message);
 
   if (!sender) {
-    return normalizeEmailAddress(message.signal) === "sent";
+    return normalizeReturnedReplyEmailAddress(message.signal) === "sent";
   }
 
   return ownAddressSet.has(sender);
@@ -171,7 +207,7 @@ export function resolveReturnedReplyEvidence(
 ): ReturnedReplyEvidence {
   const ownAddressSet = new Set(
     (input.ownEmailAddresses ?? [])
-      .map(normalizeEmailAddress)
+      .map(normalizeReturnedReplyEmailAddress)
       .filter(Boolean),
   );
 
@@ -181,7 +217,7 @@ export function resolveReturnedReplyEvidence(
     );
   }
 
-  const currentSender = getMessageSenderAddress(input.currentMessage);
+  const currentSender = getReturnedReplySenderAddress(input.currentMessage);
   if (!currentSender) {
     return noReturnedReplyEvidence(
       "Current message sender is missing, so returned-reply evidence is incomplete.",

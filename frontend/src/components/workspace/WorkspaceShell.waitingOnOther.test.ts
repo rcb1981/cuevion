@@ -42,8 +42,28 @@ assert.match(
 );
 assert.match(
   source,
+  /resolveWaitingReturnedReplyEvidence\([\s\S]*?returnedReplyEvidenceByMessageKey: runtimeReturnedReplyEvidence/,
+  "persisted waiting-to-returned evidence must enter the same Priority runtime source and gate",
+);
+assert.match(
+  source,
+  /reconcileWaitingOnOtherStore\([\s\S]*?ownEmailAddresses:/,
+  "waiting reconciliation must validate inbound senders against owned mailbox identities",
+);
+assert.match(
+  source,
+  /hasWaitingOnOtherEvidence \|\|[\s\S]*?hasReturnedReplyEvidence \|\|[\s\S]*?isPriorityQueueEligibleMessage[\s\S]*?hasWaitingOnOtherEvidence \|\|[\s\S]*?hasReturnedReplyEvidence \|\|[\s\S]*?isPriorityPageVisiblePriorityMessage/,
+  "high returned-reply evidence must survive the legacy Priority eligibility and badge filters",
+);
+assert.match(
+  source,
   /waitingOnOtherRepresentativeEntries\.forEach\(addUniqueEntry\)/,
   "one physical waiting representative must join central Priority candidates",
+);
+assert.match(
+  source,
+  /returnedReplyRepresentativeEntries\.forEach\(addUniqueEntry\)/,
+  "one physical returned-reply representative must join central Priority candidates even after Filtered routing",
 );
 
 console.log("\nWorkspaceShell waiting_on_other integration tests passed.");

@@ -323,6 +323,62 @@ test("prioritySource returns returned_reply only when returned-reply evidence is
   assert.equal(signals["main:inbound-2"].prioritySource.source, "none");
 });
 
+test("persisted waiting transition supplies high returned-reply evidence without Sent history", () => {
+  const signals = buildPriorityRuntimeSignalsForCandidates({
+    ownEmailAddresses,
+    candidateMessages: [
+      message({ id: "inbound-1", threadId: "provider-thread-1" }),
+    ],
+    returnedReplyEvidenceByMessageKey: {
+      "main:inbound-1": {
+        hasEvidence: true,
+        confidence: "high",
+        reason: "Authoritative waiting transition.",
+        lastUserReplyAt: "2026-07-02T10:00:00.000Z",
+        returnedReplyAt: "2026-07-02T12:00:00.000Z",
+      },
+    },
+  });
+
+  assert.equal(signals["main:inbound-1"].returnedReplyEvidence.hasEvidence, true);
+  assert.equal(signals["main:inbound-1"].returnedReplyEvidence.confidence, "high");
+  assert.equal(signals["main:inbound-1"].prioritySource.source, "returned_reply");
+});
+
+test("high waiting-transition evidence wins over medium subject fallback", () => {
+  const signals = buildPriorityRuntimeSignalsForCandidates({
+    ownEmailAddresses,
+    candidateMessages: [
+      message({
+        id: "inbound-1",
+        threadId: "licensing question",
+      }),
+    ],
+    sentMessagesByMailboxId: {
+      main: [
+        sentMessage({
+          id: "sent-1",
+          threadId: "licensing question",
+          to: "partner@example.com",
+        }),
+      ],
+    },
+    returnedReplyEvidenceByMessageKey: {
+      "main:inbound-1": {
+        hasEvidence: true,
+        confidence: "high",
+        reason: "Authoritative waiting transition.",
+      },
+    },
+  });
+
+  assert.equal(signals["main:inbound-1"].returnedReplyEvidence.confidence, "high");
+  assert.equal(
+    signals["main:inbound-1"].returnedReplyEvidence.reason,
+    "Authoritative waiting transition.",
+  );
+});
+
 test("waiting state is projected as a concrete runtime Priority source", () => {
   const signals = buildPriorityRuntimeSignalsForCandidates({
     ownEmailAddresses,
@@ -349,6 +405,28 @@ test("manual removed beats runtime waiting state", () => {
     },
     waitingOnOtherByMessageKey: {
       "main:inbound-1": true,
+    },
+  });
+
+  assert.equal(signals["main:inbound-1"].prioritySource.source, "manual");
+  assert.equal(signals["main:inbound-1"].prioritySource.level, "normal");
+});
+
+test("manual removed beats persisted returned-reply evidence", () => {
+  const signals = buildPriorityRuntimeSignalsForCandidates({
+    ownEmailAddresses,
+    candidateMessages: [
+      message({ id: "inbound-1", threadId: "provider-thread-1" }),
+    ],
+    manualPriorityOverrides: {
+      "main:inbound-1": "removed",
+    },
+    returnedReplyEvidenceByMessageKey: {
+      "main:inbound-1": {
+        hasEvidence: true,
+        confidence: "high",
+        reason: "Authoritative waiting transition.",
+      },
     },
   });
 

@@ -7,7 +7,11 @@
 
 import assert from "node:assert/strict";
 import { resolvePrioritySource } from "./prioritySource";
-import { resolveReturnedReplyEvidence, type ReturnedReplyMessageLike } from "./returnedReplyEvidence";
+import {
+  resolveReturnedReplyEvidence,
+  selectStrongestReturnedReplyEvidence,
+  type ReturnedReplyMessageLike,
+} from "./returnedReplyEvidence";
 
 let passed = 0;
 let failed = 0;
@@ -245,6 +249,24 @@ test("returned evidence feeds prioritySource only when explicitly passed", () =>
   assert.equal(withoutEvidence.source, "none");
   assert.equal(withEvidence.source, "returned_reply");
   assert.equal(withEvidence.level, "priority");
+});
+
+test("authoritative waiting evidence and local Sent evidence converge on the strongest contract", () => {
+  const selected = selectStrongestReturnedReplyEvidence(
+    {
+      hasEvidence: true,
+      confidence: "medium",
+      reason: "Participant-backed subject fallback.",
+    },
+    {
+      hasEvidence: true,
+      confidence: "high",
+      reason: "Authoritative waiting transition.",
+    },
+  );
+
+  assert.equal(selected.confidence, "high");
+  assert.equal(selected.reason, "Authoritative waiting transition.");
 });
 
 if (failed > 0) {
