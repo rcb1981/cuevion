@@ -305,6 +305,31 @@ assert.match(
   /applyLiveInboxMessagesToMailboxStore\([\s\S]*?prioritySemanticNewInboundAcceptedRefreshAuthorityRef\.current\[mailboxId\]/,
   "only a successfully accepted and published provider refresh grants live-row projection authority",
 );
+const gmailTrashReadbackStart = source.indexOf(
+  "const applyProviderAuthoritativeGmailTrashSnapshot =",
+);
+const gmailTrashReadbackEnd = source.indexOf(
+  "const readProviderInboxTrashStateVersion =",
+  gmailTrashReadbackStart,
+);
+const gmailTrashReadbackSource = source.slice(
+  gmailTrashReadbackStart,
+  gmailTrashReadbackEnd,
+);
+assert.ok(
+  gmailTrashReadbackStart >= 0 && gmailTrashReadbackEnd > gmailTrashReadbackStart,
+  "the authoritative Gmail Trash readback must exist",
+);
+assert.match(
+  gmailTrashReadbackSource,
+  /flushSync\([\s\S]*?if \(!applied\) \{[\s\S]*?return false;[\s\S]*?previousAuthorityGeneration[\s\S]*?confirmArchive\([\s\S]*?rebasePrioritySemanticNewInboundAcceptedGmailAuthority\([\s\S]*?currentConnectionKey:[\s\S]*?currentConnectionEpoch:[\s\S]*?previousAuthorityGeneration,[\s\S]*?flushSync/,
+  "only a successfully published, connection-current semantic Inbox authority may rebase before the post-Trash generation renders",
+);
+assert.doesNotMatch(
+  gmailTrashReadbackSource,
+  /requestPrioritySemanticNewInboundAssessment|coordinatePrioritySemanticNewInboundAssessmentCommit/,
+  "the Gmail Trash reconciliation path must contain no semantic assessment dispatch",
+);
 assert.match(
   refreshSource,
   /discoveredCandidates\.forEach[\s\S]*?newInboundMode:[\s\S]*?response\.prioritySemanticNewInboundMode === "active"[\s\S]*?authorityGeneration:/,
@@ -621,7 +646,7 @@ async function runActiveDirectAssessmentRuntimeRegression() {
         messageId: string;
         record: ActiveRecord;
         conversationEntries: Array<{
-          folder: "Archive" | "Inbox";
+          folder: "Archive" | "Inbox" | "Sent";
           message: typeof inboxMessage;
         }>;
       },
@@ -649,6 +674,37 @@ async function runActiveDirectAssessmentRuntimeRegression() {
     senderAddress: "sender@example.test",
     ownedAddressSet,
   };
+  const olderDismissedMessage = {
+    ...inboxMessage,
+    id: "message-old",
+    providerMessageId: "message-old",
+    providerThreadId: "thread-old",
+    threadId: "gmail:mailbox-1:thread-old",
+    subject: "Older dismissed message",
+    timestamp: "2026-08-22T09:01:00.000Z",
+  };
+  assert.equal(olderDismissedMessage.from, inboxMessage.from);
+  assert.notEqual(
+    olderDismissedMessage.providerMessageId,
+    inboxMessage.providerMessageId,
+    "the same-sender regression must use two different exact Gmail turns",
+  );
+  assert.equal(
+    isCurrentUserContainmentSatisfied({
+      ...currentContainment,
+      manualPriorityOverride: "removed",
+    }),
+    false,
+    "the older exact message remains manually dismissed",
+  );
+  assert.equal(
+    isCurrentUserContainmentSatisfied({
+      ...currentContainment,
+      manualPriorityOverride: undefined,
+    }),
+    true,
+    "when exact resolution is clear for the newer turn, the older same-sender removal does not suppress it",
+  );
   assert.equal(
     isCurrentUserContainmentSatisfied(currentContainment),
     true,
@@ -748,6 +804,168 @@ async function runActiveDirectAssessmentRuntimeRegression() {
   const activeObservations = {
     [buildIdentityKey(activeRecord.identity)]: activeRecord,
   };
+  type AcceptedRefreshAuthority = {
+    newInboundMode: "off" | "shadow" | "active";
+    connectionKey: string;
+    connectionEpoch: number;
+    provider: "google" | "custom_imap";
+    authorityGeneration: number;
+    imapTrashMutationPublicationEpoch: null;
+    imapUidValidity: null;
+    freshImapUids: null;
+  };
+  const rebaseAcceptedGmailAuthority =
+    workspaceRuntime.rebasePrioritySemanticNewInboundAcceptedGmailAuthority as
+      | ((input: {
+          acceptedAuthority: AcceptedRefreshAuthority | undefined;
+          currentConnectionKey: string | undefined;
+          currentConnectionEpoch: number;
+          previousAuthorityGeneration: number;
+          currentAuthorityGeneration: number;
+        }) => AcceptedRefreshAuthority | undefined)
+      | undefined;
+  let acceptedRefreshAuthority: AcceptedRefreshAuthority = {
+    newInboundMode: "active",
+    connectionKey: "gmail:mailbox-1",
+    connectionEpoch: 4,
+    provider: "google",
+    authorityGeneration: 0,
+    imapTrashMutationPublicationEpoch: null,
+    imapUidValidity: null,
+    freshImapUids: null,
+  };
+  let currentGmailAuthorityGeneration = 0;
+  const projectCanonicalPriorityAtCurrentGeneration = () =>
+    acceptedRefreshAuthority.authorityGeneration ===
+    currentGmailAuthorityGeneration
+      ? mergeCanonicalEntries([], [canonicalEntry], activeObservations)
+      : [];
+  const applyOrdinaryGmailProviderRefresh = (
+    nextGmailAuthorityGeneration: number,
+  ) => {
+    const previousAuthorityGeneration = currentGmailAuthorityGeneration;
+    currentGmailAuthorityGeneration = nextGmailAuthorityGeneration;
+    acceptedRefreshAuthority =
+      rebaseAcceptedGmailAuthority?.({
+        acceptedAuthority: acceptedRefreshAuthority,
+        currentConnectionKey: "gmail:mailbox-1",
+        currentConnectionEpoch: 4,
+        previousAuthorityGeneration,
+        currentAuthorityGeneration: currentGmailAuthorityGeneration,
+      }) ?? acceptedRefreshAuthority;
+    return projectCanonicalPriorityAtCurrentGeneration();
+  };
+
+  assert.deepEqual(
+    projectCanonicalPriorityAtCurrentGeneration(),
+    [canonicalEntry],
+    "the exact active hydrated Inbox turn must be canonical Priority before sync",
+  );
+  assert.deepEqual(
+    applyOrdinaryGmailProviderRefresh(1),
+    [canonicalEntry],
+    "an unrelated authoritative Gmail Trash readback in the same Inbox sync must not revoke the still-current semantic promotion",
+  );
+  assert.deepEqual(
+    applyOrdinaryGmailProviderRefresh(2),
+    [canonicalEntry],
+    "a second ordinary Inbox sync must keep the same semantic promotion stable",
+  );
+  assert.deepEqual(
+    applyOrdinaryGmailProviderRefresh(3),
+    [canonicalEntry],
+    "a later refresh must keep the same semantic promotion stable",
+  );
+  assert.deepEqual(
+    acceptedRefreshAuthority,
+    {
+      newInboundMode: "active",
+      connectionKey: "gmail:mailbox-1",
+      connectionEpoch: 4,
+      provider: "google",
+      authorityGeneration: 3,
+      imapTrashMutationPublicationEpoch: null,
+      imapUidValidity: null,
+      freshImapUids: null,
+    },
+    "generation rebasing must preserve mode, connection, provider, and IMAP fences verbatim",
+  );
+  assert.equal(typeof rebaseAcceptedGmailAuthority, "function");
+  if (!rebaseAcceptedGmailAuthority) {
+    throw new Error("accepted Gmail authority rebase helper is unavailable");
+  }
+  const stableAcceptedAuthority = acceptedRefreshAuthority;
+  assert.equal(
+    rebaseAcceptedGmailAuthority({
+      acceptedAuthority: stableAcceptedAuthority,
+      currentConnectionKey: stableAcceptedAuthority.connectionKey,
+      currentConnectionEpoch: stableAcceptedAuthority.connectionEpoch,
+      previousAuthorityGeneration: 3,
+      currentAuthorityGeneration: 3,
+    }),
+    stableAcceptedAuthority,
+    "an idempotent readback must not churn accepted authority or hydration",
+  );
+  for (const unsafeInput of [
+    {
+      acceptedAuthority: {
+        ...stableAcceptedAuthority,
+        authorityGeneration: 2,
+      },
+      currentConnectionKey: stableAcceptedAuthority.connectionKey,
+      currentConnectionEpoch: stableAcceptedAuthority.connectionEpoch,
+      previousAuthorityGeneration: 3,
+      currentAuthorityGeneration: 4,
+    },
+    {
+      acceptedAuthority: stableAcceptedAuthority,
+      currentConnectionKey: "gmail:other-connection",
+      currentConnectionEpoch: stableAcceptedAuthority.connectionEpoch,
+      previousAuthorityGeneration: 3,
+      currentAuthorityGeneration: 4,
+    },
+    {
+      acceptedAuthority: stableAcceptedAuthority,
+      currentConnectionKey: stableAcceptedAuthority.connectionKey,
+      currentConnectionEpoch: stableAcceptedAuthority.connectionEpoch + 1,
+      previousAuthorityGeneration: 3,
+      currentAuthorityGeneration: 4,
+    },
+    {
+      acceptedAuthority: {
+        ...stableAcceptedAuthority,
+        provider: "custom_imap" as const,
+      },
+      currentConnectionKey: stableAcceptedAuthority.connectionKey,
+      currentConnectionEpoch: stableAcceptedAuthority.connectionEpoch,
+      previousAuthorityGeneration: 3,
+      currentAuthorityGeneration: 4,
+    },
+    {
+      acceptedAuthority: stableAcceptedAuthority,
+      currentConnectionKey: stableAcceptedAuthority.connectionKey,
+      currentConnectionEpoch: stableAcceptedAuthority.connectionEpoch,
+      previousAuthorityGeneration: 3,
+      currentAuthorityGeneration: 2,
+    },
+  ]) {
+    assert.equal(
+      rebaseAcceptedGmailAuthority(unsafeInput),
+      unsafeInput.acceptedAuthority,
+      "pre-stale, wrong-connection, custom-IMAP, and backward authorities must remain fail-closed",
+    );
+  }
+  assert.equal(
+    rebaseAcceptedGmailAuthority({
+      acceptedAuthority: undefined,
+      currentConnectionKey: stableAcceptedAuthority.connectionKey,
+      currentConnectionEpoch: stableAcceptedAuthority.connectionEpoch,
+      previousAuthorityGeneration: 3,
+      currentAuthorityGeneration: 4,
+    }),
+    undefined,
+    "a missing accepted authority cannot be created by a Trash readback",
+  );
   assert.deepEqual(
     mergeCanonicalEntries([], [canonicalEntry], activeObservations),
     [canonicalEntry],
@@ -838,6 +1056,18 @@ async function runActiveDirectAssessmentRuntimeRegression() {
     { folder: "Archive" as const, message: archiveMessage },
     { folder: "Inbox" as const, message: inboxMessage },
   ];
+  assert.equal(
+    resolveCurrentInboxMessage({
+      mailboxId: "mailbox-1",
+      messageId: inboxMessage.id,
+      record: activeRecord,
+      conversationEntries: [
+        { folder: "Archive", message: archiveMessage },
+      ],
+    }),
+    null,
+    "an Archive-only copy must remain ineligible after authority rebasing",
+  );
   const dismissalRequests: unknown[] = [];
   let localDoneMutations = 0;
   assert.equal(
@@ -885,6 +1115,44 @@ async function runActiveDirectAssessmentRuntimeRegression() {
     },
   ]);
   assert.equal(localDoneMutations, 1);
+  assert.deepEqual(
+    mergeCanonicalEntries([], [canonicalEntry], {}),
+    [],
+    "once exact dismissal removes the observation from hydration, refresh cannot promote that turn",
+  );
+
+  const sentReply = {
+    ...inboxMessage,
+    id: "message-sent",
+    providerFolder: "SENT",
+    providerMessageId: "message-sent",
+    labelIds: ["SENT"],
+    threadIdentityContext: {
+      ...inboxMessage.threadIdentityContext,
+      folder: "SENT",
+    },
+    from: "owner@example.test",
+    to: "sender@example.test",
+    timestamp: "2026-08-22T10:03:00.000Z",
+  };
+  assert.equal(
+    resolveCurrentInboxMessage({
+      mailboxId: "mailbox-1",
+      messageId: inboxMessage.id,
+      record: activeRecord,
+      conversationEntries: [
+        { folder: "Inbox", message: inboxMessage },
+        { folder: "Sent", message: sentReply },
+      ],
+    }),
+    null,
+    "a successful Reply makes the old inbound semantic latest-turn identity stale",
+  );
+  assert.equal(
+    mergeCanonicalEntries([canonicalEntry], [canonicalEntry], {}).length,
+    1,
+    "once waiting_on_other supplies the deterministic row, the stale semantic turn cannot duplicate it",
+  );
 }
 
 async function runManualPriorityDismissalRuntimeRegression() {

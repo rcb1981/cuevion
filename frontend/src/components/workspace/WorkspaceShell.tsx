@@ -1831,6 +1831,42 @@ export function isPrioritySemanticNewInboundCurrentUserContainmentSatisfied(
   );
 }
 
+export function rebasePrioritySemanticNewInboundAcceptedGmailAuthority(input: {
+  acceptedAuthority:
+    | PrioritySemanticNewInboundAcceptedRefreshAuthority
+    | undefined;
+  currentConnectionKey: string | undefined;
+  currentConnectionEpoch: number;
+  previousAuthorityGeneration: number;
+  currentAuthorityGeneration: number;
+}) {
+  const {
+    acceptedAuthority,
+    currentConnectionKey,
+    currentConnectionEpoch,
+    previousAuthorityGeneration,
+    currentAuthorityGeneration,
+  } = input;
+  if (
+    !acceptedAuthority ||
+    acceptedAuthority.provider !== "google" ||
+    acceptedAuthority.connectionKey !== currentConnectionKey ||
+    acceptedAuthority.connectionEpoch !== currentConnectionEpoch ||
+    !Number.isSafeInteger(previousAuthorityGeneration) ||
+    previousAuthorityGeneration < 0 ||
+    !Number.isSafeInteger(currentAuthorityGeneration) ||
+    currentAuthorityGeneration <= previousAuthorityGeneration ||
+    acceptedAuthority.authorityGeneration !== previousAuthorityGeneration
+  ) {
+    return acceptedAuthority;
+  }
+
+  return {
+    ...acceptedAuthority,
+    authorityGeneration: currentAuthorityGeneration,
+  };
+}
+
 export function resolvePrioritySemanticNewInboundHydrationCommitPolicy(input: {
   newInboundMode: "off" | "shadow" | "active";
   requestMutationRevision: number;
@@ -42515,13 +42551,6 @@ export function WorkspaceShell({
     mailboxId: InboxId,
     snapshot: GmailTrashSnapshot,
   ) => {
-    snapshot.messages.forEach((message) => {
-      gmailInboxAuthorityRef.current.confirmArchive(
-        mailboxId,
-        message.providerMessageId,
-      );
-    });
-
     let applied = false;
     flushSync(() => {
       setMailboxStore((currentStore) => {
@@ -42553,12 +42582,54 @@ export function WorkspaceShell({
         };
       });
     });
-    if (applied) {
-      clearUnreadOverridesForProviderMessages(
-        snapshot.messages as LiveInboxMessageSnapshot[],
-      );
+    if (!applied) {
+      return false;
     }
-    return applied;
+
+    const previousAuthorityGeneration =
+      gmailInboxAuthorityRef.current.captureGeneration(mailboxId);
+    const acceptedSemanticAuthority =
+      prioritySemanticNewInboundAcceptedRefreshAuthorityRef.current[mailboxId];
+    snapshot.messages.forEach((message) => {
+      gmailInboxAuthorityRef.current.confirmArchive(
+        mailboxId,
+        message.providerMessageId,
+      );
+    });
+
+    // A successful authoritative Trash publication can advance Gmail Inbox
+    // authority for unrelated provider IDs. Rebase only the exact accepted,
+    // previously-current semantic authority before that generation can render;
+    // the published store still enforces exact Inbox/latest-turn containment.
+    const rebasedAcceptedSemanticAuthority =
+      rebasePrioritySemanticNewInboundAcceptedGmailAuthority({
+        acceptedAuthority: acceptedSemanticAuthority,
+        currentConnectionKey:
+          providerArchiveCurrentConnectionKeysRef.current[mailboxId],
+        currentConnectionEpoch:
+          providerArchiveConnectionEpochsRef.current[mailboxId] ?? 0,
+        previousAuthorityGeneration,
+        currentAuthorityGeneration:
+          gmailInboxAuthorityRef.current.captureGeneration(mailboxId),
+      });
+    if (
+      rebasedAcceptedSemanticAuthority &&
+      rebasedAcceptedSemanticAuthority !== acceptedSemanticAuthority
+    ) {
+      prioritySemanticNewInboundAcceptedRefreshAuthorityRef.current = {
+        ...prioritySemanticNewInboundAcceptedRefreshAuthorityRef.current,
+        [mailboxId]: rebasedAcceptedSemanticAuthority,
+      };
+      flushSync(() => {
+        setPrioritySemanticNewInboundHydrationRefreshEpoch(
+          (current) => current + 1,
+        );
+      });
+    }
+    clearUnreadOverridesForProviderMessages(
+      snapshot.messages as LiveInboxMessageSnapshot[],
+    );
+    return true;
   };
   const applyProviderAuthoritativeCustomImapTrashSnapshot = (
     mailboxId: InboxId,
