@@ -11,6 +11,27 @@ const newInboundRuntime = require("../../lib/prioritySemanticNewInbound") as Rec
   (...args: never[]) => unknown
 >;
 
+assert.equal(
+  typeof workspaceRuntime.coordinatePrioritySemanticNewInboundAssessmentCommit,
+  "function",
+  "a direct assessed/cached new-inbound result must have an async revalidated runtime commit path",
+);
+assert.equal(
+  typeof workspaceRuntime.mergePrioritySemanticNewInboundPromotionsIntoCanonicalPriorityEntries,
+  "function",
+  "active new-inbound promotions must merge into the one canonical Priority collection",
+);
+assert.equal(
+  typeof workspaceRuntime.isPrioritySemanticNewInboundCurrentUserContainmentSatisfied,
+  "function",
+  "current manual-removal, completion, and sender ownership must share one runtime gate",
+);
+assert.equal(
+  typeof workspaceRuntime.resolvePrioritySemanticNewInboundHydrationCommitPolicy,
+  "function",
+  "ACTIVE hydration must detect direct-result mutation races before replacement",
+);
+
 const source = readFileSync(
   "src/components/workspace/WorkspaceShell.tsx",
   "utf8",
@@ -95,8 +116,8 @@ assert.match(
 );
 assert.match(
   drainSource,
-  /hasDeterministicPriority = livePriorityInboxEntries\.some[\s\S]*?resolveOrganizerCategory\([\s\S]*?productAccess === "bundle"[\s\S]*?resolveMessageNoisePolicy\(message\)\.allowsPositiveActionability[\s\S]*?isPrioritySemanticNewInboundEligible/,
-  "current Priority, Organizer, and normalized noise exclusions must precede shadow analysis",
+  /hasDeterministicPriority = broadLivePriorityInboxEntries\.some[\s\S]*?resolveOrganizerCategory\([\s\S]*?productAccess === "bundle"[\s\S]*?resolveMessageNoisePolicy\(message\)\.allowsPositiveActionability[\s\S]*?isPrioritySemanticNewInboundEligible/,
+  "deterministic Priority, Organizer, and normalized noise exclusions must precede semantic analysis",
 );
 assert.match(
   drainSource,
@@ -105,13 +126,18 @@ assert.match(
 );
 assert.match(
   drainSource,
-  /requestPrioritySemanticNewInboundAssessment\(\{[\s\S]*?mailboxId: selected\.candidate\.mailboxId,[\s\S]*?trigger: "new_inbound",[\s\S]*?incomingLocator: selected\.candidate\.incomingLocator,[\s\S]*?\}\)[\s\S]*?\.catch\(\(\) => undefined\)/,
+  /coordinatePrioritySemanticNewInboundAssessmentCommit\(\{[\s\S]*?response: requestPrioritySemanticNewInboundAssessment\(\{[\s\S]*?mailboxId,[\s\S]*?trigger: "new_inbound",[\s\S]*?incomingLocator: selectedEntry\.candidate\.incomingLocator/,
   "the browser request must contain only mailboxId, the exact trigger, and the provider locator",
+);
+assert.match(
+  drainSource,
+  /isCurrent: \(record\)[\s\S]*?acceptedRefreshAuthority\.newInboundMode[\s\S]*?acceptedRefreshAuthority\.authorityGeneration[\s\S]*?providerArchiveCurrentConnectionKeysRef[\s\S]*?providerArchiveConnectionEpochsRef[\s\S]*?isCurrentGeneration[\s\S]*?providerImapTrashInboxMutationPublicationEpochsRef[\s\S]*?resolvePrioritySemanticNewInboundCurrentInboxMessage[\s\S]*?resolveManualPriorityOverride\([\s\S]*?manualPriorityOverridesRef\.current[\s\S]*?priorityClearedKeysRef\.current[\s\S]*?getReturnedReplySenderAddress[\s\S]*?prioritySemanticNewInboundOwnedAddressSetRef\.current[\s\S]*?commit: \(record\)[\s\S]*?prioritySemanticNewInboundMutationRevisionsRef\.current[\s\S]*?commitPrioritySemanticNewInboundHydrationRecords/,
+  "a direct result must revalidate provider mode/generation, current turn, manual removal/completion, and sender ownership before synchronously revising the shared runtime bucket",
 );
 assert.doesNotMatch(
   drainSource,
   /recordPrioritySemanticObservation|setPrioritySemanticObservationState|setWaitingOnOtherStore|setManualPriorityOverrides|authoredText|messageText/,
-  "new-inbound responses must not enter active observations or mutate deterministic/Priority state",
+  "direct new-inbound results cannot mutate deterministic workflow or manual Priority authority",
 );
 assert.doesNotMatch(
   drainSource,
@@ -135,6 +161,18 @@ const hydrationRequestSource = source.slice(
   hydrationRequestStart,
   hydrationRequestEnd,
 );
+const hydrationOrchestrationStart = source.lastIndexOf(
+  "useEffect(() => {",
+  hydrationRequestStart,
+);
+const hydrationOrchestrationEnd = source.indexOf(
+  "const externalInboundConversationEntries",
+  hydrationRequestStart,
+);
+const hydrationOrchestrationSource = source.slice(
+  hydrationOrchestrationStart,
+  hydrationOrchestrationEnd,
+);
 assert.ok(
   hydrationRequestStart >= 0 && hydrationRequestEnd > hydrationRequestStart,
   "one bounded runtime hydration request must exist",
@@ -153,6 +191,26 @@ assert.match(
   hydrationRequestSource,
   /providerArchiveCurrentConnectionKeysRef\.current\[mailbox\.id\][\s\S]*?connectionKey[\s\S]*?providerArchiveConnectionEpochsRef\.current\[mailbox\.id\][\s\S]*?connectionEpoch/,
   "a stale hydration response cannot replace the current account bucket after reconnect",
+);
+assert.match(
+  source.slice(hydrationRequestStart, hydrationRequestEnd + 500),
+  /response\.newInboundMode === "off" \? \[\] : response\.records/,
+  "shadow and active hydration records must share one bounded runtime bucket while off clears it",
+);
+assert.match(
+  hydrationOrchestrationSource,
+  /acceptedRefreshAuthority[\s\S]*?requestAcceptedMode[\s\S]*?requestAuthorityGeneration[\s\S]*?requestMutationRevision[\s\S]*?requestKey/,
+  "each bounded hydration request must capture accepted mode/generation and the per-mailbox direct mutation revision",
+);
+assert.match(
+  hydrationRequestSource,
+  /currentAcceptedRefreshAuthority[\s\S]*?newInboundMode !==[\s\S]*?requestAcceptedMode[\s\S]*?authorityGeneration !==[\s\S]*?requestAuthorityGeneration[\s\S]*?resolvePrioritySemanticNewInboundHydrationCommitPolicy[\s\S]*?preserve_and_rehydrate[\s\S]*?setPrioritySemanticNewInboundHydrationRefreshEpoch[\s\S]*?return;/,
+  "an obsolete authority response or ACTIVE/direct race cannot replace current records and the latter schedules fresh model-free hydration",
+);
+assert.match(
+  hydrationOrchestrationSource,
+  /requestAcceptedMode === "off"[\s\S]*?commitPrioritySemanticNewInboundHydrationRecords\([\s\S]*?\[\],[\s\S]*?true,[\s\S]*?return;[\s\S]*?requestPrioritySemanticNewInboundHydration/,
+  "accepted off mode must clear immediately without waiting for a hydration round trip",
 );
 assert.equal(
   source.match(/requestPrioritySemanticNewInboundHydration\(/g)?.length,
@@ -177,14 +235,14 @@ assert.doesNotMatch(
   "semantic hydration observations must never become browser-persisted authority",
 );
 
-const canonicalPriorityAssignment = source.indexOf(
-  "const livePriorityInboxEntries = broadLivePriorityInboxEntries;",
+const broadPriorityAssignment = source.indexOf(
+  "const broadLivePriorityInboxEntries =",
 );
 const hydratedProjectionStart = source.indexOf(
   "const prioritySemanticNewInboundHydratedObservations = useMemo",
 );
 const hydratedProjectionEnd = source.indexOf(
-  "const priorityReasonCopyForCandidates",
+  "const livePriorityInboxEntries =",
   hydratedProjectionStart,
 );
 const hydratedProjectionSource = source.slice(
@@ -192,10 +250,10 @@ const hydratedProjectionSource = source.slice(
   hydratedProjectionEnd,
 );
 assert.ok(
-  canonicalPriorityAssignment >= 0 &&
-    hydratedProjectionStart > canonicalPriorityAssignment &&
+  broadPriorityAssignment >= 0 &&
+    hydratedProjectionStart > broadPriorityAssignment &&
     hydratedProjectionEnd > hydratedProjectionStart,
-  "hydrated shadow projection must be assembled only after the canonical Priority collection",
+  "current semantic observations must be assembled after deterministic Priority and before the one canonical merge",
 );
 assert.match(
   hydratedProjectionSource,
@@ -219,23 +277,43 @@ assert.match(
 );
 assert.match(
   hydratedProjectionSource,
-  /readyInboxMessageKeys[\s\S]*?isWorkspaceMessageSpamSuppressed[\s\S]*?resolveOrganizerCategory[\s\S]*?resolveMessageNoisePolicy\(message\)\.allowsPositiveActionability[\s\S]*?isPrioritySemanticNewInboundHydratedObservationCurrent/,
-  "LOW/Filtered, Spam/Trash/Archive, Organizer, noise, mailbox, version, and latest-turn gates must precede observation projection",
+  /acceptedRefreshAuthority\.newInboundMode === "off"[\s\S]*?readyInboxMessageKeys[\s\S]*?isWorkspaceMessageSpamSuppressed[\s\S]*?record\.priorityEffect === "promote_new_inbound"[\s\S]*?acceptedRefreshAuthority\.newInboundMode !== "active"[\s\S]*?resolveManualPriorityOverride\([\s\S]*?isPriorityMessageCleared[\s\S]*?getReturnedReplySenderAddress[\s\S]*?ownedAddressSet[\s\S]*?resolveOrganizerCategory[\s\S]*?resolveMessageNoisePolicy\(message\)\.allowsPositiveActionability[\s\S]*?isPrioritySemanticNewInboundHydratedObservationCurrent/,
+  "mode rollback, explicit removal/completion, external sender, LOW/Filtered, Spam/Trash/Archive, Organizer, noise, mailbox, version, and latest-turn gates must precede observation projection",
 );
 assert.doesNotMatch(
   hydratedProjectionSource,
-  /setManualPriorityOverrides|setPriorityClearedKeys|setWaitingOnOtherStore|livePriorityInboxEntries\s*=|priorityEffect:\s*"promote/,
-  "hydration remains observe-only and cannot mutate canonical Priority or deterministic workflow state",
+  /setManualPriorityOverrides|setPriorityClearedKeys|setWaitingOnOtherStore|livePriorityInboxEntries\s*=/,
+  "record projection cannot mutate canonical Priority or deterministic workflow state",
 );
-assert.equal(
-  source.match(/prioritySemanticNewInboundHydratedObservations/g)?.length,
-  3,
-  "hydrated records are held only as an isolated shadow projection and its exact-action resolver",
+assert.match(
+  source.slice(hydratedProjectionEnd),
+  /const livePriorityInboxEntries =\s*mergePrioritySemanticNewInboundPromotionsIntoCanonicalPriorityEntries\([\s\S]*?broadLivePriorityInboxEntries,[\s\S]*?normalPriorityGateCandidateEntries,[\s\S]*?prioritySemanticNewInboundHydratedObservations/,
+  "active records must join the same canonical Priority collection consumed by count, list, and actions",
+);
+assert.match(
+  source,
+  /mergePrioritySemanticNewInboundPromotionsIntoCanonicalPriorityEntries\([\s\S]*?priorityEffect === "promote_new_inbound"[\s\S]*?meetsPrioritySemanticNewInboundPromotionThreshold[\s\S]*?dedupeLatestCanonicalConversationEntries/,
+  "only threshold-qualified active records promote and manual/semantic or direct/hydrated overlap dedupes canonically",
+);
+assert.match(
+  source.slice(hydratedProjectionEnd),
+  /livePriorityInboxItems: ReviewItem\[\] = livePriorityInboxEntries\.map[\s\S]*?resolvePrioritySemanticNewInboundCanonicalActionTarget\([\s\S]*?livePriorityInboxEntries[\s\S]*?priorityInboxCount=\{[\s\S]*?livePriorityInboxItems\.length[\s\S]*?supplementalItems=\{livePriorityInboxItems\}/,
+  "Done/Remove targeting, dashboard count, and Priority list must consume the same canonical merged collection",
 );
 assert.match(
   refreshSource,
   /applyLiveInboxMessagesToMailboxStore\([\s\S]*?prioritySemanticNewInboundAcceptedRefreshAuthorityRef\.current\[mailboxId\]/,
   "only a successfully accepted and published provider refresh grants live-row projection authority",
+);
+assert.match(
+  refreshSource,
+  /discoveredCandidates\.forEach[\s\S]*?newInboundMode:[\s\S]*?response\.prioritySemanticNewInboundMode === "active"[\s\S]*?authorityGeneration:/,
+  "every direct candidate must retain the exact accepted shadow/active mode and provider generation",
+);
+assert.match(
+  refreshSource,
+  /previousAcceptedRefreshAuthority[\s\S]*?nextAcceptedRefreshAuthority[\s\S]*?newInboundMode:[\s\S]*?response\.prioritySemanticNewInboundMode === "active"[\s\S]*?response\.prioritySemanticNewInboundMode === "shadow"[\s\S]*?authorityGeneration: acceptedAuthorityGeneration[\s\S]*?previousAcceptedRefreshAuthority\.authorityGeneration !==[\s\S]*?previousAcceptedRefreshAuthority\.newInboundMode !==[\s\S]*?setPrioritySemanticNewInboundHydrationRefreshEpoch/,
+  "accepted provider generation or mode transitions must wake bounded hydration for zero-model activation and rollback",
 );
 assert.match(
   refreshSource,
@@ -356,6 +434,11 @@ assert.match(
 );
 assert.match(
   priorityActionBridgeSource,
+    /manualPriorityOverridesRef\.current\s*=\s*immediateManualPriorityOverrides[\s\S]*?setManualPriorityOverrides\(\(current\) => \{[\s\S]*?manualPriorityOverridesRef\.current\s*=\s*next[\s\S]*?priorityClearedKeysRef\.current\s*=\s*immediateRestoredPriorityClearedKeys[\s\S]*?setPriorityClearedKeys\(\(current\) => \{[\s\S]*?priorityClearedKeysRef\.current\s*=\s*next[\s\S]*?applyMarkPriorityItemDone[\s\S]*?priorityClearedKeysRef\.current\s*=\s*immediateDonePriorityClearedKeys[\s\S]*?setPriorityClearedKeys\(\(current\) => \{[\s\S]*?priorityClearedKeysRef\.current\s*=\s*next/,
+  "manual Remove, manual Priority restoration, and Done must publish their ref fences before deferred setState while retaining updater reconciliation",
+);
+assert.match(
+  priorityActionBridgeSource,
   /handleMarkPriorityItemDone = async[\s\S]*?coordinatePrioritySemanticNewInboundRemoval<MailMessage>[\s\S]*?observation: semanticObservation[\s\S]*?dismissExactPrioritySemanticNewInboundObservation[\s\S]*?resolveCurrentPrioritySemanticNewInboundDismissalTarget[\s\S]*?applyMarkPriorityItemDone/,
   "Done delegates exact dismissal and current-store application to the ordered coordinator",
 );
@@ -453,6 +536,355 @@ function buildRuntimeMailboxStore(
       Inbox: [inboxMessage],
     },
   };
+}
+
+async function runActiveDirectAssessmentRuntimeRegression() {
+  const inboxMessage = buildRuntimeGmailMessage("INBOX");
+  const archiveMessage = buildRuntimeGmailMessage("ARCHIVE");
+  const canonicalEntry = {
+    mailboxId: "mailbox-1",
+    mailboxTitle: "Mailbox 1",
+    message: inboxMessage,
+  };
+  const activeResponse = {
+    ok: true,
+    status: "assessed",
+    semanticTrigger: "new_inbound",
+    newInboundMode: "active",
+    priorityEffect: "promote_new_inbound",
+    assessment: {
+      state: "needs_user_action",
+      confidence: 0.99,
+      reasonCode: "explicit_request",
+    },
+    effectiveSemanticState: "needs_user_action",
+    identity: {
+      mailboxId: "mailbox-1",
+      conversationId: "thread:mailbox-1|gmail:mailbox-1:thread-new",
+      latestTurnId: "message-new",
+      semanticVersion: "priority-semantic-state-v1",
+    },
+    assessedAt: "2026-08-22T10:02:00.000Z",
+  } as const;
+  type ActiveRecord = {
+    assessment: {
+      state: "needs_user_action";
+      confidence: number;
+      reasonCode: "explicit_request";
+    };
+    effectiveSemanticState: "needs_user_action";
+    priorityEffect: "observe_only" | "promote_new_inbound";
+    identity: typeof activeResponse.identity;
+    assessedAt: string;
+  };
+  const coordinateAssessmentCommit =
+    workspaceRuntime.coordinatePrioritySemanticNewInboundAssessmentCommit as (
+      input: {
+        response: Promise<unknown>;
+        isCurrent: (record: ActiveRecord) => boolean;
+        commit: (record: ActiveRecord) => void;
+      },
+    ) => Promise<boolean>;
+  const mergeCanonicalEntries =
+    workspaceRuntime.mergePrioritySemanticNewInboundPromotionsIntoCanonicalPriorityEntries as (
+      broadEntries: typeof canonicalEntry[],
+      candidateEntries: typeof canonicalEntry[],
+      observations: Record<string, ActiveRecord>,
+    ) => typeof canonicalEntry[];
+  const isCurrentUserContainmentSatisfied =
+    workspaceRuntime.isPrioritySemanticNewInboundCurrentUserContainmentSatisfied as (
+      input: {
+        manualPriorityOverride: unknown;
+        isPriorityCleared: boolean;
+        senderAddress: string;
+        ownedAddressSet: ReadonlySet<string>;
+      },
+    ) => boolean;
+  const resolveHydrationCommitPolicy =
+    workspaceRuntime.resolvePrioritySemanticNewInboundHydrationCommitPolicy as (
+      input: {
+        newInboundMode: "off" | "shadow" | "active";
+        requestMutationRevision: number;
+        currentMutationRevision: number;
+      },
+    ) => "replace" | "preserve_and_rehydrate";
+  const resolveExactObservation =
+    workspaceRuntime.resolveExactPrioritySemanticNewInboundObservationForMessage as (
+      observations: Record<string, ActiveRecord>,
+      mailboxId: string,
+      message: typeof inboxMessage,
+    ) => ActiveRecord | null;
+  const resolveCurrentInboxMessage =
+    workspaceRuntime.resolvePrioritySemanticNewInboundCurrentInboxMessage as (
+      input: {
+        mailboxId: string;
+        messageId: string;
+        record: ActiveRecord;
+        conversationEntries: Array<{
+          folder: "Archive" | "Inbox";
+          message: typeof inboxMessage;
+        }>;
+      },
+    ) => typeof inboxMessage | null;
+  const coordinateRemoval =
+    workspaceRuntime.coordinatePrioritySemanticNewInboundRemoval as (input: {
+      observation: ActiveRecord | null;
+      dismiss: (record: ActiveRecord) => Promise<boolean>;
+      resolveCurrentTarget: (record: ActiveRecord) => typeof inboxMessage | null;
+      applyLocal: (target: typeof inboxMessage | null) => boolean;
+    }) => Promise<boolean>;
+  const buildIdentityKey =
+    newInboundRuntime.buildPrioritySemanticNewInboundIdentityKey as (
+      identity: typeof activeResponse.identity,
+    ) => string;
+  const buildDismissalWireRequest =
+    newInboundRuntime.buildPrioritySemanticNewInboundDismissalWireRequest as (
+      request: unknown,
+    ) => unknown;
+
+  const ownedAddressSet = new Set(["owner@example.test"]);
+  const currentContainment = {
+    manualPriorityOverride: null,
+    isPriorityCleared: false,
+    senderAddress: "sender@example.test",
+    ownedAddressSet,
+  };
+  assert.equal(
+    isCurrentUserContainmentSatisfied(currentContainment),
+    true,
+    "one current external Inbox turn remains eligible",
+  );
+  assert.equal(
+    isCurrentUserContainmentSatisfied({
+      ...currentContainment,
+      manualPriorityOverride: "removed",
+    }),
+    false,
+    "an explicit current removal must fence a late direct or hydrated promotion",
+  );
+  assert.equal(
+    isCurrentUserContainmentSatisfied({
+      ...currentContainment,
+      isPriorityCleared: true,
+    }),
+    false,
+    "Done/priority-cleared exact identity must fence a late direct or hydrated promotion",
+  );
+  assert.equal(
+    isCurrentUserContainmentSatisfied({
+      ...currentContainment,
+      manualPriorityOverride: "priority",
+    }),
+    true,
+    "independent manual Priority authority must remain eligible",
+  );
+  assert.equal(
+    isCurrentUserContainmentSatisfied({
+      ...currentContainment,
+      senderAddress: "owner@example.test",
+    }),
+    false,
+    "cross-device hydration and custom IMAP must not promote the user's own message",
+  );
+  assert.equal(
+    resolveHydrationCommitPolicy({
+      newInboundMode: "active",
+      requestMutationRevision: 2,
+      currentMutationRevision: 3,
+    }),
+    "preserve_and_rehydrate",
+    "a slow ACTIVE snapshot must preserve a newer direct record and request fresh hydration",
+  );
+  assert.equal(
+    resolveHydrationCommitPolicy({
+      newInboundMode: "active",
+      requestMutationRevision: 3,
+      currentMutationRevision: 3,
+    }),
+    "replace",
+  );
+  for (const newInboundMode of ["shadow", "off"] as const) {
+    assert.equal(
+      resolveHydrationCommitPolicy({
+        newInboundMode,
+        requestMutationRevision: 2,
+        currentMutationRevision: 3,
+      }),
+      "replace",
+      `${newInboundMode} must replace immediately so rollout rollback demotes in-session`,
+    );
+  }
+
+  let resolveDirectResponse: ((response: typeof activeResponse) => void) | null =
+    null;
+  const directResponse = new Promise<typeof activeResponse>((resolve) => {
+    resolveDirectResponse = resolve;
+  });
+  const directlyCommittedRecords: ActiveRecord[] = [];
+  let asyncCurrentnessChecks = 0;
+  const directCommit = coordinateAssessmentCommit({
+    response: directResponse,
+    isCurrent: (record) => {
+      asyncCurrentnessChecks += 1;
+      return record.identity.latestTurnId === inboxMessage.providerMessageId;
+    },
+    commit: (record) => directlyCommittedRecords.push(record),
+  });
+  await Promise.resolve();
+  assert.deepEqual(
+    directlyCommittedRecords,
+    [],
+    "Priority cannot change before the direct assessment resolves",
+  );
+  resolveDirectResponse?.(activeResponse);
+  assert.equal(await directCommit, true);
+  assert.equal(asyncCurrentnessChecks, 1);
+  assert.equal(
+    directlyCommittedRecords.length,
+    1,
+    "the active direct result must enter the shared runtime record bucket without hydration",
+  );
+  const activeRecord = directlyCommittedRecords[0];
+  const activeObservations = {
+    [buildIdentityKey(activeRecord.identity)]: activeRecord,
+  };
+  assert.deepEqual(
+    mergeCanonicalEntries([], [canonicalEntry], activeObservations),
+    [canonicalEntry],
+    "a current active needs_user_action result at or above threshold must promote immediately",
+  );
+  const readCanonicalEntry = {
+    ...canonicalEntry,
+    message: { ...inboxMessage, unread: false },
+  };
+  assert.deepEqual(
+    mergeCanonicalEntries([], [readCanonicalEntry], activeObservations),
+    [readCanonicalEntry],
+    "read/unread presentation changes must not demote the same exact promoted turn",
+  );
+  assert.deepEqual(
+    mergeCanonicalEntries([canonicalEntry], [canonicalEntry], {}),
+    [canonicalEntry],
+    "missing semantic observations must not erase independent broad/manual Priority authority",
+  );
+  assert.equal(
+    mergeCanonicalEntries(
+      [canonicalEntry],
+      [canonicalEntry, canonicalEntry],
+      activeObservations,
+    ).length,
+    1,
+    "manual/deterministic plus semantic and hydration/direct overlap must count as one canonical row",
+  );
+  assert.deepEqual(
+    mergeCanonicalEntries([], [canonicalEntry], {
+      [buildIdentityKey(activeRecord.identity)]: {
+        ...activeRecord,
+        priorityEffect: "observe_only",
+      },
+    }),
+    [],
+    "shadow/observe-only records must never promote",
+  );
+  assert.deepEqual(
+    mergeCanonicalEntries([], [canonicalEntry], {
+      [buildIdentityKey(activeRecord.identity)]: {
+        ...activeRecord,
+        assessment: { ...activeRecord.assessment, confidence: 0.899 },
+      },
+    }),
+    [],
+    "even a forged promote effect below threshold must fail closed",
+  );
+
+  let staleCommits = 0;
+  assert.equal(
+    await coordinateAssessmentCommit({
+      response: Promise.resolve(activeResponse),
+      isCurrent: () => false,
+      commit: () => {
+        staleCommits += 1;
+      },
+    }),
+    false,
+    "a newer turn, reconnect, or authority-generation change must cancel a stale direct result",
+  );
+  assert.equal(staleCommits, 0);
+  let explicitRemovalResurrections = 0;
+  assert.equal(
+    await coordinateAssessmentCommit({
+      response: Promise.resolve(activeResponse),
+      isCurrent: () =>
+        isCurrentUserContainmentSatisfied({
+          ...currentContainment,
+          manualPriorityOverride: "removed",
+        }),
+      commit: () => {
+        explicitRemovalResurrections += 1;
+      },
+    }),
+    false,
+    "an in-flight direct response must not resurrect an explicit current removal",
+  );
+  assert.equal(explicitRemovalResurrections, 0);
+
+  const exactObservation = resolveExactObservation(
+    activeObservations,
+    "mailbox-1",
+    inboxMessage,
+  );
+  assert.equal(exactObservation, activeRecord);
+  const duplicateConversationEntries = [
+    { folder: "Archive" as const, message: archiveMessage },
+    { folder: "Inbox" as const, message: inboxMessage },
+  ];
+  const dismissalRequests: unknown[] = [];
+  let localDoneMutations = 0;
+  assert.equal(
+    await coordinateRemoval({
+      observation: exactObservation,
+      dismiss: async (record) => {
+        dismissalRequests.push(
+          buildDismissalWireRequest({
+            operation: "dismiss_new_inbound",
+            mailboxId: record.identity.mailboxId,
+            identity: {
+              conversationId: record.identity.conversationId,
+              latestTurnId: record.identity.latestTurnId,
+              semanticVersion: record.identity.semanticVersion,
+            },
+          }),
+        );
+        return true;
+      },
+      resolveCurrentTarget: (record) =>
+        resolveCurrentInboxMessage({
+          mailboxId: "mailbox-1",
+          messageId: inboxMessage.id,
+          record,
+          conversationEntries: duplicateConversationEntries,
+        }),
+      applyLocal: (target) => {
+        assert.equal(target, inboxMessage);
+        localDoneMutations += 1;
+        return true;
+      },
+    }),
+    true,
+    "Done must durably dismiss a directly assessed active row before any hydration refresh",
+  );
+  assert.deepEqual(dismissalRequests, [
+    {
+      operation: "dismiss_new_inbound",
+      mailboxId: "mailbox-1",
+      identity: {
+        conversationId: "thread:mailbox-1|gmail:mailbox-1:thread-new",
+        latestTurnId: "message-new",
+        semanticVersion: "priority-semantic-state-v1",
+      },
+    },
+  ]);
+  assert.equal(localDoneMutations, 1);
 }
 
 async function runManualPriorityDismissalRuntimeRegression() {
@@ -815,10 +1247,11 @@ async function runManualPriorityDismissalRuntimeRegression() {
   );
 }
 
-runManualPriorityDismissalRuntimeRegression()
+runActiveDirectAssessmentRuntimeRegression()
+  .then(() => runManualPriorityDismissalRuntimeRegression())
   .then(() =>
     console.log(
-      "\nWorkspaceShell new_inbound shadow integration and runtime tests passed.",
+      "\nWorkspaceShell new_inbound active integration and runtime tests passed.",
     ),
   )
   .catch((error) => {

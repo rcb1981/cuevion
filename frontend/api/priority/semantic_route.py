@@ -42,6 +42,7 @@ from .semantic_text import build_semantic_text_window
 from .semantic_thresholds import (
     confidence_threshold_for,
     evaluate_semantic_confidence,
+    meets_future_new_inbound_promotion_threshold,
 )
 from .semantic_types import (
     SemanticAssessment,
@@ -73,6 +74,7 @@ SEMANTIC_NEW_INBOUND_TRIGGER = "new_inbound"
 SEMANTIC_NEW_INBOUND_HYDRATE_OPERATION = "hydrate_new_inbound"
 SEMANTIC_NEW_INBOUND_DISMISS_OPERATION = "dismiss_new_inbound"
 PRIORITY_EFFECT_OBSERVE_ONLY = "observe_only"
+PRIORITY_EFFECT_PROMOTE_NEW_INBOUND = "promote_new_inbound"
 PRIORITY_EFFECT_SUPPRESS_AUTOMATIC_OPEN_LOOP = (
     "suppress_automatic_open_loop"
 )
@@ -389,6 +391,21 @@ def _priority_effect(
     return PRIORITY_EFFECT_OBSERVE_ONLY
 
 
+def _new_inbound_priority_effect(
+    config: SemanticRuntimeConfig,
+    cached: CachedSemanticAssessment | None,
+) -> str:
+    if (
+        config.can_promote_new_inbound
+        and cached is not None
+        and cached.assessment.state is SemanticState.NEEDS_USER_ACTION
+        and cached.effective_state is SemanticState.NEEDS_USER_ACTION
+        and meets_future_new_inbound_promotion_threshold(cached.assessment)
+    ):
+        return PRIORITY_EFFECT_PROMOTE_NEW_INBOUND
+    return PRIORITY_EFFECT_OBSERVE_ONLY
+
+
 def _policy_fields(
     config: SemanticRuntimeConfig,
     cached: CachedSemanticAssessment | None = None,
@@ -399,7 +416,7 @@ def _policy_fields(
         return {
             "semanticTrigger": SEMANTIC_NEW_INBOUND_TRIGGER,
             "newInboundMode": config.new_inbound_mode.value,
-            "priorityEffect": PRIORITY_EFFECT_OBSERVE_ONLY,
+            "priorityEffect": _new_inbound_priority_effect(config, cached),
         }
     if not config.enabled:
         return {}
@@ -477,6 +494,28 @@ def _new_inbound_hydration_response(
     )
 
 
+def _new_inbound_index_scope(authority: PriorityAuthority) -> NewInboundIndexScope:
+    return NewInboundIndexScope(
+        workspace_id=authority.workspace_id,
+        user_id=authority.user_id,
+        mailbox_id=authority.mailbox_id,
+        provider=authority.provider,
+        mailbox_account_identity=authority.mailbox_email,
+    )
+
+
+def _is_exact_new_inbound_dismissed(
+    semantic_store: SemanticAssessmentStore,
+    index_scope: NewInboundIndexScope,
+    source: AuthorizedSemanticSource,
+) -> bool:
+    return semantic_store.is_new_inbound_dismissed_exact(
+        index_scope,
+        conversation_id=source.conversation_id,
+        latest_turn_id=source.latest_turn_id,
+    )
+
+
 def _hydrate_new_inbound_records(
     authority: PriorityAuthority,
     config: SemanticRuntimeConfig,
@@ -494,13 +533,7 @@ def _hydrate_new_inbound_records(
         semantic_store = store or build_runtime_semantic_store(
             hmac_secret=secret
         )
-        index_scope = NewInboundIndexScope(
-            workspace_id=authority.workspace_id,
-            user_id=authority.user_id,
-            mailbox_id=authority.mailbox_id,
-            provider=authority.provider,
-            mailbox_account_identity=authority.mailbox_email,
-        )
+        index_scope = _new_inbound_index_scope(authority)
         entries = semantic_store.read_new_inbound_index(
             index_scope,
             semantic_version=config.schema_version,
@@ -534,7 +567,10 @@ def _hydrate_new_inbound_records(
                 {
                     "assessment": cached.assessment.to_wire_dict(),
                     "effectiveSemanticState": cached.effective_state.value,
-                    "priorityEffect": PRIORITY_EFFECT_OBSERVE_ONLY,
+                    "priorityEffect": _new_inbound_priority_effect(
+                        config,
+                        cached,
+                    ),
                     "identity": {
                         "mailboxId": authority.mailbox_id,
                         "conversationId": entry.conversation_id,
@@ -563,8 +599,8 @@ def _dismiss_new_inbound_record(
     store: SemanticAssessmentStore | None,
     current: int,
 ) -> SemanticRouteResponse:
-    # Dismissal is deliberately shadow-only and performs no provider, prompt,
-    # model, lease, attempt, or current-pointer work.
+    # Dismissal performs no provider, prompt, model, lease, attempt, or
+    # current-pointer work in either enabled mode.
     if not config.new_inbound_enabled or not config.model:
         return _error(
             409,
@@ -576,13 +612,7 @@ def _dismiss_new_inbound_record(
         semantic_store = store or build_runtime_semantic_store(
             hmac_secret=secret
         )
-        index_scope = NewInboundIndexScope(
-            workspace_id=authority.workspace_id,
-            user_id=authority.user_id,
-            mailbox_id=authority.mailbox_id,
-            provider=authority.provider,
-            mailbox_account_identity=authority.mailbox_email,
-        )
+        index_scope = _new_inbound_index_scope(authority)
         dismissed = semantic_store.dismiss_new_inbound_exact(
             index_scope,
             conversation_id=identity["conversationId"],
@@ -806,6 +836,10 @@ def process_semantic_request(
         semantic_version=runtime_config.schema_version,
         model_version=runtime_config.model,
     )
+    active_new_inbound = (
+        trigger == SEMANTIC_NEW_INBOUND_TRIGGER
+        and runtime_config.can_promote_new_inbound
+    )
     if lookup_current:
         try:
             # Lookup is permitted only around two current-provider proofs.  The
@@ -874,6 +908,26 @@ def process_semantic_request(
 
     try:
         semantic_store = store or build_runtime_semantic_store(hmac_secret=secret)
+        active_new_inbound_index_scope = (
+            _new_inbound_index_scope(authority)
+            if active_new_inbound
+            else None
+        )
+        if (
+            active_new_inbound_index_scope is not None
+            and _is_exact_new_inbound_dismissed(
+                semantic_store,
+                active_new_inbound_index_scope,
+                source,
+            )
+        ):
+            return _deferred_response(
+                source,
+                runtime_config,
+                status="deferred",
+                retry_after=NEGATIVE_TTL_SECONDS,
+                semantic_trigger=trigger,
+            )
         semantic_store.set_current_exact(
             scope,
             occurred_at=source.occurred_at,
@@ -908,6 +962,21 @@ def process_semantic_request(
                     retry_after=LEASE_TTL_SECONDS,
                     semantic_trigger=trigger,
                 )
+            if (
+                active_new_inbound_index_scope is not None
+                and _is_exact_new_inbound_dismissed(
+                    semantic_store,
+                    active_new_inbound_index_scope,
+                    source,
+                )
+            ):
+                return _deferred_response(
+                    source,
+                    runtime_config,
+                    status="deferred",
+                    retry_after=NEGATIVE_TTL_SECONDS,
+                    semantic_trigger=trigger,
+                )
             return _assessed_response(
                 source,
                 runtime_config,
@@ -917,6 +986,21 @@ def process_semantic_request(
                 semantic_trigger=trigger,
             )
         if semantic_store.get_negative(scope) is not None:
+            return _deferred_response(
+                source,
+                runtime_config,
+                status="deferred",
+                retry_after=NEGATIVE_TTL_SECONDS,
+                semantic_trigger=trigger,
+            )
+        if (
+            active_new_inbound_index_scope is not None
+            and _is_exact_new_inbound_dismissed(
+                semantic_store,
+                active_new_inbound_index_scope,
+                source,
+            )
+        ):
             return _deferred_response(
                 source,
                 runtime_config,
@@ -1038,6 +1122,28 @@ def process_semantic_request(
         assessed_at=assessed_at,
         input_hash=input_hash,
     )
+    if active_new_inbound_index_scope is not None:
+        try:
+            if _is_exact_new_inbound_dismissed(
+                semantic_store,
+                active_new_inbound_index_scope,
+                source,
+            ):
+                return _deferred_response(
+                    source,
+                    runtime_config,
+                    status="deferred",
+                    retry_after=NEGATIVE_TTL_SECONDS,
+                    semantic_trigger=trigger,
+                )
+        except SemanticStoreUnavailable:
+            return _deferred_response(
+                source,
+                runtime_config,
+                status="deferred",
+                retry_after=NEGATIVE_TTL_SECONDS,
+                semantic_trigger=trigger,
+            )
     return _assessed_response(
         source,
         runtime_config,

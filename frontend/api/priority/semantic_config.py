@@ -30,6 +30,7 @@ class SemanticMode(str, Enum):
 class NewInboundSemanticMode(str, Enum):
     OFF = "off"
     SHADOW = "shadow"
+    ACTIVE = "active"
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,7 +51,14 @@ class SemanticRuntimeConfig:
 
     @property
     def new_inbound_enabled(self) -> bool:
-        return self.new_inbound_mode is NewInboundSemanticMode.SHADOW
+        return self.new_inbound_mode in {
+            NewInboundSemanticMode.SHADOW,
+            NewInboundSemanticMode.ACTIVE,
+        }
+
+    @property
+    def can_promote_new_inbound(self) -> bool:
+        return self.new_inbound_mode is NewInboundSemanticMode.ACTIVE
 
     @property
     def can_call_provider(self) -> bool:
@@ -78,16 +86,19 @@ def load_semantic_runtime_config(
         source,
         SEMANTIC_NEW_INBOUND_MODE_ENV,
     ).lower()
-    # This capability is deliberately shadow-only.  Unknown values, including
-    # "active", fail closed so a future promotion cannot be enabled by typo.
+    # Unknown values fail closed. Promotion requires the exact active value.
     new_inbound_mode = {
         NewInboundSemanticMode.SHADOW.value: NewInboundSemanticMode.SHADOW,
+        NewInboundSemanticMode.ACTIVE.value: NewInboundSemanticMode.ACTIVE,
     }.get(raw_new_inbound_mode, NewInboundSemanticMode.OFF)
 
     model = _read_env(source, SEMANTIC_MODEL_ENV) or None
     any_capability_enabled = (
         mode in {SemanticMode.SHADOW, SemanticMode.ACTIVE}
-        or new_inbound_mode is NewInboundSemanticMode.SHADOW
+        or new_inbound_mode in {
+            NewInboundSemanticMode.SHADOW,
+            NewInboundSemanticMode.ACTIVE,
+        }
     )
     if any_capability_enabled and model is None:
         raise SemanticConfigurationError(
@@ -108,14 +119,14 @@ def load_semantic_runtime_config(
 def read_new_inbound_client_mode(
     environ: Mapping[str, str] | None = None,
 ) -> str:
-    """Expose only the fail-closed provider-refresh capability flag."""
+    """Expose only the bounded fail-closed new-inbound runtime mode."""
 
     try:
         config = load_semantic_runtime_config(environ)
     except SemanticConfigurationError:
         return NewInboundSemanticMode.OFF.value
     if config.new_inbound_enabled and config.model:
-        return NewInboundSemanticMode.SHADOW.value
+        return config.new_inbound_mode.value
     return NewInboundSemanticMode.OFF.value
 
 

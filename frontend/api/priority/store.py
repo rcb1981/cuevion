@@ -605,6 +605,50 @@ class SemanticAssessmentStore:
                 )
         return tuple(results)
 
+    def is_new_inbound_dismissed_exact(
+        self,
+        index_scope: NewInboundIndexScope,
+        *,
+        conversation_id: str,
+        latest_turn_id: str,
+    ) -> bool:
+        """Read one exact-turn tombstone without semantic/model coupling."""
+
+        if (
+            not isinstance(index_scope, NewInboundIndexScope)
+            or not _valid_index_identifier(
+                conversation_id,
+                NEW_INBOUND_INDEX_MAX_CONVERSATION_ID_CHARACTERS,
+            )
+            or not _valid_index_identifier(
+                latest_turn_id,
+                NEW_INBOUND_INDEX_MAX_TURN_ID_CHARACTERS,
+            )
+        ):
+            raise ValueError("invalid new-inbound dismissal read")
+        key = self._new_inbound_dismissal_key(
+            index_scope,
+            conversation_id=conversation_id,
+            latest_turn_id=latest_turn_id,
+        )
+        values = self._command(
+            [
+                "EVAL",
+                _READ_NEW_INBOUND_DISMISSALS_SCRIPT,
+                1,
+                key,
+                _NEW_INBOUND_DISMISSAL_VALUE,
+            ]
+        )
+        if (
+            type(values) is not list
+            or len(values) != 1
+            or type(values[0]) is not int
+            or values[0] not in (0, 1)
+        ):
+            raise SemanticStoreUnavailable()
+        return values[0] == 1
+
     def get_new_inbound_dismissal_states(
         self,
         index_scope: NewInboundIndexScope,

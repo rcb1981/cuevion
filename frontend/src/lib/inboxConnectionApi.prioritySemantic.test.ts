@@ -158,8 +158,8 @@ async function run() {
       ok: true,
       status: "assessed",
       semanticTrigger: "new_inbound",
-      newInboundMode: "shadow",
-      priorityEffect: "observe_only",
+      newInboundMode: "active",
+      priorityEffect: "promote_new_inbound",
       assessment: {
         state: "needs_user_action",
         confidence: 0.94,
@@ -183,10 +183,14 @@ async function run() {
       providerMessageId: "message-new",
     },
   } as const;
-  assert.equal(
-    (await requestPrioritySemanticNewInboundAssessment(newInboundRequest)).ok,
-    true,
-  );
+  const newInboundResponse =
+    await requestPrioritySemanticNewInboundAssessment(newInboundRequest);
+  assert.equal(newInboundResponse.ok, true);
+  if (newInboundResponse.ok) {
+    assert.equal(newInboundResponse.status, "assessed");
+    assert.equal(newInboundResponse.newInboundMode, "active");
+    assert.equal(newInboundResponse.priorityEffect, "promote_new_inbound");
+  }
   assert.equal(fetchCalls.length, 5);
   assert.equal(fetchCalls[4].url, "/api/priority/semantic-assessment");
   assert.equal(fetchCalls[4].init?.method, "POST");
@@ -195,23 +199,29 @@ async function run() {
   assert.equal(fetchCalls[4].init?.body, JSON.stringify(newInboundRequest));
   assert.doesNotMatch(
     String(fetchCalls[4].init?.body),
-    /text|subject|snippet|workspace|tenant|semanticMode/i,
+    /text|subject|snippet|workspace|tenant|semanticMode|newInboundMode|priorityEffect/i,
   );
 
   const newInboundCallsBeforeInvalid = fetchCalls.length;
-  assert.deepEqual(
-    await requestPrioritySemanticNewInboundAssessment({
-      ...newInboundRequest,
-      subject: "must not cross the client boundary",
-    } as unknown as typeof newInboundRequest),
-    {
-      ok: false,
-      error: {
-        code: "invalid_semantic_request",
-        message: "Semantic assessment request is invalid.",
+  for (const policyForgery of [
+    { subject: "must not cross the client boundary" },
+    { newInboundMode: "active" },
+    { priorityEffect: "promote_new_inbound" },
+  ]) {
+    assert.deepEqual(
+      await requestPrioritySemanticNewInboundAssessment({
+        ...newInboundRequest,
+        ...policyForgery,
+      } as unknown as typeof newInboundRequest),
+      {
+        ok: false,
+        error: {
+          code: "invalid_semantic_request",
+          message: "Semantic assessment request is invalid.",
+        },
       },
-    },
-  );
+    );
+  }
   assert.equal(fetchCalls.length, newInboundCallsBeforeInvalid);
 
   const hydrationRecord = {
@@ -221,7 +231,7 @@ async function run() {
       reasonCode: "explicit_request",
     },
     effectiveSemanticState: "needs_user_action",
-    priorityEffect: "observe_only",
+    priorityEffect: "promote_new_inbound",
     identity: {
       mailboxId: "mailbox-1",
       conversationId: "thread:mailbox-1|gmail:thread-new",
@@ -236,7 +246,7 @@ async function run() {
       ok: true,
       status: "hydrated",
       semanticTrigger: "new_inbound",
-      newInboundMode: "shadow",
+      newInboundMode: "active",
       priorityEffect: "observe_only",
       records: [hydrationRecord],
     });
@@ -264,19 +274,25 @@ async function run() {
   );
 
   const hydrationCallsBeforeInvalid = fetchCalls.length;
-  assert.deepEqual(
-    await requestPrioritySemanticNewInboundHydration({
-      ...hydrationRequest,
-      state: "needs_user_action",
-    } as unknown as typeof hydrationRequest),
-    {
-      ok: false,
-      error: {
-        code: "invalid_semantic_request",
-        message: "Semantic hydration request is invalid.",
+  for (const policyForgery of [
+    { state: "needs_user_action" },
+    { newInboundMode: "active" },
+    { priorityEffect: "promote_new_inbound" },
+  ]) {
+    assert.deepEqual(
+      await requestPrioritySemanticNewInboundHydration({
+        ...hydrationRequest,
+        ...policyForgery,
+      } as unknown as typeof hydrationRequest),
+      {
+        ok: false,
+        error: {
+          code: "invalid_semantic_request",
+          message: "Semantic hydration request is invalid.",
+        },
       },
-    },
-  );
+    );
+  }
   assert.equal(fetchCalls.length, hydrationCallsBeforeInvalid);
 
   globalThis.fetch = (async () =>
@@ -284,7 +300,7 @@ async function run() {
       ok: true,
       status: "hydrated",
       semanticTrigger: "new_inbound",
-      newInboundMode: "shadow",
+      newInboundMode: "active",
       priorityEffect: "observe_only",
       records: [
         {
@@ -323,7 +339,7 @@ async function run() {
       ok: true,
       status: "dismissed",
       semanticTrigger: "new_inbound",
-      newInboundMode: "shadow",
+      newInboundMode: "active",
       priorityEffect: "observe_only",
       identity: hydrationRecord.identity,
     });
@@ -334,7 +350,7 @@ async function run() {
       ok: true,
       status: "dismissed",
       semanticTrigger: "new_inbound",
-      newInboundMode: "shadow",
+      newInboundMode: "active",
       priorityEffect: "observe_only",
       identity: hydrationRecord.identity,
     },
@@ -354,19 +370,25 @@ async function run() {
   );
 
   const callsBeforeInvalidDismissal = fetchCalls.length;
-  assert.deepEqual(
-    await requestPrioritySemanticNewInboundDismissal({
-      ...dismissalRequest,
-      state: "needs_user_action",
-    } as unknown as typeof dismissalRequest),
-    {
-      ok: false,
-      error: {
-        code: "invalid_semantic_request",
-        message: "Semantic dismissal request is invalid.",
+  for (const policyForgery of [
+    { state: "needs_user_action" },
+    { newInboundMode: "active" },
+    { priorityEffect: "promote_new_inbound" },
+  ]) {
+    assert.deepEqual(
+      await requestPrioritySemanticNewInboundDismissal({
+        ...dismissalRequest,
+        ...policyForgery,
+      } as unknown as typeof dismissalRequest),
+      {
+        ok: false,
+        error: {
+          code: "invalid_semantic_request",
+          message: "Semantic dismissal request is invalid.",
+        },
       },
-    },
-  );
+    );
+  }
   assert.equal(fetchCalls.length, callsBeforeInvalidDismissal);
 
   globalThis.fetch = (async () =>
@@ -374,7 +396,7 @@ async function run() {
       ok: true,
       status: "dismissed",
       semanticTrigger: "new_inbound",
-      newInboundMode: "shadow",
+      newInboundMode: "active",
       priorityEffect: "observe_only",
       identity: {
         ...hydrationRecord.identity,
@@ -431,8 +453,8 @@ async function run() {
         mailboxId: "mailbox-1",
       })
     ).prioritySemanticNewInboundMode,
-    "off",
-    "IMAP provider refreshes must normalize active/unknown modes to off",
+    "active",
+    "IMAP provider refreshes retain an explicit server-owned active capability",
   );
 
   globalThis.fetch = (async () =>
@@ -570,7 +592,7 @@ async function run() {
 
 run()
   .then(() =>
-    console.log("\n✓ inboxConnectionApi Priority semantic shadow tests passed."),
+    console.log("\n✓ inboxConnectionApi Priority semantic activation tests passed."),
   )
   .catch((error) => {
     console.error(error);

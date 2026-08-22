@@ -349,12 +349,14 @@ import {
 } from "../../lib/prioritySemanticState";
 import {
   PRIORITY_SEMANTIC_NEW_INBOUND_MAX_HYDRATION_RECORDS,
+  buildPrioritySemanticNewInboundHydrationRecordFromResponse,
   buildPrioritySemanticNewInboundIdentityKey,
   buildPrioritySemanticNewInboundLocatorKey,
   buildPrioritySemanticNewInboundStorageKey,
   isPrioritySemanticNewInboundDismissalTurnCurrent,
   isPrioritySemanticNewInboundHydratedObservationCurrent,
   isPrioritySemanticNewInboundEligible,
+  meetsPrioritySemanticNewInboundPromotionThreshold,
   observePrioritySemanticNewInboundSnapshot,
   rememberPrioritySemanticNewInboundDismissalFence,
   type PrioritySemanticNewInboundHydrationRecord,
@@ -1581,6 +1583,7 @@ const PRIORITY_SEMANTIC_NEW_INBOUND_MAX_PENDING = 256;
 
 type PendingPrioritySemanticNewInboundCandidate =
   PrioritySemanticNewInboundPendingCandidate & {
+    newInboundMode: "shadow" | "active";
     scopeKey: string;
     connectionKey: string;
     connectionEpoch: number;
@@ -1605,6 +1608,7 @@ type PrioritySemanticNewInboundHydrationState = {
 };
 
 type PrioritySemanticNewInboundAcceptedRefreshAuthority = {
+  newInboundMode: "off" | "shadow" | "active";
   connectionKey: string;
   connectionEpoch: number;
   provider: "google" | "custom_imap";
@@ -1749,6 +1753,93 @@ export function resolveExactPrioritySemanticNewInboundObservationForMessage(
     ? observations[buildPrioritySemanticNewInboundIdentityKey(liveIdentity)] ??
         null
     : null;
+}
+
+export async function coordinatePrioritySemanticNewInboundAssessmentCommit(
+  input: {
+    response: Promise<unknown>;
+    isCurrent: (
+      record: PrioritySemanticNewInboundHydrationRecord,
+    ) => boolean;
+    commit: (record: PrioritySemanticNewInboundHydrationRecord) => void;
+  },
+) {
+  try {
+    const record = buildPrioritySemanticNewInboundHydrationRecordFromResponse(
+      await input.response,
+    );
+    if (!record || !input.isCurrent(record)) {
+      return false;
+    }
+    input.commit(record);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+type PrioritySemanticNewInboundPriorityEntry = {
+  mailboxId: InboxId;
+  mailboxTitle: string;
+  message: MailMessage;
+};
+
+export function mergePrioritySemanticNewInboundPromotionsIntoCanonicalPriorityEntries(
+  broadEntries: PrioritySemanticNewInboundPriorityEntry[],
+  candidateEntries: PrioritySemanticNewInboundPriorityEntry[],
+  observations: Record<string, PrioritySemanticNewInboundHydrationRecord>,
+) {
+  const promotedEntries = candidateEntries.filter(
+    ({ mailboxId, message }) => {
+      const observation =
+        resolveExactPrioritySemanticNewInboundObservationForMessage(
+          observations,
+          mailboxId,
+          message,
+        );
+      return Boolean(
+        observation?.priorityEffect === "promote_new_inbound" &&
+          meetsPrioritySemanticNewInboundPromotionThreshold(
+            observation.assessment,
+          ),
+      );
+    },
+  );
+  return dedupeLatestCanonicalConversationEntries([
+    ...broadEntries,
+    ...promotedEntries,
+  ]);
+}
+
+export function isPrioritySemanticNewInboundCurrentUserContainmentSatisfied(
+  input: {
+    manualPriorityOverride: unknown;
+    isPriorityCleared: boolean;
+    senderAddress: string;
+    ownedAddressSet: ReadonlySet<string>;
+  },
+) {
+  const senderAddress = normalizeReturnedReplyEmailAddress(
+    input.senderAddress,
+  );
+  return Boolean(
+    input.manualPriorityOverride !== "removed" &&
+      !input.isPriorityCleared &&
+      input.ownedAddressSet.size > 0 &&
+      /^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i.test(senderAddress) &&
+      !input.ownedAddressSet.has(senderAddress),
+  );
+}
+
+export function resolvePrioritySemanticNewInboundHydrationCommitPolicy(input: {
+  newInboundMode: "off" | "shadow" | "active";
+  requestMutationRevision: number;
+  currentMutationRevision: number;
+}) {
+  return input.newInboundMode === "active" &&
+    input.requestMutationRevision !== input.currentMutationRevision
+    ? ("preserve_and_rehydrate" as const)
+    : ("replace" as const);
 }
 
 export async function coordinatePrioritySemanticNewInboundRemoval<T>(input: {
@@ -40942,6 +41033,11 @@ export function WorkspaceShell({
   const requestedPrioritySemanticNewInboundHydrationKeysRef = useRef<
     Set<string>
   >(new Set());
+  const prioritySemanticNewInboundMutationRevisionsRef = useRef<
+    Partial<Record<InboxId, number>>
+  >({});
+  const [prioritySemanticNewInboundHydrationRefreshEpoch, setPrioritySemanticNewInboundHydrationRefreshEpoch] =
+    useState(0);
   const confirmedPrioritySemanticNewInboundDismissalKeysByMailboxRef = useRef<
     Map<InboxId, Set<string>>
   >(new Map());
@@ -44188,6 +44284,19 @@ export function WorkspaceShell({
   normalizedUserFocusPreferencesRef.current = normalizedUserFocusPreferences;
   const manualPriorityOverridesRef = useRef(manualPriorityOverrides);
   manualPriorityOverridesRef.current = manualPriorityOverrides;
+  const priorityClearedKeysRef = useRef(priorityClearedKeys);
+  priorityClearedKeysRef.current = priorityClearedKeys;
+  const prioritySemanticNewInboundOwnedAddressSetRef = useRef<Set<string>>(
+    new Set(),
+  );
+  prioritySemanticNewInboundOwnedAddressSetRef.current = new Set(
+    [
+      ...connectedOrderedMailboxes.map((mailbox) => mailbox.email),
+      authenticatedUser?.email ?? activeWorkspaceEmail,
+    ]
+      .map(normalizeReturnedReplyEmailAddress)
+      .filter(Boolean),
+  );
   const senderCategoryLearningRef = useRef(senderCategoryLearning);
   senderCategoryLearningRef.current = senderCategoryLearning;
   const applyCurrentFocusPreferencesToLiveMailboxStore = (
@@ -44618,6 +44727,7 @@ export function WorkspaceShell({
   useEffect(() => {
     pendingPrioritySemanticNewInboundCandidatesRef.current.clear();
     requestedPrioritySemanticNewInboundHydrationKeysRef.current.clear();
+    prioritySemanticNewInboundMutationRevisionsRef.current = {};
     confirmedPrioritySemanticNewInboundDismissalKeysByMailboxRef.current.clear();
     pendingPrioritySemanticNewInboundDismissalsRef.current.clear();
     prioritySemanticNewInboundAcceptedRefreshAuthorityRef.current = {};
@@ -44647,6 +44757,9 @@ export function WorkspaceShell({
         confirmedPrioritySemanticNewInboundDismissalKeysByMailboxRef.current;
       for (const mailboxId of changedMailboxIds) {
         confirmedDismissalsByMailbox.delete(mailboxId as InboxId);
+        delete prioritySemanticNewInboundMutationRevisionsRef.current[
+          mailboxId as InboxId
+        ];
       }
     }
     prioritySemanticNewInboundDismissalConnectionKeysRef.current =
@@ -44654,6 +44767,7 @@ export function WorkspaceShell({
   }, [providerArchiveConnectionKeys]);
 
   useEffect(() => {
+    void prioritySemanticNewInboundHydrationRefreshEpoch;
     if (!hasAuthenticatedMemberAuthority) {
       return;
     }
@@ -44663,14 +44777,32 @@ export function WorkspaceShell({
         providerArchiveCurrentConnectionKeysRef.current[mailbox.id] ?? "";
       const connectionEpoch =
         providerArchiveConnectionEpochsRef.current[mailbox.id] ?? 0;
-      if (!connectionKey) {
+      const acceptedRefreshAuthority =
+        prioritySemanticNewInboundAcceptedRefreshAuthorityRef.current[
+          mailbox.id
+        ];
+      if (
+        !connectionKey ||
+        !acceptedRefreshAuthority ||
+        acceptedRefreshAuthority.connectionKey !== connectionKey ||
+        acceptedRefreshAuthority.connectionEpoch !== connectionEpoch
+      ) {
         return;
       }
+      const requestMutationRevision =
+        prioritySemanticNewInboundMutationRevisionsRef.current[mailbox.id] ??
+        0;
+      const requestAuthorityGeneration =
+        acceptedRefreshAuthority.authorityGeneration;
+      const requestAcceptedMode = acceptedRefreshAuthority.newInboundMode;
       const requestKey = [
         scopeKey,
         mailbox.id,
         connectionKey,
         connectionEpoch,
+        requestAcceptedMode,
+        requestAuthorityGeneration,
+        requestMutationRevision,
       ].join("::");
       if (
         requestedPrioritySemanticNewInboundHydrationKeysRef.current.has(
@@ -44697,13 +44829,33 @@ export function WorkspaceShell({
           oldestRequestKey,
         );
       }
+      if (requestAcceptedMode === "off") {
+        commitPrioritySemanticNewInboundHydrationRecords(
+          scopeKey,
+          mailbox.id,
+          connectionKey,
+          connectionEpoch,
+          [],
+          true,
+        );
+        return;
+      }
       void requestPrioritySemanticNewInboundHydration({
         operation: "hydrate_new_inbound",
         mailboxId: mailbox.id,
       }).then((response) => {
+        const currentAcceptedRefreshAuthority =
+          prioritySemanticNewInboundAcceptedRefreshAuthorityRef.current[
+            mailbox.id
+          ];
         if (
           !response.ok ||
           response.status !== "hydrated" ||
+          !currentAcceptedRefreshAuthority ||
+          currentAcceptedRefreshAuthority.newInboundMode !==
+            requestAcceptedMode ||
+          currentAcceptedRefreshAuthority.authorityGeneration !==
+            requestAuthorityGeneration ||
           prioritySemanticNewInboundHydrationScopeRef.current !== scopeKey ||
           providerArchiveCurrentConnectionKeysRef.current[mailbox.id] !==
             connectionKey ||
@@ -44712,12 +44864,27 @@ export function WorkspaceShell({
         ) {
           return;
         }
+        const currentMutationRevision =
+          prioritySemanticNewInboundMutationRevisionsRef.current[mailbox.id] ??
+          0;
+        if (
+          resolvePrioritySemanticNewInboundHydrationCommitPolicy({
+            newInboundMode: response.newInboundMode,
+            requestMutationRevision,
+            currentMutationRevision,
+          }) === "preserve_and_rehydrate"
+        ) {
+          setPrioritySemanticNewInboundHydrationRefreshEpoch(
+            (current) => current + 1,
+          );
+          return;
+        }
         commitPrioritySemanticNewInboundHydrationRecords(
           scopeKey,
           mailbox.id,
           connectionKey,
           connectionEpoch,
-          response.newInboundMode === "shadow" ? response.records : [],
+          response.newInboundMode === "off" ? [] : response.records,
           true,
         );
       });
@@ -44726,6 +44893,7 @@ export function WorkspaceShell({
     commitPrioritySemanticNewInboundHydrationRecords,
     connectedOrderedMailboxes,
     hasAuthenticatedMemberAuthority,
+    prioritySemanticNewInboundHydrationRefreshEpoch,
     providerArchiveConnectionKeys,
     prioritySemanticNewInboundStorageKey,
   ]);
@@ -45470,7 +45638,6 @@ export function WorkspaceShell({
       );
     });
   })();
-  const livePriorityInboxEntries = broadLivePriorityInboxEntries;
   useEffect(() => {
     void prioritySemanticNewInboundDrainEpoch;
     if (!isPrioritySemanticDeterministicStoreCommitted) {
@@ -45615,7 +45782,7 @@ export function WorkspaceShell({
             record.mailboxId === mailboxId &&
             record.conversationKey === canonicalConversation.key,
         );
-        const hasDeterministicPriority = livePriorityInboxEntries.some(
+        const hasDeterministicPriority = broadLivePriorityInboxEntries.some(
           (entry) =>
             entry.mailboxId === mailboxId &&
             isExactPrioritySemanticNewInboundMessage(
@@ -45773,15 +45940,108 @@ export function WorkspaceShell({
           return;
         }
 
-        void requestPrioritySemanticNewInboundAssessment({
-          mailboxId: selected.candidate.mailboxId,
-          trigger: "new_inbound",
-          incomingLocator: selected.candidate.incomingLocator,
-        }).catch(() => undefined);
+        const selectedEntry = selected;
+        const mailboxId = selectedEntry.candidate.mailboxId as InboxId;
+        void coordinatePrioritySemanticNewInboundAssessmentCommit({
+          response: requestPrioritySemanticNewInboundAssessment({
+            mailboxId,
+            trigger: "new_inbound",
+            incomingLocator: selectedEntry.candidate.incomingLocator,
+          }),
+          isCurrent: (record) => {
+            const candidate = selectedEntry.candidate;
+            const acceptedRefreshAuthority =
+              prioritySemanticNewInboundAcceptedRefreshAuthorityRef.current[
+                mailboxId
+              ];
+            if (
+              record.identity.mailboxId !== mailboxId ||
+              !acceptedRefreshAuthority ||
+              acceptedRefreshAuthority.newInboundMode !==
+                candidate.newInboundMode ||
+              acceptedRefreshAuthority.authorityGeneration !==
+                candidate.authorityGeneration ||
+              candidate.scopeKey !== prioritySemanticNewInboundStorageKey ||
+              prioritySemanticNewInboundHydrationScopeRef.current !==
+                candidate.scopeKey ||
+              providerArchiveCurrentConnectionKeysRef.current[mailboxId] !==
+                candidate.connectionKey ||
+              (providerArchiveConnectionEpochsRef.current[mailboxId] ?? 0) !==
+                candidate.connectionEpoch ||
+              (candidate.incomingLocator.provider === "google"
+                ? !gmailInboxAuthorityRef.current.isCurrentGeneration(
+                    mailboxId,
+                    candidate.authorityGeneration,
+                  )
+                : !customImapInboxAuthorityRef.current.isCurrentGeneration(
+                    mailboxId,
+                    candidate.authorityGeneration,
+                  )) ||
+              (candidate.incomingLocator.provider === "custom_imap" &&
+                candidate.imapTrashMutationPublicationEpoch !==
+                  (providerImapTrashInboxMutationPublicationEpochsRef.current[
+                    mailboxId
+                  ] ?? 0))
+            ) {
+              return false;
+            }
+            const collections = mailboxStoreRef.current[mailboxId];
+            if (!collections) {
+              return false;
+            }
+            const conversationEntries = canonicalFolderOrder.flatMap((folder) =>
+              collections[folder]
+                .filter(
+                  (message) =>
+                    resolveCanonicalConversationIdentity(message, mailboxId)
+                      .key === record.identity.conversationId,
+                )
+                .map((message) => ({ folder, message })),
+            );
+            const currentMessage =
+              resolvePrioritySemanticNewInboundCurrentInboxMessage({
+                mailboxId,
+                messageId: selectedEntry.message.id,
+                record,
+                conversationEntries,
+              });
+            return Boolean(
+              currentMessage &&
+                isPrioritySemanticNewInboundCurrentUserContainmentSatisfied({
+                  manualPriorityOverride: resolveManualPriorityOverride(
+                    manualPriorityOverridesRef.current,
+                    currentMessage,
+                  ),
+                  isPriorityCleared: getPriorityClearedIdentityKeys(
+                    mailboxId,
+                    currentMessage,
+                  ).some((key) =>
+                    priorityClearedKeysRef.current.includes(key),
+                  ),
+                  senderAddress: getReturnedReplySenderAddress(currentMessage),
+                  ownedAddressSet:
+                    prioritySemanticNewInboundOwnedAddressSetRef.current,
+                }),
+            );
+          },
+          commit: (record) => {
+            prioritySemanticNewInboundMutationRevisionsRef.current[mailboxId] =
+              (prioritySemanticNewInboundMutationRevisionsRef.current[
+                mailboxId
+              ] ?? 0) + 1;
+            commitPrioritySemanticNewInboundHydrationRecords(
+              selectedEntry.candidate.scopeKey,
+              mailboxId,
+              selectedEntry.candidate.connectionKey,
+              selectedEntry.candidate.connectionEpoch,
+              [record],
+            );
+          },
+        });
       });
     } catch {
       pendingPrioritySemanticNewInboundCandidatesRef.current.clear();
-      // Shadow-only orchestration never blocks Inbox or mutates Priority.
+      // Semantic orchestration never blocks provider Inbox publication.
     }
   }, [
     activeFocusPreferences,
@@ -45791,7 +46051,8 @@ export function WorkspaceShell({
     effectiveFocusPreferencesByMailbox,
     effectiveWaitingOnOtherStore,
     isPrioritySemanticDeterministicStoreCommitted,
-    livePriorityInboxEntries,
+    broadLivePriorityInboxEntries,
+    commitPrioritySemanticNewInboundHydrationRecords,
     mailboxStore,
     manualLabelOverrides,
     manualOrganizerInclusions,
@@ -45813,6 +46074,14 @@ export function WorkspaceShell({
       string,
       PrioritySemanticNewInboundHydrationRecord
     > = {};
+    const ownedAddressSet = new Set(
+      [
+        ...connectedOrderedMailboxes.map((mailbox) => mailbox.email),
+        authenticatedUser?.email ?? activeWorkspaceEmail,
+      ]
+        .map(normalizeReturnedReplyEmailAddress)
+        .filter(Boolean),
+    );
 
     connectedOrderedMailboxes.forEach((mailbox) => {
       const mailboxId = mailbox.id;
@@ -45829,6 +46098,7 @@ export function WorkspaceShell({
           (providerArchiveConnectionEpochsRef.current[mailboxId] ?? 0) ||
         acceptedRefreshAuthority.connectionKey !== bucket.connectionKey ||
         acceptedRefreshAuthority.connectionEpoch !== bucket.connectionEpoch ||
+        acceptedRefreshAuthority.newInboundMode === "off" ||
         (acceptedRefreshAuthority.provider === "google"
           ? !gmailInboxAuthorityRef.current.isCurrentGeneration(
               mailboxId,
@@ -45870,6 +46140,12 @@ export function WorkspaceShell({
       );
 
       bucket.records.forEach((record) => {
+        if (
+          record.priorityEffect === "promote_new_inbound" &&
+          acceptedRefreshAuthority.newInboundMode !== "active"
+        ) {
+          return;
+        }
         if (
           confirmedPrioritySemanticNewInboundDismissalKeysByMailboxRef.current
             .get(mailboxId)
@@ -45987,6 +46263,19 @@ export function WorkspaceShell({
         if (!liveIdentity) {
           return;
         }
+        if (
+          !isPrioritySemanticNewInboundCurrentUserContainmentSatisfied({
+            manualPriorityOverride: resolveManualPriorityOverride(
+              manualPriorityOverrides,
+              message,
+            ),
+            isPriorityCleared: isPriorityMessageCleared(mailboxId, message),
+            senderAddress: getReturnedReplySenderAddress(message),
+            ownedAddressSet,
+          })
+        ) {
+          return;
+        }
         const threadMessages = conversationMessages
           .map(({ message: threadMessage }) => threadMessage)
           .sort(
@@ -46067,6 +46356,8 @@ export function WorkspaceShell({
     return observations;
   }, [
     activeFocusPreferences,
+    activeWorkspaceEmail,
+    authenticatedUser?.email,
     connectedOrderedMailboxes,
     effectiveFocusPreferencesByMailbox,
     effectiveWaitingOnOtherStore,
@@ -46077,10 +46368,17 @@ export function WorkspaceShell({
     manualPriorityOverrides,
     prioritySemanticNewInboundHydrationState,
     prioritySemanticNewInboundStorageKey,
+    priorityClearedKeys,
     productAccess,
     providerArchiveConnectionKeys,
     senderCategoryLearning,
   ]);
+  const livePriorityInboxEntries =
+    mergePrioritySemanticNewInboundPromotionsIntoCanonicalPriorityEntries(
+      broadLivePriorityInboxEntries,
+      normalPriorityGateCandidateEntries,
+      prioritySemanticNewInboundHydratedObservations,
+    );
   const resolveExactPrioritySemanticNewInboundObservation = useCallback(
     (mailboxId: InboxId, message: MailMessage) =>
       resolveExactPrioritySemanticNewInboundObservationForMessage(
@@ -47678,14 +47976,24 @@ export function WorkspaceShell({
     // Now: always write the override unconditionally based on intent.
     const override: ManualPriorityOverride = shouldBePriority ? "priority" : "removed";
 
-    setManualPriorityOverrides((current) =>
+    const writeManualPriorityOverride = (
+      current: ManualPriorityOverrideStore,
+    ) =>
       writePersistedMessageStateValue(
         current,
         sourceMessage,
         override,
         sourceLocation ? { mailboxId: sourceLocation.mailboxId } : undefined,
-      ),
+      );
+    const immediateManualPriorityOverrides = writeManualPriorityOverride(
+      manualPriorityOverridesRef.current,
     );
+    manualPriorityOverridesRef.current = immediateManualPriorityOverrides;
+    setManualPriorityOverrides((current) => {
+      const next = writeManualPriorityOverride(current);
+      manualPriorityOverridesRef.current = next;
+      return next;
+    });
 
     if (!shouldBePriority && sourceLocation) {
       setWaitingOnOtherStore((current) =>
@@ -47702,13 +48010,21 @@ export function WorkspaceShell({
           getPriorityClearedIdentityKeys(sourceLocation.mailboxId, sourceMessage),
         );
 
-        setPriorityClearedKeys((current) =>
+        const restorePriorityClearedKeys = (current: string[]) =>
           migrateLegacyMailboxPrefixedImapStateKeys(
             current,
             buildPersistedMessageIdentityCandidates(mailboxStoreRef.current),
             legacyImapMigrationOptions,
-          ).filter((key) => !restoredKeys.has(key)),
-        );
+          ).filter((key) => !restoredKeys.has(key));
+        const immediateRestoredPriorityClearedKeys =
+          restorePriorityClearedKeys(priorityClearedKeysRef.current);
+        priorityClearedKeysRef.current =
+          immediateRestoredPriorityClearedKeys;
+        setPriorityClearedKeys((current) => {
+          const next = restorePriorityClearedKeys(current);
+          priorityClearedKeysRef.current = next;
+          return next;
+        });
       }
 
       const linkedReviewId = reviewController.getReviewBySourceId(messageId)?.id ?? null;
@@ -47832,13 +48148,22 @@ export function WorkspaceShell({
 
     const clearedKeys = getPriorityClearedIdentityKeys(mailboxId, sourceMessage);
 
-    setPriorityClearedKeys((current) => {
+    const addPriorityClearedKeys = (current: string[]) => {
       const migratedCurrent = migrateLegacyMailboxPrefixedImapStateKeys(
         current,
         buildPersistedMessageIdentityCandidates(mailboxStoreRef.current),
         legacyImapMigrationOptions,
       );
       return Array.from(new Set([...migratedCurrent, ...clearedKeys]));
+    };
+    const immediateDonePriorityClearedKeys = addPriorityClearedKeys(
+      priorityClearedKeysRef.current,
+    );
+    priorityClearedKeysRef.current = immediateDonePriorityClearedKeys;
+    setPriorityClearedKeys((current) => {
+      const next = addPriorityClearedKeys(current);
+      priorityClearedKeysRef.current = next;
+      return next;
     });
     setWaitingOnOtherStore((current) =>
       clearConversationWaitingOnOther(current, {
@@ -49205,6 +49530,10 @@ export function WorkspaceShell({
                 pendingKey,
                 {
                   ...candidate,
+                  newInboundMode:
+                    response.prioritySemanticNewInboundMode === "active"
+                      ? "active"
+                      : "shadow",
                   scopeKey: prioritySemanticNewInboundStorageKey,
                   connectionKey: connectionKeyAtFetchStart,
                   connectionEpoch: connectionEpochAtFetchStart,
@@ -49389,8 +49718,18 @@ export function WorkspaceShell({
         )
           ? new Set(messages.map((message) => message.imapUid as string))
           : null;
-      prioritySemanticNewInboundAcceptedRefreshAuthorityRef.current[mailboxId] =
+      const previousAcceptedRefreshAuthority =
+        prioritySemanticNewInboundAcceptedRefreshAuthorityRef.current[
+          mailboxId
+        ];
+      const nextAcceptedRefreshAuthority: PrioritySemanticNewInboundAcceptedRefreshAuthority =
         {
+          newInboundMode:
+            response.prioritySemanticNewInboundMode === "active"
+              ? "active"
+              : response.prioritySemanticNewInboundMode === "shadow"
+                ? "shadow"
+                : "off",
           connectionKey: acceptedConnectionKey,
           connectionEpoch: acceptedConnectionEpoch,
           provider: canUseGmailOAuthFetch ? "google" : "custom_imap",
@@ -49401,6 +49740,23 @@ export function WorkspaceShell({
           imapUidValidity: acceptedImapUidValidity,
           freshImapUids: acceptedFreshImapUids,
         };
+      prioritySemanticNewInboundAcceptedRefreshAuthorityRef.current[mailboxId] =
+        nextAcceptedRefreshAuthority;
+      if (
+        !previousAcceptedRefreshAuthority ||
+        previousAcceptedRefreshAuthority.connectionKey !==
+          nextAcceptedRefreshAuthority.connectionKey ||
+        previousAcceptedRefreshAuthority.connectionEpoch !==
+          nextAcceptedRefreshAuthority.connectionEpoch ||
+        previousAcceptedRefreshAuthority.authorityGeneration !==
+          nextAcceptedRefreshAuthority.authorityGeneration ||
+        previousAcceptedRefreshAuthority.newInboundMode !==
+          nextAcceptedRefreshAuthority.newInboundMode
+      ) {
+        setPrioritySemanticNewInboundHydrationRefreshEpoch(
+          (current) => current + 1,
+        );
+      }
       clearUnreadOverridesForProviderMessages(messages);
       const refreshWarningMessage = resolveMailboxRefreshWarningMessage(response.warning);
       const refreshPresentation = resolveSuccessfulInboxRefreshPresentation({

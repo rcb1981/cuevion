@@ -25,7 +25,11 @@ const MAX_PROVIDER_FOLDER_LENGTH = 1_024;
 const MAX_RETRY_AFTER_SECONDS = 24 * 60 * 60;
 const MAX_IMAP_INTEGER = 4_294_967_295;
 
-export type PrioritySemanticNewInboundMode = "off" | "shadow";
+export type PrioritySemanticNewInboundMode = "off" | "shadow" | "active";
+
+export type PrioritySemanticNewInboundPriorityEffect =
+  | "observe_only"
+  | "promote_new_inbound";
 
 export type PrioritySemanticNewInboundStorage = {
   getItem: (key: string) => string | null;
@@ -70,8 +74,8 @@ export type PrioritySemanticNewInboundAssessmentSuccess = {
   ok: true;
   status: "assessed" | "cached";
   semanticTrigger: "new_inbound";
-  newInboundMode: "shadow";
-  priorityEffect: "observe_only";
+  newInboundMode: Exclude<PrioritySemanticNewInboundMode, "off">;
+  priorityEffect: PrioritySemanticNewInboundPriorityEffect;
   assessment: PrioritySemanticAssessment;
   effectiveSemanticState: PrioritySemanticState;
   identity: PrioritySemanticIdentity;
@@ -104,7 +108,7 @@ export type PrioritySemanticNewInboundAssessmentResponse =
 export type PrioritySemanticNewInboundHydrationRecord = {
   assessment: PrioritySemanticAssessment;
   effectiveSemanticState: PrioritySemanticState;
-  priorityEffect: "observe_only";
+  priorityEffect: PrioritySemanticNewInboundPriorityEffect;
   identity: PrioritySemanticIdentity;
   assessedAt: string;
 };
@@ -126,7 +130,7 @@ export type PrioritySemanticNewInboundDismissalSuccess = {
   ok: true;
   status: "dismissed";
   semanticTrigger: "new_inbound";
-  newInboundMode: "shadow";
+  newInboundMode: Exclude<PrioritySemanticNewInboundMode, "off">;
   priorityEffect: "observe_only";
   identity: PrioritySemanticIdentity;
 };
@@ -363,7 +367,7 @@ function readBoundaryRecord(
 export function normalizePrioritySemanticNewInboundMode(
   value: unknown,
 ): PrioritySemanticNewInboundMode {
-  return value === "shadow" ? "shadow" : "off";
+  return value === "shadow" || value === "active" ? value : "off";
 }
 
 export function buildPrioritySemanticNewInboundStorageKey(
@@ -429,7 +433,7 @@ function observeGmailSnapshot(input: {
     connectionScopeToken: input.connectionScopeToken,
     providerMessageIds: mergedIds,
   });
-  if (!persisted || !continuousRecord || input.mode !== "shadow") {
+  if (!persisted || !continuousRecord || input.mode === "off") {
     return [];
   }
 
@@ -491,7 +495,7 @@ function observeImapSnapshot(input: {
     uidValidity,
     highWaterUid: String(nextHighWaterUid),
   });
-  if (!persisted || !continuousRecord || input.mode !== "shadow") {
+  if (!persisted || !continuousRecord || input.mode === "off") {
     return [];
   }
 
@@ -605,7 +609,7 @@ export function isPrioritySemanticNewInboundEligible(input: {
   );
 }
 
-/** Future active-promotion policy only; shadow analysis never calls this. */
+/** Active promotion policy; shadow analysis always remains observe-only. */
 export function meetsPrioritySemanticNewInboundPromotionThreshold(
   assessment: Pick<PrioritySemanticAssessment, "state" | "confidence">,
 ) {
@@ -616,6 +620,18 @@ export function meetsPrioritySemanticNewInboundPromotionThreshold(
       PRIORITY_SEMANTIC_NEW_INBOUND_PROMOTION_CONFIDENCE &&
     assessment.confidence <= 1
   );
+}
+
+function resolvePrioritySemanticNewInboundPriorityEffect(input: {
+  mode: Exclude<PrioritySemanticNewInboundMode, "off">;
+  assessment: Pick<PrioritySemanticAssessment, "state" | "confidence">;
+  effectiveSemanticState: PrioritySemanticState;
+}): PrioritySemanticNewInboundPriorityEffect {
+  return input.mode === "active" &&
+    input.effectiveSemanticState === "needs_user_action" &&
+    meetsPrioritySemanticNewInboundPromotionThreshold(input.assessment)
+    ? "promote_new_inbound"
+    : "observe_only";
 }
 
 export function buildPrioritySemanticNewInboundWireRequest(
@@ -860,6 +876,7 @@ function normalizeIsoTimestamp(value: unknown) {
 
 function parseHydrationRecord(
   value: unknown,
+  mode: Exclude<PrioritySemanticNewInboundMode, "off">,
 ): PrioritySemanticNewInboundHydrationRecord | null {
   if (
     !isPlainObject(value) ||
@@ -870,7 +887,6 @@ function parseHydrationRecord(
       "identity",
       "assessedAt",
     ]) ||
-    value.priorityEffect !== "observe_only" ||
     !isPlainObject(value.assessment) ||
     !hasExactKeys(value.assessment, ["state", "confidence", "reasonCode"])
   ) {
@@ -882,6 +898,17 @@ function parseHydrationRecord(
   const effectiveSemanticState = value.effectiveSemanticState;
   const identity = parseIdentity(value.identity);
   const assessedAt = normalizeIsoTimestamp(value.assessedAt);
+  const expectedPriorityEffect =
+    isPrioritySemanticState(state) &&
+    typeof confidence === "number" &&
+    Number.isFinite(confidence) &&
+    isPrioritySemanticState(effectiveSemanticState)
+      ? resolvePrioritySemanticNewInboundPriorityEffect({
+          mode,
+          assessment: { state, confidence },
+          effectiveSemanticState,
+        })
+      : null;
   if (
     !isPrioritySemanticState(state) ||
     typeof confidence !== "number" ||
@@ -893,6 +920,8 @@ function parseHydrationRecord(
     !isPrioritySemanticState(effectiveSemanticState) ||
     effectiveSemanticState !==
       resolvePrioritySemanticEffectiveState({ state, confidence, reasonCode }) ||
+    !expectedPriorityEffect ||
+    value.priorityEffect !== expectedPriorityEffect ||
     !identity ||
     !assessedAt
   ) {
@@ -901,7 +930,7 @@ function parseHydrationRecord(
   return {
     assessment: { state, confidence, reasonCode },
     effectiveSemanticState,
-    priorityEffect: "observe_only",
+    priorityEffect: expectedPriorityEffect,
     identity,
     assessedAt,
   };
@@ -928,7 +957,9 @@ export function parsePrioritySemanticNewInboundHydrationResponse(
     value.status !== "hydrated" ||
     value.semanticTrigger !== "new_inbound" ||
     value.priorityEffect !== "observe_only" ||
-    (value.newInboundMode !== "off" && value.newInboundMode !== "shadow") ||
+    (value.newInboundMode !== "off" &&
+      value.newInboundMode !== "shadow" &&
+      value.newInboundMode !== "active") ||
     !Array.isArray(value.records) ||
     value.records.length >
       PRIORITY_SEMANTIC_NEW_INBOUND_MAX_HYDRATION_RECORDS ||
@@ -936,7 +967,16 @@ export function parsePrioritySemanticNewInboundHydrationResponse(
   ) {
     return null;
   }
-  const records = value.records.map(parseHydrationRecord);
+  const newInboundMode = value.newInboundMode;
+  if (newInboundMode === "off" && value.records.length !== 0) {
+    return null;
+  }
+  const records =
+    newInboundMode === "off"
+      ? []
+      : value.records.map((record) =>
+          parseHydrationRecord(record, newInboundMode),
+        );
   if (records.some((record) => record === null)) {
     return null;
   }
@@ -955,7 +995,7 @@ export function parsePrioritySemanticNewInboundHydrationResponse(
     ok: true,
     status: "hydrated",
     semanticTrigger: "new_inbound",
-    newInboundMode: value.newInboundMode,
+    newInboundMode,
     priorityEffect: "observe_only",
     records: records as PrioritySemanticNewInboundHydrationRecord[],
   };
@@ -981,7 +1021,8 @@ export function parsePrioritySemanticNewInboundDismissalResponse(
     value.ok !== true ||
     value.status !== "dismissed" ||
     value.semanticTrigger !== "new_inbound" ||
-    value.newInboundMode !== "shadow" ||
+    (value.newInboundMode !== "shadow" &&
+      value.newInboundMode !== "active") ||
     value.priorityEffect !== "observe_only"
   ) {
     return null;
@@ -992,7 +1033,7 @@ export function parsePrioritySemanticNewInboundDismissalResponse(
         ok: true,
         status: "dismissed",
         semanticTrigger: "new_inbound",
-        newInboundMode: "shadow",
+        newInboundMode: value.newInboundMode,
         priorityEffect: "observe_only",
         identity,
       }
@@ -1006,7 +1047,8 @@ export function isPrioritySemanticNewInboundHydratedObservationCurrent(input: {
   const { identity } = input.record;
   const liveIdentity = input.liveIdentity;
   return (
-    input.record.priorityEffect === "observe_only" &&
+    (input.record.priorityEffect === "observe_only" ||
+      input.record.priorityEffect === "promote_new_inbound") &&
     identity.semanticVersion === SEMANTIC_SCHEMA_VERSION &&
     liveIdentity.semanticVersion === SEMANTIC_SCHEMA_VERSION &&
     identity.mailboxId === liveIdentity.mailboxId &&
@@ -1031,11 +1073,13 @@ export function parsePrioritySemanticNewInboundResponse(
     !isPlainObject(value) ||
     value.ok !== true ||
     value.semanticTrigger !== "new_inbound" ||
-    value.priorityEffect !== "observe_only" ||
-    (value.newInboundMode !== "off" && value.newInboundMode !== "shadow")
+    (value.newInboundMode !== "off" &&
+      value.newInboundMode !== "shadow" &&
+      value.newInboundMode !== "active")
   ) {
     return null;
   }
+  const newInboundMode = value.newInboundMode;
   const identity = parseIdentity(value.identity);
   if (!identity) {
     return null;
@@ -1052,7 +1096,8 @@ export function parsePrioritySemanticNewInboundResponse(
         "identity",
         "retryAfterSeconds",
       ]) ||
-      (value.newInboundMode === "off" && value.status !== "deferred") ||
+      value.priorityEffect !== "observe_only" ||
+      (newInboundMode === "off" && value.status !== "deferred") ||
       typeof value.retryAfterSeconds !== "number" ||
       !Number.isInteger(value.retryAfterSeconds) ||
       value.retryAfterSeconds < 0 ||
@@ -1064,7 +1109,7 @@ export function parsePrioritySemanticNewInboundResponse(
       ok: true,
       status: value.status,
       semanticTrigger: "new_inbound",
-      newInboundMode: value.newInboundMode,
+      newInboundMode,
       priorityEffect: "observe_only",
       identity,
       retryAfterSeconds: value.retryAfterSeconds,
@@ -1073,7 +1118,7 @@ export function parsePrioritySemanticNewInboundResponse(
 
   if (
     (value.status !== "assessed" && value.status !== "cached") ||
-    value.newInboundMode !== "shadow" ||
+    newInboundMode === "off" ||
     !hasExactKeys(value, [
       "ok",
       "status",
@@ -1095,6 +1140,17 @@ export function parsePrioritySemanticNewInboundResponse(
   const reasonCode = value.assessment.reasonCode;
   const effectiveSemanticState = value.effectiveSemanticState;
   const assessedAt = normalizeIsoTimestamp(value.assessedAt);
+  const expectedPriorityEffect =
+    isPrioritySemanticState(state) &&
+    typeof confidence === "number" &&
+    Number.isFinite(confidence) &&
+    isPrioritySemanticState(effectiveSemanticState)
+      ? resolvePrioritySemanticNewInboundPriorityEffect({
+          mode: newInboundMode,
+          assessment: { state, confidence },
+          effectiveSemanticState,
+        })
+      : null;
   if (
     !isPrioritySemanticState(state) ||
     typeof confidence !== "number" ||
@@ -1106,6 +1162,8 @@ export function parsePrioritySemanticNewInboundResponse(
     !isPrioritySemanticState(effectiveSemanticState) ||
     effectiveSemanticState !==
       resolvePrioritySemanticEffectiveState({ state, confidence, reasonCode }) ||
+    !expectedPriorityEffect ||
+    value.priorityEffect !== expectedPriorityEffect ||
     !assessedAt
   ) {
     return null;
@@ -1114,11 +1172,30 @@ export function parsePrioritySemanticNewInboundResponse(
     ok: true,
     status: value.status,
     semanticTrigger: "new_inbound",
-    newInboundMode: "shadow",
-    priorityEffect: "observe_only",
+    newInboundMode,
+    priorityEffect: expectedPriorityEffect,
     assessment: { state, confidence, reasonCode },
     effectiveSemanticState,
     identity,
     assessedAt,
+  };
+}
+
+export function buildPrioritySemanticNewInboundHydrationRecordFromResponse(
+  value: unknown,
+): PrioritySemanticNewInboundHydrationRecord | null {
+  const response = parsePrioritySemanticNewInboundResponse(value);
+  if (
+    !response?.ok ||
+    (response.status !== "assessed" && response.status !== "cached")
+  ) {
+    return null;
+  }
+  return {
+    assessment: response.assessment,
+    effectiveSemanticState: response.effectiveSemanticState,
+    priorityEffect: response.priorityEffect,
+    identity: response.identity,
+    assessedAt: response.assessedAt,
   };
 }

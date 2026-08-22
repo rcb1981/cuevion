@@ -4,6 +4,7 @@ import {
   PRIORITY_SEMANTIC_NEW_INBOUND_MAX_HYDRATION_RECORDS,
   buildPrioritySemanticNewInboundDismissalWireRequest,
   buildPrioritySemanticNewInboundHydrationWireRequest,
+  buildPrioritySemanticNewInboundHydrationRecordFromResponse,
   buildPrioritySemanticNewInboundIdentityKey,
   buildPrioritySemanticNewInboundLocatorKey,
   buildPrioritySemanticNewInboundStorageKey,
@@ -109,8 +110,8 @@ function observeImap(
 
 function runBoundaryTests() {
   assert.equal(normalizePrioritySemanticNewInboundMode("shadow"), "shadow");
+  assert.equal(normalizePrioritySemanticNewInboundMode("active"), "active");
   assert.equal(normalizePrioritySemanticNewInboundMode(undefined), "off");
-  assert.equal(normalizePrioritySemanticNewInboundMode("active"), "off");
   assert.equal(normalizePrioritySemanticNewInboundMode("unknown"), "off");
   assert.equal(
     baseKey,
@@ -152,16 +153,34 @@ function runBoundaryTests() {
 
   assert.deepEqual(
     observeGoogle(storage, ["gmail-4", "gmail-3"], { mode: "active" }),
-    [],
-    "unknown/active modes are fail-closed off but still advance the boundary",
+    [
+      {
+        mailboxId: "mailbox-1",
+        incomingLocator: {
+          provider: "google",
+          providerMessageId: "gmail-4",
+        },
+      },
+    ],
+    "active mode emits only the newly observed authoritative provider identity",
   );
   assert.deepEqual(
     observeGoogle(storage, ["gmail-4", "gmail-3"], { mode: "shadow" }),
     [],
-    "off to shadow never backfills provider identities seen while off",
+    "active to shadow never rediscovers an already advanced identity",
+  );
+  assert.deepEqual(
+    observeGoogle(storage, ["gmail-5", "gmail-4"], { mode: "unknown" }),
+    [],
+    "unknown modes fail closed while still advancing the boundary",
+  );
+  assert.deepEqual(
+    observeGoogle(storage, ["gmail-5", "gmail-4"], { mode: "active" }),
+    [],
+    "off to active never backfills provider identities seen while off",
   );
   assert.equal(
-    observeGoogle(storage, ["gmail-5", "gmail-4"], { mode: "shadow" })
+    observeGoogle(storage, ["gmail-6", "gmail-5"], { mode: "active" })
       .length,
     1,
   );
@@ -435,6 +454,19 @@ function runEligibilityAndWireTests() {
     }),
     null,
   );
+  for (const policyForgery of [
+    { newInboundMode: "active" },
+    { priorityEffect: "promote_new_inbound" },
+  ]) {
+    assert.equal(
+      buildPrioritySemanticNewInboundWireRequest({
+        ...googleRequest,
+        ...policyForgery,
+      }),
+      null,
+      "the browser cannot select new-inbound activation policy",
+    );
+  }
   assert.equal(
     buildPrioritySemanticNewInboundWireRequest({
       mailboxId: "mailbox-1",
@@ -518,7 +550,7 @@ function runResponseParserTests() {
       priorityEffect: "suppress_automatic_open_loop",
     }),
     null,
-    "new inbound is always observe-only",
+    "shadow new-inbound assessment remains observe-only",
   );
   assert.equal(
     parsePrioritySemanticNewInboundResponse({
@@ -541,6 +573,76 @@ function runResponseParserTests() {
     "assessed responses cannot forge an effective semantic state",
   );
 
+  const activePromoted = {
+    ...assessed,
+    newInboundMode: "active",
+    priorityEffect: "promote_new_inbound",
+  } as const;
+  assert.deepEqual(
+    parsePrioritySemanticNewInboundResponse(activePromoted),
+    activePromoted,
+  );
+  const promotedRecord = {
+    assessment: activePromoted.assessment,
+    effectiveSemanticState: activePromoted.effectiveSemanticState,
+    priorityEffect: activePromoted.priorityEffect,
+    identity: activePromoted.identity,
+    assessedAt: activePromoted.assessedAt,
+  } as const;
+  assert.deepEqual(
+    buildPrioritySemanticNewInboundHydrationRecordFromResponse(activePromoted),
+    promotedRecord,
+    "a strict active direct assessment converts into one reusable hydration record",
+  );
+  assert.deepEqual(
+    buildPrioritySemanticNewInboundHydrationRecordFromResponse({
+      ...activePromoted,
+      status: "cached",
+    }),
+    promotedRecord,
+    "cached active assessments use the same strict conversion",
+  );
+  assert.equal(
+    parsePrioritySemanticNewInboundResponse({
+      ...activePromoted,
+      priorityEffect: "observe_only",
+    }),
+    null,
+    "an active qualifying result cannot suppress its required promotion effect",
+  );
+  assert.equal(
+    parsePrioritySemanticNewInboundResponse({
+      ...assessed,
+      priorityEffect: "promote_new_inbound",
+    }),
+    null,
+    "shadow mode can never authorize promotion",
+  );
+
+  const activeObserved = {
+    ...activePromoted,
+    priorityEffect: "observe_only",
+    assessment: {
+      state: "resolved",
+      confidence: 0.99,
+      reasonCode: "completed_confirmation",
+    },
+    effectiveSemanticState: "resolved",
+  } as const;
+  assert.deepEqual(
+    parsePrioritySemanticNewInboundResponse(activeObserved),
+    activeObserved,
+    "active non-needs-user-action assessments remain observe-only",
+  );
+  assert.equal(
+    parsePrioritySemanticNewInboundResponse({
+      ...activeObserved,
+      priorityEffect: "promote_new_inbound",
+    }),
+    null,
+    "active mode cannot promote a non-needs-user-action assessment",
+  );
+
   const disabled = {
     ok: true,
     status: "deferred",
@@ -551,6 +653,33 @@ function runResponseParserTests() {
     retryAfterSeconds: 300,
   } as const;
   assert.deepEqual(parsePrioritySemanticNewInboundResponse(disabled), disabled);
+  assert.equal(
+    buildPrioritySemanticNewInboundHydrationRecordFromResponse(disabled),
+    null,
+    "fallback responses never become hydration records",
+  );
+  const activeDeferred = {
+    ...disabled,
+    newInboundMode: "active",
+  } as const;
+  assert.deepEqual(
+    parsePrioritySemanticNewInboundResponse(activeDeferred),
+    activeDeferred,
+    "an active tombstoned direct path remains deferred and observe-only",
+  );
+  assert.equal(
+    buildPrioritySemanticNewInboundHydrationRecordFromResponse(activeDeferred),
+    null,
+    "active deferred responses never become hydration records",
+  );
+  assert.equal(
+    parsePrioritySemanticNewInboundResponse({
+      ...activeDeferred,
+      priorityEffect: "promote_new_inbound",
+    }),
+    null,
+    "an active deferred response cannot authorize promotion",
+  );
   assert.equal(
     parsePrioritySemanticNewInboundResponse({
       ...disabled,
@@ -587,6 +716,19 @@ function runHydrationTests() {
     null,
     "the browser cannot submit semantic policy fields during hydration",
   );
+  for (const policyForgery of [
+    { newInboundMode: "active" },
+    { priorityEffect: "promote_new_inbound" },
+  ]) {
+    assert.equal(
+      buildPrioritySemanticNewInboundHydrationWireRequest({
+        ...request,
+        ...policyForgery,
+      }),
+      null,
+      "hydration activation policy remains server-owned",
+    );
+  }
   assert.equal(
     buildPrioritySemanticNewInboundHydrationWireRequest({
       operation: "hydrate_new_inbound",
@@ -634,25 +776,76 @@ function runHydrationTests() {
   assert.equal(
     parsePrioritySemanticNewInboundHydrationResponse({
       ...hydrated,
-      newInboundMode: "active",
+      newInboundMode: "off",
     }),
     null,
-    "Prep 1 remains shadow-only and active fails closed",
+    "off hydration must fail closed if the server supplies any semantic records",
+  );
+  const promotedRecord = {
+    ...record,
+    priorityEffect: "promote_new_inbound",
+  } as const;
+  const activeHydrated = {
+    ...hydrated,
+    newInboundMode: "active",
+    records: [promotedRecord],
+  } as const;
+  assert.deepEqual(
+    parsePrioritySemanticNewInboundHydrationResponse(activeHydrated),
+    activeHydrated,
+    "active hydration keeps an observe-only envelope while promoting each qualified record",
   );
   assert.equal(
     parsePrioritySemanticNewInboundHydrationResponse({
-      ...hydrated,
+      ...activeHydrated,
       priorityEffect: "promote_new_inbound",
     }),
     null,
+    "the hydration envelope cannot itself authorize promotion",
   );
   assert.equal(
     parsePrioritySemanticNewInboundHydrationResponse({
       ...hydrated,
-      records: [{ ...record, priorityEffect: "promote_new_inbound" }],
+      records: [promotedRecord],
     }),
     null,
-    "even needs_user_action at 1.00 remains observe-only",
+    "shadow hydration can never promote a record",
+  );
+  assert.equal(
+    parsePrioritySemanticNewInboundHydrationResponse({
+      ...activeHydrated,
+      records: [record],
+    }),
+    null,
+    "active hydration cannot downgrade a qualifying record to observe-only",
+  );
+  const activeObservedRecord = {
+    ...record,
+    assessment: {
+      state: "resolved",
+      confidence: 0.99,
+      reasonCode: "completed_confirmation",
+    },
+    effectiveSemanticState: "resolved",
+    priorityEffect: "observe_only",
+  } as const;
+  assert.deepEqual(
+    parsePrioritySemanticNewInboundHydrationResponse({
+      ...activeHydrated,
+      records: [activeObservedRecord],
+    }),
+    { ...activeHydrated, records: [activeObservedRecord] },
+    "active non-needs-user-action records remain observe-only",
+  );
+  assert.equal(
+    parsePrioritySemanticNewInboundHydrationResponse({
+      ...activeHydrated,
+      records: [
+        { ...activeObservedRecord, priorityEffect: "promote_new_inbound" },
+      ],
+    }),
+    null,
+    "active hydration cannot promote a non-needs-user-action record",
   );
   assert.equal(
     parsePrioritySemanticNewInboundHydrationResponse({
@@ -717,6 +910,14 @@ function runHydrationTests() {
       liveIdentity,
     }),
     true,
+  );
+  assert.equal(
+    isPrioritySemanticNewInboundHydratedObservationCurrent({
+      record: promotedRecord,
+      liveIdentity,
+    }),
+    true,
+    "a promoted active record remains a current hydrated observation",
   );
   for (const mismatch of [
     { mailboxId: "mailbox-2" },
@@ -847,6 +1048,8 @@ function runDismissalTests() {
     { ...request, state: "needs_user_action" },
     { ...request, confidence: 1 },
     { ...request, priorityEffect: "observe_only" },
+    { ...request, priorityEffect: "promote_new_inbound" },
+    { ...request, newInboundMode: "active" },
     { ...request, workspaceId: "workspace-2" },
     {
       ...request,
@@ -902,11 +1105,20 @@ function runDismissalTests() {
     parsePrioritySemanticNewInboundDismissalResponse(dismissed),
     dismissed,
   );
+  const activeDismissed = {
+    ...dismissed,
+    newInboundMode: "active",
+  } as const;
+  assert.deepEqual(
+    parsePrioritySemanticNewInboundDismissalResponse(activeDismissed),
+    activeDismissed,
+    "active dismissal remains observe-only because the acknowledgement is not an assessment",
+  );
   for (const invalid of [
     { ...dismissed, status: "hydrated" },
-    { ...dismissed, newInboundMode: "active" },
     { ...dismissed, newInboundMode: "off" },
     { ...dismissed, priorityEffect: "promote_new_inbound" },
+    { ...activeDismissed, priorityEffect: "promote_new_inbound" },
     { ...dismissed, dismissedAt: "2026-08-22T10:00:00.000Z" },
     {
       ...dismissed,
@@ -917,7 +1129,7 @@ function runDismissalTests() {
     assert.equal(
       parsePrioritySemanticNewInboundDismissalResponse(invalid),
       null,
-      "dismiss success must stay shadow-only and use the exact response envelope",
+      "dismiss success must remain enabled-mode observe-only and use the exact response envelope",
     );
   }
   assert.deepEqual(

@@ -1148,8 +1148,8 @@ class SemanticConfigTests(unittest.TestCase):
         self.assertTrue(open_loop_only.can_mutate_priority)
         self.assertFalse(open_loop_only.new_inbound_enabled)
 
-    def test_new_inbound_unknown_and_active_values_fail_closed(self):
-        for value in ("invalid", "active", "enforce"):
+    def test_new_inbound_unknown_values_fail_closed(self):
+        for value in ("invalid", "enforce"):
             with self.subTest(value=value):
                 config = load_semantic_runtime_config(
                     {
@@ -1162,6 +1162,36 @@ class SemanticConfigTests(unittest.TestCase):
                     NewInboundSemanticMode.OFF,
                 )
                 self.assertFalse(config.new_inbound_enabled)
+
+    def test_new_inbound_active_is_independent_and_requires_a_valid_model(self):
+        with self.assertRaises(SemanticConfigurationError):
+            load_semantic_runtime_config(
+                {SEMANTIC_NEW_INBOUND_MODE_ENV: "active"}
+            )
+        with self.assertRaises(SemanticConfigurationError):
+            load_semantic_runtime_config(
+                {
+                    SEMANTIC_NEW_INBOUND_MODE_ENV: "active",
+                    SEMANTIC_MODEL_ENV: "invalid model",
+                }
+            )
+
+        active = load_semantic_runtime_config(
+            {
+                SEMANTIC_NEW_INBOUND_MODE_ENV: "active",
+                SEMANTIC_MODEL_ENV: "gpt-test-1",
+            }
+        )
+        self.assertEqual(active.mode, SemanticMode.OFF)
+        self.assertFalse(active.enabled)
+        self.assertFalse(active.can_mutate_priority)
+        self.assertEqual(
+            active.new_inbound_mode,
+            NewInboundSemanticMode.ACTIVE,
+        )
+        self.assertTrue(active.new_inbound_enabled)
+        self.assertTrue(active.can_promote_new_inbound)
+        self.assertTrue(active.can_call_provider)
 
     def test_client_capability_mode_is_bounded_and_fail_closed(self):
         self.assertEqual(read_new_inbound_client_mode({}), "off")
@@ -1184,6 +1214,15 @@ class SemanticConfigTests(unittest.TestCase):
             read_new_inbound_client_mode(
                 {
                     SEMANTIC_NEW_INBOUND_MODE_ENV: "active",
+                    SEMANTIC_MODEL_ENV: "gpt-test-1",
+                }
+            ),
+            "active",
+        )
+        self.assertEqual(
+            read_new_inbound_client_mode(
+                {
+                    SEMANTIC_NEW_INBOUND_MODE_ENV: "unknown",
                     SEMANTIC_MODEL_ENV: "gpt-test-1",
                 }
             ),

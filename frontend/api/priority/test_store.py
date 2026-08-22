@@ -1038,6 +1038,60 @@ class SemanticStoreTests(unittest.TestCase):
             1,
         )
 
+    def test_exact_turn_tombstone_probe_is_version_agnostic_and_fail_closed(self):
+        cache_scope = scope("probe-dismissed-turn")
+        self.assertTrue(
+            self._commit_indexed(
+                cache_scope,
+                occurred_at=65_100,
+                assessed_at=6_510,
+                token_byte=124,
+            )
+        )
+        current_index_scope = index_scope()
+        self.assertFalse(
+            self.store.is_new_inbound_dismissed_exact(
+                current_index_scope,
+                conversation_id=cache_scope.conversation_id,
+                latest_turn_id=cache_scope.latest_turn_id,
+            )
+        )
+        self.assertTrue(
+            self.store.dismiss_new_inbound_exact(
+                current_index_scope,
+                conversation_id=cache_scope.conversation_id,
+                latest_turn_id=cache_scope.latest_turn_id,
+                semantic_version=cache_scope.semantic_version,
+                current=6_510,
+            )
+        )
+        self.assertTrue(
+            self.store.is_new_inbound_dismissed_exact(
+                current_index_scope,
+                conversation_id=cache_scope.conversation_id,
+                latest_turn_id=cache_scope.latest_turn_id,
+            )
+        )
+
+        tombstone_key = next(
+            key
+            for key in self.redis.values
+            if ":new-inbound-dismissal:" in key
+        )
+        self.redis.values[tombstone_key] = "unexpected"
+        with self.assertRaises(SemanticStoreUnavailable):
+            self.store.is_new_inbound_dismissed_exact(
+                current_index_scope,
+                conversation_id=cache_scope.conversation_id,
+                latest_turn_id=cache_scope.latest_turn_id,
+            )
+        with self.assertRaises(ValueError):
+            self.store.is_new_inbound_dismissed_exact(
+                current_index_scope,
+                conversation_id=" forged ",
+                latest_turn_id=cache_scope.latest_turn_id,
+            )
+
     def test_dismissal_survives_model_version_change_but_not_a_newer_turn(self):
         original = scope("exact-turn-a")
         self.assertTrue(

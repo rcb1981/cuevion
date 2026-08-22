@@ -60,6 +60,12 @@ NEW_INBOUND_ONLY_CONFIG = SemanticRuntimeConfig(
     model="test-model",
     new_inbound_mode=NewInboundSemanticMode.SHADOW,
 )
+NEW_INBOUND_ACTIVE_CONFIG = load_semantic_runtime_config(
+    {
+        "PRIORITY_SEMANTIC_NEW_INBOUND_MODE": "active",
+        "PRIORITY_SEMANTIC_MODEL": "test-model",
+    }
+)
 
 
 def authority() -> PriorityAuthority:
@@ -397,6 +403,7 @@ class SemanticRouteTests(unittest.TestCase):
         fixture_id: str,
         text: str,
         assessment: SemanticAssessment,
+        config: SemanticRuntimeConfig = NEW_INBOUND_CONFIG,
     ):
         source = new_inbound_source(
             self.current,
@@ -418,7 +425,7 @@ class SemanticRouteTests(unittest.TestCase):
             response = self.process(
                 gmail_new_inbound_request(provider_message_id=fixture_id),
                 adapter,
-                config=NEW_INBOUND_CONFIG,
+                config=config,
             )
         return response, adapter
 
@@ -1128,6 +1135,201 @@ class SemanticRouteTests(unittest.TestCase):
         self.assertNotIn("semanticMode", assessed.payload)
         self.assertNotIn("activeEventRef", assessed.payload)
 
+    def test_new_inbound_active_direct_effect_uses_exact_ninety_threshold_and_state(self):
+        cases = (
+            (
+                "needs-action-below",
+                SemanticAssessment(
+                    state=SemanticState.NEEDS_USER_ACTION,
+                    confidence=0.899,
+                    reason_code=SemanticReasonCode.EXPLICIT_REQUEST,
+                ),
+                "needs_user_action",
+                "observe_only",
+            ),
+            (
+                "needs-action-at",
+                SemanticAssessment(
+                    state=SemanticState.NEEDS_USER_ACTION,
+                    confidence=0.90,
+                    reason_code=SemanticReasonCode.EXPLICIT_REQUEST,
+                ),
+                "needs_user_action",
+                "promote_new_inbound",
+            ),
+            (
+                "needs-action-above",
+                SemanticAssessment(
+                    state=SemanticState.NEEDS_USER_ACTION,
+                    confidence=0.901,
+                    reason_code=SemanticReasonCode.EXPLICIT_REQUEST,
+                ),
+                "needs_user_action",
+                "promote_new_inbound",
+            ),
+            (
+                "needs-action-high",
+                SemanticAssessment(
+                    state=SemanticState.NEEDS_USER_ACTION,
+                    confidence=0.99,
+                    reason_code=SemanticReasonCode.EXPLICIT_REQUEST,
+                ),
+                "needs_user_action",
+                "promote_new_inbound",
+            ),
+            (
+                "needs-action-certain",
+                SemanticAssessment(
+                    state=SemanticState.NEEDS_USER_ACTION,
+                    confidence=1.0,
+                    reason_code=SemanticReasonCode.EXPLICIT_REQUEST,
+                ),
+                "needs_user_action",
+                "promote_new_inbound",
+            ),
+            (
+                "resolved",
+                SemanticAssessment(
+                    state=SemanticState.RESOLVED,
+                    confidence=1.0,
+                    reason_code=SemanticReasonCode.COMPLETED_CONFIRMATION,
+                ),
+                "resolved",
+                "observe_only",
+            ),
+            (
+                "informational",
+                SemanticAssessment(
+                    state=SemanticState.INFORMATIONAL,
+                    confidence=1.0,
+                    reason_code=SemanticReasonCode.INFORMATIONAL_UPDATE,
+                ),
+                "informational",
+                "observe_only",
+            ),
+            (
+                "waiting",
+                SemanticAssessment(
+                    state=SemanticState.WAITING_ON_OTHER,
+                    confidence=1.0,
+                    reason_code=SemanticReasonCode.AWAITING_CONFIRMATION,
+                ),
+                "waiting_on_other",
+                "observe_only",
+            ),
+            (
+                "uncertain",
+                SemanticAssessment(
+                    state=SemanticState.UNCERTAIN,
+                    confidence=1.0,
+                    reason_code=SemanticReasonCode.AMBIGUOUS_CONTEXT,
+                ),
+                "uncertain",
+                "observe_only",
+            ),
+        )
+        for fixture_id, assessment, effective_state, expected_effect in cases:
+            with self.subTest(fixture_id=fixture_id):
+                response, adapter = self.process_new_inbound_fixture(
+                    fixture_id=f"active-{fixture_id}",
+                    text="Please review this exact request.",
+                    assessment=assessment,
+                    config=NEW_INBOUND_ACTIVE_CONFIG,
+                )
+
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.payload["status"], "assessed")
+                self.assertEqual(response.payload["newInboundMode"], "active")
+                self.assertEqual(
+                    response.payload["effectiveSemanticState"],
+                    effective_state,
+                )
+                self.assertEqual(
+                    response.payload["priorityEffect"],
+                    expected_effect,
+                )
+                self.assertEqual(adapter.calls, 1)
+
+    def test_new_inbound_cached_shadow_result_rederives_active_and_rolls_back_without_model(self):
+        source = new_inbound_source(
+            self.current,
+            latest_turn_id="cached-shadow-active-turn",
+        )
+        adapter = FixedAdapter(
+            SemanticAssessment(
+                state=SemanticState.NEEDS_USER_ACTION,
+                confidence=0.95,
+                reason_code=SemanticReasonCode.EXPLICIT_REQUEST,
+            )
+        )
+        payload = gmail_new_inbound_request(
+            provider_message_id=source.latest_turn_id
+        )
+        with (
+            patch(
+                "api.priority.semantic_route.load_authorized_gmail_new_inbound",
+                return_value=source,
+            ),
+            patch(
+                "api.priority.semantic_route.prove_authorized_new_inbound_source_current",
+                return_value=None,
+            ),
+        ):
+            shadow = self.process(
+                payload,
+                adapter,
+                config=NEW_INBOUND_CONFIG,
+            )
+            active = self.process(
+                payload,
+                adapter,
+                config=NEW_INBOUND_ACTIVE_CONFIG,
+            )
+            rolled_back = self.process(
+                payload,
+                adapter,
+                config=NEW_INBOUND_CONFIG,
+            )
+
+        self.redis.commands.clear()
+        with patch(
+            "api.priority.semantic_route.load_authorized_gmail_new_inbound",
+            side_effect=AssertionError("OFF must not load provider authority"),
+        ):
+            off = self.process(
+                payload,
+                adapter,
+                config=ACTIVE_CONFIG,
+            )
+
+        self.assertEqual(adapter.calls, 1)
+        self.assertEqual(shadow.payload["status"], "assessed")
+        self.assertEqual(shadow.payload["newInboundMode"], "shadow")
+        self.assertEqual(shadow.payload["priorityEffect"], "observe_only")
+        self.assertEqual(active.payload["status"], "cached")
+        self.assertEqual(active.payload["newInboundMode"], "active")
+        self.assertEqual(
+            active.payload["priorityEffect"],
+            "promote_new_inbound",
+        )
+        self.assertEqual(rolled_back.payload["status"], "cached")
+        self.assertEqual(rolled_back.payload["newInboundMode"], "shadow")
+        self.assertEqual(rolled_back.payload["priorityEffect"], "observe_only")
+        self.assertEqual(off.status_code, 202)
+        self.assertEqual(off.payload["status"], "deferred")
+        self.assertEqual(off.payload["newInboundMode"], "off")
+        self.assertEqual(off.payload["priorityEffect"], "observe_only")
+        self.assertEqual(self.redis.commands, [])
+        serialized_store = str(
+            (
+                self.redis.values,
+                self.redis.hashes,
+                self.redis.sorted_sets,
+            )
+        )
+        self.assertNotIn("promote_new_inbound", serialized_store)
+        self.assertNotIn("newInboundMode", serialized_store)
+
     def test_new_inbound_multilingual_actionable_and_informational_fixtures(self):
         actionable = (
             "Can you confirm the release date tomorrow?",
@@ -1294,6 +1496,63 @@ class SemanticRouteTests(unittest.TestCase):
             ),
             1,
         )
+
+    def test_active_new_inbound_pending_and_deferred_responses_never_promote(self):
+        timeout_source = new_inbound_source(
+            self.current,
+            latest_turn_id="active-new-inbound-timeout",
+        )
+        timeout_adapter = TimeoutAdapter()
+        with patch(
+            "api.priority.semantic_route.load_authorized_gmail_new_inbound",
+            return_value=timeout_source,
+        ):
+            deferred = self.process(
+                gmail_new_inbound_request(
+                    provider_message_id=timeout_source.latest_turn_id
+                ),
+                timeout_adapter,
+                config=NEW_INBOUND_ACTIVE_CONFIG,
+            )
+        self.assertEqual(deferred.status_code, 202)
+        self.assertEqual(deferred.payload["status"], "deferred")
+        self.assertEqual(deferred.payload["newInboundMode"], "active")
+        self.assertEqual(deferred.payload["priorityEffect"], "observe_only")
+        self.assertEqual(timeout_adapter.calls, 1)
+
+        contended_source = new_inbound_source(
+            self.current,
+            latest_turn_id="active-new-inbound-contended",
+            provider_conversation_id="active-contended-thread",
+        )
+        contended_scope = SemanticCacheScope(
+            workspace_id=self.current.workspace_id,
+            user_id=self.current.user_id,
+            mailbox_id=self.current.mailbox_id,
+            provider=self.current.provider,
+            conversation_id=contended_source.conversation_id,
+            latest_turn_id=contended_source.latest_turn_id,
+            semantic_version=NEW_INBOUND_ACTIVE_CONFIG.schema_version,
+            model_version=NEW_INBOUND_ACTIVE_CONFIG.model,
+        )
+        self.assertIsNotNone(self.store.try_acquire_lease(contended_scope))
+        contended_adapter = FixedAdapter()
+        with patch(
+            "api.priority.semantic_route.load_authorized_gmail_new_inbound",
+            return_value=contended_source,
+        ):
+            pending = self.process(
+                gmail_new_inbound_request(
+                    provider_message_id=contended_source.latest_turn_id
+                ),
+                contended_adapter,
+                config=NEW_INBOUND_ACTIVE_CONFIG,
+            )
+        self.assertEqual(pending.status_code, 202)
+        self.assertEqual(pending.payload["status"], "pending")
+        self.assertEqual(pending.payload["newInboundMode"], "active")
+        self.assertEqual(pending.payload["priorityEffect"], "observe_only")
+        self.assertEqual(contended_adapter.calls, 0)
 
     def test_new_inbound_lease_contention_returns_pending_without_model_work(self):
         source = new_inbound_source(
@@ -1502,7 +1761,7 @@ class SemanticRouteTests(unittest.TestCase):
             response = self.process(
                 custom_new_inbound_request(),
                 adapter,
-                config=NEW_INBOUND_CONFIG,
+                config=NEW_INBOUND_ACTIVE_CONFIG,
             )
 
         self.assertEqual(response.status_code, 400)
@@ -1652,6 +1911,7 @@ class SemanticRouteTests(unittest.TestCase):
         self.assertFalse(NEW_INBOUND_ONLY_CONFIG.enabled)
         self.assertTrue(NEW_INBOUND_ONLY_CONFIG.new_inbound_enabled)
         self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.payload["status"], "assessed")
         self.assertEqual(response.payload["newInboundMode"], "shadow")
         self.assertEqual(response.payload["priorityEffect"], "observe_only")
         self.assertEqual(adapter.calls, 1)
@@ -1718,25 +1978,41 @@ class SemanticRouteTests(unittest.TestCase):
             response = self.process(
                 custom_new_inbound_request(),
                 adapter,
-                config=NEW_INBOUND_CONFIG,
+                config=NEW_INBOUND_ACTIVE_CONFIG,
             )
-            hydrated = self.process(
+            active_hydrated = self.process(
+                hydrate_new_inbound_request(),
+                adapter,
+                config=NEW_INBOUND_ACTIVE_CONFIG,
+            )
+            rolled_back = self.process(
                 hydrate_new_inbound_request(),
                 adapter,
                 config=NEW_INBOUND_CONFIG,
             )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.payload["newInboundMode"], "shadow")
-        self.assertEqual(response.payload["priorityEffect"], "observe_only")
-        self.assertEqual(hydrated.payload["newInboundMode"], "shadow")
-        self.assertEqual(len(hydrated.payload["records"]), 1)
+        self.assertEqual(response.payload["status"], "assessed")
+        self.assertEqual(response.payload["newInboundMode"], "active")
         self.assertEqual(
-            hydrated.payload["records"][0]["identity"]["latestTurnId"],
+            response.payload["priorityEffect"],
+            "promote_new_inbound",
+        )
+        self.assertEqual(active_hydrated.payload["newInboundMode"], "active")
+        self.assertEqual(active_hydrated.payload["priorityEffect"], "observe_only")
+        self.assertEqual(len(active_hydrated.payload["records"]), 1)
+        self.assertEqual(
+            active_hydrated.payload["records"][0]["identity"]["latestTurnId"],
             "new-message@example.net",
         )
         self.assertEqual(
-            hydrated.payload["records"][0]["priorityEffect"],
+            active_hydrated.payload["records"][0]["priorityEffect"],
+            "promote_new_inbound",
+        )
+        self.assertEqual(rolled_back.payload["newInboundMode"], "shadow")
+        self.assertEqual(len(rolled_back.payload["records"]), 1)
+        self.assertEqual(
+            rolled_back.payload["records"][0]["priorityEffect"],
             "observe_only",
         )
         loader.assert_called_once_with(
@@ -1748,6 +2024,7 @@ class SemanticRouteTests(unittest.TestCase):
         )
         proof.assert_called_once_with([], source)
         self.provider_proof.assert_not_called()
+        self.assertEqual(adapter.calls, 1)
 
     def test_new_inbound_rejects_lookup_text_refs_and_authority_extras(self):
         forbidden_fields = {
@@ -1878,6 +2155,109 @@ class SemanticRouteTests(unittest.TestCase):
             str(hydrated.payload).casefold(),
         )
 
+    def test_active_hydration_rederives_each_shadow_record_and_rolls_back_without_model(self):
+        fixtures = (
+            (
+                "hydrate-active-at",
+                SemanticAssessment(
+                    state=SemanticState.NEEDS_USER_ACTION,
+                    confidence=0.90,
+                    reason_code=SemanticReasonCode.EXPLICIT_REQUEST,
+                ),
+                "promote_new_inbound",
+            ),
+            (
+                "hydrate-active-below",
+                SemanticAssessment(
+                    state=SemanticState.NEEDS_USER_ACTION,
+                    confidence=0.899,
+                    reason_code=SemanticReasonCode.EXPLICIT_REQUEST,
+                ),
+                "observe_only",
+            ),
+            (
+                "hydrate-active-informational",
+                SemanticAssessment(
+                    state=SemanticState.INFORMATIONAL,
+                    confidence=1.0,
+                    reason_code=SemanticReasonCode.INFORMATIONAL_UPDATE,
+                ),
+                "observe_only",
+            ),
+        )
+        adapters: list[FixedAdapter] = []
+        for latest_turn_id, assessment, _effect in fixtures:
+            source = new_inbound_source(
+                self.current,
+                latest_turn_id=latest_turn_id,
+                provider_conversation_id=f"thread-{latest_turn_id}",
+            )
+            adapter = FixedAdapter(assessment)
+            assessed, _ = self.index_new_inbound(
+                source,
+                adapter=adapter,
+                config=NEW_INBOUND_CONFIG,
+            )
+            self.assertEqual(assessed.payload["status"], "assessed")
+            adapters.append(adapter)
+
+        no_model_adapter = FixedAdapter()
+        with (
+            patch(
+                "api.priority.semantic_route.build_semantic_text_window",
+                side_effect=AssertionError("hydration must not build a prompt"),
+            ),
+            patch(
+                "api.priority.semantic_route.load_authorized_gmail_new_inbound",
+                side_effect=AssertionError("hydration must not call a provider"),
+            ),
+        ):
+            active = self.process(
+                hydrate_new_inbound_request(),
+                no_model_adapter,
+                config=NEW_INBOUND_ACTIVE_CONFIG,
+            )
+            rolled_back = self.process(
+                hydrate_new_inbound_request(),
+                no_model_adapter,
+                config=NEW_INBOUND_CONFIG,
+            )
+            self.redis.commands.clear()
+            off = self.process(
+                hydrate_new_inbound_request(),
+                no_model_adapter,
+                config=ACTIVE_CONFIG,
+            )
+
+        self.assertEqual(active.status_code, 200)
+        self.assertEqual(active.payload["newInboundMode"], "active")
+        self.assertEqual(active.payload["priorityEffect"], "observe_only")
+        self.assertEqual(
+            {
+                record["identity"]["latestTurnId"]: record["priorityEffect"]
+                for record in active.payload["records"]
+            },
+            {
+                latest_turn_id: effect
+                for latest_turn_id, _assessment, effect in fixtures
+            },
+        )
+        self.assertEqual(rolled_back.payload["newInboundMode"], "shadow")
+        self.assertEqual(rolled_back.payload["priorityEffect"], "observe_only")
+        self.assertTrue(
+            all(
+                record["priorityEffect"] == "observe_only"
+                for record in rolled_back.payload["records"]
+            )
+        )
+        self.assertEqual(off.status_code, 200)
+        self.assertEqual(off.payload["newInboundMode"], "off")
+        self.assertEqual(off.payload["priorityEffect"], "observe_only")
+        self.assertEqual(off.payload["records"], [])
+        self.assertEqual(self.redis.commands, [])
+        self.assertEqual([adapter.calls for adapter in adapters], [1, 1, 1])
+        self.assertEqual(no_model_adapter.calls, 0)
+
     def test_exact_new_inbound_dismissal_is_durable_idempotent_and_model_free(self):
         source = new_inbound_source(
             self.current,
@@ -1983,6 +2363,256 @@ class SemanticRouteTests(unittest.TestCase):
         )
         self.assertEqual(adapter.calls, 1)
 
+    def test_active_direct_cached_tombstone_blocks_promotion_and_model_version_replay(self):
+        source = new_inbound_source(
+            self.current,
+            latest_turn_id="active-cached-dismissed-turn",
+        )
+        assessed, adapter = self.index_new_inbound(source)
+        self.assertEqual(assessed.payload["status"], "assessed")
+        dismissed = self.process(
+            dismiss_new_inbound_request(
+                conversation_id=source.conversation_id,
+                latest_turn_id=source.latest_turn_id,
+            ),
+            adapter,
+            config=NEW_INBOUND_CONFIG,
+        )
+        self.assertEqual(dismissed.status_code, 200)
+
+        payload = gmail_new_inbound_request(
+            provider_message_id=source.latest_turn_id
+        )
+        replacement_config = SemanticRuntimeConfig(
+            mode=SemanticMode.OFF,
+            model="replacement-model",
+            new_inbound_mode=NEW_INBOUND_ACTIVE_CONFIG.new_inbound_mode,
+        )
+        with (
+            patch(
+                "api.priority.semantic_route.load_authorized_gmail_new_inbound",
+                return_value=source,
+            ),
+            patch(
+                "api.priority.semantic_route.prove_authorized_new_inbound_source_current",
+                return_value=None,
+            ),
+        ):
+            cached = self.process(
+                payload,
+                adapter,
+                config=NEW_INBOUND_ACTIVE_CONFIG,
+            )
+            replay = self.process(
+                payload,
+                adapter,
+                config=replacement_config,
+            )
+
+        self.assertEqual(cached.status_code, 202)
+        self.assertEqual(cached.payload["status"], "deferred")
+        self.assertEqual(cached.payload["newInboundMode"], "active")
+        self.assertEqual(cached.payload["priorityEffect"], "observe_only")
+        self.assertEqual(replay.status_code, 202)
+        self.assertEqual(replay.payload["status"], "deferred")
+        self.assertEqual(replay.payload["newInboundMode"], "active")
+        self.assertEqual(replay.payload["priorityEffect"], "observe_only")
+        self.assertEqual(adapter.calls, 1)
+
+    def test_active_direct_cached_post_pointer_tombstone_fails_closed(self):
+        source = new_inbound_source(
+            self.current,
+            latest_turn_id="active-cached-race-turn",
+        )
+        assessed, adapter = self.index_new_inbound(source)
+        self.assertEqual(assessed.payload["status"], "assessed")
+        proof_calls = 0
+
+        def dismiss_after_cached_current_proof(_headers, proven_source):
+            nonlocal proof_calls
+            proof_calls += 1
+            self.assertEqual(proven_source, source)
+            self.assertTrue(
+                self.store.dismiss_new_inbound_exact(
+                    store_module.NewInboundIndexScope(
+                        workspace_id=self.current.workspace_id,
+                        user_id=self.current.user_id,
+                        mailbox_id=self.current.mailbox_id,
+                        provider=self.current.provider,
+                        mailbox_account_identity=self.current.mailbox_email,
+                    ),
+                    conversation_id=source.conversation_id,
+                    latest_turn_id=source.latest_turn_id,
+                    semantic_version=NEW_INBOUND_CONFIG.schema_version,
+                    current=11,
+                )
+            )
+
+        with (
+            patch(
+                "api.priority.semantic_route.load_authorized_gmail_new_inbound",
+                return_value=source,
+            ),
+            patch(
+                "api.priority.semantic_route.prove_authorized_new_inbound_source_current",
+                side_effect=dismiss_after_cached_current_proof,
+            ),
+        ):
+            cached = self.process(
+                gmail_new_inbound_request(
+                    provider_message_id=source.latest_turn_id
+                ),
+                adapter,
+                config=NEW_INBOUND_ACTIVE_CONFIG,
+            )
+
+        self.assertEqual(cached.status_code, 202)
+        self.assertEqual(cached.payload["status"], "deferred")
+        self.assertEqual(cached.payload["priorityEffect"], "observe_only")
+        self.assertEqual(proof_calls, 1)
+        self.assertEqual(adapter.calls, 1)
+
+    def test_active_direct_tombstone_probe_failure_defers_without_model_work(self):
+        source = new_inbound_source(
+            self.current,
+            latest_turn_id="active-probe-failure-turn",
+        )
+        index_scope = store_module.NewInboundIndexScope(
+            workspace_id=self.current.workspace_id,
+            user_id=self.current.user_id,
+            mailbox_id=self.current.mailbox_id,
+            provider=self.current.provider,
+            mailbox_account_identity=self.current.mailbox_email,
+        )
+        tombstone_key = self.store._new_inbound_dismissal_key(
+            index_scope,
+            conversation_id=source.conversation_id,
+            latest_turn_id=source.latest_turn_id,
+        )
+        self.redis.values[tombstone_key] = "unexpected"
+        adapter = FixedAdapter(
+            SemanticAssessment(
+                state=SemanticState.NEEDS_USER_ACTION,
+                confidence=0.99,
+                reason_code=SemanticReasonCode.EXPLICIT_REQUEST,
+            )
+        )
+        with patch(
+            "api.priority.semantic_route.load_authorized_gmail_new_inbound",
+            return_value=source,
+        ):
+            malformed = self.process(
+                gmail_new_inbound_request(
+                    provider_message_id=source.latest_turn_id
+                ),
+                adapter,
+                config=NEW_INBOUND_ACTIVE_CONFIG,
+            )
+        self.assertEqual(malformed.status_code, 202)
+        self.assertEqual(malformed.payload["status"], "deferred")
+        self.assertEqual(malformed.payload["newInboundMode"], "active")
+        self.assertEqual(malformed.payload["priorityEffect"], "observe_only")
+        self.assertNotIn("assessment", malformed.payload)
+        self.assertEqual(adapter.calls, 0)
+
+        class UnavailableProbeStore:
+            def is_new_inbound_dismissed_exact(self, *_args, **_kwargs):
+                raise SemanticStoreUnavailable()
+
+        with patch(
+            "api.priority.semantic_route.load_authorized_gmail_new_inbound",
+            return_value=source,
+        ):
+            unavailable = process_semantic_request(
+                [],
+                gmail_new_inbound_request(
+                    provider_message_id=source.latest_turn_id
+                ),
+                config=NEW_INBOUND_ACTIVE_CONFIG,
+                hmac_secret=SECRET,
+                store=UnavailableProbeStore(),
+                adapter=adapter,
+                now=11,
+            )
+        self.assertEqual(unavailable.status_code, 202)
+        self.assertEqual(unavailable.payload["status"], "deferred")
+        self.assertEqual(unavailable.payload["priorityEffect"], "observe_only")
+        self.assertEqual(adapter.calls, 0)
+
+    def test_active_direct_fresh_commit_tombstone_race_fails_closed(self):
+        source = new_inbound_source(
+            self.current,
+            latest_turn_id="active-fresh-race-turn",
+        )
+        shadow, shadow_adapter = self.index_new_inbound(source)
+        self.assertEqual(shadow.payload["status"], "assessed")
+        replacement_config = SemanticRuntimeConfig(
+            mode=SemanticMode.OFF,
+            model="replacement-model",
+            new_inbound_mode=NEW_INBOUND_ACTIVE_CONFIG.new_inbound_mode,
+        )
+        test_case = self
+
+        class DismissDuringAssessmentAdapter(FixedAdapter):
+            model = "replacement-model"
+
+            def assess(self, window):
+                result = super().assess(window)
+                test_case.assertTrue(
+                    test_case.store.dismiss_new_inbound_exact(
+                        store_module.NewInboundIndexScope(
+                            workspace_id=test_case.current.workspace_id,
+                            user_id=test_case.current.user_id,
+                            mailbox_id=test_case.current.mailbox_id,
+                            provider=test_case.current.provider,
+                            mailbox_account_identity=test_case.current.mailbox_email,
+                        ),
+                        conversation_id=source.conversation_id,
+                        latest_turn_id=source.latest_turn_id,
+                        semantic_version=NEW_INBOUND_CONFIG.schema_version,
+                        current=11,
+                    )
+                )
+                return result
+
+        active_adapter = DismissDuringAssessmentAdapter(
+            SemanticAssessment(
+                state=SemanticState.NEEDS_USER_ACTION,
+                confidence=0.99,
+                reason_code=SemanticReasonCode.EXPLICIT_REQUEST,
+            )
+        )
+        with (
+            patch(
+                "api.priority.semantic_route.load_authorized_gmail_new_inbound",
+                return_value=source,
+            ),
+            patch(
+                "api.priority.semantic_route.prove_authorized_new_inbound_source_current",
+                return_value=None,
+            ),
+        ):
+            active = self.process(
+                gmail_new_inbound_request(
+                    provider_message_id=source.latest_turn_id
+                ),
+                active_adapter,
+                config=replacement_config,
+            )
+            hydrated = self.process(
+                hydrate_new_inbound_request(),
+                active_adapter,
+                config=replacement_config,
+            )
+
+        self.assertEqual(active.status_code, 202)
+        self.assertEqual(active.payload["status"], "deferred")
+        self.assertEqual(active.payload["newInboundMode"], "active")
+        self.assertEqual(active.payload["priorityEffect"], "observe_only")
+        self.assertEqual(hydrated.payload["records"], [])
+        self.assertEqual(shadow_adapter.calls, 1)
+        self.assertEqual(active_adapter.calls, 1)
+
     def test_dismiss_accepts_signed_index_model_after_runtime_model_change(self):
         source = new_inbound_source(
             self.current,
@@ -1993,7 +2623,7 @@ class SemanticRouteTests(unittest.TestCase):
         upgraded_config = SemanticRuntimeConfig(
             mode=SemanticMode.ACTIVE,
             model="replacement-model",
-            new_inbound_mode=NewInboundSemanticMode.SHADOW,
+            new_inbound_mode=NewInboundSemanticMode.ACTIVE,
         )
         dismissed = self.process(
             dismiss_new_inbound_request(
@@ -2005,6 +2635,8 @@ class SemanticRouteTests(unittest.TestCase):
         )
         self.assertEqual(dismissed.status_code, 200)
         self.assertEqual(dismissed.payload["status"], "dismissed")
+        self.assertEqual(dismissed.payload["newInboundMode"], "active")
+        self.assertEqual(dismissed.payload["priorityEffect"], "observe_only")
         self.assertEqual(adapter.calls, 1)
 
     def test_dismissed_turn_does_not_suppress_a_newer_turn_in_same_conversation(self):
@@ -2042,10 +2674,25 @@ class SemanticRouteTests(unittest.TestCase):
             config=NEW_INBOUND_CONFIG,
             now=12,
         )
+        active_hydrated = self.process(
+            hydrate_new_inbound_request(),
+            adapter,
+            config=NEW_INBOUND_ACTIVE_CONFIG,
+            now=12,
+        )
         self.assertEqual(len(hydrated.payload["records"]), 1)
         self.assertEqual(
             hydrated.payload["records"][0]["identity"]["latestTurnId"],
             "eligible-turn-b",
+        )
+        self.assertEqual(len(active_hydrated.payload["records"]), 1)
+        self.assertEqual(
+            active_hydrated.payload["records"][0]["identity"]["latestTurnId"],
+            "eligible-turn-b",
+        )
+        self.assertEqual(
+            active_hydrated.payload["records"][0]["priorityEffect"],
+            "promote_new_inbound",
         )
         self.assertEqual(adapter.calls, 2)
 

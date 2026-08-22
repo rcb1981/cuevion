@@ -1,8 +1,4 @@
-"""Conservative advisory confidence thresholds.
-
-Threshold checks are intentionally separate from deterministic Priority
-authority.  Passing a threshold never mutates, removes, or ranks Priority.
-"""
+"""Conservative confidence thresholds for read-time Priority policy."""
 
 from __future__ import annotations
 
@@ -26,8 +22,8 @@ SEMANTIC_CONFIDENCE_THRESHOLDS: Mapping[SemanticState, float] = MappingProxyType
     }
 )
 
-# Reserved for a later, separately reviewed activation slice.  This threshold
-# is intentionally not consulted by any current Priority effect.
+# New-inbound promotion uses its own stricter boundary than the general
+# needs-user-action effective-state threshold.
 NEW_INBOUND_NEEDS_USER_ACTION_PROMOTION_THRESHOLD = 0.90
 
 
@@ -67,7 +63,7 @@ def evaluate_semantic_confidence(
 def meets_future_new_inbound_promotion_threshold(
     assessment: SemanticAssessment,
 ) -> bool:
-    """Return future eligibility without granting any product authority."""
+    """Return exact eligibility for active read-time new-inbound promotion."""
 
     return (
         assessment.state is SemanticState.NEEDS_USER_ACTION
