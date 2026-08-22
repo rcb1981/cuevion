@@ -133,6 +133,7 @@ import {
   isValidGmailProviderIdentifier,
   requestPrioritySemanticAssessment,
   requestPrioritySemanticNewInboundAssessment,
+  requestPrioritySemanticNewInboundDismissal,
   requestPrioritySemanticNewInboundHydration,
   sendGmailMessage,
   type ArchiveFolderSnapshot,
@@ -348,11 +349,14 @@ import {
 } from "../../lib/prioritySemanticState";
 import {
   PRIORITY_SEMANTIC_NEW_INBOUND_MAX_HYDRATION_RECORDS,
+  buildPrioritySemanticNewInboundIdentityKey,
   buildPrioritySemanticNewInboundLocatorKey,
   buildPrioritySemanticNewInboundStorageKey,
+  isPrioritySemanticNewInboundDismissalTurnCurrent,
   isPrioritySemanticNewInboundHydratedObservationCurrent,
   isPrioritySemanticNewInboundEligible,
   observePrioritySemanticNewInboundSnapshot,
+  rememberPrioritySemanticNewInboundDismissalFence,
   type PrioritySemanticNewInboundHydrationRecord,
   type PrioritySemanticNewInboundPendingCandidate,
 } from "../../lib/prioritySemanticNewInbound";
@@ -1344,6 +1348,7 @@ type ManualPriorityOverride = "priority" | "removed";
 type ManualPriorityOverrideStore = Record<string, ManualPriorityOverride>;
 type ManualPriorityUpdateOptions = {
   showConfirmation?: boolean;
+  skipSemanticNewInboundDismissal?: boolean;
   storageMailboxId?: InboxId | null;
   sourceMailboxId?: InboxId | null;
   sourceMessage?: MailMessage | null;
@@ -1608,6 +1613,22 @@ type PrioritySemanticNewInboundAcceptedRefreshAuthority = {
   imapUidValidity: string | null;
   freshImapUids: ReadonlySet<string> | null;
 };
+
+function buildPrioritySemanticNewInboundRuntimeDismissalKey(input: {
+  scopeKey: string;
+  connectionKey: string;
+  connectionEpoch: number;
+  record: PrioritySemanticNewInboundHydrationRecord;
+}) {
+  return JSON.stringify([
+    input.scopeKey,
+    input.connectionKey,
+    input.connectionEpoch,
+    input.record.identity.mailboxId,
+    input.record.identity.conversationId,
+    input.record.identity.latestTurnId,
+  ]);
+}
 
 function isExactPrioritySemanticNewInboundMessage(
   message: MailMessage,
@@ -18136,7 +18157,10 @@ function MailboxView({
     mailbox.id;
   const buildManualPriorityUpdateOptions = (
     message: MailMessage,
-    options: Pick<ManualPriorityUpdateOptions, "showConfirmation"> = {},
+    options: Pick<
+      ManualPriorityUpdateOptions,
+      "showConfirmation" | "skipSemanticNewInboundDismissal"
+    > = {},
   ): ManualPriorityUpdateOptions => {
     const storageMailboxId = getCurrentMessageSourceMailboxId(message);
 
@@ -20537,6 +20561,7 @@ function MailboxView({
           false,
           buildManualPriorityUpdateOptions(composeSourceMessage, {
             showConfirmation: false,
+            skipSemanticNewInboundDismissal: true,
           }),
         );
       }
@@ -40720,6 +40745,15 @@ export function WorkspaceShell({
   const requestedPrioritySemanticNewInboundHydrationKeysRef = useRef<
     Set<string>
   >(new Set());
+  const confirmedPrioritySemanticNewInboundDismissalKeysByMailboxRef = useRef<
+    Map<InboxId, Set<string>>
+  >(new Map());
+  const prioritySemanticNewInboundDismissalConnectionKeysRef = useRef(
+    providerArchiveConnectionKeys,
+  );
+  const pendingPrioritySemanticNewInboundDismissalsRef = useRef<
+    Map<string, Promise<boolean>>
+  >(new Map());
   const prioritySemanticNewInboundAcceptedRefreshAuthorityRef = useRef<
     Partial<Record<InboxId, PrioritySemanticNewInboundAcceptedRefreshAuthority>>
   >({});
@@ -40742,6 +40776,19 @@ export function WorkspaceShell({
       ) {
         return;
       }
+      const nonDismissedRecords = records.filter(
+        (record) =>
+          !confirmedPrioritySemanticNewInboundDismissalKeysByMailboxRef.current
+            .get(mailboxId)
+            ?.has(
+              buildPrioritySemanticNewInboundRuntimeDismissalKey({
+                scopeKey,
+                connectionKey,
+                connectionEpoch,
+                record,
+              }),
+            ),
+      );
       setPrioritySemanticNewInboundHydrationState((current) => {
         const recordsByMailboxId =
           current.scopeKey === scopeKey ? current.recordsByMailboxId : {};
@@ -40753,14 +40800,14 @@ export function WorkspaceShell({
             ? currentMailboxBucket.records
             : [];
         const replacedConversationIds = new Set(
-          records.map((record) => record.identity.conversationId),
+          nonDismissedRecords.map((record) => record.identity.conversationId),
         );
         const nextMailboxRecords = [
           ...currentMailboxRecords.filter(
             (record) =>
               !replacedConversationIds.has(record.identity.conversationId),
           ),
-          ...records,
+          ...nonDismissedRecords,
         ]
           .sort(
             (first, second) =>
@@ -43871,6 +43918,8 @@ export function WorkspaceShell({
   const [manualChangeConfirmationMessage, setManualChangeConfirmationMessage] = useState<string | null>(
     null,
   );
+  const [prioritySemanticNewInboundDismissalFailure, setPrioritySemanticNewInboundDismissalFailure] =
+    useState<string | null>(null);
   const [spamSuppressionKeys, setSpamSuppressionKeys] = useState<string[]>(() => {
     if (typeof window === "undefined") {
       return [];
@@ -44372,13 +44421,40 @@ export function WorkspaceShell({
   useEffect(() => {
     pendingPrioritySemanticNewInboundCandidatesRef.current.clear();
     requestedPrioritySemanticNewInboundHydrationKeysRef.current.clear();
+    confirmedPrioritySemanticNewInboundDismissalKeysByMailboxRef.current.clear();
+    pendingPrioritySemanticNewInboundDismissalsRef.current.clear();
     prioritySemanticNewInboundAcceptedRefreshAuthorityRef.current = {};
     setPrioritySemanticNewInboundHydrationState({
       scopeKey: prioritySemanticNewInboundStorageKey,
       recordsByMailboxId: {},
     });
+    setPrioritySemanticNewInboundDismissalFailure(null);
     setPrioritySemanticNewInboundDrainEpoch((current) => current + 1);
   }, [prioritySemanticNewInboundStorageKey]);
+
+  useEffect(() => {
+    const previousConnectionKeys =
+      prioritySemanticNewInboundDismissalConnectionKeysRef.current;
+    const changedMailboxIds = new Set(
+      [
+        ...Object.keys(previousConnectionKeys),
+        ...Object.keys(providerArchiveConnectionKeys),
+      ].filter(
+        (mailboxId) =>
+          previousConnectionKeys[mailboxId as InboxId] !==
+          providerArchiveConnectionKeys[mailboxId as InboxId],
+      ),
+    );
+    if (changedMailboxIds.size > 0) {
+      const confirmedDismissalsByMailbox =
+        confirmedPrioritySemanticNewInboundDismissalKeysByMailboxRef.current;
+      for (const mailboxId of changedMailboxIds) {
+        confirmedDismissalsByMailbox.delete(mailboxId as InboxId);
+      }
+    }
+    prioritySemanticNewInboundDismissalConnectionKeysRef.current =
+      providerArchiveConnectionKeys;
+  }, [providerArchiveConnectionKeys]);
 
   useEffect(() => {
     if (!hasAuthenticatedMemberAuthority) {
@@ -45597,6 +45673,20 @@ export function WorkspaceShell({
       );
 
       bucket.records.forEach((record) => {
+        if (
+          confirmedPrioritySemanticNewInboundDismissalKeysByMailboxRef.current
+            .get(mailboxId)
+            ?.has(
+              buildPrioritySemanticNewInboundRuntimeDismissalKey({
+                scopeKey: prioritySemanticNewInboundStorageKey,
+                connectionKey: bucket.connectionKey,
+                connectionEpoch: bucket.connectionEpoch,
+                record,
+              }),
+            )
+        ) {
+          return;
+        }
         const isOwnedByDeterministicOpenLoop = Object.values(
           effectiveWaitingOnOtherStore,
         ).some(
@@ -45769,12 +45859,7 @@ export function WorkspaceShell({
           return;
         }
         observations[
-          [
-            record.identity.mailboxId,
-            record.identity.conversationId,
-            record.identity.latestTurnId,
-            record.identity.semanticVersion,
-          ].join("::")
+          buildPrioritySemanticNewInboundIdentityKey(record.identity)
         ] = record;
       });
     });
@@ -45795,7 +45880,242 @@ export function WorkspaceShell({
     providerArchiveConnectionKeys,
     senderCategoryLearning,
   ]);
-  void prioritySemanticNewInboundHydratedObservations;
+  const resolveExactPrioritySemanticNewInboundObservation = useCallback(
+    (mailboxId: InboxId, message: MailMessage) => {
+      const liveIdentity =
+        resolvePrioritySemanticNewInboundHydrationLiveIdentity(
+          mailboxId,
+          message,
+        );
+      return liveIdentity
+        ? prioritySemanticNewInboundHydratedObservations[
+            buildPrioritySemanticNewInboundIdentityKey(liveIdentity)
+          ] ?? null
+        : null;
+    },
+    [prioritySemanticNewInboundHydratedObservations],
+  );
+  const dismissExactPrioritySemanticNewInboundObservation = useCallback(
+    (
+      mailboxId: InboxId,
+      record: PrioritySemanticNewInboundHydrationRecord,
+    ) => {
+      const scopeKey = prioritySemanticNewInboundStorageKey;
+      const connectionKey =
+        providerArchiveCurrentConnectionKeysRef.current[mailboxId] ?? "";
+      const connectionEpoch =
+        providerArchiveConnectionEpochsRef.current[mailboxId] ?? 0;
+      if (!connectionKey || record.identity.mailboxId !== mailboxId) {
+        setPrioritySemanticNewInboundDismissalFailure(
+          "Could not save this Done/Remove action across devices. Nothing was removed. Please try again.",
+        );
+        return Promise.resolve(false);
+      }
+      const runtimeDismissalKey =
+        buildPrioritySemanticNewInboundRuntimeDismissalKey({
+          scopeKey,
+          connectionKey,
+          connectionEpoch,
+          record,
+        });
+      const pendingRequest =
+        pendingPrioritySemanticNewInboundDismissalsRef.current.get(
+          runtimeDismissalKey,
+        );
+      if (pendingRequest) {
+        return pendingRequest;
+      }
+
+      const request = requestPrioritySemanticNewInboundDismissal({
+        operation: "dismiss_new_inbound",
+        mailboxId,
+        identity: {
+          conversationId: record.identity.conversationId,
+          latestTurnId: record.identity.latestTurnId,
+          semanticVersion: record.identity.semanticVersion,
+        },
+      }).then((response) => {
+        const didConnectionFenceChange =
+          prioritySemanticNewInboundHydrationScopeRef.current !== scopeKey ||
+          providerArchiveCurrentConnectionKeysRef.current[mailboxId] !==
+            connectionKey ||
+          (providerArchiveConnectionEpochsRef.current[mailboxId] ?? 0) !==
+            connectionEpoch;
+        if (didConnectionFenceChange) {
+          return false;
+        }
+        if (!response.ok) {
+          setPrioritySemanticNewInboundDismissalFailure(
+            "Could not save this Done/Remove action across devices. Nothing was removed. Please try again.",
+          );
+          return false;
+        }
+
+        const confirmedDismissalsByMailbox =
+          confirmedPrioritySemanticNewInboundDismissalKeysByMailboxRef.current;
+        rememberPrioritySemanticNewInboundDismissalFence(
+          confirmedDismissalsByMailbox,
+          mailboxId,
+          runtimeDismissalKey,
+        );
+        setPrioritySemanticNewInboundHydrationState((current) => {
+          if (current.scopeKey !== scopeKey) {
+            return current;
+          }
+          const bucket = current.recordsByMailboxId[mailboxId];
+          if (
+            !bucket ||
+            bucket.connectionKey !== connectionKey ||
+            bucket.connectionEpoch !== connectionEpoch
+          ) {
+            return current;
+          }
+          return {
+            ...current,
+            recordsByMailboxId: {
+              ...current.recordsByMailboxId,
+              [mailboxId]: {
+                ...bucket,
+                records: bucket.records.filter(
+                  (candidate) =>
+                    buildPrioritySemanticNewInboundIdentityKey(
+                      candidate.identity,
+                    ) !==
+                    buildPrioritySemanticNewInboundIdentityKey(
+                      record.identity,
+                    ),
+                ),
+              },
+            },
+          };
+        });
+        return true;
+      }).catch(() => {
+        if (
+          prioritySemanticNewInboundHydrationScopeRef.current === scopeKey &&
+          providerArchiveCurrentConnectionKeysRef.current[mailboxId] ===
+            connectionKey &&
+          (providerArchiveConnectionEpochsRef.current[mailboxId] ?? 0) ===
+            connectionEpoch
+        ) {
+          setPrioritySemanticNewInboundDismissalFailure(
+            "Could not save this Done/Remove action across devices. Nothing was removed. Please try again.",
+          );
+        }
+        return false;
+      }).finally(() => {
+        pendingPrioritySemanticNewInboundDismissalsRef.current.delete(
+          runtimeDismissalKey,
+        );
+      });
+      pendingPrioritySemanticNewInboundDismissalsRef.current.set(
+        runtimeDismissalKey,
+        request,
+      );
+      return request;
+    },
+    [prioritySemanticNewInboundStorageKey],
+  );
+  const resolveCurrentPrioritySemanticNewInboundDismissalTarget = useCallback(
+    (input: {
+      mailboxId: InboxId;
+      messageId: string;
+      record: PrioritySemanticNewInboundHydrationRecord;
+      scopeKey: string;
+      connectionKey: string;
+      connectionEpoch: number;
+    }) => {
+      if (
+        prioritySemanticNewInboundHydrationScopeRef.current !== input.scopeKey ||
+        providerArchiveCurrentConnectionKeysRef.current[input.mailboxId] !==
+          input.connectionKey ||
+        (providerArchiveConnectionEpochsRef.current[input.mailboxId] ?? 0) !==
+          input.connectionEpoch
+      ) {
+        return null;
+      }
+      const collections = mailboxStoreRef.current[input.mailboxId];
+      if (!collections) {
+        return null;
+      }
+      const conversationEntries = canonicalFolderOrder.flatMap((folder) =>
+        collections[folder]
+          .filter(
+            (message) =>
+              resolveCanonicalConversationIdentity(message, input.mailboxId)
+                .key === input.record.identity.conversationId,
+          )
+          .map((message) => ({ folder, message })),
+      );
+      let currentEntry =
+        conversationEntries.length === 1 ? conversationEntries[0] : null;
+      if (!currentEntry && conversationEntries.length > 1) {
+        const imapEntries = conversationEntries.filter(
+          ({ message }) =>
+            message.threadIdentityContext?.provider === "custom_imap" &&
+            Boolean(message.threadIdentityContext.folder.trim()) &&
+            Boolean(message.threadIdentityContext.uidValidity?.trim()) &&
+            message.threadIdentityContext.folder.trim().toUpperCase() ===
+              message.providerFolder?.trim().toUpperCase() &&
+            message.threadIdentityContext.uidValidity?.trim() ===
+              message.uidValidity?.trim() &&
+            /^\d+$/.test(message.imapUid?.trim() ?? ""),
+        );
+        const imapNamespaceKeys = new Set(
+          imapEntries.map(({ message }) =>
+            [
+              message.threadIdentityContext?.folder.trim().toUpperCase(),
+              message.threadIdentityContext?.uidValidity?.trim(),
+            ].join("::"),
+          ),
+        );
+        if (
+          imapEntries.length === conversationEntries.length &&
+          imapNamespaceKeys.size === 1
+        ) {
+          const highestUid = Math.max(
+            ...imapEntries.map(({ message }) => Number(message.imapUid)),
+          );
+          const latestEntries = imapEntries.filter(
+            ({ message }) => Number(message.imapUid) === highestUid,
+          );
+          currentEntry = latestEntries.length === 1 ? latestEntries[0] : null;
+        } else {
+          const datedEntries = conversationEntries.filter(
+            ({ message }) => resolveMailDateMs(message) > 0,
+          );
+          if (datedEntries.length === conversationEntries.length) {
+            const latestDateMs = Math.max(
+              ...datedEntries.map(({ message }) => resolveMailDateMs(message)),
+            );
+            const latestEntries = datedEntries.filter(
+              ({ message }) => resolveMailDateMs(message) === latestDateMs,
+            );
+            currentEntry = latestEntries.length === 1 ? latestEntries[0] : null;
+          }
+        }
+      }
+      if (
+        !currentEntry ||
+        currentEntry.folder !== "Inbox" ||
+        currentEntry.message.id !== input.messageId
+      ) {
+        return null;
+      }
+      const liveIdentity =
+        resolvePrioritySemanticNewInboundHydrationLiveIdentity(
+          input.mailboxId,
+          currentEntry.message,
+        );
+      return isPrioritySemanticNewInboundDismissalTurnCurrent({
+        dismissedIdentity: input.record.identity,
+        currentIdentity: liveIdentity,
+      })
+        ? currentEntry.message
+        : null;
+    },
+    [],
+  );
   const priorityReasonCopyForCandidates = useMemo(
     () =>
       Object.fromEntries(
@@ -47169,14 +47489,15 @@ export function WorkspaceShell({
     });
   };
 
-  const handleSetManualPriority = (
+  const applyManualPriorityUpdate = (
     messageId: string,
     shouldBePriority: boolean,
     options: ManualPriorityUpdateOptions = {},
+    authoritativeStore: MailboxStore = mailboxStore,
   ) => {
     const scopedTarget = options.sourceMailboxId
       ? resolveMailboxScopedManualPriorityTarget({
-          store: mailboxStore,
+          store: authoritativeStore,
           messageId,
           storageMailboxId: options.storageMailboxId,
           sourceMailboxId: options.sourceMailboxId,
@@ -47185,15 +47506,34 @@ export function WorkspaceShell({
       : null;
     const sourceMessage = options.sourceMailboxId
       ? scopedTarget?.message ?? null
-      : getWorkspaceMessageById(messageId);
+      : Object.values(authoritativeStore)
+          .flatMap((collections) =>
+            canonicalFolderOrder.flatMap((folder) => collections[folder]),
+          )
+          .find((message) => message.id === messageId) ?? null;
     const sourceLocation = options.sourceMailboxId
       ? scopedTarget
         ? { mailboxId: scopedTarget.mailboxId }
         : null
-      : getWorkspaceMessageLocationById(messageId);
+      : (() => {
+          for (const [mailboxId, collections] of Object.entries(
+            authoritativeStore,
+          )) {
+            if (
+              canonicalFolderOrder.some((folder) =>
+                collections[folder].some(
+                  (message) => message.id === messageId,
+                ),
+              )
+            ) {
+              return { mailboxId: mailboxId as InboxId };
+            }
+          }
+          return null;
+        })();
 
     if (!sourceMessage) {
-      return;
+      return false;
     }
 
     // Use getVisiblePriorityBadgeForMessage as the single source of truth —
@@ -47251,16 +47591,95 @@ export function WorkspaceShell({
         shouldBePriority ? "Priority set to Important" : "This is not priority",
       );
     }
+    return true;
   };
 
-  const handleMarkPriorityItemDone = (reviewItem: ReviewItem) => {
-    const mailboxId = getReviewItemSourceMailboxId(reviewItem);
-    const sourceMessage = mailboxId
-      ? getMailboxMessageById(mailboxId, reviewItem.sourceId)
-      : getWorkspaceMessageById(reviewItem.sourceId);
+  const handleSetManualPriority = async (
+    messageId: string,
+    shouldBePriority: boolean,
+    options: ManualPriorityUpdateOptions = {},
+  ) => {
+    const scopedTarget = options.sourceMailboxId
+      ? resolveMailboxScopedManualPriorityTarget({
+          store: mailboxStore,
+          messageId,
+          storageMailboxId: options.storageMailboxId,
+          sourceMailboxId: options.sourceMailboxId,
+          sourceMessage: options.sourceMessage,
+        })
+      : null;
+    const sourceMessage = options.sourceMailboxId
+      ? scopedTarget?.message ?? null
+      : getWorkspaceMessageById(messageId);
+    const sourceMailboxId = options.sourceMailboxId
+      ? scopedTarget?.mailboxId ?? null
+      : getWorkspaceMessageLocationById(messageId)?.mailboxId ?? null;
+    const semanticObservation =
+      !shouldBePriority &&
+      !options.skipSemanticNewInboundDismissal &&
+      sourceMailboxId &&
+      sourceMessage
+        ? resolveExactPrioritySemanticNewInboundObservation(
+            sourceMailboxId,
+            sourceMessage,
+          )
+        : null;
+    if (semanticObservation && sourceMailboxId) {
+      const actionFence = {
+        scopeKey: prioritySemanticNewInboundStorageKey,
+        connectionKey:
+          providerArchiveCurrentConnectionKeysRef.current[sourceMailboxId] ??
+          "",
+        connectionEpoch:
+          providerArchiveConnectionEpochsRef.current[sourceMailboxId] ?? 0,
+      };
+      if (
+        !(await dismissExactPrioritySemanticNewInboundObservation(
+          sourceMailboxId,
+          semanticObservation,
+        ))
+      ) {
+        return false;
+      }
+      const currentMessage =
+        resolveCurrentPrioritySemanticNewInboundDismissalTarget({
+          mailboxId: sourceMailboxId,
+          messageId,
+          record: semanticObservation,
+          ...actionFence,
+        });
+      if (!currentMessage) {
+        return false;
+      }
+      return applyManualPriorityUpdate(
+        messageId,
+        shouldBePriority,
+        {
+          ...options,
+          storageMailboxId: options.storageMailboxId ?? sourceMailboxId,
+          sourceMailboxId,
+          sourceMessage: currentMessage,
+        },
+        mailboxStoreRef.current,
+      );
+    }
+    return applyManualPriorityUpdate(messageId, shouldBePriority, options);
+  };
+
+  const applyMarkPriorityItemDone = (
+    reviewItem: ReviewItem,
+    resolvedTarget?: { mailboxId: InboxId; message: MailMessage },
+  ) => {
+    const mailboxId =
+      resolvedTarget?.mailboxId ?? getReviewItemSourceMailboxId(reviewItem);
+    const sourceMessage =
+      resolvedTarget?.message ??
+      (mailboxId
+        ? getMailboxMessageById(mailboxId, reviewItem.sourceId)
+        : getWorkspaceMessageById(reviewItem.sourceId));
 
     if (!mailboxId || !sourceMessage) {
-      return;
+      return false;
     }
 
     const clearedKeys = getPriorityClearedIdentityKeys(mailboxId, sourceMessage);
@@ -47279,6 +47698,54 @@ export function WorkspaceShell({
         message: sourceMessage,
       }),
     );
+    return true;
+  };
+
+  const handleMarkPriorityItemDone = async (reviewItem: ReviewItem) => {
+    const mailboxId = getReviewItemSourceMailboxId(reviewItem);
+    const sourceMessage = mailboxId
+      ? getMailboxMessageById(mailboxId, reviewItem.sourceId)
+      : getWorkspaceMessageById(reviewItem.sourceId);
+    if (!mailboxId || !sourceMessage) {
+      return false;
+    }
+    const semanticObservation =
+      resolveExactPrioritySemanticNewInboundObservation(
+        mailboxId,
+        sourceMessage,
+      );
+    if (semanticObservation) {
+      const actionFence = {
+        scopeKey: prioritySemanticNewInboundStorageKey,
+        connectionKey:
+          providerArchiveCurrentConnectionKeysRef.current[mailboxId] ?? "",
+        connectionEpoch:
+          providerArchiveConnectionEpochsRef.current[mailboxId] ?? 0,
+      };
+      if (
+        !(await dismissExactPrioritySemanticNewInboundObservation(
+          mailboxId,
+          semanticObservation,
+        ))
+      ) {
+        return false;
+      }
+      const currentMessage =
+        resolveCurrentPrioritySemanticNewInboundDismissalTarget({
+          mailboxId,
+          messageId: reviewItem.sourceId,
+          record: semanticObservation,
+          ...actionFence,
+        });
+      if (!currentMessage) {
+        return false;
+      }
+      return applyMarkPriorityItemDone(reviewItem, {
+        mailboxId,
+        message: currentMessage,
+      });
+    }
+    return applyMarkPriorityItemDone(reviewItem);
   };
 
   const handlePriorityListAction = (
@@ -51998,6 +52465,29 @@ export function WorkspaceShell({
 		          </div>
 		        ) : null}
 		      </div>
+      <SettingsModalShell
+        open={Boolean(prioritySemanticNewInboundDismissalFailure)}
+        themeMode={resolvedTheme}
+        maxWidthClass="max-w-[420px]"
+      >
+        <div className="space-y-2">
+          <h2 className="text-[1.15rem] font-medium tracking-tight text-[var(--workspace-text)]">
+            Removal not saved
+          </h2>
+          <p className="text-[0.92rem] leading-7 text-[var(--workspace-text-soft)]">
+            {prioritySemanticNewInboundDismissalFailure}
+          </p>
+        </div>
+        <div className="mt-6 flex justify-end">
+          <button
+            type="button"
+            onClick={() => setPrioritySemanticNewInboundDismissalFailure(null)}
+            className={settingsPrimaryActionClass}
+          >
+            OK
+          </button>
+        </div>
+      </SettingsModalShell>
       <SettingsModalShell
         open={Boolean(manualChangeConfirmationMessage)}
         themeMode={resolvedTheme}

@@ -5,6 +5,7 @@ import {
   fetchGmailInbox,
   requestPrioritySemanticAssessment,
   requestPrioritySemanticNewInboundAssessment,
+  requestPrioritySemanticNewInboundDismissal,
   requestPrioritySemanticNewInboundHydration,
   sendGmailMessage,
 } from "./inboxConnectionApi";
@@ -305,6 +306,114 @@ async function run() {
       },
     },
     "a cross-mailbox record is discarded before reaching runtime state",
+  );
+
+  const dismissalRequest = {
+    operation: "dismiss_new_inbound",
+    mailboxId: hydrationRecord.identity.mailboxId,
+    identity: {
+      conversationId: hydrationRecord.identity.conversationId,
+      latestTurnId: hydrationRecord.identity.latestTurnId,
+      semanticVersion: hydrationRecord.identity.semanticVersion,
+    },
+  } as const;
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    fetchCalls.push({ url, init });
+    return response({
+      ok: true,
+      status: "dismissed",
+      semanticTrigger: "new_inbound",
+      newInboundMode: "shadow",
+      priorityEffect: "observe_only",
+      identity: hydrationRecord.identity,
+    });
+  }) as typeof fetch;
+  assert.deepEqual(
+    await requestPrioritySemanticNewInboundDismissal(dismissalRequest),
+    {
+      ok: true,
+      status: "dismissed",
+      semanticTrigger: "new_inbound",
+      newInboundMode: "shadow",
+      priorityEffect: "observe_only",
+      identity: hydrationRecord.identity,
+    },
+  );
+  assert.equal(fetchCalls.at(-1)?.url, "/api/priority/semantic-assessment");
+  assert.equal(fetchCalls.at(-1)?.init?.method, "POST");
+  assert.equal(fetchCalls.at(-1)?.init?.credentials, "include");
+  assert.equal(fetchCalls.at(-1)?.init?.cache, "no-store");
+  assert.equal(
+    fetchCalls.at(-1)?.init?.body,
+    JSON.stringify(dismissalRequest),
+  );
+  assert.doesNotMatch(
+    String(fetchCalls.at(-1)?.init?.body),
+    /"(?:state|confidence|reasonCode|priorityEffect|workspaceId|userId|tenantId|subject|body|sender|recipient)"/i,
+    "dismissal sends only one exact mailbox/conversation/latest-turn identity",
+  );
+
+  const callsBeforeInvalidDismissal = fetchCalls.length;
+  assert.deepEqual(
+    await requestPrioritySemanticNewInboundDismissal({
+      ...dismissalRequest,
+      state: "needs_user_action",
+    } as unknown as typeof dismissalRequest),
+    {
+      ok: false,
+      error: {
+        code: "invalid_semantic_request",
+        message: "Semantic dismissal request is invalid.",
+      },
+    },
+  );
+  assert.equal(fetchCalls.length, callsBeforeInvalidDismissal);
+
+  globalThis.fetch = (async () =>
+    response({
+      ok: true,
+      status: "dismissed",
+      semanticTrigger: "new_inbound",
+      newInboundMode: "shadow",
+      priorityEffect: "observe_only",
+      identity: {
+        ...hydrationRecord.identity,
+        latestTurnId: "message-forged",
+      },
+    })) as typeof fetch;
+  assert.deepEqual(
+    await requestPrioritySemanticNewInboundDismissal(dismissalRequest),
+    {
+      ok: false,
+      error: {
+        code: "invalid_semantic_response",
+        message: "Semantic dismissal returned an invalid response.",
+      },
+    },
+    "a non-matching dismissal acknowledgement cannot authorize local removal",
+  );
+
+  globalThis.fetch = (async () =>
+    response(
+      {
+        ok: false,
+        error: {
+          code: "new_inbound_identity_not_current",
+          message: "The semantic new-inbound identity is no longer current.",
+        },
+      },
+      { ok: false, status: 409 },
+    )) as typeof fetch;
+  assert.deepEqual(
+    await requestPrioritySemanticNewInboundDismissal(dismissalRequest),
+    {
+      ok: false,
+      error: {
+        code: "new_inbound_identity_not_current",
+        message: "The semantic new-inbound identity is no longer current.",
+      },
+    },
+    "strict server dismissal failures remain observable to the action bridge",
   );
 
   globalThis.fetch = (async () =>

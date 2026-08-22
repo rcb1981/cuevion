@@ -55,6 +55,17 @@ export type PrioritySemanticNewInboundHydrationRequest = {
   mailboxId: string;
 };
 
+export type PrioritySemanticNewInboundDismissalIdentity = Pick<
+  PrioritySemanticIdentity,
+  "conversationId" | "latestTurnId" | "semanticVersion"
+>;
+
+export type PrioritySemanticNewInboundDismissalRequest = {
+  operation: "dismiss_new_inbound";
+  mailboxId: string;
+  identity: PrioritySemanticNewInboundDismissalIdentity;
+};
+
 export type PrioritySemanticNewInboundAssessmentSuccess = {
   ok: true;
   status: "assessed" | "cached";
@@ -109,6 +120,19 @@ export type PrioritySemanticNewInboundHydrationSuccess = {
 
 export type PrioritySemanticNewInboundHydrationResponse =
   | PrioritySemanticNewInboundHydrationSuccess
+  | PrioritySemanticNewInboundAssessmentError;
+
+export type PrioritySemanticNewInboundDismissalSuccess = {
+  ok: true;
+  status: "dismissed";
+  semanticTrigger: "new_inbound";
+  newInboundMode: "shadow";
+  priorityEffect: "observe_only";
+  identity: PrioritySemanticIdentity;
+};
+
+export type PrioritySemanticNewInboundDismissalResponse =
+  | PrioritySemanticNewInboundDismissalSuccess
   | PrioritySemanticNewInboundAssessmentError;
 
 export type PrioritySemanticNewInboundLiveObservationIdentity = {
@@ -668,6 +692,104 @@ export function buildPrioritySemanticNewInboundHydrationWireRequest(
     : null;
 }
 
+export function buildPrioritySemanticNewInboundDismissalWireRequest(
+  value: unknown,
+): PrioritySemanticNewInboundDismissalRequest | null {
+  if (
+    !isPlainObject(value) ||
+    !hasExactKeys(value, ["operation", "mailboxId", "identity"]) ||
+    value.operation !== "dismiss_new_inbound" ||
+    !isPlainObject(value.identity) ||
+    !hasExactKeys(value.identity, [
+      "conversationId",
+      "latestTurnId",
+      "semanticVersion",
+    ])
+  ) {
+    return null;
+  }
+  const mailboxId = normalizeBoundedIdentifier(value.mailboxId, 256);
+  const conversationId = normalizeBoundedIdentifier(
+    value.identity.conversationId,
+    1_024,
+  );
+  const latestTurnId = normalizeBoundedIdentifier(
+    value.identity.latestTurnId,
+    512,
+  );
+  if (
+    !mailboxId ||
+    !conversationId ||
+    !latestTurnId ||
+    value.identity.semanticVersion !== SEMANTIC_SCHEMA_VERSION
+  ) {
+    return null;
+  }
+  return {
+    operation: "dismiss_new_inbound",
+    mailboxId,
+    identity: {
+      conversationId,
+      latestTurnId,
+      semanticVersion: SEMANTIC_SCHEMA_VERSION,
+    },
+  };
+}
+
+export function buildPrioritySemanticNewInboundIdentityKey(
+  identity: PrioritySemanticIdentity,
+) {
+  return JSON.stringify([
+    identity.mailboxId,
+    identity.conversationId,
+    identity.latestTurnId,
+    identity.semanticVersion,
+  ]);
+}
+
+export function rememberPrioritySemanticNewInboundDismissalFence(
+  fencesByMailbox: Map<string, Set<string>>,
+  mailboxId: string,
+  fenceKey: string,
+) {
+  const mailboxFences = fencesByMailbox.get(mailboxId) ?? new Set<string>();
+  fencesByMailbox.set(mailboxId, mailboxFences);
+  mailboxFences.add(fenceKey);
+  while (
+    mailboxFences.size >
+    PRIORITY_SEMANTIC_NEW_INBOUND_MAX_HYDRATION_RECORDS
+  ) {
+    const oldestFenceKey = mailboxFences.values().next().value;
+    if (typeof oldestFenceKey !== "string") {
+      break;
+    }
+    mailboxFences.delete(oldestFenceKey);
+  }
+  return mailboxFences;
+}
+
+export function isPrioritySemanticNewInboundDismissalTurnCurrent(input: {
+  dismissedIdentity: Pick<
+    PrioritySemanticIdentity,
+    "mailboxId" | "conversationId" | "latestTurnId"
+  >;
+  currentIdentity:
+    | Pick<
+        PrioritySemanticIdentity,
+        "mailboxId" | "conversationId" | "latestTurnId"
+      >
+    | null;
+}) {
+  return Boolean(
+    input.currentIdentity &&
+      input.currentIdentity.mailboxId === input.dismissedIdentity.mailboxId &&
+      input.currentIdentity.conversationId ===
+        input.dismissedIdentity.conversationId &&
+      input.currentIdentity.latestTurnId ===
+        input.dismissedIdentity.latestTurnId,
+  );
+}
+
 function isPrioritySemanticState(value: unknown): value is PrioritySemanticState {
   return PRIORITY_SEMANTIC_STATES.some((state) => state === value);
 }
@@ -837,6 +959,44 @@ export function parsePrioritySemanticNewInboundHydrationResponse(
     priorityEffect: "observe_only",
     records: records as PrioritySemanticNewInboundHydrationRecord[],
   };
+}
+
+export function parsePrioritySemanticNewInboundDismissalResponse(
+  value: unknown,
+): PrioritySemanticNewInboundDismissalResponse | null {
+  const parsedError = parseError(value);
+  if (parsedError) {
+    return parsedError;
+  }
+  if (
+    !isPlainObject(value) ||
+    !hasExactKeys(value, [
+      "ok",
+      "status",
+      "semanticTrigger",
+      "newInboundMode",
+      "priorityEffect",
+      "identity",
+    ]) ||
+    value.ok !== true ||
+    value.status !== "dismissed" ||
+    value.semanticTrigger !== "new_inbound" ||
+    value.newInboundMode !== "shadow" ||
+    value.priorityEffect !== "observe_only"
+  ) {
+    return null;
+  }
+  const identity = parseIdentity(value.identity);
+  return identity
+    ? {
+        ok: true,
+        status: "dismissed",
+        semanticTrigger: "new_inbound",
+        newInboundMode: "shadow",
+        priorityEffect: "observe_only",
+        identity,
+      }
+    : null;
 }
 
 export function isPrioritySemanticNewInboundHydratedObservationCurrent(input: {

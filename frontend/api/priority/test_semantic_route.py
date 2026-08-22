@@ -207,6 +207,24 @@ def hydrate_new_inbound_request(*, mailbox_id: str = "mailbox-1") -> dict:
     }
 
 
+def dismiss_new_inbound_request(
+    *,
+    conversation_id: str,
+    latest_turn_id: str,
+    semantic_version: str = SEMANTIC_SCHEMA_VERSION,
+    mailbox_id: str = "mailbox-1",
+) -> dict:
+    return {
+        "operation": "dismiss_new_inbound",
+        "mailboxId": mailbox_id,
+        "identity": {
+            "conversationId": conversation_id,
+            "latestTurnId": latest_turn_id,
+            "semanticVersion": semantic_version,
+        },
+    }
+
+
 def new_inbound_source(
     current: PriorityAuthority,
     *,
@@ -403,6 +421,41 @@ class SemanticRouteTests(unittest.TestCase):
                 config=NEW_INBOUND_CONFIG,
             )
         return response, adapter
+
+    def index_new_inbound(
+        self,
+        source: AuthorizedSemanticSource,
+        *,
+        adapter: FixedAdapter | None = None,
+        config: SemanticRuntimeConfig = NEW_INBOUND_CONFIG,
+        now: int = 11,
+    ):
+        current_adapter = adapter or FixedAdapter(
+            SemanticAssessment(
+                state=SemanticState.NEEDS_USER_ACTION,
+                confidence=0.99,
+                reason_code=SemanticReasonCode.EXPLICIT_REQUEST,
+            )
+        )
+        with (
+            patch(
+                "api.priority.semantic_route.load_authorized_gmail_new_inbound",
+                return_value=source,
+            ),
+            patch(
+                "api.priority.semantic_route.prove_authorized_new_inbound_source_current",
+                return_value=None,
+            ),
+        ):
+            response = self.process(
+                gmail_new_inbound_request(
+                    provider_message_id=source.latest_turn_id
+                ),
+                current_adapter,
+                config=config,
+                now=now,
+            )
+        return response, current_adapter
 
     def test_assessed_then_cached_response_matches_strict_client_shape(self):
         adapter = FixedAdapter()
@@ -1803,7 +1856,7 @@ class SemanticRouteTests(unittest.TestCase):
         proof.assert_called_once_with([], source)
         self.assertEqual(
             [command[0] for command in self.redis.commands],
-            ["ZREVRANGE", "HMGET", "MGET"],
+            ["ZREVRANGE", "HMGET", "EVAL", "MGET"],
         )
         self.assertFalse(
             any(
@@ -1824,6 +1877,501 @@ class SemanticRouteTests(unittest.TestCase):
             "kun je",
             str(hydrated.payload).casefold(),
         )
+
+    def test_exact_new_inbound_dismissal_is_durable_idempotent_and_model_free(self):
+        source = new_inbound_source(
+            self.current,
+            latest_turn_id="dismiss-action-1",
+            text="Please approve the artwork today.",
+        )
+        assessed, adapter = self.index_new_inbound(source)
+        self.assertEqual(assessed.payload["status"], "assessed")
+        before = self.process(
+            hydrate_new_inbound_request(),
+            adapter,
+            config=NEW_INBOUND_CONFIG,
+        )
+        self.assertEqual(len(before.payload["records"]), 1)
+
+        payload = dismiss_new_inbound_request(
+            conversation_id=source.conversation_id,
+            latest_turn_id=source.latest_turn_id,
+        )
+        self.redis.commands.clear()
+        with (
+            patch(
+                "api.priority.semantic_route.load_authorized_gmail_new_inbound",
+                side_effect=AssertionError("dismissal must not call a provider"),
+            ),
+            patch(
+                "api.priority.semantic_route.build_semantic_text_window",
+                side_effect=AssertionError("dismissal must not build a prompt"),
+            ),
+        ):
+            dismissed = self.process(
+                payload,
+                adapter,
+                config=NEW_INBOUND_CONFIG,
+            )
+        self.assertEqual(dismissed.status_code, 200)
+        self.assertEqual(
+            dismissed.payload,
+            {
+                "ok": True,
+                "status": "dismissed",
+                "semanticTrigger": "new_inbound",
+                "newInboundMode": "shadow",
+                "priorityEffect": "observe_only",
+                "identity": {
+                    "mailboxId": "mailbox-1",
+                    "conversationId": source.conversation_id,
+                    "latestTurnId": source.latest_turn_id,
+                    "semanticVersion": SEMANTIC_SCHEMA_VERSION,
+                },
+            },
+        )
+        self.assertEqual(
+            [command[0] for command in self.redis.commands],
+            ["HMGET", "ZSCORE", "ZSCORE", "GET", "EVAL"],
+        )
+        self.assertEqual(
+            self.redis.commands[-1][1],
+            store_module._DISMISS_NEW_INBOUND_SCRIPT,
+        )
+        self.assertFalse(
+            any(
+                command[0] == "EVAL"
+                and command[1]
+                in {
+                    store_module._ATTEMPT_SCRIPT,
+                    store_module._MARK_CURRENT_SCRIPT,
+                    store_module._COMMIT_RESULT_SCRIPT,
+                    store_module._COMMIT_NEW_INBOUND_RESULT_SCRIPT,
+                }
+                for command in self.redis.commands
+            )
+        )
+        self.assertEqual(adapter.calls, 1)
+
+        repeated = self.process(
+            payload,
+            adapter,
+            config=NEW_INBOUND_CONFIG,
+        )
+        self.assertEqual(repeated.status_code, 200)
+        self.assertEqual(
+            len(
+                [
+                    key
+                    for key in self.redis.values
+                    if ":new-inbound-dismissal:" in key
+                ]
+            ),
+            1,
+        )
+        self.redis.commands.clear()
+        device_b = self.process(
+            hydrate_new_inbound_request(),
+            adapter,
+            config=NEW_INBOUND_CONFIG,
+        )
+        self.assertEqual(device_b.status_code, 200)
+        self.assertEqual(device_b.payload["records"], [])
+        self.assertEqual(
+            [command[0] for command in self.redis.commands],
+            ["ZREVRANGE", "HMGET", "EVAL"],
+        )
+        self.assertEqual(adapter.calls, 1)
+
+    def test_dismiss_accepts_signed_index_model_after_runtime_model_change(self):
+        source = new_inbound_source(
+            self.current,
+            latest_turn_id="model-upgrade-dismiss",
+        )
+        assessed, adapter = self.index_new_inbound(source)
+        self.assertEqual(assessed.status_code, 200)
+        upgraded_config = SemanticRuntimeConfig(
+            mode=SemanticMode.ACTIVE,
+            model="replacement-model",
+            new_inbound_mode=NewInboundSemanticMode.SHADOW,
+        )
+        dismissed = self.process(
+            dismiss_new_inbound_request(
+                conversation_id=source.conversation_id,
+                latest_turn_id=source.latest_turn_id,
+            ),
+            adapter,
+            config=upgraded_config,
+        )
+        self.assertEqual(dismissed.status_code, 200)
+        self.assertEqual(dismissed.payload["status"], "dismissed")
+        self.assertEqual(adapter.calls, 1)
+
+    def test_dismissed_turn_does_not_suppress_a_newer_turn_in_same_conversation(self):
+        first_source = new_inbound_source(
+            self.current,
+            latest_turn_id="dismissed-turn-a",
+            provider_conversation_id="shared-dismiss-thread",
+        )
+        first, adapter = self.index_new_inbound(first_source)
+        self.assertEqual(first.status_code, 200)
+        dismissed = self.process(
+            dismiss_new_inbound_request(
+                conversation_id=first_source.conversation_id,
+                latest_turn_id=first_source.latest_turn_id,
+            ),
+            adapter,
+            config=NEW_INBOUND_CONFIG,
+        )
+        self.assertEqual(dismissed.status_code, 200)
+
+        newer_source = new_inbound_source(
+            self.current,
+            latest_turn_id="eligible-turn-b",
+            provider_conversation_id="shared-dismiss-thread",
+        )
+        newer, adapter = self.index_new_inbound(
+            newer_source,
+            adapter=adapter,
+            now=12,
+        )
+        self.assertEqual(newer.status_code, 200)
+        hydrated = self.process(
+            hydrate_new_inbound_request(),
+            adapter,
+            config=NEW_INBOUND_CONFIG,
+            now=12,
+        )
+        self.assertEqual(len(hydrated.payload["records"]), 1)
+        self.assertEqual(
+            hydrated.payload["records"][0]["identity"]["latestTurnId"],
+            "eligible-turn-b",
+        )
+        self.assertEqual(adapter.calls, 2)
+
+    def test_dismiss_request_is_strict_and_rejects_client_authority_fields(self):
+        valid = dismiss_new_inbound_request(
+            conversation_id="conversation-1",
+            latest_turn_id="turn-1",
+        )
+        forged_top_level = {
+            "workspaceId": WORKSPACE_ID,
+            "userId": USER_ID,
+            "provider": "google",
+            "state": "needs_user_action",
+            "confidence": 1.0,
+            "reasonCode": "explicit_request",
+            "priorityEffect": "observe_only",
+            "subject": "client subject",
+            "body": "client body",
+        }
+        for key, value in forged_top_level.items():
+            with self.subTest(top_level=key):
+                payload = {**valid, key: value}
+                self.authority_resolver.reset_mock()
+                response = self.process(
+                    payload,
+                    FixedAdapter(),
+                    config=NEW_INBOUND_CONFIG,
+                )
+                self.assertEqual(response.status_code, 400)
+                self.authority_resolver.assert_not_called()
+
+        malformed_identities = (
+            None,
+            [],
+            {},
+            {**valid["identity"], "state": "needs_user_action"},
+            {**valid["identity"], "conversationId": ""},
+            {**valid["identity"], "conversationId": " x "},
+            {**valid["identity"], "conversationId": "x" * 1_025},
+            {**valid["identity"], "latestTurnId": "x" * 513},
+            {**valid["identity"], "semanticVersion": "x" * 257},
+            {**valid["identity"], "latestTurnId": "turn\n1"},
+        )
+        for identity in malformed_identities:
+            with self.subTest(identity=identity):
+                self.authority_resolver.reset_mock()
+                response = self.process(
+                    {**valid, "identity": identity},
+                    FixedAdapter(),
+                    config=NEW_INBOUND_CONFIG,
+                )
+                self.assertEqual(response.status_code, 400)
+                self.authority_resolver.assert_not_called()
+        oversized_mailbox = {
+            **valid,
+            "mailboxId": "x" * 257,
+        }
+        response = self.process(
+            oversized_mailbox,
+            FixedAdapter(),
+            config=NEW_INBOUND_CONFIG,
+        )
+        self.assertEqual(response.status_code, 400)
+        self.authority_resolver.assert_not_called()
+
+    def test_dismiss_is_auth_first_and_forged_or_stale_identity_never_writes(self):
+        source = new_inbound_source(
+            self.current,
+            latest_turn_id="strict-dismiss-turn",
+        )
+        assessed, adapter = self.index_new_inbound(source)
+        self.assertEqual(assessed.status_code, 200)
+        valid = dismiss_new_inbound_request(
+            conversation_id=source.conversation_id,
+            latest_turn_id=source.latest_turn_id,
+        )
+
+        self.authority_resolver.side_effect = SemanticAuthorityError(
+            "unauthorized",
+            401,
+        )
+        self.redis.commands.clear()
+        with (
+            patch(
+                "api.priority.semantic_route.resolve_priority_hmac_secret",
+                side_effect=AssertionError("HMAC must follow authentication"),
+            ),
+            patch(
+                "api.priority.semantic_route.load_authorized_gmail_new_inbound",
+                side_effect=AssertionError("dismissal must not call a provider"),
+            ),
+        ):
+            unauthorized = self.process(
+                valid,
+                adapter,
+                config=NEW_INBOUND_CONFIG,
+            )
+        self.assertEqual(unauthorized.status_code, 401)
+        self.assertEqual(self.redis.commands, [])
+        self.authority_resolver.side_effect = None
+
+        self.authority_resolver.side_effect = SemanticAuthorityError(
+            "mailbox_not_found",
+            404,
+        )
+        self.redis.commands.clear()
+        non_owned = self.process(
+            valid,
+            adapter,
+            config=NEW_INBOUND_CONFIG,
+        )
+        self.assertEqual(non_owned.status_code, 404)
+        self.assertEqual(self.redis.commands, [])
+        self.authority_resolver.side_effect = None
+
+        for identity_update in (
+            {"conversationId": "forged-conversation"},
+            {"latestTurnId": "forged-latest-turn"},
+            {"semanticVersion": "wrong-semantic-version"},
+        ):
+            with self.subTest(identity_update=identity_update):
+                payload = {
+                    **valid,
+                    "identity": {**valid["identity"], **identity_update},
+                }
+                response = self.process(
+                    payload,
+                    adapter,
+                    config=NEW_INBOUND_CONFIG,
+                )
+                self.assertEqual(response.status_code, 409)
+                self.assertEqual(
+                    response.payload["error"]["code"],
+                    "new_inbound_identity_not_current",
+                )
+        for invalid_now in (10, 11 + RESULT_TTL_SECONDS + 1):
+            with self.subTest(invalid_now=invalid_now):
+                response = self.process(
+                    valid,
+                    adapter,
+                    config=NEW_INBOUND_CONFIG,
+                    now=invalid_now,
+                )
+                self.assertEqual(response.status_code, 409)
+        self.assertFalse(
+            any(":new-inbound-dismissal:" in key for key in self.redis.values)
+        )
+        self.assertEqual(adapter.calls, 1)
+
+    def test_dismiss_off_is_explicit_after_auth_without_store_work(self):
+        payload = dismiss_new_inbound_request(
+            conversation_id="conversation-1",
+            latest_turn_id="turn-1",
+        )
+        with patch(
+            "api.priority.semantic_route.resolve_priority_hmac_secret",
+            side_effect=AssertionError("OFF dismissal must not resolve HMAC"),
+        ):
+            response = self.process(
+                payload,
+                FixedAdapter(),
+                config=ACTIVE_CONFIG,
+            )
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(
+            response.payload["error"]["code"],
+            "new_inbound_dismissal_unavailable",
+        )
+        self.assertEqual(self.redis.commands, [])
+        self.authority_resolver.assert_called_once_with([], "mailbox-1")
+
+    def test_dismiss_reconnect_cache_and_store_failures_are_explicit(self):
+        source = new_inbound_source(
+            self.current,
+            latest_turn_id="failure-dismiss-turn",
+        )
+        assessed, adapter = self.index_new_inbound(source)
+        self.assertEqual(assessed.status_code, 200)
+        payload = dismiss_new_inbound_request(
+            conversation_id=source.conversation_id,
+            latest_turn_id=source.latest_turn_id,
+        )
+        result_key = next(key for key in self.redis.values if ":result:" in key)
+        raw_result = self.redis.values.pop(result_key)
+        missing = self.process(
+            payload,
+            adapter,
+            config=NEW_INBOUND_CONFIG,
+        )
+        self.assertEqual(missing.status_code, 409)
+        self.redis.values[result_key] = "malformed-cache"
+        malformed = self.process(
+            payload,
+            adapter,
+            config=NEW_INBOUND_CONFIG,
+        )
+        self.assertEqual(malformed.status_code, 503)
+        self.redis.values[result_key] = raw_result
+
+        replacement = PriorityAuthority(
+            workspace_id=self.current.workspace_id,
+            user_id=self.current.user_id,
+            member_email=self.current.member_email,
+            mailbox_id=self.current.mailbox_id,
+            provider=self.current.provider,
+            mailbox_email="replacement@example.com",
+            owned_emails=frozenset(
+                {self.current.member_email, "replacement@example.com"}
+            ),
+            user_record=self.current.user_record,
+            inbox_record={
+                **self.current.inbox_record,
+                "email": "replacement@example.com",
+            },
+        )
+        self.authority_resolver.return_value = replacement
+        reconnected = self.process(
+            payload,
+            adapter,
+            config=NEW_INBOUND_CONFIG,
+        )
+        self.assertEqual(reconnected.status_code, 409)
+
+        for scoped_authority, scoped_mailbox_id in (
+            (
+                PriorityAuthority(
+                    workspace_id=_account("wsp_", 8),
+                    user_id=self.current.user_id,
+                    member_email=self.current.member_email,
+                    mailbox_id=self.current.mailbox_id,
+                    provider=self.current.provider,
+                    mailbox_email=self.current.mailbox_email,
+                    owned_emails=self.current.owned_emails,
+                    user_record=self.current.user_record,
+                    inbox_record=self.current.inbox_record,
+                ),
+                "mailbox-1",
+            ),
+            (
+                PriorityAuthority(
+                    workspace_id=self.current.workspace_id,
+                    user_id=_account("usr_", 9),
+                    member_email=self.current.member_email,
+                    mailbox_id=self.current.mailbox_id,
+                    provider=self.current.provider,
+                    mailbox_email=self.current.mailbox_email,
+                    owned_emails=self.current.owned_emails,
+                    user_record=self.current.user_record,
+                    inbox_record=self.current.inbox_record,
+                ),
+                "mailbox-1",
+            ),
+            (
+                PriorityAuthority(
+                    workspace_id=self.current.workspace_id,
+                    user_id=self.current.user_id,
+                    member_email=self.current.member_email,
+                    mailbox_id="mailbox-2",
+                    provider=self.current.provider,
+                    mailbox_email=self.current.mailbox_email,
+                    owned_emails=self.current.owned_emails,
+                    user_record=self.current.user_record,
+                    inbox_record={**self.current.inbox_record, "id": "mailbox-2"},
+                ),
+                "mailbox-2",
+            ),
+        ):
+            with self.subTest(scoped_mailbox_id=scoped_mailbox_id):
+                self.authority_resolver.return_value = scoped_authority
+                scoped_payload = {
+                    **payload,
+                    "mailboxId": scoped_mailbox_id,
+                }
+                scoped = self.process(
+                    scoped_payload,
+                    adapter,
+                    config=NEW_INBOUND_CONFIG,
+                )
+                self.assertEqual(scoped.status_code, 409)
+
+        class UnavailableDismissStore:
+            def dismiss_new_inbound_exact(self, *_args, **_kwargs):
+                raise SemanticStoreUnavailable()
+
+        self.authority_resolver.return_value = self.current
+        unavailable = process_semantic_request(
+            [],
+            payload,
+            config=NEW_INBOUND_CONFIG,
+            hmac_secret=SECRET,
+            store=UnavailableDismissStore(),
+            adapter=adapter,
+            now=11,
+        )
+        self.assertEqual(unavailable.status_code, 503)
+        self.assertNotIn("priorityEffect", unavailable.payload)
+
+    def test_hydration_fails_closed_for_malformed_tombstone(self):
+        source = new_inbound_source(
+            self.current,
+            latest_turn_id="malformed-tombstone-turn",
+        )
+        assessed, adapter = self.index_new_inbound(source)
+        self.assertEqual(assessed.status_code, 200)
+        dismissed = self.process(
+            dismiss_new_inbound_request(
+                conversation_id=source.conversation_id,
+                latest_turn_id=source.latest_turn_id,
+            ),
+            adapter,
+            config=NEW_INBOUND_CONFIG,
+        )
+        self.assertEqual(dismissed.status_code, 200)
+        tombstone_key = next(
+            key
+            for key in self.redis.values
+            if ":new-inbound-dismissal:" in key
+        )
+        self.redis.values[tombstone_key] = "unexpected"
+        hydrated = self.process(
+            hydrate_new_inbound_request(),
+            adapter,
+            config=NEW_INBOUND_CONFIG,
+        )
+        self.assertEqual(hydrated.status_code, 503)
+        self.assertNotIn("records", hydrated.payload)
 
     def test_hydration_is_auth_first_model_provider_prompt_and_lease_free(self):
         adapter = FixedAdapter()

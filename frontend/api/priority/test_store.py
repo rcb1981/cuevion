@@ -12,6 +12,8 @@ from .semantic_types import (
     SemanticState,
 )
 from .store import (
+    NEW_INBOUND_DISMISSAL_READ_BATCH_SIZE,
+    NEW_INBOUND_DISMISSAL_TTL_SECONDS,
     NEW_INBOUND_INDEX_MAX_CONVERSATION_ID_CHARACTERS,
     NEW_INBOUND_INDEX_MAX_RECORDS,
     NEW_INBOUND_INDEX_MAX_SERIALIZED_RECORD_BYTES,
@@ -22,6 +24,8 @@ from .store import (
     NewInboundIndexScope,
     SemanticAssessmentStore,
     SemanticCacheScope,
+    SemanticStoreUnavailable,
+    derive_new_inbound_dismissal_digest,
     derive_new_inbound_index_scope_digest,
 )
 
@@ -39,6 +43,7 @@ class MemoryRedis:
         self.values: dict[str, str] = {}
         self.hashes: dict[str, dict[str, str]] = {}
         self.sorted_sets: dict[str, dict[str, float]] = {}
+        self.expirations: dict[str, int] = {}
         self.commands: list[list[object]] = []
         self.lua_type_replies_as_status_tables = True
 
@@ -68,6 +73,10 @@ class MemoryRedis:
         if operation == "HMGET":
             values = self.hashes.get(command[1], {})
             return {"result": [values.get(member) for member in command[2:]]}
+        if operation == "ZSCORE":
+            return {
+                "result": self.sorted_sets.get(command[1], {}).get(command[2])
+            }
         if operation == "ZREVRANGE":
             values = self.sorted_sets.get(command[1], {})
             ordered = sorted(
@@ -89,6 +98,22 @@ class MemoryRedis:
             key_count = command[2]
             keys = command[3 : 3 + key_count]
             args = command[3 + key_count :]
+            if script == store_module._READ_NEW_INBOUND_DISMISSALS_SCRIPT:
+                states: list[int] = []
+                for key in keys:
+                    key_type = self._lua_type(key)
+                    actual_type = (
+                        key_type.get("ok")
+                        if type(key_type) is dict
+                        else key_type
+                    )
+                    if actual_type == "none":
+                        states.append(0)
+                    elif actual_type == "string" and self.values[key] == args[0]:
+                        states.append(1)
+                    else:
+                        return {"result": [-1]}
+                return {"result": states}
             if script == store_module._ATTEMPT_SCRIPT:
                 current = self.values.get(keys[0])
                 if current is None:
@@ -126,6 +151,7 @@ class MemoryRedis:
                     (keys[3], "hash"),
                     (keys[4], "zset"),
                     (keys[5], "zset"),
+                    (keys[6], "string"),
                 )
                 for key, expected_type in expected_types:
                     type_reply = self._lua_type(key)
@@ -136,6 +162,9 @@ class MemoryRedis:
                     )
                     if actual_type not in {"none", expected_type}:
                         return {"result": -1}
+                dismissal = self.values.get(keys[6])
+                if dismissal is not None and dismissal != args[11]:
+                    return {"result": -1}
                 member = args[4]
                 occurred_at = float(args[6])
                 occurrences = self.sorted_sets.setdefault(keys[4], {})
@@ -161,6 +190,8 @@ class MemoryRedis:
                 for oldest_member in ordered[: max(0, excess)]:
                     self._remove_index_member(keys, oldest_member)
                 self.values[keys[2]] = args[2]
+                if dismissal is not None:
+                    self.expirations[keys[6]] = int(args[8])
                 self.values.pop(keys[0], None)
                 return {"result": 1}
             if script == store_module._COMMIT_NEGATIVE_SCRIPT:
@@ -173,6 +204,30 @@ class MemoryRedis:
                 if self.values.get(keys[0]) != args[0]:
                     return {"result": args[1]}
                 return {"result": self.values.get(keys[1])}
+            if script == store_module._DISMISS_NEW_INBOUND_SCRIPT:
+                if (
+                    self.hashes.get(keys[0], {}).get(args[0]) != args[1]
+                    or self.sorted_sets.get(keys[1], {}).get(args[0])
+                    != float(args[5])
+                    or self.sorted_sets.get(keys[2], {}).get(args[0])
+                    != float(args[6])
+                    or self.values.get(keys[3]) != args[3]
+                ):
+                    return {"result": 0}
+                dismissal_type = self._lua_type(keys[4])
+                actual_dismissal_type = (
+                    dismissal_type.get("ok")
+                    if type(dismissal_type) is dict
+                    else dismissal_type
+                )
+                if actual_dismissal_type not in {"none", "string"}:
+                    return {"result": -1}
+                existing = self.values.get(keys[4])
+                if existing is not None and existing != args[2]:
+                    return {"result": -1}
+                self.values[keys[4]] = args[2]
+                self.expirations[keys[4]] = int(args[4])
+                return {"result": 1}
             if script == store_module._RELEASE_LEASE_SCRIPT:
                 if self.values.get(keys[0]) == args[0]:
                     self.values.pop(keys[0], None)
@@ -534,8 +589,9 @@ class SemanticStoreTests(unittest.TestCase):
         self.assertIn("type(value)=='table'", commit[1])
         self.assertIn("value['ok']", commit[1])
         self.assertLess(len(json.dumps(commit).encode("utf-8")), 16_384)
-        self.assertEqual(commit[-3], NEW_INBOUND_INDEX_TTL_SECONDS)
-        self.assertEqual(commit[-2], NEW_INBOUND_INDEX_MAX_RECORDS)
+        self.assertEqual(commit[-4], NEW_INBOUND_INDEX_TTL_SECONDS)
+        self.assertEqual(commit[-3], NEW_INBOUND_INDEX_MAX_RECORDS)
+        self.assertEqual(commit[-1], "1")
 
     def test_non_indexed_commit_and_cache_read_never_migrate_legacy_result(self):
         cache_scope = scope("legacy-shadow")
@@ -866,6 +922,507 @@ class SemanticStoreTests(unittest.TestCase):
         self.assertLessEqual(len(worst_index_response), 32_768)
         self.assertLessEqual(len(worst_result_response), 32_768)
 
+    def test_exact_turn_dismissal_is_opaque_idempotent_and_model_free(self):
+        cache_scope = scope("dismissed-turn")
+        self.assertTrue(
+            self._commit_indexed(
+                cache_scope,
+                occurred_at=65_000,
+                assessed_at=6_500,
+                token_byte=113,
+            )
+        )
+        current_index_scope = index_scope()
+        self.redis.commands.clear()
+
+        self.assertTrue(
+            self.store.dismiss_new_inbound_exact(
+                current_index_scope,
+                conversation_id=cache_scope.conversation_id,
+                latest_turn_id=cache_scope.latest_turn_id,
+                semantic_version=cache_scope.semantic_version,
+                current=6_500,
+            )
+        )
+        first_commands = list(self.redis.commands)
+        self.assertEqual(
+            [command[0] for command in first_commands],
+            ["HMGET", "ZSCORE", "ZSCORE", "GET", "EVAL"],
+        )
+        dismiss_command = first_commands[-1]
+        self.assertEqual(dismiss_command[1], store_module._DISMISS_NEW_INBOUND_SCRIPT)
+        self.assertEqual(dismiss_command[-3], NEW_INBOUND_DISMISSAL_TTL_SECONDS)
+        self.assertLess(len(json.dumps(dismiss_command).encode("utf-8")), 16_384)
+        worst_dismiss_command = [
+            "EVAL",
+            store_module._DISMISS_NEW_INBOUND_SCRIPT,
+            5,
+            *dismiss_command[3:8],
+            "f" * 64,
+            "\\" * NEW_INBOUND_INDEX_MAX_SERIALIZED_RECORD_BYTES,
+            "1",
+            "\\" * 4_096,
+            NEW_INBOUND_DISMISSAL_TTL_SECONDS,
+            store_module.NEW_INBOUND_INDEX_MAX_OCCURRENCE,
+            store_module.NEW_INBOUND_INDEX_MAX_OCCURRENCE,
+        ]
+        self.assertLess(
+            len(json.dumps(worst_dismiss_command).encode("utf-8")),
+            16_384,
+        )
+        self.assertFalse(
+            any(
+                command[0] == "EVAL"
+                and command[1]
+                in {
+                    store_module._ATTEMPT_SCRIPT,
+                    store_module._MARK_CURRENT_SCRIPT,
+                    store_module._COMMIT_RESULT_SCRIPT,
+                    store_module._COMMIT_NEW_INBOUND_RESULT_SCRIPT,
+                }
+                for command in first_commands
+            )
+        )
+
+        tombstones = {
+            key: value
+            for key, value in self.redis.values.items()
+            if ":new-inbound-dismissal:" in key
+        }
+        self.assertEqual(len(tombstones), 1)
+        tombstone_key, tombstone_value = next(iter(tombstones.items()))
+        self.assertEqual(tombstone_value, "1")
+        serialized_tombstone = f"{tombstone_key}\n{tombstone_value}"
+        for forbidden in (
+            cache_scope.conversation_id,
+            cache_scope.latest_turn_id,
+            cache_scope.semantic_version,
+            cache_scope.model_version,
+            "primary@example.com",
+            "needs_user_action",
+            "explicit_request",
+            "classification",
+            "confidence",
+            "reason",
+            "subject",
+            "body",
+            "sender",
+            "recipient",
+            "headers",
+            "MIME",
+            "attachment",
+            "credentials",
+            "access_token",
+            "refresh_token",
+            "password",
+        ):
+            self.assertNotIn(forbidden, serialized_tombstone)
+
+        self.assertTrue(
+            self.store.dismiss_new_inbound_exact(
+                current_index_scope,
+                conversation_id=cache_scope.conversation_id,
+                latest_turn_id=cache_scope.latest_turn_id,
+                semantic_version=cache_scope.semantic_version,
+                current=6_500,
+            )
+        )
+        self.assertEqual(
+            len(
+                [
+                    key
+                    for key in self.redis.values
+                    if ":new-inbound-dismissal:" in key
+                ]
+            ),
+            1,
+        )
+
+    def test_dismissal_survives_model_version_change_but_not_a_newer_turn(self):
+        original = scope("exact-turn-a")
+        self.assertTrue(
+            self._commit_indexed(
+                original,
+                occurred_at=66_000,
+                assessed_at=6_600,
+                token_byte=118,
+            )
+        )
+        current_index_scope = index_scope()
+        self.assertTrue(
+            self.store.dismiss_new_inbound_exact(
+                current_index_scope,
+                conversation_id=original.conversation_id,
+                latest_turn_id=original.latest_turn_id,
+                semantic_version=original.semantic_version,
+                current=6_600,
+            )
+        )
+        tombstone_key = next(
+            key
+            for key in self.redis.values
+            if ":new-inbound-dismissal:" in key
+        )
+        self.redis.expirations[tombstone_key] = 1
+
+        re_assessed = replace(original, model_version="replacement-model")
+        self.assertTrue(
+            self._commit_indexed(
+                re_assessed,
+                occurred_at=66_000,
+                assessed_at=6_601,
+                token_byte=119,
+            )
+        )
+        self.assertEqual(
+            self.redis.expirations[tombstone_key],
+            NEW_INBOUND_DISMISSAL_TTL_SECONDS,
+        )
+        re_assessed_entry = self.store.read_new_inbound_index(
+            current_index_scope,
+            semantic_version=re_assessed.semantic_version,
+            model_version=re_assessed.model_version,
+        )
+        self.assertEqual(
+            self.store.get_new_inbound_dismissal_states(
+                current_index_scope,
+                re_assessed_entry,
+            ),
+            (True,),
+        )
+
+        newer = replace(re_assessed, latest_turn_id="exact-turn-b")
+        self.assertTrue(
+            self._commit_indexed(
+                newer,
+                occurred_at=66_001,
+                assessed_at=6_602,
+                token_byte=120,
+            )
+        )
+        newer_entry = self.store.read_new_inbound_index(
+            current_index_scope,
+            semantic_version=newer.semantic_version,
+            model_version=newer.model_version,
+        )
+        self.assertEqual(newer_entry[0].latest_turn_id, "exact-turn-b")
+        self.assertEqual(
+            self.store.get_new_inbound_dismissal_states(
+                current_index_scope,
+                newer_entry,
+            ),
+            (False,),
+        )
+
+    def test_dismissal_requires_exact_signed_index_and_valid_cache(self):
+        cache_scope = scope("valid-dismiss-turn")
+        self.assertTrue(
+            self._commit_indexed(
+                cache_scope,
+                occurred_at=67_000,
+                assessed_at=6_700,
+                token_byte=121,
+            )
+        )
+        current_index_scope = index_scope()
+        for conversation_id, latest_turn_id, semantic_version in (
+            (
+                "forged-conversation",
+                cache_scope.latest_turn_id,
+                cache_scope.semantic_version,
+            ),
+            (
+                cache_scope.conversation_id,
+                "forged-turn",
+                cache_scope.semantic_version,
+            ),
+            (
+                cache_scope.conversation_id,
+                cache_scope.latest_turn_id,
+                "wrong-semantic-version",
+            ),
+        ):
+            with self.subTest(
+                conversation_id=conversation_id,
+                latest_turn_id=latest_turn_id,
+                semantic_version=semantic_version,
+            ):
+                self.assertFalse(
+                    self.store.dismiss_new_inbound_exact(
+                        current_index_scope,
+                        conversation_id=conversation_id,
+                        latest_turn_id=latest_turn_id,
+                        semantic_version=semantic_version,
+                        current=6_700,
+                    )
+                )
+        self.assertFalse(
+            any(":new-inbound-dismissal:" in key for key in self.redis.values)
+        )
+
+        for invalid_current in (6_699, 6_700 + NEW_INBOUND_INDEX_TTL_SECONDS + 1):
+            with self.subTest(invalid_current=invalid_current):
+                self.assertFalse(
+                    self.store.dismiss_new_inbound_exact(
+                        current_index_scope,
+                        conversation_id=cache_scope.conversation_id,
+                        latest_turn_id=cache_scope.latest_turn_id,
+                        semantic_version=cache_scope.semantic_version,
+                        current=invalid_current,
+                    )
+                )
+
+        result_key = self.store._keys(cache_scope)["result"]
+        raw_result = self.redis.values.pop(result_key)
+        self.assertFalse(
+            self.store.dismiss_new_inbound_exact(
+                current_index_scope,
+                conversation_id=cache_scope.conversation_id,
+                latest_turn_id=cache_scope.latest_turn_id,
+                semantic_version=cache_scope.semantic_version,
+                current=6_700,
+            )
+        )
+        self.redis.values[result_key] = "malformed-cache"
+        with self.assertRaises(SemanticStoreUnavailable):
+            self.store.dismiss_new_inbound_exact(
+                current_index_scope,
+                conversation_id=cache_scope.conversation_id,
+                latest_turn_id=cache_scope.latest_turn_id,
+                semantic_version=cache_scope.semantic_version,
+                current=6_700,
+            )
+        self.redis.values[result_key] = raw_result
+        tombstone_key = self.store._new_inbound_dismissal_key(
+            current_index_scope,
+            conversation_id=cache_scope.conversation_id,
+            latest_turn_id=cache_scope.latest_turn_id,
+        )
+        self.redis.values[tombstone_key] = "unexpected"
+        with self.assertRaises(SemanticStoreUnavailable):
+            self.store.dismiss_new_inbound_exact(
+                current_index_scope,
+                conversation_id=cache_scope.conversation_id,
+                latest_turn_id=cache_scope.latest_turn_id,
+                semantic_version=cache_scope.semantic_version,
+                current=6_700,
+            )
+        self.redis.values.pop(tombstone_key)
+        self.redis.hashes[tombstone_key] = {"member": "1"}
+        with self.assertRaises(SemanticStoreUnavailable):
+            self.store.dismiss_new_inbound_exact(
+                current_index_scope,
+                conversation_id=cache_scope.conversation_id,
+                latest_turn_id=cache_scope.latest_turn_id,
+                semantic_version=cache_scope.semantic_version,
+                current=6_700,
+            )
+        self.redis.hashes.pop(tombstone_key)
+        self.assertFalse(
+            any(":new-inbound-dismissal:" in key for key in self.redis.values)
+        )
+
+    def test_dismissal_rejects_orphaned_or_inconsistent_index_membership(self):
+        cache_scope = scope("orphan-dismiss-turn")
+        self.assertTrue(
+            self._commit_indexed(
+                cache_scope,
+                occurred_at=67_500,
+                assessed_at=6_750,
+                token_byte=122,
+            )
+        )
+        current_index_scope = index_scope()
+        index_keys = self.store._new_inbound_index_keys(current_index_scope)
+        member = next(iter(self.redis.hashes[index_keys["records"]]))
+        for collection_name in ("occurrences", "freshness"):
+            with self.subTest(collection_name=collection_name):
+                collection = self.redis.sorted_sets[index_keys[collection_name]]
+                original_score = collection.pop(member)
+                self.assertFalse(
+                    self.store.dismiss_new_inbound_exact(
+                        current_index_scope,
+                        conversation_id=cache_scope.conversation_id,
+                        latest_turn_id=cache_scope.latest_turn_id,
+                        semantic_version=cache_scope.semantic_version,
+                        current=6_750,
+                    )
+                )
+                collection[member] = original_score
+        self.redis.sorted_sets[index_keys["occurrences"]][member] = 1.0
+        self.assertFalse(
+            self.store.dismiss_new_inbound_exact(
+                current_index_scope,
+                conversation_id=cache_scope.conversation_id,
+                latest_turn_id=cache_scope.latest_turn_id,
+                semantic_version=cache_scope.semantic_version,
+                current=6_750,
+            )
+        )
+        self.redis.sorted_sets[index_keys["occurrences"]][member] = 67_500.0
+        self.redis.sorted_sets[index_keys["freshness"]][member] = 1.0
+        self.assertFalse(
+            self.store.dismiss_new_inbound_exact(
+                current_index_scope,
+                conversation_id=cache_scope.conversation_id,
+                latest_turn_id=cache_scope.latest_turn_id,
+                semantic_version=cache_scope.semantic_version,
+                current=6_750,
+            )
+        )
+        self.assertFalse(
+            any(":new-inbound-dismissal:" in key for key in self.redis.values)
+        )
+
+    def test_dismissal_lua_rechecks_index_membership_after_python_validation(self):
+        class RacingRedis(MemoryRedis):
+            disrupt_dismiss = False
+
+            def __call__(self, command: list[object]) -> dict[str, object]:
+                if (
+                    self.disrupt_dismiss
+                    and command[0] == "EVAL"
+                    and command[1] == store_module._DISMISS_NEW_INBOUND_SCRIPT
+                ):
+                    key_count = int(command[2])
+                    keys = command[3 : 3 + key_count]
+                    args = command[3 + key_count :]
+                    self.sorted_sets.get(keys[2], {}).pop(args[0], None)
+                return super().__call__(command)
+
+        redis = RacingRedis()
+        current_store = SemanticAssessmentStore(redis, hmac_secret=SECRET)
+        cache_scope = scope("racing-dismiss-turn")
+        current_store.set_current_exact(cache_scope, occurred_at=68_000)
+        lease = current_store.try_acquire_lease(
+            cache_scope,
+            random_bytes=lambda length: bytes([124]) * length,
+        )
+        self.assertTrue(
+            current_store.commit_result_if_lease_owned(
+                cache_scope,
+                lease_token=lease,
+                assessment=ACTIONABLE_ASSESSMENT,
+                input_hash="2" * 64,
+                occurred_at=68_000,
+                assessed_at=6_800,
+                index_new_inbound=True,
+                new_inbound_mailbox_account_identity="primary@example.com",
+            )
+        )
+        redis.disrupt_dismiss = True
+        self.assertFalse(
+            current_store.dismiss_new_inbound_exact(
+                index_scope(),
+                conversation_id=cache_scope.conversation_id,
+                latest_turn_id=cache_scope.latest_turn_id,
+                semantic_version=cache_scope.semantic_version,
+                current=6_800,
+            )
+        )
+        self.assertFalse(
+            any(":new-inbound-dismissal:" in key for key in redis.values)
+        )
+
+    def test_dismissal_digest_binds_tenant_account_and_exact_turn(self):
+        base = index_scope()
+        base_digest = derive_new_inbound_dismissal_digest(
+            SECRET,
+            base,
+            conversation_id="conversation-1",
+            latest_turn_id="turn-1",
+        )
+        variants = (
+            (replace(base, workspace_id=_account("wsp_", 9)), "conversation-1", "turn-1"),
+            (replace(base, user_id=_account("usr_", 10)), "conversation-1", "turn-1"),
+            (replace(base, mailbox_id="mailbox-2"), "conversation-1", "turn-1"),
+            (replace(base, provider="custom_imap"), "conversation-1", "turn-1"),
+            (
+                replace(base, mailbox_account_identity="replacement@example.com"),
+                "conversation-1",
+                "turn-1",
+            ),
+            (base, "conversation-2", "turn-1"),
+            (base, "conversation-1", "turn-2"),
+        )
+        digests = {
+            base_digest,
+            *(
+                derive_new_inbound_dismissal_digest(
+                    SECRET,
+                    current_scope,
+                    conversation_id=conversation_id,
+                    latest_turn_id=latest_turn_id,
+                )
+                for current_scope, conversation_id, latest_turn_id in variants
+            ),
+        }
+        self.assertEqual(len(digests), len(variants) + 1)
+        self.assertTrue(all(len(digest) == 64 for digest in digests))
+
+    def test_dismissal_hydration_reads_are_one_bounded_batch_and_fail_closed(self):
+        current_index_scope = index_scope()
+        entries = tuple(
+            NewInboundIndexEntry(
+                conversation_id=f"conversation-{index}",
+                latest_turn_id=f"turn-{index}",
+                semantic_version=scope().semantic_version,
+                model_version=scope().model_version,
+                occurred_at=index,
+            )
+            for index in range(NEW_INBOUND_INDEX_MAX_RECORDS)
+        )
+        for index, entry in enumerate(entries):
+            if index % 2 == 0:
+                key = self.store._new_inbound_dismissal_key(
+                    current_index_scope,
+                    conversation_id=entry.conversation_id,
+                    latest_turn_id=entry.latest_turn_id,
+                )
+                self.redis.values[key] = "1"
+        self.redis.commands.clear()
+        states = self.store.get_new_inbound_dismissal_states(
+            current_index_scope,
+            entries,
+        )
+        self.assertEqual(
+            states,
+            tuple(index % 2 == 0 for index in range(len(entries))),
+        )
+        self.assertEqual(len(self.redis.commands), 1)
+        command = self.redis.commands[0]
+        self.assertEqual(command[0], "EVAL")
+        self.assertEqual(
+            command[1],
+            store_module._READ_NEW_INBOUND_DISMISSALS_SCRIPT,
+        )
+        self.assertIn("MGET", command[1])
+        self.assertEqual(command[2], NEW_INBOUND_DISMISSAL_READ_BATCH_SIZE)
+        self.assertLess(len(json.dumps(command).encode("utf-8")), 16_384)
+        worst_response = json.dumps(
+            {"result": [1] * NEW_INBOUND_DISMISSAL_READ_BATCH_SIZE}
+        ).encode("utf-8")
+        self.assertLessEqual(len(worst_response), 32_768)
+
+        malformed_key = self.store._new_inbound_dismissal_key(
+            current_index_scope,
+            conversation_id=entries[1].conversation_id,
+            latest_turn_id=entries[1].latest_turn_id,
+        )
+        self.redis.values[malformed_key] = "unexpected"
+        with self.assertRaises(SemanticStoreUnavailable):
+            self.store.get_new_inbound_dismissal_states(
+                current_index_scope,
+                entries,
+            )
+        self.redis.values.pop(malformed_key)
+        self.redis.hashes[malformed_key] = {"member": "1"}
+        with self.assertRaises(SemanticStoreUnavailable):
+            self.store.get_new_inbound_dismissal_states(
+                current_index_scope,
+                entries,
+            )
+
     def test_wrongtype_index_preflight_leaves_no_semantic_result(self):
         cache_scope = scope("wrongtype-turn")
         index_current = index_scope()
@@ -891,6 +1448,52 @@ class SemanticStoreTests(unittest.TestCase):
         self.assertNotIn(result_key, self.redis.values)
         self.assertFalse(self.redis.hashes)
         self.assertFalse(self.redis.sorted_sets)
+
+    def test_tombstone_preflight_rejects_malformed_or_wrongtype_before_commit(self):
+        for corruption in ("malformed", "wrongtype"):
+            with self.subTest(corruption=corruption):
+                redis = MemoryRedis()
+                current_store = SemanticAssessmentStore(
+                    redis,
+                    hmac_secret=SECRET,
+                )
+                cache_scope = scope(f"tombstone-preflight-{corruption}")
+                current_index_scope = index_scope()
+                tombstone_key = current_store._new_inbound_dismissal_key(
+                    current_index_scope,
+                    conversation_id=cache_scope.conversation_id,
+                    latest_turn_id=cache_scope.latest_turn_id,
+                )
+                if corruption == "malformed":
+                    redis.values[tombstone_key] = "unexpected"
+                else:
+                    redis.hashes[tombstone_key] = {"member": "1"}
+                current_store.set_current_exact(cache_scope, occurred_at=75_000)
+                lease = current_store.try_acquire_lease(
+                    cache_scope,
+                    random_bytes=lambda length: bytes([123]) * length,
+                )
+                with self.assertRaises(SemanticStoreUnavailable):
+                    current_store.commit_result_if_lease_owned(
+                        cache_scope,
+                        lease_token=lease,
+                        assessment=ACTIONABLE_ASSESSMENT,
+                        input_hash="3" * 64,
+                        occurred_at=75_000,
+                        assessed_at=7_500,
+                        index_new_inbound=True,
+                        new_inbound_mailbox_account_identity="primary@example.com",
+                    )
+                self.assertNotIn(
+                    current_store._keys(cache_scope)["result"],
+                    redis.values,
+                )
+                self.assertFalse(
+                    any(
+                        ":new-inbound-index:" in key
+                        for key in (*redis.hashes, *redis.sorted_sets)
+                    )
+                )
 
     def test_valid_index_record_copied_under_wrong_member_is_rejected(self):
         cache_scope = scope("member-bound-turn")

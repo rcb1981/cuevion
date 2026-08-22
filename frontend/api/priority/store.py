@@ -6,6 +6,7 @@ import base64
 import hashlib
 import hmac
 import json
+import math
 import re
 import secrets
 import time
@@ -35,6 +36,8 @@ NEW_INBOUND_INDEX_MAX_MODEL_CHARACTERS = 128
 NEW_INBOUND_INDEX_MAX_OCCURRENCE = 9_007_199_254_740_991
 NEW_INBOUND_INDEX_READ_BATCH_SIZE = 6
 SEMANTIC_HYDRATION_RESULT_BATCH_SIZE = 3
+NEW_INBOUND_DISMISSAL_TTL_SECONDS = NEW_INBOUND_INDEX_TTL_SECONDS
+NEW_INBOUND_DISMISSAL_READ_BATCH_SIZE = NEW_INBOUND_INDEX_MAX_RECORDS
 
 _KEY_PREFIX = "cuevion:priority:semantic:v1:"
 _SCOPE_HMAC_INFO = b"cuevion/priority/cache-scope/v1\x00"
@@ -45,8 +48,15 @@ _NEW_INBOUND_INDEX_SCOPE_HMAC_INFO = (
 _NEW_INBOUND_INDEX_RECORD_HMAC_INFO = (
     b"cuevion/priority/new-inbound-index-record/v1\x00"
 )
+_NEW_INBOUND_DISMISSAL_HMAC_INFO = (
+    b"cuevion/priority/new-inbound-dismissal/v1\x00"
+)
+_NEW_INBOUND_DISMISSAL_VALUE = "1"
 _LEASE_TOKEN_BYTES = 32
 _HEX_DIGEST_RE = re.compile(r"[0-9a-f]{64}")
+_REDIS_NONNEGATIVE_INTEGER_SCORE_RE = re.compile(
+    r"(?:0|[1-9][0-9]*)(?:\.0+)?"
+)
 _NEGATIVE_CODES = frozenset(
     {
         "configuration_invalid",
@@ -72,9 +82,13 @@ _COMMIT_NEW_INBOUND_RESULT_SCRIPT = (
     "local recordsType=keyType(KEYS[4]);"
     "local occurrencesType=keyType(KEYS[5]);"
     "local freshnessType=keyType(KEYS[6]);"
+    "local dismissalType=keyType(KEYS[7]);"
     "if (recordsType~='none' and recordsType~='hash') or "
     "(occurrencesType~='none' and occurrencesType~='zset') or "
-    "(freshnessType~='none' and freshnessType~='zset') then return -1 end;"
+    "(freshnessType~='none' and freshnessType~='zset') or "
+    "(dismissalType~='none' and dismissalType~='string') then return -1 end;"
+    "local dismissal=redis.call('GET',KEYS[7]);"
+    "if dismissal and dismissal~=ARGV[12] then return -1 end;"
     "local prior=redis.call('ZSCORE',KEYS[5],ARGV[5]);"
     "local existing=redis.call('HGET',KEYS[4],ARGV[5]);"
     "if (prior and not existing) or (existing and not prior) then return -1 end;"
@@ -96,6 +110,7 @@ _COMMIT_NEW_INBOUND_RESULT_SCRIPT = (
     "redis.call('EXPIRE',KEYS[4],ARGV[9]);"
     "redis.call('EXPIRE',KEYS[5],ARGV[9]);"
     "redis.call('EXPIRE',KEYS[6],ARGV[9]);"
+    "if dismissal then redis.call('EXPIRE',KEYS[7],ARGV[9]);end;"
     "redis.call('SET',KEYS[3],ARGV[3],'EX',ARGV[4]);"
     "redis.call('DEL',KEYS[1]);return 1"
 )
@@ -111,6 +126,29 @@ _COMMIT_NEGATIVE_SCRIPT = (
 _GET_RESULT_IF_CURRENT_SCRIPT = (
     "if redis.call('GET',KEYS[1])~=ARGV[1] then return ARGV[2] end;"
     "return redis.call('GET',KEYS[2])"
+)
+_DISMISS_NEW_INBOUND_SCRIPT = (
+    "if redis.call('HGET',KEYS[1],ARGV[1])~=ARGV[2] then return 0 end;"
+    "local occurrence=redis.call('ZSCORE',KEYS[2],ARGV[1]);"
+    "if not occurrence or tonumber(occurrence)~=tonumber(ARGV[6]) then return 0 end;"
+    "local freshness=redis.call('ZSCORE',KEYS[3],ARGV[1]);"
+    "if not freshness or tonumber(freshness)~=tonumber(ARGV[7]) then return 0 end;"
+    "if redis.call('GET',KEYS[4])~=ARGV[4] then return 0 end;"
+    "local dismissalType=redis.call('TYPE',KEYS[5]);"
+    "if type(dismissalType)=='table' then dismissalType=dismissalType['ok'] end;"
+    "if dismissalType~='none' and dismissalType~='string' then return -1 end;"
+    "local existing=redis.call('GET',KEYS[5]);"
+    "if existing and existing~=ARGV[3] then return -1 end;"
+    "redis.call('SET',KEYS[5],ARGV[3],'EX',ARGV[5]);return 1"
+)
+_READ_NEW_INBOUND_DISMISSALS_SCRIPT = (
+    "local values=redis.call('MGET',unpack(KEYS));local states={};"
+    "for index=1,#KEYS do local value=values[index];"
+    "if value then if value~=ARGV[1] then return {-1} end;states[index]=1 "
+    "else local keyType=redis.call('TYPE',KEYS[index]);"
+    "if type(keyType)=='table' then keyType=keyType['ok'] end;"
+    "if keyType~='none' then return {-1} end;states[index]=0 end;end;"
+    "return states"
 )
 _ATTEMPT_SCRIPT = (
     "local value=redis.call('GET',KEYS[1]);"
@@ -272,6 +310,26 @@ def _valid_index_identifier(value: object, maximum: int) -> bool:
     )
 
 
+def _parse_bounded_redis_score(value: object) -> int | None:
+    if type(value) is int:
+        parsed = value
+    elif type(value) is float:
+        if not math.isfinite(value) or not value.is_integer():
+            return None
+        parsed = int(value)
+    elif (
+        type(value) is str
+        and _REDIS_NONNEGATIVE_INTEGER_SCORE_RE.fullmatch(value) is not None
+    ):
+        try:
+            parsed = int(value.split(".", 1)[0])
+        except ValueError:
+            return None
+    else:
+        return None
+    return parsed if 0 <= parsed <= NEW_INBOUND_INDEX_MAX_OCCURRENCE else None
+
+
 def derive_scope_digest(secret: str, scope: SemanticCacheScope) -> str:
     key = derive_priority_hmac_key(secret, _SCOPE_HMAC_INFO)
     return hmac.new(key, scope.canonical_bytes(), hashlib.sha256).hexdigest()
@@ -283,6 +341,36 @@ def derive_new_inbound_index_scope_digest(
 ) -> str:
     key = derive_priority_hmac_key(secret, _NEW_INBOUND_INDEX_SCOPE_HMAC_INFO)
     return hmac.new(key, scope.canonical_bytes(), hashlib.sha256).hexdigest()
+
+
+def derive_new_inbound_dismissal_digest(
+    secret: str,
+    scope: NewInboundIndexScope,
+    *,
+    conversation_id: str,
+    latest_turn_id: str,
+) -> str:
+    if (
+        not isinstance(scope, NewInboundIndexScope)
+        or not _valid_index_identifier(
+            conversation_id,
+            NEW_INBOUND_INDEX_MAX_CONVERSATION_ID_CHARACTERS,
+        )
+        or not _valid_index_identifier(
+            latest_turn_id,
+            NEW_INBOUND_INDEX_MAX_TURN_ID_CHARACTERS,
+        )
+    ):
+        raise ValueError("invalid new-inbound dismissal identity")
+    key = derive_priority_hmac_key(secret, _NEW_INBOUND_DISMISSAL_HMAC_INFO)
+    identity = (
+        scope.canonical_bytes()
+        + b"\x00"
+        + conversation_id.encode("utf-8", errors="strict")
+        + b"\x00"
+        + latest_turn_id.encode("utf-8", errors="strict")
+    )
+    return hmac.new(key, identity, hashlib.sha256).hexdigest()
 
 
 def _derive_record_digest(secret: str, label: bytes, value: bytes) -> str:
@@ -361,6 +449,21 @@ class SemanticAssessmentStore:
             "occurrences": f"{_KEY_PREFIX}new-inbound-index:occurrences:{digest}",
             "freshness": f"{_KEY_PREFIX}new-inbound-index:freshness:{digest}",
         }
+
+    def _new_inbound_dismissal_key(
+        self,
+        scope: NewInboundIndexScope,
+        *,
+        conversation_id: str,
+        latest_turn_id: str,
+    ) -> str:
+        digest = derive_new_inbound_dismissal_digest(
+            self._hmac_secret,
+            scope,
+            conversation_id=conversation_id,
+            latest_turn_id=latest_turn_id,
+        )
+        return f"{_KEY_PREFIX}new-inbound-dismissal:{digest}"
 
     def _current_key_and_value(
         self,
@@ -501,6 +604,51 @@ class SemanticAssessmentStore:
                     )
                 )
         return tuple(results)
+
+    def get_new_inbound_dismissal_states(
+        self,
+        index_scope: NewInboundIndexScope,
+        entries: tuple[NewInboundIndexEntry, ...],
+    ) -> tuple[bool, ...]:
+        """Batch exact-turn tombstone reads without touching semantic authority."""
+        if (
+            not isinstance(index_scope, NewInboundIndexScope)
+            or type(entries) is not tuple
+            or len(entries) > NEW_INBOUND_INDEX_MAX_RECORDS
+            or any(not isinstance(entry, NewInboundIndexEntry) for entry in entries)
+        ):
+            raise ValueError("invalid new-inbound dismissal read")
+        states: list[bool] = []
+        for start in range(0, len(entries), NEW_INBOUND_DISMISSAL_READ_BATCH_SIZE):
+            batch = entries[
+                start : start + NEW_INBOUND_DISMISSAL_READ_BATCH_SIZE
+            ]
+            keys = [
+                self._new_inbound_dismissal_key(
+                    index_scope,
+                    conversation_id=entry.conversation_id,
+                    latest_turn_id=entry.latest_turn_id,
+                )
+                for entry in batch
+            ]
+            values = self._command(
+                [
+                    "EVAL",
+                    _READ_NEW_INBOUND_DISMISSALS_SCRIPT,
+                    len(keys),
+                    *keys,
+                    _NEW_INBOUND_DISMISSAL_VALUE,
+                ]
+            )
+            if (
+                type(values) is not list
+                or len(values) != len(batch)
+                or any(type(value) is not int or value not in (0, 1) for value in values)
+            ):
+                raise SemanticStoreUnavailable()
+            for value in values:
+                states.append(value == 1)
+        return tuple(states)
 
     def get_result_if_current(
         self,
@@ -687,6 +835,11 @@ class SemanticAssessmentStore:
                 index_scope=index_scope,
                 entry=entry,
             )
+            dismissal_key = self._new_inbound_dismissal_key(
+                index_scope,
+                conversation_id=entry.conversation_id,
+                latest_turn_id=entry.latest_turn_id,
+            )
             # The exact current pointer (plus the route's post-model provider
             # proof) is freshness authority. Provider occurrence timestamps are
             # metadata only: IMAP INTERNALDATE can tie or move backward.
@@ -694,13 +847,14 @@ class SemanticAssessmentStore:
                 [
                     "EVAL",
                     _COMMIT_NEW_INBOUND_RESULT_SCRIPT,
-                    6,
+                    7,
                     keys["lease"],
                     current_key,
                     keys["result"],
                     index_keys["records"],
                     index_keys["occurrences"],
                     index_keys["freshness"],
+                    dismissal_key,
                     lease_token,
                     current_value,
                     record,
@@ -712,6 +866,7 @@ class SemanticAssessmentStore:
                     NEW_INBOUND_INDEX_TTL_SECONDS,
                     NEW_INBOUND_INDEX_MAX_RECORDS,
                     timestamp - NEW_INBOUND_INDEX_TTL_SECONDS,
+                    _NEW_INBOUND_DISMISSAL_VALUE,
                 ]
             )
             if type(result) is not int or type(result) is bool or result not in (0, 1):
@@ -799,6 +954,133 @@ class SemanticAssessmentStore:
                 seen_conversations.add(entry.conversation_id)
                 entries.append(entry)
         return tuple(entries)
+
+    def dismiss_new_inbound_exact(
+        self,
+        index_scope: NewInboundIndexScope,
+        *,
+        conversation_id: str,
+        latest_turn_id: str,
+        semantic_version: str,
+        current: int,
+    ) -> bool:
+        """Persist a tombstone only for valid indexed exact-turn authority.
+
+        The tombstone digest deliberately omits semantic and model versions:
+        Done/Remove is authority over an unchanged provider turn, not over one
+        model rendition of that turn.
+        """
+        if (
+            not isinstance(index_scope, NewInboundIndexScope)
+            or not _valid_index_identifier(
+                conversation_id,
+                NEW_INBOUND_INDEX_MAX_CONVERSATION_ID_CHARACTERS,
+            )
+            or not _valid_index_identifier(
+                latest_turn_id,
+                NEW_INBOUND_INDEX_MAX_TURN_ID_CHARACTERS,
+            )
+            or not _valid_index_identifier(
+                semantic_version,
+                NEW_INBOUND_INDEX_MAX_VERSION_CHARACTERS,
+            )
+            or type(current) is not int
+            or current < 0
+        ):
+            raise ValueError("invalid new-inbound dismissal")
+
+        index_keys = self._new_inbound_index_keys(index_scope)
+        conversation_digest = _new_inbound_conversation_digest(
+            self._hmac_secret,
+            index_scope,
+            conversation_id,
+        )
+        index_values = self._command(
+            ["HMGET", index_keys["records"], conversation_digest]
+        )
+        if type(index_values) is not list or len(index_values) != 1:
+            raise SemanticStoreUnavailable()
+        raw_index_record = index_values[0]
+        if raw_index_record is None:
+            return False
+        entry = _decode_new_inbound_index_entry(
+            raw_index_record,
+            secret=self._hmac_secret,
+            index_scope=index_scope,
+            expected_semantic_version=semantic_version,
+            expected_model_version=None,
+            expected_conversation_digest=conversation_digest,
+        )
+        if entry is None or entry.latest_turn_id != latest_turn_id:
+            return False
+        occurrence_score = self._command(
+            ["ZSCORE", index_keys["occurrences"], conversation_digest]
+        )
+        freshness_score = self._command(
+            ["ZSCORE", index_keys["freshness"], conversation_digest]
+        )
+        if occurrence_score is None or freshness_score is None:
+            return False
+        parsed_occurrence = _parse_bounded_redis_score(occurrence_score)
+        parsed_freshness = _parse_bounded_redis_score(freshness_score)
+        if parsed_occurrence is None or parsed_freshness is None:
+            raise SemanticStoreUnavailable()
+        if parsed_occurrence != entry.occurred_at:
+            return False
+
+        cache_scope = entry.to_cache_scope(index_scope)
+        cache_keys = self._keys(cache_scope)
+        raw_result = self._command(["GET", cache_keys["result"]])
+        if raw_result is None:
+            return False
+        result_conversation_digest, result_latest_turn_digest = self._record_digests(
+            cache_scope
+        )
+        cached = _decode_result(
+            raw_result,
+            expected_scope_digest=cache_keys["digest"],
+            expected_semantic_version=cache_scope.semantic_version,
+            expected_model_version=cache_scope.model_version,
+            expected_conversation_digest=result_conversation_digest,
+            expected_latest_turn_digest=result_latest_turn_digest,
+            expected_input_hash=None,
+        )
+        if cached is None:
+            raise SemanticStoreUnavailable()
+        if (
+            cached.assessed_at > current
+            or current - cached.assessed_at > RESULT_TTL_SECONDS
+            or parsed_freshness != cached.assessed_at
+        ):
+            return False
+
+        tombstone_key = self._new_inbound_dismissal_key(
+            index_scope,
+            conversation_id=conversation_id,
+            latest_turn_id=latest_turn_id,
+        )
+        result = self._command(
+            [
+                "EVAL",
+                _DISMISS_NEW_INBOUND_SCRIPT,
+                5,
+                index_keys["records"],
+                index_keys["occurrences"],
+                index_keys["freshness"],
+                cache_keys["result"],
+                tombstone_key,
+                conversation_digest,
+                raw_index_record,
+                _NEW_INBOUND_DISMISSAL_VALUE,
+                raw_result,
+                NEW_INBOUND_DISMISSAL_TTL_SECONDS,
+                entry.occurred_at,
+                parsed_freshness,
+            ]
+        )
+        if type(result) is not int or type(result) is bool or result not in (0, 1):
+            raise SemanticStoreUnavailable()
+        return result == 1
 
     def release_lease(self, scope: SemanticCacheScope, lease_token: str) -> bool:
         result = self._command(
@@ -1029,7 +1311,7 @@ def _decode_new_inbound_index_entry(
     secret: str,
     index_scope: NewInboundIndexScope,
     expected_semantic_version: str,
-    expected_model_version: str,
+    expected_model_version: str | None,
     expected_conversation_digest: str,
 ) -> NewInboundIndexEntry | None:
     if type(value) is not str:
@@ -1092,7 +1374,10 @@ def _decode_new_inbound_index_entry(
             or payload["conversationDigest"] != expected_conversation_digest
             or payload["conversationDigest"] != computed_conversation_digest
             or entry.semantic_version != expected_semantic_version
-            or entry.model_version != expected_model_version
+            or (
+                expected_model_version is not None
+                and entry.model_version != expected_model_version
+            )
             or type(payload["recordMac"]) is not str
             or _HEX_DIGEST_RE.fullmatch(payload["recordMac"]) is None
             or not hmac.compare_digest(

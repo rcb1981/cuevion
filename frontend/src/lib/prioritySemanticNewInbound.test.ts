@@ -2,17 +2,22 @@ import assert from "node:assert/strict";
 import {
   PRIORITY_SEMANTIC_NEW_INBOUND_MAX_GMAIL_IDS,
   PRIORITY_SEMANTIC_NEW_INBOUND_MAX_HYDRATION_RECORDS,
+  buildPrioritySemanticNewInboundDismissalWireRequest,
   buildPrioritySemanticNewInboundHydrationWireRequest,
+  buildPrioritySemanticNewInboundIdentityKey,
   buildPrioritySemanticNewInboundLocatorKey,
   buildPrioritySemanticNewInboundStorageKey,
   buildPrioritySemanticNewInboundWireRequest,
   isPrioritySemanticNewInboundEligible,
+  isPrioritySemanticNewInboundDismissalTurnCurrent,
   isPrioritySemanticNewInboundHydratedObservationCurrent,
   meetsPrioritySemanticNewInboundPromotionThreshold,
   normalizePrioritySemanticNewInboundMode,
   observePrioritySemanticNewInboundSnapshot,
+  parsePrioritySemanticNewInboundDismissalResponse,
   parsePrioritySemanticNewInboundResponse,
   parsePrioritySemanticNewInboundHydrationResponse,
+  rememberPrioritySemanticNewInboundDismissalFence,
   type PrioritySemanticNewInboundStorage,
 } from "./prioritySemanticNewInbound";
 import { SEMANTIC_SCHEMA_VERSION } from "./prioritySemanticState";
@@ -734,9 +739,209 @@ function runHydrationTests() {
   }
 }
 
+function runDismissalTests() {
+  const identity = {
+    mailboxId: "mailbox-1",
+    conversationId: "thread:mailbox-1|gmail:thread-new",
+    latestTurnId: "message-new",
+    semanticVersion: SEMANTIC_SCHEMA_VERSION,
+  } as const;
+  const request = {
+    operation: "dismiss_new_inbound",
+    mailboxId: identity.mailboxId,
+    identity: {
+      conversationId: identity.conversationId,
+      latestTurnId: identity.latestTurnId,
+      semanticVersion: identity.semanticVersion,
+    },
+  } as const;
+  assert.deepEqual(
+    buildPrioritySemanticNewInboundDismissalWireRequest(request),
+    request,
+  );
+  assert.equal(
+    buildPrioritySemanticNewInboundIdentityKey(identity),
+    JSON.stringify([
+      identity.mailboxId,
+      identity.conversationId,
+      identity.latestTurnId,
+      identity.semanticVersion,
+    ]),
+  );
+  assert.equal(
+    isPrioritySemanticNewInboundDismissalTurnCurrent({
+      dismissedIdentity: identity,
+      currentIdentity: identity,
+    }),
+    true,
+  );
+  assert.equal(
+    isPrioritySemanticNewInboundDismissalTurnCurrent({
+      dismissedIdentity: identity,
+      currentIdentity: { ...identity, latestTurnId: "message-newer" },
+    }),
+    false,
+    "a same-connection newer turn cancels stale local Done/Remove completion",
+  );
+  assert.equal(
+    isPrioritySemanticNewInboundDismissalTurnCurrent({
+      dismissedIdentity: identity,
+      currentIdentity: { ...identity, mailboxId: "mailbox-reconnected" },
+    }),
+    false,
+    "a reconnect/account replacement cannot inherit stale local completion",
+  );
+
+  const dismissalFences = new Map<string, Set<string>>();
+  for (
+    let index = 0;
+    index < PRIORITY_SEMANTIC_NEW_INBOUND_MAX_HYDRATION_RECORDS + 1;
+    index += 1
+  ) {
+    rememberPrioritySemanticNewInboundDismissalFence(
+      dismissalFences,
+      "mailbox-a",
+      `a-${index}`,
+    );
+  }
+  for (
+    let index = 0;
+    index < PRIORITY_SEMANTIC_NEW_INBOUND_MAX_HYDRATION_RECORDS;
+    index += 1
+  ) {
+    rememberPrioritySemanticNewInboundDismissalFence(
+      dismissalFences,
+      "mailbox-b",
+      `b-${index}`,
+    );
+  }
+  assert.equal(
+    dismissalFences.get("mailbox-a")?.size,
+    PRIORITY_SEMANTIC_NEW_INBOUND_MAX_HYDRATION_RECORDS,
+  );
+  assert.equal(
+    dismissalFences.get("mailbox-b")?.size,
+    PRIORITY_SEMANTIC_NEW_INBOUND_MAX_HYDRATION_RECORDS,
+  );
+  assert.equal(dismissalFences.get("mailbox-a")?.has("a-0"), false);
+  assert.equal(
+    dismissalFences
+      .get("mailbox-a")
+      ?.has(`a-${PRIORITY_SEMANTIC_NEW_INBOUND_MAX_HYDRATION_RECORDS}`),
+    true,
+  );
+  assert.equal(
+    dismissalFences.get("mailbox-b")?.has("b-0"),
+    true,
+    "a 65th confirmation in mailbox A cannot evict mailbox B's stale-hydration fence",
+  );
+
+  for (const forged of [
+    { ...request, operation: "dismiss" },
+    { ...request, mailboxId: " mailbox-1" },
+    { ...request, identity: null },
+    {
+      ...request,
+      identity: { ...request.identity, conversationId: "" },
+    },
+    { ...request, state: "needs_user_action" },
+    { ...request, confidence: 1 },
+    { ...request, priorityEffect: "observe_only" },
+    { ...request, workspaceId: "workspace-2" },
+    {
+      ...request,
+      identity: { ...request.identity, mailboxId: "mailbox-2" },
+    },
+    {
+      ...request,
+      identity: { ...request.identity, reasonCode: "explicit_request" },
+    },
+    {
+      ...request,
+      identity: {
+        ...request.identity,
+        semanticVersion: "priority-semantic-v0",
+      },
+    },
+    { ...request, mailboxId: `m${"x".repeat(256)}` },
+    {
+      ...request,
+      identity: {
+        ...request.identity,
+        conversationId: `c${"x".repeat(1_024)}`,
+      },
+    },
+    {
+      ...request,
+      identity: {
+        ...request.identity,
+        latestTurnId: `t${"x".repeat(512)}`,
+      },
+    },
+    {
+      ...request,
+      identity: { ...request.identity, latestTurnId: "message\nnew" },
+    },
+  ]) {
+    assert.equal(
+      buildPrioritySemanticNewInboundDismissalWireRequest(forged),
+      null,
+      "dismissal accepts only one bounded exact-turn identity and no policy fields",
+    );
+  }
+
+  const dismissed = {
+    ok: true,
+    status: "dismissed",
+    semanticTrigger: "new_inbound",
+    newInboundMode: "shadow",
+    priorityEffect: "observe_only",
+    identity,
+  } as const;
+  assert.deepEqual(
+    parsePrioritySemanticNewInboundDismissalResponse(dismissed),
+    dismissed,
+  );
+  for (const invalid of [
+    { ...dismissed, status: "hydrated" },
+    { ...dismissed, newInboundMode: "active" },
+    { ...dismissed, newInboundMode: "off" },
+    { ...dismissed, priorityEffect: "promote_new_inbound" },
+    { ...dismissed, dismissedAt: "2026-08-22T10:00:00.000Z" },
+    {
+      ...dismissed,
+      identity: { ...identity, latestTurnId: "message-newer" },
+      state: "needs_user_action",
+    },
+  ]) {
+    assert.equal(
+      parsePrioritySemanticNewInboundDismissalResponse(invalid),
+      null,
+      "dismiss success must stay shadow-only and use the exact response envelope",
+    );
+  }
+  assert.deepEqual(
+    parsePrioritySemanticNewInboundDismissalResponse({
+      ok: false,
+      error: {
+        code: "new_inbound_identity_not_current",
+        message: "The semantic new-inbound identity is no longer current.",
+      },
+    }),
+    {
+      ok: false,
+      error: {
+        code: "new_inbound_identity_not_current",
+        message: "The semantic new-inbound identity is no longer current.",
+      },
+    },
+  );
+}
+
 runBoundaryTests();
 runEligibilityAndWireTests();
 runResponseParserTests();
 runHydrationTests();
+runDismissalTests();
 
 console.log("\n✓ Priority semantic new-inbound boundary tests passed.");

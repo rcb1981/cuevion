@@ -54,6 +54,9 @@ from .semantic_types import (
 from .store import (
     LEASE_TTL_SECONDS,
     NEGATIVE_TTL_SECONDS,
+    NEW_INBOUND_INDEX_MAX_CONVERSATION_ID_CHARACTERS,
+    NEW_INBOUND_INDEX_MAX_TURN_ID_CHARACTERS,
+    NEW_INBOUND_INDEX_MAX_VERSION_CHARACTERS,
     RESULT_TTL_SECONDS,
     CachedSemanticAssessment,
     NewInboundIndexScope,
@@ -68,6 +71,7 @@ MAX_ROUTE_AUTHORED_TEXT_CHARACTERS = MAX_AUTHORED_TEXT_CHARACTERS
 SEMANTIC_LOOKUP_OPERATION = "lookup_current"
 SEMANTIC_NEW_INBOUND_TRIGGER = "new_inbound"
 SEMANTIC_NEW_INBOUND_HYDRATE_OPERATION = "hydrate_new_inbound"
+SEMANTIC_NEW_INBOUND_DISMISS_OPERATION = "dismiss_new_inbound"
 PRIORITY_EFFECT_OBSERVE_ONLY = "observe_only"
 PRIORITY_EFFECT_SUPPRESS_AUTOMATIC_OPEN_LOOP = (
     "suppress_automatic_open_loop"
@@ -119,7 +123,7 @@ def _authority_error(error: SemanticAuthorityError) -> SemanticRouteResponse:
 
 def _validate_payload_shape(
     payload: object,
-) -> tuple[str, str, bool] | SemanticRouteResponse:
+) -> tuple[str, str, bool, dict[str, str] | None] | SemanticRouteResponse:
     if type(payload) is not dict:
         return _error(400, "invalid_request", "Request body must be a JSON object.")
     operation = payload.get("operation")
@@ -129,7 +133,41 @@ def _validate_payload_shape(
         mailbox_id = payload.get("mailboxId")
         if type(mailbox_id) is not str:
             return _error(400, "invalid_request", "Mailbox id is invalid.")
-        return SEMANTIC_NEW_INBOUND_HYDRATE_OPERATION, mailbox_id, False
+        return SEMANTIC_NEW_INBOUND_HYDRATE_OPERATION, mailbox_id, False, None
+    if operation == SEMANTIC_NEW_INBOUND_DISMISS_OPERATION:
+        if set(payload) != {"operation", "mailboxId", "identity"}:
+            return _error(400, "invalid_request", "Request contains unsupported fields.")
+        mailbox_id = payload.get("mailboxId")
+        identity = payload.get("identity")
+        if (
+            not _valid_dismissal_identifier(mailbox_id, 256)
+            or type(identity) is not dict
+            or set(identity)
+            != {"conversationId", "latestTurnId", "semanticVersion"}
+            or not _valid_dismissal_identifier(
+                identity.get("conversationId"),
+                NEW_INBOUND_INDEX_MAX_CONVERSATION_ID_CHARACTERS,
+            )
+            or not _valid_dismissal_identifier(
+                identity.get("latestTurnId"),
+                NEW_INBOUND_INDEX_MAX_TURN_ID_CHARACTERS,
+            )
+            or not _valid_dismissal_identifier(
+                identity.get("semanticVersion"),
+                NEW_INBOUND_INDEX_MAX_VERSION_CHARACTERS,
+            )
+        ):
+            return _error(400, "invalid_request", "Dismissal identity is invalid.")
+        return (
+            SEMANTIC_NEW_INBOUND_DISMISS_OPERATION,
+            mailbox_id,
+            False,
+            {
+                "conversationId": identity["conversationId"],
+                "latestTurnId": identity["latestTurnId"],
+                "semanticVersion": identity["semanticVersion"],
+            },
+        )
     lookup_current = operation == SEMANTIC_LOOKUP_OPERATION
     if "operation" in payload and not lookup_current:
         return _error(400, "invalid_request", "Semantic operation is invalid.")
@@ -199,7 +237,17 @@ def _validate_payload_shape(
     mailbox_id = payload.get("mailboxId")
     if type(mailbox_id) is not str:
         return _error(400, "invalid_request", "Mailbox id is invalid.")
-    return trigger, mailbox_id, lookup_current
+    return trigger, mailbox_id, lookup_current, None
+
+
+def _valid_dismissal_identifier(value: object, maximum: int) -> bool:
+    return (
+        type(value) is str
+        and value == value.strip()
+        and 1 <= len(value) <= maximum
+        and "\x00" not in value
+        and not any(ord(character) < 32 or ord(character) == 127 for character in value)
+    )
 
 
 def _verify_event(
@@ -458,15 +506,24 @@ def _hydrate_new_inbound_records(
             semantic_version=config.schema_version,
             model_version=config.model,
         )
+        dismissed_states = semantic_store.get_new_inbound_dismissal_states(
+            index_scope,
+            entries,
+        )
+        eligible_entries = tuple(
+            entry
+            for entry, dismissed in zip(entries, dismissed_states, strict=True)
+            if not dismissed
+        )
         cache_scopes = tuple(
             entry.to_cache_scope(index_scope)
-            for entry in entries
+            for entry in eligible_entries
         )
         cached_results = semantic_store.get_results_for_hydration_scopes(
             cache_scopes
         )
         records: list[dict] = []
-        for entry, cached in zip(entries, cached_results, strict=True):
+        for entry, cached in zip(eligible_entries, cached_results, strict=True):
             if (
                 cached is None
                 or cached.assessed_at > current
@@ -497,6 +554,70 @@ def _hydrate_new_inbound_records(
     return _new_inbound_hydration_response(config, records)
 
 
+def _dismiss_new_inbound_record(
+    authority: PriorityAuthority,
+    config: SemanticRuntimeConfig,
+    identity: dict[str, str],
+    *,
+    hmac_secret: str | None,
+    store: SemanticAssessmentStore | None,
+    current: int,
+) -> SemanticRouteResponse:
+    # Dismissal is deliberately shadow-only and performs no provider, prompt,
+    # model, lease, attempt, or current-pointer work.
+    if not config.new_inbound_enabled or not config.model:
+        return _error(
+            409,
+            "new_inbound_dismissal_unavailable",
+            "Semantic new-inbound dismissal is unavailable.",
+        )
+    try:
+        secret = hmac_secret or resolve_priority_hmac_secret()
+        semantic_store = store or build_runtime_semantic_store(
+            hmac_secret=secret
+        )
+        index_scope = NewInboundIndexScope(
+            workspace_id=authority.workspace_id,
+            user_id=authority.user_id,
+            mailbox_id=authority.mailbox_id,
+            provider=authority.provider,
+            mailbox_account_identity=authority.mailbox_email,
+        )
+        dismissed = semantic_store.dismiss_new_inbound_exact(
+            index_scope,
+            conversation_id=identity["conversationId"],
+            latest_turn_id=identity["latestTurnId"],
+            semantic_version=identity["semanticVersion"],
+            current=current,
+        )
+    except EventReferenceError:
+        return _error(503, "semantic_unavailable", "Semantic analysis is unavailable.")
+    except (SemanticStoreUnavailable, ValueError, OverflowError, OSError):
+        return _error(503, "semantic_unavailable", "Semantic analysis is unavailable.")
+    if not dismissed:
+        return _error(
+            409,
+            "new_inbound_identity_not_current",
+            "The semantic new-inbound identity is no longer current.",
+        )
+    return SemanticRouteResponse(
+        200,
+        {
+            "ok": True,
+            "status": "dismissed",
+            "semanticTrigger": SEMANTIC_NEW_INBOUND_TRIGGER,
+            "newInboundMode": config.new_inbound_mode.value,
+            "priorityEffect": PRIORITY_EFFECT_OBSERVE_ONLY,
+            "identity": {
+                "mailboxId": authority.mailbox_id,
+                "conversationId": identity["conversationId"],
+                "latestTurnId": identity["latestTurnId"],
+                "semanticVersion": identity["semanticVersion"],
+            },
+        },
+    )
+
+
 def process_semantic_request(
     headers,
     payload: object,
@@ -511,7 +632,7 @@ def process_semantic_request(
     shape = _validate_payload_shape(payload)
     if isinstance(shape, SemanticRouteResponse):
         return shape
-    trigger, mailbox_id, lookup_current = shape
+    trigger, mailbox_id, lookup_current, dismissal_identity = shape
     current = int(time.time()) if now is None else now
     try:
         authority = resolve_priority_authority(headers, mailbox_id)
@@ -526,6 +647,17 @@ def process_semantic_request(
         return _hydrate_new_inbound_records(
             authority,
             runtime_config,
+            hmac_secret=hmac_secret,
+            store=store,
+            current=current,
+        )
+    if trigger == SEMANTIC_NEW_INBOUND_DISMISS_OPERATION:
+        if dismissal_identity is None:
+            return _error(400, "invalid_request", "Dismissal identity is invalid.")
+        return _dismiss_new_inbound_record(
+            authority,
+            runtime_config,
+            dismissal_identity,
             hmac_secret=hmac_secret,
             store=store,
             current=current,

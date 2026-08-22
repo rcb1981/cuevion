@@ -26,13 +26,17 @@ import {
   type PrioritySemanticCurrentLookupRequest,
 } from "./prioritySemanticState";
 import {
+  buildPrioritySemanticNewInboundDismissalWireRequest,
   buildPrioritySemanticNewInboundHydrationWireRequest,
   buildPrioritySemanticNewInboundWireRequest,
   normalizePrioritySemanticNewInboundMode,
+  parsePrioritySemanticNewInboundDismissalResponse,
   parsePrioritySemanticNewInboundHydrationResponse,
   parsePrioritySemanticNewInboundResponse,
   type PrioritySemanticNewInboundAssessmentRequest,
   type PrioritySemanticNewInboundAssessmentResponse,
+  type PrioritySemanticNewInboundDismissalRequest,
+  type PrioritySemanticNewInboundDismissalResponse,
   type PrioritySemanticNewInboundHydrationRequest,
   type PrioritySemanticNewInboundHydrationResponse,
   type PrioritySemanticNewInboundMode,
@@ -41,6 +45,8 @@ import {
 export type {
   PrioritySemanticNewInboundAssessmentRequest,
   PrioritySemanticNewInboundAssessmentResponse,
+  PrioritySemanticNewInboundDismissalRequest,
+  PrioritySemanticNewInboundDismissalResponse,
   PrioritySemanticNewInboundHydrationRequest,
   PrioritySemanticNewInboundHydrationResponse,
 } from "./prioritySemanticNewInbound";
@@ -3693,6 +3699,110 @@ export async function requestPrioritySemanticNewInboundHydration(
         message: didTimeout
           ? "Semantic hydration timed out."
           : "Semantic hydration could not be reached.",
+      },
+    };
+  } finally {
+    globalThis.clearTimeout(timeoutId);
+  }
+}
+
+export async function requestPrioritySemanticNewInboundDismissal(
+  request: PrioritySemanticNewInboundDismissalRequest,
+): Promise<PrioritySemanticNewInboundDismissalResponse> {
+  const wireRequest = buildPrioritySemanticNewInboundDismissalWireRequest(
+    request,
+  );
+  if (!wireRequest) {
+    return {
+      ok: false,
+      error: {
+        code: "invalid_semantic_request",
+        message: "Semantic dismissal request is invalid.",
+      },
+    };
+  }
+
+  const abortController = new AbortController();
+  const timeoutId = globalThis.setTimeout(() => {
+    abortController.abort();
+  }, PRIORITY_SEMANTIC_ASSESSMENT_TIMEOUT_MS);
+
+  try {
+    const response = await fetch("/api/priority/semantic-assessment", {
+      method: "POST",
+      credentials: "include",
+      cache: "no-store",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      signal: abortController.signal,
+      body: JSON.stringify(wireRequest),
+    });
+    let rawPayload = "";
+    try {
+      rawPayload = await response.text();
+    } catch {
+      return {
+        ok: false,
+        error: {
+          code: "semantic_response_unreadable",
+          message: "Semantic dismissal response could not be read.",
+        },
+      };
+    }
+
+    let payload: unknown = null;
+    if (rawPayload.trim()) {
+      try {
+        payload = JSON.parse(rawPayload) as unknown;
+      } catch {
+        payload = null;
+      }
+    }
+    const parsedResponse =
+      parsePrioritySemanticNewInboundDismissalResponse(payload);
+    if (!response.ok) {
+      return parsedResponse && !parsedResponse.ok
+        ? parsedResponse
+        : {
+            ok: false,
+            error: {
+              code: "semantic_request_failed",
+              message: `Semantic dismissal failed${
+                response.status ? ` (${response.status})` : ""
+              }.`,
+            },
+          };
+    }
+    if (
+      !parsedResponse ||
+      !parsedResponse.ok ||
+      parsedResponse.identity.mailboxId !== wireRequest.mailboxId ||
+      parsedResponse.identity.conversationId !==
+        wireRequest.identity.conversationId ||
+      parsedResponse.identity.latestTurnId !== wireRequest.identity.latestTurnId ||
+      parsedResponse.identity.semanticVersion !==
+        wireRequest.identity.semanticVersion
+    ) {
+      return {
+        ok: false,
+        error: {
+          code: "invalid_semantic_response",
+          message: "Semantic dismissal returned an invalid response.",
+        },
+      };
+    }
+    return parsedResponse;
+  } catch (error) {
+    const didTimeout =
+      error instanceof DOMException && error.name === "AbortError";
+    return {
+      ok: false,
+      error: {
+        code: didTimeout ? "semantic_timeout" : "semantic_request_failed",
+        message: didTimeout
+          ? "Semantic dismissal timed out. Please try again."
+          : "Semantic dismissal could not be reached. Please try again.",
       },
     };
   } finally {

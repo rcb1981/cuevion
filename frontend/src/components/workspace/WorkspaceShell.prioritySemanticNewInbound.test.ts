@@ -219,8 +219,8 @@ assert.doesNotMatch(
 );
 assert.equal(
   source.match(/prioritySemanticNewInboundHydratedObservations/g)?.length,
-  2,
-  "hydrated records are held only as an isolated shadow observation projection",
+  3,
+  "hydrated records are held only as an isolated shadow projection and its exact-action resolver",
 );
 assert.match(
   refreshSource,
@@ -236,6 +236,126 @@ assert.match(
   hydratedProjectionSource,
   /acceptedRefreshAuthority\.provider === "custom_imap"[\s\S]*?acceptedRefreshAuthority\.imapUidValidity === null[\s\S]*?acceptedRefreshAuthority\.freshImapUids === null[\s\S]*?message\.uidValidity !==[\s\S]*?!acceptedRefreshAuthority\.freshImapUids\.has\(message\.imapUid\)/,
   "a retained IMAP row absent from the trusted accepted response must fail closed",
+);
+
+const dismissalRequestStart = source.indexOf(
+  "const dismissExactPrioritySemanticNewInboundObservation = useCallback",
+);
+const dismissalRequestEnd = source.indexOf(
+  "const priorityReasonCopyForCandidates",
+  dismissalRequestStart,
+);
+const dismissalRequestSource = source.slice(
+  dismissalRequestStart,
+  dismissalRequestEnd,
+);
+assert.ok(
+  dismissalRequestStart >= 0 && dismissalRequestEnd > dismissalRequestStart,
+  "the exact semantic Done/Remove dismissal bridge must exist",
+);
+assert.match(
+  dismissalRequestSource,
+  /requestPrioritySemanticNewInboundDismissal\(\{[\s\S]*?operation: "dismiss_new_inbound",[\s\S]*?mailboxId,[\s\S]*?conversationId: record\.identity\.conversationId,[\s\S]*?latestTurnId: record\.identity\.latestTurnId,[\s\S]*?semanticVersion: record\.identity\.semanticVersion/,
+  "dismissal submits only the exact hydrated mailbox/conversation/latest-turn identity",
+);
+assert.doesNotMatch(
+  dismissalRequestSource,
+  /assessment:|confidence:|reasonCode:|priorityEffect:|subject:|body:|sender:|recipient:|localStorage|sessionStorage/,
+  "dismissal cannot submit content or semantic policy and remains runtime-only",
+);
+assert.match(
+  dismissalRequestSource,
+  /didConnectionFenceChange =[\s\S]*?prioritySemanticNewInboundHydrationScopeRef[\s\S]*?providerArchiveCurrentConnectionKeysRef[\s\S]*?providerArchiveConnectionEpochsRef[\s\S]*?if \(didConnectionFenceChange\) \{[\s\S]*?return false;[\s\S]*?if \(!response\.ok\) \{[\s\S]*?setPrioritySemanticNewInboundDismissalFailure/,
+  "reconnect races cancel silently while true server failures remain observable",
+);
+assert.match(
+  dismissalRequestSource,
+  /confirmedPrioritySemanticNewInboundDismissalKeysByMailboxRef[\s\S]*?rememberPrioritySemanticNewInboundDismissalFence\([\s\S]*?confirmedDismissalsByMailbox,[\s\S]*?mailboxId,[\s\S]*?runtimeDismissalKey[\s\S]*?setPrioritySemanticNewInboundHydrationState[\s\S]*?bucket\.records\.filter/,
+  "each mailbox has its own bounded confirmation bucket and loses only the exact stale observation",
+);
+assert.match(
+  source.slice(hydrationStateStart, dismissalRequestEnd),
+  /nonDismissedRecords = records\.filter[\s\S]*?confirmedPrioritySemanticNewInboundDismissalKeysByMailboxRef[\s\S]*?\.get\(mailboxId\)/,
+  "an older in-flight hydration response cannot re-add a server-confirmed dismissal",
+);
+assert.match(
+  source,
+  /confirmedPrioritySemanticNewInboundDismissalKeysByMailboxRef = useRef<[\s\S]*?Map<InboxId, Set<string>>[\s\S]*?new Map\(\)/,
+  "two mailboxes retain independent confirmation fences instead of sharing one global 64-entry cap",
+);
+
+const priorityActionBridgeStart = source.indexOf(
+  "const applyManualPriorityUpdate =",
+);
+const priorityActionBridgeEnd = source.indexOf(
+  "const handleSetManualLabelOverride =",
+  priorityActionBridgeStart,
+);
+const priorityActionBridgeSource = source.slice(
+  priorityActionBridgeStart,
+  priorityActionBridgeEnd,
+);
+assert.ok(
+  priorityActionBridgeStart >= 0 &&
+    priorityActionBridgeEnd > priorityActionBridgeStart,
+  "existing Priority Done/Remove actions must have a narrow semantic bridge",
+);
+assert.match(
+  priorityActionBridgeSource,
+  /!shouldBePriority[\s\S]*?!options\.skipSemanticNewInboundDismissal[\s\S]*?resolveExactPrioritySemanticNewInboundObservation/,
+  "only explicit removal of an exact hydrated observation enters semantic dismissal",
+);
+assert.match(
+  priorityActionBridgeSource,
+  /await dismissExactPrioritySemanticNewInboundObservation[\s\S]*?return false;[\s\S]*?resolveCurrentPrioritySemanticNewInboundDismissalTarget[\s\S]*?mailboxStoreRef\.current[\s\S]*?applyManualPriorityUpdate/,
+  "local Remove mutation occurs only after confirmed dismissal and a current-store identity recheck",
+);
+assert.match(
+  priorityActionBridgeSource,
+  /handleMarkPriorityItemDone = async[\s\S]*?await dismissExactPrioritySemanticNewInboundObservation[\s\S]*?return false;[\s\S]*?resolveCurrentPrioritySemanticNewInboundDismissalTarget[\s\S]*?applyMarkPriorityItemDone/,
+  "local Done mutation occurs only after confirmed dismissal and a current-store identity recheck",
+);
+assert.match(
+  dismissalRequestSource,
+  /resolveCurrentPrioritySemanticNewInboundDismissalTarget[\s\S]*?prioritySemanticNewInboundHydrationScopeRef[\s\S]*?providerArchiveCurrentConnectionKeysRef[\s\S]*?providerArchiveConnectionEpochsRef[\s\S]*?mailboxStoreRef\.current[\s\S]*?conversationEntries[\s\S]*?currentEntry\.folder !== "Inbox"[\s\S]*?isPrioritySemanticNewInboundDismissalTurnCurrent/,
+  "post-await completion rechecks scope, account, current store, canonical conversation, and latest turn",
+);
+assert.match(
+  source,
+  /composeMode === "forward"[\s\S]*?skipSemanticNewInboundDismissal: true/,
+  "automatic post-send cleanup does not create a semantic dismissal tombstone",
+);
+assert.equal(
+  source.match(/requestPrioritySemanticNewInboundDismissal\(/g)?.length,
+  1,
+  "Workspace has one exact user-action dismissal request site",
+);
+assert.match(
+  source,
+  /open=\{Boolean\(prioritySemanticNewInboundDismissalFailure\)\}[\s\S]*?Removal not saved[\s\S]*?\{prioritySemanticNewInboundDismissalFailure\}/,
+  "durability failure is explicitly visible and retryable",
+);
+assert.match(
+  dismissalRequestSource,
+  /Could not save this Done\/Remove action across devices\. Nothing was removed\. Please try again\./,
+  "server failure explains that no durable or local removal occurred",
+);
+assert.doesNotMatch(
+  dismissalRequestSource,
+  /setPrioritySemanticNewInboundDismissalFailure\(null\)/,
+  "one successful dismissal cannot hide another concurrent dismissal failure",
+);
+assert.doesNotMatch(
+  source.slice(
+    source.indexOf(
+      "open={Boolean(prioritySemanticNewInboundDismissalFailure)}",
+    ),
+    source.indexOf(
+      "open={Boolean(manualChangeConfirmationMessage)}",
+    ),
+  ),
+  /Change applied/,
+  "dismissal failure is never presented as a successful local change",
 );
 
 console.log("\nWorkspaceShell new_inbound shadow integration tests passed.");
