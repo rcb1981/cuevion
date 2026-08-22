@@ -1,5 +1,9 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
+import {
+  rankPriorityItems,
+  type PriorityWorkStateByItemId,
+} from "../priorityRanking";
 import { reviewMockService } from "./mockReviewService";
 import type {
   ReviewContextEntity,
@@ -51,6 +55,7 @@ type ReviewListViewProps = {
   onOpenItem: (item: ReviewItem) => void;
   hiddenReviewIds?: string[];
   supplementalItems?: ReviewItem[];
+  priorityWorkStateByItemId?: PriorityWorkStateByItemId;
   displayOverrides?: Partial<Record<string, PriorityDisplayFields>>;
   onPriorityItemAction?: (item: ReviewItem, action: PriorityItemAction) => void;
 };
@@ -850,6 +855,7 @@ export function ReviewListView({
   onOpenItem,
   hiddenReviewIds = [],
   supplementalItems = [],
+  priorityWorkStateByItemId = {},
   displayOverrides = {},
   onPriorityItemAction,
 }: ReviewListViewProps) {
@@ -859,22 +865,18 @@ export function ReviewListView({
   const sortMenuRef = useRef<HTMLDivElement | null>(null);
   const hiddenReviewIdSet = new Set(hiddenReviewIds);
   const [prioritySortOrder, setPrioritySortOrder] = useState<PrioritySortOrder>("newest");
-  const items = controller
-    .getItems(filter)
-    .concat(supplementalItems)
-    .filter((item) => !hiddenReviewIdSet.has(item.id))
-    .sort((firstItem, secondItem) => {
-      const firstTimestamp = getReviewItemSortTimestamp(firstItem);
-      const secondTimestamp = getReviewItemSortTimestamp(secondItem);
-
-      if (firstTimestamp === secondTimestamp) {
-        return 0;
-      }
-
-      return prioritySortOrder === "newest"
-        ? secondTimestamp - firstTimestamp
-        : firstTimestamp - secondTimestamp;
-    });
+  const items = rankPriorityItems(
+    controller
+      .getItems(filter)
+      .concat(supplementalItems)
+      .filter((item) => !hiddenReviewIdSet.has(item.id)),
+    {
+      sortOrder: prioritySortOrder,
+      workStateByItemId: priorityWorkStateByItemId,
+      getItemId: (item) => item.id,
+      getTimestamp: getReviewItemSortTimestamp,
+    },
+  );
 
   useEffect(() => {
     if (!openActionItemId && !isSortMenuOpen) {

@@ -27,6 +27,7 @@ import {
   isReviewWorkspaceTarget,
   useReviewModuleState,
 } from "./review/ReviewModule";
+import { resolvePriorityWorkState } from "./priorityRanking";
 import {
   MobileWorkspaceShell,
   type MobileWorkspaceMailbox,
@@ -46450,6 +46451,43 @@ export function WorkspaceShell({
       normalPriorityGateCandidateEntries,
       prioritySemanticNewInboundHydratedObservations,
     );
+  const priorityWorkStateByReviewItemId = Object.fromEntries(
+    livePriorityInboxEntries.map(({ mailboxId, message }) => {
+      const messageKey = createNormalPriorityMessageKey(mailboxId, message);
+      const returnedReplyEvidence =
+        priorityRuntimeSignalsForCandidates[messageKey]?.returnedReplyEvidence;
+      const semanticObservation =
+        resolveExactPrioritySemanticNewInboundObservationForMessage(
+          prioritySemanticNewInboundHydratedObservations,
+          mailboxId,
+          message,
+        );
+
+      return [
+        `live-priority-${mailboxId}-${message.id}`,
+        resolvePriorityWorkState({
+          hasWaitingOnOtherEvidence: Boolean(
+            resolveWaitingOnOtherState(
+              effectiveWaitingOnOtherStore,
+              mailboxId,
+              message,
+            ),
+          ),
+          hasReturnedReplyEvidence: Boolean(
+            returnedReplyEvidence?.hasEvidence &&
+              returnedReplyEvidence.confidence === "high",
+          ),
+          hasSemanticNeedsUserAction: Boolean(
+            semanticObservation?.priorityEffect === "promote_new_inbound" &&
+              semanticObservation.assessment.state === "needs_user_action" &&
+              meetsPrioritySemanticNewInboundPromotionThreshold(
+                semanticObservation.assessment,
+              ),
+          ),
+        }),
+      ];
+    }),
+  );
   const resolveExactPrioritySemanticNewInboundObservation = useCallback(
     (mailboxId: InboxId, message: MailMessage) =>
       resolveExactPrioritySemanticNewInboundObservationForMessage(
@@ -52879,6 +52917,7 @@ export function WorkspaceShell({
                   onOpenItem={handleOpenPriorityItem}
                   hiddenReviewIds={hiddenPriorityReviewIds}
                   supplementalItems={livePriorityInboxItems}
+                  priorityWorkStateByItemId={priorityWorkStateByReviewItemId}
                   displayOverrides={priorityDisplayOverrides}
                   onPriorityItemAction={handlePriorityListAction}
                 />
