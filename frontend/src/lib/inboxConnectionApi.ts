@@ -26,17 +26,23 @@ import {
   type PrioritySemanticCurrentLookupRequest,
 } from "./prioritySemanticState";
 import {
+  buildPrioritySemanticNewInboundHydrationWireRequest,
   buildPrioritySemanticNewInboundWireRequest,
   normalizePrioritySemanticNewInboundMode,
+  parsePrioritySemanticNewInboundHydrationResponse,
   parsePrioritySemanticNewInboundResponse,
   type PrioritySemanticNewInboundAssessmentRequest,
   type PrioritySemanticNewInboundAssessmentResponse,
+  type PrioritySemanticNewInboundHydrationRequest,
+  type PrioritySemanticNewInboundHydrationResponse,
   type PrioritySemanticNewInboundMode,
 } from "./prioritySemanticNewInbound";
 
 export type {
   PrioritySemanticNewInboundAssessmentRequest,
   PrioritySemanticNewInboundAssessmentResponse,
+  PrioritySemanticNewInboundHydrationRequest,
+  PrioritySemanticNewInboundHydrationResponse,
 } from "./prioritySemanticNewInbound";
 
 export type LiveInboxAttachmentSnapshot = {
@@ -3586,6 +3592,107 @@ export async function requestPrioritySemanticNewInboundAssessment(
         message: didTimeout
           ? "Semantic assessment timed out."
           : "Semantic assessment could not be reached.",
+      },
+    };
+  } finally {
+    globalThis.clearTimeout(timeoutId);
+  }
+}
+
+export async function requestPrioritySemanticNewInboundHydration(
+  request: PrioritySemanticNewInboundHydrationRequest,
+): Promise<PrioritySemanticNewInboundHydrationResponse> {
+  const wireRequest = buildPrioritySemanticNewInboundHydrationWireRequest(
+    request,
+  );
+  if (!wireRequest) {
+    return {
+      ok: false,
+      error: {
+        code: "invalid_semantic_request",
+        message: "Semantic hydration request is invalid.",
+      },
+    };
+  }
+
+  const abortController = new AbortController();
+  const timeoutId = globalThis.setTimeout(() => {
+    abortController.abort();
+  }, PRIORITY_SEMANTIC_ASSESSMENT_TIMEOUT_MS);
+
+  try {
+    const response = await fetch("/api/priority/semantic-assessment", {
+      method: "POST",
+      credentials: "include",
+      cache: "no-store",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      signal: abortController.signal,
+      body: JSON.stringify(wireRequest),
+    });
+    let rawPayload = "";
+    try {
+      rawPayload = await response.text();
+    } catch {
+      return {
+        ok: false,
+        error: {
+          code: "semantic_response_unreadable",
+          message: "Semantic hydration response could not be read.",
+        },
+      };
+    }
+
+    let payload: unknown = null;
+    if (rawPayload.trim()) {
+      try {
+        payload = JSON.parse(rawPayload) as unknown;
+      } catch {
+        payload = null;
+      }
+    }
+    const parsedResponse =
+      parsePrioritySemanticNewInboundHydrationResponse(payload);
+    if (!response.ok) {
+      return parsedResponse && !parsedResponse.ok
+        ? parsedResponse
+        : {
+            ok: false,
+            error: {
+              code: "semantic_request_failed",
+              message: `Semantic hydration failed${
+                response.status ? ` (${response.status})` : ""
+              }.`,
+            },
+          };
+    }
+    if (
+      !parsedResponse ||
+      !parsedResponse.ok ||
+      parsedResponse.records.some(
+        (record) => record.identity.mailboxId !== wireRequest.mailboxId,
+      )
+    ) {
+      return {
+        ok: false,
+        error: {
+          code: "invalid_semantic_response",
+          message: "Semantic hydration returned an invalid response.",
+        },
+      };
+    }
+    return parsedResponse;
+  } catch (error) {
+    const didTimeout =
+      error instanceof DOMException && error.name === "AbortError";
+    return {
+      ok: false,
+      error: {
+        code: didTimeout ? "semantic_timeout" : "semantic_request_failed",
+        message: didTimeout
+          ? "Semantic hydration timed out."
+          : "Semantic hydration could not be reached.",
       },
     };
   } finally {

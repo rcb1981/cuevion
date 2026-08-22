@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import unittest
 from dataclasses import replace
 
@@ -10,7 +11,19 @@ from .semantic_types import (
     SemanticReasonCode,
     SemanticState,
 )
-from .store import SemanticAssessmentStore, SemanticCacheScope
+from .store import (
+    NEW_INBOUND_INDEX_MAX_CONVERSATION_ID_CHARACTERS,
+    NEW_INBOUND_INDEX_MAX_RECORDS,
+    NEW_INBOUND_INDEX_MAX_SERIALIZED_RECORD_BYTES,
+    NEW_INBOUND_INDEX_READ_BATCH_SIZE,
+    NEW_INBOUND_INDEX_TTL_SECONDS,
+    SEMANTIC_HYDRATION_RESULT_BATCH_SIZE,
+    NewInboundIndexEntry,
+    NewInboundIndexScope,
+    SemanticAssessmentStore,
+    SemanticCacheScope,
+    derive_new_inbound_index_scope_digest,
+)
 
 
 def _account(prefix: str, byte: int) -> str:
@@ -24,13 +37,47 @@ SECRET = "priority-test-secret-with-more-than-thirty-two-bytes"
 class MemoryRedis:
     def __init__(self) -> None:
         self.values: dict[str, str] = {}
+        self.hashes: dict[str, dict[str, str]] = {}
+        self.sorted_sets: dict[str, dict[str, float]] = {}
         self.commands: list[list[object]] = []
+        self.lua_type_replies_as_status_tables = True
+
+    def _remove_index_member(self, keys: list[object], member: str) -> None:
+        self.hashes.setdefault(keys[3], {}).pop(member, None)
+        self.sorted_sets.setdefault(keys[4], {}).pop(member, None)
+        self.sorted_sets.setdefault(keys[5], {}).pop(member, None)
+
+    def _lua_type(self, key: object) -> object:
+        kinds: list[str] = []
+        if key in self.values:
+            kinds.append("string")
+        if key in self.hashes:
+            kinds.append("hash")
+        if key in self.sorted_sets:
+            kinds.append("zset")
+        value = kinds[0] if len(kinds) == 1 else ("none" if not kinds else "mixed")
+        return {"ok": value} if self.lua_type_replies_as_status_tables else value
 
     def __call__(self, command: list[object]) -> dict[str, object]:
         self.commands.append(list(command))
         operation = command[0]
         if operation == "GET":
             return {"result": self.values.get(command[1])}
+        if operation == "MGET":
+            return {"result": [self.values.get(key) for key in command[1:]]}
+        if operation == "HMGET":
+            values = self.hashes.get(command[1], {})
+            return {"result": [values.get(member) for member in command[2:]]}
+        if operation == "ZREVRANGE":
+            values = self.sorted_sets.get(command[1], {})
+            ordered = sorted(
+                values,
+                key=lambda member: (values[member], member),
+                reverse=True,
+            )
+            return {
+                "result": ordered[int(command[2]) : int(command[3]) + 1]
+            }
         if operation == "SET":
             key = command[1]
             if command[-1] == "NX" and key in self.values:
@@ -69,6 +116,53 @@ class MemoryRedis:
                     self.values.pop(keys[0], None)
                     return {"result": 1}
                 return {"result": 0}
+            if script == store_module._COMMIT_NEW_INBOUND_RESULT_SCRIPT:
+                if (
+                    self.values.get(keys[0]) != args[0]
+                    or self.values.get(keys[1]) != args[1]
+                ):
+                    return {"result": 0}
+                expected_types = (
+                    (keys[3], "hash"),
+                    (keys[4], "zset"),
+                    (keys[5], "zset"),
+                )
+                for key, expected_type in expected_types:
+                    type_reply = self._lua_type(key)
+                    actual_type = (
+                        type_reply.get("ok")
+                        if type(type_reply) is dict
+                        else type_reply
+                    )
+                    if actual_type not in {"none", expected_type}:
+                        return {"result": -1}
+                member = args[4]
+                occurred_at = float(args[6])
+                occurrences = self.sorted_sets.setdefault(keys[4], {})
+                existing_occurrence = occurrences.get(member)
+                existing_record = self.hashes.setdefault(keys[3], {}).get(member)
+                if (existing_occurrence is None) != (existing_record is None):
+                    return {"result": -1}
+                self.hashes.setdefault(keys[3], {})[member] = args[5]
+                occurrences[member] = occurred_at
+                freshness = self.sorted_sets.setdefault(keys[5], {})
+                freshness[member] = float(args[7])
+                for expired_member, score in list(freshness.items()):
+                    if score <= float(args[10]):
+                        self._remove_index_member(keys, expired_member)
+                ordered = sorted(
+                    self.sorted_sets.setdefault(keys[5], {}),
+                    key=lambda current: (
+                        self.sorted_sets[keys[5]][current],
+                        current,
+                    ),
+                )
+                excess = len(ordered) - int(args[9])
+                for oldest_member in ordered[: max(0, excess)]:
+                    self._remove_index_member(keys, oldest_member)
+                self.values[keys[2]] = args[2]
+                self.values.pop(keys[0], None)
+                return {"result": 1}
             if script == store_module._COMMIT_NEGATIVE_SCRIPT:
                 if self.values.get(keys[0]) == args[0]:
                     self.values[keys[1]] = args[1]
@@ -105,6 +199,30 @@ ASSESSMENT = SemanticAssessment(
     confidence=0.98,
     reason_code=SemanticReasonCode.COMPLETED_CONFIRMATION,
 )
+
+ACTIONABLE_ASSESSMENT = SemanticAssessment(
+    state=SemanticState.NEEDS_USER_ACTION,
+    confidence=0.99,
+    reason_code=SemanticReasonCode.EXPLICIT_REQUEST,
+)
+
+
+def index_scope(
+    *,
+    workspace_id: str | None = None,
+    user_id: str | None = None,
+    mailbox_id: str = "mailbox-1",
+    provider: str = "google",
+    mailbox_account_identity: str = "primary@example.com",
+) -> NewInboundIndexScope:
+    current = scope()
+    return NewInboundIndexScope(
+        workspace_id=workspace_id or current.workspace_id,
+        user_id=user_id or current.user_id,
+        mailbox_id=mailbox_id,
+        provider=provider,
+        mailbox_account_identity=mailbox_account_identity,
+    )
 
 
 class SemanticStoreTests(unittest.TestCase):
@@ -304,6 +422,540 @@ class SemanticStoreTests(unittest.TestCase):
             assessed_at=24,
         ))
         self.assertEqual(self.redis.commands[-1][-1], 30 * 24 * 60 * 60)
+
+    def _commit_indexed(
+        self,
+        cache_scope: SemanticCacheScope,
+        *,
+        occurred_at: int,
+        assessed_at: int,
+        token_byte: int = 20,
+        account_identity: str = "primary@example.com",
+    ) -> bool:
+        self.store.set_current_exact(cache_scope, occurred_at=occurred_at)
+        lease = self.store.try_acquire_lease(
+            cache_scope,
+            random_bytes=lambda length: bytes([token_byte]) * length,
+        )
+        self.assertIsNotNone(lease)
+        return self.store.commit_result_if_lease_owned(
+            cache_scope,
+            lease_token=lease,
+            assessment=ACTIONABLE_ASSESSMENT,
+            input_hash="9" * 64,
+            occurred_at=occurred_at,
+            assessed_at=assessed_at,
+            index_new_inbound=True,
+            new_inbound_mailbox_account_identity=account_identity,
+        )
+
+    def test_new_inbound_commit_atomically_creates_content_free_bounded_index(self):
+        cache_scope = scope("new-inbound-1")
+        self.assertTrue(
+            self._commit_indexed(
+                cache_scope,
+                occurred_at=10_000,
+                assessed_at=1_000,
+            )
+        )
+
+        entries = self.store.read_new_inbound_index(
+            index_scope(),
+            semantic_version=cache_scope.semantic_version,
+            model_version=cache_scope.model_version,
+        )
+        self.assertEqual(
+            entries,
+            (
+                NewInboundIndexEntry(
+                    conversation_id=cache_scope.conversation_id,
+                    latest_turn_id=cache_scope.latest_turn_id,
+                    semantic_version=cache_scope.semantic_version,
+                    model_version=cache_scope.model_version,
+                    occurred_at=10_000,
+                ),
+            ),
+        )
+        serialized = next(iter(next(iter(self.redis.hashes.values())).values()))
+        self.assertTrue(
+            all(
+                "primary@example.com" not in key
+                for key in (
+                    *self.redis.hashes,
+                    *self.redis.sorted_sets,
+                    *self.redis.values,
+                )
+            )
+        )
+        self.assertLessEqual(
+            len(serialized.encode("utf-8")),
+            NEW_INBOUND_INDEX_MAX_SERIALIZED_RECORD_BYTES,
+        )
+        self.assertNotIn("primary@example.com", serialized)
+        for forbidden in (
+            "needs_user_action",
+            "explicit_request",
+            "confidence",
+            "body",
+            "subject",
+            "sender",
+            "recipient",
+            "Authorization",
+            "cookie",
+            "access_token",
+            "refresh_token",
+            "password",
+            "MIME",
+            "attachment",
+        ):
+            self.assertNotIn(forbidden, serialized)
+        payload = json.loads(serialized)
+        self.assertEqual(
+            set(payload),
+            {
+                "schemaVersion",
+                "scopeDigest",
+                "conversationDigest",
+                "conversationId",
+                "latestTurnId",
+                "semanticVersion",
+                "modelVersion",
+                "occurredAt",
+                "recordMac",
+            },
+        )
+        commit = next(
+            command
+            for command in self.redis.commands
+            if command[0] == "EVAL"
+            and command[1] == store_module._COMMIT_NEW_INBOUND_RESULT_SCRIPT
+        )
+        self.assertTrue(self.redis.lua_type_replies_as_status_tables)
+        self.assertIn("type(value)=='table'", commit[1])
+        self.assertIn("value['ok']", commit[1])
+        self.assertLess(len(json.dumps(commit).encode("utf-8")), 16_384)
+        self.assertEqual(commit[-3], NEW_INBOUND_INDEX_TTL_SECONDS)
+        self.assertEqual(commit[-2], NEW_INBOUND_INDEX_MAX_RECORDS)
+
+    def test_non_indexed_commit_and_cache_read_never_migrate_legacy_result(self):
+        cache_scope = scope("legacy-shadow")
+        self.store.set_current_exact(cache_scope, occurred_at=10_000)
+        lease = self.store.try_acquire_lease(
+            cache_scope,
+            random_bytes=lambda length: bytes([21]) * length,
+        )
+        self.assertTrue(
+            self.store.commit_result_if_lease_owned(
+                cache_scope,
+                lease_token=lease,
+                assessment=ACTIONABLE_ASSESSMENT,
+                input_hash="8" * 64,
+                occurred_at=10_000,
+                assessed_at=1_000,
+            )
+        )
+        self.assertIsNotNone(
+            self.store.get_results_for_hydration_scopes((cache_scope,))[0]
+        )
+        self.assertEqual(
+            self.store.read_new_inbound_index(
+                index_scope(),
+                semantic_version=cache_scope.semantic_version,
+                model_version=cache_scope.model_version,
+            ),
+            (),
+        )
+        self.assertEqual(self.redis.hashes, {})
+
+    def test_index_is_idempotent_and_one_record_per_conversation(self):
+        cache_scope = scope("same-turn")
+        self.assertTrue(
+            self._commit_indexed(
+                cache_scope,
+                occurred_at=20_000,
+                assessed_at=2_000,
+                token_byte=22,
+            )
+        )
+        self.assertTrue(
+            self._commit_indexed(
+                cache_scope,
+                occurred_at=20_000,
+                assessed_at=2_000,
+                token_byte=23,
+            )
+        )
+        entries = self.store.read_new_inbound_index(
+            index_scope(),
+            semantic_version=cache_scope.semantic_version,
+            model_version=cache_scope.model_version,
+        )
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].latest_turn_id, "same-turn")
+
+    def test_current_pointer_rejects_stale_race_while_occurrence_is_metadata(self):
+        stale = scope("turn-stale")
+        current = replace(stale, latest_turn_id="turn-current")
+        equal_occurrence = replace(stale, latest_turn_id="turn-equal")
+        lower_occurrence = replace(stale, latest_turn_id="turn-lower-time")
+
+        self.store.set_current_exact(stale, occurred_at=30_000)
+        stale_lease = self.store.try_acquire_lease(
+            stale,
+            random_bytes=lambda length: bytes([24]) * length,
+        )
+        self.store.set_current_exact(current, occurred_at=31_000)
+        current_lease = self.store.try_acquire_lease(
+            current,
+            random_bytes=lambda length: bytes([25]) * length,
+        )
+        self.assertTrue(
+            self.store.commit_result_if_lease_owned(
+                current,
+                lease_token=current_lease,
+                assessment=ACTIONABLE_ASSESSMENT,
+                input_hash="5" * 64,
+                occurred_at=31_000,
+                assessed_at=3_001,
+                index_new_inbound=True,
+                new_inbound_mailbox_account_identity="primary@example.com",
+            )
+        )
+        self.assertFalse(
+            self.store.commit_result_if_lease_owned(
+                stale,
+                lease_token=stale_lease,
+                assessment=ACTIONABLE_ASSESSMENT,
+                input_hash="4" * 64,
+                occurred_at=30_000,
+                assessed_at=3_002,
+                index_new_inbound=True,
+                new_inbound_mailbox_account_identity="primary@example.com",
+            )
+        )
+
+        self.assertTrue(
+            self._commit_indexed(
+                equal_occurrence,
+                occurred_at=31_000,
+                assessed_at=3_003,
+                token_byte=26,
+            )
+        )
+        self.assertTrue(
+            self._commit_indexed(
+                lower_occurrence,
+                occurred_at=29_000,
+                assessed_at=3_004,
+                token_byte=27,
+            )
+        )
+        entries = self.store.read_new_inbound_index(
+            index_scope(),
+            semantic_version=stale.semantic_version,
+            model_version=stale.model_version,
+        )
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].latest_turn_id, "turn-lower-time")
+        self.assertEqual(entries[0].occurred_at, 29_000)
+
+    def test_index_prunes_deterministically_to_sixty_four_records(self):
+        for index in range(NEW_INBOUND_INDEX_MAX_RECORDS + 3):
+            cache_scope = replace(
+                scope(f"turn-{index}"),
+                conversation_id=f"conversation-{index}",
+            )
+            self.assertTrue(
+                self._commit_indexed(
+                    cache_scope,
+                    occurred_at=40_000 + index,
+                    assessed_at=4_000 + index,
+                    token_byte=(index % 200) + 30,
+                )
+            )
+        entries = self.store.read_new_inbound_index(
+            index_scope(),
+            semantic_version=scope().semantic_version,
+            model_version=scope().model_version,
+        )
+        self.assertEqual(len(entries), NEW_INBOUND_INDEX_MAX_RECORDS)
+        self.assertEqual(entries[0].conversation_id, "conversation-66")
+        self.assertEqual(entries[-1].conversation_id, "conversation-3")
+        self.assertNotIn(
+            "conversation-0",
+            {entry.conversation_id for entry in entries},
+        )
+
+    def test_index_prunes_records_older_than_the_thirty_day_window(self):
+        old = replace(
+            scope("expired-turn"),
+            conversation_id="expired-conversation",
+        )
+        fresh = replace(
+            scope("fresh-turn"),
+            conversation_id="fresh-conversation",
+        )
+        self.assertTrue(
+            self._commit_indexed(
+                old,
+                occurred_at=45_000,
+                assessed_at=4_500,
+                token_byte=97,
+            )
+        )
+        self.assertTrue(
+            self._commit_indexed(
+                fresh,
+                occurred_at=45_001,
+                assessed_at=4_500 + NEW_INBOUND_INDEX_TTL_SECONDS + 1,
+                token_byte=98,
+            )
+        )
+        entries = self.store.read_new_inbound_index(
+            index_scope(),
+            semantic_version=scope().semantic_version,
+            model_version=scope().model_version,
+        )
+        self.assertEqual(
+            tuple(entry.conversation_id for entry in entries),
+            ("fresh-conversation",),
+        )
+
+    def test_index_scope_binds_tenant_mailbox_provider_and_account_identity(self):
+        base = index_scope()
+        variants = (
+            index_scope(workspace_id=_account("wsp_", 7)),
+            index_scope(user_id=_account("usr_", 8)),
+            index_scope(mailbox_id="mailbox-2"),
+            index_scope(provider="custom_imap"),
+            index_scope(mailbox_account_identity="replacement@example.com"),
+        )
+        base_digest = derive_new_inbound_index_scope_digest(SECRET, base)
+        self.assertEqual(
+            len(
+                {
+                    base_digest,
+                    *(
+                        derive_new_inbound_index_scope_digest(SECRET, variant)
+                        for variant in variants
+                    ),
+                }
+            ),
+            len(variants) + 1,
+        )
+        self.assertNotIn("primary@example.com", base_digest)
+
+    def test_wrong_versions_and_malformed_or_oversized_index_records_drop(self):
+        cache_scope = scope("versioned-turn")
+        self.assertTrue(
+            self._commit_indexed(
+                cache_scope,
+                occurred_at=50_000,
+                assessed_at=5_000,
+                token_byte=28,
+            )
+        )
+        self.assertEqual(
+            self.store.read_new_inbound_index(
+                index_scope(),
+                semantic_version="different-semantic-version",
+                model_version=cache_scope.model_version,
+            ),
+            (),
+        )
+        self.assertEqual(
+            self.store.read_new_inbound_index(
+                index_scope(),
+                semantic_version=cache_scope.semantic_version,
+                model_version="different-model",
+            ),
+            (),
+        )
+        record_hash = next(iter(self.redis.hashes.values()))
+        member = next(iter(record_hash))
+        record_hash[member] = "not-json"
+        self.assertEqual(
+            self.store.read_new_inbound_index(
+                index_scope(),
+                semantic_version=cache_scope.semantic_version,
+                model_version=cache_scope.model_version,
+            ),
+            (),
+        )
+        with self.assertRaises(ValueError):
+            NewInboundIndexEntry(
+                conversation_id="x" * (
+                    NEW_INBOUND_INDEX_MAX_CONVERSATION_ID_CHARACTERS + 1
+                ),
+                latest_turn_id="turn",
+                semantic_version=cache_scope.semantic_version,
+                model_version=cache_scope.model_version,
+                occurred_at=1,
+            )
+
+    def test_index_and_result_reads_are_batched_below_kv_transport_caps(self):
+        for index in range(13):
+            cache_scope = replace(
+                scope(f"batch-turn-{index}"),
+                conversation_id=f"batch-conversation-{index}",
+            )
+            self.assertTrue(
+                self._commit_indexed(
+                    cache_scope,
+                    occurred_at=60_000 + index,
+                    assessed_at=6_000 + index,
+                    token_byte=100 + index,
+                )
+            )
+        self.redis.commands.clear()
+        entries = self.store.read_new_inbound_index(
+            index_scope(),
+            semantic_version=scope().semantic_version,
+            model_version=scope().model_version,
+        )
+        index_commands = list(self.redis.commands)
+        self.assertEqual(len(entries), 13)
+        self.assertEqual(index_commands[0][0], "ZREVRANGE")
+        hmget_commands = [
+            command for command in index_commands if command[0] == "HMGET"
+        ]
+        self.assertEqual(len(hmget_commands), 3)
+        self.assertTrue(
+            all(
+                len(command) - 2 <= NEW_INBOUND_INDEX_READ_BATCH_SIZE
+                for command in hmget_commands
+            )
+        )
+
+        self.redis.commands.clear()
+        index_current = index_scope()
+        cached = self.store.get_results_for_hydration_scopes(
+            tuple(entry.to_cache_scope(index_current) for entry in entries)
+        )
+        mget_commands = [
+            command for command in self.redis.commands if command[0] == "MGET"
+        ]
+        self.assertEqual(len(cached), 13)
+        self.assertTrue(all(record is not None for record in cached))
+        self.assertEqual(len(mget_commands), 5)
+        self.assertTrue(
+            all(
+                len(command) - 1 <= SEMANTIC_HYDRATION_RESULT_BATCH_SIZE
+                for command in mget_commands
+            )
+        )
+        for command in (*hmget_commands, *mget_commands):
+            self.assertLess(len(json.dumps(command).encode("utf-8")), 16_384)
+
+        worst_index_response = json.dumps(
+            {
+                "result": [
+                    "\\" * NEW_INBOUND_INDEX_MAX_SERIALIZED_RECORD_BYTES
+                    for _ in range(NEW_INBOUND_INDEX_READ_BATCH_SIZE)
+                ]
+            }
+        ).encode("utf-8")
+        worst_result_response = json.dumps(
+            {
+                "result": [
+                    "\\" * 4_096
+                    for _ in range(SEMANTIC_HYDRATION_RESULT_BATCH_SIZE)
+                ]
+            }
+        ).encode("utf-8")
+        self.assertLessEqual(len(worst_index_response), 32_768)
+        self.assertLessEqual(len(worst_result_response), 32_768)
+
+    def test_wrongtype_index_preflight_leaves_no_semantic_result(self):
+        cache_scope = scope("wrongtype-turn")
+        index_current = index_scope()
+        index_keys = self.store._new_inbound_index_keys(index_current)
+        self.redis.values[index_keys["records"]] = "wrong-type"
+        self.store.set_current_exact(cache_scope, occurred_at=70_000)
+        lease = self.store.try_acquire_lease(
+            cache_scope,
+            random_bytes=lambda length: bytes([114]) * length,
+        )
+        with self.assertRaises(store_module.SemanticStoreUnavailable):
+            self.store.commit_result_if_lease_owned(
+                cache_scope,
+                lease_token=lease,
+                assessment=ACTIONABLE_ASSESSMENT,
+                input_hash="7" * 64,
+                occurred_at=70_000,
+                assessed_at=7_000,
+                index_new_inbound=True,
+                new_inbound_mailbox_account_identity="primary@example.com",
+            )
+        result_key = self.store._keys(cache_scope)["result"]
+        self.assertNotIn(result_key, self.redis.values)
+        self.assertFalse(self.redis.hashes)
+        self.assertFalse(self.redis.sorted_sets)
+
+    def test_valid_index_record_copied_under_wrong_member_is_rejected(self):
+        cache_scope = scope("member-bound-turn")
+        self.assertTrue(
+            self._commit_indexed(
+                cache_scope,
+                occurred_at=80_000,
+                assessed_at=8_000,
+                token_byte=115,
+            )
+        )
+        record_key, records = next(iter(self.redis.hashes.items()))
+        original_member, record = next(iter(records.items()))
+        freshness_key, freshness = next(
+            (key, values)
+            for key, values in self.redis.sorted_sets.items()
+            if "freshness" in key
+        )
+        wrong_member = "f" * 64
+        self.redis.hashes[record_key] = {wrong_member: record}
+        self.redis.sorted_sets[freshness_key] = {wrong_member: 9_000.0}
+        self.assertNotEqual(original_member, wrong_member)
+        self.assertEqual(
+            self.store.read_new_inbound_index(
+                index_scope(),
+                semantic_version=cache_scope.semantic_version,
+                model_version=cache_scope.model_version,
+            ),
+            (),
+        )
+
+    def test_partial_index_corruption_cannot_let_a_new_result_commit(self):
+        older = scope("consistent-old")
+        newer = replace(older, latest_turn_id="blocked-newer")
+        self.assertTrue(
+            self._commit_indexed(
+                older,
+                occurred_at=90_000,
+                assessed_at=9_000,
+                token_byte=116,
+            )
+        )
+        occurrences = next(
+            values
+            for key, values in self.redis.sorted_sets.items()
+            if "occurrences" in key
+        )
+        occurrences.clear()
+        self.store.set_current_exact(newer, occurred_at=91_000)
+        lease = self.store.try_acquire_lease(
+            newer,
+            random_bytes=lambda length: bytes([117]) * length,
+        )
+        with self.assertRaises(store_module.SemanticStoreUnavailable):
+            self.store.commit_result_if_lease_owned(
+                newer,
+                lease_token=lease,
+                assessment=ACTIONABLE_ASSESSMENT,
+                input_hash="6" * 64,
+                occurred_at=91_000,
+                assessed_at=9_001,
+                index_new_inbound=True,
+                new_inbound_mailbox_account_identity="primary@example.com",
+            )
+        self.assertNotIn(self.store._keys(newer)["result"], self.redis.values)
 
 
 if __name__ == "__main__":

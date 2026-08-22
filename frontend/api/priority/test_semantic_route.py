@@ -29,7 +29,13 @@ from .semantic_types import (
     SpeakerRole,
     TurnDirection,
 )
-from .store import LEASE_TTL_SECONDS, SemanticAssessmentStore, SemanticCacheScope
+from .store import (
+    LEASE_TTL_SECONDS,
+    RESULT_TTL_SECONDS,
+    SemanticAssessmentStore,
+    SemanticCacheScope,
+    SemanticStoreUnavailable,
+)
 from .test_store import MemoryRedis
 
 
@@ -191,6 +197,13 @@ def custom_new_inbound_request() -> dict:
             "uidValidity": "7",
             "imapUid": "11",
         },
+    }
+
+
+def hydrate_new_inbound_request(*, mailbox_id: str = "mailbox-1") -> dict:
+    return {
+        "operation": "hydrate_new_inbound",
+        "mailboxId": mailbox_id,
     }
 
 
@@ -1654,10 +1667,25 @@ class SemanticRouteTests(unittest.TestCase):
                 adapter,
                 config=NEW_INBOUND_CONFIG,
             )
+            hydrated = self.process(
+                hydrate_new_inbound_request(),
+                adapter,
+                config=NEW_INBOUND_CONFIG,
+            )
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.payload["newInboundMode"], "shadow")
         self.assertEqual(response.payload["priorityEffect"], "observe_only")
+        self.assertEqual(hydrated.payload["newInboundMode"], "shadow")
+        self.assertEqual(len(hydrated.payload["records"]), 1)
+        self.assertEqual(
+            hydrated.payload["records"][0]["identity"]["latestTurnId"],
+            "new-message@example.net",
+        )
+        self.assertEqual(
+            hydrated.payload["records"][0]["priorityEffect"],
+            "observe_only",
+        )
         loader.assert_called_once_with(
             [],
             current,
@@ -1690,6 +1718,453 @@ class SemanticRouteTests(unittest.TestCase):
                 )
                 self.assertEqual(response.status_code, 400)
                 self.authority_resolver.assert_not_called()
+
+    def test_new_inbound_assessment_indexes_then_hydrates_exact_shadow_result(self):
+        source = new_inbound_source(
+            self.current,
+            latest_turn_id="indexed-action-1",
+            text="Hi, kun je ook nog het artwork sturen? Groetjes!",
+        )
+        actionable = SemanticAssessment(
+            state=SemanticState.NEEDS_USER_ACTION,
+            confidence=1.0,
+            reason_code=SemanticReasonCode.EXPLICIT_REQUEST,
+        )
+        adapter = FixedAdapter(actionable)
+        with (
+            patch(
+                "api.priority.semantic_route.load_authorized_gmail_new_inbound",
+                return_value=source,
+            ) as loader,
+            patch(
+                "api.priority.semantic_route.prove_authorized_new_inbound_source_current",
+                return_value=None,
+            ) as proof,
+        ):
+            assessed = self.process(
+                gmail_new_inbound_request(
+                    provider_message_id="indexed-action-1"
+                ),
+                adapter,
+                config=NEW_INBOUND_CONFIG,
+            )
+            self.redis.commands.clear()
+            hydrated = self.process(
+                hydrate_new_inbound_request(),
+                adapter,
+                config=NEW_INBOUND_CONFIG,
+            )
+
+        self.assertEqual(assessed.status_code, 200)
+        self.assertEqual(assessed.payload["status"], "assessed")
+        self.assertEqual(assessed.payload["priorityEffect"], "observe_only")
+        self.assertEqual(hydrated.status_code, 200)
+        self.assertEqual(
+            set(hydrated.payload),
+            {
+                "ok",
+                "status",
+                "semanticTrigger",
+                "newInboundMode",
+                "priorityEffect",
+                "records",
+            },
+        )
+        self.assertEqual(hydrated.payload["status"], "hydrated")
+        self.assertEqual(hydrated.payload["semanticTrigger"], "new_inbound")
+        self.assertEqual(hydrated.payload["newInboundMode"], "shadow")
+        self.assertEqual(hydrated.payload["priorityEffect"], "observe_only")
+        self.assertEqual(len(hydrated.payload["records"]), 1)
+        record = hydrated.payload["records"][0]
+        self.assertEqual(
+            set(record),
+            {
+                "assessment",
+                "effectiveSemanticState",
+                "priorityEffect",
+                "identity",
+                "assessedAt",
+            },
+        )
+        self.assertEqual(record["assessment"], actionable.to_wire_dict())
+        self.assertEqual(record["effectiveSemanticState"], "needs_user_action")
+        self.assertEqual(record["priorityEffect"], "observe_only")
+        self.assertEqual(
+            record["identity"],
+            {
+                "mailboxId": "mailbox-1",
+                "conversationId": source.conversation_id,
+                "latestTurnId": "indexed-action-1",
+                "semanticVersion": SEMANTIC_SCHEMA_VERSION,
+            },
+        )
+        self.assertEqual(adapter.calls, 1)
+        loader.assert_called_once()
+        proof.assert_called_once_with([], source)
+        self.assertEqual(
+            [command[0] for command in self.redis.commands],
+            ["ZREVRANGE", "HMGET", "MGET"],
+        )
+        self.assertFalse(
+            any(
+                command[0] in {"SET", "GET"}
+                or (
+                    command[0] == "EVAL"
+                    and command[1]
+                    in {
+                        store_module._ATTEMPT_SCRIPT,
+                        store_module._COMMIT_RESULT_SCRIPT,
+                        store_module._COMMIT_NEW_INBOUND_RESULT_SCRIPT,
+                    }
+                )
+                for command in self.redis.commands
+            )
+        )
+        self.assertNotIn(
+            "kun je",
+            str(hydrated.payload).casefold(),
+        )
+
+    def test_hydration_is_auth_first_model_provider_prompt_and_lease_free(self):
+        adapter = FixedAdapter()
+        self.authority_resolver.side_effect = SemanticAuthorityError(
+            "unauthorized",
+            401,
+        )
+        with (
+            patch(
+                "api.priority.semantic_route.resolve_priority_hmac_secret",
+                side_effect=AssertionError("HMAC must follow authentication"),
+            ),
+            patch(
+                "api.priority.semantic_route.build_semantic_text_window",
+                side_effect=AssertionError("hydration must not build a prompt"),
+            ),
+            patch(
+                "api.priority.semantic_route.load_authorized_gmail_new_inbound",
+                side_effect=AssertionError("hydration must not call a provider"),
+            ),
+        ):
+            response = self.process(
+                hydrate_new_inbound_request(),
+                adapter,
+                config=NEW_INBOUND_CONFIG,
+            )
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.payload["error"]["code"], "unauthorized")
+        self.assertEqual(adapter.calls, 0)
+        self.assertEqual(self.redis.commands, [])
+
+    def test_hydration_off_is_empty_after_auth_without_semantic_store_work(self):
+        adapter = FixedAdapter()
+        with patch(
+            "api.priority.semantic_route.resolve_priority_hmac_secret",
+            side_effect=AssertionError("OFF hydration must not resolve HMAC"),
+        ):
+            response = self.process(
+                hydrate_new_inbound_request(),
+                adapter,
+                config=ACTIVE_CONFIG,
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.payload["newInboundMode"], "off")
+        self.assertEqual(response.payload["priorityEffect"], "observe_only")
+        self.assertEqual(response.payload["records"], [])
+        self.assertEqual(adapter.calls, 0)
+        self.assertEqual(self.redis.commands, [])
+        self.authority_resolver.assert_called_once_with([], "mailbox-1")
+
+    def test_hydration_rejects_forged_fields_before_auth(self):
+        forbidden = {
+            "trigger": "new_inbound",
+            "workspaceId": WORKSPACE_ID,
+            "userId": USER_ID,
+            "provider": "google",
+            "conversationId": "forged",
+            "latestTurnId": "forged",
+            "state": "needs_user_action",
+            "confidence": 1.0,
+            "reasonCode": "explicit_request",
+            "priorityEffect": "observe_only",
+            "incomingLocator": {
+                "provider": "google",
+                "providerMessageId": "forged",
+            },
+        }
+        for key, value in forbidden.items():
+            with self.subTest(key=key):
+                payload = hydrate_new_inbound_request()
+                payload[key] = value
+                self.authority_resolver.reset_mock()
+                response = self.process(
+                    payload,
+                    FixedAdapter(),
+                    config=NEW_INBOUND_CONFIG,
+                )
+                self.assertEqual(response.status_code, 400)
+                self.authority_resolver.assert_not_called()
+
+    def test_hydration_invalid_or_non_owned_mailbox_fails_before_index_read(self):
+        for mailbox_id, code, status in (
+            ("", "invalid_mailbox_id", 400),
+            (" x ", "invalid_mailbox_id", 400),
+            ("x" * 257, "invalid_mailbox_id", 400),
+            ("mailbox-other", "mailbox_not_found", 404),
+        ):
+            with self.subTest(mailbox_id=mailbox_id):
+                self.authority_resolver.reset_mock()
+                self.authority_resolver.side_effect = SemanticAuthorityError(
+                    code,
+                    status,
+                )
+                response = self.process(
+                    hydrate_new_inbound_request(mailbox_id=mailbox_id),
+                    FixedAdapter(),
+                    config=NEW_INBOUND_CONFIG,
+                )
+                self.assertEqual(response.status_code, status)
+                self.assertEqual(response.payload["error"]["code"], code)
+                self.assertEqual(self.redis.commands, [])
+        self.authority_resolver.side_effect = None
+
+    def test_unknown_semantic_operation_is_rejected_before_auth(self):
+        response = self.process(
+            {"operation": "hydrate_everything", "mailboxId": "mailbox-1"},
+            FixedAdapter(),
+            config=NEW_INBOUND_CONFIG,
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.payload["error"]["code"], "invalid_request")
+        self.authority_resolver.assert_not_called()
+
+    def test_hydration_drops_missing_malformed_expired_and_wrong_version_cache(self):
+        source = new_inbound_source(
+            self.current,
+            latest_turn_id="indexed-drop-controls",
+        )
+        adapter = FixedAdapter(
+            SemanticAssessment(
+                state=SemanticState.NEEDS_USER_ACTION,
+                confidence=0.99,
+                reason_code=SemanticReasonCode.EXPLICIT_REQUEST,
+            )
+        )
+        with (
+            patch(
+                "api.priority.semantic_route.load_authorized_gmail_new_inbound",
+                return_value=source,
+            ),
+            patch(
+                "api.priority.semantic_route.prove_authorized_new_inbound_source_current",
+                return_value=None,
+            ),
+        ):
+            assessed = self.process(
+                gmail_new_inbound_request(
+                    provider_message_id="indexed-drop-controls"
+                ),
+                adapter,
+                config=NEW_INBOUND_CONFIG,
+            )
+        self.assertEqual(assessed.payload["status"], "assessed")
+        result_key = next(
+            key for key in self.redis.values if ":result:" in key
+        )
+        original_result = self.redis.values.pop(result_key)
+        missing = self.process(
+            hydrate_new_inbound_request(),
+            adapter,
+            config=NEW_INBOUND_CONFIG,
+        )
+        self.assertEqual(missing.payload["records"], [])
+
+        self.redis.values[result_key] = "malformed-cache"
+        malformed = self.process(
+            hydrate_new_inbound_request(),
+            adapter,
+            config=NEW_INBOUND_CONFIG,
+        )
+        self.assertEqual(malformed.payload["records"], [])
+
+        self.redis.values[result_key] = original_result
+        expired = self.process(
+            hydrate_new_inbound_request(),
+            adapter,
+            config=NEW_INBOUND_CONFIG,
+            now=11 + RESULT_TTL_SECONDS + 1,
+        )
+        self.assertEqual(expired.payload["records"], [])
+
+        wrong_model = self.process(
+            hydrate_new_inbound_request(),
+            adapter,
+            config=SemanticRuntimeConfig(
+                mode=SemanticMode.ACTIVE,
+                model="different-model",
+                new_inbound_mode=NewInboundSemanticMode.SHADOW,
+            ),
+        )
+        self.assertEqual(wrong_model.payload["records"], [])
+        wrong_schema = self.process(
+            hydrate_new_inbound_request(),
+            adapter,
+            config=SemanticRuntimeConfig(
+                mode=SemanticMode.ACTIVE,
+                model="test-model",
+                schema_version="different-semantic-schema",
+                new_inbound_mode=NewInboundSemanticMode.SHADOW,
+            ),
+        )
+        self.assertEqual(wrong_schema.payload["records"], [])
+        self.assertEqual(adapter.calls, 1)
+
+    def test_hydration_drops_malformed_index_and_fails_safe_on_store_outage(self):
+        source = new_inbound_source(
+            self.current,
+            latest_turn_id="malformed-index-turn",
+        )
+        adapter = FixedAdapter()
+        with (
+            patch(
+                "api.priority.semantic_route.load_authorized_gmail_new_inbound",
+                return_value=source,
+            ),
+            patch(
+                "api.priority.semantic_route.prove_authorized_new_inbound_source_current",
+                return_value=None,
+            ),
+        ):
+            self.process(
+                gmail_new_inbound_request(
+                    provider_message_id="malformed-index-turn"
+                ),
+                adapter,
+                config=NEW_INBOUND_CONFIG,
+            )
+        record_hash = next(iter(self.redis.hashes.values()))
+        member = next(iter(record_hash))
+        record_hash[member] = "malformed-index"
+        malformed = self.process(
+            hydrate_new_inbound_request(),
+            adapter,
+            config=NEW_INBOUND_CONFIG,
+        )
+        self.assertEqual(malformed.status_code, 200)
+        self.assertEqual(malformed.payload["records"], [])
+
+        class UnavailableStore:
+            def read_new_inbound_index(self, *_args, **_kwargs):
+                raise SemanticStoreUnavailable()
+
+        unavailable = process_semantic_request(
+            [],
+            hydrate_new_inbound_request(),
+            config=NEW_INBOUND_CONFIG,
+            hmac_secret=SECRET,
+            store=UnavailableStore(),
+            adapter=adapter,
+            now=11,
+        )
+        self.assertEqual(unavailable.status_code, 503)
+        self.assertNotIn("priorityEffect", unavailable.payload)
+
+    def test_hydration_scope_changes_for_reconnected_mailbox_account(self):
+        source = new_inbound_source(
+            self.current,
+            latest_turn_id="old-account-turn",
+        )
+        adapter = FixedAdapter()
+        with (
+            patch(
+                "api.priority.semantic_route.load_authorized_gmail_new_inbound",
+                return_value=source,
+            ),
+            patch(
+                "api.priority.semantic_route.prove_authorized_new_inbound_source_current",
+                return_value=None,
+            ),
+        ):
+            self.process(
+                gmail_new_inbound_request(
+                    provider_message_id="old-account-turn"
+                ),
+                adapter,
+                config=NEW_INBOUND_CONFIG,
+            )
+        replacement_inbox = {
+            **self.current.inbox_record,
+            "email": "replacement@example.com",
+        }
+        self.authority_resolver.return_value = PriorityAuthority(
+            workspace_id=self.current.workspace_id,
+            user_id=self.current.user_id,
+            member_email=self.current.member_email,
+            mailbox_id=self.current.mailbox_id,
+            provider=self.current.provider,
+            mailbox_email="replacement@example.com",
+            owned_emails=frozenset(
+                {self.current.member_email, "replacement@example.com"}
+            ),
+            user_record=self.current.user_record,
+            inbox_record=replacement_inbox,
+        )
+        hydrated = self.process(
+            hydrate_new_inbound_request(),
+            adapter,
+            config=NEW_INBOUND_CONFIG,
+        )
+        self.assertEqual(hydrated.status_code, 200)
+        self.assertEqual(hydrated.payload["records"], [])
+        self.assertEqual(adapter.calls, 1)
+
+    def test_failed_or_non_new_inbound_result_never_writes_index(self):
+        outgoing_adapter = FixedAdapter()
+        outgoing = self.process(request(), outgoing_adapter)
+        self.assertEqual(outgoing.payload["status"], "assessed")
+        self.assertFalse(self.redis.hashes)
+        self.assertFalse(self.redis.sorted_sets)
+        self.assertFalse(
+            any(
+                command[0] == "EVAL"
+                and command[1]
+                == store_module._COMMIT_NEW_INBOUND_RESULT_SCRIPT
+                for command in self.redis.commands
+            )
+        )
+
+        isolated_redis = MemoryRedis()
+        isolated_store = SemanticAssessmentStore(
+            isolated_redis,
+            hmac_secret=SECRET,
+        )
+        source = new_inbound_source(
+            self.current,
+            latest_turn_id="timeout-not-indexed",
+        )
+        with (
+            patch(
+                "api.priority.semantic_route.load_authorized_gmail_new_inbound",
+                return_value=source,
+            ),
+            patch(
+                "api.priority.semantic_route.prove_authorized_new_inbound_source_current",
+                return_value=None,
+            ),
+        ):
+            timed_out = process_semantic_request(
+                [],
+                gmail_new_inbound_request(
+                    provider_message_id="timeout-not-indexed"
+                ),
+                config=NEW_INBOUND_CONFIG,
+                hmac_secret=SECRET,
+                store=isolated_store,
+                adapter=TimeoutAdapter(),
+                now=11,
+            )
+        self.assertEqual(timed_out.payload["status"], "deferred")
+        self.assertFalse(isolated_redis.hashes)
+        self.assertFalse(isolated_redis.sorted_sets)
 
     def test_custom_incoming_rejects_refs_text_roots_and_authority_extras(self):
         forbidden_fields = {

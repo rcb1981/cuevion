@@ -23,10 +23,28 @@ LEASE_TTL_SECONDS = 60
 ATTEMPT_WINDOW_SECONDS = 24 * 60 * 60
 MAX_ATTEMPTS_PER_WINDOW = 2
 STORE_SCHEMA_VERSION = 1
+NEW_INBOUND_INDEX_SCHEMA_VERSION = 1
+NEW_INBOUND_INDEX_MAX_RECORDS = 64
+NEW_INBOUND_INDEX_TTL_SECONDS = RESULT_TTL_SECONDS
+NEW_INBOUND_INDEX_MAX_SERIALIZED_RECORD_BYTES = 2 * 1_024
+NEW_INBOUND_INDEX_MAX_CONVERSATION_ID_CHARACTERS = 1_024
+NEW_INBOUND_INDEX_MAX_TURN_ID_CHARACTERS = 512
+NEW_INBOUND_INDEX_MAX_SCOPE_IDENTIFIER_CHARACTERS = 1_024
+NEW_INBOUND_INDEX_MAX_VERSION_CHARACTERS = 256
+NEW_INBOUND_INDEX_MAX_MODEL_CHARACTERS = 128
+NEW_INBOUND_INDEX_MAX_OCCURRENCE = 9_007_199_254_740_991
+NEW_INBOUND_INDEX_READ_BATCH_SIZE = 6
+SEMANTIC_HYDRATION_RESULT_BATCH_SIZE = 3
 
 _KEY_PREFIX = "cuevion:priority:semantic:v1:"
 _SCOPE_HMAC_INFO = b"cuevion/priority/cache-scope/v1\x00"
 _RECORD_HMAC_INFO = b"cuevion/priority/cache-record/v1\x00"
+_NEW_INBOUND_INDEX_SCOPE_HMAC_INFO = (
+    b"cuevion/priority/new-inbound-index-scope/v1\x00"
+)
+_NEW_INBOUND_INDEX_RECORD_HMAC_INFO = (
+    b"cuevion/priority/new-inbound-index-record/v1\x00"
+)
 _LEASE_TOKEN_BYTES = 32
 _HEX_DIGEST_RE = re.compile(r"[0-9a-f]{64}")
 _NEGATIVE_CODES = frozenset(
@@ -45,6 +63,41 @@ _COMMIT_RESULT_SCRIPT = (
     "redis.call('GET',KEYS[2])==ARGV[2] then "
     "redis.call('SET',KEYS[3],ARGV[3],'EX',ARGV[4]);"
     "redis.call('DEL',KEYS[1]);return 1 else return 0 end"
+)
+_COMMIT_NEW_INBOUND_RESULT_SCRIPT = (
+    "if redis.call('GET',KEYS[1])~=ARGV[1] or "
+    "redis.call('GET',KEYS[2])~=ARGV[2] then return 0 end;"
+    "local function keyType(key) local value=redis.call('TYPE',key);"
+    "if type(value)=='table' then return value['ok'] end;return value end;"
+    "local recordsType=keyType(KEYS[4]);"
+    "local occurrencesType=keyType(KEYS[5]);"
+    "local freshnessType=keyType(KEYS[6]);"
+    "if (recordsType~='none' and recordsType~='hash') or "
+    "(occurrencesType~='none' and occurrencesType~='zset') or "
+    "(freshnessType~='none' and freshnessType~='zset') then return -1 end;"
+    "local prior=redis.call('ZSCORE',KEYS[5],ARGV[5]);"
+    "local existing=redis.call('HGET',KEYS[4],ARGV[5]);"
+    "if (prior and not existing) or (existing and not prior) then return -1 end;"
+    "redis.call('HSET',KEYS[4],ARGV[5],ARGV[6]);"
+    "redis.call('ZADD',KEYS[5],ARGV[7],ARGV[5]);"
+    "redis.call('ZADD',KEYS[6],ARGV[8],ARGV[5]);"
+    "local expired=redis.call('ZRANGEBYSCORE',KEYS[6],'-inf',ARGV[11]);"
+    "for _,member in ipairs(expired) do "
+    "redis.call('HDEL',KEYS[4],member);"
+    "redis.call('ZREM',KEYS[5],member);"
+    "redis.call('ZREM',KEYS[6],member);end;"
+    "local excess=redis.call('ZCARD',KEYS[6])-tonumber(ARGV[10]);"
+    "if excess>0 then "
+    "local oldest=redis.call('ZRANGE',KEYS[6],0,excess-1);"
+    "for _,member in ipairs(oldest) do "
+    "redis.call('HDEL',KEYS[4],member);"
+    "redis.call('ZREM',KEYS[5],member);"
+    "redis.call('ZREM',KEYS[6],member);end;end;"
+    "redis.call('EXPIRE',KEYS[4],ARGV[9]);"
+    "redis.call('EXPIRE',KEYS[5],ARGV[9]);"
+    "redis.call('EXPIRE',KEYS[6],ARGV[9]);"
+    "redis.call('SET',KEYS[3],ARGV[3],'EX',ARGV[4]);"
+    "redis.call('DEL',KEYS[1]);return 1"
 )
 _RELEASE_LEASE_SCRIPT = (
     "if redis.call('GET',KEYS[1])==ARGV[1] then "
@@ -126,6 +179,79 @@ class SemanticCacheScope:
 
 
 @dataclass(frozen=True, slots=True)
+class NewInboundIndexScope:
+    workspace_id: str
+    user_id: str
+    mailbox_id: str
+    provider: str
+    mailbox_account_identity: str
+
+    def canonical_bytes(self) -> bytes:
+        values = (
+            self.workspace_id,
+            self.user_id,
+            self.mailbox_id,
+            self.provider,
+            self.mailbox_account_identity,
+        )
+        if any(
+            not _valid_index_identifier(
+                value,
+                NEW_INBOUND_INDEX_MAX_SCOPE_IDENTIFIER_CHARACTERS,
+            )
+            for value in values
+        ) or self.provider not in {"google", "custom_imap"}:
+            raise ValueError("invalid new-inbound index scope")
+        return "\x00".join(values).encode("utf-8", errors="strict")
+
+
+@dataclass(frozen=True, slots=True)
+class NewInboundIndexEntry:
+    conversation_id: str
+    latest_turn_id: str
+    semantic_version: str
+    model_version: str
+    occurred_at: int
+
+    def __post_init__(self) -> None:
+        if (
+            not _valid_index_identifier(
+                self.conversation_id,
+                NEW_INBOUND_INDEX_MAX_CONVERSATION_ID_CHARACTERS,
+            )
+            or not _valid_index_identifier(
+                self.latest_turn_id,
+                NEW_INBOUND_INDEX_MAX_TURN_ID_CHARACTERS,
+            )
+            or not _valid_index_identifier(
+                self.semantic_version,
+                NEW_INBOUND_INDEX_MAX_VERSION_CHARACTERS,
+            )
+            or not _valid_index_identifier(
+                self.model_version,
+                NEW_INBOUND_INDEX_MAX_MODEL_CHARACTERS,
+            )
+            or type(self.occurred_at) is not int
+            or not 0 <= self.occurred_at <= NEW_INBOUND_INDEX_MAX_OCCURRENCE
+        ):
+            raise ValueError("invalid new-inbound index entry")
+
+    def to_cache_scope(self, index_scope: NewInboundIndexScope) -> SemanticCacheScope:
+        if not isinstance(index_scope, NewInboundIndexScope):
+            raise ValueError("invalid new-inbound index scope")
+        return SemanticCacheScope(
+            workspace_id=index_scope.workspace_id,
+            user_id=index_scope.user_id,
+            mailbox_id=index_scope.mailbox_id,
+            provider=index_scope.provider,
+            conversation_id=self.conversation_id,
+            latest_turn_id=self.latest_turn_id,
+            semantic_version=self.semantic_version,
+            model_version=self.model_version,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class CachedSemanticAssessment:
     assessment: SemanticAssessment
     effective_state: SemanticState
@@ -136,8 +262,26 @@ class CachedSemanticAssessment:
 CommandTransport = Callable[[list[object]], dict[str, object]]
 
 
+def _valid_index_identifier(value: object, maximum: int) -> bool:
+    return (
+        type(value) is str
+        and value == value.strip()
+        and 1 <= len(value) <= maximum
+        and "\x00" not in value
+        and not any(ord(character) < 32 or ord(character) == 127 for character in value)
+    )
+
+
 def derive_scope_digest(secret: str, scope: SemanticCacheScope) -> str:
     key = derive_priority_hmac_key(secret, _SCOPE_HMAC_INFO)
+    return hmac.new(key, scope.canonical_bytes(), hashlib.sha256).hexdigest()
+
+
+def derive_new_inbound_index_scope_digest(
+    secret: str,
+    scope: NewInboundIndexScope,
+) -> str:
+    key = derive_priority_hmac_key(secret, _NEW_INBOUND_INDEX_SCOPE_HMAC_INFO)
     return hmac.new(key, scope.canonical_bytes(), hashlib.sha256).hexdigest()
 
 
@@ -202,6 +346,21 @@ class SemanticAssessmentStore:
             + scope.latest_turn_id.encode("utf-8"),
         )
         return conversation_digest, latest_turn_digest
+
+    def _new_inbound_index_keys(
+        self,
+        scope: NewInboundIndexScope,
+    ) -> dict[str, str]:
+        digest = derive_new_inbound_index_scope_digest(
+            self._hmac_secret,
+            scope,
+        )
+        return {
+            "digest": digest,
+            "records": f"{_KEY_PREFIX}new-inbound-index:records:{digest}",
+            "occurrences": f"{_KEY_PREFIX}new-inbound-index:occurrences:{digest}",
+            "freshness": f"{_KEY_PREFIX}new-inbound-index:freshness:{digest}",
+        }
 
     def _current_key_and_value(
         self,
@@ -303,6 +462,45 @@ class SemanticAssessmentStore:
         if record is None:
             raise SemanticStoreUnavailable()
         return record
+
+    def get_results_for_hydration_scopes(
+        self,
+        scopes: tuple[SemanticCacheScope, ...],
+    ) -> tuple[CachedSemanticAssessment | None, ...]:
+        """Batch exact indexed result reads within the KV response envelope."""
+        if (
+            type(scopes) is not tuple
+            or len(scopes) > NEW_INBOUND_INDEX_MAX_RECORDS
+            or any(not isinstance(scope, SemanticCacheScope) for scope in scopes)
+        ):
+            raise ValueError("invalid semantic hydration scopes")
+        results: list[CachedSemanticAssessment | None] = []
+        for start in range(0, len(scopes), SEMANTIC_HYDRATION_RESULT_BATCH_SIZE):
+            batch = scopes[start : start + SEMANTIC_HYDRATION_RESULT_BATCH_SIZE]
+            keys = [self._keys(scope)["result"] for scope in batch]
+            values = self._command(["MGET", *keys])
+            if type(values) is not list or len(values) != len(batch):
+                raise SemanticStoreUnavailable()
+            for scope, value in zip(batch, values, strict=True):
+                if value is None:
+                    results.append(None)
+                    continue
+                scope_keys = self._keys(scope)
+                conversation_digest, latest_turn_digest = self._record_digests(
+                    scope
+                )
+                results.append(
+                    _decode_result(
+                        value,
+                        expected_scope_digest=scope_keys["digest"],
+                        expected_semantic_version=scope.semantic_version,
+                        expected_model_version=scope.model_version,
+                        expected_conversation_digest=conversation_digest,
+                        expected_latest_turn_digest=latest_turn_digest,
+                        expected_input_hash=None,
+                    )
+                )
+        return tuple(results)
 
     def get_result_if_current(
         self,
@@ -447,6 +645,8 @@ class SemanticAssessmentStore:
         input_hash: str,
         occurred_at: int,
         assessed_at: int | None = None,
+        index_new_inbound: bool = False,
+        new_inbound_mailbox_account_identity: str | None = None,
     ) -> bool:
         timestamp = int(time.time()) if assessed_at is None else assessed_at
         confidence_result = evaluate_semantic_confidence(assessment)
@@ -464,6 +664,59 @@ class SemanticAssessmentStore:
         )
         keys = self._keys(scope)
         current_key, current_value = self._current_key_and_value(scope, occurred_at)
+        if index_new_inbound:
+            if new_inbound_mailbox_account_identity is None:
+                raise ValueError("new-inbound mailbox account identity is required")
+            index_scope = NewInboundIndexScope(
+                workspace_id=scope.workspace_id,
+                user_id=scope.user_id,
+                mailbox_id=scope.mailbox_id,
+                provider=scope.provider,
+                mailbox_account_identity=new_inbound_mailbox_account_identity,
+            )
+            entry = NewInboundIndexEntry(
+                conversation_id=scope.conversation_id,
+                latest_turn_id=scope.latest_turn_id,
+                semantic_version=scope.semantic_version,
+                model_version=scope.model_version,
+                occurred_at=occurred_at,
+            )
+            index_keys = self._new_inbound_index_keys(index_scope)
+            index_record, conversation_digest = _encode_new_inbound_index_entry(
+                secret=self._hmac_secret,
+                index_scope=index_scope,
+                entry=entry,
+            )
+            # The exact current pointer (plus the route's post-model provider
+            # proof) is freshness authority. Provider occurrence timestamps are
+            # metadata only: IMAP INTERNALDATE can tie or move backward.
+            result = self._command(
+                [
+                    "EVAL",
+                    _COMMIT_NEW_INBOUND_RESULT_SCRIPT,
+                    6,
+                    keys["lease"],
+                    current_key,
+                    keys["result"],
+                    index_keys["records"],
+                    index_keys["occurrences"],
+                    index_keys["freshness"],
+                    lease_token,
+                    current_value,
+                    record,
+                    RESULT_TTL_SECONDS,
+                    conversation_digest,
+                    index_record,
+                    occurred_at,
+                    timestamp,
+                    NEW_INBOUND_INDEX_TTL_SECONDS,
+                    NEW_INBOUND_INDEX_MAX_RECORDS,
+                    timestamp - NEW_INBOUND_INDEX_TTL_SECONDS,
+                ]
+            )
+            if type(result) is not int or type(result) is bool or result not in (0, 1):
+                raise SemanticStoreUnavailable()
+            return result == 1
         result = self._command(
             [
                 "EVAL",
@@ -481,6 +734,71 @@ class SemanticAssessmentStore:
         if type(result) is not int or type(result) is bool or result not in (0, 1):
             raise SemanticStoreUnavailable()
         return result == 1
+
+    def read_new_inbound_index(
+        self,
+        scope: NewInboundIndexScope,
+        *,
+        semantic_version: str,
+        model_version: str,
+    ) -> tuple[NewInboundIndexEntry, ...]:
+        if (
+            not isinstance(scope, NewInboundIndexScope)
+            or not _valid_index_identifier(
+                semantic_version,
+                NEW_INBOUND_INDEX_MAX_VERSION_CHARACTERS,
+            )
+            or not _valid_index_identifier(
+                model_version,
+                NEW_INBOUND_INDEX_MAX_MODEL_CHARACTERS,
+            )
+        ):
+            raise ValueError("invalid new-inbound index read")
+        keys = self._new_inbound_index_keys(scope)
+        members = self._command(
+            [
+                "ZREVRANGE",
+                keys["freshness"],
+                0,
+                NEW_INBOUND_INDEX_MAX_RECORDS - 1,
+            ]
+        )
+        if (
+            type(members) is not list
+            or len(members) > NEW_INBOUND_INDEX_MAX_RECORDS
+            or len(set(members)) != len(members)
+            or any(
+                type(member) is not str
+                or _HEX_DIGEST_RE.fullmatch(member) is None
+                for member in members
+            )
+        ):
+            raise SemanticStoreUnavailable()
+        entries: list[NewInboundIndexEntry] = []
+        seen_conversations: set[str] = set()
+        for start in range(0, len(members), NEW_INBOUND_INDEX_READ_BATCH_SIZE):
+            member_batch = members[
+                start : start + NEW_INBOUND_INDEX_READ_BATCH_SIZE
+            ]
+            values = self._command(
+                ["HMGET", keys["records"], *member_batch]
+            )
+            if type(values) is not list or len(values) != len(member_batch):
+                raise SemanticStoreUnavailable()
+            for member, value in zip(member_batch, values, strict=True):
+                entry = _decode_new_inbound_index_entry(
+                    value,
+                    secret=self._hmac_secret,
+                    index_scope=scope,
+                    expected_semantic_version=semantic_version,
+                    expected_model_version=model_version,
+                    expected_conversation_digest=member,
+                )
+                if entry is None or entry.conversation_id in seen_conversations:
+                    continue
+                seen_conversations.add(entry.conversation_id)
+                entries.append(entry)
+        return tuple(entries)
 
     def release_lease(self, scope: SemanticCacheScope, lease_token: str) -> bool:
         result = self._command(
@@ -618,6 +936,176 @@ def _decode_result(
             assessed_at=payload["assessedAt"],
             input_hash=payload["inputHash"],
         )
+    except Exception:
+        return None
+
+
+def _new_inbound_conversation_digest(
+    secret: str,
+    index_scope: NewInboundIndexScope,
+    conversation_id: str,
+) -> str:
+    return _derive_record_digest(
+        secret,
+        b"new-inbound-index-conversation",
+        index_scope.canonical_bytes()
+        + b"\x00"
+        + conversation_id.encode("utf-8", errors="strict"),
+    )
+
+
+def _new_inbound_index_record_mac(
+    secret: str,
+    index_scope: NewInboundIndexScope,
+    canonical_payload: bytes,
+) -> str:
+    key = derive_priority_hmac_key(
+        secret,
+        _NEW_INBOUND_INDEX_RECORD_HMAC_INFO,
+    )
+    return hmac.new(
+        key,
+        index_scope.canonical_bytes() + b"\x00" + canonical_payload,
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def _encode_new_inbound_index_entry(
+    *,
+    secret: str,
+    index_scope: NewInboundIndexScope,
+    entry: NewInboundIndexEntry,
+) -> tuple[str, str]:
+    if (
+        not isinstance(index_scope, NewInboundIndexScope)
+        or not isinstance(entry, NewInboundIndexEntry)
+    ):
+        raise ValueError("invalid new-inbound index entry")
+    scope_digest = derive_new_inbound_index_scope_digest(secret, index_scope)
+    conversation_digest = _new_inbound_conversation_digest(
+        secret,
+        index_scope,
+        entry.conversation_id,
+    )
+    unsigned = {
+        "schemaVersion": NEW_INBOUND_INDEX_SCHEMA_VERSION,
+        "scopeDigest": scope_digest,
+        "conversationDigest": conversation_digest,
+        "conversationId": entry.conversation_id,
+        "latestTurnId": entry.latest_turn_id,
+        "semanticVersion": entry.semantic_version,
+        "modelVersion": entry.model_version,
+        "occurredAt": entry.occurred_at,
+    }
+    canonical_payload = json.dumps(
+        unsigned,
+        allow_nan=False,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii")
+    value = json.dumps(
+        {
+            **unsigned,
+            "recordMac": _new_inbound_index_record_mac(
+                secret,
+                index_scope,
+                canonical_payload,
+            ),
+        },
+        allow_nan=False,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    if len(value.encode("ascii")) > NEW_INBOUND_INDEX_MAX_SERIALIZED_RECORD_BYTES:
+        raise ValueError("new-inbound index entry is too large")
+    return value, conversation_digest
+
+
+def _decode_new_inbound_index_entry(
+    value: object,
+    *,
+    secret: str,
+    index_scope: NewInboundIndexScope,
+    expected_semantic_version: str,
+    expected_model_version: str,
+    expected_conversation_digest: str,
+) -> NewInboundIndexEntry | None:
+    if type(value) is not str:
+        return None
+    try:
+        encoded = value.encode("utf-8", errors="strict")
+    except UnicodeError:
+        return None
+    if len(encoded) > NEW_INBOUND_INDEX_MAX_SERIALIZED_RECORD_BYTES:
+        return None
+    try:
+        payload = json.loads(
+            value,
+            object_pairs_hook=_strict_object,
+            parse_constant=_reject_constant,
+        )
+        if type(payload) is not dict or set(payload) != {
+            "schemaVersion",
+            "scopeDigest",
+            "conversationDigest",
+            "conversationId",
+            "latestTurnId",
+            "semanticVersion",
+            "modelVersion",
+            "occurredAt",
+            "recordMac",
+        }:
+            return None
+        entry = NewInboundIndexEntry(
+            conversation_id=payload["conversationId"],
+            latest_turn_id=payload["latestTurnId"],
+            semantic_version=payload["semanticVersion"],
+            model_version=payload["modelVersion"],
+            occurred_at=payload["occurredAt"],
+        )
+        expected_scope_digest = derive_new_inbound_index_scope_digest(
+            secret,
+            index_scope,
+        )
+        computed_conversation_digest = _new_inbound_conversation_digest(
+            secret,
+            index_scope,
+            entry.conversation_id,
+        )
+        unsigned = {
+            key: payload[key]
+            for key in payload
+            if key != "recordMac"
+        }
+        canonical_payload = json.dumps(
+            unsigned,
+            allow_nan=False,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("ascii")
+        if (
+            payload["schemaVersion"] != NEW_INBOUND_INDEX_SCHEMA_VERSION
+            or payload["scopeDigest"] != expected_scope_digest
+            or payload["conversationDigest"] != expected_conversation_digest
+            or payload["conversationDigest"] != computed_conversation_digest
+            or entry.semantic_version != expected_semantic_version
+            or entry.model_version != expected_model_version
+            or type(payload["recordMac"]) is not str
+            or _HEX_DIGEST_RE.fullmatch(payload["recordMac"]) is None
+            or not hmac.compare_digest(
+                payload["recordMac"],
+                _new_inbound_index_record_mac(
+                    secret,
+                    index_scope,
+                    canonical_payload,
+                ),
+            )
+        ):
+            return None
+        return entry
     except Exception:
         return None
 

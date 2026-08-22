@@ -1,14 +1,18 @@
 import assert from "node:assert/strict";
 import {
   PRIORITY_SEMANTIC_NEW_INBOUND_MAX_GMAIL_IDS,
+  PRIORITY_SEMANTIC_NEW_INBOUND_MAX_HYDRATION_RECORDS,
+  buildPrioritySemanticNewInboundHydrationWireRequest,
   buildPrioritySemanticNewInboundLocatorKey,
   buildPrioritySemanticNewInboundStorageKey,
   buildPrioritySemanticNewInboundWireRequest,
   isPrioritySemanticNewInboundEligible,
+  isPrioritySemanticNewInboundHydratedObservationCurrent,
   meetsPrioritySemanticNewInboundPromotionThreshold,
   normalizePrioritySemanticNewInboundMode,
   observePrioritySemanticNewInboundSnapshot,
   parsePrioritySemanticNewInboundResponse,
+  parsePrioritySemanticNewInboundHydrationResponse,
   type PrioritySemanticNewInboundStorage,
 } from "./prioritySemanticNewInbound";
 import { SEMANTIC_SCHEMA_VERSION } from "./prioritySemanticState";
@@ -523,6 +527,14 @@ function runResponseParserTests() {
     null,
     "state/reason pairs remain strict",
   );
+  assert.equal(
+    parsePrioritySemanticNewInboundResponse({
+      ...assessed,
+      effectiveSemanticState: "uncertain",
+    }),
+    null,
+    "assessed responses cannot forge an effective semantic state",
+  );
 
   const disabled = {
     ok: true,
@@ -553,8 +565,178 @@ function runResponseParserTests() {
   );
 }
 
+function runHydrationTests() {
+  const request = {
+    operation: "hydrate_new_inbound",
+    mailboxId: "mailbox-1",
+  } as const;
+  assert.deepEqual(
+    buildPrioritySemanticNewInboundHydrationWireRequest(request),
+    request,
+  );
+  assert.equal(
+    buildPrioritySemanticNewInboundHydrationWireRequest({
+      ...request,
+      state: "needs_user_action",
+    }),
+    null,
+    "the browser cannot submit semantic policy fields during hydration",
+  );
+  assert.equal(
+    buildPrioritySemanticNewInboundHydrationWireRequest({
+      operation: "hydrate_new_inbound",
+      mailboxId: " mailbox-1 ",
+    }),
+    null,
+  );
+
+  const record = {
+    assessment: {
+      state: "needs_user_action",
+      confidence: 1,
+      reasonCode: "explicit_request",
+    },
+    effectiveSemanticState: "needs_user_action",
+    priorityEffect: "observe_only",
+    identity: {
+      mailboxId: "mailbox-1",
+      conversationId: "thread:mailbox-1|gmail:mailbox-1:thread-new",
+      latestTurnId: "gmail-new",
+      semanticVersion: SEMANTIC_SCHEMA_VERSION,
+    },
+    assessedAt: "2026-08-22T10:00:00.000Z",
+  } as const;
+  const hydrated = {
+    ok: true,
+    status: "hydrated",
+    semanticTrigger: "new_inbound",
+    newInboundMode: "shadow",
+    priorityEffect: "observe_only",
+    records: [record],
+  } as const;
+  assert.deepEqual(
+    parsePrioritySemanticNewInboundHydrationResponse(hydrated),
+    hydrated,
+  );
+  assert.deepEqual(
+    parsePrioritySemanticNewInboundHydrationResponse({
+      ...hydrated,
+      newInboundMode: "off",
+      records: [],
+    }),
+    { ...hydrated, newInboundMode: "off", records: [] },
+  );
+  assert.equal(
+    parsePrioritySemanticNewInboundHydrationResponse({
+      ...hydrated,
+      newInboundMode: "active",
+    }),
+    null,
+    "Prep 1 remains shadow-only and active fails closed",
+  );
+  assert.equal(
+    parsePrioritySemanticNewInboundHydrationResponse({
+      ...hydrated,
+      priorityEffect: "promote_new_inbound",
+    }),
+    null,
+  );
+  assert.equal(
+    parsePrioritySemanticNewInboundHydrationResponse({
+      ...hydrated,
+      records: [{ ...record, priorityEffect: "promote_new_inbound" }],
+    }),
+    null,
+    "even needs_user_action at 1.00 remains observe-only",
+  );
+  assert.equal(
+    parsePrioritySemanticNewInboundHydrationResponse({
+      ...hydrated,
+      records: [
+        {
+          ...record,
+          effectiveSemanticState: "uncertain",
+        },
+      ],
+    }),
+    null,
+    "the effective state must match the strict local confidence projection",
+  );
+  assert.equal(
+    parsePrioritySemanticNewInboundHydrationResponse({
+      ...hydrated,
+      records: Array.from(
+        { length: PRIORITY_SEMANTIC_NEW_INBOUND_MAX_HYDRATION_RECORDS + 1 },
+        () => record,
+      ),
+    }),
+    null,
+    "hydration is bounded to 64 records per mailbox",
+  );
+  assert.equal(
+    parsePrioritySemanticNewInboundHydrationResponse({
+      ...hydrated,
+      records: [record, { ...record, assessedAt: "2026-08-22T10:01:00.000Z" }],
+    }),
+    null,
+    "duplicate current records for one mailbox conversation fail closed",
+  );
+  assert.equal(
+    parsePrioritySemanticNewInboundHydrationResponse({
+      ...hydrated,
+      records: [
+        {
+          ...record,
+          identity: {
+            ...record.identity,
+            semanticVersion: "priority-semantic-v0",
+          },
+        },
+      ],
+    }),
+    null,
+    "incompatible semantic versions are discarded",
+  );
+
+  const liveIdentity = {
+    ...record.identity,
+    isExactCurrentAuthoritativeInboxRow: true,
+    isLowOrFiltered: false,
+    isSpamTrashOrArchiveOnly: false,
+    isNoise: false,
+    isOrganizerExcluded: false,
+  };
+  assert.equal(
+    isPrioritySemanticNewInboundHydratedObservationCurrent({
+      record,
+      liveIdentity,
+    }),
+    true,
+  );
+  for (const mismatch of [
+    { mailboxId: "mailbox-2" },
+    { conversationId: `${record.identity.conversationId}:newer` },
+    { latestTurnId: "gmail-newer" },
+    { isExactCurrentAuthoritativeInboxRow: false },
+    { isLowOrFiltered: true },
+    { isSpamTrashOrArchiveOnly: true },
+    { isNoise: true },
+    { isOrganizerExcluded: true },
+  ]) {
+    assert.equal(
+      isPrioritySemanticNewInboundHydratedObservationCurrent({
+        record,
+        liveIdentity: { ...liveIdentity, ...mismatch },
+      }),
+      false,
+      `${Object.keys(mismatch)[0]} mismatch must discard hydration`,
+    );
+  }
+}
+
 runBoundaryTests();
 runEligibilityAndWireTests();
 runResponseParserTests();
+runHydrationTests();
 
 console.log("\n✓ Priority semantic new-inbound boundary tests passed.");

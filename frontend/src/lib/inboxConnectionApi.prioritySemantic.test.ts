@@ -5,6 +5,7 @@ import {
   fetchGmailInbox,
   requestPrioritySemanticAssessment,
   requestPrioritySemanticNewInboundAssessment,
+  requestPrioritySemanticNewInboundHydration,
   sendGmailMessage,
 } from "./inboxConnectionApi";
 import {
@@ -211,6 +212,100 @@ async function run() {
     },
   );
   assert.equal(fetchCalls.length, newInboundCallsBeforeInvalid);
+
+  const hydrationRecord = {
+    assessment: {
+      state: "needs_user_action",
+      confidence: 1,
+      reasonCode: "explicit_request",
+    },
+    effectiveSemanticState: "needs_user_action",
+    priorityEffect: "observe_only",
+    identity: {
+      mailboxId: "mailbox-1",
+      conversationId: "thread:mailbox-1|gmail:thread-new",
+      latestTurnId: "message-new",
+      semanticVersion: SEMANTIC_SCHEMA_VERSION,
+    },
+    assessedAt: "2026-08-22T08:30:00.000Z",
+  } as const;
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    fetchCalls.push({ url, init });
+    return response({
+      ok: true,
+      status: "hydrated",
+      semanticTrigger: "new_inbound",
+      newInboundMode: "shadow",
+      priorityEffect: "observe_only",
+      records: [hydrationRecord],
+    });
+  }) as typeof fetch;
+  const hydrationRequest = {
+    operation: "hydrate_new_inbound",
+    mailboxId: "mailbox-1",
+  } as const;
+  const hydrationResponse =
+    await requestPrioritySemanticNewInboundHydration(hydrationRequest);
+  assert.equal(hydrationResponse.ok, true);
+  assert.equal(fetchCalls.length, newInboundCallsBeforeInvalid + 1);
+  assert.equal(
+    fetchCalls.at(-1)?.url,
+    "/api/priority/semantic-assessment",
+  );
+  assert.equal(
+    fetchCalls.at(-1)?.init?.body,
+    JSON.stringify(hydrationRequest),
+  );
+  assert.doesNotMatch(
+    String(fetchCalls.at(-1)?.init?.body),
+    /state|confidence|reason|priorityEffect|conversation|messageId|subject|body/i,
+    "hydration sends only its exact mailbox-scoped cache projection request",
+  );
+
+  const hydrationCallsBeforeInvalid = fetchCalls.length;
+  assert.deepEqual(
+    await requestPrioritySemanticNewInboundHydration({
+      ...hydrationRequest,
+      state: "needs_user_action",
+    } as unknown as typeof hydrationRequest),
+    {
+      ok: false,
+      error: {
+        code: "invalid_semantic_request",
+        message: "Semantic hydration request is invalid.",
+      },
+    },
+  );
+  assert.equal(fetchCalls.length, hydrationCallsBeforeInvalid);
+
+  globalThis.fetch = (async () =>
+    response({
+      ok: true,
+      status: "hydrated",
+      semanticTrigger: "new_inbound",
+      newInboundMode: "shadow",
+      priorityEffect: "observe_only",
+      records: [
+        {
+          ...hydrationRecord,
+          identity: {
+            ...hydrationRecord.identity,
+            mailboxId: "mailbox-2",
+          },
+        },
+      ],
+    })) as typeof fetch;
+  assert.deepEqual(
+    await requestPrioritySemanticNewInboundHydration(hydrationRequest),
+    {
+      ok: false,
+      error: {
+        code: "invalid_semantic_response",
+        message: "Semantic hydration returned an invalid response.",
+      },
+    },
+    "a cross-mailbox record is discarded before reaching runtime state",
+  );
 
   globalThis.fetch = (async () =>
     response({

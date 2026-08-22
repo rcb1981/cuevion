@@ -54,7 +54,9 @@ from .semantic_types import (
 from .store import (
     LEASE_TTL_SECONDS,
     NEGATIVE_TTL_SECONDS,
+    RESULT_TTL_SECONDS,
     CachedSemanticAssessment,
+    NewInboundIndexScope,
     SemanticAssessmentStore,
     SemanticCacheScope,
     SemanticStoreUnavailable,
@@ -65,6 +67,7 @@ from .store import (
 MAX_ROUTE_AUTHORED_TEXT_CHARACTERS = MAX_AUTHORED_TEXT_CHARACTERS
 SEMANTIC_LOOKUP_OPERATION = "lookup_current"
 SEMANTIC_NEW_INBOUND_TRIGGER = "new_inbound"
+SEMANTIC_NEW_INBOUND_HYDRATE_OPERATION = "hydrate_new_inbound"
 PRIORITY_EFFECT_OBSERVE_ONLY = "observe_only"
 PRIORITY_EFFECT_SUPPRESS_AUTOMATIC_OPEN_LOOP = (
     "suppress_automatic_open_loop"
@@ -120,6 +123,13 @@ def _validate_payload_shape(
     if type(payload) is not dict:
         return _error(400, "invalid_request", "Request body must be a JSON object.")
     operation = payload.get("operation")
+    if operation == SEMANTIC_NEW_INBOUND_HYDRATE_OPERATION:
+        if set(payload) != {"operation", "mailboxId"}:
+            return _error(400, "invalid_request", "Request contains unsupported fields.")
+        mailbox_id = payload.get("mailboxId")
+        if type(mailbox_id) is not str:
+            return _error(400, "invalid_request", "Mailbox id is invalid.")
+        return SEMANTIC_NEW_INBOUND_HYDRATE_OPERATION, mailbox_id, False
     lookup_current = operation == SEMANTIC_LOOKUP_OPERATION
     if "operation" in payload and not lookup_current:
         return _error(400, "invalid_request", "Semantic operation is invalid.")
@@ -402,6 +412,91 @@ def _deferred_response(
     )
 
 
+def _new_inbound_hydration_response(
+    config: SemanticRuntimeConfig,
+    records: list[dict],
+) -> SemanticRouteResponse:
+    return SemanticRouteResponse(
+        200,
+        {
+            "ok": True,
+            "status": "hydrated",
+            "semanticTrigger": SEMANTIC_NEW_INBOUND_TRIGGER,
+            "newInboundMode": config.new_inbound_mode.value,
+            "priorityEffect": PRIORITY_EFFECT_OBSERVE_ONLY,
+            "records": records,
+        },
+    )
+
+
+def _hydrate_new_inbound_records(
+    authority: PriorityAuthority,
+    config: SemanticRuntimeConfig,
+    *,
+    hmac_secret: str | None,
+    store: SemanticAssessmentStore | None,
+    current: int,
+) -> SemanticRouteResponse:
+    # OFF remains an immediate post-auth kill switch: no HMAC, index, result,
+    # provider, lease, attempt, prompt, or model work.
+    if not config.new_inbound_enabled or not config.model:
+        return _new_inbound_hydration_response(config, [])
+    try:
+        secret = hmac_secret or resolve_priority_hmac_secret()
+        semantic_store = store or build_runtime_semantic_store(
+            hmac_secret=secret
+        )
+        index_scope = NewInboundIndexScope(
+            workspace_id=authority.workspace_id,
+            user_id=authority.user_id,
+            mailbox_id=authority.mailbox_id,
+            provider=authority.provider,
+            mailbox_account_identity=authority.mailbox_email,
+        )
+        entries = semantic_store.read_new_inbound_index(
+            index_scope,
+            semantic_version=config.schema_version,
+            model_version=config.model,
+        )
+        cache_scopes = tuple(
+            entry.to_cache_scope(index_scope)
+            for entry in entries
+        )
+        cached_results = semantic_store.get_results_for_hydration_scopes(
+            cache_scopes
+        )
+        records: list[dict] = []
+        for entry, cached in zip(entries, cached_results, strict=True):
+            if (
+                cached is None
+                or cached.assessed_at > current
+                or current - cached.assessed_at > RESULT_TTL_SECONDS
+            ):
+                continue
+            records.append(
+                {
+                    "assessment": cached.assessment.to_wire_dict(),
+                    "effectiveSemanticState": cached.effective_state.value,
+                    "priorityEffect": PRIORITY_EFFECT_OBSERVE_ONLY,
+                    "identity": {
+                        "mailboxId": authority.mailbox_id,
+                        "conversationId": entry.conversation_id,
+                        "latestTurnId": entry.latest_turn_id,
+                        "semanticVersion": config.schema_version,
+                    },
+                    "assessedAt": datetime.fromtimestamp(
+                        cached.assessed_at,
+                        tz=timezone.utc,
+                    ).isoformat(timespec="seconds").replace("+00:00", "Z"),
+                }
+            )
+    except EventReferenceError:
+        return _error(503, "semantic_unavailable", "Semantic analysis is unavailable.")
+    except (SemanticStoreUnavailable, ValueError, OverflowError, OSError):
+        return _error(503, "semantic_unavailable", "Semantic analysis is unavailable.")
+    return _new_inbound_hydration_response(config, records)
+
+
 def process_semantic_request(
     headers,
     payload: object,
@@ -427,6 +522,14 @@ def process_semantic_request(
         runtime_config = config if config is not None else config_loader()
     except SemanticCoreError:
         return _error(503, "semantic_unavailable", "Semantic analysis is unavailable.")
+    if trigger == SEMANTIC_NEW_INBOUND_HYDRATE_OPERATION:
+        return _hydrate_new_inbound_records(
+            authority,
+            runtime_config,
+            hmac_secret=hmac_secret,
+            store=store,
+            current=current,
+        )
     capability_enabled = (
         runtime_config.new_inbound_enabled
         if trigger == SEMANTIC_NEW_INBOUND_TRIGGER
@@ -779,8 +882,14 @@ def process_semantic_request(
             input_hash=input_hash,
             occurred_at=source.occurred_at,
             assessed_at=assessed_at,
+            index_new_inbound=(trigger == SEMANTIC_NEW_INBOUND_TRIGGER),
+            new_inbound_mailbox_account_identity=(
+                authority.mailbox_email
+                if trigger == SEMANTIC_NEW_INBOUND_TRIGGER
+                else None
+            ),
         )
-    except SemanticStoreUnavailable:
+    except (SemanticStoreUnavailable, ValueError, OverflowError):
         committed = False
     if not committed:
         return _deferred_response(

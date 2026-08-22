@@ -3,6 +3,7 @@ import {
   PRIORITY_SEMANTIC_REASON_CODES_BY_STATE,
   PRIORITY_SEMANTIC_STATES,
   SEMANTIC_SCHEMA_VERSION,
+  resolvePrioritySemanticEffectiveState,
   type PrioritySemanticAssessment,
   type PrioritySemanticIdentity,
   type PrioritySemanticIncomingLocator,
@@ -12,6 +13,7 @@ import {
 
 export const PRIORITY_SEMANTIC_NEW_INBOUND_BOUNDARY_VERSION = 1;
 export const PRIORITY_SEMANTIC_NEW_INBOUND_MAX_GMAIL_IDS = 512;
+export const PRIORITY_SEMANTIC_NEW_INBOUND_MAX_HYDRATION_RECORDS = 64;
 export const PRIORITY_SEMANTIC_NEW_INBOUND_PROMOTION_CONFIDENCE = 0.9;
 
 const NEW_INBOUND_STORAGE_PREFIX =
@@ -48,6 +50,11 @@ export type PrioritySemanticNewInboundAssessmentRequest = {
   incomingLocator: PrioritySemanticIncomingLocator;
 };
 
+export type PrioritySemanticNewInboundHydrationRequest = {
+  operation: "hydrate_new_inbound";
+  mailboxId: string;
+};
+
 export type PrioritySemanticNewInboundAssessmentSuccess = {
   ok: true;
   status: "assessed" | "cached";
@@ -82,6 +89,39 @@ export type PrioritySemanticNewInboundAssessmentResponse =
   | PrioritySemanticNewInboundAssessmentSuccess
   | PrioritySemanticNewInboundAssessmentFallback
   | PrioritySemanticNewInboundAssessmentError;
+
+export type PrioritySemanticNewInboundHydrationRecord = {
+  assessment: PrioritySemanticAssessment;
+  effectiveSemanticState: PrioritySemanticState;
+  priorityEffect: "observe_only";
+  identity: PrioritySemanticIdentity;
+  assessedAt: string;
+};
+
+export type PrioritySemanticNewInboundHydrationSuccess = {
+  ok: true;
+  status: "hydrated";
+  semanticTrigger: "new_inbound";
+  newInboundMode: PrioritySemanticNewInboundMode;
+  priorityEffect: "observe_only";
+  records: PrioritySemanticNewInboundHydrationRecord[];
+};
+
+export type PrioritySemanticNewInboundHydrationResponse =
+  | PrioritySemanticNewInboundHydrationSuccess
+  | PrioritySemanticNewInboundAssessmentError;
+
+export type PrioritySemanticNewInboundLiveObservationIdentity = {
+  mailboxId: string;
+  conversationId: string;
+  latestTurnId: string;
+  semanticVersion: typeof SEMANTIC_SCHEMA_VERSION;
+  isExactCurrentAuthoritativeInboxRow: boolean;
+  isLowOrFiltered: boolean;
+  isSpamTrashOrArchiveOnly: boolean;
+  isNoise: boolean;
+  isOrganizerExcluded: boolean;
+};
 
 type GmailBoundaryRecord = {
   version: typeof PRIORITY_SEMANTIC_NEW_INBOUND_BOUNDARY_VERSION;
@@ -612,6 +652,22 @@ export function buildPrioritySemanticNewInboundWireRequest(
     : null;
 }
 
+export function buildPrioritySemanticNewInboundHydrationWireRequest(
+  value: unknown,
+): PrioritySemanticNewInboundHydrationRequest | null {
+  if (
+    !isPlainObject(value) ||
+    !hasExactKeys(value, ["operation", "mailboxId"]) ||
+    value.operation !== "hydrate_new_inbound"
+  ) {
+    return null;
+  }
+  const mailboxId = normalizeMailboxId(value.mailboxId);
+  return mailboxId
+    ? { operation: "hydrate_new_inbound", mailboxId }
+    : null;
+}
+
 function isPrioritySemanticState(value: unknown): value is PrioritySemanticState {
   return PRIORITY_SEMANTIC_STATES.some((state) => state === value);
 }
@@ -678,6 +734,130 @@ function normalizeIsoTimestamp(value: unknown) {
   ) && Number.isFinite(timestampMs) && timestampMs > 0
     ? timestamp
     : "";
+}
+
+function parseHydrationRecord(
+  value: unknown,
+): PrioritySemanticNewInboundHydrationRecord | null {
+  if (
+    !isPlainObject(value) ||
+    !hasExactKeys(value, [
+      "assessment",
+      "effectiveSemanticState",
+      "priorityEffect",
+      "identity",
+      "assessedAt",
+    ]) ||
+    value.priorityEffect !== "observe_only" ||
+    !isPlainObject(value.assessment) ||
+    !hasExactKeys(value.assessment, ["state", "confidence", "reasonCode"])
+  ) {
+    return null;
+  }
+  const state = value.assessment.state;
+  const confidence = value.assessment.confidence;
+  const reasonCode = value.assessment.reasonCode;
+  const effectiveSemanticState = value.effectiveSemanticState;
+  const identity = parseIdentity(value.identity);
+  const assessedAt = normalizeIsoTimestamp(value.assessedAt);
+  if (
+    !isPrioritySemanticState(state) ||
+    typeof confidence !== "number" ||
+    !Number.isFinite(confidence) ||
+    confidence < 0 ||
+    confidence > 1 ||
+    !isPrioritySemanticReasonCode(reasonCode) ||
+    !PRIORITY_SEMANTIC_REASON_CODES_BY_STATE[state].includes(reasonCode) ||
+    !isPrioritySemanticState(effectiveSemanticState) ||
+    effectiveSemanticState !==
+      resolvePrioritySemanticEffectiveState({ state, confidence, reasonCode }) ||
+    !identity ||
+    !assessedAt
+  ) {
+    return null;
+  }
+  return {
+    assessment: { state, confidence, reasonCode },
+    effectiveSemanticState,
+    priorityEffect: "observe_only",
+    identity,
+    assessedAt,
+  };
+}
+
+export function parsePrioritySemanticNewInboundHydrationResponse(
+  value: unknown,
+): PrioritySemanticNewInboundHydrationResponse | null {
+  const parsedError = parseError(value);
+  if (parsedError) {
+    return parsedError;
+  }
+  if (
+    !isPlainObject(value) ||
+    !hasExactKeys(value, [
+      "ok",
+      "status",
+      "semanticTrigger",
+      "newInboundMode",
+      "priorityEffect",
+      "records",
+    ]) ||
+    value.ok !== true ||
+    value.status !== "hydrated" ||
+    value.semanticTrigger !== "new_inbound" ||
+    value.priorityEffect !== "observe_only" ||
+    (value.newInboundMode !== "off" && value.newInboundMode !== "shadow") ||
+    !Array.isArray(value.records) ||
+    value.records.length >
+      PRIORITY_SEMANTIC_NEW_INBOUND_MAX_HYDRATION_RECORDS ||
+    (value.newInboundMode === "off" && value.records.length !== 0)
+  ) {
+    return null;
+  }
+  const records = value.records.map(parseHydrationRecord);
+  if (records.some((record) => record === null)) {
+    return null;
+  }
+  const conversationKeys = new Set<string>();
+  for (const record of records as PrioritySemanticNewInboundHydrationRecord[]) {
+    const conversationKey = JSON.stringify([
+      record.identity.mailboxId,
+      record.identity.conversationId,
+    ]);
+    if (conversationKeys.has(conversationKey)) {
+      return null;
+    }
+    conversationKeys.add(conversationKey);
+  }
+  return {
+    ok: true,
+    status: "hydrated",
+    semanticTrigger: "new_inbound",
+    newInboundMode: value.newInboundMode,
+    priorityEffect: "observe_only",
+    records: records as PrioritySemanticNewInboundHydrationRecord[],
+  };
+}
+
+export function isPrioritySemanticNewInboundHydratedObservationCurrent(input: {
+  record: PrioritySemanticNewInboundHydrationRecord;
+  liveIdentity: PrioritySemanticNewInboundLiveObservationIdentity;
+}) {
+  const { identity } = input.record;
+  const liveIdentity = input.liveIdentity;
+  return (
+    input.record.priorityEffect === "observe_only" &&
+    identity.semanticVersion === SEMANTIC_SCHEMA_VERSION &&
+    liveIdentity.semanticVersion === SEMANTIC_SCHEMA_VERSION &&
+    identity.mailboxId === liveIdentity.mailboxId &&
+    identity.conversationId === liveIdentity.conversationId &&
+    identity.latestTurnId === liveIdentity.latestTurnId &&
+    liveIdentity.isExactCurrentAuthoritativeInboxRow &&
+    !liveIdentity.isLowOrFiltered &&
+    !liveIdentity.isSpamTrashOrArchiveOnly &&
+    !liveIdentity.isNoise &&
+    !liveIdentity.isOrganizerExcluded
+  );
 }
 
 export function parsePrioritySemanticNewInboundResponse(
@@ -764,6 +944,8 @@ export function parsePrioritySemanticNewInboundResponse(
     !isPrioritySemanticReasonCode(reasonCode) ||
     !PRIORITY_SEMANTIC_REASON_CODES_BY_STATE[state].includes(reasonCode) ||
     !isPrioritySemanticState(effectiveSemanticState) ||
+    effectiveSemanticState !==
+      resolvePrioritySemanticEffectiveState({ state, confidence, reasonCode }) ||
     !assessedAt
   ) {
     return null;
