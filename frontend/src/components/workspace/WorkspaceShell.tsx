@@ -1738,6 +1738,42 @@ function resolvePrioritySemanticNewInboundHydrationLiveIdentity(
     : null;
 }
 
+export function resolveExactPrioritySemanticNewInboundObservationForMessage(
+  observations: Record<string, PrioritySemanticNewInboundHydrationRecord>,
+  mailboxId: InboxId,
+  message: MailMessage,
+) {
+  const liveIdentity =
+    resolvePrioritySemanticNewInboundHydrationLiveIdentity(mailboxId, message);
+  return liveIdentity
+    ? observations[buildPrioritySemanticNewInboundIdentityKey(liveIdentity)] ??
+        null
+    : null;
+}
+
+export async function coordinatePrioritySemanticNewInboundRemoval<T>(input: {
+  observation: PrioritySemanticNewInboundHydrationRecord | null;
+  dismiss: (
+    observation: PrioritySemanticNewInboundHydrationRecord,
+  ) => Promise<boolean>;
+  resolveCurrentTarget: (
+    observation: PrioritySemanticNewInboundHydrationRecord,
+  ) => T | null;
+  applyLocal: (target: T | null) => boolean;
+}) {
+  if (!input.observation) {
+    return input.applyLocal(null);
+  }
+  if (!input.resolveCurrentTarget(input.observation)) {
+    return false;
+  }
+  if (!(await input.dismiss(input.observation))) {
+    return false;
+  }
+  const currentTarget = input.resolveCurrentTarget(input.observation);
+  return currentTarget ? input.applyLocal(currentTarget) : false;
+}
+
 function isCanonicalPrioritySemanticNewInboundImapInteger(
   value: unknown,
 ): value is string {
@@ -2458,15 +2494,24 @@ export function resolveMailboxScopedManualPriorityTarget({
     return null;
   }
 
-  const storedMessage = getMailboxMessageById(
-    store,
-    storageMailboxId ?? sourceMailboxId,
-    messageId,
+  const resolvedStorageMailboxId = storageMailboxId ?? sourceMailboxId;
+  const storedMessages = canonicalFolderOrder.flatMap(
+    (folder) => store[resolvedStorageMailboxId]?.[folder] ?? [],
   );
+  const exactStoredSourceMessage = sourceMessage
+    ? storedMessages.find((message) => message === sourceMessage) ?? null
+    : null;
+  const firstStoredMessage = storedMessages.find(
+    (message) => message.id === messageId,
+  );
+  if (sourceMessage && !exactStoredSourceMessage && firstStoredMessage) {
+    return null;
+  }
+  const storedMessage = exactStoredSourceMessage ?? firstStoredMessage ?? null;
 
   if (storedMessage) {
     return {
-      storageMailboxId: storageMailboxId ?? sourceMailboxId,
+      storageMailboxId: resolvedStorageMailboxId,
       mailboxId: sourceMailboxId,
       message: storedMessage,
     };
@@ -2477,7 +2522,7 @@ export function resolveMailboxScopedManualPriorityTarget({
   }
 
   return {
-    storageMailboxId: storageMailboxId ?? sourceMailboxId,
+    storageMailboxId: resolvedStorageMailboxId,
     mailboxId: sourceMailboxId,
     message: sourceMessage,
   };
@@ -3093,6 +3138,133 @@ const canonicalFolderOrder: MailFolder[] = [
   "Drafts",
   "Inbox",
 ];
+
+function collapsePrioritySemanticNewInboundGmailFolderCopies(
+  mailboxId: InboxId,
+  entries: Array<{ folder: MailFolder; message: MailMessage }>,
+) {
+  const visited = new Set<number>();
+  const collapsed: Array<{ folder: MailFolder; message: MailMessage }> = [];
+  entries.forEach((entry, index) => {
+    if (visited.has(index)) {
+      return;
+    }
+    const providerMessageId = normalizePrioritySemanticLatestTurnId(
+      entry.message.providerMessageId,
+    );
+    if (
+      entry.message.threadIdentityContext?.provider !== "google" ||
+      !providerMessageId
+    ) {
+      collapsed.push(entry);
+      return;
+    }
+    const matchingIndexes = entries.flatMap((candidate, candidateIndex) =>
+      candidate.message.threadIdentityContext?.provider === "google" &&
+      normalizePrioritySemanticLatestTurnId(
+        candidate.message.providerMessageId,
+      ) === providerMessageId
+        ? [candidateIndex]
+        : [],
+    );
+    const exactInboxCopies = matchingIndexes
+      .map((candidateIndex) => entries[candidateIndex])
+      .filter(
+        (candidate) =>
+          candidate.folder === "Inbox" &&
+          resolvePrioritySemanticNewInboundHydrationLiveIdentity(
+            mailboxId,
+            candidate.message,
+          )?.latestTurnId === providerMessageId,
+      );
+    if (matchingIndexes.length > 1 && exactInboxCopies.length === 1) {
+      matchingIndexes.forEach((candidateIndex) => visited.add(candidateIndex));
+      collapsed.push(exactInboxCopies[0]);
+      return;
+    }
+    collapsed.push(entry);
+  });
+  return collapsed;
+}
+
+export function resolvePrioritySemanticNewInboundCurrentInboxMessage(input: {
+  mailboxId: InboxId;
+  messageId: string;
+  record: PrioritySemanticNewInboundHydrationRecord;
+  conversationEntries: Array<{ folder: MailFolder; message: MailMessage }>;
+}) {
+  const conversationEntries =
+    collapsePrioritySemanticNewInboundGmailFolderCopies(
+      input.mailboxId,
+      input.conversationEntries,
+    );
+  let currentEntry =
+    conversationEntries.length === 1 ? conversationEntries[0] : null;
+  if (!currentEntry && conversationEntries.length > 1) {
+    const imapEntries = conversationEntries.filter(
+      ({ message }) =>
+        message.threadIdentityContext?.provider === "custom_imap" &&
+        Boolean(message.threadIdentityContext.folder.trim()) &&
+        Boolean(message.threadIdentityContext.uidValidity?.trim()) &&
+        message.threadIdentityContext.folder.trim().toUpperCase() ===
+          message.providerFolder?.trim().toUpperCase() &&
+        message.threadIdentityContext.uidValidity?.trim() ===
+          message.uidValidity?.trim() &&
+        /^\d+$/.test(message.imapUid?.trim() ?? ""),
+    );
+    const imapNamespaceKeys = new Set(
+      imapEntries.map(({ message }) =>
+        [
+          message.threadIdentityContext?.folder.trim().toUpperCase(),
+          message.threadIdentityContext?.uidValidity?.trim(),
+        ].join("::"),
+      ),
+    );
+    if (
+      imapEntries.length === conversationEntries.length &&
+      imapNamespaceKeys.size === 1
+    ) {
+      const highestUid = Math.max(
+        ...imapEntries.map(({ message }) => Number(message.imapUid)),
+      );
+      const latestEntries = imapEntries.filter(
+        ({ message }) => Number(message.imapUid) === highestUid,
+      );
+      currentEntry = latestEntries.length === 1 ? latestEntries[0] : null;
+    } else {
+      const datedEntries = conversationEntries.filter(
+        ({ message }) => resolveMailDateMs(message) > 0,
+      );
+      if (datedEntries.length === conversationEntries.length) {
+        const latestDateMs = Math.max(
+          ...datedEntries.map(({ message }) => resolveMailDateMs(message)),
+        );
+        const latestEntries = datedEntries.filter(
+          ({ message }) => resolveMailDateMs(message) === latestDateMs,
+        );
+        currentEntry = latestEntries.length === 1 ? latestEntries[0] : null;
+      }
+    }
+  }
+  if (
+    !currentEntry ||
+    currentEntry.folder !== "Inbox" ||
+    currentEntry.message.id !== input.messageId
+  ) {
+    return null;
+  }
+  const liveIdentity =
+    resolvePrioritySemanticNewInboundHydrationLiveIdentity(
+      input.mailboxId,
+      currentEntry.message,
+    );
+  return isPrioritySemanticNewInboundDismissalTurnCurrent({
+    dismissedIdentity: input.record.identity,
+    currentIdentity: liveIdentity,
+  })
+    ? currentEntry.message
+    : null;
+}
 const sharedCollaborationMailboxId = "__cuevion_shared_collaborations__" as InboxId;
 const TEAM_MEMBERS_POLL_INTERVAL_MS = 30_000;
 const PARTICIPANT_COLLABORATION_POLL_INTERVAL_MS = 30_000;
@@ -8811,12 +8983,37 @@ function inferLearningDecisionMailboxId(
   return null;
 }
 
-function getReviewItemSourceMailboxId(reviewItem: ReviewItem): InboxId | null {
+function getReviewItemSourceMailboxId(
+  reviewItem: Pick<ReviewItem, "linkedEntityIds">,
+): InboxId | null {
   const mailboxLink = reviewItem.linkedEntityIds.find((entityId) =>
     entityId.startsWith("mailbox:"),
   );
 
   return (mailboxLink?.slice("mailbox:".length) as InboxId | undefined) ?? null;
+}
+
+export function resolvePrioritySemanticNewInboundCanonicalActionTarget(
+  entries: Array<{
+    mailboxId: InboxId;
+    mailboxTitle: string;
+    message: MailMessage;
+  }>,
+  reviewItem: Pick<ReviewItem, "id" | "sourceId" | "linkedEntityIds">,
+) {
+  if (!reviewItem.id.startsWith("live-priority-")) {
+    return null;
+  }
+  const mailboxId = getReviewItemSourceMailboxId(reviewItem);
+  if (!mailboxId) {
+    return null;
+  }
+  const matches = entries.filter(
+    (entry) =>
+      entry.mailboxId === mailboxId &&
+      entry.message.id === reviewItem.sourceId,
+  );
+  return matches.length === 1 ? matches[0] : null;
 }
 
 function inferLearningDecisionPrioritySelection(
@@ -45697,11 +45894,15 @@ export function WorkspaceShell({
         if (isOwnedByDeterministicOpenLoop) {
           return;
         }
-        const conversationMessages = allConversationMessages.filter(
-          ({ message }) =>
-            resolveCanonicalConversationIdentity(message, mailboxId).key ===
-            record.identity.conversationId,
-        );
+        const conversationMessages =
+          collapsePrioritySemanticNewInboundGmailFolderCopies(
+            mailboxId,
+            allConversationMessages.filter(
+              ({ message }) =>
+                resolveCanonicalConversationIdentity(message, mailboxId)
+                  .key === record.identity.conversationId,
+            ),
+          );
         let currentEntry =
           conversationMessages.length === 1
             ? conversationMessages[0]
@@ -45881,18 +46082,12 @@ export function WorkspaceShell({
     senderCategoryLearning,
   ]);
   const resolveExactPrioritySemanticNewInboundObservation = useCallback(
-    (mailboxId: InboxId, message: MailMessage) => {
-      const liveIdentity =
-        resolvePrioritySemanticNewInboundHydrationLiveIdentity(
-          mailboxId,
-          message,
-        );
-      return liveIdentity
-        ? prioritySemanticNewInboundHydratedObservations[
-            buildPrioritySemanticNewInboundIdentityKey(liveIdentity)
-          ] ?? null
-        : null;
-    },
+    (mailboxId: InboxId, message: MailMessage) =>
+      resolveExactPrioritySemanticNewInboundObservationForMessage(
+        prioritySemanticNewInboundHydratedObservations,
+        mailboxId,
+        message,
+      ),
     [prioritySemanticNewInboundHydratedObservations],
   );
   const dismissExactPrioritySemanticNewInboundObservation = useCallback(
@@ -46047,72 +46242,12 @@ export function WorkspaceShell({
           )
           .map((message) => ({ folder, message })),
       );
-      let currentEntry =
-        conversationEntries.length === 1 ? conversationEntries[0] : null;
-      if (!currentEntry && conversationEntries.length > 1) {
-        const imapEntries = conversationEntries.filter(
-          ({ message }) =>
-            message.threadIdentityContext?.provider === "custom_imap" &&
-            Boolean(message.threadIdentityContext.folder.trim()) &&
-            Boolean(message.threadIdentityContext.uidValidity?.trim()) &&
-            message.threadIdentityContext.folder.trim().toUpperCase() ===
-              message.providerFolder?.trim().toUpperCase() &&
-            message.threadIdentityContext.uidValidity?.trim() ===
-              message.uidValidity?.trim() &&
-            /^\d+$/.test(message.imapUid?.trim() ?? ""),
-        );
-        const imapNamespaceKeys = new Set(
-          imapEntries.map(({ message }) =>
-            [
-              message.threadIdentityContext?.folder.trim().toUpperCase(),
-              message.threadIdentityContext?.uidValidity?.trim(),
-            ].join("::"),
-          ),
-        );
-        if (
-          imapEntries.length === conversationEntries.length &&
-          imapNamespaceKeys.size === 1
-        ) {
-          const highestUid = Math.max(
-            ...imapEntries.map(({ message }) => Number(message.imapUid)),
-          );
-          const latestEntries = imapEntries.filter(
-            ({ message }) => Number(message.imapUid) === highestUid,
-          );
-          currentEntry = latestEntries.length === 1 ? latestEntries[0] : null;
-        } else {
-          const datedEntries = conversationEntries.filter(
-            ({ message }) => resolveMailDateMs(message) > 0,
-          );
-          if (datedEntries.length === conversationEntries.length) {
-            const latestDateMs = Math.max(
-              ...datedEntries.map(({ message }) => resolveMailDateMs(message)),
-            );
-            const latestEntries = datedEntries.filter(
-              ({ message }) => resolveMailDateMs(message) === latestDateMs,
-            );
-            currentEntry = latestEntries.length === 1 ? latestEntries[0] : null;
-          }
-        }
-      }
-      if (
-        !currentEntry ||
-        currentEntry.folder !== "Inbox" ||
-        currentEntry.message.id !== input.messageId
-      ) {
-        return null;
-      }
-      const liveIdentity =
-        resolvePrioritySemanticNewInboundHydrationLiveIdentity(
-          input.mailboxId,
-          currentEntry.message,
-        );
-      return isPrioritySemanticNewInboundDismissalTurnCurrent({
-        dismissedIdentity: input.record.identity,
-        currentIdentity: liveIdentity,
-      })
-        ? currentEntry.message
-        : null;
+      return resolvePrioritySemanticNewInboundCurrentInboxMessage({
+        mailboxId: input.mailboxId,
+        messageId: input.messageId,
+        record: input.record,
+        conversationEntries,
+      });
     },
     [],
   );
@@ -47614,56 +47749,69 @@ export function WorkspaceShell({
     const sourceMailboxId = options.sourceMailboxId
       ? scopedTarget?.mailboxId ?? null
       : getWorkspaceMessageLocationById(messageId)?.mailboxId ?? null;
+    const exactSourceMessage =
+      options.sourceMessage?.id === messageId
+        ? options.sourceMessage
+        : sourceMessage;
     const semanticObservation =
       !shouldBePriority &&
       !options.skipSemanticNewInboundDismissal &&
       sourceMailboxId &&
-      sourceMessage
+      exactSourceMessage
         ? resolveExactPrioritySemanticNewInboundObservation(
             sourceMailboxId,
-            sourceMessage,
+            exactSourceMessage,
           )
         : null;
-    if (semanticObservation && sourceMailboxId) {
-      const actionFence = {
-        scopeKey: prioritySemanticNewInboundStorageKey,
-        connectionKey:
-          providerArchiveCurrentConnectionKeysRef.current[sourceMailboxId] ??
-          "",
-        connectionEpoch:
-          providerArchiveConnectionEpochsRef.current[sourceMailboxId] ?? 0,
-      };
-      if (
-        !(await dismissExactPrioritySemanticNewInboundObservation(
-          sourceMailboxId,
-          semanticObservation,
-        ))
-      ) {
-        return false;
-      }
-      const currentMessage =
-        resolveCurrentPrioritySemanticNewInboundDismissalTarget({
-          mailboxId: sourceMailboxId,
-          messageId,
-          record: semanticObservation,
-          ...actionFence,
-        });
-      if (!currentMessage) {
-        return false;
-      }
-      return applyManualPriorityUpdate(
-        messageId,
-        shouldBePriority,
-        {
-          ...options,
-          storageMailboxId: options.storageMailboxId ?? sourceMailboxId,
-          sourceMailboxId,
-          sourceMessage: currentMessage,
-        },
-        mailboxStoreRef.current,
-      );
-    }
-    return applyManualPriorityUpdate(messageId, shouldBePriority, options);
+    const actionFence = sourceMailboxId
+      ? {
+          scopeKey: prioritySemanticNewInboundStorageKey,
+          connectionKey:
+            providerArchiveCurrentConnectionKeysRef.current[sourceMailboxId] ??
+            "",
+          connectionEpoch:
+            providerArchiveConnectionEpochsRef.current[sourceMailboxId] ?? 0,
+        }
+      : null;
+    return coordinatePrioritySemanticNewInboundRemoval<MailMessage>({
+      observation: semanticObservation,
+      dismiss: (record) =>
+        sourceMailboxId
+          ? dismissExactPrioritySemanticNewInboundObservation(
+              sourceMailboxId,
+              record,
+            )
+          : Promise.resolve(false),
+      resolveCurrentTarget: (record) =>
+        sourceMailboxId && actionFence
+          ? resolveCurrentPrioritySemanticNewInboundDismissalTarget({
+              mailboxId: sourceMailboxId,
+              messageId,
+              record,
+              ...actionFence,
+            })
+          : null,
+      applyLocal: (currentMessage) => {
+        return currentMessage && sourceMailboxId
+          ? applyManualPriorityUpdate(
+              messageId,
+              shouldBePriority,
+              {
+                ...options,
+                storageMailboxId:
+                  options.storageMailboxId ?? sourceMailboxId,
+                sourceMailboxId,
+                sourceMessage: currentMessage,
+              },
+              mailboxStoreRef.current,
+            )
+          : applyManualPriorityUpdate(
+              messageId,
+              shouldBePriority,
+              options,
+            );
+      },
+    });
   };
 
   const applyMarkPriorityItemDone = (
@@ -47702,10 +47850,18 @@ export function WorkspaceShell({
   };
 
   const handleMarkPriorityItemDone = async (reviewItem: ReviewItem) => {
-    const mailboxId = getReviewItemSourceMailboxId(reviewItem);
-    const sourceMessage = mailboxId
-      ? getMailboxMessageById(mailboxId, reviewItem.sourceId)
-      : getWorkspaceMessageById(reviewItem.sourceId);
+    const canonicalTarget =
+      resolvePrioritySemanticNewInboundCanonicalActionTarget(
+        livePriorityInboxEntries,
+        reviewItem,
+      );
+    const mailboxId =
+      canonicalTarget?.mailboxId ?? getReviewItemSourceMailboxId(reviewItem);
+    const sourceMessage =
+      canonicalTarget?.message ??
+      (mailboxId
+        ? getMailboxMessageById(mailboxId, reviewItem.sourceId)
+        : getWorkspaceMessageById(reviewItem.sourceId));
     if (!mailboxId || !sourceMessage) {
       return false;
     }
@@ -47714,38 +47870,38 @@ export function WorkspaceShell({
         mailboxId,
         sourceMessage,
       );
-    if (semanticObservation) {
-      const actionFence = {
-        scopeKey: prioritySemanticNewInboundStorageKey,
-        connectionKey:
-          providerArchiveCurrentConnectionKeysRef.current[mailboxId] ?? "",
-        connectionEpoch:
-          providerArchiveConnectionEpochsRef.current[mailboxId] ?? 0,
-      };
-      if (
-        !(await dismissExactPrioritySemanticNewInboundObservation(
-          mailboxId,
-          semanticObservation,
-        ))
-      ) {
-        return false;
-      }
-      const currentMessage =
+    const actionFence = {
+      scopeKey: prioritySemanticNewInboundStorageKey,
+      connectionKey:
+        providerArchiveCurrentConnectionKeysRef.current[mailboxId] ?? "",
+      connectionEpoch:
+        providerArchiveConnectionEpochsRef.current[mailboxId] ?? 0,
+    };
+    return coordinatePrioritySemanticNewInboundRemoval<MailMessage>({
+      observation: semanticObservation,
+      dismiss: (record) =>
+        dismissExactPrioritySemanticNewInboundObservation(mailboxId, record),
+      resolveCurrentTarget: (record) =>
         resolveCurrentPrioritySemanticNewInboundDismissalTarget({
           mailboxId,
           messageId: reviewItem.sourceId,
-          record: semanticObservation,
+          record,
           ...actionFence,
-        });
-      if (!currentMessage) {
-        return false;
-      }
-      return applyMarkPriorityItemDone(reviewItem, {
-        mailboxId,
-        message: currentMessage,
-      });
-    }
-    return applyMarkPriorityItemDone(reviewItem);
+        }),
+      applyLocal: (currentMessage) => {
+        return applyMarkPriorityItemDone(
+          reviewItem,
+          currentMessage
+            ? { mailboxId, message: currentMessage }
+            : canonicalTarget
+              ? {
+                  mailboxId: canonicalTarget.mailboxId,
+                  message: canonicalTarget.message,
+                }
+              : undefined,
+        );
+      },
+    });
   };
 
   const handlePriorityListAction = (
@@ -47753,10 +47909,18 @@ export function WorkspaceShell({
     action: "remove_priority" | "mark_done",
   ) => {
     if (action === "remove_priority") {
-      const mailboxId = getReviewItemSourceMailboxId(reviewItem);
-      const sourceMessage = mailboxId
-        ? getMailboxMessageById(mailboxId, reviewItem.sourceId)
-        : null;
+      const canonicalTarget =
+        resolvePrioritySemanticNewInboundCanonicalActionTarget(
+          livePriorityInboxEntries,
+          reviewItem,
+        );
+      const mailboxId =
+        canonicalTarget?.mailboxId ?? getReviewItemSourceMailboxId(reviewItem);
+      const sourceMessage =
+        canonicalTarget?.message ??
+        (mailboxId
+          ? getMailboxMessageById(mailboxId, reviewItem.sourceId)
+          : null);
 
       handleSetManualPriority(reviewItem.sourceId, false, {
         storageMailboxId: mailboxId,

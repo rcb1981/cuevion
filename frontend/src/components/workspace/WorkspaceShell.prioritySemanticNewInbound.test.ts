@@ -1,5 +1,15 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import "sucrase/register/tsx.js";
+
+const workspaceRuntime = require("./WorkspaceShell.tsx") as Record<
+  string,
+  (...args: never[]) => unknown
+>;
+const newInboundRuntime = require("../../lib/prioritySemanticNewInbound") as Record<
+  string,
+  (...args: never[]) => unknown
+>;
 
 const source = readFileSync(
   "src/components/workspace/WorkspaceShell.tsx",
@@ -194,8 +204,8 @@ assert.match(
 );
 assert.match(
   hydratedProjectionSource,
-  /canonicalFolderOrder\.flatMap[\s\S]*?record\.identity\.conversationId[\s\S]*?currentEntry\.folder !== "Inbox"[\s\S]*?resolvePrioritySemanticNewInboundHydrationLiveIdentity/,
-  "hydration considers newer Sent/folder turns and requires the exact current canonical latest turn to remain Inbox-visible",
+  /canonicalFolderOrder\.flatMap[\s\S]*?collapsePrioritySemanticNewInboundGmailFolderCopies[\s\S]*?record\.identity\.conversationId[\s\S]*?currentEntry\.folder !== "Inbox"[\s\S]*?resolvePrioritySemanticNewInboundHydrationLiveIdentity/,
+  "hydration collapses one authoritative Gmail Inbox/folder copy while still requiring the exact current canonical latest turn to remain Inbox-visible",
 );
 assert.match(
   hydratedProjectionSource,
@@ -295,10 +305,39 @@ const priorityActionBridgeSource = source.slice(
   priorityActionBridgeStart,
   priorityActionBridgeEnd,
 );
+const removalCoordinatorStart = source.indexOf(
+  "export async function coordinatePrioritySemanticNewInboundRemoval",
+);
+const removalCoordinatorEnd = source.indexOf(
+  "function isCanonicalPrioritySemanticNewInboundImapInteger",
+  removalCoordinatorStart,
+);
+const removalCoordinatorSource = source.slice(
+  removalCoordinatorStart,
+  removalCoordinatorEnd,
+);
+const currentTargetResolverStart = source.indexOf(
+  "function collapsePrioritySemanticNewInboundGmailFolderCopies",
+);
+const currentTargetResolverEnd = source.indexOf(
+  "const sharedCollaborationMailboxId",
+  currentTargetResolverStart,
+);
+const currentTargetResolverSource = source.slice(
+  currentTargetResolverStart,
+  currentTargetResolverEnd,
+);
 assert.ok(
   priorityActionBridgeStart >= 0 &&
     priorityActionBridgeEnd > priorityActionBridgeStart,
   "existing Priority Done/Remove actions must have a narrow semantic bridge",
+);
+assert.ok(
+  removalCoordinatorStart >= 0 &&
+    removalCoordinatorEnd > removalCoordinatorStart &&
+    currentTargetResolverStart >= 0 &&
+    currentTargetResolverEnd > currentTargetResolverStart,
+  "the removal coordinator and exact current-Inbox resolver must exist",
 );
 assert.match(
   priorityActionBridgeSource,
@@ -306,19 +345,29 @@ assert.match(
   "only explicit removal of an exact hydrated observation enters semantic dismissal",
 );
 assert.match(
-  priorityActionBridgeSource,
-  /await dismissExactPrioritySemanticNewInboundObservation[\s\S]*?return false;[\s\S]*?resolveCurrentPrioritySemanticNewInboundDismissalTarget[\s\S]*?mailboxStoreRef\.current[\s\S]*?applyManualPriorityUpdate/,
-  "local Remove mutation occurs only after confirmed dismissal and a current-store identity recheck",
+  removalCoordinatorSource,
+  /if \(!input\.observation\)[\s\S]*?input\.applyLocal\(null\)[\s\S]*?input\.resolveCurrentTarget\(input\.observation\)[\s\S]*?await input\.dismiss\(input\.observation\)[\s\S]*?currentTarget = input\.resolveCurrentTarget\(input\.observation\)[\s\S]*?input\.applyLocal\(currentTarget\)/,
+  "the coordinator preserves unrelated local behavior but defers semantic local mutation until dismissal and a post-await identity recheck",
 );
 assert.match(
   priorityActionBridgeSource,
-  /handleMarkPriorityItemDone = async[\s\S]*?await dismissExactPrioritySemanticNewInboundObservation[\s\S]*?return false;[\s\S]*?resolveCurrentPrioritySemanticNewInboundDismissalTarget[\s\S]*?applyMarkPriorityItemDone/,
-  "local Done mutation occurs only after confirmed dismissal and a current-store identity recheck",
+  /handleSetManualPriority = async[\s\S]*?coordinatePrioritySemanticNewInboundRemoval<MailMessage>[\s\S]*?observation: semanticObservation[\s\S]*?dismissExactPrioritySemanticNewInboundObservation[\s\S]*?resolveCurrentPrioritySemanticNewInboundDismissalTarget[\s\S]*?mailboxStoreRef\.current[\s\S]*?applyManualPriorityUpdate/,
+  "Remove delegates exact dismissal and current-store application to the ordered coordinator",
+);
+assert.match(
+  priorityActionBridgeSource,
+  /handleMarkPriorityItemDone = async[\s\S]*?coordinatePrioritySemanticNewInboundRemoval<MailMessage>[\s\S]*?observation: semanticObservation[\s\S]*?dismissExactPrioritySemanticNewInboundObservation[\s\S]*?resolveCurrentPrioritySemanticNewInboundDismissalTarget[\s\S]*?applyMarkPriorityItemDone/,
+  "Done delegates exact dismissal and current-store application to the ordered coordinator",
 );
 assert.match(
   dismissalRequestSource,
-  /resolveCurrentPrioritySemanticNewInboundDismissalTarget[\s\S]*?prioritySemanticNewInboundHydrationScopeRef[\s\S]*?providerArchiveCurrentConnectionKeysRef[\s\S]*?providerArchiveConnectionEpochsRef[\s\S]*?mailboxStoreRef\.current[\s\S]*?conversationEntries[\s\S]*?currentEntry\.folder !== "Inbox"[\s\S]*?isPrioritySemanticNewInboundDismissalTurnCurrent/,
-  "post-await completion rechecks scope, account, current store, canonical conversation, and latest turn",
+  /resolveCurrentPrioritySemanticNewInboundDismissalTarget[\s\S]*?prioritySemanticNewInboundHydrationScopeRef[\s\S]*?providerArchiveCurrentConnectionKeysRef[\s\S]*?providerArchiveConnectionEpochsRef[\s\S]*?mailboxStoreRef\.current[\s\S]*?conversationEntries[\s\S]*?resolvePrioritySemanticNewInboundCurrentInboxMessage/,
+  "each pre/post-await check revalidates scope, account, and the current canonical conversation store",
+);
+assert.match(
+  currentTargetResolverSource,
+  /providerMessageId[\s\S]*?exactInboxCopies\.length === 1[\s\S]*?currentEntry\.folder !== "Inbox"[\s\S]*?isPrioritySemanticNewInboundDismissalTurnCurrent/,
+  "same-message Gmail folder copies collapse only to one authoritative Inbox copy before the exact latest-turn fence",
 );
 assert.match(
   source,
@@ -358,4 +407,421 @@ assert.doesNotMatch(
   "dismissal failure is never presented as a successful local change",
 );
 
-console.log("\nWorkspaceShell new_inbound shadow integration tests passed.");
+function buildRuntimeGmailMessage(folder: "INBOX" | "ARCHIVE") {
+  return {
+    id: "message-new",
+    serverMailboxId: "mailbox-1",
+    providerFolder: folder,
+    providerMessageId: "message-new",
+    providerThreadId: "thread-new",
+    threadId: "gmail:mailbox-1:thread-new",
+    threadIdentityAuthority: "gmail",
+    labelIds: folder === "INBOX" ? ["INBOX"] : [],
+    threadIdentityContext: {
+      mailboxId: "mailbox-1",
+      provider: "google",
+      folder,
+    },
+    sender: "Action Sender",
+    subject: "Cuevion indexed action test",
+    snippet: "Please complete this action.",
+    time: "10:01",
+    from: "sender@example.test",
+    to: "owner@example.test",
+    timestamp: "2026-08-22T10:01:00.000Z",
+    body: ["Please complete this action."],
+    unread: true,
+    priorityScore: "medium",
+    category: "Primary",
+    categorySource: "system",
+    categoryConfidence: "medium",
+  };
+}
+
+function buildRuntimeMailboxStore(
+  inboxMessage: ReturnType<typeof buildRuntimeGmailMessage>,
+  archiveMessage: ReturnType<typeof buildRuntimeGmailMessage>,
+) {
+  return {
+    "mailbox-1": {
+      Trash: [],
+      Spam: [],
+      Filtered: [],
+      Archive: [archiveMessage],
+      Sent: [],
+      Drafts: [],
+      Inbox: [inboxMessage],
+    },
+  };
+}
+
+async function runManualPriorityDismissalRuntimeRegression() {
+  const inboxMessage = buildRuntimeGmailMessage("INBOX");
+  const archiveMessage = buildRuntimeGmailMessage("ARCHIVE");
+  const mailboxStore = buildRuntimeMailboxStore(inboxMessage, archiveMessage);
+  const record = {
+    assessment: {
+      state: "needs_user_action",
+      confidence: 0.99,
+      reasonCode: "explicit_request",
+    },
+    effectiveSemanticState: "needs_user_action",
+    priorityEffect: "observe_only",
+    identity: {
+      mailboxId: "mailbox-1",
+      conversationId: "thread:mailbox-1|gmail:mailbox-1:thread-new",
+      latestTurnId: "message-new",
+      semanticVersion: "priority-semantic-state-v1",
+    },
+    assessedAt: "2026-08-22T10:02:00.000Z",
+  };
+
+  const getMailboxMessageById = workspaceRuntime.getMailboxMessageById as (
+    store: typeof mailboxStore,
+    mailboxId: string,
+    messageId: string,
+  ) => typeof inboxMessage | null;
+  const resolveManualTarget =
+    workspaceRuntime.resolveMailboxScopedManualPriorityTarget as (input: {
+      store: typeof mailboxStore;
+      messageId: string;
+      storageMailboxId: string;
+      sourceMailboxId: string;
+      sourceMessage: typeof inboxMessage;
+    }) => { message: typeof inboxMessage } | null;
+
+  assert.equal(
+    getMailboxMessageById(mailboxStore, "mailbox-1", "message-new"),
+    archiveMessage,
+    "the regression must preserve the Production bare-ID Archive-before-Inbox collision",
+  );
+  assert.equal(
+    resolveManualTarget({
+      store: mailboxStore,
+      messageId: "message-new",
+      storageMailboxId: "mailbox-1",
+      sourceMailboxId: "mailbox-1",
+      sourceMessage: inboxMessage,
+    })?.message,
+    inboxMessage,
+    "manual Mark as Priority must retain the exact supplied Inbox source instead of replacing it with a same-ID Archive copy",
+  );
+  assert.equal(
+    resolveManualTarget({
+      store: mailboxStore,
+      messageId: "message-new",
+      storageMailboxId: "mailbox-1",
+      sourceMailboxId: "mailbox-1",
+      sourceMessage: { ...inboxMessage },
+    }),
+    null,
+    "a detached source object must fail closed instead of falling back to a different same-ID folder copy",
+  );
+
+  const reviewItem = {
+    id: "live-priority-mailbox-1-message-new",
+    sourceId: "message-new",
+    linkedEntityIds: ["mailbox:mailbox-1"],
+  };
+  const canonicalEntries = [
+    {
+      mailboxId: "mailbox-1",
+      mailboxTitle: "Mailbox 1",
+      message: inboxMessage,
+    },
+  ];
+  const resolveCanonicalActionTarget =
+    workspaceRuntime.resolvePrioritySemanticNewInboundCanonicalActionTarget as (
+      entries: typeof canonicalEntries,
+      item: typeof reviewItem,
+    ) => (typeof canonicalEntries)[number] | null;
+  const resolveExactObservation =
+    workspaceRuntime.resolveExactPrioritySemanticNewInboundObservationForMessage as (
+      observations: Record<string, typeof record>,
+      mailboxId: string,
+      message: typeof inboxMessage,
+    ) => typeof record | null;
+  const coordinateRemoval =
+    workspaceRuntime.coordinatePrioritySemanticNewInboundRemoval as (input: {
+      observation: typeof record | null;
+      dismiss: (observation: typeof record) => Promise<boolean>;
+      resolveCurrentTarget: (
+        observation: typeof record,
+      ) => typeof inboxMessage | null;
+      applyLocal: (target: typeof inboxMessage | null) => boolean;
+    }) => Promise<boolean>;
+  const resolveCurrentInboxMessage =
+    workspaceRuntime.resolvePrioritySemanticNewInboundCurrentInboxMessage as (
+      input: {
+        mailboxId: string;
+        messageId: string;
+        record: typeof record;
+        conversationEntries: Array<{
+          folder: "Archive" | "Inbox";
+          message: typeof inboxMessage;
+        }>;
+      },
+    ) => typeof inboxMessage | null;
+  const buildIdentityKey =
+    newInboundRuntime.buildPrioritySemanticNewInboundIdentityKey as (
+      identity: typeof record.identity,
+    ) => string;
+  const buildDismissalWireRequest =
+    newInboundRuntime.buildPrioritySemanticNewInboundDismissalWireRequest as (
+      request: unknown,
+    ) => unknown;
+  const hydratedObservations = {
+    [buildIdentityKey(record.identity)]: record,
+  };
+  const initiallyAcceptedObservation = resolveExactObservation(
+    hydratedObservations,
+    "mailbox-1",
+    inboxMessage,
+  );
+  assert.equal(initiallyAcceptedObservation, record);
+  const duplicateConversationEntries = [
+    { folder: "Archive" as const, message: archiveMessage },
+    { folder: "Inbox" as const, message: inboxMessage },
+  ];
+  const projectedInboxMessage = resolveCurrentInboxMessage({
+    mailboxId: "mailbox-1",
+    messageId: "message-new",
+    record,
+    conversationEntries: duplicateConversationEntries,
+  });
+  assert.equal(
+    projectedInboxMessage,
+    inboxMessage,
+    "an equal-timestamp Gmail Archive copy must not displace the one authoritative Inbox copy",
+  );
+  assert.equal(
+    projectedInboxMessage
+      ? resolveExactObservation(
+          hydratedObservations,
+          "mailbox-1",
+          projectedInboxMessage,
+        )
+      : null,
+    record,
+    "a collision present before manual Priority must retain the exact hydrated observation",
+  );
+
+  for (const action of ["mark_done", "remove_priority"] as const) {
+    let manualPriority: "priority" | "removed" = "priority";
+    let isDone = false;
+    let localMutationCount = 0;
+    let hydratedRecords = [record];
+    const dismissalRequests: unknown[] = [];
+    let confirmDismissal: (() => void) | null = null;
+    const dismissalGate = new Promise<void>((resolve) => {
+      confirmDismissal = resolve;
+    });
+
+    const canonicalTarget = resolveCanonicalActionTarget(
+      canonicalEntries,
+      reviewItem,
+    );
+    assert.equal(
+      canonicalTarget?.message,
+      inboxMessage,
+      `${action} must recover the exact canonical Inbox object, not the bare-ID Archive match`,
+    );
+    const observation = canonicalTarget
+      ? resolveExactObservation(
+          hydratedObservations,
+          canonicalTarget.mailboxId,
+          canonicalTarget.message,
+        )
+      : null;
+    assert.equal(
+      observation,
+      record,
+      `${action} must retain the exact observation across a pre-existing or later Archive readback`,
+    );
+
+    const actionPromise = coordinateRemoval({
+      observation,
+      dismiss: async (currentRecord) => {
+        dismissalRequests.push(
+          buildDismissalWireRequest({
+            operation: "dismiss_new_inbound",
+            mailboxId: currentRecord.identity.mailboxId,
+            identity: {
+              conversationId: currentRecord.identity.conversationId,
+              latestTurnId: currentRecord.identity.latestTurnId,
+              semanticVersion: currentRecord.identity.semanticVersion,
+            },
+          }),
+        );
+        await dismissalGate;
+        hydratedRecords = [];
+        return true;
+      },
+      resolveCurrentTarget: (currentRecord) =>
+        resolveCurrentInboxMessage({
+          mailboxId: "mailbox-1",
+          messageId: "message-new",
+          record: currentRecord,
+          conversationEntries: duplicateConversationEntries,
+        }),
+      applyLocal: (target) => {
+        assert.equal(target, inboxMessage);
+        localMutationCount += 1;
+        if (action === "mark_done") {
+          isDone = true;
+        } else {
+          manualPriority = "removed";
+        }
+        return true;
+      },
+    });
+
+    await Promise.resolve();
+    assert.deepEqual(dismissalRequests, [
+      {
+        operation: "dismiss_new_inbound",
+        mailboxId: "mailbox-1",
+        identity: {
+          conversationId: "thread:mailbox-1|gmail:mailbox-1:thread-new",
+          latestTurnId: "message-new",
+          semanticVersion: "priority-semantic-state-v1",
+        },
+      },
+    ]);
+    assert.equal(
+      localMutationCount,
+      0,
+      `${action} must not remove locally before durable dismissal confirmation`,
+    );
+    assert.equal(
+      manualPriority === "priority" && !isDone,
+      true,
+      `${action} must leave the canonical Priority row visible while dismissal is pending`,
+    );
+
+    confirmDismissal?.();
+    assert.equal(await actionPromise, true);
+    assert.equal(localMutationCount, 1);
+    assert.equal(
+      manualPriority === "priority" && !isDone,
+      false,
+      `${action} must remove the canonical row only after dismissal success`,
+    );
+    assert.deepEqual(
+      hydratedRecords,
+      [],
+      `${action} dismissal must make the next hydration omit the exact turn`,
+    );
+  }
+
+  let failedDismissalRequests = 0;
+  let failedLocalMutations = 0;
+  assert.equal(
+    await coordinateRemoval({
+      observation: record,
+      dismiss: async () => {
+        failedDismissalRequests += 1;
+        return false;
+      },
+      resolveCurrentTarget: (currentRecord) =>
+        resolveCurrentInboxMessage({
+          mailboxId: "mailbox-1",
+          messageId: "message-new",
+          record: currentRecord,
+          conversationEntries: duplicateConversationEntries,
+        }),
+      applyLocal: () => {
+        failedLocalMutations += 1;
+        return true;
+      },
+    }),
+    false,
+    "a failed server dismissal must report that the action was not applied",
+  );
+  assert.equal(failedDismissalRequests, 1);
+  assert.equal(
+    failedLocalMutations,
+    0,
+    "server failure must leave the Priority row locally visible and retryable",
+  );
+
+  let unrelatedDismissalRequests = 0;
+  let unrelatedLocalMutations = 0;
+  assert.equal(
+    await coordinateRemoval({
+      observation: null,
+      dismiss: async () => {
+        unrelatedDismissalRequests += 1;
+        return true;
+      },
+      resolveCurrentTarget: () => inboxMessage,
+      applyLocal: (target) => {
+        assert.equal(target, null);
+        unrelatedLocalMutations += 1;
+        return true;
+      },
+    }),
+    true,
+    "a non-semantic Priority row must preserve its existing local action",
+  );
+  assert.equal(
+    unrelatedDismissalRequests,
+    0,
+    "unrelated rows must not create semantic dismissal persistence",
+  );
+  assert.equal(unrelatedLocalMutations, 1);
+
+  const newerInboxMessage = {
+    ...inboxMessage,
+    id: "message-newer",
+    providerMessageId: "message-newer",
+    time: "10:03",
+    timestamp: "2026-08-22T10:03:00.000Z",
+  };
+  let currentConversationEntries = duplicateConversationEntries;
+  let newerTurnDismissalRequests = 0;
+  let newerTurnLocalMutations = 0;
+  assert.equal(
+    await coordinateRemoval({
+      observation: record,
+      dismiss: async () => {
+        newerTurnDismissalRequests += 1;
+        currentConversationEntries = [
+          ...duplicateConversationEntries,
+          { folder: "Inbox" as const, message: newerInboxMessage },
+        ];
+        return true;
+      },
+      resolveCurrentTarget: (currentRecord) =>
+        resolveCurrentInboxMessage({
+          mailboxId: "mailbox-1",
+          messageId: "message-new",
+          record: currentRecord,
+          conversationEntries: currentConversationEntries,
+        }),
+      applyLocal: () => {
+        newerTurnLocalMutations += 1;
+        return true;
+      },
+    }),
+    false,
+    "a newer turn arriving during dismissal must fail the post-await exact-turn fence",
+  );
+  assert.equal(newerTurnDismissalRequests, 1);
+  assert.equal(
+    newerTurnLocalMutations,
+    0,
+    "the old turn's dismissal must not remove the newer Priority row locally",
+  );
+}
+
+runManualPriorityDismissalRuntimeRegression()
+  .then(() =>
+    console.log(
+      "\nWorkspaceShell new_inbound shadow integration and runtime tests passed.",
+    ),
+  )
+  .catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  });
