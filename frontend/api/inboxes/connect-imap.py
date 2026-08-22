@@ -38,6 +38,7 @@ from user_config_store import (  # noqa: E402
     rollback_owned_custom_imap_mailbox_update,
     upsert_owned_custom_imap_mailbox,
 )
+from api.priority.semantic_config import read_new_inbound_client_mode  # noqa: E402
 
 INITIAL_FIELDS = {
     "mode",
@@ -2920,7 +2921,11 @@ class handler(BaseHTTPRequestHandler):
             else:
                 self._send_json(502, _error("connection_failed", "Could not refresh this inbox."))
             return
-        self._send_json(200, _preview_success_payload(response_payload))
+        success_payload = _preview_success_payload(response_payload)
+        success_payload["prioritySemanticNewInboundMode"] = (
+            read_new_inbound_client_mode()
+        )
+        self._send_json(200, success_payload)
 
     def do_GET(self):
         self._send_json(405, _error("method_not_allowed", "Use POST for inbox connection."))

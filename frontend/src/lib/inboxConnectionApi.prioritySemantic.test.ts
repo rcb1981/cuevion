@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import {
   PRIORITY_SEMANTIC_ASSESSMENT_TIMEOUT_MS,
+  connectInboxWithImap,
+  fetchGmailInbox,
   requestPrioritySemanticAssessment,
+  requestPrioritySemanticNewInboundAssessment,
   sendGmailMessage,
 } from "./inboxConnectionApi";
 import {
@@ -18,6 +21,7 @@ function response(payload: unknown, options?: { ok?: boolean; status?: number })
   return {
     ok: options?.ok ?? true,
     status: options?.status ?? 200,
+    json: async () => payload,
     text: async () => JSON.stringify(payload),
   } as Response;
 }
@@ -144,6 +148,108 @@ async function run() {
     String(fetchCalls[3].init?.body),
     /authoredText|body|subject|workspace/i,
     "cache-only rehydration must not carry message content",
+  );
+
+  globalThis.fetch = (async (url: string, init?: RequestInit) => {
+    fetchCalls.push({ url, init });
+    return response({
+      ok: true,
+      status: "assessed",
+      semanticTrigger: "new_inbound",
+      newInboundMode: "shadow",
+      priorityEffect: "observe_only",
+      assessment: {
+        state: "needs_user_action",
+        confidence: 0.94,
+        reasonCode: "explicit_request",
+      },
+      effectiveSemanticState: "needs_user_action",
+      identity: {
+        mailboxId: "mailbox-1",
+        conversationId: "thread:mailbox-1|gmail:thread-new",
+        latestTurnId: "message-new",
+        semanticVersion: SEMANTIC_SCHEMA_VERSION,
+      },
+      assessedAt: "2026-08-22T08:30:00.000Z",
+    });
+  }) as typeof fetch;
+  const newInboundRequest = {
+    mailboxId: "mailbox-1",
+    trigger: "new_inbound",
+    incomingLocator: {
+      provider: "google",
+      providerMessageId: "message-new",
+    },
+  } as const;
+  assert.equal(
+    (await requestPrioritySemanticNewInboundAssessment(newInboundRequest)).ok,
+    true,
+  );
+  assert.equal(fetchCalls.length, 5);
+  assert.equal(fetchCalls[4].url, "/api/priority/semantic-assessment");
+  assert.equal(fetchCalls[4].init?.method, "POST");
+  assert.equal(fetchCalls[4].init?.credentials, "include");
+  assert.equal(fetchCalls[4].init?.cache, "no-store");
+  assert.equal(fetchCalls[4].init?.body, JSON.stringify(newInboundRequest));
+  assert.doesNotMatch(
+    String(fetchCalls[4].init?.body),
+    /text|subject|snippet|workspace|tenant|semanticMode/i,
+  );
+
+  const newInboundCallsBeforeInvalid = fetchCalls.length;
+  assert.deepEqual(
+    await requestPrioritySemanticNewInboundAssessment({
+      ...newInboundRequest,
+      subject: "must not cross the client boundary",
+    } as unknown as typeof newInboundRequest),
+    {
+      ok: false,
+      error: {
+        code: "invalid_semantic_request",
+        message: "Semantic assessment request is invalid.",
+      },
+    },
+  );
+  assert.equal(fetchCalls.length, newInboundCallsBeforeInvalid);
+
+  globalThis.fetch = (async () =>
+    response({
+      ok: true,
+      messages: [],
+      uidValidity: "7",
+      inboxUidSet: [],
+      prioritySemanticNewInboundMode: "active",
+    })) as typeof fetch;
+  assert.equal(
+    (
+      await connectInboxWithImap({
+        mode: "refresh",
+        mailboxId: "mailbox-1",
+      })
+    ).prioritySemanticNewInboundMode,
+    "off",
+    "IMAP provider refreshes must normalize active/unknown modes to off",
+  );
+
+  globalThis.fetch = (async () =>
+    response({
+      ok: true,
+      messages: [],
+      prioritySemanticNewInboundMode: "shadow",
+    })) as typeof fetch;
+  assert.equal(
+    (await fetchGmailInbox({ mailboxId: "mailbox-1" }))
+      .prioritySemanticNewInboundMode,
+    "shadow",
+  );
+
+  globalThis.fetch = (async () =>
+    response({ ok: true, messages: [] })) as typeof fetch;
+  assert.equal(
+    (await fetchGmailInbox({ mailboxId: "mailbox-1" }))
+      .prioritySemanticNewInboundMode,
+    "off",
+    "missing Gmail capability metadata must fail closed",
   );
 
   const callsBeforeInvalidRequest = fetchCalls.length;

@@ -8,7 +8,11 @@ from .openai_responses_adapter import (
     OpenAIResponsesSemanticAdapter,
     build_openai_semantic_adapter,
 )
-from .semantic_config import SemanticMode, SemanticRuntimeConfig
+from .semantic_config import (
+    NewInboundSemanticMode,
+    SemanticMode,
+    SemanticRuntimeConfig,
+)
 from .semantic_errors import (
     SemanticConfigurationError,
     SemanticInputError,
@@ -406,6 +410,17 @@ class OpenAIResponsesSemanticAdapterTests(unittest.TestCase):
             client_factory=factory,
         )
         self.assertEqual(active_adapter.model, "gpt-explicit")
+
+        new_inbound_adapter = build_openai_semantic_adapter(
+            SemanticRuntimeConfig(
+                mode=SemanticMode.OFF,
+                model="gpt-explicit",
+                new_inbound_mode=NewInboundSemanticMode.SHADOW,
+            ),
+            environ={"OPENAI_API_KEY": "sk-explicit"},
+            client_factory=factory,
+        )
+        self.assertEqual(new_inbound_adapter.model, "gpt-explicit")
 
         with self.assertRaises(SemanticConfigurationError):
             build_openai_semantic_adapter(

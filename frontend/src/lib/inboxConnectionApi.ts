@@ -25,6 +25,19 @@ import {
   type PrioritySemanticAssessmentResponse,
   type PrioritySemanticCurrentLookupRequest,
 } from "./prioritySemanticState";
+import {
+  buildPrioritySemanticNewInboundWireRequest,
+  normalizePrioritySemanticNewInboundMode,
+  parsePrioritySemanticNewInboundResponse,
+  type PrioritySemanticNewInboundAssessmentRequest,
+  type PrioritySemanticNewInboundAssessmentResponse,
+  type PrioritySemanticNewInboundMode,
+} from "./prioritySemanticNewInbound";
+
+export type {
+  PrioritySemanticNewInboundAssessmentRequest,
+  PrioritySemanticNewInboundAssessmentResponse,
+} from "./prioritySemanticNewInbound";
 
 export type LiveInboxAttachmentSnapshot = {
   id: string;
@@ -195,6 +208,7 @@ export type ConnectInboxResponse = {
   messages?: LiveInboxMessageSnapshot[];
   inboxUidSet?: string[] | null;
   uidValidity?: string | null;
+  prioritySemanticNewInboundMode?: PrioritySemanticNewInboundMode;
   warning?: {
     code?: string;
     stage?: string;
@@ -2919,6 +2933,10 @@ export async function connectInboxWithImap(
     return {
       ...payload,
       ...(normalizedMessages ? { messages: normalizedMessages } : {}),
+      prioritySemanticNewInboundMode:
+        normalizePrioritySemanticNewInboundMode(
+          payload.prioritySemanticNewInboundMode,
+        ),
       ok: true,
     };
   } catch {
@@ -3486,6 +3504,95 @@ export async function requestPrioritySemanticAssessment(
   }
 }
 
+export async function requestPrioritySemanticNewInboundAssessment(
+  request: PrioritySemanticNewInboundAssessmentRequest,
+): Promise<PrioritySemanticNewInboundAssessmentResponse> {
+  const wireRequest = buildPrioritySemanticNewInboundWireRequest(request);
+  if (!wireRequest) {
+    return {
+      ok: false,
+      error: {
+        code: "invalid_semantic_request",
+        message: "Semantic assessment request is invalid.",
+      },
+    };
+  }
+
+  const abortController = new AbortController();
+  const timeoutId = globalThis.setTimeout(() => {
+    abortController.abort();
+  }, PRIORITY_SEMANTIC_ASSESSMENT_TIMEOUT_MS);
+
+  try {
+    const response = await fetch("/api/priority/semantic-assessment", {
+      method: "POST",
+      credentials: "include",
+      cache: "no-store",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      signal: abortController.signal,
+      body: JSON.stringify(wireRequest),
+    });
+    let rawPayload = "";
+    try {
+      rawPayload = await response.text();
+    } catch {
+      return {
+        ok: false,
+        error: {
+          code: "semantic_response_unreadable",
+          message: "Semantic assessment response could not be read.",
+        },
+      };
+    }
+
+    let payload: unknown = null;
+    if (rawPayload.trim()) {
+      try {
+        payload = JSON.parse(rawPayload) as unknown;
+      } catch {
+        payload = null;
+      }
+    }
+    const parsedResponse = parsePrioritySemanticNewInboundResponse(payload);
+    if (!response.ok) {
+      return parsedResponse && !parsedResponse.ok
+        ? parsedResponse
+        : {
+            ok: false,
+            error: {
+              code: "semantic_request_failed",
+              message: `Semantic assessment failed${
+                response.status ? ` (${response.status})` : ""
+              }.`,
+            },
+          };
+    }
+    return parsedResponse ?? {
+      ok: false,
+      error: {
+        code: "invalid_semantic_response",
+        message: "Semantic assessment returned an invalid response.",
+      },
+    };
+  } catch (error) {
+    const didTimeout =
+      error instanceof DOMException && error.name === "AbortError";
+    return {
+      ok: false,
+      error: {
+        code: didTimeout ? "semantic_timeout" : "semantic_request_failed",
+        message: didTimeout
+          ? "Semantic assessment timed out."
+          : "Semantic assessment could not be reached.",
+      },
+    };
+  } finally {
+    globalThis.clearTimeout(timeoutId);
+  }
+}
+
 async function readAttachmentDownloadError(
   response: Response,
   fallbackMessage: string,
@@ -3605,6 +3712,10 @@ export async function fetchGmailInbox(
             ),
           }
         : {}),
+      prioritySemanticNewInboundMode:
+        normalizePrioritySemanticNewInboundMode(
+          payload.prioritySemanticNewInboundMode,
+        ),
     };
   } catch (error) {
     return {

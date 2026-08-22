@@ -48,6 +48,7 @@ from .authenticated_gmail import (
     valid_identifier,
 )
 from .gmail_snapshot import read_gmail_folder_snapshot
+from api.priority.semantic_config import read_new_inbound_client_mode
 
 GMAIL_API_BASE_URL = "https://gmail.googleapis.com/gmail/v1/users/me"
 DEFAULT_FETCH_LIMIT = 50
@@ -223,6 +224,9 @@ class handler(BaseHTTPRequestHandler):
                 "messages": previews,
                 "inboxUidSet": inbox_uid_set,
                 "uidValidity": snapshot.get("uidValidity", "gmail-api"),
+                "prioritySemanticNewInboundMode": (
+                    read_new_inbound_client_mode()
+                ),
             },
         )
 

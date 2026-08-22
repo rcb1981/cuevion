@@ -27,6 +27,7 @@ from api.inboxes.gmail_thread_parser import (
     GmailThreadParseError,
     parse_gmail_thread,
 )
+from api.inboxes.gmail_snapshot import parse_gmail_message_detail
 from api.inboxes.imap_snapshot import (
     _is_absent_uid_fetch_response,
     _is_ok_status,
@@ -43,6 +44,7 @@ from imap_connect_preview import (
     connect_mailbox_with_settings,
     extract_message_thread_metadata,
     normalize_message_id_token,
+    to_message_preview,
 )
 
 from .event_reference import (
@@ -69,6 +71,14 @@ _MAX_SEMANTIC_MIME_PART_BYTES = 256 * 1_024
 _MAX_SEMANTIC_MIME_TOTAL_BYTES = 512 * 1_024
 _MAX_SEMANTIC_MIME_PARTS = 128
 _MAX_SEMANTIC_MIME_DEPTH = 32
+_GMAIL_NON_INBOX_LABELS = frozenset({"SENT", "SPAM", "TRASH", "DRAFT"})
+_BULK_PRECEDENCE_VALUES = frozenset({"bulk", "junk", "list"})
+_NEW_INBOUND_NOISE_DISPOSITIONS = frozenset(
+    {"bulk_marketing", "unsolicited_low_value", "strong_spam"}
+)
+_NEW_INBOUND_ORGANIZER_SIGNALS = frozenset(
+    {"demo", "high_priority_demo", "incomplete_demo", "promo", "promo_reminder"}
+)
 _ENCODE_URI_COMPONENT_SAFE = "-_.!~*'()"
 _MONTHS = {
     "Jan": 1,
@@ -389,6 +399,139 @@ def _gmail_thread_request(access_token: str, thread_id: str) -> tuple[object | N
         return None, "gmail_unavailable"
 
 
+def _gmail_message_request(
+    access_token: str,
+    provider_message_id: str,
+) -> tuple[object | None, str | None]:
+    """Read one exact Gmail message identity without relying on thread lookup."""
+    request = Request(
+        (
+            f"{GMAIL_API_BASE_URL}/messages/"
+            f"{quote(provider_message_id, safe='')}?format=raw"
+        ),
+        headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
+        method="GET",
+    )
+    try:
+        with urlopen(request, timeout=PROVIDER_TIMEOUT_SECONDS) as response:
+            content_length = response.headers.get("Content-Length")
+            if content_length is not None:
+                if not content_length.isascii() or not content_length.isdigit():
+                    return None, "gmail_response_invalid"
+                if int(content_length) > MAX_GMAIL_RESPONSE_BYTES:
+                    return None, "gmail_message_too_large"
+            body = response.read(MAX_GMAIL_RESPONSE_BYTES + 1)
+            if len(body) > MAX_GMAIL_RESPONSE_BYTES:
+                return None, "gmail_message_too_large"
+            try:
+                return json.loads(body.decode("utf-8")), None
+            except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
+                return None, "gmail_response_invalid"
+    except HTTPError as error:
+        if error.code == 404:
+            return None, "incoming_message_not_found"
+        return None, gmail_http_error_code(error.code, "gmail_unavailable")
+    except (IncompleteRead, OSError, URLError, TimeoutError):
+        return None, "gmail_unavailable"
+
+
+def _headers_are_server_derived_bulk_or_spam(
+    selected_headers: dict[str, tuple[str, ...]],
+) -> bool:
+    spam_flags = selected_headers.get("x-spam-flag", ())
+    if any(value.strip().casefold() == "yes" for value in spam_flags):
+        return True
+    spam_statuses = selected_headers.get("x-spam-status", ())
+    if any(value.lstrip().casefold().startswith("yes") for value in spam_statuses):
+        return True
+    precedence = selected_headers.get("precedence", ())
+    if any(value.strip().casefold() in _BULK_PRECEDENCE_VALUES for value in precedence):
+        return True
+    return bool(
+        selected_headers.get("list-id")
+        and selected_headers.get("list-unsubscribe")
+    )
+
+
+def _new_inbound_preview_routing_rejection(preview: object) -> str | None:
+    """Apply browser-independent existing routing before semantic state I/O."""
+    if type(preview) is not dict:
+        return "incoming_message_identity_unconfirmed"
+    noise_disposition = preview.get("noiseDisposition")
+    noise_confidence = preview.get("noiseConfidence")
+    noise_reasons = preview.get("noiseReasons")
+    if (
+        noise_disposition not in {"none", *_NEW_INBOUND_NOISE_DISPOSITIONS}
+        or noise_confidence not in {"low", "medium", "high"}
+        or type(noise_reasons) is not list
+        or len(noise_reasons) > 16
+        or any(type(reason) is not str or not reason for reason in noise_reasons)
+        or len(set(noise_reasons)) != len(noise_reasons)
+    ):
+        return "incoming_message_identity_unconfirmed"
+    if noise_disposition in _NEW_INBOUND_NOISE_DISPOSITIONS:
+        return "incoming_message_noise_excluded"
+
+    final_priority = preview.get("v7_final_priority")
+    final_visibility = preview.get("final_visibility")
+    action = preview.get("action")
+    signal = preview.get("signal")
+    if (
+        final_priority in {"PRIORITY", "REVIEW"}
+        or final_visibility == "show_priority"
+        or action == "show_in_priority"
+        or signal in {"Priority", "For review"}
+    ):
+        return "incoming_message_routing_excluded"
+    if (
+        final_priority == "LOW"
+        or final_visibility in {"show_low", "hide"}
+        or action in {"show_in_quiet_view", "hide"}
+    ):
+        return "incoming_message_routing_excluded"
+
+    category = preview.get("category")
+    internal_classification = preview.get("internalClassification")
+    ui_signal = preview.get("ui_signal")
+    if (
+        category in _NEW_INBOUND_ORGANIZER_SIGNALS
+        or internal_classification in _NEW_INBOUND_ORGANIZER_SIGNALS
+        or ui_signal in {"DEMO", "PROMO"}
+    ):
+        return "incoming_message_routing_excluded"
+    return None
+
+
+def _gmail_raw_label_routing_rejection(raw_message: object) -> str | None:
+    if type(raw_message) is not dict:
+        return "incoming_message_identity_unconfirmed"
+    raw_labels = raw_message.get("labelIds")
+    if (
+        type(raw_labels) is not list
+        or any(type(label) is not str or not label for label in raw_labels)
+        or len(set(raw_labels)) != len(raw_labels)
+    ):
+        return "incoming_message_identity_unconfirmed"
+    if "INBOX" not in raw_labels or _GMAIL_NON_INBOX_LABELS.intersection(raw_labels):
+        return "incoming_message_not_in_inbox"
+    if "CATEGORY_PROMOTIONS" in raw_labels:
+        return "incoming_message_noise_excluded"
+    return None
+
+
+def _gmail_new_inbound_routing_rejection(
+    raw_message: object,
+    parsed_message: dict,
+) -> str | None:
+    label_rejection = _gmail_raw_label_routing_rejection(raw_message)
+    if label_rejection is not None:
+        return label_rejection
+    raw_labels = raw_message.get("labelIds")
+    if parsed_message.get("labelIds") != raw_labels:
+        return "incoming_message_identity_unconfirmed"
+    return _new_inbound_preview_routing_rejection(parsed_message)
+
+
 def _external_gmail_turn(
     message: dict,
     authority: PriorityAuthority,
@@ -577,6 +720,194 @@ def load_authorized_gmail_incoming(
         revalidation_locator={
             "provider": "google",
             "providerMessageId": provider_message_id,
+        },
+    )
+
+
+def _resolve_gmail_authority_context(authority: PriorityAuthority) -> dict:
+    owned = {"user": authority.user_record, "inbox": authority.inbox_record}
+    resolution = resolve_gmail_context(owned)
+    if resolution.get("status") != "ok" or type(resolution.get("context")) is not dict:
+        status_code = int(resolution.get("status_code") or 503)
+        raise SemanticAuthorityError("gmail_authority_unavailable", status_code)
+    return resolution["context"]
+
+
+def _refresh_gmail_authority_context(context: dict) -> dict:
+    refreshed = refresh_gmail_context(context)
+    if refreshed.get("status") != "ok" or type(refreshed.get("context")) is not dict:
+        raise SemanticAuthorityError("gmail_authority_unavailable", 503)
+    return refreshed["context"]
+
+
+def _load_gmail_new_inbound_snapshot(
+    authority: PriorityAuthority,
+    *,
+    provider_message_id: str,
+) -> tuple[str, dict, list[dict]]:
+    """Resolve one exact Inbox message and prove it is its provider thread latest."""
+    context = _resolve_gmail_authority_context(authority)
+    refresh_used = context.get("refresh_attempted") is True
+    raw_target, error = _gmail_message_request(
+        context["access_token"],
+        provider_message_id,
+    )
+    if error == "gmail_token_invalid" and not refresh_used:
+        context = _refresh_gmail_authority_context(context)
+        refresh_used = True
+        raw_target, error = _gmail_message_request(
+            context["access_token"],
+            provider_message_id,
+        )
+    if error:
+        status = 404 if error == "incoming_message_not_found" else 503
+        raise SemanticAuthorityError(error, status)
+    label_rejection = _gmail_raw_label_routing_rejection(raw_target)
+    if label_rejection is not None:
+        raise SemanticAuthorityError(label_rejection, 409)
+    parser_context = {
+        "mailbox_email": authority.mailbox_email,
+        "mailbox_id": authority.mailbox_id,
+    }
+    focus_preferences = authority.inbox_record.get("focusPreferences")
+    if type(focus_preferences) is not dict:
+        focus_preferences = None
+    try:
+        target = parse_gmail_message_detail(
+            raw_target,
+            context=parser_context,
+            provider_folder="Inbox",
+            requested_message_id=provider_message_id,
+            index=0,
+            focus_preferences=focus_preferences,
+            strict=True,
+        )
+    except Exception:
+        raise SemanticAuthorityError("gmail_response_invalid", 503) from None
+    if type(target) is not dict:
+        raise SemanticAuthorityError("gmail_response_invalid", 503)
+    if target.get("providerMessageId") != provider_message_id:
+        raise SemanticAuthorityError("incoming_message_identity_unconfirmed", 409)
+    raw_internal_date = raw_target.get("internalDate") if type(raw_target) is dict else None
+    if (
+        type(raw_internal_date) is not str
+        or re.fullmatch(r"0|[1-9][0-9]{0,15}", raw_internal_date, re.ASCII) is None
+    ):
+        raise SemanticAuthorityError("incoming_message_identity_unconfirmed", 409)
+    target["internalDate"] = raw_internal_date
+    provider_thread_id = target.get("providerThreadId")
+    if not _valid_identifier(provider_thread_id):
+        raise SemanticAuthorityError("incoming_message_identity_unconfirmed", 409)
+    routing_rejection = _gmail_new_inbound_routing_rejection(raw_target, target)
+    if routing_rejection is not None:
+        raise SemanticAuthorityError(routing_rejection, 409)
+    if _external_gmail_turn(target, authority) is not True:
+        raise SemanticAuthorityError("incoming_message_not_external", 409)
+
+    raw_thread, error = _gmail_thread_request(
+        context["access_token"],
+        provider_thread_id,
+    )
+    if error == "gmail_token_invalid" and not refresh_used:
+        context = _refresh_gmail_authority_context(context)
+        refresh_used = True
+        raw_thread, error = _gmail_thread_request(
+            context["access_token"],
+            provider_thread_id,
+        )
+    if error:
+        status = 404 if error == "incoming_message_not_found" else 503
+        raise SemanticAuthorityError(error, status)
+    try:
+        messages = parse_gmail_thread(raw_thread, provider_thread_id)
+    except (GmailThreadParseError, OverflowError):
+        raise SemanticAuthorityError("gmail_response_invalid", 503) from None
+    target_indexes = [
+        index
+        for index, message in enumerate(messages)
+        if message.get("providerMessageId") == provider_message_id
+    ]
+    if len(target_indexes) != 1:
+        raise SemanticAuthorityError("incoming_message_identity_unconfirmed", 409)
+    target_index = target_indexes[0]
+    thread_target = messages[target_index]
+    if (
+        target_index != len(messages) - 1
+        or thread_target.get("providerThreadId") != provider_thread_id
+        or thread_target.get("internalDate") != target.get("internalDate")
+        or thread_target.get("labelIds") != target.get("labelIds")
+    ):
+        raise SemanticAuthorityError("incoming_message_stale", 409)
+    messages[target_index] = target
+    return provider_thread_id, target, messages
+
+
+def load_authorized_gmail_new_inbound(
+    authority: PriorityAuthority,
+    *,
+    provider_message_id: object,
+) -> AuthorizedSemanticSource:
+    """Load a brand-new Gmail Inbox delivery without an outgoing event claim."""
+    if authority.provider != "google":
+        raise SemanticAuthorityError("provider_mismatch", 400)
+    if not _valid_identifier(provider_message_id, 256):
+        raise SemanticAuthorityError("invalid_incoming_locator", 400)
+
+    provider_thread_id, target, messages = _load_gmail_new_inbound_snapshot(
+        authority,
+        provider_message_id=provider_message_id,
+    )
+    try:
+        occurred_at = int(target.get("internalDate"))
+    except (TypeError, ValueError):
+        raise SemanticAuthorityError("incoming_message_identity_unconfirmed", 409) from None
+
+    turns: list[dict[str, Any]] = []
+    for message in messages[-3:]:
+        external = _external_gmail_turn(message, authority)
+        if external is None:
+            continue
+        body_html = message.get("bodyHtml")
+        if type(body_html) is str and body_html.strip():
+            body_text = body_html
+        elif type(message.get("bodyText")) is str:
+            body_text = message["bodyText"]
+        else:
+            body_parts = message.get("body")
+            body_text = (
+                "\n\n".join(body_parts)
+                if type(body_parts) is list
+                and body_parts
+                and all(type(part) is str for part in body_parts)
+                else None
+            )
+        if type(body_text) is not str or not body_text.strip():
+            continue
+        turns.append(
+            {
+                "turnId": message["providerMessageId"],
+                "speaker": "external" if external else "user",
+                "direction": "incoming" if external else "outgoing",
+                "text": body_text,
+                "timestamp": message.get("createdAt"),
+            }
+        )
+    if not turns or turns[-1]["turnId"] != provider_message_id:
+        raise SemanticAuthorityError("incoming_message_text_unavailable", 422)
+
+    thread_id = gmail_thread_id(authority.mailbox_id, provider_thread_id)
+    conversation_id = canonical_conversation_id(authority.mailbox_id, thread_id)
+    return AuthorizedSemanticSource(
+        authority=authority,
+        conversation_id=conversation_id,
+        provider_conversation_id=provider_thread_id,
+        latest_turn_id=provider_message_id,
+        occurred_at=occurred_at,
+        turns=tuple(turns),
+        revalidation_locator={
+            "provider": "google",
+            "providerMessageId": provider_message_id,
+            "authorityKind": "new_inbound",
         },
     )
 
@@ -773,6 +1104,71 @@ def _raw_imap_thread_identity(
     if message_id is None or root is None:
         return None
     return message_id, root
+
+
+def _raw_imap_new_inbound_thread_identity(
+    message: object,
+    source: dict,
+    *,
+    imap_uid: str,
+) -> tuple[str, str, bool] | None:
+    """Allow only a truly ancestry-free message to use its own RFC id as root."""
+    try:
+        metadata = extract_message_thread_metadata(
+            message,
+            imap_uid,
+            f"imap-uid-{imap_uid}",
+        )
+        raw_references = message.get_all("References", [])
+        raw_in_reply_to = message.get_all("In-Reply-To", [])
+    except Exception:
+        return None
+    if (
+        type(metadata) is not dict
+        or metadata.get("message_id_ambiguous") is not False
+        or type(raw_references) is not list
+        or type(raw_in_reply_to) is not list
+        or len(raw_references) > 1
+        or len(raw_in_reply_to) > 1
+        or any(type(value) is not str for value in (*raw_references, *raw_in_reply_to))
+    ):
+        return None
+    message_id = normalize_message_id_token(metadata.get("message_id"))
+    source_message_id = normalize_message_id_token(source.get("messageId"))
+    if message_id is None or source_message_id != message_id:
+        return None
+
+    source_root = _root_from_imap_source(source)
+    has_raw_ancestry = bool(raw_references or raw_in_reply_to)
+    if has_raw_ancestry:
+        raw_identity = _raw_imap_thread_identity(message, imap_uid=imap_uid)
+        if source_root is None or raw_identity != (message_id, source_root):
+            # Present-but-empty, malformed, duplicated, or disagreeing ancestry
+            # is not a singleton and must never receive a self-root fallback.
+            return None
+        return message_id, source_root, True
+    if source_root is not None:
+        return None
+    return message_id, message_id, False
+
+
+def _imap_message_is_server_derived_bulk_or_spam(message: object) -> bool | None:
+    try:
+        selected: dict[str, tuple[str, ...]] = {}
+        for name in (
+            "X-Spam-Flag",
+            "X-Spam-Status",
+            "Precedence",
+            "List-Id",
+            "List-Unsubscribe",
+        ):
+            values = message.get_all(name, [])
+            if type(values) is not list or any(type(value) is not str for value in values):
+                return None
+            selected[name.casefold()] = tuple(values)
+    except Exception:
+        return None
+    return _headers_are_server_derived_bulk_or_spam(selected)
 
 
 def _strict_mime_transfer_decode(
@@ -1138,6 +1534,186 @@ def load_authorized_imap_incoming(
     )
 
 
+def load_authorized_imap_new_inbound(
+    headers,
+    authority: PriorityAuthority,
+    *,
+    provider_folder: object,
+    uid_validity: object,
+    imap_uid: object,
+) -> AuthorizedSemanticSource:
+    """Load one exact custom-IMAP Inbox delivery without an outgoing event."""
+    if authority.provider != "custom_imap":
+        raise SemanticAuthorityError("provider_mismatch", 400)
+    if (
+        not _valid_imap_folder(provider_folder)
+        or not _valid_imap_number(uid_validity)
+        or not _valid_imap_number(imap_uid)
+    ):
+        raise SemanticAuthorityError("invalid_incoming_locator", 400)
+    if provider_folder != "INBOX":
+        raise SemanticAuthorityError("incoming_message_not_in_inbox", 409)
+    resolution = resolve_authenticated_imap_mailbox(
+        headers,
+        authority.mailbox_id,
+        require_smtp=False,
+    )
+    if resolution.get("status") != "ok" or type(resolution.get("mailbox")) is not dict:
+        error = resolution.get("error") if type(resolution.get("error")) is dict else {}
+        status = int(error.get("status_code") or 503)
+        raise SemanticAuthorityError("imap_authority_unavailable", status)
+    mailbox = resolution["mailbox"]
+
+    connection = _open_authenticated_imap(mailbox)
+    try:
+        source_result = read_imap_reply_source(
+            connection,
+            folder=provider_folder,
+            uid=imap_uid,
+            expected_uid_validity=uid_validity,
+        )
+        if source_result.get("ok") is not True or type(source_result.get("source")) is not dict:
+            error = source_result.get("error") if type(source_result.get("error")) is dict else {}
+            code = error.get("code")
+            status = 409 if code in {
+                "uid_validity_changed",
+                "message_not_found",
+                "imap_reply_source_unthreadable",
+            } else 503
+            raise SemanticAuthorityError("incoming_message_identity_unconfirmed", status)
+        source = source_result["source"]
+        if (
+            source.get("providerFolder") != provider_folder
+            or source.get("uidValidity") != uid_validity
+            or source.get("imapUid") != imap_uid
+        ):
+            raise SemanticAuthorityError("incoming_message_identity_unconfirmed", 409)
+
+        try:
+            fetch_response = connection.uid(
+                "FETCH",
+                imap_uid,
+                "(UID INTERNALDATE BODY.PEEK[])",
+            )
+        except Exception:
+            raise SemanticAuthorityError("imap_unavailable", 503) from None
+        if _is_absent_uid_fetch_response(fetch_response):
+            raise SemanticAuthorityError("incoming_message_not_found", 404)
+        parsed_fetch = _parse_imap_semantic_fetch(
+            fetch_response,
+            expected_uid=imap_uid,
+        )
+        if parsed_fetch is None:
+            raise SemanticAuthorityError("incoming_message_identity_unconfirmed", 409)
+        raw_message, occurred_at, provider_timestamp = parsed_fetch
+        try:
+            message = BytesParser().parsebytes(raw_message)
+            body_text = _extract_semantic_mime_body(message)
+            from_headers = message.get_all("From", [])
+            if (
+                type(from_headers) is not list
+                or len(from_headers) != 1
+                or type(from_headers[0]) is not str
+            ):
+                raise ValueError("invalid From authority")
+            from_header = from_headers[0]
+        except Exception:
+            raise SemanticAuthorityError("incoming_message_identity_unconfirmed", 409) from None
+        if body_text is None:
+            raise SemanticAuthorityError("incoming_message_text_unavailable", 422)
+        routing_noise = _imap_message_is_server_derived_bulk_or_spam(message)
+        if routing_noise is None:
+            raise SemanticAuthorityError("incoming_message_identity_unconfirmed", 409)
+        if routing_noise:
+            raise SemanticAuthorityError("incoming_message_noise_excluded", 409)
+        focus_preferences = authority.inbox_record.get("focusPreferences")
+        if type(focus_preferences) is not dict:
+            focus_preferences = None
+        internal_role = authority.inbox_record.get("internalRole")
+        if type(internal_role) is not str:
+            internal_role = None
+        try:
+            routing_preview = to_message_preview(
+                message,
+                0,
+                authority.mailbox_email,
+                False,
+                imap_uid,
+                False,
+                internal_role=internal_role,
+                focus_preferences=focus_preferences,
+            )
+        except Exception:
+            raise SemanticAuthorityError(
+                "incoming_message_identity_unconfirmed",
+                409,
+            ) from None
+        routing_rejection = _new_inbound_preview_routing_rejection(routing_preview)
+        if routing_rejection is not None:
+            raise SemanticAuthorityError(routing_rejection, 409)
+        sender_email = _single_header_address(from_header)
+        if sender_email is None or sender_email in authority.owned_emails:
+            raise SemanticAuthorityError("incoming_message_not_external", 409)
+        raw_identity = _raw_imap_new_inbound_thread_identity(
+            message,
+            source,
+            imap_uid=imap_uid,
+        )
+        if raw_identity is None:
+            raise SemanticAuthorityError("incoming_message_identity_unconfirmed", 409)
+        latest_turn_id, root_message_id, require_predecessor = raw_identity
+        thread_id = custom_imap_thread_id(authority.mailbox_id, root_message_id)
+        conversation_id = canonical_conversation_id(authority.mailbox_id, thread_id)
+
+        latest_result = read_imap_latest_thread_identity(
+            connection,
+            mailbox_key=authority.mailbox_id,
+            folder=provider_folder,
+            expected_uid_validity=uid_validity,
+            target_uid=imap_uid,
+            expected_thread_id=thread_id,
+            require_predecessor=require_predecessor,
+        )
+        latest = latest_result.get("latest") if type(latest_result) is dict else None
+        if (
+            type(latest_result) is not dict
+            or latest_result.get("ok") is not True
+            or type(latest) is not dict
+            or latest.get("providerFolder") != provider_folder
+            or latest.get("uidValidity") != uid_validity
+            or latest.get("imapUid") != imap_uid
+            or latest.get("threadId") != thread_id
+            or latest.get("rfcMessageId") != latest_turn_id
+        ):
+            raise SemanticAuthorityError("incoming_message_stale", 409)
+    finally:
+        _safe_close_imap(connection)
+    return AuthorizedSemanticSource(
+        authority=authority,
+        conversation_id=conversation_id,
+        provider_conversation_id=root_message_id,
+        latest_turn_id=latest_turn_id,
+        occurred_at=occurred_at,
+        turns=(
+            {
+                "turnId": latest_turn_id,
+                "speaker": "external",
+                "direction": "incoming",
+                "text": body_text,
+                "timestamp": provider_timestamp,
+            },
+        ),
+        revalidation_locator={
+            "provider": "custom_imap",
+            "providerFolder": provider_folder,
+            "uidValidity": uid_validity,
+            "imapUid": imap_uid,
+            "rfcMessageId": latest_turn_id,
+            "authorityKind": "new_inbound",
+        },
+    )
+
+
 def _resolve_imap_mailbox_for_authority(headers, authority: PriorityAuthority) -> dict:
     resolution = resolve_authenticated_imap_mailbox(
         headers,
@@ -1208,6 +1784,139 @@ def prove_authorized_imap_latest(
         )
     ):
         raise SemanticAuthorityError("incoming_message_stale", 409)
+
+
+def _prove_authorized_gmail_new_inbound_latest(
+    authority: PriorityAuthority,
+    *,
+    provider_conversation_id: str,
+    conversation_id: str,
+    provider_message_id: str,
+) -> None:
+    if authority.provider != "google":
+        raise SemanticAuthorityError("provider_mismatch", 400)
+    if not _valid_identifier(provider_message_id, 256):
+        raise SemanticAuthorityError("invalid_incoming_locator", 400)
+    current_thread_id, target, _messages = _load_gmail_new_inbound_snapshot(
+        authority,
+        provider_message_id=provider_message_id,
+    )
+    expected_thread_id = gmail_thread_id(authority.mailbox_id, current_thread_id)
+    if (
+        current_thread_id != provider_conversation_id
+        or canonical_conversation_id(authority.mailbox_id, expected_thread_id)
+        != conversation_id
+        or target.get("providerMessageId") != provider_message_id
+    ):
+        raise SemanticAuthorityError("conversation_mismatch", 409)
+
+
+def _prove_authorized_imap_new_inbound_latest(
+    headers,
+    authority: PriorityAuthority,
+    *,
+    provider_conversation_id: str,
+    conversation_id: str,
+    provider_folder: str,
+    uid_validity: str,
+    target_uid: str,
+    expected_rfc_message_id: str,
+) -> None:
+    if authority.provider != "custom_imap":
+        raise SemanticAuthorityError("provider_mismatch", 400)
+    if (
+        provider_folder != "INBOX"
+        or not _valid_imap_number(uid_validity)
+        or not _valid_imap_number(target_uid)
+    ):
+        raise SemanticAuthorityError("incoming_message_not_in_inbox", 409)
+    normalized_root = normalize_message_id_token(provider_conversation_id)
+    normalized_target = normalize_message_id_token(expected_rfc_message_id)
+    if normalized_root is None or normalized_target is None:
+        raise SemanticAuthorityError("conversation_mismatch", 409)
+    expected_thread_id = custom_imap_thread_id(authority.mailbox_id, normalized_root)
+    if canonical_conversation_id(
+        authority.mailbox_id,
+        expected_thread_id,
+    ) != conversation_id:
+        raise SemanticAuthorityError("conversation_mismatch", 409)
+    mailbox = _resolve_imap_mailbox_for_authority(headers, authority)
+    connection = _open_authenticated_imap(mailbox)
+    try:
+        result = read_imap_latest_thread_identity(
+            connection,
+            mailbox_key=authority.mailbox_id,
+            folder=provider_folder,
+            expected_uid_validity=uid_validity,
+            target_uid=target_uid,
+            expected_thread_id=expected_thread_id,
+            require_predecessor=normalized_root != normalized_target,
+        )
+    finally:
+        _safe_close_imap(connection)
+    latest = result.get("latest") if type(result) is dict else None
+    if (
+        type(result) is not dict
+        or result.get("ok") is not True
+        or type(latest) is not dict
+        or latest.get("providerFolder") != provider_folder
+        or latest.get("uidValidity") != uid_validity
+        or latest.get("imapUid") != target_uid
+        or latest.get("threadId") != expected_thread_id
+        or latest.get("rfcMessageId") != normalized_target
+    ):
+        raise SemanticAuthorityError("incoming_message_stale", 409)
+
+
+def prove_authorized_new_inbound_source_current(
+    headers,
+    source: AuthorizedSemanticSource,
+) -> None:
+    """Revalidate only a source minted by a new-inbound authority loader."""
+    locator = source.revalidation_locator
+    if (
+        type(locator) is not dict
+        or locator.get("provider") != source.authority.provider
+        or locator.get("authorityKind") != "new_inbound"
+    ):
+        raise SemanticAuthorityError("incoming_message_identity_unconfirmed", 409)
+    if source.authority.provider == "google":
+        provider_message_id = locator.get("providerMessageId")
+        if type(provider_message_id) is not str:
+            raise SemanticAuthorityError("incoming_message_identity_unconfirmed", 409)
+        _prove_authorized_gmail_new_inbound_latest(
+            source.authority,
+            provider_conversation_id=source.provider_conversation_id,
+            conversation_id=source.conversation_id,
+            provider_message_id=provider_message_id,
+        )
+        return
+    if source.authority.provider != "custom_imap":
+        raise SemanticAuthorityError("provider_mismatch", 400)
+    provider_folder = locator.get("providerFolder")
+    uid_validity = locator.get("uidValidity")
+    target_uid = locator.get("imapUid")
+    expected_rfc_message_id = locator.get("rfcMessageId")
+    if not all(
+        type(value) is str
+        for value in (
+            provider_folder,
+            uid_validity,
+            target_uid,
+            expected_rfc_message_id,
+        )
+    ):
+        raise SemanticAuthorityError("incoming_message_identity_unconfirmed", 409)
+    _prove_authorized_imap_new_inbound_latest(
+        headers,
+        source.authority,
+        provider_conversation_id=source.provider_conversation_id,
+        conversation_id=source.conversation_id,
+        provider_folder=provider_folder,
+        uid_validity=uid_validity,
+        target_uid=target_uid,
+        expected_rfc_message_id=expected_rfc_message_id,
+    )
 
 
 def prove_authorized_source_current(

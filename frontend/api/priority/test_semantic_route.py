@@ -13,7 +13,11 @@ from .authority import (
     gmail_thread_id,
 )
 from .event_reference import issue_outgoing_event_reference
-from .semantic_config import SemanticMode, SemanticRuntimeConfig
+from .semantic_config import (
+    NewInboundSemanticMode,
+    SemanticMode,
+    SemanticRuntimeConfig,
+)
 from .semantic_config import load_semantic_runtime_config
 from .semantic_errors import SemanticProviderTimeoutError
 from .semantic_route import process_semantic_request
@@ -22,8 +26,10 @@ from .semantic_types import (
     SemanticAssessment,
     SemanticReasonCode,
     SemanticState,
+    SpeakerRole,
+    TurnDirection,
 )
-from .store import SemanticAssessmentStore, SemanticCacheScope
+from .store import LEASE_TTL_SECONDS, SemanticAssessmentStore, SemanticCacheScope
 from .test_store import MemoryRedis
 
 
@@ -38,6 +44,16 @@ USER_ID = _account("usr_", 2)
 AUTHORED_TEXT = "Everything is complete from my side."
 CONFIG = SemanticRuntimeConfig(mode=SemanticMode.SHADOW, model="test-model")
 ACTIVE_CONFIG = SemanticRuntimeConfig(mode=SemanticMode.ACTIVE, model="test-model")
+NEW_INBOUND_CONFIG = SemanticRuntimeConfig(
+    mode=SemanticMode.ACTIVE,
+    model="test-model",
+    new_inbound_mode=NewInboundSemanticMode.SHADOW,
+)
+NEW_INBOUND_ONLY_CONFIG = SemanticRuntimeConfig(
+    mode=SemanticMode.OFF,
+    model="test-model",
+    new_inbound_mode=NewInboundSemanticMode.SHADOW,
+)
 
 
 def authority() -> PriorityAuthority:
@@ -151,6 +167,82 @@ def gmail_incoming_request(
     }
 
 
+def gmail_new_inbound_request(
+    *,
+    provider_message_id: str = "new-inbound-1",
+) -> dict:
+    return {
+        "mailboxId": "mailbox-1",
+        "trigger": "new_inbound",
+        "incomingLocator": {
+            "provider": "google",
+            "providerMessageId": provider_message_id,
+        },
+    }
+
+
+def custom_new_inbound_request() -> dict:
+    return {
+        "mailboxId": "mailbox-1",
+        "trigger": "new_inbound",
+        "incomingLocator": {
+            "provider": "custom_imap",
+            "providerFolder": "INBOX",
+            "uidValidity": "7",
+            "imapUid": "11",
+        },
+    }
+
+
+def new_inbound_source(
+    current: PriorityAuthority,
+    *,
+    latest_turn_id: str = "new-inbound-1",
+    text: str = "Can you confirm the release date tomorrow?",
+    provider_conversation_id: str | None = None,
+) -> AuthorizedSemanticSource:
+    provider_thread_id = provider_conversation_id or (
+        "new-thread-1" if current.provider == "google" else "new-root@example.net"
+    )
+    return AuthorizedSemanticSource(
+        authority=current,
+        conversation_id=canonical_conversation_id(
+            current.mailbox_id,
+            (
+                gmail_thread_id(current.mailbox_id, provider_thread_id)
+                if current.provider == "google"
+                else "imap:rfc:mailbox-1:new-root"
+            ),
+        ),
+        provider_conversation_id=provider_thread_id,
+        latest_turn_id=latest_turn_id,
+        occurred_at=30_000,
+        turns=(
+            {
+                "turnId": latest_turn_id,
+                "speaker": "external",
+                "direction": "incoming",
+                "text": text,
+                "timestamp": "2026-01-01T00:00:30Z",
+            },
+        ),
+        revalidation_locator=(
+            {
+                "provider": "google",
+                "providerMessageId": latest_turn_id,
+            }
+            if current.provider == "google"
+            else {
+                "provider": "custom_imap",
+                "providerFolder": "INBOX",
+                "uidValidity": "7",
+                "imapUid": "11",
+                "rfcMessageId": latest_turn_id,
+            }
+        ),
+    )
+
+
 ASSESSMENT = SemanticAssessment(
     state=SemanticState.RESOLVED,
     confidence=0.98,
@@ -164,9 +256,11 @@ class FixedAdapter:
     def __init__(self, assessment=ASSESSMENT) -> None:
         self.assessment = assessment
         self.calls = 0
+        self.windows = []
 
-    def assess(self, _window):
+    def assess(self, window):
         self.calls += 1
+        self.windows.append(window)
         return self.assessment
 
 
@@ -191,6 +285,18 @@ class LeaseLosingTimeoutAdapter:
         lease_key = next(key for key in self.redis.values if ":lease:" in key)
         self.redis.values[lease_key] = "new-owner-token"
         raise SemanticProviderTimeoutError("fixed")
+
+
+class LeaseLosingSuccessAdapter(FixedAdapter):
+    def __init__(self, redis: MemoryRedis, assessment=ASSESSMENT) -> None:
+        super().__init__(assessment)
+        self.redis = redis
+
+    def assess(self, window):
+        result = super().assess(window)
+        lease_key = next(key for key in self.redis.values if ":lease:" in key)
+        self.redis.values[lease_key] = "new-owner-token"
+        return result
 
 
 class StaleDuringCallAdapter:
@@ -253,6 +359,37 @@ class SemanticRouteTests(unittest.TestCase):
             adapter=adapter,
             now=now,
         )
+
+    def process_new_inbound_fixture(
+        self,
+        *,
+        fixture_id: str,
+        text: str,
+        assessment: SemanticAssessment,
+    ):
+        source = new_inbound_source(
+            self.current,
+            latest_turn_id=fixture_id,
+            text=text,
+            provider_conversation_id=f"thread-{fixture_id}",
+        )
+        adapter = FixedAdapter(assessment)
+        with (
+            patch(
+                "api.priority.semantic_route.load_authorized_gmail_new_inbound",
+                return_value=source,
+            ),
+            patch(
+                "api.priority.semantic_route.prove_authorized_new_inbound_source_current",
+                return_value=None,
+            ),
+        ):
+            response = self.process(
+                gmail_new_inbound_request(provider_message_id=fixture_id),
+                adapter,
+                config=NEW_INBOUND_CONFIG,
+            )
+        return response, adapter
 
     def test_assessed_then_cached_response_matches_strict_client_shape(self):
         adapter = FixedAdapter()
@@ -855,6 +992,704 @@ class SemanticRouteTests(unittest.TestCase):
         self.assertEqual(adapter.calls, 1)
         self.assertEqual(len(self.redis.commands), 2)
         self.assertTrue(all(command[0] == "GET" for command in self.redis.commands))
+
+    def test_new_inbound_gmail_is_strict_shadow_even_with_open_loop_active(self):
+        source = new_inbound_source(self.current)
+        actionable = SemanticAssessment(
+            state=SemanticState.NEEDS_USER_ACTION,
+            confidence=0.99,
+            reason_code=SemanticReasonCode.EXPLICIT_REQUEST,
+        )
+        adapter = FixedAdapter(actionable)
+        with (
+            patch(
+                "api.priority.semantic_route.load_authorized_gmail_new_inbound",
+                return_value=source,
+            ) as loader,
+            patch(
+                "api.priority.semantic_route.prove_authorized_new_inbound_source_current",
+                return_value=None,
+            ) as proof,
+        ):
+            assessed = self.process(
+                gmail_new_inbound_request(),
+                adapter,
+                config=NEW_INBOUND_CONFIG,
+            )
+            cached = self.process(
+                gmail_new_inbound_request(),
+                adapter,
+                config=NEW_INBOUND_CONFIG,
+            )
+
+        self.assertTrue(NEW_INBOUND_CONFIG.can_mutate_priority)
+        self.assertEqual(assessed.status_code, 200)
+        self.assertEqual(assessed.payload["status"], "assessed")
+        self.assertEqual(cached.payload["status"], "cached")
+        self.assertEqual(adapter.calls, 1)
+        self.assertEqual(loader.call_count, 2)
+        loader.assert_called_with(
+            self.current,
+            provider_message_id="new-inbound-1",
+        )
+        self.assertEqual(proof.call_count, 2)
+        self.provider_proof.assert_not_called()
+        self.assertEqual(
+            set(assessed.payload),
+            {
+                "ok",
+                "status",
+                "assessment",
+                "effectiveSemanticState",
+                "assessedAt",
+                "identity",
+                "semanticTrigger",
+                "newInboundMode",
+                "priorityEffect",
+            },
+        )
+        self.assertEqual(assessed.payload["semanticTrigger"], "new_inbound")
+        self.assertEqual(assessed.payload["newInboundMode"], "shadow")
+        self.assertEqual(assessed.payload["priorityEffect"], "observe_only")
+        self.assertEqual(
+            assessed.payload["assessment"],
+            actionable.to_wire_dict(),
+        )
+        self.assertEqual(
+            assessed.payload["effectiveSemanticState"],
+            "needs_user_action",
+        )
+        self.assertNotIn("semanticMode", assessed.payload)
+        self.assertNotIn("activeEventRef", assessed.payload)
+
+    def test_new_inbound_multilingual_actionable_and_informational_fixtures(self):
+        actionable = (
+            "Can you confirm the release date tomorrow?",
+            "Kun je de artwork vandaag nog sturen?",
+            "Kannst du bitte die Rechnung schicken?",
+            "Peux-tu confirmer la date de sortie ?",
+            "¿Puedes enviarme el contrato?",
+            "Puoi confermare la data?",
+            "Pode enviar o contrato?",
+        )
+        informational = (
+            "FYI, the release is now live.",
+            "Ter info: de release staat nu live.",
+            "Zur Information: Die Veröffentlichung ist jetzt live.",
+            "Pour information, la sortie est maintenant en ligne.",
+            "Para tu información, el lanzamiento ya está disponible.",
+            "Per informazione, la pubblicazione è ora online.",
+            "Para sua informação, o lançamento já está no ar.",
+        )
+        cases = (
+            *(
+                (
+                    f"actionable-{index}",
+                    text,
+                    SemanticAssessment(
+                        state=SemanticState.NEEDS_USER_ACTION,
+                        confidence=0.99,
+                        reason_code=SemanticReasonCode.EXPLICIT_REQUEST,
+                    ),
+                )
+                for index, text in enumerate(actionable)
+            ),
+            *(
+                (
+                    f"informational-{index}",
+                    text,
+                    SemanticAssessment(
+                        state=SemanticState.INFORMATIONAL,
+                        confidence=0.99,
+                        reason_code=SemanticReasonCode.INFORMATIONAL_UPDATE,
+                    ),
+                )
+                for index, text in enumerate(informational)
+            ),
+        )
+        for fixture_id, text, assessment in cases:
+            with self.subTest(fixture_id=fixture_id, text=text):
+                response, adapter = self.process_new_inbound_fixture(
+                    fixture_id=fixture_id,
+                    text=text,
+                    assessment=assessment,
+                )
+
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.payload["status"], "assessed")
+                self.assertEqual(response.payload["semanticTrigger"], "new_inbound")
+                self.assertEqual(response.payload["newInboundMode"], "shadow")
+                self.assertEqual(response.payload["priorityEffect"], "observe_only")
+                self.assertEqual(
+                    response.payload["assessment"],
+                    assessment.to_wire_dict(),
+                )
+                self.assertEqual(adapter.calls, 1)
+                self.assertEqual(len(adapter.windows[0].turns), 1)
+                self.assertEqual(
+                    adapter.windows[0].turns[0].speaker,
+                    SpeakerRole.EXTERNAL,
+                )
+                self.assertEqual(
+                    adapter.windows[0].turns[0].direction,
+                    TurnDirection.INCOMING,
+                )
+                self.assertEqual(adapter.windows[0].turns[0].text, text)
+
+    def test_new_inbound_ambiguity_controls_remain_observational(self):
+        cases = (
+            (
+                "sounds-good",
+                "Sounds good.",
+                SemanticState.UNCERTAIN,
+                SemanticReasonCode.AMBIGUOUS_CONTEXT,
+            ),
+            (
+                "yes",
+                "Yes.",
+                SemanticState.UNCERTAIN,
+                SemanticReasonCode.AMBIGUOUS_CONTEXT,
+            ),
+            (
+                "thanks",
+                "Thanks.",
+                SemanticState.INFORMATIONAL,
+                SemanticReasonCode.INFORMATIONAL_UPDATE,
+            ),
+            (
+                "contextless-can-you",
+                "Can you?",
+                SemanticState.UNCERTAIN,
+                SemanticReasonCode.AMBIGUOUS_CONTEXT,
+            ),
+        )
+        for fixture_id, text, state, reason in cases:
+            with self.subTest(fixture_id=fixture_id):
+                assessment = SemanticAssessment(
+                    state=state,
+                    confidence=0.99,
+                    reason_code=reason,
+                )
+                response, adapter = self.process_new_inbound_fixture(
+                    fixture_id=fixture_id,
+                    text=text,
+                    assessment=assessment,
+                )
+
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(
+                    response.payload["assessment"],
+                    assessment.to_wire_dict(),
+                )
+                self.assertEqual(response.payload["priorityEffect"], "observe_only")
+                self.assertEqual(adapter.calls, 1)
+                self.assertEqual(adapter.windows[0].turns[0].text, text)
+
+    def test_new_inbound_timeout_is_negative_cached_without_a_second_model_call(self):
+        source = new_inbound_source(
+            self.current,
+            latest_turn_id="new-inbound-timeout",
+        )
+        adapter = TimeoutAdapter()
+        with (
+            patch(
+                "api.priority.semantic_route.load_authorized_gmail_new_inbound",
+                return_value=source,
+            ) as loader,
+            patch(
+                "api.priority.semantic_route.prove_authorized_new_inbound_source_current",
+                return_value=None,
+            ) as proof,
+        ):
+            payload = gmail_new_inbound_request(
+                provider_message_id="new-inbound-timeout"
+            )
+            first = self.process(payload, adapter, config=NEW_INBOUND_CONFIG)
+            second = self.process(payload, adapter, config=NEW_INBOUND_CONFIG)
+
+        self.assertEqual(first.status_code, 202)
+        self.assertEqual(first.payload["status"], "deferred")
+        self.assertEqual(first.payload["retryAfterSeconds"], 300)
+        self.assertEqual(first.payload["semanticTrigger"], "new_inbound")
+        self.assertEqual(first.payload["newInboundMode"], "shadow")
+        self.assertEqual(first.payload["priorityEffect"], "observe_only")
+        self.assertEqual(second.payload["status"], "deferred")
+        self.assertEqual(adapter.calls, 1)
+        self.assertEqual(loader.call_count, 2)
+        proof.assert_not_called()
+        self.assertEqual(
+            len(
+                [
+                    command
+                    for command in self.redis.commands
+                    if command[0] == "EVAL"
+                    and command[1] == store_module._COMMIT_NEGATIVE_SCRIPT
+                ]
+            ),
+            1,
+        )
+
+    def test_new_inbound_lease_contention_returns_pending_without_model_work(self):
+        source = new_inbound_source(
+            self.current,
+            latest_turn_id="new-inbound-contended",
+        )
+        scope = SemanticCacheScope(
+            workspace_id=self.current.workspace_id,
+            user_id=self.current.user_id,
+            mailbox_id=self.current.mailbox_id,
+            provider=self.current.provider,
+            conversation_id=source.conversation_id,
+            latest_turn_id=source.latest_turn_id,
+            semantic_version=NEW_INBOUND_CONFIG.schema_version,
+            model_version=NEW_INBOUND_CONFIG.model,
+        )
+        self.assertIsNotNone(self.store.try_acquire_lease(scope))
+        adapter = FixedAdapter()
+        with (
+            patch(
+                "api.priority.semantic_route.load_authorized_gmail_new_inbound",
+                return_value=source,
+            ),
+            patch(
+                "api.priority.semantic_route.prove_authorized_new_inbound_source_current",
+                return_value=None,
+            ) as proof,
+        ):
+            response = self.process(
+                gmail_new_inbound_request(
+                    provider_message_id="new-inbound-contended"
+                ),
+                adapter,
+                config=NEW_INBOUND_CONFIG,
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.payload["status"], "pending")
+        self.assertEqual(response.payload["retryAfterSeconds"], LEASE_TTL_SECONDS)
+        self.assertEqual(response.payload["priorityEffect"], "observe_only")
+        self.assertEqual(adapter.calls, 0)
+        proof.assert_not_called()
+
+    def test_new_inbound_lost_lease_cannot_commit_model_result(self):
+        source = new_inbound_source(
+            self.current,
+            latest_turn_id="new-inbound-lost-lease",
+        )
+        adapter = LeaseLosingSuccessAdapter(self.redis)
+        with (
+            patch(
+                "api.priority.semantic_route.load_authorized_gmail_new_inbound",
+                return_value=source,
+            ),
+            patch(
+                "api.priority.semantic_route.prove_authorized_new_inbound_source_current",
+                return_value=None,
+            ) as proof,
+        ):
+            response = self.process(
+                gmail_new_inbound_request(
+                    provider_message_id="new-inbound-lost-lease"
+                ),
+                adapter,
+                config=NEW_INBOUND_CONFIG,
+            )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.payload["status"], "pending")
+        self.assertEqual(response.payload["priorityEffect"], "observe_only")
+        self.assertEqual(adapter.calls, 1)
+        proof.assert_called_once_with([], source)
+        self.assertFalse(any(":result:" in key for key in self.redis.values))
+        self.assertTrue(
+            any(
+                ":lease:" in key and value == "new-owner-token"
+                for key, value in self.redis.values.items()
+            )
+        )
+
+    def test_new_inbound_post_model_provider_staleness_rejects_commit(self):
+        source = new_inbound_source(
+            self.current,
+            latest_turn_id="new-inbound-stale-after-model",
+        )
+        adapter = FixedAdapter()
+        with (
+            patch(
+                "api.priority.semantic_route.load_authorized_gmail_new_inbound",
+                return_value=source,
+            ),
+            patch(
+                "api.priority.semantic_route.prove_authorized_new_inbound_source_current",
+                side_effect=SemanticAuthorityError("incoming_message_stale", 409),
+            ) as proof,
+        ):
+            response = self.process(
+                gmail_new_inbound_request(
+                    provider_message_id="new-inbound-stale-after-model"
+                ),
+                adapter,
+                config=NEW_INBOUND_CONFIG,
+            )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.payload["error"]["code"], "incoming_message_stale")
+        self.assertNotIn("assessment", response.payload)
+        self.assertEqual(adapter.calls, 1)
+        proof.assert_called_once_with([], source)
+        self.assertFalse(any(":result:" in key for key in self.redis.values))
+        self.assertFalse(any(":lease:" in key for key in self.redis.values))
+
+    def test_open_loop_outgoing_and_incoming_keep_active_resolved_suppression_when_new_inbound_is_shadow(self):
+        outgoing_adapter = FixedAdapter(ASSESSMENT)
+        outgoing = self.process(
+            request(),
+            outgoing_adapter,
+            config=NEW_INBOUND_CONFIG,
+        )
+
+        incoming_source = AuthorizedSemanticSource(
+            authority=self.current,
+            conversation_id=canonical_conversation_id(
+                "mailbox-1",
+                gmail_thread_id("mailbox-1", "thread-1"),
+            ),
+            provider_conversation_id="thread-1",
+            latest_turn_id="incoming-2",
+            occurred_at=12_000,
+            turns=(
+                {
+                    "turnId": "incoming-2",
+                    "speaker": "external",
+                    "direction": "incoming",
+                    "text": "Thanks, everything is sorted.",
+                    "timestamp": "2026-01-01T00:00:20Z",
+                },
+            ),
+            revalidation_locator={
+                "provider": "google",
+                "providerMessageId": "incoming-2",
+            },
+        )
+        incoming_adapter = FixedAdapter(ASSESSMENT)
+        with patch(
+            "api.priority.semantic_route.load_authorized_gmail_incoming",
+            return_value=incoming_source,
+        ) as loader:
+            incoming = self.process(
+                gmail_incoming_request(),
+                incoming_adapter,
+                config=NEW_INBOUND_CONFIG,
+            )
+
+        self.assertTrue(NEW_INBOUND_CONFIG.can_mutate_priority)
+        self.assertTrue(NEW_INBOUND_CONFIG.new_inbound_enabled)
+        for name, response in (("outgoing", outgoing), ("incoming", incoming)):
+            with self.subTest(name=name):
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.payload["status"], "assessed")
+                self.assertEqual(response.payload["semanticMode"], "active")
+                self.assertEqual(
+                    response.payload["priorityEffect"],
+                    "suppress_automatic_open_loop",
+                )
+                self.assertNotIn("semanticTrigger", response.payload)
+                self.assertNotIn("newInboundMode", response.payload)
+        self.assertEqual(outgoing_adapter.calls, 1)
+        self.assertEqual(incoming_adapter.calls, 1)
+        loader.assert_called_once()
+
+    def test_new_inbound_unauthenticated_fails_before_provider_kv_or_model(self):
+        self.authority_resolver.side_effect = SemanticAuthorityError(
+            "unauthorized",
+            401,
+        )
+        adapter = FixedAdapter()
+        with patch(
+            "api.priority.semantic_route.load_authorized_gmail_new_inbound",
+            side_effect=AssertionError("provider load must not run"),
+        ) as loader:
+            response = self.process(
+                gmail_new_inbound_request(),
+                adapter,
+                config=NEW_INBOUND_CONFIG,
+            )
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.payload["error"]["code"], "unauthorized")
+        loader.assert_not_called()
+        self.assertEqual(self.redis.commands, [])
+        self.assertEqual(adapter.calls, 0)
+
+    def test_new_inbound_provider_mismatch_fails_before_provider_kv_or_model(self):
+        adapter = FixedAdapter()
+        with (
+            patch(
+                "api.priority.semantic_route.load_authorized_gmail_new_inbound",
+                side_effect=AssertionError("Gmail provider load must not run"),
+            ) as gmail_loader,
+            patch(
+                "api.priority.semantic_route.load_authorized_imap_new_inbound",
+                side_effect=AssertionError("IMAP provider load must not run"),
+            ) as imap_loader,
+        ):
+            response = self.process(
+                custom_new_inbound_request(),
+                adapter,
+                config=NEW_INBOUND_CONFIG,
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.payload["error"]["code"], "provider_mismatch")
+        gmail_loader.assert_not_called()
+        imap_loader.assert_not_called()
+        self.assertEqual(self.redis.commands, [])
+        self.assertEqual(adapter.calls, 0)
+
+    def test_new_inbound_cross_mailbox_request_fails_before_provider_kv_or_model(self):
+        self.authority_resolver.side_effect = SemanticAuthorityError(
+            "mailbox_not_found",
+            404,
+        )
+        payload = gmail_new_inbound_request()
+        payload["mailboxId"] = "mailbox-2"
+        adapter = FixedAdapter()
+        with patch(
+            "api.priority.semantic_route.load_authorized_gmail_new_inbound",
+            side_effect=AssertionError("provider load must not run"),
+        ) as loader:
+            response = self.process(
+                payload,
+                adapter,
+                config=NEW_INBOUND_CONFIG,
+            )
+
+        self.authority_resolver.assert_called_once_with([], "mailbox-2")
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.payload["error"]["code"], "mailbox_not_found")
+        loader.assert_not_called()
+        self.assertEqual(self.redis.commands, [])
+        self.assertEqual(adapter.calls, 0)
+
+    def test_new_inbound_cross_mailbox_provider_id_is_rejected_before_kv_or_model(self):
+        adapter = FixedAdapter()
+        with patch(
+            "api.priority.semantic_route.load_authorized_gmail_new_inbound",
+            side_effect=SemanticAuthorityError("event_scope_mismatch", 403),
+        ) as loader:
+            response = self.process(
+                gmail_new_inbound_request(
+                    provider_message_id="belongs-to-another-mailbox"
+                ),
+                adapter,
+                config=NEW_INBOUND_CONFIG,
+            )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.payload["error"]["code"], "event_scope_mismatch")
+        loader.assert_called_once_with(
+            self.current,
+            provider_message_id="belongs-to-another-mailbox",
+        )
+        self.assertEqual(self.redis.commands, [])
+        self.assertEqual(adapter.calls, 0)
+
+    def test_new_inbound_routing_exclusion_uses_bounded_public_error_before_kv_or_model(self):
+        adapter = FixedAdapter()
+        with patch(
+            "api.priority.semantic_route.load_authorized_gmail_new_inbound",
+            side_effect=SemanticAuthorityError(
+                "incoming_message_routing_excluded",
+                409,
+            ),
+        ) as loader:
+            response = self.process(
+                gmail_new_inbound_request(
+                    provider_message_id="routing-excluded-message"
+                ),
+                adapter,
+                config=NEW_INBOUND_CONFIG,
+            )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(
+            response.payload["error"]["code"],
+            "incoming_message_routing_excluded",
+        )
+        self.assertEqual(
+            set(response.payload["error"]),
+            {"code", "message"},
+        )
+        loader.assert_called_once()
+        self.assertEqual(self.redis.commands, [])
+        self.assertEqual(adapter.calls, 0)
+
+    def test_new_inbound_resolved_never_inherits_active_suppression_effect(self):
+        source = new_inbound_source(
+            self.current,
+            latest_turn_id="new-inbound-resolved",
+            text="Everything has been approved. No further action needed.",
+        )
+        with (
+            patch(
+                "api.priority.semantic_route.load_authorized_gmail_new_inbound",
+                return_value=source,
+            ),
+            patch(
+                "api.priority.semantic_route.prove_authorized_new_inbound_source_current",
+                return_value=None,
+            ),
+        ):
+            response = self.process(
+                gmail_new_inbound_request(
+                    provider_message_id="new-inbound-resolved"
+                ),
+                FixedAdapter(ASSESSMENT),
+                config=NEW_INBOUND_CONFIG,
+            )
+
+        self.assertEqual(response.payload["assessment"]["state"], "resolved")
+        self.assertEqual(response.payload["effectiveSemanticState"], "resolved")
+        self.assertEqual(response.payload["priorityEffect"], "observe_only")
+        self.assertNotIn("semanticMode", response.payload)
+
+    def test_new_inbound_shadow_can_run_while_open_loop_semantics_are_off(self):
+        source = new_inbound_source(
+            self.current,
+            latest_turn_id="new-inbound-only",
+        )
+        adapter = FixedAdapter(
+            SemanticAssessment(
+                state=SemanticState.NEEDS_USER_ACTION,
+                confidence=0.95,
+                reason_code=SemanticReasonCode.EXPLICIT_REQUEST,
+            )
+        )
+        with (
+            patch(
+                "api.priority.semantic_route.load_authorized_gmail_new_inbound",
+                return_value=source,
+            ),
+            patch(
+                "api.priority.semantic_route.prove_authorized_new_inbound_source_current",
+                return_value=None,
+            ),
+        ):
+            response = self.process(
+                gmail_new_inbound_request(
+                    provider_message_id="new-inbound-only"
+                ),
+                adapter,
+                config=NEW_INBOUND_ONLY_CONFIG,
+            )
+
+        self.assertFalse(NEW_INBOUND_ONLY_CONFIG.enabled)
+        self.assertTrue(NEW_INBOUND_ONLY_CONFIG.new_inbound_enabled)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.payload["newInboundMode"], "shadow")
+        self.assertEqual(response.payload["priorityEffect"], "observe_only")
+        self.assertEqual(adapter.calls, 1)
+
+    def test_new_inbound_off_is_independent_from_open_loop_active_and_does_no_work(self):
+        adapter = FixedAdapter()
+        with (
+            patch(
+                "api.priority.semantic_route.load_authorized_gmail_new_inbound",
+                side_effect=AssertionError("provider authority must stay off"),
+            ) as loader,
+            patch(
+                "api.priority.semantic_route.resolve_priority_hmac_secret",
+                side_effect=AssertionError("HMAC resolution must stay off"),
+            ),
+        ):
+            response = process_semantic_request(
+                [],
+                gmail_new_inbound_request(),
+                config=ACTIVE_CONFIG,
+                store=self.store,
+                adapter=adapter,
+                now=11,
+            )
+
+        self.assertTrue(ACTIVE_CONFIG.enabled)
+        self.assertTrue(ACTIVE_CONFIG.can_mutate_priority)
+        self.assertFalse(ACTIVE_CONFIG.new_inbound_enabled)
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.payload["status"], "deferred")
+        self.assertEqual(response.payload["semanticTrigger"], "new_inbound")
+        self.assertEqual(response.payload["newInboundMode"], "off")
+        self.assertEqual(response.payload["priorityEffect"], "observe_only")
+        self.assertNotIn("semanticMode", response.payload)
+        loader.assert_not_called()
+        self.provider_proof.assert_not_called()
+        self.assertEqual(self.redis.commands, [])
+        self.assertEqual(adapter.calls, 0)
+
+    def test_new_inbound_custom_imap_uses_exact_ref_less_locator(self):
+        current = custom_authority()
+        self.authority_resolver.return_value = current
+        source = new_inbound_source(
+            current,
+            latest_turn_id="new-message@example.net",
+        )
+        adapter = FixedAdapter(
+            SemanticAssessment(
+                state=SemanticState.NEEDS_USER_ACTION,
+                confidence=0.91,
+                reason_code=SemanticReasonCode.EXPLICIT_REQUEST,
+            )
+        )
+        with (
+            patch(
+                "api.priority.semantic_route.load_authorized_imap_new_inbound",
+                return_value=source,
+            ) as loader,
+            patch(
+                "api.priority.semantic_route.prove_authorized_new_inbound_source_current",
+                return_value=None,
+            ) as proof,
+        ):
+            response = self.process(
+                custom_new_inbound_request(),
+                adapter,
+                config=NEW_INBOUND_CONFIG,
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.payload["newInboundMode"], "shadow")
+        self.assertEqual(response.payload["priorityEffect"], "observe_only")
+        loader.assert_called_once_with(
+            [],
+            current,
+            provider_folder="INBOX",
+            uid_validity="7",
+            imap_uid="11",
+        )
+        proof.assert_called_once_with([], source)
+        self.provider_proof.assert_not_called()
+
+    def test_new_inbound_rejects_lookup_text_refs_and_authority_extras(self):
+        forbidden_fields = {
+            "operation": "lookup_current",
+            "activeEventRef": "signed-but-not-allowed",
+            "authoredText": "client text",
+            "subject": "client subject",
+            "sender": "external@example.net",
+            "workspaceId": WORKSPACE_ID,
+            "userId": USER_ID,
+        }
+        for key, value in forbidden_fields.items():
+            with self.subTest(key=key):
+                payload = gmail_new_inbound_request()
+                payload[key] = value
+                self.authority_resolver.reset_mock()
+                response = self.process(
+                    payload,
+                    FixedAdapter(),
+                    config=NEW_INBOUND_CONFIG,
+                )
+                self.assertEqual(response.status_code, 400)
+                self.authority_resolver.assert_not_called()
 
     def test_custom_incoming_rejects_refs_text_roots_and_authority_extras(self):
         forbidden_fields = {

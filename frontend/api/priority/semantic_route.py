@@ -14,7 +14,10 @@ from .authority import (
     PriorityAuthority,
     SemanticAuthorityError,
     load_authorized_gmail_incoming,
+    load_authorized_gmail_new_inbound,
     load_authorized_imap_incoming,
+    load_authorized_imap_new_inbound,
+    prove_authorized_new_inbound_source_current,
     prove_authorized_source_current,
     resolve_priority_authority,
     verify_claim_scope,
@@ -61,6 +64,7 @@ from .store import (
 
 MAX_ROUTE_AUTHORED_TEXT_CHARACTERS = MAX_AUTHORED_TEXT_CHARACTERS
 SEMANTIC_LOOKUP_OPERATION = "lookup_current"
+SEMANTIC_NEW_INBOUND_TRIGGER = "new_inbound"
 PRIORITY_EFFECT_OBSERVE_ONLY = "observe_only"
 PRIORITY_EFFECT_SUPPRESS_AUTOMATIC_OPEN_LOOP = (
     "suppress_automatic_open_loop"
@@ -94,6 +98,10 @@ def _authority_error(error: SemanticAuthorityError) -> SemanticRouteResponse:
         "incoming_message_not_found": "The incoming message was not found.",
         "incoming_message_stale": "The incoming message is not newer than the active event.",
         "incoming_message_not_external": "The incoming message is not from an external sender.",
+        "incoming_message_not_in_inbox": "The incoming message is not in the Inbox.",
+        "incoming_message_noise_excluded": "The incoming message is not eligible for semantic assessment.",
+        "incoming_message_routing_excluded": "The incoming message is not eligible for semantic assessment.",
+        "incoming_message_identity_unconfirmed": "The incoming message identity could not be confirmed.",
         "conversation_mismatch": "The incoming message belongs to another conversation.",
         "incoming_message_text_unavailable": "No bounded message text is available for assessment.",
         "reconnect_required": "Reconnect this mailbox to continue.",
@@ -137,23 +145,25 @@ def _validate_payload_shape(
             )
         ):
             return _error(400, "invalid_request", "Outgoing semantic input is invalid.")
-    elif trigger == "incoming_reply":
+    elif trigger in {"incoming_reply", SEMANTIC_NEW_INBOUND_TRIGGER}:
+        if trigger == SEMANTIC_NEW_INBOUND_TRIGGER and lookup_current:
+            return _error(400, "invalid_request", "Semantic operation is invalid.")
         locator = payload.get("incomingLocator")
         if type(locator) is not dict:
             return _error(400, "invalid_request", "Incoming locator is invalid.")
         provider = locator.get("provider")
         if provider == "google":
-            expected_fields = {
-                "mailboxId",
-                "trigger",
-                "activeEventRef",
-                "incomingLocator",
-            }
+            expected_fields = {"mailboxId", "trigger", "incomingLocator"}
+            if trigger == "incoming_reply":
+                expected_fields.add("activeEventRef")
             if lookup_current:
                 expected_fields.add("operation")
             if (
                 set(payload) != expected_fields
-                or type(payload.get("activeEventRef")) is not str
+                or (
+                    trigger == "incoming_reply"
+                    and type(payload.get("activeEventRef")) is not str
+                )
                 or set(locator) != {"provider", "providerMessageId"}
             ):
                 return _error(400, "invalid_request", "Incoming locator is invalid.")
@@ -324,7 +334,15 @@ def _priority_effect(
 def _policy_fields(
     config: SemanticRuntimeConfig,
     cached: CachedSemanticAssessment | None = None,
+    *,
+    semantic_trigger: str | None = None,
 ) -> dict[str, str]:
+    if semantic_trigger == SEMANTIC_NEW_INBOUND_TRIGGER:
+        return {
+            "semanticTrigger": SEMANTIC_NEW_INBOUND_TRIGGER,
+            "newInboundMode": config.new_inbound_mode.value,
+            "priorityEffect": PRIORITY_EFFECT_OBSERVE_ONLY,
+        }
     if not config.enabled:
         return {}
     return {
@@ -340,6 +358,7 @@ def _assessed_response(
     *,
     status: str,
     active_event_ref: str | None,
+    semantic_trigger: str | None = None,
 ) -> SemanticRouteResponse:
     payload = {
         "ok": True,
@@ -351,7 +370,11 @@ def _assessed_response(
             tz=timezone.utc,
         ).isoformat(timespec="seconds").replace("+00:00", "Z"),
         "identity": _identity(source, config),
-        **_policy_fields(config, cached),
+        **_policy_fields(
+            config,
+            cached,
+            semantic_trigger=semantic_trigger,
+        ),
     }
     if active_event_ref is not None:
         payload["activeEventRef"] = active_event_ref
@@ -364,6 +387,7 @@ def _deferred_response(
     *,
     status: str,
     retry_after: int,
+    semantic_trigger: str | None = None,
 ) -> SemanticRouteResponse:
     return SemanticRouteResponse(
         202,
@@ -372,7 +396,7 @@ def _deferred_response(
             "status": status,
             "identity": _identity(source, config),
             "retryAfterSeconds": retry_after,
-            **_policy_fields(config),
+            **_policy_fields(config, semantic_trigger=semantic_trigger),
         },
         retry_after=retry_after,
     )
@@ -403,7 +427,12 @@ def process_semantic_request(
         runtime_config = config if config is not None else config_loader()
     except SemanticCoreError:
         return _error(503, "semantic_unavailable", "Semantic analysis is unavailable.")
-    if not runtime_config.enabled or not runtime_config.model:
+    capability_enabled = (
+        runtime_config.new_inbound_enabled
+        if trigger == SEMANTIC_NEW_INBOUND_TRIGGER
+        else runtime_config.enabled
+    )
+    if not capability_enabled or not runtime_config.model:
         # Mode OFF deliberately performs no provider, KV, or HMAC work.
         placeholder_source = AuthorizedSemanticSource(
             authority=authority,
@@ -419,6 +448,7 @@ def process_semantic_request(
             runtime_config,
             status="deferred",
             retry_after=NEGATIVE_TTL_SECONDS,
+            semantic_trigger=trigger,
         )
 
     if trigger == "outgoing_reply" and authority.provider != "google":
@@ -427,7 +457,11 @@ def process_semantic_request(
             "outgoing_semantic_unsupported",
             "Outgoing semantic analysis is not supported for this mailbox provider.",
         )
-    locator = payload.get("incomingLocator") if trigger == "incoming_reply" else None
+    locator = (
+        payload.get("incomingLocator")
+        if trigger in {"incoming_reply", SEMANTIC_NEW_INBOUND_TRIGGER}
+        else None
+    )
     if (
         type(locator) is dict
         and locator.get("provider") != authority.provider
@@ -440,7 +474,9 @@ def process_semantic_request(
         return _error(503, "semantic_unavailable", "Semantic analysis is unavailable.")
 
     claims: OutgoingEventClaims | None = None
-    if trigger == "outgoing_reply" or authority.provider == "google":
+    if trigger == "outgoing_reply" or (
+        trigger == "incoming_reply" and authority.provider == "google"
+    ):
         event_field = "eventRef" if trigger == "outgoing_reply" else "activeEventRef"
         verified = _verify_event(payload[event_field], hmac_secret=secret, now=current)
         if isinstance(verified, SemanticRouteResponse):
@@ -479,7 +515,7 @@ def process_semantic_request(
                 prove_authorized_source_current(headers, source, claims)
             except SemanticAuthorityError as error:
                 return _authority_error(error)
-    else:
+    elif trigger == "incoming_reply":
         locator = payload["incomingLocator"]
         try:
             if locator["provider"] == "google":
@@ -505,6 +541,25 @@ def process_semantic_request(
             if locator["provider"] == "google"
             else None
         )
+    else:
+        locator = payload["incomingLocator"]
+        try:
+            if locator["provider"] == "google":
+                source = load_authorized_gmail_new_inbound(
+                    authority,
+                    provider_message_id=locator.get("providerMessageId"),
+                )
+            else:
+                source = load_authorized_imap_new_inbound(
+                    headers,
+                    authority,
+                    provider_folder=locator.get("providerFolder"),
+                    uid_validity=locator.get("uidValidity"),
+                    imap_uid=locator.get("imapUid"),
+                )
+        except SemanticAuthorityError as error:
+            return _authority_error(error)
+        active_event_ref = None
 
     scope = SemanticCacheScope(
         workspace_id=authority.workspace_id,
@@ -534,6 +589,7 @@ def process_semantic_request(
                 runtime_config,
                 status="deferred",
                 retry_after=NEGATIVE_TTL_SECONDS,
+                semantic_trigger=trigger,
             )
         if cached is None:
             return _deferred_response(
@@ -541,6 +597,7 @@ def process_semantic_request(
                 runtime_config,
                 status="deferred",
                 retry_after=NEGATIVE_TTL_SECONDS,
+                semantic_trigger=trigger,
             )
         try:
             prove_authorized_source_current(headers, source, claims)
@@ -553,6 +610,7 @@ def process_semantic_request(
                 runtime_config,
                 status="deferred",
                 retry_after=NEGATIVE_TTL_SECONDS,
+                semantic_trigger=trigger,
             )
         if cached is None:
             return _deferred_response(
@@ -560,6 +618,7 @@ def process_semantic_request(
                 runtime_config,
                 status="deferred",
                 retry_after=NEGATIVE_TTL_SECONDS,
+                semantic_trigger=trigger,
             )
         return _assessed_response(
             source,
@@ -567,6 +626,7 @@ def process_semantic_request(
             cached,
             status="cached",
             active_event_ref=active_event_ref,
+            semantic_trigger=trigger,
         )
 
     try:
@@ -592,7 +652,10 @@ def process_semantic_request(
             return _error(409, "incoming_message_stale", "Semantic input is stale.")
         if cached is not None:
             try:
-                prove_authorized_source_current(headers, source, claims)
+                if trigger == SEMANTIC_NEW_INBOUND_TRIGGER:
+                    prove_authorized_new_inbound_source_current(headers, source)
+                else:
+                    prove_authorized_source_current(headers, source, claims)
             except SemanticAuthorityError as error:
                 return _authority_error(error)
             cache_is_current, cached = semantic_store.get_result_if_current(
@@ -608,6 +671,7 @@ def process_semantic_request(
                     runtime_config,
                     status="pending",
                     retry_after=LEASE_TTL_SECONDS,
+                    semantic_trigger=trigger,
                 )
             return _assessed_response(
                 source,
@@ -615,6 +679,7 @@ def process_semantic_request(
                 cached,
                 status="cached",
                 active_event_ref=active_event_ref,
+                semantic_trigger=trigger,
             )
         if semantic_store.get_negative(scope) is not None:
             return _deferred_response(
@@ -622,6 +687,7 @@ def process_semantic_request(
                 runtime_config,
                 status="deferred",
                 retry_after=NEGATIVE_TTL_SECONDS,
+                semantic_trigger=trigger,
             )
         lease_token = semantic_store.try_acquire_lease(scope)
         if lease_token is None:
@@ -630,6 +696,7 @@ def process_semantic_request(
                 runtime_config,
                 status="pending",
                 retry_after=LEASE_TTL_SECONDS,
+                semantic_trigger=trigger,
             )
         if not semantic_store.consume_attempt(scope):
             semantic_store.release_lease(scope, lease_token)
@@ -638,6 +705,7 @@ def process_semantic_request(
                 runtime_config,
                 status="deferred",
                 retry_after=NEGATIVE_TTL_SECONDS,
+                semantic_trigger=trigger,
             )
     except SemanticStoreUnavailable:
         return _deferred_response(
@@ -645,6 +713,7 @@ def process_semantic_request(
             runtime_config,
             status="deferred",
             retry_after=NEGATIVE_TTL_SECONDS,
+            semantic_trigger=trigger,
         )
 
     try:
@@ -668,6 +737,7 @@ def process_semantic_request(
             runtime_config,
             status="deferred",
             retry_after=NEGATIVE_TTL_SECONDS,
+            semantic_trigger=trigger,
         )
     except Exception:
         try:
@@ -683,12 +753,16 @@ def process_semantic_request(
             runtime_config,
             status="deferred",
             retry_after=NEGATIVE_TTL_SECONDS,
+            semantic_trigger=trigger,
         )
 
     try:
         # Provider truth is checked again after the model call.  This catches a
         # newer delivery even when no competing semantic request advanced Redis.
-        prove_authorized_source_current(headers, source, claims)
+        if trigger == SEMANTIC_NEW_INBOUND_TRIGGER:
+            prove_authorized_new_inbound_source_current(headers, source)
+        else:
+            prove_authorized_source_current(headers, source, claims)
     except SemanticAuthorityError as error:
         try:
             semantic_store.release_lease(scope, lease_token)
@@ -714,6 +788,7 @@ def process_semantic_request(
             runtime_config,
             status="pending",
             retry_after=LEASE_TTL_SECONDS,
+            semantic_trigger=trigger,
         )
     confidence = evaluate_semantic_confidence(assessment)
     fresh = CachedSemanticAssessment(
@@ -728,4 +803,5 @@ def process_semantic_request(
         fresh,
         status="assessed",
         active_event_ref=active_event_ref,
+        semantic_trigger=trigger,
     )

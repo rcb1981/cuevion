@@ -26,6 +26,10 @@ SEMANTIC_CONFIDENCE_THRESHOLDS: Mapping[SemanticState, float] = MappingProxyType
     }
 )
 
+# Reserved for a later, separately reviewed activation slice.  This threshold
+# is intentionally not consulted by any current Priority effect.
+NEW_INBOUND_NEEDS_USER_ACTION_PROMOTION_THRESHOLD = 0.90
+
 
 @dataclass(frozen=True, slots=True)
 class SemanticConfidencePolicyResult:
@@ -57,6 +61,18 @@ def evaluate_semantic_confidence(
         confidence=assessment.confidence,
         threshold=threshold,
         meets_threshold=meets_threshold,
+    )
+
+
+def meets_future_new_inbound_promotion_threshold(
+    assessment: SemanticAssessment,
+) -> bool:
+    """Return future eligibility without granting any product authority."""
+
+    return (
+        assessment.state is SemanticState.NEEDS_USER_ACTION
+        and assessment.confidence
+        >= NEW_INBOUND_NEEDS_USER_ACTION_PROMOTION_THRESHOLD
     )
 
 

@@ -7,8 +7,11 @@ import unittest
 from .semantic_config import (
     SEMANTIC_MODE_ENV,
     SEMANTIC_MODEL_ENV,
+    SEMANTIC_NEW_INBOUND_MODE_ENV,
+    NewInboundSemanticMode,
     SemanticMode,
     load_semantic_runtime_config,
+    read_new_inbound_client_mode,
 )
 from .semantic_core import assess_semantic_conversation
 from .semantic_errors import (
@@ -25,8 +28,10 @@ from .semantic_text import (
     normalize_semantic_turn_text,
 )
 from .semantic_thresholds import (
+    NEW_INBOUND_NEEDS_USER_ACTION_PROMOTION_THRESHOLD,
     SEMANTIC_CONFIDENCE_THRESHOLDS,
     evaluate_semantic_confidence,
+    meets_future_new_inbound_promotion_threshold,
 )
 from .semantic_types import (
     SEMANTIC_SCHEMA_VERSION,
@@ -839,6 +844,69 @@ class SemanticCoreFixtureTests(unittest.TestCase):
                     reason,
                 )
 
+    def test_new_inbound_multilingual_actionable_fixtures(self):
+        fixtures = (
+            "Can you confirm the release date tomorrow?",
+            "Kun je de artwork vandaag nog sturen?",
+            "Kannst du bitte die Rechnung schicken?",
+            "Peux-tu confirmer la date de sortie ?",
+            "¿Puedes enviarme el contrato?",
+            "Puoi confermare la data?",
+            "Pode enviar o contrato?",
+        )
+        for text in fixtures:
+            with self.subTest(text=text):
+                self._run_fixture(
+                    text,
+                    SemanticState.NEEDS_USER_ACTION,
+                    SemanticReasonCode.EXPLICIT_REQUEST,
+                )
+
+    def test_new_inbound_multilingual_informational_controls(self):
+        fixtures = (
+            "FYI, the release is now live.",
+            "Ter info: de release staat nu live.",
+            "Zur Information: Die Veröffentlichung ist jetzt live.",
+            "Pour information, la sortie est maintenant en ligne.",
+            "Para tu información, el lanzamiento ya está disponible.",
+            "Per informazione, la pubblicazione è ora online.",
+            "Para sua informação, o lançamento já está no ar.",
+        )
+        for text in fixtures:
+            with self.subTest(text=text):
+                self._run_fixture(
+                    text,
+                    SemanticState.INFORMATIONAL,
+                    SemanticReasonCode.INFORMATIONAL_UPDATE,
+                )
+
+    def test_new_inbound_ambiguity_controls_fail_conservatively(self):
+        fixtures = (
+            (
+                "Sounds good.",
+                SemanticState.UNCERTAIN,
+                SemanticReasonCode.AMBIGUOUS_CONTEXT,
+            ),
+            (
+                "Yes.",
+                SemanticState.UNCERTAIN,
+                SemanticReasonCode.AMBIGUOUS_CONTEXT,
+            ),
+            (
+                "Thanks.",
+                SemanticState.INFORMATIONAL,
+                SemanticReasonCode.INFORMATIONAL_UPDATE,
+            ),
+            (
+                "Can you?",
+                SemanticState.UNCERTAIN,
+                SemanticReasonCode.AMBIGUOUS_CONTEXT,
+            ),
+        )
+        for text, state, reason in fixtures:
+            with self.subTest(text=text):
+                self._run_fixture(text, state, reason)
+
     def test_mixed_language_fixture(self):
         self._run_fixture(
             "Thanks! Kun je ook nog de artwork sturen?",
@@ -949,6 +1017,33 @@ class SemanticThresholdTests(unittest.TestCase):
                 reason_code=reason,
             )
 
+    def test_future_new_inbound_promotion_threshold_is_pure_and_exact(self):
+        below = SemanticAssessment(
+            state=SemanticState.NEEDS_USER_ACTION,
+            confidence=0.899,
+            reason_code=SemanticReasonCode.EXPLICIT_REQUEST,
+        )
+        at = SemanticAssessment(
+            state=SemanticState.NEEDS_USER_ACTION,
+            confidence=0.900,
+            reason_code=SemanticReasonCode.EXPLICIT_REQUEST,
+        )
+        informational = SemanticAssessment(
+            state=SemanticState.INFORMATIONAL,
+            confidence=1.0,
+            reason_code=SemanticReasonCode.INFORMATIONAL_UPDATE,
+        )
+
+        self.assertEqual(
+            NEW_INBOUND_NEEDS_USER_ACTION_PROMOTION_THRESHOLD,
+            0.90,
+        )
+        self.assertFalse(meets_future_new_inbound_promotion_threshold(below))
+        self.assertTrue(meets_future_new_inbound_promotion_threshold(at))
+        self.assertFalse(
+            meets_future_new_inbound_promotion_threshold(informational)
+        )
+
 
 class SemanticConfigTests(unittest.TestCase):
     def test_default_is_off_without_a_model(self):
@@ -957,6 +1052,9 @@ class SemanticConfigTests(unittest.TestCase):
         self.assertIsNone(config.model)
         self.assertFalse(config.enabled)
         self.assertFalse(config.can_mutate_priority)
+        self.assertEqual(config.new_inbound_mode, NewInboundSemanticMode.OFF)
+        self.assertFalse(config.new_inbound_enabled)
+        self.assertFalse(config.can_call_provider)
 
         explicit_off = load_semantic_runtime_config(
             {SEMANTIC_MODE_ENV: "off", SEMANTIC_MODEL_ENV: "gpt-unused"}
@@ -1010,6 +1108,87 @@ class SemanticConfigTests(unittest.TestCase):
             }
         )
         self.assertEqual(config.mode, SemanticMode.OFF)
+
+    def test_new_inbound_shadow_is_independent_and_requires_a_valid_model(self):
+        with self.assertRaises(SemanticConfigurationError):
+            load_semantic_runtime_config(
+                {SEMANTIC_NEW_INBOUND_MODE_ENV: "shadow"}
+            )
+        with self.assertRaises(SemanticConfigurationError):
+            load_semantic_runtime_config(
+                {
+                    SEMANTIC_NEW_INBOUND_MODE_ENV: "shadow",
+                    SEMANTIC_MODEL_ENV: "invalid model",
+                }
+            )
+
+        new_only = load_semantic_runtime_config(
+            {
+                SEMANTIC_NEW_INBOUND_MODE_ENV: "shadow",
+                SEMANTIC_MODEL_ENV: "gpt-test-1",
+            }
+        )
+        self.assertEqual(new_only.mode, SemanticMode.OFF)
+        self.assertFalse(new_only.enabled)
+        self.assertFalse(new_only.can_mutate_priority)
+        self.assertEqual(
+            new_only.new_inbound_mode,
+            NewInboundSemanticMode.SHADOW,
+        )
+        self.assertTrue(new_only.new_inbound_enabled)
+        self.assertTrue(new_only.can_call_provider)
+
+        open_loop_only = load_semantic_runtime_config(
+            {
+                SEMANTIC_MODE_ENV: "active",
+                SEMANTIC_MODEL_ENV: "gpt-test-1",
+            }
+        )
+        self.assertTrue(open_loop_only.enabled)
+        self.assertTrue(open_loop_only.can_mutate_priority)
+        self.assertFalse(open_loop_only.new_inbound_enabled)
+
+    def test_new_inbound_unknown_and_active_values_fail_closed(self):
+        for value in ("invalid", "active", "enforce"):
+            with self.subTest(value=value):
+                config = load_semantic_runtime_config(
+                    {
+                        SEMANTIC_NEW_INBOUND_MODE_ENV: value,
+                        SEMANTIC_MODEL_ENV: "gpt-test-1",
+                    }
+                )
+                self.assertEqual(
+                    config.new_inbound_mode,
+                    NewInboundSemanticMode.OFF,
+                )
+                self.assertFalse(config.new_inbound_enabled)
+
+    def test_client_capability_mode_is_bounded_and_fail_closed(self):
+        self.assertEqual(read_new_inbound_client_mode({}), "off")
+        self.assertEqual(
+            read_new_inbound_client_mode(
+                {
+                    SEMANTIC_NEW_INBOUND_MODE_ENV: "shadow",
+                    SEMANTIC_MODEL_ENV: "gpt-test-1",
+                }
+            ),
+            "shadow",
+        )
+        self.assertEqual(
+            read_new_inbound_client_mode(
+                {SEMANTIC_NEW_INBOUND_MODE_ENV: "shadow"}
+            ),
+            "off",
+        )
+        self.assertEqual(
+            read_new_inbound_client_mode(
+                {
+                    SEMANTIC_NEW_INBOUND_MODE_ENV: "active",
+                    SEMANTIC_MODEL_ENV: "gpt-test-1",
+                }
+            ),
+            "off",
+        )
 
 
 if __name__ == "__main__":

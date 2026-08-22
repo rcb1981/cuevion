@@ -4,20 +4,24 @@ import base64
 import unittest
 from email.parser import BytesParser
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from .authority import (
     PROVIDER_TIMEOUT_SECONDS,
     PriorityAuthority,
     SemanticAuthorityError,
     _extract_semantic_mime_body,
+    _gmail_message_request,
     _open_authenticated_imap,
     canonical_conversation_id,
     custom_imap_thread_id,
     gmail_thread_id,
     load_authorized_gmail_incoming,
+    load_authorized_gmail_new_inbound,
     load_authorized_imap_incoming,
+    load_authorized_imap_new_inbound,
     mint_outgoing_event_reference_for_authority,
+    prove_authorized_new_inbound_source_current,
     prove_authorized_imap_latest,
     resolve_priority_authority,
 )
@@ -93,6 +97,83 @@ def normalized_latest_text(source) -> str:
         )
     )
     return window.turns[-1].text
+
+
+def gmail_message(
+    *,
+    message_id: str = "incoming-1",
+    thread_id: str = "thread-new",
+    sender: str = "External <outside@example.net>",
+    labels: list[str] | None = None,
+    body: str = "Can you review the agreement?",
+    extra_headers: list[dict[str, str]] | None = None,
+    internal_date: str = "12000",
+) -> dict:
+    raw_headers = [
+        f"From: {sender}",
+        "To: primary@example.com",
+        "Subject: Provider-authoritative subject",
+        "Date: Thu, 01 Jan 1970 00:00:12 +0000",
+        "Message-ID: <incoming@example.net>",
+        *(f"{header['name']}: {header['value']}" for header in (extra_headers or [])),
+        "Content-Type: text/plain; charset=utf-8",
+        "Content-Transfer-Encoding: 8bit",
+    ]
+    raw_rfc_message = ("\r\n".join(raw_headers) + "\r\n\r\n" + body).encode("utf-8")
+    encoded_body = base64.urlsafe_b64encode(raw_rfc_message).rstrip(b"=").decode("ascii")
+    return {
+        "id": message_id,
+        "threadId": thread_id,
+        "internalDate": internal_date,
+        "labelIds": ["INBOX"] if labels is None else labels,
+        "raw": encoded_body,
+    }
+
+
+def gmail_preview(
+    target: dict,
+    *,
+    sender: str = "External <outside@example.net>",
+    body: str = "Can you review the agreement?",
+    **overrides,
+) -> dict:
+    return {
+        "providerMessageId": target["id"],
+        "providerThreadId": target["threadId"],
+        "providerFolder": "Inbox",
+        "labelIds": list(target["labelIds"]),
+        "from": sender,
+        "createdAt": "1970-01-01T00:00:12.000Z",
+        "body": [body],
+        "noiseDisposition": "none",
+        "noiseConfidence": "low",
+        "noiseReasons": [],
+        "v7_final_priority": "NORMAL",
+        "final_visibility": "show_normal",
+        "action": "show_in_main_feed",
+        "category": "business",
+        "internalClassification": "business",
+        "ui_signal": "BUSINESS",
+        "signal": None,
+        **overrides,
+    }
+
+
+def gmail_thread_turn(
+    target: dict,
+    *,
+    sender: str = "External <outside@example.net>",
+    body: str = "Can you review the agreement?",
+) -> dict:
+    return {
+        "providerMessageId": target["id"],
+        "providerThreadId": target["threadId"],
+        "from": sender,
+        "bodyText": body,
+        "createdAt": "1970-01-01T00:00:12.000Z",
+        "internalDate": target["internalDate"],
+        "labelIds": list(target["labelIds"]),
+    }
 
 
 class FakeImap:
@@ -353,6 +434,194 @@ class PriorityAuthorityTests(unittest.TestCase):
                 self._gmail_source(messages)
             self.assertEqual(captured.exception.code, code)
 
+    def test_new_inbound_gmail_uses_exact_message_and_current_inbox_thread(self):
+        current = authority("google")
+        target = gmail_message()
+        with patch(
+            "api.priority.authority.resolve_gmail_context",
+            return_value={
+                "status": "ok",
+                "context": {"access_token": "internal", "refresh_attempted": False},
+            },
+        ), patch(
+            "api.priority.authority._gmail_message_request",
+            return_value=(target, None),
+        ) as message_read, patch(
+            "api.priority.authority._gmail_thread_request",
+            return_value=({}, None),
+        ) as thread_read, patch(
+            "api.priority.authority.parse_gmail_message_detail",
+            return_value=gmail_preview(target),
+        ) as detail_parser, patch(
+            "api.priority.authority.parse_gmail_thread",
+            return_value=[gmail_thread_turn(target)],
+        ):
+            source = load_authorized_gmail_new_inbound(
+                current,
+                provider_message_id="incoming-1",
+            )
+            prove_authorized_new_inbound_source_current([], source)
+
+        self.assertEqual(message_read.call_count, 2)
+        self.assertEqual(thread_read.call_count, 2)
+        self.assertTrue(
+            all(call.args == ("internal", "incoming-1") for call in message_read.call_args_list)
+        )
+        self.assertTrue(
+            all(call.args == ("internal", "thread-new") for call in thread_read.call_args_list)
+        )
+        self.assertEqual(detail_parser.call_count, 2)
+        self.assertTrue(
+            all(call.kwargs["provider_folder"] == "Inbox" for call in detail_parser.call_args_list)
+        )
+        self.assertTrue(all(call.kwargs["strict"] is True for call in detail_parser.call_args_list))
+        self.assertEqual(source.provider_conversation_id, "thread-new")
+        self.assertEqual(source.latest_turn_id, "incoming-1")
+        self.assertEqual(source.turns[-1]["text"], "Can you review the agreement?")
+        self.assertEqual(source.revalidation_locator["authorityKind"], "new_inbound")
+
+    def test_new_inbound_gmail_exact_detail_transport_uses_raw_format(self):
+        payload = b'{"id":"incoming-1"}'
+        response = MagicMock()
+        response.headers = {"Content-Length": str(len(payload))}
+        response.read.return_value = payload
+        response.__enter__.return_value = response
+        with patch(
+            "api.priority.authority.urlopen",
+            return_value=response,
+        ) as opener:
+            parsed, error = _gmail_message_request("internal", "incoming-1")
+
+        self.assertIsNone(error)
+        self.assertEqual(parsed, {"id": "incoming-1"})
+        request = opener.call_args.args[0]
+        self.assertEqual(
+            request.full_url,
+            "https://gmail.googleapis.com/gmail/v1/users/me/messages/incoming-1?format=raw",
+        )
+
+    def test_new_inbound_gmail_rejects_non_inbox_noise_and_ambiguous_sender(self):
+        outside = gmail_message()
+        non_inbox = gmail_message(labels=[])
+        promotion = gmail_message(labels=["INBOX", "CATEGORY_PROMOTIONS"])
+        owned = gmail_message(sender="secondary@example.com")
+        cases = (
+            (non_inbox, gmail_preview(non_inbox), "incoming_message_not_in_inbox"),
+            (
+                promotion,
+                gmail_preview(promotion),
+                "incoming_message_noise_excluded",
+            ),
+            (
+                outside,
+                gmail_preview(outside, sender="first@example.net, second@example.net"),
+                "incoming_message_not_external",
+            ),
+            (
+                owned,
+                gmail_preview(owned, sender="secondary@example.com"),
+                "incoming_message_not_external",
+            ),
+        )
+        for target, preview, expected_code in cases:
+            with self.subTest(expected_code=expected_code), patch(
+                "api.priority.authority.resolve_gmail_context",
+                return_value={
+                    "status": "ok",
+                    "context": {
+                        "access_token": "internal",
+                        "refresh_attempted": False,
+                    },
+                },
+            ), patch(
+                "api.priority.authority._gmail_message_request",
+                return_value=(target, None),
+            ), patch(
+                "api.priority.authority.parse_gmail_message_detail",
+                return_value=preview,
+            ), patch(
+                "api.priority.authority._gmail_thread_request"
+            ) as thread_read, self.assertRaises(SemanticAuthorityError) as captured:
+                load_authorized_gmail_new_inbound(
+                    authority("google"),
+                    provider_message_id="incoming-1",
+                )
+            self.assertEqual(captured.exception.code, expected_code)
+            thread_read.assert_not_called()
+
+    def test_new_inbound_gmail_rejects_delivery_when_thread_has_advanced(self):
+        target = gmail_message()
+        newer = gmail_message(
+            message_id="incoming-2",
+            body="This later message owns current semantics.",
+            internal_date="13000",
+        )
+        with patch(
+            "api.priority.authority.resolve_gmail_context",
+            return_value={
+                "status": "ok",
+                "context": {"access_token": "internal", "refresh_attempted": False},
+            },
+        ), patch(
+            "api.priority.authority._gmail_message_request",
+            return_value=(target, None),
+        ), patch(
+            "api.priority.authority.parse_gmail_message_detail",
+            return_value=gmail_preview(target),
+        ), patch(
+            "api.priority.authority._gmail_thread_request",
+            return_value=({}, None),
+        ), patch(
+            "api.priority.authority.parse_gmail_thread",
+            return_value=[gmail_thread_turn(target), gmail_thread_turn(newer)],
+        ), self.assertRaises(SemanticAuthorityError) as captured:
+            load_authorized_gmail_new_inbound(
+                authority("google"),
+                provider_message_id="incoming-1",
+            )
+        self.assertEqual(captured.exception.code, "incoming_message_stale")
+
+    def test_new_inbound_gmail_applies_normalized_noise_low_quiet_and_priority_gate(self):
+        target = gmail_message()
+        cases = (
+            (
+                {"noiseDisposition": "strong_spam", "noiseConfidence": "high"},
+                "incoming_message_noise_excluded",
+            ),
+            ({"v7_final_priority": "LOW"}, "incoming_message_routing_excluded"),
+            ({"final_visibility": "show_low"}, "incoming_message_routing_excluded"),
+            ({"action": "show_in_quiet_view"}, "incoming_message_routing_excluded"),
+            ({"v7_final_priority": "PRIORITY"}, "incoming_message_routing_excluded"),
+            ({"v7_final_priority": "REVIEW"}, "incoming_message_routing_excluded"),
+            ({"category": "promo"}, "incoming_message_routing_excluded"),
+            ({"ui_signal": "DEMO"}, "incoming_message_routing_excluded"),
+        )
+        for overrides, expected_code in cases:
+            with self.subTest(overrides=overrides), patch(
+                "api.priority.authority.resolve_gmail_context",
+                return_value={
+                    "status": "ok",
+                    "context": {
+                        "access_token": "internal",
+                        "refresh_attempted": False,
+                    },
+                },
+            ), patch(
+                "api.priority.authority._gmail_message_request",
+                return_value=(target, None),
+            ), patch(
+                "api.priority.authority.parse_gmail_message_detail",
+                return_value=gmail_preview(target, **overrides),
+            ), patch(
+                "api.priority.authority._gmail_thread_request"
+            ) as thread_read, self.assertRaises(SemanticAuthorityError) as captured:
+                load_authorized_gmail_new_inbound(
+                    authority("google"),
+                    provider_message_id="incoming-1",
+                )
+            self.assertEqual(captured.exception.code, expected_code)
+            thread_read.assert_not_called()
+
     def test_imap_locator_is_refetched_and_bound_to_rfc_root(self):
         current = authority("custom_imap")
         root = "root@example.net"
@@ -439,6 +708,261 @@ class PriorityAuthorityTests(unittest.TestCase):
         self.assertNotIn("HIDDEN_IMAP_SECRET", normalized)
         self.assertNotIn("internal-secret", repr(source))
         self.assertTrue(latest_reader.call_args.kwargs["require_predecessor"])
+
+    def test_new_inbound_imap_allows_only_a_truly_singleton_inbox_without_predecessor(self):
+        current = authority("custom_imap")
+        raw = (
+            b"From: External <outside@example.net>\r\n"
+            b"Message-ID: <singleton@example.net>\r\n"
+            b"Content-Type: text/plain; charset=utf-8\r\n\r\n"
+            b"Please approve the attached plan."
+        )
+        source_result = {
+            "ok": True,
+            "status": "ok",
+            "source": {
+                "providerFolder": "INBOX",
+                "imapUid": "9",
+                "uidValidity": "7",
+                "messageId": "<singleton@example.net>",
+                "references": [],
+                "inReplyTo": None,
+            },
+            "error": None,
+        }
+        expected_thread = custom_imap_thread_id(
+            current.mailbox_id,
+            "singleton@example.net",
+        )
+        mailbox = {
+            "imap": {
+                "host": "imap.example.net",
+                "port": 993,
+                "ssl": True,
+                "username": "primary@example.com",
+                "password": "internal-secret",
+            }
+        }
+        connection = FakeImap(raw)
+        with patch(
+            "api.priority.authority.resolve_authenticated_imap_mailbox",
+            return_value={"status": "ok", "mailbox": mailbox},
+        ), patch(
+            "api.priority.authority._open_authenticated_imap",
+            return_value=connection,
+        ), patch(
+            "api.priority.authority.read_imap_reply_source",
+            return_value=source_result,
+        ), patch(
+            "api.priority.authority.read_imap_latest_thread_identity",
+            return_value={
+                "ok": True,
+                "latest": {
+                    "providerFolder": "INBOX",
+                    "uidValidity": "7",
+                    "imapUid": "9",
+                    "threadId": expected_thread,
+                    "rfcMessageId": "singleton@example.net",
+                },
+            },
+        ) as latest_reader:
+            source = load_authorized_imap_new_inbound(
+                [],
+                current,
+                provider_folder="INBOX",
+                uid_validity="7",
+                imap_uid="9",
+            )
+
+        self.assertFalse(latest_reader.call_args.kwargs["require_predecessor"])
+        self.assertEqual(source.provider_conversation_id, "singleton@example.net")
+        self.assertEqual(source.latest_turn_id, "singleton@example.net")
+        self.assertEqual(source.revalidation_locator["authorityKind"], "new_inbound")
+        self.assertTrue(connection.closed)
+
+        revalidation_connection = FakeImap(raw)
+        with patch(
+            "api.priority.authority.resolve_authenticated_imap_mailbox",
+            return_value={"status": "ok", "mailbox": mailbox},
+        ), patch(
+            "api.priority.authority._open_authenticated_imap",
+            return_value=revalidation_connection,
+        ), patch(
+            "api.priority.authority.read_imap_latest_thread_identity",
+            return_value={
+                "ok": True,
+                "latest": {
+                    "providerFolder": "INBOX",
+                    "uidValidity": "7",
+                    "imapUid": "9",
+                    "threadId": expected_thread,
+                    "rfcMessageId": "singleton@example.net",
+                },
+            },
+        ) as latest_reader:
+            prove_authorized_new_inbound_source_current([], source)
+        self.assertFalse(latest_reader.call_args.kwargs["require_predecessor"])
+        self.assertTrue(revalidation_connection.closed)
+
+    def test_new_inbound_imap_ancestry_stays_conservative_and_non_inbox_fails_early(self):
+        current = authority("custom_imap")
+        raw = (
+            b"From: outside@example.net\r\n"
+            b"Message-ID: <incoming@example.net>\r\n"
+            b"References: <root@example.net>\r\n"
+            b"Content-Type: text/plain; charset=utf-8\r\n\r\nDone."
+        )
+        source_result = {
+            "ok": True,
+            "source": {
+                "providerFolder": "INBOX",
+                "imapUid": "9",
+                "uidValidity": "7",
+                "messageId": "<incoming@example.net>",
+                "references": ["<root@example.net>"],
+                "inReplyTo": None,
+            },
+        }
+        expected_thread = custom_imap_thread_id(current.mailbox_id, "root@example.net")
+        with patch(
+            "api.priority.authority.resolve_authenticated_imap_mailbox",
+            return_value={"status": "ok", "mailbox": {"imap": {}}},
+        ), patch(
+            "api.priority.authority._open_authenticated_imap",
+            return_value=FakeImap(raw),
+        ), patch(
+            "api.priority.authority.read_imap_reply_source",
+            return_value=source_result,
+        ), patch(
+            "api.priority.authority.read_imap_latest_thread_identity",
+            return_value={
+                "ok": True,
+                "latest": {
+                    "providerFolder": "INBOX",
+                    "uidValidity": "7",
+                    "imapUid": "9",
+                    "threadId": expected_thread,
+                    "rfcMessageId": "incoming@example.net",
+                },
+            },
+        ) as latest_reader:
+            load_authorized_imap_new_inbound(
+                [], current,
+                provider_folder="INBOX", uid_validity="7", imap_uid="9",
+            )
+        self.assertTrue(latest_reader.call_args.kwargs["require_predecessor"])
+
+        with patch(
+            "api.priority.authority.resolve_authenticated_imap_mailbox"
+        ) as resolver, self.assertRaises(SemanticAuthorityError) as captured:
+            load_authorized_imap_new_inbound(
+                [], current,
+                provider_folder="Archive", uid_validity="7", imap_uid="9",
+            )
+        self.assertEqual(captured.exception.code, "incoming_message_not_in_inbox")
+        resolver.assert_not_called()
+
+    def test_new_inbound_imap_rejects_present_malformed_ancestry_and_spam_headers(self):
+        current = authority("custom_imap")
+        source_result = {
+            "ok": True,
+            "source": {
+                "providerFolder": "INBOX",
+                "imapUid": "9",
+                "uidValidity": "7",
+                "messageId": "<incoming@example.net>",
+                "references": [],
+                "inReplyTo": None,
+            },
+        }
+        samples = (
+            (
+                b"From: outside@example.net\r\n"
+                b"Message-ID: <incoming@example.net>\r\n"
+                b"References: malformed-ancestry\r\n"
+                b"Content-Type: text/plain\r\n\r\nVisible body.",
+                "incoming_message_identity_unconfirmed",
+            ),
+            (
+                b"From: outside@example.net\r\n"
+                b"Message-ID: <incoming@example.net>\r\n"
+                b"X-Spam-Flag: YES\r\n"
+                b"Content-Type: text/plain\r\n\r\nVisible body.",
+                "incoming_message_noise_excluded",
+            ),
+        )
+        for raw, expected_code in samples:
+            with self.subTest(expected_code=expected_code), patch(
+                "api.priority.authority.resolve_authenticated_imap_mailbox",
+                return_value={"status": "ok", "mailbox": {"imap": {}}},
+            ), patch(
+                "api.priority.authority._open_authenticated_imap",
+                return_value=FakeImap(raw),
+            ), patch(
+                "api.priority.authority.read_imap_reply_source",
+                return_value=source_result,
+            ), patch(
+                "api.priority.authority.read_imap_latest_thread_identity"
+            ) as latest_reader, self.assertRaises(SemanticAuthorityError) as captured:
+                load_authorized_imap_new_inbound(
+                    [], current,
+                    provider_folder="INBOX", uid_validity="7", imap_uid="9",
+                )
+            self.assertEqual(captured.exception.code, expected_code)
+            latest_reader.assert_not_called()
+
+    def test_new_inbound_imap_applies_normalized_noise_low_quiet_and_priority_gate(self):
+        current = authority("custom_imap")
+        raw = (
+            b"From: outside@example.net\r\n"
+            b"Message-ID: <incoming@example.net>\r\n"
+            b"Content-Type: text/plain; charset=utf-8\r\n\r\nVisible body."
+        )
+        source_result = {
+            "ok": True,
+            "source": {
+                "providerFolder": "INBOX",
+                "imapUid": "9",
+                "uidValidity": "7",
+                "messageId": "<incoming@example.net>",
+                "references": [],
+                "inReplyTo": None,
+            },
+        }
+        cases = (
+            (
+                {"noiseDisposition": "unsolicited_low_value"},
+                "incoming_message_noise_excluded",
+            ),
+            ({"v7_final_priority": "LOW"}, "incoming_message_routing_excluded"),
+            ({"final_visibility": "show_low"}, "incoming_message_routing_excluded"),
+            ({"action": "show_in_quiet_view"}, "incoming_message_routing_excluded"),
+            ({"v7_final_priority": "PRIORITY"}, "incoming_message_routing_excluded"),
+            ({"category": "demo"}, "incoming_message_routing_excluded"),
+        )
+        target = gmail_message()
+        for overrides, expected_code in cases:
+            with self.subTest(overrides=overrides), patch(
+                "api.priority.authority.resolve_authenticated_imap_mailbox",
+                return_value={"status": "ok", "mailbox": {"imap": {}}},
+            ), patch(
+                "api.priority.authority._open_authenticated_imap",
+                return_value=FakeImap(raw),
+            ), patch(
+                "api.priority.authority.read_imap_reply_source",
+                return_value=source_result,
+            ), patch(
+                "api.priority.authority.to_message_preview",
+                return_value=gmail_preview(target, **overrides),
+            ), patch(
+                "api.priority.authority.read_imap_latest_thread_identity"
+            ) as latest_reader, self.assertRaises(SemanticAuthorityError) as captured:
+                load_authorized_imap_new_inbound(
+                    [], current,
+                    provider_folder="INBOX", uid_validity="7", imap_uid="9",
+                )
+            self.assertEqual(captured.exception.code, expected_code)
+            latest_reader.assert_not_called()
 
     def test_semantic_mime_extractor_excludes_attachment_text_and_subtrees(self):
         raw = (

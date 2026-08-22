@@ -349,12 +349,21 @@ class RealHandlerOwnershipMatrixTests(unittest.TestCase):
             provider_transport.assert_called_once()
 
     def test_fetch_limit_actions_and_server_derived_from(self):
-        request, _, _, provider_transport = self._invoke(
+        with patch.object(
             fetch_gmail,
-            {"mailboxId": "gmail-1", "limit": 999},
-            {"messages": []},
-        )
+            "read_new_inbound_client_mode",
+            return_value="shadow",
+        ):
+            request, _, _, provider_transport = self._invoke(
+                fetch_gmail,
+                {"mailboxId": "gmail-1", "limit": 999},
+                {"messages": []},
+            )
         self.assertEqual(request.status, 200)
+        self.assertEqual(
+            request.payload()["prioritySemanticNewInboundMode"],
+            "shadow",
+        )
         self.assertIn("maxResults=100", provider_transport.call_args.args[0].full_url)
 
         boolean_limit = FakeHandler({"mailboxId": "gmail-1", "limit": True})

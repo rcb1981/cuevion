@@ -215,7 +215,7 @@ def build_openai_semantic_adapter(
     environ: Mapping[str, str] | None = None,
     client_factory: Callable[..., object] | None = None,
 ) -> OpenAIResponsesSemanticAdapter:
-    if not config.enabled or not config.model:
+    if not config.can_call_provider or not config.model:
         raise SemanticConfigurationError(
             "OpenAI semantic adapter requires an explicitly enabled mode."
         )

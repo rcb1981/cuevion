@@ -2657,6 +2657,45 @@ class InitialAndRefreshTests(unittest.TestCase):
                         secret_lookup.assert_not_called()
                         provider_fetch.assert_not_called()
 
+    def test_refresh_publishes_server_derived_new_inbound_mode(self):
+        handler = FakeHandler(
+            {"mode": "refresh", "mailboxId": "demo", "limit": 20}
+        )
+        provider_payload = {
+            "ok": True,
+            "messages": [],
+            "uidValidity": "123",
+            "inboxUidSet": ["44"],
+        }
+
+        with patch.object(
+            connect_route,
+            "resolve_authenticated_user",
+            return_value=({"email": "owner@example.com"}, None),
+        ), patch.object(
+            connect_route,
+            "resolve_authenticated_imap_mailbox",
+            return_value=resolved_mailbox(),
+        ), patch.object(
+            imap_connect_preview,
+            "build_connect_preview_response",
+            return_value=(200, provider_payload),
+        ), patch.object(
+            connect_route,
+            "read_new_inbound_client_mode",
+            return_value="shadow",
+        ):
+            invoke_connect(handler)
+
+        self.assertEqual(handler.status, 200)
+        self.assertEqual(
+            handler.response(),
+            {
+                **provider_payload,
+                "prioritySemanticNewInboundMode": "shadow",
+            },
+        )
+
     def test_unauthenticated_initial_stops_before_imap_and_storage(self):
         handler = FakeHandler(initial_payload())
         with patch.object(connect_route, "resolve_authenticated_user", return_value=(None, {})), patch.object(
