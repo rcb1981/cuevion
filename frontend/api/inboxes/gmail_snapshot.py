@@ -283,8 +283,29 @@ def read_gmail_folder_snapshot(
             error={"code": "gmail_snapshot_invalid_request"},
         )
 
+    transport_retry_available = True
+
+    def request_snapshot_path(
+        request_context: dict,
+        path: str,
+    ) -> tuple[dict | None, dict | None, dict, dict | None]:
+        nonlocal transport_retry_available
+
+        payload, error, next_context, refresh_failure = (
+            request_with_one_refresh(request_context, path)
+        )
+        if (
+            transport_retry_available
+            and refresh_failure is None
+            and isinstance(error, dict)
+            and error.get("code") == "gmail_unavailable"
+        ):
+            transport_retry_available = False
+            return request_with_one_refresh(next_context, path)
+        return payload, error, next_context, refresh_failure
+
     list_payload, list_error, context, refresh_failure = (
-        request_with_one_refresh(
+        request_snapshot_path(
             context,
             _list_path(provider_folder, limit),
         )
@@ -325,7 +346,7 @@ def read_gmail_folder_snapshot(
     }
     for index, requested_message_id in enumerate(message_ids):
         detail_payload, detail_error, context, refresh_failure = (
-            request_with_one_refresh(
+            request_snapshot_path(
                 context,
                 (
                     f"/messages/{quote(requested_message_id, safe='')}"
