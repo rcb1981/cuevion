@@ -197,6 +197,7 @@ import {
   ARCHIVE_REFRESH_ERROR_MESSAGE,
   createCustomImapInboxAuthority,
   createGmailInboxAuthority,
+  createGmailUnreadIntentAuthority,
   createGmailArchiveReconciliationCoordinator,
   resolveMailboxRefreshPlan,
   resolveProviderArchiveRefreshSemantics,
@@ -208,6 +209,7 @@ import {
   type MailboxRefreshReason,
   type MailboxRefreshResult,
   type GmailArchiveReconciliationCoordinator,
+  type GmailUnreadIntentToken,
   type ProviderArchiveCapability,
   type StartupSyncStatus,
 } from "../../lib/mailboxRefreshSemantics";
@@ -16174,6 +16176,9 @@ function MailboxView({
   onSyncMailbox,
   isSyncingMailbox,
   onSyncUnreadOverrides,
+  onBeginGmailUnreadIntent,
+  onFailGmailUnreadIntent,
+  isCurrentGmailUnreadIntent,
   initialSelectedMessageId = null,
   onMessageSelected,
   productAccess,
@@ -16314,6 +16319,13 @@ function MailboxView({
   onSyncMailbox: () => void;
   isSyncingMailbox: boolean;
   onSyncUnreadOverrides: (messages: MessageIdentitySource[], unread: boolean) => void;
+  onBeginGmailUnreadIntent: (
+    mailboxId: string,
+    providerMessageId: string,
+    desiredUnread: boolean,
+  ) => GmailUnreadIntentToken | null;
+  onFailGmailUnreadIntent: (intent: GmailUnreadIntentToken) => boolean;
+  isCurrentGmailUnreadIntent: (intent: GmailUnreadIntentToken) => boolean;
   initialSelectedMessageId?: string | null;
   onMessageSelected?: (messageId: string) => void;
   productAccess: ProductAccess;
@@ -23797,7 +23809,7 @@ function MailboxView({
     }
 
     const action: InboxMessageAction = unread ? "mark_unread" : "mark_read";
-    const requests = targetMessages.map((message) => ({
+    const unresolvedRequests = targetMessages.map((message) => ({
       message,
       request: buildProviderMessageActionRequest(
         message,
@@ -23807,12 +23819,24 @@ function MailboxView({
       previousUnread: message.unread,
     }));
 
-    if (requests.some((entry) => entry.request === null)) {
+    if (unresolvedRequests.some((entry) => entry.request === null)) {
       if (shouldCloseMenus) {
         closeMenus();
       }
       return;
     }
+
+    const requests = unresolvedRequests.map((entry) => ({
+      ...entry,
+      gmailUnreadIntent:
+        entry.request && "messageId" in entry.request
+          ? onBeginGmailUnreadIntent(
+              entry.request.mailboxId,
+              entry.request.messageId,
+              unread,
+            )
+          : null,
+    }));
 
     const targetMessageIds = targetMessages.map((message) => message.id);
     const imapRequests = requests.filter(
@@ -23859,7 +23883,12 @@ function MailboxView({
       const messagesForUnreadOverrides = successfulEntries
         .filter(
           (entry) =>
-            Boolean(entry.request && "messageId" in entry.request),
+            Boolean(
+              entry.request &&
+                "messageId" in entry.request &&
+                entry.gmailUnreadIntent &&
+                isCurrentGmailUnreadIntent(entry.gmailUnreadIntent),
+            ),
         )
         .map((entry) => entry.message);
 
@@ -23880,7 +23909,16 @@ function MailboxView({
           return;
         }
 
-        updateUnreadStateInMailboxStore(folder, [entry.message.id], entry.previousUnread);
+        if (
+          !entry.gmailUnreadIntent ||
+          onFailGmailUnreadIntent(entry.gmailUnreadIntent)
+        ) {
+          updateUnreadStateInMailboxStore(
+            folder,
+            [entry.message.id],
+            entry.previousUnread,
+          );
+        }
       });
       setMailboxActionToastMessage(buildMailboxActionErrorMessage(firstError));
       return;
@@ -41052,6 +41090,9 @@ export function WorkspaceShell({
     createMailboxRefreshTailSequencer<ProviderImapTrashWorkspaceRefreshResult>(),
   );
   const gmailInboxAuthorityRef = useRef(createGmailInboxAuthority());
+  const gmailUnreadIntentAuthorityRef = useRef(
+    createGmailUnreadIntentAuthority(),
+  );
   const customImapInboxAuthorityRef = useRef(
     createCustomImapInboxAuthority(),
   );
@@ -41657,6 +41698,7 @@ export function WorkspaceShell({
         (providerTrashFetchSequenceByMailboxRef.current[mailboxId] ?? 0) + 1;
       gmailInboxAuthorityRef.current.resetMailbox(mailboxId);
       customImapInboxAuthorityRef.current.resetMailbox(mailboxId);
+      gmailUnreadIntentAuthorityRef.current.resetMailbox(mailboxId);
     });
     providerArchiveCapabilitiesRef.current = Object.fromEntries(
       Object.entries(providerArchiveCapabilitiesRef.current).filter(
@@ -41831,6 +41873,20 @@ export function WorkspaceShell({
       );
     });
   };
+  const beginGmailUnreadIntent = (
+    mailboxId: string,
+    providerMessageId: string,
+    desiredUnread: boolean,
+  ) =>
+    gmailUnreadIntentAuthorityRef.current.beginIntent(
+      mailboxId,
+      providerMessageId,
+      desiredUnread,
+    );
+  const failGmailUnreadIntent = (intent: GmailUnreadIntentToken) =>
+    gmailUnreadIntentAuthorityRef.current.failIntent(intent);
+  const isCurrentGmailUnreadIntent = (intent: GmailUnreadIntentToken) =>
+    gmailUnreadIntentAuthorityRef.current.isCurrentIntent(intent);
   const clearUnreadOverridesForProviderMessages = (
     messages: LiveInboxMessageSnapshot[],
   ) => {
@@ -42020,6 +42076,14 @@ export function WorkspaceShell({
             incomingMessages,
           )
         : incomingMessages;
+    const unreadIntentProtectedIncomingMessages =
+      options.threadIdentityContext.provider === "google" &&
+      options.threadIdentityContext.folder.trim().toUpperCase() === "INBOX"
+        ? gmailUnreadIntentAuthorityRef.current.applyPendingIntents(
+            mailboxId,
+            authorityFilteredIncomingMessages,
+          )
+        : authorityFilteredIncomingMessages;
     const bodyfulCurrentInboxMessages =
       currentInboxMessages.filter(hasRenderableMessagePayload);
     const currentInboxIndexes = buildMessageIdentityIndexes(bodyfulCurrentInboxMessages);
@@ -42028,7 +42092,7 @@ export function WorkspaceShell({
     // email twice in one snapshot (e.g. old "Other" + new "Reply" after reclassification).
     // Identity priority: imapUid > id > preview (subject|from|timestamp). First occurrence wins.
     const seenIncomingKeys = new Set<string>();
-    const uniqueIncomingMessages = authorityFilteredIncomingMessages.filter((message) => {
+    const uniqueIncomingMessages = unreadIntentProtectedIncomingMessages.filter((message) => {
       const providerIdentity = buildProviderArchiveStateIdentity(message);
       const keys = providerIdentity
         ? [`provider:${providerIdentity}`]
@@ -42052,6 +42116,14 @@ export function WorkspaceShell({
         getCanonicalMessageIdentityKeys(persistedMessage).some((key) =>
           options.freshProviderStateKeys?.has(key),
         );
+      const pendingGmailUnreadIntent =
+        options.threadIdentityContext.provider === "google" &&
+        typeof persistedMessage.providerMessageId === "string"
+          ? gmailUnreadIntentAuthorityRef.current.getPendingIntent(
+              mailboxId,
+              persistedMessage.providerMessageId,
+            )
+          : null;
       const mergedMessageState = mergeLiveInboxMessageState(
         persistedMessage,
         existingMessage,
@@ -42061,7 +42133,8 @@ export function WorkspaceShell({
           preferExistingUnreadWhenProviderStateIsNotFresh: shouldIgnoreUnreadOverrides,
           localUnread: shouldIgnoreUnreadOverrides
             ? undefined
-            : resolveUnreadOverride(messageUnreadOverrides, persistedMessage),
+            : pendingGmailUnreadIntent?.desiredUnread ??
+              resolveUnreadOverride(messageUnreadOverrides, persistedMessage),
         },
       );
       return normalizeMailMessage(
@@ -49546,6 +49619,9 @@ export function WorkspaceShell({
         canUseGmailOAuthFetch
           ? gmailInboxAuthorityRef.current.captureGeneration(mailboxId)
           : null;
+      const gmailUnreadIntentGenerationAtFetchStart = canUseGmailOAuthFetch
+        ? gmailUnreadIntentAuthorityRef.current.captureGeneration()
+        : null;
       const gmailInboxConnectionKeyAtFetchStart = canUseGmailOAuthFetch
         ? providerArchiveCurrentConnectionKeysRef.current[mailboxId] ?? null
         : null;
@@ -49780,11 +49856,23 @@ export function WorkspaceShell({
       if (customImapInboxResolution?.stale) {
         return "skipped";
       }
-      const messages =
+      const providerMessages =
         gmailInboxResolution?.messages ??
         customImapInboxResolution?.messages ??
         response.messages ??
         [];
+      const gmailUnreadIntentResolution =
+        canUseGmailOAuthFetch &&
+        gmailUnreadIntentGenerationAtFetchStart !== null
+          ? gmailUnreadIntentAuthorityRef.current.resolveFetchResponse({
+              mailboxId,
+              generationAtFetchStart:
+                gmailUnreadIntentGenerationAtFetchStart,
+              messages: providerMessages,
+            })
+          : null;
+      const messages =
+        gmailUnreadIntentResolution?.messages ?? providerMessages;
       try {
         if (
           typeof window !== "undefined" &&
@@ -50066,7 +50154,11 @@ export function WorkspaceShell({
           (current) => current + 1,
         );
       }
-      clearUnreadOverridesForProviderMessages(messages);
+      clearUnreadOverridesForProviderMessages(
+        canUseGmailOAuthFetch
+          ? gmailUnreadIntentResolution?.overrideClearableMessages ?? []
+          : messages,
+      );
       const refreshWarningMessage = resolveMailboxRefreshWarningMessage(response.warning);
       const refreshPresentation = resolveSuccessfulInboxRefreshPresentation({
         inboxWarningMessage: refreshWarningMessage,
@@ -53073,6 +53165,9 @@ export function WorkspaceShell({
                   onSyncMailbox={handleSyncActiveMailbox}
                   isSyncingMailbox={syncingMailboxId === activeMailbox.id}
                   onSyncUnreadOverrides={syncUnreadOverrides}
+                  onBeginGmailUnreadIntent={beginGmailUnreadIntent}
+                  onFailGmailUnreadIntent={failGmailUnreadIntent}
+                  isCurrentGmailUnreadIntent={isCurrentGmailUnreadIntent}
                   initialSelectedMessageId={lastMailboxSelectionRef.current[activeMailbox.id] ?? null}
                   onMessageSelected={(messageId) => {
                     lastMailboxSelectionRef.current[activeMailbox.id] = messageId;

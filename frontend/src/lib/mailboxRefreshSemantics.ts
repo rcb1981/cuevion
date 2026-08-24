@@ -56,6 +56,48 @@ export type GmailInboxAuthority = {
   };
 };
 
+export type GmailUnreadIntentMessage = {
+  serverMailboxId?: unknown;
+  providerMessageId?: unknown;
+  unread?: unknown;
+};
+
+export type GmailUnreadIntentToken = {
+  mailboxId: string;
+  providerMessageId: string;
+  desiredUnread: boolean;
+  generation: number;
+};
+
+export type GmailUnreadIntentAuthority = {
+  captureGeneration: () => number;
+  beginIntent: (
+    mailboxId: string,
+    providerMessageId: string,
+    desiredUnread: boolean,
+  ) => GmailUnreadIntentToken | null;
+  isCurrentIntent: (intent: GmailUnreadIntentToken) => boolean;
+  failIntent: (intent: GmailUnreadIntentToken) => boolean;
+  resetMailbox: (mailboxId: string) => void;
+  getPendingIntent: (
+    mailboxId: string,
+    providerMessageId: string,
+  ) => GmailUnreadIntentToken | null;
+  applyPendingIntents: <Message extends GmailUnreadIntentMessage>(
+    mailboxId: string,
+    messages: readonly Message[],
+  ) => Message[];
+  resolveFetchResponse: <Message extends GmailUnreadIntentMessage>(args: {
+    mailboxId: string;
+    generationAtFetchStart: number;
+    messages: readonly Message[];
+  }) => {
+    messages: Message[];
+    confirmedMessages: Message[];
+    overrideClearableMessages: Message[];
+  };
+};
+
 export type CustomImapInboxAuthorityMessage = {
   serverMailboxId?: unknown;
   providerFolder?: unknown;
@@ -249,6 +291,164 @@ function isExactAuthorityIdentifier(value: unknown): value is string {
     value.length > 0 &&
     value === value.trim()
   );
+}
+
+function buildGmailUnreadIntentIdentity(
+  mailboxId: string,
+  providerMessageId: string,
+) {
+  return JSON.stringify([mailboxId, providerMessageId]);
+}
+
+function isExactGmailUnreadIntentMessage(
+  message: GmailUnreadIntentMessage,
+  mailboxId: string,
+  providerMessageId: string,
+) {
+  return (
+    message.serverMailboxId === mailboxId &&
+    message.providerMessageId === providerMessageId
+  );
+}
+
+export function createGmailUnreadIntentAuthority(): GmailUnreadIntentAuthority {
+  let generation = 0;
+  const pendingIntents = new Map<string, GmailUnreadIntentToken>();
+  const readIntent = (mailboxId: string, providerMessageId: string) =>
+    pendingIntents.get(
+      buildGmailUnreadIntentIdentity(mailboxId, providerMessageId),
+    ) ?? null;
+  const isCurrentIntent = (intent: GmailUnreadIntentToken) => {
+    const current = readIntent(intent.mailboxId, intent.providerMessageId);
+    return (
+      current?.generation === intent.generation &&
+      current.desiredUnread === intent.desiredUnread
+    );
+  };
+  const applyPendingIntents = <Message extends GmailUnreadIntentMessage>(
+    mailboxId: string,
+    messages: readonly Message[],
+  ) =>
+    messages.map((message) => {
+      if (
+        message.serverMailboxId !== mailboxId ||
+        !isExactAuthorityIdentifier(message.providerMessageId)
+      ) {
+        return message;
+      }
+
+      const intent = readIntent(mailboxId, message.providerMessageId);
+      if (!intent || message.unread === intent.desiredUnread) {
+        return message;
+      }
+
+      return {
+        ...message,
+        unread: intent.desiredUnread,
+      };
+    });
+
+  return {
+    captureGeneration: () => generation,
+    beginIntent: (mailboxId, providerMessageId, desiredUnread) => {
+      if (
+        !isExactAuthorityIdentifier(mailboxId) ||
+        !isExactAuthorityIdentifier(providerMessageId)
+      ) {
+        return null;
+      }
+
+      generation += 1;
+      const intent = {
+        mailboxId,
+        providerMessageId,
+        desiredUnread,
+        generation,
+      };
+      pendingIntents.set(
+        buildGmailUnreadIntentIdentity(mailboxId, providerMessageId),
+        intent,
+      );
+      return intent;
+    },
+    isCurrentIntent,
+    failIntent: (intent) => {
+      if (!isCurrentIntent(intent)) {
+        return false;
+      }
+
+      pendingIntents.delete(
+        buildGmailUnreadIntentIdentity(
+          intent.mailboxId,
+          intent.providerMessageId,
+        ),
+      );
+      return true;
+    },
+    resetMailbox: (mailboxId) => {
+      pendingIntents.forEach((intent, identity) => {
+        if (intent.mailboxId === mailboxId) {
+          pendingIntents.delete(identity);
+        }
+      });
+    },
+    getPendingIntent: readIntent,
+    applyPendingIntents,
+    resolveFetchResponse: ({
+      mailboxId,
+      generationAtFetchStart,
+      messages,
+    }) => {
+      const confirmedIntentIdentities = new Set<string>();
+      const confirmedMessages: (typeof messages)[number][] = [];
+
+      pendingIntents.forEach((intent, identity) => {
+        if (
+          intent.mailboxId !== mailboxId ||
+          generationAtFetchStart < intent.generation
+        ) {
+          return;
+        }
+
+        const matchingMessages = messages.filter((message) =>
+          isExactGmailUnreadIntentMessage(
+            message,
+            mailboxId,
+            intent.providerMessageId,
+          ),
+        );
+        if (
+          matchingMessages.length > 0 &&
+          matchingMessages.every(
+            (message) => message.unread === intent.desiredUnread,
+          )
+        ) {
+          confirmedIntentIdentities.add(identity);
+          confirmedMessages.push(...matchingMessages);
+        }
+      });
+
+      const resolvedMessages = applyPendingIntents(mailboxId, messages);
+      confirmedIntentIdentities.forEach((identity) => {
+        pendingIntents.delete(identity);
+      });
+      const overrideClearableMessages = messages.filter((message) => {
+        if (
+          message.serverMailboxId !== mailboxId ||
+          !isExactAuthorityIdentifier(message.providerMessageId)
+        ) {
+          return false;
+        }
+        return readIntent(mailboxId, message.providerMessageId) === null;
+      });
+
+      return {
+        messages: resolvedMessages,
+        confirmedMessages,
+        overrideClearableMessages,
+      };
+    },
+  };
 }
 
 function isExactMailboxProviderMessage(
