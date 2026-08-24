@@ -31931,12 +31931,14 @@ const SettingsInfoRow = memo(function SettingsInfoRow({
   onClick,
   actionLabel,
   onActionClick,
+  actionSize = "compact",
 }: {
   label: string;
   value: string;
   onClick?: () => void;
   actionLabel?: string;
   onActionClick?: () => void;
+  actionSize?: "regular" | "compact";
 }) {
   if (onActionClick) {
     return (
@@ -31952,7 +31954,7 @@ const SettingsInfoRow = memo(function SettingsInfoRow({
             type="button"
             onClick={onActionClick}
             variant="tertiary"
-            size="compact"
+            size={actionSize}
           >
             {actionLabel ?? "Manage"}
           </DesktopActionButton>
@@ -37618,6 +37620,7 @@ const AccountSettingsCard = memo(function AccountSettingsCard({
             value=""
             actionLabel="Contact support"
             onActionClick={onOpenContact}
+            actionSize="regular"
           />
           <div className={settingsInfoRowClass}>
             <div className="text-[0.86rem] text-[var(--workspace-text-soft)]">Session</div>
