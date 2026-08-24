@@ -480,7 +480,7 @@ const workspaceAccountConfigSaveRegion = sourceBetween(
 );
 assert.equal(
   workspaceAccountConfigSaveRegion.includes(
-    "workspaceAccountConfigSaveQueueRef.current?.enqueue(nextAccountConfig)",
+    "workspaceAccountConfigSaveQueueRef.current?.enqueue(nextAccountConfig, {",
   ),
   true,
 );

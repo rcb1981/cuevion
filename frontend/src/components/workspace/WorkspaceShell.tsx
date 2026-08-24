@@ -266,9 +266,12 @@ import {
   type UserAccountConfig,
 } from "../../lib/userConfigApi";
 import {
+  beginOptimisticMailboxTitleRename,
   buildCanonicalWorkspaceMailboxPresentations,
   buildWorkspaceMailboxPresentationLabels,
-  updateMailboxTitleOverrideRecord,
+  reconcileActiveWorkspaceMailboxTitle,
+  settleOptimisticMailboxTitleRename,
+  type PendingOptimisticMailboxTitleRename,
   type WorkspaceMailboxDisplayRecord,
 } from "../../lib/mailboxDisplayName";
 import { sendContactSupportRequest } from "../../lib/contactSupportApi";
@@ -34738,6 +34741,7 @@ function ManagedInboxEditor({
 const ManageInboxesView = memo(function ManageInboxesView({
   savedManagedInboxes,
   mailboxDisplayTitles,
+  mailboxTitleSaveError,
   mailboxHealthById,
   primaryManagedInboxId,
   navigationRequest,
@@ -34755,6 +34759,7 @@ const ManageInboxesView = memo(function ManageInboxesView({
 }: {
   savedManagedInboxes: ManagedWorkspaceInbox[];
   mailboxDisplayTitles: Readonly<Record<string, string | undefined>>;
+  mailboxTitleSaveError?: string | null;
   mailboxHealthById: MailboxHealthStore;
   primaryManagedInboxId: string | null;
   navigationRequest?: MailboxConnectionSettingsNavigationRequest | null;
@@ -34873,6 +34878,12 @@ const ManageInboxesView = memo(function ManageInboxesView({
 
     return () => window.clearTimeout(timeoutId);
   }, [successToastMessage]);
+
+  useEffect(() => {
+    if (mailboxTitleSaveError) {
+      setSuccessToastMessage(mailboxTitleSaveError);
+    }
+  }, [mailboxTitleSaveError]);
 
   const hasMailboxTitleDraftChanges = savedManagedInboxes.some((mailbox) => {
     const canonicalTitle =
@@ -38035,6 +38046,7 @@ function SettingsView({
   productAccess,
   savedManagedInboxes,
   mailboxDisplayTitles,
+  mailboxTitleSaveError,
   mailboxHealthById,
   primaryManagedInboxId,
   credentialStatuses,
@@ -38077,6 +38089,7 @@ function SettingsView({
   productAccess: ProductAccess;
   savedManagedInboxes: ManagedWorkspaceInbox[];
   mailboxDisplayTitles: Readonly<Record<string, string | undefined>>;
+  mailboxTitleSaveError?: string | null;
   mailboxHealthById: MailboxHealthStore;
   primaryManagedInboxId: string | null;
   credentialStatuses: MailboxCredentialStatusStore;
@@ -38235,6 +38248,7 @@ function SettingsView({
           <ManageInboxesView
             savedManagedInboxes={savedManagedInboxes}
             mailboxDisplayTitles={mailboxDisplayTitles}
+            mailboxTitleSaveError={mailboxTitleSaveError}
             mailboxHealthById={mailboxHealthById}
             primaryManagedInboxId={primaryManagedInboxId}
             navigationRequest={mailboxConnectionNavigationRequest}
@@ -41022,6 +41036,15 @@ export function WorkspaceShell({
       return {};
     }
   });
+  const mailboxTitleOverridesRef = useRef(mailboxTitleOverrides);
+  mailboxTitleOverridesRef.current = mailboxTitleOverrides;
+  const mailboxTitleRenameGenerationRef = useRef(0);
+  const pendingMailboxTitleRenamesRef = useRef<
+    Partial<Record<InboxId, PendingOptimisticMailboxTitleRename>>
+  >({});
+  const [mailboxTitleSaveError, setMailboxTitleSaveError] = useState<string | null>(
+    null,
+  );
   const hasAuthenticatedMemberAuthority =
     authenticationContext === "auth0" && authenticatedUser?.userType === "member";
   const authoritativeManagedInboxSeed = useMemo(
@@ -43913,6 +43936,11 @@ export function WorkspaceShell({
     setActiveTarget(target);
   };
   const [activeMailbox, setActiveMailbox] = useState<OrderedMailbox | null>(null);
+  useLayoutEffect(() => {
+    setActiveMailbox((currentMailbox) =>
+      reconcileActiveWorkspaceMailboxTitle(currentMailbox, orderedMailboxes),
+    );
+  }, [orderedMailboxes]);
   const [mailboxReturnContext, setMailboxReturnContext] =
     useState<MailboxReturnContext | null>(null);
   const [hasUnsavedManagedInboxSettings, setHasUnsavedManagedInboxSettings] = useState(false);
@@ -49464,9 +49492,21 @@ export function WorkspaceShell({
   };
 
   const handleRenameMailbox = (mailboxId: InboxId, nextTitle: string) => {
-    setMailboxTitleOverrides((current) =>
-      updateMailboxTitleOverrideRecord(current, mailboxId, nextTitle),
-    );
+    const generation = mailboxTitleRenameGenerationRef.current + 1;
+    mailboxTitleRenameGenerationRef.current = generation;
+    const optimisticRename = beginOptimisticMailboxTitleRename({
+      currentOverrides: mailboxTitleOverridesRef.current,
+      currentPendingRename: pendingMailboxTitleRenamesRef.current[mailboxId],
+      mailboxId,
+      nextTitle,
+      generation,
+    });
+
+    pendingMailboxTitleRenamesRef.current[mailboxId] =
+      optimisticRename.pendingRename;
+    mailboxTitleOverridesRef.current = optimisticRename.nextOverrides;
+    setMailboxTitleSaveError(null);
+    setMailboxTitleOverrides(optimisticRename.nextOverrides);
   };
 
   const handleLearnCategoryDecision = (
@@ -52487,6 +52527,12 @@ export function WorkspaceShell({
       return;
     }
 
+    const pendingTitleRenames = Object.values(
+      pendingMailboxTitleRenamesRef.current,
+    ).filter(
+      (pendingRename): pendingRename is PendingOptimisticMailboxTitleRename =>
+        Boolean(pendingRename),
+    );
     const timeoutId = window.setTimeout(() => {
       const nextAccountConfig: UserAccountConfig =
         projectWorkspaceUserAccountConfigForSave({
@@ -52506,8 +52552,49 @@ export function WorkspaceShell({
           },
         });
 
-      workspaceAccountConfigSaveQueueRef.current?.enqueue(nextAccountConfig);
-    }, 900);
+      workspaceAccountConfigSaveQueueRef.current?.enqueue(nextAccountConfig, {
+        onSettled: (result) => {
+          pendingTitleRenames.forEach((pendingRename) => {
+            const currentPendingRename =
+              pendingMailboxTitleRenamesRef.current[
+                pendingRename.mailboxId as InboxId
+              ];
+            if (
+              currentPendingRename?.generation !== pendingRename.generation
+            ) {
+              return;
+            }
+
+            setMailboxTitleOverrides((currentOverrides) => {
+              const settledRename = settleOptimisticMailboxTitleRename({
+                currentOverrides,
+                pendingRename,
+                generation: currentPendingRename.generation,
+                authoritativeOverrides:
+                  result.status === "found"
+                    ? result.config.mailboxTitleOverrides ?? {}
+                    : null,
+              });
+
+              if (!settledRename.applied) {
+                return currentOverrides;
+              }
+              mailboxTitleOverridesRef.current = settledRename.nextOverrides;
+              return settledRename.nextOverrides;
+            });
+            delete pendingMailboxTitleRenamesRef.current[
+              pendingRename.mailboxId as InboxId
+            ];
+
+            if (result.status !== "found") {
+              setMailboxTitleSaveError(
+                `Could not save the inbox name. ${result.error.message} The previous name was restored.`,
+              );
+            }
+          });
+        },
+      });
+    }, pendingTitleRenames.length > 0 ? 0 : 900);
 
     return () => {
       window.clearTimeout(timeoutId);
@@ -53827,6 +53914,7 @@ export function WorkspaceShell({
                   productAccess={productAccess}
                   savedManagedInboxes={savedManagedInboxes}
                   mailboxDisplayTitles={mailboxDisplayTitles}
+                  mailboxTitleSaveError={mailboxTitleSaveError}
                   mailboxHealthById={mailboxHealthById}
                   primaryManagedInboxId={primaryManagedInboxId}
                   credentialStatuses={mailboxCredentialStatuses}

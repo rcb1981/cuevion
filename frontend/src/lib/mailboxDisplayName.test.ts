@@ -7,10 +7,13 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import {
+  beginOptimisticMailboxTitleRename,
   buildCanonicalWorkspaceMailboxPresentations,
   buildWorkspaceMailboxPresentationLabels,
   isGeneratedMailboxPlaceholderTitle,
+  reconcileActiveWorkspaceMailboxTitle,
   resolveWorkspaceMailboxDisplayName,
+  settleOptimisticMailboxTitleRename,
   updateMailboxTitleOverrideRecord,
   type WorkspaceMailboxDisplayRecord,
 } from "./mailboxDisplayName";
@@ -361,6 +364,93 @@ test("clearing Inbox title removes its override so canonical fallback can resume
   );
 });
 
+test("optimistic Inbox rename is visible before the server settles", () => {
+  const started = beginOptimisticMailboxTitleRename({
+    currentOverrides: { primary: "Old name", secondary: "Team inbox" },
+    mailboxId: "primary",
+    nextTitle: "New name",
+    generation: 1,
+  });
+
+  assert.equal(started.nextOverrides.primary, "New name");
+  assert.equal(started.nextOverrides.secondary, "Team inbox");
+  assert.equal(
+    reconcileActiveWorkspaceMailboxTitle(
+      { id: "primary", title: "Old name", email: "primary@example.com" },
+      [
+        {
+          id: "primary",
+          title: started.nextOverrides.primary,
+          email: "primary@example.com",
+        },
+      ],
+    )?.title,
+    "New name",
+  );
+});
+
+test("successful Inbox rename keeps the authoritative server title", () => {
+  const started = beginOptimisticMailboxTitleRename({
+    currentOverrides: { primary: "Old name" },
+    mailboxId: "primary",
+    nextTitle: "New name",
+    generation: 1,
+  });
+  const settled = settleOptimisticMailboxTitleRename({
+    currentOverrides: started.nextOverrides,
+    pendingRename: started.pendingRename,
+    generation: 1,
+    authoritativeOverrides: { primary: "New name" },
+  });
+
+  assert.equal(settled.applied, true);
+  assert.equal(settled.nextOverrides.primary, "New name");
+});
+
+test("failed Inbox rename rolls back without changing another mailbox", () => {
+  const started = beginOptimisticMailboxTitleRename({
+    currentOverrides: { primary: "Old name", secondary: "Team inbox" },
+    mailboxId: "primary",
+    nextTitle: "New name",
+    generation: 1,
+  });
+  const settled = settleOptimisticMailboxTitleRename({
+    currentOverrides: started.nextOverrides,
+    pendingRename: started.pendingRename,
+    generation: 1,
+    authoritativeOverrides: null,
+  });
+
+  assert.equal(settled.nextOverrides.primary, "Old name");
+  assert.equal(settled.nextOverrides.secondary, "Team inbox");
+});
+
+test("older Inbox rename completion cannot overwrite newer intent", () => {
+  const first = beginOptimisticMailboxTitleRename({
+    currentOverrides: { primary: "Old name" },
+    mailboxId: "primary",
+    nextTitle: "Main",
+    generation: 1,
+  });
+  const second = beginOptimisticMailboxTitleRename({
+    currentOverrides: first.nextOverrides,
+    currentPendingRename: first.pendingRename,
+    mailboxId: "primary",
+    nextTitle: "Personal",
+    generation: 2,
+  });
+  const stale = settleOptimisticMailboxTitleRename({
+    currentOverrides: second.nextOverrides,
+    pendingRename: second.pendingRename,
+    generation: 1,
+    authoritativeOverrides: { primary: "Main" },
+  });
+
+  assert.equal(stale.applied, false);
+  assert.equal(stale.nextOverrides.primary, "Personal");
+  assert.equal(second.pendingRename.previousAuthoritativeTitle, "Old name");
+});
+
 test("canonical Inbox title derivation alone never creates an override", () => {
   const overrides: Record<string, string> = {};
 
@@ -400,7 +490,7 @@ test("Settings composes its Inbox title field from canonical display state", () 
   );
   assert.equal(
     workspaceSource.includes(
-      "updateMailboxTitleOverrideRecord(current, mailboxId, nextTitle)",
+      "beginOptimisticMailboxTitleRename({",
     ),
     true,
   );

@@ -42,6 +42,10 @@ export type UserAccountConfigSaveResult = Exclude<
   { status: "missing" }
 >;
 
+type UserAccountConfigSaveQueueCallbacks = {
+  onSettled?: (result: UserAccountConfigSaveResult) => void;
+};
+
 type UserConfigOperation = "loaded" | "saved";
 
 const VALID_THEME_MODES = new Set(["Light", "Dark", "System", "light", "dark"]);
@@ -422,6 +426,7 @@ export function createUserAccountConfigConflictRetryQueue({
     config: UserAccountConfig,
     requestGeneration: number,
     conflictRetryCount: number,
+    callbacks?: UserAccountConfigSaveQueueCallbacks,
   ) => {
     operationTail = operationTail.then(async () => {
       if (requestGeneration !== generation) {
@@ -432,13 +437,18 @@ export function createUserAccountConfigConflictRetryQueue({
       try {
         result = await save(config);
       } catch {
-        return;
+        result = networkError("saved");
       }
       if (requestGeneration !== generation) {
         return;
       }
       if (result.status === "found") {
         dirty = false;
+        try {
+          callbacks?.onSettled?.(result);
+        } catch {
+          // Consumer feedback must not break the serialized save queue.
+        }
         return;
       }
 
@@ -449,6 +459,11 @@ export function createUserAccountConfigConflictRetryQueue({
         result.error.code !== "user_config_write_conflict" ||
         delayMs === undefined
       ) {
+        try {
+          callbacks?.onSettled?.(result);
+        } catch {
+          // Consumer feedback must not break the serialized save queue.
+        }
         return;
       }
 
@@ -461,18 +476,26 @@ export function createUserAccountConfigConflictRetryQueue({
           return;
         }
         retryHandle = null;
-        queueAttempt(config, requestGeneration, conflictRetryCount + 1);
+        queueAttempt(
+          config,
+          requestGeneration,
+          conflictRetryCount + 1,
+          callbacks,
+        );
       }, delayMs);
       retryHandle = handle;
     });
   };
 
   return {
-    enqueue(config: UserAccountConfig) {
+    enqueue(
+      config: UserAccountConfig,
+      callbacks?: UserAccountConfigSaveQueueCallbacks,
+    ) {
       generation += 1;
       clearRetry();
       dirty = true;
-      queueAttempt(config, generation, 0);
+      queueAttempt(config, generation, 0, callbacks);
     },
     supersede() {
       generation += 1;

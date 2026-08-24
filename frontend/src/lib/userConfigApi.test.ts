@@ -302,6 +302,7 @@ async function run(): Promise<void> {
         if (pending) pending.cancelled = true;
       };
       let conflictCalls = 0;
+      const boundedSettlements: string[] = [];
       const boundedQueue = createUserAccountConfigConflictRetryQueue({
         save: async () => {
           conflictCalls += 1;
@@ -310,7 +311,12 @@ async function run(): Promise<void> {
         scheduleRetry,
         cancelRetry,
       });
-      boundedQueue.enqueue({ onboardingSession: {} });
+      boundedQueue.enqueue(
+        { onboardingSession: {} },
+        {
+          onSettled: (result) => boundedSettlements.push(result.status),
+        },
+      );
       await flushAsyncWork();
       assert.equal(conflictCalls, 1);
       assert.equal(scheduled[0].delayMs, 120);
@@ -323,9 +329,11 @@ async function run(): Promise<void> {
       assert.equal(conflictCalls, 3);
       assert.equal(scheduled.length, 2);
       assert.equal(boundedQueue.isDirty(), true);
+      assert.deepEqual(boundedSettlements, ["conflict"]);
 
       const supersedingScheduled: typeof scheduled = [];
       const savedConfigs: UserAccountConfig[] = [];
+      const supersedingSettlements: string[] = [];
       const supersedingQueue = createUserAccountConfigConflictRetryQueue({
         save: async (config) => {
           savedConfigs.push(config);
@@ -351,17 +359,27 @@ async function run(): Promise<void> {
           if (pending) pending.cancelled = true;
         },
       });
-      supersedingQueue.enqueue({
-        onboardingSession: { currentStep: 1 },
-      });
+      supersedingQueue.enqueue(
+        {
+          onboardingSession: { currentStep: 1 },
+        },
+        {
+          onSettled: () => supersedingSettlements.push("stale"),
+        },
+      );
       await flushAsyncWork();
       assert.equal(supersedingScheduled.length, 1);
       supersedingQueue.supersede();
       assert.equal(supersedingScheduled[0].cancelled, true);
-      supersedingQueue.enqueue({
-        onboardingSession: { currentStep: 3 },
-        managedInboxes: [{ id: "imap-server-1" }],
-      });
+      supersedingQueue.enqueue(
+        {
+          onboardingSession: { currentStep: 3 },
+          managedInboxes: [{ id: "imap-server-1" }],
+        },
+        {
+          onSettled: (result) => supersedingSettlements.push(result.status),
+        },
+      );
       supersedingScheduled[0].callback();
       await flushAsyncWork();
       assert.equal(savedConfigs.length, 2);
@@ -371,6 +389,7 @@ async function run(): Promise<void> {
       });
       assert.equal(JSON.stringify(savedConfigs).includes("password"), false);
       assert.equal(supersedingQueue.isDirty(), false);
+      assert.deepEqual(supersedingSettlements, ["found"]);
     });
 
     await test("failed POST responses", async () => {

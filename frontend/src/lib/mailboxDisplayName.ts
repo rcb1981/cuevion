@@ -15,6 +15,29 @@ export type WorkspaceMailboxDisplayItem = {
   email: string;
 };
 
+export function reconcileActiveWorkspaceMailboxTitle<
+  TMailbox extends WorkspaceMailboxDisplayItem,
+>(
+  activeMailbox: TMailbox | null,
+  canonicalMailboxes: readonly WorkspaceMailboxDisplayItem[],
+): TMailbox | null {
+  if (!activeMailbox) {
+    return null;
+  }
+
+  const canonicalMailbox = canonicalMailboxes.find(
+    (mailbox) => mailbox.id === activeMailbox.id,
+  );
+  if (!canonicalMailbox || canonicalMailbox.title === activeMailbox.title) {
+    return activeMailbox;
+  }
+
+  return {
+    ...activeMailbox,
+    title: canonicalMailbox.title,
+  };
+}
+
 export type OnboardingCustomInboxDisplayRecord = {
   id: string;
   name: string;
@@ -288,4 +311,84 @@ export function updateMailboxTitleOverrideRecord(
       (entry): entry is [string, string] => typeof entry[1] === "string",
     ),
   );
+}
+
+export type PendingOptimisticMailboxTitleRename = {
+  mailboxId: string;
+  generation: number;
+  previousAuthoritativeTitle: string | undefined;
+};
+
+export function beginOptimisticMailboxTitleRename({
+  currentOverrides,
+  currentPendingRename,
+  mailboxId,
+  nextTitle,
+  generation,
+}: {
+  currentOverrides: Readonly<Record<string, string | undefined>>;
+  currentPendingRename?: PendingOptimisticMailboxTitleRename | null;
+  mailboxId: string;
+  nextTitle: string;
+  generation: number;
+}): {
+  nextOverrides: Record<string, string>;
+  pendingRename: PendingOptimisticMailboxTitleRename;
+} {
+  const nextOverrides = updateMailboxTitleOverrideRecord(
+    currentOverrides,
+    mailboxId,
+    nextTitle,
+  );
+
+  return {
+    nextOverrides,
+    pendingRename: {
+      mailboxId,
+      generation,
+      previousAuthoritativeTitle:
+        currentPendingRename?.previousAuthoritativeTitle ??
+        trimmedNonEmpty(currentOverrides[mailboxId]) ??
+        undefined,
+    },
+  };
+}
+
+export function settleOptimisticMailboxTitleRename({
+  currentOverrides,
+  pendingRename,
+  generation,
+  authoritativeOverrides,
+}: {
+  currentOverrides: Readonly<Record<string, string | undefined>>;
+  pendingRename: PendingOptimisticMailboxTitleRename;
+  generation: number;
+  authoritativeOverrides?: Readonly<Record<string, unknown>> | null;
+}): {
+  applied: boolean;
+  nextOverrides: Record<string, string>;
+} {
+  if (pendingRename.generation !== generation) {
+    return {
+      applied: false,
+      nextOverrides: Object.fromEntries(
+        Object.entries(currentOverrides).filter(
+          (entry): entry is [string, string] => typeof entry[1] === "string",
+        ),
+      ),
+    };
+  }
+
+  const settledTitle = authoritativeOverrides
+    ? trimmedNonEmpty(authoritativeOverrides[pendingRename.mailboxId]) ?? undefined
+    : pendingRename.previousAuthoritativeTitle;
+
+  return {
+    applied: true,
+    nextOverrides: updateMailboxTitleOverrideRecord(
+      currentOverrides,
+      pendingRename.mailboxId,
+      settledTitle ?? "",
+    ),
+  };
 }

@@ -228,7 +228,7 @@ assert.equal(
 for (const memberApiCall of [
   "getMailboxCredentialStatuses(mailboxIds)",
   "fetchParticipantCollaborationThreads({})",
-  "workspaceAccountConfigSaveQueueRef.current?.enqueue(nextAccountConfig)",
+  "workspaceAccountConfigSaveQueueRef.current?.enqueue(nextAccountConfig, {",
 ]) {
   assert.equal(
     enclosingEffect(workspaceSource, memberApiCall).includes(
