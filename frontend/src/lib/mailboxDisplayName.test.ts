@@ -469,7 +469,6 @@ test("Settings composes its Inbox title field from canonical display state", () 
     path.resolve(__dirname, "../components/workspace/WorkspaceShell.tsx"),
     "utf8",
   );
-
   assert.equal(
     workspaceSource.includes(
       'displayTitle={\n                    selectedInbox.provider !== "custom_imap"',
@@ -690,6 +689,13 @@ test("long authoritative email stays intact while identity surfaces retain trunc
     path.resolve(__dirname, "../components/workspace/WorkspaceShell.tsx"),
     "utf8",
   );
+  const mailboxTitleEditorSource = fs.readFileSync(
+    path.resolve(
+      __dirname,
+      "../components/workspace/MailboxTitleEditor.tsx",
+    ),
+    "utf8",
+  );
   const mobileSource = fs.readFileSync(
     path.resolve(
       __dirname,
@@ -700,7 +706,7 @@ test("long authoritative email stays intact while identity surfaces retain trunc
 
   assert.equal(presented[0].title, longEmail);
   assert.match(
-    workspaceSource,
+    mailboxTitleEditorSource,
     /max-w-\[min\(70vw,32rem\)\][^"]*[\s\S]{0,500}truncate/,
   );
   assert.equal(

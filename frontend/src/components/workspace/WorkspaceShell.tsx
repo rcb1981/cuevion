@@ -33,6 +33,7 @@ import {
   type MobileWorkspaceMailbox,
   type MobileWorkspaceMessage,
 } from "./mobile/MobileWorkspaceShell";
+import { MailboxTitleEditor } from "./MailboxTitleEditor";
 import {
   DesktopComposeBodyEditor,
   type DesktopComposeBodyEditorHandle,
@@ -16757,9 +16758,6 @@ function MailboxView({
   const composeBodyEditorRef = useRef<DesktopComposeBodyEditorHandle | null>(null);
   const composeAttachmentInputRef = useRef<HTMLInputElement | null>(null);
   const pendingComposeInitialFocusRef = useRef<"to" | "body" | null>(null);
-  const [isEditingMailboxTitle, setIsEditingMailboxTitle] = useState(false);
-  const [mailboxTitleDraft, setMailboxTitleDraft] = useState(mailbox.title);
-  const mailboxTitleInputRef = useRef<HTMLInputElement | null>(null);
   const [collaborationRequestType, setCollaborationRequestType] = useState<
     "needs_review" | "needs_action" | "note_only"
   >("needs_review");
@@ -17651,17 +17649,6 @@ function MailboxView({
     }
     setComposeMode(transition.mode);
   };
-
-  useEffect(() => {
-    setMailboxTitleDraft(mailbox.title);
-  }, [mailbox.title]);
-
-  useEffect(() => {
-    if (isEditingMailboxTitle) {
-      mailboxTitleInputRef.current?.focus();
-      mailboxTitleInputRef.current?.select();
-    }
-  }, [isEditingMailboxTitle]);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -26024,19 +26011,6 @@ function MailboxView({
     closeMenus();
   };
 
-  const commitMailboxTitleEdit = () => {
-    const nextTitle = mailboxTitleDraft.trim();
-
-    if (nextTitle.length > 0 && nextTitle !== mailbox.title) {
-      onRenameMailbox(mailbox.id, nextTitle);
-    } else {
-      setMailboxTitleDraft(mailbox.title);
-    }
-
-    setIsEditingMailboxTitle(false);
-  };
-
-
   useEffect(() => {
     const isTypingTarget = (target: EventTarget | null) => {
       if (!(target instanceof HTMLElement)) {
@@ -26360,69 +26334,18 @@ function MailboxView({
           </div>
           <div className="flex flex-none items-start md:justify-end">
             <div className="flex flex-col items-start gap-0.5 text-[0.82rem] leading-5 text-[var(--workspace-text-faint)] md:items-end">
-              {activeFolder === "Inbox" && !isSharedView && isEditingMailboxTitle ? (
-                <input
-                  ref={mailboxTitleInputRef}
-                  value={mailboxTitleDraft}
-                  onChange={(event) => setMailboxTitleDraft(event.target.value)}
-                  onBlur={commitMailboxTitleEdit}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter") {
-                      event.preventDefault();
-                      commitMailboxTitleEdit();
-                    }
-
-                    if (event.key === "Escape") {
-                      event.preventDefault();
-                      setMailboxTitleDraft(mailbox.title);
-                      setIsEditingMailboxTitle(false);
-                    }
-                  }}
-                  className="min-w-0 bg-transparent text-[0.98rem] font-semibold tracking-[-0.01em] text-[var(--workspace-text)] outline-none md:text-[1.04rem] md:text-right"
-                />
-              ) : (
-                <div className="group relative">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      if (activeFolder === "Inbox" && !isSharedView && !activeSmartFolder) {
-                        setIsEditingMailboxTitle(true);
-                      }
-                    }}
-                    aria-label="Edit mailbox name"
-                    disabled={activeFolder !== "Inbox" || isSharedView || Boolean(activeSmartFolder)}
-                    className={`inline-flex min-w-0 max-w-[min(70vw,32rem)] items-center gap-1.5 rounded-full text-[0.98rem] font-semibold tracking-[-0.01em] text-[var(--workspace-text)] transition-colors duration-200 focus-visible:outline-none md:text-[1.04rem] ${
-                      activeFolder === "Inbox" && !isSharedView && !activeSmartFolder
-                        ? "cursor-pointer"
-                        : "cursor-default"
-                    }`}
-                  >
-                    <span className="block min-w-0 truncate">{activeDestinationTitle}</span>
-                    {activeFolder === "Inbox" && !isSharedView && !activeSmartFolder ? (
-                      <span className="text-[var(--workspace-text-faint)] opacity-45 transition-opacity duration-200 group-hover:opacity-100">
-                        <svg
-                          aria-hidden="true"
-                          viewBox="0 0 16 16"
-                          className="h-3.5 w-3.5"
-                          fill="none"
-                          stroke="currentColor"
-                          strokeWidth="1.75"
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                        >
-                          <path d="M3.25 12.75 3.6 10.25 10.9 2.95a1.15 1.15 0 0 1 1.65 0l.5.5a1.15 1.15 0 0 1 0 1.65l-7.3 7.3z" />
-                          <path d="M9.95 3.9 12.1 6.05" />
-                        </svg>
-                      </span>
-                    ) : null}
-                  </button>
-                  {activeFolder === "Inbox" && !isSharedView && !activeSmartFolder ? (
-                    <div className="pointer-events-none absolute right-0 top-full z-10 mt-2 whitespace-nowrap rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card)] px-3.5 py-1 text-[0.62rem] font-medium tracking-[0.08em] text-[var(--workspace-text-soft)] opacity-0 shadow-panel transition-opacity duration-200 group-hover:opacity-100">
-                      Edit name
-                    </div>
-                  ) : null}
-                </div>
-              )}
+              <MailboxTitleEditor
+                canonicalTitle={mailbox.title}
+                displayTitle={activeDestinationTitle}
+                canEdit={
+                  activeFolder === "Inbox" &&
+                  !isSharedView &&
+                  !activeSmartFolder
+                }
+                onCommit={(nextTitle) =>
+                  onRenameMailbox(mailbox.id, nextTitle)
+                }
+              />
               <div className="text-[var(--workspace-text-faint)]">{mailbox.email}</div>
               <MailboxConnectionState
                 health={mailboxHealth}
