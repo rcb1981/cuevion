@@ -7,6 +7,8 @@ import re
 import secrets
 import sys
 import time
+from copy import deepcopy
+from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
@@ -18,9 +20,13 @@ if str(API_DIR) not in sys.path:
     sys.path.insert(0, str(API_DIR))
 
 from user_config_store import (  # noqa: E402
+    acquire_mailbox_mutation_lease,
     read_user_config_record,
+    release_mailbox_mutation_lease,
     resolve_authenticated_member_authority,
+    resolve_owned_managed_inbox_record,
     resolve_user_config_store,
+    write_user_config_record_if_unchanged,
 )
 from api.auth.email_address import normalize_auth_email  # noqa: E402
 from api.user.config import _classify_stored_onboarding_session  # noqa: E402
@@ -49,11 +55,14 @@ DEFAULT_MICROSOFT_SCOPES = [
     "https://graph.microsoft.com/Mail.Read",
 ]
 MAX_REQUEST_BODY_BYTES = 16 * 1024
-OAUTH_STATE_VERSION = 2
+OAUTH_STATE_VERSION = 3
 OAUTH_STATE_TTL_SECONDS = 15 * 60
-STATE_SIGNATURE_DOMAIN = "cuevion-oauth-state-signature:v2"
-OWNER_BINDING_DOMAIN = "cuevion-oauth-owner-binding:v2"
-PKCE_DERIVATION_DOMAIN = "cuevion-oauth-pkce:v2"
+STATE_SIGNATURE_DOMAIN = "cuevion-oauth-state-signature:v3"
+OWNER_BINDING_DOMAIN = "cuevion-oauth-owner-binding:v3"
+PKCE_DERIVATION_DOMAIN = "cuevion-oauth-pkce:v3"
+OAUTH_CREDENTIAL_GENERATION_PATTERN = re.compile(r"^[A-Za-z0-9_-]{43}$")
+OAUTH_MAILBOX_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$")
+MAX_RECONNECT_CONFIG_WRITE_ATTEMPTS = 3
 ONBOARDING_CONFLICT_ERROR = {
     "ok": False,
     "error": {
@@ -212,6 +221,10 @@ def build_owner_binding(
     expires_at: int,
     signing_secret: str,
     inbox_position: str | None = None,
+    mode: str = "initial",
+    mailbox_id: str | None = None,
+    expected_email: str | None = None,
+    credential_generation: str | None = None,
 ) -> str:
     normalized_owner = normalize_auth_email(owner_email)
     normalized_user_id = (
@@ -232,7 +245,11 @@ def build_owner_binding(
         normalized_workspace_id,
         provider,
         email_hint,
+        mode,
+        credential_generation or "",
     ]
+    if mode == "reconnect":
+        binding_fields.extend((mailbox_id or "", expected_email or ""))
     if inbox_position is not None:
         binding_fields.append(inbox_position)
     binding_fields.extend((nonce, str(issued_at), str(expires_at)))
@@ -259,7 +276,30 @@ def build_signed_state(
     *,
     member_user_id: str,
     member_workspace_id: str,
+    mode: str = "initial",
+    mailbox_id: str | None = None,
+    expected_email: str | None = None,
+    credential_generation: str | None = None,
 ) -> tuple[str, str]:
+    generation = credential_generation or secrets.token_urlsafe(32)
+    if not OAUTH_CREDENTIAL_GENERATION_PATTERN.fullmatch(generation):
+        raise ValueError("OAuth credential generation is invalid.")
+    if mode not in {"initial", "reconnect"}:
+        raise ValueError("OAuth connection mode is invalid.")
+    if mode == "reconnect":
+        if (
+            provider != "google"
+            or not isinstance(mailbox_id, str)
+            or OAUTH_MAILBOX_ID_PATTERN.fullmatch(mailbox_id) is None
+            or not isinstance(expected_email, str)
+            or expected_email != expected_email.strip().lower()
+            or not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", expected_email)
+            or inbox_position is not None
+        ):
+            raise ValueError("OAuth reconnect target is invalid.")
+    elif mailbox_id is not None or expected_email is not None:
+        raise ValueError("Initial OAuth state cannot contain a reconnect target.")
+
     issued_at = int(time.time())
     expires_at = issued_at + OAUTH_STATE_TTL_SECONDS
     nonce = secrets.token_urlsafe(16)
@@ -267,6 +307,8 @@ def build_signed_state(
         "v": OAUTH_STATE_VERSION,
         "provider": provider,
         "email_hint": email_hint,
+        "mode": mode,
+        "credential_generation": generation,
         "issued_at": issued_at,
         "expires_at": expires_at,
         "nonce": nonce,
@@ -281,8 +323,15 @@ def build_signed_state(
             expires_at=expires_at,
             signing_secret=signing_secret,
             inbox_position=inbox_position,
+            mode=mode,
+            mailbox_id=mailbox_id,
+            expected_email=expected_email,
+            credential_generation=generation,
         ),
     }
+    if mode == "reconnect":
+        state_payload["mailboxId"] = mailbox_id
+        state_payload["expected_email"] = expected_email
     if inbox_position is not None:
         state_payload["inboxPosition"] = inbox_position
     encoded_payload = base64url_encode(
@@ -381,6 +430,192 @@ def resolve_authoritative_onboarding_position(
     return inbox_position, None, None
 
 
+def _reconnect_error(status_code: int, code: str, message: str):
+    return None, status_code, {
+        "ok": False,
+        "error": {"code": code, "message": message},
+    }
+
+
+def _resolve_reconnect_target_index(config: dict, mailbox_id: str) -> int | None:
+    managed_inboxes = config.get("managedInboxes")
+    if not isinstance(managed_inboxes, list):
+        return None
+    exact_matches = [
+        index
+        for index, inbox in enumerate(managed_inboxes)
+        if isinstance(inbox, dict) and inbox.get("id") == mailbox_id
+    ]
+    casefold_matches = [
+        inbox
+        for inbox in managed_inboxes
+        if isinstance(inbox, dict)
+        and isinstance(inbox.get("id"), str)
+        and inbox["id"].casefold() == mailbox_id.casefold()
+    ]
+    if len(exact_matches) != 1 or len(casefold_matches) != 1:
+        return None
+    return exact_matches[0]
+
+
+def reserve_authoritative_google_reconnect(
+    headers,
+    session_member,
+    mailbox_id: str,
+    asserted_email: str,
+    credential_generation: str,
+) -> tuple[str | None, int | None, dict | None]:
+    """CAS-reserve one exact owned Gmail target without changing its live status."""
+    store, store_error = resolve_user_config_store()
+    if store_error or not store:
+        return _reconnect_error(
+            503,
+            "user_config_store_unavailable",
+            "Mailbox configuration is temporarily unavailable.",
+        )
+
+    for _attempt in range(MAX_RECONNECT_CONFIG_WRITE_ATTEMPTS):
+        owned_result = resolve_owned_managed_inbox_record(
+            headers,
+            mailbox_id,
+            include_member_authority=True,
+        )
+        owned_status = owned_result.get("status")
+        if owned_status == "unauthorized":
+            return _reconnect_error(
+                401,
+                "unauthorized",
+                "A valid member session is required.",
+            )
+        if owned_status == "unavailable":
+            return _reconnect_error(
+                503,
+                "user_config_store_unavailable",
+                "Mailbox configuration is temporarily unavailable.",
+            )
+        if owned_status == "not_found":
+            return _reconnect_error(
+                404,
+                "managed_inbox_not_found",
+                "The requested mailbox was not found.",
+            )
+        if owned_status != "ok":
+            return _reconnect_error(
+                409,
+                "oauth_reconnect_target_invalid",
+                "The selected Google mailbox cannot be reconnected safely.",
+            )
+
+        member_authority = owned_result.get("memberAuthority")
+        inbox = owned_result.get("inbox")
+        config = owned_result.get("config")
+        if (
+            member_authority is None
+            or member_authority.user_id != session_member.user_id
+            or member_authority.workspace_id != session_member.workspace_id
+            or not isinstance(inbox, dict)
+            or not isinstance(config, dict)
+            or inbox.get("provider") != "google"
+        ):
+            return _reconnect_error(
+                409,
+                "oauth_reconnect_target_invalid",
+                "The selected Google mailbox cannot be reconnected safely.",
+            )
+
+        raw_expected_email = inbox.get("email")
+        expected_email = (
+            normalize_auth_email(raw_expected_email)
+            if isinstance(raw_expected_email, str)
+            else ""
+        )
+        stored_owner = inbox.get("oauthOwnerEmail")
+        if (
+            not expected_email
+            or not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", expected_email)
+            or (
+                stored_owner is not None
+                and (
+                    not isinstance(stored_owner, str)
+                    or normalize_auth_email(stored_owner)
+                    != normalize_auth_email(session_member.email)
+                )
+            )
+        ):
+            return _reconnect_error(
+                409,
+                "oauth_reconnect_target_invalid",
+                "The selected Google mailbox cannot be reconnected safely.",
+            )
+        if asserted_email and normalize_auth_email(asserted_email) != expected_email:
+            return _reconnect_error(
+                409,
+                "oauth_reconnect_email_mismatch",
+                f"Reconnect this mailbox using the Google account for {expected_email}.",
+            )
+
+        target_index = _resolve_reconnect_target_index(config, mailbox_id)
+        if target_index is None:
+            return _reconnect_error(
+                409,
+                "oauth_reconnect_target_invalid",
+                "The selected Google mailbox cannot be reconnected safely.",
+            )
+        managed_inboxes = config.get("managedInboxes")
+        matching_email_mailboxes = (
+            [
+                candidate
+                for candidate in managed_inboxes
+                if isinstance(candidate, dict)
+                and isinstance(candidate.get("email"), str)
+                and normalize_auth_email(candidate["email"]) == expected_email
+            ]
+            if isinstance(managed_inboxes, list)
+            else []
+        )
+        if len(matching_email_mailboxes) != 1:
+            return _reconnect_error(
+                409,
+                "oauth_reconnect_target_invalid",
+                "The selected Google mailbox cannot be reconnected safely.",
+            )
+
+        replacement = deepcopy(config)
+        replacement_target = deepcopy(replacement["managedInboxes"][target_index])
+        replacement_target["oauthReconnectGeneration"] = credential_generation
+        replacement["managedInboxes"][target_index] = replacement_target
+        replacement["updatedAt"] = (
+            datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        )
+        write_result = write_user_config_record_if_unchanged(
+            store,
+            session_member.email,
+            config,
+            replacement,
+        )
+        if not isinstance(write_result, dict):
+            return _reconnect_error(
+                503,
+                "user_config_store_unavailable",
+                "Mailbox configuration is temporarily unavailable.",
+            )
+        if write_result.get("status") == "ok":
+            return expected_email, None, None
+        if write_result.get("status") == "conflict":
+            continue
+        return _reconnect_error(
+            503,
+            "user_config_store_unavailable",
+            "Mailbox configuration is temporarily unavailable.",
+        )
+
+    return _reconnect_error(
+        409,
+        "oauth_reconnect_stale",
+        "The mailbox changed before reconnect could start. Reload and try again.",
+    )
+
+
 class handler(BaseHTTPRequestHandler):
     def send_error(self, code, message=None, explain=None):
         if code == HTTPStatus.NOT_IMPLEMENTED:
@@ -453,6 +688,8 @@ class handler(BaseHTTPRequestHandler):
                 "provider",
                 "email",
                 "inboxPosition",
+                "mode",
+                "mailboxId",
             }:
                 self._send_json(400, {"ok": False, "error": {"code": "invalid_request", "message": "Request body contains unsupported fields."}})
                 return
@@ -462,6 +699,8 @@ class handler(BaseHTTPRequestHandler):
             email = raw_email.strip().lower() if isinstance(raw_email, str) else ""
             inbox_position = payload.get("inboxPosition")
             has_inbox_position = "inboxPosition" in payload
+            mode = payload.get("mode", "initial")
+            mailbox_id = payload.get("mailboxId")
             email_pattern = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
             if not isinstance(provider, str) or provider not in ("google", "microsoft"):
@@ -472,6 +711,50 @@ class handler(BaseHTTPRequestHandler):
                         "error": {
                             "code": "unsupported_provider",
                             "message": "OAuth is not configured for this provider.",
+                        },
+                    },
+                )
+                return
+
+            if mode not in {"initial", "reconnect"}:
+                self._send_json(
+                    400,
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "invalid_request",
+                            "message": "OAuth connection mode is invalid.",
+                        },
+                    },
+                )
+                return
+
+            if mode == "reconnect":
+                if (
+                    provider != "google"
+                    or not isinstance(mailbox_id, str)
+                    or OAUTH_MAILBOX_ID_PATTERN.fullmatch(mailbox_id) is None
+                    or has_inbox_position
+                ):
+                    self._send_json(
+                        400,
+                        {
+                            "ok": False,
+                            "error": {
+                                "code": "invalid_request",
+                                "message": "Google reconnect requires one exact mailbox target.",
+                            },
+                        },
+                    )
+                    return
+            elif "mailboxId" in payload:
+                self._send_json(
+                    400,
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "invalid_request",
+                            "message": "Initial OAuth setup cannot target an existing mailbox.",
                         },
                     },
                 )
@@ -541,14 +824,16 @@ class handler(BaseHTTPRequestHandler):
                 client_secret = os.getenv("GOOGLE_CLIENT_SECRET", "").strip()
                 redirect_uri = resolve_google_redirect_uri(self.headers)
                 oauth_state_secret = (
-                    os.getenv("CUEVION_OAUTH_STATE_SECRET", "").strip() or client_secret
+                    os.getenv("CUEVION_OAUTH_STATE_SECRET", "").strip()
+                    or client_secret
                 )
             else:
                 client_id = os.getenv("MICROSOFT_CLIENT_ID", "").strip()
                 client_secret = os.getenv("MICROSOFT_CLIENT_SECRET", "").strip()
                 redirect_uri = os.getenv("MICROSOFT_OAUTH_REDIRECT_URI", "").strip()
                 oauth_state_secret = (
-                    os.getenv("CUEVION_OAUTH_STATE_SECRET", "").strip() or client_secret
+                    os.getenv("CUEVION_OAUTH_STATE_SECRET", "").strip()
+                    or client_secret
                 )
 
             if (
@@ -594,6 +879,91 @@ class handler(BaseHTTPRequestHandler):
                 )
                 return
 
+            credential_generation = secrets.token_urlsafe(32)
+            if not OAUTH_CREDENTIAL_GENERATION_PATTERN.fullmatch(
+                credential_generation
+            ):
+                self._send_json(
+                    503,
+                    {
+                        "ok": False,
+                        "error": {
+                            "code": "oauth_not_configured",
+                            "message": "OAuth reconnect state could not be prepared safely.",
+                        },
+                    },
+                )
+                return
+
+            expected_email = None
+            if mode == "reconnect":
+                lease_result = acquire_mailbox_mutation_lease(
+                    session_member.email,
+                    mailbox_id,
+                )
+                if lease_result.get("status") != "acquired" or not isinstance(
+                    lease_result.get("token"), str
+                ):
+                    lease_status = lease_result.get("status")
+                    self._send_json(
+                        409 if lease_status == "held" else 503,
+                        {
+                            "ok": False,
+                            "error": {
+                                "code": (
+                                    "oauth_reconnect_in_progress"
+                                    if lease_status == "held"
+                                    else "user_config_store_unavailable"
+                                ),
+                                "message": (
+                                    "Another reconnect is already in progress for this mailbox."
+                                    if lease_status == "held"
+                                    else "Mailbox configuration is temporarily unavailable."
+                                ),
+                            },
+                        },
+                    )
+                    return
+
+                lease_token = lease_result["token"]
+                try:
+                    (
+                        expected_email,
+                        reconnect_error_status,
+                        reconnect_error_payload,
+                    ) = reserve_authoritative_google_reconnect(
+                        self.headers,
+                        session_member,
+                        mailbox_id,
+                        email,
+                        credential_generation,
+                    )
+                finally:
+                    release_mailbox_mutation_lease(
+                        session_member.email,
+                        mailbox_id,
+                        lease_token,
+                    )
+                if reconnect_error_status is not None and reconnect_error_payload:
+                    self._send_json(
+                        reconnect_error_status,
+                        reconnect_error_payload,
+                    )
+                    return
+                if not isinstance(expected_email, str):
+                    self._send_json(
+                        503,
+                        {
+                            "ok": False,
+                            "error": {
+                                "code": "user_config_store_unavailable",
+                                "message": "Mailbox configuration is temporarily unavailable.",
+                            },
+                        },
+                    )
+                    return
+                email = expected_email
+
             authorization_state, code_verifier = build_signed_state(
                 provider,
                 email,
@@ -602,6 +972,10 @@ class handler(BaseHTTPRequestHandler):
                 inbox_position,
                 member_user_id=session_member.user_id,
                 member_workspace_id=session_member.workspace_id,
+                mode=mode,
+                mailbox_id=mailbox_id if mode == "reconnect" else None,
+                expected_email=expected_email,
+                credential_generation=credential_generation,
             )
             if provider == "google":
                 authorization_params = {
@@ -651,6 +1025,12 @@ class handler(BaseHTTPRequestHandler):
                     "connectionStatus": "waiting_for_authentication",
                     "authorizationUrl": authorization_url,
                     "message": message,
+                    "mode": mode,
+                    **(
+                        {"mailboxId": mailbox_id}
+                        if mode == "reconnect"
+                        else {}
+                    ),
                 },
             )
         except Exception:

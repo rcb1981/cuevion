@@ -301,22 +301,52 @@ else:
 
     def _token_failure(error: dict | None = None) -> dict:
         code = (error or {}).get("code")
+        if error is None or code in {
+            "gmail_reconnect_required",
+            "gmail_refresh_invalid_grant",
+            "gmail_refresh_token_missing",
+            "gmail_token_missing",
+            "gmail_token_record_malformed",
+        }:
+            return result_error(
+                401,
+                "reconnect_required",
+                "Reconnect this Gmail inbox to continue.",
+            )
         if code in {"gmail_token_store_unavailable", "token_persistence_failed"}:
             return result_error(
                 503,
                 "gmail_token_store_unavailable",
                 "Gmail authorization storage is temporarily unavailable.",
             )
-        if code == "gmail_refresh_unavailable":
+        if code == "gmail_refresh_not_configured":
+            return result_error(
+                503,
+                "gmail_refresh_not_configured",
+                "Gmail authorization refresh is not configured.",
+            )
+        if code == "gmail_refresh_rate_limited":
+            return result_error(
+                429,
+                "gmail_refresh_rate_limited",
+                "Gmail authorization refresh is temporarily rate limited.",
+            )
+        if code in {"gmail_refresh_unavailable", "gmail_refresh_failed"}:
             return result_error(
                 502,
                 "gmail_refresh_unavailable",
                 "Gmail authorization refresh is temporarily unavailable.",
             )
+        if code == "gmail_token_write_conflict":
+            return result_error(
+                503,
+                "gmail_refresh_conflict",
+                "Gmail authorization changed while it was being refreshed.",
+            )
         return result_error(
-            401,
-            "reconnect_required",
-            "Reconnect this Gmail inbox to continue.",
+            502,
+            "gmail_refresh_unavailable",
+            "Gmail authorization refresh is temporarily unavailable.",
         )
 
 
@@ -342,7 +372,10 @@ else:
         mailbox_email = mailbox_email.strip().lower()
         owner_email = owner_email.strip().lower()
 
-        token_record, token_error = load_google_token_record_with_metadata(mailbox_email)
+        token_record, token_error = load_google_token_record_with_metadata(
+            mailbox_email,
+            owner_email=owner_email,
+        )
         if token_error:
             return _token_failure(token_error)
         if not isinstance(token_record, dict):

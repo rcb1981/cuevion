@@ -8,6 +8,7 @@ import re
 import sys
 import tempfile
 import time
+from copy import deepcopy
 from http import HTTPStatus
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler
@@ -27,15 +28,17 @@ MICROSOFT_TOKEN_ENDPOINT_TEMPLATE = (
 )
 STATE_MAX_AGE_SECONDS = 15 * 60
 MAX_OAUTH_RESPONSE_BYTES = 256 * 1024
-GMAIL_OAUTH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60
 USER_CONFIG_SCHEMA_VERSION = 1
 MAX_GMAIL_USER_CONFIG_WRITE_ATTEMPTS = 3
+MAX_GMAIL_TOKEN_WRITE_ATTEMPTS = 3
 EMAIL_PATTERN = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
-OAUTH_STATE_VERSION = 2
+OAUTH_STATE_VERSION = 3
 MAX_STATE_CLOCK_SKEW_SECONDS = 60
-STATE_SIGNATURE_DOMAIN = "cuevion-oauth-state-signature:v2"
-OWNER_BINDING_DOMAIN = "cuevion-oauth-owner-binding:v2"
-PKCE_DERIVATION_DOMAIN = "cuevion-oauth-pkce:v2"
+STATE_SIGNATURE_DOMAIN = "cuevion-oauth-state-signature:v3"
+OWNER_BINDING_DOMAIN = "cuevion-oauth-owner-binding:v3"
+PKCE_DERIVATION_DOMAIN = "cuevion-oauth-pkce:v3"
+OAUTH_CREDENTIAL_GENERATION_PATTERN = re.compile(r"^[A-Za-z0-9_-]{43}$")
+OAUTH_MAILBOX_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$")
 ONBOARDING_PRESET_INBOX_IDS = {
     "main",
     "demo",
@@ -60,6 +63,10 @@ GMAIL_CALLBACK_FAILURE_CODES = frozenset(
         "member_authority_unavailable",
         "member_unauthenticated",
         "owner_binding_invalid",
+        "oauth_reconnect_email_mismatch",
+        "oauth_reconnect_in_progress",
+        "oauth_reconnect_stale",
+        "oauth_reconnect_target_invalid",
         "provider_denied",
         "state_expired",
         "state_invalid",
@@ -74,6 +81,7 @@ GMAIL_CALLBACK_FAILURE_CODES = frozenset(
         "token_payload_invalid",
         "token_persistence_failed",
         "token_provider_mismatch",
+        "refresh_token_missing",
         "token_record_malformed",
         "token_store_unavailable",
         "unexpected_callback_failure",
@@ -110,8 +118,11 @@ LEGACY_GOOGLE_TOKEN_RECORD_FIELDS = frozenset(
         "created_at",
     }
 )
-CURRENT_GOOGLE_TOKEN_RECORD_FIELDS = frozenset(
+PRE_GENERATION_GOOGLE_TOKEN_RECORD_FIELDS = frozenset(
     {*LEGACY_GOOGLE_TOKEN_RECORD_FIELDS, "owner_email"}
+)
+CURRENT_GOOGLE_TOKEN_RECORD_FIELDS = frozenset(
+    {*PRE_GENERATION_GOOGLE_TOKEN_RECORD_FIELDS, "credential_generation"}
 )
 ADOPTABLE_LEGACY_GOOGLE_TOKEN_RECORD_MATCHES = frozenset(
     {
@@ -124,19 +135,25 @@ GOOGLE_TOKEN_OWNER_IDENTITY_FIELDS = frozenset(
 LEGACY_GOOGLE_TOKEN_ADOPTION_SCRIPT = (
     "local current=redis.call('GET',KEYS[1]);"
     "if current~=ARGV[1] then return 0 end;"
-    "redis.call('SET',KEYS[1],ARGV[2],'EX',ARGV[3]);"
+    "redis.call('SET',KEYS[1],ARGV[2]);"
     "return 1"
 )
 GOOGLE_TOKEN_CREATE_IF_MISSING_SCRIPT = (
     "if redis.call('EXISTS',KEYS[1])~=0 then return 0 end;"
-    "redis.call('SET',KEYS[1],ARGV[1],'EX',ARGV[2]);"
+    "redis.call('SET',KEYS[1],ARGV[1]);"
     "return 1"
 )
 GOOGLE_TOKEN_REPLACE_IF_UNCHANGED_SCRIPT = (
     "local current=redis.call('GET',KEYS[1]);"
     "if current~=ARGV[1] then return 0 end;"
-    "redis.call('SET',KEYS[1],ARGV[2],'EX',ARGV[3]);"
+    "redis.call('SET',KEYS[1],ARGV[2]);"
     "return 1"
+)
+GOOGLE_TOKEN_RAW_SNAPSHOT_PREFIX = "cuevion-google-token-raw:v1:"
+GOOGLE_TOKEN_READ_EXACT_SCRIPT = (
+    "local current=redis.call('GET',KEYS[1]);"
+    "if not current then return false end;"
+    f"return '{GOOGLE_TOKEN_RAW_SNAPSHOT_PREFIX}'..current"
 )
 
 
@@ -209,6 +226,28 @@ def _send_gmail_callback_failure(
     set_cookies: tuple[str, ...] | None = None,
     inbox_position: str | None = None,
 ) -> None:
+    if payload.get("provider") == "google":
+        callback_mode = getattr(request, "_oauth_callback_mode", None)
+        callback_mailbox_id = getattr(request, "_oauth_callback_mailbox_id", None)
+        callback_expected_email = getattr(
+            request,
+            "_oauth_callback_expected_email",
+            None,
+        )
+        if callback_mode in {"initial", "reconnect"}:
+            payload.setdefault("mode", callback_mode)
+        if (
+            callback_mode == "reconnect"
+            and isinstance(callback_mailbox_id, str)
+            and OAUTH_MAILBOX_ID_PATTERN.fullmatch(callback_mailbox_id)
+        ):
+            payload.setdefault("mailboxId", callback_mailbox_id)
+        if (
+            callback_mode == "reconnect"
+            and isinstance(callback_expected_email, str)
+            and EMAIL_PATTERN.fullmatch(callback_expected_email)
+        ):
+            payload.setdefault("email", callback_expected_email)
     if payload.get("provider") == "google" and not getattr(
         request,
         "_gmail_callback_failure_logged",
@@ -381,6 +420,10 @@ def build_owner_binding(
     expires_at: int,
     signing_secret: str,
     inbox_position: str | None = None,
+    mode: str = "initial",
+    mailbox_id: str | None = None,
+    expected_email: str | None = None,
+    credential_generation: str | None = None,
 ) -> str:
     normalized_user_id = (
         member_user_id.strip() if isinstance(member_user_id, str) else ""
@@ -400,7 +443,11 @@ def build_owner_binding(
         normalized_workspace_id,
         provider,
         email_hint,
+        mode,
+        credential_generation or "",
     ]
+    if mode == "reconnect":
+        binding_fields.extend((mailbox_id or "", expected_email or ""))
     if inbox_position is not None:
         binding_fields.append(inbox_position)
     binding_fields.extend((nonce, str(issued_at), str(expires_at)))
@@ -438,6 +485,10 @@ def verify_owner_binding(
             expires_at=payload["expires_at"],
             signing_secret=signing_secret,
             inbox_position=payload.get("inboxPosition"),
+            mode=payload["mode"],
+            mailbox_id=payload.get("mailboxId"),
+            expected_email=payload.get("expected_email"),
+            credential_generation=payload["credential_generation"],
         )
     except (KeyError, TypeError, ValueError):
         return False
@@ -475,13 +526,27 @@ def verify_signed_state(
         "v",
         "provider",
         "email_hint",
+        "mode",
+        "credential_generation",
         "issued_at",
         "expires_at",
         "nonce",
         "owner_binding",
         "inboxPosition",
+        "mailboxId",
+        "expected_email",
     }
-    required_state_fields = allowed_state_fields - {"inboxPosition"}
+    required_state_fields = {
+        "v",
+        "provider",
+        "email_hint",
+        "mode",
+        "credential_generation",
+        "issued_at",
+        "expires_at",
+        "nonce",
+        "owner_binding",
+    }
     if set(payload) - allowed_state_fields or not required_state_fields.issubset(payload):
         return None, "invalid_state"
     if expected_provider is not None and payload.get("provider") != expected_provider:
@@ -509,12 +574,20 @@ def verify_signed_state(
 
     email_hint = payload.get("email_hint")
     inbox_position = payload.get("inboxPosition")
+    mode = payload.get("mode")
+    mailbox_id = payload.get("mailboxId")
+    expected_email = payload.get("expected_email")
+    credential_generation = payload.get("credential_generation")
     nonce = payload.get("nonce")
     owner_binding = payload.get("owner_binding")
     if (
         not isinstance(email_hint, str)
         or email_hint != email_hint.strip().lower()
         or (email_hint and not EMAIL_PATTERN.match(email_hint))
+        or mode not in {"initial", "reconnect"}
+        or not isinstance(credential_generation, str)
+        or OAUTH_CREDENTIAL_GENERATION_PATTERN.fullmatch(credential_generation)
+        is None
         or (
             inbox_position is not None
             and (
@@ -532,6 +605,21 @@ def verify_signed_state(
         or len(owner_binding) != 43
         or "owner_email" in payload
     ):
+        return None, "invalid_state"
+
+    if mode == "reconnect":
+        if (
+            payload.get("provider") != "google"
+            or not isinstance(mailbox_id, str)
+            or OAUTH_MAILBOX_ID_PATTERN.fullmatch(mailbox_id) is None
+            or not isinstance(expected_email, str)
+            or expected_email != expected_email.strip().lower()
+            or EMAIL_PATTERN.fullmatch(expected_email) is None
+            or email_hint != expected_email
+            or inbox_position is not None
+        ):
+            return None, "invalid_state"
+    elif mailbox_id is not None or expected_email is not None:
         return None, "invalid_state"
 
     payload["code_verifier"] = base64url_encode(
@@ -648,6 +736,7 @@ def _has_supported_google_token_record_shape(
     expires_in = record.get("expires_in")
     created_at = record.get("created_at")
     updated_at = record.get("updated_at")
+    credential_generation = record.get("credential_generation")
     expiry_is_supported = (
         expires_at is None
         and expires_in is None
@@ -672,6 +761,14 @@ def _has_supported_google_token_record_shape(
         and expiry_is_supported
         and _is_supported_token_timestamp(created_at)
         and _is_supported_token_timestamp(updated_at)
+        and (
+            "credential_generation" not in expected_fields
+            or isinstance(credential_generation, str)
+            and OAUTH_CREDENTIAL_GENERATION_PATTERN.fullmatch(
+                credential_generation
+            )
+            is not None
+        )
     )
 
 
@@ -721,6 +818,12 @@ def _has_supported_current_google_token_record_shape(record: dict) -> bool:
     for field in ("created_at", "updated_at"):
         if field in record and not _is_supported_token_timestamp(record[field]):
             return False
+    credential_generation = record.get("credential_generation")
+    if "credential_generation" in record and (
+        not isinstance(credential_generation, str)
+        or OAUTH_CREDENTIAL_GENERATION_PATTERN.fullmatch(credential_generation) is None
+    ):
+        return False
     return True
 
 
@@ -742,9 +845,15 @@ def _is_legacy_owner_equals_mailbox_google_token_record(
         and normalized_existing_owner == normalized_email
         and _is_canonical_token_email(normalized_existing_owner)
         and record.get("email") == normalized_email
-        and _has_supported_google_token_record_shape(
-            record,
-            CURRENT_GOOGLE_TOKEN_RECORD_FIELDS,
+        and (
+            _has_supported_google_token_record_shape(
+                record,
+                PRE_GENERATION_GOOGLE_TOKEN_RECORD_FIELDS,
+            )
+            or _has_supported_google_token_record_shape(
+                record,
+                CURRENT_GOOGLE_TOKEN_RECORD_FIELDS,
+            )
         )
     )
 
@@ -775,7 +884,14 @@ def _classify_existing_google_token_record(
         existing_owner = existing_record["owner_email"]
         owner_is_canonical = _is_canonical_token_email(existing_owner)
         current_shape_is_supported = (
-            _has_supported_current_google_token_record_shape(existing_record)
+            _has_supported_google_token_record_shape(
+                existing_record,
+                PRE_GENERATION_GOOGLE_TOKEN_RECORD_FIELDS,
+            )
+            or _has_supported_google_token_record_shape(
+                existing_record,
+                CURRENT_GOOGLE_TOKEN_RECORD_FIELDS,
+            )
         )
         if (
             owner_is_canonical
@@ -893,6 +1009,7 @@ def build_google_token_record(
     owner_email: str,
     token_payload: dict,
     existing_record: dict | None = None,
+    credential_generation: str | None = None,
 ) -> dict:
     expires_at, expires_in = _resolve_expiry(token_payload)
     refresh_token = token_payload.get("refresh_token")
@@ -904,10 +1021,22 @@ def build_google_token_record(
         )
 
     scope = token_payload.get("scope")
+    if (
+        not isinstance(scope, str)
+        and isinstance(existing_record, dict)
+        and isinstance(existing_record.get("scope"), str)
+    ):
+        scope = existing_record["scope"]
     token_type = token_payload.get("token_type")
+    if (
+        not isinstance(token_type, str)
+        and isinstance(existing_record, dict)
+        and isinstance(existing_record.get("token_type"), str)
+    ):
+        token_type = existing_record["token_type"]
     now = datetime.now(timezone.utc).isoformat()
 
-    return {
+    record = {
         "provider": "google",
         "email": email,
         "owner_email": owner_email.strip().lower(),
@@ -925,6 +1054,23 @@ def build_google_token_record(
             else now
         ),
     }
+    if credential_generation is not None:
+        if (
+            not isinstance(credential_generation, str)
+            or OAUTH_CREDENTIAL_GENERATION_PATTERN.fullmatch(credential_generation)
+            is None
+        ):
+            raise ValueError("OAuth credential generation is invalid.")
+        record["credential_generation"] = credential_generation
+    elif (
+        isinstance(existing_record, dict)
+        and isinstance(existing_record.get("credential_generation"), str)
+        and OAUTH_CREDENTIAL_GENERATION_PATTERN.fullmatch(
+            existing_record["credential_generation"]
+        )
+    ):
+        record["credential_generation"] = existing_record["credential_generation"]
+    return record
 
 
 def _perform_rest_request(
@@ -993,21 +1139,18 @@ def _decode_durable_record_payload(
     result = payload.get("result")
     if result is None:
         return None, None, None
-    if isinstance(result, str):
+    if isinstance(result, str) and result.startswith(
+        GOOGLE_TOKEN_RAW_SNAPSHOT_PREFIX
+    ):
+        raw_result = result[len(GOOGLE_TOKEN_RAW_SNAPSHOT_PREFIX):]
         try:
-            parsed = json.loads(result)
+            parsed = json.loads(raw_result)
         except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
             return None, None, unreadable_error
         if not isinstance(parsed, dict):
             return None, None, unreadable_error
-        return parsed, result, None
-    if not isinstance(result, dict):
-        return None, None, unreadable_error
-    return (
-        result,
-        json.dumps(result, separators=(",", ":"), sort_keys=True),
-        None,
-    )
+        return parsed, raw_result, None
+    return None, None, unreadable_error
 
 
 def _read_durable_record_snapshot(
@@ -1016,8 +1159,12 @@ def _read_durable_record_snapshot(
 ) -> tuple[dict | None, str | None, dict | None]:
     payload, error = _perform_rest_request(
         config,
-        "GET",
-        f"/get/{quote(store_key, safe='')}",
+        "POST",
+        "",
+        json.dumps(
+            ["EVAL", GOOGLE_TOKEN_READ_EXACT_SCRIPT, 1, store_key],
+            separators=(",", ":"),
+        ).encode("utf-8"),
     )
     if error:
         return None, None, error
@@ -1100,7 +1247,7 @@ def _write_conditional_durable_record(
     ]
     if expected_record is not None:
         command.append(expected_value)
-    command.extend((next_value, GMAIL_OAUTH_TOKEN_TTL_SECONDS))
+    command.append(next_value)
 
     payload, write_error = _perform_rest_request(
         config,
@@ -1196,9 +1343,31 @@ def persist_google_token_record(
     email: str,
     owner_email: str,
     token_payload: dict,
+    mode: str = "initial",
+    credential_generation: str | None = None,
 ) -> tuple[dict | None, dict | None]:
     access_token = token_payload.get("access_token")
     if not isinstance(access_token, str) or not access_token.strip():
+        return None, {
+            "code": "invalid_token_payload",
+            "message": "Google returned an incomplete token response.",
+            GMAIL_CALLBACK_FAILURE_CODE_FIELD: "token_payload_invalid",
+        }
+    if mode not in {"initial", "reconnect"} or (
+        credential_generation is not None
+        and (
+            not isinstance(credential_generation, str)
+            or OAUTH_CREDENTIAL_GENERATION_PATTERN.fullmatch(credential_generation)
+            is None
+        )
+    ) or (
+        mode == "reconnect"
+        and (
+            not isinstance(credential_generation, str)
+            or OAUTH_CREDENTIAL_GENERATION_PATTERN.fullmatch(credential_generation)
+            is None
+        )
+    ):
         return None, {
             "code": "invalid_token_payload",
             "message": "Google returned an incomplete token response.",
@@ -1265,6 +1434,30 @@ def persist_google_token_record(
             ),
         }
 
+    response_refresh_token = token_payload.get("refresh_token")
+    has_response_refresh_token = (
+        isinstance(response_refresh_token, str)
+        and bool(response_refresh_token.strip())
+    )
+    if not has_response_refresh_token:
+        existing_refresh_token = (
+            existing_record.get("refresh_token")
+            if isinstance(existing_record, dict)
+            else None
+        )
+        may_preserve_existing_refresh = (
+            mode == "reconnect"
+            and record_classification == GOOGLE_TOKEN_RECORD_EXACT_OWNER_MATCH
+            and isinstance(existing_refresh_token, str)
+            and bool(existing_refresh_token.strip())
+        )
+        if not may_preserve_existing_refresh:
+            return None, {
+                "code": "invalid_token_payload",
+                "message": "Google did not return a durable refresh authorization.",
+                GMAIL_CALLBACK_FAILURE_CODE_FIELD: "refresh_token_missing",
+            }
+
     if record_classification in ADOPTABLE_LEGACY_GOOGLE_TOKEN_RECORD_MATCHES:
         refresh_token = token_payload.get("refresh_token")
         if not isinstance(refresh_token, str) or not refresh_token.strip():
@@ -1274,38 +1467,110 @@ def persist_google_token_record(
                 GMAIL_CALLBACK_FAILURE_CODE_FIELD: "token_payload_invalid",
             }
 
-    next_record = build_google_token_record(
-        email=normalized_email,
-        owner_email=normalized_owner_email,
-        token_payload=token_payload,
-        existing_record=(
-            existing_record
-            if record_classification == GOOGLE_TOKEN_RECORD_EXACT_OWNER_MATCH
-            else None
-        ),
+    next_record = None
+    persisted_record = None
+    error = None
+    storage_backend = (
+        durable_config["backend"] if durable_config else "runtime_tmp_file"
     )
+    storage_durable = durable_config is not None
+    for write_attempt in range(MAX_GMAIL_TOKEN_WRITE_ATTEMPTS):
+        try:
+            next_record = build_google_token_record(
+                email=normalized_email,
+                owner_email=normalized_owner_email,
+                token_payload=token_payload,
+                existing_record=(
+                    existing_record
+                    if record_classification
+                    == GOOGLE_TOKEN_RECORD_EXACT_OWNER_MATCH
+                    else None
+                ),
+                credential_generation=credential_generation,
+            )
+        except ValueError:
+            return None, {
+                "code": "invalid_token_payload",
+                "message": "Google returned an incomplete token response.",
+                GMAIL_CALLBACK_FAILURE_CODE_FIELD: "token_payload_invalid",
+            }
 
-    if durable_config:
-        if record_classification in ADOPTABLE_LEGACY_GOOGLE_TOKEN_RECORD_MATCHES:
-            persisted_record, error = _adopt_legacy_durable_record(
-                durable_config,
-                store_key,
-                existing_record,
-                next_record,
-            )
+        if durable_config:
+            if record_classification in ADOPTABLE_LEGACY_GOOGLE_TOKEN_RECORD_MATCHES:
+                persisted_record, error = _adopt_legacy_durable_record(
+                    durable_config,
+                    store_key,
+                    existing_record,
+                    next_record,
+                )
+            else:
+                persisted_record, error = _write_durable_record(
+                    durable_config,
+                    store_key,
+                    existing_record,
+                    next_record,
+                )
         else:
-            persisted_record, error = _write_durable_record(
-                durable_config,
+            persisted_record, error = _persist_runtime_record(
                 store_key,
-                existing_record,
                 next_record,
             )
-        storage_backend = durable_config["backend"]
-        storage_durable = True
-    else:
-        persisted_record, error = _persist_runtime_record(store_key, next_record)
-        storage_backend = "runtime_tmp_file"
-        storage_durable = False
+
+        if not error:
+            break
+        if (
+            not durable_config
+            or mode != "reconnect"
+            or error.get("code") != "token_owner_conflict"
+            or record_classification != GOOGLE_TOKEN_RECORD_EXACT_OWNER_MATCH
+            or write_attempt + 1 >= MAX_GMAIL_TOKEN_WRITE_ATTEMPTS
+        ):
+            break
+
+        # A refresh that began before this callback may win the first CAS. It
+        # is safe to retry only when the winner is still the exact same owner
+        # and credential generation. A different generation is a newer
+        # reconnect and must win.
+        previous_generation = existing_record.get("credential_generation")
+        raced_record, raced_error = _read_durable_record(
+            durable_config,
+            store_key,
+        )
+        if raced_error:
+            error = raced_error
+            break
+        raced_classification = _classify_existing_google_token_record(
+            raced_record,
+            normalized_email=normalized_email,
+            normalized_owner_email=normalized_owner_email,
+        )
+        raced_refresh_token = (
+            raced_record.get("refresh_token")
+            if isinstance(raced_record, dict)
+            else None
+        )
+        raced_generation = (
+            raced_record.get("credential_generation")
+            if isinstance(raced_record, dict)
+            else None
+        )
+        if (
+            raced_classification != GOOGLE_TOKEN_RECORD_EXACT_OWNER_MATCH
+            or not isinstance(raced_refresh_token, str)
+            or not raced_refresh_token.strip()
+        ):
+            break
+        if raced_generation == credential_generation:
+            # Our CAS committed, then a refresh derived a newer access token
+            # from that exact reconnect generation before readback.
+            persisted_record = raced_record
+            next_record = raced_record
+            error = None
+            break
+        if raced_generation != previous_generation:
+            break
+        existing_record = raced_record
+        record_classification = raced_classification
 
     if error:
         diagnostic_code = _resolve_gmail_callback_failure_code(
@@ -1317,7 +1582,7 @@ def persist_google_token_record(
             GMAIL_CALLBACK_FAILURE_CODE_FIELD: diagnostic_code,
         }
 
-    if not isinstance(persisted_record, dict):
+    if not isinstance(next_record, dict) or not isinstance(persisted_record, dict):
         return None, {
             "code": "token_persistence_failed",
             "message": "Google authentication succeeded, but mailbox token storage could not be verified.",
@@ -1434,6 +1699,287 @@ def _create_empty_managed_smtp_settings() -> dict:
 
 def _gmail_link_conflict(message: str) -> dict:
     return {"code": "gmail_link_conflict", "message": message}
+
+
+def _gmail_reconnect_error(
+    code: str,
+    message: str,
+    failure_code: str,
+) -> dict:
+    return {
+        "code": code,
+        "message": message,
+        GMAIL_CALLBACK_FAILURE_CODE_FIELD: failure_code,
+    }
+
+
+def _prepare_gmail_reconnect_target(
+    member: runtime.AuthenticatedMemberContext,
+    *,
+    mailbox_id: str,
+    expected_email: str,
+    credential_generation: str,
+) -> tuple[dict | None, dict | None]:
+    """Resolve one exact generation-reserved Gmail target owned by this member."""
+    normalized_owner = normalize_auth_email(member.email)
+    if (
+        not isinstance(mailbox_id, str)
+        or OAUTH_MAILBOX_ID_PATTERN.fullmatch(mailbox_id) is None
+        or not isinstance(expected_email, str)
+        or expected_email != expected_email.strip().lower()
+        or EMAIL_PATTERN.fullmatch(expected_email) is None
+        or not isinstance(credential_generation, str)
+        or OAUTH_CREDENTIAL_GENERATION_PATTERN.fullmatch(credential_generation)
+        is None
+    ):
+        return None, _gmail_reconnect_error(
+            "gmail_link_conflict",
+            "The selected Google mailbox reconnect target is invalid.",
+            "oauth_reconnect_target_invalid",
+        )
+
+    durable_config = _resolve_durable_store_config()
+    if not durable_config:
+        return None, _gmail_reconnect_error(
+            "user_config_store_unavailable",
+            "User config storage is unavailable.",
+            "user_config_store_unavailable",
+        )
+    read_result = user_config_store.read_user_config_record(
+        durable_config,
+        member.email,
+    )
+    if not isinstance(read_result, dict) or read_result.get("status") == "unavailable":
+        return None, _gmail_reconnect_error(
+            "user_config_store_unavailable",
+            "User config storage is temporarily unavailable.",
+            "user_config_store_unavailable",
+        )
+    config = read_result.get("config")
+    if read_result.get("status") != "ok" or not isinstance(config, dict):
+        return None, _gmail_reconnect_error(
+            "gmail_link_conflict",
+            "The selected Google mailbox no longer exists.",
+            "oauth_reconnect_stale",
+        )
+
+    stored_config_owner = config.get("email")
+    managed_inboxes = config.get("managedInboxes")
+    if (
+        not isinstance(stored_config_owner, str)
+        or normalize_auth_email(stored_config_owner) != normalized_owner
+        or not isinstance(managed_inboxes, list)
+        or any(not isinstance(inbox, dict) for inbox in managed_inboxes)
+    ):
+        return None, _gmail_reconnect_error(
+            "gmail_link_conflict",
+            "The selected Google mailbox reconnect target is invalid.",
+            "oauth_reconnect_target_invalid",
+        )
+
+    exact_matches = [
+        (index, inbox)
+        for index, inbox in enumerate(managed_inboxes)
+        if inbox.get("id") == mailbox_id
+    ]
+    casefold_matches = [
+        inbox
+        for inbox in managed_inboxes
+        if isinstance(inbox.get("id"), str)
+        and inbox["id"].casefold() == mailbox_id.casefold()
+    ]
+    if len(exact_matches) != 1 or len(casefold_matches) != 1:
+        return None, _gmail_reconnect_error(
+            "gmail_link_conflict",
+            "The selected Google mailbox no longer exists.",
+            "oauth_reconnect_stale",
+        )
+
+    target_index, target = exact_matches[0]
+    raw_target_email = target.get("email")
+    target_email = (
+        normalize_auth_email(raw_target_email)
+        if isinstance(raw_target_email, str)
+        else ""
+    )
+    stored_target_owner = target.get("oauthOwnerEmail")
+    email_matches = [
+        inbox
+        for inbox in managed_inboxes
+        if isinstance(inbox.get("email"), str)
+        and normalize_auth_email(inbox["email"]) == expected_email
+    ]
+    if (
+        target.get("provider") != "google"
+        or target_email != expected_email
+        or len(email_matches) != 1
+        or (
+            stored_target_owner is not None
+            and (
+                not isinstance(stored_target_owner, str)
+                or normalize_auth_email(stored_target_owner) != normalized_owner
+            )
+        )
+    ):
+        return None, _gmail_reconnect_error(
+            "gmail_link_conflict",
+            "The selected Google mailbox changed before reconnect completed.",
+            "oauth_reconnect_stale",
+        )
+    if target.get("oauthReconnectGeneration") != credential_generation:
+        return None, _gmail_reconnect_error(
+            "gmail_link_conflict",
+            "A newer reconnect attempt replaced this one. Please try again.",
+            "oauth_reconnect_stale",
+        )
+
+    return {
+        "durable_config": durable_config,
+        "existing_config": config,
+        "target_index": target_index,
+        "target": deepcopy(target),
+    }, None
+
+
+def _register_gmail_reconnect_in_user_config(
+    member: runtime.AuthenticatedMemberContext,
+    *,
+    mailbox_id: str,
+    expected_email: str,
+    verified_email: str,
+    owner_email: str,
+    message: str,
+    credential_generation: str,
+) -> tuple[dict | None, dict | None]:
+    if (
+        normalize_auth_email(member.email) != normalize_auth_email(owner_email)
+        or normalize_auth_email(verified_email) != expected_email
+    ):
+        return None, _gmail_reconnect_error(
+            "gmail_link_conflict",
+            f"Please reconnect using the Google account for {expected_email}.",
+            "oauth_reconnect_email_mismatch",
+        )
+
+    for _attempt in range(MAX_GMAIL_USER_CONFIG_WRITE_ATTEMPTS):
+        preparation, preparation_error = _prepare_gmail_reconnect_target(
+            member,
+            mailbox_id=mailbox_id,
+            expected_email=expected_email,
+            credential_generation=credential_generation,
+        )
+        if preparation_error or not preparation:
+            return None, preparation_error
+
+        existing_config = preparation["existing_config"]
+        target_index = preparation["target_index"]
+        next_record = deepcopy(existing_config)
+        next_target = deepcopy(preparation["target"])
+        next_target.update(
+            {
+                "id": mailbox_id,
+                "email": expected_email,
+                "provider": "google",
+                "oauthOwnerEmail": normalize_auth_email(owner_email),
+                "connected": True,
+                "connectionMethod": "oauth",
+                "connectionType": "oauth",
+                "connectionStatus": "connected",
+                "connectionMessage": message,
+                "oauthAuthorizationUrl": None,
+            }
+        )
+        next_target.pop("oauthReconnectGeneration", None)
+        next_record["managedInboxes"][target_index] = next_target
+        next_record["updatedAt"] = (
+            datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        )
+
+        write_result = user_config_store.write_user_config_record_if_unchanged(
+            preparation["durable_config"],
+            member.email,
+            existing_config,
+            next_record,
+        )
+        if not isinstance(write_result, dict):
+            return None, _gmail_reconnect_error(
+                "user_config_persistence_failed",
+                "User config storage did not confirm the reconnect.",
+                "user_config_write_failed",
+            )
+        if write_result.get("status") in {"conflict", "missing"}:
+            continue
+        if write_result.get("status") != "ok":
+            return None, _gmail_reconnect_error(
+                "user_config_persistence_failed",
+                "User config storage did not confirm the reconnect.",
+                "user_config_write_failed",
+            )
+        written_record = write_result.get("record")
+        if not _user_config_records_are_type_exact(
+            written_record,
+            next_record,
+        ):
+            return None, _gmail_reconnect_error(
+                "user_config_persistence_failed",
+                "User config storage did not confirm the intended reconnect settings.",
+                "user_config_write_failed",
+            )
+
+        readback = user_config_store.read_user_config_record(
+            preparation["durable_config"],
+            member.email,
+        )
+        verified_config = (
+            readback.get("config")
+            if isinstance(readback, dict) and readback.get("status") == "ok"
+            else None
+        )
+        if not isinstance(verified_config, dict) or not _user_config_records_are_type_exact(
+            verified_config,
+            next_record,
+        ):
+            return None, _gmail_reconnect_error(
+                "user_config_persistence_failed",
+                "User config storage could not verify the reconnected mailbox.",
+                "user_config_readback_failed",
+            )
+        verified_inboxes = verified_config.get("managedInboxes")
+        matches = (
+            [
+                inbox
+                for inbox in verified_inboxes
+                if isinstance(inbox, dict) and inbox.get("id") == mailbox_id
+            ]
+            if isinstance(verified_inboxes, list)
+            else []
+        )
+        if len(matches) != 1:
+            return None, _gmail_reconnect_error(
+                "user_config_persistence_failed",
+                "User config storage could not verify the reconnected mailbox.",
+                "mailbox_readback_verification_failed",
+            )
+        saved = matches[0]
+        if (
+            saved.get("email") != expected_email
+            or saved.get("provider") != "google"
+            or saved.get("connected") is not True
+            or saved.get("connectionStatus") != "connected"
+            or saved.get("oauthReconnectGeneration") is not None
+        ):
+            return None, _gmail_reconnect_error(
+                "user_config_persistence_failed",
+                "User config storage could not verify the reconnected mailbox.",
+                "mailbox_readback_verification_failed",
+            )
+        return deepcopy(saved), None
+
+    return None, _gmail_reconnect_error(
+        "gmail_link_conflict",
+        "The mailbox changed before reconnect could be committed.",
+        "oauth_reconnect_stale",
+    )
 
 
 def _resolve_gmail_managed_inbox_target(
@@ -2104,6 +2650,7 @@ def _build_callback_payload(
     display_name: str | None = None,
     inbox_position: str | None = None,
     mailbox_id: str | None = None,
+    mode: str | None = None,
 ) -> dict:
     if provider == "google":
         is_success = (
@@ -2119,6 +2666,8 @@ def _build_callback_payload(
             "provider": "google",
             "message": message,
         }
+        if mode in {"initial", "reconnect"}:
+            payload["mode"] = mode
         normalized_email = email.strip().lower() if isinstance(email, str) else ""
         if EMAIL_PATTERN.match(normalized_email):
             payload["email"] = normalized_email
@@ -2128,7 +2677,11 @@ def _build_callback_payload(
             is not None
         ):
             payload["inboxPosition"] = inbox_position
-        if is_success:
+        if is_success or (
+            mode == "reconnect"
+            and isinstance(mailbox_id, str)
+            and OAUTH_MAILBOX_ID_PATTERN.fullmatch(mailbox_id)
+        ):
             payload["mailboxId"] = mailbox_id.strip()
         return payload
 
@@ -2160,14 +2713,28 @@ def _render_callback_bridge_page(app_redirect_url: str, payload: dict) -> bytes:
     <title>Cuevion Gmail Connection</title>
   </head>
   <body>
+    <p id="oauth-status">Returning to Cuevion…</p>
+    <p><a id="oauth-return" href="/">Return to Cuevion</a></p>
     <script>
       const payload = {payload_json};
       const redirectUrl = {redirect_json};
+      const statusNode = document.getElementById("oauth-status");
+      const returnLink = document.getElementById("oauth-return");
+      statusNode.textContent = typeof payload.message === "string" && payload.message
+        ? payload.message
+        : "Returning to Cuevion…";
+      returnLink.href = redirectUrl;
       window.history.replaceState(null, "", {callback_path_json});
-      window.localStorage.setItem({storage_key_json}, JSON.stringify(payload));
-      window.location.replace(redirectUrl);
+      try {{
+        window.localStorage.setItem({storage_key_json}, JSON.stringify(payload));
+      }} catch (_error) {{
+        // The visible message and return link remain available if storage is blocked.
+      }}
+      window.setTimeout(
+        () => window.location.replace(redirectUrl),
+        payload.status === "error" ? 1500 : 0,
+      );
     </script>
-    <p>Returning to Cuevion…</p>
   </body>
 </html>
 """
@@ -2228,7 +2795,19 @@ def _exchange_google_code(
                 return None, {"code": "token_exchange_failed", "message": "Google returned an invalid token response."}
             return payload, None
     except HTTPError as error:
-        error_body = error.read(MAX_OAUTH_RESPONSE_BYTES + 1).decode("utf-8", errors="replace")
+        try:
+            raw_error_body = error.read(MAX_OAUTH_RESPONSE_BYTES + 1)
+        except Exception:
+            return None, {
+                "code": "token_exchange_unavailable",
+                "message": "Google token exchange was unavailable.",
+            }
+        if len(raw_error_body) > MAX_OAUTH_RESPONSE_BYTES:
+            return None, {
+                "code": "token_exchange_unavailable",
+                "message": "Google token exchange was unavailable.",
+            }
+        error_body = raw_error_body.decode("utf-8", errors="replace")
         try:
             parsed_error = json.loads(error_body) if error_body else {}
         except json.JSONDecodeError:
@@ -2409,10 +2988,41 @@ class handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(page)
 
+    def _release_callback_mailbox_lease(self):
+        lease_token = getattr(self, "_oauth_callback_lease_token", None)
+        lease_owner = getattr(self, "_oauth_callback_lease_owner", None)
+        lease_mailbox_id = getattr(
+            self,
+            "_oauth_callback_lease_mailbox_id",
+            None,
+        )
+        self._oauth_callback_lease_token = None
+        if not (
+            isinstance(lease_token, str)
+            and isinstance(lease_owner, str)
+            and isinstance(lease_mailbox_id, str)
+        ):
+            return
+        try:
+            user_config_store.release_mailbox_mutation_lease(
+                lease_owner,
+                lease_mailbox_id,
+                lease_token,
+            )
+        except Exception:
+            return
+
     def do_GET(self):
         self._gmail_callback_failure_logged = False
         self._gmail_callback_provider = "google"
         self._gmail_callback_inbox_position = None
+        self._oauth_callback_mode = None
+        self._oauth_callback_mailbox_id = None
+        self._oauth_callback_expected_email = None
+        self._oauth_callback_credential_generation = None
+        self._oauth_callback_lease_token = None
+        self._oauth_callback_lease_owner = None
+        self._oauth_callback_lease_mailbox_id = None
         try:
             handler._handle_get(self)
         except Exception:
@@ -2426,6 +3036,8 @@ class handler(BaseHTTPRequestHandler):
                     self._gmail_callback_inbox_position,
                 )
             raise
+        finally:
+            self._release_callback_mailbox_lease()
 
     def _handle_get(self):
         parsed_url = urlparse(self.path)
@@ -2493,6 +3105,14 @@ class handler(BaseHTTPRequestHandler):
             return
 
         inbox_position = state_payload.get("inboxPosition")
+        mode = state_payload["mode"]
+        credential_generation = state_payload["credential_generation"]
+        mailbox_id = state_payload.get("mailboxId")
+        expected_email = state_payload.get("expected_email")
+        self._oauth_callback_mode = mode
+        self._oauth_callback_mailbox_id = mailbox_id
+        self._oauth_callback_expected_email = expected_email
+        self._oauth_callback_credential_generation = credential_generation
         self._gmail_callback_inbox_position = inbox_position
         if (
             not state_signing_secret
@@ -2566,6 +3186,79 @@ class handler(BaseHTTPRequestHandler):
                 inbox_position=inbox_position,
             )
             return
+
+        if mode == "reconnect":
+            lease_result = user_config_store.acquire_mailbox_mutation_lease(
+                state_owner_email,
+                mailbox_id,
+            )
+            lease_token = lease_result.get("token")
+            if lease_result.get("status") != "acquired" or not isinstance(
+                lease_token,
+                str,
+            ):
+                lease_held = lease_result.get("status") == "held"
+                _send_gmail_callback_failure(
+                    self,
+                    _build_callback_payload(
+                        provider="google",
+                        email=expected_email,
+                        connection_status="connection_failed",
+                        message=(
+                            "Another reconnect is already in progress for this mailbox."
+                            if lease_held
+                            else "Mailbox configuration is temporarily unavailable."
+                        ),
+                        connected=False,
+                        mailbox_id=mailbox_id,
+                        mode=mode,
+                    ),
+                    failure_code=(
+                        "oauth_reconnect_in_progress"
+                        if lease_held
+                        else "user_config_store_unavailable"
+                    ),
+                )
+                return
+            self._oauth_callback_lease_token = lease_token
+            self._oauth_callback_lease_owner = state_owner_email
+            self._oauth_callback_lease_mailbox_id = mailbox_id
+
+            reconnect_preflight, reconnect_preflight_error = (
+                _prepare_gmail_reconnect_target(
+                    member,
+                    mailbox_id=mailbox_id,
+                    expected_email=expected_email,
+                    credential_generation=credential_generation,
+                )
+            )
+            if reconnect_preflight_error or not reconnect_preflight:
+                reconnect_failure_code = _resolve_gmail_callback_failure_code(
+                    reconnect_preflight_error,
+                    default="oauth_reconnect_target_invalid",
+                )
+                _send_gmail_callback_failure(
+                    self,
+                    _build_callback_payload(
+                        provider="google",
+                        email=expected_email,
+                        connection_status="connection_failed",
+                        message=(
+                            reconnect_preflight_error.get("message")
+                            if isinstance(reconnect_preflight_error, dict)
+                            and isinstance(
+                                reconnect_preflight_error.get("message"),
+                                str,
+                            )
+                            else "The selected Google mailbox cannot be reconnected safely."
+                        ),
+                        connected=False,
+                        mailbox_id=mailbox_id,
+                        mode=mode,
+                    ),
+                    failure_code=reconnect_failure_code,
+                )
+                return
 
         if provider == "google":
             google_client_id = os.getenv("GOOGLE_CLIENT_ID", "").strip()
@@ -2697,6 +3390,29 @@ class handler(BaseHTTPRequestHandler):
         mailbox_email = oauth_identity["email"]
         display_name = oauth_identity.get("display_name")
 
+        if (
+            provider == "google"
+            and mode == "reconnect"
+            and mailbox_email != expected_email
+        ):
+            _send_gmail_callback_failure(
+                self,
+                _build_callback_payload(
+                    provider="google",
+                    email=expected_email,
+                    connection_status="connection_failed",
+                    message=(
+                        "Please reconnect using the Google account for "
+                        f"{expected_email}."
+                    ),
+                    connected=False,
+                    mailbox_id=mailbox_id,
+                    mode=mode,
+                ),
+                failure_code="oauth_reconnect_email_mismatch",
+            )
+            return
+
         if provider == "google":
             current_member, current_member_error = (
                 _resolve_current_gmail_callback_member(
@@ -2726,12 +3442,22 @@ class handler(BaseHTTPRequestHandler):
                 )
                 return
             member = current_member
-            _, registration_preflight_error = _prepare_gmail_managed_inbox_registration(
-                member,
-                email=mailbox_email,
-                owner_email=state_owner_email,
-                inbox_position=inbox_position,
-            )
+            if mode == "reconnect":
+                _, registration_preflight_error = _prepare_gmail_reconnect_target(
+                    member,
+                    mailbox_id=mailbox_id,
+                    expected_email=expected_email,
+                    credential_generation=credential_generation,
+                )
+            else:
+                _, registration_preflight_error = (
+                    _prepare_gmail_managed_inbox_registration(
+                        member,
+                        email=mailbox_email,
+                        owner_email=state_owner_email,
+                        inbox_position=inbox_position,
+                    )
+                )
             if registration_preflight_error:
                 preflight_failure_code = _resolve_gmail_callback_failure_code(
                     registration_preflight_error,
@@ -2750,9 +3476,20 @@ class handler(BaseHTTPRequestHandler):
                         provider=provider,
                         email=mailbox_email,
                         connection_status="connection_failed",
-                        message="This Gmail inbox could not be linked to the selected onboarding inbox.",
+                        message=(
+                            registration_preflight_error.get("message")
+                            if mode == "reconnect"
+                            and isinstance(registration_preflight_error, dict)
+                            and isinstance(
+                                registration_preflight_error.get("message"),
+                                str,
+                            )
+                            else "This Gmail inbox could not be linked to the selected onboarding inbox."
+                        ),
                         connected=False,
                         inbox_position=inbox_position,
+                        mailbox_id=mailbox_id,
+                        mode=mode,
                     ),
                     failure_code=preflight_failure_code,
                     inbox_position=inbox_position,
@@ -2763,6 +3500,8 @@ class handler(BaseHTTPRequestHandler):
                 email=mailbox_email,
                 owner_email=state_owner_email,
                 token_payload=token_payload,
+                mode=mode,
+                credential_generation=credential_generation,
             )
         else:
             persisted_record, persistence_error = persist_microsoft_token_record(
@@ -2787,9 +3526,17 @@ class handler(BaseHTTPRequestHandler):
                     provider=provider,
                     email=mailbox_email,
                     connection_status="authenticated_pending_activation",
-                    message=f"{provider_name} authentication completed, but secure authorization storage is unavailable.",
+                    message=(
+                        persistence_error.get("message")
+                        if persistence_failure_code == "refresh_token_missing"
+                        and isinstance(persistence_error, dict)
+                        and isinstance(persistence_error.get("message"), str)
+                        else f"{provider_name} authentication completed, but secure authorization storage is unavailable."
+                    ),
                     connected=False,
                     display_name=display_name,
+                    mailbox_id=mailbox_id,
+                    mode=mode if provider == "google" else None,
                 ),
                 failure_code=persistence_failure_code,
                 inbox_position=inbox_position,
@@ -2864,14 +3611,29 @@ class handler(BaseHTTPRequestHandler):
                 )
                 return
             member = current_member
-            saved_mailbox, user_config_error = _register_gmail_managed_inbox_in_user_config(
-                member,
-                email=mailbox_email,
-                display_name=display_name,
-                owner_email=state_owner_email,
-                message=connected_message,
-                inbox_position=inbox_position,
-            )
+            if mode == "reconnect":
+                saved_mailbox, user_config_error = (
+                    _register_gmail_reconnect_in_user_config(
+                        member,
+                        mailbox_id=mailbox_id,
+                        expected_email=expected_email,
+                        verified_email=mailbox_email,
+                        owner_email=state_owner_email,
+                        message=connected_message,
+                        credential_generation=credential_generation,
+                    )
+                )
+            else:
+                saved_mailbox, user_config_error = (
+                    _register_gmail_managed_inbox_in_user_config(
+                        member,
+                        email=mailbox_email,
+                        display_name=display_name,
+                        owner_email=state_owner_email,
+                        message=connected_message,
+                        inbox_position=inbox_position,
+                    )
+                )
             if user_config_error:
                 user_config_failure_code = _resolve_gmail_callback_failure_code(
                     user_config_error,
@@ -2890,9 +3652,17 @@ class handler(BaseHTTPRequestHandler):
                         provider=provider,
                         email=mailbox_email,
                         connection_status="authenticated_pending_activation",
-                        message="Google authentication completed, but the Gmail inbox could not be saved securely.",
+                        message=(
+                            user_config_error.get("message")
+                            if mode == "reconnect"
+                            and isinstance(user_config_error, dict)
+                            and isinstance(user_config_error.get("message"), str)
+                            else "Google authentication completed, but the Gmail inbox could not be saved securely."
+                        ),
                         connected=False,
                         inbox_position=inbox_position,
+                        mailbox_id=mailbox_id,
+                        mode=mode,
                     ),
                     failure_code=user_config_failure_code,
                     inbox_position=inbox_position,
@@ -2912,6 +3682,7 @@ class handler(BaseHTTPRequestHandler):
                 if isinstance(saved_mailbox, dict)
                 else None
             ),
+            mode=mode if provider == "google" else None,
         )
         if provider == "google" and callback_payload.get("status") != "success":
             _send_gmail_callback_failure(

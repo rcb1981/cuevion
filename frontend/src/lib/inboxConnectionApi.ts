@@ -241,11 +241,29 @@ export type ConnectInboxResponse = {
   };
 };
 
-export type OAuthInboxRequest = {
-  provider: Extract<ProviderId, "google" | "microsoft">;
-  email?: string;
-  inboxPosition?: string;
-};
+export const GMAIL_OAUTH_RECONNECT_REQUIRED_CONNECTION_MESSAGE =
+  "Reconnect mailbox to continue syncing.";
+
+export type OAuthInboxRequest =
+  | {
+      provider: "google";
+      email?: string;
+      inboxPosition?: string;
+      mode: "initial";
+      mailboxId?: never;
+    }
+  | {
+      provider: "google";
+      email?: string;
+      inboxPosition?: never;
+      mode: "reconnect";
+      mailboxId: string;
+    }
+  | {
+      provider: "microsoft";
+      email?: string;
+      inboxPosition?: string;
+    };
 
 export type OAuthInboxResponse = {
   ok: boolean;
@@ -653,13 +671,40 @@ export function buildRefreshInboxRequest(options: {
 export function buildOAuthInboxRequest(options: {
   provider: Extract<ProviderId, "google" | "microsoft">;
   email: string;
+  mode?: "initial" | "reconnect";
+  mailboxId?: string | null;
   inboxPosition?: string | null;
 }): OAuthInboxRequest {
   const email = options.email.trim();
+  const mailboxId = options.mailboxId?.trim();
   const inboxPosition = options.inboxPosition?.trim();
 
+  if (options.provider === "google") {
+    const mode = options.mode ?? "initial";
+
+    if (mode === "reconnect" && !mailboxId) {
+      throw new Error("A mailbox ID is required to reconnect Gmail.");
+    }
+
+    if (mode === "reconnect") {
+      return {
+        provider: "google",
+        mode,
+        mailboxId: mailboxId!,
+        ...(email ? { email } : {}),
+      };
+    }
+
+    return {
+      provider: "google",
+      mode,
+      ...(email ? { email } : {}),
+      ...(inboxPosition ? { inboxPosition } : {}),
+    };
+  }
+
   return {
-    provider: options.provider,
+    provider: "microsoft",
     ...(email ? { email } : {}),
     ...(inboxPosition ? { inboxPosition } : {}),
   };
@@ -3037,13 +3082,35 @@ export async function beginInboxConnection(options: {
   const connectionMethod = getProviderConnectionMethod(options.provider);
 
   if (isOAuthConnectionProvider(options.provider)) {
-    const response = await connectInboxWithOAuth(
-      buildOAuthInboxRequest({
+    let oauthRequest: OAuthInboxRequest;
+    try {
+      oauthRequest = buildOAuthInboxRequest({
         provider: options.provider as Extract<ProviderId, "google" | "microsoft">,
         email: options.email,
+        mode: options.imapMode,
+        mailboxId: options.mailboxId,
         inboxPosition: options.inboxPosition,
-      }),
-    );
+      });
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : "OAuth connection settings are invalid.";
+      return {
+        ok: false,
+        connected: false,
+        connectionMethod,
+        connectionStatus: "connection_failed",
+        connectionMessage: message,
+        oauthAuthorizationUrl: null,
+        error: {
+          code: "oauth_invalid_request",
+          message,
+        },
+      };
+    }
+
+    const response = await connectInboxWithOAuth(oauthRequest);
 
     if (!response.ok) {
       return {

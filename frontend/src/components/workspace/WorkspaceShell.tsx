@@ -137,6 +137,7 @@ import {
   requestPrioritySemanticNewInboundDismissal,
   requestPrioritySemanticNewInboundHydration,
   sendGmailMessage,
+  GMAIL_OAUTH_RECONNECT_REQUIRED_CONNECTION_MESSAGE,
   type ArchiveFolderSnapshot,
   type ArchiveMutationResponse,
   type GmailArchiveMessageSnapshot,
@@ -3442,6 +3443,7 @@ const MAIL_OUT_OF_OFFICE_STORAGE_KEY = "cuevion-mail-out-of-office";
 const OUT_OF_OFFICE_REPLY_LOG_STORAGE_KEY = "cuevion-out-of-office-reply-log";
 const MANAGED_INBOXES_STORAGE_KEY = "cuevion-managed-inboxes";
 const PENDING_OAUTH_MANAGED_INBOX_STORAGE_KEY = "cuevion-pending-oauth-managed-inbox";
+export { GMAIL_OAUTH_RECONNECT_REQUIRED_CONNECTION_MESSAGE };
 const PRIMARY_MANAGED_INBOX_ID_STORAGE_KEY = "cuevion-primary-managed-inbox-id";
 const WORKSPACE_NAME_STORAGE_KEY = "cuevion-workspace-name";
 const CONTACT_REQUESTS_STORAGE_KEY = "cuevion-contact-requests";
@@ -32035,7 +32037,10 @@ type InboxRefreshIssue = {
   message?: string;
   fetched_count?: number;
 };
-function savePendingOAuthManagedInbox(mailbox: ManagedWorkspaceInbox) {
+function savePendingOAuthManagedInbox(
+  mailbox: ManagedWorkspaceInbox,
+  mode: "initial" | "reconnect",
+) {
   if (mailbox.provider !== "google") {
     return;
   }
@@ -32044,6 +32049,8 @@ function savePendingOAuthManagedInbox(mailbox: ManagedWorkspaceInbox) {
     PENDING_OAUTH_MANAGED_INBOX_STORAGE_KEY,
     JSON.stringify({
       id: mailbox.id,
+      mailboxId: mailbox.id,
+      mode,
       title: mailbox.title.trim(),
       email: mailbox.email.trim().toLowerCase(),
       provider: mailbox.provider,
@@ -33401,6 +33408,16 @@ function getManagedInboxStatusClassName(mailbox: ManagedWorkspaceInbox) {
   return "border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] text-[var(--workspace-text-faint)]";
 }
 
+function isGmailOAuthReconnectRequired(mailbox: ManagedWorkspaceInbox) {
+  return (
+    mailbox.provider === "google" &&
+    mailbox.connected === false &&
+    mailbox.connectionStatus === "connection_failed" &&
+    mailbox.connectionMessage ===
+      GMAIL_OAUTH_RECONNECT_REQUIRED_CONNECTION_MESSAGE
+  );
+}
+
 function getCredentialAwareManagedInboxStatus(
   mailbox: ManagedWorkspaceInbox,
   credentialStatuses: MailboxCredentialStatusStore = {},
@@ -33794,6 +33811,16 @@ function ManagedInboxEditor({
   );
   const isUnsupportedProvider =
     Boolean(mailbox.provider) && !isPrivateBetaSupportedProvider(mailbox.provider);
+  const gmailOAuthReconnectRequired =
+    isGmailOAuthReconnectRequired(mailbox);
+  const canReconnectGmail =
+    isExisting &&
+    mailbox.provider === "google" &&
+    Boolean(onReconnectAction) &&
+    (
+      (mailbox.connected && mailbox.connectionStatus === "connected") ||
+      gmailOAuthReconnectRequired
+    );
   const unsupportedProviderLabel = getUnsupportedProviderLabel(mailbox.provider);
   const providerLabel =
     onboardingText.connect.providers.find((provider) => provider.id === mailbox.provider)
@@ -34198,11 +34225,12 @@ function ManagedInboxEditor({
                     {onboardingText.connect.googleOAuthDescription}
                   </p>
                 </div>
-                {isExisting &&
-                mailbox.provider === "google" &&
-                mailbox.connected &&
-                mailbox.connectionStatus === "connected" &&
-                onReconnectAction ? (
+                {gmailOAuthReconnectRequired ? (
+                  <span className="inline-flex rounded-full border border-[color:rgba(184,163,120,0.28)] bg-[color:rgba(184,163,120,0.12)] px-2.5 py-1 text-[0.66rem] font-medium text-[var(--workspace-text-muted)]">
+                    Connection needs attention
+                  </span>
+                ) : null}
+                {canReconnectGmail && onReconnectAction ? (
                   <DesktopActionButton
                     onClick={onReconnectAction}
                     disabled={isApplying}
@@ -34498,6 +34526,7 @@ const ManageInboxesView = memo(function ManageInboxesView({
   const [pendingInboxApplyId, setPendingInboxApplyId] = useState<string | null>(null);
   const [pendingInboxRemovalId, setPendingInboxRemovalId] = useState<string | null>(null);
   const [validatingInboxId, setValidatingInboxId] = useState<string | null>(null);
+  const reconnectingGmailInboxIdsRef = useRef(new Set<string>());
   const [validationErrorInboxId, setValidationErrorInboxId] = useState<string | null>(null);
   const [successToastMessage, setSuccessToastMessage] = useState<string | null>(null);
   const [selectedInboxId, setSelectedInboxId] = useState<string | null>(() =>
@@ -34936,7 +34965,10 @@ const ManageInboxesView = memo(function ManageInboxesView({
             : null;
 
         if (authorizationUrl) {
-          savePendingOAuthManagedInbox(mailboxForStorage);
+          savePendingOAuthManagedInbox(
+            mailboxForStorage,
+            inboxId.startsWith("draft-") ? "initial" : "reconnect",
+          );
           window.location.assign(authorizationUrl);
           return true;
         }
@@ -34968,17 +35000,26 @@ const ManageInboxesView = memo(function ManageInboxesView({
   };
 
   const connectManagedInbox = async (inboxId: string) => {
-    const mailbox = draftManagedInboxes.find((candidate) => candidate.id === inboxId);
-    const savedMailbox = mailbox
-      ? findMatchingSavedManagedInbox(mailbox, savedManagedInboxes)
-      : undefined;
-    const mailboxForConnection = mailbox
-      ? normalizeManagedInboxForStorage(mailbox, savedMailbox)
-      : null;
+    if (reconnectingGmailInboxIdsRef.current.has(inboxId)) {
+      return false;
+    }
+    const mailbox = draftManagedInboxes.find(
+      (candidate) => candidate.id === inboxId,
+    );
+    const savedMailbox = savedManagedInboxes.find(
+      (candidate) => candidate.id === inboxId,
+    );
+    const mailboxForConnection =
+      savedMailbox?.provider === "google"
+        ? normalizeManagedInboxForStorage(savedMailbox, savedMailbox)
+        : null;
 
     if (
       !mailboxForConnection ||
-      !isManagedInboxConfigurationComplete(mailboxForConnection, credentialStatuses)
+      !isManagedInboxConfigurationComplete(
+        mailboxForConnection,
+        credentialStatuses,
+      )
     ) {
       return false;
     }
@@ -34996,114 +35037,67 @@ const ManageInboxesView = memo(function ManageInboxesView({
       return false;
     }
 
+    reconnectingGmailInboxIdsRef.current.add(inboxId);
     setValidatingInboxId(inboxId);
     clearConnectionError(inboxId);
 
-    const response = await validateManagedInbox(
-      mailboxForConnection,
-      savedMailbox ? "reconnect" : "initial",
-      savedMailbox,
-    );
-    if (mailboxForConnection.provider === "custom_imap") {
-      clearDraftMailboxPasswords(inboxId);
-    }
+    try {
+      const response = await validateManagedInbox(
+        mailboxForConnection,
+        "reconnect",
+        savedMailbox,
+      );
 
-    if (!response.ok) {
-      setConnectionErrors((current) => ({
-        ...current,
-        [inboxId]:
-          response.error?.message ??
-          response.connectionMessage ??
-          "Could not connect to inbox.",
-      }));
+      if (!response.ok) {
+        setConnectionErrors((current) => ({
+          ...current,
+          [inboxId]:
+            response.error?.message ??
+            response.connectionMessage ??
+            "Could not reconnect Gmail.",
+        }));
+        return false;
+      }
+
+      const authorizationUrl =
+        response.connectionStatus === "waiting_for_authentication"
+          ? response.oauthAuthorizationUrl
+          : null;
+
       setDraftManagedInboxes((current) =>
         current.map((candidate) =>
           candidate.id === inboxId
             ? {
                 ...candidate,
-                connected: false,
+                connected: response.connected,
                 connectionMethod: response.connectionMethod,
-                connectionStatus: "connection_failed",
+                connectionStatus: response.connectionStatus,
                 connectionMessage: response.connectionMessage ?? null,
-                oauthAuthorizationUrl: null,
+                oauthAuthorizationUrl: response.oauthAuthorizationUrl ?? null,
               }
             : candidate,
         ),
       );
-      setValidatingInboxId(null);
-      return false;
-    }
+      setValidationErrorInboxId((current) =>
+        current === inboxId ? null : current,
+      );
 
-    if (mailboxForConnection.provider === "custom_imap") {
-      const didReloadAuthoritativeMailbox =
-        await onReloadAuthoritativeMailbox(mailboxForConnection.id);
-      setValidatingInboxId(null);
-
-      if (!didReloadAuthoritativeMailbox) {
-        const verificationMessage =
-          "The mailbox response could not be verified against the saved server configuration. Try again.";
-        setConnectionErrors((current) => ({
-          ...current,
-          [inboxId]: verificationMessage,
-        }));
-        setDraftManagedInboxes((current) =>
-          current.map((candidate) =>
-            candidate.id === inboxId
-              ? {
-                  ...candidate,
-                  connected: false,
-                  connectionMethod: "imap",
-                  connectionStatus: "connection_failed",
-                  connectionMessage: verificationMessage,
-                  oauthAuthorizationUrl: null,
-                }
-              : candidate,
-          ),
-        );
-        setEditingInboxId(inboxId);
-        return false;
+      if (authorizationUrl) {
+        savePendingOAuthManagedInbox(mailboxForConnection, "reconnect");
+        window.location.assign(authorizationUrl);
       }
 
-      saveLiveInboxSnapshot({
-        provider: "custom_imap",
-        inboxId: mailboxForConnection.id,
-        email: mailboxForConnection.email.trim().toLowerCase(),
-        fetchedAt: new Date().toISOString(),
-        messages: response.messages ?? [],
-        folder: "INBOX",
-        uidValidity: response.uidValidity ?? null,
-      });
       return true;
+    } catch {
+      setConnectionErrors((current) => ({
+        ...current,
+        [inboxId]: "Could not reconnect Gmail. Try again.",
+      }));
+      return false;
+    } finally {
+      reconnectingGmailInboxIdsRef.current.delete(inboxId);
+      setValidatingInboxId(null);
     }
-
-    const authorizationUrl =
-      response.connectionStatus === "waiting_for_authentication"
-        ? response.oauthAuthorizationUrl
-        : null;
-
-    setDraftManagedInboxes((current) =>
-      current.map((candidate) =>
-        candidate.id === inboxId
-          ? {
-              ...candidate,
-              connected: response.connected,
-              connectionMethod: response.connectionMethod,
-              connectionStatus: response.connectionStatus,
-              connectionMessage: response.connectionMessage ?? null,
-              oauthAuthorizationUrl: response.oauthAuthorizationUrl ?? null,
-            }
-          : candidate,
-      ),
-    );
-    setValidationErrorInboxId((current) => (current === inboxId ? null : current));
-    setValidatingInboxId(null);
-
-    if (authorizationUrl) {
-      savePendingOAuthManagedInbox(mailboxForConnection);
-      window.location.assign(authorizationUrl);
-    }
-
-    return true;
   };
 
   const updateDraftInbox = (
@@ -40576,6 +40570,7 @@ export function WorkspaceShell({
   theme = "light",
   userConfig,
   onboardingState,
+  authoritativeManagedInboxes = [],
   authenticatedUser = null,
   authenticationContext,
   onAuthenticatedUserNameChange,
@@ -40585,6 +40580,7 @@ export function WorkspaceShell({
   theme?: "light" | "dark";
   userConfig: UserConfig;
   onboardingState: OnboardingState;
+  authoritativeManagedInboxes?: unknown[];
   authenticatedUser?: AuthenticatedCuevionUser | null;
   authenticationContext: AuthenticationContext;
   onAuthenticatedUserNameChange?: (name: string) => void;
@@ -40642,6 +40638,15 @@ export function WorkspaceShell({
   });
   const hasAuthenticatedMemberAuthority =
     authenticationContext === "auth0" && authenticatedUser?.userType === "member";
+  const authoritativeManagedInboxSeed = useMemo(
+    () =>
+      hasAuthenticatedMemberAuthority
+        ? normalizeAuthoritativeManagedInboxList(
+            authoritativeManagedInboxes,
+          ) ?? []
+        : [],
+    [authoritativeManagedInboxes, hasAuthenticatedMemberAuthority],
+  );
   const learningStorageKey = buildLearningStorageKey(
     hasAuthenticatedMemberAuthority ? authenticatedUser?.workspaceId : null,
     hasAuthenticatedMemberAuthority ? authenticatedUser?.userId : null,
@@ -40664,7 +40669,13 @@ export function WorkspaceShell({
   const [savedManagedInboxes, setSavedManagedInboxes] = useState<ManagedWorkspaceInbox[]>(() => {
     const onboardingSeed = buildManagedWorkspaceInboxes(onboardingState);
 
-    if (typeof window === "undefined" || hasAuthenticatedMemberAuthority) {
+    if (hasAuthenticatedMemberAuthority) {
+      return authoritativeManagedInboxSeed.length > 0
+        ? authoritativeManagedInboxSeed.map(cloneManagedWorkspaceInbox)
+        : onboardingSeed;
+    }
+
+    if (typeof window === "undefined") {
       return onboardingSeed;
     }
 
@@ -40753,9 +40764,16 @@ export function WorkspaceShell({
       buildManagedWorkspaceInboxes(onboardingState),
     ),
   );
+  const authoritativeMailboxSeedKey = JSON.stringify(
+    sanitizeManagedInboxCredentials(authoritativeManagedInboxSeed),
+  );
   const managedMailboxAuthoritySeedKey = `${
     hasAuthenticatedMemberAuthority ? "server" : "local"
-  }:${onboardingMailboxSeedKey}`;
+  }:${
+    hasAuthenticatedMemberAuthority
+      ? authoritativeMailboxSeedKey
+      : onboardingMailboxSeedKey
+  }`;
   const lastOnboardingMailboxSeedKeyRef = useRef(
     managedMailboxAuthoritySeedKey,
   );
@@ -44159,7 +44177,9 @@ export function WorkspaceShell({
     setSavedManagedInboxes((current) => {
       const onboardingSeed = buildManagedWorkspaceInboxes(onboardingState);
       const nextInboxes = hasAuthenticatedMemberAuthority
-        ? onboardingSeed
+        ? authoritativeManagedInboxSeed.length > 0
+          ? authoritativeManagedInboxSeed.map(cloneManagedWorkspaceInbox)
+          : onboardingSeed
         : mergeOnboardingSeedWithSavedInboxes(onboardingSeed, current);
 
       if (JSON.stringify(nextInboxes) === JSON.stringify(current)) {
@@ -44170,6 +44190,8 @@ export function WorkspaceShell({
 	    });
   }, [
     hasAuthenticatedMemberAuthority,
+    authoritativeManagedInboxSeed,
+    authoritativeMailboxSeedKey,
     managedMailboxAuthoritySeedKey,
     onboardingMailboxSeedKey,
     onboardingState,
@@ -49771,7 +49793,8 @@ export function WorkspaceShell({
           (canUseImapFetch || canUseGmailOAuthFetch) &&
           response.error?.code === "reconnect_required"
         ) {
-          const reconnectMessage = "Reconnect mailbox to continue syncing.";
+          const reconnectMessage =
+            GMAIL_OAUTH_RECONNECT_REQUIRED_CONNECTION_MESSAGE;
           setSavedManagedInboxes((current) =>
             current.map((candidate) =>
               candidate.id === mailboxId

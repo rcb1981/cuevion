@@ -53,6 +53,7 @@ import {
   isAuth0LoginPath,
   loadStartupSession,
 } from "./lib/authApi";
+import { GMAIL_OAUTH_RECONNECT_REQUIRED_CONNECTION_MESSAGE } from "./lib/inboxConnectionApi";
 
 const WorkspaceShell = lazy(() =>
   import("./components/workspace/WorkspaceShell").then((module) => ({
@@ -161,8 +162,9 @@ type MicrosoftOAuthCallbackStorageResult = {
 };
 
 type GoogleOAuthCallbackSignal = {
-  status: "success";
+  status: "success" | "error";
   provider: "google";
+  mode?: "initial" | "reconnect";
   inboxPosition?: string;
   email: string;
   mailboxId: string;
@@ -171,6 +173,8 @@ type GoogleOAuthCallbackSignal = {
 
 type PendingOAuthManagedInbox = {
   id?: string;
+  mailboxId?: string;
+  mode?: "initial" | "reconnect";
   title?: string;
   email?: string;
   provider?: string | null;
@@ -204,6 +208,7 @@ type LocalOnboardingIdentityInput = {
 
 type AccountConfigStartupAccountState = {
   displayNameOverrides: DisplayNameOverrideStore;
+  authoritativeManagedInboxes: StoredManagedWorkspaceInbox[];
   persistedOnboardingSession: PersistedOnboardingSession | null;
   onboardingState: OnboardingState;
   onboardingStep: number;
@@ -213,7 +218,7 @@ type AccountConfigStartupAccountState = {
 
 type LocalOnboardingHydrationState = Omit<
   AccountConfigStartupAccountState,
-  "displayNameOverrides"
+  "displayNameOverrides" | "authoritativeManagedInboxes"
 >;
 
 function canUseHydratedLocalAccountState(
@@ -2336,6 +2341,13 @@ function projectConnectedManagedInboxesOntoOnboardingState(
       mailbox.connectionMethod === "oauth" &&
       mailbox.connected === true &&
       mailbox.connectionStatus === "connected";
+    const isReconnectRequiredGoogleMailbox =
+      mailbox.provider === "google" &&
+      mailbox.connectionMethod === "oauth" &&
+      mailbox.connected === false &&
+      mailbox.connectionStatus === "connection_failed" &&
+      mailbox.connectionMessage ===
+        GMAIL_OAUTH_RECONNECT_REQUIRED_CONNECTION_MESSAGE;
     const projectedCustomImap =
       mailbox.provider === "custom_imap"
         ? projectServerCustomImapSettings(
@@ -2366,7 +2378,11 @@ function projectConnectedManagedInboxesOntoOnboardingState(
       hasAuthoritativeCustomImapCapabilityShape(mailbox) &&
       hasValidManagedMailboxOptionalMetadata(mailbox) &&
       !containsUnsafeMailboxMetadata(mailbox);
-    if (!isConnectedGoogleMailbox && !isAuthoritativeCustomImapMailbox) {
+    if (
+      !isConnectedGoogleMailbox &&
+      !isReconnectRequiredGoogleMailbox &&
+      !isAuthoritativeCustomImapMailbox
+    ) {
       continue;
     }
 
@@ -2384,17 +2400,22 @@ function projectConnectedManagedInboxesOntoOnboardingState(
       continue;
     }
 
-    nextConnections[inboxPosition] = isConnectedGoogleMailbox
+    nextConnections[inboxPosition] =
+      isConnectedGoogleMailbox || isReconnectRequiredGoogleMailbox
       ? {
           ...currentConnection,
           serverMailboxId: mailboxId,
           provider: "google",
           email,
-          connected: true,
+          connected: isConnectedGoogleMailbox,
           connectionMethod: "oauth",
-          connectionStatus: "connected",
+          connectionStatus: isConnectedGoogleMailbox
+            ? "connected"
+            : "connection_failed",
           connectionMessage:
-            typeof mailbox.connectionMessage === "string"
+            isReconnectRequiredGoogleMailbox
+              ? GMAIL_OAUTH_RECONNECT_REQUIRED_CONNECTION_MESSAGE
+              : typeof mailbox.connectionMessage === "string"
               ? mailbox.connectionMessage
               : null,
           oauthAuthorizationUrl: null,
@@ -2883,6 +2904,7 @@ function createCleanAccountConfigStartupState(): AccountConfigStartupAccountStat
 
   return {
     displayNameOverrides: {},
+    authoritativeManagedInboxes: [],
     persistedOnboardingSession: null,
     onboardingState,
     onboardingStep: ONBOARDING_STEP_MIN,
@@ -3076,6 +3098,9 @@ function applyLoadedUserAccountConfig(
         typeof result.config.displayNameOverrides === "object"
           ? result.config.displayNameOverrides
           : {},
+      authoritativeManagedInboxes: sanitizeManagedInboxesForBrowserStorage(
+        getServerManagedInboxesForHydration(result.config),
+      ),
       persistedOnboardingSession,
       onboardingState,
       onboardingStep:
@@ -3243,16 +3268,20 @@ function normalizeGoogleOAuthCallbackSignal(
     !hasOnlyKeys(value, [
       "status",
       "provider",
+      "mode",
       "inboxPosition",
       "email",
       "mailboxId",
       "message",
     ]) ||
-    value.status !== "success" ||
+    (value.status !== "success" && value.status !== "error") ||
     value.provider !== "google" ||
     typeof value.email !== "string" ||
     typeof value.mailboxId !== "string" ||
     typeof value.message !== "string" ||
+    (value.mode !== undefined &&
+      value.mode !== "initial" &&
+      value.mode !== "reconnect") ||
     (value.inboxPosition !== undefined && !isInboxId(value.inboxPosition))
   ) {
     return null;
@@ -3271,14 +3300,18 @@ function normalizeGoogleOAuthCallbackSignal(
   }
 
   return {
-    status: "success",
+    status: value.status,
     provider: "google",
+    ...(value.mode !== undefined ? { mode: value.mode } : {}),
     ...(value.inboxPosition !== undefined
       ? { inboxPosition: value.inboxPosition }
       : {}),
     email,
     mailboxId,
-    message: value.message,
+    message:
+      value.status === "error"
+        ? "Google authentication was not completed. Try reconnecting Gmail."
+        : value.message,
   };
 }
 
@@ -3945,6 +3978,10 @@ function CuevionApp() {
   const [displayNameOverrides, setDisplayNameOverrides] = useState<DisplayNameOverrideStore>(() =>
     parseDisplayNameOverrides(),
   );
+  const [authoritativeManagedInboxes, setAuthoritativeManagedInboxes] =
+    useState<StoredManagedWorkspaceInbox[]>(
+      initialAccountState.authoritativeManagedInboxes,
+    );
   const [sessionStatus, setSessionStatus] = useState<MemberSessionStatus>("loading");
   const [accountConfigHydrationStatus, setAccountConfigHydrationStatus] =
     useState<AccountConfigHydrationStatus>("idle");
@@ -4441,6 +4478,7 @@ function CuevionApp() {
       setUserAccountConfigHydrationEchoExpectation(null, null);
       resetAccountConfigSaveState("");
       setHydratedMemberAccountKey("");
+      setAuthoritativeManagedInboxes([]);
       missingAccountConfigNeedsCleanMirrorRef.current = false;
       setAccountConfigErrorStatus(null);
       setAccountConfigHydrationStatus("ready");
@@ -4474,6 +4512,7 @@ function CuevionApp() {
       setUserAccountConfigHydrationEchoExpectation(null, null);
       resetAccountConfigSaveState("");
       setHydratedMemberAccountKey("");
+      setAuthoritativeManagedInboxes([]);
       missingAccountConfigNeedsCleanMirrorRef.current = false;
       setAccountConfigErrorStatus(null);
       setAccountConfigHydrationStatus("idle");
@@ -4523,6 +4562,9 @@ function CuevionApp() {
           outcome.status === "missing" && !outcome.didResetOnboarding;
         setAccountConfigErrorStatus(null);
         setDisplayNameOverrides(accountState.displayNameOverrides);
+        setAuthoritativeManagedInboxes(
+          accountState.authoritativeManagedInboxes,
+        );
         setPersistedOnboardingSession(accountState.persistedOnboardingSession);
         onboardingStateRef.current = accountState.onboardingState;
         setOnboardingState(accountState.onboardingState);
@@ -4842,6 +4884,7 @@ function CuevionApp() {
         <WorkspaceShell
           userConfig={userConfig}
           onboardingState={onboardingState}
+          authoritativeManagedInboxes={authoritativeManagedInboxes}
           authenticatedUser={sessionUser}
           authenticationContext="auth0"
           workspaceDataMode={workspaceDataMode}
