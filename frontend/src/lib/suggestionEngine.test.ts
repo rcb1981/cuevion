@@ -170,6 +170,47 @@ const senderCategoryLearning: SenderCategoryLearningStore = {
   },
 };
 
+const informationalMessage = {
+  ...noneMessage,
+  subject: "Project update",
+  snippet: "The latest project update is attached for reference.",
+  body: ["The latest project update is attached for reference."],
+};
+
+assert.notEqual(
+  resolveSuggestedMessageAction(
+    informationalMessage,
+    "Primary",
+    senderCategoryLearning,
+  ).type,
+  "reply",
+  "Learning Important alone must not create reply actionability",
+);
+assert.equal(
+  resolveMessageSuggestionBanner(
+    { ...informationalMessage, category: "Primary" },
+    senderCategoryLearning,
+  )?.type,
+  "review",
+  "non-actionable content may still receive the existing neutral review suggestion",
+);
+assert.equal(
+  resolveSuggestedMessageAction(
+    noneMessage,
+    "Primary",
+    senderCategoryLearning,
+  ).type,
+  "reply",
+  "a concrete request must still trigger the content-derived reply heuristic",
+);
+assert.equal(
+  resolveMessageSuggestionBanner(
+    { ...noneMessage, category: "Primary" },
+    senderCategoryLearning,
+  )?.primary,
+  "A quick reply may help move this forward",
+);
+
 assert.deepEqual(
   resolveMailMessageBehaviorSuggestion(
     noneMessage,

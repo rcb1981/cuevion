@@ -513,6 +513,22 @@ test("automatic open-loop suppression requires exact current active server autho
     hasIndependentPriorityAuthority: false,
   } as const;
   assert.equal(shouldSuppressAutomaticOpenLoopPriority(baseInput), true);
+  const learningPreference = resolvePrioritySource({
+    learnedPrioritySelection: "Important",
+    message: { priorityScore: "medium" },
+  });
+  const learningHasIndependentPriorityAuthority = shouldAllowNormalPriority({
+    prioritySource: learningPreference,
+  });
+  assert.equal(learningHasIndependentPriorityAuthority, false);
+  assert.equal(
+    shouldSuppressAutomaticOpenLoopPriority({
+      ...baseInput,
+      hasIndependentPriorityAuthority: learningHasIndependentPriorityAuthority,
+    }),
+    true,
+    "Learning Important alone cannot veto accepted resolved suppression",
+  );
   assert.equal(
     shouldSuppressAutomaticOpenLoopPriority({
       ...baseInput,

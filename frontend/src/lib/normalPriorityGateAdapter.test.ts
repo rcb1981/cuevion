@@ -134,7 +134,7 @@ test("runtime source manual is preserved", () => {
   assert.equal(shouldAllowNormalPriority(input), true);
 });
 
-test("runtime source learning is preserved", () => {
+test("runtime source learning is preserved as metadata without canonical authority", () => {
   const input = build({
     runtimeSignal: {
       prioritySource: {
@@ -147,7 +147,7 @@ test("runtime source learning is preserved", () => {
 
   assert.equal(input.prioritySource?.source, "learning");
   assert.equal(input.prioritySource?.level, "priority");
-  assert.equal(shouldAllowNormalPriority(input), true);
+  assert.equal(shouldAllowNormalPriority(input), false);
 });
 
 test("runtime waiting_on_other source is preserved and allowed", () => {

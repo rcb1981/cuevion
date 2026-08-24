@@ -211,11 +211,19 @@ test("manual priority copy is stable", () => {
 
 test("learning copy is stable", () => {
   const copy = formatPriorityReasonCopy({
-    prioritySource: sourceResult("learning"),
+    prioritySource: sourceResult("learning", { level: "normal" }),
   });
 
   assert.equal(copy.shouldShow, true);
-  assert.equal(copy.title, "Marked important by your learning preferences");
+  assert.equal(copy.title, "Learning preference applied");
+  assert.equal(
+    copy.detail,
+    "Your Learning preference gives messages like this more attention.",
+  );
+  assert.doesNotMatch(
+    copyText(copy),
+    /marked important|usually needs a response/,
+  );
 });
 
 test("reply_protection copy is user-friendly", () => {

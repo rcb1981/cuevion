@@ -258,11 +258,7 @@ function resolveLearningMessageActionOverride(
     entry.mailboxAction === "keep" &&
     entry.sourcePrioritySelection === "Important"
   ) {
-    return {
-      type: "reply",
-      confidence: 0.92,
-      reason: "Learned as a sender that usually needs a response",
-    };
+    return undefined;
   }
 
   if (

@@ -45677,18 +45677,8 @@ export function WorkspaceShell({
             ? currentSemanticTrigger.request.activeEventRef
             : undefined
         : undefined;
-      const learnedPrioritySelection = resolveSenderLearningEntry(
-        message.from,
-        senderCategoryLearning,
-      )?.entry.sourcePrioritySelection;
-      const normalizedLearnedPrioritySelection =
-        typeof learnedPrioritySelection === "string"
-          ? learnedPrioritySelection.trim().toLowerCase()
-          : "";
       const hasIndependentPriorityAuthority = Boolean(
         override === "priority" ||
-          normalizedLearnedPrioritySelection === "priority" ||
-          normalizedLearnedPrioritySelection === "important" ||
           message.collaboration ||
           message.isShared ||
           message.sharedContext ||

@@ -210,16 +210,6 @@ export function resolvePrioritySource(
     };
   }
 
-  const learningLevel = normalizePriorityLevel(input.learnedPrioritySelection);
-  if (learningLevel === "priority") {
-    return {
-      level: "priority",
-      source: "learning",
-      reason: "A learned sender or domain rule marks similar mail as important.",
-      confidence: "high",
-    };
-  }
-
   if (input.hasReturnedReplyEvidence) {
     return {
       level: "priority",
@@ -290,6 +280,16 @@ export function resolvePrioritySource(
       source: "ai_heuristic",
       reason: "Current heuristic priority fields indicate this may need attention.",
       confidence: "low",
+    };
+  }
+
+  const learningLevel = normalizePriorityLevel(input.learnedPrioritySelection);
+  if (learningLevel === "priority") {
+    return {
+      level: currentLevel,
+      source: "learning",
+      reason: "A learned sender or domain preference gives similar mail more attention.",
+      confidence: "high",
     };
   }
 

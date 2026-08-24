@@ -29,7 +29,8 @@ const priorityReasonCopyBySource: Record<
     title: "Manually marked as priority",
   },
   learning: {
-    title: "Marked important by your learning preferences",
+    title: "Learning preference applied",
+    detail: "Your Learning preference gives messages like this more attention.",
   },
   waiting_on_other: {
     title: "Waiting for their reply",
@@ -100,7 +101,10 @@ export function formatPriorityReasonCopy(
     !isPrioritySource(prioritySource.source) ||
     !isPriorityLevel(prioritySource.level) ||
     prioritySource.source === "none" ||
-    prioritySource.level !== "priority" ||
+    (prioritySource.level !== "priority" &&
+      !(
+        prioritySource.source === "learning" && prioritySource.level === "normal"
+      )) ||
     !visiblePriorityReasonSources.has(prioritySource.source)
   ) {
     return { ...hiddenPriorityReasonCopy };

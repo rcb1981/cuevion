@@ -95,8 +95,10 @@ export function shouldAllowNormalPriority(input: NormalPriorityGateInput) {
 
   switch (source) {
     case "manual":
-    case "learning":
       return hasPriorityLevel(prioritySource);
+
+    case "learning":
+      return false;
 
     case "waiting_on_other":
       return hasPriorityLevel(prioritySource);

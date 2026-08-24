@@ -238,6 +238,28 @@ assert.doesNotMatch(
 const broadPriorityAssignment = source.indexOf(
   "const broadLivePriorityInboxEntries =",
 );
+const independentAuthorityStart = source.indexOf(
+  "const hasIndependentPriorityAuthority = Boolean(",
+  broadPriorityAssignment,
+);
+const independentAuthorityEnd = source.indexOf(
+  "const isAutomaticOpenLoopSemanticallySuppressed = Boolean(",
+  independentAuthorityStart,
+);
+const independentAuthoritySource = source.slice(
+  independentAuthorityStart,
+  independentAuthorityEnd,
+);
+assert.ok(
+  independentAuthorityStart > broadPriorityAssignment &&
+    independentAuthorityEnd > independentAuthorityStart,
+  "deterministic resolved suppression must retain an explicit-authority boundary",
+);
+assert.doesNotMatch(
+  independentAuthoritySource,
+  /learnedPrioritySelection|normalizedLearnedPrioritySelection|sourcePrioritySelection|\bImportant\b/,
+  "Learning preference metadata must not veto semantic resolved suppression",
+);
 const hydratedProjectionStart = source.indexOf(
   "const prioritySemanticNewInboundHydratedObservations = useMemo",
 );

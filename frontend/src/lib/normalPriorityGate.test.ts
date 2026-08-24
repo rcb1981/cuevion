@@ -133,12 +133,12 @@ test("manual removed does not allow Priority", () => {
   );
 });
 
-test("learning source allows Priority", () => {
+test("learning source alone does not allow canonical Priority", () => {
   assert.equal(
     allows({
       prioritySource: source({ source: "learning" }),
     }),
-    true,
+    false,
   );
 });
 
@@ -391,7 +391,7 @@ test("signal and final_visibility-style generic Priority is blocked without conc
   );
 });
 
-test("signal and final_visibility-style generic Priority is allowed with concrete source", () => {
+test("learning does not compose with legacy Priority state into canonical Priority", () => {
   assert.equal(
     allows({
       prioritySource: source({ source: "learning" }),
@@ -400,7 +400,7 @@ test("signal and final_visibility-style generic Priority is allowed with concret
         signal: "Priority",
       },
     }),
-    true,
+    false,
   );
 });
 

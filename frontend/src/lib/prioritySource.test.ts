@@ -153,7 +153,7 @@ test("manual removed beats waiting_on_other", () => {
   assert.equal(result.source, "manual");
 });
 
-test("learning Important resolves to learning", () => {
+test("learning Important remains preference metadata without promoting NORMAL mail", () => {
   const result = resolvePrioritySource({
     learnedPrioritySelection: "Important",
     message: {
@@ -161,8 +161,21 @@ test("learning Important resolves to learning", () => {
     },
   });
 
-  assert.equal(result.level, "priority");
+  assert.equal(result.level, "normal");
   assert.equal(result.source, "learning");
+});
+
+test("returned reply evidence outranks learning Important", () => {
+  const result = resolvePrioritySource({
+    learnedPrioritySelection: "Important",
+    hasReturnedReplyEvidence: true,
+    message: {
+      priorityScore: "medium",
+    },
+  });
+
+  assert.equal(result.level, "priority");
+  assert.equal(result.source, "returned_reply");
 });
 
 test("no signals resolves to none and normal", () => {
