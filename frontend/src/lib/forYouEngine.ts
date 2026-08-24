@@ -5,6 +5,7 @@ import {
   formatLearningRuleTimestamp,
   inferLearningDecisionPrioritySelection,
   inferLearningDecisionSourceContext,
+  isLearningExclusionEntry,
   normalizeSenderLearningKey,
   type CuevionMessageCategory,
   type CuevionLearningLabel,
@@ -414,6 +415,7 @@ export function buildRecentLearningDecisions(
   senderCategoryLearning: SenderCategoryLearningStore,
 ): ForYouRecentLearningDecision[] {
   return Object.entries(senderCategoryLearning)
+    .filter(([, entry]) => !isLearningExclusionEntry(entry))
     .map(([learningKey, entry]) => {
       const ruleType = learningKey.startsWith("domain:") ? ("domain" as const) : ("sender" as const);
       const sourceContext = inferLearningDecisionSourceContext(

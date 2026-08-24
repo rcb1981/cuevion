@@ -44,6 +44,12 @@ export type SenderCategoryLearningEntry = {
 
 export type SenderCategoryLearningStore = Record<string, SenderCategoryLearningEntry>;
 
+export function isLearningExclusionEntry(
+  entry: SenderCategoryLearningEntry | null | undefined,
+) {
+  return entry?.senderBehavior === "do_not_learn";
+}
+
 export function normalizeSenderLearningKey(value: string) {
   const normalizedValue = value.trim().toLowerCase();
   const emailMatch = normalizedValue.match(
@@ -82,6 +88,12 @@ export function resolveSenderLearningEntry(
   const senderEntry = senderCategoryLearning[senderKey];
 
   if (senderEntry) {
+    // An exact sender exclusion is authoritative as a stop condition: it must
+    // not expose stale positive fields or continue into domain fallback.
+    if (isLearningExclusionEntry(senderEntry)) {
+      return null;
+    }
+
     return {
       entry: senderEntry,
       key: senderKey,
@@ -93,6 +105,10 @@ export function resolveSenderLearningEntry(
   const domainEntry = senderCategoryLearning[domainKey];
 
   if (domainEntry) {
+    if (isLearningExclusionEntry(domainEntry)) {
+      return null;
+    }
+
     return {
       entry: domainEntry,
       key: domainKey,

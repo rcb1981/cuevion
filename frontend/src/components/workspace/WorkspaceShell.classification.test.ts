@@ -509,6 +509,84 @@ assert.deepEqual(
 );
 assert.equal(learnedImportantCollections.Filtered.length, 0);
 
+const domainLearningWithSenderExclusion = {
+  "domain:example.test": {
+    learnedCategory: "Updates" as const,
+    learnedLabel: "Update" as const,
+    learnedFromCount: 4,
+    autoCategoryEnabled: true,
+    mailboxAction: "move" as const,
+    senderBehavior: "show_less" as const,
+    sourcePrioritySelection: "Show Less" as const,
+  },
+  "excluded@example.test": {
+    learnedCategory: "Promo" as const,
+    learnedLabel: "Promo" as const,
+    learnedFromCount: 99,
+    autoCategoryEnabled: true,
+    mailboxAction: "move" as const,
+    senderBehavior: "do_not_learn" as const,
+    sourcePrioritySelection: "Show Less" as const,
+  },
+};
+const exclusionSeed: MessageSeed = {
+  id: "excluded-learning-message",
+  sender: "Excluded Sender",
+  subject: "Project question",
+  snippet: "Can you review the attached project note?",
+  time: "10:00",
+  from: "excluded@example.test",
+  to: "owner@example.test",
+  timestamp: "2026-08-24T08:00:00.000Z",
+  body: ["Can you review the attached project note?"],
+  internalClassification: "unknown",
+  priorityScore: "medium",
+};
+const excludedLearningMessage = normalizeMailMessage(
+  exclusionSeed,
+  "main",
+  domainLearningWithSenderExclusion,
+  {},
+  "user-1",
+);
+assert.equal(
+  excludedLearningMessage.categorySource,
+  "system",
+  "a historical exclusion carrying category fields must have no learned category authority",
+);
+assert.equal(excludedLearningMessage.category, "Primary");
+assert.deepEqual(
+  routeSingleInboxMessage(
+    excludedLearningMessage,
+    domainLearningWithSenderExclusion,
+  ).Inbox.map((message) => message.id),
+  ["excluded-learning-message"],
+  "a sender exclusion must have no routing authority and must block domain fallback",
+);
+
+const otherDomainLearningMessage = normalizeMailMessage(
+  {
+    ...exclusionSeed,
+    id: "other-domain-learning-message",
+    sender: "Other Sender",
+    from: "other@example.test",
+  },
+  "main",
+  domainLearningWithSenderExclusion,
+  {},
+  "user-1",
+);
+assert.equal(otherDomainLearningMessage.categorySource, "learned");
+assert.equal(otherDomainLearningMessage.category, "Updates");
+assert.deepEqual(
+  routeSingleInboxMessage(
+    otherDomainLearningMessage,
+    domainLearningWithSenderExclusion,
+  ).Filtered.map((message) => message.id),
+  ["other-domain-learning-message"],
+  "the positive domain rule must continue to classify and route other senders",
+);
+
 const lowPromoReminderFocusPreferences: Parameters<
   typeof getVisiblePriorityBadgeForWorkspaceMessage
 >[2] = {

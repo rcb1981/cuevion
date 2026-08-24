@@ -374,7 +374,10 @@ import {
   getReturnedReplySenderAddress,
   normalizeReturnedReplyEmailAddress,
 } from "../../lib/returnedReplyEvidence";
-import { applyLearningDecision } from "../../lib/applyLearningDecision";
+import {
+  applyCurrentMessageCategoryDecision,
+  applyLearningDecision,
+} from "../../lib/applyLearningDecision";
 import type {
   MailMessageBehaviorSuggestion as EngineMailMessageBehaviorSuggestion,
   MailMessageSuggestion as EngineMailMessageSuggestion,
@@ -8061,29 +8064,10 @@ function resolveSenderLearningEntry(
   senderAddress: string,
   senderCategoryLearning: SenderCategoryLearningStore,
 ) {
-  const senderKey = buildSenderLearningStoreKey(senderAddress, "sender");
-  const senderEntry = senderCategoryLearning[senderKey];
-
-  if (senderEntry) {
-    return {
-      entry: senderEntry,
-      key: senderKey,
-      matchType: "sender" as const,
-    };
-  }
-
-  const domainKey = buildSenderLearningStoreKey(senderAddress, "domain");
-  const domainEntry = senderCategoryLearning[domainKey];
-
-  if (domainEntry) {
-    return {
-      entry: domainEntry,
-      key: domainKey,
-      matchType: "domain" as const,
-    };
-  }
-
-  return null;
+  return learningEngine.resolveSenderLearningEntry(
+    senderAddress,
+    senderCategoryLearning,
+  );
 }
 
 function formatSharedContextHint(sharedContext?: MailMessageSharedContext) {
@@ -16202,6 +16186,8 @@ function MailboxView({
       sourceMailboxId?: InboxId | null;
       sourceCurrentMailboxId?: InboxId | null;
       autoCategoryEnabled?: boolean;
+      sourceMessageId?: string;
+      sourceMessageMailboxId?: InboxId | null;
     },
   ) => void;
   onLearnCategoryDecision: (senderAddress: string, category: CuevionMessageCategory) => void;
@@ -38912,6 +38898,8 @@ function ForYouView({
       sourceMailboxId?: InboxId | null;
       sourceCurrentMailboxId?: InboxId | null;
       autoCategoryEnabled?: boolean;
+      sourceMessageId?: string;
+      sourceMessageMailboxId?: InboxId | null;
     },
   ) => void;
   senderCategoryLearning: SenderCategoryLearningStore;
@@ -39135,6 +39123,8 @@ function ForYouView({
         sourcePrioritySelection: prioritySelection,
         sourceMailboxId: activeLearningSuggestion.mailboxId ?? null,
         autoCategoryEnabled: senderBehavior !== "do_not_learn",
+        sourceMessageId: activeLearningSuggestion.key,
+        sourceMessageMailboxId: activeLearningSuggestion.mailboxId,
       },
     );
     setReviewedLearningSuggestionKeys((current) =>
@@ -39169,6 +39159,8 @@ function ForYouView({
         sourceMailboxId: null,
         sourceCurrentMailboxId: activeUncertainEmail.mailboxId,
         autoCategoryEnabled: false,
+        sourceMessageId: activeUncertainEmail.key,
+        sourceMessageMailboxId: activeUncertainEmail.mailboxId,
       },
     );
 
@@ -48903,8 +48895,21 @@ export function WorkspaceShell({
       sourceMailboxId?: InboxId | null;
       sourceCurrentMailboxId?: InboxId | null;
       autoCategoryEnabled?: boolean;
+      sourceMessageId?: string;
+      sourceMessageMailboxId?: InboxId | null;
     },
   ) => {
+    if (options?.sourceMessageId && options.sourceMessageMailboxId) {
+      setMailboxStore((current) =>
+        applyCurrentMessageCategoryDecision(
+          current,
+          options.sourceMessageMailboxId,
+          options.sourceMessageId,
+          category,
+        ),
+      );
+    }
+
     setSenderCategoryLearning((current) => {
       const result = applyLearningDecision({
         senderCategoryLearning: current,

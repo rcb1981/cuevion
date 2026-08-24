@@ -10,7 +10,15 @@ import {
   resolveSenderLearningEntry,
   type SenderCategoryLearningStore,
 } from "./learningEngine";
-import { resolveSuggestedMessageAction } from "./suggestionEngine";
+import {
+  applyCurrentMessageCategoryDecision,
+  applyLearningDecision,
+} from "./applyLearningDecision";
+import { buildRecentLearningDecisions } from "./forYouEngine";
+import {
+  resolveMailMessageBehaviorSuggestion,
+  resolveSuggestedMessageAction,
+} from "./suggestionEngine";
 
 const LEGACY_LEARNING_STORAGE_KEY = "cuevion-sender-category-learning";
 
@@ -125,7 +133,7 @@ const userALearning: SenderCategoryLearningStore = {
     learnedFromCount: 4,
     autoCategoryEnabled: false,
     mailboxAction: "keep",
-    senderBehavior: "do_not_learn",
+    senderBehavior: "normal",
     sourceContext: "refine",
     sourcePrioritySelection: "Important",
     sourceMailboxId: "main",
@@ -355,7 +363,7 @@ assert.deepEqual(
 assert.deepEqual(
   crossMailboxState.store,
   userALearning,
-  "persistence must not reinterpret do_not_learn, Important, counts, or metadata",
+  "persistence must preserve positive Important, counts, and metadata",
 );
 const informationalMessage = {
   from: "person@example.com",
@@ -387,6 +395,271 @@ assert.notEqual(
   priorityBehaviorAfterPersistence.type,
   "reply",
   "persisted Learning Important must remain non-canonical Priority authority",
+);
+
+const staleSenderExclusionStore: SenderCategoryLearningStore = {
+  "domain:example.com": {
+    learnedCategory: "Updates",
+    learnedLabel: "Update",
+    learnedFromCount: 4,
+    autoCategoryEnabled: true,
+    mailboxAction: "move",
+    senderBehavior: "show_less",
+    sourcePrioritySelection: "Show Less",
+  },
+  "person@example.com": {
+    learnedCategory: "Primary",
+    learnedLabel: "Business",
+    learnedFromCount: 99,
+    autoCategoryEnabled: true,
+    mailboxAction: "keep",
+    senderBehavior: "do_not_learn",
+    sourcePrioritySelection: "Important",
+    updatedAt: "2026-08-23T14:00:00.000Z",
+  },
+};
+
+assert.equal(
+  resolveSenderLearningEntry("person@example.com", staleSenderExclusionStore),
+  null,
+  "an exact sender exclusion must expose no stale category, routing, Priority, or action authority",
+);
+assert.equal(
+  resolveSenderLearningEntry("Person <person@example.com>", staleSenderExclusionStore),
+  null,
+  "an exact sender exclusion must block positive domain fallback",
+);
+assert.equal(
+  resolveSenderLearningEntry("other@example.com", staleSenderExclusionStore)?.key,
+  "domain:example.com",
+  "a sender exclusion must leave the domain rule active for other senders",
+);
+assert.deepEqual(
+  resolveSuggestedMessageAction(informationalMessage, "Primary", staleSenderExclusionStore),
+  resolveSuggestedMessageAction(informationalMessage, "Primary"),
+  "an exclusion must not create a Learning-derived action suggestion",
+);
+assert.equal(
+  resolveMailMessageBehaviorSuggestion(
+    informationalMessage,
+    {
+      category: "Primary",
+      categorySource: "user",
+      categoryConfidence: "medium",
+    },
+    staleSenderExclusionStore,
+    true,
+  ),
+  undefined,
+  "an exclusion must not create an auto-category suggestion",
+);
+
+const existingSenderRule: SenderCategoryLearningStore = {
+  "person@example.com": {
+    learnedCategory: "Primary",
+    learnedLabel: "Business",
+    learnedFromCount: 5,
+    autoCategoryEnabled: true,
+    mailboxAction: "keep",
+    senderBehavior: "always_prioritize",
+    sourcePrioritySelection: "Important",
+  },
+};
+const excludedSenderResult = applyLearningDecision({
+  senderCategoryLearning: existingSenderRule,
+  ruleValue: "person@example.com",
+  ruleType: "sender",
+  category: "Promo",
+  learnedLabel: "Promo",
+  mailboxAction: "move",
+  senderBehavior: "do_not_learn",
+  sourcePrioritySelection: "Show Less",
+  updatedAt: "2026-08-23T15:00:00.000Z",
+});
+assert.ok(excludedSenderResult);
+assert.deepEqual(
+  excludedSenderResult.nextEntry,
+  {
+    learnedCategory: "Promo",
+    learnedFromCount: 0,
+    senderBehavior: "do_not_learn",
+    sourceContext: undefined,
+    sourceMailboxId: undefined,
+    sourceCurrentMailboxId: undefined,
+    updatedAt: "2026-08-23T15:00:00.000Z",
+  },
+  "Do not learn must replace an existing exact rule with exclusion-only state",
+);
+assert.equal(
+  resolveSenderLearningEntry(
+    "person@example.com",
+    excludedSenderResult.nextSenderCategoryLearning,
+  ),
+  null,
+);
+assert.deepEqual(
+  excludedSenderResult.nextRecentLearningDecisions,
+  [],
+  "exclusions must not appear as active Recent Learning Decisions",
+);
+
+const retrainedSenderResult = applyLearningDecision({
+  senderCategoryLearning: excludedSenderResult.nextSenderCategoryLearning,
+  ruleValue: "person@example.com",
+  ruleType: "sender",
+  category: "Updates",
+  learnedLabel: "Update",
+  mailboxAction: "move",
+  senderBehavior: "normal",
+  sourcePrioritySelection: "Normal",
+  learnedFromCountFloor: 3,
+  updatedAt: "2026-08-24T09:00:00.000Z",
+});
+assert.ok(retrainedSenderResult);
+assert.equal(
+  resolveSenderLearningEntry(
+    "person@example.com",
+    retrainedSenderResult.nextSenderCategoryLearning,
+  )?.entry.learnedCategory,
+  "Updates",
+  "explicit positive sender retraining must replace the exclusion",
+);
+
+const domainExclusionResult = applyLearningDecision({
+  senderCategoryLearning: {
+    "domain:example.net": userALearning["domain:example.net"],
+    "vip@example.net": userALearning["person@example.com"],
+  },
+  ruleValue: "example.net",
+  ruleType: "domain",
+  category: "Updates",
+  senderBehavior: "do_not_learn",
+  updatedAt: "2026-08-23T16:00:00.000Z",
+});
+assert.ok(domainExclusionResult);
+assert.equal(
+  resolveSenderLearningEntry(
+    "other@example.net",
+    domainExclusionResult.nextSenderCategoryLearning,
+  ),
+  null,
+  "a domain exclusion must block domain Learning",
+);
+assert.equal(
+  resolveSenderLearningEntry(
+    "vip@example.net",
+    domainExclusionResult.nextSenderCategoryLearning,
+  )?.matchType,
+  "sender",
+  "an exact positive sender rule must win over a domain exclusion",
+);
+
+const retrainedDomainResult = applyLearningDecision({
+  senderCategoryLearning: domainExclusionResult.nextSenderCategoryLearning,
+  ruleValue: "example.net",
+  ruleType: "domain",
+  category: "Promo",
+  learnedLabel: "Promo",
+  mailboxAction: "move",
+  senderBehavior: "normal",
+  sourcePrioritySelection: "Normal",
+  learnedFromCountFloor: 3,
+  updatedAt: "2026-08-24T10:00:00.000Z",
+});
+assert.ok(retrainedDomainResult);
+assert.equal(
+  resolveSenderLearningEntry(
+    "other@example.net",
+    retrainedDomainResult.nextSenderCategoryLearning,
+  )?.entry.learnedCategory,
+  "Promo",
+  "explicit positive domain retraining must replace the exclusion",
+);
+
+assert.deepEqual(
+  buildRecentLearningDecisions({
+    ...staleSenderExclusionStore,
+    "positive@example.org": userALearning["person@example.com"],
+  }).map(({ key }) => key),
+  ["positive@example.org", "domain:example.com"],
+  "Recent Learning Decisions must hide exclusions and retain positive rules",
+);
+
+const directMessageStore = {
+  main: {
+    Inbox: [
+      {
+        id: "current-message",
+        category: "Primary" as const,
+        categorySource: "system" as const,
+        categoryConfidence: "low" as const,
+        suggestion: { type: "confirm_category" },
+      },
+      {
+        id: "other-message",
+        category: "Primary" as const,
+        categorySource: "system" as const,
+        categoryConfidence: "low" as const,
+      },
+    ],
+  },
+};
+const directMessageDecisionStore = applyCurrentMessageCategoryDecision(
+  directMessageStore,
+  "main",
+  "current-message",
+  "Promo",
+);
+assert.deepEqual(directMessageDecisionStore.main.Inbox[0], {
+  id: "current-message",
+  category: "Promo",
+  categorySource: "user",
+  categoryConfidence: "high",
+  suggestion: undefined,
+});
+assert.strictEqual(
+  directMessageDecisionStore.main.Inbox[1],
+  directMessageStore.main.Inbox[1],
+  "a direct decision must update only the concrete reviewed message",
+);
+
+const exclusionRoundTripStorage = new MemoryStorage();
+let exclusionRoundTripState = hydrateScopedSenderCategoryLearning(
+  exclusionRoundTripStorage,
+  workspaceAUserAKey,
+);
+exclusionRoundTripState = updateScopedSenderCategoryLearning(
+  exclusionRoundTripState,
+  workspaceAUserAKey,
+  {
+    ...staleSenderExclusionStore,
+    "person@example.com": excludedSenderResult.nextEntry,
+  },
+);
+assert.equal(
+  persistScopedSenderCategoryLearning(
+    exclusionRoundTripStorage,
+    exclusionRoundTripState,
+    workspaceAUserAKey,
+  ),
+  true,
+);
+const hydratedExclusionStore = hydrateScopedSenderCategoryLearning(
+  exclusionRoundTripStorage,
+  workspaceAUserAKey,
+).store;
+assert.equal(
+  resolveSenderLearningEntry("person@example.com", hydratedExclusionStore),
+  null,
+  "a sender exclusion must still block domain fallback after scoped v2 hydration",
+);
+assert.equal(
+  hydrateScopedSenderCategoryLearning(
+    exclusionRoundTripStorage,
+    workspaceAUserBKey,
+  ).store["person@example.com"],
+  undefined,
+  "an exclusion must remain isolated by workspace and user",
 );
 
 for (const invalidRawValue of [

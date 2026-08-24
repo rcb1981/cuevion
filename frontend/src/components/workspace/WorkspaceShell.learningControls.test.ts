@@ -100,6 +100,32 @@ for (const handler of [
   assert.match(forYouViewSource, new RegExp(`\\b${handler}\\b`));
 }
 
+assert.match(
+  forYouViewSource,
+  /sourceMessageId: activeLearningSuggestion\.key,[\s\S]*?sourceMessageMailboxId: activeLearningSuggestion\.mailboxId/,
+  "Refine must identify the concrete message for a direct category decision",
+);
+assert.match(
+  forYouViewSource,
+  /sourceMessageId: activeUncertainEmail\.key,[\s\S]*?sourceMessageMailboxId: activeUncertainEmail\.mailboxId/,
+  "Review Uncertain must identify the concrete message for a direct category decision",
+);
+
+const saveLearningRuleSource = sourceBetween(
+  "const handleSaveLearningRule",
+  "const handleApplyFocusPreferences",
+);
+assert.match(
+  saveLearningRuleSource,
+  /applyCurrentMessageCategoryDecision\(\s*current,\s*options\.sourceMessageMailboxId,\s*options\.sourceMessageId,\s*category/,
+  "a concrete reviewed message must receive the direct user category before generalized Learning is stored",
+);
+assert.match(
+  workspaceShellSource,
+  /function resolveSenderLearningEntry\([\s\S]*?return learningEngine\.resolveSenderLearningEntry\(/,
+  "all Workspace categorization and routing must use the central exclusion-aware resolver",
+);
+
 const scopedLearningSource = sourceBetween(
   "const [scopedSenderCategoryLearningState",
   "const mailboxStoreRef",

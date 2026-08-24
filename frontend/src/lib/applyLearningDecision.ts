@@ -1,5 +1,6 @@
 import {
   buildSenderLearningStoreKey,
+  isLearningExclusionEntry,
   normalizeSenderLearningDomain,
   normalizeSenderLearningKey,
   type CuevionMessageCategory,
@@ -53,6 +54,56 @@ export type ApplyLearningDecisionResult = {
   affectedMessageIds: string[];
 };
 
+type CurrentMessageCategoryDecision = {
+  id: string;
+  category?: CuevionMessageCategory;
+  categorySource?: "system" | "user" | "learned";
+  categoryConfidence?: "low" | "medium" | "high";
+  suggestion?: unknown;
+};
+
+export function applyCurrentMessageCategoryDecision<
+  TMessage extends CurrentMessageCategoryDecision,
+  TStore extends Record<string, Record<string, TMessage[]>>,
+>(
+  mailboxStore: TStore,
+  mailboxId: string | null | undefined,
+  messageId: string | null | undefined,
+  category: CuevionMessageCategory,
+): TStore {
+  if (!mailboxId || !messageId || !mailboxStore[mailboxId]) {
+    return mailboxStore;
+  }
+
+  let didUpdate = false;
+  const nextCollections = Object.fromEntries(
+    Object.entries(mailboxStore[mailboxId]).map(([folder, messages]) => [
+      folder,
+      messages.map((message) => {
+        if (message.id !== messageId) {
+          return message;
+        }
+
+        didUpdate = true;
+        return {
+          ...message,
+          category,
+          categorySource: "user" as const,
+          categoryConfidence: "high" as const,
+          suggestion: undefined,
+        };
+      }),
+    ]),
+  ) as Record<string, TMessage[]>;
+
+  return didUpdate
+    ? ({
+        ...mailboxStore,
+        [mailboxId]: nextCollections,
+      } as TStore)
+    : mailboxStore;
+}
+
 function resolveAffectedMessageIds(
   mailboxStore: LearningDecisionMailboxStore | undefined,
   ruleType: "sender" | "domain",
@@ -97,29 +148,56 @@ export function applyLearningDecision(
   }
 
   const existingEntry = input.senderCategoryLearning[learningKey];
-  const nextEntry: SenderCategoryLearningEntry = {
-    learnedCategory: input.category,
-    learnedLabel: input.learnedLabel ?? existingEntry?.learnedLabel,
-    learnedFromCount:
-      input.learnedFromCount ??
-      Math.max(existingEntry?.learnedFromCount ?? 0, input.learnedFromCountFloor ?? 3),
-    autoCategoryEnabled: input.autoCategoryEnabled ?? existingEntry?.autoCategoryEnabled ?? true,
-    mailboxAction:
-      input.mailboxAction ?? existingEntry?.mailboxAction ?? (input.category === "Primary" ? "keep" : "move"),
-    senderBehavior: input.senderBehavior ?? existingEntry?.senderBehavior,
-    sourceContext: input.sourceContext ?? existingEntry?.sourceContext,
-    sourcePrioritySelection:
-      input.sourcePrioritySelection ?? existingEntry?.sourcePrioritySelection,
-    sourceMailboxId:
-      input.sourceMailboxId !== undefined
-        ? input.sourceMailboxId
-        : existingEntry?.sourceMailboxId,
-    sourceCurrentMailboxId:
-      input.sourceCurrentMailboxId !== undefined
-        ? input.sourceCurrentMailboxId
-        : existingEntry?.sourceCurrentMailboxId,
-    updatedAt: input.updatedAt ?? new Date().toISOString(),
-  };
+  const existingPositiveEntry = isLearningExclusionEntry(existingEntry)
+    ? undefined
+    : existingEntry;
+  const nextEntry: SenderCategoryLearningEntry =
+    input.senderBehavior === "do_not_learn"
+      ? {
+          // learnedCategory/learnedFromCount remain compatibility fields for
+          // the existing flat v2 payload. Central resolution treats this
+          // record only as an exclusion and never exposes them as authority.
+          learnedCategory: input.category,
+          learnedFromCount: 0,
+          senderBehavior: "do_not_learn",
+          sourceContext: input.sourceContext,
+          sourceMailboxId: input.sourceMailboxId,
+          sourceCurrentMailboxId: input.sourceCurrentMailboxId,
+          updatedAt: input.updatedAt ?? new Date().toISOString(),
+        }
+      : {
+          learnedCategory: input.category,
+          learnedLabel: input.learnedLabel ?? existingPositiveEntry?.learnedLabel,
+          learnedFromCount:
+            input.learnedFromCount ??
+            Math.max(
+              existingPositiveEntry?.learnedFromCount ?? 0,
+              input.learnedFromCountFloor ?? 3,
+            ),
+          autoCategoryEnabled:
+            input.autoCategoryEnabled ??
+            existingPositiveEntry?.autoCategoryEnabled ??
+            true,
+          mailboxAction:
+            input.mailboxAction ??
+            existingPositiveEntry?.mailboxAction ??
+            (input.category === "Primary" ? "keep" : "move"),
+          senderBehavior:
+            input.senderBehavior ?? existingPositiveEntry?.senderBehavior,
+          sourceContext: input.sourceContext ?? existingPositiveEntry?.sourceContext,
+          sourcePrioritySelection:
+            input.sourcePrioritySelection ??
+            existingPositiveEntry?.sourcePrioritySelection,
+          sourceMailboxId:
+            input.sourceMailboxId !== undefined
+              ? input.sourceMailboxId
+              : existingPositiveEntry?.sourceMailboxId,
+          sourceCurrentMailboxId:
+            input.sourceCurrentMailboxId !== undefined
+              ? input.sourceCurrentMailboxId
+              : existingPositiveEntry?.sourceCurrentMailboxId,
+          updatedAt: input.updatedAt ?? new Date().toISOString(),
+        };
   const nextSenderCategoryLearning: SenderCategoryLearningStore = {
     ...input.senderCategoryLearning,
     [learningKey]: nextEntry,
