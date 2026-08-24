@@ -31910,13 +31910,20 @@ function settingsTabButtonClass(selected: boolean) {
   }`;
 }
 
-function settingsToggleButtonClass(enabled: boolean) {
-  return `relative inline-flex h-7 w-[3rem] items-center rounded-full border transition-[background-color,border-color,box-shadow,transform] duration-150 active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-text-soft)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--workspace-card)] ${
+function settingsToggleButtonClass() {
+  return "relative inline-flex h-7 w-[3rem] items-center justify-center rounded-full transition-transform duration-150 active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-text-soft)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--workspace-card)]";
+}
+
+function settingsToggleTrackClass(enabled: boolean) {
+  return `inline-flex h-5 w-9 items-center rounded-full border px-[0.15rem] transition-[background-color,border-color,box-shadow] duration-150 ${
     enabled
-      ? "justify-end border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-toggle-on-start),var(--workspace-toggle-on-end))] px-[0.2rem] shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_4px_10px_rgba(66,99,69,0.1)]"
-      : "justify-start border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-[0.2rem]"
+      ? "justify-end border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-toggle-on-start),var(--workspace-toggle-on-end))] shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_3px_8px_rgba(66,99,69,0.1)]"
+      : "justify-start border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)]"
   }`;
 }
+
+const settingsToggleThumbClass =
+  "h-3.5 w-3.5 rounded-full bg-[rgba(255,252,247,0.98)] shadow-[0_2px_5px_rgba(31,42,36,0.12)] transition-[transform,box-shadow,background-color] duration-150";
 
 const SettingsInfoRow = memo(function SettingsInfoRow({
   label,
@@ -32002,13 +32009,15 @@ const SettingsToggleRow = memo(function SettingsToggleRow({
         aria-checked={enabled}
         aria-label={label}
         onClick={onToggle}
-        className={settingsToggleButtonClass(enabled)}
+        className={settingsToggleButtonClass()}
       >
-        <span
-          className={`h-[1.15rem] w-[1.15rem] rounded-full bg-[rgba(255,252,247,0.98)] shadow-[0_3px_8px_rgba(31,42,36,0.12)] transition-[transform,box-shadow,background-color] duration-150 ${
-            enabled ? "ring-1 ring-white/40" : ""
-          }`}
-        />
+        <span className={settingsToggleTrackClass(enabled)}>
+          <span
+            className={`${settingsToggleThumbClass} ${
+              enabled ? "ring-1 ring-white/40" : ""
+            }`}
+          />
+        </span>
       </button>
     </div>
   );
@@ -36455,13 +36464,15 @@ const OutOfOfficeSettingsModal = memo(function OutOfOfficeSettingsModal({
               aria-checked={outOfOffice.enabled}
               aria-label="Out of office enabled"
               onClick={() => onChangeEnabled(!outOfOffice.enabled)}
-              className={settingsToggleButtonClass(outOfOffice.enabled)}
+              className={settingsToggleButtonClass()}
             >
-              <span
-                className={`h-[1.15rem] w-[1.15rem] rounded-full bg-[rgba(255,252,247,0.98)] shadow-[0_3px_8px_rgba(31,42,36,0.12)] transition-[transform,box-shadow,background-color] duration-150 ${
-                  outOfOffice.enabled ? "ring-1 ring-white/40" : ""
-                }`}
-              />
+              <span className={settingsToggleTrackClass(outOfOffice.enabled)}>
+                <span
+                  className={`${settingsToggleThumbClass} ${
+                    outOfOffice.enabled ? "ring-1 ring-white/40" : ""
+                  }`}
+                />
+              </span>
             </button>
           </div>
         </div>
