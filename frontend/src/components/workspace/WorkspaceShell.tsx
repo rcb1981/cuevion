@@ -12283,14 +12283,14 @@ function ReadingLearningButton({
       type="button"
       onClick={onClick}
       data-reading-learning-trigger={triggerId}
-      className={`inline-flex flex-none items-center justify-center rounded-full border text-[0.68rem] font-medium uppercase transition-[background-color,border-color,color,transform,box-shadow] duration-150 focus-visible:outline-none ${
+      className={`inline-flex flex-none items-center justify-center rounded-full border font-medium uppercase transition-[background-color,border-color,color,transform,box-shadow] duration-150 focus-visible:outline-none ${
         compact
-          ? `h-8 gap-1.5 px-3 tracking-[0.12em] ${
+          ? `h-8 gap-1.5 px-3 text-[0.68rem] tracking-[0.12em] ${
               open
                 ? "border-[var(--workspace-border-hover)] bg-[var(--workspace-hover-surface)] text-[var(--workspace-text)]"
                 : "border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] text-[var(--workspace-text-soft)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text)]"
             }`
-          : `h-9 px-4 tracking-[0.14em] ${
+          : `h-8 px-3.5 text-[0.66rem] tracking-[0.12em] ${
               open
                 ? "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-panel"
                 : "border-[var(--workspace-accent-border)] bg-[linear-gradient(180deg,var(--workspace-accent-surface-start),var(--workspace-accent-surface-end))] text-[var(--workspace-accent-text)] shadow-[inset_0_1px_0_rgba(255,255,255,0.16),0_8px_24px_rgba(118,170,112,0.08)] hover:bg-[linear-gradient(180deg,var(--workspace-accent-surface-hover-start),var(--workspace-accent-surface-hover-end))]"
@@ -27281,7 +27281,7 @@ function MailboxView({
                             key={filter}
                             type="button"
                             onClick={() => setActiveFilter(filter)}
-                            className={`inline-flex h-9 items-center justify-center rounded-full px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] transition-[background-color,border-color,color,box-shadow,transform] duration-150 focus-visible:outline-none ${
+                            className={`inline-flex h-8 items-center justify-center rounded-full px-3.5 text-[0.66rem] font-medium uppercase tracking-[0.14em] transition-[background-color,border-color,color,box-shadow,transform] duration-150 focus-visible:outline-none ${
                               active
                                 ? "bg-[linear-gradient(180deg,var(--workspace-card-featured-start),var(--workspace-card-featured-end))] text-[var(--workspace-text)]"
                                 : "border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] text-[var(--workspace-text-soft)] hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)]"
@@ -27303,7 +27303,7 @@ function MailboxView({
                         setContextMenuState(null);
                         setIsSortMenuOpen((open) => !open);
                       }}
-                      className="inline-flex h-9 w-10 items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] text-[var(--workspace-text-faint)] transition-[background-color,border-color,color,transform] duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text-soft)] active:scale-[0.98] focus-visible:outline-none"
+                      className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] text-[var(--workspace-text-faint)] transition-[background-color,border-color,color,transform] duration-150 hover:border-[var(--workspace-border)] hover:bg-[var(--workspace-hover-surface)] hover:text-[var(--workspace-text-soft)] active:scale-[0.98] focus-visible:outline-none"
                     >
                       <svg
                         aria-hidden="true"
