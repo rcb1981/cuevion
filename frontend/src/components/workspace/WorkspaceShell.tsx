@@ -152,6 +152,20 @@ import {
   type LiveInboxMessageSnapshot,
 } from "../../lib/inboxConnectionApi";
 import {
+  beginMailboxHealthOperation,
+  cancelMailboxHealthOperation,
+  completeMailboxHealthOperation,
+  createInitialMailboxHealthStore,
+  createMailboxHealthOperationClock,
+  getMailboxHealthPresentation,
+  reconcileMailboxHealthStore,
+  type MailboxHealthBeginOptions,
+  type MailboxHealthOperation,
+  type MailboxHealthProvider,
+  type MailboxHealthRecord,
+  type MailboxHealthStore,
+} from "../../lib/mailboxProviderHealth";
+import {
   applyGmailProviderArchiveDelta,
   buildProviderArchiveStateIdentity,
   buildProviderArchiveMutationTarget,
@@ -443,6 +457,10 @@ type WorkspaceSection =
   | "Contact";
 type PendingManagedInboxNavigation = {
   action: () => void;
+};
+type MailboxConnectionSettingsNavigationRequest = {
+  mailboxId: string;
+  requestKey: number;
 };
 type WorkspaceDataMode = "demo" | "live";
 type ProductAccess = "bundle" | null;
@@ -12624,11 +12642,76 @@ function ContextSubmenuTriggerRow({
   );
 }
 
-function MailboxConnectionState() {
+const mailboxCheckingDotClass =
+  "h-2.5 w-2.5 rounded-full bg-[radial-gradient(circle_at_30%_30%,rgba(228,214,178,0.98),rgba(184,163,120,0.96)_58%,rgba(132,111,72,0.96)_100%)] shadow-[0_0_0_3px_rgba(184,163,120,0.12),0_0_12px_rgba(184,163,120,0.18)]";
+const mailboxTemporaryIssueDotClass =
+  "h-2.5 w-2.5 rounded-full bg-[radial-gradient(circle_at_30%_30%,rgba(244,213,146,0.98),rgba(205,159,76,0.96)_58%,rgba(154,108,42,0.98)_100%)] shadow-[0_0_0_3px_rgba(205,159,76,0.14),0_0_12px_rgba(205,159,76,0.22)]";
+const mailboxActionRequiredDotClass =
+  "h-2.5 w-2.5 rounded-full bg-[radial-gradient(circle_at_30%_30%,rgba(236,177,165,0.98),rgba(170,103,93,0.98)_58%,rgba(126,67,60,0.98)_100%)] shadow-[0_0_0_3px_rgba(170,103,93,0.14),0_0_12px_rgba(170,103,93,0.22)]";
+
+function mailboxHealthDotClass(status: MailboxHealthRecord["status"]) {
+  switch (status) {
+    case "connected":
+      return premiumGreenDotClass;
+    case "temporary_issue":
+      return mailboxTemporaryIssueDotClass;
+    case "action_required":
+      return mailboxActionRequiredDotClass;
+    default:
+      return mailboxCheckingDotClass;
+  }
+}
+
+function mailboxHealthTextClass(status: MailboxHealthRecord["status"]) {
+  if (status === "action_required") {
+    return "text-[color:rgba(146,82,73,0.96)] dark:text-[color:rgba(244,186,168,0.9)]";
+  }
+
+  if (status === "temporary_issue") {
+    return "text-[color:rgba(148,107,42,0.94)] dark:text-[color:rgba(230,198,132,0.9)]";
+  }
+
+  return "text-[color:rgba(98,92,84,0.78)]";
+}
+
+function MailboxConnectionState({
+  health,
+  onActionRequired,
+}: {
+  health?: MailboxHealthRecord | null;
+  onActionRequired?: () => void;
+}) {
+  if (!health) {
+    return null;
+  }
+
+  const status = health.status;
+  const presentation = getMailboxHealthPresentation(status);
+  const className = `inline-flex items-center gap-2 text-[0.72rem] font-medium uppercase tracking-[0.16em] ${mailboxHealthTextClass(status)}`;
+  const content = (
+    <>
+      <span className={mailboxHealthDotClass(status)} />
+      {presentation.label}
+    </>
+  );
+
+  if (status === "action_required" && onActionRequired) {
+    return (
+      <button
+        type="button"
+        onClick={onActionRequired}
+        title={presentation.description}
+        aria-label={`${presentation.label}: open connection settings`}
+        className={`${className} rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[color:rgba(146,82,73,0.42)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--workspace-bg)]`}
+      >
+        {content}
+      </button>
+    );
+  }
+
   return (
-    <span className="inline-flex items-center gap-2 text-[0.72rem] font-medium uppercase tracking-[0.16em] text-[color:rgba(98,92,84,0.78)]">
-      <span className={premiumGreenDotClass} />
-      Connected
+    <span className={className} title={presentation.description}>
+      {content}
     </span>
   );
 }
@@ -16022,10 +16105,12 @@ function ReviewView({
 function InboxesView({
   filter,
   orderedMailboxes,
+  mailboxHealthById,
   onOpenMailbox,
 }: {
   filter: InboxFilter;
   orderedMailboxes: OrderedMailbox[];
+  mailboxHealthById: MailboxHealthStore;
   onOpenMailbox: (mailbox: OrderedMailbox) => void;
 }) {
   return (
@@ -16067,10 +16152,14 @@ function InboxesView({
                 </div>
               </div>
               <div className="text-[0.88rem] leading-6 text-[var(--workspace-text-soft)]">
-                {inbox.detail}
+                {mailboxHealthById[inbox.id]
+                  ? getMailboxHealthPresentation(
+                      mailboxHealthById[inbox.id].status,
+                    ).description
+                  : "Provider connection is not configured."}
               </div>
               <div className="justify-self-end">
-                <MailboxConnectionState />
+                <MailboxConnectionState health={mailboxHealthById[inbox.id]} />
               </div>
             </button>
           ))}
@@ -16112,6 +16201,8 @@ function MailboxView({
   orderedMailboxes,
   managedInboxes,
   credentialStatuses,
+  mailboxHealth,
+  onOpenConnectionSettings,
   smartFolders,
   activeSmartFolderId,
   onActiveSmartFolderChange,
@@ -16200,6 +16291,8 @@ function MailboxView({
   orderedMailboxes: OrderedMailbox[];
   managedInboxes: ManagedWorkspaceInbox[];
   credentialStatuses: MailboxCredentialStatusStore;
+  mailboxHealth?: MailboxHealthRecord | null;
+  onOpenConnectionSettings: () => void;
   smartFolders: SmartFolderDefinition[];
   activeSmartFolderId: string | null;
   onActiveSmartFolderChange: (folderId: string | null) => void;
@@ -26328,7 +26421,10 @@ function MailboxView({
                 </div>
               )}
               <div className="text-[var(--workspace-text-faint)]">{mailbox.email}</div>
-              <MailboxConnectionState />
+              <MailboxConnectionState
+                health={mailboxHealth}
+                onActionRequired={onOpenConnectionSettings}
+              />
             </div>
           </div>
         </div>
@@ -31942,6 +32038,69 @@ function resolveLiveInboxProvider(provider: ProviderId | null): LiveInboxProvide
   return null;
 }
 
+function buildInitialMailboxHealthSeeds(
+  mailboxes: ManagedWorkspaceInbox[],
+  credentialStatuses: MailboxCredentialStatusStore = {},
+): Array<{
+  mailboxId: string;
+  provider: MailboxHealthProvider;
+  status: MailboxHealthRecord["status"];
+  authorityKey: string;
+}> {
+  return mailboxes.flatMap((mailbox) => {
+    const provider = resolveLiveInboxProvider(mailbox.provider);
+    if (!provider) {
+      return [];
+    }
+
+    const credentialStatus = credentialStatuses[mailbox.id];
+    const customImapCredentialMissing =
+      provider === "custom_imap" &&
+      credentialStatus !== undefined &&
+      credentialStatus.imapPasswordSet !== true;
+    const customImapCredentialAuthority =
+      credentialStatus?.imapPasswordSet === false
+        ? "missing"
+        : "not_missing";
+    const actionRequired =
+      isGmailOAuthReconnectRequired(mailbox) ||
+      isCustomImapReconnectRequired(mailbox) ||
+      customImapCredentialMissing;
+    const configured =
+      mailbox.connected === true &&
+      mailbox.connectionStatus === "connected";
+
+    if (!configured && !actionRequired) {
+      return [];
+    }
+
+    return [
+      {
+        mailboxId: mailbox.id,
+        provider,
+        status: actionRequired ? "action_required" : "checking",
+        authorityKey: JSON.stringify([
+          provider,
+          mailbox.email.trim().toLowerCase(),
+          mailbox.connected,
+          mailbox.connectionStatus,
+          isGmailOAuthReconnectRequired(mailbox) ||
+            isCustomImapReconnectRequired(mailbox),
+          ...(provider === "custom_imap"
+            ? [
+                customImapCredentialAuthority,
+                mailbox.customImap.host.trim().toLowerCase(),
+                mailbox.customImap.port.trim(),
+                mailbox.customImap.ssl,
+                mailbox.customImap.username.trim(),
+              ]
+            : []),
+        ]),
+      },
+    ];
+  });
+}
+
 function buildTrustedLiveInboxSnapshotContexts(
   managedInboxes: ManagedWorkspaceInbox[],
 ): TrustedLiveInboxSnapshotContexts {
@@ -32214,16 +32373,26 @@ function sanitizeManagedMailboxCredentialStatuses(
   return Object.fromEntries(
     mailboxes
       .filter((mailbox) => mailbox.provider === "custom_imap")
-      .map((mailbox) => {
+      .flatMap((mailbox) => {
         const status = credentialStatuses[mailbox.id];
+        if (
+          !status ||
+          typeof status.imapPasswordSet !== "boolean" ||
+          typeof status.smtpPasswordSet !== "boolean"
+        ) {
+          return [];
+        }
+
         return [
-          mailbox.id,
-          {
-            imapPasswordSet: status?.imapPasswordSet === true,
-            smtpPasswordSet:
-              status?.smtpPasswordSet === true &&
-              isCompleteManagedCustomSmtpSettings(mailbox.customSmtp),
-          },
+          [
+            mailbox.id,
+            {
+              imapPasswordSet: status.imapPasswordSet,
+              smtpPasswordSet:
+                status.smtpPasswordSet &&
+                isCompleteManagedCustomSmtpSettings(mailbox.customSmtp),
+            },
+          ] as const,
         ];
       }),
   );
@@ -33408,6 +33577,20 @@ function getManagedInboxStatusClassName(mailbox: ManagedWorkspaceInbox) {
   return "border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] text-[var(--workspace-text-faint)]";
 }
 
+function getMailboxHealthSettingsClassName(
+  status: MailboxHealthRecord["status"],
+) {
+  if (status === "connected") {
+    return "border-[var(--workspace-status-success-border)] bg-[var(--workspace-status-success-bg)] text-[var(--workspace-status-success-text)]";
+  }
+
+  if (status === "action_required") {
+    return "border-[color:rgba(146,82,73,0.22)] bg-[color:rgba(82,49,44,0.18)] text-[color:rgba(225,196,188,0.9)]";
+  }
+
+  return "border-[color:rgba(184,163,120,0.28)] bg-[color:rgba(184,163,120,0.12)] text-[var(--workspace-text-muted)]";
+}
+
 function isGmailOAuthReconnectRequired(mailbox: ManagedWorkspaceInbox) {
   return (
     mailbox.provider === "google" &&
@@ -33418,17 +33601,35 @@ function isGmailOAuthReconnectRequired(mailbox: ManagedWorkspaceInbox) {
   );
 }
 
+const CUSTOM_IMAP_RECONNECT_REQUIRED_CONNECTION_MESSAGE =
+  "Reconnect this mailbox to continue syncing.";
+
+function isCustomImapReconnectRequired(mailbox: ManagedWorkspaceInbox) {
+  return (
+    mailbox.provider === "custom_imap" &&
+    mailbox.connected === false &&
+    mailbox.connectionStatus === "connection_failed" &&
+    (mailbox.connectionMessage ===
+      CUSTOM_IMAP_RECONNECT_REQUIRED_CONNECTION_MESSAGE ||
+      mailbox.connectionMessage ===
+        GMAIL_OAUTH_RECONNECT_REQUIRED_CONNECTION_MESSAGE)
+  );
+}
+
 function getCredentialAwareManagedInboxStatus(
   mailbox: ManagedWorkspaceInbox,
   credentialStatuses: MailboxCredentialStatusStore = {},
+  mailboxHealth?: MailboxHealthRecord | null,
 ) {
+  const credentialStatus = credentialStatuses[mailbox.id];
   const credentialUnavailable =
     mailbox.provider === "custom_imap" &&
     mailbox.connected === true &&
     mailbox.connectionStatus === "connected" &&
+    credentialStatus !== undefined &&
     !isAuthoritativeCustomImapIncomingConnected(
       mailbox,
-      credentialStatuses[mailbox.id],
+      credentialStatus,
     );
   const displayMailbox = credentialUnavailable
     ? {
@@ -33438,8 +33639,31 @@ function getCredentialAwareManagedInboxStatus(
       }
     : mailbox;
 
+  const fallbackHealthStatus =
+    credentialUnavailable ||
+    isGmailOAuthReconnectRequired(mailbox) ||
+    isCustomImapReconnectRequired(mailbox)
+      ? "action_required"
+      : isPrivateBetaSupportedProvider(mailbox.provider) &&
+          mailbox.connected === true &&
+          mailbox.connectionStatus === "connected"
+        ? "checking"
+        : null;
+  const healthStatus = mailboxHealth?.status ?? fallbackHealthStatus;
+
+  if (healthStatus) {
+    const presentation = getMailboxHealthPresentation(healthStatus);
+    return {
+      credentialUnavailable,
+      healthStatus,
+      className: getMailboxHealthSettingsClassName(healthStatus),
+      label: presentation.label,
+    };
+  }
+
   return {
     credentialUnavailable,
+    healthStatus: null,
     className: getManagedInboxStatusClassName(displayMailbox),
     label: credentialUnavailable
       ? "Reconnect required"
@@ -33719,6 +33943,7 @@ function ManagedInboxEditor({
   connectionError = null,
   isApplying = false,
   credentialStatuses = {},
+  mailboxHealth = null,
   onEditAction,
   onRemoveAction,
   onSetPrimaryAction,
@@ -33745,6 +33970,7 @@ function ManagedInboxEditor({
   connectionError?: string | null;
   isApplying?: boolean;
   credentialStatuses?: MailboxCredentialStatusStore;
+  mailboxHealth?: MailboxHealthRecord | null;
   onEditAction?: () => void;
   onRemoveAction?: () => void;
   onSetPrimaryAction?: () => void;
@@ -33796,6 +34022,7 @@ function ManagedInboxEditor({
   const managedInboxStatus = getCredentialAwareManagedInboxStatus(
     mailbox,
     credentialStatuses,
+    mailboxHealth,
   );
   const customImapCredentialUnavailable =
     managedInboxStatus.credentialUnavailable;
@@ -33812,7 +34039,11 @@ function ManagedInboxEditor({
   const isUnsupportedProvider =
     Boolean(mailbox.provider) && !isPrivateBetaSupportedProvider(mailbox.provider);
   const gmailOAuthReconnectRequired =
-    isGmailOAuthReconnectRequired(mailbox);
+    mailbox.provider === "google" &&
+    managedInboxStatus.healthStatus === "action_required";
+  const customImapActionRequired =
+    mailbox.provider === "custom_imap" &&
+    managedInboxStatus.healthStatus === "action_required";
   const canReconnectGmail =
     isExisting &&
     mailbox.provider === "google" &&
@@ -34202,15 +34433,15 @@ function ManagedInboxEditor({
               </label>
               {isExisting &&
               mailbox.provider === "custom_imap" &&
-              (mailbox.connectionStatus === "connection_failed" ||
-                customImapCredentialUnavailable) &&
+              customImapActionRequired &&
               !editable &&
               onReconnectAction ? (
                 <DesktopActionButton
                   onClick={onReconnectAction}
-                  variant="tertiary"
+                  variant="secondary"
+                  size="compact"
                 >
-                  Reconnect mailbox
+                  Check connection settings
                 </DesktopActionButton>
               ) : null}
             </div>
@@ -34234,7 +34465,8 @@ function ManagedInboxEditor({
                   <DesktopActionButton
                     onClick={onReconnectAction}
                     disabled={isApplying}
-                    variant="tertiary"
+                    variant="secondary"
+                    size="compact"
                   >
                     {isApplying ? "Opening..." : "Reconnect Gmail"}
                   </DesktopActionButton>
@@ -34490,7 +34722,9 @@ function ManagedInboxEditor({
 const ManageInboxesView = memo(function ManageInboxesView({
   savedManagedInboxes,
   mailboxDisplayTitles,
+  mailboxHealthById,
   primaryManagedInboxId,
+  navigationRequest,
   onBack,
   onApply,
   onSetPrimaryInbox,
@@ -34499,10 +34733,15 @@ const ManageInboxesView = memo(function ManageInboxesView({
   credentialStatuses,
   onReloadAuthoritativeMailbox,
   onRenameMailbox,
+  onBeginMailboxHealthCheck,
+  onCompleteMailboxHealthCheck,
+  onConsumeNavigationRequest,
 }: {
   savedManagedInboxes: ManagedWorkspaceInbox[];
   mailboxDisplayTitles: Readonly<Record<string, string | undefined>>;
+  mailboxHealthById: MailboxHealthStore;
   primaryManagedInboxId: string | null;
+  navigationRequest?: MailboxConnectionSettingsNavigationRequest | null;
   onBack?: () => void;
   onApply: (nextMailboxes: ManagedWorkspaceInbox[]) => boolean;
   onSetPrimaryInbox: (inboxId: string) => void;
@@ -34511,6 +34750,20 @@ const ManageInboxesView = memo(function ManageInboxesView({
   credentialStatuses: MailboxCredentialStatusStore;
   onReloadAuthoritativeMailbox: (mailboxId: string) => Promise<boolean>;
   onRenameMailbox: (mailboxId: InboxId, nextTitle: string) => void;
+  onBeginMailboxHealthCheck: (
+    mailboxId: string,
+    provider: MailboxHealthProvider,
+    options?: MailboxHealthBeginOptions,
+  ) => MailboxHealthOperation;
+  onCompleteMailboxHealthCheck: (
+    operation: MailboxHealthOperation,
+    result: {
+      ok: boolean;
+      errorCode?: string | null;
+      provesProviderUsable?: boolean;
+    },
+  ) => void;
+  onConsumeNavigationRequest?: (requestKey: number) => void;
 }) {
   const [draftManagedInboxes, setDraftManagedInboxes] = useState<ManagedWorkspaceInbox[]>(
     savedManagedInboxes.map(cloneManagedWorkspaceInbox),
@@ -34553,6 +34806,26 @@ const ManageInboxesView = memo(function ManageInboxesView({
     );
     setActiveInboxEditorTab("Details");
   }, [savedManagedInboxes]);
+
+  useEffect(() => {
+    if (!navigationRequest) {
+      return;
+    }
+
+    if (
+      savedManagedInboxes.some(
+        (mailbox) => mailbox.id === navigationRequest.mailboxId,
+      )
+    ) {
+      setSelectedInboxId(navigationRequest.mailboxId);
+      setActiveInboxEditorTab("Receiving");
+    }
+    onConsumeNavigationRequest?.(navigationRequest.requestKey);
+  }, [
+    navigationRequest,
+    onConsumeNavigationRequest,
+    savedManagedInboxes,
+  ]);
 
   useEffect(() => {
     if (draftManagedInboxes.length === 0) {
@@ -34710,6 +34983,7 @@ const ManageInboxesView = memo(function ManageInboxesView({
           message: "Select an inbox provider.",
         },
         messages: [],
+        mailboxHealthOperation: null,
       };
     }
 
@@ -34717,6 +34991,10 @@ const ManageInboxesView = memo(function ManageInboxesView({
       mailbox.provider !== "custom_imap" ||
       (hasExplicitManagedCustomSmtpChange(mailbox, previous) &&
         isCompleteManagedCustomSmtpSettings(mailbox.customSmtp));
+    const mailboxHealthOperation =
+      mailbox.provider === "custom_imap"
+        ? onBeginMailboxHealthCheck(mailbox.id, "custom_imap")
+        : null;
     const response = await beginInboxConnection({
       imapMode,
       mailboxId: mailbox.id,
@@ -34728,11 +35006,21 @@ const ManageInboxesView = memo(function ManageInboxesView({
         : {}),
     });
 
+    if (mailboxHealthOperation && !response.ok) {
+      onCompleteMailboxHealthCheck(mailboxHealthOperation, {
+        ok: false,
+        errorCode: response.error?.code,
+      });
+    }
+
     if (response.connected && mailbox.provider !== "custom_imap") {
       const provider = resolveLiveInboxProvider(mailbox.provider);
 
       if (!provider) {
-        return response;
+        return {
+          ...response,
+          mailboxHealthOperation,
+        };
       }
 
       saveLiveInboxSnapshot({
@@ -34746,7 +35034,10 @@ const ManageInboxesView = memo(function ManageInboxesView({
       });
     }
 
-    return response;
+    return {
+      ...response,
+      mailboxHealthOperation,
+    };
   };
 
   const isMailboxPersistedWithoutChanges = (mailbox: ManagedWorkspaceInbox) => {
@@ -34905,10 +35196,24 @@ const ManageInboxesView = memo(function ManageInboxesView({
         }
 
         if (mailboxForStorage.provider === "custom_imap") {
-          const didReloadAuthoritativeMailbox =
-            await onReloadAuthoritativeMailbox(mailboxForStorage.id);
+          let didReloadAuthoritativeMailbox = false;
+          try {
+            didReloadAuthoritativeMailbox =
+              await onReloadAuthoritativeMailbox(mailboxForStorage.id);
+          } catch {
+            didReloadAuthoritativeMailbox = false;
+          }
 
           if (!didReloadAuthoritativeMailbox) {
+            if (response.mailboxHealthOperation) {
+              onCompleteMailboxHealthCheck(
+                response.mailboxHealthOperation,
+                {
+                  ok: false,
+                  errorCode: "mailbox_configuration_unavailable",
+                },
+              );
+            }
             const verificationMessage =
               "The mailbox response could not be verified against the saved server configuration. Try again.";
             setConnectionErrors((current) => ({
@@ -34932,6 +35237,21 @@ const ManageInboxesView = memo(function ManageInboxesView({
             setEditingInboxId(inboxId);
             return false;
           }
+
+          if (response.mailboxHealthOperation) {
+            onCompleteMailboxHealthCheck(response.mailboxHealthOperation, {
+              ok: true,
+            });
+          }
+          const recoveryOperation = onBeginMailboxHealthCheck(
+            mailboxForStorage.id,
+            "custom_imap",
+            { actionRequiredRecovery: true },
+          );
+          onCompleteMailboxHealthCheck(recoveryOperation, {
+            ok: true,
+            provesProviderUsable: false,
+          });
 
           saveLiveInboxSnapshot({
             provider: "custom_imap",
@@ -34965,6 +35285,9 @@ const ManageInboxesView = memo(function ManageInboxesView({
             : null;
 
         if (authorizationUrl) {
+          onBeginMailboxHealthCheck(mailboxForStorage.id, "google", {
+            actionRequiredRecovery: true,
+          });
           savePendingOAuthManagedInbox(
             mailboxForStorage,
             inboxId.startsWith("draft-") ? "initial" : "reconnect",
@@ -35083,6 +35406,9 @@ const ManageInboxesView = memo(function ManageInboxesView({
       );
 
       if (authorizationUrl) {
+        onBeginMailboxHealthCheck(mailboxForConnection.id, "google", {
+          actionRequiredRecovery: true,
+        });
         savePendingOAuthManagedInbox(mailboxForConnection, "reconnect");
         window.location.assign(authorizationUrl);
       }
@@ -35498,6 +35824,7 @@ const ManageInboxesView = memo(function ManageInboxesView({
                       getCredentialAwareManagedInboxStatus(
                         mailbox,
                         credentialStatuses,
+                        mailboxHealthById[mailbox.id],
                       );
 
                     return (
@@ -35573,6 +35900,7 @@ const ManageInboxesView = memo(function ManageInboxesView({
                   connectionError={connectionErrors[selectedInbox.id] ?? null}
                   isApplying={validatingInboxId === selectedInbox.id}
                   credentialStatuses={credentialStatuses}
+                  mailboxHealth={mailboxHealthById[selectedInbox.id]}
                   showValidationErrors={validationErrorInboxId === selectedInbox.id}
                   onEditAction={
                     editingInboxId === selectedInbox.id
@@ -37687,8 +38015,10 @@ function SettingsView({
   productAccess,
   savedManagedInboxes,
   mailboxDisplayTitles,
+  mailboxHealthById,
   primaryManagedInboxId,
   credentialStatuses,
+  mailboxConnectionNavigationRequest,
   baseFocusPreferences,
   focusPreferenceOverrides,
   themeMode,
@@ -37709,6 +38039,9 @@ function SettingsView({
   onApplyManagedInboxes,
   onReloadAuthoritativeMailbox,
   onRenameMailbox,
+  onBeginMailboxHealthCheck,
+  onCompleteMailboxHealthCheck,
+  onConsumeMailboxConnectionNavigationRequest,
   onSetPrimaryManagedInbox,
   onManagedInboxesDirtyChange,
   onSaveInboxSignature,
@@ -37724,8 +38057,12 @@ function SettingsView({
   productAccess: ProductAccess;
   savedManagedInboxes: ManagedWorkspaceInbox[];
   mailboxDisplayTitles: Readonly<Record<string, string | undefined>>;
+  mailboxHealthById: MailboxHealthStore;
   primaryManagedInboxId: string | null;
   credentialStatuses: MailboxCredentialStatusStore;
+  mailboxConnectionNavigationRequest?:
+    | MailboxConnectionSettingsNavigationRequest
+    | null;
   baseFocusPreferences: FocusPreferences;
   focusPreferenceOverrides: MailboxFocusPreferenceOverridesStore;
   themeMode: "light" | "dark";
@@ -37746,6 +38083,20 @@ function SettingsView({
   onApplyManagedInboxes: (nextMailboxes: ManagedWorkspaceInbox[]) => boolean;
   onReloadAuthoritativeMailbox: (mailboxId: string) => Promise<boolean>;
   onRenameMailbox: (mailboxId: InboxId, nextTitle: string) => void;
+  onBeginMailboxHealthCheck: (
+    mailboxId: string,
+    provider: MailboxHealthProvider,
+    options?: MailboxHealthBeginOptions,
+  ) => MailboxHealthOperation;
+  onCompleteMailboxHealthCheck: (
+    operation: MailboxHealthOperation,
+    result: {
+      ok: boolean;
+      errorCode?: string | null;
+      provesProviderUsable?: boolean;
+    },
+  ) => void;
+  onConsumeMailboxConnectionNavigationRequest?: (requestKey: number) => void;
   onSetPrimaryManagedInbox: (inboxId: string) => void;
   onManagedInboxesDirtyChange: (hasUnsavedChanges: boolean) => void;
   onSaveInboxSignature: (inboxId: InboxId, signature: InboxSignatureSettings) => void;
@@ -37758,7 +38109,9 @@ function SettingsView({
   onOpenContact: () => void;
   onLogoutClick: () => void;
 }) {
-  const [activeSettingsTab, setActiveSettingsTab] = useState<SettingsTab>("Workspace");
+  const [activeSettingsTab, setActiveSettingsTab] = useState<SettingsTab>(() =>
+    mailboxConnectionNavigationRequest ? "Inboxes" : "Workspace",
+  );
   const [pendingSettingsTab, setPendingSettingsTab] = useState<SettingsTab | null>(null);
   const [hasManagedInboxDraftChanges, setHasManagedInboxDraftChanges] = useState(false);
   const [activeSignatureInboxId, setActiveSignatureInboxId] = useState<string | null>(null);
@@ -37819,6 +38172,12 @@ function SettingsView({
     setOutOfOfficeDraft(savedOutOfOffice);
   }, [activeOutOfOfficeInboxId, inboxOutOfOffice]);
 
+  useEffect(() => {
+    if (mailboxConnectionNavigationRequest) {
+      setActiveSettingsTab("Inboxes");
+    }
+  }, [mailboxConnectionNavigationRequest]);
+
   const handleManagedInboxesDirtyChange = useCallback((hasUnsavedChanges: boolean) => {
     setHasManagedInboxDraftChanges(hasUnsavedChanges);
     onManagedInboxesDirtyChange(hasUnsavedChanges);
@@ -37856,10 +38215,17 @@ function SettingsView({
           <ManageInboxesView
             savedManagedInboxes={savedManagedInboxes}
             mailboxDisplayTitles={mailboxDisplayTitles}
+            mailboxHealthById={mailboxHealthById}
             primaryManagedInboxId={primaryManagedInboxId}
+            navigationRequest={mailboxConnectionNavigationRequest}
             onApply={onApplyManagedInboxes}
             onReloadAuthoritativeMailbox={onReloadAuthoritativeMailbox}
             onRenameMailbox={onRenameMailbox}
+            onBeginMailboxHealthCheck={onBeginMailboxHealthCheck}
+            onCompleteMailboxHealthCheck={onCompleteMailboxHealthCheck}
+            onConsumeNavigationRequest={
+              onConsumeMailboxConnectionNavigationRequest
+            }
             onSetPrimaryInbox={onSetPrimaryManagedInbox}
             onDirtyChange={handleManagedInboxesDirtyChange}
             themeMode={themeMode}
@@ -40705,6 +41071,56 @@ export function WorkspaceShell({
 	      return onboardingSeed;
 	    }
   });
+  const mailboxHealthOperationClockRef = useRef(
+    createMailboxHealthOperationClock(),
+  );
+  const [mailboxHealthStateById, setMailboxHealthById] =
+    useState<MailboxHealthStore>(() =>
+      createInitialMailboxHealthStore(
+        buildInitialMailboxHealthSeeds(savedManagedInboxes),
+      ),
+    );
+  const beginMailboxHealthCheck = useCallback(
+    (
+      mailboxId: string,
+      provider: MailboxHealthProvider,
+      options?: MailboxHealthBeginOptions,
+    ) => {
+      const operation = mailboxHealthOperationClockRef.current.begin(
+        mailboxId,
+        provider,
+        options,
+      );
+      setMailboxHealthById((current) =>
+        beginMailboxHealthOperation(current, operation),
+      );
+      return operation;
+    },
+    [],
+  );
+  const cancelMailboxHealthCheck = useCallback(
+    (operation: MailboxHealthOperation) => {
+      setMailboxHealthById((current) =>
+        cancelMailboxHealthOperation(current, operation),
+      );
+    },
+    [],
+  );
+  const completeMailboxHealthCheck = useCallback(
+    (
+      operation: MailboxHealthOperation,
+      result: {
+        ok: boolean;
+        errorCode?: string | null;
+        provesProviderUsable?: boolean;
+      },
+    ) => {
+      setMailboxHealthById((current) =>
+        completeMailboxHealthOperation(current, operation, result),
+      );
+    },
+    [],
+  );
   const knownLegacyImapMailboxIds = savedManagedInboxes
     .filter((mailbox) => isImapCredentialsProvider(mailbox.provider))
     .map((mailbox) => mailbox.id)
@@ -40723,6 +41139,18 @@ export function WorkspaceShell({
   } as const;
   const [mailboxCredentialStatuses, setMailboxCredentialStatuses] =
     useState<MailboxCredentialStatusStore>({});
+  const mailboxHealthSeeds = useMemo(
+    () =>
+      buildInitialMailboxHealthSeeds(
+        savedManagedInboxes,
+        mailboxCredentialStatuses,
+      ),
+    [mailboxCredentialStatuses, savedManagedInboxes],
+  );
+  const mailboxHealthById = useMemo(
+    () => reconcileMailboxHealthStore(mailboxHealthStateById, mailboxHealthSeeds),
+    [mailboxHealthSeeds, mailboxHealthStateById],
+  );
   const auth0WorkspaceStorageScope =
     authenticationContext === "auth0"
       ? normalizeSenderLearningKey(
@@ -40780,7 +41208,6 @@ export function WorkspaceShell({
   const reloadAuthoritativeManagedMailbox = useCallback(
     async (mailboxId: string) => {
       const normalizedMailboxId = mailboxId.trim();
-      setMailboxCredentialStatuses({});
 
       if (!normalizedMailboxId) {
         return false;
@@ -43471,6 +43898,8 @@ export function WorkspaceShell({
   const [hasUnsavedManagedInboxSettings, setHasUnsavedManagedInboxSettings] = useState(false);
   const [pendingManagedInboxNavigation, setPendingManagedInboxNavigation] =
     useState<PendingManagedInboxNavigation | null>(null);
+  const [mailboxConnectionNavigationRequest, setMailboxConnectionNavigationRequest] =
+    useState<MailboxConnectionSettingsNavigationRequest | null>(null);
   const [isLogoutConfirmationOpen, setIsLogoutConfirmationOpen] = useState(false);
   const [learningLaunchRequest, setLearningLaunchRequest] =
     useState<LearningLaunchRequest>(null);
@@ -44205,6 +44634,12 @@ export function WorkspaceShell({
   }, [savedManagedInboxes]);
 
   useEffect(() => {
+    setMailboxHealthById((current) =>
+      reconcileMailboxHealthStore(current, mailboxHealthSeeds),
+    );
+  }, [mailboxHealthSeeds]);
+
+  useEffect(() => {
     if (!hasAuthenticatedMemberAuthority) {
       setMailboxCredentialStatuses({});
       return;
@@ -44220,7 +44655,6 @@ export function WorkspaceShell({
       return;
     }
 
-    setMailboxCredentialStatuses({});
     let cancelled = false;
 
     const loadMailboxCredentialStatuses = async () => {
@@ -44230,16 +44664,25 @@ export function WorkspaceShell({
           return;
         }
 
-        setMailboxCredentialStatuses(
-          sanitizeManagedMailboxCredentialStatuses(
-            savedManagedInboxes,
-            rawStatuses,
-          ),
+        const sanitizedStatuses = sanitizeManagedMailboxCredentialStatuses(
+          savedManagedInboxes,
+          rawStatuses,
         );
-      } catch {
-        if (!cancelled) {
-          setMailboxCredentialStatuses({});
+        if (
+          !mailboxIds.every((mailboxId) =>
+            Object.prototype.hasOwnProperty.call(
+              sanitizedStatuses,
+              mailboxId,
+            ),
+          )
+        ) {
+          return;
         }
+
+        setMailboxCredentialStatuses(sanitizedStatuses);
+      } catch {
+        // Preserve the last definitive credential evidence when status lookup
+        // is temporarily unavailable.
       }
     };
 
@@ -48284,6 +48727,20 @@ export function WorkspaceShell({
     setMailboxReturnContext(null);
   };
 
+  const openMailboxConnectionSettings = (mailboxId: InboxId) => {
+    requestNavigationAwayFromDirtyManagedInboxes(() => {
+      setMailboxConnectionNavigationRequest({
+        mailboxId,
+        requestKey: Date.now(),
+      });
+      setActiveSection("Settings");
+      setActiveTarget(null);
+      setActiveMailbox(null);
+      setActiveSmartFolderId(null);
+      setMailboxReturnContext(null);
+    });
+  };
+
   const handleChangeSection = (section: WorkspaceSection) => {
     if (section === activeSection) {
       setActiveTarget(null);
@@ -49611,6 +50068,10 @@ export function WorkspaceShell({
       return "skipped";
     }
 
+    const mailboxHealthOperation = beginMailboxHealthCheck(
+      mailboxId,
+      canUseGmailOAuthFetch ? "google" : "custom_imap",
+    );
     syncingMailboxIdsRef.current.add(mailboxId);
     setSyncingMailboxId(mailboxId);
     if (!isProviderReconciliation) {
@@ -49618,6 +50079,10 @@ export function WorkspaceShell({
     }
 
     let reconciliationArchivePromise: Promise<unknown> | null = null;
+    let deferredReconciliationHealthFailure: {
+      ok: false;
+      errorCode?: string | null;
+    } | null = null;
 
     try {
 	      const buildCustomImapRefreshRequest = (limit?: number) =>
@@ -49785,16 +50250,28 @@ export function WorkspaceShell({
       ) {
         return "skipped";
       }
+	      if (!response.ok && isProviderReconciliation) {
+        deferredReconciliationHealthFailure = {
+          ok: false,
+          errorCode: response.error?.code,
+        };
+      }
 	      if (!response.ok) {
         if (isProviderReconciliation) {
           return "failed";
         }
+        completeMailboxHealthCheck(mailboxHealthOperation, {
+          ok: false,
+          errorCode: response.error?.code,
+        });
         if (
           (canUseImapFetch || canUseGmailOAuthFetch) &&
           response.error?.code === "reconnect_required"
         ) {
           const reconnectMessage =
-            GMAIL_OAUTH_RECONNECT_REQUIRED_CONNECTION_MESSAGE;
+            canUseGmailOAuthFetch
+              ? GMAIL_OAUTH_RECONNECT_REQUIRED_CONNECTION_MESSAGE
+              : CUSTOM_IMAP_RECONNECT_REQUIRED_CONNECTION_MESSAGE;
           setSavedManagedInboxes((current) =>
             current.map((candidate) =>
               candidate.id === mailboxId
@@ -50117,6 +50594,7 @@ export function WorkspaceShell({
       ) {
         return "skipped";
       }
+      completeMailboxHealthCheck(mailboxHealthOperation, { ok: true });
       const acceptedImapUidValidity =
         canUseImapFetch &&
         isCanonicalPrioritySemanticNewInboundImapInteger(
@@ -50219,6 +50697,13 @@ export function WorkspaceShell({
       if (reconciliationArchivePromise) {
         await reconciliationArchivePromise.catch(() => undefined);
       }
+      if (deferredReconciliationHealthFailure) {
+        completeMailboxHealthCheck(
+          mailboxHealthOperation,
+          deferredReconciliationHealthFailure,
+        );
+      }
+      cancelMailboxHealthCheck(mailboxHealthOperation);
       syncingMailboxIdsRef.current.delete(mailboxId);
       setSyncingMailboxId((current) => (current === mailboxId ? null : current));
       drainGmailArchiveReconciliation(mailboxId);
@@ -53041,6 +53526,10 @@ export function WorkspaceShell({
 			                  orderedMailboxes={orderedMailboxes}
 		                  managedInboxes={savedManagedInboxes}
 		                  credentialStatuses={mailboxCredentialStatuses}
+	                  mailboxHealth={mailboxHealthById[activeMailbox.id]}
+	                  onOpenConnectionSettings={() =>
+	                    openMailboxConnectionSettings(activeMailbox.id)
+	                  }
 	                  smartFolders={smartFolders}
                   activeSmartFolderId={activeSmartFolderId}
                   onActiveSmartFolderChange={setActiveSmartFolderId}
@@ -53246,6 +53735,7 @@ export function WorkspaceShell({
               <InboxesView
                 filter={inboxFilter}
                 orderedMailboxes={orderedMailboxes}
+                mailboxHealthById={mailboxHealthById}
                 onOpenMailbox={openMailboxFromContext}
               />
             ) : activeSection === "Organizer" && productAccess === "bundle" ? (
@@ -53317,8 +53807,12 @@ export function WorkspaceShell({
                   productAccess={productAccess}
                   savedManagedInboxes={savedManagedInboxes}
                   mailboxDisplayTitles={mailboxDisplayTitles}
+                  mailboxHealthById={mailboxHealthById}
                   primaryManagedInboxId={primaryManagedInboxId}
                   credentialStatuses={mailboxCredentialStatuses}
+                  mailboxConnectionNavigationRequest={
+                    mailboxConnectionNavigationRequest
+                  }
                   baseFocusPreferences={userConfig.focusPreferences}
                   focusPreferenceOverrides={mailboxFocusPreferenceOverrides}
                   themeMode={resolvedTheme}
@@ -53347,6 +53841,13 @@ export function WorkspaceShell({
                     reloadAuthoritativeManagedMailbox
                   }
                   onRenameMailbox={handleRenameMailbox}
+                  onBeginMailboxHealthCheck={beginMailboxHealthCheck}
+                  onCompleteMailboxHealthCheck={completeMailboxHealthCheck}
+                  onConsumeMailboxConnectionNavigationRequest={(requestKey) =>
+                    setMailboxConnectionNavigationRequest((current) =>
+                      current?.requestKey === requestKey ? null : current,
+                    )
+                  }
                   onSetPrimaryManagedInbox={handleSetPrimaryManagedInbox}
                   onManagedInboxesDirtyChange={setHasUnsavedManagedInboxSettings}
                   onSaveInboxSignature={(inboxId, signature) => {

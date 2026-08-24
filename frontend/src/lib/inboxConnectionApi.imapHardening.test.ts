@@ -87,6 +87,7 @@ async function run() {
     uidValidity: "900",
   };
   let connectImapPayload: unknown = canonicalRefreshPayload;
+  let connectImapHttpOk = true;
   const originalFetch = globalThis.fetch;
   const originalWindow = (globalThis as any).window;
   (globalThis as any).window = {
@@ -99,7 +100,7 @@ async function run() {
       return response(null);
     }
     if (url.endsWith("/connect-imap")) {
-      return response(connectImapPayload);
+      return response(connectImapPayload, connectImapHttpOk);
     }
     return response({ ok: true, action: requestBody(lastCaptured(captured)).action });
   };
@@ -150,6 +151,30 @@ async function run() {
       "mode",
     ]);
     assert.equal(refresh.mode, "refresh");
+
+    for (const code of [
+      "imap_host_invalid",
+      "mailbox_secret_malformed",
+    ] as const) {
+      connectImapPayload = {
+        ok: false,
+        error: {
+          code,
+          message: "Provider detail must be replaced with safe client copy.",
+        },
+      };
+      connectImapHttpOk = false;
+      const definitiveConfigurationFailure =
+        await connectInboxWithImap(refresh);
+      assert.equal(definitiveConfigurationFailure.ok, false);
+      assert.equal(definitiveConfigurationFailure.error?.code, code);
+      assert.equal(
+        definitiveConfigurationFailure.error?.message,
+        "Could not connect to inbox.",
+      );
+    }
+    connectImapHttpOk = true;
+    connectImapPayload = canonicalRefreshPayload;
 
     connectImapPayload = {
       ...canonicalRefreshPayload,
