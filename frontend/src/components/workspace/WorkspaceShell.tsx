@@ -31943,9 +31943,11 @@ const SettingsInfoRow = memo(function SettingsInfoRow({
       <div className={settingsInfoRowClass}>
         <div className="text-[0.86rem] text-[var(--workspace-text-soft)]">{label}</div>
         <div className="flex items-center gap-3 text-right">
-          <div className="text-[0.86rem] font-medium text-[var(--workspace-text)]">
-            {value}
-          </div>
+          {value ? (
+            <div className="text-[0.86rem] font-medium text-[var(--workspace-text)]">
+              {value}
+            </div>
+          ) : null}
           <DesktopActionButton
             type="button"
             onClick={onActionClick}
@@ -37613,7 +37615,7 @@ const AccountSettingsCard = memo(function AccountSettingsCard({
 
           <SettingsInfoRow
             label="Support"
-            value="Cuevion support"
+            value=""
             actionLabel="Contact support"
             onActionClick={onOpenContact}
           />
