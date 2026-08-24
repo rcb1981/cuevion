@@ -37373,8 +37373,6 @@ const AccountSettingsCard = memo(function AccountSettingsCard({
   );
   const [draftName, setDraftName] = useState(savedName);
   const [isChangeEmailOpen, setIsChangeEmailOpen] = useState(false);
-  const [isResetPasswordOpen, setIsResetPasswordOpen] = useState(false);
-  const [isResetPasswordSent, setIsResetPasswordSent] = useState(false);
   const [isManagePlanOpen, setIsManagePlanOpen] = useState(false);
   const [draftPlan, setDraftPlan] = useState(savedPlan);
   const [nextEmail, setNextEmail] = useState("");
@@ -37422,11 +37420,6 @@ const AccountSettingsCard = memo(function AccountSettingsCard({
     setNextEmail("");
     setConfirmNextEmail("");
     setPassword("");
-  };
-
-  const handleCloseResetPassword = () => {
-    setIsResetPasswordOpen(false);
-    setIsResetPasswordSent(false);
   };
 
   const handleCloseManagePlan = () => {
@@ -37528,29 +37521,6 @@ const AccountSettingsCard = memo(function AccountSettingsCard({
             actionLabel={isManaging ? "Change email" : undefined}
             onActionClick={isManaging ? () => setIsChangeEmailOpen(true) : undefined}
           />
-
-          {isManaging ? (
-            <div className={settingsCardSectionClass}>
-              <div className="flex items-center justify-between gap-4">
-                <div>
-                  <div className="text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
-                    Password
-                  </div>
-                  <div className="mt-1 text-[0.86rem] text-[var(--workspace-text-muted)]">
-                    Update your sign-in password securely.
-                  </div>
-                </div>
-                <DesktopActionButton
-                  onClick={() => setIsResetPasswordOpen(true)}
-                  variant="tertiary"
-                >
-                  Reset password
-                </DesktopActionButton>
-              </div>
-            </div>
-          ) : (
-            <SettingsInfoRow label="Password" value="Reset password" />
-          )}
 
           <SettingsInfoRow
             label="Support"
@@ -37768,71 +37738,6 @@ const AccountSettingsCard = memo(function AccountSettingsCard({
             Continue
           </DesktopActionButton>
         </div>
-      </SettingsModalShell>
-      <SettingsModalShell
-        open={isResetPasswordOpen}
-        themeMode={themeMode}
-        maxWidthClass="max-w-[460px]"
-      >
-        {isResetPasswordSent ? (
-          <>
-            <div className="space-y-2">
-              <h2 className="text-[1.25rem] font-medium tracking-tight text-[var(--workspace-text)]">
-                Reset password
-              </h2>
-              <p className="text-[0.9rem] leading-7 text-[var(--workspace-text-soft)]">
-                Reset link sent.
-              </p>
-            </div>
-
-            <div className="mt-6 flex items-center justify-end">
-              <DesktopActionButton
-                onClick={handleCloseResetPassword}
-                variant="primary"
-              >
-                Done
-              </DesktopActionButton>
-            </div>
-          </>
-        ) : (
-          <>
-            <div className="space-y-2">
-              <h2 className="text-[1.25rem] font-medium tracking-tight text-[var(--workspace-text)]">
-                Reset password
-              </h2>
-              <p className="text-[0.9rem] leading-7 text-[var(--workspace-text-soft)]">
-                We&apos;ll send you a secure link to reset your password.
-              </p>
-            </div>
-
-            <div className="mt-5 rounded-[20px] border border-[var(--workspace-border-soft)] bg-[var(--workspace-card-subtle)] px-4 py-3">
-              <div className="text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)]">
-                Account email
-              </div>
-              <div className="mt-1 text-[0.92rem] font-medium text-[var(--workspace-text)]">
-                {savedEmail}
-              </div>
-            </div>
-
-            <div className="mt-6 flex items-center justify-end gap-3">
-              <DesktopActionButton
-                onClick={handleCloseResetPassword}
-                variant="secondary"
-                className="w-[7.5rem]"
-              >
-                Cancel
-              </DesktopActionButton>
-              <DesktopActionButton
-	                onClick={() => {
-	                  setIsResetPasswordSent(true);
-	                }}
-                variant="primary"
-              >
-                Send reset link
-              </DesktopActionButton>
-            </div>
-          </>
-        )}
       </SettingsModalShell>
       <SettingsModalShell
         open={isManagePlanOpen}
