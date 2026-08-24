@@ -99,3 +99,59 @@ for (const handler of [
 ] as const) {
   assert.match(forYouViewSource, new RegExp(`\\b${handler}\\b`));
 }
+
+const scopedLearningSource = sourceBetween(
+  "const [scopedSenderCategoryLearningState",
+  "const mailboxStoreRef",
+);
+
+assert.match(
+  workspaceShellSource,
+  /const learningStorageKey = buildLearningStorageKey\(\s*hasAuthenticatedMemberAuthority \? authenticatedUser\?\.workspaceId : null,\s*hasAuthenticatedMemberAuthority \? authenticatedUser\?\.userId : null,\s*\);/,
+  "Learning persistence must use authenticated workspaceId + userId in that order",
+);
+assert.doesNotMatch(
+  workspaceShellSource,
+  /["']cuevion-sender-category-learning["']/,
+  "WorkspaceShell must not retain the legacy bare Learning key as runtime authority",
+);
+assert.match(
+  scopedLearningSource,
+  /hydrateScopedSenderCategoryLearning\(\s*getBrowserLearningStorage\(\),\s*learningStorageKey/,
+  "Learning initialization must hydrate only the current scoped v2 key",
+);
+assert.match(
+  scopedLearningSource,
+  /selectScopedSenderCategoryLearning\(\s*activeScopedSenderCategoryLearningState,\s*learningStorageKey/,
+  "rendered Learning authority must reject state from a different identity key",
+);
+assert.match(
+  scopedLearningSource,
+  /scopedSenderCategoryLearningState\.storageKey !== learningStorageKey[\s\S]*?hydrateScopedSenderCategoryLearning\([\s\S]*?learningStorageKey[\s\S]*?setScopedSenderCategoryLearningState\(activeScopedSenderCategoryLearningState\)/,
+  "an in-place identity change must synchronously select the new scoped Learning state",
+);
+assert.match(
+  scopedLearningSource,
+  /setScopedSenderCategoryLearningState\(\(current\) =>\s*updateScopedSenderCategoryLearning\(\s*current,\s*expectedStorageKey,\s*update/,
+  "Learning updates must reject callbacks captured under another identity",
+);
+assert.match(
+  scopedLearningSource,
+  /scopedMailboxStoreState\.learningStorageKey !== learningStorageKey[\s\S]*?normalizeMailboxStoreForLearningIdentity\([\s\S]*?senderCategoryLearning[\s\S]*?setScopedMailboxStoreState\(activeScopedMailboxStoreState\)/,
+  "mailbox messages must be re-evaluated under the new Learning identity before commit",
+);
+assert.match(
+  scopedLearningSource,
+  /current\.learningStorageKey !== expectedStorageKey[\s\S]*?return current/,
+  "mailbox callbacks captured under the previous Learning identity must be rejected",
+);
+assert.match(
+  scopedLearningSource,
+  /createInitialMailboxStore\(\s*orderedMailboxes,\s*learningStore,/,
+  "all ordered mailboxes must continue to share the same user/workspace Learning store",
+);
+assert.match(
+  workspaceShellSource,
+  /persistScopedSenderCategoryLearning\(\s*getBrowserLearningStorage\(\),\s*scopedSenderCategoryLearningState,\s*learningStorageKey,\s*\);/,
+  "persistence must guard the state with the exact active identity key",
+);

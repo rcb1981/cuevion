@@ -271,6 +271,13 @@ import * as learningEngine from "../../lib/learningEngine";
 import * as forYouEngine from "../../lib/forYouEngine";
 import * as suggestionEngine from "../../lib/suggestionEngine";
 import {
+  buildLearningStorageKey,
+  hydrateScopedSenderCategoryLearning,
+  persistScopedSenderCategoryLearning,
+  selectScopedSenderCategoryLearning,
+  updateScopedSenderCategoryLearning,
+} from "../../lib/learningPersistence";
+import {
   applyLiveThreadIdentity,
   buildMailboxScopedThreadGroupingKey,
   buildRenderedConversationRows,
@@ -3412,7 +3419,6 @@ const buildTeamPendingInvitationStorageKey = (workspaceKey: string) =>
 const buildTeamMembershipsStorageKey = (workspaceKey: string) =>
   `cuevion-team-memberships:${workspaceKey}`;
 const WORKSPACE_THEME_MODE_STORAGE_KEY = "cuevion-workspace-theme-mode";
-const CATEGORY_LEARNING_STORAGE_KEY = "cuevion-sender-category-learning";
 const MESSAGE_OWNERSHIP_STORAGE_KEY = "cuevion-message-ownership";
 const CUEVION_MESSAGE_UNREAD_OVERRIDES_STORAGE_KEY = "cuevion-message-unread-overrides";
 const CUEVION_COLLABORATION_LAST_SEEN_STORAGE_KEY = "cuevion-collaboration-last-seen";
@@ -3443,6 +3449,18 @@ const COMPOSE_RECIPIENT_MEMORY_STORAGE_KEY = "cuevion-compose-recipient-memory";
 const ACTIVE_MAILBOX_AUTO_REFRESH_INTERVAL_MS = 3 * 60 * 1000;
 const MAIL_FOLDER_COLUMN_WIDTH = 180;
 const MAIL_SPLIT_GAP = 24;
+
+function getBrowserLearningStorage() {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+}
 const MIN_MAIL_LIST_PANE_WIDTH = 320;
 const MIN_MAIL_DETAIL_PANE_WIDTH = 400;
 const MAIL_SPLIT_DIVIDER_WIDTH = 24;
@@ -13168,6 +13186,35 @@ function normalizeMailboxStore(
   }
 
   return nextStore;
+}
+
+function normalizeMailboxStoreForLearningIdentity(
+  store: MailboxStore,
+  orderedMailboxes: OrderedMailbox[],
+  senderCategoryLearning: SenderCategoryLearningStore,
+  messageOwnershipInteractions: MessageOwnershipInteractionStore,
+  currentUserId: string,
+) {
+  const learningNeutralStore = Object.fromEntries(
+    Object.entries(store).map(([mailboxId, collections]) => [
+      mailboxId,
+      mailboxId === sharedCollaborationMailboxId
+        ? collections
+        : {
+            ...collections,
+            Inbox: [...collections.Inbox, ...collections.Filtered],
+            Filtered: [],
+          },
+    ]),
+  ) as MailboxStore;
+
+  return normalizeMailboxStore(
+    learningNeutralStore,
+    orderedMailboxes,
+    senderCategoryLearning,
+    messageOwnershipInteractions,
+    currentUserId,
+  );
 }
 
 function formatMailboxIdentityTitle(inboxId: InboxId, email: string, fallbackTitle: string) {
@@ -40495,6 +40542,10 @@ export function WorkspaceShell({
   });
   const hasAuthenticatedMemberAuthority =
     authenticationContext === "auth0" && authenticatedUser?.userType === "member";
+  const learningStorageKey = buildLearningStorageKey(
+    hasAuthenticatedMemberAuthority ? authenticatedUser?.workspaceId : null,
+    hasAuthenticatedMemberAuthority ? authenticatedUser?.userId : null,
+  );
   const [
     hydratedAuthoritativeManagedInboxPresentations,
     setHydratedAuthoritativeManagedInboxPresentations,
@@ -41367,24 +41418,49 @@ export function WorkspaceShell({
   const liveMailboxSyncKey = orderedMailboxes
     .map((mailbox) => `${mailbox.id}:${mailbox.email}:${mailbox.title}`)
     .join("|");
-  const [senderCategoryLearning, setSenderCategoryLearning] =
-    useState<SenderCategoryLearningStore>(() => {
-      if (typeof window === "undefined") {
-        return {};
+  const [scopedSenderCategoryLearningState, setScopedSenderCategoryLearningState] =
+    useState(() =>
+      hydrateScopedSenderCategoryLearning(
+        getBrowserLearningStorage(),
+        learningStorageKey,
+      ),
+    );
+  let activeScopedSenderCategoryLearningState = scopedSenderCategoryLearningState;
+
+  if (scopedSenderCategoryLearningState.storageKey !== learningStorageKey) {
+    // Updating this component's own tagged state during render makes React retry
+    // before committing, so the previous identity never becomes B's authority.
+    activeScopedSenderCategoryLearningState = hydrateScopedSenderCategoryLearning(
+      getBrowserLearningStorage(),
+      learningStorageKey,
+    );
+    setScopedSenderCategoryLearningState(activeScopedSenderCategoryLearningState);
+  }
+
+  const senderCategoryLearning = selectScopedSenderCategoryLearning(
+    activeScopedSenderCategoryLearningState,
+    learningStorageKey,
+  );
+  const setSenderCategoryLearning: Dispatch<
+    SetStateAction<SenderCategoryLearningStore>
+  > = useCallback(
+    (update) => {
+      const expectedStorageKey = learningStorageKey;
+
+      if (!expectedStorageKey) {
+        return;
       }
 
-      const storedValue = window.localStorage.getItem(CATEGORY_LEARNING_STORAGE_KEY);
-
-      if (!storedValue) {
-        return {};
-      }
-
-      try {
-        return JSON.parse(storedValue) as SenderCategoryLearningStore;
-      } catch {
-        return {};
-      }
-    });
+      setScopedSenderCategoryLearningState((current) =>
+        updateScopedSenderCategoryLearning(
+          current,
+          expectedStorageKey,
+          update,
+        ),
+      );
+    },
+    [learningStorageKey],
+  );
   const [messageOwnershipInteractions, setMessageOwnershipInteractions] =
     useState<MessageOwnershipInteractionStore>(() => {
       if (typeof window === "undefined") {
@@ -41403,21 +41479,66 @@ export function WorkspaceShell({
         return {};
       }
     });
-  const [mailboxStore, setMailboxStore] = useState<MailboxStore>(() =>
+  const createInitialLearningMailboxStore = (
+    learningStore: SenderCategoryLearningStore,
+  ) =>
     normalizeMailboxStore(
       createInitialMailboxStore(
         orderedMailboxes,
-        senderCategoryLearning,
+        learningStore,
         messageOwnershipInteractions,
         currentWorkspaceUserId,
         workspaceDataMode,
         savedManagedInboxes,
       ),
       orderedMailboxes,
-      senderCategoryLearning,
+      learningStore,
       messageOwnershipInteractions,
       currentWorkspaceUserId,
-    ),
+    );
+  const [scopedMailboxStoreState, setScopedMailboxStoreState] = useState(() => ({
+    learningStorageKey,
+    store: createInitialLearningMailboxStore(senderCategoryLearning),
+  }));
+  let activeScopedMailboxStoreState = scopedMailboxStoreState;
+
+  if (
+    scopedMailboxStoreState.learningStorageKey !== learningStorageKey
+  ) {
+    // Preserve the current messages, but remove their prior Learning-derived
+    // categorization/routing and re-evaluate them under the newly selected store.
+    activeScopedMailboxStoreState = {
+      learningStorageKey,
+      store: normalizeMailboxStoreForLearningIdentity(
+        scopedMailboxStoreState.store,
+        orderedMailboxes,
+        senderCategoryLearning,
+        messageOwnershipInteractions,
+        currentWorkspaceUserId,
+      ),
+    };
+    setScopedMailboxStoreState(activeScopedMailboxStoreState);
+  }
+
+  const mailboxStore = activeScopedMailboxStoreState.store;
+  const setMailboxStore: Dispatch<SetStateAction<MailboxStore>> = useCallback(
+    (update) => {
+      const expectedStorageKey = learningStorageKey;
+
+      setScopedMailboxStoreState((current) => {
+        if (current.learningStorageKey !== expectedStorageKey) {
+          return current;
+        }
+
+        const nextStore =
+          typeof update === "function" ? update(current.store) : update;
+
+        return nextStore === current.store
+          ? current
+          : { learningStorageKey: expectedStorageKey, store: nextStore };
+      });
+    },
+    [learningStorageKey],
   );
   const mailboxStoreRef = useRef(mailboxStore);
   mailboxStoreRef.current = mailboxStore;
@@ -51315,11 +51436,12 @@ export function WorkspaceShell({
   ]);
 
   useEffect(() => {
-    window.localStorage.setItem(
-      CATEGORY_LEARNING_STORAGE_KEY,
-      JSON.stringify(senderCategoryLearning),
+    persistScopedSenderCategoryLearning(
+      getBrowserLearningStorage(),
+      scopedSenderCategoryLearningState,
+      learningStorageKey,
     );
-  }, [senderCategoryLearning]);
+  }, [learningStorageKey, scopedSenderCategoryLearningState]);
 
   useEffect(() => {
     window.localStorage.setItem(
