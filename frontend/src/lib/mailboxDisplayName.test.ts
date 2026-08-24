@@ -614,7 +614,13 @@ test("long authoritative email stays intact while identity surfaces retain trunc
     /max-w-\[min\(70vw,32rem\)\][^"]*[\s\S]{0,500}truncate/,
   );
   assert.equal(
-    workspaceSource.includes("const MAIL_FOLDER_COLUMN_WIDTH = 152;"),
+    workspaceSource.includes("const MAIL_FOLDER_COLUMN_WIDTH = 140;"),
+    true,
+  );
+  assert.equal(
+    workspaceSource.includes(
+      'xl:grid-cols-[140px_minmax(0,0.92fr)_minmax(0,1.28fr)]',
+    ),
     true,
   );
   assert.equal(

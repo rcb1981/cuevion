@@ -3450,7 +3450,7 @@ const SMART_FOLDERS_STORAGE_KEY = "cuevion-smart-folders";
 const MAIL_LIST_PANE_WIDTH_STORAGE_KEY = "cuevion-mail-list-pane-width";
 const COMPOSE_RECIPIENT_MEMORY_STORAGE_KEY = "cuevion-compose-recipient-memory";
 const ACTIVE_MAILBOX_AUTO_REFRESH_INTERVAL_MS = 3 * 60 * 1000;
-const MAIL_FOLDER_COLUMN_WIDTH = 152;
+const MAIL_FOLDER_COLUMN_WIDTH = 140;
 const MAIL_SPLIT_GAP = 24;
 
 function getBrowserLearningStorage() {
@@ -16083,6 +16083,14 @@ const mailboxComposeActionButtonClass = mailboxPrimaryActionButtonClass.replace(
   "h-9 items-center justify-center rounded-full px-4 text-[0.68rem] font-medium uppercase tracking-[0.18em]",
   "h-8 items-center justify-center rounded-full px-3.5 text-[0.66rem] font-medium uppercase tracking-[0.16em]",
 );
+const draftClosePrimaryActionButtonClass = mailboxPrimaryActionButtonClass.replace(
+  "h-9 items-center justify-center rounded-full px-4 text-[0.68rem] font-medium uppercase tracking-[0.18em]",
+  "h-8 items-center justify-center rounded-full px-3.5 text-[0.66rem] font-medium uppercase tracking-[0.14em]",
+);
+const draftCloseDiscardActionButtonClass =
+  "inline-flex h-8 items-center justify-center rounded-full border border-[color:rgba(146,82,73,0.34)] bg-[linear-gradient(180deg,rgba(170,103,93,0.96),rgba(138,76,67,0.98))] px-3.5 text-[0.66rem] font-medium uppercase tracking-[0.14em] text-[color:rgba(255,248,244,0.98)] shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_8px_18px_rgba(123,70,61,0.14)] transition-[background-color,border-color,color,transform,box-shadow] duration-150 hover:border-[color:rgba(132,72,64,0.42)] hover:bg-[linear-gradient(180deg,rgba(156,91,82,0.98),rgba(126,67,60,0.98))] active:scale-[0.99] focus-visible:outline-none";
+const draftCloseCancelActionButtonClass =
+  "inline-flex h-8 items-center justify-center rounded-full border border-transparent bg-transparent px-3.5 text-[0.66rem] font-medium uppercase tracking-[0.14em] text-[var(--workspace-text-faint)] transition-[color,transform] duration-150 hover:text-[var(--workspace-text-soft)] active:scale-[0.99] focus-visible:outline-none";
 
 function MailboxView({
   mailbox,
@@ -26135,18 +26143,18 @@ function MailboxView({
             Keep this message in Drafts, discard it, or continue editing.
           </p>
         </div>
-        <div className="mt-6 flex flex-wrap items-center gap-2">
+        <div className="mt-6 flex flex-wrap items-center gap-1.5">
           <button
             type="button"
             onClick={saveDraftAndClose}
-            className={mailboxPrimaryActionButtonClass}
+            className={draftClosePrimaryActionButtonClass}
           >
             Save to Drafts
           </button>
           <button
             type="button"
             onClick={discardCompose}
-            className="inline-flex h-9 items-center justify-center rounded-full border border-[color:rgba(146,82,73,0.34)] bg-[linear-gradient(180deg,rgba(170,103,93,0.96),rgba(138,76,67,0.98))] px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[color:rgba(255,248,244,0.98)] shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_8px_18px_rgba(123,70,61,0.14)] transition-[background-color,border-color,color,transform,box-shadow] duration-150 hover:border-[color:rgba(132,72,64,0.42)] hover:bg-[linear-gradient(180deg,rgba(156,91,82,0.98),rgba(126,67,60,0.98))] active:scale-[0.99] focus-visible:outline-none"
+            className={draftCloseDiscardActionButtonClass}
           >
             Discard
           </button>
@@ -26154,7 +26162,7 @@ function MailboxView({
             ref={composeCloseConfirmationCancelRef}
             type="button"
             onClick={continueEditingCompose}
-            className="inline-flex h-9 items-center justify-center rounded-full border border-transparent bg-transparent px-4 text-[0.68rem] font-medium uppercase tracking-[0.16em] text-[var(--workspace-text-faint)] transition-[color,transform] duration-150 hover:text-[var(--workspace-text-soft)] active:scale-[0.99] focus-visible:outline-none"
+            className={draftCloseCancelActionButtonClass}
           >
             Cancel
           </button>
@@ -27035,7 +27043,7 @@ function MailboxView({
             className={`grid h-0 min-h-0 flex-1 items-stretch gap-6 overflow-hidden ${
               activeSmartFolder
                 ? "xl:grid-cols-[minmax(0,0.92fr)_minmax(0,1.28fr)]"
-                : "xl:grid-cols-[152px_minmax(0,0.92fr)_minmax(0,1.28fr)]"
+                : "xl:grid-cols-[140px_minmax(0,0.92fr)_minmax(0,1.28fr)]"
             }`}
             style={
               isWideSplitView && effectiveMailListPaneWidth !== null
@@ -36121,6 +36129,19 @@ const SmartFolderModal = memo(function SmartFolderModal({
   onCancel: () => void;
   onSave: (input: SmartFolderDraftInput) => void;
 }) {
+  const smartFolderSecondaryActionClass = settingsPairedSecondaryActionClass
+    .replace(
+      "h-10 w-[7.5rem] items-center justify-center rounded-full border",
+      "h-8 min-w-[5.5rem] items-center justify-center rounded-full border",
+    )
+    .replace(
+      "px-5 text-[0.72rem] font-medium uppercase tracking-[0.16em]",
+      "px-3.5 text-[0.66rem] font-medium uppercase tracking-[0.14em]",
+    );
+  const smartFolderPrimaryActionClass = settingsPrimaryActionClass.replace(
+    "h-10 items-center justify-center rounded-full px-5 text-[0.72rem] font-medium uppercase tracking-[0.16em]",
+    "h-8 items-center justify-center rounded-full px-3.5 text-[0.66rem] font-medium uppercase tracking-[0.14em]",
+  );
   const [draftName, setDraftName] = useState(() => initialFolder?.name ?? "");
   const [draftScope, setDraftScope] = useState<"all" | "selected">(
     () => initialFolder?.scope ?? "all",
@@ -36178,7 +36199,7 @@ const SmartFolderModal = memo(function SmartFolderModal({
           <button
             type="button"
             onClick={onCancel}
-            className={settingsPairedSecondaryActionClass}
+            className={smartFolderSecondaryActionClass}
           >
             Cancel
           </button>
@@ -36186,7 +36207,7 @@ const SmartFolderModal = memo(function SmartFolderModal({
             type="button"
             onClick={handleSave}
             disabled={!canSave}
-            className={`${settingsPrimaryActionClass} w-[7.5rem] disabled:cursor-not-allowed disabled:border-[color:rgba(120,104,89,0.14)] disabled:bg-[linear-gradient(180deg,rgba(167,174,167,0.42),rgba(131,137,131,0.52))] disabled:text-[color:rgba(251,248,242,0.78)] disabled:shadow-none`}
+            className={`${smartFolderPrimaryActionClass} min-w-[5.5rem] disabled:cursor-not-allowed disabled:border-[color:rgba(120,104,89,0.14)] disabled:bg-[linear-gradient(180deg,rgba(167,174,167,0.42),rgba(131,137,131,0.52))] disabled:text-[color:rgba(251,248,242,0.78)] disabled:shadow-none`}
           >
             Save
           </button>
