@@ -302,6 +302,20 @@ assert.match(
   /deriveReplyRecipientPlan\([\s\S]*ownAddresses: orderedMailboxes\.map/,
   "Reply ownership must continue using connected mailbox identities only",
 );
+const replyRecipientSource = openComposeSource.slice(
+  openComposeSource.indexOf("const replyRecipientPlan ="),
+  openComposeSource.indexOf("closeReadingLearningMenu();"),
+);
+assert.match(
+  replyRecipientSource,
+  /originalSender: effectiveMessage\.from,[\s\S]*originalTo: effectiveMessage\.to,[\s\S]*originalCc: effectiveMessage\.cc \?\? ""/,
+  "Reply-after-Sent recipients must come from the selected presentation source",
+);
+assert.doesNotMatch(
+  replyRecipientSource,
+  /replyAnchorMessage/,
+  "the provider-only reply anchor must not affect Reply or Reply All recipients",
+);
 assert.match(
   openComposeSource,
   /selectLatestAuthoritativeConversationMessage\(/,
@@ -896,6 +910,28 @@ recordReplyModeExpectation("owned-address exclusion and normalized dedupe", () =
   });
   assert.deepEqual(duplicatePlan.replyAllDelta, [
     { key: "carol@example.com", renderedValue: "Carol <carol@example.com>" },
+  ]);
+});
+
+recordReplyModeExpectation("Reply after own Sent row targets external participants", () => {
+  const sentRowPlan = derivePlan({
+    originalSender: "owner@example.com",
+    originalTo: "Partner <partner@example.com>",
+    originalCc: "Team <team@example.com>, owner@example.com",
+    ownAddresses: ["owner@example.com"],
+  });
+
+  assert.deepEqual(sentRowPlan.replyTo, [
+    {
+      key: "partner@example.com",
+      renderedValue: "Partner <partner@example.com>",
+    },
+  ]);
+  assert.deepEqual(sentRowPlan.replyAllDelta, [
+    {
+      key: "team@example.com",
+      renderedValue: "Team <team@example.com>",
+    },
   ]);
 });
 

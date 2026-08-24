@@ -6,6 +6,7 @@ import {
   buildImapReplyContext,
   buildSendInboxWireRequest,
 } from "../../lib/inboxConnectionApi";
+import { selectLatestEligibleAuthoritativeConversationMessage } from "../../lib/inboxEngine";
 
 const authoritativeImapSource = {
   serverMailboxId: "imap-mailbox-1",
@@ -183,6 +184,134 @@ assert.equal(
   "local IDs and thread context must not substitute for the physical provider locator",
 );
 
+const providerBackedConversationSource = {
+  id: "imap-uid-42",
+  ...authoritativeImapSource,
+  threadId: "imap:rfc:root%40example.com",
+  threadIdentityAuthority: "rfc" as const,
+  subject: "Re: Release timing",
+  from: "Partner <partner@example.com>",
+  to: "owner@example.com",
+  createdAt: "2026-08-24T08:00:00.000Z",
+  timestamp: "2026-08-24T08:00:00.000Z",
+};
+const syntheticSentConversationSource = {
+  id: "imap-mailbox-1-sent-1",
+  threadId: providerBackedConversationSource.threadId,
+  threadIdentityAuthority: "rfc" as const,
+  subject: "Re: Release timing",
+  from: "owner@example.com",
+  to: "Partner <partner@example.com>",
+  cc: "Team <team@example.com>",
+  signal: "Sent",
+  createdAt: "2026-08-24T09:00:00.000Z",
+  timestamp: "2026-08-24T09:00:00.000Z",
+};
+const differentConversationSource = {
+  ...providerBackedConversationSource,
+  id: "imap-uid-99",
+  imapUid: "99",
+  threadId: "imap:rfc:other-root%40example.com",
+  createdAt: "2026-08-24T10:00:00.000Z",
+  timestamp: "2026-08-24T10:00:00.000Z",
+};
+const differentMailboxSource = {
+  ...providerBackedConversationSource,
+  id: "imap-uid-100",
+  serverMailboxId: "imap-mailbox-2",
+  imapUid: "100",
+  threadIdentityContext: {
+    provider: "custom_imap",
+    mailboxId: "imap-mailbox-2",
+  },
+  createdAt: "2026-08-24T11:00:00.000Z",
+  timestamp: "2026-08-24T11:00:00.000Z",
+};
+const heuristicLocatorCollision = {
+  ...providerBackedConversationSource,
+  id: "imap-uid-43",
+  imapUid: "43",
+  threadIdentityAuthority: "heuristic" as const,
+  createdAt: "2026-08-24T12:00:00.000Z",
+  timestamp: "2026-08-24T12:00:00.000Z",
+};
+const unknownDateSyntheticSource = {
+  ...syntheticSentConversationSource,
+  id: "imap-mailbox-1-sent-unknown-date",
+  createdAt: undefined,
+  timestamp: undefined,
+};
+const isEligibleImapReplyAnchor = (candidate: any) =>
+  Boolean(
+    buildImapReplyContext({
+      sendProvider: "custom_imap",
+      composeMode: "reply",
+      mailboxId: "imap-mailbox-1",
+      sourceMessage: candidate,
+    }),
+  );
+const resolvedReplyAfterSentAnchor =
+  selectLatestEligibleAuthoritativeConversationMessage(
+    syntheticSentConversationSource,
+    [
+      syntheticSentConversationSource,
+      differentConversationSource,
+      differentMailboxSource,
+      heuristicLocatorCollision,
+      unknownDateSyntheticSource,
+      providerBackedConversationSource,
+    ],
+    "imap-mailbox-1",
+    isEligibleImapReplyAnchor,
+  );
+
+assert.equal(
+  resolvedReplyAfterSentAnchor.id,
+  providerBackedConversationSource.id,
+  "a synthetic Sent row may use only a provider-backed anchor from its canonical mailbox conversation",
+);
+assert.deepEqual(
+  buildImapReplyContext({
+    sendProvider: "custom_imap",
+    composeMode: "reply",
+    mailboxId: "imap-mailbox-1",
+    sourceMessage: resolvedReplyAfterSentAnchor,
+  }),
+  {
+    sourceProviderFolder: "INBOX",
+    sourceImapUid: "42",
+    sourceUidValidity: "900",
+  },
+  "the second send uses the original physical IMAP locator without fabricating Sent identity",
+);
+
+const genuinelyUnanchoredLocalSource = {
+  ...syntheticSentConversationSource,
+  id: "local-only",
+  threadId: "browser-local-thread",
+  threadIdentityAuthority: "heuristic" as const,
+};
+assert.equal(
+  selectLatestEligibleAuthoritativeConversationMessage(
+    genuinelyUnanchoredLocalSource,
+    [genuinelyUnanchoredLocalSource, providerBackedConversationSource],
+    "imap-mailbox-1",
+    isEligibleImapReplyAnchor,
+  ),
+  genuinelyUnanchoredLocalSource,
+  "a local-only message cannot borrow an unrelated provider locator",
+);
+assert.equal(
+  buildImapReplyContext({
+    sendProvider: "custom_imap",
+    composeMode: "reply",
+    mailboxId: "imap-mailbox-1",
+    sourceMessage: genuinelyUnanchoredLocalSource,
+  }),
+  undefined,
+  "the provider safety guard still has no context for a genuinely unanchored message",
+);
+
 const imapWireRequest = JSON.parse(
   JSON.stringify(
     buildSendInboxWireRequest({
@@ -267,6 +396,24 @@ const workspaceShellSource = readFileSync(
   resolve(process.cwd(), "src/components/workspace/WorkspaceShell.tsx"),
   "utf8",
 );
+const composeStateSource = workspaceShellSource.slice(
+  workspaceShellSource.indexOf("const [composeTo, setComposeTo]"),
+  workspaceShellSource.indexOf("const [pendingComposeAttachmentPickerOpen"),
+);
+const resetComposeSource = workspaceShellSource.slice(
+  workspaceShellSource.indexOf("const resetComposeState ="),
+  workspaceShellSource.indexOf("const normalizeRememberedRecipient ="),
+);
+assert.match(
+  composeStateSource,
+  /composeReplyAnchorMessage, setComposeReplyAnchorMessage/,
+  "the authoritative provider anchor must be scoped to one compose session",
+);
+assert.match(
+  resetComposeSource,
+  /setComposeReplyAnchorMessage\(null\)/,
+  "closing, discarding, or completing compose must clear the provider anchor",
+);
 const openComposeSource = workspaceShellSource.slice(
   workspaceShellSource.indexOf("const openComposeFromMessage ="),
   workspaceShellSource.indexOf(
@@ -280,6 +427,9 @@ const preserveLocatorlessSourceIndex = openComposeSource.indexOf(
 const authoritativeSelectionIndex = openComposeSource.indexOf(
   "selectLatestAuthoritativeConversationMessage(",
 );
+const eligibleAnchorSelectionIndex = openComposeSource.indexOf(
+  "selectLatestEligibleAuthoritativeConversationMessage(",
+);
 
 assert.ok(
   preserveLocatorlessSourceIndex >= 0 &&
@@ -292,7 +442,21 @@ assert.match(
     authoritativeSelectionIndex,
   ),
   /selectedSourceProvider === "custom_imap"[\s\S]*!buildImapReplyContext\([\s\S]*preserveLocatorlessCustomReplySource[\s\S]*\? message/,
-  "a synthetic Sent source must not be replaced with an older provider-backed message",
+  "a synthetic Sent row must remain the compose presentation source",
+);
+assert.ok(
+  eligibleAnchorSelectionIndex > authoritativeSelectionIndex,
+  "provider anchor selection must remain separate from presentation-source selection",
+);
+assert.match(
+  openComposeSource.slice(authoritativeSelectionIndex, eligibleAnchorSelectionIndex + 1200),
+  /selectedSourceProvider === "custom_imap"[\s\S]*selectLatestEligibleAuthoritativeConversationMessage\([\s\S]*message,[\s\S]*normalReplyCandidates,[\s\S]*selectedSourceMailboxId,[\s\S]*buildImapReplyContext\(/,
+  "custom IMAP continuity must filter canonical candidates through the physical provider-context validator",
+);
+assert.match(
+  openComposeSource,
+  /setComposeSourceMessage\(effectiveMessage\)[\s\S]*setComposeReplyAnchorMessage\(replyAnchorMessage\)/,
+  "quote and recipient source must remain distinct from the provider reply anchor",
 );
 
 const sendSource = workspaceShellSource.slice(
@@ -309,6 +473,11 @@ const sendRequestIndex = sendSource.indexOf(
 );
 
 assert.ok(imapContextIndex >= 0, "the compose path must build IMAP reply context");
+assert.match(
+  sendSource.slice(imapContextIndex, sendingStateIndex),
+  /sourceMessage: composeReplyAnchorMessage \?\? composeSourceMessage/,
+  "the second send must prefer the separately validated provider anchor",
+);
 assert.ok(
   imapContextIndex < sendingStateIndex &&
     imapContextIndex < attachmentSerializationIndex &&
@@ -322,6 +491,72 @@ assert.match(
 assert.match(
   sendSource.slice(sendRequestIndex, sendSource.indexOf("\n      });", sendRequestIndex)),
   /imapReplyContext\s*\?\s*\{ imapReplyContext \}/,
+);
+
+const sentSeedStart = sendSource.indexOf("const sentMessageSeed:");
+const sentSeedEnd = sendSource.indexOf("const hasGmailProviderIdentity", sentSeedStart);
+const sentSeedSource = sendSource.slice(sentSeedStart, sentSeedEnd);
+assert.match(
+  sentSeedSource,
+  /sendProvider === "custom_imap" && isReplyComposeMode[\s\S]*composeSourceMessage\?\.threadId[\s\S]*composeSourceMessage\?\.threadIdentityAuthority/,
+  "the visible custom Sent row must retain only the proven canonical conversation identity",
+);
+assert.doesNotMatch(
+  sentSeedSource,
+  /imapUid|uidValidity|providerFolder|rfcMessageId/,
+  "the visible custom Sent row must not fabricate a physical IMAP or RFC locator",
+);
+assert.match(
+  sendSource,
+  /Sent: \[sentMessage, \.\.\.currentStore\[activeComposeMailbox\.id\]\.Sent\]/,
+  "a successful Reply must still insert the visible Sent row immediately",
+);
+assert.match(
+  sendSource,
+  /if \(!sendResponse\.ok\) \{[\s\S]*setComposeSendError\([\s\S]*return;[\s\S]*setMailboxStore\([\s\S]*setIsComposeOpen\(false\)/,
+  "failed sends must return before insertion/close while successful sends still close",
+);
+const providerFailureStart = sendSource.indexOf("if (!sendResponse.ok)");
+const providerFailureEnd = sendSource.indexOf(
+  "rememberSentRecipients(",
+  providerFailureStart,
+);
+const providerFailureSource = sendSource.slice(
+  providerFailureStart,
+  providerFailureEnd,
+);
+assert.doesNotMatch(
+  providerFailureSource,
+  /resetComposeState|setIsComposeOpen\(false\)|setComposeReplyAnchorMessage/,
+  "a provider-declared send failure must leave the composer and its anchor intact",
+);
+const caughtFailureStart = sendSource.lastIndexOf("} catch (error) {");
+const caughtFailureEnd = sendSource.indexOf("} finally {", caughtFailureStart);
+const caughtFailureSource = sendSource.slice(caughtFailureStart, caughtFailureEnd);
+assert.doesNotMatch(
+  caughtFailureSource,
+  /resetComposeState|setIsComposeOpen\(false\)|setComposeReplyAnchorMessage/,
+  "a thrown send failure must leave the composer and its anchor intact",
+);
+assert.match(
+  sendSource.slice(caughtFailureEnd),
+  /setIsSendingCompose\(false\)/,
+  "every settled send attempt must release the sending state",
+);
+assert.match(
+  sendSource,
+  /onSuccessfulConversationReply\([\s\S]*activeComposeMailbox\.id,[\s\S]*composeSourceMessage,[\s\S]*composeMode,[\s\S]*sentAt/,
+  "waiting state must continue from the visible conversation source",
+);
+assert.doesNotMatch(
+  sendSource,
+  /onSuccessfulConversationReply\([\s\S]{0,240}composeReplyAnchorMessage/,
+  "the provider-only anchor must never replace waiting-state conversation identity",
+);
+assert.match(
+  sendSource,
+  /hasGmailProviderIdentity[\s\S]*applyLiveThreadIdentity\([\s\S]*providerMessageId: sendResponse\.providerMessageId,[\s\S]*providerThreadId: sendResponse\.providerThreadId/,
+  "Gmail must continue using its authoritative send-result message and thread identity",
 );
 
 const apiSource = readFileSync(

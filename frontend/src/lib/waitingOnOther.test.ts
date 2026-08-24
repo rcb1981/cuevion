@@ -114,6 +114,48 @@ test("custom IMAP RFC ancestry -> successful Reply -> waiting_on_other", () => {
   );
 });
 
+test("second consecutive custom IMAP Reply updates one waiting_on_other record", () => {
+  const inbound = message({ provider: "custom_imap", authority: "rfc" });
+  const firstStore = replyTransition(inbound);
+  const secondTransitionTime = "2026-08-21T10:05:00.000Z";
+  const syntheticSent = {
+    ...inbound,
+    id: "local-sent-1",
+    from: "me@example.com",
+    to: "partner@example.com",
+    signal: "Sent",
+    threadIdentityContext: undefined,
+    createdAt: "2026-08-21T10:00:00.000Z",
+    timestamp: "2026-08-21T10:00:00.000Z",
+  };
+  const secondStore = transitionWaitingOnOtherAfterSend(firstStore, {
+    mailboxId: "mail-a",
+    message: syntheticSent,
+    composeMode: "reply",
+    sendSucceeded: true,
+    transitionedAt: secondTransitionTime,
+  });
+  const replayedSecondStore = transitionWaitingOnOtherAfterSend(secondStore, {
+    mailboxId: "mail-a",
+    message: syntheticSent,
+    composeMode: "reply",
+    sendSucceeded: true,
+    transitionedAt: secondTransitionTime,
+  });
+
+  assert.equal(Object.keys(secondStore).length, 1);
+  assert.deepEqual(replayedSecondStore, secondStore);
+  assert.equal(
+    resolveWaitingOnOtherState(
+      secondStore,
+      "mail-a",
+      syntheticSent,
+      new Date(secondTransitionTime).getTime(),
+    )?.transitionedAt,
+    secondTransitionTime,
+  );
+});
+
 test("unsafe heuristic identity fails closed", () => {
   const source = message({ threadId: "licensing question", authority: "heuristic" });
   assert.deepEqual(replyTransition(source), {});

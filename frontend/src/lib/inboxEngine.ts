@@ -395,6 +395,22 @@ export function resolveSafeThreadGroupingKey(
 export function selectLatestAuthoritativeConversationMessage<
   T extends RenderedConversationMessage,
 >(selectedMessage: T, candidates: T[], mailboxId?: string): T {
+  return selectLatestEligibleAuthoritativeConversationMessage(
+    selectedMessage,
+    candidates,
+    mailboxId,
+    () => true,
+  );
+}
+
+export function selectLatestEligibleAuthoritativeConversationMessage<
+  T extends RenderedConversationMessage,
+>(
+  selectedMessage: T,
+  candidates: T[],
+  mailboxId: string | undefined,
+  isEligible: (candidate: T) => boolean,
+): T {
   const selectedIdentity = resolveCanonicalConversationIdentity(
     selectedMessage,
     mailboxId,
@@ -404,11 +420,22 @@ export function selectLatestAuthoritativeConversationMessage<
     return selectedMessage;
   }
 
-  const matchingCandidates = candidates.filter(
-    (candidate) =>
-      resolveCanonicalConversationIdentity(candidate, mailboxId).key ===
-      selectedIdentity.key,
-  );
+  const matchingCandidates = candidates.filter((candidate) => {
+    if (!isEligible(candidate)) {
+      return false;
+    }
+
+    const candidateIdentity = resolveCanonicalConversationIdentity(
+      candidate,
+      mailboxId,
+    );
+
+    return (
+      candidateIdentity.isAuthoritativeConversation &&
+      candidateIdentity.authority === selectedIdentity.authority &&
+      candidateIdentity.key === selectedIdentity.key
+    );
+  });
   const hasUnknownCandidateDate = matchingCandidates.some(
     (candidate) => resolveMessageDateMs(candidate) === 0,
   );

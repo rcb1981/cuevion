@@ -288,6 +288,7 @@ import {
   resolveMailboxScopedMessageIdentity,
   resolveSafeThreadGroupingKey,
   selectLatestAuthoritativeConversationMessage,
+  selectLatestEligibleAuthoritativeConversationMessage,
   pruneInboxSnapshot,
   INBOX_SNAPSHOT_MAX_MESSAGES,
   INBOX_SNAPSHOT_MAX_AGE_MS,
@@ -16629,6 +16630,10 @@ function MailboxView({
   const [composeMailboxId, setComposeMailboxId] = useState<InboxId>(mailbox.id);
   const [composeMode, setComposeMode] = useState<ComposeMode>("new");
   const [composeSourceMessage, setComposeSourceMessage] = useState<MailMessage | null>(null);
+  // The visible source owns quote/recipients; this separate source owns only
+  // provider-verified reply metadata for the current compose session.
+  const [composeReplyAnchorMessage, setComposeReplyAnchorMessage] =
+    useState<MailMessage | null>(null);
   const [composeAttachments, setComposeAttachments] = useState<MailAttachment[]>([]);
   const replyModeSessionRef = useRef<ReplyModeSession | null>(null);
   const [composeSendError, setComposeSendError] = useState<string | null>(null);
@@ -16853,6 +16858,7 @@ function MailboxView({
     setComposeMailboxId(mailbox.id);
     setComposeMode("new");
     setComposeSourceMessage(null);
+    setComposeReplyAnchorMessage(null);
     setComposeAttachments([]);
     replyModeSessionRef.current = null;
     pendingComposeInitialFocusRef.current = null;
@@ -17403,6 +17409,24 @@ function MailboxView({
               selectedSourceMailboxId,
             )
         : message;
+    const replyAnchorMessage =
+      (mode === "reply" || mode === "reply_all") &&
+      selectedSourceProvider === "custom_imap"
+        ? selectLatestEligibleAuthoritativeConversationMessage(
+            message,
+            normalReplyCandidates,
+            selectedSourceMailboxId,
+            (candidate) =>
+              Boolean(
+                buildImapReplyContext({
+                  sendProvider: selectedSourceProvider,
+                  composeMode: mode,
+                  mailboxId: selectedSourceMailboxId,
+                  sourceMessage: candidate,
+                }),
+              ),
+          )
+        : effectiveMessage;
     const effectiveMessageLocation = resolveAuthoritativeMessageLocation({
       message: effectiveMessage,
       exactLocation: currentMessageLocationByMessage.get(effectiveMessage) ?? null,
@@ -17459,6 +17483,7 @@ function MailboxView({
         : null;
     setComposeMode(composePlan.mode);
     setComposeSourceMessage(effectiveMessage);
+    setComposeReplyAnchorMessage(replyAnchorMessage);
     setComposeTo(initialReplyModeState?.to ?? "");
     setComposeCc(initialReplyModeState?.cc ?? "");
     setComposeSubject(
@@ -20774,7 +20799,7 @@ function MailboxView({
       sendProvider,
       composeMode,
       mailboxId: managedMailbox.id,
-      sourceMessage: composeSourceMessage,
+      sourceMessage: composeReplyAnchorMessage ?? composeSourceMessage,
     });
 
     if (

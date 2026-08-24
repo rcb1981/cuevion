@@ -19,6 +19,7 @@ import {
   mergeLiveInboxMessageState,
   normalizeThreadSubject,
   selectLatestAuthoritativeConversationMessage,
+  selectLatestEligibleAuthoritativeConversationMessage,
   resolveLiveCustomImapThreadId,
   resolveThreadKey,
   resolveMessageDateMs,
@@ -868,6 +869,132 @@ test("authoritative Reply source fails safe when any candidate date is missing",
       selected,
       [selected, unknownDate],
       gmailMailboxAContext.mailboxId,
+    ).id,
+    selected.id,
+  );
+});
+
+test("eligible Reply source can safely anchor a newer synthetic Sent row", () => {
+  const providerBacked = applyLiveThreadIdentity(
+    {
+      ...renderedMessage("imap-inbound", {
+        threadId: "imap:rfc:root%40example.com",
+        createdAt: "2026-07-13T08:00:00.000Z",
+      }),
+      serverMailboxId: "mailbox-a",
+      providerFolder: "INBOX",
+      uidValidity: "900",
+    },
+    mailboxAContext,
+  );
+  const syntheticSent = {
+    ...renderedMessage("local-sent", {
+      imapUid: undefined,
+      threadId: providerBacked.threadId,
+      from: "owner@example.com",
+      to: "sender@example.com",
+      createdAt: "2026-07-13T09:00:00.000Z",
+    }),
+    threadIdentityAuthority: providerBacked.threadIdentityAuthority,
+  };
+  const unknownDateSyntheticSent = {
+    ...syntheticSent,
+    id: "local-sent-unknown-date",
+    createdAt: undefined,
+    timestamp: undefined,
+  };
+  const heuristicLocatorCollision = {
+    ...providerBacked,
+    id: "heuristic-locator-collision",
+    imapUid: "99",
+    threadIdentityAuthority: "heuristic" as const,
+    createdAt: "2026-07-13T10:00:00.000Z",
+  };
+
+  assert.equal(
+    selectLatestEligibleAuthoritativeConversationMessage(
+      syntheticSent,
+      [
+        providerBacked,
+        syntheticSent,
+        unknownDateSyntheticSent,
+        heuristicLocatorCollision,
+      ],
+      mailboxAContext.mailboxId,
+      (candidate) => Boolean(candidate.imapUid && candidate.providerFolder),
+    ).id,
+    providerBacked.id,
+    "ineligible unknown-date rows and heuristic locator collisions must not displace the authoritative anchor",
+  );
+});
+
+test("eligible Reply source never crosses canonical conversation or mailbox identity", () => {
+  const selected = {
+    ...renderedMessage("local-sent", {
+      imapUid: undefined,
+      threadId: "imap:rfc:thread-a%40example.com",
+      createdAt: "2026-07-13T09:00:00.000Z",
+    }),
+    threadIdentityAuthority: "rfc" as const,
+  };
+  const otherConversation = applyLiveThreadIdentity(
+    {
+      ...renderedMessage("other-thread", {
+        threadId: "imap:rfc:thread-b%40example.com",
+        createdAt: "2026-07-13T10:00:00.000Z",
+      }),
+      providerFolder: "INBOX",
+    },
+    mailboxAContext,
+  );
+  const otherMailbox = applyLiveThreadIdentity(
+    {
+      ...renderedMessage("other-mailbox", {
+        threadId: selected.threadId,
+        createdAt: "2026-07-13T11:00:00.000Z",
+      }),
+      providerFolder: "INBOX",
+    },
+    mailboxBContext,
+  );
+
+  assert.equal(
+    selectLatestEligibleAuthoritativeConversationMessage(
+      selected,
+      [selected, otherConversation, otherMailbox],
+      mailboxAContext.mailboxId,
+      (candidate) => Boolean(candidate.imapUid && candidate.providerFolder),
+    ).id,
+    selected.id,
+  );
+});
+
+test("eligible Reply source keeps a heuristic local message unanchored", () => {
+  const selected = {
+    ...renderedMessage("local-only", {
+      imapUid: undefined,
+      threadId: "local-browser-thread",
+      createdAt: "2026-07-13T09:00:00.000Z",
+    }),
+    threadIdentityAuthority: "heuristic" as const,
+  };
+  const providerCandidate = applyLiveThreadIdentity(
+    {
+      ...renderedMessage("provider-candidate", {
+        threadId: "local-browser-thread",
+        createdAt: "2026-07-13T08:00:00.000Z",
+      }),
+      providerFolder: "INBOX",
+    },
+    mailboxAContext,
+  );
+
+  assert.equal(
+    selectLatestEligibleAuthoritativeConversationMessage(
+      selected,
+      [selected, providerCandidate],
+      mailboxAContext.mailboxId,
+      (candidate) => Boolean(candidate.imapUid && candidate.providerFolder),
     ).id,
     selected.id,
   );
