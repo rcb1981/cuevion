@@ -50,6 +50,78 @@ assert.deepEqual(
   "primary navigation labels and order must remain unchanged",
 );
 
+const sidebarCallStart = workspaceShellSource.indexOf("<WorkspaceSidebar");
+const sidebarCallEnd = workspaceShellSource.indexOf("/>", sidebarCallStart);
+const sidebarCallSource = workspaceShellSource.slice(sidebarCallStart, sidebarCallEnd);
+assert.match(
+  sidebarCallSource,
+  /priorityCount=\{livePriorityInboxEntries\.length\}/,
+  "WorkspaceSidebar must receive the canonical Priority collection length directly",
+);
+const priorityCountPropExpression = sidebarCallSource.match(
+  /priorityCount=\{([^}]+)\}/,
+)?.[1];
+assert.equal(priorityCountPropExpression, "livePriorityInboxEntries.length");
+assert.doesNotMatch(
+  priorityCountPropExpression ?? "",
+  /unread|mailbox|learning|semantic|reduce\(|filter\(/i,
+  "the sidebar count must not recalculate Priority from unread, mailbox, Learning, or semantic inputs",
+);
+
+const priorityCountRenderStart = sidebarSource.indexOf(
+  '{item.section === "Priority" && priorityCount > 0 ? (',
+);
+const priorityCountRenderEnd = sidebarSource.indexOf(
+  '{item.section === "Notifications"',
+  priorityCountRenderStart,
+);
+const priorityCountRenderSource = sidebarSource.slice(
+  priorityCountRenderStart,
+  priorityCountRenderEnd,
+);
+assert.ok(
+  priorityCountRenderStart >= 0 && priorityCountRenderEnd > priorityCountRenderStart,
+  "Priority count rendering must remain isolated to the Priority navigation row",
+);
+assert.match(
+  priorityCountRenderSource,
+  /priorityCount > 0[\s\S]*?aria-hidden="true"[\s\S]*?\{priorityCount\}[\s\S]*?: null/,
+  "zero must render nothing while one and larger exact counts render visibly",
+);
+assert.doesNotMatch(
+  priorityCountRenderSource,
+  /99\+|Math\.|formatUnreadBadgeCount|sidebarUnreadBadgeClass/,
+  "Priority count must remain exact and independent from unread badge semantics",
+);
+assert.match(
+  priorityCountRenderSource,
+  /text-\[0\.68rem\][\s\S]*?tabular-nums[\s\S]*?text-current[\s\S]*?opacity-65/,
+  "Priority count must use quiet, neutral sidebar styling",
+);
+assert.doesNotMatch(
+  priorityCountRenderSource,
+  /red|orange|warning|error|animate|pulse|radial-gradient/i,
+  "Priority count must not use alert or animated styling",
+);
+assert.match(
+  sidebarSource,
+  /item\.section === "Priority" && priorityCount > 0[\s\S]*?priorityCount === 1 \? "item" : "items"/,
+  "the Priority navigation control must provide contextual accessible count wording",
+);
+for (const otherSection of [
+  "Dashboard",
+  "For You",
+  "Inboxes",
+  "Notifications",
+  "Team",
+]) {
+  assert.doesNotMatch(
+    priorityCountRenderSource,
+    new RegExp(`item\\.section === "${otherSection}"`),
+    `Priority count must not be attached to ${otherSection}`,
+  );
+}
+
 const utilityNavigationSource = workspaceShellSource.slice(
   workspaceShellSource.indexOf("const utilityNavigationItems = ["),
   workspaceShellSource.indexOf("] as const;", workspaceShellSource.indexOf("const utilityNavigationItems = [")),

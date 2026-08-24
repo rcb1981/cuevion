@@ -14404,6 +14404,7 @@ function WorkspaceSidebar({
   activeSmartFolderId,
   hasPendingTeamInvitation,
   notificationUnreadCount,
+  priorityCount,
   mailboxUnreadCounts,
   showMailboxUnreadCounts,
   orderedMailboxes,
@@ -14422,6 +14423,7 @@ function WorkspaceSidebar({
   activeSmartFolderId: string | null;
   hasPendingTeamInvitation: boolean;
   notificationUnreadCount: number;
+  priorityCount: number;
   mailboxUnreadCounts: Record<string, number>;
   showMailboxUnreadCounts: boolean;
   orderedMailboxes: OrderedMailbox[];
@@ -14784,12 +14786,24 @@ function WorkspaceSidebar({
               ? "bg-[linear-gradient(180deg,var(--workspace-sidebar-active-start),var(--workspace-sidebar-active-end))] text-[var(--workspace-sidebar-text)]"
               : "text-[var(--workspace-sidebar-text-muted)] hover:bg-[var(--workspace-sidebar-hover)] hover:text-[var(--workspace-sidebar-text)]"
           }`}
-          aria-label={item.label}
+          aria-label={
+            item.section === "Priority" && priorityCount > 0
+              ? `${item.label}, ${priorityCount} priority ${priorityCount === 1 ? "item" : "items"}`
+              : item.label
+          }
         >
           <span className="hidden items-center gap-2 xl:inline-flex">
             <SidebarNavigationIcon name={item.icon} />
             <span>{item.label}</span>
           </span>
+          {item.section === "Priority" && priorityCount > 0 ? (
+            <span
+              aria-hidden="true"
+              className="ml-auto hidden text-[0.68rem] font-medium tabular-nums text-current opacity-65 xl:inline-flex"
+            >
+              {priorityCount}
+            </span>
+          ) : null}
           {item.section === "Notifications" && notificationUnreadCount > 0 ? (
             <span className="ml-2 hidden min-w-[1.4rem] items-center justify-center rounded-full bg-[linear-gradient(180deg,var(--workspace-sidebar-active-start),var(--workspace-sidebar-active-end))] px-1.5 py-0.5 text-[0.62rem] font-medium tracking-normal text-[var(--workspace-sidebar-text)] xl:inline-flex">
               {notificationUnreadCount > 99 ? "99+" : notificationUnreadCount}
@@ -52666,6 +52680,7 @@ export function WorkspaceShell({
         activeSmartFolderId={activeSmartFolderId}
         hasPendingTeamInvitation={Boolean(visiblePendingTeamInvitation)}
         notificationUnreadCount={notificationUnreadCount}
+        priorityCount={livePriorityInboxEntries.length}
         mailboxUnreadCounts={sidebarMailboxUnreadCounts}
         showMailboxUnreadCounts={areMailboxCountsHydrated}
         orderedMailboxes={sidebarMailboxes}
