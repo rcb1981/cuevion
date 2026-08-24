@@ -587,7 +587,7 @@ test("an onboarding position is never accepted as a server mailbox ID", () => {
   assert.equal(name, "Inbox 2");
 });
 
-test("long authoritative email stays intact while workspace surfaces retain truncation", () => {
+test("long authoritative email stays intact while identity surfaces retain truncation", () => {
   const longEmail =
     "an-extremely-long-custom-mailbox-address-for-layout-regression@example.com";
   const presented = buildPresentedMailboxes({
@@ -614,9 +614,11 @@ test("long authoritative email stays intact while workspace surfaces retain trun
     /max-w-\[min\(70vw,32rem\)\][^"]*[\s\S]{0,500}truncate/,
   );
   assert.equal(
-    workspaceSource.includes(
-      'className="block min-w-0 truncate text-[0.8rem] font-medium uppercase',
-    ),
+    workspaceSource.includes("const MAIL_FOLDER_COLUMN_WIDTH = 152;"),
+    true,
+  );
+  assert.equal(
+    workspaceSource.includes('const folderLabel = folder;'),
     true,
   );
   assert.match(mobileSource, /min-w-0 flex-1 truncate text-center/);

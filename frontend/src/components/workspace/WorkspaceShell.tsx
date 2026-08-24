@@ -3450,7 +3450,7 @@ const SMART_FOLDERS_STORAGE_KEY = "cuevion-smart-folders";
 const MAIL_LIST_PANE_WIDTH_STORAGE_KEY = "cuevion-mail-list-pane-width";
 const COMPOSE_RECIPIENT_MEMORY_STORAGE_KEY = "cuevion-compose-recipient-memory";
 const ACTIVE_MAILBOX_AUTO_REFRESH_INTERVAL_MS = 3 * 60 * 1000;
-const MAIL_FOLDER_COLUMN_WIDTH = 180;
+const MAIL_FOLDER_COLUMN_WIDTH = 152;
 const MAIL_SPLIT_GAP = 24;
 
 function getBrowserLearningStorage() {
@@ -16075,6 +16075,15 @@ function InboxesView({
   );
 }
 
+const mailboxNavigationBackButtonClass = navigationCloseBackButtonClass.replace(
+  "px-4 py-2 text-[0.68rem] font-semibold uppercase tracking-[0.15em]",
+  "px-3.5 py-1.5 text-[0.66rem] font-semibold uppercase tracking-[0.14em]",
+);
+const mailboxComposeActionButtonClass = mailboxPrimaryActionButtonClass.replace(
+  "h-9 items-center justify-center rounded-full px-4 text-[0.68rem] font-medium uppercase tracking-[0.18em]",
+  "h-8 items-center justify-center rounded-full px-3.5 text-[0.66rem] font-medium uppercase tracking-[0.16em]",
+);
+
 function MailboxView({
   mailbox,
   activeMailboxTitleOverride,
@@ -26167,7 +26176,7 @@ function MailboxView({
             <button
               type="button"
               onClick={handleMailboxBack}
-              className={navigationCloseBackButtonClass}
+              className={mailboxNavigationBackButtonClass}
             >
               Back
             </button>
@@ -26248,7 +26257,7 @@ function MailboxView({
         <div className="mb-4 flex flex-none flex-wrap items-center gap-2">
           <button
             type="button"
-            className={mailboxPrimaryActionButtonClass}
+            className={mailboxComposeActionButtonClass}
             onClick={openCompose}
           >
             <svg
@@ -27026,7 +27035,7 @@ function MailboxView({
             className={`grid h-0 min-h-0 flex-1 items-stretch gap-6 overflow-hidden ${
               activeSmartFolder
                 ? "xl:grid-cols-[minmax(0,0.92fr)_minmax(0,1.28fr)]"
-                : "xl:grid-cols-[180px_minmax(0,0.92fr)_minmax(0,1.28fr)]"
+                : "xl:grid-cols-[152px_minmax(0,0.92fr)_minmax(0,1.28fr)]"
             }`}
             style={
               isWideSplitView && effectiveMailListPaneWidth !== null
@@ -27055,10 +27064,7 @@ function MailboxView({
                         folder === "Inbox" ? getSharedMessageCount() : 0;
                       const dragTargetId = `folder-${folder}`;
                       const isDragTargetActive = dragTargetKey === dragTargetId;
-                      const folderLabel =
-                        folder === "Inbox"
-                          ? mailboxPresentationLabels.messageListHeading
-                          : folder;
+                      const folderLabel = folder;
 
                       return (
                         <div key={folder} className="space-y-1">
@@ -27081,7 +27087,7 @@ function MailboxView({
                               handleDropToTarget({ type: "folder", folder });
                             }}
                             onClick={() => switchToFolder(folder)}
-                            className={`flex w-full items-center justify-between rounded-[18px] px-4 py-3 text-left transition-[background-color,border-color,color,box-shadow,transform] duration-150 ${
+                            className={`flex w-full items-center justify-between rounded-[14px] px-3 py-2 text-left transition-[background-color,border-color,color,box-shadow,transform] duration-150 ${
                               active
                                 ? "bg-[linear-gradient(180deg,var(--workspace-card-featured-start),var(--workspace-card-featured-end))] text-[var(--workspace-text)]"
                                 : isDragTargetActive
@@ -27089,7 +27095,7 @@ function MailboxView({
                                   : "text-[var(--workspace-text-soft)] hover:bg-[var(--workspace-card-subtle)]"
                             } focus-visible:outline-none`}
                           >
-                            <span className="block min-w-0 truncate text-[0.8rem] font-medium uppercase tracking-[0.14em]">
+                            <span className="block min-w-0 truncate text-[0.75rem] font-medium uppercase tracking-[0.1em]">
                               {folderLabel}
                             </span>
                             {shouldShowFolderCount ? (
@@ -27119,7 +27125,7 @@ function MailboxView({
                                   handleDropToTarget({ type: "folder", folder: "Filtered" });
                                 }}
                                 onClick={() => switchToFolder("Filtered")}
-                                className={`flex w-full items-center justify-between rounded-[18px] py-3 pl-6 pr-4 text-left transition-[background-color,border-color,color,box-shadow,transform] duration-150 ${
+                                className={`flex w-full items-center justify-between rounded-[14px] py-2 pl-5 pr-3 text-left transition-[background-color,border-color,color,box-shadow,transform] duration-150 ${
                                   !isSharedView &&
                                   !activeSmartFolder &&
                                   activeFolder === "Filtered"
@@ -27130,7 +27136,7 @@ function MailboxView({
                                 } focus-visible:outline-none`}
                               >
                                 <span
-                                  className={`text-[0.8rem] font-medium uppercase tracking-[0.14em] ${
+                                  className={`text-[0.75rem] font-medium uppercase tracking-[0.1em] ${
                                     !isSharedView &&
                                     !activeSmartFolder &&
                                     activeFolder === "Filtered"
@@ -27157,13 +27163,13 @@ function MailboxView({
                               <button
                                 type="button"
                                 onClick={switchToSharedView}
-                                className={`flex w-full items-center justify-between rounded-[18px] px-4 py-3 text-left transition-[background-color,border-color,color,box-shadow,transform] duration-150 ${
+                                className={`flex w-full items-center justify-between rounded-[14px] px-3 py-2 text-left transition-[background-color,border-color,color,box-shadow,transform] duration-150 ${
                                   isSharedView
                                     ? "bg-[linear-gradient(180deg,var(--workspace-card-featured-start),var(--workspace-card-featured-end))] text-[var(--workspace-text)]"
                                     : "text-[var(--workspace-text-soft)] hover:bg-[var(--workspace-card-subtle)]"
                                 } focus-visible:outline-none`}
                               >
-                                <span className="text-[0.8rem] font-medium uppercase tracking-[0.14em]">
+                                <span className="text-[0.75rem] font-medium uppercase tracking-[0.1em]">
                                   Shared
                                 </span>
                                 {sharedMessageCount > 0 ? (
